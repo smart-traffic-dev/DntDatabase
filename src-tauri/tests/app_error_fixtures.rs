@@ -35,17 +35,38 @@ fn no_secrets() -> SecretsInput {
     serde_json::from_value(json!({})).unwrap()
 }
 
-fn timing(stage: ConnectStage, ms: u64) -> StageTiming {
-    StageTiming { stage, ms }
+/// Fixed duration per stage: measured timings vary from run to run.
+fn fixed_ms(stage: ConnectStage) -> u64 {
+    match stage {
+        ConnectStage::ResolveSecrets => 1,
+        ConnectStage::OpenTunnel => 120,
+        ConnectStage::ConnectDb => 35,
+        ConnectStage::DetectServer | ConnectStage::Execute => 0,
+    }
+}
+
+fn timing(stage: ConnectStage) -> StageTiming {
+    StageTiming {
+        stage,
+        ms: fixed_ms(stage),
+    }
+}
+
+/// `err` with every measured stage duration replaced by its fixed value.
+fn deterministic(mut err: AppError) -> AppError {
+    for t in err.timings.iter_mut().flatten() {
+        t.ms = fixed_ms(t.stage);
+    }
+    err
 }
 
 /// Timings of the stages before `stage`, as the pipeline records them.
 fn before(stage: ConnectStage, ssh: bool) -> Vec<StageTiming> {
-    let mut all = vec![timing(ConnectStage::ResolveSecrets, 1)];
+    let mut all = vec![timing(ConnectStage::ResolveSecrets)];
     if ssh {
-        all.push(timing(ConnectStage::OpenTunnel, 120));
+        all.push(timing(ConnectStage::OpenTunnel));
     }
-    all.push(timing(ConnectStage::ConnectDb, 35));
+    all.push(timing(ConnectStage::ConnectDb));
     all.into_iter().take_while(|t| t.stage != stage).collect()
 }
 
@@ -349,7 +370,11 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
 
 #[tokio::test]
 async fn ui_error_fixtures_match_the_backend() {
-    let errors = app_errors().await;
+    let errors: BTreeMap<_, _> = app_errors()
+        .await
+        .into_iter()
+        .map(|(name, err)| (name, deterministic(err)))
+        .collect();
     let text = format!("{}\n", serde_json::to_string_pretty(&errors).unwrap());
     let path = fixture_path();
     if std::env::var(UPDATE_ENV).is_ok_and(|v| v == "1") {
