@@ -17,11 +17,25 @@
 //! - `SET PASSWORD [FOR <user>] =`: every literal after the `=`;
 //! - `REPLACE '<current password>'` (MySQL 8 `ALTER USER … REPLACE`);
 //! - `CONNECTION '…'` (FEDERATED URLs, PG subscriptions), and any string whose
-//!   content holds `password=` / `pwd=` (libpq / ODBC connection strings).
+//!   content holds `password=` / `passwd=` / `pwd=` (libpq / ODBC connection
+//!   strings) or a URL with `user:password@`.
 //!
 //! Under MySQL a statement is scanned twice: as the splitter lexes it, and with
 //! every executable-comment opener (`/*!NNNNN`, `/*M!NNNNNN`) blanked, as a
 //! server that runs the comment body lexes it. The union of both is redacted.
+//!
+//! Plain comments (`--`, `#`, `/* … */`, unterminated too) are scanned like
+//! code; in a comment, a trigger with no redacted literal after it redacts the
+//! rest of the body. Comment markers are never touched, so statement
+//! boundaries do not move.
+//!
+//! Under PG, a plain `'…'` target holding `\` is redacted as far as its
+//! backslash-escape reading goes too (`standard_conforming_strings=off`).
+//!
+//! Out of scope: application data in ordinary DML (`INSERT INTO users
+//! (password) VALUES ('…')`, `AES_ENCRYPT(…, 'key')`), and literals reached
+//! through `BINARY`, `CONCAT(…)` outside `PASSWORD(…)`, or an introducer
+//! separated from its string by a space.
 
 use dnt_core::sql::{tokenize, Dialect, TokKind, Token};
 
@@ -38,10 +52,10 @@ pub struct Redacted {
 /// panics; linear in the length of `stmt`.
 pub fn redact(stmt: &str, dialect: Dialect) -> Redacted {
     let mut spans = Vec::new();
-    collect(stmt, &tokenize(stmt, dialect), dialect, &mut spans);
+    scan(stmt, 0, dialect, 0, &mut spans);
     if dialect.is_mysql() {
         if let Some(inlined) = blank_exec_openers(stmt) {
-            collect(&inlined, &tokenize(&inlined, dialect), dialect, &mut spans);
+            scan(&inlined, 0, dialect, 0, &mut spans);
         }
     }
     if spans.is_empty() {
@@ -98,12 +112,185 @@ fn blank_exec_openers(stmt: &str) -> Option<String> {
     found.then(|| String::from_utf8(b).ok()).flatten()
 }
 
+/// Comment bodies nested deeper than this are not tokenized again; see
+/// [`raw_fallback`].
+const MAX_COMMENT_DEPTH: usize = 4;
+
+/// Pushes the spans to redact in `src`, which sits at byte `base` of the
+/// statement: its code, then (recursively) the body of each plain comment.
+/// `depth` is 0 for the statement and n for a body nested n comments deep.
+fn scan(src: &str, base: usize, dialect: Dialect, depth: usize, out: &mut Vec<(usize, usize)>) {
+    let toks = tokenize(src, dialect);
+    let mut local = Vec::new();
+    collect(src, &toks, dialect, &mut local);
+    if depth > 0 {
+        comment_fallback(src, &toks, dialect, &mut local);
+    }
+    out.extend(local.iter().map(|&(s, e)| (base + s, base + e)));
+    for (bs, be) in comment_bodies(src, &toks, dialect) {
+        let Some(body) = src.get(bs..be) else {
+            continue;
+        };
+        if depth + 1 >= MAX_COMMENT_DEPTH {
+            raw_fallback(body, base + bs, out);
+        } else {
+            scan(body, base + bs, dialect, depth + 1, out);
+        }
+    }
+}
+
+/// In a comment body, prose may name a secret without quoting it
+/// (`-- password: hunter2`): a trigger with no redacted literal after it (up
+/// to the next trigger) redacts everything from it to the end of the body.
+fn comment_fallback(src: &str, toks: &[Token], dialect: Dialect, local: &mut Vec<(usize, usize)>) {
+    local.sort_unstable();
+    let triggers: Vec<usize> = toks
+        .iter()
+        .filter(|t| is_trigger_token(src, t, dialect))
+        .map(|t| t.start)
+        .collect();
+    let end = src.trim_end().len();
+    let mut p = 0;
+    for (n, &start) in triggers.iter().enumerate() {
+        let next = triggers.get(n + 1).copied().unwrap_or(usize::MAX);
+        while local.get(p).is_some_and(|s| s.0 < start) {
+            p += 1;
+        }
+        if !local.get(p).is_some_and(|s| s.0 < next) {
+            local.push((start, end.max(start)));
+            return;
+        }
+    }
+}
+
+/// Whether token `t` names a secret (the comment-fallback triggers).
+fn is_trigger_token(src: &str, t: &Token, dialect: Dialect) -> bool {
+    match t.kind {
+        TokKind::Word(w) => {
+            let up = w.to_ascii_uppercase();
+            up == "IDENTIFIED" || up == "CONNECTION" || is_secret_name(&up)
+        }
+        TokKind::Quoted => {
+            let text = src.get(t.start..t.end).unwrap_or_default();
+            if is_ident_quote(text, dialect) {
+                is_secret_name(&text.to_ascii_uppercase())
+            } else {
+                has_inline_secret(text.as_bytes())
+            }
+        }
+        _ => false,
+    }
+}
+
+/// Past [`MAX_COMMENT_DEPTH`]: from each raw trigger word in `body`, redacts
+/// up to the next `/*`, `*/` or newline (so nesting and line ends survive).
+fn raw_fallback(body: &str, base: usize, out: &mut Vec<(usize, usize)>) {
+    const WORDS: [&[u8]; 6] = [
+        b"identified",
+        b"password",
+        b"passwd",
+        b"pwd",
+        b"encryption_key",
+        b"connection",
+    ];
+    let b = body.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        let hit = WORDS.iter().any(|w| {
+            b.get(i..i + w.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(w))
+        });
+        if !hit {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < b.len()
+            && b[j] != b'\n'
+            && !b[j..].starts_with(b"/*")
+            && !b[j..].starts_with(b"*/")
+        {
+            j += 1;
+        }
+        // Back off trailing spaces; `j` and the result stay char boundaries.
+        let mut e = j;
+        while e > i && b[e - 1].is_ascii_whitespace() {
+            e -= 1;
+        }
+        out.push((base + i, base + e));
+        i = j.max(i + 1);
+    }
+}
+
+/// Byte ranges of the plain-comment bodies of `src` (markers excluded; a line
+/// comment's body stops before its `\r\n`/`\n`). Comments are exactly the
+/// non-blank text between tokens.
+fn comment_bodies(src: &str, toks: &[Token], dialect: Dialect) -> Vec<(usize, usize)> {
+    let b = src.as_bytes();
+    let mut out = Vec::new();
+    let mut gap = |lo: usize, hi: usize| {
+        let mut i = lo;
+        while i < hi {
+            let rest = &b[i..hi];
+            if rest.starts_with(b"--") || (rest[0] == b'#' && dialect.is_mysql()) {
+                let body = i + if rest[0] == b'#' { 1 } else { 2 };
+                let nl = rest.iter().position(|&c| c == b'\n').map_or(hi, |p| i + p);
+                let end = if nl > body && b[nl - 1] == b'\r' {
+                    nl - 1
+                } else {
+                    nl
+                };
+                out.push((body, end.max(body)));
+                i = nl;
+            } else if rest.starts_with(b"/*") {
+                let (close, next) = block_end(b, i, hi, !dialect.is_mysql());
+                out.push((i + 2, close));
+                i = next;
+            } else {
+                i += 1;
+            }
+        }
+    };
+    let mut prev = 0;
+    for t in toks {
+        gap(prev, t.start);
+        prev = t.end;
+    }
+    gap(prev, b.len());
+    out
+}
+
+/// For the block comment opening at `i`: (start of its `*/`, offset past it),
+/// or `(hi, hi)` when unterminated before `hi`.
+fn block_end(b: &[u8], i: usize, hi: usize, nested: bool) -> (usize, usize) {
+    let mut depth = 1;
+    let mut j = i + 2;
+    while j + 1 < hi {
+        if b[j..].starts_with(b"*/") {
+            depth -= 1;
+            if depth == 0 {
+                return (j, j + 2);
+            }
+            j += 2;
+        } else if nested && b[j..].starts_with(b"/*") {
+            depth += 1;
+            j += 2;
+        } else {
+            j += 1;
+        }
+    }
+    (hi, hi)
+}
+
 /// Pushes the byte spans of `src` to redact, per the triggers in the module doc.
 fn collect(src: &str, toks: &[Token], dialect: Dialect, out: &mut Vec<(usize, usize)>) {
     let mut scan = Scan {
+        src,
         toks,
         out,
+        pg: !dialect.is_mysql(),
         covered: None,
+        run_end: 0,
         tail_searched: false,
     };
     let mut identified = false;
@@ -128,8 +315,9 @@ fn collect(src: &str, toks: &[Token], dialect: Dialect, out: &mut Vec<(usize, us
                     if is_secret_name(&text.to_ascii_uppercase()) {
                         scan.target(i + 1, true, true);
                     }
-                } else if has_kv_secret(text.as_bytes()) {
-                    scan.out.push((t.start, t.end));
+                } else if has_inline_secret(text.as_bytes()) {
+                    let end = scan.lit_end(&t);
+                    scan.out.push((t.start, end));
                 }
             }
             _ => {}
@@ -138,10 +326,15 @@ fn collect(src: &str, toks: &[Token], dialect: Dialect, out: &mut Vec<(usize, us
 }
 
 struct Scan<'t, 'a, 'o> {
+    src: &'t str,
     toks: &'t [Token<'a>],
     out: &'o mut Vec<(usize, usize)>,
+    /// PostgreSQL: a plain `'…'` literal may also be read with backslash escapes.
+    pg: bool,
     /// Every literal up to this token index was already redacted by a region.
     covered: Option<usize>,
+    /// Tokens before this index belong to an already redacted literal run.
+    run_end: usize,
     /// A `SET PASSWORD FOR …` search for `=` already ran to the end.
     tail_searched: bool,
 }
@@ -199,13 +392,17 @@ impl Scan<'_, '_, '_> {
         let Some(t) = toks.get(k) else { return };
         match t.kind {
             TokKind::Quoted => {
+                if k < self.run_end {
+                    return;
+                }
                 // Adjacent literals are concatenated by the server.
-                let mut end = t.end;
+                let mut end = self.lit_end(t);
                 let mut j = k + 1;
                 while let Some(n) = toks.get(j).filter(|n| n.kind == TokKind::Quoted) {
-                    end = n.end;
+                    end = end.max(self.lit_end(n));
                     j += 1;
                 }
+                self.run_end = j;
                 self.out.push((t.start, end));
             }
             TokKind::Word(w) if number && w.starts_with(|c: char| c.is_ascii_digit()) => {
@@ -223,7 +420,7 @@ impl Scan<'_, '_, '_> {
         }
         for t in self.toks.get(from..to).unwrap_or_default() {
             match t.kind {
-                TokKind::Quoted => self.out.push((t.start, t.end)),
+                TokKind::Quoted => self.out.push((t.start, self.lit_end(t))),
                 TokKind::Word(w) if w.starts_with(|c: char| c.is_ascii_digit()) => {
                     self.out.push((t.start, t.end))
                 }
@@ -232,6 +429,44 @@ impl Scan<'_, '_, '_> {
         }
         self.covered = Some(to);
     }
+
+    /// End of the literal token `t`. Under PG a plain `'…'` holding `\` may be
+    /// read with backslash escapes (`standard_conforming_strings=off`), which
+    /// can end it later: then the span runs to that end, widened to the end of
+    /// the token it lands in (or to the next token when it lands in a gap) so
+    /// the redacted text still lexes the same way.
+    fn lit_end(&self, t: &Token) -> usize {
+        let b = self.src.as_bytes();
+        let plain = b.get(t.start) == Some(&b'\'');
+        if !self.pg || !plain || !b[t.start..t.end].contains(&b'\\') {
+            return t.end;
+        }
+        let e = backslash_quote_end(b, t.start);
+        if e <= t.end {
+            return t.end;
+        }
+        let idx = self.toks.partition_point(|x| x.end < e);
+        match self.toks.get(idx) {
+            Some(x) if x.start < e => x.end,
+            Some(x) => x.start,
+            None => b.len(),
+        }
+    }
+}
+
+/// Offset past the `'…'` literal opening at `open`, read with backslash
+/// escapes (the input length when unterminated).
+fn backslash_quote_end(b: &[u8], open: usize) -> usize {
+    let mut j = open + 1;
+    while j < b.len() {
+        match b[j] {
+            b'\\' => j += 2,
+            b'\'' if b.get(j + 1) == Some(&b'\'') => j += 2,
+            b'\'' => return j + 1,
+            _ => j += 1,
+        }
+    }
+    b.len()
 }
 
 /// Index of the `)` matching the `(` at `open`, or the token count.
@@ -286,11 +521,42 @@ fn is_ident_quote(text: &str, dialect: Dialect) -> bool {
     }
 }
 
-/// Whether a string literal holds a `password=` / `pwd=` key (case-insensitive,
-/// optional spaces before `=`), as connection strings do.
+/// Whether a string literal holds a credential: a `password=` / `passwd=` /
+/// `pwd=` key, or a URL with `user:password@`.
+fn has_inline_secret(b: &[u8]) -> bool {
+    has_kv_secret(b) || has_url_password(b)
+}
+
+/// `scheme://user:password@…`: a `:` in the authority before an `@`.
+fn has_url_password(b: &[u8]) -> bool {
+    let mut i = 0;
+    while i + 3 <= b.len() {
+        if &b[i..i + 3] != b"://" {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 3;
+        let mut colon = false;
+        while j < b.len()
+            && !matches!(b[j], b'/' | b'@' | b'?' | b'#' | b'\'' | b'"')
+            && !b[j].is_ascii_whitespace()
+        {
+            colon |= b[j] == b':';
+            j += 1;
+        }
+        if colon && b.get(j) == Some(&b'@') {
+            return true;
+        }
+        i = j.max(i + 1);
+    }
+    false
+}
+
+/// Whether a string literal holds a `password=` / `passwd=` / `pwd=` key
+/// (case-insensitive, optional spaces before `=`), as connection strings do.
 fn has_kv_secret(b: &[u8]) -> bool {
     (0..b.len()).any(|i| {
-        [&b"password"[..], b"pwd"].iter().any(|key| {
+        [&b"password"[..], b"passwd", b"pwd"].iter().any(|key| {
             b.get(i..i + key.len())
                 .is_some_and(|w| w.eq_ignore_ascii_case(key))
                 && b[i + key.len()..]
@@ -553,9 +819,12 @@ mod tests {
             MY,
         );
         assert!(!out.contains("pw"), "{out}");
-        // PG has no executable comments.
-        let s = "/*!50706 CREATE USER u IDENTIFIED BY 'x' */ SELECT 1";
-        assert_eq!(red(s, PG), s);
+        // In PG it is a plain comment, scanned the same way.
+        assert_red(
+            "/*!50706 CREATE USER u IDENTIFIED BY 'x' */ SELECT 1",
+            PG,
+            "/*!50706 CREATE USER u IDENTIFIED BY '[REDACTED]' */ SELECT 1",
+        );
     }
 
     #[test]
@@ -578,6 +847,138 @@ mod tests {
     }
 
     #[test]
+    fn redact_url_userinfo_and_passwd_keys() {
+        assert_red(
+            "SELECT dblink_connect('postgresql://u:s3cret@h/db')",
+            PG,
+            "SELECT dblink_connect('[REDACTED]')",
+        );
+        assert_red(
+            "SELECT dblink('user=u passwd=x', 'select 1')",
+            PG,
+            "SELECT dblink('[REDACTED]', 'select 1')",
+        );
+        for s in [
+            "SELECT 'http://h:80/x', 'mailto:a@b', 'postgresql://u@h/db'",
+            "SELECT 'a://b:c'",
+        ] {
+            assert_eq!(red(s, PG), s);
+        }
+    }
+
+    fn same_split(input: &str, out: &str, d: Dialect) {
+        assert_eq!(
+            split(input, d).len(),
+            split(out, d).len(),
+            "{input:?} -> {out:?}"
+        );
+    }
+
+    #[test]
+    fn redact_inside_plain_comments() {
+        let cases = [
+            (
+                MY,
+                "SELECT 1 -- ALTER USER u IDENTIFIED BY 'pw'\n; SELECT 2",
+                "SELECT 1 -- ALTER USER u IDENTIFIED BY '[REDACTED]'\n; SELECT 2",
+            ),
+            (
+                PG,
+                "SELECT 1 -- ALTER USER u IDENTIFIED BY 'pw'\r\n; SELECT 2",
+                "SELECT 1 -- ALTER USER u IDENTIFIED BY '[REDACTED]'\r\n; SELECT 2",
+            ),
+            (
+                MY,
+                "# CREATE USER u IDENTIFIED BY 'pw'\nSELECT 1; SELECT 2",
+                "# CREATE USER u IDENTIFIED BY '[REDACTED]'\nSELECT 1; SELECT 2",
+            ),
+            (
+                PG,
+                "/* CREATE ROLE r PASSWORD 'pw' */ SELECT 1; SELECT 2",
+                "/* CREATE ROLE r PASSWORD '[REDACTED]' */ SELECT 1; SELECT 2",
+            ),
+            (
+                MY,
+                "/* CREATE ROLE r PASSWORD 'pw' */ SELECT 1; SELECT 2",
+                "/* CREATE ROLE r PASSWORD '[REDACTED]' */ SELECT 1; SELECT 2",
+            ),
+            // A trigger without a literal after it: redact to the end of the body.
+            (
+                MY,
+                "SELECT 1 -- old password: hunter2\n; SELECT 2",
+                "SELECT 1 -- old '[REDACTED]'\n; SELECT 2",
+            ),
+            (
+                PG,
+                "SELECT 1 /* IDENTIFIED BY hunter2 */; SELECT 2",
+                "SELECT 1 /* '[REDACTED]' */; SELECT 2",
+            ),
+            // Unterminated block comment.
+            (
+                PG,
+                "SELECT 1 /* password hunter2",
+                "SELECT 1 /* '[REDACTED]'",
+            ),
+            (
+                MY,
+                "SELECT 1 /* ALTER USER u IDENTIFIED BY 'p;w",
+                "SELECT 1 /* ALTER USER u IDENTIFIED BY '[REDACTED]'",
+            ),
+            // Nested PG comment and a comment inside a comment.
+            (
+                PG,
+                "/* a /* PASSWORD 'x' */ b */ SELECT 1",
+                "/* a /* PASSWORD '[REDACTED]' */ b */ SELECT 1",
+            ),
+            (
+                MY,
+                "/* a -- PASSWORD hunter2\n b */ SELECT 1",
+                "/* a -- '[REDACTED]'\n b */ SELECT 1",
+            ),
+        ];
+        for (d, input, want) in cases {
+            assert_red(input, d, want);
+            same_split(input, want, d);
+        }
+        // Untouched comments stay byte-identical.
+        for d in [MY, PG] {
+            let s = "SELECT 1 -- just a note\n/* by 'x' */ SELECT 2";
+            assert_eq!(red(s, d), s);
+        }
+        // Deep nesting falls back to redacting from the trigger to the end.
+        let deep = "/*".repeat(100) + " PASSWORD hunter2 " + &"*/".repeat(100) + " SELECT 1";
+        let out = red(&deep, PG);
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(out.ends_with("*/ SELECT 1"), "{out}");
+        same_split(&deep, &out, PG);
+    }
+
+    #[test]
+    fn redact_pg_backslash_reading_of_plain_literals() {
+        // With standard_conforming_strings=off, `'a\' VALID UNTIL '` is the
+        // password: redact as far as the backslash reading goes.
+        assert_red(
+            "ALTER ROLE r PASSWORD 'a\\' VALID UNTIL '2030'",
+            PG,
+            "ALTER ROLE r PASSWORD '[REDACTED]'",
+        );
+        assert_red(
+            "ALTER ROLE r PASSWORD 'a\\b' VALID UNTIL '2030'",
+            PG,
+            "ALTER ROLE r PASSWORD '[REDACTED]' VALID UNTIL '2030'",
+        );
+    }
+
+    #[test]
+    fn redact_quoted_identifier_triggers_stay_linear() {
+        let s = "\"password\" ".repeat(50_000);
+        let t = std::time::Instant::now();
+        let out = red(&s, PG);
+        assert!(t.elapsed().as_millis() < 500, "{:?}", t.elapsed());
+        assert!(out.contains(REDACTED));
+    }
+
+    #[test]
     fn redact_respects_sql_mode() {
         let nbe = Dialect::MySql(MySqlMode {
             ansi_quotes: false,
@@ -592,24 +993,26 @@ mod tests {
 
     #[test]
     fn redact_never_panics_and_is_linear() {
-        for s in [
-            "PASSWORD",
-            "PASSWORD =",
-            "PASSWORD (",
-            "SET PASSWORD FOR",
-            "IDENTIFIED BY",
-            "IDENTIFIED BY 'x",
-            "PASSWORD $$x",
-            "PASSWORD E'",
-            "/*!",
-            "/*!5",
-            "PASSWORD 'ư😀",
-            "ưPASSWORD = 'é'",
-            "))((PASSWORD))",
+        // (input, redacted under MySQL, redacted under PG)
+        for (s, my, pg) in [
+            ("PASSWORD", false, false),
+            ("PASSWORD =", false, false),
+            ("PASSWORD (", false, false),
+            ("SET PASSWORD FOR", false, false),
+            ("IDENTIFIED BY", false, false),
+            ("IDENTIFIED BY 'x", true, true),
+            ("PASSWORD $$x", false, true),
+            ("PASSWORD E'", true, true),
+            ("/*!", false, false),
+            ("/*!5", false, false),
+            ("PASSWORD 'ư😀", true, true),
+            ("ưPASSWORD = 'é'", true, true),
+            ("))((PASSWORD))", false, false),
         ] {
-            for d in [MY, PG] {
+            for (d, want) in [(MY, my), (PG, pg)] {
                 let out = red(s, d);
-                assert!(!out.contains('x') || !s.contains("'x"), "{s} -> {out}");
+                assert_eq!(out.contains(REDACTED), want, "{s} -> {out}");
+                assert!(!out.contains("'x"), "{s} -> {out}");
             }
         }
         let mix = "/*!50000 SET PASSWORD FOR 'ư'@'h' = PASSWORD(E'a\\'😀$q$') */ \
