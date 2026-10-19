@@ -3,6 +3,8 @@
 use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::secret::MemorySecretStore;
+use dnt_store::repo::NodeId;
+use dnt_store::transfer::ConflictPolicy;
 use dnt_testkit::{require_db, Target, FIXTURE_DB, TEST_PASSWORD};
 use dntdatabase::commands::browse::{
     list_databases_impl, list_objects_impl, list_schemas_impl, object_ddl_impl, refresh_node_impl,
@@ -10,6 +12,7 @@ use dntdatabase::commands::browse::{
 use dntdatabase::commands::connections::{
     close_connection_impl, create_connection_impl, open_connection_impl, SecretsInput,
 };
+use dntdatabase::commands::transfer::{apply_import_impl, export_connections_impl};
 use dntdatabase::state::{AppPaths, AppState};
 use serde_json::json;
 use std::sync::Arc;
@@ -92,6 +95,29 @@ async fn mysql_system_databases_hidden_unless_requested() {
         .await
         .unwrap();
     close_connection_impl(&state, id).await.unwrap();
+}
+
+#[tokio::test]
+async fn overwrite_import_closes_the_open_connection() {
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path());
+    let id = open(&state, Target::MySql8).await;
+    assert_eq!(state.sessions.open_connections(), [id]);
+
+    let file = dir.path().join("self.dntconn");
+    let path = file.to_string_lossy().into_owned();
+    export_connections_impl(&state, vec![NodeId::Connection(id)], None, path.clone())
+        .await
+        .unwrap();
+    let result = apply_import_impl(&state, path, None, ConflictPolicy::Overwrite)
+        .await
+        .unwrap();
+    assert_eq!(result.overwritten_ids, [id]);
+    // The runtime kept the old settings: it is closed, the next browse says so.
+    assert!(state.sessions.open_connections().is_empty());
+    let err = list_databases_impl(&state, id, false).await.unwrap_err();
+    assert!(matches!(err, dnt_core::error::DbError::NotOpen), "{err:?}");
 }
 
 #[tokio::test]

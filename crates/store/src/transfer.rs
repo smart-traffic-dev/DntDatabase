@@ -102,6 +102,9 @@ pub struct ImportResult {
     pub overwritten: u32,
     /// Conflicts skipped by policy plus entries the parser could not import.
     pub skipped: u32,
+    /// Stored connections replaced by `Overwrite`: an open one must be closed (it still
+    /// uses the old settings).
+    pub overwritten_ids: Vec<Uuid>,
 }
 
 pub fn preview(repo: &ConnectionRepo, bundle: &ImportBundle) -> Result<ImportPreview, DbError> {
@@ -178,6 +181,7 @@ pub fn apply(
         imported: 0,
         overwritten: 0,
         skipped: skipped.len() as u32,
+        overwritten_ids: Vec::new(),
     };
     repo.transaction(|tx| {
         import_groups(tx, groups)?;
@@ -201,6 +205,7 @@ pub fn apply(
                         cfg.name = unique_name(tx, &cfg)?;
                         update_connection_row(tx, &mut cfg)?;
                         result.overwritten += 1;
+                        result.overwritten_ids.push(cfg.id);
                         overwritten = true;
                     }
                     ConflictPolicy::Copy => {

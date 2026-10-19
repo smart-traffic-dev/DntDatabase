@@ -43,6 +43,8 @@ interface TreeState {
   /** Loads groups and connections from the store (`list_tree`). */
   reloadStored(): Promise<void>;
   closeConnection(connectionId: string): Promise<void>;
+  /** Shows a connection as closed without calling the backend (its runtime is already gone). */
+  forgetConnection(connectionId: string): void;
   duplicateConnection(connectionId: string): Promise<void>;
   /** Drag and drop: moves a group or connection into / next to `targetId` (`null` = the root). */
   move(dragId: string, targetId: string | null): Promise<void>;
@@ -379,6 +381,11 @@ export const useTree = create<TreeState>()((set, get) => {
         set({ error: toAppError(e) });
         return;
       }
+      get().forgetConnection(connectionId);
+    },
+
+    forgetConnection: (connectionId) => {
+      const id = connNodeId(connectionId);
       invalidate(id);
       useConnections.getState().clearInfo(connectionId);
       const d = draft();

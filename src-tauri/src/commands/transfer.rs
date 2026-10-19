@@ -124,6 +124,10 @@ pub async fn apply_import_impl(
         transfer::apply(&repo, bundle, policy)
     })
     .await?;
+    // Like `update_connection`: an open runtime would keep using the replaced settings.
+    for id in &result.overwritten_ids {
+        state.sessions.close(*id).await;
+    }
     tracing::info!(
         imported = result.imported,
         overwritten = result.overwritten,

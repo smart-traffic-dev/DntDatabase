@@ -302,7 +302,12 @@ export type ImportResult = { imported: number; overwritten: number;
 /**
  * Conflicts skipped by policy plus entries the parser could not import.
  */
-skipped: number }
+skipped: number; 
+/**
+ * Stored connections replaced by `Overwrite`: an open one must be closed (it still
+ * uses the old settings).
+ */
+overwritten_ids: string[] }
 export type IndexDetail = { name: string; unique: boolean; primary: boolean; columns: string[]; expression: string | null; method: string | null; 
 /**
  * Either a full `CREATE INDEX …` statement or, for an index backing a table

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, toAppError } from '../api';
 import type { ConflictPolicy, DbKind, ImportPreview } from '../bindings';
 import { useDialogs } from '../store/dialogs';
+import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { Modal } from './Modal';
 
@@ -129,6 +130,11 @@ export function ImportDialog({ onClose }: Props) {
       const r = await api.applyImport(path, used, policy);
       // The import happened on the backend: always surface it, even if the dialog went away.
       useDialogs.getState().setNotice(`Imported ${r.imported} · Overwritten ${r.overwritten} · Skipped ${r.skipped}`);
+      // The backend closed the replaced connections: drop what the UI still shows of them.
+      for (const id of r.overwritten_ids) {
+        useTree.getState().forgetConnection(id);
+        useTabs.getState().closeConnection(id);
+      }
       await useTree.getState().reloadStored();
       if (my !== token.current) return;
       onClose();

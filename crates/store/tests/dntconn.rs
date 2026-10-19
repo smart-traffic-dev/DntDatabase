@@ -492,7 +492,8 @@ fn apply_policies() {
         ImportResult {
             imported: 1,
             overwritten: 0,
-            skipped: 1
+            skipped: 1,
+            overwritten_ids: vec![],
         }
     );
     assert_eq!(repo.get(existing.id).unwrap(), existing);
@@ -515,7 +516,8 @@ fn apply_policies() {
         ImportResult {
             imported: 1,
             overwritten: 1,
-            skipped: 0
+            skipped: 0,
+            overwritten_ids: vec![existing.id],
         }
     );
     let over = repo.get(existing.id).unwrap();
@@ -548,7 +550,8 @@ fn apply_policies() {
         ImportResult {
             imported: 2,
             overwritten: 0,
-            skipped: 0
+            skipped: 0,
+            overwritten_ids: vec![],
         }
     );
     assert_eq!(repo.get(existing.id).unwrap(), existing);
@@ -609,7 +612,8 @@ fn apply_creates_groups_once_and_counts_parse_skips() {
         ImportResult {
             imported: 1,
             overwritten: 0,
-            skipped: 1
+            skipped: 1,
+            overwritten_ids: vec![],
         }
     );
     let tree = repo.tree().unwrap();

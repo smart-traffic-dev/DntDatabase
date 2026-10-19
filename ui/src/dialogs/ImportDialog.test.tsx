@@ -4,7 +4,10 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImportPreview } from '../bindings';
 import { useDialogs } from '../store/dialogs';
-import { callsOf, calls, fail, mockBackend, resetStores, sampleTree } from '../test/backend';
+import { useConnections } from '../store/connections';
+import { objectTabId, useTabs } from '../store/tabs';
+import { useTree } from '../store/tree';
+import { callsOf, calls, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ImportDialog } from './ImportDialog';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn(), open: vi.fn() }));
@@ -89,7 +92,7 @@ describe('ImportDialog', () => {
     mockBackend({
       import_needs_passphrase: () => false,
       preview_import: () => preview,
-      apply_import: () => ({ imported: 2, overwritten: 1, skipped: 3 }),
+      apply_import: () => ({ imported: 2, overwritten: 1, skipped: 3, overwritten_ids: [] }),
       list_tree: () => sampleTree(),
     });
     const onClose = vi.fn();
@@ -105,6 +108,41 @@ describe('ImportDialog', () => {
     expect(useDialogs.getState().notice).toBe('Imported 2 · Overwritten 1 · Skipped 3');
   });
 
+  it('overwrite closes the replaced connections and their tabs before reloading', async () => {
+    const user = userEvent.setup();
+    mockBackend({
+      import_needs_passphrase: () => false,
+      preview_import: () => preview,
+      apply_import: () => ({ imported: 0, overwritten: 1, skipped: 0, overwritten_ids: [ids.prod] }),
+      list_tree: () => sampleTree(),
+    });
+    await useTree.getState().reloadStored();
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
+    useConnections.getState().setInfo(ids.analytics, serverInfo('Postgres'));
+    const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
+    const tabOf = (connectionId: string) => ({
+      id: objectTabId(connectionId, orders),
+      kind: 'object' as const,
+      connectionId,
+      objectRef: orders,
+      title: 'orders',
+    });
+    useTabs.getState().open(tabOf(ids.prod));
+    useTabs.getState().open(tabOf(ids.analytics));
+
+    const onClose = vi.fn();
+    render(<ImportDialog onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Choose file…' }));
+    await screen.findByText('shop');
+    await user.click(screen.getByRole('radio', { name: /Overwrite/ }));
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+
+    expect(useConnections.getState().info.has(ids.prod)).toBe(false);
+    expect(useConnections.getState().info.has(ids.analytics)).toBe(true);
+    expect(useTabs.getState().tabs.map((t) => t.connectionId)).toEqual([ids.analytics]);
+  });
+
   it('keeps the dialog open while applying and still reloads and notifies when apply resolves', async () => {
     const user = userEvent.setup();
     let finish!: () => void;
@@ -114,7 +152,7 @@ describe('ImportDialog', () => {
       preview_import: () => preview,
       apply_import: async () => {
         await gate;
-        return { imported: 1, overwritten: 0, skipped: 0 };
+        return { imported: 1, overwritten: 0, skipped: 0, overwritten_ids: [] };
       },
       list_tree: () => sampleTree(),
     });

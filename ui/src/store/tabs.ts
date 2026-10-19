@@ -15,6 +15,8 @@ interface TabsState {
   open(tab: Tab): void;
   activate(id: string): void;
   close(id: string): void;
+  /** Closes every tab of a connection (it was deleted or replaced). */
+  closeConnection(connectionId: string): void;
   reset(): void;
 }
 
@@ -40,6 +42,16 @@ export const useTabs = create<TabsState>()((set) => ({
       if (s.activeId !== id) return { tabs };
       // Closing the active tab activates its right neighbour, else the left one.
       return { tabs, activeId: (tabs[index] ?? tabs[index - 1])?.id };
+    }),
+  closeConnection: (connectionId) =>
+    set((s) => {
+      const tabs = s.tabs.filter((t) => t.connectionId !== connectionId);
+      if (tabs.length === s.tabs.length) return s;
+      if (tabs.some((t) => t.id === s.activeId)) return { tabs };
+      // The active tab went away: activate the nearest remaining tab to its left, else the first.
+      const at = s.tabs.findIndex((t) => t.id === s.activeId);
+      const before = s.tabs.slice(0, Math.max(at, 0)).filter((t) => t.connectionId !== connectionId);
+      return { tabs, activeId: (before.at(-1) ?? tabs[0])?.id };
     }),
   reset: () => set({ tabs: [], activeId: undefined }),
 }));
