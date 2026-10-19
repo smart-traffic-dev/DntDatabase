@@ -2,10 +2,10 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
-  Failure,
-  appError,
+  backendError,
   callsOf,
   config,
+  fail,
   ids,
   mockBackend,
   resetStores,
@@ -45,7 +45,7 @@ describe('ConnectionDialog', () => {
   it('field_error_focuses_tab', async () => {
     mockBackend({
       create_connection: () => {
-        throw new Failure(appError('config', 'Key file does not exist', { field: 'ssh.key_path' }));
+        throw fail('field_ssh_key_path');
       },
     });
     const user = userEvent.setup();
@@ -57,7 +57,7 @@ describe('ConnectionDialog', () => {
     await user.click(screen.getByTestId('conn-save'));
     expect(await screen.findByRole('tab', { name: 'SSH', selected: true })).toBeInTheDocument();
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('Key file does not exist');
+    expect(alert).toHaveTextContent('SSH key authentication requires a private key file.');
     expect(screen.getByLabelText('Key file')).toHaveAttribute('aria-invalid', 'true');
     await waitFor(() => expect(screen.getByLabelText('Key file')).toHaveFocus());
     // Editing the field clears its error.
@@ -77,44 +77,53 @@ describe('ConnectionDialog', () => {
     expect(callsOf('test_connection')[0]).toMatchObject({ secrets: { db_password: 'pw' } });
   });
 
-  it('test_failure_shows_stage_hint_and_detail', async () => {
+  it('test_failure_shows_stage_hint_detail_and_completed_timings', async () => {
     mockBackend({
       test_connection: () => {
-        throw new Failure(
-          appError('connect', 'Connection refused', {
-            stage: 'connect_db',
-            hint: 'Check the host and port.',
-            detail: 'os error 10061',
-          }),
-        );
+        throw fail('connect_refused');
       },
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     await user.click(screen.getByTestId('conn-test'));
     const bar = await screen.findByRole('alert');
-    expect(bar).toHaveTextContent('Connect');
-    expect(bar).toHaveTextContent('Connection refused');
-    expect(bar).toHaveTextContent('Check the host and port.');
-    expect(screen.queryByText('os error 10061')).not.toBeInTheDocument();
+    expect(within(bar).getByTestId('test-stage')).toHaveTextContent('Connect:');
+    expect(bar).toHaveTextContent('Could not connect to the database server.');
+    expect(bar).toHaveTextContent('Connection refused: check host, port, firewall');
+    // Stages that completed before the failure keep their timings.
+    expect(bar).toHaveTextContent('Secrets 1 ms');
+    expect(screen.queryByText(/os error 10061/)).not.toBeInTheDocument();
     await user.click(within(bar).getByRole('button', { name: 'Details' }));
-    expect(screen.getByText('os error 10061')).toBeInTheDocument();
+    expect(screen.getByText(/os error 10061/)).toBeInTheDocument();
+  });
+
+  it.each([
+    ['auth_mysql', 'Connect:', 'Wrong user/password'],
+    ['tls', 'Connect:', 'TLS handshake failed.'],
+    ['server_db_missing', 'Connect:', 'Database does not exist.'],
+    ['timeout_connect', 'Connect:', 'The operation timed out.'],
+    ['ssh_connect', 'SSH connect:', 'SSH connection failed.'],
+    ['ssh_auth', 'SSH authentication:', 'If the key has a passphrase, enter it.'],
+    ['ssh_channel', 'SSH channel:', 'The SSH server could not reach db.internal:3306.'],
+  ] as const)('test_failure_%s_names_its_step', async (name, step, text) => {
+    mockBackend({
+      test_connection: () => {
+        throw fail(name);
+      },
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(screen.getByTestId('conn-test'));
+    const bar = await screen.findByRole('alert');
+    expect(within(bar).getByTestId('test-stage')).toHaveTextContent(step);
+    expect(bar).toHaveTextContent(text);
   });
 
   it('unknown_host_key_flow', async () => {
     let n = 0;
     mockBackend({
       test_connection: () => {
-        if (n++ === 0) {
-          throw new Failure(
-            appError('ssh_host_key_unknown', 'Unknown host key', {
-              host: 'bastion',
-              port: 22,
-              fingerprint: 'SHA256:abc123',
-              key_openssh: 'ssh-ed25519 AAAA',
-            }),
-          );
-        }
+        if (n++ === 0) throw fail('ssh_host_key_unknown');
         return okResult;
       },
       trust_host_key: () => null,
@@ -132,7 +141,7 @@ describe('ConnectionDialog', () => {
       host: 'bastion',
       port: 22,
       fingerprint: 'SHA256:abc123',
-      keyOpenssh: 'ssh-ed25519 AAAA',
+      keyOpenssh: backendError('ssh_host_key_unknown').key_openssh,
     });
     expect(callsOf('test_connection')).toHaveLength(2);
     expect(onClose).not.toHaveBeenCalled();
@@ -141,7 +150,7 @@ describe('ConnectionDialog', () => {
   it('host_key_mismatch_warns_without_trust_button', async () => {
     mockBackend({
       test_connection: () => {
-        throw new Failure(appError('ssh', 'Host key changed', { stage: 'host_key_mismatch' }));
+        throw fail('ssh_host_key_mismatch');
       },
     });
     const user = userEvent.setup();

@@ -1,9 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ServerVariant } from '../bindings';
 import {
-  Failure,
-  appError,
   callsOf,
+  fail,
   ids,
   mockBackend,
   openResult,
@@ -237,11 +236,11 @@ describe('tree store: names, errors, selection, drops', () => {
   it('shows a refresh_node failure in the tree error state', async () => {
     await openFolder(['orders'], {
       refresh_node: () => {
-        throw new Failure(appError('connection_lost', 'gone'));
+        throw fail('internal');
       },
     });
     await useTree.getState().refresh(`${folder}/obj:Table:orders`);
-    expect(useTree.getState().error?.message).toBe('gone');
+    expect(useTree.getState().error?.message).toBe('An internal error occurred.');
   });
 
   it('clears the selection when the selected node disappears on reload', async () => {

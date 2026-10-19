@@ -124,7 +124,7 @@ async fn open_mysql8_via_ssh_reports_timings() {
         .id;
 
     // The fresh known_hosts does not trust the server yet: the UI asks, trusts, retries.
-    match f.sm.open(id, None).await {
+    match f.sm.open(id, None).await.map_err(DbError::into_unstaged) {
         Err(DbError::SshHostKeyUnknown {
             host,
             port,
@@ -235,7 +235,8 @@ async fn test_connection_does_not_persist() {
         ssh_key_passphrase: None,
     };
     let err = f.sm.test(&cfg, bad).await.unwrap_err();
-    assert!(matches!(err, DbError::Auth { .. }), "{err:?}");
+    assert_eq!(err.stage(), Some(ConnectStage::ConnectDb));
+    assert!(matches!(err.unstaged(), DbError::Auth { .. }), "{err:?}");
     assert_eq!(f.repo.tree().unwrap(), before);
     assert!(f.sm.open_connections().is_empty());
 }

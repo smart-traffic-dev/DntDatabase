@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectKind, ObjectRef, TableDetail } from '../bindings';
 import { objectTabId, useTabs, type Tab } from '../store/tabs';
-import { Failure, appError, callsOf, ids, mockBackend, resetStores } from '../test/backend';
+import { callsOf, fail, ids, mockBackend, resetStores } from '../test/backend';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -173,14 +173,14 @@ describe('ObjectTab', () => {
     const user = userEvent.setup();
     setup(makeTab('Table'), {
       object_ddl: () => {
-        throw new Failure(appError('server', 'permission denied for orders', { hint: 'Ask your DBA', detail: 'SQLSTATE 42501' }));
+        throw fail('server_db_missing');
       },
     });
     expect(await screen.findByText('Customer orders')).toBeInTheDocument();
     await user.click(screen.getByTestId('object-tab-ddl'));
     const alert = await screen.findByRole('alert');
-    expect(alert).toHaveTextContent('permission denied for orders');
-    expect(alert).toHaveTextContent('Ask your DBA');
+    expect(alert).toHaveTextContent("Unknown database 'shop'");
+    expect(alert).toHaveTextContent('Database does not exist.');
     expect(within(alert).getByText('Details')).toBeInTheDocument();
     // The other sub-tabs keep working.
     await user.click(screen.getByRole('tab', { name: 'Info' }));

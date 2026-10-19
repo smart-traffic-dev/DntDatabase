@@ -4,7 +4,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImportPreview } from '../bindings';
 import { useDialogs } from '../store/dialogs';
-import { Failure, appError, callsOf, calls, mockBackend, resetStores, sampleTree } from '../test/backend';
+import { callsOf, calls, fail, mockBackend, resetStores, sampleTree } from '../test/backend';
 import { ImportDialog } from './ImportDialog';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn(), open: vi.fn() }));
@@ -33,7 +33,7 @@ describe('ImportDialog', () => {
       import_needs_passphrase: () => true,
       preview_import: (a) => {
         if (a.passphrase === 'wrong-pass') {
-          throw new Failure(appError('config', 'Passphrase is incorrect.', { field: 'passphrase' }));
+          throw fail('passphrase_incorrect');
         }
         return preview;
       },

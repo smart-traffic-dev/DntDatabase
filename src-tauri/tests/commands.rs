@@ -147,6 +147,33 @@ async fn export_then_import_into_another_app() {
     );
 }
 
+#[tokio::test]
+async fn unreadable_import_file_is_a_path_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let missing = dir
+        .path()
+        .join("missing.dntconn")
+        .to_string_lossy()
+        .into_owned();
+    for err in [
+        preview_import_impl(&state, missing.clone(), None)
+            .await
+            .unwrap_err(),
+        import_needs_passphrase_impl(missing.clone())
+            .await
+            .unwrap_err(),
+    ] {
+        let app = dnt_core::error::AppError::from(err);
+        assert_eq!(app.kind, "config");
+        assert_eq!(app.field.as_deref(), Some("path"));
+        assert!(
+            app.message.starts_with("Could not read missing.dntconn: "),
+            "{app:?}"
+        );
+    }
+}
+
 #[test]
 fn bindings_export() {
     let dir = tempfile::tempdir().unwrap();

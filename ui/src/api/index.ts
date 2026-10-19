@@ -1,7 +1,17 @@
 import { commands, type Result } from '../bindings';
 import { AppErrorEx, toAppError } from './errors';
 
-export { AppErrorEx, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from './errors';
+export {
+  AppErrorEx,
+  isCancelled,
+  isHostKeyMismatch,
+  isHostKeyUnknown,
+  isPasswordRequired,
+  needsReconnect,
+  notOpenError,
+  stageLabel,
+  toAppError,
+} from './errors';
 
 type Commands = typeof commands;
 type Unwrap<R> = R extends Promise<Result<infer T, unknown>> ? T : never;

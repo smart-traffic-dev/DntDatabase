@@ -5,10 +5,9 @@ import { useDialogs } from '../store/dialogs';
 import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
 import {
-  Failure,
-  appError,
   calls,
   callsOf,
+  fail,
   ids,
   mockBackend,
   openResult,
@@ -108,7 +107,7 @@ describe('ConnectionTree', () => {
     let attempts = 0;
     backend({
       list_databases: () => {
-        if (attempts++ === 0) throw new Failure(appError('server', 'Access denied for user', { server_code: '1045' }));
+        if (attempts++ === 0) throw fail('timeout_execute');
         return [{ name: 'shop' }];
       },
     });
@@ -116,11 +115,11 @@ describe('ConnectionTree', () => {
     const user = userEvent.setup();
 
     await user.dblClick(row('shop-prod'));
-    expect(await screen.findByText('Access denied for user')).toBeInTheDocument();
+    expect(await screen.findByText('The operation timed out.')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Retry' }));
 
     expect(await screen.findByRole('treeitem', { name: /^shop$/ })).toBeInTheDocument();
-    expect(screen.queryByText('Access denied for user')).not.toBeInTheDocument();
+    expect(screen.queryByText('The operation timed out.')).not.toBeInTheDocument();
     expect(callsOf('list_databases')).toHaveLength(2);
     // The connection stays open: Retry does not open it again.
     expect(callsOf('open_connection')).toHaveLength(1);
@@ -129,7 +128,7 @@ describe('ConnectionTree', () => {
   it('asks for the password when the connection needs one', async () => {
     backend({
       open_connection: () => {
-        throw new Failure(appError('secret', 'password_required'));
+        throw fail('password_required');
       },
     });
     await renderTree();
@@ -147,9 +146,8 @@ describe('ConnectionTree', () => {
   it('asks to trust the SSH host key when it is unknown', async () => {
     backend({
       open_connection: () => {
-        throw new Failure(
-          appError('ssh_host_key_unknown', 'unknown host key', { host: 'bastion-01', port: 22, fingerprint: 'SHA256:abc', key_openssh: 'ssh-ed25519 AAAA' }),
-        );
+        throw fail('ssh_host_key_unknown');
+
       },
     });
     await renderTree();
@@ -159,7 +157,7 @@ describe('ConnectionTree', () => {
     expect(useDialogs.getState().prompt).toMatchObject({
       kind: 'hostKey',
       connectionId: ids.prod,
-      error: { fingerprint: 'SHA256:abc' },
+      error: { fingerprint: 'SHA256:abc123' },
     });
   });
 
@@ -232,7 +230,7 @@ describe('ConnectionTree', () => {
     let attempts = 0;
     backend({
       list_databases: () => {
-        if (attempts++ === 0) throw new Failure(appError('server', 'boom'));
+        if (attempts++ === 0) throw fail('timeout_execute');
         return [{ name: 'shop' }];
       },
     });

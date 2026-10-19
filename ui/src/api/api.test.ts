@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AppErrorEx, api, isPasswordRequired } from '.';
-import { Failure, appError, mockBackend } from '../test/backend';
+import { backendError, fail, mockBackend } from '../test/backend';
 
 describe('api', () => {
   beforeEach(() => {
@@ -10,26 +10,29 @@ describe('api', () => {
   it('throws AppErrorEx carrying the AppError when a command returns an error', async () => {
     mockBackend({
       list_tree: () => {
-        throw new Failure(appError('server', 'table is gone', { server_code: '1146', retryable: true }));
+        throw fail('server_db_missing');
       },
     });
     const err = await api.listTree().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppErrorEx);
     expect((err as AppErrorEx).kind).toBe('server');
-    expect((err as AppErrorEx).message).toBe('table is gone');
-    expect((err as AppErrorEx).server_code).toBe('1146');
-    expect((err as AppErrorEx).retryable).toBe(true);
+    expect((err as AppErrorEx).message).toBe("Unknown database 'shop'");
+    expect((err as AppErrorEx).server_code).toBe('1049');
+    expect((err as AppErrorEx).stage).toBe('connect_db');
+    expect((err as AppErrorEx).timings).toEqual([{ stage: 'resolve_secrets', ms: 1 }]);
+    expect((err as AppErrorEx).toAppError()).toEqual(backendError('server_db_missing'));
   });
 
-  it('shows password_required as a human message and still recognizes it', async () => {
+  it('recognizes the real password_required error', async () => {
     mockBackend({
       list_tree: () => {
-        throw new Failure(appError('secret', 'password_required'));
+        throw fail('password_required');
       },
     });
     const err = (await api.listTree().catch((e: unknown) => e)) as AppErrorEx;
     expect(err.message).toBe('A password is required.');
     expect(isPasswordRequired(err)).toBe(true);
+    expect(isPasswordRequired(backendError('internal'))).toBe(false);
   });
 
   it('resolves to the value of a successful command and sends its arguments', async () => {

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { HostKeyDialog } from './HostKeyDialog';
 import { PasswordPrompt } from './PasswordPrompt';
-import { Failure, appError, callsOf, mockBackend } from '../test/backend';
+import { callsOf, fail, mockBackend } from '../test/backend';
 
 describe('PasswordPrompt', () => {
   it('password_prompt_submits_needed_fields', async () => {
@@ -69,14 +69,14 @@ describe('HostKeyDialog', () => {
   it('cancel reports not trusted and a failed trust stays open', async () => {
     mockBackend({
       trust_host_key: () => {
-        throw new Failure(appError('io', 'known_hosts is read-only'));
+        throw fail('host_key_trust_invalid');
       },
     });
     const user = userEvent.setup();
     const onDone = vi.fn();
     render(<HostKeyDialog host="h" port={22} fingerprint="f" keyOpenssh="k" onDone={onDone} />);
     await user.click(screen.getByRole('button', { name: 'Trust and connect' }));
-    expect(await screen.findByRole('alert')).toHaveTextContent('known_hosts is read-only');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Not an OpenSSH public key.');
     expect(onDone).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(onDone).toHaveBeenCalledWith(false);

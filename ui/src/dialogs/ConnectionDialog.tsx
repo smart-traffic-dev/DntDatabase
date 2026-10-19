@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { open as pickFile } from '@tauri-apps/plugin-dialog';
-import { api, isHostKeyMismatch, isHostKeyUnknown, toAppError } from '../api';
+import { api, isHostKeyMismatch, isHostKeyUnknown, stageLabel, toAppError } from '../api';
 import type {
   AppError,
   ConnectionConfig,
@@ -11,6 +11,7 @@ import type {
   SecretsUpdateInput,
   SshAuth,
   SslMode,
+  StageTiming,
 } from '../bindings';
 import { useConnections } from '../store/connections';
 import { HostKeyDialog } from './HostKeyDialog';
@@ -64,15 +65,7 @@ interface FieldError {
   value: string;
 }
 
-const STAGE_LABELS: Record<string, string> = {
-  resolve_secrets: 'Secrets',
-  open_tunnel: 'SSH tunnel',
-  connect_db: 'Connect',
-  detect_server: 'Detect server',
-  execute: 'Query',
-  host_key_mismatch: 'SSH host key',
-};
-const stageLabel = (stage: string) => STAGE_LABELS[stage] ?? stage;
+const timingsText = (timings: StageTiming[]) => timings.map((t) => ` · ${stageLabel(t.stage)} ${t.ms} ms`).join('');
 
 const defaultPort = (engine: Engine) => (engine === 'postgres' ? 5432 : 3306);
 
@@ -651,7 +644,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           {test.state === 'ok' && (
             <div className="result ok" role="status" data-testid="test-result">
               Connected · {test.result.info.version_string}
-              {test.result.timings.map((t) => ` · ${stageLabel(t.stage)} ${t.ms} ms`).join('')}
+              {timingsText(test.result.timings)}
             </div>
           )}
           {test.state === 'failed' && (
@@ -667,10 +660,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               ) : (
                 <>
                   <div>
-                    {test.error.stage && <strong>{stageLabel(test.error.stage)}: </strong>}
+                    {test.error.stage && <strong data-testid="test-stage">{stageLabel(test.error.stage)}: </strong>}
                     <span>{test.error.message}</span>
                   </div>
                   {test.error.hint && <p className="hint-line">{test.error.hint}</p>}
+                  {test.error.timings && test.error.timings.length > 0 && (
+                    <p className="hint-line">Completed{timingsText(test.error.timings)}</p>
+                  )}
                 </>
               )}
               {test.error.detail && (

@@ -11,6 +11,7 @@
 use crate::cache::{NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{Driver, ExecOptions, Introspector, RowSink, Session};
+pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
@@ -31,8 +32,7 @@ use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-/// Error message telling the UI to prompt for the missing password(s) and call again.
-pub const PASSWORD_REQUIRED: &str = "password_required";
+pub use dnt_core::error::PASSWORD_REQUIRED;
 
 /// Used when the connection sets no application name.
 const DEFAULT_APPLICATION_NAME: &str = "DntDatabase";
@@ -64,14 +64,6 @@ pub enum ConnState {
     Connected,
     Reconnecting,
     Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct StageTiming {
-    pub stage: ConnectStage,
-    /// Exported as a JS number (milliseconds).
-    #[specta(type = f64)]
-    pub ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -347,6 +339,24 @@ impl SessionManager {
         cfg.validate()?;
         let mut timings = Vec::new();
         let started = Instant::now();
+        let secrets = self
+            .test_secrets(cfg, secrets)
+            .map_err(|e| DbError::at_stage(ConnectStage::ResolveSecrets, Vec::new(), e))?;
+        record(&mut timings, ConnectStage::ResolveSecrets, started);
+        let opened = self
+            .connect_pipeline(cfg, &secrets, &mut timings, &|_| {})
+            .await?;
+        let info = opened.info.clone();
+        opened.close().await;
+        Ok(OpenResult { info, timings })
+    }
+
+    /// The secrets `test` connects with: typed ones, completed from the store (see `test`).
+    fn test_secrets(
+        &self,
+        cfg: &ConnectionConfig,
+        secrets: NewSecrets,
+    ) -> Result<ConnSecrets, DbError> {
         let mut secrets = ConnSecrets::from(secrets);
         if cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil() {
             let fill = |slot: &mut Option<SecretString>, kind| -> Result<(), DbError> {
@@ -363,13 +373,7 @@ impl SessionManager {
             )?;
         }
         secrets.check_ssh(cfg)?;
-        record(&mut timings, ConnectStage::ResolveSecrets, started);
-        let opened = self
-            .connect_pipeline(cfg, &secrets, &mut timings, &|_| {})
-            .await?;
-        let info = opened.info.clone();
-        opened.close().await;
-        Ok(OpenResult { info, timings })
+        Ok(secrets)
     }
 
     /// Opens a saved connection. Opening one that is already connected returns its info
@@ -459,7 +463,9 @@ impl SessionManager {
     ) -> Result<(ConnectionConfig, ConnSecrets, Opened), DbError> {
         let started = Instant::now();
         let cfg = self.repo.get(id)?;
-        let secrets = self.resolve_secrets(&cfg, prompt)?;
+        let secrets = self
+            .resolve_secrets(&cfg, prompt)
+            .map_err(|e| DbError::at_stage(ConnectStage::ResolveSecrets, Vec::new(), e))?;
         record(timings, ConnectStage::ResolveSecrets, started);
         let report =
             |stage| self.set_pending_if_current(id, generation, ConnState::Connecting { stage });
@@ -506,7 +512,8 @@ impl SessionManager {
     }
 
     /// `OpenTunnel` (with SSH), `ConnectDb` and `DetectServer`, each timed. Errors are
-    /// returned as the failing stage produced them; anything opened is closed again.
+    /// wrapped with the failing stage and the timings of the completed ones
+    /// ([`DbError::AtStage`]); anything opened is closed again.
     async fn connect_pipeline(
         &self,
         cfg: &ConnectionConfig,
@@ -519,7 +526,9 @@ impl SessionManager {
             Some(ssh) => {
                 report(ConnectStage::OpenTunnel);
                 let started = Instant::now();
-                let tunnel = open_tunnel(ssh, cfg, secrets, &self.known_hosts).await?;
+                let tunnel = open_tunnel(ssh, cfg, secrets, &self.known_hosts)
+                    .await
+                    .map_err(|e| DbError::at_stage(ConnectStage::OpenTunnel, timings.clone(), e))?;
                 record(timings, ConnectStage::OpenTunnel, started);
                 Some(tunnel)
             }
@@ -535,7 +544,11 @@ impl SessionManager {
                 if let Some(t) = tunnel {
                     t.close().await;
                 }
-                return Err(e);
+                return Err(DbError::at_stage(
+                    ConnectStage::ConnectDb,
+                    timings.clone(),
+                    e,
+                ));
             }
         };
         record(timings, ConnectStage::ConnectDb, started);
@@ -570,9 +583,7 @@ impl SessionManager {
     }
 
     fn runtime(&self, id: Uuid) -> Result<Arc<ConnectionRuntime>, DbError> {
-        self.runtime_opt(id).ok_or_else(|| DbError::Internal {
-            message: format!("connection {id} is not open"),
-        })
+        self.runtime_opt(id).ok_or(DbError::NotOpen)
     }
 
     /// Closes the tunnel and every metadata session and forgets the connection. An `open`

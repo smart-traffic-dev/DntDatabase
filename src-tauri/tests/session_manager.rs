@@ -5,7 +5,7 @@ use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
     CancelHandle, Canceller, Driver, ExecOptions, ExecSummary, Introspector, RowSink, Session,
 };
-use dnt_core::error::{ConnectStage, DbError};
+use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
 };
@@ -309,8 +309,9 @@ async fn ask_mode_requires_prompt() {
     let f = fixture(DbKind::MySql, false);
     let id = save(&f, config(DbKind::MySql, SecretMode::Ask), None);
     let err = f.sm.open(id, None).await.unwrap_err();
+    assert_eq!(err.stage(), Some(ConnectStage::ResolveSecrets));
     assert!(
-        matches!(&err, DbError::Secret { message } if message == "password_required"),
+        matches!(err.unstaged(), DbError::Secret { message } if message == "password_required"),
         "{err:?}"
     );
     assert_eq!(f.log.connects.load(Ordering::SeqCst), 0);
@@ -357,12 +358,18 @@ async fn stage_reported_on_failure() {
     let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
     let err = f.sm.open(id, None).await.unwrap_err();
     assert!(
-        matches!(&err, DbError::Connect { message } if message == "fake refused (10061)"),
+        matches!(err.unstaged(), DbError::Connect { message } if message == "fake refused (10061)"),
         "{err:?}"
     );
     let timings = f.sm.last_timings(id).unwrap();
     let stages: Vec<_> = timings.iter().map(|t| t.stage).collect();
     assert_eq!(stages, [ConnectStage::ResolveSecrets]);
+    // The error names the failing stage and carries the completed stages for the UI.
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "connect");
+    assert_eq!(app.stage.as_deref(), Some("connect_db"));
+    assert_eq!(app.timings, Some(timings));
+    assert!(app.hint.is_some());
     assert_eq!(f.sm.state(id), ConnState::Failed);
     // A failed open does not count as connected.
     assert!(f.repo.tree().unwrap().connections[0]
@@ -465,7 +472,19 @@ async fn close_drops_runtime() {
         f.sm.browse(id, Some("a"), k, list("a", ObjectKind::Table))
             .await
             .unwrap_err();
-    assert!(matches!(err, DbError::Internal { .. }), "{err:?}");
+    assert!(matches!(err, DbError::NotOpen), "{err:?}");
+}
+
+#[tokio::test]
+async fn failed_test_reports_stage_and_partial_timings() {
+    let f = fixture(DbKind::MySql, true);
+    let cfg = config(DbKind::MySql, SecretMode::Saved);
+    let err = f.sm.test(&cfg, secrets(Some("pw"))).await.unwrap_err();
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "connect");
+    assert_eq!(app.stage.as_deref(), Some("connect_db"));
+    let stages: Vec<_> = app.timings.unwrap().iter().map(|t| t.stage).collect();
+    assert_eq!(stages, [ConnectStage::ResolveSecrets]);
 }
 
 #[tokio::test]
@@ -520,7 +539,7 @@ async fn ask_mode_prompt_without_password_is_rejected() {
     let id = save(&f, config(DbKind::MySql, SecretMode::Ask), None);
     let err = f.sm.open(id, Some(secrets(None))).await.unwrap_err();
     assert!(
-        matches!(&err, DbError::Secret { message } if message == "password_required"),
+        matches!(err.unstaged(), DbError::Secret { message } if message == "password_required"),
         "{err:?}"
     );
     assert_eq!(f.log.connects.load(Ordering::SeqCst), 0);
@@ -534,7 +553,7 @@ async fn ssh_password_auth_without_password_is_rejected() {
     let id = save(&f, cfg, Some("pw"));
     let err = f.sm.open(id, None).await.unwrap_err();
     assert!(
-        matches!(&err, DbError::Secret { message } if message == "password_required"),
+        matches!(err.unstaged(), DbError::Secret { message } if message == "password_required"),
         "{err:?}"
     );
 }

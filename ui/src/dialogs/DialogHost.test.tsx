@@ -6,8 +6,9 @@ import { useDialogs } from '../store/dialogs';
 import { useTree } from '../store/tree';
 import {
   Failure,
-  appError,
+  backendError,
   callsOf,
+  fail,
   ids,
   mockBackend,
   openResult,
@@ -29,7 +30,7 @@ describe('DialogHost', () => {
     mockBackend({
       list_tree: () => sampleTree(),
       open_connection: (a) => {
-        if (a.prompt === null) throw new Failure(appError('secret', 'password_required'));
+        if (a.prompt === null) throw fail('password_required');
         return openResult(info);
       },
       list_databases: () => [{ name: 'shop' }],
@@ -41,7 +42,7 @@ describe('DialogHost', () => {
     useDialogs.getState().showPrompt({
       kind: 'password',
       connectionId: ids.prod,
-      error: appError('secret', 'password_required'),
+      error: backendError('password_required'),
     });
     const user = userEvent.setup();
     render(<DialogHost />);
@@ -55,12 +56,8 @@ describe('DialogHost', () => {
 
   it('host key retry hitting another unknown key leaves a usable dialog', async () => {
     const unknown = (fp: string) =>
-      appError('ssh_host_key_unknown', 'Unknown host key', {
-        host: 'bastion-01',
-        port: 22,
-        fingerprint: fp,
-        key_openssh: `ssh-ed25519 ${fp}`,
-      });
+      backendError('ssh_host_key_unknown', { fingerprint: fp, key_openssh: `ssh-ed25519 ${fp}` });
+
     mockBackend({ list_tree: () => sampleTree(), trust_host_key: () => null, open_connection: () => { throw new Failure(unknown('SHA256:second')); } });
     await seed();
     useDialogs.getState().showPrompt({ kind: 'hostKey', connectionId: ids.prod, error: unknown('SHA256:first') });
@@ -80,7 +77,7 @@ describe('DialogHost', () => {
     mockBackend({
       list_tree: () => sampleTree(),
       open_connection: () => {
-        throw new Failure(appError('ssh', 'Host key for bastion-01 changed', { stage: 'host_key_mismatch' }));
+        throw fail('ssh_host_key_mismatch');
       },
     });
     await seed();
@@ -99,7 +96,7 @@ describe('DialogHost', () => {
   it('cancelling the prompt leaves the connection collapsed', async () => {
     mockBackend({ list_tree: () => sampleTree() });
     await seed();
-    useDialogs.getState().showPrompt({ kind: 'password', connectionId: ids.legacy, error: appError('secret', 'password_required') });
+    useDialogs.getState().showPrompt({ kind: 'password', connectionId: ids.legacy, error: backendError('password_required') });
     const user = userEvent.setup();
     render(<DialogHost />);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));

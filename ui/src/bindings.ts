@@ -236,7 +236,11 @@ async openLogFolder() : Promise<Result<null, AppError>> {
 
 /** user-defined types **/
 
-export type AppError = { kind: string; message: string; detail: string | null; stage: string | null; server_code: string | null; sqlstate: string | null; position: number | null; retryable: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null }
+export type AppError = { kind: string; message: string; detail: string | null; stage: string | null; 
+/**
+ * Connect errors: the stages that completed before the failing one.
+ */
+timings: StageTiming[] | null; server_code: string | null; sqlstate: string | null; position: number | null; retryable: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -357,6 +361,9 @@ export type SshAuth = "password" | "key"
 export type SshConfig = { version?: number; host: string; port: number; user: string; auth: SshAuth; key_path: string | null }
 export type SslConfig = { version?: number; mode: SslMode; ca_path: string | null; cert_path: string | null; key_path: string | null }
 export type SslMode = "disable" | "prefer" | "require" | "verify_ca" | "verify_full"
+/**
+ * How long one completed stage of the connect pipeline took.
+ */
 export type StageTiming = { stage: ConnectStage; 
 /**
  * Exported as a JS number (milliseconds).

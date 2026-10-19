@@ -9,6 +9,7 @@ import type {
   ServerVariant,
   Tree,
 } from '../bindings';
+import backendErrors from './fixtures/app-errors.json';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { useTabs } from '../store/tabs';
@@ -21,11 +22,28 @@ export class Failure {
   constructor(public readonly error: AppError) {}
 }
 
+/** Names of the real backend errors in `fixtures/app-errors.json` (generated from Rust). */
+export type BackendErrorName = keyof typeof backendErrors;
+
+/**
+ * A real `AppError` as the backend sends it, from the fixtures the Rust test
+ * `app_error_fixtures` generates. Use these instead of hand-written error shapes.
+ */
+export function backendError(name: BackendErrorName, extra: Partial<AppError> = {}): AppError {
+  return { ...structuredClone(backendErrors[name] as AppError), ...extra };
+}
+
+/** Throwable `backendError`, for handlers. */
+export const fail = (name: BackendErrorName, extra: Partial<AppError> = {}) =>
+  new Failure(backendError(name, extra));
+
+/** Hand-written error shape: only for failures that are not about the backend's error contract. */
 export const appError = (kind: string, message: string, extra: Partial<AppError> = {}): AppError => ({
   kind,
   message,
   detail: null,
   stage: null,
+  timings: null,
   server_code: null,
   sqlstate: null,
   position: null,

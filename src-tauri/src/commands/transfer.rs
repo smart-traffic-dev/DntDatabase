@@ -43,11 +43,23 @@ pub fn detect_format(text: &str) -> Result<ImportFormat, DbError> {
     })
 }
 
+/// A file the user chose could not be read or written: shown at the file field.
+fn path_error(action: &str, path: &str, e: &std::io::Error) -> DbError {
+    let path = Path::new(path);
+    let name = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy();
+    DbError::Config {
+        field: Some("path".into()),
+        message: format!("Could not {action} {name}: {}", e.kind()),
+    }
+}
+
 /// File contents without a UTF-8 byte order mark.
 fn read_file(path: &str) -> Result<String, DbError> {
-    let text = std::fs::read_to_string(Path::new(path)).map_err(|e| DbError::Internal {
-        message: format!("cannot read {path}: {e}"),
-    })?;
+    let text =
+        std::fs::read_to_string(Path::new(path)).map_err(|e| path_error("read", path, &e))?;
     Ok(match text.strip_prefix('\u{feff}') {
         Some(rest) => rest.to_string(),
         None => text,
@@ -76,9 +88,7 @@ pub async fn export_connections_impl(
     // Argon2id key derivation, keychain reads and file I/O: on the blocking pool.
     blocking(move || {
         let text = export_dntconn(&repo, &ids, passphrase.as_ref())?;
-        std::fs::write(Path::new(&path), text).map_err(|e| DbError::Internal {
-            message: format!("cannot write {path}: {e}"),
-        })?;
+        std::fs::write(Path::new(&path), text).map_err(|e| path_error("write", &path, &e))?;
         tracing::info!(
             nodes = ids.len(),
             with_secrets = passphrase.is_some(),
