@@ -1,11 +1,16 @@
 import { useConnections } from '../store/connections';
+import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 
-/** Connection of the selected tree node, its server version and whether it goes through SSH. */
+/**
+ * The connection of the active tab (else of the selected tree node), its server version
+ * and whether it goes through SSH; coloured by its environment tag.
+ */
 export function StatusBar() {
   const selectedId = useTree((s) => s.selectedId);
-  const connectionId = selectedId ? connectionIdOf(selectedId) : undefined;
+  const tabConnection = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.connectionId);
+  const connectionId = tabConnection ?? (selectedId ? connectionIdOf(selectedId) : undefined);
   const summary = useConnections((s) => (connectionId ? s.summaries.get(connectionId) : undefined));
   const info = useConnections((s) => (connectionId ? s.info.get(connectionId) : undefined));
 
