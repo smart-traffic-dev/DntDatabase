@@ -15,13 +15,54 @@ use dnt_core::error::{AppError, DbError};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::FutureExt;
 use specta_typescript::Typescript;
-use std::any::Any;
+use std::cell::RefCell;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::sync::Once;
 
 /// Where debug builds write the bindings (relative to `src-tauri`).
 pub const BINDINGS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/src/bindings.ts");
+
+/// Logged (with the panic location) when a command panics.
+pub const PANIC_LOG_MESSAGE: &str = "a command panicked";
+
+thread_local! {
+    /// `file:line` of the last panic on this thread, recorded by the panic hook.
+    static PANIC_LOCATION: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Chains a hook in front of the current panic hook that records where a panic happened,
+/// so the guards can log the location without the payload (which may hold user data).
+fn install_panic_hook() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()));
+            PANIC_LOCATION.with(|slot| *slot.borrow_mut() = location);
+            previous(info);
+        }));
+    });
+}
+
+fn clear_panic_location() {
+    PANIC_LOCATION.with(|slot| slot.borrow_mut().take());
+}
+
+/// Logs a caught panic of this thread (location only) and returns the error to report.
+fn panicked() -> DbError {
+    let location = PANIC_LOCATION.with(|slot| slot.borrow_mut().take());
+    tracing::error!(
+        location = location.as_deref().unwrap_or("unknown"),
+        "{PANIC_LOG_MESSAGE}"
+    );
+    DbError::Internal {
+        message: "the command failed unexpectedly; see the log for details".into(),
+    }
+}
 
 /// Runs a command body: errors become `AppError`, and a panic becomes
 /// `AppError { kind: "internal" }` (logged) instead of tearing down the IPC call.
@@ -29,29 +70,31 @@ pub async fn guard<T, F>(fut: F) -> Result<T, AppError>
 where
     F: Future<Output = Result<T, DbError>>,
 {
+    install_panic_hook();
+    clear_panic_location();
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(result) => result.map_err(AppError::from),
-        Err(payload) => {
-            // Panic messages come from our own code and never carry secret values.
-            tracing::error!(
-                panic = panic_message(payload.as_ref()),
-                "a command panicked"
-            );
-            Err(AppError::from(DbError::Internal {
-                message: "the command failed unexpectedly; see the log for details".into(),
-            }))
-        }
+        // The payload is dropped unread: panic messages can contain user data.
+        Err(_payload) => Err(AppError::from(panicked())),
     }
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> &str {
-    if let Some(s) = payload.downcast_ref::<&str>() {
-        s
-    } else if let Some(s) = payload.downcast_ref::<String>() {
-        s
-    } else {
-        "<non-string panic payload>"
-    }
+/// Runs blocking or CPU-heavy work (SQLite, keychain, Argon2id, file I/O) on the blocking
+/// pool. A panic there is logged like in [`guard`] and reported as `Internal`.
+pub async fn blocking<T, F>(f: F) -> Result<T, DbError>
+where
+    F: FnOnce() -> Result<T, DbError> + Send + 'static,
+    T: Send + 'static,
+{
+    install_panic_hook();
+    tauri::async_runtime::spawn_blocking(move || {
+        clear_panic_location();
+        std::panic::catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_payload| Err(panicked()))
+    })
+    .await
+    .map_err(|e| DbError::Internal {
+        message: format!("a background task failed: {e}"),
+    })?
 }
 
 /// Every command, plus the result types the UI needs that no command returns yet.
@@ -108,19 +151,76 @@ pub fn export_bindings(path: &Path) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
+    /// Collects formatted log output.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    fn capture_logs() -> (Captured, tracing::subscriber::DefaultGuard) {
+        let out = Captured::default();
+        let writer = out.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        (out, tracing::subscriber::set_default(subscriber))
+    }
+
+    const USER_DATA: &str = "SELECT secret_column FROM customers";
+
+    // Current-thread runtime: the log subscriber set for this thread covers the guard.
     #[tokio::test]
     async fn guard_converts_panic_to_internal() {
+        let (logs, _sub) = capture_logs();
         let err = guard(async {
             if true {
-                panic!("boom");
+                panic!("boom: {USER_DATA}");
             }
             Ok::<(), DbError>(())
         })
         .await
         .unwrap_err();
         assert_eq!(err.kind, "internal");
-        assert!(!err.message.contains("boom"));
+        assert!(!format!("{err:?}").contains("boom"));
+
+        let logs = logs.text();
+        assert!(logs.contains(PANIC_LOG_MESSAGE), "{logs}");
+        // The location is logged, the payload is not.
+        assert!(
+            logs.contains("commands") && logs.contains("mod.rs:"),
+            "{logs}"
+        );
+        assert!(
+            !logs.contains("boom") && !logs.contains(USER_DATA),
+            "{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_converts_panic_to_internal() {
+        let err = blocking(|| -> Result<(), DbError> { panic!("boom: {USER_DATA}") })
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, DbError::Internal { message } if !message.contains("boom")));
+        assert_eq!(blocking(|| Ok::<_, DbError>(5)).await.unwrap(), 5);
     }
 
     #[tokio::test]

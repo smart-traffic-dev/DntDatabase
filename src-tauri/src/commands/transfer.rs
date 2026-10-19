@@ -1,7 +1,7 @@
 //! Export to `.dntconn` and import from `.dntconn` or Navicat `.ncx` (format detected by
 //! content). Importing only writes the repository; the UI reloads the tree afterwards.
 
-use super::guard;
+use super::{blocking, guard};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_store::dntconn::{dntconn_has_secrets, export_dntconn, parse_dntconn};
@@ -10,6 +10,7 @@ use dnt_store::repo::NodeId;
 use dnt_store::transfer::{self, ConflictPolicy, ImportBundle, ImportPreview, ImportResult};
 use secrecy::SecretString;
 use std::path::Path;
+use std::sync::Arc;
 use tauri::State;
 
 /// The `format` marker of a `.dntconn` file.
@@ -71,16 +72,21 @@ pub async fn export_connections_impl(
     path: String,
 ) -> Result<(), DbError> {
     let passphrase = passphrase.map(SecretString::from);
-    let text = export_dntconn(&state.repo, &ids, passphrase.as_ref())?;
-    std::fs::write(Path::new(&path), text).map_err(|e| DbError::Internal {
-        message: format!("cannot write {path}: {e}"),
-    })?;
-    tracing::info!(
-        nodes = ids.len(),
-        with_secrets = passphrase.is_some(),
-        "connections exported"
-    );
-    Ok(())
+    let repo = Arc::clone(&state.repo);
+    // Argon2id key derivation, keychain reads and file I/O: on the blocking pool.
+    blocking(move || {
+        let text = export_dntconn(&repo, &ids, passphrase.as_ref())?;
+        std::fs::write(Path::new(&path), text).map_err(|e| DbError::Internal {
+            message: format!("cannot write {path}: {e}"),
+        })?;
+        tracing::info!(
+            nodes = ids.len(),
+            with_secrets = passphrase.is_some(),
+            "connections exported"
+        );
+        Ok(())
+    })
+    .await
 }
 
 pub async fn preview_import_impl(
@@ -88,8 +94,12 @@ pub async fn preview_import_impl(
     path: String,
     passphrase: Option<String>,
 ) -> Result<ImportPreview, DbError> {
-    let bundle = read_bundle(&path, passphrase)?;
-    transfer::preview(&state.repo, &bundle)
+    let repo = Arc::clone(&state.repo);
+    blocking(move || {
+        let bundle = read_bundle(&path, passphrase)?;
+        transfer::preview(&repo, &bundle)
+    })
+    .await
 }
 
 pub async fn apply_import_impl(
@@ -98,8 +108,12 @@ pub async fn apply_import_impl(
     passphrase: Option<String>,
     policy: ConflictPolicy,
 ) -> Result<ImportResult, DbError> {
-    let bundle = read_bundle(&path, passphrase)?;
-    let result = transfer::apply(&state.repo, bundle, policy)?;
+    let repo = Arc::clone(&state.repo);
+    let result = blocking(move || {
+        let bundle = read_bundle(&path, passphrase)?;
+        transfer::apply(&repo, bundle, policy)
+    })
+    .await?;
     tracing::info!(
         imported = result.imported,
         overwritten = result.overwritten,
@@ -111,11 +125,14 @@ pub async fn apply_import_impl(
 
 /// Whether the file carries encrypted secrets (`.ncx` never needs a passphrase).
 pub async fn import_needs_passphrase_impl(path: String) -> Result<bool, DbError> {
-    let text = read_file(&path)?;
-    match detect_format(&text)? {
-        ImportFormat::Dntconn => dntconn_has_secrets(&text),
-        ImportFormat::Ncx => Ok(false),
-    }
+    blocking(move || {
+        let text = read_file(&path)?;
+        match detect_format(&text)? {
+            ImportFormat::Dntconn => dntconn_has_secrets(&text),
+            ImportFormat::Ncx => Ok(false),
+        }
+    })
+    .await
 }
 
 #[tauri::command]

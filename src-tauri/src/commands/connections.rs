@@ -3,7 +3,7 @@
 //! Secrets arrive as plain strings in the IPC payload and are turned into `SecretString`
 //! before anything else happens; the input types have no `Debug` so they cannot be logged.
 
-use super::guard;
+use super::{blocking, guard};
 use crate::session_manager::{ConnState, OpenResult};
 use crate::state::AppState;
 use dnt_core::config::ConnectionConfig;
@@ -13,6 +13,7 @@ use dnt_tunnel::KnownHosts;
 use secrecy::SecretString;
 use serde::Deserialize;
 use specta::Type;
+use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
 
@@ -79,8 +80,11 @@ impl From<SecretsUpdateInput> for SecretUpdate {
     }
 }
 
+// Repository calls hit SQLite and the OS keychain: they run on the blocking pool.
+
 pub async fn list_tree_impl(state: &AppState) -> Result<Tree, DbError> {
-    state.repo.tree()
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.tree()).await
 }
 
 pub async fn create_connection_impl(
@@ -89,7 +93,8 @@ pub async fn create_connection_impl(
     secrets: SecretsInput,
 ) -> Result<ConnectionConfig, DbError> {
     let secrets = NewSecrets::from(secrets);
-    let cfg = state.repo.create(cfg, secrets)?;
+    let repo = Arc::clone(&state.repo);
+    let cfg = blocking(move || repo.create(cfg, secrets)).await?;
     tracing::info!(connection = %cfg.id, "connection created");
     Ok(cfg)
 }
@@ -104,7 +109,8 @@ pub async fn update_connection_impl(
     // Invalid settings leave the connection (and its open runtime) untouched.
     cfg.validate()?;
     state.sessions.close(cfg.id).await;
-    let cfg = state.repo.update(cfg, secrets)?;
+    let repo = Arc::clone(&state.repo);
+    let cfg = blocking(move || repo.update(cfg, secrets)).await?;
     tracing::info!(connection = %cfg.id, "connection updated");
     Ok(cfg)
 }
@@ -113,12 +119,14 @@ pub async fn duplicate_connection_impl(
     state: &AppState,
     id: Uuid,
 ) -> Result<ConnectionConfig, DbError> {
-    state.repo.duplicate(id)
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.duplicate(id)).await
 }
 
 pub async fn delete_connection_impl(state: &AppState, id: Uuid) -> Result<(), DbError> {
     state.sessions.close(id).await;
-    state.repo.delete(id)?;
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.delete(id)).await?;
     tracing::info!(connection = %id, "connection deleted");
     Ok(())
 }
@@ -128,15 +136,18 @@ pub async fn create_group_impl(
     name: String,
     parent_id: Option<Uuid>,
 ) -> Result<Group, DbError> {
-    state.repo.create_group(&name, parent_id)
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.create_group(&name, parent_id)).await
 }
 
 pub async fn rename_group_impl(state: &AppState, id: Uuid, name: String) -> Result<(), DbError> {
-    state.repo.rename_group(id, &name)
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.rename_group(id, &name)).await
 }
 
 pub async fn delete_group_impl(state: &AppState, id: Uuid) -> Result<(), DbError> {
-    state.repo.delete_group(id)
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.delete_group(id)).await
 }
 
 pub async fn move_node_impl(
@@ -146,7 +157,8 @@ pub async fn move_node_impl(
     index: u32,
 ) -> Result<(), DbError> {
     let index = usize::try_from(index).unwrap_or(usize::MAX);
-    state.repo.move_node(node, parent_id, index)
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.move_node(node, parent_id, index)).await
 }
 
 pub async fn test_connection_impl(
@@ -189,14 +201,13 @@ pub async fn trust_host_key_impl(
     fingerprint: String,
     key_openssh: String,
 ) -> Result<(), DbError> {
-    KnownHosts::new(state.paths.known_hosts.clone()).trust(
-        &host,
-        port,
-        &fingerprint,
-        &key_openssh,
-    )?;
-    tracing::info!(%host, port, %fingerprint, "SSH host key trusted");
-    Ok(())
+    let known_hosts = KnownHosts::new(state.paths.known_hosts.clone());
+    blocking(move || {
+        known_hosts.trust(&host, port, &fingerprint, &key_openssh)?;
+        tracing::info!(%host, port, %fingerprint, "SSH host key trusted");
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]

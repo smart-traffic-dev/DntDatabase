@@ -10,13 +10,16 @@
 //! | `list_databases` | `["dbs"]`                                                               |
 //! | `list_schemas`   | `["db:<db>", "schemas"]`                                                |
 //! | `list_objects`   | `["db:<db>", "schema:<s>"?, "folder:<Kind>"]`                           |
-//! | `table_detail`   | `["db:<db>", "schema:<s>"?, "obj:<Kind>:<name>", "detail"]`             |
-//! | `object_ddl`     | `["db:<db>", "schema:<s>"?, "obj:<Kind>:<name>", "ddl"]`                |
+//! | `table_detail`   | `["db:<db>", "schema:<s>"?, "folder:<Kind>", "obj:<Kind>:<name>", "detail"]` |
+//! | `object_ddl`     | `["db:<db>", "schema:<s>"?, "folder:<Kind>", "obj:<Kind>:<name>", "ddl"]`    |
 //!
-//! `schema:<s>` is present only when the scope / object has a schema (PostgreSQL). `<Kind>`
-//! is the `ObjectKind` variant name (`Table`, `MaterializedView`, ...). `refresh_node(id,
-//! key)` drops every cached result whose key starts with `key` (whole segments), so `[]`
-//! refreshes the whole connection and `["db:shop"]` everything below database `shop`.
+//! Every key is the tree path of its node (an object sits in the folder of its kind), with
+//! `detail` / `ddl` appended for the object's two results. `schema:<s>` is present only
+//! when the scope / object has a schema (PostgreSQL). `<Kind>` is the `ObjectKind` variant
+//! name (`Table`, `MaterializedView`, ...). `refresh_node(id, key)` drops every cached
+//! result whose key starts with `key` (whole segments): `[]` refreshes the whole
+//! connection, `["db:shop"]` everything below database `shop`, a folder path its listing
+//! and the detail / DDL of its objects, and an object's exact path both of its results.
 //!
 //! `show_system` is applied after the cache: MySQL system databases in `list_databases`,
 //! PostgreSQL system schemas in `list_schemas` (see [`is_system`]).
@@ -32,15 +35,19 @@ use dnt_core::server::DbKind;
 use tauri::State;
 use uuid::Uuid;
 
-const MYSQL_SYSTEM_DATABASES: [&str; 4] =
-    ["information_schema", "mysql", "performance_schema", "sys"];
-
 /// Whether `name` is a system database (MySQL) or system schema (PostgreSQL).
+///
+/// MySQL: the virtual `information_schema` / `performance_schema` match in any case (the
+/// server resolves them case-insensitively); `mysql` and `sys` are ordinary databases and
+/// match exactly, so a user database `MySQL` on a case-sensitive server stays visible.
 pub fn is_system(kind: DbKind, name: &str) -> bool {
     match kind {
-        DbKind::MySql => MYSQL_SYSTEM_DATABASES
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(name)),
+        DbKind::MySql => {
+            name.eq_ignore_ascii_case("information_schema")
+                || name.eq_ignore_ascii_case("performance_schema")
+                || name == "mysql"
+                || name == "sys"
+        }
         DbKind::Postgres => name == "information_schema" || name.starts_with("pg_"),
     }
 }
@@ -101,9 +108,10 @@ pub fn folder_key(scope: &Scope, kind: ObjectKind) -> NodeKey {
     NodeKey(segments)
 }
 
-/// `leaf` is `detail` or `ddl`.
+/// The object's tree path (inside the folder of its kind) plus `leaf` (`detail` or `ddl`).
 pub fn object_key(obj: &ObjectRef, leaf: &str) -> NodeKey {
     let mut segments = scope_segments(&obj.database, obj.schema.as_deref());
+    segments.push(format!("folder:{:?}", obj.kind));
     segments.push(format!("obj:{:?}:{}", obj.kind, obj.name));
     segments.push(leaf.into());
     NodeKey(segments)
@@ -296,11 +304,15 @@ mod tests {
             "performance_schema",
             "sys",
             "INFORMATION_SCHEMA",
+            "Performance_Schema",
+            "MySQL",
+            "SYS",
             "mysql_archive",
         ]);
+        // The virtual schemas match in any case; `mysql` / `sys` only exactly.
         assert_eq!(
             filter_system(DbKind::MySql, mysql.clone(), false),
-            names(&["app", "mysql_archive"])
+            names(&["app", "MySQL", "SYS", "mysql_archive"])
         );
         assert_eq!(filter_system(DbKind::MySql, mysql.clone(), true), mysql);
 
@@ -340,11 +352,64 @@ mod tests {
         };
         assert_eq!(
             object_key(&obj, "ddl").0,
-            ["db:shop", "obj:Table:orders", "ddl"]
+            ["db:shop", "folder:Table", "obj:Table:orders", "ddl"]
         );
         assert_eq!(
             object_key(&obj, "detail").0,
-            ["db:shop", "obj:Table:orders", "detail"]
+            ["db:shop", "folder:Table", "obj:Table:orders", "detail"]
         );
+        let view = ObjectRef {
+            database: "shop".into(),
+            schema: Some("public".into()),
+            name: "mv".into(),
+            kind: ObjectKind::MaterializedView,
+        };
+        let view_folder = folder_key(&scope, ObjectKind::MaterializedView);
+        let view_ddl = object_key(&view, "ddl");
+        assert_eq!(
+            view_ddl.0,
+            [
+                "db:shop",
+                "schema:public",
+                "folder:MaterializedView",
+                "obj:MaterializedView:mv",
+                "ddl"
+            ]
+        );
+        // Refreshing the folder (or the object's own path) reaches the object's results.
+        assert!(view_ddl.starts_with(&view_folder));
+        assert!(view_ddl.starts_with(&NodeKey(view_ddl.0[..4].to_vec())));
+    }
+
+    #[test]
+    fn refreshing_a_folder_drops_its_objects_results() {
+        use crate::cache::NodeCache;
+        let cache = NodeCache::default();
+        let scope = Scope {
+            database: "shop".into(),
+            schema: None,
+        };
+        let obj = ObjectRef {
+            database: "shop".into(),
+            schema: None,
+            name: "orders".into(),
+            kind: ObjectKind::Table,
+        };
+        let other = ObjectRef {
+            kind: ObjectKind::View,
+            name: "v".into(),
+            ..obj.clone()
+        };
+        for key in [
+            folder_key(&scope, ObjectKind::Table),
+            object_key(&obj, "detail"),
+            object_key(&obj, "ddl"),
+            object_key(&other, "ddl"),
+        ] {
+            assert!(cache.insert_if_epoch(key, serde_json::json!(1), cache.epoch()));
+        }
+        cache.invalidate_prefix(&folder_key(&scope, ObjectKind::Table));
+        assert_eq!(cache.len(), 1);
+        assert!(cache.get(&object_key(&other, "ddl")).is_some());
     }
 }

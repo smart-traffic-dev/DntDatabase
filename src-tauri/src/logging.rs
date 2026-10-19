@@ -60,11 +60,21 @@ impl LogHandle {
     }
 }
 
-/// Removes old log files, then installs the global subscriber writing to `logs_dir` at
-/// `info`. If a global subscriber is already set (tests), it is kept.
+/// Most daily log files the appender keeps (it deletes the oldest beyond this).
+const MAX_LOG_FILES: usize = 7;
+
+/// Installs the global subscriber writing to `logs_dir` at `info`, then removes log files
+/// older than 7 days. If a global subscriber is already set (tests), it is kept.
 pub fn init(logs_dir: &Path) -> LogHandle {
-    let removed = remove_old_logs(logs_dir, LOG_RETENTION, SystemTime::now());
-    let appender = tracing_appender::rolling::daily(logs_dir, LOG_FILE_PREFIX);
+    let appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(LOG_FILE_PREFIX)
+        .max_log_files(MAX_LOG_FILES)
+        .build(logs_dir)
+        .unwrap_or_else(|e| {
+            eprintln!("cannot configure the log appender ({e}); using defaults");
+            tracing_appender::rolling::daily(logs_dir, LOG_FILE_PREFIX)
+        });
     let (writer, guard) = tracing_appender::non_blocking(appender);
     let (filter, handle) = reload::Layer::new(LogLevel::Info.filter());
     let installed = tracing_subscriber::registry()
@@ -74,10 +84,9 @@ pub fn init(logs_dir: &Path) -> LogHandle {
     if let Err(e) = installed {
         eprintln!("logging was already initialised: {e}");
     }
-    match removed {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(removed = n, "removed old log files"),
-        Err(e) => tracing::warn!(error = %e, "could not clean up old log files"),
+    let removed = remove_old_logs(logs_dir, LOG_RETENTION, SystemTime::now());
+    if removed > 0 {
+        tracing::info!(removed, "removed old log files");
     }
     LogHandle {
         filter: handle,
@@ -86,16 +95,26 @@ pub fn init(logs_dir: &Path) -> LogHandle {
 }
 
 /// Deletes the log files in `dir` last modified more than `max_age` before `now`; returns
-/// how many were removed. Other files are left alone.
-pub fn remove_old_logs(dir: &Path, max_age: Duration, now: SystemTime) -> std::io::Result<usize> {
+/// how many were removed. Other files are left alone; a file that cannot be inspected or
+/// removed is logged and skipped.
+pub fn remove_old_logs(dir: &Path, max_age: Duration, now: SystemTime) -> usize {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot list the log folder");
+            return 0;
+        }
     };
     let mut removed = 0;
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot read a log folder entry");
+                continue;
+            }
+        };
         if !entry
             .file_name()
             .to_string_lossy()
@@ -103,19 +122,33 @@ pub fn remove_old_logs(dir: &Path, max_age: Duration, now: SystemTime) -> std::i
         {
             continue;
         }
-        let meta = entry.metadata()?;
-        if !meta.is_file() {
+        let path = entry.path();
+        let modified = match entry.metadata().and_then(|m| {
+            if m.is_file() {
+                m.modified().map(Some)
+            } else {
+                Ok(None)
+            }
+        }) {
+            Ok(Some(modified)) => modified,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(file = %path.display(), error = %e, "cannot inspect a log file");
+                continue;
+            }
+        };
+        let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+        if age <= max_age {
             continue;
         }
-        let age = now
-            .duration_since(meta.modified()?)
-            .unwrap_or(Duration::ZERO);
-        if age > max_age {
-            std::fs::remove_file(entry.path())?;
-            removed += 1;
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                tracing::warn!(file = %path.display(), error = %e, "cannot remove an old log file")
+            }
         }
     }
-    Ok(removed)
+    removed
 }
 
 #[cfg(test)]
@@ -139,7 +172,7 @@ mod tests {
         file_aged(dir.path(), "dntdatabase.log.2026-10-13", now, 6);
         file_aged(dir.path(), "dntdatabase.log.2026-10-11", now, 8);
 
-        assert_eq!(remove_old_logs(dir.path(), LOG_RETENTION, now).unwrap(), 1);
+        assert_eq!(remove_old_logs(dir.path(), LOG_RETENTION, now), 1);
 
         let mut left: Vec<String> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -157,12 +190,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let now = SystemTime::now();
         file_aged(dir.path(), "notes.txt", now, 30);
-        assert_eq!(remove_old_logs(dir.path(), LOG_RETENTION, now).unwrap(), 0);
+        std::fs::create_dir(dir.path().join("dntdatabase.log.dir")).unwrap();
+        assert_eq!(remove_old_logs(dir.path(), LOG_RETENTION, now), 0);
         assert!(dir.path().join("notes.txt").exists());
+        assert!(dir.path().join("dntdatabase.log.dir").is_dir());
         assert_eq!(
-            remove_old_logs(&dir.path().join("missing"), LOG_RETENTION, now).unwrap(),
+            remove_old_logs(&dir.path().join("missing"), LOG_RETENTION, now),
             0
         );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_removed_does_not_stop_the_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        // Read-only: removal may fail (Windows); the cleanup logs it and goes on.
+        file_aged(dir.path(), "dntdatabase.log.2026-01-01", now, 30);
+        let locked = dir.path().join("dntdatabase.log.2026-01-01");
+        let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&locked, perms).unwrap();
+        file_aged(dir.path(), "dntdatabase.log.2026-01-02", now, 30);
+
+        let removed = remove_old_logs(dir.path(), LOG_RETENTION, now);
+        assert!(removed >= 1);
+        assert!(!dir.path().join("dntdatabase.log.2026-01-02").exists());
+
+        if let Ok(meta) = std::fs::metadata(&locked) {
+            let mut perms = meta.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(&locked, perms).unwrap();
+        }
     }
 
     #[test]
