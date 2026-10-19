@@ -5,11 +5,15 @@
 //! Every offset exchanged with the UI is a UTF-16 code-unit offset into the
 //! editor text; byte offsets stay inside this crate and `dnt-core`.
 
+pub mod explain;
 pub mod guard;
 pub mod offsets;
 pub mod plan;
 pub mod redact;
 
+pub use explain::{
+    explain_sql, parse_plan, self_cost, ExplainFormat, ExplainSql, PlanNode, PlanTree,
+};
 pub use guard::{guard, lifts_read_only, other_whitelisted, verdict};
 pub use offsets::Utf16Map;
 pub use plan::{plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target, Verdict};

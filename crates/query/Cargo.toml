@@ -13,4 +13,8 @@ serde_json.workspace = true
 specta.workspace = true
 
 [dev-dependencies]
+# Explain fixture capture only (tests/explain_capture.rs).
+dnt-driver-mysql.workspace = true
+dnt-driver-pg.workspace = true
+dnt-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

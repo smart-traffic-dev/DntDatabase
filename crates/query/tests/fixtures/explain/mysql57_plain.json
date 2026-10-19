@@ -1,0 +1,115 @@
+{
+  "columns": [
+    "id",
+    "select_type",
+    "table",
+    "partitions",
+    "type",
+    "possible_keys",
+    "key",
+    "key_len",
+    "ref",
+    "rows",
+    "filtered",
+    "Extra"
+  ],
+  "rows": [
+    [
+      {
+        "t": "UInt",
+        "v": 1
+      },
+      {
+        "t": "Text",
+        "v": "SIMPLE"
+      },
+      {
+        "t": "Text",
+        "v": "o"
+      },
+      {
+        "t": "Null"
+      },
+      {
+        "t": "Text",
+        "v": "index"
+      },
+      {
+        "t": "Text",
+        "v": "idx_orders_customer_status"
+      },
+      {
+        "t": "Text",
+        "v": "idx_orders_customer_status"
+      },
+      {
+        "t": "Text",
+        "v": "5"
+      },
+      {
+        "t": "Null"
+      },
+      {
+        "t": "UInt",
+        "v": 3
+      },
+      {
+        "t": "Float",
+        "v": 33.33
+      },
+      {
+        "t": "Text",
+        "v": "Using where; Using index; Using temporary; Using filesort"
+      }
+    ],
+    [
+      {
+        "t": "UInt",
+        "v": 1
+      },
+      {
+        "t": "Text",
+        "v": "SIMPLE"
+      },
+      {
+        "t": "Text",
+        "v": "c"
+      },
+      {
+        "t": "Null"
+      },
+      {
+        "t": "Text",
+        "v": "eq_ref"
+      },
+      {
+        "t": "Text",
+        "v": "PRIMARY,uq_customers_email"
+      },
+      {
+        "t": "Text",
+        "v": "PRIMARY"
+      },
+      {
+        "t": "Text",
+        "v": "4"
+      },
+      {
+        "t": "Text",
+        "v": "dnt_fixture.o.customer_id"
+      },
+      {
+        "t": "UInt",
+        "v": 1
+      },
+      {
+        "t": "Float",
+        "v": 100.0
+      },
+      {
+        "t": "Text",
+        "v": "Using index"
+      }
+    ]
+  ]
+}

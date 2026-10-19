@@ -81,6 +81,20 @@ services:
       - ./sql/mysql8.sql:/docker-entrypoint-initdb.d/02_mysql8.sql:ro
     healthcheck: *mysql-health
 
+  # Explain fixtures only (crates/query/tests/explain_capture.rs); not in the default matrix.
+  mysql84:
+    image: mysql:8.4
+    command: *mysql-args
+    environment:
+      MYSQL_ROOT_PASSWORD: dnt_test
+      MYSQL_DATABASE: dnt_fixture
+    ports: ["33084:3306"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/mysql_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+      - ./sql/mysql8.sql:/docker-entrypoint-initdb.d/02_mysql8.sql:ro
+    healthcheck: *mysql-health
+
   mariadb106:
     image: mariadb:10.6
     command: *mysql-args
