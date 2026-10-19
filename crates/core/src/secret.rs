@@ -29,6 +29,11 @@ impl SecretKind {
 
 pub trait SecretStore: Send + Sync {
     fn get(&self, conn: Uuid, kind: SecretKind) -> Result<Option<SecretString>, DbError>;
+    /// Whether a secret is stored. Stores that can check presence without reading the
+    /// value should; the default reads it and drops it right away.
+    fn has(&self, conn: Uuid, kind: SecretKind) -> Result<bool, DbError> {
+        Ok(self.get(conn, kind)?.is_some())
+    }
     fn set(&self, conn: Uuid, kind: SecretKind, value: &SecretString) -> Result<(), DbError>;
     fn delete(&self, conn: Uuid, kind: SecretKind) -> Result<(), DbError>;
     fn delete_all(&self, conn: Uuid) -> Result<(), DbError>;

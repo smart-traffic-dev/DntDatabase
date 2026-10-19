@@ -1469,6 +1469,7 @@ dependencies = [
  "specta",
  "tempfile",
  "time",
+ "tracing",
  "uuid",
  "zeroize",
 ]

@@ -382,3 +382,70 @@ fn explicit_id_is_kept_and_node_id_serde_shape() {
     assert_eq!(j["type"], "connection");
     assert_eq!(j["id"], id.to_string());
 }
+
+/// Wraps a `MemorySecretStore`: reading a secret value always fails (the tree must only
+/// check presence), and every access for the `broken` connection fails.
+struct FlakyStore {
+    inner: MemorySecretStore,
+    broken: std::sync::Mutex<Option<Uuid>>,
+}
+
+impl FlakyStore {
+    fn check(&self, conn: Uuid) -> Result<(), DbError> {
+        if *self.broken.lock().unwrap() == Some(conn) {
+            return Err(DbError::Secret {
+                message: "read db_password failed: credential manager unavailable".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl SecretStore for FlakyStore {
+    fn get(&self, _conn: Uuid, _kind: SecretKind) -> Result<Option<SecretString>, DbError> {
+        Err(DbError::Secret {
+            message: "the tree must not read secret values".into(),
+        })
+    }
+    fn has(&self, conn: Uuid, kind: SecretKind) -> Result<bool, DbError> {
+        self.check(conn)?;
+        self.inner.has(conn, kind)
+    }
+    fn set(&self, conn: Uuid, kind: SecretKind, value: &SecretString) -> Result<(), DbError> {
+        self.inner.set(conn, kind, value)
+    }
+    fn delete(&self, conn: Uuid, kind: SecretKind) -> Result<(), DbError> {
+        self.inner.delete(conn, kind)
+    }
+    fn delete_all(&self, conn: Uuid) -> Result<(), DbError> {
+        self.inner.delete_all(conn)
+    }
+}
+
+#[test]
+fn tree_survives_a_failing_keychain_entry_and_never_reads_values() {
+    let store = Arc::new(FlakyStore {
+        inner: MemorySecretStore::default(),
+        broken: std::sync::Mutex::new(None),
+    });
+    let repo = ConnectionRepo::new(open_in_memory().unwrap(), store.clone());
+    let with_pw = || NewSecrets {
+        db_password: pw("pw"),
+        ..no_secrets()
+    };
+    let a = repo.create(cfg("a"), with_pw()).unwrap().id;
+    let b = repo.create(cfg("b"), with_pw()).unwrap().id;
+    *store.broken.lock().unwrap() = Some(b);
+
+    let tree = repo.tree().unwrap();
+    let flag = |id: Uuid| {
+        tree.connections
+            .iter()
+            .find(|c| c.config.id == id)
+            .unwrap()
+            .has_db_password
+    };
+    assert!(flag(a));
+    // The unreadable entry is reported as absent instead of failing the whole tree.
+    assert!(!flag(b));
+}

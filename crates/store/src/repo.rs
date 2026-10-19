@@ -98,17 +98,26 @@ impl ConnectionRepo {
             let conn = self.lock()?;
             (load_groups(&conn)?, load_raw_connections(&conn)?)
         };
-        // Keychain lookups happen without holding the database lock.
+        // Keychain lookups happen without holding the database lock. They only check
+        // presence; an entry that cannot be read is shown as absent (the user is asked
+        // for it when connecting) rather than failing the whole tree.
         let mut connections = Vec::with_capacity(rows.len());
         for raw in rows {
             let last_connected_at = raw.last_connected_at.clone();
             let config = raw.into_config()?;
-            let has = |kind| -> Result<bool, DbError> {
-                Ok(self.secrets.get(config.id, kind)?.is_some())
+            let has = |kind: SecretKind| match self.secrets.has(config.id, kind) {
+                Ok(present) => present,
+                Err(_) => {
+                    tracing::warn!(
+                        connection = %config.id,
+                        kind = kind.as_str(),
+                        "cannot check a stored secret; treating it as absent"
+                    );
+                    false
+                }
             };
-            let has_db_password = has(SecretKind::DbPassword)?;
-            let has_ssh_secret =
-                has(SecretKind::SshPassword)? || has(SecretKind::SshKeyPassphrase)?;
+            let has_db_password = has(SecretKind::DbPassword);
+            let has_ssh_secret = has(SecretKind::SshPassword) || has(SecretKind::SshKeyPassphrase);
             connections.push(ConnectionSummary {
                 config,
                 has_db_password,

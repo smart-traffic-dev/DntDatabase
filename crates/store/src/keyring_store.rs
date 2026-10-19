@@ -31,6 +31,15 @@ impl SecretStore for KeyringSecretStore {
         }
     }
 
+    /// Reads the entry's attributes, not its secret: the password never reaches our memory.
+    fn has(&self, conn: Uuid, kind: SecretKind) -> Result<bool, DbError> {
+        match entry(conn, kind)?.get_attributes() {
+            Ok(_) => Ok(true),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            Err(e) => Err(secret_err("check", kind, e)),
+        }
+    }
+
     fn set(&self, conn: Uuid, kind: SecretKind, value: &SecretString) -> Result<(), DbError> {
         entry(conn, kind)?
             .set_password(value.expose_secret())
@@ -71,6 +80,8 @@ mod tests {
             .unwrap();
         let got = store.get(id, SecretKind::DbPassword).unwrap().unwrap();
         assert_eq!(got.expose_secret(), "pw-1");
+        assert!(store.has(id, SecretKind::DbPassword).unwrap());
+        assert!(!store.has(id, SecretKind::SshKeyPassphrase).unwrap());
 
         store.delete(id, SecretKind::DbPassword).unwrap();
         assert!(store.get(id, SecretKind::DbPassword).unwrap().is_none());
