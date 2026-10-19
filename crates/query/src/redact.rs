@@ -120,36 +120,88 @@ const MAX_COMMENT_DEPTH: usize = 4;
 /// statement: its code, then (recursively) the body of each plain comment.
 /// `depth` is 0 for the statement and n for a body nested n comments deep.
 fn scan(src: &str, base: usize, dialect: Dialect, depth: usize, out: &mut Vec<(usize, usize)>) {
+    scan_in(src, src.as_bytes(), base, dialect, depth, out);
+}
+
+/// [`scan`] of `src`, a slice of `full` starting at `base`.
+fn scan_in(
+    src: &str,
+    full: &[u8],
+    base: usize,
+    dialect: Dialect,
+    depth: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
     let toks = tokenize(src, dialect);
     let mut local = Vec::new();
     collect(src, &toks, dialect, &mut local);
-    if depth > 0 {
+    if depth == 0 {
+        out.extend(local.iter().map(|&(s, e)| (base + s, base + e)));
+    } else {
         comment_fallback(src, &toks, dialect, &mut local);
+        for &(s, e) in &local {
+            push_comment_span(full, base + s, base + e, out);
+        }
     }
-    out.extend(local.iter().map(|&(s, e)| (base + s, base + e)));
     for (bs, be) in comment_bodies(src, &toks, dialect) {
         let Some(body) = src.get(bs..be) else {
             continue;
         };
         if depth + 1 >= MAX_COMMENT_DEPTH {
-            raw_fallback(body, base + bs, out);
+            raw_fallback(body, full, base + bs, out);
         } else {
-            scan(body, base + bs, dialect, depth + 1, out);
+            scan_in(body, full, base + bs, dialect, depth + 1, out);
         }
+    }
+}
+
+/// Pushes the comment-body span `s..e` of `full`, minus every `/` or `*` byte
+/// that forms `/*` or `*/` with a neighbour (inside the span or not), so a
+/// redaction never adds or removes a comment delimiter. The kept bytes split
+/// the span; each piece is redacted on its own.
+fn push_comment_span(full: &[u8], s: usize, e: usize, out: &mut Vec<(usize, usize)>) {
+    let pair = |a: u8, b: u8| (a == b'/' && b == b'*') || (a == b'*' && b == b'/');
+    let delim = |j: usize| {
+        let c = full[j];
+        (c == b'/' || c == b'*')
+            && ((j > 0 && pair(full[j - 1], c)) || full.get(j + 1).is_some_and(|&n| pair(c, n)))
+    };
+    let mut run = None;
+    for j in s..e.min(full.len()) {
+        if delim(j) {
+            if let Some(r) = run.take() {
+                out.push((r, j));
+            }
+        } else if run.is_none() {
+            run = Some(j);
+        }
+    }
+    if let Some(r) = run {
+        out.push((r, e.min(full.len())));
     }
 }
 
 /// In a comment body, prose may name a secret without quoting it
 /// (`-- password: hunter2`): a trigger with no redacted literal after it (up
-/// to the next trigger) redacts everything from it to the end of the body.
+/// to the next trigger) redacts everything from it to the end of the body. So
+/// does a trigger word the token pass could not see, e.g. inside a "string"
+/// that an apostrophe in prose opened (`-- don't … IDENTIFIED BY 'x'`).
 fn comment_fallback(src: &str, toks: &[Token], dialect: Dialect, local: &mut Vec<(usize, usize)>) {
+    let end = src.trim_end().len();
+    let b = src.as_bytes();
+    let hidden = toks
+        .iter()
+        .filter(|t| !is_trigger_token(src, t, dialect))
+        .find_map(|t| find_trigger(&b[t.start..t.end]).map(|p| t.start + p));
+    if let Some(start) = hidden {
+        local.push((start, end.max(start)));
+    }
     local.sort_unstable();
     let triggers: Vec<usize> = toks
         .iter()
         .filter(|t| is_trigger_token(src, t, dialect))
         .map(|t| t.start)
         .collect();
-    let end = src.trim_end().len();
     let mut p = 0;
     for (n, &start) in triggers.iter().enumerate() {
         let next = triggers.get(n + 1).copied().unwrap_or(usize::MAX);
@@ -163,47 +215,48 @@ fn comment_fallback(src: &str, toks: &[Token], dialect: Dialect, local: &mut Vec
     }
 }
 
+/// The trigger words of comment prose (matched case-insensitively, anywhere).
+const COMMENT_TRIGGERS: [&[u8]; 6] = [
+    b"identified",
+    b"password",
+    b"passwd",
+    b"pwd",
+    b"encryption_key",
+    b"connection",
+];
+
+/// Offset of the first [`COMMENT_TRIGGERS`] word in `b`.
+fn find_trigger(b: &[u8]) -> Option<usize> {
+    (0..b.len()).find(|&i| {
+        COMMENT_TRIGGERS.iter().any(|w| {
+            b.get(i..i + w.len())
+                .is_some_and(|s| s.eq_ignore_ascii_case(w))
+        })
+    })
+}
+
 /// Whether token `t` names a secret (the comment-fallback triggers).
 fn is_trigger_token(src: &str, t: &Token, dialect: Dialect) -> bool {
+    let text = src.get(t.start..t.end).unwrap_or_default();
     match t.kind {
-        TokKind::Word(w) => {
-            let up = w.to_ascii_uppercase();
-            up == "IDENTIFIED" || up == "CONNECTION" || is_secret_name(&up)
-        }
-        TokKind::Quoted => {
-            let text = src.get(t.start..t.end).unwrap_or_default();
-            if is_ident_quote(text, dialect) {
-                is_secret_name(&text.to_ascii_uppercase())
-            } else {
-                has_inline_secret(text.as_bytes())
-            }
-        }
+        TokKind::Word(_) => find_trigger(text.as_bytes()).is_some(),
+        TokKind::Quoted if is_ident_quote(text, dialect) => find_trigger(text.as_bytes()).is_some(),
+        TokKind::Quoted => has_inline_secret(text.as_bytes()),
         _ => false,
     }
 }
 
-/// Past [`MAX_COMMENT_DEPTH`]: from each raw trigger word in `body`, redacts
-/// up to the next `/*`, `*/` or newline (so nesting and line ends survive).
-fn raw_fallback(body: &str, base: usize, out: &mut Vec<(usize, usize)>) {
-    const WORDS: [&[u8]; 6] = [
-        b"identified",
-        b"password",
-        b"passwd",
-        b"pwd",
-        b"encryption_key",
-        b"connection",
-    ];
+/// Past [`MAX_COMMENT_DEPTH`]: from each raw trigger word in `body` (at byte
+/// `base` of `full`), redacts up to the next `/*`, `*/` or newline (so nesting
+/// and line ends survive).
+fn raw_fallback(body: &str, full: &[u8], base: usize, out: &mut Vec<(usize, usize)>) {
     let b = body.as_bytes();
     let mut i = 0;
     while i < b.len() {
-        let hit = WORDS.iter().any(|w| {
-            b.get(i..i + w.len())
-                .is_some_and(|s| s.eq_ignore_ascii_case(w))
-        });
-        if !hit {
-            i += 1;
-            continue;
-        }
+        let Some(p) = find_trigger(&b[i..]) else {
+            return;
+        };
+        i += p;
         let mut j = i;
         while j < b.len()
             && b[j] != b'\n'
@@ -217,7 +270,7 @@ fn raw_fallback(body: &str, base: usize, out: &mut Vec<(usize, usize)>) {
         while e > i && b[e - 1].is_ascii_whitespace() {
             e -= 1;
         }
-        out.push((base + i, base + e));
+        push_comment_span(full, base + i, base + e, out);
         i = j.max(i + 1);
     }
 }
@@ -951,6 +1004,58 @@ mod tests {
         assert!(!out.contains("hunter2"), "{out}");
         assert!(out.ends_with("*/ SELECT 1"), "{out}");
         same_split(&deep, &out, PG);
+    }
+
+    #[test]
+    fn redact_comment_prose_apostrophe_does_not_hide_triggers() {
+        let cases = [
+            (
+                MY,
+                "SELECT 1 -- don't forget: ALTER USER u IDENTIFIED BY 'hunter2'",
+            ),
+            (
+                PG,
+                "SELECT 1 -- don't forget: ALTER USER u IDENTIFIED BY 'hunter2'",
+            ),
+            (
+                MY,
+                "SELECT 1 # don't forget: ALTER USER u IDENTIFIED BY 'hunter2'\n; SELECT 2",
+            ),
+            (
+                PG,
+                "SELECT 1 /* don't forget: ALTER USER u IDENTIFIED BY 'hunter2' */; SELECT 2",
+            ),
+            (MY, "SELECT 1 /* it's the pwd: hunter2 */; SELECT 2"),
+        ];
+        for (d, input) in cases {
+            let out = red(input, d);
+            assert!(!out.contains("hunter2"), "{out}");
+            assert!(out.starts_with("SELECT 1 "), "{out}");
+            same_split(input, &out, d);
+        }
+    }
+
+    #[test]
+    fn redact_never_moves_comment_delimiters() {
+        let cases = [
+            (PG, "SELECT 0 /* PASSWORD '/*' */ SELECT 1; SELECT 2"),
+            (PG, "SELECT 0 /* PASSWORD 'a*/' */ SELECT 1; SELECT 2"),
+            (
+                PG,
+                "SELECT 0 /* IDENTIFIED BY x /* y */ z */ SELECT 1; SELECT 2",
+            ),
+            (MY, "SELECT 0 /* PASSWORD 'a*/ SELECT 1; SELECT 2"),
+            (MY, "SELECT 0 -- PASSWORD '/*'\n; SELECT 2"),
+            (PG, "SELECT 0 /* x */ /* PASSWORD p/*q*/r */; SELECT 2"),
+        ];
+        for (d, input) in cases {
+            let out = red(input, d);
+            assert!(out.contains(REDACTED), "{out}");
+            same_split(input, &out, d);
+            let count = |s: &str, p: &str| s.matches(p).count();
+            assert_eq!(count(input, "/*"), count(&out, "/*"), "{out}");
+            assert_eq!(count(input, "*/"), count(&out, "*/"), "{out}");
+        }
     }
 
     #[test]
