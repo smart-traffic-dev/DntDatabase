@@ -306,12 +306,17 @@ fn may_have_committed(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
 /// Whether a `Write`/`Ddl` statement stopped by `KILL QUERY` (timeout or cancel) may
 /// still have applied part of its work. Outside an explicit transaction a
 /// non-transactional table (MyISAM, Aria) keeps the rows written before the kill and
-/// DDL is not atomic everywhere; a `CALL` commits its inner statements one by one.
-/// Inside a transaction InnoDB rolls the killed statement back, so it is reported as
-/// not applied; a write to a non-transactional table inside a transaction is the
-/// accepted residual case.
+/// DDL is not atomic everywhere (and always commits the open transaction first); a
+/// `CALL` commits its inner statements one by one. Inside a transaction InnoDB rolls a
+/// killed plain write back, so it is reported as not applied; a write to a
+/// non-transactional table inside a transaction is the accepted residual case.
 fn killed_outcome_unknown(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
-    matches!(kind, StatementKind::Write | StatementKind::Ddl) && (!was_in_tx || is_call(sql))
+    match kind {
+        // DDL implicitly committed any open transaction before it ran.
+        StatementKind::Ddl => true,
+        StatementKind::Write => !was_in_tx || is_call(sql),
+        _ => false,
+    }
 }
 
 /// Lexically: does a statement that succeeded change session state that a reconnect
@@ -329,7 +334,15 @@ fn changes_session_state(sql: &str) -> bool {
     {
         ["SET", ..] => {
             let stripped = strip_comments(sql, Dialect::MySql);
-            let rest = stripped.trim_start()[3..].trim_start().to_ascii_lowercase();
+            let text = stripped.trim_start();
+            let Some(rest) = text
+                .get(..3)
+                .filter(|kw| kw.eq_ignore_ascii_case("SET"))
+                .and(text.get(3..))
+            else {
+                return false;
+            };
+            let rest = rest.trim_start().to_ascii_lowercase();
             let first = rest.split_whitespace().next().unwrap_or("");
             let global = ["global", "persist", "persist_only"].contains(&first)
                 || ["@@global.", "@@persist.", "@@persist_only."]
@@ -357,6 +370,7 @@ fn reset_notes(was_in_tx: bool, session_custom: bool) -> String {
 /// The error for a statement that ignored `KILL QUERY` after its timeout, once its
 /// connection was abandoned and replaced (`Ok`) or replacing it failed (`Err`).
 /// `unknown`: it may have committed ([`may_have_committed`]); `notes`: [`reset_notes`].
+/// Always `ConnectionLost`, so the reset notes and `was_in_tx` reach the user.
 fn stuck_error(
     unknown: bool,
     was_in_tx: bool,
@@ -364,11 +378,7 @@ fn stuck_error(
     replaced: Result<(), DbError>,
 ) -> DbError {
     match replaced {
-        Ok(()) if unknown => DbError::Timeout {
-            stage: ConnectStage::Execute,
-            outcome_unknown: true,
-        },
-        Ok(()) => lost(was_in_tx, false, format!("{STUCK}{notes}")),
+        Ok(()) => lost(was_in_tx, unknown, format!("{STUCK}{notes}")),
         Err(e) => lost(
             was_in_tx,
             unknown,
@@ -498,7 +508,8 @@ impl Session for MySqlSession {
 
     /// `opts.max_rows` applies per result set and `opts.timeout` per statement (not to the
     /// whole script): an expired statement is killed and `Timeout { Execute }` returned
-    /// (`outcome_unknown` when it ignored the kill and may have committed).
+    /// (`outcome_unknown` when the killed write may be partly applied). One that ignores
+    /// the kill loses its connection: `ConnectionLost` (see `stuck_error`).
     async fn execute(
         &self,
         sql: &str,
@@ -828,14 +839,41 @@ mod tests {
     }
 
     #[test]
-    fn stuck_statement_that_may_have_committed_is_an_unknown_timeout() {
+    fn stuck_statement_that_may_have_committed_is_lost_with_unknown_outcome() {
+        let notes = reset_notes(true, true);
+        match stuck_error(true, true, &notes, Ok(())) {
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: true,
+                message,
+            } => {
+                assert!(message.starts_with(STUCK), "{message}");
+                assert!(message.contains("rolled back"), "{message}");
+                assert!(message.contains("user variables"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
         assert!(matches!(
             stuck_error(true, false, "", Ok(())),
-            DbError::Timeout {
-                stage: ConnectStage::Execute,
-                outcome_unknown: true
+            DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: true,
+                ..
             }
         ));
+    }
+
+    #[test]
+    fn killed_ddl_inside_a_transaction_has_unknown_outcome() {
+        // DDL implicitly committed the open transaction before it ran.
+        assert!(killed_outcome_unknown(Ddl, true, "ALTER TABLE t ADD b int"));
+    }
+
+    #[test]
+    fn session_state_lexing_survives_non_ascii_starts() {
+        assert!(!changes_session_state("ưư SET @x = 1"));
+        assert!(!changes_session_state("ế"));
+        assert!(changes_session_state("/* ư */ SET @x = 1"));
     }
 
     #[test]
