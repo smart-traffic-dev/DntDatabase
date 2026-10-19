@@ -46,10 +46,17 @@ pub struct MySqlSession {
     last_db: std::sync::Mutex<Option<String>>,
 }
 
-/// How one statement attempt ended.
+/// InnoDB deadlock: the server rolled the whole transaction back.
+const ER_LOCK_DEADLOCK: u16 = 1213;
+
+/// How one statement attempt failed.
 enum StmtError {
     My(MyError),
+    /// `opts.timeout` expired and the killed statement stopped.
     Timeout,
+    /// `opts.timeout` expired and the statement did not stop after `KILL QUERY`, so the
+    /// connection was replaced (`Ok`) or replacing it failed (`Err`).
+    Replaced(Result<(), DbError>),
 }
 
 impl MySqlSession {
@@ -91,10 +98,6 @@ impl MySqlSession {
         }
     }
 
-    fn cancel_requested(&self) -> bool {
-        self.cancel.requested.load(Ordering::SeqCst)
-    }
-
     fn reset_tx(&self) {
         self.in_tx.store(false, Ordering::SeqCst);
         self.autocommit_off.store(false, Ordering::SeqCst);
@@ -102,8 +105,11 @@ impl MySqlSession {
 
     /// Transaction tracking applied before a statement runs.
     fn track_before(&self, kind: StatementKind) {
-        let StatementKind::Transaction(tx) = kind else {
-            return;
+        let tx = match kind {
+            // MySQL commits implicitly before running DDL, even DDL that then fails.
+            StatementKind::Ddl => return self.in_tx.store(false, Ordering::SeqCst),
+            StatementKind::Transaction(tx) => tx,
+            _ => return,
         };
         match tx {
             TxControl::Begin => self.in_tx.store(true, Ordering::SeqCst),
@@ -114,17 +120,12 @@ impl MySqlSession {
         }
     }
 
-    /// Tracking applied after a statement succeeded.
+    /// Tracking applied after a statement succeeded: remembers the last `USE`.
     fn track_after(&self, kind: StatementKind, sql: &str) {
-        match kind {
-            // DDL implicitly commits in MySQL.
-            StatementKind::Ddl => self.in_tx.store(false, Ordering::SeqCst),
-            StatementKind::Other => {
-                if let Some(db) = parse_use(sql) {
-                    *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
-                }
+        if kind == StatementKind::Other {
+            if let Some(db) = parse_use(sql) {
+                *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
             }
-            _ => {}
         }
     }
 
@@ -162,9 +163,9 @@ impl MySqlSession {
         Ok(())
     }
 
-    /// Runs one statement, enforcing `opts.timeout`: on expiry the query is killed and
-    /// awaited so the connection stays in sync; if it does not stop, the connection is
-    /// replaced.
+    /// Runs one statement, enforcing `opts.timeout` per statement (not per script): on
+    /// expiry the query is killed and awaited so the connection stays in sync; if it does
+    /// not stop, the connection is replaced. Returns whether any result had columns.
     async fn run_timed(
         &self,
         conn: &mut Conn,
@@ -173,7 +174,7 @@ impl MySqlSession {
         sink: &mut dyn RowSink,
         summary: &mut ExecSummary,
         emitted: &mut bool,
-    ) -> Result<(), StmtError> {
+    ) -> Result<bool, StmtError> {
         let Some(limit) = opts.timeout else {
             return run_statement(conn, sql, opts, sink, summary, emitted)
                 .await
@@ -185,7 +186,7 @@ impl MySqlSession {
                 Ok(res) => return res.map_err(StmtError::My),
                 Err(_) => {
                     let id = self.cancel.connection_id.load(Ordering::SeqCst);
-                    let _ = kill_query(&self.opts, id).await;
+                    let _ = kill_query(&self.opts, || Some(id)).await;
                     tokio::time::timeout(CANCEL_TIMEOUT, fut.as_mut())
                         .await
                         .is_err()
@@ -193,13 +194,14 @@ impl MySqlSession {
             }
         };
         if stuck {
-            let _ = self.reconnect(conn).await;
+            return Err(StmtError::Replaced(self.reconnect(conn).await));
         }
         Err(StmtError::Timeout)
     }
 }
 
-/// Streams every result of one statement into `sink`.
+/// Streams every result of one statement into `sink`. Returns whether any result had
+/// columns (a result set rather than an OK status).
 async fn run_statement(
     conn: &mut Conn,
     sql: &str,
@@ -207,12 +209,14 @@ async fn run_statement(
     sink: &mut dyn RowSink,
     summary: &mut ExecSummary,
     emitted: &mut bool,
-) -> Result<(), MyError> {
+) -> Result<bool, MyError> {
     let mut started = Instant::now();
     let mut result = conn.query_iter(sql).await?;
     let batch_size = opts.batch_size.max(1);
+    let mut had_columns = false;
     loop {
         let cols = result.columns().unwrap_or_else(|| Arc::from([]));
+        had_columns |= !cols.is_empty();
         let metas: Vec<ColumnMeta> = cols.iter().map(column_meta).collect();
         sink.result_start(&metas);
         *emitted = true;
@@ -256,7 +260,7 @@ async fn run_statement(
         // More sets only follow for multi-result statements such as `CALL`; the
         // trailing status of a `CALL` is not reported as a separate result.
         if result.is_empty() {
-            return Ok(());
+            return Ok(had_columns);
         }
         started = Instant::now();
     }
@@ -318,6 +322,8 @@ impl Session for MySqlSession {
         &self.info
     }
 
+    /// `opts.max_rows` applies per result set and `opts.timeout` per statement (not to the
+    /// whole script): an expired statement is killed and `Timeout { Execute }` returned.
     async fn execute(
         &self,
         sql: &str,
@@ -325,11 +331,12 @@ impl Session for MySqlSession {
         sink: &mut dyn RowSink,
     ) -> Result<ExecSummary, DbError> {
         let mut conn = self.conn.lock().await;
-        self.cancel.requested.store(false, Ordering::SeqCst);
+        // Cancels only apply to this call from here on (see `cancel.rs`).
+        let run = self.cancel.begin();
         let mut summary = ExecSummary::default();
         let mut reconnected = false;
         for stmt in split(sql, Dialect::MySql) {
-            if self.cancel_requested() {
+            if run.cancelled() {
                 return Err(DbError::Cancelled);
             }
             let kind = classify(&stmt.text);
@@ -348,19 +355,31 @@ impl Session for MySqlSession {
                     )
                     .await;
                 let err = match res {
-                    Ok(()) if self.cancel_requested() => return Err(DbError::Cancelled),
-                    Ok(()) => break,
+                    // A killed `SELECT SLEEP(n)` returns a row instead of an error. A
+                    // statement that only returned an OK status completed (and committed
+                    // under autocommit): keep it; the flag stops the next statement.
+                    Ok(true) if run.cancelled() => return Err(DbError::Cancelled),
+                    Ok(_) => break,
                     Err(StmtError::Timeout) => {
                         return Err(DbError::Timeout {
                             stage: ConnectStage::Execute,
                         })
                     }
+                    Err(StmtError::Replaced(Ok(()))) => {
+                        return Err(DbError::ConnectionLost {
+                            in_transaction: was_in_tx,
+                        })
+                    }
+                    Err(StmtError::Replaced(Err(e))) => return Err(e),
                     Err(StmtError::My(e)) => e,
                 };
-                if self.cancel_requested() {
+                if run.cancelled() {
                     return Err(DbError::Cancelled);
                 }
                 if !is_connection_lost(&err) {
+                    if matches!(&err, MyError::Server(se) if se.code == ER_LOCK_DEADLOCK) {
+                        self.in_tx.store(false, Ordering::SeqCst);
+                    }
                     return Err(map_exec_error(err));
                 }
                 if was_in_tx {
@@ -377,7 +396,15 @@ impl Session for MySqlSession {
                     });
                 }
                 reconnected = true;
-                self.reconnect(&mut conn).await?;
+                // `ConnectionLost` has no message field: the reconnect error is dropped.
+                if self.reconnect(&mut conn).await.is_err() {
+                    return Err(DbError::ConnectionLost {
+                        in_transaction: false,
+                    });
+                }
+                if run.cancelled() {
+                    return Err(DbError::Cancelled);
+                }
                 // Only a read that produced nothing yet is safe to run again.
                 if kind != StatementKind::Read || emitted {
                     return Err(DbError::ConnectionLost {

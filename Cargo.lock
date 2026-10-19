@@ -482,6 +482,7 @@ dependencies = [
  "mysql_async",
  "rustls",
  "secrecy",
+ "serde",
  "tokio",
 ]
 

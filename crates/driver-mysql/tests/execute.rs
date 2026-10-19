@@ -1,6 +1,6 @@
 use dnt_core::driver::{ExecOptions, ExecSummary, RowSink, Session};
 use dnt_core::error::{ConnectStage, DbError};
-use dnt_core::value::{ColumnMeta, Value};
+use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::time::{Duration, Instant};
@@ -123,9 +123,34 @@ async fn all_types_roundtrip() {
         let (_, c) = run(&s, "SELECT * FROM all_types ORDER BY id")
             .await
             .unwrap_or_else(|e| panic!("{t:?}: {e}"));
-        let rows = &c.results[0].rows;
-        insta::assert_yaml_snapshot!(format!("{t:?}_all_types"), rows);
+        let res = &c.results[0];
+        let snapshot = AllTypes {
+            columns: res
+                .cols
+                .iter()
+                .map(|c| SnapColumn {
+                    name: &c.name,
+                    logical: c.logical,
+                    db_type: &c.db_type,
+                })
+                .collect(),
+            rows: &res.rows,
+        };
+        insta::assert_yaml_snapshot!(format!("{t:?}_all_types"), snapshot);
     }
+}
+
+#[derive(serde::Serialize)]
+struct SnapColumn<'a> {
+    name: &'a str,
+    logical: LogicalType,
+    db_type: &'a str,
+}
+
+#[derive(serde::Serialize)]
+struct AllTypes<'a> {
+    columns: Vec<SnapColumn<'a>>,
+    rows: &'a [Vec<Value>],
 }
 
 #[tokio::test]
@@ -244,6 +269,56 @@ async fn cancel_long_query() {
 }
 
 #[tokio::test]
+async fn cancel_when_idle_is_a_noop() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        s.cancel_handle()
+            .cancel()
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: idle cancel failed: {e}"));
+        // Nothing leaks into the next call.
+        let (_, c) = run(&s, "select 1; select 2")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(c.results.len(), 2, "{t:?}");
+    }
+}
+
+/// A statement that completes with an OK status keeps its result even when a cancel
+/// arrives while it runs. `DO SLEEP(1)` is a `Write` that a `KILL QUERY` cuts short
+/// without an error (the sleep returns 1), which forces the "completed while a cancel
+/// was in flight" race deterministically.
+#[tokio::test]
+async fn completed_write_during_cancel_keeps_its_result() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let handle = s.cancel_handle();
+        let (res, cancel) = tokio::join!(run(&s, "DO SLEEP(1)"), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            handle.cancel().await
+        });
+        cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
+        let (summary, c) = res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(summary.results.len(), 1, "{t:?}");
+        assert_eq!(c.results[0].affected, Some(0), "{t:?}");
+
+        // In a script, the cancel then stops the statements that follow.
+        let handle = s.cancel_handle();
+        let (res, _) = tokio::join!(run(&s, "DO SLEEP(1); SELECT 'not reached'"), async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            handle.cancel().await
+        });
+        assert!(
+            matches!(res, Err(DbError::Cancelled)),
+            "{t:?}: {:?}",
+            res.map(|(s, _)| s)
+        );
+    }
+}
+
+#[tokio::test]
 async fn timeout_option() {
     require_db!();
     for t in Target::mysql_family() {
@@ -346,6 +421,55 @@ async fn transaction_flags_follow_statements() {
         .unwrap();
         // DDL implicitly commits.
         assert!(!s.in_transaction(), "{t:?}");
+        // ... before it runs, so even failing DDL ends the transaction.
+        run(&s, "BEGIN").await.unwrap();
+        let err = run(&s, "DROP TABLE t10_no_such_table").await.err();
+        assert!(
+            matches!(err, Some(DbError::Server { .. })),
+            "{t:?}: {err:?}"
+        );
+        assert!(!s.in_transaction(), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn deadlock_ends_the_transaction() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let a = connect(t).await;
+        let b = connect(t).await;
+        run(
+            &a,
+            "CREATE TABLE IF NOT EXISTS t10_deadlock (id int PRIMARY KEY, v int); \
+             INSERT IGNORE INTO t10_deadlock VALUES (1, 0), (2, 0)",
+        )
+        .await
+        .unwrap();
+        run(&a, "BEGIN; UPDATE t10_deadlock SET v = v + 1 WHERE id = 1")
+            .await
+            .unwrap();
+        run(&b, "BEGIN; UPDATE t10_deadlock SET v = v + 1 WHERE id = 2")
+            .await
+            .unwrap();
+        let (ra, rb) = tokio::join!(
+            run(&a, "UPDATE t10_deadlock SET v = v + 1 WHERE id = 2"),
+            async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                run(&b, "UPDATE t10_deadlock SET v = v + 1 WHERE id = 1").await
+            }
+        );
+        let code = |r: &Result<_, DbError>| match r {
+            Err(DbError::Server { code, .. }) => code.clone(),
+            _ => None,
+        };
+        let (victim, survivor) = match (code(&ra).as_deref(), code(&rb).as_deref()) {
+            (Some("1213"), None) => (&a, &b),
+            (None, Some("1213")) => (&b, &a),
+            other => panic!("{t:?}: expected exactly one deadlock, got {other:?}"),
+        };
+        assert!(!victim.in_transaction(), "{t:?}: victim still in tx");
+        assert!(survivor.in_transaction(), "{t:?}");
+        run(survivor, "ROLLBACK").await.unwrap();
     }
 }
 
