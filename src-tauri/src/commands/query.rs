@@ -31,6 +31,11 @@ pub async fn completion_objects_impl(
         .await
 }
 
+/// The SchemaCache of `database` for autocomplete. The whole scope comes back in one
+/// payload: the UI must cache it per (tab connection, database) and fetch it again only
+/// after a refresh or when the tab changes database, never per keystroke. Errors: an
+/// empty `database` is a `config` error; a failed load is returned again (without a new
+/// load) for 10 s.
 #[tauri::command]
 #[specta::specta]
 pub async fn completion_scope(
@@ -41,6 +46,8 @@ pub async fn completion_scope(
     guard(completion_scope_impl(&state, conn_id, database)).await
 }
 
+/// Tables and views after `db.` (MySQL: `schema` must be null) or `schema.` (PostgreSQL:
+/// `schema` is required). Shares the object tree's cache.
 #[tauri::command]
 #[specta::specta]
 pub async fn completion_objects(

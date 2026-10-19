@@ -45,6 +45,10 @@ const CLOSE_DEAD_TIMEOUT: Duration = Duration::from_secs(2);
 /// session is dropped and `Timeout{Execute}` returned, without a retry.
 pub const METADATA_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a failed SchemaCache load is remembered: callers within this window get the
+/// same error without a new load; the first caller after it retries.
+pub const SCHEMA_ERROR_TTL: Duration = Duration::from_secs(10);
+
 /// How long `close` waits for an in-flight metadata call to release the runtime before it
 /// marks the runtime closed and tears down what it can reach without it.
 const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -303,6 +307,7 @@ pub struct SessionManager {
     /// longer current was superseded and must not install its runtime or touch `pending`.
     generations: Mutex<HashMap<Uuid, u64>>,
     metadata_timeout: Duration,
+    schema_error_ttl: Duration,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -338,12 +343,19 @@ impl SessionManager {
             timings: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             metadata_timeout: METADATA_CALL_TIMEOUT,
+            schema_error_ttl: SCHEMA_ERROR_TTL,
         }
     }
 
     /// Overrides [`METADATA_CALL_TIMEOUT`] for runtimes opened afterwards (tests).
     pub fn with_metadata_timeout(mut self, timeout: Duration) -> Self {
         self.metadata_timeout = timeout;
+        self
+    }
+
+    /// Overrides [`SCHEMA_ERROR_TTL`] for runtimes opened afterwards (tests).
+    pub fn with_schema_error_ttl(mut self, ttl: Duration) -> Self {
+        self.schema_error_ttl = ttl;
         self
     }
 
@@ -484,6 +496,7 @@ impl SessionManager {
             opened,
             self.known_hosts.clone(),
             self.metadata_timeout,
+            self.schema_error_ttl,
         ));
         // Checked and installed under the generations lock, so a `close` either supersedes
         // this open or finds (and closes) its runtime.
@@ -768,16 +781,31 @@ impl SessionManager {
     }
 
     /// Tables and views (and materialized views on PostgreSQL) for autocomplete after
-    /// `db.` / `schema.`: of `schema` when set, otherwise of `database`. Listed through
-    /// [`SessionManager::browse`] under the tree's folder keys, so the tree and
-    /// autocomplete share one cache.
+    /// `db.` (MySQL: `schema` must be `None`) / `schema.` (PostgreSQL: `schema` is
+    /// required, as every PostgreSQL folder key of the tree carries a `schema:` segment).
+    /// Listed through [`SessionManager::browse`] under the tree's folder keys, so the tree
+    /// and autocomplete share one cache.
     pub async fn completion_objects(
         &self,
         id: Uuid,
         database: &str,
         schema: Option<&str>,
     ) -> Result<Vec<CompletionObject>, DbError> {
-        let kinds: &[ObjectKind] = match self.runtime(id)?.cfg.kind {
+        require_database(database)?;
+        let kind = self.runtime(id)?.cfg.kind;
+        match (kind, schema) {
+            (DbKind::MySql, Some(_)) => {
+                return Err(config_error(
+                    "schema",
+                    "MySQL has no schemas inside a database",
+                ))
+            }
+            (DbKind::Postgres, None) => {
+                return Err(config_error("schema", "a schema is required on PostgreSQL"))
+            }
+            _ => {}
+        }
+        let kinds: &[ObjectKind] = match kind {
             DbKind::MySql => &[ObjectKind::Table, ObjectKind::View],
             DbKind::Postgres => &[
                 ObjectKind::Table,
@@ -807,11 +835,47 @@ impl SessionManager {
     }
 }
 
-/// One database's SchemaCache. Its async mutex serializes loads: the caller holding it
-/// loads (or finds the cache loaded), concurrent callers wait for that result.
+fn config_error(field: &str, message: &str) -> DbError {
+    DbError::Config {
+        field: Some(field.into()),
+        message: message.into(),
+    }
+}
+
+fn require_database(database: &str) -> Result<(), DbError> {
+    if database.is_empty() {
+        Err(config_error("database", "a database is required"))
+    } else {
+        Ok(())
+    }
+}
+
+/// What a SchemaSlot holds.
+#[derive(Default)]
+enum SlotState {
+    #[default]
+    Empty,
+    Ready(SchemaCache),
+    /// The last load failed at the given time; returned as is until the TTL runs out.
+    Failed(DbError, Instant),
+}
+
+/// One database's SchemaCache. Its async mutex makes loads single-flight: the caller
+/// holding it runs the load (in a task, so `refresh` can abort it), and the callers
+/// waiting for it then find the result (success or error) in the state.
 #[derive(Default)]
 struct SchemaSlot {
-    cache: tokio::sync::Mutex<Option<SchemaCache>>,
+    state: tokio::sync::Mutex<SlotState>,
+    /// Abort handle of the load running for this slot.
+    load: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl SchemaSlot {
+    fn abort_load(&self) {
+        if let Some(load) = lock(&self.load).take() {
+            load.abort();
+        }
+    }
 }
 
 /// Resolved address and metadata sessions, held by one metadata call at a time.
@@ -836,6 +900,7 @@ pub struct ConnectionRuntime {
     /// Set first thing by `shutdown`, even when it cannot get the link.
     closed: AtomicBool,
     metadata_timeout: Duration,
+    schema_error_ttl: Duration,
     cache: NodeCache,
     /// `database → SchemaCache`, each loaded on first use.
     schema_caches: Mutex<HashMap<String, Arc<SchemaSlot>>>,
@@ -852,6 +917,7 @@ impl ConnectionRuntime {
         opened: Opened,
         known_hosts: KnownHosts,
         metadata_timeout: Duration,
+        schema_error_ttl: Duration,
     ) -> Self {
         let home = match cfg.kind {
             DbKind::MySql => None,
@@ -877,6 +943,7 @@ impl ConnectionRuntime {
             }),
             closed: AtomicBool::new(false),
             metadata_timeout,
+            schema_error_ttl,
             cache: NodeCache::default(),
             schema_caches: Mutex::new(HashMap::new()),
             state: Mutex::new(ConnState::Connected),
@@ -922,16 +989,23 @@ impl ConnectionRuntime {
                 let session = connect_db(self.driver.as_ref(), &resolved).await?;
                 link.metadata.insert(key.clone(), session);
             }
-            let session = link.metadata.get(&key).ok_or_else(|| DbError::Internal {
-                message: "metadata session vanished".into(),
-            })?;
+            // Taken out of the map for the call: if this future is dropped mid-call (an
+            // aborted SchemaCache load), the session, possibly mid-protocol, is dropped with
+            // it instead of being reused.
+            let session = link
+                .metadata
+                .remove(&key)
+                .ok_or_else(|| DbError::Internal {
+                    message: "metadata session vanished".into(),
+                })?;
             let outcome = tokio::time::timeout(self.metadata_timeout, f(session.as_ref())).await;
             let Ok(outcome) = outcome else {
                 // The session may be stuck mid-protocol: drop it (no graceful close) and do
                 // not retry; the next call opens a fresh one.
-                link.metadata.remove(&key);
+                drop(session);
                 return Err(DbError::timeout(ConnectStage::Execute));
             };
+            link.metadata.insert(key.clone(), session);
             match outcome {
                 Err(e) if !reopened && is_lost(&e) => {
                     self.ensure_open(&link)?;
@@ -1025,7 +1099,9 @@ impl ConnectionRuntime {
                 task.abort();
             }
         }
-        lock(&self.schema_caches).clear();
+        for (_, slot) in lock(&self.schema_caches).drain() {
+            slot.abort_load();
+        }
         match tokio::time::timeout(SHUTDOWN_LOCK_TIMEOUT, self.link.lock()).await {
             Ok(mut link) => {
                 link.closed = true;
@@ -1062,26 +1138,81 @@ impl ConnectionRuntime {
         )
     }
 
+    /// Whether `slot` is still the slot of `database` (not replaced by a refresh).
+    fn is_current_slot(&self, database: &str, slot: &Arc<SchemaSlot>) -> bool {
+        lock(&self.schema_caches)
+            .get(database)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+    }
+
     /// Databases that have a SchemaCache slot (loaded or loading).
     fn schema_databases(&self) -> Vec<String> {
         lock(&self.schema_caches).keys().cloned().collect()
     }
 
-    async fn schema_cache_for(&self, database: &str) -> Result<SchemaCache, DbError> {
-        let slot = self.schema_slot(database);
-        let mut cache = slot.cache.lock().await;
-        if let Some(loaded) = cache.as_ref() {
-            return Ok(loaded.clone());
+    /// Single-flight per database: one load at a time, and its result (a cache, or an
+    /// error kept for `schema_error_ttl`) is what every waiter gets. A caller whose load
+    /// (or slot) is replaced by a refresh follows the new slot.
+    async fn schema_cache_for(self: &Arc<Self>, database: &str) -> Result<SchemaCache, DbError> {
+        require_database(database)?;
+        loop {
+            let slot = self.schema_slot(database);
+            let mut state = slot.state.lock().await;
+            match &*state {
+                SlotState::Ready(cache) => return Ok(cache.clone()),
+                SlotState::Failed(e, at) if at.elapsed() < self.schema_error_ttl => {
+                    return Err(e.clone())
+                }
+                _ => {}
+            }
+            if !self.is_current_slot(database, &slot) {
+                continue;
+            }
+            self.ensure_not_closed()?;
+            let rt = Arc::clone(self);
+            let db = database.to_string();
+            let load = tokio::spawn(async move { rt.load_schema_cache(&db).await });
+            *lock(&slot.load) = Some(load.abort_handle());
+            let outcome = load.await;
+            lock(&slot.load).take();
+            match outcome {
+                Ok(Ok(cache)) => {
+                    *state = SlotState::Ready(cache.clone());
+                    return Ok(cache);
+                }
+                Ok(Err(e)) => {
+                    *state = SlotState::Failed(e.clone(), Instant::now());
+                    return Err(e);
+                }
+                // Aborted by a refresh (follow the new slot) or by `shutdown`.
+                Err(join) if join.is_cancelled() => {
+                    self.ensure_not_closed()?;
+                }
+                Err(_) => {
+                    return Err(DbError::Internal {
+                        message: "the schema cache load failed unexpectedly".into(),
+                    })
+                }
+            }
         }
-        let loaded = self.load_schema_cache(database).await?;
-        *cache = Some(loaded.clone());
-        Ok(loaded)
     }
 
-    /// Replaces the slot of `database` with an empty one and loads it in the background.
-    /// A load still running on the old slot finishes into that (dropped) slot.
+    fn ensure_not_closed(&self) -> Result<(), DbError> {
+        if self.closed.load(Ordering::SeqCst) {
+            Err(closed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Replaces the slot of `database` with an empty one, aborts the load running on the
+    /// old one (so the two loads do not compete for the metadata link), and loads the new
+    /// one in the background. Callers waiting on the old slot follow the new one.
     fn refresh_schema_cache(self: &Arc<Self>, database: &str) {
-        lock(&self.schema_caches).insert(database.to_string(), Arc::default());
+        let old = lock(&self.schema_caches).insert(database.to_string(), Arc::default());
+        if let Some(old) = old {
+            old.abort_load();
+        }
         self.spawn_schema_load(database.to_string());
     }
 

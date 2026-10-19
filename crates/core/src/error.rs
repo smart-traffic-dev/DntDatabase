@@ -52,7 +52,8 @@ pub struct StageTiming {
     pub ms: u64,
 }
 
-#[derive(thiserror::Error, Debug)]
+/// `Clone` so one result can be shared by several waiters (e.g. a failed SchemaCache load).
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum DbError {
     #[error("invalid configuration: {message}")]
     Config {

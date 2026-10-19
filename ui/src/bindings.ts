@@ -173,6 +173,13 @@ async getSchemaCache(id: string) : Promise<Result<SchemaCache | null, AppError>>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The SchemaCache of `database` for autocomplete. The whole scope comes back in one
+ * payload: the UI must cache it per (tab connection, database) and fetch it again only
+ * after a refresh or when the tab changes database, never per keystroke. Errors: an
+ * empty `database` is a `config` error; a failed load is returned again (without a new
+ * load) for 10 s.
+ */
 async completionScope(connId: string, database: string) : Promise<Result<SchemaCache, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("completion_scope", { connId, database }) };
@@ -181,6 +188,10 @@ async completionScope(connId: string, database: string) : Promise<Result<SchemaC
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Tables and views after `db.` (MySQL: `schema` must be null) or `schema.` (PostgreSQL:
+ * `schema` is required). Shares the object tree's cache.
+ */
 async completionObjects(connId: string, database: string, schema: string | null) : Promise<Result<CompletionObject[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("completion_objects", { connId, database, schema }) };
