@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            ui/pnpm-lock.yaml
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir ui install --frozen-lockfile
+      - name: Build the UI
+        run: pnpm --dir ui build
+      - name: Generate TLS/SSH fixtures
+        run: cargo run -p dnt-testkit --features gen-fixtures --bin gen_fixtures
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: pnpm --dir ui lint
+      - run: pnpm --dir ui test
+      - run: pnpm tauri build
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install system libraries for the Tauri crate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+      - name: Build the UI
+        run: |
+          pnpm --dir ui install --frozen-lockfile
+          pnpm --dir ui build
+      # Must run before compose: the ssh container mounts testdata/ssh and the TLS tests read testdata/certs.
+      - name: Generate TLS/SSH fixtures
+        run: cargo run -p dnt-testkit --features gen-fixtures --bin gen_fixtures
+      - name: Start the test databases
+        run: docker compose -f testdata/docker-compose.test.yml up -d --wait
+      # Plain `cargo test` runs test binaries one after another; keep it so (the tunnel
+      # tests restart the ssh container). Do not switch to nextest.
+      - name: Integration tests
+        run: cargo test --workspace -- --test-threads=1
+        env:
+          DNT_TEST_DB: "1"
+      - name: Stop the test databases
+        if: always()
+        run: docker compose -f testdata/docker-compose.test.yml down -v
