@@ -1,4 +1,4 @@
-use dnt_core::driver::{ExecOptions, ExecSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ExecSummary, ResultSummary, RowSink, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
@@ -31,11 +31,11 @@ impl RowSink for Collect {
         r.batches.push(batch.len());
         r.rows.extend(batch);
     }
-    fn result_end(&mut self, affected: Option<u64>, _elapsed: Duration) {
+    fn result_end(&mut self, summary: &ResultSummary) {
         self.results
             .last_mut()
             .expect("result_end before start")
-            .affected = affected;
+            .affected = summary.affected;
     }
 }
 
@@ -401,7 +401,8 @@ async fn cancel_long_query() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: false,
                 })
             ),
             "{t:?}: {:?}",
@@ -486,7 +487,8 @@ async fn timeout_option() {
                 res,
                 Err(DbError::Timeout {
                     stage: ConnectStage::Execute,
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: false,
                 })
             ),
             "{t:?}: {:?}",
@@ -764,7 +766,8 @@ async fn grace_success() {
                 res,
                 Err(DbError::Timeout {
                     stage: ConnectStage::Execute,
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: false,
                 })
             ),
             "{t:?}: {:?}",
@@ -808,6 +811,7 @@ async fn grace_success() {
                 res,
                 Err(DbError::Timeout {
                     outcome_unknown: false,
+                    was_in_tx: true,
                     ..
                 })
             ),
@@ -844,7 +848,8 @@ async fn cancel_twice_keeps_session_usable() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: true,
                 })
             ),
             "{t:?}: {:?}",
@@ -893,9 +898,11 @@ async fn timeout_racing_cancel_keeps_session_usable() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: true,
                 } | DbError::Timeout {
                     outcome_unknown: false,
+                    was_in_tx: true,
                     ..
                 })
             ),

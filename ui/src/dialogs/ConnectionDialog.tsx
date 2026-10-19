@@ -242,6 +242,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       ssh_timeout_s: num(form.sshTimeout, 10),
       charset: initial?.options.charset ?? null,
       application_name: orNull(form.appName),
+      query_timeout_s: initial?.options.query_timeout_s ?? 0,
     },
   });
 

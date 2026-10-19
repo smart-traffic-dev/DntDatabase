@@ -3,7 +3,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, ExecSummary, Introspector, RowSink, Session,
+    CancelHandle, Canceller, Driver, ExecOptions, ExecSummary, Introspector, ResultSummary,
+    RowSink, Session,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
@@ -118,7 +119,12 @@ impl Session for FakeSession {
         sink: &mut dyn RowSink,
     ) -> Result<ExecSummary, DbError> {
         sink.result_start(&[]);
-        sink.result_end(None, Duration::ZERO);
+        sink.result_end(&ResultSummary {
+            affected: None,
+            row_count: 0,
+            truncated: false,
+            elapsed_ms: 0,
+        });
         Ok(ExecSummary::default())
     }
     fn cancel_handle(&self) -> CancelHandle {
@@ -846,7 +852,8 @@ async fn hanging_metadata_call_times_out_and_close_is_prompt() {
             err,
             DbError::Timeout {
                 stage: ConnectStage::Execute,
-                outcome_unknown: false
+                outcome_unknown: false,
+                was_in_tx: false,
             }
         ),
         "{err:?}"

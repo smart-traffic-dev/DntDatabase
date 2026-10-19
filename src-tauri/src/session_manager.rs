@@ -10,7 +10,7 @@
 
 use crate::cache::{NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
-use dnt_core::driver::{Driver, ExecOptions, Introspector, RowSink, Session};
+use dnt_core::driver::{Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session};
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ObjectKind, Scope};
@@ -1076,7 +1076,7 @@ impl RowSink for TextColumn {
                 }),
         );
     }
-    fn result_end(&mut self, _affected: Option<u64>, _elapsed: Duration) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 /// The schemas of the session's effective `search_path` (PostgreSQL).

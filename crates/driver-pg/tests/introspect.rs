@@ -1,4 +1,4 @@
-use dnt_core::driver::{ExecOptions, Introspector, RowSink, Session};
+use dnt_core::driver::{ExecOptions, Introspector, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::value::{ColumnMeta, Value};
@@ -32,7 +32,7 @@ struct Discard;
 impl RowSink for Discard {
     fn result_start(&mut self, _cols: &[ColumnMeta]) {}
     fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
-    fn result_end(&mut self, _affected: Option<u64>, _elapsed: Duration) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 async fn exec(s: &PgSession, sql: &str) -> Result<(), DbError> {

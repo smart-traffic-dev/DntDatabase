@@ -287,13 +287,14 @@ fn finish(
     truncated: bool,
 ) {
     let elapsed = started.elapsed();
-    sink.result_end(affected, elapsed);
-    summary.results.push(ResultSummary {
+    let result = ResultSummary {
         affected,
         row_count,
         truncated,
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-    });
+    };
+    sink.result_end(&result);
+    summary.results.push(result);
 }
 
 fn sqlstate(e: &tokio_postgres::Error) -> Option<&str> {
@@ -564,6 +565,7 @@ impl Session for PgSession {
                         return Err(DbError::Timeout {
                             stage: ConnectStage::Execute,
                             outcome_unknown: killed_outcome_unknown(was_in_tx, &stmt.text),
+                            was_in_tx,
                         });
                     }
                     Err(StmtError::Stuck) => {
@@ -588,7 +590,10 @@ impl Session for PgSession {
                     killed_outcome_unknown(was_in_tx, &stmt.text),
                 ) {
                     Failure::Cancelled { outcome_unknown } => {
-                        return Err(DbError::Cancelled { outcome_unknown })
+                        return Err(DbError::Cancelled {
+                            outcome_unknown,
+                            was_in_tx,
+                        })
                     }
                     Failure::Server => return Err(map_pg_error(err, ConnectStage::Execute)),
                     Failure::Lost => {}

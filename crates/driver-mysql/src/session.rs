@@ -403,13 +403,14 @@ async fn run_statement(
         }
         let affected = cols.is_empty().then(|| result.affected_rows());
         let elapsed = started.elapsed();
-        sink.result_end(affected, elapsed);
-        summary.results.push(ResultSummary {
+        let result_summary = ResultSummary {
             affected,
             row_count,
             truncated,
             elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
-        });
+        };
+        sink.result_end(&result_summary);
+        summary.results.push(result_summary);
         // More sets only follow for multi-result statements such as `CALL`; the
         // trailing status of a `CALL` is not reported as a separate result.
         if result.is_empty() {
@@ -538,13 +539,17 @@ impl Session for MySqlSession {
                     // dropped. Anything else completed (and may have committed): keep
                     // it; the flag stops the next statement.
                     Ok(true) if kind == StatementKind::Read && run.cancelled() => {
-                        return Err(DbError::cancelled())
+                        return Err(DbError::Cancelled {
+                            outcome_unknown: false,
+                            was_in_tx,
+                        })
                     }
                     Ok(_) => break,
                     Err(StmtError::Timeout) => {
                         return Err(DbError::Timeout {
                             stage: ConnectStage::Execute,
                             outcome_unknown: killed_outcome_unknown(kind, was_in_tx, &stmt.text),
+                            was_in_tx,
                         });
                     }
                     Err(StmtError::Stuck) => {
@@ -567,7 +572,10 @@ impl Session for MySqlSession {
                     killed_outcome_unknown(kind, was_in_tx, &stmt.text),
                 ) {
                     Failure::Cancelled { outcome_unknown } => {
-                        return Err(DbError::Cancelled { outcome_unknown })
+                        return Err(DbError::Cancelled {
+                            outcome_unknown,
+                            was_in_tx,
+                        })
                     }
                     Failure::Server => return Err(map_mysql_error(err, ConnectStage::Execute)),
                     Failure::Lost => {}

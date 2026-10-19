@@ -17,6 +17,7 @@ export class AppErrorEx extends Error implements AppError {
   readonly host: string | null;
   readonly port: number | null;
   readonly field: string | null;
+  readonly tx_state: string | null;
 
   constructor(error: AppError) {
     super(error.message);
@@ -36,6 +37,7 @@ export class AppErrorEx extends Error implements AppError {
     this.host = error.host;
     this.port = error.port;
     this.field = error.field;
+    this.tx_state = error.tx_state;
   }
 
   /** The plain payload (what the stores keep). */
@@ -57,6 +59,7 @@ export class AppErrorEx extends Error implements AppError {
       host: this.host,
       port: this.port,
       field: this.field,
+      tx_state: this.tx_state,
     };
   }
 }
@@ -93,6 +96,7 @@ function internal(message: string): AppError {
     host: null,
     port: null,
     field: null,
+    tx_state: null,
   };
 }
 

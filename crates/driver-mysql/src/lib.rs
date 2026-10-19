@@ -215,7 +215,8 @@ mod tests {
             map_mysql_error(timed_out.into(), ConnectStage::ConnectDb),
             DbError::Timeout {
                 stage: ConnectStage::ConnectDb,
-                outcome_unknown: false
+                outcome_unknown: false,
+                was_in_tx: false,
             }
         ));
         let handshake = std::io::Error::new(

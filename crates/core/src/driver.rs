@@ -7,14 +7,51 @@ use crate::meta::{
 use crate::server::{DbKind, ServerInfo};
 use crate::value::{ColumnMeta, Value};
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How long a driver waits, after it asked the server to stop a statement (timeout or
+/// Stop), for the statement to end before it gives the connection up.
+pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(10);
+
+/// A flag the query layer raises to stop a run; every clone shares it. Two signals are
+/// equal only when they are the same flag.
+#[derive(Clone, Debug, Default)]
+pub struct StopSignal(Arc<AtomicBool>);
+
+impl StopSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for StopSignal {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StopSignal {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOptions {
     pub max_rows: usize,
     pub batch_size: usize,
+    /// Per-statement time limit.
     pub timeout: Option<Duration>,
+    /// See [`DEFAULT_CANCEL_GRACE`]; tests set it shorter.
+    pub cancel_grace: Duration,
+    /// Raised by the user's Stop: no statement may be sent once it is set.
+    pub stop: StopSignal,
 }
 
 impl Default for ExecOptions {
@@ -23,8 +60,29 @@ impl Default for ExecOptions {
             max_rows: 10_000,
             batch_size: 500,
             timeout: None,
+            cancel_grace: DEFAULT_CANCEL_GRACE,
+            stop: StopSignal::new(),
         }
     }
+}
+
+/// What one executed statement produced.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StmtOutcome {
+    /// One entry per result (a MySQL `CALL` may return several result sets).
+    pub results: Vec<ResultSummary>,
+    /// The statement completed within the cancel grace after its timeout: its results
+    /// are kept, and the script must not continue.
+    pub late_completion: bool,
+}
+
+/// Progress of a statement being stopped, reported through [`RowSink::progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecProgress {
+    /// The server was asked to stop the statement.
+    CancelSent,
+    /// The statement did not stop within the cancel grace.
+    GraceExpired,
 }
 
 /// Outcome of one statement of an executed script.
@@ -76,7 +134,11 @@ pub trait Session: Send + Sync {
 pub trait RowSink: Send {
     fn result_start(&mut self, cols: &[ColumnMeta]);
     fn rows(&mut self, batch: Vec<Vec<Value>>);
-    fn result_end(&mut self, affected: Option<u64>, elapsed: Duration);
+    /// The result that `result_start` opened is complete (`summary` is also returned
+    /// in the call's summary).
+    fn result_end(&mut self, summary: &ResultSummary);
+    /// Progress while a statement is being stopped. Default: ignored.
+    fn progress(&mut self, _p: ExecProgress) {}
 }
 
 #[async_trait]
@@ -103,7 +165,54 @@ mod tests {
     #[test]
     fn exec_options_defaults() {
         let o = ExecOptions::default();
-        assert_eq!((o.max_rows, o.batch_size, o.timeout), (10_000, 500, None));
+        assert_eq!(
+            (o.max_rows, o.batch_size, o.timeout, o.cancel_grace),
+            (10_000, 500, None, Duration::from_secs(10))
+        );
+        assert_eq!(o.cancel_grace, DEFAULT_CANCEL_GRACE);
+        assert!(!o.stop.is_stopped());
+    }
+
+    #[test]
+    fn stop_signal_is_shared_across_clones() {
+        let a = StopSignal::new();
+        let b = a.clone();
+        assert!(!a.is_stopped());
+        b.stop();
+        assert!(a.is_stopped());
+        assert_eq!(a, b);
+        assert_ne!(a, StopSignal::new());
+    }
+
+    #[test]
+    fn stmt_outcome_default_is_empty() {
+        let o = StmtOutcome::default();
+        assert!(o.results.is_empty());
+        assert!(!o.late_completion);
+    }
+
+    /// A sink that only implements the required methods gets a no-op `progress`.
+    #[test]
+    fn row_sink_progress_defaults_to_noop() {
+        struct Ends(Vec<ResultSummary>);
+        impl RowSink for Ends {
+            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+            fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+            fn result_end(&mut self, summary: &ResultSummary) {
+                self.0.push(summary.clone());
+            }
+        }
+        let mut s = Ends(vec![]);
+        s.progress(ExecProgress::CancelSent);
+        s.progress(ExecProgress::GraceExpired);
+        let summary = ResultSummary {
+            affected: Some(2),
+            row_count: 0,
+            truncated: false,
+            elapsed_ms: 5,
+        };
+        s.result_end(&summary);
+        assert_eq!(s.0, [summary]);
     }
 
     /// A session that is its own introspector, as the drivers are built.
@@ -132,7 +241,12 @@ mod tests {
             sink: &mut dyn RowSink,
         ) -> Result<ExecSummary, DbError> {
             sink.result_start(&[]);
-            sink.result_end(Some(0), Duration::ZERO);
+            sink.result_end(&ResultSummary {
+                affected: Some(0),
+                row_count: 0,
+                truncated: false,
+                elapsed_ms: 0,
+            });
             Ok(ExecSummary::default())
         }
         fn cancel_handle(&self) -> CancelHandle {

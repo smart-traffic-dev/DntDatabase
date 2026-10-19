@@ -254,7 +254,13 @@ timings: StageTiming[] | null; server_code: string | null; sqlstate: string | nu
  * (the server's outcome is unknown). The UI must show such an error to the user,
  * never treat it as a silent cancel.
  */
-outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null }
+outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null; 
+/**
+ * Query errors: the tab's transaction state after the failure (`idle` / `active` /
+ * `aborted`, see `TxState::as_str`), so the status bar updates at once. Filled by
+ * the query layer; `None` from `From<DbError>`.
+ */
+tx_state: string | null }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -280,7 +286,11 @@ export type ConflictPolicy = "skip" | "overwrite" | "copy"
 /**
  * Advanced options. Missing fields fall back to defaults so `options_json = '{}'` parses.
  */
-export type ConnOptions = { version: number; connect_timeout_s: number; ssh_timeout_s: number; charset: string | null; application_name: string | null }
+export type ConnOptions = { version: number; connect_timeout_s: number; ssh_timeout_s: number; charset: string | null; application_name: string | null; 
+/**
+ * Per-statement time limit of query tabs, in seconds; 0 = no limit.
+ */
+query_timeout_s: number }
 export type ConnState = { state: "disconnected" } | { state: "connecting"; stage: ConnectStage } | { state: "connected" } | { state: "reconnecting" } | { state: "failed" }
 export type ConnectStage = "resolve_secrets" | "open_tunnel" | "connect_db" | "detect_server" | "execute"
 export type ConnectionConfig = { id: string; group_id: string | null; name: string; 

@@ -1,5 +1,5 @@
 use dnt_core::config::{ResolvedConfig, SshAuth, SshConfig};
-use dnt_core::driver::{Driver, ExecOptions, RowSink};
+use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::error::{DbError, SshStage};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -88,7 +88,7 @@ impl RowSink for Rows {
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
         self.0.extend(batch);
     }
-    fn result_end(&mut self, _affected: Option<u64>, _elapsed: Duration) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 /// Connects `driver` to `t` through `tunnel` and checks `SELECT 1`.

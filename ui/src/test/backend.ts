@@ -55,6 +55,7 @@ export const appError = (kind: string, message: string, extra: Partial<AppError>
   host: null,
   port: null,
   field: null,
+  tx_state: null,
   ...extra,
 });
 
@@ -113,7 +114,7 @@ export function config(id: string, name: string, over: Partial<ConnectionConfig>
       secret_mode: 'saved',
       ssh: null,
       ssl: null,
-      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null },
+      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0 },
       ...over,
     },
     has_db_password: true,

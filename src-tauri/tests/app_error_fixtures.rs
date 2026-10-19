@@ -360,6 +360,17 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         DbError::Timeout {
             stage: ConnectStage::Execute,
             outcome_unknown: true,
+            was_in_tx: false,
+        }
+        .into(),
+    );
+    // Inside a transaction: nothing applied, but not a plain retry either.
+    out.insert(
+        "timeout_in_tx",
+        DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: false,
+            was_in_tx: true,
         }
         .into(),
     );
@@ -397,8 +408,19 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         "cancelled_outcome_unknown",
         DbError::Cancelled {
             outcome_unknown: true,
+            was_in_tx: false,
         }
         .into(),
+    );
+
+    // Query runs: the tab is busy, or the guard / plan stops the run.
+    out.insert("busy", DbError::Busy.into());
+    out.insert("transaction_open", DbError::TransactionOpen.into());
+    out.insert("plan_expired", DbError::PlanExpired.into());
+    out.insert("blocked", DbError::Blocked { count: 2 }.into());
+    out.insert(
+        "confirmation_required",
+        DbError::ConfirmationRequired { count: 3 }.into(),
     );
     out
 }

@@ -81,10 +81,14 @@ pub enum DbError {
     /// but its completion was never observed, so it may or may not have been applied
     /// (and committed). When false the statement is known not to have taken effect, or
     /// it could not change anything.
+    ///
+    /// `was_in_tx`: the statement ran inside a transaction (still open on MySQL, aborted
+    /// on PostgreSQL), so running it again is not a plain retry.
     #[error("timed out during {}{}", .stage.as_str(), outcome_note(.outcome_unknown))]
     Timeout {
         stage: ConnectStage,
         outcome_unknown: bool,
+        was_in_tx: bool,
     },
     #[error("authentication failed: {message}")]
     Auth { message: String },
@@ -113,8 +117,27 @@ pub enum DbError {
     /// statement was killed while it may already have applied part of its work (for
     /// example a `CALL` whose inner statements autocommit, or a non-transactional table
     /// outside a transaction).
+    /// `was_in_tx`: as on [`DbError::Timeout`].
     #[error("cancelled{}", outcome_note(.outcome_unknown))]
-    Cancelled { outcome_unknown: bool },
+    Cancelled {
+        outcome_unknown: bool,
+        was_in_tx: bool,
+    },
+    /// The query tab already has a run in progress.
+    #[error("the tab is already running a query")]
+    Busy,
+    /// The action needs the tab's open transaction to be committed or rolled back first.
+    #[error("a transaction is open")]
+    TransactionOpen,
+    /// The run plan the UI confirmed is gone (expired or replaced).
+    #[error("the run plan expired")]
+    PlanExpired,
+    /// The guard blocked `count` statements that change data on a read-only connection.
+    #[error("{count} statement(s) blocked on a read-only connection")]
+    Blocked { count: u32 },
+    /// The guard needs the user to confirm `count` statements on a Production connection.
+    #[error("{count} statement(s) need confirmation on Production")]
+    ConfirmationRequired { count: u32 },
     #[error("{feature} is not supported on server version {version}")]
     Unsupported { feature: String, version: String },
     #[error("internal error: {message}")]
@@ -147,6 +170,7 @@ impl DbError {
         DbError::Timeout {
             stage,
             outcome_unknown: false,
+            was_in_tx: false,
         }
     }
 
@@ -154,6 +178,7 @@ impl DbError {
     pub fn cancelled() -> DbError {
         DbError::Cancelled {
             outcome_unknown: false,
+            was_in_tx: false,
         }
     }
 
@@ -233,6 +258,10 @@ pub struct AppError {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub field: Option<String>,
+    /// Query errors: the tab's transaction state after the failure (`idle` / `active` /
+    /// `aborted`, see `TxState::as_str`), so the status bar updates at once. Filled by
+    /// the query layer; `None` from `From<DbError>`.
+    pub tx_state: Option<String>,
 }
 
 impl AppError {
@@ -254,6 +283,7 @@ impl AppError {
             host: None,
             port: None,
             field: None,
+            tx_state: None,
         }
     }
 }
@@ -328,13 +358,15 @@ impl From<DbError> for AppError {
                 retryable: true,
                 ..AppError::base("connect", "Could not connect to the database server.")
             },
-            // Re-running a statement that may have been applied could apply it twice.
+            // Re-running a statement that may have been applied could apply it twice;
+            // inside a transaction (aborted on PG) it is not a plain retry either.
             DbError::Timeout {
                 stage,
                 outcome_unknown,
+                was_in_tx,
             } => AppError {
                 stage: Some(stage.as_str().into()),
-                retryable: !outcome_unknown,
+                retryable: !outcome_unknown && !was_in_tx,
                 outcome_unknown,
                 ..AppError::base(
                     "timeout",
@@ -380,7 +412,11 @@ impl From<DbError> for AppError {
                     },
                 )
             },
-            DbError::Cancelled { outcome_unknown } => AppError {
+            DbError::Cancelled {
+                outcome_unknown,
+                was_in_tx,
+            } => AppError {
+                retryable: !outcome_unknown && !was_in_tx,
                 outcome_unknown,
                 ..AppError::base(
                     "cancelled",
@@ -406,6 +442,22 @@ impl From<DbError> for AppError {
                 retryable: true,
                 ..AppError::base("not_open", "This connection is not open.")
             },
+            DbError::Busy => AppError::base("busy", "This tab is already running a query."),
+            DbError::TransactionOpen => AppError::base(
+                "transaction_open",
+                "Commit or roll back the open transaction first.",
+            ),
+            DbError::PlanExpired => {
+                AppError::base("plan_expired", "The run plan expired; run it again.")
+            }
+            DbError::Blocked { .. } => AppError::base(
+                "blocked",
+                "Statements that change data are blocked on this read-only connection.",
+            ),
+            DbError::ConfirmationRequired { .. } => AppError::base(
+                "confirmation_required",
+                "Running these statements on Production needs confirmation.",
+            ),
         };
         a.hint = hint;
         a
@@ -722,6 +774,7 @@ mod tests {
         let a: AppError = DbError::Timeout {
             stage: ConnectStage::Execute,
             outcome_unknown: true,
+            was_in_tx: false,
         }
         .into();
         assert_eq!(a.kind, "timeout");
@@ -735,6 +788,7 @@ mod tests {
         let known: AppError = DbError::Timeout {
             stage: ConnectStage::Execute,
             outcome_unknown: false,
+            was_in_tx: false,
         }
         .into();
         assert_eq!(known.message, "The operation timed out.");
@@ -742,6 +796,7 @@ mod tests {
         assert!(DbError::Timeout {
             stage: ConnectStage::Execute,
             outcome_unknown: true,
+            was_in_tx: false,
         }
         .to_string()
         .contains("may have been applied"));
@@ -802,6 +857,7 @@ mod tests {
                 DbError::Timeout {
                     stage: ConnectStage::Execute,
                     outcome_unknown: unknown,
+                    was_in_tx: false,
                 },
                 DbError::ConnectionLost {
                     was_in_tx: false,
@@ -810,6 +866,7 @@ mod tests {
                 },
                 DbError::Cancelled {
                     outcome_unknown: unknown,
+                    was_in_tx: false,
                 },
             ];
             for e in errors {
@@ -825,6 +882,7 @@ mod tests {
     fn cancelled_with_unknown_outcome_says_it_may_have_been_applied() {
         let a: AppError = DbError::Cancelled {
             outcome_unknown: true,
+            was_in_tx: false,
         }
         .into();
         assert_eq!(a.kind, "cancelled");
@@ -838,10 +896,112 @@ mod tests {
     }
 
     #[test]
+    fn timeout_in_tx_is_not_retryable() {
+        let a: AppError = DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: false,
+            was_in_tx: true,
+        }
+        .into();
+        assert!(!a.retryable);
+        assert!(!a.outcome_unknown);
+        assert_eq!(a.tx_state, None);
+        let outside: AppError = DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: false,
+            was_in_tx: false,
+        }
+        .into();
+        assert!(outside.retryable);
+    }
+
+    #[test]
+    fn cancelled_in_tx_is_not_retryable() {
+        let a: AppError = DbError::Cancelled {
+            outcome_unknown: false,
+            was_in_tx: true,
+        }
+        .into();
+        assert!(!a.retryable);
+        assert_eq!(a.tx_state, None);
+        let b: AppError = DbError::Cancelled {
+            outcome_unknown: false,
+            was_in_tx: false,
+        }
+        .into();
+        assert!(b.retryable);
+        let c: AppError = DbError::Cancelled {
+            outcome_unknown: true,
+            was_in_tx: false,
+        }
+        .into();
+        assert!(!c.retryable);
+    }
+
+    #[test]
+    fn helpers_are_outside_a_transaction() {
+        assert!(matches!(
+            DbError::timeout(ConnectStage::ConnectDb),
+            DbError::Timeout {
+                stage: ConnectStage::ConnectDb,
+                outcome_unknown: false,
+                was_in_tx: false,
+            }
+        ));
+        assert!(matches!(
+            DbError::cancelled(),
+            DbError::Cancelled {
+                outcome_unknown: false,
+                was_in_tx: false,
+            }
+        ));
+    }
+
+    #[test]
+    fn query_layer_errors_have_their_own_kind_and_message() {
+        let cases = [
+            (
+                DbError::Busy,
+                "busy",
+                "This tab is already running a query.",
+            ),
+            (
+                DbError::TransactionOpen,
+                "transaction_open",
+                "Commit or roll back the open transaction first.",
+            ),
+            (
+                DbError::PlanExpired,
+                "plan_expired",
+                "The run plan expired; run it again.",
+            ),
+            (
+                DbError::Blocked { count: 2 },
+                "blocked",
+                "Statements that change data are blocked on this read-only connection.",
+            ),
+            (
+                DbError::ConfirmationRequired { count: 3 },
+                "confirmation_required",
+                "Running these statements on Production needs confirmation.",
+            ),
+        ];
+        for (err, kind, message) in cases {
+            let a: AppError = err.into();
+            assert_eq!(a.kind, kind);
+            assert_eq!(a.message, message);
+            assert!(!a.retryable, "{kind}");
+            assert!(!a.outcome_unknown, "{kind}");
+            assert_eq!(a.tx_state, None, "{kind}");
+        }
+    }
+
+    #[test]
     fn retryable_and_stage() {
         let t: AppError = DbError::Timeout {
             stage: ConnectStage::ConnectDb,
             outcome_unknown: false,
+            was_in_tx: false,
         }
         .into();
         assert!(t.retryable);

@@ -20,7 +20,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "auth_pg": {
     "kind": "auth",
@@ -43,11 +44,12 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
-  "cancelled": {
-    "kind": "cancelled",
-    "message": "The operation was cancelled.",
+  "blocked": {
+    "kind": "blocked",
+    "message": "Statements that change data are blocked on this read-only connection.",
     "detail": null,
     "stage": null,
     "timings": null,
@@ -61,7 +63,46 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
+  },
+  "busy": {
+    "kind": "busy",
+    "message": "This tab is already running a query.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
+  },
+  "cancelled": {
+    "kind": "cancelled",
+    "message": "The operation was cancelled.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": true,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
   },
   "cancelled_outcome_unknown": {
     "kind": "cancelled",
@@ -79,7 +120,27 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
+  },
+  "confirmation_required": {
+    "kind": "confirmation_required",
+    "message": "Running these statements on Production needs confirmation.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
   },
   "connect_refused": {
     "kind": "connect",
@@ -102,7 +163,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "connection_lost": {
     "kind": "connection_lost",
@@ -120,7 +182,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "connection_lost_in_transaction": {
     "kind": "connection_lost",
@@ -138,7 +201,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "connection_lost_outcome_unknown": {
     "kind": "connection_lost",
@@ -156,7 +220,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "field_host": {
     "kind": "config",
@@ -174,7 +239,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "host"
+    "field": "host",
+    "tx_state": null
   },
   "field_name": {
     "kind": "config",
@@ -192,7 +258,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "name"
+    "field": "name",
+    "tx_state": null
   },
   "field_port": {
     "kind": "config",
@@ -210,7 +277,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "port"
+    "field": "port",
+    "tx_state": null
   },
   "field_ssh_key_path": {
     "kind": "config",
@@ -228,7 +296,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "ssh.key_path"
+    "field": "ssh.key_path",
+    "tx_state": null
   },
   "field_ssl_ca_path": {
     "kind": "config",
@@ -246,7 +315,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "ssl.ca_path"
+    "field": "ssl.ca_path",
+    "tx_state": null
   },
   "host_key_trust_invalid": {
     "kind": "config",
@@ -264,7 +334,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "known_hosts"
+    "field": "known_hosts",
+    "tx_state": null
   },
   "import_unknown_format": {
     "kind": "config",
@@ -282,7 +353,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "path"
+    "field": "path",
+    "tx_state": null
   },
   "import_unreadable": {
     "kind": "config",
@@ -300,7 +372,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "path"
+    "field": "path",
+    "tx_state": null
   },
   "internal": {
     "kind": "internal",
@@ -318,7 +391,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "key_passphrase_required": {
     "kind": "password_required",
@@ -341,7 +415,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "not_open": {
     "kind": "not_open",
@@ -359,7 +434,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "passphrase_incorrect": {
     "kind": "config",
@@ -377,7 +453,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "passphrase"
+    "field": "passphrase",
+    "tx_state": null
   },
   "passphrase_too_short": {
     "kind": "config",
@@ -395,7 +472,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": "passphrase"
+    "field": "passphrase",
+    "tx_state": null
   },
   "password_required": {
     "kind": "password_required",
@@ -413,7 +491,27 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
+  },
+  "plan_expired": {
+    "kind": "plan_expired",
+    "message": "The run plan expired; run it again.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
   },
   "server_db_missing": {
     "kind": "server",
@@ -436,7 +534,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "ssh_auth": {
     "kind": "ssh",
@@ -459,7 +558,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "ssh_channel": {
     "kind": "ssh",
@@ -486,7 +586,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "ssh_connect": {
     "kind": "ssh",
@@ -509,7 +610,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "ssh_host_key_mismatch": {
     "kind": "ssh",
@@ -532,7 +634,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "ssh_host_key_unknown": {
     "kind": "ssh_host_key_unknown",
@@ -555,7 +658,8 @@
     "key_openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
     "host": "bastion",
     "port": 22,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "timeout_connect": {
     "kind": "timeout",
@@ -578,7 +682,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "timeout_execute": {
     "kind": "timeout",
@@ -596,7 +701,8 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
   },
   "timeout_execute_outcome_unknown": {
     "kind": "timeout",
@@ -614,7 +720,27 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
+  },
+  "timeout_in_tx": {
+    "kind": "timeout",
+    "message": "The operation timed out.",
+    "detail": null,
+    "stage": "execute",
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
   },
   "tls": {
     "kind": "tls",
@@ -637,6 +763,26 @@
     "key_openssh": null,
     "host": null,
     "port": null,
-    "field": null
+    "field": null,
+    "tx_state": null
+  },
+  "transaction_open": {
+    "kind": "transaction_open",
+    "message": "Commit or roll back the open transaction first.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
   }
 }

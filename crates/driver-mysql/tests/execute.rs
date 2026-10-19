@@ -1,4 +1,4 @@
-use dnt_core::driver::{ExecOptions, ExecSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ExecSummary, ResultSummary, RowSink, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
@@ -31,11 +31,11 @@ impl RowSink for Collect {
         r.batches.push(batch.len());
         r.rows.extend(batch);
     }
-    fn result_end(&mut self, affected: Option<u64>, _elapsed: Duration) {
+    fn result_end(&mut self, summary: &ResultSummary) {
         self.results
             .last_mut()
             .expect("result_end before start")
-            .affected = affected;
+            .affected = summary.affected;
     }
 }
 
@@ -276,7 +276,8 @@ async fn cancel_long_query() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: false,
                 })
             ),
             "{t:?}: {:?}",
@@ -342,7 +343,8 @@ async fn completed_write_during_cancel_keeps_its_result() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: false,
                 })
             ),
             "{t:?}: {:?}",
@@ -387,7 +389,8 @@ async fn cancel_twice_keeps_session_usable() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: true,
                 })
             ),
             "{t:?}: {:?}",
@@ -435,9 +438,11 @@ async fn timeout_racing_cancel_keeps_session_usable() {
             matches!(
                 res,
                 Err(DbError::Cancelled {
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: true,
                 } | DbError::Timeout {
                     outcome_unknown: false,
+                    was_in_tx: true,
                     ..
                 })
             ),
@@ -489,6 +494,7 @@ async fn write_finishing_in_grace_reports_success() {
             Err(DbError::Timeout {
                 stage: ConnectStage::Execute,
                 outcome_unknown: true,
+                was_in_tx: false,
             }) => assert_eq!(rows, 0, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
         }
@@ -508,6 +514,7 @@ async fn write_finishing_in_grace_reports_success() {
             Ok(_) => assert_eq!(rows, 1, "{t:?}"),
             Err(DbError::Cancelled {
                 outcome_unknown: true,
+                was_in_tx: false,
             }) => assert_eq!(rows, 0, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
         }
@@ -526,6 +533,7 @@ async fn write_finishing_in_grace_reports_success() {
             Ok(_) => assert!(mysql, "{t:?}"),
             Err(DbError::Timeout {
                 outcome_unknown: false,
+                was_in_tx: true,
                 ..
             }) => assert!(!mysql, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
@@ -690,7 +698,8 @@ async fn timeout_option() {
                 res,
                 Err(DbError::Timeout {
                     stage: ConnectStage::Execute,
-                    outcome_unknown: false
+                    outcome_unknown: false,
+                    was_in_tx: false,
                 })
             ),
             "{t:?}: {:?}",
