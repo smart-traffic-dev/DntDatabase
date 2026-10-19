@@ -1,0 +1,116 @@
+---
+source: crates/driver-mysql/tests/execute.rs
+expression: rows
+---
+- - t: Int
+    v: 1
+  - t: Int
+    v: -128
+  - t: UInt
+    v: 255
+  - t: Int
+    v: -32768
+  - t: UInt
+    v: 65535
+  - t: Int
+    v: -8388608
+  - t: UInt
+    v: 16777215
+  - t: Int
+    v: -2147483648
+  - t: UInt
+    v: 4294967295
+  - t: Int
+    v: "9223372036854775807"
+  - t: UInt
+    v: "18446744073709551615"
+  - t: Decimal
+    v: "123456789012345678901234567890.1234567890"
+  - t: Float
+    v: 340282000000000000000000000000000000000
+  - t: Float
+    v: 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  - t: Bytes
+    v:
+      len: 1
+      preview:
+        - 170
+  - t: Date
+    v: 9999-12-31
+  - t: DateTime
+    v: "9999-12-31 23:59:59.999999"
+  - t: DateTime
+    v: "2038-01-19 03:14:07"
+  - t: Time
+    v: "838:59:59"
+  - t: Int
+    v: 2155
+  - t: Text
+    v: Nguyễn
+  - t: Text
+    v: Nguyễn Văn A
+  - t: Text
+    v: Nguyễn Văn A — văn bản dài
+  - t: Bytes
+    v:
+      len: 8
+      preview:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+        - 7
+        - 8
+  - t: Bytes
+    v:
+      len: 3
+      preview:
+        - 0
+        - 255
+        - 16
+  - t: Bytes
+    v:
+      len: 4
+      preview:
+        - 222
+        - 173
+        - 190
+        - 239
+  - t: Text
+    v: large
+  - t: Text
+    v: "a,c"
+  - t: Text
+    v: "{\"name\": \"Nguyễn Văn A\", \"tags\": [1, 2, 3]}"
+- - t: Int
+    v: 2
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
+  - t: "Null"
