@@ -280,7 +280,7 @@ fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
 
 /// Upper-cased leading keywords of `sql` with comments removed (at most `n`).
 fn leading_words(sql: &str, n: usize) -> Vec<String> {
-    strip_comments(sql, Dialect::MySql)
+    strip_comments(sql, Dialect::MYSQL)
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .filter(|w| !w.is_empty())
         .take(n)
@@ -338,7 +338,7 @@ fn changes_session_state(sql: &str) -> bool {
         .as_slice()
     {
         ["SET", ..] => {
-            let stripped = strip_comments(sql, Dialect::MySql);
+            let stripped = strip_comments(sql, Dialect::MYSQL);
             let text = stripped.trim_start();
             let Some(rest) = text
                 .get(..3)
@@ -517,7 +517,7 @@ fn failure_kind(
 /// The database a successful statement switched to, if it is a `USE` (comments around
 /// it allowed). A `USE` inside an executable comment (`/*! USE db */`) is not tracked.
 fn use_target(sql: &str) -> Option<String> {
-    parse_use(&strip_comments(sql, Dialect::MySql))
+    parse_use(&strip_comments(sql, Dialect::MYSQL))
 }
 
 /// The database named by a `USE db` statement (backticks removed), if `sql` is one.
@@ -557,11 +557,11 @@ impl Session for MySqlSession {
         let run = self.cancel.begin();
         let mut summary = ExecSummary::default();
         let mut reconnected = false;
-        for stmt in split(sql, Dialect::MySql) {
+        for stmt in split(sql, Dialect::MYSQL) {
             if run.cancelled() {
                 return Err(DbError::cancelled());
             }
-            let kind = classify(&stmt.text, Dialect::MySql);
+            let kind = classify(&stmt.text, Dialect::MYSQL);
             // An earlier call abandoned the connection and could not replace it (and
             // reported that). Nothing was sent yet, so opening one now is safe for any
             // statement.

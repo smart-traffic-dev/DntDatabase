@@ -1,4 +1,4 @@
-use super::split::{skip_at, Dialect, Skipped};
+use super::lexer::{is_kw, readings, tokenize, word_at, Dialect, TokKind, Token};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatementKind {
@@ -37,17 +37,10 @@ impl Classifier {
         // Only MySQL lexing yields ExecComment; in PG `/*!` is a plain comment.
         // Whether the server runs a body depends on its version, so classify
         // both readings and keep the stricter (the inlined one on a tie).
-        if toks.iter().any(|t| t.tok == Tok::ExecComment) {
-            let (mut inlined, mut ignored) = (String::new(), String::new());
-            let mut from = 0;
-            for t in toks.iter().filter(|t| t.tok == Tok::ExecComment) {
-                let before = &stmt[from..t.start];
-                inlined.extend([before, " ", exec_comment_body(&stmt[t.start..t.end]), " "]);
-                ignored.extend([before, " "]);
-                from = t.end;
-            }
-            inlined.push_str(&stmt[from..]);
-            ignored.push_str(&stmt[from..]);
+        if toks.iter().any(|t| t.kind == TokKind::ExecComment) {
+            let [inlined, ignored]: [String; 2] = readings(stmt, self.dialect)
+                .try_into()
+                .expect("an executable comment yields two readings");
             let (run, skip) = (self.classify(&inlined), self.classify(&ignored));
             return if strictness(skip) > strictness(run) {
                 skip
@@ -55,7 +48,7 @@ impl Classifier {
                 run
             };
         }
-        let start = toks.iter().take_while(|t| t.tok == Tok::Open).count();
+        let start = toks.iter().take_while(|t| t.kind == TokKind::Open).count();
         let toks = &toks[start..];
         let Some(first) = word_at(toks, 0) else {
             return StatementKind::Other;
@@ -82,8 +75,8 @@ impl Classifier {
             // PG `END [WORK|TRANSACTION] [AND [NO] CHAIN]` commits.
             "END"
                 if toks.get(1).is_none_or(|t| {
-                    t.tok == Tok::Punct(b';')
-                        || matches!(t.tok, Tok::Word(w) if ["WORK", "TRANSACTION", "AND"]
+                    t.kind == TokKind::Punct(b';')
+                        || matches!(t.kind, TokKind::Word(w) if ["WORK", "TRANSACTION", "AND"]
                     .iter()
                     .any(|k| w.eq_ignore_ascii_case(k)))
                 }) =>
@@ -131,11 +124,11 @@ impl Classifier {
             }
         };
         for (idx, t) in toks.iter().enumerate() {
-            match t.tok {
-                Tok::Open if depth == 0 && cte_done => {
+            match t.kind {
+                TokKind::Open if depth == 0 && cte_done => {
                     return combine(self.classify(&src[t.start..]), cte_writes);
                 }
-                Tok::Open => {
+                TokKind::Open => {
                     if depth == 0 {
                         body_start = t.end;
                         in_body = idx > 0
@@ -144,7 +137,7 @@ impl Classifier {
                     }
                     depth += 1;
                 }
-                Tok::Close if depth > 0 => {
+                TokKind::Close if depth > 0 => {
                     depth -= 1;
                     if depth == 0 && in_body {
                         cte_done = true;
@@ -153,19 +146,19 @@ impl Classifier {
                         }
                     }
                 }
-                Tok::Punct(b',') if depth == 0 => {
+                TokKind::Punct(b',') if depth == 0 => {
                     cte_done = false;
                     expect_name = true;
                 }
                 // The CTE name slot may hold a word such as `values`; it is never
                 // the main statement.
-                Tok::Word(w) if depth == 0 && expect_name => {
+                TokKind::Word(w) if depth == 0 && expect_name => {
                     if !(idx == 0 && w.eq_ignore_ascii_case("RECURSIVE")) {
                         expect_name = false;
                     }
                 }
-                Tok::Quoted if depth == 0 => expect_name = false,
-                Tok::Word(w) if depth == 0 => {
+                TokKind::Quoted if depth == 0 => expect_name = false,
+                TokKind::Word(w) if depth == 0 => {
                     let main = match w.to_ascii_uppercase().as_str() {
                         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => {
                             StatementKind::Write
@@ -193,13 +186,13 @@ impl Classifier {
 fn select_kind(toks: &[Token]) -> StatementKind {
     let mut depth = 0usize;
     for (i, t) in toks.iter().enumerate() {
-        match t.tok {
-            Tok::Open => depth += 1,
-            Tok::Close => depth = depth.saturating_sub(1),
-            Tok::Word(w) if depth == 0 && w.eq_ignore_ascii_case("INTO") => {
-                return match toks.get(i + 1).map(|t| t.tok) {
+        match t.kind {
+            TokKind::Open => depth += 1,
+            TokKind::Close => depth = depth.saturating_sub(1),
+            TokKind::Word(w) if depth == 0 && w.eq_ignore_ascii_case("INTO") => {
+                return match toks.get(i + 1).map(|t| t.kind) {
                     None => StatementKind::Read,
-                    Some(Tok::Word(v)) if v.starts_with('@') => StatementKind::Read,
+                    Some(TokKind::Word(v)) if v.starts_with('@') => StatementKind::Read,
                     Some(_) => StatementKind::Ddl,
                 };
             }
@@ -221,19 +214,19 @@ impl Classifier {
                 i += 1;
             }
             if is_kw(word_at(toks, i), "FORMAT")
-                && toks.get(i + 1).map(|t| t.tok) == Some(Tok::Punct(b'='))
+                && toks.get(i + 1).map(|t| t.kind) == Some(TokKind::Punct(b'='))
             {
                 i += 3;
             }
             Some(i)
-        } else if toks.first().map(|t| t.tok) == Some(Tok::Open) {
+        } else if toks.first().map(|t| t.kind) == Some(TokKind::Open) {
             // PG `EXPLAIN (option [value], …) …`
             let close = toks
                 .iter()
-                .position(|t| t.tok == Tok::Close)
+                .position(|t| t.kind == TokKind::Close)
                 .unwrap_or(toks.len());
             let analyze = toks[1..close]
-                .split(|t| t.tok == Tok::Punct(b','))
+                .split(|t| t.kind == TokKind::Punct(b','))
                 .any(|opt| {
                     is_analyze(word_at(opt, 0))
                         && !["FALSE", "OFF", "0"]
@@ -261,24 +254,15 @@ fn strictness(k: StatementKind) -> u8 {
     }
 }
 
-/// Body of a `/*!NNNNN … */` / `/*M!NNNNNN … */` executable comment.
-fn exec_comment_body(c: &str) -> &str {
-    let body = c.strip_prefix("/*").unwrap_or(c);
-    let body = body.strip_prefix('M').unwrap_or(body);
-    let body = body.strip_prefix('!').unwrap_or(body);
-    let body = body.trim_start_matches(|ch: char| ch.is_ascii_digit());
-    body.strip_suffix("*/").unwrap_or(body)
-}
-
 /// `SET` assignments; the last non-global `autocommit` assignment wins.
 /// Trailing `;` tokens are ignored.
 fn set_autocommit(src: &str, toks: &[Token]) -> Option<TxControl> {
     let end = toks
         .iter()
-        .rposition(|t| t.tok != Tok::Punct(b';'))
+        .rposition(|t| t.kind != TokKind::Punct(b';'))
         .map_or(0, |p| p + 1);
     toks[..end]
-        .rsplit(|t| t.tok == Tok::Punct(b','))
+        .rsplit(|t| t.kind == TokKind::Punct(b','))
         .find_map(|a| autocommit_assignment(src, a))
 }
 
@@ -293,17 +277,17 @@ fn autocommit_assignment(src: &str, a: &[Token]) -> Option<TxControl> {
     if is_kw(Some(target), "autocommit") || is_kw(Some(target), "@@autocommit") {
         i += 1;
     } else if (is_kw(Some(target), "@@session") || is_kw(Some(target), "@@local"))
-        && a.get(i + 1).map(|t| t.tok) == Some(Tok::Punct(b'.'))
+        && a.get(i + 1).map(|t| t.kind) == Some(TokKind::Punct(b'.'))
         && is_kw(word_at(a, i + 2), "autocommit")
     {
         i += 3;
     } else {
         return None;
     }
-    if a.get(i).map(|t| t.tok) == Some(Tok::Punct(b':')) {
+    if a.get(i).map(|t| t.kind) == Some(TokKind::Punct(b':')) {
         i += 1;
     }
-    if a.get(i).map(|t| t.tok) == Some(Tok::Punct(b'=')) || is_kw(word_at(a, i), "TO") {
+    if a.get(i).map(|t| t.kind) == Some(TokKind::Punct(b'=')) || is_kw(word_at(a, i), "TO") {
         i += 1;
     } else {
         return None;
@@ -311,9 +295,9 @@ fn autocommit_assignment(src: &str, a: &[Token]) -> Option<TxControl> {
     if i + 1 != a.len() {
         return None;
     }
-    let value = match a[i].tok {
-        Tok::Word(w) => w,
-        Tok::Quoted => {
+    let value = match a[i].kind {
+        TokKind::Word(w) => w,
+        TokKind::Quoted => {
             let q = &src[a[i].start..a[i].end];
             let terminated = q.len() >= 2 && q.ends_with(&q[..1]);
             terminated.then(|| &q[1..q.len() - 1])?
@@ -327,74 +311,6 @@ fn autocommit_assignment(src: &str, a: &[Token]) -> Option<TxControl> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tok<'a> {
-    Word(&'a str),
-    Open,
-    Close,
-    Quoted,
-    ExecComment,
-    Punct(u8),
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Token<'a> {
-    tok: Tok<'a>,
-    start: usize,
-    end: usize,
-}
-
-/// Significant tokens of `s` (whitespace and comments dropped), built on the
-/// splitter's lexer so strings and comments never affect paren depth.
-fn tokenize(s: &str, dialect: Dialect) -> Vec<Token<'_>> {
-    let b = s.as_bytes();
-    let is_word = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'@') || c >= 0x80;
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        let start = i;
-        let tok = if let Some((kind, end)) = skip_at(b, i, dialect) {
-            i = end;
-            match kind {
-                Skipped::Comment => continue,
-                Skipped::ExecComment => Tok::ExecComment,
-                Skipped::Quoted => Tok::Quoted,
-            }
-        } else if b[i].is_ascii_whitespace() {
-            i += 1;
-            continue;
-        } else if is_word(b[i]) {
-            // A word also ends wherever `split` would start a literal, e.g. the
-            // E-string or dollar quote in PG `<@e'…'` / `<@$$…$$`.
-            i += 1;
-            while i < b.len() && is_word(b[i]) && skip_at(b, i, dialect).is_none() {
-                i += 1;
-            }
-            Tok::Word(&s[start..i])
-        } else {
-            i += 1;
-            match b[start] {
-                b'(' => Tok::Open,
-                b')' => Tok::Close,
-                c => Tok::Punct(c),
-            }
-        };
-        out.push(Token { tok, start, end: i });
-    }
-    out
-}
-
-fn word_at<'a>(toks: &[Token<'a>], i: usize) -> Option<&'a str> {
-    match toks.get(i)?.tok {
-        Tok::Word(w) => Some(w),
-        _ => None,
-    }
-}
-
-fn is_kw(word: Option<&str>, kw: &str) -> bool {
-    word.is_some_and(|w| w.eq_ignore_ascii_case(kw))
-}
-
 #[cfg(test)]
 mod tests {
     use super::StatementKind::*;
@@ -403,12 +319,12 @@ mod tests {
 
     /// The pre-dialect assertions below all use MySQL lexing.
     fn classify(s: &str) -> StatementKind {
-        super::classify(s, Dialect::MySql)
+        super::classify(s, Dialect::MYSQL)
     }
 
     #[test]
     fn cte_named_like_a_main_keyword() {
-        for d in [Dialect::MySql, Dialect::Postgres] {
+        for d in [Dialect::MYSQL, Dialect::Postgres] {
             let c = |s: &str| super::classify(s, d);
             assert_eq!(
                 c("WITH values AS (DELETE FROM t RETURNING 1) SELECT 1"),
@@ -443,7 +359,8 @@ mod tests {
 
     #[test]
     fn production_gate_keywords() {
-        use Dialect::{MySql, Postgres};
+        use Dialect::Postgres;
+        const MYSQL: Dialect = Dialect::MYSQL;
         let table: &[(&str, Dialect, StatementKind)] = &[
             ("REFRESH MATERIALIZED VIEW mv", Postgres, Ddl),
             ("REINDEX TABLE t", Postgres, Ddl),
@@ -463,26 +380,49 @@ mod tests {
                 Ddl,
             ),
             ("DISCARD ALL", Postgres, Other),
-            ("OPTIMIZE TABLE t", MySql, Ddl),
-            ("REPAIR TABLE t", MySql, Ddl),
-            ("INSTALL PLUGIN p SONAME 'p.so'", MySql, Ddl),
-            ("UNINSTALL PLUGIN p", MySql, Ddl),
-            ("SET PASSWORD FOR u = 'x'", MySql, Ddl),
-            ("set password = 'x'", MySql, Ddl),
-            ("ALTER USER u IDENTIFIED BY 'x'", MySql, Ddl),
-            ("CREATE USER u", MySql, Ddl),
-            ("DROP USER u", MySql, Ddl),
-            ("RENAME USER a TO b", MySql, Ddl),
-            ("GRANT ALL ON *.* TO u", MySql, Ddl),
-            ("REVOKE ALL ON *.* FROM u", MySql, Ddl),
-            ("EXECUTE stmt USING @a", MySql, Write),
+            ("OPTIMIZE TABLE t", MYSQL, Ddl),
+            ("REPAIR TABLE t", MYSQL, Ddl),
+            ("INSTALL PLUGIN p SONAME 'p.so'", MYSQL, Ddl),
+            ("UNINSTALL PLUGIN p", MYSQL, Ddl),
+            ("SET PASSWORD FOR u = 'x'", MYSQL, Ddl),
+            ("set password = 'x'", MYSQL, Ddl),
+            ("ALTER USER u IDENTIFIED BY 'x'", MYSQL, Ddl),
+            ("CREATE USER u", MYSQL, Ddl),
+            ("DROP USER u", MYSQL, Ddl),
+            ("RENAME USER a TO b", MYSQL, Ddl),
+            ("GRANT ALL ON *.* TO u", MYSQL, Ddl),
+            ("REVOKE ALL ON *.* FROM u", MYSQL, Ddl),
+            ("EXECUTE stmt USING @a", MYSQL, Write),
             ("EXECUTE p(1)", Postgres, Write),
-            ("CALL p()", MySql, Write),
+            ("CALL p()", MYSQL, Write),
             ("CALL p()", Postgres, Write),
         ];
         for &(s, d, want) in table {
             assert_eq!(super::classify(s, d), want, "{s} ({d:?})");
         }
+    }
+
+    #[test]
+    fn sql_mode_flags_change_classification() {
+        use crate::sql::MySqlMode;
+        let ansi = Dialect::MySql(MySqlMode {
+            ansi_quotes: true,
+            ..Default::default()
+        });
+        let nbe = Dialect::MySql(MySqlMode {
+            no_backslash_escapes: true,
+            ..Default::default()
+        });
+        let s = r#"WITH a AS (SELECT "x\") DELETE FROM t"#;
+        assert_eq!(super::classify(s, ansi), Write);
+        assert_eq!(super::classify(s, nbe), Write);
+        assert_eq!(classify(s), Other);
+        // Two readings still apply under the flags.
+        assert_eq!(super::classify(r"/*!50001 DROP VIEW v */", nbe), Ddl);
+        assert_eq!(
+            super::classify(r"/*!40101 SET x='C:\' */ DELETE FROM t", nbe),
+            Write
+        );
     }
 
     #[test]
@@ -768,7 +708,7 @@ mod pg_dialect {
         assert_eq!(pg("/* a /* b */ ) */ DELETE FROM t"), Write);
         // Same text under MySQL: `'C:\'` swallows the rest, so it is no write.
         assert_eq!(
-            classify("WITH a AS (SELECT 'C:\\') DELETE FROM t", Dialect::MySql),
+            classify("WITH a AS (SELECT 'C:\\') DELETE FROM t", Dialect::MYSQL),
             Other
         );
     }
