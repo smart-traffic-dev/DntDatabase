@@ -66,5 +66,5 @@ Minor findings from task reviews and the final review that were deferred (triage
 - Task 21: minor (deferred): Ctrl+C leaves temp dir/credential; snapshot-diff race could delete a credential the real app saved during the run; actions pinned to major tags; push+PR double runs
 - Task 21: minor (deferred): .gitignore 'tools/' unanchored (prefer /tools/)
 - Final: Ruling: real Navicat .ncx fixture parked — needs a human with Navicat — cost if wrong: §10 'import real .ncx' remains undemonstrated until user supplies a sanitized export.
-- Final: parked — same_target treats SSH-on→SSH-off as same target (stored DB password could go to a different machine answering at the same host string) — Ruling: surfaced to user as first follow-up; low likelihood, user-initiated Test only — cost if wrong: stored password sent to an unintended host on Test.
+- Final: parked — same_target treats SSH-on→SSH-off as same target (stored DB password could go to a different machine answering at the same host string) — Ruling: surfaced to user as first follow-up; low likelihood, user-initiated Test only — cost if wrong: stored password sent to an unintended host on Test. **Resolved in fix/pre-p2-hardening (16efd46).**
 - Final: parked — key-passphrase prompt doesn't also ask for missing DB password; list_columns failure aborts SchemaCache load — Ruling: UX-only, deferred.
