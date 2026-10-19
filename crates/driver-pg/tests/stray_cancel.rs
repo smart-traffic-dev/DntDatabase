@@ -2,7 +2,7 @@
 //! postmaster signals it after reading the request). These tests hold the request back
 //! in a local proxy, so the late signal is deterministic rather than a timing accident.
 
-use dnt_core::driver::{ExecOptions, ExecSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ExecSummary, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
@@ -29,7 +29,7 @@ impl RowSink for Collect {
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
         self.results.last_mut().unwrap().extend(batch);
     }
-    fn result_end(&mut self, _affected: Option<u64>, _elapsed: Duration) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 async fn run_with(
