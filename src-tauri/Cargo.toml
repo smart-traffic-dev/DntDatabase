@@ -1,0 +1,31 @@
+[package]
+name = "dntdatabase"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Library only for now; Task 16 adds the Tauri binary, build script and config.
+[lib]
+name = "dntdatabase"
+
+[dependencies]
+dirs.workspace = true
+dnt-core.workspace = true
+dnt-driver-mysql.workspace = true
+dnt-driver-pg.workspace = true
+dnt-store.workspace = true
+dnt-tunnel.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+dnt-core = { workspace = true, features = ["test-util"] }
+dnt-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

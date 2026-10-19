@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "src-tauri"]
 
 [workspace.package]
 edition = "2021"
@@ -13,8 +13,13 @@ async-trait = "0.1"
 base64 = "0.22"
 cbc = { version = "0.1", features = ["alloc", "block-padding"] }
 chacha20poly1305 = "0.10"
+dirs = "6"
 dnt-core = { path = "crates/core" }
+dnt-driver-mysql = { path = "crates/driver-mysql" }
+dnt-driver-pg = { path = "crates/driver-pg" }
 dnt-store = { path = "crates/store" }
+dnt-testkit = { path = "crates/testkit" }
+dnt-tunnel = { path = "crates/tunnel" }
 futures-util = { version = "0.3", default-features = false }
 hex = "0.4"
 keyring = { version = "3", features = ["windows-native"] }
@@ -32,6 +37,7 @@ tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["sync", "time"] }
 tokio-postgres = "0.7"
+tracing = "0.1"
 # rustls (ring provider) only, like mysql_async above.
 tokio-postgres-rustls = { version = "0.13", default-features = false }
 serde = { version = "1", features = ["derive"] }
