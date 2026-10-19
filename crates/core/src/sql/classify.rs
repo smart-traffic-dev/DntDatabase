@@ -35,8 +35,25 @@ impl Classifier {
     fn classify(self, stmt: &str) -> StatementKind {
         let toks = tokenize(stmt, self.dialect);
         // Only MySQL lexing yields ExecComment; in PG `/*!` is a plain comment.
-        if let Some(t) = toks.first().filter(|t| t.tok == Tok::ExecComment) {
-            return self.classify(exec_comment_body(&stmt[t.start..t.end]));
+        // Whether the server runs a body depends on its version, so classify
+        // both readings and keep the stricter (the inlined one on a tie).
+        if toks.iter().any(|t| t.tok == Tok::ExecComment) {
+            let (mut inlined, mut ignored) = (String::new(), String::new());
+            let mut from = 0;
+            for t in toks.iter().filter(|t| t.tok == Tok::ExecComment) {
+                let before = &stmt[from..t.start];
+                inlined.extend([before, " ", exec_comment_body(&stmt[t.start..t.end]), " "]);
+                ignored.extend([before, " "]);
+                from = t.end;
+            }
+            inlined.push_str(&stmt[from..]);
+            ignored.push_str(&stmt[from..]);
+            let (run, skip) = (self.classify(&inlined), self.classify(&ignored));
+            return if strictness(skip) > strictness(run) {
+                skip
+            } else {
+                run
+            };
         }
         let start = toks.iter().take_while(|t| t.tok == Tok::Open).count();
         let toks = &toks[start..];
@@ -48,10 +65,18 @@ impl Classifier {
             "SELECT" => select_kind(&toks[1..]),
             "EXPLAIN" => self.explain(stmt, &toks[1..]),
             "SHOW" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => StatementKind::Read,
+            // `EXECUTE` runs a prepared statement whose body is unknown here.
             "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "MERGE" | "CALL" | "DO" | "LOAD"
-            | "COPY" => StatementKind::Write,
+            | "COPY" | "EXECUTE" => StatementKind::Write,
             "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE"
             | "COMMENT" => StatementKind::Ddl,
+            // PG maintenance / ownership statements.
+            "REFRESH" | "REINDEX" | "VACUUM" | "CLUSTER" | "IMPORT" | "SECURITY" | "REASSIGN" => {
+                StatementKind::Ddl
+            }
+            // MySQL table maintenance and plugins.
+            "OPTIMIZE" | "REPAIR" | "INSTALL" | "UNINSTALL" => StatementKind::Ddl,
+            "SET" if is_kw(word_at(toks, 1), "PASSWORD") => StatementKind::Ddl,
             // MariaDB `BEGIN NOT ATOMIC … END` is a compound statement, not a transaction.
             "BEGIN" if !is_kw(word_at(toks, 1), "NOT") => tx(TxControl::Begin),
             // PG `END [WORK|TRANSACTION] [AND [NO] CHAIN]` commits.
@@ -96,6 +121,7 @@ impl Classifier {
         let mut body_start = 0;
         let mut in_body = false;
         let mut cte_done = false;
+        let mut expect_name = true;
         let mut cte_writes = false;
         let combine = |main: StatementKind, cte_writes: bool| {
             if cte_writes && main == StatementKind::Read {
@@ -127,7 +153,18 @@ impl Classifier {
                         }
                     }
                 }
-                Tok::Punct(b',') if depth == 0 => cte_done = false,
+                Tok::Punct(b',') if depth == 0 => {
+                    cte_done = false;
+                    expect_name = true;
+                }
+                // The CTE name slot may hold a word such as `values`; it is never
+                // the main statement.
+                Tok::Word(w) if depth == 0 && expect_name => {
+                    if !(idx == 0 && w.eq_ignore_ascii_case("RECURSIVE")) {
+                        expect_name = false;
+                    }
+                }
+                Tok::Quoted if depth == 0 => expect_name = false,
                 Tok::Word(w) if depth == 0 => {
                     let main = match w.to_ascii_uppercase().as_str() {
                         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => {
@@ -211,6 +248,16 @@ impl Classifier {
             Some(t) => self.classify(&src[t.start..]),
             None => StatementKind::Read,
         }
+    }
+}
+
+/// Ddl > Write > Transaction/Other > Read.
+fn strictness(k: StatementKind) -> u8 {
+    match k {
+        StatementKind::Read => 0,
+        StatementKind::Transaction(_) | StatementKind::Other => 1,
+        StatementKind::Write => 2,
+        StatementKind::Ddl => 3,
     }
 }
 
@@ -317,7 +364,10 @@ fn tokenize(s: &str, dialect: Dialect) -> Vec<Token<'_>> {
             i += 1;
             continue;
         } else if is_word(b[i]) {
-            while i < b.len() && is_word(b[i]) {
+            // A word also ends wherever `split` would start a literal, e.g. the
+            // E-string or dollar quote in PG `<@e'…'` / `<@$$…$$`.
+            i += 1;
+            while i < b.len() && is_word(b[i]) && skip_at(b, i, dialect).is_none() {
                 i += 1;
             }
             Tok::Word(&s[start..i])
@@ -354,6 +404,85 @@ mod tests {
     /// The pre-dialect assertions below all use MySQL lexing.
     fn classify(s: &str) -> StatementKind {
         super::classify(s, Dialect::MySql)
+    }
+
+    #[test]
+    fn cte_named_like_a_main_keyword() {
+        for d in [Dialect::MySql, Dialect::Postgres] {
+            let c = |s: &str| super::classify(s, d);
+            assert_eq!(
+                c("WITH values AS (DELETE FROM t RETURNING 1) SELECT 1"),
+                Write
+            );
+            assert_eq!(
+                c("WITH RECURSIVE table AS (DELETE FROM t RETURNING 1) SELECT 1"),
+                Write
+            );
+            assert_eq!(
+                c("WITH a AS (SELECT 1), select AS (UPDATE t SET x=1 RETURNING 1) TABLE a"),
+                Write
+            );
+            assert_eq!(c("WITH values(v) AS (SELECT 1) SELECT * FROM values"), Read);
+            assert_eq!(c("WITH x AS (SELECT 1) VALUES (1)"), Read);
+        }
+    }
+
+    #[test]
+    fn executable_comment_with_trailing_text() {
+        assert_eq!(classify("/*! */ DELETE FROM t"), Write);
+        assert_eq!(classify("/*!99999 SELECT 1 */ DELETE FROM t"), Write);
+        assert_eq!(classify("SELECT 1 /*!, (DROP TABLE t) */"), Read);
+        assert_eq!(classify("/*!50001 DROP VIEW v */ SELECT 1"), Ddl);
+        assert_eq!(classify("/*!50001 DROP VIEW v */"), Ddl);
+        assert_eq!(classify("/*!40014 SET FOREIGN_KEY_CHECKS=0 */"), Other);
+        assert_eq!(
+            classify("/*!40101 SET autocommit=0 */"),
+            Transaction(AutocommitOff)
+        );
+    }
+
+    #[test]
+    fn production_gate_keywords() {
+        use Dialect::{MySql, Postgres};
+        let table: &[(&str, Dialect, StatementKind)] = &[
+            ("REFRESH MATERIALIZED VIEW mv", Postgres, Ddl),
+            ("REINDEX TABLE t", Postgres, Ddl),
+            ("VACUUM FULL t", Postgres, Ddl),
+            ("vacuum", Postgres, Ddl),
+            ("CLUSTER t USING i", Postgres, Ddl),
+            (
+                "IMPORT FOREIGN SCHEMA s FROM SERVER srv INTO public",
+                Postgres,
+                Ddl,
+            ),
+            ("SECURITY LABEL ON TABLE t IS 'x'", Postgres, Ddl),
+            ("REASSIGN OWNED BY a TO b", Postgres, Ddl),
+            (
+                "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO u",
+                Postgres,
+                Ddl,
+            ),
+            ("DISCARD ALL", Postgres, Other),
+            ("OPTIMIZE TABLE t", MySql, Ddl),
+            ("REPAIR TABLE t", MySql, Ddl),
+            ("INSTALL PLUGIN p SONAME 'p.so'", MySql, Ddl),
+            ("UNINSTALL PLUGIN p", MySql, Ddl),
+            ("SET PASSWORD FOR u = 'x'", MySql, Ddl),
+            ("set password = 'x'", MySql, Ddl),
+            ("ALTER USER u IDENTIFIED BY 'x'", MySql, Ddl),
+            ("CREATE USER u", MySql, Ddl),
+            ("DROP USER u", MySql, Ddl),
+            ("RENAME USER a TO b", MySql, Ddl),
+            ("GRANT ALL ON *.* TO u", MySql, Ddl),
+            ("REVOKE ALL ON *.* FROM u", MySql, Ddl),
+            ("EXECUTE stmt USING @a", MySql, Write),
+            ("EXECUTE p(1)", Postgres, Write),
+            ("CALL p()", MySql, Write),
+            ("CALL p()", Postgres, Write),
+        ];
+        for &(s, d, want) in table {
+            assert_eq!(super::classify(s, d), want, "{s} ({d:?})");
+        }
     }
 
     #[test]
@@ -642,6 +771,34 @@ mod pg_dialect {
             classify("WITH a AS (SELECT 'C:\\') DELETE FROM t", Dialect::MySql),
             Other
         );
+    }
+
+    const AT_E_STRING: &str = "WITH a AS (SELECT ARRAY['x'] <@e'{\"y\\') SELECT 1 /*\"}'), d AS (DELETE FROM t RETURNING 1) SELECT 1 -- */";
+
+    #[test]
+    fn literal_after_at_operator_lexes_like_split() {
+        // `<@e'…'` is the operator `<@` then an E-string, as in `split`.
+        assert_eq!(pg(AT_E_STRING), Write);
+        assert_eq!(
+            pg("WITH a AS (SELECT ARRAY[1] <@$$ ) $$), d AS (DELETE FROM t RETURNING 1) SELECT 1"),
+            Write
+        );
+        assert_eq!(pg("SELECT @e'\\')' FROM t"), Read);
+    }
+
+    #[test]
+    fn split_and_classify_agree_after_at() {
+        let script = format!("{AT_E_STRING}\n;SELECT ARRAY['x'] <@e'\\';' ; DELETE FROM t");
+        let stmts: Vec<String> = crate::sql::split(&script, Dialect::Postgres)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(
+            stmts,
+            [AT_E_STRING, "SELECT ARRAY['x'] <@e'\\';'", "DELETE FROM t"]
+        );
+        let kinds: Vec<StatementKind> = stmts.iter().map(|s| pg(s)).collect();
+        assert_eq!(kinds, [Write, Read, Write]);
     }
 
     #[test]
