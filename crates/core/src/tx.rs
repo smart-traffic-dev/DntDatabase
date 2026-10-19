@@ -45,8 +45,34 @@ pub enum StmtResult<'a> {
 /// InnoDB deadlock: the server rolled the whole transaction back.
 const MYSQL_DEADLOCK: u16 = 1213;
 
+/// MySQL errors raised while parsing: the statement never ran, so a DDL statement that
+/// fails with one did not commit implicitly (`ER_PARSE_ERROR`, `ER_SYNTAX_ERROR`).
+const MYSQL_PARSE_ERRORS: [u16; 2] = [1064, 1149];
+
+/// Whether the MySQL session's `autocommit` is off after `kind` ended with `result`,
+/// given that it was `prev_off` before. Only a successful `SET autocommit = …`
+/// changes it; a lost connection keeps it (the driver re-applies it on the new
+/// connection). Always `false` on PostgreSQL, which has no such mode.
+pub fn next_autocommit_off(
+    engine: DbKind,
+    prev_off: bool,
+    kind: StatementKind,
+    result: StmtResult<'_>,
+) -> bool {
+    if engine == DbKind::Postgres {
+        return false;
+    }
+    match (kind, result) {
+        (StatementKind::Transaction(TxControl::AutocommitOff), StmtResult::Ok) => true,
+        (StatementKind::Transaction(TxControl::AutocommitOn), StmtResult::Ok) => false,
+        _ => prev_off,
+    }
+}
+
 /// The transaction state after `stmt` (of kind `kind`, classified for `engine`) ended
-/// with `result` on a session that was in state `prev`.
+/// with `result` on a session that was in state `prev`. `autocommit_off`: MySQL only,
+/// the session's `autocommit` was off before `stmt` (track it with
+/// [`next_autocommit_off`]); ignored on PostgreSQL.
 ///
 /// - `BEGIN` / `START TRANSACTION`, and MySQL `SET autocommit = 0`, open a transaction
 ///   when they succeed; MySQL `SET autocommit = 1` commits it.
@@ -57,10 +83,37 @@ const MYSQL_DEADLOCK: u16 = 1213;
 ///   aborts a PG block), unchanged on MySQL.
 /// - PG: `ROLLBACK TO [SAVEPOINT]` that succeeds in an aborted block makes it `Active`
 ///   again; any other failure inside a block (`57014` included) aborts it.
-/// - MySQL: DDL commits implicitly, even when it then fails; a deadlock (`1213`) rolls
-///   the transaction back; other failures keep the state.
+/// - MySQL: DDL and the other implicit-commit statements ([`mysql_implicit_commit`])
+///   commit, even when they then fail, unless they failed to parse; a deadlock
+///   (`1213`) rolls the transaction back; other failures keep the state.
+/// - MySQL with `autocommit` off: the server opens a transaction for any statement,
+///   so whatever would leave the session `Idle` leaves it `Active` (until
+///   `SET autocommit = 1`).
 /// - A lost connection always leaves the session `Idle`.
+///
+/// The dialect's MySQL `sql_mode` flags are ignored: they only change how quoted text
+/// is lexed, and every keyword read here (`AND CHAIN`, `ROLLBACK … TO`,
+/// `PREPARE TRANSACTION`, the implicit-commit statements) leads the statement, before
+/// any quoted text.
 pub fn next_tx_state(
+    engine: DbKind,
+    prev: TxState,
+    autocommit_off: bool,
+    kind: StatementKind,
+    stmt: &str,
+    result: StmtResult<'_>,
+) -> TxState {
+    let state = tx_state_after(engine, prev, kind, stmt, result);
+    let off_after = next_autocommit_off(engine, autocommit_off, kind, result);
+    if state == TxState::Idle && off_after && result != StmtResult::Lost {
+        TxState::Active
+    } else {
+        state
+    }
+}
+
+/// [`next_tx_state`] without the MySQL autocommit mode.
+fn tx_state_after(
     engine: DbKind,
     prev: TxState,
     kind: StatementKind,
@@ -68,6 +121,7 @@ pub fn next_tx_state(
     result: StmtResult<'_>,
 ) -> TxState {
     let dialect = Dialect::for_kind(engine);
+    let implicit_commit = engine == DbKind::MySql && mysql_implicit_commit(kind, stmt);
     let pg = engine == DbKind::Postgres;
     let ends_tx = matches!(
         kind,
@@ -86,7 +140,7 @@ pub fn next_tx_state(
             StatementKind::Transaction(TxControl::Begin) => TxState::Active,
             StatementKind::Transaction(TxControl::AutocommitOff) if !pg => TxState::Active,
             StatementKind::Transaction(TxControl::AutocommitOn) if !pg => TxState::Idle,
-            StatementKind::Ddl if !pg => TxState::Idle,
+            _ if implicit_commit => TxState::Idle,
             _ if pg && prev == TxState::Aborted && is_rollback_to(stmt, dialect) => TxState::Active,
             _ => prev,
         },
@@ -104,13 +158,47 @@ pub fn next_tx_state(
                     TxState::Idle => TxState::Idle,
                     TxState::Active | TxState::Aborted => TxState::Aborted,
                 }
-            } else if kind == StatementKind::Ddl || code == Some(MYSQL_DEADLOCK) {
+            } else if code == Some(MYSQL_DEADLOCK)
+                || (implicit_commit && !code.is_some_and(|c| MYSQL_PARSE_ERRORS.contains(&c)))
+            {
                 TxState::Idle
             } else {
                 prev
             }
         }
     }
+}
+
+/// MySQL statements that commit the open transaction before they run: DDL (per
+/// `classify`), and `LOCK TABLES`, `ANALYZE` / `CHECK` / `OPTIMIZE` / `REPAIR TABLE`,
+/// `FLUSH`, `RESET` (except `RESET QUERY CACHE` and `RESET PERSIST`), `CACHE INDEX` and
+/// `LOAD INDEX INTO CACHE`.
+///
+/// `UNLOCK TABLES` commits only while `LOCK TABLES` is in effect, which is not tracked
+/// here, so it keeps the state.
+fn mysql_implicit_commit(kind: StatementKind, stmt: &str) -> bool {
+    if kind == StatementKind::Ddl {
+        return true;
+    }
+    let words = leading_keywords(stmt, Dialect::MYSQL, 3);
+    let w: Vec<&str> = words.iter().map(String::as_str).collect();
+    matches!(
+        w.as_slice(),
+        ["LOCK", "TABLE" | "TABLES", ..]
+            | ["ANALYZE" | "CHECK" | "OPTIMIZE" | "REPAIR", "TABLE", ..]
+            | [
+                "ANALYZE" | "OPTIMIZE" | "REPAIR",
+                "NO_WRITE_TO_BINLOG" | "LOCAL",
+                "TABLE"
+            ]
+            | ["FLUSH", ..]
+            | ["CACHE", "INDEX", ..]
+            | ["LOAD", "INDEX", "INTO"]
+    ) || (w.first() == Some(&"RESET")
+        && !matches!(
+            w.as_slice(),
+            ["RESET", "QUERY", "CACHE"] | ["RESET", "PERSIST", ..]
+        ))
 }
 
 /// `ROLLBACK [WORK | TRANSACTION] TO …` (comments allowed before and between).
@@ -155,10 +243,158 @@ mod tests {
         }
     }
 
-    /// `next_tx_state` with the statement classified for `engine`.
+    /// `next_tx_state` with the statement classified for `engine`, autocommit on.
     fn next(engine: DbKind, prev: TxState, stmt: &str, result: StmtResult<'_>) -> TxState {
         let kind = classify(stmt, Dialect::for_kind(engine));
-        next_tx_state(engine, prev, kind, stmt, result)
+        next_tx_state(engine, prev, false, kind, stmt, result)
+    }
+
+    /// Runs `script` (each statement with its result) on a fresh session, tracking the
+    /// autocommit mode as a driver does; returns the state after each statement.
+    fn run_script(engine: DbKind, script: &[(&str, StmtResult<'_>)]) -> Vec<TxState> {
+        let (mut state, mut ac_off) = (Idle, false);
+        script
+            .iter()
+            .map(|&(stmt, result)| {
+                let kind = classify(stmt, Dialect::for_kind(engine));
+                state = next_tx_state(engine, state, ac_off, kind, stmt, result);
+                ac_off = next_autocommit_off(engine, ac_off, kind, result);
+                state
+            })
+            .collect()
+    }
+
+    #[test]
+    fn mysql_autocommit_off_survives_commit() {
+        let ok = StmtResult::Ok;
+        assert_eq!(
+            run_script(
+                MySql,
+                &[
+                    ("SET autocommit=0", ok),
+                    ("COMMIT", ok),
+                    ("INSERT INTO t VALUES (1)", ok)
+                ]
+            ),
+            [Active, Active, Active]
+        );
+        // MySQL opens a transaction on any statement while autocommit is off.
+        assert_eq!(
+            run_script(
+                MySql,
+                &[("SET autocommit=0", ok), ("ROLLBACK", ok), ("SELECT 1", ok)]
+            ),
+            [Active, Active, Active]
+        );
+        // Implicit commits and a deadlock do not turn autocommit back on.
+        assert_eq!(
+            run_script(
+                MySql,
+                &[
+                    ("SET autocommit=0", ok),
+                    ("CREATE TABLE t (a int)", ok),
+                    ("UPDATE t SET a = 1", mysql_failed(1213)),
+                    ("SELECT 1", ok),
+                ]
+            ),
+            [Active, Active, Active, Active]
+        );
+        // `SET autocommit = 1` commits and turns it back on.
+        assert_eq!(
+            run_script(
+                MySql,
+                &[
+                    ("SET autocommit=0", ok),
+                    ("SET autocommit=1", ok),
+                    ("SELECT 1", ok)
+                ]
+            ),
+            [Active, Idle, Idle]
+        );
+        // A failed SET leaves the mode as it was.
+        assert_eq!(
+            run_script(
+                MySql,
+                &[("SET autocommit=0", mysql_failed(1231)), ("SELECT 1", ok)]
+            ),
+            [Idle, Idle]
+        );
+        // Losing the connection ends the transaction (the driver re-applies the mode).
+        assert_eq!(
+            run_script(
+                MySql,
+                &[("SET autocommit=0", ok), ("SELECT 1", StmtResult::Lost)]
+            ),
+            [Active, Idle]
+        );
+        // PostgreSQL has no autocommit mode.
+        assert!(!next_autocommit_off(
+            Postgres,
+            false,
+            classify("SET autocommit = 0", Dialect::Postgres),
+            StmtResult::Ok
+        ));
+    }
+
+    #[test]
+    fn mysql_ddl_parse_error_does_not_commit() {
+        for code in [1064, 1149] {
+            let parse = StmtResult::Failed {
+                sqlstate: Some("42000"),
+                code: Some(code),
+            };
+            assert_eq!(
+                next(MySql, Active, "CREATE TABLE (", parse),
+                Active,
+                "{code}"
+            );
+            assert_eq!(next(MySql, Active, "LOCK TABLES", parse), Active, "{code}");
+        }
+        assert_eq!(
+            next(MySql, Active, "DROP TABLE nope", mysql_failed(1051)),
+            Idle
+        );
+    }
+
+    #[test]
+    fn mysql_implicit_commit_statements() {
+        let cases = [
+            ("LOCK TABLES t WRITE", true),
+            ("lock table t read", true),
+            ("ANALYZE TABLE t", true),
+            ("ANALYZE NO_WRITE_TO_BINLOG TABLE t", true),
+            ("ANALYZE LOCAL TABLE t", true),
+            ("CHECK TABLE t", true),
+            ("FLUSH PRIVILEGES", true),
+            ("FLUSH TABLES", true),
+            ("RESET MASTER", true),
+            ("RESET QUERY CACHE", false),
+            ("RESET PERSIST", false),
+            ("CACHE INDEX t IN hot", true),
+            ("LOAD INDEX INTO CACHE t", true),
+            ("/* c */ OPTIMIZE TABLE t", true),
+            // Not implicit commits.
+            ("UNLOCK TABLES", false),
+            ("ANALYZE SELECT 1", false),
+            ("CHECKSUM TABLE t", false),
+            ("LOAD DATA INFILE 'x' INTO TABLE t", false),
+            ("SELECT 'LOCK TABLES'", false),
+        ];
+        for (sql, commits) in cases {
+            let want = if commits { Idle } else { Active };
+            assert_eq!(next(MySql, Active, sql, StmtResult::Ok), want, "{sql} ok");
+            assert_eq!(
+                next(MySql, Active, sql, mysql_failed(1146)),
+                want,
+                "{sql} failed"
+            );
+            // PG has no implicit commit.
+            assert_eq!(
+                next(Postgres, Active, sql, StmtResult::Ok),
+                Active,
+                "{sql} pg"
+            );
+        }
     }
 
     #[test]

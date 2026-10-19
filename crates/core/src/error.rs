@@ -82,8 +82,11 @@ pub enum DbError {
     /// (and committed). When false the statement is known not to have taken effect, or
     /// it could not change anything.
     ///
-    /// `was_in_tx`: the statement ran inside a transaction (still open on MySQL, aborted
-    /// on PostgreSQL), so running it again is not a plain retry.
+    /// `was_in_tx`: the statement was sent inside a transaction (still open on MySQL,
+    /// aborted on PostgreSQL), so running it again is not a plain retry. It is `false`
+    /// when no statement was sent (a cancel before sending, or a non-statement stage),
+    /// even if the session has a transaction open: it describes the stopped statement,
+    /// not the session's transaction state (that is `AppError::tx_state`).
     #[error("timed out during {}{}", .stage.as_str(), outcome_note(.outcome_unknown))]
     Timeout {
         stage: ConnectStage,
@@ -117,7 +120,8 @@ pub enum DbError {
     /// statement was killed while it may already have applied part of its work (for
     /// example a `CALL` whose inner statements autocommit, or a non-transactional table
     /// outside a transaction).
-    /// `was_in_tx`: as on [`DbError::Timeout`].
+    /// `was_in_tx`: as on [`DbError::Timeout`]; `false` for a cancel that stopped the
+    /// script before the statement was sent, whatever the session's transaction state.
     #[error("cancelled{}", outcome_note(.outcome_unknown))]
     Cancelled {
         outcome_unknown: bool,
@@ -288,6 +292,15 @@ impl AppError {
     }
 }
 
+/// "1 statement" / "`n` statements".
+fn statements(n: u32) -> String {
+    if n == 1 {
+        "1 statement".into()
+    } else {
+        format!("{n} statements")
+    }
+}
+
 /// `message` as a sentence: capital first letter, final punctuation.
 fn sentence(message: &str) -> String {
     let message = message.trim();
@@ -450,14 +463,20 @@ impl From<DbError> for AppError {
             DbError::PlanExpired => {
                 AppError::base("plan_expired", "The run plan expired; run it again.")
             }
-            DbError::Blocked { .. } => AppError::base(
-                "blocked",
-                "Statements that change data are blocked on this read-only connection.",
-            ),
-            DbError::ConfirmationRequired { .. } => AppError::base(
-                "confirmation_required",
-                "Running these statements on Production needs confirmation.",
-            ),
+            DbError::Blocked { count } => AppError {
+                detail: Some(statements(count)),
+                ..AppError::base(
+                    "blocked",
+                    "Statements that change data are blocked on this read-only connection.",
+                )
+            },
+            DbError::ConfirmationRequired { count } => AppError {
+                detail: Some(statements(count)),
+                ..AppError::base(
+                    "confirmation_required",
+                    "Running these statements on Production needs confirmation.",
+                )
+            },
         };
         a.hint = hint;
         a
@@ -994,6 +1013,16 @@ mod tests {
             assert!(!a.outcome_unknown, "{kind}");
             assert_eq!(a.tx_state, None, "{kind}");
         }
+    }
+
+    #[test]
+    fn guard_errors_carry_the_count_as_detail() {
+        let a: AppError = DbError::Blocked { count: 2 }.into();
+        assert_eq!(a.detail.as_deref(), Some("2 statements"));
+        let a: AppError = DbError::ConfirmationRequired { count: 1 }.into();
+        assert_eq!(a.detail.as_deref(), Some("1 statement"));
+        let a: AppError = DbError::Busy.into();
+        assert_eq!(a.detail, None);
     }
 
     #[test]

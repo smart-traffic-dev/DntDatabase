@@ -50,7 +50,7 @@
   "blocked": {
     "kind": "blocked",
     "message": "Statements that change data are blocked on this read-only connection.",
-    "detail": null,
+    "detail": "2 statements",
     "stage": null,
     "timings": null,
     "server_code": null,
@@ -126,7 +126,7 @@
   "confirmation_required": {
     "kind": "confirmation_required",
     "message": "Running these statements on Production needs confirmation.",
-    "detail": null,
+    "detail": "3 statements",
     "stage": null,
     "timings": null,
     "server_code": null,
