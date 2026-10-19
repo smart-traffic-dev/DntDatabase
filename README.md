@@ -59,8 +59,9 @@ pnpm --dir ui test
 
 ### End-to-end smoke test
 
-Local only (needs a Windows desktop session and Docker; CI does not run it). Scenario: connect to the MySQL 8
-container at `127.0.0.1:33080`, open `dnt_fixture.orders` and check that the DDL tab shows `CREATE TABLE`.
+Local only (needs a Windows desktop session and Docker; CI does not run it). Scenarios: connect to the MySQL 8
+container at `127.0.0.1:33080` and to PostgreSQL 17 at `127.0.0.1:54317`, open `dnt_fixture.orders` in each and check
+that the DDL tab shows `CREATE TABLE`.
 
 One-time setup:
 
@@ -75,14 +76,12 @@ Each run:
 
 ```powershell
 docker compose -f testdata/docker-compose.test.yml up -d --wait
-pnpm --dir ui build
-cargo build -p dntdatabase --features tauri/custom-protocol    # embeds ui/dist; a plain debug build loads the dev server
+pnpm --dir e2e build:app    # builds ui/dist and an embedded-UI binary into target/e2e (own target dir)
 pnpm --dir e2e test
 ```
 
-Rebuild with that exact command right before the E2E run: other cargo builds (`cargo test`, a plain `cargo build`)
-overwrite `target/debug/dntdatabase.exe` with a binary that loads the dev server, and the test then times out.
-
+`build:app` uses a dedicated `--target-dir target/e2e`, so other cargo builds (`cargo test`, a plain `cargo build`)
+can no longer overwrite the binary the test launches. Re-run it after UI or Rust changes.
 Optional environment: `MSEDGEDRIVER` (path to msedgedriver.exe), `TAURI_DRIVER` (path to tauri-driver.exe,
 default `%CARGO_HOME%\bin`). The run uses a fresh temporary `DNT_DATA_DIR` and removes the test password it stored
 in Windows Credential Manager when it finishes.
