@@ -3,7 +3,8 @@
 //! Opt-in: writes only when both `DNT_TEST_DB=1` and `DNT_UPDATE_FIXTURES=1` are set;
 //! normal runs read the committed fixtures (`tests/explain.rs`).
 //! Needs `docker compose -f testdata/docker-compose.test.yml up -d --wait` plus the
-//! `mysql84` service.
+//! `mysql84` service, which is in the `explain` profile:
+//! `docker compose -f testdata/docker-compose.test.yml --profile explain up -d --wait mysql84`.
 
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::value::{ColumnMeta, Value};

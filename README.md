@@ -50,6 +50,15 @@ docker compose -f testdata/docker-compose.test.yml down -v
 Without `DNT_TEST_DB=1` the integration tests print `skipped` and return. Keep `cargo test` (sequential test
 binaries); the tunnel tests restart the ssh container.
 
+The explain fixtures (`crates/query/tests/fixtures/explain/`) also need MySQL 8.4, which is in the `explain`
+compose profile and not started by default. Recapture them only when needed:
+
+```powershell
+docker compose -f testdata/docker-compose.test.yml --profile explain up -d --wait mysql84
+$env:DNT_TEST_DB = "1"; $env:DNT_UPDATE_FIXTURES = "1"
+cargo test -p dnt-query --test explain_capture
+```
+
 UI tests:
 
 ```powershell

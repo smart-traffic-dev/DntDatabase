@@ -36,7 +36,8 @@ fn unsupported(feature: &str, info: &ServerInfo) -> DbError {
 }
 
 /// Builds the explain statement for `stmt` on the server `info` describes.
-/// `analyze` executes the statement (only allowed for reads; the guard decides that).
+/// `analyze` makes the server execute the statement. This function does not refuse
+/// non-`Read` statements under `analyze`; the caller (`query_explain`, Task 15) must.
 pub fn explain_sql(stmt: &str, info: &ServerInfo, analyze: bool) -> Result<ExplainSql, DbError> {
     let (prefix, format) = match (info.kind, info.variant, analyze) {
         (DbKind::Postgres, _, false) => ("EXPLAIN (FORMAT JSON)", ExplainFormat::PgJson),
@@ -108,10 +109,18 @@ pub fn parse_plan(
 }
 
 /// The node's own cost: its `est_cost` minus the sum of its children's `est_cost`
-/// (a child without a cost counts as 0). `None` when the node has no cost.
+/// (a child without a cost counts as 0), clamped to 0. `None` when the node has no cost.
+///
+/// The clamp covers nodes that stop early: a PG `Limit` costs less than the scan below it.
+///
+/// MySQL JSON `prefix_cost` is cumulative: each table's cost includes the tables joined
+/// before it, and the query block's `query_cost` includes everything. The subtraction is
+/// therefore only approximate there, and the query-block node usually carries the
+/// highest self cost.
 pub fn self_cost(node: &PlanNode) -> Option<f64> {
     let own = node.est_cost?;
-    Some(own - node.children.iter().filter_map(|c| c.est_cost).sum::<f64>())
+    let children: f64 = node.children.iter().filter_map(|c| c.est_cost).sum();
+    Some((own - children).max(0.0))
 }
 
 fn internal(message: &str) -> DbError {
@@ -494,6 +503,10 @@ mod mysql_tree {
     use super::{internal, leaf, PlanNode};
     use dnt_core::error::DbError;
 
+    /// Deepest nesting accepted. Real plans are far shallower; the cap keeps the
+    /// recursive walks over `PlanNode` (drop, serialize, the UI) off the stack limit.
+    const MAX_DEPTH: usize = 1000;
+
     pub fn parse(raw: &str) -> Result<PlanNode, DbError> {
         // (depth, node) of the open path from the root to the last node.
         let mut stack: Vec<(usize, PlanNode)> = vec![];
@@ -514,6 +527,11 @@ mod mysql_tree {
             };
             let depth = (line.len() - body.len()) / 4;
             close_to(&mut stack, &mut roots, depth);
+            if stack.len() >= MAX_DEPTH {
+                return Err(internal(&format!(
+                    "the plan nests deeper than {MAX_DEPTH} levels"
+                )));
+            }
             stack.push((depth, node(text)));
         }
         close_to(&mut stack, &mut roots, 0);

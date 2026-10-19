@@ -263,6 +263,49 @@ fn self_cost_subtracts_children() {
 }
 
 #[test]
+fn self_cost_is_clamped_to_zero() {
+    // PG `Limit` stops early, so its total cost is below its child's.
+    let raw = r#"[{"Plan": {"Node Type": "Limit", "Total Cost": 0.5, "Plan Rows": 1,
+        "Plans": [{"Node Type": "Seq Scan", "Relation Name": "orders",
+                   "Total Cost": 1000, "Plan Rows": 100000}]}}]"#;
+    let tree = parse_plan(
+        ExplainFormat::PgJson,
+        &["QUERY PLAN".to_string()],
+        &[vec![Value::Json(raw.into())]],
+    )
+    .unwrap();
+    let r = root(&tree);
+    assert_eq!(r.label, "Limit");
+    assert_eq!(self_cost(r), Some(0.0));
+    assert_eq!(self_cost(&r.children[0]), Some(1000.0));
+}
+
+#[test]
+fn mysql_tree_depth_is_capped() {
+    let deep: String = (0..5000)
+        .map(|i| format!("{}-> Filter: x{i}\n", " ".repeat(4 * i)))
+        .collect();
+    match parse_plan(
+        ExplainFormat::MySqlTree,
+        &["EXPLAIN".to_string()],
+        &[vec![Value::Text(deep)]],
+    ) {
+        Err(DbError::Internal { .. }) => {}
+        other => panic!("expected Internal, got {:?}", other.map(|_| "a tree")),
+    }
+    // 1000 levels still parse.
+    let ok: String = (0..1000)
+        .map(|i| format!("{}-> Filter: x{i}\n", " ".repeat(4 * i)))
+        .collect();
+    assert!(parse_plan(
+        ExplainFormat::MySqlTree,
+        &["EXPLAIN".to_string()],
+        &[vec![Value::Text(ok)]],
+    )
+    .is_ok());
+}
+
+#[test]
 fn malformed_json_is_internal_error() {
     let cols = vec!["QUERY PLAN".to_string()];
     let text = |s: &str| vec![vec![Value::Text(s.into())]];
