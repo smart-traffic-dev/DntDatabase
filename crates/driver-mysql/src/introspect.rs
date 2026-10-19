@@ -318,9 +318,9 @@ impl Introspector for MySqlSession {
     async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
         let mut conn = self.live_conn().await?;
         let rows = fetch(&mut conn, queries::SCHEMA_COLUMNS, params1(&scope.database)).await?;
-        Ok(group_table_columns(
-            rows.iter().filter_map(|r| Some((col(r, 0)?, col(r, 1)?))),
-        ))
+        Ok(group_table_columns(rows.iter().filter_map(|r| {
+            Some((col(r, 0)?, col(r, 1)?, col(r, 2)?))
+        })))
     }
 
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {

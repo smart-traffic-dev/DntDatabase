@@ -8,6 +8,7 @@
 
 pub mod browse;
 pub mod connections;
+pub mod query;
 pub mod settings;
 pub mod transfer;
 pub mod workspace;
@@ -123,6 +124,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browse::object_ddl,
             browse::refresh_node,
             browse::get_schema_cache,
+            query::completion_scope,
+            query::completion_objects,
             transfer::export_connections,
             transfer::preview_import,
             transfer::apply_import,

@@ -1,6 +1,6 @@
 //! Per-connection caches: `NodeCache` (browse results by tree path) and `SchemaCache`.
 
-use dnt_core::meta::ObjectKind;
+use dnt_core::meta::{ColumnBrief, ObjectKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashMap;
@@ -78,8 +78,9 @@ impl NodeCache {
     }
 }
 
-/// Table / view names and their column names of the connection's default database
-/// (PostgreSQL: of the schemas in `current_schemas(false)`), loaded in the background.
+/// Table / view names and their columns (with types) of one database (PostgreSQL: of the
+/// schemas in `current_schemas(false)` of that database's metadata session). One per
+/// database, loaded lazily (see `SessionManager::schema_cache_for`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct SchemaCache {
     pub database: String,
@@ -91,7 +92,15 @@ pub struct SchemaCacheTable {
     pub schema: Option<String>,
     pub name: String,
     pub kind: ObjectKind,
-    pub columns: Vec<String>,
+    pub columns: Vec<ColumnBrief>,
+}
+
+/// A table or view offered by autocomplete after `db.` / `schema.`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+pub struct CompletionObject {
+    pub schema: Option<String>,
+    pub name: String,
+    pub kind: ObjectKind,
 }
 
 #[cfg(test)]

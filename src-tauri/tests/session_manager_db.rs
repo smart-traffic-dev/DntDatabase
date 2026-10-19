@@ -17,7 +17,7 @@ use dntdatabase::session_manager::SessionManager;
 use secrecy::SecretString;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use uuid::Uuid;
 
 struct Fixture {
@@ -77,26 +77,23 @@ fn db_password() -> NewSecrets {
     }
 }
 
-/// Polls the SchemaCache of `id` for up to 5 s until it holds `table` with `column`.
+/// The SchemaCache of `id`'s fixture database, which must hold `table` with `column`.
 async fn wait_schema_cache(
     sm: &SessionManager,
     id: Uuid,
     table: &str,
     column: &str,
 ) -> SchemaCache {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(cache) = sm.schema_cache(id) {
-            let found = cache
-                .tables
-                .iter()
-                .any(|t| t.name == table && t.columns.iter().any(|c| c == column));
-            assert!(found, "{table}.{column} missing from {cache:?}");
-            return cache;
-        }
-        assert!(Instant::now() < deadline, "SchemaCache not ready in 5 s");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    let cache = tokio::time::timeout(Duration::from_secs(5), sm.schema_cache_for(id, FIXTURE_DB))
+        .await
+        .expect("SchemaCache not ready in 5 s")
+        .unwrap();
+    let found = cache
+        .tables
+        .iter()
+        .any(|t| t.name == table && t.columns.iter().any(|c| c.name == column));
+    assert!(found, "{table}.{column} missing from {cache:?}");
+    cache
 }
 
 #[tokio::test]

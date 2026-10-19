@@ -52,21 +52,35 @@ pub struct ObjectSummary {
     pub row_estimate: Option<u64>,
 }
 
-/// Column names of one table or view, in ordinal order ([`Introspector::list_columns`]).
-///
-/// [`Introspector::list_columns`]: crate::driver::Introspector::list_columns
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TableColumns {
-    pub table: String,
-    pub columns: Vec<String>,
+/// A column's name and its type as the server spells it: MySQL `COLUMNS.COLUMN_TYPE`
+/// (e.g. `enum('a','b')`, `decimal(12,2)`), PostgreSQL `format_type(atttypid, atttypmod)`
+/// (e.g. `numeric(12,2)`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct ColumnBrief {
+    pub name: String,
+    pub data_type: String,
 }
 
-/// Groups `(table, column)` rows (ordered by table, then column position) by table,
-/// sorted by table name (byte order).
-pub fn group_table_columns(rows: impl IntoIterator<Item = (String, String)>) -> Vec<TableColumns> {
-    let mut by_table: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    for (table, column) in rows {
-        by_table.entry(table).or_default().push(column);
+/// Columns of one table or view, in ordinal order ([`Introspector::list_columns`]).
+///
+/// [`Introspector::list_columns`]: crate::driver::Introspector::list_columns
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct TableColumns {
+    pub table: String,
+    pub columns: Vec<ColumnBrief>,
+}
+
+/// Groups `(table, column, data_type)` rows (ordered by table, then column position) by
+/// table, sorted by table name (byte order).
+pub fn group_table_columns(
+    rows: impl IntoIterator<Item = (String, String, String)>,
+) -> Vec<TableColumns> {
+    let mut by_table: std::collections::BTreeMap<String, Vec<ColumnBrief>> = Default::default();
+    for (table, name, data_type) in rows {
+        by_table
+            .entry(table)
+            .or_default()
+            .push(ColumnBrief { name, data_type });
     }
     by_table
         .into_iter()
@@ -162,22 +176,57 @@ pub struct TableDetail {
 mod tests {
     use super::*;
 
+    fn brief(name: &str, data_type: &str) -> ColumnBrief {
+        ColumnBrief {
+            name: name.into(),
+            data_type: data_type.into(),
+        }
+    }
+
     #[test]
     fn groups_columns_by_table_keeping_their_order() {
-        let rows = [("b", "id"), ("b", "name"), ("a", "z"), ("a", "y")]
-            .map(|(t, c)| (t.to_string(), c.to_string()));
+        let rows = [
+            ("b", "id", "int"),
+            ("b", "name", "text"),
+            ("a", "z", "int"),
+            ("a", "y", "int"),
+        ]
+        .map(|(t, c, ty)| (t.to_string(), c.to_string(), ty.to_string()));
         assert_eq!(
             group_table_columns(rows),
             [
                 TableColumns {
                     table: "a".into(),
-                    columns: vec!["z".into(), "y".into()]
+                    columns: vec![brief("z", "int"), brief("y", "int")]
                 },
                 TableColumns {
                     table: "b".into(),
-                    columns: vec!["id".into(), "name".into()]
+                    columns: vec![brief("id", "int"), brief("name", "text")]
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn group_table_columns_keeps_types() {
+        let rows = [
+            ("orders", "status", "enum('new','paid')"),
+            ("orders", "total", "numeric(12,2)"),
+        ]
+        .map(|(t, c, ty)| (t.to_string(), c.to_string(), ty.to_string()));
+        let grouped = group_table_columns(rows);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(
+            grouped[0].columns,
+            [
+                brief("status", "enum('new','paid')"),
+                brief("total", "numeric(12,2)")
+            ]
+        );
+        // Serialized for the UI as `{ name, data_type }`.
+        assert_eq!(
+            serde_json::to_value(&grouped[0].columns[1]).unwrap(),
+            serde_json::json!({"name": "total", "data_type": "numeric(12,2)"})
         );
     }
 }

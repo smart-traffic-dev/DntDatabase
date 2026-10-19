@@ -8,12 +8,13 @@
 //! introspection, so a call that fails with a lost connection (or finds the SSH tunnel
 //! dead) reopens the tunnel and that session once and is retried once.
 
-use crate::cache::{NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
+use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
+use crate::commands::browse::folder_key;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session};
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
-use dnt_core::meta::{ObjectKind, Scope};
+use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
@@ -508,7 +509,10 @@ impl SessionManager {
         if let Err(e) = self.repo.touch_connected(id) {
             tracing::warn!(connection = %id, error = %e, "could not record the connection time");
         }
-        rt.spawn_schema_cache();
+        // Warm the cache of the database a new query tab starts on.
+        if let Some(home) = rt.home_database() {
+            rt.spawn_schema_load(home);
+        }
         Ok(OpenResult { info, timings })
     }
 
@@ -722,20 +726,92 @@ impl SessionManager {
         Ok(value)
     }
 
-    /// Drops every cached browse result of `id` under `prefix`.
+    /// Drops every cached browse result of `id` under `prefix`, and reloads (in the
+    /// background) the SchemaCache of every loaded database the prefix covers: all of them
+    /// for `[]`, database `x` for any prefix starting with `db:x`.
     pub fn refresh(&self, id: Uuid, prefix: &NodeKey) {
         if let Some(rt) = self.runtime_opt(id) {
             rt.cache.invalidate_prefix(prefix);
+            let covered: Vec<String> = rt
+                .schema_databases()
+                .into_iter()
+                .filter(|db| match prefix.0.first() {
+                    None => true,
+                    Some(first) => first.strip_prefix("db:") == Some(db.as_str()),
+                })
+                .collect();
+            for db in covered {
+                rt.refresh_schema_cache(&db);
+            }
         }
     }
 
-    pub fn schema_cache(&self, id: Uuid) -> Option<SchemaCache> {
-        self.runtime_opt(id)?
-            .schema_cache
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    /// The SchemaCache of `database`, loading it on first use. Concurrent first calls for
+    /// one database share a single load; a failed load is not kept (the next call retries).
+    pub async fn schema_cache_for(&self, id: Uuid, database: &str) -> Result<SchemaCache, DbError> {
+        self.runtime(id)?.schema_cache_for(database).await
     }
+
+    /// Drops the SchemaCache of `database` and reloads it in the background (e.g. after a
+    /// DDL statement). Callers arriving meanwhile wait for the reload.
+    pub fn refresh_schema_cache(&self, id: Uuid, database: &str) {
+        if let Some(rt) = self.runtime_opt(id) {
+            rt.refresh_schema_cache(database);
+        }
+    }
+
+    /// The database whose SchemaCache `get_schema_cache` returns: the connect database
+    /// (PostgreSQL: the one named after the user when none is set; MySQL: none when no
+    /// default database is set).
+    pub fn home_database(&self, id: Uuid) -> Result<Option<String>, DbError> {
+        Ok(self.runtime(id)?.home_database())
+    }
+
+    /// Tables and views (and materialized views on PostgreSQL) for autocomplete after
+    /// `db.` / `schema.`: of `schema` when set, otherwise of `database`. Listed through
+    /// [`SessionManager::browse`] under the tree's folder keys, so the tree and
+    /// autocomplete share one cache.
+    pub async fn completion_objects(
+        &self,
+        id: Uuid,
+        database: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<CompletionObject>, DbError> {
+        let kinds: &[ObjectKind] = match self.runtime(id)?.cfg.kind {
+            DbKind::MySql => &[ObjectKind::Table, ObjectKind::View],
+            DbKind::Postgres => &[
+                ObjectKind::Table,
+                ObjectKind::View,
+                ObjectKind::MaterializedView,
+            ],
+        };
+        let scope = Scope {
+            database: database.to_string(),
+            schema: schema.map(str::to_string),
+        };
+        let mut objects = Vec::new();
+        for &kind in kinds {
+            let listed = self
+                .browse(id, Some(database), folder_key(&scope, kind), |i| {
+                    let scope = scope.clone();
+                    Box::pin(async move { i.list_objects(&scope, kind).await })
+                })
+                .await?;
+            objects.extend(listed.into_iter().map(|o| CompletionObject {
+                schema: scope.schema.clone(),
+                name: o.name,
+                kind,
+            }));
+        }
+        Ok(objects)
+    }
+}
+
+/// One database's SchemaCache. Its async mutex serializes loads: the caller holding it
+/// loads (or finds the cache loaded), concurrent callers wait for that result.
+#[derive(Default)]
+struct SchemaSlot {
+    cache: tokio::sync::Mutex<Option<SchemaCache>>,
 }
 
 /// Resolved address and metadata sessions, held by one metadata call at a time.
@@ -761,9 +837,12 @@ pub struct ConnectionRuntime {
     closed: AtomicBool,
     metadata_timeout: Duration,
     cache: NodeCache,
-    schema_cache: RwLock<Option<SchemaCache>>,
+    /// `database → SchemaCache`, each loaded on first use.
+    schema_caches: Mutex<HashMap<String, Arc<SchemaSlot>>>,
     state: Mutex<ConnState>,
-    schema_task: Mutex<Option<JoinHandle<()>>>,
+    /// Background SchemaCache loads (home database on open, refreshes); aborted by
+    /// `shutdown`.
+    schema_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 impl ConnectionRuntime {
@@ -799,9 +878,9 @@ impl ConnectionRuntime {
             closed: AtomicBool::new(false),
             metadata_timeout,
             cache: NodeCache::default(),
-            schema_cache: RwLock::new(None),
+            schema_caches: Mutex::new(HashMap::new()),
             state: Mutex::new(ConnState::Connected),
-            schema_task: Mutex::new(None),
+            schema_tasks: Mutex::new(Vec::new()),
             cfg,
         }
     }
@@ -940,12 +1019,13 @@ impl ConnectionRuntime {
     /// tunnel is closed regardless, and the call finds the runtime closed.
     async fn shutdown(&self) {
         {
-            let mut task = lock(&self.schema_task);
+            let mut tasks = lock(&self.schema_tasks);
             self.closed.store(true, Ordering::SeqCst);
-            if let Some(task) = task.take() {
+            for task in tasks.drain(..) {
                 task.abort();
             }
         }
+        lock(&self.schema_caches).clear();
         match tokio::time::timeout(SHUTDOWN_LOCK_TIMEOUT, self.link.lock()).await {
             Ok(mut link) => {
                 link.closed = true;
@@ -965,62 +1045,89 @@ impl ConnectionRuntime {
         self.set_state(ConnState::Disconnected);
     }
 
-    /// Starts loading the SchemaCache; does nothing on a closed runtime.
-    fn spawn_schema_cache(self: &Arc<Self>) {
+    /// The connect database: PostgreSQL's `home`, MySQL's default database (if any).
+    fn home_database(&self) -> Option<String> {
+        match self.cfg.kind {
+            DbKind::MySql => self.cfg.default_db.clone(),
+            DbKind::Postgres => self.home.clone(),
+        }
+    }
+
+    /// The slot of `database`, created empty on first use.
+    fn schema_slot(&self, database: &str) -> Arc<SchemaSlot> {
+        Arc::clone(
+            lock(&self.schema_caches)
+                .entry(database.to_string())
+                .or_default(),
+        )
+    }
+
+    /// Databases that have a SchemaCache slot (loaded or loading).
+    fn schema_databases(&self) -> Vec<String> {
+        lock(&self.schema_caches).keys().cloned().collect()
+    }
+
+    async fn schema_cache_for(&self, database: &str) -> Result<SchemaCache, DbError> {
+        let slot = self.schema_slot(database);
+        let mut cache = slot.cache.lock().await;
+        if let Some(loaded) = cache.as_ref() {
+            return Ok(loaded.clone());
+        }
+        let loaded = self.load_schema_cache(database).await?;
+        *cache = Some(loaded.clone());
+        Ok(loaded)
+    }
+
+    /// Replaces the slot of `database` with an empty one and loads it in the background.
+    /// A load still running on the old slot finishes into that (dropped) slot.
+    fn refresh_schema_cache(self: &Arc<Self>, database: &str) {
+        lock(&self.schema_caches).insert(database.to_string(), Arc::default());
+        self.spawn_schema_load(database.to_string());
+    }
+
+    /// Loads the SchemaCache of `database` in the background; does nothing on a closed
+    /// runtime.
+    fn spawn_schema_load(self: &Arc<Self>, database: String) {
         // `closed` is set under the same lock by `shutdown`, so either the task is not
         // started or `shutdown` finds (and aborts) it.
-        let mut slot = lock(&self.schema_task);
+        let mut tasks = lock(&self.schema_tasks);
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
+        tasks.retain(|t| !t.is_finished());
         let rt = Arc::clone(self);
-        let task = tokio::spawn(async move {
-            match rt.load_schema_cache().await {
-                Ok(Some(cache)) => {
-                    *rt.schema_cache
-                        .write()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(cache);
-                }
-                Ok(None) => {}
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = rt.schema_cache_for(&database).await {
                 // DbError messages never carry secrets.
-                Err(e) => tracing::warn!(
+                tracing::warn!(
                     connection = %rt.cfg.id,
                     error = %e,
                     "could not load the schema cache"
-                ),
+                );
             }
-        });
-        *slot = Some(task);
+        }));
     }
 
-    /// Tables and views (with column names) of the default database; on PostgreSQL of
-    /// the schemas in `current_schemas(false)`. `None` for MySQL without a default database.
-    async fn load_schema_cache(&self) -> Result<Option<SchemaCache>, DbError> {
-        let (database, schemas, kinds): (String, Vec<Option<String>>, &[ObjectKind]) =
-            match (self.cfg.kind, &self.home) {
-                (DbKind::Postgres, Some(home)) => {
-                    let schemas = self
-                        .with_session(None, |s| Box::pin(current_schemas(s)))
-                        .await?;
-                    (
-                        home.clone(),
-                        schemas.into_iter().map(Some).collect(),
-                        &[
-                            ObjectKind::Table,
-                            ObjectKind::View,
-                            ObjectKind::MaterializedView,
-                        ],
-                    )
-                }
-                _ => match &self.cfg.default_db {
-                    Some(db) => (
-                        db.clone(),
-                        vec![None],
-                        &[ObjectKind::Table, ObjectKind::View],
-                    ),
-                    None => return Ok(None),
-                },
-            };
+    /// Tables and views (with column names and types) of `database`; on PostgreSQL of the
+    /// schemas in `current_schemas(false)` of that database's metadata session.
+    async fn load_schema_cache(&self, database: &str) -> Result<SchemaCache, DbError> {
+        let database = database.to_string();
+        let (schemas, kinds): (Vec<Option<String>>, &[ObjectKind]) = match self.cfg.kind {
+            DbKind::Postgres => {
+                let schemas = self
+                    .with_session(Some(&database), |s| Box::pin(current_schemas(s)))
+                    .await?;
+                (
+                    schemas.into_iter().map(Some).collect(),
+                    &[
+                        ObjectKind::Table,
+                        ObjectKind::View,
+                        ObjectKind::MaterializedView,
+                    ],
+                )
+            }
+            DbKind::MySql => (vec![None], &[ObjectKind::Table, ObjectKind::View]),
+        };
 
         // Per scope: one listing per object kind plus ONE bulk column query; never a
         // per-table `table_detail` (that reads statistics, ~6-8 queries per table).
@@ -1030,7 +1137,7 @@ impl ConnectionRuntime {
                 database: database.clone(),
                 schema: schema.clone(),
             };
-            let mut columns: HashMap<String, Vec<String>> = self
+            let mut columns: HashMap<String, Vec<ColumnBrief>> = self
                 .with_session(Some(&database), |s| {
                     let scope = scope.clone();
                     Box::pin(async move { s.introspector().list_columns(&scope).await })
@@ -1056,7 +1163,7 @@ impl ConnectionRuntime {
                 }
             }
         }
-        Ok(Some(SchemaCache { database, tables }))
+        Ok(SchemaCache { database, tables })
     }
 }
 

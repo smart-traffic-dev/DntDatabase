@@ -8,8 +8,8 @@ use dnt_core::driver::{
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
-    TableDetail,
+    ColumnBrief, DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope,
+    TableColumns, TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
 use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
@@ -46,6 +46,10 @@ struct Log {
     connect_delay_ms: AtomicU64,
     /// Every `list_objects` call takes this long (ms).
     list_delay_ms: AtomicU64,
+    /// Every `list_columns` call takes this long (ms).
+    columns_delay_ms: AtomicU64,
+    /// `Scope::database` of every `list_columns` call, in order.
+    column_scopes: Mutex<Vec<String>>,
 }
 
 async fn delay(ms: &AtomicU64) {
@@ -179,11 +183,26 @@ impl Introspector for FakeSession {
             row_estimate: None,
         }])
     }
-    async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
+    async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
         self.log.columns_calls.fetch_add(1, Ordering::SeqCst);
+        self.log
+            .column_scopes
+            .lock()
+            .unwrap()
+            .push(scope.database.clone());
+        delay(&self.log.columns_delay_ms).await;
         Ok(vec![TableColumns {
             table: "orders".into(),
-            columns: vec!["id".into(), "total".into()],
+            columns: vec![
+                ColumnBrief {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                },
+                ColumnBrief {
+                    name: "total".into(),
+                    data_type: "decimal(12,2)".into(),
+                },
+            ],
         }])
     }
     async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
@@ -330,20 +349,134 @@ async fn schema_cache_loads_with_bulk_column_listing_only() {
     cfg.default_db = Some("shop".into());
     let id = save(&f, cfg, Some("pw"));
     f.sm.open(id, None).await.unwrap();
-    wait_until(|| f.sm.schema_cache(id).is_some()).await;
-    let cache = f.sm.schema_cache(id).unwrap();
+    // `open` starts loading the home database in the background; this call waits for
+    // that load instead of starting a second one.
+    let cache = f.sm.schema_cache_for(id, "shop").await.unwrap();
     assert_eq!(cache.database, "shop");
     let orders = cache
         .tables
         .iter()
         .find(|t| t.name == "orders" && t.kind == ObjectKind::Table)
         .unwrap();
-    assert_eq!(orders.columns, ["id", "total"]);
+    let columns: Vec<(&str, &str)> = orders
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.data_type.as_str()))
+        .collect();
+    assert_eq!(columns, [("id", "int"), ("total", "decimal(12,2)")]);
     // One column query per scope, never a per-table detail.
     assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.log.detail_calls.load(Ordering::SeqCst), 0);
     // Tables and views listed: one list_objects call each.
     assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn schema_cache_is_per_database_and_lazy() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    // No default database: nothing is loaded until asked for.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 0);
+
+    let a = f.sm.schema_cache_for(id, "a").await.unwrap();
+    assert_eq!(a.database, "a");
+    let b = f.sm.schema_cache_for(id, "b").await.unwrap();
+    assert_eq!(b.database, "b");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+    // A repeat is served from the cache.
+    assert_eq!(f.sm.schema_cache_for(id, "a").await.unwrap(), a);
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*f.log.column_scopes.lock().unwrap(), ["a", "b"]);
+
+    // Concurrent first requests for one database share a single load.
+    f.log.columns_delay_ms.store(50, Ordering::SeqCst);
+    let (x, y) = tokio::join!(
+        f.sm.schema_cache_for(id, "c"),
+        f.sm.schema_cache_for(id, "c")
+    );
+    assert_eq!(x.unwrap(), y.unwrap());
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn refresh_schema_cache_reloads_in_background() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.sm.schema_cache_for(id, "a").await.unwrap();
+    f.sm.schema_cache_for(id, "b").await.unwrap();
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+
+    f.sm.refresh_schema_cache(id, "a");
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 3).await;
+    // The reload is what the next call gets: no further load.
+    f.sm.schema_cache_for(id, "a").await.unwrap();
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 3);
+
+    // A tree refresh of a database reloads that database's cache too (and only it).
+    f.sm.refresh(id, &key(&["db:b", "folder:Table"]));
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 4).await;
+    assert_eq!(
+        f.log
+            .column_scopes
+            .lock()
+            .unwrap()
+            .last()
+            .map(String::as_str),
+        Some("b")
+    );
+    // A whole-connection refresh reloads every loaded database.
+    f.sm.refresh(id, &key(&[]));
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 6).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 6);
+}
+
+#[tokio::test]
+async fn completion_objects_uses_browse_cache() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let first = f.sm.completion_objects(id, "shop", None).await.unwrap();
+    let second = f.sm.completion_objects(id, "shop", None).await.unwrap();
+    assert_eq!(first, second);
+    let kinds: Vec<ObjectKind> = first.iter().map(|o| o.kind).collect();
+    assert_eq!(kinds, [ObjectKind::Table, ObjectKind::View]);
+    assert!(first
+        .iter()
+        .all(|o| o.name == "orders" && o.schema.is_none()));
+    // One listing per kind, shared with the tree (same folder keys).
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+    list_tables(&f, id, Some("shop"), &["db:shop", "folder:Table"]).await;
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn pg_completion_objects_list_materialized_views_of_the_schema() {
+    let f = fixture(DbKind::Postgres, false);
+    let id = save(&f, config(DbKind::Postgres, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let objects =
+        f.sm.completion_objects(id, "shop", Some("sales"))
+            .await
+            .unwrap();
+    let kinds: Vec<ObjectKind> = objects.iter().map(|o| o.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::MaterializedView
+        ]
+    );
+    assert!(objects.iter().all(|o| o.schema.as_deref() == Some("sales")));
+    // Listed on the metadata session of database `shop`.
+    assert_eq!(
+        f.log.databases.lock().unwrap().last().cloned().flatten(),
+        Some("shop".to_string())
+    );
 }
 
 #[tokio::test]
@@ -506,7 +639,8 @@ async fn close_drops_runtime() {
     f.sm.close(id).await;
     assert_eq!(f.sm.state(id), ConnState::Disconnected);
     assert!(f.sm.open_connections().is_empty());
-    assert!(f.sm.schema_cache(id).is_none());
+    let err = f.sm.schema_cache_for(id, "a").await.unwrap_err();
+    assert!(matches!(err, DbError::NotOpen), "{err:?}");
     // Both metadata sessions (connect database and `a`) were closed.
     assert_eq!(f.log.closes.load(Ordering::SeqCst), 2);
     let k = key(&["db:a", "folder:Table"]);

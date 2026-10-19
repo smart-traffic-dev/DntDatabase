@@ -173,6 +173,22 @@ async getSchemaCache(id: string) : Promise<Result<SchemaCache | null, AppError>>
     else return { status: "error", error: e  as any };
 }
 },
+async completionScope(connId: string, database: string) : Promise<Result<SchemaCache, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("completion_scope", { connId, database }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async completionObjects(connId: string, database: string, schema: string | null) : Promise<Result<CompletionObject[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("completion_objects", { connId, database, schema }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async exportConnections(ids: NodeId[], passphrase: string | null, path: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_connections", { ids, passphrase, path }) };
@@ -331,8 +347,18 @@ export type CheckDetail = { name: string; expression: string;
  * (e.g. `CHECK ((total >= 0)) NOT VALID`).
  */
 definition: string | null }
+/**
+ * A column's name and its type as the server spells it: MySQL `COLUMNS.COLUMN_TYPE`
+ * (e.g. `enum('a','b')`, `decimal(12,2)`), PostgreSQL `format_type(atttypid, atttypmod)`
+ * (e.g. `numeric(12,2)`).
+ */
+export type ColumnBrief = { name: string; data_type: string }
 export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; comment: string | null }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
+/**
+ * A table or view offered by autocomplete after `db.` / `schema.`.
+ */
+export type CompletionObject = { schema: string | null; name: string; kind: ObjectKind }
 export type ConflictKind = 
 /**
  * A stored connection has the same id; resolved by the [`ConflictPolicy`].
@@ -445,11 +471,12 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  */
 updated_at: string }
 /**
- * Table / view names and their column names of the connection's default database
- * (PostgreSQL: of the schemas in `current_schemas(false)`), loaded in the background.
+ * Table / view names and their columns (with types) of one database (PostgreSQL: of the
+ * schemas in `current_schemas(false)` of that database's metadata session). One per
+ * database, loaded lazily (see `SessionManager::schema_cache_for`).
  */
 export type SchemaCache = { database: string; tables: SchemaCacheTable[] }
-export type SchemaCacheTable = { schema: string | null; name: string; kind: ObjectKind; columns: string[] }
+export type SchemaCacheTable = { schema: string | null; name: string; kind: ObjectKind; columns: ColumnBrief[] }
 export type SchemaInfo = { name: string }
 /**
  * Where objects are listed: a database, plus a schema on PostgreSQL.

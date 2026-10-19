@@ -150,8 +150,8 @@ pub trait Introspector: Send + Sync {
         scope: &Scope,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError>;
-    /// Column names of every table and view of `scope` the user can see, in ONE query
-    /// (the SchemaCache needs names only; no statistics are read).
+    /// Column names and types of every table and view of `scope` the user can see, in ONE
+    /// query (the SchemaCache needs nothing more; no statistics are read).
     async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError>;
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError>;
     async fn object_ddl(&self, obj: &ObjectRef) -> Result<String, DbError>;
