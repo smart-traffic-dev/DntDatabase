@@ -24,8 +24,8 @@ pub struct SessionEffect {
 /// - MySQL: an assignment of a session-scope `SET` (anything but `GLOBAL`,
 ///   `PERSIST`, `PERSIST_ONLY`, `@@global.`, `@@persist.`, `@@persist_only.`;
 ///   user variables always), `CREATE [OR REPLACE] TEMPORARY`, `PREPARE`, `LOCK
-///   TABLES` and a depth-0 user-variable assignment in any other statement (`@v
-///   := …`, `INTO @v`) are `custom`; an assignment to the session `sql_mode` also
+///   TABLES` and a user-variable assignment in any other statement (`@v := …` at
+///   any depth, depth-0 `INTO @v`) are `custom`; an assignment to the session `sql_mode` also
 ///   sets `sql_mode`; a plain `USE db` sets `use_db`. The `autocommit` assignment
 ///   is transaction control, tracked by the drivers, and is skipped (the other
 ///   assignments of the same `SET` still count).
@@ -73,8 +73,8 @@ fn is_user_var(t: Option<&Token>) -> bool {
     matches!(t.map(|t| t.kind), Some(TokKind::Word(w)) if w.starts_with('@') && !w.starts_with("@@"))
 }
 
-/// Whether a statement other than `SET` assigns a user variable at depth 0:
-/// `@v := …` or `… INTO @v`.
+/// Whether a statement other than `SET` assigns a user variable: `@v := …` at any
+/// paren depth, or `… INTO @v` at depth 0.
 fn assigns_user_variable(toks: &[Token]) -> bool {
     let punct = |i: usize, c: u8| toks.get(i).map(|t| t.kind) == Some(TokKind::Punct(c));
     let mut depth = 0usize;
@@ -82,12 +82,14 @@ fn assigns_user_variable(toks: &[Token]) -> bool {
         match t.kind {
             TokKind::Open => depth += 1,
             TokKind::Close => depth = depth.saturating_sub(1),
-            _ if depth > 0 => {}
-            TokKind::Word(w) if w.eq_ignore_ascii_case("INTO") && is_user_var(toks.get(i + 1)) => {
-                return true
-            }
+            // Outside `SET`, `:=` is always an assignment, at any depth.
             TokKind::Word(_)
                 if is_user_var(Some(t)) && punct(i + 1, b':') && punct(i + 2, b'=') =>
+            {
+                return true
+            }
+            TokKind::Word(w)
+                if depth == 0 && w.eq_ignore_ascii_case("INTO") && is_user_var(toks.get(i + 1)) =>
             {
                 return true
             }
@@ -497,6 +499,10 @@ mod tests {
             "SELECT @v:=1",
             "UPDATE t SET a = @n := @n + 1",
             "/*!40101 SELECT 1 INTO @v */",
+            // Outside `SET`, `:=` assigns at any paren depth.
+            "SELECT (@v := 1)",
+            "SELECT a, (@rn := @rn + 1) AS rn FROM t",
+            "SELECT IF(@v := a, 1, 0) FROM t",
         ] {
             assert!(custom(sql, MYSQL), "{sql}");
         }
@@ -506,8 +512,9 @@ mod tests {
             "SELECT a INTO OUTFILE '/tmp/x' FROM t",
             "SELECT @v = 1",
             "SELECT 'INTO @v'",
-            "SELECT (@v := 1)",
             "SELECT @@x := 1",
+            // `INTO` only counts at depth 0.
+            "SELECT (SELECT a INTO @v FROM t)",
         ] {
             assert!(!custom(sql, MYSQL), "{sql}");
         }
