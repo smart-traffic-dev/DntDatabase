@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { api, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
+import { api, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { ConnectionConfig, SecretsInput } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt } from '../store/dialogs';
@@ -42,7 +42,7 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
       await finishOpen(id, opened.info);
     } catch (e) {
       const err = toAppError(e);
-      if (isHostKeyUnknown(err)) {
+      if (isHostKeyUnknown(err) || isHostKeyMismatch(err)) {
         showPrompt({ kind: 'hostKey', connectionId: id, error: err });
       } else if (isPasswordRequired(err) && prompt.kind === 'hostKey') {
         showPrompt({ kind: 'password', connectionId: id, error: err });
@@ -64,6 +64,7 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
         port={e.port ?? ssh?.port ?? 22}
         fingerprint={e.fingerprint ?? ''}
         keyOpenssh={e.key_openssh ?? ''}
+        mismatchMessage={isHostKeyMismatch(e) ? e.message : undefined}
         onDone={(trusted) => {
           if (trusted) void attempt(null);
           else closePrompt();
@@ -122,8 +123,14 @@ export function DialogHost() {
             closeRequest();
             if (!saved) return;
             // The backend closed the runtime on update: show the connection as closed.
-            if (useConnections.getState().info.has(id)) void useTree.getState().closeConnection(id).then(reload);
-            else void reload();
+            void (async () => {
+              try {
+                if (useConnections.getState().info.has(id)) await useTree.getState().closeConnection(id);
+                await reload();
+              } catch (e) {
+                useTree.setState({ error: toAppError(e) });
+              }
+            })();
           }}
         />
       );
@@ -189,7 +196,7 @@ export function DialogHost() {
   return (
     <>
       {dialog}
-      {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}`} prompt={prompt} />}
+      {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}:${prompt.error.fingerprint ?? ''}:${prompt.error.stage ?? ''}`} prompt={prompt} />}
     </>
   );
 }

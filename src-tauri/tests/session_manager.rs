@@ -482,6 +482,39 @@ async fn test_connection_opens_and_closes_without_persisting() {
 }
 
 #[tokio::test]
+async fn test_connection_falls_back_to_stored_secrets_and_typed_ones_win() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(
+        &f,
+        config(DbKind::MySql, SecretMode::Saved),
+        Some("stored-pw"),
+    );
+    let cfg = f.repo.get(id).unwrap();
+
+    f.sm.test(&cfg, secrets(None)).await.unwrap();
+    assert_eq!(
+        f.log.last_password.lock().unwrap().as_deref(),
+        Some("stored-pw")
+    );
+
+    f.sm.test(&cfg, secrets(Some("typed-pw"))).await.unwrap();
+    assert_eq!(
+        f.log.last_password.lock().unwrap().as_deref(),
+        Some("typed-pw")
+    );
+
+    // Ask mode and unsaved (nil id) configs have nothing to fall back to.
+    let mut ask = cfg.clone();
+    ask.secret_mode = SecretMode::Ask;
+    f.sm.test(&ask, secrets(None)).await.unwrap();
+    assert_eq!(f.log.last_password.lock().unwrap().as_deref(), None);
+    let mut fresh = cfg;
+    fresh.id = Uuid::nil();
+    f.sm.test(&fresh, secrets(None)).await.unwrap();
+    assert_eq!(f.log.last_password.lock().unwrap().as_deref(), None);
+}
+
+#[tokio::test]
 async fn ask_mode_prompt_without_password_is_rejected() {
     let f = fixture(DbKind::MySql, false);
     let id = save(&f, config(DbKind::MySql, SecretMode::Ask), None);

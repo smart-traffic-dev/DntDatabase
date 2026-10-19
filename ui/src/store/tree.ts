@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { api, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
+import { api, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionSummary, Group, ServerInfo } from '../bindings';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
@@ -271,7 +271,11 @@ export const useTree = create<TreeState>()((set, get) => {
     } catch (e) {
       if (!latest()) return;
       const error = toAppError(e);
-      const prompt = isPasswordRequired(error) ? 'password' : isHostKeyUnknown(error) ? 'hostKey' : null;
+      const prompt = isPasswordRequired(error)
+        ? 'password'
+        : isHostKeyUnknown(error) || isHostKeyMismatch(error)
+          ? 'hostKey'
+          : null;
       if (node.kind === 'connection' && prompt) {
         // Task 18's dialogs answer the prompt, then expand the connection again.
         patch(id, { loading: false });

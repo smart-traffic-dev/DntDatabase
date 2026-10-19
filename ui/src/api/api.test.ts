@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { AppErrorEx, api } from '.';
+import { AppErrorEx, api, isPasswordRequired } from '.';
 import { Failure, appError, mockBackend } from '../test/backend';
 
 describe('api', () => {
@@ -19,6 +19,17 @@ describe('api', () => {
     expect((err as AppErrorEx).message).toBe('table is gone');
     expect((err as AppErrorEx).server_code).toBe('1146');
     expect((err as AppErrorEx).retryable).toBe(true);
+  });
+
+  it('shows password_required as a human message and still recognizes it', async () => {
+    mockBackend({
+      list_tree: () => {
+        throw new Failure(appError('secret', 'password_required'));
+      },
+    });
+    const err = (await api.listTree().catch((e: unknown) => e)) as AppErrorEx;
+    expect(err.message).toBe('A password is required.');
+    expect(isPasswordRequired(err)).toBe(true);
   });
 
   it('resolves to the value of a successful command and sends its arguments', async () => {

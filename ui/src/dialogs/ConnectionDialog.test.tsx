@@ -60,6 +60,10 @@ describe('ConnectionDialog', () => {
     expect(alert).toHaveTextContent('Key file does not exist');
     expect(screen.getByLabelText('Key file')).toHaveAttribute('aria-invalid', 'true');
     await waitFor(() => expect(screen.getByLabelText('Key file')).toHaveFocus());
+    // Editing the field clears its error.
+    await user.type(screen.getByLabelText('Key file'), 'k');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Key file')).not.toHaveAttribute('aria-invalid');
   });
 
   it('test_success_shows_version_and_timings', async () => {

@@ -53,6 +53,49 @@ describe('DialogHost', () => {
     await waitFor(() => expect(useTree.getState().expanded.has(`conn:${ids.prod}`)).toBe(true));
   });
 
+  it('host key retry hitting another unknown key leaves a usable dialog', async () => {
+    const unknown = (fp: string) =>
+      appError('ssh_host_key_unknown', 'Unknown host key', {
+        host: 'bastion-01',
+        port: 22,
+        fingerprint: fp,
+        key_openssh: `ssh-ed25519 ${fp}`,
+      });
+    mockBackend({ list_tree: () => sampleTree(), trust_host_key: () => null, open_connection: () => { throw new Failure(unknown('SHA256:second')); } });
+    await seed();
+    useDialogs.getState().showPrompt({ kind: 'hostKey', connectionId: ids.prod, error: unknown('SHA256:first') });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    await user.click(screen.getByRole('button', { name: 'Trust and connect' }));
+    expect(await screen.findByText('SHA256:second')).toBeInTheDocument();
+    const trust = screen.getByRole('button', { name: 'Trust and connect' });
+    expect(trust).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(useDialogs.getState().prompt).toBeNull();
+    expect(callsOf('trust_host_key')).toHaveLength(1);
+  });
+
+  it('host key mismatch on tree open shows the warning without a trust button', async () => {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => {
+        throw new Failure(appError('ssh', 'Host key for bastion-01 changed', { stage: 'host_key_mismatch' }));
+      },
+    });
+    await seed();
+    useTree.getState().expand(`conn:${ids.prod}`);
+    await waitFor(() => expect(useDialogs.getState().prompt).not.toBeNull());
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    const dialog = screen.getByRole('alertdialog');
+    expect(dialog).toHaveTextContent('has CHANGED');
+    expect(dialog).toHaveTextContent('Remove the old key from known_hosts manually to continue');
+    expect(screen.queryByRole('button', { name: /trust/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(useDialogs.getState().prompt).toBeNull();
+  });
+
   it('cancelling the prompt leaves the connection collapsed', async () => {
     mockBackend({ list_tree: () => sampleTree() });
     await seed();

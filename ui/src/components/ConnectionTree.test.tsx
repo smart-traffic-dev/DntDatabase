@@ -139,7 +139,7 @@ describe('ConnectionTree', () => {
     await waitFor(() => expect(useDialogs.getState().prompt).not.toBeNull());
     const prompt = useDialogs.getState().prompt;
     expect(prompt).toMatchObject({ kind: 'password', connectionId: ids.prod });
-    expect(prompt?.error.message).toBe('password_required');
+    expect(prompt?.error.message).toBe('A password is required.');
     expect(row('shop-prod')).toHaveAttribute('aria-expanded', 'false');
     expect(callsOf('list_databases')).toHaveLength(0);
   });

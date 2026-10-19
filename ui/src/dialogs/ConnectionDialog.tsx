@@ -42,6 +42,28 @@ const FIELDS: Record<string, { tab: TabId; id: string }> = {
   'ssl.cert_path': { tab: 'ssl', id: 'cd-ssl-cert' },
 };
 
+/** Backend field path -> the form value it comes from. */
+const FIELD_KEYS: Record<string, keyof Form> = {
+  name: 'name',
+  group_id: 'groupId',
+  parent_id: 'groupId',
+  host: 'host',
+  port: 'port',
+  'ssh.host': 'sshHost',
+  'ssh.user': 'sshUser',
+  'ssh.key_path': 'sshKeyPath',
+  passphrase: 'passphrase',
+  'ssl.ca_path': 'sslCa',
+  'ssl.cert_path': 'sslCert',
+};
+
+interface FieldError {
+  field: string;
+  message: string;
+  /** Value of the input when the error arrived. */
+  value: string;
+}
+
 const STAGE_LABELS: Record<string, string> = {
   resolve_secrets: 'Secrets',
   open_tunnel: 'SSH tunnel',
@@ -153,13 +175,19 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const groups = useConnections((s) => s.groups);
   const [form, setForm] = useState<Form>(() => initialForm(initial));
   const [tab, setTab] = useState<TabId>('general');
-  const [fieldError, setFieldError] = useState<{ field: string; message: string } | null>(null);
+  const [rawFieldError, setFieldError] = useState<FieldError | null>(null);
   const [saveError, setSaveError] = useState<AppError | null>(null);
   const [saving, setSaving] = useState(false);
   const [test, setTest] = useState<TestState>({ state: 'idle' });
   const [hostKey, setHostKey] = useState<HostKeyRequest | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const testSeq = useRef(0);
+
+  // A field error goes away as soon as its input is edited.
+  const fieldError =
+    rawFieldError && String(form[FIELD_KEYS[rawFieldError.field] ?? 'name']) === rawFieldError.value
+      ? rawFieldError
+      : null;
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
   const mariadb = form.engine === 'mariadb';
@@ -169,7 +197,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     if (!fieldError) return;
     const target = FIELDS[fieldError.field];
     if (target) document.getElementById(target.id)?.focus();
-  }, [fieldError, tab]);
+  }, [fieldError]);
 
   const chooseEngine = (engine: Engine) =>
     setForm((f) => ({
@@ -252,7 +280,11 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     const target = error.field ? FIELDS[error.field] : undefined;
     if (error.kind !== 'config' || !error.field || !target) return false;
     setTab(target.tab);
-    setFieldError({ field: error.field, message: error.message });
+    setFieldError({
+      field: error.field,
+      message: error.message,
+      value: String(form[FIELD_KEYS[error.field] ?? 'name']),
+    });
     return true;
   };
 

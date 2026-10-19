@@ -57,6 +57,20 @@ export class AppErrorEx extends Error implements AppError {
 
 /** Anything thrown while calling the backend, as an `AppError` payload. */
 export function toAppError(e: unknown): AppError {
+  return humanize(normalize(e));
+}
+
+const PASSWORD_REQUIRED = 'password_required';
+const PASSWORD_REQUIRED_TEXT = 'A password is required.';
+
+/** Backend codes that would reach the user as-is get a readable message. */
+function humanize(error: AppError): AppError {
+  return error.kind === 'secret' && error.message === PASSWORD_REQUIRED
+    ? { ...error, message: PASSWORD_REQUIRED_TEXT }
+    : error;
+}
+
+function normalize(e: unknown): AppError {
   if (e instanceof AppErrorEx) return e.toAppError();
   // A real AppError payload (`kind` and `message` strings); missing optional fields become null.
   if (typeof e === 'object' && e !== null) {
@@ -90,7 +104,7 @@ function internal(message: string): AppError {
 
 /** The backend asks the user for a password (`secret` / `password_required`). */
 export function isPasswordRequired(e: AppError): boolean {
-  return e.kind === 'secret' && e.message === 'password_required';
+  return e.kind === 'secret' && (e.message === PASSWORD_REQUIRED || e.message === PASSWORD_REQUIRED_TEXT);
 }
 
 /** The SSH server presented a key that differs from the one in known_hosts. */

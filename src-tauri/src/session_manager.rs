@@ -336,6 +336,9 @@ impl SessionManager {
 
     /// Runs the connect pipeline for an unsaved config with the given secrets, then closes
     /// everything again. Nothing is stored and no runtime is kept.
+    ///
+    /// For a saved connection (non-nil id, `Saved` mode) secrets the user did not type fall
+    /// back to the stored ones; typed secrets always win. They never leave the backend.
     pub async fn test(
         &self,
         cfg: &ConnectionConfig,
@@ -344,7 +347,21 @@ impl SessionManager {
         cfg.validate()?;
         let mut timings = Vec::new();
         let started = Instant::now();
-        let secrets = ConnSecrets::from(secrets);
+        let mut secrets = ConnSecrets::from(secrets);
+        if cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil() {
+            let fill = |slot: &mut Option<SecretString>, kind| -> Result<(), DbError> {
+                if slot.is_none() {
+                    *slot = self.secrets.get(cfg.id, kind)?;
+                }
+                Ok(())
+            };
+            fill(&mut secrets.db_password, SecretKind::DbPassword)?;
+            fill(&mut secrets.ssh_password, SecretKind::SshPassword)?;
+            fill(
+                &mut secrets.ssh_key_passphrase,
+                SecretKind::SshKeyPassphrase,
+            )?;
+        }
         secrets.check_ssh(cfg)?;
         record(&mut timings, ConnectStage::ResolveSecrets, started);
         let opened = self
