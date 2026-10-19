@@ -313,14 +313,38 @@ fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
     }
 }
 
-/// `killed_unknown`: [`killed_outcome_unknown`] for the statement that failed.
-fn map_exec_error(e: tokio_postgres::Error, killed_unknown: bool) -> DbError {
-    if sqlstate(&e) == Some(QUERY_CANCELED) {
-        return DbError::Cancelled {
-            outcome_unknown: killed_unknown,
-        };
+/// How a statement error (not a timeout of ours) is reported.
+#[derive(Debug, PartialEq, Eq)]
+enum Failure {
+    /// The connection went away: `ConnectionLost` with [`may_have_committed`], even when a
+    /// cancel was pending (the statement may have committed before the socket died).
+    Lost,
+    /// Our cancel was pending; `outcome_unknown` only when the cancel stopped a
+    /// non-atomic statement ([`killed_outcome_unknown`]).
+    Cancelled { outcome_unknown: bool },
+    /// The server's own error, `query_canceled` we did not ask for included (server
+    /// `statement_timeout`, a DBA's `pg_cancel_backend`): its message and SQLSTATE are
+    /// what the user should see.
+    Server,
+}
+
+/// `cancelled`: our cancel targeted this call; `query_canceled`: the error is `57014`;
+/// `killed_unknown`: [`killed_outcome_unknown`] for the statement.
+fn failure_kind(
+    conn_lost: bool,
+    cancelled: bool,
+    query_canceled: bool,
+    killed_unknown: bool,
+) -> Failure {
+    if conn_lost {
+        Failure::Lost
+    } else if cancelled {
+        Failure::Cancelled {
+            outcome_unknown: query_canceled && killed_unknown,
+        }
+    } else {
+        Failure::Server
     }
-    map_pg_error(e, ConnectStage::Execute)
 }
 
 /// Upper-cased leading words of `sql` with comments removed (at most `n`). Non-ASCII
@@ -604,17 +628,17 @@ impl Session for PgSession {
                     // (`in_tx` kept): the server answers `25P02` until `ROLLBACK`.
                     self.track_failed(kind, &stmt.text, was_in_tx, sqlstate(&err));
                 }
-                let killed_unknown = killed_outcome_unknown(was_in_tx, &stmt.text);
-                if run.cancelled() {
-                    // A statement the cancel stopped (or whose connection went away) may
-                    // have applied part of its work; one that failed on its own did not.
-                    let killed = sqlstate(&err) == Some(QUERY_CANCELED) || conn_lost;
-                    return Err(DbError::Cancelled {
-                        outcome_unknown: killed && killed_unknown,
-                    });
-                }
-                if !conn_lost {
-                    return Err(map_exec_error(err, killed_unknown));
+                match failure_kind(
+                    conn_lost,
+                    run.cancelled(),
+                    sqlstate(&err) == Some(QUERY_CANCELED),
+                    killed_outcome_unknown(was_in_tx, &stmt.text),
+                ) {
+                    Failure::Cancelled { outcome_unknown } => {
+                        return Err(DbError::Cancelled { outcome_unknown })
+                    }
+                    Failure::Server => return Err(map_pg_error(err, ConnectStage::Execute)),
+                    Failure::Lost => {}
                 }
                 // Captured before the reconnect resets the session state.
                 let notes = self.notes(was_in_tx);
@@ -640,13 +664,14 @@ impl Session for PgSession {
                         format!("{cause}; reconnecting failed: {e}"),
                     ));
                 }
-                if run.cancelled() {
-                    return Err(DbError::cancelled());
-                }
                 // Only a read that produced nothing yet, on a session with nothing a
                 // reconnect cannot restore, is safe to run again silently.
                 if kind != StatementKind::Read || emitted || custom {
                     return Err(lost(false, unknown, cause));
+                }
+                // ... and not when the user asked to stop it (nothing was applied).
+                if run.cancelled() {
+                    return Err(DbError::cancelled());
                 }
             }
             self.track_after(kind, &stmt.text, was_in_tx);
@@ -954,6 +979,51 @@ mod tests {
             None
         );
         assert_eq!(tx_state_after(Read, "SELECT 1", false, ok), None);
+    }
+
+    #[test]
+    fn a_lost_connection_wins_over_a_pending_cancel() {
+        // The socket died after the Cancel click: reported like any other loss (the
+        // caller then applies `may_have_committed`), never as a not-applied cancel.
+        for (query_canceled, killed_unknown) in [(false, false), (true, true), (false, true)] {
+            assert_eq!(
+                failure_kind(true, true, query_canceled, killed_unknown),
+                Failure::Lost
+            );
+            assert_eq!(
+                failure_kind(true, false, query_canceled, killed_unknown),
+                Failure::Lost
+            );
+        }
+        // Stopped by our cancel: the outcome depends on the statement.
+        assert_eq!(
+            failure_kind(false, true, true, true),
+            Failure::Cancelled {
+                outcome_unknown: true
+            }
+        );
+        assert_eq!(
+            failure_kind(false, true, true, false),
+            Failure::Cancelled {
+                outcome_unknown: false
+            }
+        );
+        // Failed on its own while a cancel was pending: nothing was killed.
+        assert_eq!(
+            failure_kind(false, true, false, true),
+            Failure::Cancelled {
+                outcome_unknown: false
+            }
+        );
+    }
+
+    #[test]
+    fn query_canceled_we_did_not_ask_for_is_a_server_error() {
+        // Server `statement_timeout` or a DBA's `pg_cancel_backend`: the server's own
+        // message and SQLSTATE reach the user.
+        assert_eq!(failure_kind(false, false, true, true), Failure::Server);
+        assert_eq!(failure_kind(false, false, true, false), Failure::Server);
+        assert_eq!(failure_kind(false, false, false, false), Failure::Server);
     }
 
     fn refused() -> DbError {

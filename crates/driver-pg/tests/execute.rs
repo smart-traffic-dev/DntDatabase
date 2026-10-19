@@ -851,6 +851,11 @@ async fn cancel_twice_keeps_session_usable() {
             res.map(|(s, _)| s)
         );
         assert!(s.in_transaction(), "{t:?}: the aborted block is still open");
+        // A PG cancel request is asynchronous: the postmaster signals the backend
+        // (SIGINT) after the request returned, so a late click could in principle still
+        // land on whatever the backend runs next. The generation check stops our own
+        // clicks once the call is over; the remaining window is one signal delivery,
+        // which the sleep below would expose as a 57014 instead of success.
         assert_eq!(
             sqlstate_of(&run(&s, "SELECT 1").await),
             Some("25P02"),
@@ -898,6 +903,10 @@ async fn timeout_racing_cancel_keeps_session_usable() {
             res.map(|(s, _)| s)
         );
         assert!(s.in_transaction(), "{t:?}");
+        // The cancel request is asynchronous (the backend gets a SIGINT after the request
+        // returned): if the timeout's own cancel ended the statement first, the click's
+        // signal could still be in flight. The generation check skips clicks after the
+        // call ended; the sleep below would show a stray signal as a 57014.
         run(&s, "ROLLBACK").await.unwrap();
         run(&s, "SELECT pg_sleep(0.5)")
             .await
@@ -1099,5 +1108,76 @@ async fn transaction_state_follows_the_server() {
         assert!(s.in_transaction(), "{t:?}");
         run(&s, "ROLLBACK").await.unwrap();
         assert!(!s.in_transaction(), "{t:?}");
+    }
+}
+
+/// The connection dies after a Cancel click whose request the statement swallowed: the
+/// loss wins over the pending cancel. Outside a transaction the write may have committed
+/// (unknown outcome); inside one it was rolled back with the transaction, and the
+/// session's state says so without a stale "rolled back" on the next call.
+/// Deterministic: the `DO` loop ignores every cancel, so only the termination ends it.
+#[tokio::test]
+async fn connection_lost_after_cancel_is_reported_as_lost() {
+    require_db!();
+    let swallowing_write = "DO $$ BEGIN INSERT INTO t4_cancel_lost VALUES (1); \
+         LOOP BEGIN PERFORM pg_sleep(0.1), 't4_cancel_lost'; \
+         EXCEPTION WHEN query_canceled THEN NULL; END; END LOOP; END $$";
+    for t in Target::pg() {
+        for in_tx in [false, true] {
+            let s = connect(t).await;
+            let admin = connect(t).await;
+            run(&s, "CREATE TEMP TABLE t4_cancel_lost (v int)")
+                .await
+                .unwrap();
+            if in_tx {
+                run(&s, "BEGIN").await.unwrap();
+            }
+            let pid = backend_pid(&s).await;
+            let handle = s.cancel_handle();
+            let (res, cancel) = tokio::join!(run(&s, swallowing_write), async {
+                wait_running(&admin, "t4_cancel_lost").await;
+                let cancel = handle.cancel().await;
+                kill(t, pid).await;
+                cancel
+            });
+            cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
+            match &res {
+                Err(DbError::ConnectionLost {
+                    was_in_tx,
+                    outcome_unknown,
+                    ..
+                }) => {
+                    assert_eq!(*was_in_tx, in_tx, "{t:?}");
+                    assert_eq!(*outcome_unknown, !in_tx, "{t:?} in_tx={in_tx}");
+                }
+                other => panic!("{t:?} in_tx={in_tx}: {:?}", other.as_ref().map(|(s, _)| s)),
+            }
+            assert!(!s.in_transaction(), "{t:?} in_tx={in_tx}");
+            let (_, c) = run(&s, "SELECT 1")
+                .await
+                .unwrap_or_else(|e| panic!("{t:?} in_tx={in_tx}: stale state: {e}"));
+            assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
+        }
+    }
+}
+
+/// A `query_canceled` we did not ask for (server `statement_timeout`) is the server's
+/// own error, not a Cancel.
+#[tokio::test]
+async fn server_statement_timeout_is_a_server_error() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let res = run(&s, "SET statement_timeout = '200ms'; SELECT pg_sleep(2)").await;
+        match &res {
+            Err(DbError::Server {
+                sqlstate, message, ..
+            }) => {
+                assert_eq!(sqlstate.as_deref(), Some("57014"), "{t:?}");
+                assert!(message.contains("statement timeout"), "{t:?}: {message}");
+            }
+            other => panic!("{t:?}: {:?}", other.as_ref().map(|(s, _)| s)),
+        }
+        run(&s, "RESET statement_timeout; SELECT 1").await.unwrap();
     }
 }
