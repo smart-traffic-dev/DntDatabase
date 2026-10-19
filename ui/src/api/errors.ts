@@ -93,6 +93,11 @@ export function isPasswordRequired(e: AppError): boolean {
   return e.kind === 'secret' && e.message === 'password_required';
 }
 
+/** The SSH server presented a key that differs from the one in known_hosts. */
+export function isHostKeyMismatch(e: AppError): boolean {
+  return e.kind === 'ssh' && e.stage === 'host_key_mismatch';
+}
+
 /** The SSH server's host key is not trusted yet. */
 export function isHostKeyUnknown(e: AppError): boolean {
   return e.kind === 'ssh_host_key_unknown';

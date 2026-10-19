@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { DialogHost } from './dialogs/DialogHost';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
@@ -49,6 +50,7 @@ export default function App() {
         </ErrorBoundary>
       </div>
       <StatusBar />
+      <DialogHost />
     </div>
   );
 }
