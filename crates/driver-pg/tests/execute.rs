@@ -558,8 +558,9 @@ async fn deadlock_keeps_the_transaction() {
         let b = connect(t).await;
         run(
             &a,
-            "CREATE TABLE IF NOT EXISTS t12_deadlock (id int PRIMARY KEY, v int); \
-             INSERT INTO t12_deadlock VALUES (1, 0), (2, 0) ON CONFLICT DO NOTHING",
+            "DROP TABLE IF EXISTS t12_deadlock; \
+             CREATE TABLE t12_deadlock (id int PRIMARY KEY, v int); \
+             INSERT INTO t12_deadlock VALUES (1, 0), (2, 0)",
         )
         .await
         .unwrap();
@@ -594,5 +595,7 @@ async fn deadlock_keeps_the_transaction() {
             !victim.in_transaction() && !survivor.in_transaction(),
             "{t:?}"
         );
+        // Leave no permanent table behind (introspection snapshots list the schema).
+        run(&a, "DROP TABLE t12_deadlock").await.unwrap();
     }
 }

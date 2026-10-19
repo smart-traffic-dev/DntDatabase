@@ -1,0 +1,121 @@
+---
+source: crates/driver-pg/tests/introspect.rs
+expression: d
+---
+object:
+  database: dnt_fixture
+  schema: sales
+  name: invoices
+  kind: Table
+columns:
+  - name: id
+    ordinal: 1
+    db_type: bigint
+    nullable: false
+    default: ~
+    auto_increment: true
+    identity: ALWAYS
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: order_id
+    ordinal: 2
+    db_type: integer
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: amount
+    ordinal: 3
+    db_type: "numeric(12,2)"
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: amount_with_tax
+    ordinal: 4
+    db_type: "numeric(12,2)"
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: "round((amount * 1.1), 2)"
+    invisible: false
+    comment: ~
+  - name: tags
+    ordinal: 5
+    db_type: "text[]"
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: meta
+    ordinal: 6
+    db_type: jsonb
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: issued_at
+    ordinal: 7
+    db_type: timestamp with time zone
+    nullable: false
+    default: now()
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: ttl
+    ordinal: 8
+    db_type: interval
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+primary_key:
+  name: invoices_pkey
+  unique: true
+  primary: true
+  columns:
+    - id
+  expression: ~
+  method: btree
+  definition: PRIMARY KEY (id)
+indexes: []
+foreign_keys:
+  - name: invoices_order_id_fkey
+    columns:
+      - order_id
+    ref_schema: public
+    ref_table: orders
+    ref_columns:
+      - id
+    on_update: NO ACTION
+    on_delete: NO ACTION
+checks: []
+triggers: []
+options:
+  engine: ~
+  collation: ~
+  tablespace: ~
+  partitioned_by: ~
+  system_versioned: false
+row_estimate: "[redacted]"
+size_bytes: "[redacted]"
+comment: ~

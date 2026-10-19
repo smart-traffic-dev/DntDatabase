@@ -259,13 +259,13 @@ async fn ping_works() {
 }
 
 #[tokio::test]
-async fn introspector_is_a_placeholder() {
+async fn introspector_is_the_session() {
     require_db!();
     let s = PgDriver
         .connect(&Target::Pg17.resolved(None))
         .await
         .unwrap();
-    let err = s.introspector().list_databases().await.err();
-    assert!(matches!(err, Some(DbError::Unsupported { .. })), "{err:?}");
+    let dbs = s.introspector().list_databases().await.unwrap();
+    assert!(dbs.iter().any(|d| d.name == FIXTURE_DB), "{dbs:?}");
     s.close().await;
 }

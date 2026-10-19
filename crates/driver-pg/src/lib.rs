@@ -1,8 +1,10 @@
 //! PostgreSQL driver (12–17) built on `tokio-postgres` + rustls (`tokio-postgres-rustls`).
 
 mod cancel;
+pub mod ddl;
 mod introspect;
 mod numeric;
+mod queries;
 mod session;
 mod tls;
 mod values;

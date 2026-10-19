@@ -29,7 +29,7 @@ const LOST_STATES: [&str; 6] = ["57P01", "57P02", "57P03", "08000", "08003", "08
 
 /// One PostgreSQL connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct PgSession {
-    conn: Mutex<PgConn>,
+    pub(crate) conn: Mutex<PgConn>,
     info: ServerInfo,
     /// Settings of the established connection (TLS fallback applied); used to reconnect
     /// and by cancel requests.

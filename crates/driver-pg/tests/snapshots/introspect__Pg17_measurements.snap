@@ -1,0 +1,63 @@
+---
+source: crates/driver-pg/tests/introspect.rs
+expression: d
+---
+object:
+  database: dnt_fixture
+  schema: sales
+  name: measurements
+  kind: Table
+columns:
+  - name: id
+    ordinal: 1
+    db_type: integer
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: taken_at
+    ordinal: 2
+    db_type: date
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: value
+    ordinal: 3
+    db_type: numeric
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+primary_key:
+  name: measurements_pkey
+  unique: true
+  primary: true
+  columns:
+    - id
+    - taken_at
+  expression: ~
+  method: btree
+  definition: "PRIMARY KEY (id, taken_at)"
+indexes: []
+foreign_keys: []
+checks: []
+triggers: []
+options:
+  engine: ~
+  collation: ~
+  tablespace: ~
+  partitioned_by: RANGE (taken_at)
+  system_versioned: false
+row_estimate: "[redacted]"
+size_bytes: "[redacted]"
+comment: ~
