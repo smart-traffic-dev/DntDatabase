@@ -69,6 +69,8 @@ pub enum ConnState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct StageTiming {
     pub stage: ConnectStage,
+    /// Exported as a JS number (milliseconds).
+    #[specta(type = f64)]
     pub ms: u64,
 }
 

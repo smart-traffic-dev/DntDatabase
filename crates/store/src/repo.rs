@@ -23,6 +23,8 @@ pub struct Group {
     pub id: Uuid,
     pub parent_id: Option<Uuid>,
     pub name: String,
+    /// Exported as a JS number (positions are small).
+    #[specta(type = f64)]
     pub sort_order: i64,
 }
 

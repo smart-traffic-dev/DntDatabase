@@ -9,17 +9,33 @@ const MAX_SAFE: u64 = 9_007_199_254_740_992;
 /// Maximum number of bytes kept in `Value::Bytes::preview`.
 const BYTES_PREVIEW_LEN: usize = 64;
 
+/// TypeScript type of `Value::Int` / `Value::UInt`: a number when |x| ≤ 2^53, else a string.
+/// Only used for the bindings (`#[specta(type = …)]`, exported as
+/// `type JsInteger = number | string`), never constructed.
+#[derive(Type)]
+#[serde(untagged)]
+#[allow(dead_code)]
+pub enum JsInteger {
+    Number(f64),
+    String(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "t", content = "v")]
 pub enum Value {
     Null,
     Bool(bool),
-    Int(#[serde(serialize_with = "serialize_int", deserialize_with = "deserialize_int")] i64),
+    Int(
+        #[serde(serialize_with = "serialize_int", deserialize_with = "deserialize_int")]
+        #[specta(type = JsInteger)]
+        i64,
+    ),
     UInt(
         #[serde(
             serialize_with = "serialize_uint",
             deserialize_with = "deserialize_uint"
         )]
+        #[specta(type = JsInteger)]
         u64,
     ),
     Float(f64),
@@ -28,6 +44,8 @@ pub enum Value {
     Json(String),
     Uuid(String),
     Bytes {
+        /// A byte length; far below 2^53 in practice, so a plain number.
+        #[specta(type = f64)]
         len: u64,
         preview: Vec<u8>,
     },

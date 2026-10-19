@@ -17,6 +17,8 @@ pub struct ConnectionConfig {
     pub id: Uuid,
     pub group_id: Option<Uuid>,
     pub name: String,
+    /// Exported as a JS number (positions are small).
+    #[specta(type = f64)]
     pub sort_order: i64,
     pub kind: DbKind,
     pub host: String,

@@ -47,6 +47,8 @@ pub struct ObjectSummary {
     pub name: String,
     pub kind: ObjectKind,
     pub comment: Option<String>,
+    /// Exported as a JS number: estimates stay far below 2^53.
+    #[specta(type = Option<f64>)]
     pub row_estimate: Option<u64>,
 }
 
@@ -126,7 +128,10 @@ pub struct TableDetail {
     pub checks: Vec<CheckDetail>,
     pub triggers: Vec<TriggerDetail>,
     pub options: TableOptions,
+    /// Exported as JS numbers: estimates and sizes stay far below 2^53.
+    #[specta(type = Option<f64>)]
     pub row_estimate: Option<u64>,
+    #[specta(type = Option<f64>)]
     pub size_bytes: Option<u64>,
     pub comment: Option<String>,
 }
