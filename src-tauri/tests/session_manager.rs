@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, ExecSummary, Introspector, ResultSummary,
-    RowSink, Session,
+    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
+    StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
@@ -13,7 +13,9 @@ use dnt_core::meta::{
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
 use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
+use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
+use dnt_core::tx::TxState;
 use dnt_store::db::open_in_memory;
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::KnownHosts;
@@ -120,29 +122,37 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
-    async fn execute(
+    async fn execute_one(
         &self,
-        _sql: &str,
-        _opts: ExecOptions,
+        _stmt: &str,
+        _kind: StatementKind,
+        _opts: &ExecOptions,
         sink: &mut dyn RowSink,
-    ) -> Result<ExecSummary, DbError> {
-        sink.result_start(&[]);
-        sink.result_end(&ResultSummary {
+    ) -> Result<StmtOutcome, DbError> {
+        let summary = ResultSummary {
             affected: None,
             row_count: 0,
             truncated: false,
             elapsed_ms: 0,
-        });
-        Ok(ExecSummary::default())
+        };
+        sink.result_start(&[]);
+        sink.result_end(&summary);
+        Ok(StmtOutcome {
+            results: vec![summary],
+            late_completion: false,
+        })
+    }
+    fn tx_state(&self) -> TxState {
+        TxState::Idle
+    }
+    fn dialect(&self) -> Dialect {
+        Dialect::for_kind(self.info.kind)
     }
     fn cancel_handle(&self) -> CancelHandle {
         Arc::new(NoopCancel)
     }
     fn introspector(&self) -> &dyn Introspector {
         self
-    }
-    fn in_transaction(&self) -> bool {
-        false
     }
     async fn ping(&self) -> Result<(), DbError> {
         Ok(())

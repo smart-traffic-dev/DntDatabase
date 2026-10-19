@@ -17,3 +17,6 @@ serde_json.workspace = true
 specta.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

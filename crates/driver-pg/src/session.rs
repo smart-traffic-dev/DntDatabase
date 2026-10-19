@@ -1,15 +1,15 @@
-use crate::cancel::{send_cancel, CancelState, CancelTarget, PgCanceller, CANCEL_TIMEOUT};
+use crate::cancel::{send_cancel, CancelState, CancelTarget, PgCanceller, RunGuard};
 use crate::values::{column_meta, to_value, Raw};
 use crate::{close_conn, io_error, map_pg_error, open, ConnectParams, PgConn};
 use async_trait::async_trait;
 use dnt_core::driver::{
-    CancelHandle, ExecOptions, ExecSummary, Introspector, ResultSummary, RowSink, Session,
+    CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
+    SharedSink, StmtOutcome,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::ServerInfo;
-use dnt_core::sql::{
-    classify, leading_keywords, session_effect, split, Dialect, StatementKind, TxControl,
-};
+use dnt_core::sql::{leading_keywords, session_effect, Dialect, StatementKind, TxControl};
+use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,6 +32,9 @@ const LOST_STATES: [&str; 6] = ["57P01", "57P02", "57P03", "08000", "08003", "08
 /// `ConnectionLost` message for a statement that ignored the cancel request sent after
 /// its timeout.
 const STUCK: &str = "the statement did not stop after the timeout, so its connection was closed";
+/// `ConnectionLost` message for a statement that ignored the user's cancel.
+const STUCK_CANCEL: &str =
+    "the statement did not stop after it was cancelled, so its connection was closed";
 /// `ConnectionLost` message for a statement that ended during the grace period while the
 /// cancel request sent after its timeout was not confirmed (see `cancel.rs`).
 const UNCONFIRMED: &str = "the cancel request sent after the timeout could not be confirmed, \
@@ -65,9 +68,11 @@ enum StmtError {
     /// `opts.timeout` expired and the cancel request stopped the statement
     /// (`query_canceled`); whether it applied anything is [`killed_outcome_unknown`].
     Timeout,
-    /// `opts.timeout` expired and the statement did not stop after the cancel request:
-    /// its completion was never observed and the connection must be abandoned.
-    Stuck,
+    /// The statement did not stop within `opts.cancel_grace` after the cancel request
+    /// (sent at its timeout, or by the user's cancel): its completion was never observed
+    /// and the connection must be abandoned. Holds the `ConnectionLost` message
+    /// ([`STUCK`] or [`STUCK_CANCEL`]).
+    Stuck(&'static str),
     /// `opts.timeout` expired and the statement ended during the grace period, but the
     /// cancel request was not confirmed: the signal may still arrive and cancel whatever
     /// runs next, so the connection must be abandoned. `failed`: the server error it
@@ -76,6 +81,13 @@ enum StmtError {
         failed: Option<tokio_postgres::Error>,
         cancel: DbError,
     },
+}
+
+/// What made `run_timed` stop waiting for the statement alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    Timeout,
+    Cancel,
 }
 
 impl PgSession {
@@ -189,63 +201,90 @@ impl PgSession {
         Ok(())
     }
 
-    /// Runs one statement, enforcing `opts.timeout` per statement (not per script).
+    /// Runs one statement, enforcing `opts.timeout` per statement (not per script), and
+    /// watching for a cancel aimed at `run`.
     ///
-    /// On expiry a cancel request is sent and the statement awaited for a grace period so
-    /// the connection stays in sync. PostgreSQL reports a statement stopped by a cancel
-    /// with `query_canceled` (`Timeout`); a statement that completes during the grace
-    /// period instead (it finished first, or swallowed the cancel) reports what really
-    /// happened. A statement still running after the grace period is `Stuck`. Returns
-    /// whether the statement produced a result set (had columns).
+    /// On expiry a cancel request is sent; on a cancel the canceller sends it. Either way
+    /// `sink` gets [`ExecProgress::CancelSent`] and the statement is awaited for
+    /// `opts.cancel_grace` so the connection stays in sync. A statement still running
+    /// after that is `Stuck` (after [`ExecProgress::GraceExpired`]).
     ///
-    /// The script goes on after a statement that completed during the grace period:
-    /// `send_cancel` returns only once the server closed the request's connection, after
-    /// which the signal can no longer reach a later statement (see `cancel.rs`). Only when
-    /// that was not confirmed is the connection given up (`Unconfirmed`), since the signal
-    /// may still be on its way.
+    /// After a timeout, PostgreSQL reports a statement stopped by the cancel with
+    /// `query_canceled` (`Timeout`); a statement that completes during the grace period
+    /// instead (it finished first, or swallowed the cancel) reports what really happened,
+    /// a success with `late_completion`. After a user's cancel, whatever the statement
+    /// ended with is returned as is (the caller sees `run.cancelled()`). Returns whether
+    /// the statement produced a result set (had columns) and whether it was late.
+    ///
+    /// A statement that completed during the grace period after a timeout needs no new
+    /// connection: `send_cancel` returns only once the server closed the request's
+    /// connection, after which the signal can no longer reach a later statement (see
+    /// `cancel.rs`). Only when that was not confirmed is the connection given up
+    /// (`Unconfirmed`), since the signal may still be on its way.
+    #[allow(clippy::too_many_arguments)]
     async fn run_timed(
         &self,
         conn: &PgConn,
         sql: &str,
         opts: &ExecOptions,
+        run: &RunGuard,
         sink: &mut dyn RowSink,
-        summary: &mut ExecSummary,
+        results: &mut Vec<ResultSummary>,
         emitted: &mut bool,
-    ) -> Result<bool, StmtError> {
-        let Some(limit) = opts.timeout else {
-            return run_statement(&conn.client, sql, opts, sink, summary, emitted)
-                .await
-                .map_err(StmtError::Pg);
-        };
+    ) -> Result<(bool, bool), StmtError> {
+        let shared = SharedSink::new(sink);
+        let mut handle = &shared;
         let mut fut = std::pin::pin!(run_statement(
             &conn.client,
             sql,
             opts,
-            sink,
-            summary,
+            &mut handle,
+            results,
             emitted
         ));
-        if let Ok(res) = tokio::time::timeout(limit, fut.as_mut()).await {
-            return res.map_err(StmtError::Pg);
+        let expiry = async {
+            match opts.timeout {
+                Some(limit) => tokio::time::sleep(limit).await,
+                None => std::future::pending().await,
+            }
+        };
+        let trigger = tokio::select! {
+            biased;
+            res = fut.as_mut() => return res.map(|had| (had, false)).map_err(StmtError::Pg),
+            () = expiry => Trigger::Timeout,
+            () = run.cancel_requested() => Trigger::Cancel,
+        };
+        let (unconfirmed, stuck) = match trigger {
+            Trigger::Timeout => {
+                let target = CancelTarget::new(&self.params);
+                match send_cancel(&self.cancel.token(), &target).await {
+                    Err(f) if f.maybe_sent => (Some(f.error), STUCK),
+                    _ => (None, STUCK),
+                }
+            }
+            // The canceller sends the request itself.
+            Trigger::Cancel => (None, STUCK_CANCEL),
+        };
+        shared.progress(ExecProgress::CancelSent);
+        let Ok(res) = tokio::time::timeout(opts.cancel_grace, fut.as_mut()).await else {
+            shared.progress(ExecProgress::GraceExpired);
+            return Err(StmtError::Stuck(stuck));
+        };
+        if trigger == Trigger::Cancel {
+            return res.map(|had| (had, false)).map_err(StmtError::Pg);
         }
-        let unconfirmed =
-            match send_cancel(&self.cancel.token(), &CancelTarget::new(&self.params)).await {
-                Err(f) if f.maybe_sent => Some(f.error),
-                _ => None,
-            };
-        match tokio::time::timeout(CANCEL_TIMEOUT, fut.as_mut()).await {
-            Err(_) => Err(StmtError::Stuck),
+        match res {
             // Given up anyway: no statement follows on this connection.
-            Ok(Err(e)) if is_connection_lost(&e, &conn.client) => Err(StmtError::Pg(e)),
+            Err(e) if is_connection_lost(&e, &conn.client) => Err(StmtError::Pg(e)),
             // Even a `query_canceled` may have come from elsewhere (server
             // `statement_timeout`), with our signal still on its way.
-            Ok(res) => match unconfirmed {
+            res => match unconfirmed {
                 Some(cancel) => Err(StmtError::Unconfirmed {
                     failed: res.err(),
                     cancel,
                 }),
                 // Our confirmed signal stopped it, so it cannot reach anything else.
-                None => res.map_err(|e| match sqlstate(&e) {
+                None => res.map(|had| (had, true)).map_err(|e| match sqlstate(&e) {
                     Some(QUERY_CANCELED) => StmtError::Timeout,
                     _ => StmtError::Pg(e),
                 }),
@@ -261,7 +300,7 @@ async fn run_statement(
     sql: &str,
     opts: &ExecOptions,
     sink: &mut dyn RowSink,
-    summary: &mut ExecSummary,
+    results: &mut Vec<ResultSummary>,
     emitted: &mut bool,
 ) -> Result<bool, tokio_postgres::Error> {
     let started = Instant::now();
@@ -271,7 +310,7 @@ async fn run_statement(
         let affected = client.execute(&stmt, &[]).await?;
         sink.result_start(&[]);
         *emitted = true;
-        finish(sink, summary, started, Some(affected), 0, false);
+        finish(sink, results, started, Some(affected), 0, false);
         return Ok(false);
     }
     let metas: Vec<ColumnMeta> = cols.iter().map(column_meta).collect();
@@ -309,13 +348,13 @@ async fn run_statement(
     if !batch.is_empty() {
         sink.rows(batch);
     }
-    finish(sink, summary, started, None, row_count, truncated);
+    finish(sink, results, started, None, row_count, truncated);
     Ok(true)
 }
 
 fn finish(
     sink: &mut dyn RowSink,
-    summary: &mut ExecSummary,
+    results: &mut Vec<ResultSummary>,
     started: Instant,
     affected: Option<u64>,
     row_count: u64,
@@ -329,7 +368,7 @@ fn finish(
         elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
     };
     sink.result_end(&result);
-    summary.results.push(result);
+    results.push(result);
 }
 
 fn sqlstate(e: &tokio_postgres::Error) -> Option<&str> {
@@ -534,167 +573,193 @@ impl Session for PgSession {
         &self.info
     }
 
-    /// `opts.max_rows` applies per result set and `opts.timeout` per statement (not to the
-    /// whole script): an expired statement is cancelled and `Timeout { Execute }` returned
+    /// `opts.max_rows` applies per result set and `opts.timeout` to the statement: an
+    /// expired statement is cancelled and `Timeout { Execute }` returned
     /// (`outcome_unknown` when it may have committed part of its work, see
-    /// [`killed_outcome_unknown`]). One that ignores the cancel loses its connection:
-    /// `ConnectionLost` (see [`abandoned_error`]), and so does one that ended during the
-    /// grace period while the cancel request was not confirmed (see `run_timed`).
-    async fn execute(
+    /// [`killed_outcome_unknown`]). One that ignores the cancel (after a timeout or a
+    /// user's cancel) for `opts.cancel_grace` loses its connection: `ConnectionLost`
+    /// (see [`abandoned_error`]), and so does one that ended during the grace period
+    /// while the timeout's cancel request was not confirmed (see `run_timed`).
+    async fn execute_one(
         &self,
-        sql: &str,
-        opts: ExecOptions,
+        stmt: &str,
+        kind: StatementKind,
+        opts: &ExecOptions,
         sink: &mut dyn RowSink,
-    ) -> Result<ExecSummary, DbError> {
+    ) -> Result<StmtOutcome, DbError> {
         let mut conn = self.conn.lock().await;
         // Cancels only apply to this call from here on (see `cancel.rs`).
-        let run = self.cancel.begin();
-        let mut summary = ExecSummary::default();
+        let run = self.cancel.begin(&opts.stop);
+        let was_in_tx = self.in_transaction();
+        // Stopped before anything was sent.
+        let stopped = || run.cancelled() || opts.stop.is_stopped();
+        let not_sent = DbError::Cancelled {
+            outcome_unknown: false,
+            was_in_tx,
+        };
+        if stopped() {
+            return Err(not_sent);
+        }
+        let mut outcome = StmtOutcome::default();
         let mut reconnected = false;
-        for stmt in split(sql, Dialect::Postgres) {
-            if run.cancelled() {
-                return Err(DbError::cancelled());
-            }
-            let kind = classify(&stmt.text, Dialect::Postgres);
-            let was_in_tx = self.in_transaction();
-            // Found dead before anything was sent (the idle backend was terminated, or
-            // an earlier call abandoned it). Reconnecting first is safe for any
-            // statement, but silently only when nothing of the old session is lost.
-            if conn.client.is_closed() {
-                const CLOSED: &str = "the server closed the connection";
-                let custom = self.session_custom.load(Ordering::SeqCst);
-                let notes = self.notes(was_in_tx);
-                if was_in_tx || custom || reconnected {
-                    let mut message = format!("{CLOSED}{notes}");
-                    if !reconnected {
-                        // Best effort so the next statement finds a live connection.
-                        if let Err(e) = self.reconnect(&mut conn).await {
-                            message.push_str(&format!("; reconnecting failed: {e}"));
-                        }
-                    }
-                    return Err(lost(was_in_tx, false, message));
-                }
-                reconnected = true;
+        // Found dead before anything was sent (the idle backend was terminated, or an
+        // earlier call abandoned it). Reconnecting first is safe for any statement, but
+        // silently only when nothing of the old session is lost.
+        if conn.client.is_closed() {
+            const CLOSED: &str = "the server closed the connection";
+            let custom = self.session_custom.load(Ordering::SeqCst);
+            let notes = self.notes(was_in_tx);
+            if was_in_tx || custom {
+                let mut message = format!("{CLOSED}{notes}");
+                // Best effort so the next statement finds a live connection.
                 if let Err(e) = self.reconnect(&mut conn).await {
-                    return Err(lost(
-                        false,
-                        false,
-                        format!("{CLOSED}; reconnecting failed: {e}"),
-                    ));
+                    message.push_str(&format!("; reconnecting failed: {e}"));
                 }
-                if run.cancelled() {
-                    return Err(DbError::cancelled());
-                }
+                return Err(lost(was_in_tx, false, message));
             }
-            loop {
-                let mut emitted = false;
-                let res = self
-                    .run_timed(&conn, &stmt.text, &opts, sink, &mut summary, &mut emitted)
-                    .await;
-                let err = match res {
-                    // A statement stopped by a cancel fails with `query_canceled`, so one
-                    // that completed while a cancel was in flight really completed (and
-                    // committed outside a transaction): keep its result. A Cancel click
-                    // stops the next statement; a timeout's confirmed cancel cannot
-                    // reach it (see `run_timed`).
-                    Ok(_) => break,
-                    Err(StmtError::Timeout) => {
-                        self.track_failed(kind, &stmt.text, was_in_tx, Some(QUERY_CANCELED));
-                        return Err(DbError::Timeout {
-                            stage: ConnectStage::Execute,
-                            outcome_unknown: killed_outcome_unknown(was_in_tx, &stmt.text),
-                            was_in_tx,
-                        });
-                    }
-                    Err(StmtError::Stuck) => {
-                        let notes = self.notes(was_in_tx);
-                        let unknown = may_have_committed(kind, was_in_tx, &stmt.text);
-                        let replaced = self.reconnect(&mut conn).await;
-                        return Err(abandoned_error(STUCK, unknown, was_in_tx, &notes, replaced));
-                    }
-                    Err(StmtError::Unconfirmed { failed, cancel }) => {
-                        // A success is real (committed outside a transaction); a failure
-                        // was atomic unless the statement commits as it goes.
-                        let unknown = match failed {
-                            None => may_have_committed(kind, was_in_tx, &stmt.text),
-                            Some(_) => killed_outcome_unknown(was_in_tx, &stmt.text),
-                        };
-                        if failed.is_none() {
-                            self.track_after(kind, &stmt.text, was_in_tx);
-                        }
-                        // After it: a successful `BEGIN` opened a block that is now lost.
-                        let in_tx = self.in_transaction();
-                        let notes = self.notes(in_tx);
-                        let cause = match &failed {
-                            None => format!("{UNCONFIRMED} ({cancel})"),
-                            Some(e) => {
-                                format!("{UNCONFIRMED} ({cancel}); the statement failed: {e}")
-                            }
-                        };
-                        let replaced = self.reconnect(&mut conn).await;
-                        return Err(abandoned_error(&cause, unknown, in_tx, &notes, replaced));
-                    }
-                    Err(StmtError::Pg(e)) => e,
-                };
-                let conn_lost = is_connection_lost(&err, &conn.client);
-                if !conn_lost {
-                    // Before the cancel check, so a coinciding cancel cannot skip it.
-                    // Any other error inside a block aborts it but leaves it open
-                    // (`in_tx` kept): the server answers `25P02` until `ROLLBACK`.
-                    self.track_failed(kind, &stmt.text, was_in_tx, sqlstate(&err));
+            reconnected = true;
+            if let Err(e) = self.reconnect(&mut conn).await {
+                return Err(lost(
+                    false,
+                    false,
+                    format!("{CLOSED}; reconnecting failed: {e}"),
+                ));
+            }
+            if stopped() {
+                return Err(not_sent);
+            }
+        }
+        loop {
+            let mut emitted = false;
+            let res = self
+                .run_timed(
+                    &conn,
+                    stmt,
+                    opts,
+                    &run,
+                    sink,
+                    &mut outcome.results,
+                    &mut emitted,
+                )
+                .await;
+            let err = match res {
+                // A statement stopped by a cancel fails with `query_canceled`, so one
+                // that completed while a cancel was in flight really completed (and
+                // committed outside a transaction): keep its result. A Cancel click
+                // raised the stop signal, which stops the next statement; a timeout's
+                // confirmed cancel cannot reach it (see `run_timed`).
+                Ok((_, late)) => {
+                    outcome.late_completion = late;
+                    break;
                 }
-                match failure_kind(
-                    conn_lost,
-                    run.cancelled(),
-                    sqlstate(&err) == Some(QUERY_CANCELED),
-                    killed_outcome_unknown(was_in_tx, &stmt.text),
-                ) {
-                    Failure::Cancelled { outcome_unknown } => {
-                        return Err(DbError::Cancelled {
-                            outcome_unknown,
-                            was_in_tx,
-                        })
-                    }
-                    Failure::Server => return Err(map_pg_error(err, ConnectStage::Execute)),
-                    Failure::Lost => {}
-                }
-                // Captured before the reconnect resets the session state.
-                let notes = self.notes(was_in_tx);
-                let custom = self.session_custom.load(Ordering::SeqCst);
-                let unknown = may_have_committed(kind, was_in_tx, &stmt.text);
-                let cause = format!("{err}{notes}");
-                if was_in_tx {
-                    // The server rolled the transaction back; never replay anything.
-                    // Best effort so the next statement finds a live connection.
-                    return Err(match self.reconnect(&mut conn).await {
-                        Ok(()) => lost(true, unknown, cause),
-                        Err(e) => lost(true, unknown, format!("{cause}; reconnecting failed: {e}")),
+                Err(StmtError::Timeout) => {
+                    self.track_failed(kind, stmt, was_in_tx, Some(QUERY_CANCELED));
+                    return Err(DbError::Timeout {
+                        stage: ConnectStage::Execute,
+                        outcome_unknown: killed_outcome_unknown(was_in_tx, stmt),
+                        was_in_tx,
                     });
                 }
-                if reconnected {
-                    return Err(lost(false, unknown, cause));
+                Err(StmtError::Stuck(cause)) => {
+                    let notes = self.notes(was_in_tx);
+                    let unknown = may_have_committed(kind, was_in_tx, stmt);
+                    let replaced = self.reconnect(&mut conn).await;
+                    return Err(abandoned_error(cause, unknown, was_in_tx, &notes, replaced));
                 }
-                reconnected = true;
-                if let Err(e) = self.reconnect(&mut conn).await {
-                    return Err(lost(
-                        false,
-                        unknown,
-                        format!("{cause}; reconnecting failed: {e}"),
-                    ));
+                Err(StmtError::Unconfirmed { failed, cancel }) => {
+                    // A success is real (committed outside a transaction); a failure
+                    // was atomic unless the statement commits as it goes.
+                    let unknown = match failed {
+                        None => may_have_committed(kind, was_in_tx, stmt),
+                        Some(_) => killed_outcome_unknown(was_in_tx, stmt),
+                    };
+                    if failed.is_none() {
+                        self.track_after(kind, stmt, was_in_tx);
+                    }
+                    // After it: a successful `BEGIN` opened a block that is now lost.
+                    let in_tx = self.in_transaction();
+                    let notes = self.notes(in_tx);
+                    let cause = match &failed {
+                        None => format!("{UNCONFIRMED} ({cancel})"),
+                        Some(e) => {
+                            format!("{UNCONFIRMED} ({cancel}); the statement failed: {e}")
+                        }
+                    };
+                    let replaced = self.reconnect(&mut conn).await;
+                    return Err(abandoned_error(&cause, unknown, in_tx, &notes, replaced));
                 }
-                // Only a read that produced nothing yet, on a session with nothing a
-                // reconnect cannot restore, is safe to run again silently.
-                if kind != StatementKind::Read || emitted || custom {
-                    return Err(lost(false, unknown, cause));
-                }
-                // ... and not when the user asked to stop it (nothing was applied).
-                if run.cancelled() {
-                    return Err(DbError::cancelled());
-                }
+                Err(StmtError::Pg(e)) => e,
+            };
+            let conn_lost = is_connection_lost(&err, &conn.client);
+            if !conn_lost {
+                // Before the cancel check, so a coinciding cancel cannot skip it.
+                // Any other error inside a block aborts it but leaves it open
+                // (`in_tx` kept): the server answers `25P02` until `ROLLBACK`.
+                self.track_failed(kind, stmt, was_in_tx, sqlstate(&err));
             }
-            self.track_after(kind, &stmt.text, was_in_tx);
+            match failure_kind(
+                conn_lost,
+                run.cancelled(),
+                sqlstate(&err) == Some(QUERY_CANCELED),
+                killed_outcome_unknown(was_in_tx, stmt),
+            ) {
+                Failure::Cancelled { outcome_unknown } => {
+                    return Err(DbError::Cancelled {
+                        outcome_unknown,
+                        was_in_tx,
+                    })
+                }
+                Failure::Server => return Err(map_pg_error(err, ConnectStage::Execute)),
+                Failure::Lost => {}
+            }
+            // Captured before the reconnect resets the session state.
+            let notes = self.notes(was_in_tx);
+            let custom = self.session_custom.load(Ordering::SeqCst);
+            let unknown = may_have_committed(kind, was_in_tx, stmt);
+            let cause = format!("{err}{notes}");
+            if was_in_tx {
+                // The server rolled the transaction back; never replay anything.
+                // Best effort so the next statement finds a live connection.
+                return Err(match self.reconnect(&mut conn).await {
+                    Ok(()) => lost(true, unknown, cause),
+                    Err(e) => lost(true, unknown, format!("{cause}; reconnecting failed: {e}")),
+                });
+            }
+            if reconnected {
+                return Err(lost(false, unknown, cause));
+            }
+            reconnected = true;
+            if let Err(e) = self.reconnect(&mut conn).await {
+                return Err(lost(
+                    false,
+                    unknown,
+                    format!("{cause}; reconnecting failed: {e}"),
+                ));
+            }
+            // Only a read that produced nothing yet, on a session with nothing a
+            // reconnect cannot restore, is safe to run again silently.
+            if kind != StatementKind::Read || emitted || custom {
+                return Err(lost(false, unknown, cause));
+            }
+            // ... and not when the user asked to stop it (nothing was applied).
+            if stopped() {
+                return Err(not_sent);
+            }
         }
-        Ok(summary)
+        self.track_after(kind, stmt, was_in_tx);
+        Ok(outcome)
+    }
+
+    fn tx_state(&self) -> TxState {
+        if self.in_tx.load(Ordering::SeqCst) {
+            TxState::Active
+        } else {
+            TxState::Idle
+        }
+    }
+
+    fn dialect(&self) -> Dialect {
+        Dialect::Postgres
     }
 
     fn cancel_handle(&self) -> CancelHandle {
@@ -706,10 +771,6 @@ impl Session for PgSession {
 
     fn introspector(&self) -> &dyn Introspector {
         self
-    }
-
-    fn in_transaction(&self) -> bool {
-        self.in_tx.load(Ordering::SeqCst)
     }
 
     async fn ping(&self) -> Result<(), DbError> {

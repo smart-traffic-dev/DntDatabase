@@ -1,5 +1,8 @@
-use dnt_core::driver::{ExecOptions, ExecSummary, ResultSummary, RowSink, Session};
-use dnt_core::error::{ConnectStage, DbError};
+use dnt_core::driver::{
+    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
+};
+use dnt_core::error::{AppError, ConnectStage, DbError};
+use dnt_core::sql::{classify, StatementKind};
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
@@ -17,9 +20,13 @@ struct Res {
 #[derive(Debug, Default)]
 struct Collect {
     results: Vec<Res>,
+    progress: Vec<ExecProgress>,
 }
 
 impl RowSink for Collect {
+    fn progress(&mut self, p: ExecProgress) {
+        self.progress.push(p);
+    }
     fn result_start(&mut self, cols: &[ColumnMeta]) {
         self.results.push(Res {
             cols: cols.to_vec(),
@@ -58,6 +65,18 @@ async fn run_with(
     let mut sink = Collect::default();
     let summary = s.execute(sql, opts, &mut sink).await?;
     Ok((summary, sink))
+}
+
+/// Runs `sql` as one statement through `execute_one` (classified by the session's dialect).
+async fn run_one(
+    s: &MySqlSession,
+    sql: &str,
+    opts: ExecOptions,
+) -> (Result<StmtOutcome, DbError>, Collect) {
+    let mut sink = Collect::default();
+    let kind = classify(sql, s.dialect());
+    let res = s.execute_one(sql, kind, &opts, &mut sink).await;
+    (res, sink)
 }
 
 /// First value of the first row of the last result.
@@ -479,17 +498,19 @@ async fn write_finishing_in_grace_reports_success() {
         let mysql = matches!(t, Target::MySql57 | Target::MySql8);
 
         // Timeout.
-        let res = run_with(
+        let (res, c) = run_one(
             &s,
             "INSERT INTO t3_grace VALUES (SLEEP(5))",
             timeout_opts(500),
         )
         .await;
         let rows = count_rows(&s, "t3_grace").await;
+        assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
         match &res {
-            Ok((_, c)) => {
+            Ok(outcome) => {
                 assert_eq!(rows, 1, "{t:?}");
                 assert_eq!(c.results[0].affected, Some(1), "{t:?}");
+                assert!(outcome.late_completion, "{t:?}");
             }
             Err(DbError::Timeout {
                 stage: ConnectStage::Execute,
@@ -498,39 +519,50 @@ async fn write_finishing_in_grace_reports_success() {
             }) => assert_eq!(rows, 0, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
         }
-        assert_eq!(res.is_ok(), mysql, "{t:?}: {:?}", res.map(|(s, _)| s));
+        assert_eq!(res.is_ok(), mysql, "{t:?}: {res:?}");
 
         // Cancel.
         run(&s, "DELETE FROM t3_grace").await.unwrap();
         let handle = s.cancel_handle();
-        let (res, cancel) =
-            tokio::join!(run(&s, "INSERT INTO t3_grace VALUES (SLEEP(5))"), async {
+        let ((res, c), cancel) = tokio::join!(
+            run_one(
+                &s,
+                "INSERT INTO t3_grace VALUES (SLEEP(5))",
+                ExecOptions::default()
+            ),
+            async {
                 wait_running(&admin, "t3_grace VALUES").await;
                 handle.cancel().await
-            });
+            }
+        );
         cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
         let rows = count_rows(&s, "t3_grace").await;
+        assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
         match &res {
-            Ok(_) => assert_eq!(rows, 1, "{t:?}"),
+            // Completed despite the cancel, but no timeout expired: not late.
+            Ok(outcome) => {
+                assert_eq!(rows, 1, "{t:?}");
+                assert!(!outcome.late_completion, "{t:?}");
+            }
             Err(DbError::Cancelled {
                 outcome_unknown: true,
                 was_in_tx: false,
             }) => assert_eq!(rows, 0, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
         }
-        assert_eq!(res.is_ok(), mysql, "{t:?}: {:?}", res.map(|(s, _)| s));
+        assert_eq!(res.is_ok(), mysql, "{t:?}: {res:?}");
         assert!(!s.in_transaction(), "{t:?}");
 
         // Inside a transaction InnoDB rolls a killed write back: not applied.
         run(&s, "DELETE FROM t3_grace; BEGIN").await.unwrap();
-        let res = run_with(
+        let (res, _) = run_one(
             &s,
             "INSERT INTO t3_grace VALUES (SLEEP(5))",
             timeout_opts(500),
         )
         .await;
         match &res {
-            Ok(_) => assert!(mysql, "{t:?}"),
+            Ok(outcome) => assert!(mysql && outcome.late_completion, "{t:?}"),
             Err(DbError::Timeout {
                 outcome_unknown: false,
                 was_in_tx: true,
@@ -880,5 +912,98 @@ async fn delimiter_procedure_script() {
         .await
         .unwrap();
         assert_eq!(as_u64(&scalar(&c)), 0, "{t:?}: procedure not dropped");
+    }
+}
+
+/// A `CALL` returns every result set of the procedure from one `execute_one`.
+#[tokio::test]
+async fn execute_one_call_returns_every_result_set() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(&s, "DROP PROCEDURE IF EXISTS p2_multi").await.unwrap();
+        let (res, _) = run_one(
+            &s,
+            "CREATE PROCEDURE p2_multi() BEGIN SELECT 1; SELECT 2, 3; END",
+            ExecOptions::default(),
+        )
+        .await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let mut sink = Collect::default();
+        let outcome = s
+            .execute_one(
+                "CALL p2_multi()",
+                StatementKind::Write,
+                &ExecOptions::default(),
+                &mut sink,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(outcome.results.len(), 2, "{t:?}: {outcome:?}");
+        assert!(!outcome.late_completion, "{t:?}");
+        let counts: Vec<usize> = sink.results.iter().map(|r| r.cols.len()).collect();
+        assert_eq!(counts, [1, 2], "{t:?}");
+        run(&s, "DROP PROCEDURE p2_multi").await.unwrap();
+    }
+}
+
+/// A Stop raised before the statement is sent cancels it without sending anything.
+#[tokio::test]
+async fn stop_signal_before_send_cancels() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let opts = ExecOptions::default();
+        opts.stop.stop();
+        let (res, c) = run_one(&s, "SELECT 1", opts).await;
+        assert!(
+            matches!(
+                res,
+                Err(DbError::Cancelled {
+                    outcome_unknown: false,
+                    was_in_tx: false,
+                })
+            ),
+            "{t:?}: {res:?}"
+        );
+        assert!(c.results.is_empty(), "{t:?}: something was sent");
+        let (res, c) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn timeout_reports_cancel_sent() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let (res, c) = run_one(&s, "SELECT SLEEP(5)", timeout_opts(200)).await;
+        assert!(
+            matches!(res, Err(DbError::Timeout { .. })),
+            "{t:?}: {res:?}"
+        );
+        assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn timeout_in_tx_carries_was_in_tx() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(&s, "BEGIN").await.unwrap();
+        let (res, _) = run_one(&s, "SELECT SLEEP(5)", timeout_opts(200)).await;
+        match res {
+            Err(
+                e @ DbError::Timeout {
+                    was_in_tx: true, ..
+                },
+            ) => {
+                assert!(!AppError::from(e).retryable, "{t:?}")
+            }
+            other => panic!("{t:?}: {other:?}"),
+        }
+        run(&s, "ROLLBACK").await.unwrap();
     }
 }

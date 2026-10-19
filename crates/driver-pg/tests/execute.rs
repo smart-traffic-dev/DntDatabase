@@ -1,5 +1,8 @@
-use dnt_core::driver::{ExecOptions, ExecSummary, ResultSummary, RowSink, Session};
-use dnt_core::error::{ConnectStage, DbError};
+use dnt_core::driver::{
+    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
+};
+use dnt_core::error::{AppError, ConnectStage, DbError};
+use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
@@ -17,9 +20,13 @@ struct Res {
 #[derive(Debug, Default)]
 struct Collect {
     results: Vec<Res>,
+    progress: Vec<ExecProgress>,
 }
 
 impl RowSink for Collect {
+    fn progress(&mut self, p: ExecProgress) {
+        self.progress.push(p);
+    }
     fn result_start(&mut self, cols: &[ColumnMeta]) {
         self.results.push(Res {
             cols: cols.to_vec(),
@@ -58,6 +65,26 @@ async fn run_with(
     let mut sink = Collect::default();
     let summary = s.execute(sql, opts, &mut sink).await?;
     Ok((summary, sink))
+}
+
+/// Runs `sql` as one statement through `execute_one` (classified by the session's dialect).
+async fn run_one(
+    s: &PgSession,
+    sql: &str,
+    opts: ExecOptions,
+) -> (Result<StmtOutcome, DbError>, Collect) {
+    let mut sink = Collect::default();
+    let kind = classify(sql, s.dialect());
+    let res = s.execute_one(sql, kind, &opts, &mut sink).await;
+    (res, sink)
+}
+
+fn grace_opts(timeout_ms: Option<u64>, grace_ms: u64) -> ExecOptions {
+    ExecOptions {
+        timeout: timeout_ms.map(Duration::from_millis),
+        cancel_grace: Duration::from_millis(grace_ms),
+        ..ExecOptions::default()
+    }
 }
 
 /// First value of the first row of the last result.
@@ -748,9 +775,11 @@ async fn grace_success() {
              BEGIN PERFORM pg_sleep(5); EXCEPTION WHEN query_canceled THEN NULL; END; \
              INSERT INTO t4_grace VALUES (1); END $$";
         let started = Instant::now();
-        let res = run_with(&s, swallow_then_insert, timeout_opts(500)).await;
-        let (summary, _) = res.unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
-        assert_eq!(summary.results.len(), 1, "{t:?}");
+        let (res, c) = run_one(&s, swallow_then_insert, timeout_opts(500)).await;
+        let outcome = res.unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+        assert_eq!(outcome.results.len(), 1, "{t:?}");
+        assert!(outcome.late_completion, "{t:?}");
+        assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
         assert_eq!(count_rows(&s, "t4_grace").await, 1, "{t:?}");
         assert!(started.elapsed() < Duration::from_secs(3), "{t:?}");
 
@@ -1186,5 +1215,133 @@ async fn server_statement_timeout_is_a_server_error() {
             other => panic!("{t:?}: {:?}", other.as_ref().map(|(s, _)| s)),
         }
         run(&s, "RESET statement_timeout; SELECT 1").await.unwrap();
+    }
+}
+
+/// A Stop raised before the statement is sent cancels it without sending anything.
+#[tokio::test]
+async fn stop_signal_before_send_cancels() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let opts = ExecOptions::default();
+        opts.stop.stop();
+        let (res, c) = run_one(&s, "SELECT 1", opts).await;
+        assert!(
+            matches!(
+                res,
+                Err(DbError::Cancelled {
+                    outcome_unknown: false,
+                    was_in_tx: false,
+                })
+            ),
+            "{t:?}: {res:?}"
+        );
+        assert!(c.results.is_empty(), "{t:?}: something was sent");
+        let (res, c) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn timeout_reports_cancel_sent() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let (res, c) = run_one(&s, "SELECT pg_sleep(5)", timeout_opts(200)).await;
+        assert!(
+            matches!(res, Err(DbError::Timeout { .. })),
+            "{t:?}: {res:?}"
+        );
+        assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn timeout_in_tx_carries_was_in_tx() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        run(&s, "BEGIN").await.unwrap();
+        let (res, _) = run_one(&s, "SELECT pg_sleep(5)", timeout_opts(200)).await;
+        match res {
+            Err(
+                e @ DbError::Timeout {
+                    was_in_tx: true, ..
+                },
+            ) => {
+                assert!(!AppError::from(e).retryable, "{t:?}")
+            }
+            other => panic!("{t:?}: {other:?}"),
+        }
+        run(&s, "ROLLBACK").await.unwrap();
+    }
+}
+
+/// A `DO` loop that swallows every cancel request.
+const STUCK_LOOP: &str = "DO $$ BEGIN LOOP BEGIN PERFORM pg_sleep(0.1); \
+                          EXCEPTION WHEN query_canceled THEN NULL; END; END LOOP; END $$";
+
+/// The timeout's cancel is sent, the grace expires, and the connection is given up, in
+/// that order and within the short grace.
+#[tokio::test]
+async fn stuck_statement_progress_order() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let pid = backend_pid(&s).await;
+        let started = Instant::now();
+        let (res, c) = run_one(&s, STUCK_LOOP, grace_opts(Some(200), 300)).await;
+        assert!(
+            matches!(res, Err(DbError::ConnectionLost { .. })),
+            "{t:?}: {res:?}"
+        );
+        assert_eq!(
+            c.progress,
+            [ExecProgress::CancelSent, ExecProgress::GraceExpired],
+            "{t:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{t:?}: took {:?}",
+            started.elapsed()
+        );
+        // The abandoned backend still loops server-side until terminated.
+        kill(t, pid).await;
+    }
+}
+
+/// A user's Cancel that the statement ignores: after the grace the connection is
+/// abandoned, and the message says it was cancelled (not timed out).
+#[tokio::test]
+async fn user_cancel_of_stuck_statement_abandons() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let pid = backend_pid(&s).await;
+        let handle = s.cancel_handle();
+        let ((res, c), cancel) =
+            tokio::join!(run_one(&s, STUCK_LOOP, grace_opts(None, 300)), async {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                handle.cancel().await
+            });
+        cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
+        match &res {
+            Err(DbError::ConnectionLost { message, .. }) => {
+                assert!(
+                    message.contains("after it was cancelled"),
+                    "{t:?}: {message}"
+                )
+            }
+            other => panic!("{t:?}: {other:?}"),
+        }
+        assert_eq!(
+            c.progress,
+            [ExecProgress::CancelSent, ExecProgress::GraceExpired],
+            "{t:?}"
+        );
+        assert_ne!(backend_pid(&s).await, pid, "{t:?}: same backend");
+        kill(t, pid).await;
     }
 }

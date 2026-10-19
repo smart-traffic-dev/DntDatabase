@@ -5,6 +5,8 @@ use crate::meta::{
     TableDetail,
 };
 use crate::server::{DbKind, ServerInfo};
+use crate::sql::{classify, split, Dialect, StatementKind};
+use crate::tx::TxState;
 use crate::value::{ColumnMeta, Value};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -115,18 +117,49 @@ pub trait Driver: Send + Sync {
 #[async_trait]
 pub trait Session: Send + Sync {
     fn server_info(&self) -> &ServerInfo;
-    /// Runs a (possibly multi-statement) script. The driver splits it by its dialect
-    /// and calls `result_start` / `rows` / `result_end` on `sink` for every statement.
+    /// Runs ONE statement (`kind`: its [`classify`] result) and calls `result_start` /
+    /// `rows` / `result_end` on `sink` for every result it produces (a MySQL `CALL` may
+    /// produce several), and `progress` while it is being stopped.
+    ///
+    /// Nothing is sent when `opts.stop` is raised (or a cancel targeted this call)
+    /// before the statement starts: `Cancelled { outcome_unknown: false, .. }`.
+    /// `opts.timeout` applies to this statement; once it expires, or a cancel targets
+    /// it, the driver waits `opts.cancel_grace` for the statement to end before giving
+    /// its connection up. Every `Timeout` / `Cancelled` carries `was_in_tx`.
+    async fn execute_one(
+        &self,
+        stmt: &str,
+        kind: StatementKind,
+        opts: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<StmtOutcome, DbError>;
+    /// Runs a (possibly multi-statement) script: splits it by [`Session::dialect`],
+    /// classifies each statement and runs it with [`Session::execute_one`], stopping at
+    /// the first error.
     async fn execute(
         &self,
         sql: &str,
         opts: ExecOptions,
         sink: &mut dyn RowSink,
-    ) -> Result<ExecSummary, DbError>;
+    ) -> Result<ExecSummary, DbError> {
+        let dialect = self.dialect();
+        let mut summary = ExecSummary::default();
+        for stmt in split(sql, dialect) {
+            let kind = classify(&stmt.text, dialect);
+            let outcome = self.execute_one(&stmt.text, kind, &opts, sink).await?;
+            summary.results.extend(outcome.results);
+        }
+        Ok(summary)
+    }
+    fn tx_state(&self) -> TxState;
+    /// The dialect statements of this session are split and classified with.
+    fn dialect(&self) -> Dialect;
+    fn in_transaction(&self) -> bool {
+        self.tx_state() != TxState::Idle
+    }
     fn cancel_handle(&self) -> CancelHandle;
     /// Session types implement `Introspector` themselves and return `self`.
     fn introspector(&self) -> &dyn Introspector;
-    fn in_transaction(&self) -> bool;
     async fn ping(&self) -> Result<(), DbError>;
     async fn close(self: Box<Self>);
 }
@@ -139,6 +172,45 @@ pub trait RowSink: Send {
     fn result_end(&mut self, summary: &ResultSummary);
     /// Progress while a statement is being stopped. Default: ignored.
     fn progress(&mut self, _p: ExecProgress) {}
+}
+
+/// A [`RowSink`] shared between a running statement (which streams into `&SharedSink`)
+/// and the driver code waiting on it, which reports [`ExecProgress`] meanwhile. Every
+/// call locks only for its own duration, never across an `.await`.
+pub struct SharedSink<'a> {
+    inner: std::sync::Mutex<&'a mut dyn RowSink>,
+}
+
+impl<'a> SharedSink<'a> {
+    pub fn new(sink: &'a mut dyn RowSink) -> Self {
+        SharedSink {
+            inner: std::sync::Mutex::new(sink),
+        }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut dyn RowSink) -> R) -> R {
+        let mut sink = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        f(&mut **sink)
+    }
+
+    pub fn progress(&self, p: ExecProgress) {
+        self.with(|s| s.progress(p));
+    }
+}
+
+impl RowSink for &SharedSink<'_> {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.with(|s| s.result_start(cols));
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        self.with(|s| s.rows(batch));
+    }
+    fn result_end(&mut self, summary: &ResultSummary) {
+        self.with(|s| s.result_end(summary));
+    }
+    fn progress(&mut self, p: ExecProgress) {
+        SharedSink::progress(self, p);
+    }
 }
 
 #[async_trait]
@@ -194,14 +266,6 @@ mod tests {
     /// A sink that only implements the required methods gets a no-op `progress`.
     #[test]
     fn row_sink_progress_defaults_to_noop() {
-        struct Ends(Vec<ResultSummary>);
-        impl RowSink for Ends {
-            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
-            fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
-            fn result_end(&mut self, summary: &ResultSummary) {
-                self.0.push(summary.clone());
-            }
-        }
         let mut s = Ends(vec![]);
         s.progress(ExecProgress::CancelSent);
         s.progress(ExecProgress::GraceExpired);
@@ -215,9 +279,103 @@ mod tests {
         assert_eq!(s.0, [summary]);
     }
 
-    /// A session that is its own introspector, as the drivers are built.
+    /// A session that is its own introspector, as the drivers are built. Records the
+    /// statements it is given; one containing `fail` fails.
     struct FakeSession {
         info: ServerInfo,
+        seen: std::sync::Mutex<Vec<(String, StatementKind)>>,
+    }
+
+    fn fake() -> FakeSession {
+        FakeSession {
+            info: detect_pg(170002, "PostgreSQL 17.2"),
+            seen: std::sync::Mutex::new(vec![]),
+        }
+    }
+
+    struct Ends(Vec<ResultSummary>);
+    impl RowSink for Ends {
+        fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+        fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+        fn result_end(&mut self, summary: &ResultSummary) {
+            self.0.push(summary.clone());
+        }
+    }
+
+    #[derive(Default)]
+    struct Log(Vec<String>);
+    impl RowSink for Log {
+        fn result_start(&mut self, cols: &[ColumnMeta]) {
+            self.0.push(format!("start {}", cols.len()));
+        }
+        fn rows(&mut self, batch: Vec<Vec<Value>>) {
+            self.0.push(format!("rows {}", batch.len()));
+        }
+        fn result_end(&mut self, summary: &ResultSummary) {
+            self.0.push(format!("end {}", summary.row_count));
+        }
+        fn progress(&mut self, p: ExecProgress) {
+            self.0.push(format!("{p:?}"));
+        }
+    }
+
+    /// Calls through a `&SharedSink` and the sink's own `progress` reach the same sink,
+    /// in order.
+    #[test]
+    fn shared_sink_forwards_every_call() {
+        let mut log = Log::default();
+        {
+            let shared = SharedSink::new(&mut log);
+            let mut handle = &shared;
+            handle.result_start(&[]);
+            handle.rows(vec![vec![Value::Null], vec![Value::Null]]);
+            shared.progress(ExecProgress::CancelSent);
+            handle.result_end(&ResultSummary {
+                affected: None,
+                row_count: 2,
+                truncated: false,
+                elapsed_ms: 0,
+            });
+            handle.progress(ExecProgress::GraceExpired);
+        }
+        assert_eq!(
+            log.0,
+            ["start 0", "rows 2", "CancelSent", "end 2", "GraceExpired"]
+        );
+    }
+
+    /// The default `execute` splits by the session's dialect, classifies each
+    /// statement, runs it with `execute_one` and stops at the first error.
+    #[tokio::test]
+    async fn default_execute_runs_statements_until_the_first_error() {
+        let s = fake();
+        let mut sink = Ends(vec![]);
+        let summary = s
+            .execute("SELECT 1; BEGIN", ExecOptions::default(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(summary.results.len(), 2);
+        assert_eq!(sink.0.len(), 2);
+        assert_eq!(
+            *s.seen.lock().unwrap(),
+            [
+                ("SELECT 1".to_string(), StatementKind::Read),
+                (
+                    "BEGIN".to_string(),
+                    StatementKind::Transaction(crate::sql::TxControl::Begin)
+                ),
+            ]
+        );
+        s.seen.lock().unwrap().clear();
+        let err = s
+            .execute(
+                "SELECT 1; SELECT fail; SELECT 3",
+                ExecOptions::default(),
+                &mut sink,
+            )
+            .await;
+        assert!(matches!(err, Err(DbError::Internal { .. })), "{err:?}");
+        assert_eq!(s.seen.lock().unwrap().len(), 2);
     }
 
     struct NoopCancel;
@@ -234,29 +392,43 @@ mod tests {
         fn server_info(&self) -> &ServerInfo {
             &self.info
         }
-        async fn execute(
+        async fn execute_one(
             &self,
-            _sql: &str,
-            _opts: ExecOptions,
+            stmt: &str,
+            kind: StatementKind,
+            _opts: &ExecOptions,
             sink: &mut dyn RowSink,
-        ) -> Result<ExecSummary, DbError> {
-            sink.result_start(&[]);
-            sink.result_end(&ResultSummary {
+        ) -> Result<StmtOutcome, DbError> {
+            self.seen.lock().unwrap().push((stmt.to_string(), kind));
+            if stmt.contains("fail") {
+                return Err(DbError::Internal {
+                    message: "fail".into(),
+                });
+            }
+            let summary = ResultSummary {
                 affected: Some(0),
                 row_count: 0,
                 truncated: false,
                 elapsed_ms: 0,
-            });
-            Ok(ExecSummary::default())
+            };
+            sink.result_start(&[]);
+            sink.result_end(&summary);
+            Ok(StmtOutcome {
+                results: vec![summary],
+                late_completion: false,
+            })
+        }
+        fn tx_state(&self) -> TxState {
+            TxState::Idle
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::Postgres
         }
         fn cancel_handle(&self) -> CancelHandle {
             Arc::new(NoopCancel)
         }
         fn introspector(&self) -> &dyn Introspector {
             self
-        }
-        fn in_transaction(&self) -> bool {
-            false
         }
         async fn ping(&self) -> Result<(), DbError> {
             Ok(())
@@ -294,9 +466,7 @@ mod tests {
 
     #[test]
     fn session_can_be_its_own_introspector() {
-        let s: Box<dyn Session> = Box::new(FakeSession {
-            info: detect_pg(170002, "PostgreSQL 17.2"),
-        });
+        let s: Box<dyn Session> = Box::new(fake());
         let i: &dyn Introspector = s.introspector();
         assert!(std::ptr::addr_eq(
             i as *const dyn Introspector,

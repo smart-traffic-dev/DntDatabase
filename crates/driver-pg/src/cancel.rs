@@ -2,7 +2,7 @@
 //! (`CancelToken::cancel_query_raw`), sent over a new socket to the same address — through
 //! the same SSH tunnel port when tunnelled — with the session's TLS settings.
 //!
-//! Cancels are scoped to one `execute` call by a generation number: `cancel()` targets the
+//! Cancels are scoped to one `execute_one` call by a generation number: `cancel()` targets the
 //! call running when it is invoked, does nothing when the session is idle, and is skipped if
 //! that call finished before the request could be sent.
 //!
@@ -32,7 +32,7 @@
 use crate::tls::Tls;
 use crate::{map_pg_error, ConnectParams};
 use async_trait::async_trait;
-use dnt_core::driver::Canceller;
+use dnt_core::driver::{Canceller, StopSignal};
 use dnt_core::error::{ConnectStage, DbError};
 use std::io;
 use std::pin::Pin;
@@ -42,6 +42,7 @@ use std::task::{ready, Context, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio_postgres::config::Host;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::CancelToken;
@@ -73,27 +74,34 @@ impl CancelState {
         *self.token.lock().unwrap_or_else(|p| p.into_inner()) = token;
     }
 
-    /// Marks a new `execute` call as running (call with the connection lock held).
-    /// The returned guard marks the session idle again when dropped.
-    pub(crate) fn begin(&self) -> RunGuard {
-        self.gens.begin()
+    /// Marks a new `execute_one` call as running (call with the connection lock held);
+    /// `stop` is its stop signal. The returned guard marks the session idle again when
+    /// dropped.
+    pub(crate) fn begin(&self, stop: &StopSignal) -> RunGuard {
+        self.gens.begin(stop)
     }
 }
 
-/// Generation bookkeeping for `execute` calls.
+/// Generation bookkeeping for `execute_one` calls.
 #[derive(Debug, Default)]
 struct Generations {
-    /// Last generation handed out to an `execute` call.
+    /// Last generation handed out to an `execute_one` call.
     last: AtomicU64,
-    /// Generation of the `execute` call holding the connection; 0 when idle.
+    /// Generation of the `execute_one` call holding the connection; 0 when idle.
     running: AtomicU64,
     /// Generation a cancel was requested for.
     cancelled: AtomicU64,
+    /// Woken when a cancel targets the running call (see [`RunGuard::cancel_requested`]).
+    notify: Notify,
+    /// The running call's `ExecOptions::stop`, with its generation. A cancel raises it,
+    /// so no later statement of the same run is sent.
+    stop: Mutex<Option<(u64, StopSignal)>>,
 }
 
 impl Generations {
-    fn begin(self: &Arc<Self>) -> RunGuard {
+    fn begin(self: &Arc<Self>, stop: &StopSignal) -> RunGuard {
         let gen = self.last.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.stop.lock().unwrap_or_else(|p| p.into_inner()) = Some((gen, stop.clone()));
         self.running.store(gen, Ordering::SeqCst);
         RunGuard {
             gens: self.clone(),
@@ -111,11 +119,18 @@ impl Generations {
         Some(gen)
     }
 
-    /// Records a cancel for generation `gen`. `fetch_max`: a cancel that read an older
-    /// generation before a newer call began must never lower the mark and so undo the
-    /// newer call's cancel.
+    /// Records a cancel for generation `gen`, raises that call's stop signal and wakes
+    /// it. `fetch_max`: a cancel that read an older generation before a newer call began
+    /// must never lower the mark and so undo the newer call's cancel; the stop signal is
+    /// only raised for `gen` itself.
     fn mark_cancelled(&self, gen: u64) {
         self.cancelled.fetch_max(gen, Ordering::SeqCst);
+        if let Some((g, stop)) = &*self.stop.lock().unwrap_or_else(|p| p.into_inner()) {
+            if *g == gen {
+                stop.stop();
+            }
+        }
+        self.notify.notify_waiters();
     }
 
     fn is_running(&self, gen: u64) -> bool {
@@ -123,7 +138,7 @@ impl Generations {
     }
 }
 
-/// One running `execute` call.
+/// One running `execute_one` call.
 pub(crate) struct RunGuard {
     gens: Arc<Generations>,
     gen: u64,
@@ -134,10 +149,30 @@ impl RunGuard {
     pub(crate) fn cancelled(&self) -> bool {
         self.gens.cancelled.load(Ordering::SeqCst) == self.gen
     }
+
+    /// Completes once a cancel targeted this call (at once if one already did).
+    pub(crate) async fn cancel_requested(&self) {
+        loop {
+            let notified = self.gens.notify.notified();
+            let mut notified = std::pin::pin!(notified);
+            // Registered before the check, so a request in between still wakes us.
+            notified.as_mut().enable();
+            if self.cancelled() {
+                return;
+            }
+            // Also woken by a stale request for an older call: check again.
+            notified.await;
+        }
+    }
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
+        let mut stop = self.gens.stop.lock().unwrap_or_else(|p| p.into_inner());
+        if stop.as_ref().is_some_and(|(g, _)| *g == self.gen) {
+            *stop = None;
+        }
+        drop(stop);
         let _ = self
             .gens
             .running
@@ -303,18 +338,57 @@ fn peer_closed(e: &io::Error) -> bool {
 mod tests {
     use super::*;
 
+    /// A cancel raises the stop signal of the call it targets, never another call's.
+    #[test]
+    fn a_cancel_raises_only_its_calls_stop_signal() {
+        let gens = Arc::new(Generations::default());
+        let (first, second) = (StopSignal::new(), StopSignal::new());
+        drop(gens.begin(&first));
+        assert_eq!(gens.request(), None);
+        assert!(!first.is_stopped(), "idle: nothing to stop");
+        let b = gens.begin(&second);
+        gens.mark_cancelled(1);
+        assert!(
+            !second.is_stopped(),
+            "a stale cancel stopped the newer call"
+        );
+        assert_eq!(gens.request(), Some(2));
+        assert!(second.is_stopped() && b.cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_requested_wakes_only_for_its_call() {
+        let gens = Arc::new(Generations::default());
+        drop(gens.begin(&StopSignal::new()));
+        let b = gens.begin(&StopSignal::new());
+        let wait = Duration::from_millis(50);
+        // A stale request for call 1 wakes the waiter, which keeps waiting.
+        let (pending, ()) = tokio::join!(tokio::time::timeout(wait, b.cancel_requested()), async {
+            gens.mark_cancelled(1)
+        });
+        assert!(pending.is_err());
+        let (woken, _) = tokio::join!(tokio::time::timeout(wait, b.cancel_requested()), async {
+            gens.request()
+        });
+        assert!(woken.is_ok());
+        // Already cancelled: completes at once.
+        assert!(tokio::time::timeout(wait, b.cancel_requested())
+            .await
+            .is_ok());
+    }
+
     #[test]
     fn generations_scope_cancel_requests() {
         let gens = Arc::new(Generations::default());
         assert_eq!(gens.request(), None, "idle: nothing to cancel");
-        let a = gens.begin();
+        let a = gens.begin(&StopSignal::new());
         assert!(gens.is_running(1));
         assert_eq!(gens.request(), Some(1));
         assert!(a.cancelled());
         drop(a);
         assert!(gens.is_running(0));
         // A request aimed at the finished call does not leak into the next one.
-        let b = gens.begin();
+        let b = gens.begin(&StopSignal::new());
         assert!(!b.cancelled());
         assert!(gens.is_running(2));
         // A guard of an older call never clears a newer one.
@@ -328,8 +402,8 @@ mod tests {
     #[test]
     fn a_stale_cancel_never_lowers_the_cancelled_generation() {
         let gens = Arc::new(Generations::default());
-        drop(gens.begin());
-        let second = gens.begin();
+        drop(gens.begin(&StopSignal::new()));
+        let second = gens.begin(&StopSignal::new());
         assert_eq!(gens.request(), Some(2));
         // A click that read generation 1 before it ended lands late.
         gens.mark_cancelled(1);

@@ -17,7 +17,7 @@ dnt-core.workspace = true
 futures-util.workspace = true
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 secrecy.workspace = true
-tokio = { workspace = true, features = ["rt", "net"] }
+tokio = { workspace = true, features = ["macros", "rt", "net"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 
