@@ -87,9 +87,11 @@ foreign_keys:
       - id
     on_update: RESTRICT
     on_delete: RESTRICT
+    definition: ~
 checks:
   - name: chk_orders_total
     expression: "`total` >= 0"
+    definition: ~
 triggers:
   - name: trg_orders_bi
     timing: BEFORE

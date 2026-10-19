@@ -108,6 +108,7 @@ foreign_keys:
       - id
     on_update: NO ACTION
     on_delete: NO ACTION
+    definition: FOREIGN KEY (order_id) REFERENCES public.orders(id)
 checks: []
 triggers: []
 options:

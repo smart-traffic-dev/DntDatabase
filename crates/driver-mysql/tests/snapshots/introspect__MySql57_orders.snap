@@ -87,6 +87,7 @@ foreign_keys:
       - id
     on_update: RESTRICT
     on_delete: RESTRICT
+    definition: ~
 checks: []
 triggers:
   - name: trg_orders_bi

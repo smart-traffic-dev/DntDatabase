@@ -213,15 +213,20 @@ pub fn build_table_ddl(t: &TableDetail) -> String {
             lines.push(format!("CONSTRAINT {} {def}", quote_ident(&idx.name)));
         }
     }
+    // A verbatim server definition keeps every option (NOT VALID, NO INHERIT, MATCH,
+    // DEFERRABLE, `SET NULL (cols)`); the rebuild from parts is only a fallback.
     for check in &t.checks {
-        lines.push(format!(
-            "CONSTRAINT {} CHECK ({})",
-            quote_ident(&check.name),
-            check.expression
-        ));
+        let body = match &check.definition {
+            Some(def) => def.clone(),
+            None => format!("CHECK ({})", check.expression),
+        };
+        lines.push(format!("CONSTRAINT {} {body}", quote_ident(&check.name)));
     }
     for fk in &t.foreign_keys {
-        lines.push(foreign_key_line(fk, schema));
+        lines.push(match &fk.definition {
+            Some(def) => format!("CONSTRAINT {} {def}", quote_ident(&fk.name)),
+            None => foreign_key_line(fk, schema),
+        });
     }
 
     let mut out = format!("CREATE TABLE {table} (\n    {}\n)", lines.join(",\n    "));
@@ -351,10 +356,12 @@ mod tests {
                 ref_columns: vec!["id".into()],
                 on_update: "NO ACTION".into(),
                 on_delete: "CASCADE".into(),
+                definition: None,
             }],
             checks: vec![CheckDetail {
                 name: "events_amount_check".into(),
                 expression: "(amount >= (0)::numeric)".into(),
+                definition: None,
             }],
             triggers: Vec::new(),
             options: TableOptions {
@@ -373,6 +380,33 @@ mod tests {
     #[test]
     fn builds_table_ddl() {
         insta::assert_snapshot!(build_table_ddl(&sample()));
+    }
+
+    /// Without definitions (above) FKs and checks are rebuilt from their parts; with them
+    /// the server's text is used as is.
+    #[test]
+    fn verbatim_constraint_definitions_win() {
+        let mut t = sample();
+        let fk_def = "FOREIGN KEY (customer_id) REFERENCES sales.customers(id) \
+                      MATCH FULL ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED";
+        let check_def = "CHECK ((amount >= (0)::numeric)) NOT VALID";
+        t.foreign_keys[0].definition = Some(fk_def.into());
+        t.checks[0].definition = Some(check_def.into());
+        let ddl = build_table_ddl(&t);
+        assert!(
+            ddl.contains(&format!(
+                "    CONSTRAINT events_customer_id_fkey {fk_def}\n)"
+            )),
+            "{ddl}"
+        );
+        assert!(
+            ddl.contains(&format!(
+                "    CONSTRAINT events_amount_check {check_def},\n"
+            )),
+            "{ddl}"
+        );
+        assert_eq!(ddl.matches("FOREIGN KEY").count(), 1, "{ddl}");
+        assert_eq!(ddl.matches("CHECK").count(), 1, "{ddl}");
     }
 
     #[test]

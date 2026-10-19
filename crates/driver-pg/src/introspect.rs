@@ -11,7 +11,7 @@
 use crate::ddl::{build_table_ddl, quote_ident};
 use crate::{map_pg_error, queries, PgConn, PgSession};
 use async_trait::async_trait;
-use dnt_core::driver::Introspector;
+use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
     CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail, ObjectKind, ObjectRef,
@@ -227,6 +227,7 @@ fn foreign_keys(rows: &[Row], schema: &str) -> Result<Vec<ForeignKeyDetail>, DbE
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
         let ref_schema: String = get(r, 2)?;
+        let (unqualified, qualified): (String, String) = (get(r, 8)?, get(r, 9)?);
         out.push(ForeignKeyDetail {
             name: get(r, 0)?,
             columns: get(r, 1)?,
@@ -236,10 +237,27 @@ fn foreign_keys(rows: &[Row], schema: &str) -> Result<Vec<ForeignKeyDetail>, DbE
             ref_columns: get(r, 4)?,
             on_update: fk_action(&get::<String>(r, 5)?).into(),
             on_delete: fk_action(&get::<String>(r, 6)?).into(),
+            definition: get::<Option<String>>(r, 7)?
+                .map(|def| qualify_reference(def, &unqualified, &qualified)),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// `pg_get_constraintdef` names the referenced table unqualified when its schema is on
+/// the session's `search_path`; the DDL must not depend on that, so the reference is
+/// schema-qualified. Everything else stays verbatim.
+fn qualify_reference(def: String, unqualified: &str, qualified: &str) -> String {
+    let bare = format!(" REFERENCES {unqualified}(");
+    match def.find(&bare) {
+        Some(at) => format!(
+            "{} REFERENCES {qualified}({}",
+            &def[..at],
+            &def[at + bare.len()..]
+        ),
+        None => def,
+    }
 }
 
 /// Joins definitions (functions, triggers) into one script, each ending with `;`.
@@ -261,9 +279,13 @@ impl PgSession {
             .map_err(map_err)?;
         let current: String = get(&row, 0)?;
         if current != db {
-            return Err(self.unsupported(&format!(
-                "cross-database introspection (session database {current}, requested {db})"
-            )));
+            return Err(DbError::Unsupported {
+                feature: "cross-database introspection".into(),
+                version: format!(
+                    "{} (session database {current}, requested {db})",
+                    self.server_info().version_string
+                ),
+            });
         }
         Ok(conn)
     }
@@ -494,6 +516,7 @@ impl Introspector for PgSession {
             checks.push(CheckDetail {
                 name: get(r, 0)?,
                 expression: get::<Option<String>>(r, 1)?.unwrap_or_default(),
+                definition: get(r, 2)?,
             });
         }
         checks.sort_by(|a, b| a.name.cmp(&b.name));
@@ -574,6 +597,20 @@ mod tests {
         assert_eq!(trigger_timing(0b1010001), "INSTEAD OF");
         assert_eq!(trigger_events(0b1010001), "UPDATE");
         assert_eq!(trigger_events(1 << 5), "TRUNCATE");
+    }
+
+    #[test]
+    fn qualifies_fk_reference_only() {
+        let def = "FOREIGN KEY (a) REFERENCES orders(id) DEFERRABLE INITIALLY DEFERRED";
+        assert_eq!(
+            qualify_reference(def.into(), "orders", "public.orders"),
+            "FOREIGN KEY (a) REFERENCES public.orders(id) DEFERRABLE INITIALLY DEFERRED"
+        );
+        let qualified = "FOREIGN KEY (a) REFERENCES sales.\"T(x)\"(id)";
+        assert_eq!(
+            qualify_reference(qualified.into(), "\"T(x)\"", "sales.\"T(x)\""),
+            qualified
+        );
     }
 
     #[test]

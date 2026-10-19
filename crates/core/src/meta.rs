@@ -72,6 +72,8 @@ pub struct IndexDetail {
     pub columns: Vec<String>,
     pub expression: Option<String>,
     pub method: Option<String>,
+    /// Either a full `CREATE INDEX …` statement or, for an index backing a table
+    /// constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).
     pub definition: Option<String>,
 }
 
@@ -84,12 +86,18 @@ pub struct ForeignKeyDetail {
     pub ref_columns: Vec<String>,
     pub on_update: String,
     pub on_delete: String,
+    /// Verbatim server constraint definition when the backend provides one
+    /// (e.g. `FOREIGN KEY (a) REFERENCES t(id) DEFERRABLE INITIALLY DEFERRED`).
+    pub definition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct CheckDetail {
     pub name: String,
     pub expression: String,
+    /// Verbatim server constraint definition when the backend provides one
+    /// (e.g. `CHECK ((total >= 0)) NOT VALID`).
+    pub definition: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

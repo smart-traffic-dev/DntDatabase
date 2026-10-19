@@ -220,7 +220,8 @@ async fn lists_fixture_objects() {
         };
         let r = s.list_objects(&other, ObjectKind::Table).await;
         assert!(
-            matches!(r, Err(DbError::Unsupported { .. })),
+            matches!(&r, Err(DbError::Unsupported { feature, .. })
+                if feature == "cross-database introspection"),
             "{t:?}: {r:?}"
         );
         let r = s.list_schemas("postgres").await;
@@ -367,8 +368,49 @@ async fn ddl_for_each_kind() {
     }
 }
 
-/// Renames the table (and every index / constraint, which share a namespace with
-/// relations) in `ddl`, then runs it in a transaction that is rolled back.
+/// `name` + `_copy`, quoted as a whole (`"Foo_copy"`, never `"Foo"_copy`).
+fn copy_name(name: &str) -> String {
+    quote_ident(&format!("{name}_copy"))
+}
+
+/// Renames the table and every index / constraint (they share a namespace with
+/// relations) of `ddl` to `<name>_copy`. Only the table's own `schema.table ` occurrences
+/// are renamed: a reference (`schema.table(`) keeps pointing at the original.
+fn copy_ddl(ddl: &str, d: &TableDetail, schema: &str, table: &str) -> String {
+    let mut ddl = ddl.to_string();
+    let mut renamed: Vec<&str> = d
+        .primary_key
+        .iter()
+        .chain(&d.indexes)
+        .map(|i| i.name.as_str())
+        .chain(d.foreign_keys.iter().map(|f| f.name.as_str()))
+        .chain(d.checks.iter().map(|c| c.name.as_str()))
+        .collect();
+    assert!(!renamed.is_empty(), "{table}");
+    renamed.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    for name in renamed {
+        ddl = ddl.replace(
+            &format!("{} ", quote_ident(name)),
+            &format!("{} ", copy_name(name)),
+        );
+    }
+    let qualified = format!("{}.{} ", quote_ident(schema), quote_ident(table));
+    assert!(ddl.contains(&qualified), "{ddl}");
+    ddl.replace(
+        &qualified,
+        &format!("{}.{} ", quote_ident(schema), copy_name(table)),
+    )
+}
+
+/// Runs `sql` in a transaction that is rolled back.
+async fn run_rolled_back(s: &PgSession, sql: &str) -> Result<(), DbError> {
+    exec(s, "BEGIN").await.unwrap();
+    let res = exec(s, sql).await;
+    exec(s, "ROLLBACK").await.unwrap();
+    res
+}
+
+/// The generated DDL, renamed to `<table>_copy`, runs without error.
 #[tokio::test]
 async fn ddl_roundtrip() {
     require_db!();
@@ -376,38 +418,82 @@ async fn ddl_roundtrip() {
         let s = connect(t).await;
         for (schema, table) in [
             ("public", "orders"),
+            ("public", "weird_names"),
+            ("public", "đơn_hàng"),
             ("sales", "invoices"),
             ("sales", "measurements"),
         ] {
             let d = detail(&s, t, schema, table).await;
-            let mut ddl = s
+            let ddl = s
                 .object_ddl(&obj(schema, table, ObjectKind::Table))
                 .await
                 .unwrap_or_else(|e| panic!("{t:?} {table}: {e}"));
-            let mut renamed: Vec<&str> = d
-                .primary_key
-                .iter()
-                .chain(&d.indexes)
-                .map(|i| i.name.as_str())
-                .chain(d.foreign_keys.iter().map(|f| f.name.as_str()))
-                .chain(d.checks.iter().map(|c| c.name.as_str()))
-                .collect();
-            assert!(!renamed.is_empty(), "{t:?} {table}");
-            renamed.sort_by_key(|n| std::cmp::Reverse(n.len()));
-            for name in renamed {
-                let q = quote_ident(name);
-                ddl = ddl.replace(&format!("{q} "), &format!("{}_copy ", q));
-            }
-            let qualified = format!("{}.{} ", quote_ident(schema), quote_ident(table));
-            let copy = format!("{}.{}_copy ", quote_ident(schema), quote_ident(table));
-            assert!(ddl.contains(&qualified), "{t:?}: {ddl}");
-            let ddl = ddl.replace(&qualified, &copy);
-
-            exec(&s, "BEGIN").await.unwrap();
-            let res = exec(&s, &ddl).await;
-            exec(&s, "ROLLBACK").await.unwrap();
-            res.unwrap_or_else(|e| panic!("{t:?} {table}: {e}\n{ddl}"));
+            let ddl = copy_ddl(&ddl, &d, schema, table);
+            run_rolled_back(&s, &ddl)
+                .await
+                .unwrap_or_else(|e| panic!("{t:?} {table}: {e}\n{ddl}"));
         }
+    }
+}
+
+/// FK and CHECK options that cannot be rebuilt from their parts come through verbatim.
+/// Everything happens in one transaction that is rolled back.
+#[tokio::test]
+async fn verbatim_constraint_definitions() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let mut setup = vec![
+            "CREATE TABLE public.t13_constraints (\
+               id int PRIMARY KEY, customer_id int, parent_id int, total numeric, \
+               CONSTRAINT t13_uq UNIQUE (id, customer_id), \
+               CONSTRAINT t13_fk FOREIGN KEY (customer_id) REFERENCES public.customers (id) \
+                 MATCH FULL DEFERRABLE INITIALLY DEFERRED)",
+            "ALTER TABLE public.t13_constraints \
+               ADD CONSTRAINT t13_chk CHECK (total >= 0) NOT VALID",
+        ];
+        let mut want = vec![
+            "CONSTRAINT t13_fk FOREIGN KEY (customer_id) REFERENCES public.customers(id) \
+             MATCH FULL DEFERRABLE INITIALLY DEFERRED",
+            "CONSTRAINT t13_chk CHECK ((total >= (0)::numeric)) NOT VALID",
+        ];
+        if t == Target::Pg17 {
+            // PG 15+: a column list on ON DELETE SET NULL.
+            setup.push(
+                "ALTER TABLE public.t13_constraints ADD CONSTRAINT t13_parent \
+                 FOREIGN KEY (parent_id, customer_id) \
+                 REFERENCES public.t13_constraints (id, customer_id) \
+                 ON DELETE SET NULL (parent_id)",
+            );
+            want.push(
+                "CONSTRAINT t13_parent FOREIGN KEY (parent_id, customer_id) \
+                 REFERENCES public.t13_constraints(id, customer_id) ON DELETE SET NULL (parent_id)",
+            );
+        }
+        exec(&s, "BEGIN").await.unwrap();
+        let checked = async {
+            exec(&s, &setup.join("; ")).await?;
+            let d = detail(&s, t, "public", "t13_constraints").await;
+            assert!(
+                d.foreign_keys.iter().all(|f| f.definition.is_some()),
+                "{t:?}: {:?}",
+                d.foreign_keys
+            );
+            assert!(d.checks[0].definition.is_some(), "{t:?}");
+            let ddl = s
+                .object_ddl(&obj("public", "t13_constraints", ObjectKind::Table))
+                .await?;
+            for w in &want {
+                assert!(ddl.contains(w), "{t:?}: {w}\n{ddl}");
+            }
+            let copy = copy_ddl(&ddl, &d, "public", "t13_constraints");
+            exec(&s, &copy).await.map_err(|e| DbError::Internal {
+                message: format!("{e}\n{copy}"),
+            })
+        }
+        .await;
+        exec(&s, "ROLLBACK").await.unwrap();
+        checked.unwrap_or_else(|e| panic!("{t:?}: {e}"));
     }
 }
 

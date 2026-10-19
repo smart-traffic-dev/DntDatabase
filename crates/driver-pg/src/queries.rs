@@ -109,7 +109,8 @@ pub(crate) const INDEXES: &str = "SELECT ic.relname::text, i.indisunique, i.indi
      WHERE i.indrelid = $1";
 
 /// Foreign keys (`$1` = relation oid): name, columns, referenced schema / table /
-/// columns, `confupdtype`, `confdeltype`.
+/// columns, `confupdtype`, `confdeltype`, `pg_get_constraintdef`, the referenced table as
+/// the server may print it unqualified (`quote_ident(relname)`) and schema-qualified.
 pub(crate) const FOREIGN_KEYS: &str = "SELECT con.conname::text, \
      ARRAY(SELECT a.attname::text FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord) \
            JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
@@ -118,13 +119,15 @@ pub(crate) const FOREIGN_KEYS: &str = "SELECT con.conname::text, \
      ARRAY(SELECT a.attname::text FROM unnest(con.confkey) WITH ORDINALITY k(attnum, ord) \
            JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum \
            ORDER BY k.ord), \
-     con.confupdtype::text, con.confdeltype::text \
+     con.confupdtype::text, con.confdeltype::text, pg_get_constraintdef(con.oid), \
+     quote_ident(cf.relname), quote_ident(nf.nspname) || '.' || quote_ident(cf.relname) \
      FROM pg_constraint con JOIN pg_class cf ON cf.oid = con.confrelid \
      JOIN pg_namespace nf ON nf.oid = cf.relnamespace \
      WHERE con.conrelid = $1 AND con.contype = 'f'";
 
-/// Check constraints (`$1` = relation oid): name, expression.
-pub(crate) const CHECKS: &str = "SELECT con.conname::text, pg_get_expr(con.conbin, con.conrelid) \
+/// Check constraints (`$1` = relation oid): name, expression, `pg_get_constraintdef`.
+pub(crate) const CHECKS: &str = "SELECT con.conname::text, pg_get_expr(con.conbin, con.conrelid), \
+     pg_get_constraintdef(con.oid) \
      FROM pg_constraint con WHERE con.conrelid = $1 AND con.contype = 'c'";
 
 /// User triggers of one relation (`$1` = relation oid): name, `tgtype` bits.

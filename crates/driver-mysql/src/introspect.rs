@@ -240,6 +240,8 @@ fn group_foreign_keys(rows: &[TextRow], db: &str) -> Vec<ForeignKeyDetail> {
             ref_columns: Vec::new(),
             on_update: col(r, 5).unwrap_or_default(),
             on_delete: col(r, 6).unwrap_or_default(),
+            // MySQL table DDL comes verbatim from `SHOW CREATE TABLE`.
+            definition: None,
         });
         fk.columns.extend(col(r, 1));
         fk.ref_columns.extend(col(r, 4));
@@ -351,6 +353,7 @@ impl Introspector for MySqlSession {
                     Some(CheckDetail {
                         name: col(r, 0)?,
                         expression: col(r, 1).unwrap_or_default(),
+                        definition: None,
                     })
                 })
                 .collect(),
@@ -569,6 +572,7 @@ mod tests {
         let checks = [CheckDetail {
             name: "c".into(),
             expression: "`doc` is null or json_valid(`doc`)".into(),
+            definition: None,
         }];
         apply_json_alias(&mut cols, &checks);
         assert_eq!(cols[0].db_type, "json");

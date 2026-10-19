@@ -312,6 +312,7 @@ foreign_keys: []
 checks:
   - name: c_json
     expression: "json_valid(`c_json`)"
+    definition: ~
 triggers: []
 options:
   engine: InnoDB
