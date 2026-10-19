@@ -103,11 +103,30 @@ describe('ObjectTab', () => {
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Info', 'DDL', 'Structure']);
   });
 
-  it('view_shows_only_ddl', async () => {
-    setup(makeTab('View', 'v_open'));
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['DDL']);
+  it('view_has_info_ddl_and_structure', async () => {
+    const user = userEvent.setup();
+    // Views have no row estimate, size, engine or indexes.
+    const view = detail({
+      object: ref('View', 'v_open'),
+      row_estimate: null,
+      size_bytes: null,
+      options: { engine: null, collation: null, tablespace: null, partitioned_by: null, system_versioned: false },
+      primary_key: null,
+      indexes: [],
+      foreign_keys: [],
+      checks: [],
+      triggers: [],
+      comment: null,
+    });
+    setup(makeTab('View', 'v_open'), { table_detail: () => view });
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Info', 'DDL', 'Structure']);
+    const info = await screen.findByText('Row estimate');
+    expect(info.closest('.ot-info-row')).toHaveTextContent('—');
+    expect(callsOf('table_detail')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
+    await user.click(screen.getByRole('tab', { name: 'Structure' }));
+    expect(await screen.findByRole('region', { name: 'Columns' })).toBeInTheDocument();
+    await user.click(screen.getByTestId('object-tab-ddl'));
     expect(await screen.findByTestId('object-ddl-text')).toHaveTextContent('CREATE TABLE');
-    expect(callsOf('table_detail')).toHaveLength(0);
     expect(callsOf('object_ddl')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
   });
 
@@ -127,7 +146,8 @@ describe('ObjectTab', () => {
   it('copy_failure_is_shown_and_cleared_on_next_success', async () => {
     const user = userEvent.setup();
     const write = vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('denied'));
-    setup(makeTab('View', 'v_open'));
+    // A function opens on its only sub-tab, DDL.
+    setup(makeTab('Function', 'f_add'));
     await screen.findByTestId('object-ddl-text');
     await user.click(screen.getByRole('button', { name: 'Copy' }));
     expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't copy — select the text and press Ctrl+C.");

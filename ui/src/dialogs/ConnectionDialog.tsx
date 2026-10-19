@@ -83,6 +83,7 @@ interface Form {
   passwordTouched: boolean;
   defaultDb: string;
   envTag: '' | EnvTag;
+  readOnly: boolean;
   savePassword: boolean;
   sshOn: boolean;
   sshHost: string;
@@ -117,6 +118,7 @@ function initialForm(initial: ConnectionConfig | undefined): Form {
     passwordTouched: false,
     defaultDb: initial?.default_db ?? '',
     envTag: initial?.env_tag ?? '',
+    readOnly: initial?.read_only ?? false,
     savePassword: (initial?.secret_mode ?? 'saved') === 'saved',
     sshOn: !!initial?.ssh,
     sshHost: initial?.ssh?.host ?? '',
@@ -212,7 +214,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     username: form.username,
     default_db: orNull(form.defaultDb),
     env_tag: form.envTag === '' ? null : form.envTag,
-    read_only: initial?.read_only ?? false,
+    read_only: form.readOnly,
     secret_mode: form.savePassword ? 'saved' : 'ask',
     ssh: form.sshOn
       ? {
@@ -469,6 +471,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             <option value="staging">Staging</option>
             <option value="local">Local</option>
           </select>
+        </div>
+        <div className="field span2">
+          <label className="check">
+            <input type="checkbox" checked={form.readOnly} onChange={(e) => set('readOnly', e.target.checked)} />
+            <span>Read-only connection</span>
+          </label>
+          {form.readOnly && <p className="hint">Sessions are opened read-only on the server.</p>}
         </div>
       </div>
     ),

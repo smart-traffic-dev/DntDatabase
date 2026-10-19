@@ -232,6 +232,30 @@ describe('ConnectionDialog', () => {
     });
   });
 
+  it('read_only_flag_round_trips', async () => {
+    mockBackend({ update_connection: (a) => a.cfg, create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const stored = config(ids.prod, 'shop', { read_only: true });
+    const onClose = vi.fn();
+    const { unmount } = render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
+    const box = screen.getByLabelText('Read-only connection');
+    expect(box).toBeChecked();
+    await user.click(box);
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('update_connection')[0]).toMatchObject({ cfg: { read_only: false } });
+    unmount();
+
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    expect(screen.getByLabelText('Read-only connection')).not.toBeChecked();
+    await user.type(screen.getByTestId('conn-name'), 'ro');
+    await user.type(screen.getByTestId('conn-host'), 'h');
+    await user.click(screen.getByLabelText('Read-only connection'));
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { read_only: true } });
+  });
+
   it('labels_are_associated', () => {
     mockBackend({});
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);

@@ -24,8 +24,9 @@ export function formatBytes(bytes: number): string {
 
 const formatCount = (n: number) => `≈ ${n.toLocaleString('en-US')}`;
 
+/** Tables and views (incl. materialized) have Info, DDL and Structure; other objects DDL only. */
 function subTabsOf(kind: Tab['objectRef']['kind']): SubTab[] {
-  return kind === 'Table' || kind === 'MaterializedView' ? ['info', 'ddl', 'structure'] : ['ddl'];
+  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['info', 'ddl', 'structure'] : ['ddl'];
 }
 
 const resourceOf = (sub: SubTab): Resource => (sub === 'ddl' ? 'ddl' : 'detail');
