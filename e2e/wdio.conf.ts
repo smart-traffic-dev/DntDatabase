@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const application = path.join(root, 'target', 'debug', 'dntdatabase.exe');
+const application = path.join(root, 'target', 'e2e', 'debug', 'dntdatabase.exe');
 const README_HINT = 'See README.md, section "End-to-end smoke test".';
 
 /** First existing candidate, or the first candidate when none exists (used in the error message). */
@@ -86,14 +86,16 @@ function cleanup() {
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
-  specs: ['./smoke.e2e.ts'],
+  specs: ['./smoke.e2e.ts', './postgres.e2e.ts'],
   maxInstances: 1,
+  maxInstancesPerCapability: 1, // both specs share one DNT_DATA_DIR and one tauri-driver port
   hostname: '127.0.0.1',
   port: 4444,
   path: '/',
   capabilities: [
     {
       browserName: 'wry',
+      maxInstances: 1, // specs share one DNT_DATA_DIR and one tauri-driver; run them serially
       'tauri:options': { application },
     } as WebdriverIO.Capabilities,
   ],
@@ -104,7 +106,7 @@ export const config: WebdriverIO.Config = {
 
   async onPrepare() {
     const missing: [string, string][] = [
-      ['the app binary', application],
+      ['the app binary (run `pnpm --dir e2e build:app`)', application],
       ['msedgedriver (set MSEDGEDRIVER or extract it to tools/msedgedriver/)', nativeDriver],
       ['tauri-driver (set TAURI_DRIVER or run `cargo install tauri-driver --locked`)', tauriDriver],
     ];
@@ -144,3 +146,4 @@ export const config: WebdriverIO.Config = {
     cleanup();
   },
 };
+

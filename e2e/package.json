@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "build:app": "tsx build-app.ts",
     "test": "wdio run ./wdio.conf.ts"
   },
   "devDependencies": {
@@ -18,3 +19,4 @@
     "webdriverio": "^9.0.0"
   }
 }
+
