@@ -30,6 +30,7 @@ export function ImportDialog({ onClose }: Props) {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [policy, setPolicy] = useState<ConflictPolicy>('skip');
   const [busy, setBusy] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [passError, setPassError] = useState<string | null>(null);
   // Results of calls that finish after the dialog closed or a newer call started are dropped.
@@ -83,6 +84,8 @@ export function ImportDialog({ onClose }: Props) {
     }
     if (!file || Array.isArray(file) || my !== token.current) return;
     setPath(file);
+    setNeedsPassphrase(false);
+    setPassError(null);
     setPreview(null);
     setUsed(null);
     setPassphrase('');
@@ -120,22 +123,26 @@ export function ImportDialog({ onClose }: Props) {
     if (!path || !preview || busy) return;
     const my = ++token.current;
     setBusy(true);
+    setApplying(true);
     setError(null);
     try {
       const r = await api.applyImport(path, used, policy);
-      if (my !== token.current) return;
+      // The import happened on the backend: always surface it, even if the dialog went away.
       useDialogs.getState().setNotice(`Imported ${r.imported} · Overwritten ${r.overwritten} · Skipped ${r.skipped}`);
       await useTree.getState().reloadStored();
       if (my !== token.current) return;
       onClose();
     } catch (e) {
       if (my !== token.current) return;
-      fail(e);
+      setError(toAppError(e).message);
       setBusy(false);
+      setApplying(false);
     }
   };
 
   const close = () => {
+    // The dialog stays until a running import has finished.
+    if (applying) return;
     token.current++;
     setPassphrase('');
     setUsed(null);
@@ -206,7 +213,7 @@ export function ImportDialog({ onClose }: Props) {
                   <tr key={r.id}>
                     <td>{r.name}</td>
                     <td>
-                      <span className="chip chip-ma">{chip(r.kind)}</span>
+                      <span className={`chip chip-${chip(r.kind)}`}>{chip(r.kind)}</span>
                     </td>
                     <td>{r.host}</td>
                     <td>{r.group_path}</td>
@@ -273,7 +280,7 @@ export function ImportDialog({ onClose }: Props) {
         )}
       </div>
       <footer className="modal-foot">
-        <button type="button" className="btn" onClick={close}>
+        <button type="button" className="btn" disabled={applying} onClick={close}>
           Cancel
         </button>
         <button

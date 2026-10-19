@@ -108,14 +108,18 @@ export function ExportDialog({ preselected = [], onClose }: Props) {
     if (!canExport) return;
     const my = ++run.current;
     setError(null);
+    setBusy(true);
     try {
       const day = new Date().toISOString().slice(0, 10);
       const path = await save({
         defaultPath: `connections-${day}.dntconn`,
         filters: [{ name: 'DntDatabase connections', extensions: ['dntconn'] }],
       });
-      if (!path || my !== run.current) return;
-      setBusy(true);
+      if (my !== run.current) return;
+      if (!path) {
+        setBusy(false);
+        return;
+      }
       await api.exportConnections(selectedNodes(), includePasswords ? passphrase : null, path);
       if (my !== run.current) return;
       onClose();

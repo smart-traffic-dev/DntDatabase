@@ -73,10 +73,10 @@ describe('ImportDialog', () => {
 
     const rows = screen.getAllByRole('row').slice(1);
     expect(within(rows[0]!).getByText('Same id')).toBeInTheDocument();
-    expect(within(rows[0]!).getByText('MY')).toBeInTheDocument();
+    expect(within(rows[0]!).getByText('MY')).toHaveClass('chip-MY');
     expect(within(rows[0]!).getByText('Prod / EU')).toBeInTheDocument();
     expect(within(rows[1]!).getByText('Same name')).toBeInTheDocument();
-    expect(within(rows[1]!).getByText('PG')).toBeInTheDocument();
+    expect(within(rows[1]!).getByText('PG')).toHaveClass('chip-PG');
     expect(within(rows[1]!).getByText('SSH key file not found')).toBeInTheDocument();
     const skipped = screen.getByRole('region', { name: 'Skipped entries' });
     expect(within(skipped).getByText('weird')).toBeInTheDocument();
@@ -103,6 +103,36 @@ describe('ImportDialog', () => {
     expect(callsOf('apply_import')).toEqual([{ path: FILE, passphrase: null, policy: 'overwrite' }]);
     expect(calls()).toContain('list_tree');
     expect(useDialogs.getState().notice).toBe('Imported 2 · Overwritten 1 · Skipped 3');
+  });
+
+  it('keeps the dialog open while applying and still reloads and notifies when apply resolves', async () => {
+    const user = userEvent.setup();
+    let finish!: () => void;
+    const gate = new Promise<void>((r) => (finish = r));
+    mockBackend({
+      import_needs_passphrase: () => false,
+      preview_import: () => preview,
+      apply_import: async () => {
+        await gate;
+        return { imported: 1, overwritten: 0, skipped: 0 };
+      },
+      list_tree: () => sampleTree(),
+    });
+    const onClose = vi.fn();
+    render(<ImportDialog onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Choose file…' }));
+    await screen.findByText('shop');
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    expect(cancel).toBeDisabled();
+    await user.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+
+    finish();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(calls()).toContain('list_tree');
+    expect(useDialogs.getState().notice).toBe('Imported 1 · Overwritten 0 · Skipped 0');
   });
 
   it('does nothing when the file dialog is cancelled', async () => {
