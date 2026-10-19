@@ -290,7 +290,7 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
     );
     out.insert(
         "timeout_connect",
-        staged(ConnectDb, false, DbError::Timeout { stage: ConnectDb }),
+        staged(ConnectDb, false, DbError::timeout(ConnectDb)),
     );
     out.insert(
         "ssh_connect",
@@ -352,15 +352,30 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
     // Browsing an open connection.
     out.insert(
         "timeout_execute",
+        DbError::timeout(ConnectStage::Execute).into(),
+    );
+    // Running a statement: it timed out, and whether it was applied is unknown.
+    out.insert(
+        "timeout_execute_outcome_unknown",
         DbError::Timeout {
             stage: ConnectStage::Execute,
+            outcome_unknown: true,
         }
         .into(),
     );
     out.insert(
         "connection_lost",
         DbError::ConnectionLost {
-            in_transaction: false,
+            was_in_tx: false,
+            message: "Lost connection to MySQL server during query".into(),
+        }
+        .into(),
+    );
+    out.insert(
+        "connection_lost_in_transaction",
+        DbError::ConnectionLost {
+            was_in_tx: true,
+            message: "Lost connection to MySQL server during query".into(),
         }
         .into(),
     );

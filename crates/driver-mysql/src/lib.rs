@@ -33,9 +33,7 @@ impl MySqlDriver {
     pub async fn connect_session(&self, cfg: &ResolvedConfig) -> Result<MySqlSession, DbError> {
         tokio::time::timeout(cfg.connect_timeout, connect_inner(cfg))
             .await
-            .map_err(|_| DbError::Timeout {
-                stage: ConnectStage::ConnectDb,
-            })?
+            .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))?
     }
 }
 
@@ -147,7 +145,7 @@ pub(crate) fn map_mysql_error(e: MyError, stage: ConnectStage) -> DbError {
             message: t.to_string(),
         },
         MyError::Io(IoError::Io(io)) if io.kind() == std::io::ErrorKind::TimedOut => {
-            DbError::Timeout { stage }
+            DbError::timeout(stage)
         }
         MyError::Io(IoError::Io(io)) => DbError::Connect {
             message: io.to_string(),
@@ -216,7 +214,8 @@ mod tests {
         assert!(matches!(
             map_mysql_error(timed_out.into(), ConnectStage::ConnectDb),
             DbError::Timeout {
-                stage: ConnectStage::ConnectDb
+                stage: ConnectStage::ConnectDb,
+                outcome_unknown: false
             }
         ));
         let handshake = std::io::Error::new(

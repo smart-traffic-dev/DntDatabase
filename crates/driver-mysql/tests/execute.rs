@@ -318,6 +318,181 @@ async fn completed_write_during_cancel_keeps_its_result() {
     }
 }
 
+fn timeout_opts(ms: u64) -> ExecOptions {
+    ExecOptions {
+        timeout: Some(Duration::from_millis(ms)),
+        ..ExecOptions::default()
+    }
+}
+
+async fn count_rows(s: &MySqlSession, table: &str) -> u64 {
+    let (_, c) = run(s, &format!("SELECT COUNT(*) FROM {table}"))
+        .await
+        .unwrap();
+    as_u64(&scalar(&c))
+}
+
+/// Two Cancel clicks on the same statement (each sends its own `KILL QUERY`): the call
+/// is cancelled once, the open transaction is untouched, and no stray kill reaches the
+/// statements that follow.
+#[tokio::test]
+async fn cancel_twice_keeps_session_usable() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(&s, "BEGIN").await.unwrap();
+        let (h1, h2) = (s.cancel_handle(), s.cancel_handle());
+        let click = |h: dnt_core::driver::CancelHandle| async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            h.cancel().await
+        };
+        let (res, c1, c2) = tokio::join!(run(&s, "SELECT SLEEP(10)"), click(h1), click(h2));
+        c1.unwrap_or_else(|e| panic!("{t:?}: first cancel failed: {e}"));
+        c2.unwrap_or_else(|e| panic!("{t:?}: second cancel failed: {e}"));
+        assert!(
+            matches!(res, Err(DbError::Cancelled)),
+            "{t:?}: {:?}",
+            res.map(|(s, _)| s)
+        );
+        assert!(
+            s.in_transaction(),
+            "{t:?}: a cancel must not end the transaction"
+        );
+        // A sleep that is not interrupted returns 0.
+        let (_, c) = run(&s, "SELECT SLEEP(0.5)")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(
+            as_u64(&scalar(&c)),
+            0,
+            "{t:?}: a stray kill hit the next call"
+        );
+        run(&s, "ROLLBACK").await.unwrap();
+        assert!(!s.in_transaction(), "{t:?}");
+    }
+}
+
+/// A timeout and a Cancel click land on the same statement: either error is fine, but
+/// the session stays usable and keeps its transaction state.
+#[tokio::test]
+async fn timeout_racing_cancel_keeps_session_usable() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(&s, "BEGIN").await.unwrap();
+        let handle = s.cancel_handle();
+        let (res, cancel) =
+            tokio::join!(run_with(&s, "SELECT SLEEP(10)", timeout_opts(300)), async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                handle.cancel().await
+            });
+        cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
+        assert!(
+            matches!(
+                res,
+                Err(DbError::Cancelled
+                    | DbError::Timeout {
+                        outcome_unknown: false,
+                        ..
+                    })
+            ),
+            "{t:?}: {:?}",
+            res.map(|(s, _)| s)
+        );
+        assert!(s.in_transaction(), "{t:?}");
+        let (_, c) = run(&s, "SELECT SLEEP(0.5)")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(as_u64(&scalar(&c)), 0, "{t:?}");
+        run(&s, "ROLLBACK").await.unwrap();
+    }
+}
+
+/// `INSERT … VALUES (SLEEP(n))` cut short by `KILL QUERY`: MySQL ends the sleep early
+/// and still inserts the row (the statement succeeds), MariaDB aborts it with error 1317
+/// and inserts nothing. Whichever happens, the reported result must match the table:
+/// a write that was applied during the timeout / cancel grace period is never reported
+/// as a timeout or a cancel.
+#[tokio::test]
+async fn write_finishing_in_grace_reports_success() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(
+            &s,
+            "CREATE TABLE IF NOT EXISTS t3_grace (v int); DELETE FROM t3_grace",
+        )
+        .await
+        .unwrap();
+        let mysql = matches!(t, Target::MySql57 | Target::MySql8);
+
+        // Timeout.
+        let res = run_with(
+            &s,
+            "INSERT INTO t3_grace VALUES (SLEEP(5))",
+            timeout_opts(500),
+        )
+        .await;
+        let rows = count_rows(&s, "t3_grace").await;
+        match &res {
+            Ok((_, c)) => {
+                assert_eq!(rows, 1, "{t:?}");
+                assert_eq!(c.results[0].affected, Some(1), "{t:?}");
+            }
+            Err(DbError::Timeout {
+                stage: ConnectStage::Execute,
+                outcome_unknown: false,
+            }) => assert_eq!(rows, 0, "{t:?}"),
+            Err(e) => panic!("{t:?}: {e:?}"),
+        }
+        assert_eq!(res.is_ok(), mysql, "{t:?}: {:?}", res.map(|(s, _)| s));
+
+        // Cancel.
+        run(&s, "DELETE FROM t3_grace").await.unwrap();
+        let handle = s.cancel_handle();
+        let (res, cancel) =
+            tokio::join!(run(&s, "INSERT INTO t3_grace VALUES (SLEEP(5))"), async {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                handle.cancel().await
+            });
+        cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
+        let rows = count_rows(&s, "t3_grace").await;
+        match &res {
+            Ok(_) => assert_eq!(rows, 1, "{t:?}"),
+            Err(DbError::Cancelled) => assert_eq!(rows, 0, "{t:?}"),
+            Err(e) => panic!("{t:?}: {e:?}"),
+        }
+        assert_eq!(res.is_ok(), mysql, "{t:?}: {:?}", res.map(|(s, _)| s));
+        assert!(!s.in_transaction(), "{t:?}");
+    }
+}
+
+/// A `USE` behind a comment is still the database re-applied after a reconnect.
+#[tokio::test]
+async fn use_after_comment_tracks_db() {
+    require_db!();
+    for t in Target::mysql_family() {
+        for (sql, db) in [
+            ("/* pick */ USE information_schema", "information_schema"),
+            ("-- pick\nUSE mysql -- trailing", "mysql"),
+            (
+                "# pick\n USE `information_schema` /* end */",
+                "information_schema",
+            ),
+        ] {
+            let s = connect(t).await;
+            run(&s, sql)
+                .await
+                .unwrap_or_else(|e| panic!("{t:?} {sql:?}: {e}"));
+            kill(t, connection_id(&s).await).await;
+            let (_, c) = run(&s, "SELECT DATABASE()")
+                .await
+                .unwrap_or_else(|e| panic!("{t:?} {sql:?}: {e}"));
+            assert_eq!(scalar(&c), Value::Text(db.into()), "{t:?} {sql:?}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn timeout_option() {
     require_db!();
@@ -333,7 +508,8 @@ async fn timeout_option() {
             matches!(
                 res,
                 Err(DbError::Timeout {
-                    stage: ConnectStage::Execute
+                    stage: ConnectStage::Execute,
+                    outcome_unknown: false
                 })
             ),
             "{t:?}: {:?}",
@@ -387,7 +563,8 @@ async fn no_retry_inside_transaction() {
             matches!(
                 err,
                 Some(DbError::ConnectionLost {
-                    in_transaction: true
+                    was_in_tx: true,
+                    ..
                 })
             ),
             "{t:?}: {err:?}"

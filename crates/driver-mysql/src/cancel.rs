@@ -46,6 +46,13 @@ impl CancelState {
             gen,
         }
     }
+
+    /// Records a cancel for generation `gen`. Generations only grow, so `fetch_max`
+    /// keeps a stale request (one that read an older `running` before a newer click
+    /// stored its own) from lowering the value and un-cancelling the newer call.
+    pub(crate) fn request_cancel(&self, gen: u64) {
+        self.cancelled.fetch_max(gen, Ordering::SeqCst);
+    }
 }
 
 /// One running `execute` call.
@@ -82,7 +89,7 @@ impl Canceller for MySqlCanceller {
         if gen == 0 {
             return Ok(());
         }
-        self.state.cancelled.store(gen, Ordering::SeqCst);
+        self.state.request_cancel(gen);
         let state = &self.state;
         kill_query(&self.opts, || {
             (state.running.load(Ordering::SeqCst) == gen)
@@ -114,9 +121,7 @@ pub(crate) async fn kill_query(
     };
     tokio::time::timeout(CANCEL_TIMEOUT, work)
         .await
-        .map_err(|_| DbError::Timeout {
-            stage: ConnectStage::Execute,
-        })?
+        .map_err(|_| DbError::timeout(ConnectStage::Execute))?
 }
 
 #[cfg(test)]
@@ -136,5 +141,20 @@ mod tests {
         let b = state.begin();
         assert!(!b.cancelled());
         assert_eq!(state.running.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_stale_cancel_never_lowers_the_cancelled_generation() {
+        let state = Arc::new(CancelState::default());
+        drop(state.begin());
+        let b = state.begin();
+        // A click for call 2, then a late write from a click that read call 1 earlier.
+        state.request_cancel(2);
+        state.request_cancel(1);
+        assert!(b.cancelled());
+        assert_eq!(state.cancelled.load(Ordering::SeqCst), 2);
+        // A second click on the same call changes nothing.
+        state.request_cancel(2);
+        assert!(b.cancelled());
     }
 }

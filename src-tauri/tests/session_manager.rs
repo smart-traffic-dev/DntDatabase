@@ -161,7 +161,8 @@ impl Introspector for FakeSession {
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         if lose.is_ok() {
             return Err(DbError::ConnectionLost {
-                in_transaction: false,
+                was_in_tx: false,
+                message: "Lost connection to MySQL server during query".into(),
             });
         }
         Ok(vec![ObjectSummary {
@@ -843,7 +844,8 @@ async fn hanging_metadata_call_times_out_and_close_is_prompt() {
         matches!(
             err,
             DbError::Timeout {
-                stage: ConnectStage::Execute
+                stage: ConnectStage::Execute,
+                outcome_unknown: false
             }
         ),
         "{err:?}"

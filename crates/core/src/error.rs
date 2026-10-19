@@ -74,8 +74,18 @@ pub enum DbError {
     Tls { message: String },
     #[error("connection failed: {message}")]
     Connect { message: String },
-    #[error("timed out during {}", .stage.as_str())]
-    Timeout { stage: ConnectStage },
+    /// An operation ran past its time limit.
+    ///
+    /// `outcome_unknown` is only ever true for an executed statement (`stage: Execute`)
+    /// that may have changed data: the limit expired, the statement was told to stop,
+    /// but its completion was never observed, so it may or may not have been applied
+    /// (and committed). When false the statement is known not to have taken effect, or
+    /// it could not change anything.
+    #[error("timed out during {}{}", .stage.as_str(), outcome_note(.outcome_unknown))]
+    Timeout {
+        stage: ConnectStage,
+        outcome_unknown: bool,
+    },
     #[error("authentication failed: {message}")]
     Auth { message: String },
     #[error("server error: {message}")]
@@ -85,8 +95,13 @@ pub enum DbError {
         message: String,
         position: Option<u32>,
     },
-    #[error("connection lost")]
-    ConnectionLost { in_transaction: bool },
+    /// The connection to the server dropped (or had to be abandoned) while working.
+    ///
+    /// `was_in_tx`: a transaction was open on it, which the server has rolled back; the
+    /// session's transaction state is reset. `message`: what happened, for diagnostics
+    /// (the driver error, or why replacing the connection failed). Never holds secrets.
+    #[error("connection lost: {message}")]
+    ConnectionLost { was_in_tx: bool, message: String },
     #[error("cancelled")]
     Cancelled,
     #[error("{feature} is not supported on server version {version}")]
@@ -106,7 +121,24 @@ pub enum DbError {
     },
 }
 
+fn outcome_note(outcome_unknown: &bool) -> &'static str {
+    if *outcome_unknown {
+        " (the statement may have been applied)"
+    } else {
+        ""
+    }
+}
+
 impl DbError {
+    /// A [`DbError::Timeout`] at `stage` that applied nothing (`outcome_unknown: false`):
+    /// every timeout except one of a statement that may have changed data.
+    pub fn timeout(stage: ConnectStage) -> DbError {
+        DbError::Timeout {
+            stage,
+            outcome_unknown: false,
+        }
+    }
+
     /// Wraps `err` with the connect stage it happened in. An error that already carries
     /// a stage keeps it (the innermost stage is the one that failed).
     pub fn at_stage(stage: ConnectStage, timings: Vec<StageTiming>, err: DbError) -> DbError {
@@ -273,10 +305,21 @@ impl From<DbError> for AppError {
                 retryable: true,
                 ..AppError::base("connect", "Could not connect to the database server.")
             },
-            DbError::Timeout { stage } => AppError {
+            // Re-running a statement that may have been applied could apply it twice.
+            DbError::Timeout {
+                stage,
+                outcome_unknown,
+            } => AppError {
                 stage: Some(stage.as_str().into()),
-                retryable: true,
-                ..AppError::base("timeout", "The operation timed out.")
+                retryable: !outcome_unknown,
+                ..AppError::base(
+                    "timeout",
+                    if outcome_unknown {
+                        "The statement timed out and may have been applied."
+                    } else {
+                        "The operation timed out."
+                    },
+                )
             },
             DbError::Auth { message } => AppError {
                 detail: Some(message),
@@ -294,11 +337,12 @@ impl From<DbError> for AppError {
                 position,
                 ..AppError::base("server", message)
             },
-            DbError::ConnectionLost { in_transaction } => AppError {
-                retryable: !in_transaction,
+            DbError::ConnectionLost { was_in_tx, message } => AppError {
+                retryable: !was_in_tx,
+                detail: (!message.is_empty()).then_some(message),
                 ..AppError::base(
                     "connection_lost",
-                    if in_transaction {
+                    if was_in_tx {
                         "The connection was lost during a transaction; it was rolled back."
                     } else {
                         "The connection to the server was lost."
@@ -633,20 +677,78 @@ mod tests {
     }
 
     #[test]
+    fn timeout_with_unknown_outcome_says_it_may_have_been_applied() {
+        let a: AppError = DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: true,
+        }
+        .into();
+        assert_eq!(a.kind, "timeout");
+        assert_eq!(a.stage.as_deref(), Some("execute"));
+        assert_eq!(
+            a.message,
+            "The statement timed out and may have been applied."
+        );
+        // Running it again could apply it twice.
+        assert!(!a.retryable);
+        let known: AppError = DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: false,
+        }
+        .into();
+        assert_eq!(known.message, "The operation timed out.");
+        assert!(known.retryable);
+        assert!(DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: true,
+        }
+        .to_string()
+        .contains("may have been applied"));
+    }
+
+    #[test]
+    fn connection_lost_keeps_its_message_as_detail() {
+        let a: AppError = DbError::ConnectionLost {
+            was_in_tx: false,
+            message: "Lost connection to MySQL server during query".into(),
+        }
+        .into();
+        assert_eq!(a.kind, "connection_lost");
+        assert_eq!(a.message, "The connection to the server was lost.");
+        assert_eq!(
+            a.detail.as_deref(),
+            Some("Lost connection to MySQL server during query")
+        );
+        let empty: AppError = DbError::ConnectionLost {
+            was_in_tx: false,
+            message: String::new(),
+        }
+        .into();
+        assert_eq!(empty.detail, None);
+    }
+
+    #[test]
     fn retryable_and_stage() {
         let t: AppError = DbError::Timeout {
             stage: ConnectStage::ConnectDb,
+            outcome_unknown: false,
         }
         .into();
         assert!(t.retryable);
         assert_eq!(t.stage.as_deref(), Some("connect_db"));
         let l: AppError = DbError::ConnectionLost {
-            in_transaction: true,
+            was_in_tx: true,
+            message: "gone".into(),
         }
         .into();
         assert!(!l.retryable);
+        assert_eq!(
+            l.message,
+            "The connection was lost during a transaction; it was rolled back."
+        );
         let l: AppError = DbError::ConnectionLost {
-            in_transaction: false,
+            was_in_tx: false,
+            message: "gone".into(),
         }
         .into();
         assert!(l.retryable);

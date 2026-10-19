@@ -401,7 +401,8 @@ async fn timeout_option() {
             matches!(
                 res,
                 Err(DbError::Timeout {
-                    stage: ConnectStage::Execute
+                    stage: ConnectStage::Execute,
+                    outcome_unknown: false
                 })
             ),
             "{t:?}: {:?}",
@@ -473,7 +474,8 @@ async fn killed_during_query_is_connection_lost() {
             matches!(
                 res,
                 Err(DbError::ConnectionLost {
-                    in_transaction: false
+                    was_in_tx: false,
+                    ..
                 })
             ),
             "{t:?}: {:?}",
@@ -500,7 +502,8 @@ async fn no_retry_inside_transaction() {
             matches!(
                 err,
                 Some(DbError::ConnectionLost {
-                    in_transaction: true
+                    was_in_tx: true,
+                    ..
                 })
             ),
             "{t:?}: {err:?}"

@@ -76,6 +76,29 @@ fn is_blank(s: &str, dialect: Dialect) -> bool {
     true
 }
 
+/// `stmt` with every plain comment replaced by one space. Strings, quoted identifiers,
+/// dollar-quoted bodies and MySQL executable comments (`/*! … */`, which the server
+/// runs) are kept verbatim; lexing follows the same per-dialect rules as [`split`].
+pub fn strip_comments(stmt: &str, dialect: Dialect) -> String {
+    let b = stmt.as_bytes();
+    let mut out = String::with_capacity(stmt.len());
+    let (mut i, mut kept) = (0, 0);
+    while i < b.len() {
+        match skip_at(b, i, dialect) {
+            Some((Skipped::Comment, end)) => {
+                out.push_str(&stmt[kept..i]);
+                out.push(' ');
+                i = end;
+                kept = end;
+            }
+            Some((_, end)) => i = end,
+            None => i += 1,
+        }
+    }
+    out.push_str(&stmt[kept..]);
+    out
+}
+
 /// Recognises a MySQL client `DELIMITER <tok>` line starting at `i` (only
 /// spaces/tabs may precede it on its line). Returns the new delimiter and the
 /// offset just past the directive's line.
@@ -376,6 +399,32 @@ mod tests {
         for (input, dialect, expected) in cases().into_iter().chain(extra_cases()) {
             let texts: Vec<String> = split(input, dialect).into_iter().map(|s| s.text).collect();
             assert_eq!(texts, expected, "input: {input:?} ({dialect:?})");
+        }
+    }
+
+    #[test]
+    fn strips_comments_but_not_strings_or_exec_comments() {
+        let cases = [
+            ("/* c */ USE shop", MySql, "USE shop"),
+            ("-- c\nUSE `a b` # tail", MySql, "USE `a b`"),
+            ("USE x /* end */;", MySql, "USE x  ;"),
+            (
+                "select '/* kept */', `--x`",
+                MySql,
+                "select '/* kept */', `--x`",
+            ),
+            ("/*!40101 USE x */", MySql, "/*!40101 USE x */"),
+            ("/* a /* b */ c */ select 1", Postgres, "select 1"),
+            ("select '#'", Postgres, "select '#'"),
+            ("select $$--$$ -- c", Postgres, "select $$--$$"),
+            ("/* đ */ USE thẻ", MySql, "USE thẻ"),
+        ];
+        for (input, dialect, expected) in cases {
+            assert_eq!(
+                strip_comments(input, dialect).trim(),
+                expected,
+                "input: {input:?} ({dialect:?})"
+            );
         }
     }
 

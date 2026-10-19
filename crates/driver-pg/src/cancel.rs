@@ -133,9 +133,7 @@ impl Canceller for PgCanceller {
 pub(crate) async fn send_cancel(token: &CancelToken, tls: &Tls) -> Result<(), DbError> {
     tokio::time::timeout(CANCEL_TIMEOUT, token.cancel_query(tls.connector.clone()))
         .await
-        .map_err(|_| DbError::Timeout {
-            stage: ConnectStage::Execute,
-        })?
+        .map_err(|_| DbError::timeout(ConnectStage::Execute))?
         .map_err(|e| map_pg_error(e, ConnectStage::Execute))
 }
 

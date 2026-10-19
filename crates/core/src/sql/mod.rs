@@ -4,4 +4,4 @@ mod classify;
 mod split;
 
 pub use classify::{classify, StatementKind, TxControl};
-pub use split::{split, Dialect, Statement};
+pub use split::{split, strip_comments, Dialect, Statement};

@@ -139,9 +139,7 @@ impl PgSession {
         };
         let fresh = tokio::time::timeout(RECONNECT_TIMEOUT, fresh)
             .await
-            .map_err(|_| DbError::Timeout {
-                stage: ConnectStage::ConnectDb,
-            })??;
+            .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))??;
         self.cancel.set_token(fresh.client.cancel_token());
         // The old socket may be stuck behind a statement that ignored the cancel: drop it.
         let old = std::mem::replace(conn, fresh);
@@ -281,6 +279,10 @@ fn is_connection_lost(e: &tokio_postgres::Error, client: &Client) -> bool {
         || sqlstate(e).is_some_and(|s| LOST_STATES.contains(&s))
 }
 
+fn lost(was_in_tx: bool, message: String) -> DbError {
+    DbError::ConnectionLost { was_in_tx, message }
+}
+
 fn map_exec_error(e: tokio_postgres::Error) -> DbError {
     if sqlstate(&e) == Some(QUERY_CANCELED) {
         return DbError::Cancelled;
@@ -346,16 +348,16 @@ impl Session for PgSession {
             // Found dead before anything was sent (e.g. the idle backend was terminated):
             // reconnecting first is safe for any statement.
             if conn.client.is_closed() {
+                const CLOSED: &str = "the server closed the connection";
                 if was_in_tx {
                     let _ = self.reconnect(&mut conn).await;
-                    return Err(DbError::ConnectionLost {
-                        in_transaction: true,
-                    });
+                    return Err(lost(true, CLOSED.into()));
                 }
-                if reconnected || self.reconnect(&mut conn).await.is_err() {
-                    return Err(DbError::ConnectionLost {
-                        in_transaction: false,
-                    });
+                if reconnected {
+                    return Err(lost(false, CLOSED.into()));
+                }
+                if let Err(e) = self.reconnect(&mut conn).await {
+                    return Err(lost(false, format!("{CLOSED}; reconnecting failed: {e}")));
                 }
                 reconnected = true;
                 if run.cancelled() {
@@ -381,15 +383,14 @@ impl Session for PgSession {
                     // outside a transaction): keep it, the flag stops the next statement.
                     Ok(true) if run.cancelled() => return Err(DbError::Cancelled),
                     Ok(_) => break,
-                    Err(StmtError::Timeout) => {
-                        return Err(DbError::Timeout {
-                            stage: ConnectStage::Execute,
-                        })
-                    }
+                    Err(StmtError::Timeout) => return Err(DbError::timeout(ConnectStage::Execute)),
                     Err(StmtError::Replaced(Ok(()))) => {
-                        return Err(DbError::ConnectionLost {
-                            in_transaction: was_in_tx,
-                        })
+                        return Err(lost(
+                            was_in_tx,
+                            "the statement did not stop after the timeout; the connection \
+                             was replaced"
+                                .into(),
+                        ))
                     }
                     Err(StmtError::Replaced(Err(e))) => return Err(e),
                     Err(StmtError::Pg(e)) => e,
@@ -402,34 +403,26 @@ impl Session for PgSession {
                     // transaction stays open (aborted) until ROLLBACK, so `in_tx` is kept.
                     return Err(map_exec_error(err));
                 }
+                let cause = err.to_string();
                 if was_in_tx {
                     // The server rolled the transaction back; never replay anything.
                     // Best effort so the next statement finds a live connection.
                     let _ = self.reconnect(&mut conn).await;
-                    return Err(DbError::ConnectionLost {
-                        in_transaction: true,
-                    });
+                    return Err(lost(true, cause));
                 }
                 if reconnected {
-                    return Err(DbError::ConnectionLost {
-                        in_transaction: false,
-                    });
+                    return Err(lost(false, cause));
                 }
                 reconnected = true;
-                // `ConnectionLost` has no message field: the reconnect error is dropped.
-                if self.reconnect(&mut conn).await.is_err() {
-                    return Err(DbError::ConnectionLost {
-                        in_transaction: false,
-                    });
+                if let Err(e) = self.reconnect(&mut conn).await {
+                    return Err(lost(false, format!("{cause}; reconnecting failed: {e}")));
                 }
                 if run.cancelled() {
                     return Err(DbError::Cancelled);
                 }
                 // Only a read that produced nothing yet is safe to run again.
                 if kind != StatementKind::Read || emitted {
-                    return Err(DbError::ConnectionLost {
-                        in_transaction: false,
-                    });
+                    return Err(lost(false, cause));
                 }
             }
             self.track_after(kind, &stmt.text);

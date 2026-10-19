@@ -52,7 +52,8 @@ const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 /// waiting while `close` ran): the connection is gone and is not reopened.
 fn closed_error() -> DbError {
     DbError::ConnectionLost {
-        in_transaction: false,
+        was_in_tx: false,
+        message: "the connection was closed".into(),
     }
 }
 
@@ -227,9 +228,7 @@ async fn connect_db(
 ) -> Result<Box<dyn Session>, DbError> {
     tokio::time::timeout(resolved.connect_timeout, driver.connect(resolved))
         .await
-        .map_err(|_| DbError::Timeout {
-            stage: ConnectStage::ConnectDb,
-        })?
+        .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))?
 }
 
 /// Host names compare case-insensitively, ignoring surrounding blanks.
@@ -851,9 +850,7 @@ impl ConnectionRuntime {
                 // The session may be stuck mid-protocol: drop it (no graceful close) and do
                 // not retry; the next call opens a fresh one.
                 link.metadata.remove(&key);
-                return Err(DbError::Timeout {
-                    stage: ConnectStage::Execute,
-                });
+                return Err(DbError::timeout(ConnectStage::Execute));
             };
             match outcome {
                 Err(e) if !reopened && is_lost(&e) => {
