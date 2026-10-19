@@ -8,7 +8,9 @@
 pub mod guard;
 pub mod offsets;
 pub mod plan;
+pub mod redact;
 
 pub use guard::{guard, lifts_read_only, other_whitelisted, verdict};
 pub use offsets::Utf16Map;
 pub use plan::{plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target, Verdict};
+pub use redact::{redact, Redacted, REDACTED};
