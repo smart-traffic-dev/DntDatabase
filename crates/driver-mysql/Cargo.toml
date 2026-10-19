@@ -1,0 +1,19 @@
+[package]
+name = "dnt-driver-mysql"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_driver_mysql"
+
+[dependencies]
+async-trait.workspace = true
+dnt-core.workspace = true
+mysql_async.workspace = true
+rustls.workspace = true
+secrecy.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+dnt-testkit = { path = "../testkit" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

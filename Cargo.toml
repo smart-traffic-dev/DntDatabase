@@ -17,12 +17,17 @@ dnt-core = { path = "crates/core" }
 dnt-store = { path = "crates/store" }
 hex = "0.4"
 keyring = { version = "3", features = ["windows-native"] }
+# rustls (ring provider) only: no native-tls/OpenSSL, and aws-lc-rs would need cmake/NASM on Windows.
+mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
 quick-xml = "0.37"
 rusqlite = { version = "0.40", features = ["bundled"] }
 rusqlite_migration = "2.6"
+# Only used to recognise rustls handshake errors that tokio-rustls wraps in io::Error.
+rustls = { version = "0.23", default-features = false }
 secrecy = "0.10"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting"] }
+tokio = { version = "1", features = ["sync", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 specta = { version = "=2.0.0-rc.22", features = ["derive", "uuid"] }
