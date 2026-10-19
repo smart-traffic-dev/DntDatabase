@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "dnt-core"
 version.workspace = true
 edition.workspace = true
