@@ -239,22 +239,46 @@ async fn batches_respect_batch_size() {
     }
 }
 
+/// Waits (up to 10 s) until a statement whose text contains `marker` is running on the
+/// server, so a Cancel click lands while it executes rather than after a fixed delay.
+async fn wait_running(admin: &MySqlSession, marker: &str) {
+    let sql = format!(
+        "SELECT COUNT(*) FROM information_schema.PROCESSLIST \
+         WHERE INFO LIKE '%{marker}%' AND ID <> CONNECTION_ID()"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, c) = run(admin, &sql).await.unwrap();
+        if as_u64(&scalar(&c)) > 0 {
+            return;
+        }
+        assert!(Instant::now() < deadline, "{marker:?} never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn cancel_long_query() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
+        let admin = connect(t).await;
         let handle = s.cancel_handle();
         let cancelled_at = std::sync::Mutex::new(None);
-        let (res, cancel) = tokio::join!(run(&s, "SELECT SLEEP(10)"), async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        let (res, cancel) = tokio::join!(run(&s, "SELECT SLEEP(10) AS t3_long"), async {
+            wait_running(&admin, "t3_long").await;
             *cancelled_at.lock().unwrap() = Some(Instant::now());
             handle.cancel().await
         });
         let since_cancel = cancelled_at.lock().unwrap().unwrap().elapsed();
         cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
         assert!(
-            matches!(res, Err(DbError::Cancelled)),
+            matches!(
+                res,
+                Err(DbError::Cancelled {
+                    outcome_unknown: false
+                })
+            ),
             "{t:?}: {:?}",
             res.map(|(s, _)| s)
         );
@@ -286,7 +310,7 @@ async fn cancel_when_idle_is_a_noop() {
 }
 
 /// A statement that completes with an OK status keeps its result even when a cancel
-/// arrives while it runs. `DO SLEEP(1)` is a `Write` that a `KILL QUERY` cuts short
+/// arrives while it runs. `DO SLEEP(n)` is a `Write` that a `KILL QUERY` cuts short
 /// without an error (the sleep returns 1), which forces the "completed while a cancel
 /// was in flight" race deterministically.
 #[tokio::test]
@@ -294,9 +318,10 @@ async fn completed_write_during_cancel_keeps_its_result() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
+        let admin = connect(t).await;
         let handle = s.cancel_handle();
-        let (res, cancel) = tokio::join!(run(&s, "DO SLEEP(1)"), async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
+        let (res, cancel) = tokio::join!(run(&s, "DO SLEEP(5), 't3_do1'"), async {
+            wait_running(&admin, "t3_do1").await;
             handle.cancel().await
         });
         cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
@@ -306,12 +331,20 @@ async fn completed_write_during_cancel_keeps_its_result() {
 
         // In a script, the cancel then stops the statements that follow.
         let handle = s.cancel_handle();
-        let (res, _) = tokio::join!(run(&s, "DO SLEEP(1); SELECT 'not reached'"), async {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            handle.cancel().await
-        });
+        let (res, _) = tokio::join!(
+            run(&s, "DO SLEEP(5), 't3_do2'; SELECT 'not reached'"),
+            async {
+                wait_running(&admin, "t3_do2").await;
+                handle.cancel().await
+            }
+        );
         assert!(
-            matches!(res, Err(DbError::Cancelled)),
+            matches!(
+                res,
+                Err(DbError::Cancelled {
+                    outcome_unknown: false
+                })
+            ),
             "{t:?}: {:?}",
             res.map(|(s, _)| s)
         );
@@ -340,17 +373,23 @@ async fn cancel_twice_keeps_session_usable() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
+        let admin = connect(t).await;
         run(&s, "BEGIN").await.unwrap();
         let (h1, h2) = (s.cancel_handle(), s.cancel_handle());
-        let click = |h: dnt_core::driver::CancelHandle| async move {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            h.cancel().await
-        };
-        let (res, c1, c2) = tokio::join!(run(&s, "SELECT SLEEP(10)"), click(h1), click(h2));
+        let (res, (c1, c2)) = tokio::join!(run(&s, "SELECT SLEEP(10) AS t3_twice"), async {
+            wait_running(&admin, "t3_twice").await;
+            // Both clicks at once.
+            tokio::join!(h1.cancel(), h2.cancel())
+        });
         c1.unwrap_or_else(|e| panic!("{t:?}: first cancel failed: {e}"));
         c2.unwrap_or_else(|e| panic!("{t:?}: second cancel failed: {e}"));
         assert!(
-            matches!(res, Err(DbError::Cancelled)),
+            matches!(
+                res,
+                Err(DbError::Cancelled {
+                    outcome_unknown: false
+                })
+            ),
             "{t:?}: {:?}",
             res.map(|(s, _)| s)
         );
@@ -379,22 +418,28 @@ async fn timeout_racing_cancel_keeps_session_usable() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
+        let admin = connect(t).await;
         run(&s, "BEGIN").await.unwrap();
         let handle = s.cancel_handle();
-        let (res, cancel) =
-            tokio::join!(run_with(&s, "SELECT SLEEP(10)", timeout_opts(300)), async {
-                tokio::time::sleep(Duration::from_millis(300)).await;
+        let (res, cancel) = tokio::join!(
+            run_with(&s, "SELECT SLEEP(10) AS t3_race", timeout_opts(300)),
+            async {
+                wait_running(&admin, "t3_race").await;
+                // Land the click next to the 300 ms timeout; either may win.
+                tokio::time::sleep(Duration::from_millis(280)).await;
                 handle.cancel().await
-            });
+            }
+        );
         cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
         assert!(
             matches!(
                 res,
-                Err(DbError::Cancelled
-                    | DbError::Timeout {
-                        outcome_unknown: false,
-                        ..
-                    })
+                Err(DbError::Cancelled {
+                    outcome_unknown: false
+                } | DbError::Timeout {
+                    outcome_unknown: false,
+                    ..
+                })
             ),
             "{t:?}: {:?}",
             res.map(|(s, _)| s)
@@ -410,14 +455,16 @@ async fn timeout_racing_cancel_keeps_session_usable() {
 
 /// `INSERT … VALUES (SLEEP(n))` cut short by `KILL QUERY`: MySQL ends the sleep early
 /// and still inserts the row (the statement succeeds), MariaDB aborts it with error 1317
-/// and inserts nothing. Whichever happens, the reported result must match the table:
-/// a write that was applied during the timeout / cancel grace period is never reported
-/// as a timeout or a cancel.
+/// and inserts nothing. A write that was applied during the timeout / cancel grace
+/// period is never reported as a timeout or a cancel; a killed autocommit write is
+/// reported with an unknown outcome (it may be partly applied on a non-transactional
+/// table), never as "not applied".
 #[tokio::test]
 async fn write_finishing_in_grace_reports_success() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
+        let admin = connect(t).await;
         run(
             &s,
             "CREATE TABLE IF NOT EXISTS t3_grace (v int); DELETE FROM t3_grace",
@@ -441,7 +488,7 @@ async fn write_finishing_in_grace_reports_success() {
             }
             Err(DbError::Timeout {
                 stage: ConnectStage::Execute,
-                outcome_unknown: false,
+                outcome_unknown: true,
             }) => assert_eq!(rows, 0, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
         }
@@ -452,18 +499,92 @@ async fn write_finishing_in_grace_reports_success() {
         let handle = s.cancel_handle();
         let (res, cancel) =
             tokio::join!(run(&s, "INSERT INTO t3_grace VALUES (SLEEP(5))"), async {
-                tokio::time::sleep(Duration::from_millis(500)).await;
+                wait_running(&admin, "t3_grace VALUES").await;
                 handle.cancel().await
             });
         cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
         let rows = count_rows(&s, "t3_grace").await;
         match &res {
             Ok(_) => assert_eq!(rows, 1, "{t:?}"),
-            Err(DbError::Cancelled) => assert_eq!(rows, 0, "{t:?}"),
+            Err(DbError::Cancelled {
+                outcome_unknown: true,
+            }) => assert_eq!(rows, 0, "{t:?}"),
             Err(e) => panic!("{t:?}: {e:?}"),
         }
         assert_eq!(res.is_ok(), mysql, "{t:?}: {:?}", res.map(|(s, _)| s));
         assert!(!s.in_transaction(), "{t:?}");
+
+        // Inside a transaction InnoDB rolls a killed write back: not applied.
+        run(&s, "DELETE FROM t3_grace; BEGIN").await.unwrap();
+        let res = run_with(
+            &s,
+            "INSERT INTO t3_grace VALUES (SLEEP(5))",
+            timeout_opts(500),
+        )
+        .await;
+        match &res {
+            Ok(_) => assert!(mysql, "{t:?}"),
+            Err(DbError::Timeout {
+                outcome_unknown: false,
+                ..
+            }) => assert!(!mysql, "{t:?}"),
+            Err(e) => panic!("{t:?}: {e:?}"),
+        }
+        run(&s, "ROLLBACK").await.unwrap();
+        assert_eq!(count_rows(&s, "t3_grace").await, 0, "{t:?}");
+    }
+}
+
+/// A reconnect restores what it can (`autocommit = 0`, the database) and says what it
+/// could not; a read is not silently re-run on a session whose state was reset.
+#[tokio::test]
+async fn reconnect_restores_autocommit_and_reports_reset_state() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(&s, "SET autocommit = 0").await.unwrap();
+        kill(t, connection_id(&s).await).await;
+        match run(&s, "SELECT 1").await.err() {
+            Some(DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                message,
+            }) => assert!(
+                message.contains("transaction was rolled back"),
+                "{t:?}: {message}"
+            ),
+            other => panic!("{t:?}: {other:?}"),
+        }
+        let (_, c) = run(&s, "SELECT @@autocommit").await.unwrap();
+        assert_eq!(as_u64(&scalar(&c)), 0, "{t:?}: autocommit not re-applied");
+        assert!(s.in_transaction(), "{t:?}");
+        run(&s, "SET autocommit = 1").await.unwrap();
+        assert!(!s.in_transaction(), "{t:?}");
+
+        let s = connect(t).await;
+        run(&s, "SET @x = 1").await.unwrap();
+        kill(t, connection_id(&s).await).await;
+        let err = run(&s, "SELECT 1").await.err();
+        match &err {
+            Some(DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: false,
+                message,
+            }) => assert!(message.contains("user variables"), "{t:?}: {message}"),
+            other => panic!("{t:?}: the read was re-run silently: {other:?}"),
+        }
+        assert!(
+            dnt_core::error::AppError::from(err.unwrap()).retryable,
+            "{t:?}"
+        );
+        // The new session is clean, and the flag went with the old one.
+        let (_, c) = run(&s, "SELECT @x IS NULL").await.unwrap();
+        assert_eq!(as_u64(&scalar(&c)), 1, "{t:?}");
+        kill(t, connection_id(&s).await).await;
+        let (_, c) = run(&s, "SELECT 2")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: clean session not retried: {e}"));
+        assert_eq!(scalar(&c), Value::Int(2), "{t:?}");
     }
 }
 

@@ -50,11 +50,16 @@ pub struct MySqlSession {
     opts: Opts,
     /// Set by `BEGIN` / `START TRANSACTION`, cleared by `COMMIT` / `ROLLBACK` / DDL.
     in_tx: AtomicBool,
-    /// Set while the user has `SET autocommit = 0`.
+    /// Set while the user has `SET autocommit = 0`. A session setting rather than
+    /// transaction state: it survives a reconnect (re-applied on the new connection).
     autocommit_off: AtomicBool,
     cancel: Arc<CancelState>,
     /// Database of the last successful `USE`, re-applied after a reconnect.
     last_db: std::sync::Mutex<Option<String>>,
+    /// Set once a statement changed session state that a reconnect cannot restore
+    /// (see [`changes_session_state`]); cleared on a fresh connection. While set, a lost
+    /// read is not silently re-run and `ConnectionLost` says the state was reset.
+    session_custom: AtomicBool,
 }
 
 /// InnoDB deadlock: the server rolled the whole transaction back.
@@ -63,8 +68,8 @@ const ER_LOCK_DEADLOCK: u16 = 1213;
 /// How one statement attempt failed.
 enum StmtError {
     My(MyError),
-    /// `opts.timeout` expired and the statement was stopped by the `KILL QUERY` without
-    /// taking effect.
+    /// `opts.timeout` expired and the statement was stopped by the `KILL QUERY` (whether
+    /// part of it was applied is [`killed_outcome_unknown`]).
     Timeout,
     /// `opts.timeout` expired and the statement did not stop after `KILL QUERY`: its
     /// completion was never observed and the connection must be abandoned.
@@ -84,6 +89,7 @@ impl MySqlSession {
             autocommit_off: AtomicBool::new(false),
             cancel,
             last_db: std::sync::Mutex::new(None),
+            session_custom: AtomicBool::new(false),
         }
     }
 
@@ -95,6 +101,7 @@ impl MySqlSession {
     pub(crate) async fn live_conn(&self) -> Result<MappedMutexGuard<'_, Conn>, DbError> {
         MutexGuard::try_map(self.conn.lock().await, Option::as_mut).map_err(|_| {
             lost(
+                false,
                 false,
                 "the connection was closed after an earlier failure".into(),
             )
@@ -142,21 +149,32 @@ impl MySqlSession {
         }
     }
 
-    /// Tracking applied after a statement succeeded: remembers the last `USE`.
+    /// Tracking applied after a statement succeeded: remembers the last `USE` and
+    /// whether session state was customised.
     fn track_after(&self, kind: StatementKind, sql: &str) {
         if kind == StatementKind::Other {
             if let Some(db) = use_target(sql) {
                 *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
             }
         }
+        // `SET autocommit` is transaction control, tracked and re-applied separately.
+        if !matches!(kind, StatementKind::Transaction(_)) && changes_session_state(sql) {
+            self.session_custom.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// The `ConnectionLost` message suffix for losing the current connection.
+    fn notes(&self, was_in_tx: bool) -> String {
+        reset_notes(was_in_tx, self.session_custom.load(Ordering::SeqCst))
     }
 
     /// Abandons the connection in `slot` (if any) and opens a fresh one (startup
-    /// statements come from `opts.init`), re-applying the last `USE`. Clears transaction
-    /// state: the server rolls back whatever was open on the old connection. On failure
-    /// `slot` is left empty, so nothing ever runs on the abandoned connection again.
+    /// statements come from `opts.init`), re-applying the last `USE` and
+    /// `autocommit = 0`. Clears the open transaction (the server rolls it back) and the
+    /// custom-session-state flag. On failure `slot` is left empty, so nothing ever runs
+    /// on the abandoned connection again.
     async fn reconnect(&self, slot: &mut Option<Conn>) -> Result<(), DbError> {
-        self.reset_tx();
+        self.in_tx.store(false, Ordering::SeqCst);
         if let Some(old) = slot.take() {
             abandon(old);
         }
@@ -165,6 +183,7 @@ impl MySqlSession {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
+        let autocommit_off = self.autocommit_off.load(Ordering::SeqCst);
         let open = async {
             let mut fresh = Conn::new(self.opts.clone())
                 .await
@@ -172,6 +191,12 @@ impl MySqlSession {
             if let Some(db) = db {
                 fresh
                     .query_drop(format!("USE {}", quote_ident(&db)))
+                    .await
+                    .map_err(|e| map_mysql_error(e, ConnectStage::ConnectDb))?;
+            }
+            if autocommit_off {
+                fresh
+                    .query_drop("SET autocommit = 0")
                     .await
                     .map_err(|e| map_mysql_error(e, ConnectStage::ConnectDb))?;
             }
@@ -183,6 +208,7 @@ impl MySqlSession {
         self.cancel
             .connection_id
             .store(fresh.id(), Ordering::SeqCst);
+        self.session_custom.store(false, Ordering::SeqCst);
         *slot = Some(fresh);
         Ok(())
     }
@@ -240,43 +266,114 @@ fn abandon(conn: Conn) {
     });
 }
 
-fn lost(was_in_tx: bool, message: String) -> DbError {
-    DbError::ConnectionLost { was_in_tx, message }
+fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
+    DbError::ConnectionLost {
+        was_in_tx,
+        outcome_unknown,
+        message,
+    }
 }
 
-/// Whether a statement of `kind` may have made a durable change by the time it was
-/// abandoned. Inside a transaction an ordinary statement's work is rolled back with the
-/// connection; DDL and transaction control can commit by themselves.
-fn may_have_committed(kind: StatementKind, was_in_tx: bool) -> bool {
+/// Upper-cased leading keywords of `sql` with comments removed (at most `n`).
+fn leading_words(sql: &str, n: usize) -> Vec<String> {
+    strip_comments(sql, Dialect::MySql)
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .take(n)
+        .map(str::to_ascii_uppercase)
+        .collect()
+}
+
+/// `CALL proc(…)`: its inner statements may each autocommit, so its work can be
+/// partly applied even when the call as a whole fails or is killed.
+fn is_call(sql: &str) -> bool {
+    leading_words(sql, 1) == ["CALL"]
+}
+
+/// Whether a statement of `kind` may have made a durable change by the time its
+/// connection went away. Inside a transaction an ordinary statement's work is rolled
+/// back with the connection; DDL, transaction control and `CALL` can commit by themselves.
+fn may_have_committed(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
     match kind {
         StatementKind::Read
         | StatementKind::Transaction(TxControl::Rollback | TxControl::AutocommitOff) => false,
         StatementKind::Ddl | StatementKind::Transaction(_) => true,
+        StatementKind::Write if is_call(sql) => true,
         StatementKind::Write | StatementKind::Other => !was_in_tx,
     }
 }
 
+/// Whether a `Write`/`Ddl` statement stopped by `KILL QUERY` (timeout or cancel) may
+/// still have applied part of its work. Outside an explicit transaction a
+/// non-transactional table (MyISAM, Aria) keeps the rows written before the kill and
+/// DDL is not atomic everywhere; a `CALL` commits its inner statements one by one.
+/// Inside a transaction InnoDB rolls the killed statement back, so it is reported as
+/// not applied; a write to a non-transactional table inside a transaction is the
+/// accepted residual case.
+fn killed_outcome_unknown(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
+    matches!(kind, StatementKind::Write | StatementKind::Ddl) && (!was_in_tx || is_call(sql))
+}
+
+/// Lexically: does a statement that succeeded change session state that a reconnect
+/// cannot restore? Session-scope `SET` (variables, user variables, `NAMES`, isolation
+/// level; `GLOBAL` / `PERSIST` survive the session), `CREATE TEMPORARY TABLE` and named
+/// prepared statements (`PREPARE`). `SET autocommit` is classified as transaction
+/// control and handled by the caller.
+fn changes_session_state(sql: &str) -> bool {
+    let words = leading_words(sql, 2);
+    match words
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["SET", ..] => {
+            let stripped = strip_comments(sql, Dialect::MySql);
+            let rest = stripped.trim_start()[3..].trim_start().to_ascii_lowercase();
+            let first = rest.split_whitespace().next().unwrap_or("");
+            let global = ["global", "persist", "persist_only"].contains(&first)
+                || ["@@global.", "@@persist.", "@@persist_only."]
+                    .iter()
+                    .any(|p| rest.starts_with(p));
+            !global
+        }
+        ["CREATE", "TEMPORARY"] | ["PREPARE", ..] => true,
+        _ => false,
+    }
+}
+
+/// `ConnectionLost` message suffix naming what losing the connection reset.
+fn reset_notes(was_in_tx: bool, session_custom: bool) -> String {
+    let mut notes = String::new();
+    if was_in_tx {
+        notes.push_str("; the transaction was rolled back");
+    }
+    if session_custom {
+        notes.push_str("; session settings, user variables and temporary tables were reset");
+    }
+    notes
+}
+
 /// The error for a statement that ignored `KILL QUERY` after its timeout, once its
 /// connection was abandoned and replaced (`Ok`) or replacing it failed (`Err`).
-fn stuck_error(kind: StatementKind, was_in_tx: bool, replaced: Result<(), DbError>) -> DbError {
-    let unknown = may_have_committed(kind, was_in_tx);
+/// `unknown`: it may have committed ([`may_have_committed`]); `notes`: [`reset_notes`].
+fn stuck_error(
+    unknown: bool,
+    was_in_tx: bool,
+    notes: &str,
+    replaced: Result<(), DbError>,
+) -> DbError {
     match replaced {
         Ok(()) if unknown => DbError::Timeout {
             stage: ConnectStage::Execute,
             outcome_unknown: true,
         },
-        Ok(()) => lost(was_in_tx, STUCK.into()),
-        Err(e) => {
-            let note = if unknown {
-                "; the statement may have been applied"
-            } else {
-                ""
-            };
-            lost(
-                was_in_tx,
-                format!("{STUCK} and reconnecting failed: {e}{note}"),
-            )
-        }
+        Ok(()) => lost(was_in_tx, false, format!("{STUCK}{notes}")),
+        Err(e) => lost(
+            was_in_tx,
+            unknown,
+            format!("{STUCK}{notes}; reconnecting failed: {e}"),
+        ),
     }
 }
 
@@ -361,9 +458,12 @@ fn is_interrupted(e: &MyError) -> bool {
             || se.message.contains("Query execution was interrupted"))
 }
 
-fn map_exec_error(e: MyError) -> DbError {
+/// `killed_unknown`: [`killed_outcome_unknown`] for the statement that failed.
+fn map_exec_error(e: MyError, killed_unknown: bool) -> DbError {
     if is_interrupted(&e) {
-        return DbError::Cancelled;
+        return DbError::Cancelled {
+            outcome_unknown: killed_unknown,
+        };
     }
     map_mysql_error(e, ConnectStage::Execute)
 }
@@ -412,18 +512,19 @@ impl Session for MySqlSession {
         let mut reconnected = false;
         for stmt in split(sql, Dialect::MySql) {
             if run.cancelled() {
-                return Err(DbError::Cancelled);
+                return Err(DbError::cancelled());
             }
             let kind = classify(&stmt.text, Dialect::MySql);
-            // An earlier call abandoned the connection and could not replace it. Nothing
-            // was sent yet, so opening one now is safe for any statement.
+            // An earlier call abandoned the connection and could not replace it (and
+            // reported that). Nothing was sent yet, so opening one now is safe for any
+            // statement.
             if slot.is_none() {
                 reconnected = true;
                 if let Err(e) = self.reconnect(&mut slot).await {
-                    return Err(lost(false, format!("reconnecting failed: {e}")));
+                    return Err(lost(false, false, format!("reconnecting failed: {e}")));
                 }
                 if run.cancelled() {
-                    return Err(DbError::Cancelled);
+                    return Err(DbError::cancelled());
                 }
             }
             let was_in_tx = self.in_transaction();
@@ -451,15 +552,20 @@ impl Session for MySqlSession {
                     // dropped. Anything else completed (and may have committed): keep
                     // it; the flag stops the next statement.
                     Ok(true) if kind == StatementKind::Read && run.cancelled() => {
-                        return Err(DbError::Cancelled)
+                        return Err(DbError::cancelled())
                     }
                     Ok(_) => break,
                     Err(StmtError::Timeout) => {
-                        return Err(DbError::timeout(ConnectStage::Execute));
+                        return Err(DbError::Timeout {
+                            stage: ConnectStage::Execute,
+                            outcome_unknown: killed_outcome_unknown(kind, was_in_tx, &stmt.text),
+                        });
                     }
                     Err(StmtError::Stuck) => {
+                        let notes = self.notes(was_in_tx);
+                        let unknown = may_have_committed(kind, was_in_tx, &stmt.text);
                         let replaced = self.reconnect(&mut slot).await;
-                        return Err(stuck_error(kind, was_in_tx, replaced));
+                        return Err(stuck_error(unknown, was_in_tx, &notes, replaced));
                     }
                     Err(StmtError::My(e)) => e,
                 };
@@ -468,32 +574,50 @@ impl Session for MySqlSession {
                 if matches!(&err, MyError::Server(se) if se.code == ER_LOCK_DEADLOCK) {
                     self.in_tx.store(false, Ordering::SeqCst);
                 }
+                let killed_unknown = killed_outcome_unknown(kind, was_in_tx, &stmt.text);
                 if run.cancelled() {
-                    return Err(DbError::Cancelled);
+                    // A statement the kill stopped (or whose connection the kill took
+                    // down) may have applied part of its work; one that failed on its
+                    // own did not.
+                    let killed = is_interrupted(&err) || is_connection_lost(&err);
+                    return Err(DbError::Cancelled {
+                        outcome_unknown: killed && killed_unknown,
+                    });
                 }
                 if !is_connection_lost(&err) {
-                    return Err(map_exec_error(err));
+                    return Err(map_exec_error(err, killed_unknown));
                 }
-                let cause = err.to_string();
+                // Captured before the reconnect resets the session state.
+                let notes = self.notes(was_in_tx);
+                let custom = self.session_custom.load(Ordering::SeqCst);
+                let unknown = may_have_committed(kind, was_in_tx, &stmt.text);
+                let cause = format!("{err}{notes}");
                 if was_in_tx {
                     // The server rolled the transaction back; never replay anything.
                     // Best effort so the next statement finds a live connection.
-                    let _ = self.reconnect(&mut slot).await;
-                    return Err(lost(true, cause));
+                    return Err(match self.reconnect(&mut slot).await {
+                        Ok(()) => lost(true, unknown, cause),
+                        Err(e) => lost(true, unknown, format!("{cause}; reconnecting failed: {e}")),
+                    });
                 }
                 if reconnected {
-                    return Err(lost(false, cause));
+                    return Err(lost(false, unknown, cause));
                 }
                 reconnected = true;
                 if let Err(e) = self.reconnect(&mut slot).await {
-                    return Err(lost(false, format!("{cause}; reconnecting failed: {e}")));
+                    return Err(lost(
+                        false,
+                        unknown,
+                        format!("{cause}; reconnecting failed: {e}"),
+                    ));
                 }
                 if run.cancelled() {
-                    return Err(DbError::Cancelled);
+                    return Err(DbError::cancelled());
                 }
-                // Only a read that produced nothing yet is safe to run again.
-                if kind != StatementKind::Read || emitted {
-                    return Err(lost(false, cause));
+                // Only a read that produced nothing yet, on a session with nothing a
+                // reconnect cannot restore, is safe to run again silently.
+                if kind != StatementKind::Read || emitted || custom {
+                    return Err(lost(false, unknown, cause));
                 }
             }
             self.track_after(kind, &stmt.text);
@@ -572,11 +696,13 @@ mod tests {
     #[test]
     fn interrupted_queries_are_cancelled() {
         assert!(matches!(
-            map_exec_error(server(1317, "Query execution was interrupted")),
-            DbError::Cancelled
+            map_exec_error(server(1317, "Query execution was interrupted"), false),
+            DbError::Cancelled {
+                outcome_unknown: false
+            }
         ));
         assert!(matches!(
-            map_exec_error(server(1064, "syntax")),
+            map_exec_error(server(1064, "syntax"), true),
             DbError::Server { .. }
         ));
     }
@@ -598,97 +724,159 @@ mod tests {
         }
     }
 
+    use StatementKind::{Ddl, Other, Read, Transaction, Write};
+
     #[test]
-    fn stuck_write_with_replaced_connection_may_have_been_applied() {
-        for kind in [
-            StatementKind::Write,
-            StatementKind::Ddl,
-            StatementKind::Other,
-            StatementKind::Transaction(TxControl::Commit),
+    fn statements_that_may_have_committed_when_abandoned() {
+        for (kind, sql) in [
+            (Write, "INSERT INTO t VALUES (1)"),
+            (Ddl, "CREATE TABLE t (a int)"),
+            (Other, "SET x = 1"),
+            (Transaction(TxControl::Commit), "COMMIT"),
         ] {
-            assert!(
-                matches!(
-                    stuck_error(kind, false, Ok(())),
-                    DbError::Timeout {
-                        stage: ConnectStage::Execute,
-                        outcome_unknown: true
-                    }
-                ),
-                "{kind:?}"
-            );
+            assert!(may_have_committed(kind, false, sql), "{sql}");
         }
-        // DDL and COMMIT commit by themselves even inside a transaction.
-        for kind in [
-            StatementKind::Ddl,
-            StatementKind::Transaction(TxControl::Commit),
+        // DDL, COMMIT and CALL (whose inner statements may commit) even inside a
+        // transaction.
+        for (kind, sql) in [
+            (Ddl, "DROP TABLE t"),
+            (Transaction(TxControl::Commit), "COMMIT"),
+            (Write, "/* p */ CALL p()"),
         ] {
-            assert!(
-                matches!(
-                    stuck_error(kind, true, Ok(())),
-                    DbError::Timeout {
-                        outcome_unknown: true,
-                        ..
-                    }
-                ),
-                "{kind:?}"
-            );
+            assert!(may_have_committed(kind, true, sql), "{sql}");
         }
+        for (kind, in_tx, sql) in [
+            (Read, false, "SELECT 1"),
+            (Write, true, "UPDATE t SET a = 1"),
+            (Transaction(TxControl::Rollback), true, "ROLLBACK"),
+        ] {
+            assert!(!may_have_committed(kind, in_tx, sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn killed_write_outside_a_transaction_or_call_has_unknown_outcome() {
+        assert!(killed_outcome_unknown(
+            Write,
+            false,
+            "INSERT INTO t VALUES (1)"
+        ));
+        assert!(killed_outcome_unknown(
+            Ddl,
+            false,
+            "ALTER TABLE t ADD b int"
+        ));
+        assert!(killed_outcome_unknown(Write, true, "call p()"));
+        // InnoDB rolls a killed statement back inside a transaction.
+        assert!(!killed_outcome_unknown(
+            Write,
+            true,
+            "INSERT INTO t VALUES (1)"
+        ));
+        assert!(!killed_outcome_unknown(Read, false, "SELECT SLEEP(5)"));
+        assert!(!killed_outcome_unknown(Other, false, "SET @x = SLEEP(5)"));
+    }
+
+    #[test]
+    fn interrupted_queries_carry_the_outcome() {
+        assert!(matches!(
+            map_exec_error(server(1317, "Query execution was interrupted"), true),
+            DbError::Cancelled {
+                outcome_unknown: true
+            }
+        ));
+    }
+
+    #[test]
+    fn session_state_changes_are_lexical() {
+        for sql in [
+            "SET @x = 1",
+            "set sql_mode = ''",
+            "/* c */ SET SESSION wait_timeout = 10",
+            "SET @@session.sql_mode = ''",
+            "SET NAMES latin1",
+            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            "CREATE TEMPORARY TABLE tmp (a int)",
+            "create  temporary table if not exists tmp (a int)",
+            "PREPARE s FROM 'SELECT 1'",
+        ] {
+            assert!(changes_session_state(sql), "{sql}");
+        }
+        for sql in [
+            "SELECT 1",
+            "SET GLOBAL max_connections = 10",
+            "SET PERSIST max_connections = 10",
+            "SET @@global.sql_mode = ''",
+            "CREATE TABLE t (a int)",
+            "INSERT INTO t SELECT 'SET @x = 1'",
+            "-- SET @x = 1\nSELECT 1",
+        ] {
+            assert!(!changes_session_state(sql), "{sql}");
+        }
+    }
+
+    #[test]
+    fn reset_notes_name_what_was_lost() {
+        assert_eq!(reset_notes(false, false), "");
+        assert!(reset_notes(true, false).contains("transaction was rolled back"));
+        let both = reset_notes(true, true);
+        assert!(both.contains("transaction was rolled back"), "{both}");
+        assert!(
+            both.contains("session settings, user variables and temporary tables were reset"),
+            "{both}"
+        );
+    }
+
+    #[test]
+    fn stuck_statement_that_may_have_committed_is_an_unknown_timeout() {
+        assert!(matches!(
+            stuck_error(true, false, "", Ok(())),
+            DbError::Timeout {
+                stage: ConnectStage::Execute,
+                outcome_unknown: true
+            }
+        ));
     }
 
     #[test]
     fn stuck_statement_that_cannot_have_committed_is_connection_lost() {
         // A write inside a transaction is rolled back with the abandoned connection.
-        let e = stuck_error(StatementKind::Write, true, Ok(()));
-        assert!(
-            matches!(&e, DbError::ConnectionLost { was_in_tx: true, message } if message == STUCK),
-            "{e:?}"
-        );
-        let e = stuck_error(StatementKind::Read, false, Ok(()));
-        assert!(
-            matches!(
-                e,
-                DbError::ConnectionLost {
-                    was_in_tx: false,
-                    ..
-                }
-            ),
-            "{e:?}"
-        );
-        let e = stuck_error(
-            StatementKind::Transaction(TxControl::Rollback),
-            true,
-            Ok(()),
-        );
+        let e = stuck_error(false, true, "; the transaction was rolled back", Ok(()));
+        match e {
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                message,
+            } => {
+                assert!(message.starts_with(STUCK), "{message}");
+                assert!(message.contains("rolled back"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn stuck_statement_whose_replacement_failed_is_connection_lost() {
+        let e = stuck_error(true, false, "", Err(refused()));
+        match e {
+            DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: true,
+                message,
+            } => assert!(message.contains("connection refused"), "{message}"),
+            other => panic!("{other:?}"),
+        }
+        let e = stuck_error(false, true, "", Err(refused()));
         assert!(
             matches!(
                 e,
                 DbError::ConnectionLost {
                     was_in_tx: true,
+                    outcome_unknown: false,
                     ..
                 }
             ),
             "{e:?}"
         );
-    }
-
-    #[test]
-    fn stuck_statement_whose_replacement_failed_is_connection_lost() {
-        let e = stuck_error(StatementKind::Write, false, Err(refused()));
-        match e {
-            DbError::ConnectionLost { was_in_tx, message } => {
-                assert!(!was_in_tx);
-                assert!(message.contains("connection refused"), "{message}");
-                assert!(message.contains("may have been applied"), "{message}");
-            }
-            other => panic!("{other:?}"),
-        }
-        let e = stuck_error(StatementKind::Read, true, Err(refused()));
-        match e {
-            DbError::ConnectionLost { was_in_tx, message } => {
-                assert!(was_in_tx);
-                assert!(!message.contains("may have been applied"), "{message}");
-            }
-            other => panic!("{other:?}"),
-        }
     }
 }

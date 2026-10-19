@@ -279,13 +279,17 @@ fn is_connection_lost(e: &tokio_postgres::Error, client: &Client) -> bool {
         || sqlstate(e).is_some_and(|s| LOST_STATES.contains(&s))
 }
 
-fn lost(was_in_tx: bool, message: String) -> DbError {
-    DbError::ConnectionLost { was_in_tx, message }
+fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
+    DbError::ConnectionLost {
+        was_in_tx,
+        outcome_unknown,
+        message,
+    }
 }
 
 fn map_exec_error(e: tokio_postgres::Error) -> DbError {
     if sqlstate(&e) == Some(QUERY_CANCELED) {
-        return DbError::Cancelled;
+        return DbError::cancelled();
     }
     map_pg_error(e, ConnectStage::Execute)
 }
@@ -341,7 +345,7 @@ impl Session for PgSession {
         let mut reconnected = false;
         for stmt in split(sql, Dialect::Postgres) {
             if run.cancelled() {
-                return Err(DbError::Cancelled);
+                return Err(DbError::cancelled());
             }
             let kind = classify(&stmt.text, Dialect::Postgres);
             let was_in_tx = self.in_transaction();
@@ -351,17 +355,21 @@ impl Session for PgSession {
                 const CLOSED: &str = "the server closed the connection";
                 if was_in_tx {
                     let _ = self.reconnect(&mut conn).await;
-                    return Err(lost(true, CLOSED.into()));
+                    return Err(lost(true, false, CLOSED.into()));
                 }
                 if reconnected {
-                    return Err(lost(false, CLOSED.into()));
+                    return Err(lost(false, false, CLOSED.into()));
                 }
                 if let Err(e) = self.reconnect(&mut conn).await {
-                    return Err(lost(false, format!("{CLOSED}; reconnecting failed: {e}")));
+                    return Err(lost(
+                        false,
+                        false,
+                        format!("{CLOSED}; reconnecting failed: {e}"),
+                    ));
                 }
                 reconnected = true;
                 if run.cancelled() {
-                    return Err(DbError::Cancelled);
+                    return Err(DbError::cancelled());
                 }
             }
             self.track_before(kind, &stmt.text);
@@ -381,12 +389,13 @@ impl Session for PgSession {
                     // A result set that completed while a cancel was in flight is dropped;
                     // a statement that only returned a status completed (and committed
                     // outside a transaction): keep it, the flag stops the next statement.
-                    Ok(true) if run.cancelled() => return Err(DbError::Cancelled),
+                    Ok(true) if run.cancelled() => return Err(DbError::cancelled()),
                     Ok(_) => break,
                     Err(StmtError::Timeout) => return Err(DbError::timeout(ConnectStage::Execute)),
                     Err(StmtError::Replaced(Ok(()))) => {
                         return Err(lost(
                             was_in_tx,
+                            false,
                             "the statement did not stop after the timeout; the connection \
                              was replaced"
                                 .into(),
@@ -396,7 +405,7 @@ impl Session for PgSession {
                     Err(StmtError::Pg(e)) => e,
                 };
                 if run.cancelled() {
-                    return Err(DbError::Cancelled);
+                    return Err(DbError::cancelled());
                 }
                 if !is_connection_lost(&err, &conn.client) {
                     // Including deadlocks / serialization failures: in PostgreSQL the
@@ -404,25 +413,32 @@ impl Session for PgSession {
                     return Err(map_exec_error(err));
                 }
                 let cause = err.to_string();
+                // Outside a transaction a statement that may change data may have
+                // committed before the connection went away (Task 4 refines this).
+                let unknown = kind != StatementKind::Read;
                 if was_in_tx {
                     // The server rolled the transaction back; never replay anything.
                     // Best effort so the next statement finds a live connection.
                     let _ = self.reconnect(&mut conn).await;
-                    return Err(lost(true, cause));
+                    return Err(lost(true, false, cause));
                 }
                 if reconnected {
-                    return Err(lost(false, cause));
+                    return Err(lost(false, unknown, cause));
                 }
                 reconnected = true;
                 if let Err(e) = self.reconnect(&mut conn).await {
-                    return Err(lost(false, format!("{cause}; reconnecting failed: {e}")));
+                    return Err(lost(
+                        false,
+                        unknown,
+                        format!("{cause}; reconnecting failed: {e}"),
+                    ));
                 }
                 if run.cancelled() {
-                    return Err(DbError::Cancelled);
+                    return Err(DbError::cancelled());
                 }
                 // Only a read that produced nothing yet is safe to run again.
                 if kind != StatementKind::Read || emitted {
-                    return Err(lost(false, cause));
+                    return Err(lost(false, unknown, cause));
                 }
             }
             self.track_after(kind, &stmt.text);

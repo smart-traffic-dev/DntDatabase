@@ -60,6 +60,23 @@
     "port": null,
     "field": null
   },
+  "cancelled_outcome_unknown": {
+    "kind": "cancelled",
+    "message": "The statement was cancelled and may have been applied.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
   "connect_refused": {
     "kind": "connect",
     "message": "Could not connect to the database server.",
@@ -102,6 +119,23 @@
   "connection_lost_in_transaction": {
     "kind": "connection_lost",
     "message": "The connection was lost during a transaction; it was rolled back.",
+    "detail": "Lost connection to MySQL server during query; the transaction was rolled back",
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "connection_lost_outcome_unknown": {
+    "kind": "connection_lost",
+    "message": "The connection was lost and the statement may have been applied.",
     "detail": "Lost connection to MySQL server during query",
     "stage": null,
     "timings": null,

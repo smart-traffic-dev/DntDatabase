@@ -53,6 +53,7 @@ const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 fn closed_error() -> DbError {
     DbError::ConnectionLost {
         was_in_tx: false,
+        outcome_unknown: false,
         message: "the connection was closed".into(),
     }
 }
@@ -498,7 +499,7 @@ impl SessionManager {
         guard.done = true;
         let Some(replaced) = installed else {
             rt.shutdown().await;
-            return Err(DbError::Cancelled);
+            return Err(DbError::cancelled());
         };
         if let Some(old) = replaced {
             // Cannot normally happen (every open/close bumps the generation); never leak it.

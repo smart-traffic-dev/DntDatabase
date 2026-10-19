@@ -98,12 +98,23 @@ pub enum DbError {
     /// The connection to the server dropped (or had to be abandoned) while working.
     ///
     /// `was_in_tx`: a transaction was open on it, which the server has rolled back; the
-    /// session's transaction state is reset. `message`: what happened, for diagnostics
-    /// (the driver error, or why replacing the connection failed). Never holds secrets.
-    #[error("connection lost: {message}")]
-    ConnectionLost { was_in_tx: bool, message: String },
-    #[error("cancelled")]
-    Cancelled,
+    /// session's transaction state is reset. `outcome_unknown`: the statement that was
+    /// running may have committed before the connection went away (same meaning as on
+    /// [`DbError::Timeout`]). `message`: what happened, for diagnostics (the driver
+    /// error, why replacing the connection failed, which session state was reset).
+    /// Never holds secrets.
+    #[error("connection lost{}: {message}", outcome_note(.outcome_unknown))]
+    ConnectionLost {
+        was_in_tx: bool,
+        outcome_unknown: bool,
+        message: String,
+    },
+    /// The user (or a superseding call) cancelled the operation. `outcome_unknown`: the
+    /// statement was killed while it may already have applied part of its work (for
+    /// example a `CALL` whose inner statements autocommit, or a non-transactional table
+    /// outside a transaction).
+    #[error("cancelled{}", outcome_note(.outcome_unknown))]
+    Cancelled { outcome_unknown: bool },
     #[error("{feature} is not supported on server version {version}")]
     Unsupported { feature: String, version: String },
     #[error("internal error: {message}")]
@@ -135,6 +146,13 @@ impl DbError {
     pub fn timeout(stage: ConnectStage) -> DbError {
         DbError::Timeout {
             stage,
+            outcome_unknown: false,
+        }
+    }
+
+    /// A [`DbError::Cancelled`] that applied nothing (`outcome_unknown: false`).
+    pub fn cancelled() -> DbError {
+        DbError::Cancelled {
             outcome_unknown: false,
         }
     }
@@ -337,19 +355,32 @@ impl From<DbError> for AppError {
                 position,
                 ..AppError::base("server", message)
             },
-            DbError::ConnectionLost { was_in_tx, message } => AppError {
-                retryable: !was_in_tx,
+            DbError::ConnectionLost {
+                was_in_tx,
+                outcome_unknown,
+                message,
+            } => AppError {
+                retryable: !was_in_tx && !outcome_unknown,
                 detail: (!message.is_empty()).then_some(message),
                 ..AppError::base(
                     "connection_lost",
-                    if was_in_tx {
+                    if outcome_unknown {
+                        "The connection was lost and the statement may have been applied."
+                    } else if was_in_tx {
                         "The connection was lost during a transaction; it was rolled back."
                     } else {
                         "The connection to the server was lost."
                     },
                 )
             },
-            DbError::Cancelled => AppError::base("cancelled", "The operation was cancelled."),
+            DbError::Cancelled { outcome_unknown } => AppError::base(
+                "cancelled",
+                if outcome_unknown {
+                    "The statement was cancelled and may have been applied."
+                } else {
+                    "The operation was cancelled."
+                },
+            ),
             DbError::Unsupported { feature, version } => AppError {
                 detail: Some(format!("{feature} (server version {version})")),
                 ..AppError::base(
@@ -651,9 +682,9 @@ mod tests {
         let twice = DbError::at_stage(
             ConnectStage::DetectServer,
             vec![],
-            DbError::at_stage(ConnectStage::ConnectDb, vec![], DbError::Cancelled),
+            DbError::at_stage(ConnectStage::ConnectDb, vec![], DbError::cancelled()),
         );
-        assert!(matches!(twice.unstaged(), DbError::Cancelled));
+        assert!(matches!(twice.unstaged(), DbError::Cancelled { .. }));
         assert_eq!(twice.stage(), Some(ConnectStage::ConnectDb));
     }
 
@@ -710,6 +741,7 @@ mod tests {
     fn connection_lost_keeps_its_message_as_detail() {
         let a: AppError = DbError::ConnectionLost {
             was_in_tx: false,
+            outcome_unknown: false,
             message: "Lost connection to MySQL server during query".into(),
         }
         .into();
@@ -721,10 +753,52 @@ mod tests {
         );
         let empty: AppError = DbError::ConnectionLost {
             was_in_tx: false,
+            outcome_unknown: false,
             message: String::new(),
         }
         .into();
         assert_eq!(empty.detail, None);
+    }
+
+    #[test]
+    fn connection_lost_with_unknown_outcome_is_not_retryable() {
+        for was_in_tx in [false, true] {
+            let a: AppError = DbError::ConnectionLost {
+                was_in_tx,
+                outcome_unknown: true,
+                message: "gone".into(),
+            }
+            .into();
+            assert_eq!(a.kind, "connection_lost");
+            assert_eq!(
+                a.message,
+                "The connection was lost and the statement may have been applied."
+            );
+            assert!(!a.retryable);
+        }
+        assert!(DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: "gone".into(),
+        }
+        .to_string()
+        .contains("may have been applied"));
+    }
+
+    #[test]
+    fn cancelled_with_unknown_outcome_says_it_may_have_been_applied() {
+        let a: AppError = DbError::Cancelled {
+            outcome_unknown: true,
+        }
+        .into();
+        assert_eq!(a.kind, "cancelled");
+        assert_eq!(
+            a.message,
+            "The statement was cancelled and may have been applied."
+        );
+        assert!(!a.retryable);
+        let plain: AppError = DbError::cancelled().into();
+        assert_eq!(plain.message, "The operation was cancelled.");
     }
 
     #[test]
@@ -738,6 +812,7 @@ mod tests {
         assert_eq!(t.stage.as_deref(), Some("connect_db"));
         let l: AppError = DbError::ConnectionLost {
             was_in_tx: true,
+            outcome_unknown: false,
             message: "gone".into(),
         }
         .into();
@@ -748,6 +823,7 @@ mod tests {
         );
         let l: AppError = DbError::ConnectionLost {
             was_in_tx: false,
+            outcome_unknown: false,
             message: "gone".into(),
         }
         .into();

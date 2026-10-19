@@ -320,7 +320,7 @@ async fn cancel_long_query() {
         let since_cancel = cancelled_at.lock().unwrap().unwrap().elapsed();
         cancel.unwrap_or_else(|e| panic!("{t:?}: cancel failed: {e}"));
         assert!(
-            matches!(res, Err(DbError::Cancelled)),
+            matches!(res, Err(DbError::Cancelled { .. })),
             "{t:?}: {:?}",
             res.map(|(s, _)| s)
         );
@@ -379,7 +379,7 @@ async fn completed_statement_during_cancel_keeps_its_result() {
             handle.cancel().await
         });
         assert!(
-            matches!(res, Err(DbError::Cancelled)),
+            matches!(res, Err(DbError::Cancelled { .. })),
             "{t:?}: {:?}",
             res.map(|(s, _)| s)
         );

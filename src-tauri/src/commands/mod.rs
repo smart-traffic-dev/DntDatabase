@@ -227,7 +227,7 @@ mod tests {
     #[tokio::test]
     async fn guard_maps_errors_and_passes_values() {
         assert_eq!(guard(async { Ok::<_, DbError>(7) }).await.unwrap(), 7);
-        let err = guard(async { Err::<(), _>(DbError::Cancelled) })
+        let err = guard(async { Err::<(), _>(DbError::cancelled()) })
             .await
             .unwrap_err();
         assert_eq!(err.kind, "cancelled");

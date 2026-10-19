@@ -367,6 +367,7 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         "connection_lost",
         DbError::ConnectionLost {
             was_in_tx: false,
+            outcome_unknown: false,
             message: "Lost connection to MySQL server during query".into(),
         }
         .into(),
@@ -375,11 +376,30 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         "connection_lost_in_transaction",
         DbError::ConnectionLost {
             was_in_tx: true,
+            outcome_unknown: false,
+            message: "Lost connection to MySQL server during query; the transaction was \
+                      rolled back"
+                .into(),
+        }
+        .into(),
+    );
+    out.insert(
+        "connection_lost_outcome_unknown",
+        DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
             message: "Lost connection to MySQL server during query".into(),
         }
         .into(),
     );
-    out.insert("cancelled", DbError::Cancelled.into());
+    out.insert("cancelled", DbError::cancelled().into());
+    out.insert(
+        "cancelled_outcome_unknown",
+        DbError::Cancelled {
+            outcome_unknown: true,
+        }
+        .into(),
+    );
     out
 }
 

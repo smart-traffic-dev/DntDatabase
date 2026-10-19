@@ -162,6 +162,7 @@ impl Introspector for FakeSession {
         if lose.is_ok() {
             return Err(DbError::ConnectionLost {
                 was_in_tx: false,
+                outcome_unknown: false,
                 message: "Lost connection to MySQL server during query".into(),
             });
         }
@@ -782,7 +783,7 @@ async fn close_during_slow_connect_ends_disconnected() {
     f.sm.close(id).await;
     assert_eq!(f.sm.state(id), ConnState::Disconnected);
     let err = open.await.unwrap().unwrap_err();
-    assert!(matches!(err, DbError::Cancelled), "{err:?}");
+    assert!(matches!(err, DbError::Cancelled { .. }), "{err:?}");
     // The superseded open closed the session it got and installed nothing.
     assert_eq!(f.sm.state(id), ConnState::Disconnected);
     assert!(f.sm.open_connections().is_empty());
