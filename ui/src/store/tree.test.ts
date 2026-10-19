@@ -1,6 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ServerVariant } from '../bindings';
-import { ids, callsOf, mockBackend, openResult, resetStores, sampleTree, serverInfo } from '../test/backend';
+import {
+  Failure,
+  appError,
+  callsOf,
+  ids,
+  mockBackend,
+  openResult,
+  resetStores,
+  sampleTree,
+  serverInfo,
+} from '../test/backend';
+import { useConnections } from './connections';
 import { useTabs } from './tabs';
 import { useTree } from './tree';
 import { connNodeId, groupNodeId } from './treeModel';
@@ -129,6 +140,128 @@ describe('tree store', () => {
     expect(useTree.getState().expanded.has(conn)).toBe(false);
     expect(useTree.getState().nodes.get(conn)?.engine).toBe('MY');
     expect(useTree.getState().nodes.has(`${conn}/db:shop`)).toBe(false);
+  });
+});
+
+function deferred<T>() {
+  let resolve: (v: T) => void = () => {};
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe('tree store: stale loads', () => {
+  beforeEach(() => {
+    resetStores();
+  });
+
+  it('keeps the newest list_databases answer when responses arrive out of order', async () => {
+    const gates = [deferred<{ name: string }[]>(), deferred<{ name: string }[]>()];
+    let call = 0;
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => openResult(serverInfo('MySql8')),
+      list_databases: () => gates[call++]?.promise,
+    });
+    await useTree.getState().reloadStored();
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
+    const first = useTree.getState().loadChildren(conn);
+    const second = useTree.getState().loadChildren(conn);
+    gates[1]?.resolve([{ name: 'new' }]);
+    await second;
+    gates[0]?.resolve([{ name: 'old' }]);
+    await first;
+    await tick();
+    expect(children(conn)).toEqual(['new']);
+    expect(useTree.getState().nodes.get(conn)?.loading).toBe(false);
+  });
+
+  it('a close during the load keeps the connection closed and childless', async () => {
+    const gate = deferred<unknown>();
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => gate.promise,
+      list_databases: () => [{ name: 'shop' }],
+      close_connection: () => null,
+    });
+    await useTree.getState().reloadStored();
+    useTree.getState().expand(conn);
+    await useTree.getState().closeConnection(ids.prod);
+    gate.resolve(openResult(serverInfo('MySql8')));
+    await tick();
+    await tick();
+    expect(useConnections.getState().info.has(ids.prod)).toBe(false);
+    expect(useTree.getState().childIds.has(conn)).toBe(false);
+    expect(useTree.getState().nodes.get(conn)?.loading).toBe(false);
+    expect(callsOf('list_databases')).toHaveLength(0);
+  });
+});
+
+describe('tree store: names, errors, selection, drops', () => {
+  const folder = `${conn}/db:shop/folder:Table`;
+
+  beforeEach(() => {
+    resetStores();
+  });
+
+  async function openFolder(objects: string[], extra: Parameters<typeof mockBackend>[0] = {}) {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => openResult(serverInfo('MySql8')),
+      list_databases: () => [{ name: 'shop' }],
+      list_objects: () => objects.map((name) => ({ name, kind: 'Table', comment: null, row_estimate: null })),
+      refresh_node: () => null,
+      ...extra,
+    });
+    await useTree.getState().reloadStored();
+    await open(conn);
+    await open(`${conn}/db:shop`);
+    await open(folder);
+  }
+
+  it('percent-encodes names in node ids and refreshes with the raw key', async () => {
+    await openFolder(['a/b', 'a']);
+    const slash = `${folder}/obj:Table:a%2Fb`;
+    expect(children(folder)).toEqual(['a/b', 'a']);
+    expect(useTree.getState().childIds.get(folder)).toEqual([slash, `${folder}/obj:Table:a`]);
+
+    useTree.getState().select(slash);
+    await useTree.getState().refresh(slash);
+    expect(callsOf('refresh_node')[0]).toEqual({
+      id: ids.prod,
+      key: ['db:shop', 'folder:Table', 'obj:Table:a/b'],
+    });
+  });
+
+  it('shows a refresh_node failure in the tree error state', async () => {
+    await openFolder(['orders'], {
+      refresh_node: () => {
+        throw new Failure(appError('connection_lost', 'gone'));
+      },
+    });
+    await useTree.getState().refresh(`${folder}/obj:Table:orders`);
+    expect(useTree.getState().error?.message).toBe('gone');
+  });
+
+  it('clears the selection when the selected node disappears on reload', async () => {
+    let objects = ['orders', 'products'];
+    await openFolder(objects, {
+      list_objects: () => objects.map((name) => ({ name, kind: 'Table', comment: null, row_estimate: null })),
+    });
+    const selected = `${folder}/obj:Table:products`;
+    useTree.getState().select(selected);
+    objects = ['orders'];
+    await useTree.getState().refresh(folder);
+    expect(useTree.getState().nodes.has(selected)).toBe(false);
+    expect(useTree.getState().selectedId).toBeUndefined();
+  });
+
+  it('ignores drops onto rows that are neither groups nor connections', async () => {
+    await openFolder(['orders'], { move_node: () => null });
+    await useTree.getState().move(connNodeId(ids.legacy), `${conn}/db:shop`);
+    await useTree.getState().move(connNodeId(ids.legacy), `${folder}/obj:Table:orders`);
+    expect(callsOf('move_node')).toHaveLength(0);
   });
 });
 

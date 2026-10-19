@@ -20,7 +20,7 @@ interface TabsState {
 
 /** One tab per object of a connection. */
 export function objectTabId(connectionId: string, o: ObjectRef): string {
-  return [connectionId, o.database, o.schema ?? '', o.kind, o.name].join('/');
+  return [connectionId, o.database, o.schema ?? '', o.kind, o.name].map(encodeURIComponent).join('/');
 }
 
 export const useTabs = create<TabsState>()((set) => ({

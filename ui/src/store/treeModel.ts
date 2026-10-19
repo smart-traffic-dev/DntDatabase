@@ -50,8 +50,22 @@ export function connectionIdOf(nodeId: string): string | undefined {
   return first.startsWith('conn:') ? first.slice('conn:'.length) : undefined;
 }
 
-/** The `NodeKey` of a node: its id path without the `conn:<uuid>` segment. */
-export const nodeKey = (nodeId: string): string[] => nodeId.split('/').slice(1);
+/** A name as the value part of a node-id segment: `/` and `:` never appear raw. */
+export const seg = (name: string) => encodeURIComponent(name);
+
+/**
+ * The backend `NodeKey` of a node: its id path without the `conn:<uuid>` segment, with the
+ * value of every segment decoded (backend keys carry raw names).
+ */
+export const nodeKey = (nodeId: string): string[] =>
+  nodeId
+    .split('/')
+    .slice(1)
+    .map((segment) => {
+      // `obj:<Kind>:<value>` has two prefixes, `db:` / `schema:` / `folder:` one.
+      const match = /^(obj:[^:]*:|[^:]+:)(.*)$/.exec(segment);
+      return match ? `${match[1]}${decodeURIComponent(match[2] ?? '')}` : segment;
+    });
 
 export function engineOf(variant: ServerVariant): Engine {
   switch (variant) {

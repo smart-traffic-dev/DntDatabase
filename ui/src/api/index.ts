@@ -1,4 +1,4 @@
-import { commands, type AppError, type Result } from '../bindings';
+import { commands, type Result } from '../bindings';
 import { AppErrorEx, toAppError } from './errors';
 
 export { AppErrorEx, isHostKeyUnknown, isPasswordRequired, toAppError } from './errors';
@@ -19,7 +19,7 @@ async function unwrap<T>(call: () => Promise<Result<T, unknown>>): Promise<T> {
     // The generated bindings rethrow real `Error`s (e.g. no Tauri runtime): keep one shape.
     throw new AppErrorEx(toAppError(e));
   }
-  if (result.status === 'error') throw new AppErrorEx(result.error as AppError);
+  if (result.status === 'error') throw new AppErrorEx(toAppError(result.error));
   return result.data;
 }
 

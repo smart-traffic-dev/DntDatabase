@@ -58,9 +58,21 @@ export class AppErrorEx extends Error implements AppError {
 /** Anything thrown while calling the backend, as an `AppError` payload. */
 export function toAppError(e: unknown): AppError {
   if (e instanceof AppErrorEx) return e.toAppError();
+  // A real AppError payload (`kind` and `message` strings); missing optional fields become null.
+  if (typeof e === 'object' && e !== null) {
+    const o = e as Record<string, unknown>;
+    if (typeof o.kind === 'string' && typeof o.message === 'string') {
+      return { ...internal(o.message), ...(e as Partial<AppError>), kind: o.kind, message: o.message };
+    }
+  }
+  // Tauri rejects with a plain string for deserialization or unknown-command failures.
+  return internal(e instanceof Error ? e.message : String(e));
+}
+
+function internal(message: string): AppError {
   return {
     kind: 'internal',
-    message: e instanceof Error ? e.message : String(e),
+    message,
     detail: null,
     stage: null,
     server_code: null,

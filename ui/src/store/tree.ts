@@ -13,6 +13,7 @@ import {
   folderLabel,
   groupNodeId,
   nodeKey,
+  seg,
   type TreeNode,
   type TreeRow,
 } from './treeModel';
@@ -85,10 +86,28 @@ const versionShort = (info: ServerInfo) => `${info.version[0]}.${info.version[1]
 /** Newest load request per node: a slower, older one must not overwrite a newer result. */
 const requests = new Map<string, number>();
 
+/** Makes every in-flight load of `id` and its descendants stale. */
+function invalidate(id: string) {
+  for (const key of [...requests.keys()]) {
+    if (key === id || key.startsWith(`${id}/`)) requests.set(key, (requests.get(key) ?? 0) + 1);
+  }
+}
+
+interface Loaded {
+  children: TreeNode[];
+  parentPatch?: Partial<TreeNode>;
+}
+
 export const useTree = create<TreeState>()((set, get) => {
   const draft = (): Draft => {
     const s = get();
     return { nodes: new Map(s.nodes), childIds: new Map(s.childIds), expanded: new Set(s.expanded) };
+  };
+
+  /** Commits a draft; the selection goes away with the node it points at. */
+  const commit = (d: Draft) => {
+    const selected = get().selectedId;
+    set(selected && !d.nodes.has(selected) ? { ...d, selectedId: undefined } : d);
   };
 
   const patch = (id: string, change: Partial<TreeNode>) =>
@@ -112,7 +131,7 @@ export const useTree = create<TreeState>()((set, get) => {
     if (parent) {
       d.nodes.set(parentId, { ...parent, loading: false, error: undefined, ...parentPatch });
     }
-    set(d);
+    commit(d);
   };
 
   const connectionNode = (c: ConnectionSummary, previous?: TreeNode): TreeNode => {
@@ -157,51 +176,55 @@ export const useTree = create<TreeState>()((set, get) => {
     for (const id of [ROOT, ...groups.map((g) => groupNodeId(g.id))]) {
       d.childIds.set(id, children.get(id) ?? []);
     }
-    set(d);
+    commit(d);
   };
 
-  const listChildren = async (node: TreeNode, connectionId: string): Promise<void> => {
+  /** Fetches the children of a node; the caller applies them only if the request is still current. */
+  const listChildren = async (
+    node: TreeNode,
+    connectionId: string,
+    latest: () => boolean,
+  ): Promise<Loaded | null> => {
     const id = node.id;
     if (node.kind === 'connection') {
       let info = useConnections.getState().info.get(connectionId);
       if (!info) {
         info = (await api.openConnection(connectionId, null)).info;
+        // Closed or superseded meanwhile: record nothing, list nothing.
+        if (!latest()) return null;
         useConnections.getState().setInfo(connectionId, info);
         patch(id, { engine: engineOf(info.variant), meta: versionShort(info) });
       }
       const dbs = await api.listDatabases(connectionId, get().showSystem);
-      setChildren(
-        id,
-        dbs.map((db) => ({
-          id: `${id}/db:${db.name}`,
+      return {
+        children: dbs.map((db) => ({
+          id: `${id}/db:${seg(db.name)}`,
           parentId: id,
           kind: 'database',
           label: db.name,
           scope: { database: db.name, schema: null },
         })),
-      );
-      return;
+      };
     }
     const variant = useConnections.getState().info.get(connectionId)?.variant;
     if (!variant) throw new Error('The connection is not open.');
     const scope = node.scope;
-    if (!scope) return;
+    if (!scope) return null;
     if (node.kind === 'database' && variant === 'Postgres') {
       const schemas = await api.listSchemas(connectionId, scope.database, get().showSystem);
-      setChildren(
-        id,
-        schemas.map((s) => ({
-          id: `${id}/schema:${s.name}`,
+      return {
+        children: schemas.map((s) => ({
+          id: `${id}/schema:${seg(s.name)}`,
           parentId: id,
           kind: 'schema',
           label: s.name,
           scope: { database: scope.database, schema: s.name },
         })),
-      );
-    } else if (node.kind === 'database' || node.kind === 'schema') {
-      setChildren(
-        id,
-        folderKindsOf(variant).map((kind) => ({
+      };
+    }
+    if (node.kind === 'database' || node.kind === 'schema') {
+      return {
+        children: folderKindsOf(variant).map((kind) => ({
           id: `${id}/folder:${kind}`,
           parentId: id,
           kind: 'folder',
@@ -209,22 +232,23 @@ export const useTree = create<TreeState>()((set, get) => {
           folderKind: kind,
           scope,
         })),
-      );
-    } else if (node.kind === 'folder' && node.folderKind) {
+      };
+    }
+    if (node.kind === 'folder' && node.folderKind) {
       const kind = node.folderKind;
       const objects = await api.listObjects(connectionId, scope, kind);
-      setChildren(
-        id,
-        objects.map((o) => ({
-          id: `${id}/obj:${kind}:${o.name}`,
+      return {
+        children: objects.map((o) => ({
+          id: `${id}/obj:${kind}:${seg(o.name)}`,
           parentId: id,
           kind: 'object',
           label: o.name,
           objectRef: { database: scope.database, schema: scope.schema, name: o.name, kind },
         })),
-        { meta: String(objects.length) },
-      );
+        parentPatch: { meta: String(objects.length) },
+      };
     }
+    return null;
   };
 
   const loadChildren = async (id: string) => {
@@ -236,7 +260,14 @@ export const useTree = create<TreeState>()((set, get) => {
     const latest = () => requests.get(id) === token && get().nodes.has(id);
     patch(id, { loading: true, error: undefined });
     try {
-      await listChildren(node, connectionId);
+      const loaded = await listChildren(node, connectionId, latest);
+      // A newer request, a close, or a removed node supersedes this answer.
+      if (!latest()) return;
+      if (!loaded) {
+        patch(id, { loading: false });
+        return;
+      }
+      setChildren(id, loaded.children, loaded.parentPatch);
     } catch (e) {
       if (!latest()) return;
       const error = toAppError(e);
@@ -263,11 +294,11 @@ export const useTree = create<TreeState>()((set, get) => {
     };
     if (!d.expanded.has(id)) {
       dropChildren(d, id);
-      set(d);
+      commit(d);
       return;
     }
     prune(id);
-    set(d);
+    commit(d);
     const targets = [...get().expanded]
       .filter((e) => e === id || e.startsWith(`${id}/`))
       .sort((a, b) => a.length - b.length);
@@ -315,7 +346,8 @@ export const useTree = create<TreeState>()((set, get) => {
       try {
         await api.refreshNode(connectionId, nodeKey(id));
       } catch (e) {
-        patch(id, { error: toAppError(e) });
+        // The node may be collapsed or a leaf: report through the sidebar banner.
+        set({ error: toAppError(e) });
         return;
       }
       await reloadSubtree(node.kind === 'object' && node.parentId ? node.parentId : id);
@@ -335,12 +367,15 @@ export const useTree = create<TreeState>()((set, get) => {
 
     closeConnection: async (connectionId) => {
       const id = connNodeId(connectionId);
+      // Loads still in flight must not bring the connection's children or info back.
+      invalidate(id);
       try {
         await api.closeConnection(connectionId);
       } catch (e) {
-        patch(id, { error: toAppError(e) });
+        set({ error: toAppError(e) });
         return;
       }
+      invalidate(id);
       useConnections.getState().clearInfo(connectionId);
       const d = draft();
       dropChildren(d, id);
@@ -356,7 +391,7 @@ export const useTree = create<TreeState>()((set, get) => {
           engine: stored?.config.kind === 'postgres' ? 'PG' : 'MY',
         });
       }
-      set(d);
+      commit(d);
     },
 
     duplicateConnection: async (connectionId) => {
@@ -375,6 +410,8 @@ export const useTree = create<TreeState>()((set, get) => {
       const target = targetId ? nodes.get(targetId) : undefined;
       if (!drag || (drag.kind !== 'group' && drag.kind !== 'connection')) return;
       if (targetId && (!target || targetId === dragId)) return;
+      // Only groups and connections are drop targets.
+      if (target && target.kind !== 'group' && target.kind !== 'connection') return;
 
       // Into the target when it is a group, else next to it.
       const intoGroup = target?.kind === 'group';

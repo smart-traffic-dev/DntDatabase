@@ -200,6 +200,54 @@ describe('ConnectionTree', () => {
     expect(screen.getByRole('treeitem', { name: /orders/ })).toBeInTheDocument();
   });
 
+  it('moves the selection and expands/collapses from the keyboard', async () => {
+    backend();
+    await renderTree();
+    const user = userEvent.setup();
+
+    await user.click(row('Production'));
+    await user.keyboard('{ArrowDown}');
+    expect(useTree.getState().selectedId).toBe(prodNode);
+    await user.keyboard('{ArrowDown}');
+    expect(useTree.getState().selectedId).toBe(connNodeId(ids.analytics));
+    await user.keyboard('{ArrowUp}');
+    expect(useTree.getState().selectedId).toBe(prodNode);
+
+    await user.keyboard('{ArrowRight}');
+    await waitFor(() => expect(row('shop-prod')).toHaveAttribute('aria-expanded', 'true'));
+    await screen.findByRole('treeitem', { name: /^shop$/ });
+    await user.keyboard('{ArrowLeft}');
+    expect(row('shop-prod')).toHaveAttribute('aria-expanded', 'false');
+    // Left on a collapsed node selects its parent group.
+    await user.keyboard('{ArrowLeft}');
+    expect(useTree.getState().selectedId).toBe(groupNodeId(ids.groupA));
+
+    await user.keyboard('{Enter}');
+    expect(row('Production')).toHaveAttribute('aria-expanded', 'false');
+    await user.keyboard('{Enter}');
+    expect(row('Production')).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('Enter on the Retry button retries instead of toggling the node', async () => {
+    let attempts = 0;
+    backend({
+      list_databases: () => {
+        if (attempts++ === 0) throw new Failure(appError('server', 'boom'));
+        return [{ name: 'shop' }];
+      },
+    });
+    await renderTree();
+    const user = userEvent.setup();
+    await user.dblClick(row('shop-prod'));
+    const retry = await screen.findByRole('button', { name: 'Retry' });
+    retry.focus();
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByRole('treeitem', { name: /^shop$/ })).toBeInTheDocument();
+    expect(callsOf('list_databases')).toHaveLength(2);
+    expect(row('shop-prod')).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('opens the context menu of a connection with its actions', async () => {
     backend();
     await renderTree();

@@ -173,6 +173,8 @@ export function ConnectionTree() {
   }, [selectedId, rows, virtualizer]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    // Keys on a button inside a row (Retry) belong to that button.
+    if ((e.target as HTMLElement).closest('button')) return;
     const tree = useTree.getState();
     const nodeRows = rows.filter((r) => r.type === 'node');
     const at = nodeRows.findIndex((r) => r.key === selectedId);
@@ -218,7 +220,9 @@ export function ConnectionTree() {
 
   const canDrop = (target: TreeNode | null) => {
     const drag = dragging.current;
-    return !!drag && drag !== target?.id;
+    if (!drag || drag === target?.id) return false;
+    // Rows other than groups and connections are no drop targets.
+    return !target || target.kind === 'group' || target.kind === 'connection';
   };
 
   return (
@@ -265,15 +269,16 @@ export function ConnectionTree() {
                 setDropId(null);
               }}
               onDragOver={(node, e) => {
+                // Not a target: swallow the event so the root drop zone does not take it.
+                e.stopPropagation();
                 if (!canDrop(node)) return;
                 e.preventDefault();
-                e.stopPropagation();
                 setDropId(node.id);
               }}
               onDragLeave={() => setDropId(null)}
               onDrop={(node, e) => {
                 const drag = dragging.current;
-                if (!drag) return;
+                if (!drag || !canDrop(node)) return;
                 e.preventDefault();
                 e.stopPropagation();
                 dragging.current = null;
