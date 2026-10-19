@@ -33,8 +33,9 @@ const ER_QUERY_INTERRUPTED: u16 = 1317;
 /// MariaDB "Connection was killed" (1927).
 const LOST_CODES: [u16; 4] = [2006, 2013, 4031, 1927];
 /// The subset of [`LOST_CODES`] meaning the statement was never run (see
-/// [`lost_before_sent`]).
-const LOST_BEFORE_SENT: [u16; 2] = [2006, 4031];
+/// [`lost_before_sent`]). Only 4031, which the server sends before reading the next
+/// command; 2006 is a client code and does not prove the statement never ran.
+const LOST_BEFORE_SENT: [u16; 1] = [4031];
 
 /// `ConnectionLost` message for a statement that ignored `KILL QUERY` after its timeout.
 const STUCK: &str = "the statement did not stop after the timeout, so its connection was closed";
@@ -466,8 +467,8 @@ fn is_connection_lost(e: &MyError) -> bool {
 }
 
 /// The connection was gone before the statement reached the server: MySQL 8 closed the
-/// idle session (4031, sent as the answer to our next command) or the server had gone
-/// away (2006). The statement never ran, so like PG's closed-client pre-check it may be
+/// idle session (4031, sent as the answer to our next command). The statement never
+/// ran, so like PG's closed-client pre-check it may be
 /// re-sent on a fresh connection and its outcome is known (nothing applied).
 fn lost_before_sent(e: &MyError) -> bool {
     matches!(e, MyError::Server(se) if LOST_BEFORE_SENT.contains(&se.code))
@@ -889,12 +890,12 @@ mod tests {
 
     #[test]
     fn idle_disconnects_mean_the_statement_was_not_sent() {
-        // 4031: MySQL 8 dropped the idle session; 2006: server has gone away.
-        for code in [2006, 4031] {
-            assert!(lost_before_sent(&server(code, "gone")), "{code}");
-            assert!(is_connection_lost(&server(code, "gone")), "{code}");
-        }
-        // Lost mid-statement, or killed while running: it may have run.
+        // 4031: MySQL 8 dropped the idle session before reading our command.
+        assert!(lost_before_sent(&server(4031, "gone")));
+        assert!(is_connection_lost(&server(4031, "gone")));
+        // Lost mid-statement, or killed while running: it may have run. 2006 is a
+        // client code; arriving as a server error (e.g. from a proxy) proves nothing.
+        assert!(!lost_before_sent(&server(2006, "gone away")));
         assert!(!lost_before_sent(&server(2013, "lost during query")));
         assert!(!lost_before_sent(&server(1927, "Connection was killed")));
         let eof = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
