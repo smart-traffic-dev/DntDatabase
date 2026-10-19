@@ -87,6 +87,7 @@ function InfoPanel({ detail }: { detail: TableDetail }) {
 
 function DdlPanel({ ddl }: { ddl: string }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
@@ -94,8 +95,11 @@ function DdlPanel({ ddl }: { ddl: string }) {
     try {
       await navigator.clipboard.writeText(ddl);
     } catch {
+      setCopied(false);
+      setCopyError(true);
       return;
     }
+    setCopyError(false);
     setCopied(true);
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setCopied(false), 1500);
@@ -108,6 +112,11 @@ function DdlPanel({ ddl }: { ddl: string }) {
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
+      {copyError ? (
+        <div role="alert" className="ot-error">
+          Couldn't copy — select the text and press Ctrl+C.
+        </div>
+      ) : null}
       <pre className="ot-ddl-text" data-testid="object-ddl-text" tabIndex={0} aria-label="DDL">
         {ddl}
       </pre>
@@ -214,8 +223,8 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
               </tr>
             </thead>
             <tbody>
-              {detail.foreign_keys.map((fk) => (
-                <tr key={fk.name}>
+              {detail.foreign_keys.map((fk, i) => (
+                <tr key={`${fk.name}:${i}`}>
                   <td>{fk.name}</td>
                   <td className="mono">{referenceOf(fk)}</td>
                   <td>{fk.on_update}</td>
@@ -232,8 +241,8 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
           <p className="muted">None</p>
         ) : (
           <ul className="ot-list">
-            {detail.checks.map((c) => (
-              <li key={c.name}>
+            {detail.checks.map((c, i) => (
+              <li key={`${c.name}:${i}`}>
                 <span>{c.name}</span> <code className="mono">{c.expression}</code>
               </li>
             ))}
@@ -246,8 +255,8 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
           <p className="muted">None</p>
         ) : (
           <ul className="ot-list">
-            {detail.triggers.map((t) => (
-              <li key={t.name}>
+            {detail.triggers.map((t, i) => (
+              <li key={`${t.name}:${i}`}>
                 <span>{t.name}</span> <span className="muted">{`${t.timing} ${t.event}`}</span>
               </li>
             ))}

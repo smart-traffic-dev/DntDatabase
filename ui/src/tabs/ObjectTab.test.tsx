@@ -123,6 +123,35 @@ describe('ObjectTab', () => {
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
   });
 
+  it('copy_failure_is_shown_and_cleared_on_next_success', async () => {
+    const user = userEvent.setup();
+    const write = vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('denied'));
+    setup(makeTab('View', 'v_open'));
+    await screen.findByTestId('object-ddl-text');
+    await user.click(screen.getByRole('button', { name: 'Copy' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't copy — select the text and press Ctrl+C.");
+    expect(screen.queryByRole('button', { name: 'Copied' })).not.toBeInTheDocument();
+    write.mockResolvedValueOnce();
+    await user.click(screen.getByRole('button', { name: 'Copy' }));
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('refresh_forgets_ddl_cache', async () => {
+    const user = userEvent.setup();
+    setup(makeTab('Table'));
+    await screen.findByText('Customer orders');
+    await user.click(screen.getByTestId('object-tab-ddl'));
+    await screen.findByTestId('object-ddl-text');
+    expect(callsOf('object_ddl')).toHaveLength(1);
+    await user.click(screen.getByRole('tab', { name: 'Info' }));
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(callsOf('table_detail')).toHaveLength(2));
+    await user.click(screen.getByTestId('object-tab-ddl'));
+    await screen.findByTestId('object-ddl-text');
+    expect(callsOf('object_ddl')).toHaveLength(2);
+  });
+
   it('size_is_humanized', async () => {
     expect(formatBytes(0)).toBe('0 B');
     expect(formatBytes(1023)).toBe('1023 B');
