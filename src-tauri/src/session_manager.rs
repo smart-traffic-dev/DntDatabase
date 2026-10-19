@@ -232,14 +232,36 @@ async fn connect_db(
         })?
 }
 
-/// Whether `cfg` (as typed) still points at the server, user and SSH bastion of `stored`.
+/// Host names compare case-insensitively, ignoring surrounding blanks.
+fn same_host(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+fn same_ssh(a: &SshConfig, b: &SshConfig) -> bool {
+    same_host(&a.host, &b.host) && a.port == b.port && a.user == b.user
+}
+
+/// Whether `cfg` (as typed) still takes the whole network path of `stored` to the same
+/// server as the same user: engine, database host, port and user, whether SSH is used,
+/// and, with SSH, the bastion's host, port and user. Gates the stored database password.
+/// Turning SSH on or off is a different target: `host:port` then names another machine.
 fn same_target(stored: &ConnectionConfig, cfg: &ConnectionConfig) -> bool {
     let ssh = match (&stored.ssh, &cfg.ssh) {
-        (_, None) => true,
-        (Some(a), Some(b)) => a.host == b.host && a.port == b.port && a.user == b.user,
-        (None, Some(_)) => false,
+        (None, None) => true,
+        (Some(a), Some(b)) => same_ssh(a, b),
+        _ => false,
     };
-    stored.host == cfg.host && stored.port == cfg.port && stored.username == cfg.username && ssh
+    stored.kind == cfg.kind
+        && same_host(&stored.host, &cfg.host)
+        && stored.port == cfg.port
+        && stored.username == cfg.username
+        && ssh
+}
+
+/// Whether both configs use SSH through the same bastion host, port and user. Gates the
+/// stored SSH password and key passphrase, which only ever reach the bastion.
+fn same_ssh_endpoint(stored: &ConnectionConfig, cfg: &ConnectionConfig) -> bool {
+    matches!((&stored.ssh, &cfg.ssh), (Some(a), Some(b)) if same_ssh(a, b))
 }
 
 /// Opening a saved connection whose SSH key is encrypted and whose passphrase is not
@@ -355,9 +377,11 @@ impl SessionManager {
     /// everything again. Nothing is stored and no runtime is kept.
     ///
     /// For a saved connection (non-nil id, `Saved` mode) secrets the user did not type fall
-    /// back to the stored ones, but only while host, port and user (and, with SSH, the SSH
-    /// host, port and user) are those of the stored config: an edited target never gets
-    /// the stored secrets. Typed secrets always win. They never leave the backend.
+    /// back to the stored ones, each only while its target is unchanged: the database
+    /// password while the whole path is ([`same_target`]: engine, host, port, user, SSH on
+    /// or off and the bastion), SSH secrets while the bastion's host, port and user are
+    /// ([`same_ssh_endpoint`]). An edited target never gets the stored secret. Typed
+    /// secrets always win. They never leave the backend.
     pub async fn test(
         &self,
         cfg: &ConnectionConfig,
@@ -385,23 +409,26 @@ impl SessionManager {
         secrets: NewSecrets,
     ) -> Result<ConnSecrets, DbError> {
         let mut secrets = ConnSecrets::from(secrets);
-        let same_target = || match self.repo.get(cfg.id) {
-            Ok(stored) => same_target(&stored, cfg),
-            Err(_) => false,
-        };
-        if cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil() && same_target() {
+        let stored = (cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil())
+            .then(|| self.repo.get(cfg.id).ok())
+            .flatten();
+        if let Some(stored) = stored {
             let fill = |slot: &mut Option<SecretString>, kind| -> Result<(), DbError> {
                 if slot.is_none() {
                     *slot = self.secrets.get(cfg.id, kind)?;
                 }
                 Ok(())
             };
-            fill(&mut secrets.db_password, SecretKind::DbPassword)?;
-            fill(&mut secrets.ssh_password, SecretKind::SshPassword)?;
-            fill(
-                &mut secrets.ssh_key_passphrase,
-                SecretKind::SshKeyPassphrase,
-            )?;
+            if same_target(&stored, cfg) {
+                fill(&mut secrets.db_password, SecretKind::DbPassword)?;
+            }
+            if same_ssh_endpoint(&stored, cfg) {
+                fill(&mut secrets.ssh_password, SecretKind::SshPassword)?;
+                fill(
+                    &mut secrets.ssh_key_passphrase,
+                    SecretKind::SshKeyPassphrase,
+                )?;
+            }
         }
         secrets.check_ssh(cfg)?;
         Ok(secrets)
@@ -1077,6 +1104,116 @@ mod tests {
     fn manager_is_send_and_sync() {
         assert_send_sync::<SessionManager>();
         assert_send_sync::<ConnectionRuntime>();
+    }
+
+    mod target {
+        use super::super::{same_ssh_endpoint, same_target};
+        use dnt_core::config::ConnectionConfig;
+        use dnt_core::server::DbKind;
+        use dnt_core::test_util::{sample_config, sample_ssh};
+
+        fn with_ssh() -> ConnectionConfig {
+            ConnectionConfig {
+                ssh: Some(sample_ssh()),
+                ..sample_config()
+            }
+        }
+
+        #[test]
+        fn ssh_on_to_off_is_different_target() {
+            let stored = with_ssh();
+            let cfg = ConnectionConfig {
+                ssh: None,
+                ..stored.clone()
+            };
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_off_to_on_is_different_target() {
+            let stored = sample_config();
+            let cfg = with_ssh();
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_host_changed_is_different_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.ssh.as_mut().unwrap().host = "other-bastion.example.com".into();
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_port_changed_is_different_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.ssh.as_mut().unwrap().port = 2222;
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_user_changed_is_different_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.ssh.as_mut().unwrap().user = "someone".into();
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn unchanged_ssh_is_same_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.name = "renamed".into();
+            cfg.default_db = Some("other".into());
+            assert!(same_target(&stored, &cfg));
+            assert!(same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn unchanged_direct_connection_is_same_target() {
+            let stored = sample_config();
+            assert!(same_target(&stored, &stored.clone()));
+            // No SSH on either side: there is no SSH secret to fall back to.
+            assert!(!same_ssh_endpoint(&stored, &stored.clone()));
+        }
+
+        #[test]
+        fn db_host_case_only_change_is_same_target() {
+            let stored = ConnectionConfig {
+                host: "db.example.com".into(),
+                ..with_ssh()
+            };
+            let mut cfg = stored.clone();
+            cfg.host = "  DB.Example.COM ".into();
+            cfg.ssh.as_mut().unwrap().host = " Bastion.EXAMPLE.com".into();
+            assert!(same_target(&stored, &cfg));
+            assert!(same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn db_endpoint_or_engine_changed_is_different_target() {
+            let stored = with_ssh();
+            type Edit = (&'static str, fn(&mut ConnectionConfig));
+            let edits: [Edit; 4] = [
+                ("engine", |c| c.kind = DbKind::Postgres),
+                ("host", |c| c.host = "10.0.0.9".into()),
+                ("port", |c| c.port = 3307),
+                ("user", |c| c.username = "someone".into()),
+            ];
+            for (what, edit) in edits {
+                let mut cfg = stored.clone();
+                edit(&mut cfg);
+                assert!(!same_target(&stored, &cfg), "changed {what}");
+                // The bastion is unchanged: its secrets may still be reused.
+                assert!(same_ssh_endpoint(&stored, &cfg), "changed {what}");
+            }
+        }
     }
 
     #[test]

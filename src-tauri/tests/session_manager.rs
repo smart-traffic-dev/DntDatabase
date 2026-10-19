@@ -653,6 +653,60 @@ async fn test_falls_back_to_stored_ssh_secret_only_for_the_same_ssh_server_and_u
             "changed {what}: {err:?}"
         );
     }
+
+    // Only the database endpoint changed: the bastion still gets its stored password
+    // (the test fails at OpenTunnel, not at ResolveSecrets).
+    let mut cfg = stored.clone();
+    cfg.host = "10.0.0.9".into();
+    let err = f.sm.test(&cfg, secrets(None)).await.unwrap_err();
+    assert_eq!(err.stage(), Some(ConnectStage::OpenTunnel), "{err:?}");
+}
+
+#[tokio::test]
+async fn test_does_not_send_stored_password_when_ssh_is_turned_off() {
+    let f = fixture(DbKind::MySql, false);
+    let mut cfg = config(DbKind::MySql, SecretMode::Saved);
+    cfg.ssh = Some(dnt_core::test_util::sample_ssh());
+    let id = f
+        .repo
+        .create(
+            cfg,
+            NewSecrets {
+                db_password: Some(SecretString::from("stored-pw")),
+                ssh_password: Some(SecretString::from("ssh-pw")),
+                ssh_key_passphrase: None,
+            },
+        )
+        .unwrap()
+        .id;
+    // Without the tunnel the same host:port is another server (seen from this machine).
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.ssh = None;
+    f.sm.test(&cfg, secrets(None)).await.unwrap();
+    assert_eq!(f.log.last_password.lock().unwrap().as_deref(), None);
+}
+
+#[tokio::test]
+async fn test_does_not_send_stored_ssh_secret_when_ssh_is_turned_on() {
+    let f = fixture(DbKind::MySql, false);
+    let id = f
+        .repo
+        .create(
+            config(DbKind::MySql, SecretMode::Saved),
+            NewSecrets {
+                db_password: Some(SecretString::from("stored-pw")),
+                ssh_password: Some(SecretString::from("ssh-pw")),
+                ssh_key_passphrase: None,
+            },
+        )
+        .unwrap()
+        .id;
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.ssh = Some(dnt_core::test_util::sample_ssh());
+    let err = f.sm.test(&cfg, secrets(None)).await.unwrap_err();
+    assert_eq!(err.stage(), Some(ConnectStage::ResolveSecrets), "{err:?}");
+    assert_eq!(AppError::from(err).kind, "password_required");
+    assert_eq!(f.log.connects.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
