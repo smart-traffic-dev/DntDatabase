@@ -9,8 +9,9 @@ pub(crate) fn quote_ident(name: &str) -> String {
 
 pub(crate) const LIST_DATABASES: &str = "SHOW DATABASES";
 
-/// `TABLE_ROWS` / `TABLE_COMMENT` for every table and view of one database (`?` = db).
-pub(crate) const TABLE_STATS: &str = "SELECT TABLE_NAME, TABLE_ROWS, TABLE_COMMENT \
+/// Comments of every table of one database (`?` = db). Selects no statistics column, so
+/// MySQL 8 never computes per-table stats for it. Not used on MySQL 5.7.
+pub(crate) const TABLE_COMMENTS: &str = "SELECT TABLE_NAME, TABLE_COMMENT \
      FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?";
 
 /// MariaDB sequences (`?` = db).

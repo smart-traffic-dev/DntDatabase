@@ -90,7 +90,8 @@ async fn lists_fixture_objects() {
 
         let summaries = s.list_objects(&scope, ObjectKind::Table).await.unwrap();
         let orders = summaries.iter().find(|o| o.name == "orders").unwrap();
-        assert!(orders.row_estimate.is_some(), "{t:?}: {orders:?}");
+        // Lists never carry statistics; the estimate comes from `table_detail`.
+        assert!(summaries.iter().all(|o| o.row_estimate.is_none()), "{t:?}");
         assert_eq!(orders.comment, None, "{t:?}");
 
         let views = s.list_objects(&scope, ObjectKind::View).await.unwrap();
@@ -231,6 +232,7 @@ async fn capability_specific_details() {
             "CREATE DATABASE IF NOT EXISTS dnt_t11",
             "CREATE TABLE IF NOT EXISTS dnt_t11.parted (id int NOT NULL PRIMARY KEY) \
              PARTITION BY HASH (id) PARTITIONS 2",
+            "CREATE TABLE IF NOT EXISTS dnt_t11.commented (id int) COMMENT = 'hello'",
         ] {
             s.query_row_text(sql).await.unwrap();
         }
@@ -246,6 +248,28 @@ async fn capability_specific_details() {
         let by = parted.options.partitioned_by.unwrap_or_default();
         assert!(by.starts_with("HASH"), "{t:?}: {by}");
         assert_eq!(orders.options.partitioned_by, None, "{t:?}");
+
+        // Table comments: listed on MySQL 8 / MariaDB (no stats read), never on 5.7,
+        // where any `information_schema.TABLES` read opens every table.
+        let t11 = Scope {
+            database: "dnt_t11".into(),
+            schema: None,
+        };
+        let listed = s.list_objects(&t11, ObjectKind::Table).await.unwrap();
+        let commented = listed.iter().find(|o| o.name == "commented").unwrap();
+        let want = (t != Target::MySql57).then(|| "hello".to_string());
+        assert_eq!(commented.comment, want, "{t:?}");
+        let d = s
+            .table_detail(&ObjectRef {
+                database: "dnt_t11".into(),
+                schema: None,
+                name: "commented".into(),
+                kind: ObjectKind::Table,
+            })
+            .await
+            .unwrap();
+        assert_eq!(d.comment.as_deref(), Some("hello"), "{t:?}");
+        assert!(d.row_estimate.is_some(), "{t:?}");
     }
 }
 
@@ -323,26 +347,29 @@ async fn ensure_big_schema(s: &MySqlSession) {
 #[tokio::test]
 async fn lists_5000_tables_fast() {
     require_db!();
-    let s = connect(Target::MySql8).await;
-    ensure_big_schema(&s).await;
-    // Setup, not measured: MySQL 8 computes `TABLE_ROWS` on first read after creation
-    // (or after `information_schema_stats_expiry`), ~10 ms per table, then caches it.
-    // The timed call below measures the listing with the server's stats cache warm.
-    s.query_row_text(
-        "SELECT COUNT(TABLE_ROWS) FROM information_schema.TABLES WHERE TABLE_SCHEMA = 'dnt_big'",
-    )
-    .await
-    .unwrap();
     let scope = Scope {
         database: BIG_DB.into(),
         schema: None,
     };
-    let started = Instant::now();
-    let tables = s.list_objects(&scope, ObjectKind::Table).await.unwrap();
-    let elapsed = started.elapsed();
-    assert_eq!(tables.len(), BIG_TABLES);
-    assert_eq!(tables[0].name, "t_00001");
-    assert!(elapsed < Duration::from_secs(2), "took {elapsed:?}");
+    for t in [Target::MySql8, Target::MySql57] {
+        let s = connect(t).await;
+        ensure_big_schema(&s).await;
+        if t == Target::MySql8 {
+            // Cold path: with expiry 0, MySQL 8 recomputes table statistics on every
+            // read (~10 ms per table), so this only stays fast if listing reads none.
+            s.query_row_text("SET SESSION information_schema_stats_expiry = 0")
+                .await
+                .unwrap();
+        }
+        let started = Instant::now();
+        let tables = s.list_objects(&scope, ObjectKind::Table).await.unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(tables.len(), BIG_TABLES, "{t:?}");
+        assert_eq!(tables[0].name, "t_00001");
+        assert!(tables.iter().all(|o| o.row_estimate.is_none()), "{t:?}");
+        eprintln!("{t:?}: listed {BIG_TABLES} tables in {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(2), "{t:?} took {elapsed:?}");
+    }
 }
 
 #[tokio::test]

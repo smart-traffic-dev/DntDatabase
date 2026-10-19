@@ -114,11 +114,22 @@ impl MySqlSession {
             &format!("SHOW FULL TABLES FROM {}", quote_ident(db)),
         )
         .await?;
-        let stats: HashMap<String, TextRow> = fetch(&mut conn, queries::TABLE_STATS, params1(db))
-            .await?
-            .into_iter()
-            .filter_map(|r| Some((col(&r, 0)?, r)))
-            .collect();
+        // Listing never reads per-table statistics (`TABLE_ROWS` & co.): on a cold
+        // cache MySQL 8 computes them per table (~10 ms each). Comments only come from
+        // MySQL 8 / MariaDB, where selecting them alone touches no table; MySQL 5.7
+        // opens every table for any `information_schema.TABLES` read, so lists there
+        // carry no comment (`table_detail` has it). Views never have a comment.
+        let read_comments =
+            kind == ObjectKind::Table && self.server_info().variant != ServerVariant::MySql57;
+        let comments: HashMap<String, String> = if read_comments {
+            fetch(&mut conn, queries::TABLE_COMMENTS, params1(db))
+                .await?
+                .iter()
+                .filter_map(|r| Some((col(r, 0)?, non_empty(r, 1)?)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
         let mut out: Vec<ObjectSummary> = shown
             .iter()
             .filter_map(|r| {
@@ -126,12 +137,9 @@ impl MySqlSession {
                 if table_kind(&col(r, 1)?)? != kind {
                     return None;
                 }
-                let stat = stats.get(&name);
-                let is_table = kind == ObjectKind::Table;
                 Some(ObjectSummary {
-                    // Views have no comment (MySQL 8 reports the text `VIEW`).
-                    comment: stat.and_then(|s| non_empty(s, 2)).filter(|_| is_table),
-                    row_estimate: stat.and_then(|s| num(s, 1)).filter(|_| is_table),
+                    comment: comments.get(&name).cloned(),
+                    row_estimate: None,
                     name,
                     kind,
                 })
