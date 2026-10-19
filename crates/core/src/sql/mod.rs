@@ -10,4 +10,4 @@ pub use effect::{session_effect, SessionEffect};
 pub use lexer::{
     is_ident_byte, leading_keywords, readings, tokenize, Dialect, MySqlMode, TokKind, Token,
 };
-pub use split::{split, strip_comments, Statement};
+pub use split::{leading_blank_len, split, strip_comments, Statement};

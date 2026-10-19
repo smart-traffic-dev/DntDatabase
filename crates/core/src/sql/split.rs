@@ -63,6 +63,13 @@ fn push(out: &mut Vec<Statement>, sql: &str, from: usize, to: usize, dialect: Di
 
 /// True when `s` holds nothing but whitespace and comments.
 fn is_blank(s: &str, dialect: Dialect) -> bool {
+    leading_blank_len(s, dialect) == s.len()
+}
+
+/// Byte length of the whitespace and plain comments that open `s`, i.e. the offset
+/// of its first significant byte (`s.len()` when there is none). MySQL executable
+/// comments (`/*! … */`) are significant: the server runs them.
+pub fn leading_blank_len(s: &str, dialect: Dialect) -> usize {
     let b = s.as_bytes();
     let mut i = 0;
     while i < b.len() {
@@ -71,10 +78,10 @@ fn is_blank(s: &str, dialect: Dialect) -> bool {
         } else if let Some((Skipped::Comment, end)) = skip_at(b, i, dialect) {
             i = end;
         } else {
-            return false;
+            return i;
         }
     }
-    true
+    b.len()
 }
 
 /// `stmt` with every plain comment replaced by one space. Strings, quoted identifiers,
@@ -147,6 +154,17 @@ mod tests {
     use crate::sql::{classify, MySqlMode, StatementKind};
     const MYSQL: Dialect = Dialect::MYSQL;
     use Dialect::Postgres;
+
+    #[test]
+    fn leading_blank_len_skips_whitespace_and_plain_comments() {
+        assert_eq!(leading_blank_len("-- c\n  # d\nSELECT 1", MYSQL), 11);
+        assert_eq!(leading_blank_len("/* a /* b */ */ SELECT", Postgres), 16);
+        // `#` is not a comment in PG; executable comments are significant.
+        assert_eq!(leading_blank_len("# x", Postgres), 0);
+        assert_eq!(leading_blank_len(" /*!40101 SET x=1 */", MYSQL), 1);
+        assert_eq!(leading_blank_len(" -- only\n", MYSQL), 9);
+        assert_eq!(leading_blank_len("", MYSQL), 0);
+    }
 
     fn cases() -> Vec<(&'static str, Dialect, Vec<&'static str>)> {
         vec![

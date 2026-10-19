@@ -1449,6 +1449,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dnt-query"
+version = "0.1.0"
+dependencies = [
+ "dnt-core",
+ "serde",
+ "serde_json",
+ "specta",
+ "tokio",
+]
+
+[[package]]
 name = "dnt-store"
 version = "0.1.0"
 dependencies = [
