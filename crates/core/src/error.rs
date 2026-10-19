@@ -223,6 +223,10 @@ pub struct AppError {
     pub sqlstate: Option<String>,
     pub position: Option<u32>,
     pub retryable: bool,
+    /// `timeout` / `connection_lost` / `cancelled`: the statement may have been applied
+    /// (the server's outcome is unknown). The UI must show such an error to the user,
+    /// never treat it as a silent cancel.
+    pub outcome_unknown: bool,
     pub hint: Option<String>,
     pub fingerprint: Option<String>,
     pub key_openssh: Option<String>,
@@ -243,6 +247,7 @@ impl AppError {
             sqlstate: None,
             position: None,
             retryable: false,
+            outcome_unknown: false,
             hint: None,
             fingerprint: None,
             key_openssh: None,
@@ -330,6 +335,7 @@ impl From<DbError> for AppError {
             } => AppError {
                 stage: Some(stage.as_str().into()),
                 retryable: !outcome_unknown,
+                outcome_unknown,
                 ..AppError::base(
                     "timeout",
                     if outcome_unknown {
@@ -361,6 +367,7 @@ impl From<DbError> for AppError {
                 message,
             } => AppError {
                 retryable: !was_in_tx && !outcome_unknown,
+                outcome_unknown,
                 detail: (!message.is_empty()).then_some(message),
                 ..AppError::base(
                     "connection_lost",
@@ -373,14 +380,17 @@ impl From<DbError> for AppError {
                     },
                 )
             },
-            DbError::Cancelled { outcome_unknown } => AppError::base(
-                "cancelled",
-                if outcome_unknown {
-                    "The statement was cancelled and may have been applied."
-                } else {
-                    "The operation was cancelled."
-                },
-            ),
+            DbError::Cancelled { outcome_unknown } => AppError {
+                outcome_unknown,
+                ..AppError::base(
+                    "cancelled",
+                    if outcome_unknown {
+                        "The statement was cancelled and may have been applied."
+                    } else {
+                        "The operation was cancelled."
+                    },
+                )
+            },
             DbError::Unsupported { feature, version } => AppError {
                 detail: Some(format!("{feature} (server version {version})")),
                 ..AppError::base(
@@ -783,6 +793,32 @@ mod tests {
         }
         .to_string()
         .contains("may have been applied"));
+    }
+
+    #[test]
+    fn app_error_carries_outcome_unknown_as_data() {
+        for unknown in [false, true] {
+            let errors = [
+                DbError::Timeout {
+                    stage: ConnectStage::Execute,
+                    outcome_unknown: unknown,
+                },
+                DbError::ConnectionLost {
+                    was_in_tx: false,
+                    outcome_unknown: unknown,
+                    message: "gone".into(),
+                },
+                DbError::Cancelled {
+                    outcome_unknown: unknown,
+                },
+            ];
+            for e in errors {
+                let a: AppError = e.into();
+                assert_eq!(a.outcome_unknown, unknown, "{}", a.kind);
+            }
+        }
+        let other: AppError = DbError::NotOpen.into();
+        assert!(!other.outcome_unknown);
     }
 
     #[test]

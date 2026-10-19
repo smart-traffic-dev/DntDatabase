@@ -10,6 +10,7 @@ export class AppErrorEx extends Error implements AppError {
   readonly sqlstate: string | null;
   readonly position: number | null;
   readonly retryable: boolean;
+  readonly outcome_unknown: boolean;
   readonly hint: string | null;
   readonly fingerprint: string | null;
   readonly key_openssh: string | null;
@@ -28,6 +29,7 @@ export class AppErrorEx extends Error implements AppError {
     this.sqlstate = error.sqlstate;
     this.position = error.position;
     this.retryable = error.retryable;
+    this.outcome_unknown = error.outcome_unknown;
     this.hint = error.hint;
     this.fingerprint = error.fingerprint;
     this.key_openssh = error.key_openssh;
@@ -48,6 +50,7 @@ export class AppErrorEx extends Error implements AppError {
       sqlstate: this.sqlstate,
       position: this.position,
       retryable: this.retryable,
+      outcome_unknown: this.outcome_unknown,
       hint: this.hint,
       fingerprint: this.fingerprint,
       key_openssh: this.key_openssh,
@@ -83,6 +86,7 @@ function internal(message: string): AppError {
     sqlstate: null,
     position: null,
     retryable: false,
+    outcome_unknown: false,
     hint: null,
     fingerprint: null,
     key_openssh: null,
@@ -107,9 +111,12 @@ export function needsReconnect(e: AppError): boolean {
   return e.kind === 'not_open' || e.kind === 'connection_lost';
 }
 
-/** `cancelled` means the user (or a newer request) stopped the call: never an error to show. */
+/**
+ * `cancelled` means the user (or a newer request) stopped the call: not an error to show,
+ * unless the statement may have been applied (`outcome_unknown`), which the user must see.
+ */
 export function isCancelled(e: AppError): boolean {
-  return e.kind === 'cancelled';
+  return e.kind === 'cancelled' && !e.outcome_unknown;
 }
 
 /** Labels of the connect stages (`ConnectStage`) and SSH stages (`SshStage`). */

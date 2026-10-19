@@ -32,6 +32,9 @@ const ER_QUERY_INTERRUPTED: u16 = 1317;
 /// "lost connection" (2006, 2013), MySQL 8 "disconnected by the client" (4031) and
 /// MariaDB "Connection was killed" (1927).
 const LOST_CODES: [u16; 4] = [2006, 2013, 4031, 1927];
+/// The subset of [`LOST_CODES`] meaning the statement was never run (see
+/// [`lost_before_sent`]).
+const LOST_BEFORE_SENT: [u16; 2] = [2006, 4031];
 
 /// `ConnectionLost` message for a statement that ignored `KILL QUERY` after its timeout.
 const STUCK: &str = "the statement did not stop after the timeout, so its connection was closed";
@@ -303,7 +306,7 @@ fn may_have_committed(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
     }
 }
 
-/// Whether a `Write`/`Ddl` statement stopped by `KILL QUERY` (timeout or cancel) may
+/// Whether a `Write`/`Ddl`/`COMMIT` statement stopped by `KILL QUERY` (timeout or cancel) may
 /// still have applied part of its work. Outside an explicit transaction a
 /// non-transactional table (MyISAM, Aria) keeps the rows written before the kill and
 /// DDL is not atomic everywhere (and always commits the open transaction first); a
@@ -312,8 +315,9 @@ fn may_have_committed(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
 /// non-transactional table inside a transaction is the accepted residual case.
 fn killed_outcome_unknown(kind: StatementKind, was_in_tx: bool, sql: &str) -> bool {
     match kind {
-        // DDL implicitly committed any open transaction before it ran.
-        StatementKind::Ddl => true,
+        // DDL implicitly committed any open transaction before it ran; a killed COMMIT
+        // may have committed before the kill landed.
+        StatementKind::Ddl | StatementKind::Transaction(TxControl::Commit) => true,
         StatementKind::Write => !was_in_tx || is_call(sql),
         _ => false,
     }
@@ -461,21 +465,52 @@ fn is_connection_lost(e: &MyError) -> bool {
     }
 }
 
-/// "Query execution was interrupted": the statement was stopped by `KILL QUERY`.
-fn is_interrupted(e: &MyError) -> bool {
-    matches!(e, MyError::Server(se)
-        if se.code == ER_QUERY_INTERRUPTED
-            || se.message.contains("Query execution was interrupted"))
+/// The connection was gone before the statement reached the server: MySQL 8 closed the
+/// idle session (4031, sent as the answer to our next command) or the server had gone
+/// away (2006). The statement never ran, so like PG's closed-client pre-check it may be
+/// re-sent on a fresh connection and its outcome is known (nothing applied).
+fn lost_before_sent(e: &MyError) -> bool {
+    matches!(e, MyError::Server(se) if LOST_BEFORE_SENT.contains(&se.code))
 }
 
-/// `killed_unknown`: [`killed_outcome_unknown`] for the statement that failed.
-fn map_exec_error(e: MyError, killed_unknown: bool) -> DbError {
-    if is_interrupted(&e) {
-        return DbError::Cancelled {
-            outcome_unknown: killed_unknown,
-        };
+/// "Query execution was interrupted": the statement was stopped by `KILL QUERY`. Only
+/// consulted when our own cancel or timeout fired; any other interrupt (another
+/// session's `KILL QUERY`, 3024 `max_execution_time`, MariaDB 1969
+/// `max_statement_time`) is reported as the server's own error.
+fn is_interrupted(e: &MyError) -> bool {
+    matches!(e, MyError::Server(se) if se.code == ER_QUERY_INTERRUPTED)
+}
+
+/// How a statement error (not a timeout of ours) is reported.
+#[derive(Debug, PartialEq, Eq)]
+enum Failure {
+    /// The connection went away: `ConnectionLost`, even when a cancel was pending (the
+    /// statement may have committed before the socket died).
+    Lost,
+    /// Our cancel was pending; `outcome_unknown` only when the kill stopped a statement
+    /// that may be partly applied ([`killed_outcome_unknown`]).
+    Cancelled { outcome_unknown: bool },
+    /// The server's own error, code and text kept.
+    Server,
+}
+
+/// `cancelled`: our cancel targeted this call; `interrupted`: the error is 1317;
+/// `killed_unknown`: [`killed_outcome_unknown`] for the statement.
+fn failure_kind(
+    conn_lost: bool,
+    cancelled: bool,
+    interrupted: bool,
+    killed_unknown: bool,
+) -> Failure {
+    if conn_lost {
+        Failure::Lost
+    } else if cancelled {
+        Failure::Cancelled {
+            outcome_unknown: interrupted && killed_unknown,
+        }
+    } else {
+        Failure::Server
     }
-    map_mysql_error(e, ConnectStage::Execute)
 }
 
 /// The database a successful statement switched to, if it is a `USE` (comments around
@@ -585,23 +620,23 @@ impl Session for MySqlSession {
                 if matches!(&err, MyError::Server(se) if se.code == ER_LOCK_DEADLOCK) {
                     self.in_tx.store(false, Ordering::SeqCst);
                 }
-                let killed_unknown = killed_outcome_unknown(kind, was_in_tx, &stmt.text);
-                if run.cancelled() {
-                    // A statement the kill stopped (or whose connection the kill took
-                    // down) may have applied part of its work; one that failed on its
-                    // own did not.
-                    let killed = is_interrupted(&err) || is_connection_lost(&err);
-                    return Err(DbError::Cancelled {
-                        outcome_unknown: killed && killed_unknown,
-                    });
-                }
-                if !is_connection_lost(&err) {
-                    return Err(map_exec_error(err, killed_unknown));
+                match failure_kind(
+                    is_connection_lost(&err),
+                    run.cancelled(),
+                    is_interrupted(&err),
+                    killed_outcome_unknown(kind, was_in_tx, &stmt.text),
+                ) {
+                    Failure::Cancelled { outcome_unknown } => {
+                        return Err(DbError::Cancelled { outcome_unknown })
+                    }
+                    Failure::Server => return Err(map_mysql_error(err, ConnectStage::Execute)),
+                    Failure::Lost => {}
                 }
                 // Captured before the reconnect resets the session state.
                 let notes = self.notes(was_in_tx);
                 let custom = self.session_custom.load(Ordering::SeqCst);
-                let unknown = may_have_committed(kind, was_in_tx, &stmt.text);
+                let not_sent = lost_before_sent(&err);
+                let unknown = !not_sent && may_have_committed(kind, was_in_tx, &stmt.text);
                 let cause = format!("{err}{notes}");
                 if was_in_tx {
                     // The server rolled the transaction back; never replay anything.
@@ -622,13 +657,15 @@ impl Session for MySqlSession {
                         format!("{cause}; reconnecting failed: {e}"),
                     ));
                 }
+                // Only a statement that never reached the server, or a read that produced
+                // nothing yet, on a session with nothing a reconnect cannot restore, is
+                // safe to run again silently.
+                if custom || (!not_sent && (kind != StatementKind::Read || emitted)) {
+                    return Err(lost(false, unknown, cause));
+                }
+                // ... and not when the user asked to stop it (nothing was applied).
                 if run.cancelled() {
                     return Err(DbError::cancelled());
-                }
-                // Only a read that produced nothing yet, on a session with nothing a
-                // reconnect cannot restore, is safe to run again silently.
-                if kind != StatementKind::Read || emitted || custom {
-                    return Err(lost(false, unknown, cause));
                 }
             }
             self.track_after(kind, &stmt.text);
@@ -705,17 +742,63 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_queries_are_cancelled() {
-        assert!(matches!(
-            map_exec_error(server(1317, "Query execution was interrupted"), false),
-            DbError::Cancelled {
+    fn a_lost_connection_wins_over_a_pending_cancel() {
+        // Lost: reported as lost whatever else happened.
+        for (cancelled, interrupted, unknown) in [(true, false, true), (true, true, false)] {
+            assert_eq!(
+                failure_kind(true, cancelled, interrupted, unknown),
+                Failure::Lost
+            );
+        }
+        // Our cancel: the outcome is unknown only when the kill stopped a statement
+        // that may be partly applied.
+        assert_eq!(
+            failure_kind(false, true, true, true),
+            Failure::Cancelled {
+                outcome_unknown: true
+            }
+        );
+        assert_eq!(
+            failure_kind(false, true, true, false),
+            Failure::Cancelled {
                 outcome_unknown: false
             }
-        ));
-        assert!(matches!(
-            map_exec_error(server(1064, "syntax"), true),
-            DbError::Server { .. }
-        ));
+        );
+        // Failed on its own while a cancel was in flight: nothing was killed.
+        assert_eq!(
+            failure_kind(false, true, false, true),
+            Failure::Cancelled {
+                outcome_unknown: false
+            }
+        );
+        // An interrupt we did not ask for (another session's KILL QUERY,
+        // max_execution_time, max_statement_time) is the server's own error.
+        assert_eq!(failure_kind(false, false, true, true), Failure::Server);
+    }
+
+    #[test]
+    fn unrequested_interrupts_keep_the_server_code() {
+        for (code, msg) in [
+            (1317, "Query execution was interrupted"),
+            (
+                3024,
+                "Query execution was interrupted, maximum statement execution time exceeded",
+            ),
+            (
+                1969,
+                "Query execution was interrupted (max_statement_time exceeded)",
+            ),
+        ] {
+            match map_mysql_error(server(code, msg), ConnectStage::Execute) {
+                DbError::Server {
+                    code: c, message, ..
+                } => {
+                    assert_eq!(c, Some(code.to_string()));
+                    assert_eq!(message, msg);
+                }
+                other => panic!("{code}: {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -789,13 +872,33 @@ mod tests {
     }
 
     #[test]
-    fn interrupted_queries_carry_the_outcome() {
-        assert!(matches!(
-            map_exec_error(server(1317, "Query execution was interrupted"), true),
-            DbError::Cancelled {
-                outcome_unknown: true
-            }
+    fn killed_commit_has_unknown_outcome() {
+        for in_tx in [false, true] {
+            assert!(killed_outcome_unknown(
+                Transaction(TxControl::Commit),
+                in_tx,
+                "COMMIT"
+            ));
+        }
+        assert!(!killed_outcome_unknown(
+            Transaction(TxControl::Rollback),
+            true,
+            "ROLLBACK"
         ));
+    }
+
+    #[test]
+    fn idle_disconnects_mean_the_statement_was_not_sent() {
+        // 4031: MySQL 8 dropped the idle session; 2006: server has gone away.
+        for code in [2006, 4031] {
+            assert!(lost_before_sent(&server(code, "gone")), "{code}");
+            assert!(is_connection_lost(&server(code, "gone")), "{code}");
+        }
+        // Lost mid-statement, or killed while running: it may have run.
+        assert!(!lost_before_sent(&server(2013, "lost during query")));
+        assert!(!lost_before_sent(&server(1927, "Connection was killed")));
+        let eof = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        assert!(!lost_before_sent(&eof.into()));
     }
 
     #[test]

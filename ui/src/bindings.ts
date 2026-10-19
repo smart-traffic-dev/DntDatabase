@@ -248,7 +248,13 @@ export type AppError = { kind: string; message: string; detail: string | null; s
 /**
  * Connect errors: the stages that completed before the failing one.
  */
-timings: StageTiming[] | null; server_code: string | null; sqlstate: string | null; position: number | null; retryable: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null }
+timings: StageTiming[] | null; server_code: string | null; sqlstate: string | null; position: number | null; retryable: boolean; 
+/**
+ * `timeout` / `connection_lost` / `cancelled`: the statement may have been applied
+ * (the server's outcome is unknown). The UI must show such an error to the user,
+ * never treat it as a silent cancel.
+ */
+outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one

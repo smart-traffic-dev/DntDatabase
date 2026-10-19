@@ -48,6 +48,7 @@ export const appError = (kind: string, message: string, extra: Partial<AppError>
   sqlstate: null,
   position: null,
   retryable: false,
+  outcome_unknown: false,
   hint: null,
   fingerprint: null,
   key_openssh: null,

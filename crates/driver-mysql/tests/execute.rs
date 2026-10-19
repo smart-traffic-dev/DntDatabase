@@ -588,6 +588,45 @@ async fn reconnect_restores_autocommit_and_reports_reset_state() {
     }
 }
 
+/// An interrupt we did not ask for (the server's statement time limit) is the server's
+/// own error with its code and text, not a Cancel. MySQL enforces `max_execution_time`
+/// on SELECTs (3024; a killed `SLEEP` would just return 1, hence the slow cross join),
+/// MariaDB `max_statement_time` (1969).
+#[tokio::test]
+async fn server_statement_time_limit_is_a_server_error() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let (setup, sql, code) = match t {
+            Target::MySql57 | Target::MySql8 => (
+                "SET SESSION max_execution_time = 200",
+                "SELECT COUNT(*) FROM information_schema.columns a, \
+                 information_schema.columns b, information_schema.columns c",
+                "3024",
+            ),
+            _ => (
+                "SET SESSION max_statement_time = 0.2",
+                "SELECT SLEEP(5)",
+                "1969",
+            ),
+        };
+        run(&s, setup).await.unwrap();
+        match run(&s, sql).await {
+            Err(DbError::Server {
+                code: Some(c),
+                message,
+                ..
+            }) => {
+                assert_eq!(c, code, "{t:?}: {message}");
+                assert!(message.contains("interrupted"), "{t:?}: {message}");
+            }
+            other => panic!("{t:?}: {:?}", other.map(|(s, _)| s)),
+        }
+        let (_, c) = run(&s, "SELECT 1").await.unwrap();
+        assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
+    }
+}
+
 /// A `USE` behind a comment is still the database re-applied after a reconnect.
 #[tokio::test]
 async fn use_after_comment_tracks_db() {
