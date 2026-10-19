@@ -1,4 +1,4 @@
-use crate::cancel::{send_cancel, CancelState, PgCanceller, CANCEL_TIMEOUT};
+use crate::cancel::{send_cancel, CancelState, CancelTarget, PgCanceller, CANCEL_TIMEOUT};
 use crate::values::{column_meta, to_value, Raw};
 use crate::{close_conn, io_error, map_pg_error, open, ConnectParams, PgConn};
 use async_trait::async_trait;
@@ -32,6 +32,11 @@ const LOST_STATES: [&str; 6] = ["57P01", "57P02", "57P03", "08000", "08003", "08
 /// `ConnectionLost` message for a statement that ignored the cancel request sent after
 /// its timeout.
 const STUCK: &str = "the statement did not stop after the timeout, so its connection was closed";
+/// `ConnectionLost` message for a statement that ended during the grace period while the
+/// cancel request sent after its timeout was not confirmed (see `cancel.rs`).
+const UNCONFIRMED: &str = "the cancel request sent after the timeout could not be confirmed, \
+                           so the connection was closed before a late cancel could hit the \
+                           next statement";
 
 /// One PostgreSQL connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct PgSession {
@@ -63,6 +68,14 @@ enum StmtError {
     /// `opts.timeout` expired and the statement did not stop after the cancel request:
     /// its completion was never observed and the connection must be abandoned.
     Stuck,
+    /// `opts.timeout` expired and the statement ended during the grace period, but the
+    /// cancel request was not confirmed: the signal may still arrive and cancel whatever
+    /// runs next, so the connection must be abandoned. `failed`: the server error it
+    /// ended with (`None`: it succeeded); `cancel`: why the request was not confirmed.
+    Unconfirmed {
+        failed: Option<tokio_postgres::Error>,
+        cancel: DbError,
+    },
 }
 
 impl PgSession {
@@ -184,6 +197,12 @@ impl PgSession {
     /// period instead (it finished first, or swallowed the cancel) reports what really
     /// happened. A statement still running after the grace period is `Stuck`. Returns
     /// whether the statement produced a result set (had columns).
+    ///
+    /// The script goes on after a statement that completed during the grace period:
+    /// `send_cancel` returns only once the server closed the request's connection, after
+    /// which the signal can no longer reach a later statement (see `cancel.rs`). Only when
+    /// that was not confirmed is the connection given up (`Unconfirmed`), since the signal
+    /// may still be on its way.
     async fn run_timed(
         &self,
         conn: &PgConn,
@@ -209,12 +228,28 @@ impl PgSession {
         if let Ok(res) = tokio::time::timeout(limit, fut.as_mut()).await {
             return res.map_err(StmtError::Pg);
         }
-        let _ = send_cancel(&self.cancel.token(), &self.params.tls).await;
+        let unconfirmed =
+            match send_cancel(&self.cancel.token(), &CancelTarget::new(&self.params)).await {
+                Err(f) if f.maybe_sent => Some(f.error),
+                _ => None,
+            };
         match tokio::time::timeout(CANCEL_TIMEOUT, fut.as_mut()).await {
             Err(_) => Err(StmtError::Stuck),
-            Ok(Ok(had_columns)) => Ok(had_columns),
-            Ok(Err(e)) if sqlstate(&e) == Some(QUERY_CANCELED) => Err(StmtError::Timeout),
-            Ok(Err(e)) => Err(StmtError::Pg(e)),
+            // Given up anyway: no statement follows on this connection.
+            Ok(Err(e)) if is_connection_lost(&e, &conn.client) => Err(StmtError::Pg(e)),
+            // Even a `query_canceled` may have come from elsewhere (server
+            // `statement_timeout`), with our signal still on its way.
+            Ok(res) => match unconfirmed {
+                Some(cancel) => Err(StmtError::Unconfirmed {
+                    failed: res.err(),
+                    cancel,
+                }),
+                // Our confirmed signal stopped it, so it cannot reach anything else.
+                None => res.map_err(|e| match sqlstate(&e) {
+                    Some(QUERY_CANCELED) => StmtError::Timeout,
+                    _ => StmtError::Pg(e),
+                }),
+            },
         }
     }
 }
@@ -472,22 +507,23 @@ fn reset_notes(was_in_tx: bool, session_custom: bool) -> String {
     notes
 }
 
-/// The error for a statement that ignored the cancel request after its timeout, once
-/// its connection was abandoned and replaced (`Ok`) or replacing it failed (`Err`).
-/// `unknown`: it may have committed ([`may_have_committed`]); `notes`: [`reset_notes`].
-/// Always `ConnectionLost`, so the reset notes and `was_in_tx` reach the user.
-fn stuck_error(
+/// The error for a statement whose connection was abandoned after its timeout (`cause`:
+/// [`STUCK`] or [`UNCONFIRMED`]), once the connection was replaced (`Ok`) or replacing it
+/// failed (`Err`). `unknown`: it may have committed; `notes`: [`reset_notes`]. Always
+/// `ConnectionLost`, so the reset notes and `was_in_tx` reach the user.
+fn abandoned_error(
+    cause: &str,
     unknown: bool,
     was_in_tx: bool,
     notes: &str,
     replaced: Result<(), DbError>,
 ) -> DbError {
     match replaced {
-        Ok(()) => lost(was_in_tx, unknown, format!("{STUCK}{notes}")),
+        Ok(()) => lost(was_in_tx, unknown, format!("{cause}{notes}")),
         Err(e) => lost(
             was_in_tx,
             unknown,
-            format!("{STUCK}{notes}; reconnecting failed: {e}"),
+            format!("{cause}{notes}; reconnecting failed: {e}"),
         ),
     }
 }
@@ -502,7 +538,8 @@ impl Session for PgSession {
     /// whole script): an expired statement is cancelled and `Timeout { Execute }` returned
     /// (`outcome_unknown` when it may have committed part of its work, see
     /// [`killed_outcome_unknown`]). One that ignores the cancel loses its connection:
-    /// `ConnectionLost` (see [`stuck_error`]).
+    /// `ConnectionLost` (see [`abandoned_error`]), and so does one that ended during the
+    /// grace period while the cancel request was not confirmed (see `run_timed`).
     async fn execute(
         &self,
         sql: &str,
@@ -557,8 +594,9 @@ impl Session for PgSession {
                 let err = match res {
                     // A statement stopped by a cancel fails with `query_canceled`, so one
                     // that completed while a cancel was in flight really completed (and
-                    // committed outside a transaction): keep its result; the flag stops
-                    // the next statement.
+                    // committed outside a transaction): keep its result. A Cancel click
+                    // stops the next statement; a timeout's confirmed cancel cannot
+                    // reach it (see `run_timed`).
                     Ok(_) => break,
                     Err(StmtError::Timeout) => {
                         self.track_failed(kind, &stmt.text, was_in_tx, Some(QUERY_CANCELED));
@@ -572,7 +610,29 @@ impl Session for PgSession {
                         let notes = self.notes(was_in_tx);
                         let unknown = may_have_committed(kind, was_in_tx, &stmt.text);
                         let replaced = self.reconnect(&mut conn).await;
-                        return Err(stuck_error(unknown, was_in_tx, &notes, replaced));
+                        return Err(abandoned_error(STUCK, unknown, was_in_tx, &notes, replaced));
+                    }
+                    Err(StmtError::Unconfirmed { failed, cancel }) => {
+                        // A success is real (committed outside a transaction); a failure
+                        // was atomic unless the statement commits as it goes.
+                        let unknown = match failed {
+                            None => may_have_committed(kind, was_in_tx, &stmt.text),
+                            Some(_) => killed_outcome_unknown(was_in_tx, &stmt.text),
+                        };
+                        if failed.is_none() {
+                            self.track_after(kind, &stmt.text, was_in_tx);
+                        }
+                        // After it: a successful `BEGIN` opened a block that is now lost.
+                        let in_tx = self.in_transaction();
+                        let notes = self.notes(in_tx);
+                        let cause = match &failed {
+                            None => format!("{UNCONFIRMED} ({cancel})"),
+                            Some(e) => {
+                                format!("{UNCONFIRMED} ({cancel}); the statement failed: {e}")
+                            }
+                        };
+                        let replaced = self.reconnect(&mut conn).await;
+                        return Err(abandoned_error(&cause, unknown, in_tx, &notes, replaced));
                     }
                     Err(StmtError::Pg(e)) => e,
                 };
@@ -639,7 +699,7 @@ impl Session for PgSession {
 
     fn cancel_handle(&self) -> CancelHandle {
         Arc::new(PgCanceller {
-            tls: self.params.tls.clone(),
+            target: CancelTarget::new(&self.params),
             state: self.cancel.clone(),
         })
     }
@@ -903,9 +963,20 @@ mod tests {
     }
 
     #[test]
-    fn stuck_statement_is_always_connection_lost() {
+    fn abandoned_statement_is_always_connection_lost() {
         let notes = reset_notes(true, true);
-        match stuck_error(true, true, &notes, Ok(())) {
+        match abandoned_error(UNCONFIRMED, false, true, &notes, Ok(())) {
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                message,
+            } => {
+                assert!(message.starts_with(UNCONFIRMED), "{message}");
+                assert!(message.contains("rolled back"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match abandoned_error(STUCK, true, true, &notes, Ok(())) {
             DbError::ConnectionLost {
                 was_in_tx: true,
                 outcome_unknown: true,
@@ -918,14 +989,14 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(matches!(
-            stuck_error(false, false, "", Ok(())),
+            abandoned_error(STUCK, false, false, "", Ok(())),
             DbError::ConnectionLost {
                 was_in_tx: false,
                 outcome_unknown: false,
                 ..
             }
         ));
-        match stuck_error(true, false, "", Err(refused())) {
+        match abandoned_error(STUCK, true, false, "", Err(refused())) {
             DbError::ConnectionLost {
                 was_in_tx: false,
                 outcome_unknown: true,

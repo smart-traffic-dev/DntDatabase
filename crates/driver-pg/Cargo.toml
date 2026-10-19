@@ -17,7 +17,7 @@ dnt-core.workspace = true
 futures-util.workspace = true
 rustls = { workspace = true, features = ["ring", "std", "tls12"] }
 secrecy.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "net"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 
@@ -26,4 +26,4 @@ dnt-driver-pg = { path = ".", features = ["test-helpers"] }
 dnt-testkit = { path = "../testkit" }
 insta = { version = "1", features = ["yaml", "redactions"] }
 serde.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
