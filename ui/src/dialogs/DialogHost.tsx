@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { ConnectionConfig, SecretsInput } from '../bindings';
 import { useConnections } from '../store/connections';
@@ -6,7 +6,9 @@ import { useDialogs, type PendingPrompt } from '../store/dialogs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
 import { ConnectionDialog } from './ConnectionDialog';
+import { ExportDialog } from './ExportDialog';
 import { HostKeyDialog } from './HostKeyDialog';
+import { ImportDialog } from './ImportDialog';
 import { PasswordPrompt, type SecretNeed } from './PasswordPrompt';
 import { ConfirmDialog, NameDialog } from './SimpleDialogs';
 
@@ -84,6 +86,22 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
       }}
       onCancel={closePrompt}
     />
+  );
+}
+
+/** Shows the status message set by a dialog (import summary) for a few seconds. */
+function Toast() {
+  const notice = useDialogs((s) => s.notice);
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => useDialogs.getState().setNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [notice]);
+  if (!notice) return null;
+  return (
+    <div className="toast" role="status">
+      {notice}
+    </div>
   );
 }
 
@@ -166,6 +184,10 @@ export function DialogHost() {
         }}
       />
     );
+  } else if (request?.kind === 'export') {
+    dialog = <ExportDialog preselected={request.preselected} onClose={closeRequest} />;
+  } else if (request?.kind === 'import') {
+    dialog = <ImportDialog onClose={closeRequest} />;
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';
@@ -196,6 +218,7 @@ export function DialogHost() {
   return (
     <>
       {dialog}
+      <Toast />
       {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}:${prompt.error.fingerprint ?? ''}:${prompt.error.stage ?? ''}`} prompt={prompt} />}
     </>
   );

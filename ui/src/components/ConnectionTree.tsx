@@ -13,6 +13,7 @@ import {
   TableIcon,
 } from './icons';
 import { openObjectTab } from './openObject';
+import { ActionMenu, transferItems } from './ActionMenu';
 import { TreeContextMenu } from './TreeContextMenu';
 
 export const ROW_HEIGHT = 26;
@@ -158,6 +159,7 @@ export function ConnectionTree() {
   });
 
   const [menu, setMenu] = useState<{ node: TreeNode; x: number; y: number } | null>(null);
+  const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number } | null>(null);
   const [dropId, setDropId] = useState<string | null>(null);
   const dragging = useRef<string | null>(null);
 
@@ -235,6 +237,12 @@ export function ConnectionTree() {
       aria-activedescendant={selectedId ? domId(selectedId) : undefined}
       tabIndex={0}
       onKeyDown={onKeyDown}
+      onContextMenu={(e) => {
+        // Rows handle their own menu (and prevent the default); this is the empty area.
+        if (e.defaultPrevented) return;
+        e.preventDefault();
+        setEmptyMenu({ x: e.clientX, y: e.clientY });
+      }}
       onDragOver={(e) => canDrop(null) && e.preventDefault()}
       onDrop={(e) => {
         const drag = dragging.current;
@@ -290,6 +298,9 @@ export function ConnectionTree() {
         })}
       </div>
     </div>
+      {emptyMenu && (
+        <ActionMenu label="Connections actions" x={emptyMenu.x} y={emptyMenu.y} items={transferItems()} onClose={() => setEmptyMenu(null)} />
+      )}
       {menu && <TreeContextMenu node={menu.node} x={menu.x} y={menu.y} onClose={() => setMenu(null)} />}
     </>
   );

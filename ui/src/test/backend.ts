@@ -66,7 +66,7 @@ export function resetStores() {
   useTree.getState().reset();
   useConnections.getState().reset();
   useTabs.getState().reset();
-  useDialogs.setState({ prompt: null, request: null });
+  useDialogs.setState({ prompt: null, request: null, notice: null });
 }
 
 export const ids = {

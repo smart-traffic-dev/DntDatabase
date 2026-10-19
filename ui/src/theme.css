@@ -565,3 +565,21 @@ button:disabled {
   font-size: 10px;
   letter-spacing: 0.04em;
 }
+
+/* Connection split button */
+.tool-split {
+  display: flex;
+  align-items: stretch;
+}
+
+.tool-more {
+  width: 16px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+.tool-more:hover {
+  background: var(--sel);
+}
