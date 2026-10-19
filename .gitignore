@@ -8,3 +8,4 @@ testdata/ssh/*
 !.gitkeep
 .superpowers/
 tools/
+e2e/evidence/

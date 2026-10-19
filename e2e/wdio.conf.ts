@@ -114,6 +114,13 @@ export const config: WebdriverIO.Config = {
     // A fresh data dir per run; the app (spawned by the driver) inherits this environment.
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dnt-e2e-'));
     process.env.DNT_DATA_DIR = dataDir;
+    // One evidence folder per run, shared with the worker process.
+    process.env.E2E_EVIDENCE_DIR ??= path.join(
+      here,
+      'evidence',
+      new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19),
+    );
+    console.log(`e2e evidence: ${process.env.E2E_EVIDENCE_DIR}`);
     credentialsBefore = appCredentials();
     driver = spawn(tauriDriver, ['--native-driver', nativeDriver], {
       stdio: ['ignore', process.stdout, process.stderr],
@@ -123,6 +130,13 @@ export const config: WebdriverIO.Config = {
     } catch (e) {
       cleanup();
       throw e;
+    }
+  },
+
+  async afterTest(test, _context, { passed }) {
+    if (!passed) {
+      const { evidence } = await import('./evidence');
+      await evidence(`FAILED-${test.title.replace(/\W+/g, '_').slice(0, 60)}`);
     }
   },
 
