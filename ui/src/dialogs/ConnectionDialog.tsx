@@ -143,7 +143,7 @@ interface HostKeyRequest {
 interface Props {
   mode: 'create' | 'edit';
   initial?: ConnectionConfig;
-  /** Whether a database / SSH secret is stored (edit mode: shows the `â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢` placeholder). */
+  /** Whether a database / SSH secret is stored (edit mode: shows the `••••••••` placeholder). */
   hasDbPassword?: boolean;
   hasSshSecret?: boolean;
   onClose(saved?: ConnectionConfig): void;
@@ -344,7 +344,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       <div className="row">
         <input id={id} value={form[field]} onChange={(e) => set(field, e.target.value)} {...(errField ? aria(errField) : {})} />
         <button type="button" className="btn" aria-label={`Browse for ${label.toLowerCase()}`} onClick={() => void browse(field)}>
-          Browseâ€¦
+          Browse…
         </button>
       </div>
       {errField && errorFor(errField)}
@@ -413,7 +413,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             type="password"
             autoComplete="new-password"
             value={form.password}
-            placeholder={mode === 'edit' && hasDbPassword && !form.passwordTouched ? 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' : undefined}
+            placeholder={mode === 'edit' && hasDbPassword && !form.passwordTouched ? '••••••••' : undefined}
             onChange={(e) => setForm((f) => ({ ...f, password: e.target.value, passwordTouched: true }))}
           />
         </div>
@@ -481,7 +481,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                 type="password"
                 autoComplete="new-password"
                 value={form.sshPassword}
-                placeholder={mode === 'edit' && hasSshSecret && !form.sshPasswordTouched ? 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' : undefined}
+                placeholder={mode === 'edit' && hasSshSecret && !form.sshPasswordTouched ? '••••••••' : undefined}
                 onChange={(e) => setForm((f) => ({ ...f, sshPassword: e.target.value, sshPasswordTouched: true }))}
               />
             </div>
@@ -495,7 +495,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                   type="password"
                   autoComplete="new-password"
                   value={form.passphrase}
-                  placeholder={mode === 'edit' && hasSshSecret && !form.passphraseTouched ? 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' : undefined}
+                  placeholder={mode === 'edit' && hasSshSecret && !form.passphraseTouched ? '••••••••' : undefined}
                   onChange={(e) => setForm((f) => ({ ...f, passphrase: e.target.value, passphraseTouched: true }))}
                   {...aria('passphrase')}
                 />
@@ -613,13 +613,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
 
           {test.state === 'running' && (
             <div className="result" role="status">
-              Testing connectionâ€¦
+              Testing connection…
             </div>
           )}
           {test.state === 'ok' && (
             <div className="result ok" role="status" data-testid="test-result">
-              Connected Â· {test.result.info.version_string}
-              {test.result.timings.map((t) => ` Â· ${stageLabel(t.stage)} ${t.ms} ms`).join('')}
+              Connected · {test.result.info.version_string}
+              {test.result.timings.map((t) => ` · ${stageLabel(t.stage)} ${t.ms} ms`).join('')}
             </div>
           )}
           {test.state === 'failed' && (
