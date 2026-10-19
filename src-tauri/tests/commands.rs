@@ -8,11 +8,15 @@ use dntdatabase::commands::connections::{
     create_connection_impl, list_tree_impl, update_connection_impl, SecretsInput,
     SecretsUpdateInput,
 };
-use dntdatabase::commands::export_bindings;
 use dntdatabase::commands::settings::{get_log_level_impl, saved_log_level, set_log_level_impl};
 use dntdatabase::commands::transfer::{
     apply_import_impl, export_connections_impl, import_needs_passphrase_impl, preview_import_impl,
 };
+use dntdatabase::commands::workspace::{
+    file_read_impl, file_write_impl, history_clear_impl, history_delete_impl, history_list_impl,
+    tabs_delete_impl, tabs_load_impl, tabs_save_impl,
+};
+use dntdatabase::commands::{export_bindings, BINDINGS_PATH};
 use dntdatabase::logging::LogLevel;
 use dntdatabase::state::{AppPaths, AppState};
 use secrecy::ExposeSecret;
@@ -215,4 +219,157 @@ fn bindings_export() {
     assert!(ts.contains(r#"{ t: "Int"; v: JsInteger }"#), "{ts}");
     assert!(ts.contains(r#"{ t: "UInt"; v: JsInteger }"#), "{ts}");
     assert!(ts.contains("len: number"), "{ts}");
+}
+
+/// The committed `ui/src/bindings.ts` matches what the commands export. With
+/// `DNT_UPDATE_FIXTURES=1` the committed file is rewritten instead.
+#[test]
+fn bindings_are_current() {
+    let committed = std::path::Path::new(BINDINGS_PATH);
+    if std::env::var("DNT_UPDATE_FIXTURES").as_deref() == Ok("1") {
+        export_bindings(committed).unwrap();
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("bindings.ts");
+    export_bindings(&fresh).unwrap();
+    // Line endings may differ with git's autocrlf on Windows.
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).unwrap().replace("\r\n", "\n");
+    assert!(
+        read(&fresh) == read(committed),
+        "ui/src/bindings.ts is stale; regenerate it with \
+         DNT_UPDATE_FIXTURES=1 cargo test -p dntdatabase --test commands bindings_are_current"
+    );
+}
+
+#[tokio::test]
+async fn file_roundtrip_utf8_without_bom() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("query.sql");
+    let path = file.to_string_lossy().into_owned();
+    let text = "SELECT 'Tiếng Việt 😀';\r\n";
+    file_write_impl(path.clone(), text.to_string())
+        .await
+        .unwrap();
+    let bytes = std::fs::read(&file).unwrap();
+    assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+    assert_eq!(bytes, text.as_bytes());
+    assert_eq!(file_read_impl(path.clone()).await.unwrap(), text);
+
+    // A leading BOM is never written, and is stripped on read.
+    file_write_impl(path.clone(), format!("\u{feff}{text}"))
+        .await
+        .unwrap();
+    assert!(!std::fs::read(&file)
+        .unwrap()
+        .starts_with(&[0xEF, 0xBB, 0xBF]));
+    let mut with_bom = vec![0xEF, 0xBB, 0xBF];
+    with_bom.extend_from_slice(text.as_bytes());
+    std::fs::write(&file, with_bom).unwrap();
+    assert_eq!(file_read_impl(path).await.unwrap(), text);
+}
+
+#[tokio::test]
+async fn file_read_rejects_non_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("latin1.sql");
+    std::fs::write(&file, b"SELECT '\xE9t\xE9';").unwrap();
+    let err = file_read_impl(file.to_string_lossy().into_owned())
+        .await
+        .unwrap_err();
+    let app = dnt_core::error::AppError::from(err);
+    assert_eq!(app.kind, "config");
+    assert_eq!(app.field.as_deref(), Some("path"));
+    assert_eq!(app.message, "The file is not UTF-8 text.");
+
+    let missing = dir
+        .path()
+        .join("missing.sql")
+        .to_string_lossy()
+        .into_owned();
+    let app = dnt_core::error::AppError::from(file_read_impl(missing).await.unwrap_err());
+    assert_eq!(app.kind, "config");
+    assert!(
+        app.message.starts_with("Could not read missing.sql: "),
+        "{app:?}"
+    );
+}
+
+#[tokio::test]
+async fn tabs_commands_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    // Deserialized like an IPC payload.
+    let tab: dnt_store::tabs::QueryTabRecord = serde_json::from_value(json!({
+        "id": "tab-1", "title": "Query 1", "sort_order": 0, "connection_id": null,
+        "database": null, "sql_text": "SELECT 1", "cursor": 8, "file_path": null,
+        "dirty": false, "continue_on_error": true, "row_limit": 100000, "updated_at": ""
+    }))
+    .unwrap();
+    tabs_save_impl(&state, tab.clone()).await.unwrap();
+    let loaded = tabs_load_impl(&state).await.unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].sql_text, "SELECT 1");
+    assert!(loaded[0].continue_on_error);
+    assert_eq!(loaded[0].row_limit, 100_000);
+
+    // Restored after a restart.
+    drop(state);
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert_eq!(tabs_load_impl(&state).await.unwrap().len(), 1);
+    tabs_delete_impl(&state, "tab-1".into()).await.unwrap();
+    assert!(tabs_load_impl(&state).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn history_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let cfg = create_connection_impl(
+        &state,
+        sample_config(),
+        serde_json::from_value(json!({})).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut ids = Vec::new();
+    for sql in ["SELECT 1", "SELECT 2", "SELECT 3"] {
+        let id = state
+            .repo
+            .history_insert(&dnt_store::history::NewHistoryEntry {
+                connection_id: cfg.id,
+                database: None,
+                sql_text: sql.into(),
+                redacted: false,
+                kind: "select".into(),
+                started_at: "2026-10-20T10:00:00Z".into(),
+                elapsed_ms: Some(1),
+                status: dnt_store::history::HistoryStatus::Ok,
+                row_count: Some(1),
+                affected: None,
+                error_kind: None,
+                error_code: None,
+            })
+            .unwrap();
+        ids.push(id);
+    }
+    let filter: dnt_store::history::HistoryFilter =
+        serde_json::from_value(json!({ "connection_id": cfg.id, "search": "2", "limit": 50 }))
+            .unwrap();
+    let found = history_list_impl(&state, filter).await.unwrap();
+    assert_eq!(found.len(), 1);
+    // The status is serialized in snake_case.
+    assert_eq!(serde_json::to_value(&found[0]).unwrap()["status"], "ok");
+
+    let all: dnt_store::history::HistoryFilter =
+        serde_json::from_value(json!({ "connection_id": null, "search": null, "limit": 50 }))
+            .unwrap();
+    let delete: dnt_store::history::HistoryIds = serde_json::from_value(json!([ids[0]])).unwrap();
+    history_delete_impl(&state, delete).await.unwrap();
+    assert_eq!(
+        history_list_impl(&state, all.clone()).await.unwrap().len(),
+        2
+    );
+    history_clear_impl(&state).await.unwrap();
+    assert!(history_list_impl(&state, all).await.unwrap().is_empty());
 }

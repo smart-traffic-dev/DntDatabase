@@ -231,6 +231,70 @@ async openLogFolder() : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async tabsLoad() : Promise<Result<QueryTabRecord[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tabs_load") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tabsSave(tab: QueryTabRecord) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tabs_save", { tab }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tabsDelete(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tabs_delete", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async fileRead(path: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_read", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async fileWrite(path: string, text: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_write", { path, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async historyList(filter: HistoryFilter) : Promise<Result<HistoryEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("history_list", { filter }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async historyDelete(ids: HistoryIds) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("history_delete", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async historyClear() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("history_clear") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -316,6 +380,18 @@ export type Group = { id: string; parent_id: string | null; name: string;
  * Exported as a JS number (positions are small).
  */
 sort_order: number }
+export type HistoryEntry = { id: number; connection_id: string; database: string | null; sql_text: string; redacted: boolean; kind: string; started_at: string; elapsed_ms: number | null; status: HistoryStatus; row_count: number | null; affected: number | null; error_kind: string | null; error_code: string | null }
+export type HistoryFilter = { connection_id: string | null; 
+/**
+ * Substring of the SQL text; `%`, `_` and `\` match literally.
+ */
+search: string | null; 
+/**
+ * At most [`HISTORY_LIST_MAX`]; larger values are clamped.
+ */
+limit: number }
+export type HistoryIds = number[]
+export type HistoryStatus = "ok" | "error" | "cancelled"
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
@@ -355,6 +431,19 @@ export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | 
  */
 row_estimate: number | null }
 export type OpenResult = { info: ServerInfo; timings: StageTiming[] }
+export type QueryTabRecord = { id: string; title: string; 
+/**
+ * Exported as a JS number (positions are small).
+ */
+sort_order: number; connection_id: string | null; database: string | null; sql_text: string; 
+/**
+ * UTF-16 offset of the cursor in `sql_text`.
+ */
+cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boolean; row_limit: number; 
+/**
+ * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
+ */
+updated_at: string }
 /**
  * Table / view names and their column names of the connection's default database
  * (PostgreSQL: of the schemas in `current_schemas(false)`), loaded in the background.

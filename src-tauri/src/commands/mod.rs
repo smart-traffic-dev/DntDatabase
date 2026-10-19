@@ -10,6 +10,7 @@ pub mod browse;
 pub mod connections;
 pub mod settings;
 pub mod transfer;
+pub mod workspace;
 
 use dnt_core::error::{AppError, DbError};
 use dnt_core::value::{ColumnMeta, Value};
@@ -129,6 +130,14 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::get_log_level,
             settings::set_log_level,
             settings::open_log_folder,
+            workspace::tabs_load,
+            workspace::tabs_save,
+            workspace::tabs_delete,
+            workspace::file_read,
+            workspace::file_write,
+            workspace::history_list,
+            workspace::history_delete,
+            workspace::history_clear,
         ])
         .typ::<Value>()
         .typ::<ColumnMeta>()

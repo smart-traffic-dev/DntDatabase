@@ -2,7 +2,9 @@
 
 pub mod db;
 pub mod dntconn;
+pub mod history;
 pub mod keyring_store;
 pub mod ncx;
 pub mod repo;
+pub mod tabs;
 pub mod transfer;

@@ -21,8 +21,28 @@ CREATE TABLE connections (
 CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
+/// P2 spec §7.2 (`query_tabs`) and §8.1 (`query_history`), verbatim.
+const MIGRATION_2: &str = "
+CREATE TABLE query_tabs (
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, sort_order INTEGER NOT NULL,
+  connection_id TEXT NULL REFERENCES connections(id) ON DELETE SET NULL,
+  database TEXT NULL, sql_text TEXT NOT NULL, cursor INTEGER NOT NULL DEFAULT 0,
+  file_path TEXT NULL, dirty INTEGER NOT NULL DEFAULT 0,
+  continue_on_error INTEGER NOT NULL DEFAULT 0, row_limit INTEGER NOT NULL DEFAULT 10000,
+  updated_at TEXT NOT NULL);
+CREATE TABLE query_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  database TEXT NULL, sql_text TEXT NOT NULL, redacted INTEGER NOT NULL,
+  kind TEXT NOT NULL, started_at TEXT NOT NULL, elapsed_ms INTEGER NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok','error','cancelled')),
+  row_count INTEGER NULL, affected INTEGER NULL,
+  error_kind TEXT NULL, error_code TEXT NULL);
+CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
+";
+
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(MIGRATION_1)])
+    Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)])
 }
 
 /// Opens (creating if needed) the database file, enables foreign keys and migrates to latest.
