@@ -1,6 +1,8 @@
 //! MySQL / MariaDB driver (MySQL 5.7, MySQL 8.x, MariaDB 10.3+) built on `mysql_async` + rustls.
 
 mod cancel;
+mod introspect;
+mod queries;
 mod session;
 mod tls;
 mod values;

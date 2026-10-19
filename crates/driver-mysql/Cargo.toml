@@ -22,7 +22,7 @@ tokio.workspace = true
 [dev-dependencies]
 dnt-driver-mysql = { path = ".", features = ["test-helpers"] }
 dnt-testkit = { path = "../testkit" }
-insta = { version = "1", features = ["yaml"] }
+insta = { version = "1", features = ["yaml", "redactions"] }
 serde.workspace = true
 rustls = { workspace = true, features = ["ring", "std"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

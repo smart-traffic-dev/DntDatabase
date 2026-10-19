@@ -1,0 +1,322 @@
+---
+source: crates/driver-mysql/tests/introspect.rs
+expression: d
+---
+object:
+  database: dnt_fixture
+  schema: ~
+  name: all_types
+  kind: Table
+columns:
+  - name: id
+    ordinal: 1
+    db_type: int
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_tinyint
+    ordinal: 2
+    db_type: tinyint
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_tinyint_u
+    ordinal: 3
+    db_type: tinyint unsigned
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_smallint
+    ordinal: 4
+    db_type: smallint
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_smallint_u
+    ordinal: 5
+    db_type: smallint unsigned
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_mediumint
+    ordinal: 6
+    db_type: mediumint
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_mediumint_u
+    ordinal: 7
+    db_type: mediumint unsigned
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_int
+    ordinal: 8
+    db_type: int
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_int_u
+    ordinal: 9
+    db_type: int unsigned
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_bigint
+    ordinal: 10
+    db_type: bigint
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_bigint_u
+    ordinal: 11
+    db_type: bigint unsigned
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_decimal
+    ordinal: 12
+    db_type: "decimal(40,10)"
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_float
+    ordinal: 13
+    db_type: float
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_double
+    ordinal: 14
+    db_type: double
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_bit
+    ordinal: 15
+    db_type: bit(8)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_date
+    ordinal: 16
+    db_type: date
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_datetime
+    ordinal: 17
+    db_type: datetime(6)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_timestamp
+    ordinal: 18
+    db_type: timestamp
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_time
+    ordinal: 19
+    db_type: time(6)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_year
+    ordinal: 20
+    db_type: year
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_char
+    ordinal: 21
+    db_type: char(10)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_varchar
+    ordinal: 22
+    db_type: varchar(255)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_text
+    ordinal: 23
+    db_type: text
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_binary
+    ordinal: 24
+    db_type: binary(8)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_varbinary
+    ordinal: 25
+    db_type: varbinary(16)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_blob
+    ordinal: 26
+    db_type: blob
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_enum
+    ordinal: 27
+    db_type: "enum('small','medium','large')"
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_set
+    ordinal: 28
+    db_type: "set('a','b','c')"
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: c_json
+    ordinal: 29
+    db_type: json
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+primary_key:
+  name: PRIMARY
+  unique: true
+  primary: true
+  columns:
+    - id
+  expression: ~
+  method: BTREE
+  definition: ~
+indexes: []
+foreign_keys: []
+checks: []
+triggers: []
+options:
+  engine: InnoDB
+  collation: utf8mb4_unicode_ci
+  tablespace: ~
+  partitioned_by: ~
+  system_versioned: false
+row_estimate: "[redacted]"
+size_bytes: "[redacted]"
+comment: ~

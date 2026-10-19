@@ -207,6 +207,16 @@ fn from_bytes(b: Vec<u8>, col: &Column) -> Value {
     }
 }
 
+/// A value as plain text, independent of column type (`None` for SQL NULL). Used for
+/// metadata rows, whose cells are names, numbers and SQL fragments.
+pub(crate) fn value_text(v: My) -> Option<String> {
+    match v {
+        My::NULL => None,
+        My::Bytes(b) => Some(String::from_utf8_lossy(&b).into_owned()),
+        other => Some(other.as_sql(true)),
+    }
+}
+
 /// Unsigned integer column. YEAR carries `UNSIGNED_FLAG` on the wire but maps to `Int`.
 fn is_unsigned(col: &Column) -> bool {
     col.flags().contains(ColumnFlags::UNSIGNED_FLAG)

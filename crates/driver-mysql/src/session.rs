@@ -1,14 +1,14 @@
 use crate::cancel::{kill_query, CancelState, MySqlCanceller, CANCEL_TIMEOUT};
 use crate::map_mysql_error;
+use crate::queries::quote_ident;
+#[cfg(feature = "test-helpers")]
+use crate::values::value_text;
 use crate::values::{column_meta, to_value};
 use async_trait::async_trait;
 use dnt_core::driver::{
     CancelHandle, ExecOptions, ExecSummary, Introspector, ResultSummary, RowSink, Session,
 };
 use dnt_core::error::{ConnectStage, DbError};
-use dnt_core::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
-};
 use dnt_core::server::{MySqlCapabilities, ServerInfo};
 use dnt_core::sql::{classify, split, Dialect, StatementKind, TxControl};
 use dnt_core::value::ColumnMeta;
@@ -29,9 +29,9 @@ const ER_QUERY_INTERRUPTED: u16 = 1317;
 /// MariaDB "Connection was killed" (1927).
 const LOST_CODES: [u16; 4] = [2006, 2013, 4031, 1927];
 
-/// One MySQL-family connection. It is its own [`Introspector`].
+/// One MySQL-family connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct MySqlSession {
-    conn: Mutex<Conn>,
+    pub(crate) conn: Mutex<Conn>,
     info: ServerInfo,
     caps: MySqlCapabilities,
     /// Options of the established connection (TLS fallback applied); used to reconnect
@@ -91,7 +91,7 @@ impl MySqlSession {
         Ok(row.map(|r| r.unwrap().into_iter().map(value_text).collect()))
     }
 
-    fn unsupported(&self, feature: &str) -> DbError {
+    pub(crate) fn unsupported(&self, feature: &str) -> DbError {
         DbError::Unsupported {
             feature: feature.into(),
             version: self.info.version_string.clone(),
@@ -302,20 +302,6 @@ fn parse_use(sql: &str) -> Option<String> {
     (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_string())
 }
 
-fn quote_ident(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
-
-#[cfg(feature = "test-helpers")]
-fn value_text(v: mysql_async::Value) -> Option<String> {
-    use mysql_async::Value;
-    match v {
-        Value::NULL => None,
-        Value::Bytes(b) => Some(String::from_utf8_lossy(&b).into_owned()),
-        other => Some(other.as_sql(true)),
-    }
-}
-
 #[async_trait]
 impl Session for MySqlSession {
     fn server_info(&self) -> &ServerInfo {
@@ -444,34 +430,6 @@ impl Session for MySqlSession {
     async fn close(self: Box<Self>) {
         // Best effort: the server drops the session either way.
         let _ = self.conn.into_inner().disconnect().await;
-    }
-}
-
-/// Implemented in Task 11.
-#[async_trait]
-impl Introspector for MySqlSession {
-    async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
-        Err(self.unsupported("list_databases"))
-    }
-
-    async fn list_schemas(&self, _db: &str) -> Result<Vec<SchemaInfo>, DbError> {
-        Err(self.unsupported("list_schemas"))
-    }
-
-    async fn list_objects(
-        &self,
-        _scope: &Scope,
-        _kind: ObjectKind,
-    ) -> Result<Vec<ObjectSummary>, DbError> {
-        Err(self.unsupported("list_objects"))
-    }
-
-    async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
-        Err(self.unsupported("table_detail"))
-    }
-
-    async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
-        Err(self.unsupported("object_ddl"))
     }
 }
 
