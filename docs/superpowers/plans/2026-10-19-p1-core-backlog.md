@@ -1,0 +1,70 @@
+# P1 core — deferred findings backlog
+
+Minor findings from task reviews and the final review that were deferred (triage in final review: most are OK to defer; items marked before P2 should be scheduled with P2). Source: SDD ledger.
+
+- Task 1: minor (deferred): test gaps (-2^53, UInt boundary, i64::MIN/MAX, out-of-range deserialize error, Bytes <64/=64 preview contents, non-int variant round trips)
+- Task 1: minor (deferred): thiserror/uuid declared before use; uuid v4 pulls wasm-bindgen
+- Task 1: minor (deferred): UTF-8 BOM at start of .gitignore, Cargo.toml, crates/core/Cargo.toml, rust-toolchain.toml, meta.rs — strip
+- Task 2: minor (deferred): as_str() duplicates serde snake_case names — add drift test
+- Task 2: minor (deferred): sqlstate 28000 branch precedes message-based 1045 check (MySQL w/o code gets PG hint)
+- Task 2: minor (deferred): test gaps (case-insensitivity, Auth 'access denied', Server msg 1045, kinds, Config.field)
+- Task 2: minor (deferred): Server AppError message == detail (duplicate text)
+- Task 3: minor (deferred): WITH x AS (...) (SELECT …) parenthesised main query → Other instead of Read
+- Task 3: minor (deferred): no multi-byte non-zero-offset split tests ('ư;đ', '\ư', $thẻ$)
+- Task 3: minor (deferred): dialect-less classify can misjudge PG 'C:\' inside WITH (Write→Read) — known limitation per ruling
+- Task 3: minor (deferred): backtick-quoted autocommit value accepted; SELECT … INTO local_var in procedural text reads as Ddl; '*/' inside string within exec comment ends it early (matches MySQL)
+- Task 4: minor (deferred): add real-world version strings to detects_variants test (ubuntu/deb suffixes, 5.5.5-10.3.39-MariaDB)
+- Task 4: minor (deferred): MariaDB system_versioned should gate >= 10.3.4
+- Task 4: minor (deferred): ssh.port 0 passes validate()
+- Task 5: minor (deferred): update/delete/Ask-clear not atomic vs keychain on commit/keychain failure (commit first then delete secrets; cover create commit failure)
+- Task 5: minor (deferred): missing group_id → Internal (FK) instead of Config{field:"group_id"}
+- Task 5: minor (deferred): tree() fails wholly if one keychain read fails — treat per-entry error as absent (UX-relevant, triage at final)
+- Task 5: minor (deferred): tests: failing SecretStore, 3-level delete_group, not-found paths; swallowed cleanup error unlogged; not-found → Internal
+- Task 6: minor (deferred): residual plaintext via Vec reallocation in to_vec/from_slice (document or presize)
+- Task 6: minor (deferred): KDF caps generous (1 GiB/t16) — consider tighter
+- Task 6: minor (deferred): keychain cleanup swallowed; commit failure orphans secrets; overwritten secrets not restorable
+- Task 6: minor (deferred): invalid group name aborts whole import (validate groups in parse)
+- Task 6: minor (deferred): tests: keychain-failure rollback; preview intra-file name clash undocumented for UI
+- Task 7: minor (deferred): decrypted plaintext in non-zeroized Vec/String (wrap Zeroizing)
+- Task 7: minor (deferred): SSH secrets decrypted even when SSH flag false → orphan secrets / spurious warning
+- Task 7: minor (deferred): dead 'seen' uuid-collision loop; attr error messages interpolate quick-xml error
+- Task 7: minor (deferred): tests: case-insensitive attrs, validate-skip path, decrypt edge inputs, verify-ca/Require fallback
+- Task 8: minor (deferred): PG all_types lacks timetz/bit/inet/money/ranges/xml/tsvector (P1 mapper falls back to Other)
+- Task 8: minor (deferred): smoke.rs hardcodes 2222; tautological len asserts; key_path not canonicalised
+- Task 9: minor (deferred): value_text uses as_sql(true) (quoted literals)
+- Task 9: minor (deferred): rustls_error downcast silently None if mysql_async pulls different rustls major — pin/comment
+- Task 9: minor (deferred): URI-only SAN still gives generic 'not valid for name' message
+- Task 10: minor (deferred): DATETIME(1) .5 printed .500000 (UI consistency note)
+- Task 10: minor (deferred): USE after a leading comment not tracked
+- Task 10: minor (deferred): concurrent cancels can overwrite cancelled gen — use fetch_max (cancel.rs:85)
+- Task 10: minor (deferred): deadlock in_tx clear skipped when a cancel coincides (session.rs:376-380 order)
+- Task 10: minor (deferred): timed-out statement that actually committed reported as Timeout; ConnectionLost lacks message field
+- Task 11: minor (deferred): no integration test with backtick in table/db name through SHOW paths
+- Task 11: minor (deferred): 5.7 cold test may run on warm table cache (existence check via information_schema)
+- Task 11: minor (deferred): metadata decode drops column silently on parse failure; functional index part order lost
+- Task 12: minor (deferred): stuck timeout replacement failure leaves old conn + in_tx cleared; should abort old task and return ConnectionLost{was_in_tx} (same in MySQL)
+- Task 12: minor (deferred): statement finishing OK during cancel grace period reported as Timeout (both drivers)
+- Task 12: minor (deferred): non-mapped PG types arrive binary → hex (inet/cidr/macaddr/money/timetz/tsvector) — consider text format later
+- Task 12: minor (deferred): BC timestamptz '… BC' not ISO; coverage gaps (Prefer fallback, lost-before-emit replay, stuck path); read_only test via helper; sessions not closed in tests
+- Task 12: minor (deferred): SET search_path after a leading comment not tracked (split keeps comments)
+- Task 12: minor (deferred, cross-task): plaintext password retained in tokio_postgres::Config / mysql_async Opts for reconnect — conflicts with 'secrets in RAM are SecretString' — final review to rule
+- Task 13: minor (deferred): DDL lacks per-column COLLATE, identity sequence options, COMMENT ON constraints/indexes; partitioned parent size 0; extra current_database() round trip
+- Task 13: minor (deferred): qualify_reference rewrites first match (pathological quoted column name); Unsupported.version carries db names
+- Task 14: minor (deferred): channel-open failures silent (expose last_channel_error for Test-connection diagnostics) — UX-relevant, triage at final
+- Task 14: minor (deferred): key decrypt blocks executor (spawn_blocking); IO/disconnect during auth labelled Auth; parsing tests (hashed, IPv6, CRLF); concurrent trust lost update; restart test only protects own binary; russh pulls pre-release ssh-key/rsa (RUSTSEC-2023-0071)
+- Task 15: minor (deferred): SchemaCache swallows table_detail errors w/o log; refresh doesn't reload SchemaCache (note for T16/P2); keychain reads blocking in async; test gaps (Timeout{ConnectDb}, test() tunnel close on DB failure, dead-tunnel reopen)
+- Task 15: minor (deferred): close bump vs runtimes/pending removal not in one critical section; timings not generation-gated; stuck-call lazy connect after forced shutdown can insert an orphan session; superseded open keeps pipeline running until timeout; 5 s fallback untested
+- Task 16: minor (deferred): placeholder ui/dist can ship without beforeBuildCommand (T17 adds commands); test gaps (update/delete closes runtime, set_level reload, secret-free log file)
+- Task 16: minor (deferred): default panic hook still prints payload to stderr; devCsp lists only localhost:5173 (not 127.0.0.1)
+- Task 17: minor (deferred): scroll effect fights manual scroll; context menu refocus/clamp/keyboard open; aria-setsize/posinset; DRY uuidOf + AppError field lists; hardcoded UTF-8 in status bar; noUnusedLocals off; two pnpm lockfiles
+- Task 17: minor (deferred): close failure can leave node stuck loading; open in flight during close can leave backend session open while UI shows closed; '[object Object]' message for odd rejections
+- Task 18: minor (deferred): MariaDB chip UI-only (edit shows MySQL); empty/invalid ports silently defaulted; focus-trap selector edge cases, Esc only inside dialog; test mutates store Map in place
+- Task 18: minor (deferred): HostKeyDialog re-enabled while retry in flight (await onDone); reverted field re-shows stale error; cleared-password field in edit form still tests with stored password
+- Task 19: minor (deferred): refreshNode failure swallowed before re-fetch; aria-label on bare pre; module-level subscribe; literal 'NULL' default shown as —
+- Task 20: minor (deferred): ActionMenu a11y (arrow keys, focus return, inline onClose re-focus, toggle on chevron, viewport clamp); same-text notice doesn't restart timer; no indeterminate group checkbox; missing tests (partial group, menus, toast, passphrase preview success); file can change between preview and apply
+- Task 20: minor (deferred): reloadStored throwing after successful apply re-enables Import; ConnectionDialog still uses chip-ma class
+- Task 21: minor (deferred): Ctrl+C leaves temp dir/credential; snapshot-diff race could delete a credential the real app saved during the run; actions pinned to major tags; push+PR double runs
+- Task 21: minor (deferred): .gitignore 'tools/' unanchored (prefer /tools/)
+- Final: Ruling: real Navicat .ncx fixture parked — needs a human with Navicat — cost if wrong: §10 'import real .ncx' remains undemonstrated until user supplies a sanitized export.
+- Final: parked — same_target treats SSH-on→SSH-off as same target (stored DB password could go to a different machine answering at the same host string) — Ruling: surfaced to user as first follow-up; low likelihood, user-initiated Test only — cost if wrong: stored password sent to an unintended host on Test.
+- Final: parked — key-passphrase prompt doesn't also ask for missing DB password; list_columns failure aborts SchemaCache load — Ruling: UX-only, deferred.
