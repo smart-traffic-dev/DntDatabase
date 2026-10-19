@@ -408,3 +408,14 @@
   border: 1px solid var(--border);
   box-shadow: 0 6px 20px rgba(20, 24, 31, 0.18);
 }
+
+/* Internal error toast: above the notice toast so both can show. */
+.toast.error {
+  bottom: 60px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 520px;
+  border-color: var(--danger);
+  color: var(--danger);
+}

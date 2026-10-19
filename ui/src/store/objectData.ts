@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { api, toAppError } from '../api';
+import { api, isCancelled, notOpenError, toAppError } from '../api';
+import { promptHandles, reopenConnection } from './reopen';
 import type { AppError, ObjectRef, TableDetail } from '../bindings';
 import type { Tab } from './tabs';
 import { useTabs } from './tabs';
@@ -27,6 +28,8 @@ interface ObjectDataState {
   load(tab: Tab, resource: Resource, force?: boolean): Promise<void>;
   /** Drops the backend cache of the object, then re-fetches `active` and forgets the rest. */
   refresh(tab: Tab, active: Resource): Promise<void>;
+  /** Opens the tab's connection again (`not_open` / `connection_lost`), then re-fetches. */
+  reconnect(tab: Tab, resource: Resource): Promise<void>;
 }
 
 // Monotonic, so a request of a closed (and reopened) tab never matches a newer token.
@@ -58,7 +61,22 @@ export const useObjectData = create<ObjectDataState>()((set, get) => {
         const data = await fetchResource(tab.connectionId, tab.objectRef, resource);
         if (latest()) patch(tab.id, { [resource]: { status: 'ok', data } });
       } catch (e) {
-        if (latest()) patch(tab.id, { [resource]: { status: 'error', error: toAppError(e) } });
+        if (!latest()) return;
+        const error = toAppError(e);
+        // A cancelled call is not an error: forget it (the next visit fetches again).
+        patch(tab.id, { [resource]: isCancelled(error) ? undefined : { status: 'error', error } });
+      }
+    },
+    async reconnect(tab, resource) {
+      patch(tab.id, { [resource]: { status: 'loading' } });
+      const error = await reopenConnection(tab.connectionId);
+      if (!useTabs.getState().tabs.some((t) => t.id === tab.id)) return;
+      if (!error) {
+        await get().load(tab, resource, true);
+      } else {
+        // The password / host-key prompt finishes the open; the tab keeps its Reconnect.
+        const shown = promptHandles(error) ? notOpenError() : error;
+        patch(tab.id, { [resource]: { status: 'error', error: shown } });
       }
     },
     async refresh(tab, active) {

@@ -1,5 +1,6 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { computeRows } from '../store/treeModel';
 import {
@@ -69,6 +70,8 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
   }
   if (row.type === 'error') {
     const error = node.error;
+    // A closed or lost connection is fixed by opening it again, not by repeating the call.
+    const reconnect = !!error && needsReconnect(error);
     return (
       <div role="treeitem" aria-level={row.level} aria-disabled="true" aria-selected="false" data-testid="tree-row" className="tree-row placeholder error" style={{ ...style, ...indent }}>
         <span className="chev" />
@@ -80,10 +83,11 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
           className="btn small"
           onClick={(e) => {
             e.stopPropagation();
-            void useTree.getState().loadChildren(node.id);
+            const tree = useTree.getState();
+            void (reconnect ? tree.reconnect(node.id) : tree.loadChildren(node.id));
           }}
         >
-          Retry
+          {reconnect ? 'Reconnect' : 'Retry'}
         </button>
       </div>
     );

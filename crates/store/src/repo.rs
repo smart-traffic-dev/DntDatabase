@@ -405,6 +405,29 @@ impl ConnectionRepo {
         Ok(())
     }
 
+    /// A value of the `app_settings` table (app.db is the one database the repository owns).
+    pub fn app_setting(&self, key: &str) -> Result<Option<String>, DbError> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            params![key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|e| internal("read app setting", e))
+    }
+
+    pub fn set_app_setting(&self, key: &str, value: &str) -> Result<(), DbError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2) \
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .map_err(|e| internal("write app setting", e))?;
+        Ok(())
+    }
+
     pub(crate) fn secret_store(&self) -> &dyn SecretStore {
         &*self.secrets
     }

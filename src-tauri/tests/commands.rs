@@ -9,9 +9,11 @@ use dntdatabase::commands::connections::{
     SecretsUpdateInput,
 };
 use dntdatabase::commands::export_bindings;
+use dntdatabase::commands::settings::{get_log_level_impl, saved_log_level, set_log_level_impl};
 use dntdatabase::commands::transfer::{
     apply_import_impl, export_connections_impl, import_needs_passphrase_impl, preview_import_impl,
 };
+use dntdatabase::logging::LogLevel;
 use dntdatabase::state::{AppPaths, AppState};
 use secrecy::ExposeSecret;
 use serde_json::json;
@@ -172,6 +174,28 @@ async fn unreadable_import_file_is_a_path_error() {
             "{app:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn log_level_is_persisted_and_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let log = dntdatabase::logging::init(&state.paths.logs_dir);
+    assert_eq!(get_log_level_impl(&state).await.unwrap(), LogLevel::Info);
+
+    set_log_level_impl(&state, &log, LogLevel::Debug)
+        .await
+        .unwrap();
+    assert_eq!(get_log_level_impl(&state).await.unwrap(), LogLevel::Debug);
+
+    // A restart reads it back from app.db and applies it.
+    drop(state);
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert_eq!(saved_log_level(&state.repo), LogLevel::Debug);
+    set_log_level_impl(&state, &log, LogLevel::Info)
+        .await
+        .unwrap();
+    assert_eq!(saved_log_level(&state.repo), LogLevel::Info);
 }
 
 #[test]

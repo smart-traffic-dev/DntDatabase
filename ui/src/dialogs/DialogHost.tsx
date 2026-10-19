@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { api, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
+import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt } from '../store/dialogs';
+import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
 import { ConnectionDialog } from './ConnectionDialog';
@@ -10,6 +11,7 @@ import { ExportDialog } from './ExportDialog';
 import { HostKeyDialog } from './HostKeyDialog';
 import { ImportDialog } from './ImportDialog';
 import { PasswordPrompt, type SecretNeed } from './PasswordPrompt';
+import { SettingsDialog } from './SettingsDialog';
 import { ConfirmDialog, NameDialog } from './SimpleDialogs';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
@@ -48,7 +50,10 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
       await finishOpen(id, opened.info);
     } catch (e) {
       const err = toAppError(e);
-      if (isHostKeyUnknown(err) || isHostKeyMismatch(err)) {
+      if (isCancelled(err)) {
+        // Superseded by a close or another open: nothing to report.
+        closePrompt();
+      } else if (isHostKeyUnknown(err) || isHostKeyMismatch(err)) {
         showPrompt({ kind: 'hostKey', connectionId: id, error: err });
       } else if (isPasswordRequired(err) && prompt.kind === 'hostKey') {
         showPrompt({ kind: 'password', connectionId: id, error: err });
@@ -105,6 +110,40 @@ function Toast() {
   return (
     <div className="toast" role="status">
       {notice}
+    </div>
+  );
+}
+
+/** Spec §7: an internal error is a toast that points at the log folder. */
+function InternalErrorToast() {
+  const error = useDialogs((s) => s.internalError);
+  const [openFailed, setOpenFailed] = useState(false);
+  if (!error) return null;
+  const openLogs = async () => {
+    try {
+      await api.openLogFolder();
+      setOpenFailed(false);
+    } catch {
+      setOpenFailed(true);
+    }
+  };
+  return (
+    <div className="toast error" role="alert" aria-label="Internal error">
+      <span>{error.message}</span>
+      {openFailed && <span className="hint">The log folder could not be opened.</span>}
+      <button type="button" className="btn small" onClick={() => void openLogs()}>
+        Open log folder
+      </button>
+      <button
+        type="button"
+        className="btn small"
+        onClick={() => {
+          setOpenFailed(false);
+          useDialogs.getState().dismissInternal();
+        }}
+      >
+        Dismiss
+      </button>
     </div>
   );
 }
@@ -192,6 +231,8 @@ export function DialogHost() {
     dialog = <ExportDialog preselected={request.preselected} onClose={closeRequest} />;
   } else if (request?.kind === 'import') {
     dialog = <ImportDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'settings') {
+    dialog = <SettingsDialog onClose={closeRequest} />;
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';
@@ -211,6 +252,8 @@ export function DialogHost() {
           } else {
             await api.deleteConnection(node.id);
             useConnections.getState().clearInfo(node.id);
+            // The objects of a deleted connection cannot be shown any more.
+            useTabs.getState().closeConnection(node.id);
           }
           closeRequest();
           await reload();
@@ -223,6 +266,7 @@ export function DialogHost() {
     <>
       {dialog}
       <Toast />
+      <InternalErrorToast />
       {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}:${prompt.error.fingerprint ?? ''}:${prompt.error.stage ?? ''}`} prompt={prompt} />}
     </>
   );

@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
+import { objectTabId, useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import {
   Failure,
@@ -118,6 +119,71 @@ describe('DialogHost', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(useDialogs.getState().prompt).toBeNull();
     expect(useTree.getState().expanded.has(`conn:${ids.legacy}`)).toBe(false);
+  });
+
+  it('an internal error shows a toast that opens the log folder', async () => {
+    mockBackend({
+      list_tree: () => {
+        throw fail('internal');
+      },
+      open_log_folder: () => null,
+    });
+    await seed();
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    const toast = await screen.findByRole('alert', { name: 'Internal error' });
+    expect(toast).toHaveTextContent('An internal error occurred.');
+    await user.click(within(toast).getByRole('button', { name: 'Open log folder' }));
+    expect(callsOf('open_log_folder')).toHaveLength(1);
+    await user.click(within(toast).getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByRole('alert', { name: 'Internal error' })).not.toBeInTheDocument();
+  });
+
+  it('other errors do not raise the internal toast', async () => {
+    mockBackend({
+      list_tree: () => {
+        throw fail('connection_lost');
+      },
+    });
+    await seed();
+    render(<DialogHost />);
+    expect(screen.queryByRole('alert', { name: 'Internal error' })).not.toBeInTheDocument();
+  });
+
+  it('settings toggles debug logging', async () => {
+    let level = 'Info';
+    mockBackend({
+      get_log_level: () => level,
+      set_log_level: (a) => {
+        level = a.level as string;
+        return null;
+      },
+    });
+    useDialogs.getState().requestDialog({ kind: 'settings' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    const box = await screen.findByRole('checkbox', { name: /Debug logging/ });
+    await waitFor(() => expect(box).toBeEnabled());
+    expect(box).not.toBeChecked();
+    await user.click(box);
+    await waitFor(() => expect(callsOf('set_log_level')).toEqual([{ level: 'Debug' }]));
+    expect(box).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(useDialogs.getState().request).toBeNull();
+  });
+
+  it('deleting a connection closes its tabs', async () => {
+    mockBackend({ list_tree: () => sampleTree(), delete_connection: () => null });
+    const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
+    for (const connectionId of [ids.prod, ids.analytics]) {
+      useTabs.getState().open({ id: objectTabId(connectionId, orders), kind: 'object', connectionId, objectRef: orders, title: 'orders' });
+    }
+    useDialogs.getState().requestDialog({ kind: 'deleteNode', node: { type: 'connection', id: ids.prod }, label: 'shop-prod' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(useDialogs.getState().request).toBeNull());
+    expect(useTabs.getState().tabs.map((t) => t.connectionId)).toEqual([ids.analytics]);
   });
 
   it('new group creates it and reloads the tree', async () => {

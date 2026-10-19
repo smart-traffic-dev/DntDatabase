@@ -1,5 +1,14 @@
 import { create } from 'zustand';
-import { api, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
+import {
+  AppErrorEx,
+  api,
+  isCancelled,
+  isHostKeyMismatch,
+  isHostKeyUnknown,
+  isPasswordRequired,
+  notOpenError,
+  toAppError,
+} from '../api';
 import type { AppError, ConnectionSummary, Group, ServerInfo } from '../bindings';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
@@ -40,6 +49,8 @@ interface TreeState {
   /** Invalidates the backend cache of the node (`refresh_node`) and reloads what is shown. */
   refresh(id: string): Promise<void>;
   loadChildren(id: string): Promise<void>;
+  /** "Reconnect" on a node whose connection is closed or lost: opens it again, then reloads. */
+  reconnect(id: string): Promise<void>;
   /** Loads groups and connections from the store (`list_tree`). */
   reloadStored(): Promise<void>;
   closeConnection(connectionId: string): Promise<void>;
@@ -209,7 +220,7 @@ export const useTree = create<TreeState>()((set, get) => {
       };
     }
     const variant = useConnections.getState().info.get(connectionId)?.variant;
-    if (!variant) throw new Error('The connection is not open.');
+    if (!variant) throw new AppErrorEx(notOpenError());
     const scope = node.scope;
     if (!scope) return null;
     if (node.kind === 'database' && variant === 'Postgres') {
@@ -273,6 +284,12 @@ export const useTree = create<TreeState>()((set, get) => {
     } catch (e) {
       if (!latest()) return;
       const error = toAppError(e);
+      if (isCancelled(error)) {
+        // Superseded (e.g. closed meanwhile): not an error, just not loaded.
+        patch(id, { loading: false });
+        get().collapse(id);
+        return;
+      }
       const prompt = isPasswordRequired(error)
         ? 'password'
         : isHostKeyUnknown(error) || isHostKeyMismatch(error)
@@ -359,6 +376,15 @@ export const useTree = create<TreeState>()((set, get) => {
       await reloadSubtree(node.kind === 'object' && node.parentId ? node.parentId : id);
     },
     loadChildren,
+
+    reconnect: async (id) => {
+      const connectionId = connectionIdOf(id);
+      if (!connectionId) return;
+      // Without server info the connection node opens the connection first (password and
+      // host-key prompts are routed as usual), then everything expanded below reloads.
+      useConnections.getState().clearInfo(connectionId);
+      await reloadSubtree(connNodeId(connectionId));
+    },
 
     reloadStored: async () => {
       try {

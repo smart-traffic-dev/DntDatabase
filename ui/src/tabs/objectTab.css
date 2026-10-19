@@ -84,6 +84,13 @@
   margin-top: 8px;
 }
 
+/* Closed or lost connection: a notice with Reconnect rather than a failure. */
+.ot-error.ot-reconnect {
+  border-color: var(--border);
+  background: var(--panel);
+  color: inherit;
+}
+
 .ot-info {
   display: grid;
   max-width: 560px;

@@ -205,6 +205,14 @@ async importNeedsPassphrase(path: string) : Promise<Result<boolean, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+async getLogLevel() : Promise<Result<LogLevel, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_log_level") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async setLogLevel(level: LogLevel) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_log_level", { level }) };

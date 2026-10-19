@@ -125,6 +125,42 @@ describe('ConnectionTree', () => {
     expect(callsOf('open_connection')).toHaveLength(1);
   });
 
+  it('a lost connection offers Reconnect, which reopens it and reloads the node', async () => {
+    let attempts = 0;
+    backend({
+      list_databases: () => {
+        if (attempts++ === 0) throw fail('connection_lost');
+        return [{ name: 'shop' }];
+      },
+    });
+    await renderTree();
+    const user = userEvent.setup();
+
+    await user.dblClick(row('shop-prod'));
+    expect(await screen.findByText('The connection to the server was lost.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Reconnect' }));
+
+    expect(await screen.findByRole('treeitem', { name: /^shop$/ })).toBeInTheDocument();
+    // Reconnect opens the connection again before listing.
+    expect(callsOf('open_connection')).toHaveLength(2);
+    expect(callsOf('list_databases')).toHaveLength(2);
+  });
+
+  it('a cancelled open is not shown as an error', async () => {
+    backend({
+      open_connection: () => {
+        throw fail('cancelled');
+      },
+    });
+    await renderTree();
+    await userEvent.setup().dblClick(row('shop-prod'));
+    await waitFor(() => expect(callsOf('open_connection')).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText('Loading…')).not.toBeInTheDocument());
+    expect(screen.queryByText('The operation was cancelled.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
   it('asks for the password when the connection needs one', async () => {
     backend({
       open_connection: () => {

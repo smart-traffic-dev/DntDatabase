@@ -23,6 +23,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "DntDatabase starting");
 
     let state = AppState::open(paths, Arc::new(KeyringSecretStore))?;
+    // The level chosen in Settings (Debug logging) survives restarts.
+    let level = commands::settings::saved_log_level(&state.repo);
+    if level != logging::LogLevel::Info {
+        if let Err(e) = log.set_level(level) {
+            tracing::warn!(error = %e, "could not apply the saved log level");
+        }
+    }
     let builder = commands::specta_builder();
 
     #[cfg(debug_assertions)]

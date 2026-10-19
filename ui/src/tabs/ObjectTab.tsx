@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { needsReconnect } from '../api';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
 import type { Tab } from '../store/tabs';
@@ -29,9 +30,16 @@ function subTabsOf(kind: Tab['objectRef']['kind']): SubTab[] {
 
 const resourceOf = (sub: SubTab): Resource => (sub === 'ddl' ? 'ddl' : 'detail');
 
-function ErrorBox({ error, onRetry }: { error: AppError; onRetry: () => void }) {
+interface Recovery {
+  onRetry(): void;
+  onReconnect(): void;
+}
+
+/** The error of a sub-tab. A closed or lost connection offers Reconnect instead of Retry. */
+function ErrorBox({ error, onRetry, onReconnect }: { error: AppError } & Recovery) {
+  const reconnect = needsReconnect(error);
   return (
-    <div role="alert" className="ot-error">
+    <div role="alert" className={`ot-error${reconnect ? ' ot-reconnect' : ''}`}>
       <strong>{error.message}</strong>
       {error.hint ? <p>{error.hint}</p> : null}
       {error.detail ? (
@@ -40,24 +48,29 @@ function ErrorBox({ error, onRetry }: { error: AppError; onRetry: () => void }) 
           <pre>{error.detail}</pre>
         </details>
       ) : null}
-      <button type="button" className="btn small" onClick={onRetry}>
-        Retry
-      </button>
+      {reconnect ? (
+        <button type="button" className="btn small primary" onClick={onReconnect}>
+          Reconnect
+        </button>
+      ) : (
+        <button type="button" className="btn small" onClick={onRetry}>
+          Retry
+        </button>
+      )}
     </div>
   );
 }
 
 function Loaded<T>({
   state,
-  onRetry,
   children,
+  ...recovery
 }: {
   state: Loadable<T> | undefined;
-  onRetry: () => void;
   children: (data: T) => React.ReactNode;
-}) {
+} & Recovery) {
   if (!state || state.status === 'loading') return <p className="ot-loading muted">Loading…</p>;
-  if (state.status === 'error') return <ErrorBox error={state.error} onRetry={onRetry} />;
+  if (state.status === 'error') return <ErrorBox error={state.error} {...recovery} />;
   return <>{children(state.data)}</>;
 }
 
@@ -302,6 +315,7 @@ export function ObjectTab({ tab }: { tab: Tab }) {
   };
 
   const retry = () => void useObjectData.getState().load(tab, resource, true);
+  const reconnect = () => void useObjectData.getState().reconnect(tab, resource);
   const { objectRef } = tab;
   const path = [objectRef.database, objectRef.schema, objectRef.name].filter(Boolean).join('.');
   const state = stored?.[resource];
@@ -344,11 +358,11 @@ export function ObjectTab({ tab }: { tab: Tab }) {
       </div>
       <div role="tabpanel" id={`${uid}-panel`} aria-labelledby={`${uid}-tab-${sub}`} className="ot-panel">
         {sub === 'ddl' ? (
-          <Loaded state={state as Loadable<string> | undefined} onRetry={retry}>
+          <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
             {(ddl) => <DdlPanel ddl={ddl} />}
           </Loaded>
         ) : (
-          <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry}>
+          <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
             {(detail) => (sub === 'info' ? <InfoPanel detail={detail} /> : <StructurePanel detail={detail} />)}
           </Loaded>
         )}

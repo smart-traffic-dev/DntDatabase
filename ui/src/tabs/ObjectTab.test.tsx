@@ -2,8 +2,9 @@ import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectKind, ObjectRef, TableDetail } from '../bindings';
+import { useDialogs } from '../store/dialogs';
 import { objectTabId, useTabs, type Tab } from '../store/tabs';
-import { callsOf, fail, ids, mockBackend, resetStores } from '../test/backend';
+import { backendError, callsOf, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -186,6 +187,51 @@ describe('ObjectTab', () => {
     await user.click(screen.getByRole('tab', { name: 'Info' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByText('Customer orders')).toBeInTheDocument();
+  });
+
+  it.each(['not_open', 'connection_lost'] as const)('%s_offers_reconnect_then_reloads', async (kind) => {
+    const user = userEvent.setup();
+    let attempts = 0;
+    setup(makeTab('Table'), {
+      table_detail: () => {
+        if (attempts++ === 0) throw fail(kind);
+        return detail();
+      },
+      open_connection: () => ({ info: serverInfo('MySql8'), timings: [] }),
+      list_tree: () => sampleTree(),
+    });
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(backendError(kind).message);
+    expect(within(alert).queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    await user.click(within(alert).getByRole('button', { name: 'Reconnect' }));
+    expect(await screen.findByText('Customer orders')).toBeInTheDocument();
+    expect(callsOf('open_connection')).toEqual([{ id: ids.prod, prompt: null }]);
+    expect(callsOf('table_detail')).toHaveLength(2);
+  });
+
+  it('reconnect_needing_a_password_opens_the_prompt', async () => {
+    const user = userEvent.setup();
+    setup(makeTab('Table'), {
+      table_detail: () => {
+        throw fail('not_open');
+      },
+      open_connection: () => {
+        throw fail('password_required');
+      },
+    });
+    await user.click(await screen.findByRole('button', { name: 'Reconnect' }));
+    await waitFor(() => expect(useDialogs.getState().prompt).toMatchObject({ kind: 'password', connectionId: ids.prod }));
+  });
+
+  it('cancelled_is_not_shown_as_an_error', async () => {
+    setup(makeTab('Table'), {
+      table_detail: () => {
+        throw fail('cancelled');
+      },
+    });
+    await waitFor(() => expect(callsOf('table_detail')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('arrow_keys_switch_subtabs', async () => {

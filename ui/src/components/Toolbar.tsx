@@ -54,7 +54,11 @@ export function Toolbar() {
           label="Connection actions"
           x={menu.x}
           y={menu.y}
-          items={[{ label: 'New connection', run: () => requestDialog({ kind: 'newConnection' }) }, ...transferItems()]}
+          items={[
+            { label: 'New connection', run: () => requestDialog({ kind: 'newConnection' }) },
+            ...transferItems(),
+            { label: 'Settings…', run: () => requestDialog({ kind: 'settings' }) },
+          ]}
           onClose={() => setMenu(null)}
         />
       )}

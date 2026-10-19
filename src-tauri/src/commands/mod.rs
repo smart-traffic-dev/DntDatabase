@@ -126,6 +126,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             transfer::preview_import,
             transfer::apply_import,
             transfer::import_needs_passphrase,
+            settings::get_log_level,
             settings::set_log_level,
             settings::open_log_folder,
         ])

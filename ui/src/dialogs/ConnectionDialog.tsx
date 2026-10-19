@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { open as pickFile } from '@tauri-apps/plugin-dialog';
-import { api, isHostKeyMismatch, isHostKeyUnknown, stageLabel, toAppError } from '../api';
+import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, stageLabel, toAppError } from '../api';
 import type {
   AppError,
   ConnectionConfig,
@@ -312,7 +312,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     } catch (e) {
       if (seq !== testSeq.current) return;
       const error = toAppError(e);
-      if (isHostKeyUnknown(error) && error.fingerprint && error.key_openssh) {
+      if (isCancelled(error)) {
+        setTest({ state: 'idle' });
+      } else if (isHostKeyUnknown(error) && error.fingerprint && error.key_openssh) {
         setTest({ state: 'idle' });
         setHostKey({
           host: error.host ?? form.sshHost.trim(),

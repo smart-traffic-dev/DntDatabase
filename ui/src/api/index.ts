@@ -1,4 +1,5 @@
 import { commands, type Result } from '../bindings';
+import { useDialogs } from '../store/dialogs';
 import { AppErrorEx, toAppError } from './errors';
 
 export {
@@ -21,15 +22,22 @@ export type Api = {
   [K in keyof Commands]: (...args: Parameters<Commands[K]>) => Promise<Unwrap<ReturnType<Commands[K]>>>;
 };
 
+/** Every `internal` failure also reaches the global toast (spec §7: "Open log folder"). */
+function failure(e: unknown): AppErrorEx {
+  const error = toAppError(e);
+  if (error.kind === 'internal') useDialogs.getState().reportInternal(error);
+  return new AppErrorEx(error);
+}
+
 async function unwrap<T>(call: () => Promise<Result<T, unknown>>): Promise<T> {
   let result: Result<T, unknown>;
   try {
     result = await call();
   } catch (e) {
     // The generated bindings rethrow real `Error`s (e.g. no Tauri runtime): keep one shape.
-    throw new AppErrorEx(toAppError(e));
+    throw failure(e);
   }
-  if (result.status === 'error') throw new AppErrorEx(toAppError(result.error));
+  if (result.status === 'error') throw failure(result.error);
   return result.data;
 }
 
