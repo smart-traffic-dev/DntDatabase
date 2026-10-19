@@ -1,7 +1,9 @@
 import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { EnvTag } from '../bindings';
+import userEvent from '@testing-library/user-event';
 import { useConnections } from '../store/connections';
+import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
 import { config, ids, resetStores } from '../test/backend';
 import { TabBar } from './TabBar';
@@ -30,6 +32,14 @@ describe('TabBar', () => {
     expect(tab('s_orders').querySelector('.env-dot.env-staging')).not.toBeNull();
     expect(tab('c_orders').querySelector('.env-dot')).toBeNull();
     expect(tab('c_orders')).not.toHaveClass('env-production');
+  });
+
+  it('closing a query tab removes its doc', async () => {
+    const id = useQueryDocs.getState().newQuery(null, null);
+    render(<TabBar />);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Close Query 1' }));
+    expect(useTabs.getState().tabs).toEqual([]);
+    expect(useQueryDocs.getState().docs.has(id)).toBe(false);
   });
 
   it('query_tab_shows_sql_label', () => {

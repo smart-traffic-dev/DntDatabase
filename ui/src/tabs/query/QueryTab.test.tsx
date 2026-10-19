@@ -74,6 +74,31 @@ describe('query tab shell', () => {
     expect(options).toEqual(['1,000', '10,000', '100,000', '1,000,000']);
   });
 
+  it('closeConnection closes object tabs but keeps query tabs', () => {
+    const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
+    act(() => {
+      useTabs.getState().open({ id: 'o1', kind: 'object', connectionId: ids.prod, objectRef: orders, title: 'orders' });
+      useQueryDocs.getState().newQuery(ids.prod, 'shop');
+      useTabs.getState().closeConnection(ids.prod);
+    });
+    expect(useTabs.getState().tabs.map((t) => t.kind)).toEqual(['query']);
+    expect(useTabs.getState().activeId).toBe(useTabs.getState().tabs[0]!.id);
+  });
+
+  it('a query tab survives deletion of its connection and shows a placeholder', () => {
+    const docId = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    act(() => {
+      useConnections.getState().setStored([], [config(ids.analytics, 'analytics', { kind: 'postgres' })]);
+      useTabs.getState().closeConnection(ids.prod);
+    });
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([docId]);
+    render(<QueryTab tab={{ id: docId, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
+    const select = screen.getByTestId('query-connection') as HTMLSelectElement;
+    expect(select.value).toBe(ids.prod);
+    expect(select.selectedOptions[0]).toHaveTextContent('(deleted connection)');
+    expect(select.selectedOptions[0]).toBeDisabled();
+  });
+
   it('editor_language_follows_engine', () => {
     const mount = (connectionId: string) => {
       const docId = useQueryDocs.getState().newQuery(connectionId, null);

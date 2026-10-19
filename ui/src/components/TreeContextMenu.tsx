@@ -31,7 +31,7 @@ function itemsFor(node: TreeNode): Item[] {
     run: () => void navigator.clipboard?.writeText(node.label).catch(() => undefined),
   };
   const newQuery: Item = { label: 'New query', run: () => void openNewQuery(node) };
-  const refresh: Item ={ label: 'Refresh', hint: 'F5', run: () => void tree.refresh(node.id) };
+  const refresh: Item = { label: 'Refresh', hint: 'F5', run: () => void tree.refresh(node.id) };
 
   if (node.kind === 'connection' && connectionId) {
     const isOpen = useConnections.getState().info.has(connectionId);

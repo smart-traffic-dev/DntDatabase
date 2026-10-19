@@ -13,7 +13,17 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
 
   const prefix = doc.connectionId ? `conn:${doc.connectionId}/db:` : null;
   const databases = new Set<string>();
-  if (prefix) for (const id of nodes.keys()) if (id.startsWith(prefix) && !id.slice(prefix.length).includes('/')) databases.add(decodeURIComponent(id.slice(prefix.length)));
+  if (prefix) {
+    for (const id of nodes.keys()) {
+      const raw = id.slice(prefix.length);
+      if (!id.startsWith(prefix) || raw.includes('/')) continue;
+      try {
+        databases.add(decodeURIComponent(raw));
+      } catch {
+        databases.add(raw);
+      }
+    }
+  }
   if (doc.database) databases.add(doc.database);
 
   const bind = (connectionId: string | null) => {
@@ -45,6 +55,11 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
         onChange={(e) => bind(e.target.value || null)}
       >
         <option value="">No connection</option>
+        {doc.connectionId && !summaries.has(doc.connectionId) && (
+          <option value={doc.connectionId} disabled>
+            (deleted connection)
+          </option>
+        )}
         {[...summaries.values()].map((c) => (
           <option key={c.config.id} value={c.config.id}>
             {c.config.name}
