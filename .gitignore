@@ -7,3 +7,4 @@ testdata/certs/*
 testdata/ssh/*
 !.gitkeep
 .superpowers/
+tools/

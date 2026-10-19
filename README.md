@@ -68,7 +68,7 @@ One-time setup:
 2. Download the `msedgedriver` that matches your WebView2 runtime exactly. Find the version in
    `HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` (value `pv`),
    then fetch `https://msedgedriver.microsoft.com/<version>/edgedriver_win64.zip` and extract `msedgedriver.exe`
-   to `D:\dev\msedgedriver\` (or anywhere, then set `MSEDGEDRIVER`). Redo this whenever WebView2 updates.
+   into `tools/msedgedriver/` (gitignored) or set `MSEDGEDRIVER` to its path. Redo this whenever WebView2 updates.
 3. `pnpm --dir e2e install`
 
 Each run:
@@ -79,6 +79,9 @@ pnpm --dir ui build
 cargo build -p dntdatabase --features tauri/custom-protocol    # embeds ui/dist; a plain debug build loads the dev server
 pnpm --dir e2e test
 ```
+
+Rebuild with that exact command right before the E2E run: other cargo builds (`cargo test`, a plain `cargo build`)
+overwrite `target/debug/dntdatabase.exe` with a binary that loads the dev server, and the test then times out.
 
 Optional environment: `MSEDGEDRIVER` (path to msedgedriver.exe), `TAURI_DRIVER` (path to tauri-driver.exe,
 default `%CARGO_HOME%\bin`). The run uses a fresh temporary `DNT_DATA_DIR` and removes the test password it stored
