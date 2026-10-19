@@ -29,7 +29,7 @@ CREATE TABLE public."đơn_hàng" (
 
 CREATE TABLE public.weird_names (
   id integer PRIMARY KEY,
-  "we'ird""col" varchar(50) NULL
+  "we`ird""col" varchar(50) NULL
 );
 
 CREATE TABLE public.bin_blob (
@@ -104,7 +104,7 @@ INSERT INTO public."đơn_hàng" (id, ten, ghi_chu) VALUES
   (2, 'Trần Thị B', NULL);
 SELECT setval(pg_get_serial_sequence('public."đơn_hàng"', 'id'), 2);
 
-INSERT INTO public.weird_names (id, "we'ird""col") VALUES (1, 'quote''d "value"');
+INSERT INTO public.weird_names (id, "we`ird""col") VALUES (1, 'quote''d "value"');
 
 INSERT INTO public.bin_blob (id, data) VALUES (1, decode(repeat('00ff', 500), 'hex'));
 

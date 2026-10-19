@@ -138,11 +138,12 @@ services:
       PASSWORD_ACCESS: "true"
       USER_NAME: dnt
       USER_PASSWORD: dnt_test
-      PUBLIC_KEY_FILE: /keys/id_ed25519.pub
+      PUBLIC_KEY_DIR: /keys
       DOCKER_MODS: linuxserver/mods:openssh-server-ssh-tunnel
     ports: ["2222:2222"]
     volumes:
       - ./ssh/id_ed25519.pub:/keys/id_ed25519.pub:ro
+      - ./ssh/id_ed25519_enc.pub:/keys/id_ed25519_enc.pub:ro
     healthcheck:
       test: ["CMD-SHELL", "nc -z localhost 2222"]
       interval: 5s

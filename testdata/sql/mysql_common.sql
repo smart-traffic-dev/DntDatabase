@@ -29,7 +29,7 @@ CREATE TABLE `đơn_hàng` (
 
 CREATE TABLE weird_names (
   id int NOT NULL PRIMARY KEY,
-  `we'ird"col` varchar(50) NULL
+  `we``ird"col` varchar(50) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE bin_blob (
@@ -49,7 +49,7 @@ CREATE TABLE all_types (
   c_int_u int unsigned NULL,
   c_bigint bigint NULL,
   c_bigint_u bigint unsigned NULL,
-  c_decimal decimal(30,10) NULL,
+  c_decimal decimal(40,10) NULL,
   c_float float NULL,
   c_double double NULL,
   c_bit bit(8) NULL,
@@ -83,7 +83,7 @@ INSERT INTO `đơn_hàng` (id, ten, ghi_chu) VALUES
   (1, 'Nguyễn Văn A', 'Giao hàng buổi sáng'),
   (2, 'Trần Thị B', NULL);
 
-INSERT INTO weird_names (id, `we'ird"col`) VALUES (1, 'quote''d "value"');
+INSERT INTO weird_names (id, `we``ird"col`) VALUES (1, 'quote''d "value"');
 
 INSERT INTO bin_blob (id, data) VALUES (1, REPEAT(UNHEX('00FF'), 500));
 
@@ -94,7 +94,7 @@ INSERT INTO all_types VALUES (
   -8388608, 16777215,
   -2147483648, 4294967295,
   9223372036854775807, 18446744073709551615,
-  99999999999999999999.9999999999,
+  123456789012345678901234567890.1234567890,
   3.40282e38,
   1.7976931348623157e308,
   b'10101010',
