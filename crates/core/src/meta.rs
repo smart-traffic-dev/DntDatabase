@@ -52,6 +52,28 @@ pub struct ObjectSummary {
     pub row_estimate: Option<u64>,
 }
 
+/// Column names of one table or view, in ordinal order ([`Introspector::list_columns`]).
+///
+/// [`Introspector::list_columns`]: crate::driver::Introspector::list_columns
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableColumns {
+    pub table: String,
+    pub columns: Vec<String>,
+}
+
+/// Groups `(table, column)` rows (ordered by table, then column position) by table,
+/// sorted by table name (byte order).
+pub fn group_table_columns(rows: impl IntoIterator<Item = (String, String)>) -> Vec<TableColumns> {
+    let mut by_table: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for (table, column) in rows {
+        by_table.entry(table).or_default().push(column);
+    }
+    by_table
+        .into_iter()
+        .map(|(table, columns)| TableColumns { table, columns })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct ColumnDetail {
     pub name: String,
@@ -134,4 +156,28 @@ pub struct TableDetail {
     #[specta(type = Option<f64>)]
     pub size_bytes: Option<u64>,
     pub comment: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn groups_columns_by_table_keeping_their_order() {
+        let rows = [("b", "id"), ("b", "name"), ("a", "z"), ("a", "y")]
+            .map(|(t, c)| (t.to_string(), c.to_string()));
+        assert_eq!(
+            group_table_columns(rows),
+            [
+                TableColumns {
+                    table: "a".into(),
+                    columns: vec!["z".into(), "y".into()]
+                },
+                TableColumns {
+                    table: "b".into(),
+                    columns: vec!["id".into(), "name".into()]
+                },
+            ]
+        );
+    }
 }

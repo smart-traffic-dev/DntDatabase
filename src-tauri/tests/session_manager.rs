@@ -7,7 +7,8 @@ use dnt_core::driver::{
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
+    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
+    TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
 use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
@@ -30,6 +31,8 @@ struct Log {
     connects: AtomicUsize,
     closes: AtomicUsize,
     list_calls: AtomicUsize,
+    columns_calls: AtomicUsize,
+    detail_calls: AtomicUsize,
     /// `ResolvedConfig::database` of every connect, in order.
     databases: Mutex<Vec<Option<String>>>,
     /// `ResolvedConfig::password` of the last connect.
@@ -168,7 +171,15 @@ impl Introspector for FakeSession {
             row_estimate: None,
         }])
     }
+    async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
+        self.log.columns_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![TableColumns {
+            table: "orders".into(),
+            columns: vec!["id".into(), "total".into()],
+        }])
+    }
     async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
+        self.log.detail_calls.fetch_add(1, Ordering::SeqCst);
         Err(DbError::Internal {
             message: "n/a".into(),
         })
@@ -302,6 +313,29 @@ async fn cache_hits_and_refresh_invalidates_prefix() {
     assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
     // Only the metadata session opened by `open` was used.
     assert_eq!(f.log.connects.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn schema_cache_loads_with_bulk_column_listing_only() {
+    let f = fixture(DbKind::MySql, false);
+    let mut cfg = config(DbKind::MySql, SecretMode::Saved);
+    cfg.default_db = Some("shop".into());
+    let id = save(&f, cfg, Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    wait_until(|| f.sm.schema_cache(id).is_some()).await;
+    let cache = f.sm.schema_cache(id).unwrap();
+    assert_eq!(cache.database, "shop");
+    let orders = cache
+        .tables
+        .iter()
+        .find(|t| t.name == "orders" && t.kind == ObjectKind::Table)
+        .unwrap();
+    assert_eq!(orders.columns, ["id", "total"]);
+    // One column query per scope, never a per-table detail.
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.log.detail_calls.load(Ordering::SeqCst), 0);
+    // Tables and views listed: one list_objects call each.
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

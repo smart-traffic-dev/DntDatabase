@@ -12,8 +12,9 @@ use async_trait::async_trait;
 use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
-    CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail, ObjectKind, ObjectRef,
-    ObjectSummary, SchemaInfo, Scope, TableDetail, TableOptions, TriggerDetail,
+    group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail,
+    ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail,
+    TableOptions, TriggerDetail,
 };
 use dnt_core::server::ServerVariant;
 use mysql_async::prelude::Queryable;
@@ -312,6 +313,14 @@ impl Introspector for MySqlSession {
                 Ok(Vec::new())
             }
         }
+    }
+
+    async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
+        let mut conn = self.conn.lock().await;
+        let rows = fetch(&mut conn, queries::SCHEMA_COLUMNS, params1(&scope.database)).await?;
+        Ok(group_table_columns(
+            rows.iter().filter_map(|r| Some((col(r, 0)?, col(r, 1)?))),
+        ))
     }
 
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {

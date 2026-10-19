@@ -14,8 +14,9 @@ use async_trait::async_trait;
 use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
-    CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail, ObjectKind, ObjectRef,
-    ObjectSummary, SchemaInfo, Scope, TableDetail, TableOptions, TriggerDetail,
+    group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail,
+    ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail,
+    TableOptions, TriggerDetail,
 };
 use tokio::sync::MutexGuard;
 use tokio_postgres::types::{FromSql, ToSql};
@@ -484,6 +485,17 @@ impl Introspector for PgSession {
                 Ok(Vec::new())
             }
         }
+    }
+
+    async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
+        let schema = schema_of(&scope.schema);
+        let conn = self.conn_for(&scope.database).await?;
+        let rows = fetch(&conn.client, &queries::list_columns(), &[&schema]).await?;
+        let mut pairs = Vec::with_capacity(rows.len());
+        for r in &rows {
+            pairs.push((get::<String>(r, 0)?, get::<String>(r, 1)?));
+        }
+        Ok(group_table_columns(pairs))
     }
 
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {

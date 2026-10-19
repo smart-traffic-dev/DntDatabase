@@ -14,6 +14,12 @@ pub(crate) const LIST_DATABASES: &str = "SHOW DATABASES";
 pub(crate) const TABLE_COMMENTS: &str = "SELECT TABLE_NAME, TABLE_COMMENT \
      FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?";
 
+/// Column names of every table and view of one database (`?` = db), in ordinal order.
+/// Reads no statistics; the server shows only the columns the user has privileges on.
+pub(crate) const SCHEMA_COLUMNS: &str = "SELECT TABLE_NAME, COLUMN_NAME \
+     FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? \
+     ORDER BY TABLE_NAME, ORDINAL_POSITION";
+
 /// MariaDB sequences (`?` = db).
 pub(crate) const SEQUENCES: &str = "SELECT TABLE_NAME, TABLE_COMMENT \
      FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'SEQUENCE'";

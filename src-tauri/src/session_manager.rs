@@ -13,7 +13,7 @@ use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, Ss
 use dnt_core::driver::{Driver, ExecOptions, Introspector, RowSink, Session};
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
-use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
+use dnt_core::meta::{ObjectKind, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
@@ -997,13 +997,24 @@ impl ConnectionRuntime {
                 },
             };
 
+        // Per scope: one listing per object kind plus ONE bulk column query; never a
+        // per-table `table_detail` (that reads statistics, ~6-8 queries per table).
         let mut tables = Vec::new();
         for schema in &schemas {
+            let scope = Scope {
+                database: database.clone(),
+                schema: schema.clone(),
+            };
+            let mut columns: HashMap<String, Vec<String>> = self
+                .with_session(Some(&database), |s| {
+                    let scope = scope.clone();
+                    Box::pin(async move { s.introspector().list_columns(&scope).await })
+                })
+                .await?
+                .into_iter()
+                .map(|t| (t.table, t.columns))
+                .collect();
             for &kind in kinds {
-                let scope = Scope {
-                    database: database.clone(),
-                    schema: schema.clone(),
-                };
                 let objects = self
                     .with_session(Some(&database), |s| {
                         let scope = scope.clone();
@@ -1011,32 +1022,11 @@ impl ConnectionRuntime {
                     })
                     .await?;
                 for object in objects {
-                    let obj = ObjectRef {
-                        database: database.clone(),
+                    tables.push(SchemaCacheTable {
                         schema: schema.clone(),
+                        columns: columns.remove(&object.name).unwrap_or_default(),
                         name: object.name,
                         kind,
-                    };
-                    let detail = self
-                        .with_session(Some(&database), |s| {
-                            let obj = obj.clone();
-                            Box::pin(async move { s.introspector().table_detail(&obj).await })
-                        })
-                        .await;
-                    let columns = match detail {
-                        Ok(d) => d.columns.into_iter().map(|c| c.name).collect(),
-                        // Connection trouble (or a stuck server) ends the whole load.
-                        Err(e) if is_lost(&e) || matches!(e, DbError::Timeout { .. }) => {
-                            return Err(e)
-                        }
-                        // E.g. a view whose definition no longer resolves: keep its name.
-                        Err(_) => Vec::new(),
-                    };
-                    tables.push(SchemaCacheTable {
-                        schema: obj.schema,
-                        name: obj.name,
-                        kind,
-                        columns,
                     });
                 }
             }

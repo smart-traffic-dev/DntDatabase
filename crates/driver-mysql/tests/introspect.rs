@@ -373,6 +373,62 @@ async fn lists_5000_tables_fast() {
 }
 
 #[tokio::test]
+async fn list_columns_matches_table_detail_in_one_query() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let all = s.list_columns(&fixture()).await.unwrap();
+        let names: Vec<&str> = all.iter().map(|c| c.table.as_str()).collect();
+        assert_sorted(
+            t,
+            ObjectKind::Table,
+            &names.iter().map(|n| n.to_string()).collect::<Vec<_>>(),
+        );
+        for (table, kind) in [
+            ("customers", ObjectKind::Table),
+            ("đơn_hàng", ObjectKind::Table),
+            ("weird_names", ObjectKind::Table),
+            ("v_customer_orders", ObjectKind::View),
+        ] {
+            let listed = &all
+                .iter()
+                .find(|c| c.table == table)
+                .unwrap_or_else(|| panic!("{t:?}: {table} missing from {names:?}"))
+                .columns;
+            let detail = s.table_detail(&obj(table, kind)).await.unwrap();
+            let expected: Vec<String> = detail.columns.into_iter().map(|c| c.name).collect();
+            assert_eq!(listed, &expected, "{t:?} {table}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn schema_cache_queries_on_5000_tables_are_fast_cold() {
+    require_db!();
+    let scope = Scope {
+        database: BIG_DB.into(),
+        schema: None,
+    };
+    let t = Target::MySql8;
+    let s = connect(t).await;
+    ensure_big_schema(&s).await;
+    s.query_row_text("SET SESSION information_schema_stats_expiry = 0")
+        .await
+        .unwrap();
+    // What the SchemaCache loader runs for one database.
+    let started = Instant::now();
+    let tables = s.list_objects(&scope, ObjectKind::Table).await.unwrap();
+    let views = s.list_objects(&scope, ObjectKind::View).await.unwrap();
+    let columns = s.list_columns(&scope).await.unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!((tables.len(), views.len()), (BIG_TABLES, 0));
+    assert_eq!(columns.len(), BIG_TABLES);
+    assert!(columns.iter().all(|c| !c.columns.is_empty()));
+    eprintln!("{t:?}: SchemaCache queries for {BIG_TABLES} tables in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "{t:?} took {elapsed:?}");
+}
+
+#[tokio::test]
 async fn limited_user_sees_partial_tree() {
     require_db!();
     for t in Target::mysql_family() {
@@ -389,6 +445,12 @@ async fn limited_user_sees_partial_tree() {
         assert!(names(&s, &scope, ObjectKind::View).await.is_empty());
         let customers = detail(&s, t, "customers").await;
         assert!(!customers.columns.is_empty(), "{t:?}");
+        let columns = s.list_columns(&scope).await.unwrap();
+        assert_eq!(
+            columns.iter().map(|c| c.table.as_str()).collect::<Vec<_>>(),
+            ["customers"],
+            "{t:?}"
+        );
         let r = s.object_ddl(&obj("orders", ObjectKind::Table)).await;
         assert!(matches!(r, Err(DbError::Server { .. })), "{t:?}: {r:?}");
         let r = s.table_detail(&obj("orders", ObjectKind::Table)).await;

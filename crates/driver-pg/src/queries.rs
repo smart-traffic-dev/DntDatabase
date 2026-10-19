@@ -28,6 +28,21 @@ pub(crate) fn list_relations() -> String {
     )
 }
 
+/// Column names of every visible table, partitioned table, view, materialized view and
+/// foreign table of one schema (`$1` = schema), ordered by relation then `attnum`. Same
+/// privilege filter as [`list_relations`]; partitions are left out like there.
+pub(crate) fn list_columns() -> String {
+    format!(
+        "SELECT c.relname::text, a.attname::text \
+         FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+         AND NOT c.relispartition AND a.attnum > 0 AND NOT a.attisdropped \
+         AND has_table_privilege(c.oid, {ANY_TABLE_PRIVILEGE}) \
+         ORDER BY c.relname, a.attnum"
+    )
+}
+
 /// `has_sequence_privilege` raises an error on a non-sequence, and the planner may test it
 /// before `relkind`: the `CASE` keeps it to sequences.
 const SEQUENCE_PRIVILEGE: &str =

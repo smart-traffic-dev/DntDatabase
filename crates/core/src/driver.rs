@@ -1,7 +1,8 @@
 use crate::config::ResolvedConfig;
 use crate::error::DbError;
 use crate::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
+    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
+    TableDetail,
 };
 use crate::server::{DbKind, ServerInfo};
 use crate::value::{ColumnMeta, Value};
@@ -87,6 +88,9 @@ pub trait Introspector: Send + Sync {
         scope: &Scope,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError>;
+    /// Column names of every table and view of `scope` the user can see, in ONE query
+    /// (the SchemaCache needs names only; no statistics are read).
+    async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError>;
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError>;
     async fn object_ddl(&self, obj: &ObjectRef) -> Result<String, DbError>;
 }
@@ -159,6 +163,9 @@ mod tests {
             _scope: &Scope,
             _kind: ObjectKind,
         ) -> Result<Vec<ObjectSummary>, DbError> {
+            Ok(vec![])
+        }
+        async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
             Ok(vec![])
         }
         async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {

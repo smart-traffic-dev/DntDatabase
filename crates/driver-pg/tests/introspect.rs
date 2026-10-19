@@ -562,6 +562,62 @@ async fn lists_5000_tables_fast() {
 }
 
 #[tokio::test]
+async fn list_columns_matches_table_detail_in_one_query() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        for (schema, table, kind) in [
+            ("public", "customers", ObjectKind::Table),
+            ("public", "weird_names", ObjectKind::Table),
+            ("public", "v_customer_orders", ObjectKind::View),
+            ("sales", "mv_order_totals", ObjectKind::MaterializedView),
+        ] {
+            let all = s.list_columns(&scope(schema)).await.unwrap();
+            let tables: Vec<String> = all.iter().map(|c| c.table.clone()).collect();
+            assert_sorted(t, ObjectKind::Table, &tables);
+            let listed = &all
+                .iter()
+                .find(|c| c.table == table)
+                .unwrap_or_else(|| panic!("{t:?}: {table} missing from {tables:?}"))
+                .columns;
+            let detail = s.table_detail(&obj(schema, table, kind)).await.unwrap();
+            let expected: Vec<String> = detail.columns.into_iter().map(|c| c.name).collect();
+            assert_eq!(listed, &expected, "{t:?} {schema}.{table}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn schema_cache_queries_on_5000_tables_are_fast_cold() {
+    require_db!();
+    let t = Target::Pg17;
+    ensure_big_schema(t).await;
+    // A fresh backend: catalog caches are cold.
+    let s = connect_to(t, BIG_DB).await;
+    let scope = Scope {
+        database: BIG_DB.into(),
+        schema: Some("public".into()),
+    };
+    // What the SchemaCache loader runs for one schema.
+    let started = Instant::now();
+    let mut listed = 0;
+    for kind in [
+        ObjectKind::Table,
+        ObjectKind::View,
+        ObjectKind::MaterializedView,
+    ] {
+        listed += s.list_objects(&scope, kind).await.unwrap().len();
+    }
+    let columns = s.list_columns(&scope).await.unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(listed, BIG_TABLES);
+    assert_eq!(columns.len(), BIG_TABLES);
+    assert!(columns.iter().all(|c| !c.columns.is_empty()));
+    eprintln!("{t:?}: SchemaCache queries for {BIG_TABLES} tables in {elapsed:?}");
+    assert!(elapsed < Duration::from_secs(2), "{t:?} took {elapsed:?}");
+}
+
+#[tokio::test]
 async fn limited_user_sees_partial_tree() {
     require_db!();
     for t in Target::pg() {
@@ -595,6 +651,14 @@ async fn limited_user_sees_partial_tree() {
         let customers = detail(&s, t, "public", "customers").await;
         assert!(!customers.columns.is_empty(), "{t:?}");
         assert!(customers.primary_key.is_some(), "{t:?}");
+        // Same privilege filter as the listings.
+        let columns = s.list_columns(&public).await.unwrap();
+        assert_eq!(
+            columns.iter().map(|c| c.table.as_str()).collect::<Vec<_>>(),
+            ["customers"],
+            "{t:?}"
+        );
+        assert!(s.list_columns(&sales).await.unwrap().is_empty(), "{t:?}");
         let r = s
             .object_ddl(&obj("public", "orders", ObjectKind::Table))
             .await;
