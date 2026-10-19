@@ -1,0 +1,67 @@
+.query-tab {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.query-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+  flex-wrap: wrap;
+}
+
+.qt-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.qt-btn:hover:not(:disabled) {
+  background: var(--sel);
+}
+
+.qt-btn:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+.qt-run:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.qt-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+.qt-select {
+  height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  font: inherit;
+  max-width: 220px;
+}
+
+.qt-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sql-editor {
+  flex: 1;
+  min-height: 0;
+}

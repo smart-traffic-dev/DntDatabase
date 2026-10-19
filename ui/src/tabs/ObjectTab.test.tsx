@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectKind, ObjectRef, TableDetail } from '../bindings';
 import { useDialogs } from '../store/dialogs';
-import { objectTabId, useTabs, type Tab } from '../store/tabs';
+import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { backendError, callsOf, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ObjectTab, formatBytes } from './ObjectTab';
 

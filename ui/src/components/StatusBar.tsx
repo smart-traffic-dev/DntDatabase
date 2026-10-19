@@ -10,6 +10,7 @@ import { connectionIdOf } from '../store/treeModel';
 export function StatusBar() {
   const selectedId = useTree((s) => s.selectedId);
   const tabConnection = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.connectionId);
+  // A query tab without a connection falls back to the tree selection.
   const connectionId = tabConnection ?? (selectedId ? connectionIdOf(selectedId) : undefined);
   const summary = useConnections((s) => (connectionId ? s.summaries.get(connectionId) : undefined));
   const info = useConnections((s) => (connectionId ? s.info.get(connectionId) : undefined));

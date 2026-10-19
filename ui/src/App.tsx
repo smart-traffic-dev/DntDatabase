@@ -6,6 +6,7 @@ import { StatusBar } from './components/StatusBar';
 import { TabBar } from './components/TabBar';
 import { Toolbar } from './components/Toolbar';
 import { ObjectTab } from './tabs/ObjectTab';
+import { QueryTab } from './tabs/query/QueryTab';
 import { useTabs } from './store/tabs';
 import { useTree } from './store/tree';
 
@@ -15,8 +16,10 @@ function Workspace() {
     <main className="workspace">
       <TabBar />
       <section className="tab-content" aria-label="Tab content">
-        {tab ? (
+        {tab?.kind === 'object' ? (
           <ObjectTab key={tab.id} tab={tab} />
+        ) : tab?.kind === 'query' ? (
+          <QueryTab key={tab.id} tab={tab} />
         ) : (
           <div className="empty">
             <strong>No object open</strong>

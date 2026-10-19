@@ -12,6 +12,7 @@ import type {
 import backendErrors from './fixtures/app-errors.json';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
+import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 
@@ -86,6 +87,7 @@ export function resetStores() {
   useTree.getState().reset();
   useConnections.getState().reset();
   useTabs.getState().reset();
+  useQueryDocs.getState().reset();
   useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null });
 }
 

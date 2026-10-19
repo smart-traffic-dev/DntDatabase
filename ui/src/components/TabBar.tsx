@@ -1,6 +1,7 @@
 import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
-import { useTabs } from '../store/tabs';
+import { useQueryDocs } from '../store/queryTabs';
+import { useTabs, type Tab } from '../store/tabs';
 import { CloseIcon } from './icons';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
@@ -21,11 +22,16 @@ export function TabBar() {
   const activate = useTabs((s) => s.activate);
   const close = useTabs((s) => s.close);
   const summaries = useConnections((s) => s.summaries);
+  // Closing a query tab drops its document (unsaved-changes prompts come with later tasks).
+  const closeTab = (tab: Tab) => {
+    close(tab.id);
+    if (tab.kind === 'query') useQueryDocs.getState().remove(tab.id);
+  };
   return (
     <div role="tablist" aria-label="Open tabs" className="tabbar">
       {tabs.map((tab) => {
         // Environment colour of the tab's connection, as in the tree and status bar.
-        const env = summaries.get(tab.connectionId)?.config.env_tag ?? null;
+        const env = (tab.connectionId ? summaries.get(tab.connectionId)?.config.env_tag : null) ?? null;
         const classes = ['tab', tab.id === activeId ? 'active' : '', env ? `env-${env}` : ''].filter(Boolean).join(' ');
         return (
           <div key={tab.id} className={classes}>
@@ -35,13 +41,13 @@ export function TabBar() {
               aria-selected={tab.id === activeId}
               className="tab-label"
               onClick={() => activate(tab.id)}
-              onAuxClick={(e) => e.button === 1 && close(tab.id)}
+              onAuxClick={(e) => e.button === 1 && closeTab(tab)}
             >
               {env && <span className={`env-dot env-${env}`} title={`Environment: ${env}`} />}
-              <span className="tab-kind">{KIND_LABEL[tab.objectRef.kind]}</span>
+              <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : KIND_LABEL[tab.objectRef.kind]}</span>
               <span>{tab.title}</span>
             </button>
-            <button type="button" className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => close(tab.id)}>
+            <button type="button" className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => closeTab(tab)}>
               <CloseIcon />
             </button>
           </div>

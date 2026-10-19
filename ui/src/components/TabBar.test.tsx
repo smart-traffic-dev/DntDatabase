@@ -31,4 +31,17 @@ describe('TabBar', () => {
     expect(tab('c_orders').querySelector('.env-dot')).toBeNull();
     expect(tab('c_orders')).not.toHaveClass('env-production');
   });
+
+  it('query_tab_shows_sql_label', () => {
+    act(() => {
+      useConnections.getState().setStored([], [config(ids.prod, 'prod', { env_tag: 'production' })]);
+      useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: ids.prod, title: 'Query 1' });
+      useTabs.getState().open({ id: 'q2', kind: 'query', connectionId: null, title: 'Query 2' });
+    });
+    render(<TabBar />);
+    const q1 = screen.getByRole('tab', { name: /Query 1/ });
+    expect(q1).toHaveTextContent('SQL');
+    expect(q1.closest('.tab')).toHaveClass('env-production');
+    expect(screen.getByRole('tab', { name: /Query 2/ })).toHaveTextContent('SQL');
+  });
 });
