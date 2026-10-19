@@ -41,6 +41,7 @@ const FIELDS: Record<string, { tab: TabId; id: string }> = {
   passphrase: { tab: 'ssh', id: 'cd-ssh-passphrase' },
   'ssl.ca_path': { tab: 'ssl', id: 'cd-ssl-ca' },
   'ssl.cert_path': { tab: 'ssl', id: 'cd-ssl-cert' },
+  'ssl.key_path': { tab: 'ssl', id: 'cd-ssl-key' },
 };
 
 /** Backend field path -> the form value it comes from. */
@@ -56,6 +57,7 @@ const FIELD_KEYS: Record<string, keyof Form> = {
   passphrase: 'passphrase',
   'ssl.ca_path': 'sslCa',
   'ssl.cert_path': 'sslCert',
+  'ssl.key_path': 'sslKey',
 };
 
 interface FieldError {
@@ -545,7 +547,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         </div>
         <div className="span2">{pathInput('cd-ssl-ca', 'CA certificate', 'sslCa', 'ssl.ca_path')}</div>
         <div className="span2">{pathInput('cd-ssl-cert', 'Client certificate', 'sslCert', 'ssl.cert_path')}</div>
-        <div className="span2">{pathInput('cd-ssl-key', 'Client key', 'sslKey')}</div>
+        <div className="span2">{pathInput('cd-ssl-key', 'Client key', 'sslKey', 'ssl.key_path')}</div>
       </div>
     ),
     advanced: (

@@ -30,8 +30,8 @@ pub(crate) fn ssl_opts(ssl: &SslConfig, server_name: &str) -> Result<Option<SslO
     match (&ssl.cert_path, &ssl.key_path) {
         (Some(cert), Some(key)) => {
             opts = opts.with_client_identity(Some(ClientIdentity::new(
-                read_file(cert, "client certificate")?.into(),
-                read_file(key, "client key")?.into(),
+                read_file(cert, "client certificate", "ssl.cert_path")?.into(),
+                read_file(key, "client key", "ssl.key_path")?.into(),
             )));
         }
         (None, None) => {}
@@ -55,13 +55,15 @@ fn verifying(ssl: &SslConfig) -> Result<SslOpts, DbError> {
         message: "SSL verification requires a CA certificate file".into(),
     })?;
     Ok(SslOpts::default()
-        .with_root_certs(vec![read_file(ca, "CA certificate")?.into()])
+        .with_root_certs(vec![read_file(ca, "CA certificate", "ssl.ca_path")?.into()])
         .with_disable_built_in_roots(true))
 }
 
-fn read_file(path: &Path, what: &str) -> Result<Vec<u8>, DbError> {
-    std::fs::read(path).map_err(|e| DbError::Tls {
-        message: format!("cannot read {what} file {}: {e}", path.display()),
+/// A certificate / key file the user chose; failing to read it is reported at `field`.
+fn read_file(path: &Path, what: &str, field: &str) -> Result<Vec<u8>, DbError> {
+    std::fs::read(path).map_err(|e| DbError::Config {
+        field: Some(field.into()),
+        message: format!("cannot read the {what} file {}: {e}", path.display()),
     })
 }
 
@@ -237,19 +239,34 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_files_are_tls_errors() {
-        let missing = PathBuf::from("Z:\\nope\\ca.pem");
-        let err = ssl_opts(&ssl(SslMode::VerifyFull, Some(missing.clone())), "db").unwrap_err();
-        assert!(matches!(err, DbError::Tls { .. }), "{err:?}");
-        let bad_identity = SslConfig {
-            cert_path: Some(missing),
+    fn unreadable_files_are_field_errors() {
+        let missing = PathBuf::from("Z:\\nope\\missing.pem");
+        assert_eq!(
+            config_field(ssl_opts(
+                &ssl(SslMode::VerifyFull, Some(missing.clone())),
+                "db"
+            ))
+            .as_deref(),
+            Some("ssl.ca_path")
+        );
+        let bad_cert = SslConfig {
+            cert_path: Some(missing.clone()),
             key_path: Some(certs("client-key.pem")),
             ..ssl(SslMode::Require, None)
         };
-        assert!(matches!(
-            ssl_opts(&bad_identity, "db"),
-            Err(DbError::Tls { .. })
-        ));
+        assert_eq!(
+            config_field(ssl_opts(&bad_cert, "db")).as_deref(),
+            Some("ssl.cert_path")
+        );
+        let bad_key = SslConfig {
+            cert_path: Some(certs("client.pem")),
+            key_path: Some(missing),
+            ..ssl(SslMode::Require, None)
+        };
+        assert_eq!(
+            config_field(ssl_opts(&bad_key, "db")).as_deref(),
+            Some("ssl.key_path")
+        );
     }
 
     fn wrapped(t: rustls::Error) -> MyError {

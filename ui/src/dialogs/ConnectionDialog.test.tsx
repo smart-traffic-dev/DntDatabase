@@ -66,6 +66,24 @@ describe('ConnectionDialog', () => {
     expect(screen.getByLabelText('Key file')).not.toHaveAttribute('aria-invalid');
   });
 
+  it('unreadable_client_key_error_goes_to_its_field', async () => {
+    mockBackend({
+      test_connection: () => {
+        // The drivers report unreadable CA / certificate / key files as config errors.
+        throw fail('field_ssl_ca_path', {
+          field: 'ssl.key_path',
+          message: 'Cannot read the client key file key.pem: access denied.',
+        });
+      },
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(screen.getByTestId('conn-test'));
+    expect(await screen.findByRole('tab', { name: 'SSL', selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Cannot read the client key file');
+    expect(screen.getByLabelText('Client key')).toHaveAttribute('aria-invalid', 'true');
+  });
+
   it('test_success_shows_version_and_timings', async () => {
     mockBackend({ test_connection: () => okResult });
     const user = userEvent.setup();

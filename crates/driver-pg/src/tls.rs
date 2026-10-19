@@ -111,7 +111,7 @@ fn roots(ssl: Option<&SslConfig>) -> Result<RootCertStore, DbError> {
             message: "SSL verification requires a CA certificate file".into(),
         })?;
     let mut store = RootCertStore::empty();
-    for cert in read_certs(ca, "CA certificate")? {
+    for cert in read_certs(ca, "CA certificate", "ssl.ca_path")? {
         store.add(cert).map_err(|e| DbError::Tls {
             message: format!("invalid CA certificate in {}: {e}", ca.display()),
         })?;
@@ -122,9 +122,10 @@ fn roots(ssl: Option<&SslConfig>) -> Result<RootCertStore, DbError> {
 fn client_identity(ssl: &SslConfig) -> Result<Option<Identity>, DbError> {
     match (&ssl.cert_path, &ssl.key_path) {
         (Some(cert), Some(key)) => {
-            let certs = read_certs(cert, "client certificate")?;
-            let key = PrivateKeyDer::from_pem_file(key).map_err(|e| DbError::Tls {
-                message: format!("cannot read client key file {}: {e}", key.display()),
+            let certs = read_certs(cert, "client certificate", "ssl.cert_path")?;
+            let key = PrivateKeyDer::from_pem_file(key).map_err(|e| DbError::Config {
+                field: Some("ssl.key_path".into()),
+                message: format!("cannot read the client key file {}: {e}", key.display()),
             })?;
             Ok(Some((certs, key)))
         }
@@ -136,9 +137,16 @@ fn client_identity(ssl: &SslConfig) -> Result<Option<Identity>, DbError> {
     }
 }
 
-fn read_certs(path: &Path, what: &str) -> Result<Vec<CertificateDer<'static>>, DbError> {
-    let err = |e: &dyn std::fmt::Display| DbError::Tls {
-        message: format!("cannot read {what} file {}: {e}", path.display()),
+/// PEM certificates from a file the user chose; a file that cannot be read (or holds no
+/// certificate) is reported at `field`.
+fn read_certs(
+    path: &Path,
+    what: &str,
+    field: &str,
+) -> Result<Vec<CertificateDer<'static>>, DbError> {
+    let err = |e: &dyn std::fmt::Display| DbError::Config {
+        field: Some(field.into()),
+        message: format!("cannot read the {what} file {}: {e}", path.display()),
     };
     let certs = CertificateDer::pem_file_iter(path)
         .map_err(|e| err(&e))?
@@ -380,16 +388,44 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_files_are_tls_errors() {
-        let missing = PathBuf::from("Z:\\nope\\ca.pem");
-        let r = tls_setup(Some(&ssl(SslMode::VerifyFull, Some(missing))), "db");
-        assert!(matches!(r, Err(DbError::Tls { .. })));
-        // A key file is not a certificate.
-        let r = tls_setup(
-            Some(&ssl(SslMode::VerifyCa, Some(certs("client-key.pem")))),
-            "db",
+    fn unreadable_files_are_field_errors() {
+        let missing = PathBuf::from("Z:\\nope\\missing.pem");
+        let field = |r| config_error(r).0;
+        assert_eq!(
+            field(tls_setup(
+                Some(&ssl(SslMode::VerifyFull, Some(missing.clone()))),
+                "db"
+            ))
+            .as_deref(),
+            Some("ssl.ca_path")
         );
-        assert!(matches!(r, Err(DbError::Tls { .. })));
+        // A key file is not a certificate.
+        assert_eq!(
+            field(tls_setup(
+                Some(&ssl(SslMode::VerifyCa, Some(certs("client-key.pem")))),
+                "db",
+            ))
+            .as_deref(),
+            Some("ssl.ca_path")
+        );
+        let bad_cert = SslConfig {
+            cert_path: Some(missing.clone()),
+            key_path: Some(certs("client-key.pem")),
+            ..ssl(SslMode::Require, None)
+        };
+        assert_eq!(
+            field(tls_setup(Some(&bad_cert), "db")).as_deref(),
+            Some("ssl.cert_path")
+        );
+        let bad_key = SslConfig {
+            cert_path: Some(certs("client.pem")),
+            key_path: Some(missing),
+            ..ssl(SslMode::Require, None)
+        };
+        assert_eq!(
+            field(tls_setup(Some(&bad_key), "db")).as_deref(),
+            Some("ssl.key_path")
+        );
     }
 
     fn leaf(name: &str) -> CertificateDer<'static> {
