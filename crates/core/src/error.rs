@@ -219,6 +219,8 @@ impl From<DbError> for AppError {
 
 const HINT_DB_MISSING: &str = "Database does not exist.";
 const HINT_ACCESS_DENIED: &str = "Wrong user/password, or this user may not log in from your host.";
+const HINT_PG_PASSWORD: &str = "Wrong user/password.";
+const HINT_PG_HBA: &str = "pg_hba.conf rejects connections from this host/user.";
 const HINT_REFUSED: &str =
     "Connection refused: check host, port, firewall, or whether an SSH tunnel is needed.";
 
@@ -242,10 +244,8 @@ pub fn hint(err: &DbError) -> Option<&'static str> {
             }
             match sqlstate.as_deref() {
                 Some("3D000") => return Some(HINT_DB_MISSING),
-                Some("28000") => {
-                    return Some("pg_hba.conf rejects connections from this host/user.")
-                }
-                Some("28P01") => return Some("Wrong user/password."),
+                Some("28000") => return Some(HINT_PG_HBA),
+                Some("28P01") => return Some(HINT_PG_PASSWORD),
                 _ => {}
             }
             if is_access_denied(&message.to_lowercase()) {
@@ -257,6 +257,11 @@ pub fn hint(err: &DbError) -> Option<&'static str> {
             let m = message.to_lowercase();
             if is_access_denied(&m) || m.contains("access denied") {
                 Some(HINT_ACCESS_DENIED)
+            } else if m.contains("[28p01]") {
+                // PostgreSQL auth failures carry their SQLSTATE in brackets (driver-pg).
+                Some(HINT_PG_PASSWORD)
+            } else if m.contains("[28000]") {
+                Some(HINT_PG_HBA)
             } else {
                 None
             }
@@ -310,6 +315,21 @@ mod tests {
             Some("pg_hba.conf rejects connections from this host/user.")
         );
         assert_eq!(hint(&mk("", "28P01")), Some("Wrong user/password."));
+    }
+    #[test]
+    fn hint_pg_auth_errors() {
+        let auth = |m: &str| DbError::Auth { message: m.into() };
+        assert_eq!(
+            hint(&auth(
+                "password authentication failed for user \"postgres\" [28P01]"
+            )),
+            Some("Wrong user/password.")
+        );
+        assert_eq!(
+            hint(&auth("no pg_hba.conf entry for host \"1.2.3.4\" [28000]")),
+            Some("pg_hba.conf rejects connections from this host/user.")
+        );
+        assert_eq!(hint(&auth("something else")), None);
     }
     #[test]
     fn hint_conn_refused() {
