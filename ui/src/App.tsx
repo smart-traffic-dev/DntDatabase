@@ -5,6 +5,7 @@ import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
 import { TabBar } from './components/TabBar';
 import { Toolbar } from './components/Toolbar';
+import { ObjectTab } from './tabs/ObjectTab';
 import { useTabs } from './store/tabs';
 import { useTree } from './store/tree';
 
@@ -15,13 +16,7 @@ function Workspace() {
       <TabBar />
       <section className="tab-content" aria-label="Tab content">
         {tab ? (
-          <div className="empty">
-            <strong>{tab.title}</strong>
-            <span>
-              {tab.objectRef.database}
-              {tab.objectRef.schema ? `.${tab.objectRef.schema}` : ''} · {tab.objectRef.kind}
-            </span>
-          </div>
+          <ObjectTab key={tab.id} tab={tab} />
         ) : (
           <div className="empty">
             <strong>No object open</strong>

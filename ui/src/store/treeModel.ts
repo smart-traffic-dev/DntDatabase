@@ -67,6 +67,18 @@ export const nodeKey = (nodeId: string): string[] =>
       return match ? `${match[1]}${decodeURIComponent(match[2] ?? '')}` : segment;
     });
 
+/** The `refresh_node` key of an object (its tree path; `detail` / `ddl` are dropped with it). */
+export function objectNodeKey(o: ObjectRef): string[] {
+  const id = [
+    'conn:-',
+    `db:${seg(o.database)}`,
+    ...(o.schema === null ? [] : [`schema:${seg(o.schema)}`]),
+    `folder:${o.kind}`,
+    `obj:${o.kind}:${seg(o.name)}`,
+  ].join('/');
+  return nodeKey(id);
+}
+
 export function engineOf(variant: ServerVariant): Engine {
   switch (variant) {
     case 'Postgres':
