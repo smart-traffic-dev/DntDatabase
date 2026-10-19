@@ -115,6 +115,9 @@ fn delimiter_directive(sql: &str, i: usize) -> Option<(&str, usize)> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Skipped {
     Comment,
+    /// MySQL/MariaDB executable comment `/*!NNNNN … */` or `/*M!NNNNNN … */`:
+    /// the server runs its body, so it is never blank.
+    ExecComment,
     /// String literal, quoted identifier or dollar-quoted body.
     Quoted,
 }
@@ -135,7 +138,15 @@ pub(super) fn skip_at(b: &[u8], i: usize, dialect: Dialect) -> Option<(Skipped, 
             Some((Skipped::Comment, line_end(b, i)))
         }
         b'#' if mysql => Some((Skipped::Comment, line_end(b, i))),
-        b'/' if next == Some(b'*') => Some((Skipped::Comment, block_comment_end(b, i, !mysql))),
+        b'/' if next == Some(b'*') => {
+            let rest = &b[i + 2..];
+            let kind = if mysql && (rest.starts_with(b"!") || rest.starts_with(b"M!")) {
+                Skipped::ExecComment
+            } else {
+                Skipped::Comment
+            };
+            Some((kind, block_comment_end(b, i, !mysql)))
+        }
         q @ (b'\'' | b'"') => Some((Skipped::Quoted, quote_end(b, i, q, mysql))),
         b'`' if mysql => Some((Skipped::Quoted, quote_end(b, i, b'`', false))),
         b'E' | b'e' if !mysql && next == Some(b'\'') && !prev_is_ident(b, i) => {
@@ -323,6 +334,24 @@ mod tests {
             // Unterminated constructs swallow the rest of the input.
             ("select $x$ ; ", Postgres, vec!["select $x$ ;"]),
             ("select 1 /* ; ", MySql, vec!["select 1 /* ;"]),
+            // MySQL executable comments are statements, not blank fragments.
+            (
+                "/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\nselect 1;",
+                MySql,
+                vec!["/*!40014 SET FOREIGN_KEY_CHECKS=0 */", "select 1"],
+            ),
+            (
+                "/*!50001 CREATE VIEW v AS select 1 */;",
+                MySql,
+                vec!["/*!50001 CREATE VIEW v AS select 1 */"],
+            ),
+            (
+                "/*M!100100 SET a=1; */;\n/*!40101 SET NAMES utf8mb4 */",
+                MySql,
+                vec!["/*M!100100 SET a=1; */", "/*!40101 SET NAMES utf8mb4 */"],
+            ),
+            // In PG `/*!` is an ordinary comment.
+            ("select 1; /*! x */", Postgres, vec!["select 1"]),
         ]
     }
 
