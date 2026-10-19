@@ -170,6 +170,53 @@ async fn password_auth_forwards_to_mysql() {
 }
 
 #[tokio::test]
+async fn every_target_works_through_the_tunnel() {
+    require_db!();
+    let _g = SSH_SERVER.read().await;
+    let (_d, kh) = trusted_known_hosts().await;
+    for t in Target::all() {
+        let (cfg, secrets) = password_setup();
+        let tunnel = Tunnel::open(&cfg, secrets, target(t), &kh, TIMEOUT)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let driver: &dyn Driver = match t.kind() {
+            dnt_core::server::DbKind::MySql => &MySqlDriver,
+            dnt_core::server::DbKind::Postgres => &PgDriver,
+        };
+        select_one_through(&tunnel, driver, t).await;
+        assert_eq!(tunnel.last_channel_error(), None, "{t:?}");
+        tunnel.close().await;
+    }
+}
+
+#[tokio::test]
+async fn unreachable_target_records_the_channel_error() {
+    require_db!();
+    let _g = SSH_SERVER.read().await;
+    let (_d, kh) = trusted_known_hosts().await;
+    let (cfg, secrets) = password_setup();
+    // Nothing listens on this port of the mysql8 container.
+    let tunnel = Tunnel::open(&cfg, secrets, ("mysql8".into(), 3399), &kh, TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(tunnel.last_channel_error(), None);
+    let mut db = Target::MySql8.resolved(None);
+    db.host = "127.0.0.1".into();
+    db.port = tunnel.local_addr().port();
+    let err = MySqlDriver
+        .connect(&db)
+        .await
+        .err()
+        .expect("nothing listens there");
+    let recorded = tunnel.last_channel_error();
+    assert!(
+        recorded.is_some(),
+        "driver saw {err:?}, no channel error recorded"
+    );
+    tunnel.close().await;
+}
+
+#[tokio::test]
 async fn wrong_password_is_auth_error() {
     require_db!();
     let _g = SSH_SERVER.read().await;

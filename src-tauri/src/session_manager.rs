@@ -12,7 +12,7 @@ use crate::cache::{NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{Driver, ExecOptions, Introspector, RowSink, Session};
 pub use dnt_core::error::StageTiming;
-use dnt_core::error::{ConnectStage, DbError, SshStage};
+use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
@@ -573,6 +573,13 @@ impl SessionManager {
         let session = match connect_db(driver.as_ref(), &resolved).await {
             Ok(s) => s,
             Err(e) => {
+                // Through a tunnel, a refused channel explains the failure better than
+                // the driver's EOF: the bastion could not reach the database.
+                let channel = tunnel.as_ref().and_then(Tunnel::last_channel_error);
+                let e = match channel {
+                    Some(cause) => ssh_channel_error(&cfg.host, cfg.port, &cause),
+                    None => e,
+                };
                 if let Some(t) = tunnel {
                     t.close().await;
                 }

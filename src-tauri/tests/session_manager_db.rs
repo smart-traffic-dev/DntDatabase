@@ -2,7 +2,7 @@
 
 use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode, SshAuth};
 use dnt_core::driver::{Driver, Introspector};
-use dnt_core::error::{ConnectStage, DbError};
+use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{ObjectKind, Scope};
 use dnt_core::secret::{MemorySecretStore, SecretStore};
 use dnt_core::server::{DbKind, ServerVariant};
@@ -159,6 +159,52 @@ async fn open_mysql8_via_ssh_reports_timings() {
         .unwrap();
     assert!(dbs.iter().any(|d| d.name == FIXTURE_DB), "{dbs:?}");
     f.sm.close(id).await;
+}
+
+#[tokio::test]
+async fn unreachable_database_behind_ssh_reports_the_channel_step() {
+    require_db!();
+    let f = fixture();
+    let (ssh, ssh_secrets) = ssh_config(SshAuth::Password);
+    let cfg = ConnectionConfig {
+        // The bastion resolves the host, but nothing listens on this port.
+        host: "mysql8".into(),
+        port: 3399,
+        ssh: Some(ssh),
+        ..direct(Target::MySql8, None)
+    };
+    let secrets = || NewSecrets {
+        db_password: Some(SecretString::from(TEST_PASSWORD)),
+        ssh_password: ssh_secrets.ssh_password.clone(),
+        ssh_key_passphrase: None,
+    };
+    if let Err(DbError::SshHostKeyUnknown {
+        host,
+        port,
+        fingerprint,
+        key_openssh,
+    }) =
+        f.sm.test(&cfg, secrets())
+            .await
+            .map_err(DbError::into_unstaged)
+    {
+        f.known_hosts
+            .trust(&host, port, &fingerprint, &key_openssh)
+            .unwrap();
+    }
+    let err = f.sm.test(&cfg, secrets()).await.unwrap_err();
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "ssh", "{app:?}");
+    assert_eq!(app.stage.as_deref(), Some("channel"));
+    assert_eq!(
+        app.hint.as_deref(),
+        Some("The SSH server could not reach mysql8:3399.")
+    );
+    let stages: Vec<_> = app.timings.unwrap().iter().map(|t| t.stage).collect();
+    assert_eq!(
+        stages,
+        [ConnectStage::ResolveSecrets, ConnectStage::OpenTunnel]
+    );
 }
 
 #[tokio::test]

@@ -117,6 +117,8 @@ fn ssh_err(stage: SshStage, message: impl Into<String>) -> DbError {
 pub struct Tunnel {
     local_addr: SocketAddr,
     alive: Arc<AtomicBool>,
+    /// Why the SSH server last refused to open a forwarding channel (set by `forward`).
+    channel_error: Arc<Mutex<Option<String>>>,
     handle: Arc<Handle<Client>>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<()>>,
@@ -176,16 +178,19 @@ impl Tunnel {
             message: format!("local tunnel address: {e}"),
         })?;
         let (stop, stopped) = oneshot::channel();
+        let channel_error = Arc::new(Mutex::new(None));
         let task = tokio::spawn(accept_loop(
             listener,
             Arc::clone(&handle),
             target,
             stopped,
             dead,
+            Arc::clone(&channel_error),
         ));
         Ok(Tunnel {
             local_addr,
             alive,
+            channel_error,
             handle,
             stop: Some(stop),
             task: Some(task),
@@ -277,6 +282,15 @@ impl Tunnel {
         self.local_addr
     }
 
+    /// Why the SSH server last refused a forwarding channel (e.g. the database host or
+    /// port is unreachable from it), if it did since the tunnel opened.
+    pub fn last_channel_error(&self) -> Option<String> {
+        self.channel_error
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
     /// False once the SSH session has ended (server gone, keepalive failure, closed).
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst) && !self.handle.is_closed()
@@ -314,6 +328,7 @@ async fn accept_loop(
     target: (String, u16),
     mut stop: oneshot::Receiver<()>,
     dead: Arc<Notify>,
+    channel_error: Arc<Mutex<Option<String>>>,
 ) {
     // Dropping the set (when the loop ends) aborts every in-flight forward.
     let mut conns = JoinSet::new();
@@ -324,7 +339,13 @@ async fn accept_loop(
             Some(_) = conns.join_next(), if !conns.is_empty() => {}
             accepted = listener.accept() => match accepted {
                 Ok((tcp, peer)) => {
-                    conns.spawn(forward(Arc::clone(&handle), target.clone(), tcp, peer));
+                    conns.spawn(forward(
+                        Arc::clone(&handle),
+                        target.clone(),
+                        tcp,
+                        peer,
+                        Arc::clone(&channel_error),
+                    ));
                 }
                 // Transient (e.g. out of sockets): back off instead of spinning.
                 Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
@@ -333,12 +354,14 @@ async fn accept_loop(
     }
 }
 
-/// Copies one accepted connection over its own `direct-tcpip` channel.
+/// Copies one accepted connection over its own `direct-tcpip` channel. A refused channel
+/// is recorded in `channel_error` before the client's connection is dropped.
 async fn forward(
     handle: Arc<Handle<Client>>,
     (host, port): (String, u16),
     mut tcp: TcpStream,
     peer: SocketAddr,
+    channel_error: Arc<Mutex<Option<String>>>,
 ) {
     let channel = match handle
         .channel_open_direct_tcpip(
@@ -351,7 +374,10 @@ async fn forward(
     {
         Ok(c) => c,
         // Dropping `tcp` closes the client's connection, which it reports as an error.
-        Err(_) => return,
+        Err(e) => {
+            *channel_error.lock().unwrap_or_else(|p| p.into_inner()) = Some(e.to_string());
+            return;
+        }
     };
     let mut stream = channel.into_stream();
     let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
