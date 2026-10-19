@@ -72,6 +72,72 @@ columns:
   - name: c_enum
     logical: Enum
     db_type: order_status
+  - name: c_inet
+    logical: Other
+    db_type: inet
+  - name: c_inet_host
+    logical: Other
+    db_type: inet
+  - name: c_inet6
+    logical: Other
+    db_type: inet
+  - name: c_inet6_mapped
+    logical: Other
+    db_type: inet
+  - name: c_inet6_compat
+    logical: Other
+    db_type: inet
+  - name: c_inet6_single_zero
+    logical: Other
+    db_type: inet
+  - name: c_cidr
+    logical: Other
+    db_type: cidr
+  - name: c_cidr6
+    logical: Other
+    db_type: cidr
+  - name: c_macaddr
+    logical: Other
+    db_type: macaddr
+  - name: c_macaddr8
+    logical: Other
+    db_type: macaddr8
+  - name: c_money
+    logical: Other
+    db_type: money
+  - name: c_money_small
+    logical: Other
+    db_type: money
+  - name: c_timetz
+    logical: Other
+    db_type: timetz
+  - name: c_timetz_secs
+    logical: Other
+    db_type: timetz
+  - name: c_bit
+    logical: Other
+    db_type: bit
+  - name: c_varbit
+    logical: Other
+    db_type: varbit
+  - name: c_tsvector
+    logical: Other
+    db_type: tsvector
+  - name: c_xml
+    logical: Other
+    db_type: xml
+  - name: c_timestamp_bc
+    logical: DateTime
+    db_type: timestamp
+  - name: c_timestamptz_bc
+    logical: DateTime
+    db_type: timestamptz
+  - name: c_date_bc
+    logical: Date
+    db_type: date
+  - name: c_inet_array
+    logical: Array
+    db_type: "inet[]"
 rows:
   - - t: Int
       v: 1
@@ -142,8 +208,115 @@ rows:
           v: z
     - t: Text
       v: shipped
+    - t: Other
+      v:
+        type_name: inet
+        text: 192.168.0.1/24
+    - t: Other
+      v:
+        type_name: inet
+        text: 127.0.0.1
+    - t: Other
+      v:
+        type_name: inet
+        text: "fe80::1:0:0:1/64"
+    - t: Other
+      v:
+        type_name: inet
+        text: "::ffff:1.2.3.4"
+    - t: Other
+      v:
+        type_name: inet
+        text: "::1.2.3.4"
+    - t: Other
+      v:
+        type_name: inet
+        text: "1:0:2:3:4:5:6:7"
+    - t: Other
+      v:
+        type_name: cidr
+        text: 10.0.0.0/8
+    - t: Other
+      v:
+        type_name: cidr
+        text: "2001:db8::/32"
+    - t: Other
+      v:
+        type_name: macaddr
+        text: "08:00:2b:01:02:03"
+    - t: Other
+      v:
+        type_name: macaddr8
+        text: "08:00:2b:01:02:03:04:05"
+    - t: Other
+      v:
+        type_name: money
+        text: "-$1,234,567.89"
+    - t: Other
+      v:
+        type_name: money
+        text: $0.05
+    - t: Other
+      v:
+        type_name: timetz
+        text: "12:34:56.5+05:30"
+    - t: Other
+      v:
+        type_name: timetz
+        text: "01:02:03-08:00:15"
+    - t: Other
+      v:
+        type_name: bit
+        text: "1010"
+    - t: Other
+      v:
+        type_name: varbit
+        text: "1111111101"
+    - t: Other
+      v:
+        type_name: tsvector
+        text: "'a':1A 'back\\\\slash' 'cat':5 'fat':2B,4C 'it''s' 'ưu':3"
+    - t: Other
+      v:
+        type_name: xml
+        text: "<a>Nguyễn &amp; x</a>"
+    - t: DateTime
+      v: "0044-03-15 12:00:00 BC"
+    - t: TimestampTz
+      v: "0044-03-15 12:00:00.5+00 BC"
+    - t: Date
+      v: 0044-03-15 BC
+    - t: Array
+      v:
+        - t: Other
+          v:
+            type_name: inet
+            text: 10.0.0.1
+        - t: "Null"
   - - t: Int
       v: 2
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
     - t: "Null"
     - t: "Null"
     - t: "Null"

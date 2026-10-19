@@ -79,8 +79,15 @@ impl Generations {
         if gen == 0 {
             return None;
         }
-        self.cancelled.store(gen, Ordering::SeqCst);
+        self.mark_cancelled(gen);
         Some(gen)
+    }
+
+    /// Records a cancel for generation `gen`. `fetch_max`: a cancel that read an older
+    /// generation before a newer call began must never lower the mark and so undo the
+    /// newer call's cancel.
+    fn mark_cancelled(&self, gen: u64) {
+        self.cancelled.fetch_max(gen, Ordering::SeqCst);
     }
 
     fn is_running(&self, gen: u64) -> bool {
@@ -161,5 +168,16 @@ mod tests {
             gen: 1,
         });
         assert!(gens.is_running(2));
+    }
+
+    #[test]
+    fn a_stale_cancel_never_lowers_the_cancelled_generation() {
+        let gens = Arc::new(Generations::default());
+        drop(gens.begin());
+        let second = gens.begin();
+        assert_eq!(gens.request(), Some(2));
+        // A click that read generation 1 before it ended lands late.
+        gens.mark_cancelled(1);
+        assert!(second.cancelled(), "the newer call lost its cancel");
     }
 }

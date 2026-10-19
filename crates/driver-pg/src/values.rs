@@ -137,9 +137,204 @@ fn decode(ty: &Type, raw: &[u8]) -> Option<Value> {
                 ),
             }
         }
+        // Types without a dedicated `Value`: PG's own text form, decoded from the fixed,
+        // documented binary format (the `*_send` functions of the server).
+        Type::INET | Type::CIDR => other_of(ty, inet(raw, *ty == Type::CIDR)?),
+        Type::MACADDR => other_of(ty, mac(&fixed::<6>(raw)?)),
+        Type::MACADDR8 => other_of(ty, mac(&fixed::<8>(raw)?)),
+        Type::MONEY => other_of(ty, money(i64::from_be_bytes(fixed(raw)?))),
+        Type::TIMETZ => {
+            let b = fixed::<12>(raw)?;
+            let time = time_of_day(i64::from_be_bytes(b[..8].try_into().ok()?))?;
+            let zone = i32::from_be_bytes(b[8..].try_into().ok()?);
+            other_of(ty, format!("{time}{}", tz_offset(zone)))
+        }
+        Type::BIT | Type::VARBIT => other_of(ty, bit_string(raw)?),
+        Type::TS_VECTOR => other_of(ty, tsvector(raw)?),
+        // Sent as text in the client encoding (UTF-8).
+        Type::XML => other_of(ty, std::str::from_utf8(raw).ok()?.to_string()),
         _ if is_text_type(ty) => Value::Text(text(raw)),
         _ => return None,
     })
+}
+
+fn other_of(ty: &Type, text: String) -> Value {
+    Value::Other {
+        type_name: type_name(ty),
+        text,
+    }
+}
+
+/// inet / cidr: `family` (2 = IPv4, 3 = IPv6), `bits`, `is_cidr`, address length, then the
+/// address. Like `network_out`: the prefix length is printed for a `cidr`, and for an
+/// `inet` only when it is not the full address width.
+fn inet(raw: &[u8], cidr: bool) -> Option<String> {
+    let (head, addr) = raw.split_at_checked(4)?;
+    let (family, bits, len) = (head[0], head[1], usize::from(head[3]));
+    let (mut s, max) = match (family, len, addr.len()) {
+        (2, 4, 4) => (
+            addr.iter().map(u8::to_string).collect::<Vec<_>>().join("."),
+            32,
+        ),
+        (3, 16, 16) => (ipv6(addr.try_into().ok()?), 128),
+        _ => return None,
+    };
+    if cidr || bits != max {
+        s.push_str(&format!("/{bits}"));
+    }
+    Some(s)
+}
+
+/// IPv6 text as PostgreSQL's `inet_net_ntop` prints it (from BIND): lowercase hex groups,
+/// the first longest run of two or more zero groups shortened to `::`, and an IPv4 tail
+/// in dotted form for IPv4-compatible (`::a.b.c.d`) and IPv4-mapped (`::ffff:a.b.c.d`)
+/// addresses.
+fn ipv6(b: &[u8; 16]) -> String {
+    let words: Vec<u16> = b
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    // (start, len) of the first longest zero run.
+    let mut best: Option<(usize, usize)> = None;
+    let mut i = 0;
+    while i < 8 {
+        if words[i] != 0 {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < 8 && words[i] == 0 {
+            i += 1;
+        }
+        if best.is_none_or(|(_, len)| i - start > len) {
+            best = Some((start, i - start));
+        }
+    }
+    let best = best.filter(|&(_, len)| len >= 2);
+    let mut s = String::new();
+    for (i, w) in words.iter().enumerate() {
+        if let Some((start, len)) = best {
+            if (start..start + len).contains(&i) {
+                if i == start {
+                    s.push(':');
+                }
+                continue;
+            }
+        }
+        if i != 0 {
+            s.push(':');
+        }
+        let ipv4_tail =
+            matches!(best, Some((0, 6))) || matches!(best, Some((0, 5)) if words[5] == 0xffff);
+        if i == 6 && ipv4_tail {
+            s.push_str(&format!("{}.{}.{}.{}", b[12], b[13], b[14], b[15]));
+            return s;
+        }
+        s.push_str(&format!("{w:x}"));
+    }
+    if best.is_some_and(|(start, len)| start + len == 8) {
+        s.push(':');
+    }
+    s
+}
+
+fn mac(b: &[u8]) -> String {
+    b.iter()
+        .map(|x| format!("{x:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// `money` is an int8 count of the currency's smallest unit; its text form depends on
+/// `lc_monetary`. Rendered as PostgreSQL prints it in the `C` and `en_US` locales (the
+/// server default): `$`, 2 decimals, `,` every 3 digits, a leading `-`.
+fn money(v: i64) -> String {
+    let abs = v.unsigned_abs();
+    let int = (abs / 100).to_string();
+    let mut grouped = String::with_capacity(int.len() + int.len() / 3);
+    for (i, c) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    let sign = if v < 0 { "-" } else { "" };
+    format!("{sign}${grouped}.{:02}", abs % 100)
+}
+
+/// Zone of a `timetz` (seconds *west* of UTC on the wire) as PostgreSQL prints it:
+/// `+HH`, `+HH:MM` or `+HH:MM:SS`.
+fn tz_offset(zone: i32) -> String {
+    let sign = if zone <= 0 { '+' } else { '-' };
+    let a = zone.unsigned_abs();
+    let (h, m, s) = (a / 3600, a / 60 % 60, a % 60);
+    if s != 0 {
+        format!("{sign}{h:02}:{m:02}:{s:02}")
+    } else if m != 0 {
+        format!("{sign}{h:02}:{m:02}")
+    } else {
+        format!("{sign}{h:02}")
+    }
+}
+
+/// bit / varbit: int32 bit count, then the bits packed most significant first.
+fn bit_string(raw: &[u8]) -> Option<String> {
+    let (len, bytes) = raw.split_at_checked(4)?;
+    let n = usize::try_from(i32::from_be_bytes(len.try_into().ok()?)).ok()?;
+    if bytes.len() != n.div_ceil(8) {
+        return None;
+    }
+    Some(
+        (0..n)
+            .map(|i| {
+                if bytes[i / 8] & (0x80 >> (i % 8)) != 0 {
+                    '1'
+                } else {
+                    '0'
+                }
+            })
+            .collect(),
+    )
+}
+
+/// tsvector: int32 lexeme count, then per lexeme its NUL-terminated text, a uint16
+/// position count and the positions (14 bits of position, 2 bits of weight). Printed as
+/// `tsvectorout` does: `'lexeme':1A,2` with `'` and `\` doubled inside the quotes.
+fn tsvector(raw: &[u8]) -> Option<String> {
+    let (count, mut rest) = raw.split_at_checked(4)?;
+    let count = u32::from_be_bytes(count.try_into().ok()?);
+    let mut out = String::new();
+    for i in 0..count {
+        let nul = rest.iter().position(|&b| b == 0)?;
+        let lexeme = std::str::from_utf8(&rest[..nul]).ok()?;
+        let (npos, tail) = rest[nul + 1..].split_at_checked(2)?;
+        let npos = usize::from(u16::from_be_bytes(npos.try_into().ok()?));
+        let (positions, tail) = tail.split_at_checked(npos * 2)?;
+        rest = tail;
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push('\'');
+        for c in lexeme.chars() {
+            if c == '\'' || c == '\\' {
+                out.push(c);
+            }
+            out.push(c);
+        }
+        out.push('\'');
+        for (j, p) in positions.chunks(2).enumerate() {
+            let p = u16::from_be_bytes([p[0], p[1]]);
+            out.push(if j == 0 { ':' } else { ',' });
+            out.push_str(&(p & 0x3fff).to_string());
+            match p >> 14 {
+                3 => out.push('A'),
+                2 => out.push('B'),
+                1 => out.push('C'),
+                _ => {}
+            }
+        }
+    }
+    rest.is_empty().then_some(out)
 }
 
 fn fixed<const N: usize>(raw: &[u8]) -> Option<[u8; N]> {
@@ -313,7 +508,9 @@ fn time_of_day(us: i64) -> Option<String> {
 }
 
 /// `timestamp` as `YYYY-MM-DD HH:MM:SS[.f]`; `timestamptz` (always UTC on the wire) as
-/// ISO 8601 `YYYY-MM-DDTHH:MM:SS[.f]+00:00`.
+/// ISO 8601 `YYYY-MM-DDTHH:MM:SS[.f]+00:00`. ISO 8601 has no era marker, so BC values
+/// are printed as PostgreSQL prints them with `TimeZone = UTC`:
+/// `0044-03-15 12:00:00 BC` / `0044-03-15 12:00:00+00 BC`.
 fn timestamp(us: i64, tz: bool) -> String {
     match us {
         i64::MAX => return "infinity".into(),
@@ -322,15 +519,11 @@ fn timestamp(us: i64, tz: bool) -> String {
     }
     let (date, bc) = ymd(us.div_euclid(USECS_PER_DAY));
     let time = hms(us.rem_euclid(USECS_PER_DAY));
-    let s = if tz {
-        format!("{date}T{time}+00:00")
-    } else {
-        format!("{date} {time}")
-    };
-    if bc {
-        format!("{s} BC")
-    } else {
-        s
+    match (tz, bc) {
+        (false, false) => format!("{date} {time}"),
+        (false, true) => format!("{date} {time} BC"),
+        (true, false) => format!("{date}T{time}+00:00"),
+        (true, true) => format!("{date} {time}+00 BC"),
     }
 }
 
@@ -607,16 +800,199 @@ mod tests {
     #[test]
     fn other_types_as_text_or_hex() {
         assert_eq!(v(&Type::XML, b"<a>x</a>"), other_text("xml", "<a>x</a>"));
-        // inet 127.0.0.1/32 in binary: valid UTF-8, but control bytes -> hex.
-        assert_eq!(
-            v(&Type::INET, &[2, 32, 0, 4, 127, 0, 0, 1]),
-            other_text("inet", "\\x022000047f000001")
-        );
+        // A type outside the table: control bytes -> hex.
         assert_eq!(
             v(&Type::POINT, &[0xff, 0xfe]),
             other_text("point", "\\xfffe")
         );
         assert_eq!(logical(&Type::INET), LogicalType::Other);
         assert_eq!(logical(&Type::INTERVAL), LogicalType::Other);
+    }
+
+    /// inet / cidr wire format: family (2 = IPv4, 3 = IPv6), bits, is_cidr, address
+    /// length, address bytes.
+    fn net(family: u8, bits: u8, cidr: bool, addr: &[u8]) -> Vec<u8> {
+        let mut b = vec![family, bits, u8::from(cidr), addr.len() as u8];
+        b.extend_from_slice(addr);
+        b
+    }
+
+    fn v6(words: [u16; 8]) -> Vec<u8> {
+        words.iter().flat_map(|w| w.to_be_bytes()).collect()
+    }
+
+    #[test]
+    fn inet_and_cidr_as_pg_text() {
+        let inet = |raw: Vec<u8>| v(&Type::INET, &raw);
+        let cidr = |raw: Vec<u8>| v(&Type::CIDR, &raw);
+        assert_eq!(
+            inet(net(2, 32, false, &[127, 0, 0, 1])),
+            other_text("inet", "127.0.0.1")
+        );
+        assert_eq!(
+            inet(net(2, 8, false, &[10, 1, 2, 3])),
+            other_text("inet", "10.1.2.3/8")
+        );
+        assert_eq!(
+            cidr(net(2, 8, true, &[10, 0, 0, 0])),
+            other_text("cidr", "10.0.0.0/8")
+        );
+        assert_eq!(
+            cidr(net(2, 32, true, &[10, 0, 0, 1])),
+            other_text("cidr", "10.0.0.1/32")
+        );
+        let ip6 = |w: [u16; 8], bits: u8| inet(net(3, bits, false, &v6(w)));
+        assert_eq!(
+            ip6([0, 0, 0, 0, 0, 0, 0, 1], 128),
+            other_text("inet", "::1")
+        );
+        assert_eq!(ip6([0; 8], 128), other_text("inet", "::"));
+        assert_eq!(
+            ip6([0, 0, 0, 0, 0, 0xffff, 0x0102, 0x0304], 128),
+            other_text("inet", "::ffff:1.2.3.4")
+        );
+        assert_eq!(
+            ip6([0, 0, 0, 0, 0, 0, 0x0102, 0x0304], 128),
+            other_text("inet", "::1.2.3.4")
+        );
+        // A single zero group is not shortened; the first longest run is.
+        assert_eq!(
+            ip6([1, 0, 2, 3, 4, 5, 6, 7], 128),
+            other_text("inet", "1:0:2:3:4:5:6:7")
+        );
+        assert_eq!(
+            ip6([0xfe80, 0, 0, 0, 1, 0, 0, 1], 64),
+            other_text("inet", "fe80::1:0:0:1/64")
+        );
+        assert_eq!(
+            ip6([1, 0, 0, 2, 0, 0, 3, 4], 128),
+            other_text("inet", "1::2:0:0:3:4")
+        );
+        assert_eq!(
+            ip6([0xabcd, 0, 0, 0, 0, 0, 0, 0], 128),
+            other_text("inet", "abcd::")
+        );
+        assert_eq!(
+            cidr(net(3, 32, true, &v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 0]))),
+            other_text("cidr", "2001:db8::/32")
+        );
+        // Malformed: falls back to hex.
+        assert_eq!(
+            inet(vec![2, 32, 0, 4, 127]),
+            other_text("inet", "\\x022000047f")
+        );
+    }
+
+    #[test]
+    fn macaddr_money_bits() {
+        assert_eq!(
+            v(&Type::MACADDR, &[0x08, 0, 0x2b, 1, 2, 3]),
+            other_text("macaddr", "08:00:2b:01:02:03")
+        );
+        assert_eq!(
+            v(&Type::MACADDR8, &[0x08, 0, 0x2b, 1, 2, 3, 4, 5]),
+            other_text("macaddr8", "08:00:2b:01:02:03:04:05")
+        );
+        let money = |cents: i64| v(&Type::MONEY, &cents.to_be_bytes());
+        assert_eq!(money(-123_456_789), other_text("money", "-$1,234,567.89"));
+        assert_eq!(money(5), other_text("money", "$0.05"));
+        assert_eq!(money(100_000), other_text("money", "$1,000.00"));
+        assert_eq!(
+            money(i64::MIN),
+            other_text("money", "-$92,233,720,368,547,758.08")
+        );
+        let bits = |n: i32, bytes: &[u8]| {
+            let mut b = n.to_be_bytes().to_vec();
+            b.extend_from_slice(bytes);
+            b
+        };
+        assert_eq!(
+            v(&Type::BIT, &bits(4, &[0b1010_0000])),
+            other_text("bit", "1010")
+        );
+        assert_eq!(
+            v(&Type::VARBIT, &bits(10, &[0xff, 0b0100_0000])),
+            other_text("varbit", "1111111101")
+        );
+        assert_eq!(v(&Type::VARBIT, &bits(0, &[])), other_text("varbit", ""));
+        // Byte count not matching the bit length: hex.
+        assert!(matches!(
+            v(&Type::BIT, &bits(9, &[0xff])),
+            Value::Other { text, .. } if text.starts_with("\\x")
+        ));
+    }
+
+    #[test]
+    fn timetz_as_pg_text() {
+        let timetz = |us: i64, zone: i32| {
+            let mut b = us.to_be_bytes().to_vec();
+            b.extend_from_slice(&zone.to_be_bytes());
+            v(&Type::TIMETZ, &b)
+        };
+        // The wire zone is seconds west of UTC.
+        assert_eq!(
+            timetz(45_296_500_000, -19_800),
+            other_text("timetz", "12:34:56.5+05:30")
+        );
+        assert_eq!(
+            timetz(3_723_000_000, 28_815),
+            other_text("timetz", "01:02:03-08:00:15")
+        );
+        assert_eq!(timetz(0, 0), other_text("timetz", "00:00:00+00"));
+    }
+
+    #[test]
+    fn tsvector_as_pg_text() {
+        // Lexemes (NUL-terminated) with positions: 14 bits of position, 2 of weight
+        // (3 = A, 2 = B, 1 = C, 0 = D, not printed).
+        let mut b = 4i32.to_be_bytes().to_vec();
+        for (lexeme, positions) in [
+            ("a", vec![(3u16 << 14) | 1]),
+            ("back\\slash", vec![]),
+            ("fat", vec![(2 << 14) | 2, (1 << 14) | 4]),
+            ("it's", vec![]),
+        ] {
+            b.extend_from_slice(lexeme.as_bytes());
+            b.push(0);
+            b.extend_from_slice(&(positions.len() as u16).to_be_bytes());
+            for p in positions {
+                b.extend_from_slice(&p.to_be_bytes());
+            }
+        }
+        assert_eq!(
+            v(&Type::TS_VECTOR, &b),
+            other_text("tsvector", "'a':1A 'back\\\\slash' 'fat':2B,4C 'it''s'")
+        );
+        assert_eq!(
+            v(&Type::TS_VECTOR, &0i32.to_be_bytes()),
+            other_text("tsvector", "")
+        );
+    }
+
+    #[test]
+    fn bc_timestamps_as_pg_text() {
+        // 0044-03-15 12:00:00 BC (astronomical year -43).
+        let days = civil_days(-43, 3, 15) - PG_EPOCH_DAYS;
+        let us = days * USECS_PER_DAY + 43_200_000_000;
+        assert_eq!(
+            v(&Type::TIMESTAMP, &us.to_be_bytes()),
+            Value::DateTime("0044-03-15 12:00:00 BC".into())
+        );
+        assert_eq!(
+            v(&Type::TIMESTAMPTZ, &us.to_be_bytes()),
+            Value::TimestampTz("0044-03-15 12:00:00+00 BC".into())
+        );
+    }
+
+    /// Days since 1970-01-01 of a proleptic Gregorian date (inverse of
+    /// `civil_from_days`, H. Hinnant's `days_from_civil`).
+    fn civil_days(y: i64, m: i64, d: i64) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let era = y.div_euclid(400);
+        let yoe = y.rem_euclid(400);
+        let mp = (m + 9) % 12;
+        let doy = (153 * mp + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
     }
 }
