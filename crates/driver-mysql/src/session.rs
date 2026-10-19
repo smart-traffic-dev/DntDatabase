@@ -325,7 +325,7 @@ impl Session for MySqlSession {
             if run.cancelled() {
                 return Err(DbError::Cancelled);
             }
-            let kind = classify(&stmt.text);
+            let kind = classify(&stmt.text, Dialect::MySql);
             let was_in_tx = self.in_transaction();
             self.track_before(kind);
             loop {

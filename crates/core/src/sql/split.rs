@@ -352,6 +352,22 @@ mod tests {
             ),
             // In PG `/*!` is an ordinary comment.
             ("select 1; /*! x */", Postgres, vec!["select 1"]),
+            // Multibyte text inside strings and dollar tags (backlog T3).
+            (
+                "select 'ư;đ'; select 2",
+                MySql,
+                vec!["select 'ư;đ'", "select 2"],
+            ),
+            (
+                "select '\\ư'; select 'đ'",
+                MySql,
+                vec!["select '\\ư'", "select 'đ'"],
+            ),
+            (
+                "select $thẻ$ ; $thẻ$; select 2",
+                Postgres,
+                vec!["select $thẻ$ ; $thẻ$", "select 2"],
+            ),
         ]
     }
 

@@ -19,101 +19,134 @@ pub enum TxControl {
 }
 
 /// Classifies one statement by its leading keyword (after comments and
-/// opening parens). Lexing uses MySQL rules, since no dialect is given.
-pub fn classify(stmt: &str) -> StatementKind {
-    let toks = tokenize(stmt);
-    if let Some(t) = toks.first().filter(|t| t.tok == Tok::ExecComment) {
-        return classify(exec_comment_body(&stmt[t.start..t.end]));
-    }
-    let start = toks.iter().take_while(|t| t.tok == Tok::Open).count();
-    let toks = &toks[start..];
-    let Some(first) = word_at(toks, 0) else {
-        return StatementKind::Other;
-    };
-    let tx = StatementKind::Transaction;
-    match first.to_ascii_uppercase().as_str() {
-        "SELECT" => select_kind(&toks[1..]),
-        "EXPLAIN" => explain(stmt, &toks[1..]),
-        "SHOW" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => StatementKind::Read,
-        "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "MERGE" | "CALL" | "DO" | "LOAD" | "COPY" => {
-            StatementKind::Write
-        }
-        "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE" | "COMMENT" => {
-            StatementKind::Ddl
-        }
-        // MariaDB `BEGIN NOT ATOMIC … END` is a compound statement, not a transaction.
-        "BEGIN" if !is_kw(word_at(toks, 1), "NOT") => tx(TxControl::Begin),
-        // PG `END [WORK|TRANSACTION] [AND [NO] CHAIN]` commits.
-        "END"
-            if toks.get(1).is_none_or(|t| {
-                t.tok == Tok::Punct(b';')
-                    || matches!(t.tok, Tok::Word(w) if ["WORK", "TRANSACTION", "AND"]
-                    .iter()
-                    .any(|k| w.eq_ignore_ascii_case(k)))
-            }) =>
-        {
-            tx(TxControl::Commit)
-        }
-        "ABORT" => tx(TxControl::Rollback),
-        "START" if is_kw(word_at(toks, 1), "TRANSACTION") => tx(TxControl::Begin),
-        "COMMIT" if !is_kw(word_at(toks, 1), "PREPARED") => tx(TxControl::Commit),
-        "ROLLBACK" => {
-            let mut i = 1;
-            if is_kw(word_at(toks, i), "WORK") || is_kw(word_at(toks, i), "TRANSACTION") {
-                i += 1;
-            }
-            if is_kw(word_at(toks, i), "TO") || is_kw(word_at(toks, i), "PREPARED") {
-                StatementKind::Other
-            } else {
-                tx(TxControl::Rollback)
-            }
-        }
-        "SET" => set_autocommit(stmt, &toks[1..]).map_or(StatementKind::Other, tx),
-        "WITH" => classify_with(stmt, &toks[1..]),
-        _ => StatementKind::Other,
-    }
+/// opening parens). Strings, comments and quoted identifiers are lexed with
+/// the same per-dialect rules as [`split`](super::split::split).
+pub fn classify(stmt: &str, dialect: Dialect) -> StatementKind {
+    Classifier { dialect }.classify(stmt)
 }
 
-/// After `WITH`: skips CTE definitions (balanced parens at depth 0) until the
-/// main statement keyword. A data-modifying CTE body also makes it a write.
-fn classify_with(src: &str, toks: &[Token]) -> StatementKind {
-    let mut depth = 0usize;
-    let mut body_start = 0;
-    let mut cte_writes = false;
-    for (idx, t) in toks.iter().enumerate() {
-        match t.tok {
-            Tok::Open => {
-                if depth == 0 {
-                    body_start = t.end;
-                }
-                depth += 1;
+/// Carries the dialect through the recursive helpers.
+#[derive(Clone, Copy)]
+struct Classifier {
+    dialect: Dialect,
+}
+
+impl Classifier {
+    fn classify(self, stmt: &str) -> StatementKind {
+        let toks = tokenize(stmt, self.dialect);
+        // Only MySQL lexing yields ExecComment; in PG `/*!` is a plain comment.
+        if let Some(t) = toks.first().filter(|t| t.tok == Tok::ExecComment) {
+            return self.classify(exec_comment_body(&stmt[t.start..t.end]));
+        }
+        let start = toks.iter().take_while(|t| t.tok == Tok::Open).count();
+        let toks = &toks[start..];
+        let Some(first) = word_at(toks, 0) else {
+            return StatementKind::Other;
+        };
+        let tx = StatementKind::Transaction;
+        match first.to_ascii_uppercase().as_str() {
+            "SELECT" => select_kind(&toks[1..]),
+            "EXPLAIN" => self.explain(stmt, &toks[1..]),
+            "SHOW" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => StatementKind::Read,
+            "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "MERGE" | "CALL" | "DO" | "LOAD"
+            | "COPY" => StatementKind::Write,
+            "CREATE" | "ALTER" | "DROP" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE"
+            | "COMMENT" => StatementKind::Ddl,
+            // MariaDB `BEGIN NOT ATOMIC … END` is a compound statement, not a transaction.
+            "BEGIN" if !is_kw(word_at(toks, 1), "NOT") => tx(TxControl::Begin),
+            // PG `END [WORK|TRANSACTION] [AND [NO] CHAIN]` commits.
+            "END"
+                if toks.get(1).is_none_or(|t| {
+                    t.tok == Tok::Punct(b';')
+                        || matches!(t.tok, Tok::Word(w) if ["WORK", "TRANSACTION", "AND"]
+                    .iter()
+                    .any(|k| w.eq_ignore_ascii_case(k)))
+                }) =>
+            {
+                tx(TxControl::Commit)
             }
-            Tok::Close if depth > 0 => {
-                depth -= 1;
-                if depth == 0 && classify(&src[body_start..t.start]) == StatementKind::Write {
-                    cte_writes = true;
+            "ABORT" => tx(TxControl::Rollback),
+            "START" if is_kw(word_at(toks, 1), "TRANSACTION") => tx(TxControl::Begin),
+            "COMMIT" if !is_kw(word_at(toks, 1), "PREPARED") => tx(TxControl::Commit),
+            "ROLLBACK" => {
+                let mut i = 1;
+                if is_kw(word_at(toks, i), "WORK") || is_kw(word_at(toks, i), "TRANSACTION") {
+                    i += 1;
                 }
-            }
-            Tok::Word(w) if depth == 0 => {
-                let main = match w.to_ascii_uppercase().as_str() {
-                    "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => StatementKind::Write,
-                    "SELECT" => select_kind(&toks[idx + 1..]),
-                    "VALUES" | "TABLE" => StatementKind::Read,
-                    _ => continue,
-                };
-                return if cte_writes && main == StatementKind::Read {
-                    StatementKind::Write
+                if is_kw(word_at(toks, i), "TO") || is_kw(word_at(toks, i), "PREPARED") {
+                    StatementKind::Other
                 } else {
-                    main
-                };
+                    tx(TxControl::Rollback)
+                }
             }
-            _ => {}
+            "SET" => set_autocommit(stmt, &toks[1..]).map_or(StatementKind::Other, tx),
+            "WITH" => self.classify_with(stmt, &toks[1..]),
+            _ => StatementKind::Other,
         }
     }
-    if cte_writes {
-        StatementKind::Write
-    } else {
-        StatementKind::Other
+
+    /// After `WITH`: skips CTE definitions until the main statement, which is
+    /// either a keyword or a parenthesised query (`WITH x AS (…) (SELECT …)`).
+    /// A depth-0 paren group is a CTE's column list or body while that CTE has
+    /// not yet had its body (`AS [NOT] [MATERIALIZED] (…)`); after a body only a
+    /// `,` starts another CTE, so any other depth-0 `(` opens the main query.
+    /// A data-modifying CTE body also makes the statement a write.
+    fn classify_with(self, src: &str, toks: &[Token]) -> StatementKind {
+        let mut depth = 0usize;
+        let mut body_start = 0;
+        let mut in_body = false;
+        let mut cte_done = false;
+        let mut cte_writes = false;
+        let combine = |main: StatementKind, cte_writes: bool| {
+            if cte_writes && main == StatementKind::Read {
+                StatementKind::Write
+            } else {
+                main
+            }
+        };
+        for (idx, t) in toks.iter().enumerate() {
+            match t.tok {
+                Tok::Open if depth == 0 && cte_done => {
+                    return combine(self.classify(&src[t.start..]), cte_writes);
+                }
+                Tok::Open => {
+                    if depth == 0 {
+                        body_start = t.end;
+                        in_body = idx > 0
+                            && (is_kw(word_at(toks, idx - 1), "AS")
+                                || is_kw(word_at(toks, idx - 1), "MATERIALIZED"));
+                    }
+                    depth += 1;
+                }
+                Tok::Close if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 && in_body {
+                        cte_done = true;
+                        if self.classify(&src[body_start..t.start]) == StatementKind::Write {
+                            cte_writes = true;
+                        }
+                    }
+                }
+                Tok::Punct(b',') if depth == 0 => cte_done = false,
+                Tok::Word(w) if depth == 0 => {
+                    let main = match w.to_ascii_uppercase().as_str() {
+                        "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => {
+                            StatementKind::Write
+                        }
+                        "SELECT" => select_kind(&toks[idx + 1..]),
+                        "VALUES" | "TABLE" => StatementKind::Read,
+                        _ => continue,
+                    };
+                    return combine(main, cte_writes);
+                }
+                _ => {}
+            }
+        }
+        if cte_writes {
+            StatementKind::Write
+        } else {
+            StatementKind::Other
+        }
     }
 }
 
@@ -139,43 +172,45 @@ fn select_kind(toks: &[Token]) -> StatementKind {
     StatementKind::Read
 }
 
-/// Tokens after `EXPLAIN`. With ANALYZE the statement is executed, so it takes
-/// the inner statement's kind; otherwise it is Read.
-fn explain(src: &str, toks: &[Token]) -> StatementKind {
-    let is_analyze = |w: Option<&str>| is_kw(w, "ANALYZE") || is_kw(w, "ANALYSE");
-    let inner = if is_analyze(word_at(toks, 0)) {
-        // `EXPLAIN ANALYZE [VERBOSE] …` (PG) / `EXPLAIN ANALYZE [FORMAT=TREE] …` (MySQL)
-        let mut i = 1;
-        if is_kw(word_at(toks, i), "VERBOSE") {
-            i += 1;
+impl Classifier {
+    /// Tokens after `EXPLAIN`. With ANALYZE the statement is executed, so it takes
+    /// the inner statement's kind; otherwise it is Read.
+    fn explain(self, src: &str, toks: &[Token]) -> StatementKind {
+        let is_analyze = |w: Option<&str>| is_kw(w, "ANALYZE") || is_kw(w, "ANALYSE");
+        let inner = if is_analyze(word_at(toks, 0)) {
+            // `EXPLAIN ANALYZE [VERBOSE] …` (PG) / `EXPLAIN ANALYZE [FORMAT=TREE] …` (MySQL)
+            let mut i = 1;
+            if is_kw(word_at(toks, i), "VERBOSE") {
+                i += 1;
+            }
+            if is_kw(word_at(toks, i), "FORMAT")
+                && toks.get(i + 1).map(|t| t.tok) == Some(Tok::Punct(b'='))
+            {
+                i += 3;
+            }
+            Some(i)
+        } else if toks.first().map(|t| t.tok) == Some(Tok::Open) {
+            // PG `EXPLAIN (option [value], …) …`
+            let close = toks
+                .iter()
+                .position(|t| t.tok == Tok::Close)
+                .unwrap_or(toks.len());
+            let analyze = toks[1..close]
+                .split(|t| t.tok == Tok::Punct(b','))
+                .any(|opt| {
+                    is_analyze(word_at(opt, 0))
+                        && !["FALSE", "OFF", "0"]
+                            .iter()
+                            .any(|v| is_kw(word_at(opt, 1), v))
+                });
+            analyze.then_some(close + 1)
+        } else {
+            None
+        };
+        match inner.and_then(|i| toks.get(i)) {
+            Some(t) => self.classify(&src[t.start..]),
+            None => StatementKind::Read,
         }
-        if is_kw(word_at(toks, i), "FORMAT")
-            && toks.get(i + 1).map(|t| t.tok) == Some(Tok::Punct(b'='))
-        {
-            i += 3;
-        }
-        Some(i)
-    } else if toks.first().map(|t| t.tok) == Some(Tok::Open) {
-        // PG `EXPLAIN (option [value], …) …`
-        let close = toks
-            .iter()
-            .position(|t| t.tok == Tok::Close)
-            .unwrap_or(toks.len());
-        let analyze = toks[1..close]
-            .split(|t| t.tok == Tok::Punct(b','))
-            .any(|opt| {
-                is_analyze(word_at(opt, 0))
-                    && !["FALSE", "OFF", "0"]
-                        .iter()
-                        .any(|v| is_kw(word_at(opt, 1), v))
-            });
-        analyze.then_some(close + 1)
-    } else {
-        None
-    };
-    match inner.and_then(|i| toks.get(i)) {
-        Some(t) => classify(&src[t.start..]),
-        None => StatementKind::Read,
     }
 }
 
@@ -264,14 +299,14 @@ struct Token<'a> {
 
 /// Significant tokens of `s` (whitespace and comments dropped), built on the
 /// splitter's lexer so strings and comments never affect paren depth.
-fn tokenize(s: &str) -> Vec<Token<'_>> {
+fn tokenize(s: &str, dialect: Dialect) -> Vec<Token<'_>> {
     let b = s.as_bytes();
     let is_word = |c: u8| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'@') || c >= 0x80;
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
         let start = i;
-        let tok = if let Some((kind, end)) = skip_at(b, i, Dialect::MySql) {
+        let tok = if let Some((kind, end)) = skip_at(b, i, dialect) {
             i = end;
             match kind {
                 Skipped::Comment => continue,
@@ -315,6 +350,34 @@ mod tests {
     use super::StatementKind::*;
     use super::TxControl::*;
     use super::*;
+
+    /// The pre-dialect assertions below all use MySQL lexing.
+    fn classify(s: &str) -> StatementKind {
+        super::classify(s, Dialect::MySql)
+    }
+
+    #[test]
+    fn parenthesised_main_query_after_cte() {
+        assert_eq!(classify("WITH x AS (SELECT 1) (SELECT * FROM x)"), Read);
+        assert_eq!(
+            classify(
+                "WITH x(a) AS (SELECT 1), y AS (SELECT 2) ((SELECT a FROM x) UNION (SELECT 2))"
+            ),
+            Read
+        );
+        assert_eq!(
+            classify("WITH d AS (DELETE FROM t RETURNING *) (SELECT * FROM d)"),
+            Write
+        );
+        assert_eq!(
+            classify("WITH x AS (SELECT 1) (SELECT * INTO newtab FROM x)"),
+            Ddl
+        );
+        assert_eq!(
+            classify("WITH x AS NOT MATERIALIZED (SELECT 1) (SELECT 1)"),
+            Read
+        );
+    }
 
     #[test]
     fn brief_cases() {
@@ -537,5 +600,60 @@ mod tests {
             ),
             Write
         );
+    }
+}
+
+#[cfg(test)]
+mod pg_dialect {
+    use super::StatementKind::*;
+    use super::TxControl::*;
+    use super::*;
+
+    fn pg(s: &str) -> StatementKind {
+        classify(s, Dialect::Postgres)
+    }
+
+    #[test]
+    fn plan_cases() {
+        assert_eq!(pg("WITH a AS (SELECT 'C:\\') DELETE FROM t"), Write);
+        assert_eq!(pg("SELECT E'it\\'s'"), Read);
+        assert_eq!(pg("WITH a AS (SELECT $$ ) $$) UPDATE t SET x=1"), Write);
+        assert_eq!(pg("SELECT '#' "), Read);
+        assert_eq!(pg("/*! DELETE FROM t */"), Other);
+    }
+
+    #[test]
+    fn pg_lexing_rules() {
+        // `#` is an operator in PG, not a comment.
+        assert_eq!(pg("# x\nDELETE FROM t"), Other);
+        // Backticks are ordinary characters, so `)` inside them closes the CTE.
+        assert_eq!(pg("WITH a AS (SELECT 1 AS `) DELETE FROM t"), Write);
+        // Tagged dollar quotes are opaque.
+        assert_eq!(
+            pg("WITH a AS (SELECT $q$ ') $q$) INSERT INTO t VALUES (1)"),
+            Write
+        );
+        // E-strings honour backslash escapes; `e` must not be an identifier tail.
+        assert_eq!(pg("WITH a AS (SELECT e'\\') ') UPDATE t SET x=1"), Write);
+        // PG block comments nest.
+        assert_eq!(pg("/* a /* b */ ) */ DELETE FROM t"), Write);
+        // Same text under MySQL: `'C:\'` swallows the rest, so it is no write.
+        assert_eq!(
+            classify("WITH a AS (SELECT 'C:\\') DELETE FROM t", Dialect::MySql),
+            Other
+        );
+    }
+
+    #[test]
+    fn pg_statement_forms() {
+        assert_eq!(pg("WITH x AS (SELECT 1) (SELECT * FROM x)"), Read);
+        assert_eq!(pg("SELECT a INTO UNLOGGED newtab FROM t"), Ddl);
+        assert_eq!(pg("EXPLAIN (ANALYZE) DELETE FROM t"), Write);
+        assert_eq!(pg("END"), Transaction(Commit));
+        assert_eq!(pg("ABORT"), Transaction(Rollback));
+        assert_eq!(pg("COMMIT PREPARED 'x'"), Other);
+        assert_eq!(pg("SET search_path = public"), Other);
+        // PG has no `autocommit` setting (the server rejects it); kept as-is.
+        assert_eq!(pg("SET autocommit = 0"), Transaction(AutocommitOff));
     }
 }

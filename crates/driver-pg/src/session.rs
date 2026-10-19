@@ -341,7 +341,7 @@ impl Session for PgSession {
             if run.cancelled() {
                 return Err(DbError::Cancelled);
             }
-            let kind = classify(&stmt.text);
+            let kind = classify(&stmt.text, Dialect::Postgres);
             let was_in_tx = self.in_transaction();
             // Found dead before anything was sent (e.g. the idle backend was terminated):
             // reconnecting first is safe for any statement.
