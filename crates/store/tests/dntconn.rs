@@ -1,4 +1,4 @@
-use dnt_core::config::{ConnectionConfig, SshAuth, SshConfig};
+use dnt_core::config::{ConnectionConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::error::DbError;
 use dnt_core::secret::{MemorySecretStore, SecretKind, SecretStore};
 use dnt_core::test_util::{sample_config, sample_ssh};
@@ -285,6 +285,80 @@ fn invalid_connection_in_file_is_skipped() {
             name: "broken".into(),
             reason: "port must be between 1 and 65535".into(),
         }]
+    );
+}
+
+#[test]
+fn nil_and_duplicate_connection_ids_are_skipped() {
+    let (repo, _secrets) = setup();
+    let c = repo.create(cfg("first"), db_pw("pw-a-123")).unwrap();
+    let json = export_dntconn(&repo, &[NodeId::Connection(c.id)], Some(&pass(PASSPHRASE))).unwrap();
+    let mut v: Value = serde_json::from_str(&json).unwrap();
+    let mut dup = v["connections"][0].clone();
+    dup["name"] = Value::from("second");
+    let mut nil = v["connections"][0].clone();
+    nil["name"] = Value::from("nil-id");
+    nil["id"] = Value::from(Uuid::nil().to_string());
+    v["connections"].as_array_mut().unwrap().extend([dup, nil]);
+
+    let bundle = parse_dntconn(&v.to_string(), Some(&pass(PASSPHRASE))).unwrap();
+    assert_eq!(bundle.connections, vec![c.clone()]);
+    assert_eq!(
+        exposed(&bundle.secrets[&c.id].db_password),
+        Some("pw-a-123")
+    );
+    assert_eq!(
+        bundle.skipped,
+        vec![
+            SkippedItem {
+                name: "second".into(),
+                reason: "Duplicate connection id".into(),
+            },
+            SkippedItem {
+                name: "nil-id".into(),
+                reason: "Invalid connection id".into(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn over_cap_kdf_cost_is_config_error() {
+    let (repo, _secrets) = setup();
+    let c = repo.create(cfg("a"), db_pw("pw-a-123")).unwrap();
+    let json = export_dntconn(&repo, &[NodeId::Connection(c.id)], Some(&pass(PASSPHRASE))).unwrap();
+    let mut v: Value = serde_json::from_str(&json).unwrap();
+    v["secrets"]["m"] = Value::from((1u64 << 20) + 1);
+    let err = parse_dntconn(&v.to_string(), Some(&pass(PASSPHRASE))).unwrap_err();
+    assert!(matches!(err, DbError::Config { .. }), "{err:?}");
+}
+
+#[test]
+fn overwrite_with_ask_config_clears_stored_secrets() {
+    let (repo, secrets, existing) = repo_with_shop_prod();
+    let mut ask = existing.clone();
+    ask.secret_mode = SecretMode::Ask;
+    let mut bundle = empty_bundle();
+    bundle.connections = vec![ask];
+    apply(&repo, bundle, ConflictPolicy::Overwrite).unwrap();
+    for kind in SecretKind::ALL {
+        assert_eq!(secret(&secrets, existing.id, kind), None);
+    }
+    assert!(!repo.tree().unwrap().connections[0].has_db_password);
+}
+
+#[test]
+fn overwrite_with_saved_config_without_secrets_keeps_stored_password() {
+    let (repo, secrets, existing) = repo_with_shop_prod();
+    let mut changed = existing.clone();
+    changed.host = "new-host".into();
+    let mut bundle = empty_bundle();
+    bundle.connections = vec![changed];
+    apply(&repo, bundle, ConflictPolicy::Overwrite).unwrap();
+    assert_eq!(repo.get(existing.id).unwrap().host, "new-host");
+    assert_eq!(
+        secret(&secrets, existing.id, SecretKind::DbPassword).as_deref(),
+        Some("old-pw")
     );
 }
 

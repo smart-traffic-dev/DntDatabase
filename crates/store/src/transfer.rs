@@ -190,6 +190,7 @@ pub fn apply(
                 }
             }
             let cfg_secrets = secrets.remove(&cfg.id);
+            let mut overwritten = false;
             if find_connection(tx, cfg.id)?.is_some() {
                 match policy {
                     ConflictPolicy::Skip => {
@@ -200,6 +201,7 @@ pub fn apply(
                         cfg.name = unique_name(tx, &cfg)?;
                         update_connection_row(tx, &mut cfg)?;
                         result.overwritten += 1;
+                        overwritten = true;
                     }
                     ConflictPolicy::Copy => {
                         cfg.id = Uuid::new_v4();
@@ -215,8 +217,20 @@ pub fn apply(
                 created.push(cfg.id);
                 result.imported += 1;
             }
-            if let Some(s) = cfg_secrets {
-                to_store.push((cfg.id, cfg.secret_mode, s));
+            // An overwrite always goes through `apply_secrets`, even with nothing to set, so a
+            // switch to Ask mode clears the secrets stored for the old config.
+            match cfg_secrets {
+                Some(s) => to_store.push((cfg.id, cfg.secret_mode, s)),
+                None if overwritten => to_store.push((
+                    cfg.id,
+                    cfg.secret_mode,
+                    NewSecrets {
+                        db_password: None,
+                        ssh_password: None,
+                        ssh_key_passphrase: None,
+                    },
+                )),
+                None => {}
             }
         }
         // Keychain writes last: if one fails, the transaction rolls back and the secrets of

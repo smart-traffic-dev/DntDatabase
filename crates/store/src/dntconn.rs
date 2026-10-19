@@ -123,15 +123,23 @@ pub fn parse_dntconn(
     };
     let mut connections = Vec::new();
     let mut skipped = Vec::new();
+    let mut seen = HashSet::new();
     for c in file.connections {
-        match c.validate() {
-            Ok(()) => connections.push(c),
-            Err(e) => skipped.push(SkippedItem {
-                reason: match e {
-                    DbError::Config { message, .. } => message,
-                    other => other.to_string(),
-                },
+        let problem = if c.id.is_nil() {
+            Some("Invalid connection id".to_string())
+        } else if !seen.insert(c.id) {
+            Some("Duplicate connection id".to_string())
+        } else {
+            c.validate().err().map(|e| match e {
+                DbError::Config { message, .. } => message,
+                other => other.to_string(),
+            })
+        };
+        match problem {
+            None => connections.push(c),
+            Some(reason) => skipped.push(SkippedItem {
                 name: c.name,
+                reason,
             }),
         }
     }
@@ -252,16 +260,18 @@ fn encrypt_secrets(
 ) -> Result<EncryptedSecrets, DbError> {
     let mut plain = BTreeMap::new();
     for c in connections {
-        let get = |kind| -> Result<Option<String>, DbError> {
-            Ok(store
+        // Fill a zeroize-on-drop entry field by field, so an early `?` never drops a plain
+        // `String` holding a secret.
+        let mut entry = PlainSecrets::default();
+        for (kind, slot) in [
+            (SecretKind::DbPassword, &mut entry.db_password),
+            (SecretKind::SshPassword, &mut entry.ssh_password),
+            (SecretKind::SshKeyPassphrase, &mut entry.ssh_key_passphrase),
+        ] {
+            *slot = store
                 .get(c.id, kind)?
-                .map(|s| s.expose_secret().to_string()))
-        };
-        let entry = PlainSecrets {
-            db_password: get(SecretKind::DbPassword)?,
-            ssh_password: get(SecretKind::SshPassword)?,
-            ssh_key_passphrase: get(SecretKind::SshKeyPassphrase)?,
-        };
+                .map(|s| s.expose_secret().to_string());
+        }
         if entry.db_password.is_some()
             || entry.ssh_password.is_some()
             || entry.ssh_key_passphrase.is_some()
