@@ -1,0 +1,7 @@
+﻿target/
+ui/node_modules/
+ui/dist/
+testdata/certs/*
+testdata/ssh/*
+!.gitkeep
+.superpowers/
