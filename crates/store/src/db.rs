@@ -1,0 +1,73 @@
+//! Opening the app database and applying schema migrations.
+
+use dnt_core::error::DbError;
+use rusqlite::Connection;
+use rusqlite_migration::{Migrations, M};
+use std::path::Path;
+
+const MIGRATION_1: &str = "
+CREATE TABLE groups (
+  id TEXT PRIMARY KEY, parent_id TEXT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  name TEXT NOT NULL, sort_order INTEGER NOT NULL);
+CREATE TABLE connections (
+  id TEXT PRIMARY KEY, group_id TEXT NULL REFERENCES groups(id) ON DELETE SET NULL,
+  name TEXT NOT NULL, sort_order INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('mysql','postgres')),
+  host TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL,
+  default_db TEXT NULL, env_tag TEXT NULL, read_only INTEGER NOT NULL DEFAULT 0,
+  secret_mode TEXT NOT NULL CHECK (secret_mode IN ('saved','ask')),
+  ssh_json TEXT NULL, ssl_json TEXT NULL, options_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_connected_at TEXT NULL);
+CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+";
+
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![M::up(MIGRATION_1)])
+}
+
+/// Opens (creating if needed) the database file, enables foreign keys and migrates to latest.
+pub fn open(path: &Path) -> Result<Connection, DbError> {
+    let conn = Connection::open(path)
+        .map_err(|e| internal(format!("open database {}", path.display()), e))?;
+    prepare(conn)
+}
+
+/// In-memory database with the full schema; used by tests.
+pub fn open_in_memory() -> Result<Connection, DbError> {
+    let conn = Connection::open_in_memory().map_err(|e| internal("open in-memory database", e))?;
+    prepare(conn)
+}
+
+fn prepare(mut conn: Connection) -> Result<Connection, DbError> {
+    conn.pragma_update(None, "foreign_keys", true)
+        .map_err(|e| internal("enable foreign keys", e))?;
+    migrations()
+        .to_latest(&mut conn)
+        .map_err(|e| internal("migrate database", e))?;
+    Ok(conn)
+}
+
+pub(crate) fn internal(context: impl std::fmt::Display, err: impl std::fmt::Display) -> DbError {
+    DbError::Internal {
+        message: format!("{context}: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrations_are_valid() {
+        migrations().validate().unwrap();
+    }
+
+    #[test]
+    fn foreign_keys_enabled() {
+        let conn = open_in_memory().unwrap();
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+    }
+}
