@@ -7,6 +7,12 @@ use rustls::pki_types::ServerName;
 use rustls::{AlertDescription, CertificateError};
 use std::path::Path;
 
+/// Shown when `VerifyCa` meets a certificate without subjectAltName (e.g. MySQL's
+/// auto-generated server certificates), which the retry in [`verify_ca_retry`] cannot handle.
+pub(crate) const NO_SAN_MESSAGE: &str = "Server certificate has no subjectAltName; VerifyCa \
+     cannot skip host-name checking for it with this driver. Use Require, or a certificate \
+     with SANs.";
+
 /// Maps `SslConfig` to `mysql_async` TLS options. The certificate host name is always
 /// `server_name` (the original host when the connection goes through an SSH tunnel).
 pub(crate) fn ssl_opts(ssl: &SslConfig, server_name: &str) -> Result<Option<SslOpts>, DbError> {
@@ -17,15 +23,24 @@ pub(crate) fn ssl_opts(ssl: &SslConfig, server_name: &str) -> Result<Option<SslO
             .with_danger_accept_invalid_certs(true)
             .with_danger_skip_domain_validation(true),
         // mysql_async 0.37 fails to honour this flag with rustls 0.23 (it string-matches
-        // "NotValidForName"); `verify_ca_name` below recovers from the resulting error.
+        // "NotValidForName"); `verify_ca_retry` below recovers from the resulting error.
         SslMode::VerifyCa => verifying(ssl)?.with_danger_skip_domain_validation(true),
         SslMode::VerifyFull => verifying(ssl)?,
     };
-    if let (Some(cert), Some(key)) = (&ssl.cert_path, &ssl.key_path) {
-        opts = opts.with_client_identity(Some(ClientIdentity::new(
-            read_file(cert, "client certificate")?.into(),
-            read_file(key, "client key")?.into(),
-        )));
+    match (&ssl.cert_path, &ssl.key_path) {
+        (Some(cert), Some(key)) => {
+            opts = opts.with_client_identity(Some(ClientIdentity::new(
+                read_file(cert, "client certificate")?.into(),
+                read_file(key, "client key")?.into(),
+            )));
+        }
+        (None, None) => {}
+        _ => {
+            return Err(DbError::Config {
+                field: Some("ssl.cert_path".into()),
+                message: "Client certificate and key must both be set".into(),
+            })
+        }
     }
     if !server_name.is_empty() {
         opts = opts.with_danger_tls_hostname_override(Some(server_name.to_string()));
@@ -33,15 +48,15 @@ pub(crate) fn ssl_opts(ssl: &SslConfig, server_name: &str) -> Result<Option<SslO
     Ok(Some(opts))
 }
 
-/// Chain verification: against `ca_path` only when given, otherwise the built-in web roots.
+/// Chain verification against `ca_path` only; the public web roots are never trusted.
 fn verifying(ssl: &SslConfig) -> Result<SslOpts, DbError> {
-    let opts = SslOpts::default();
-    Ok(match &ssl.ca_path {
-        Some(ca) => opts
-            .with_root_certs(vec![read_file(ca, "CA certificate")?.into()])
-            .with_disable_built_in_roots(true),
-        None => opts,
-    })
+    let ca = ssl.ca_path.as_ref().ok_or_else(|| DbError::Config {
+        field: Some("ssl.ca_path".into()),
+        message: "SSL verification requires a CA certificate file".into(),
+    })?;
+    Ok(SslOpts::default()
+        .with_root_certs(vec![read_file(ca, "CA certificate")?.into()])
+        .with_disable_built_in_roots(true))
 }
 
 fn read_file(path: &Path, what: &str) -> Result<Vec<u8>, DbError> {
@@ -71,16 +86,27 @@ pub(crate) fn handshake_message(t: &rustls::Error) -> String {
     }
 }
 
-/// For `VerifyCa`: when the chain verified but the host name did not match, returns a name
-/// the certificate *is* valid for, so the connection can be retried with full verification
-/// against that name (chain + name are still checked, which is at least as strict as
-/// `VerifyCa`).
-pub(crate) fn verify_ca_name(e: &MyError) -> Option<String> {
+/// For `VerifyCa`, after a failed handshake:
+/// - `None`: not a host-name mismatch; report the error as usual.
+/// - `Some(Ok(name))`: the chain verified but the name did not match; `name` is one the
+///   certificate *is* valid for, so the connection is retried with full verification against
+///   it (chain + name are still checked, which is at least as strict as `VerifyCa`).
+/// - `Some(Err(_))`: the certificate has no subjectAltName to retry with.
+///
+/// mysql_async exposes no way to plug in a custom rustls verifier, hence this workaround.
+pub(crate) fn verify_ca_retry(e: &MyError) -> Option<Result<String, DbError>> {
     match rustls_error(e)? {
         rustls::Error::InvalidCertificate(CertificateError::NotValidForNameContext {
             presented,
             ..
-        }) => presented.iter().find_map(|p| presented_name(p)),
+        }) => {
+            if presented.is_empty() {
+                return Some(Err(DbError::Tls {
+                    message: NO_SAN_MESSAGE.into(),
+                }));
+            }
+            presented.iter().find_map(|p| presented_name(p)).map(Ok)
+        }
         _ => None,
     }
 }
@@ -106,7 +132,13 @@ fn presented_name(p: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, UnixTime};
+    use rustls::RootCertStore;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn ssl(mode: SslMode, ca: Option<PathBuf>) -> SslConfig {
         SslConfig {
@@ -124,6 +156,16 @@ mod tests {
             .join(name)
     }
 
+    fn config_field(r: Result<Option<SslOpts>, DbError>) -> Option<String> {
+        match r {
+            Err(DbError::Config { field, .. }) => field,
+            other => panic!(
+                "expected Config error, got {:?}",
+                other.map(|o| o.is_some())
+            ),
+        }
+    }
+
     #[test]
     fn ssl_mode_mapping() {
         assert!(ssl_opts(&ssl(SslMode::Disable, None), "db")
@@ -139,11 +181,14 @@ mod tests {
             .unwrap();
         assert!(!o.accept_invalid_certs() && o.skip_domain_validation());
         assert!(o.disable_built_in_roots() && o.root_certs().len() == 1);
-        let o = ssl_opts(&ssl(SslMode::VerifyFull, None), "db.example")
-            .unwrap()
-            .unwrap();
+        let o = ssl_opts(
+            &ssl(SslMode::VerifyFull, Some(certs("ca.pem"))),
+            "db.example",
+        )
+        .unwrap()
+        .unwrap();
         assert!(!o.accept_invalid_certs() && !o.skip_domain_validation());
-        assert!(!o.disable_built_in_roots());
+        assert!(o.disable_built_in_roots() && o.root_certs().len() == 1);
         assert_eq!(o.tls_hostname_override(), Some("db.example"));
         assert!(o.client_identity().is_none());
 
@@ -154,6 +199,41 @@ mod tests {
         };
         let o = ssl_opts(&with_identity, "db").unwrap().unwrap();
         assert!(o.client_identity().is_some());
+    }
+
+    #[test]
+    fn verify_modes_require_ca() {
+        for mode in [SslMode::VerifyCa, SslMode::VerifyFull] {
+            assert_eq!(
+                config_field(ssl_opts(&ssl(mode, None), "db")).as_deref(),
+                Some("ssl.ca_path"),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn client_cert_and_key_must_be_paired() {
+        let only_cert = SslConfig {
+            cert_path: Some(certs("client.pem")),
+            ..ssl(SslMode::Require, None)
+        };
+        let only_key = SslConfig {
+            key_path: Some(certs("client-key.pem")),
+            ..ssl(SslMode::Require, None)
+        };
+        for cfg in [only_cert, only_key] {
+            match ssl_opts(&cfg, "db") {
+                Err(DbError::Config { field, message }) => {
+                    assert_eq!(field.as_deref(), Some("ssl.cert_path"));
+                    assert_eq!(message, "Client certificate and key must both be set");
+                }
+                other => panic!(
+                    "expected Config error, got {:?}",
+                    other.map(|o| o.is_some())
+                ),
+            }
+        }
     }
 
     #[test]
@@ -176,8 +256,12 @@ mod tests {
         std::io::Error::new(std::io::ErrorKind::InvalidData, t).into()
     }
 
+    fn retry_name(e: &MyError) -> Option<String> {
+        verify_ca_retry(e).map(|r| r.expect("retry name"))
+    }
+
     #[test]
-    fn verify_ca_name_from_mismatch() {
+    fn verify_ca_retry_from_mismatch() {
         let mismatch = |presented: Vec<&str>| {
             wrapped(rustls::Error::InvalidCertificate(
                 CertificateError::NotValidForNameContext {
@@ -187,7 +271,7 @@ mod tests {
             ))
         };
         assert_eq!(
-            verify_ca_name(&mismatch(vec![
+            retry_name(&mismatch(vec![
                 "DnsName(\"localhost\")",
                 "IpAddress(127.0.0.1)"
             ]))
@@ -195,19 +279,62 @@ mod tests {
             Some("localhost")
         );
         assert_eq!(
-            verify_ca_name(&mismatch(vec!["IpAddress(10.0.0.5)"])).as_deref(),
+            retry_name(&mismatch(vec!["IpAddress(10.0.0.5)"])).as_deref(),
             Some("10.0.0.5")
         );
         assert_eq!(
-            verify_ca_name(&mismatch(vec!["DnsName(\"*.db.example\")"])).as_deref(),
+            retry_name(&mismatch(vec!["DnsName(\"*.db.example\")"])).as_deref(),
             Some("dnt-verify-ca.db.example")
         );
-        assert_eq!(verify_ca_name(&mismatch(vec!["Uri(\"x\")"])), None);
-        assert_eq!(verify_ca_name(&mismatch(vec![])), None);
+        assert_eq!(retry_name(&mismatch(vec!["Uri(\"x\")"])), None);
+        match verify_ca_retry(&mismatch(vec![])) {
+            Some(Err(DbError::Tls { message })) => assert_eq!(message, NO_SAN_MESSAGE),
+            other => panic!("expected no-SAN Tls error, got {other:?}"),
+        }
         let untrusted = wrapped(rustls::Error::InvalidCertificate(
             CertificateError::UnknownIssuer,
         ));
-        assert_eq!(verify_ca_name(&untrusted), None);
+        assert!(verify_ca_retry(&untrusted).is_none());
+    }
+
+    /// Runs the same rustls verifier mysql_async uses (chain against `ca.pem`, name
+    /// `wrong.example`) on a fixture certificate and returns the resulting error.
+    fn verify_fixture(leaf: &str) -> MyError {
+        let mut roots = RootCertStore::empty();
+        roots
+            .add(CertificateDer::from_pem_file(certs("ca.pem")).unwrap())
+            .unwrap();
+        let verifier = WebPkiServerVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        let leaf = CertificateDer::from_pem_file(certs(leaf)).unwrap();
+        let err = verifier
+            .verify_server_cert(
+                &leaf,
+                &[],
+                &ServerName::try_from("wrong.example").unwrap(),
+                &[],
+                UnixTime::now(),
+            )
+            .expect_err("wrong.example must not verify");
+        wrapped(err)
+    }
+
+    #[test]
+    fn verify_ca_retry_with_real_certificates() {
+        // Cert with SANs: retried against a presented name.
+        assert_eq!(
+            retry_name(&verify_fixture("server.pem")).as_deref(),
+            Some("localhost")
+        );
+        // SAN-less cert (like MySQL's auto-generated ones): explicit, actionable error.
+        match verify_ca_retry(&verify_fixture("server-nosan.pem")) {
+            Some(Err(DbError::Tls { message })) => assert_eq!(message, NO_SAN_MESSAGE),
+            other => panic!("expected no-SAN Tls error, got {other:?}"),
+        }
     }
 
     #[test]

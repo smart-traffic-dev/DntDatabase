@@ -9,7 +9,7 @@ use dnt_core::meta::{
 };
 use dnt_core::server::{MySqlCapabilities, ServerInfo};
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, Opts, Row, Value};
+use mysql_async::{Conn, Opts};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -44,11 +44,12 @@ impl MySqlSession {
         self.caps
     }
 
-    /// Runs one statement and returns its first row as text (`None` for SQL NULL).
-    /// A small helper for internal queries and tests; `execute` is the general path.
+    /// Test-only (`test-helpers` feature): runs one statement and returns its first row as
+    /// text (`None` for SQL NULL). Bypasses transaction tracking; `execute` is the real path.
+    #[cfg(feature = "test-helpers")]
     pub async fn query_row_text(&self, sql: &str) -> Result<Option<Vec<Option<String>>>, DbError> {
         let mut conn = self.conn.lock().await;
-        let row: Option<Row> = conn
+        let row: Option<mysql_async::Row> = conn
             .query_first(sql)
             .await
             .map_err(|e| map_mysql_error(e, ConnectStage::Execute))?;
@@ -67,7 +68,9 @@ fn unsupported(feature: &str, version: &str) -> DbError {
     }
 }
 
-fn value_text(v: Value) -> Option<String> {
+#[cfg(feature = "test-helpers")]
+fn value_text(v: mysql_async::Value) -> Option<String> {
+    use mysql_async::Value;
     match v {
         Value::NULL => None,
         Value::Bytes(b) => Some(String::from_utf8_lossy(&b).into_owned()),

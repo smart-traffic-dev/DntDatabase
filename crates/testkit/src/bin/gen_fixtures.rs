@@ -40,6 +40,8 @@ fn gen_certs(dir: &Path) -> Result<(), Box<dyn Error>> {
         "server-key.pem",
         "client.pem",
         "client-key.pem",
+        "server-nosan.pem",
+        "server-nosan-key.pem",
     ];
     if names.iter().all(|n| dir.join(n).exists()) {
         println!("certs: up to date");
@@ -69,11 +71,21 @@ fn gen_certs(dir: &Path) -> Result<(), Box<dyn Error>> {
     client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
     let client = client_params.signed_by(&client_key, &ca, &ca_key)?;
 
+    // Like MySQL's auto-generated server certificates: CN only, no subjectAltName.
+    let nosan_key = KeyPair::generate()?;
+    let mut nosan_params = CertificateParams::new(Vec::<String>::new())?;
+    set_validity(&mut nosan_params);
+    nosan_params.distinguished_name = dn("DntDatabase_Auto_Generated_Server_Certificate");
+    nosan_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let nosan = nosan_params.signed_by(&nosan_key, &ca, &ca_key)?;
+
     std::fs::write(dir.join("ca.pem"), ca.pem())?;
     std::fs::write(dir.join("server.pem"), server.pem())?;
     std::fs::write(dir.join("server-key.pem"), server_key.serialize_pem())?;
     std::fs::write(dir.join("client.pem"), client.pem())?;
     std::fs::write(dir.join("client-key.pem"), client_key.serialize_pem())?;
+    std::fs::write(dir.join("server-nosan.pem"), nosan.pem())?;
+    std::fs::write(dir.join("server-nosan-key.pem"), nosan_key.serialize_pem())?;
     println!("certs: generated in {}", dir.display());
     Ok(())
 }

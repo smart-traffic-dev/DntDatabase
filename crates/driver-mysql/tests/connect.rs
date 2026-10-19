@@ -135,7 +135,13 @@ async fn tls_require_and_verify_ca() {
                 .await
                 .err()
                 .expect("MySQL 5.7 require");
-            assert!(matches!(err, DbError::Tls { .. }), "{t:?}: {err:?}");
+            match &err {
+                DbError::Tls { message } => assert!(
+                    message.contains("no TLS 1.2+ ECDHE cipher suite"),
+                    "{t:?}: missing cipher-suite hint: {message}"
+                ),
+                other => panic!("{t:?}: expected Tls, got {other:?}"),
+            }
             // Prefer falls back to plaintext.
             let s = MySqlDriver
                 .connect_session(&with_ssl(t, ssl(SslMode::Prefer, None, false), "localhost"))

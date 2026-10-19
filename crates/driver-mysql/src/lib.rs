@@ -80,14 +80,15 @@ async fn open(cfg: &ResolvedConfig) -> Result<(Conn, Opts), DbError> {
     };
     match mode {
         // Chain verified but the name did not match: retry against a name the
-        // certificate is valid for (see `tls::verify_ca_name`).
-        Some(SslMode::VerifyCa) => {
-            let Some(name) = tls::verify_ca_name(&err) else {
-                return Err(map_mysql_error(err, ConnectStage::ConnectDb));
-            };
-            let tls = tls.map(|t| t.with_danger_tls_hostname_override(Some(name)));
-            connect_with(build_opts(cfg, tls)).await
-        }
+        // certificate is valid for (see `tls::verify_ca_retry`).
+        Some(SslMode::VerifyCa) => match tls::verify_ca_retry(&err) {
+            Some(Ok(name)) => {
+                let tls = tls.map(|t| t.with_danger_tls_hostname_override(Some(name)));
+                connect_with(build_opts(cfg, tls)).await
+            }
+            Some(Err(no_san)) => Err(no_san),
+            None => Err(map_mysql_error(err, ConnectStage::ConnectDb)),
+        },
         // The server has no (usable) TLS: fall back to plaintext.
         Some(SslMode::Prefer) => match map_mysql_error(err, ConnectStage::ConnectDb) {
             DbError::Tls { .. } => connect_with(build_opts(cfg, None)).await,
