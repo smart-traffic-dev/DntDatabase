@@ -7,7 +7,10 @@ edition = "2021"
 version = "0.1.0"
 
 [workspace.dependencies]
+argon2 = "0.5"
 async-trait = "0.1"
+base64 = "0.22"
+chacha20poly1305 = "0.10"
 dnt-core = { path = "crates/core" }
 keyring = { version = "3", features = ["windows-native"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -20,3 +23,11 @@ serde_json = "1"
 specta = { version = "=2.0.0-rc.22", features = ["derive", "uuid"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1"
+
+# Argon2id (m = 64 MiB) is very slow unoptimised; keep debug builds and tests usable.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

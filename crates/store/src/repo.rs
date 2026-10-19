@@ -12,6 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
@@ -93,43 +94,7 @@ impl ConnectionRepo {
     pub fn tree(&self) -> Result<Tree, DbError> {
         let (groups, rows) = {
             let conn = self.lock()?;
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, parent_id, name, sort_order FROM groups \
-                     ORDER BY parent_id, sort_order, name",
-                )
-                .map_err(|e| internal("list groups", e))?;
-            let groups = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, i64>(3)?,
-                    ))
-                })
-                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-                .map_err(|e| internal("list groups", e))?
-                .into_iter()
-                .map(|(id, parent, name, sort_order)| {
-                    Ok(Group {
-                        id: parse_uuid(&id)?,
-                        parent_id: parent.as_deref().map(parse_uuid).transpose()?,
-                        name,
-                        sort_order,
-                    })
-                })
-                .collect::<Result<Vec<_>, DbError>>()?;
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {CONN_COLUMNS} FROM connections ORDER BY group_id, sort_order, name"
-                ))
-                .map_err(|e| internal("list connections", e))?;
-            let rows = stmt
-                .query_map([], RawConn::from_row)
-                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-                .map_err(|e| internal("list connections", e))?;
-            (groups, rows)
+            (load_groups(&conn)?, load_raw_connections(&conn)?)
         };
         // Keychain lookups happen without holding the database lock.
         let mut connections = Vec::with_capacity(rows.len());
@@ -172,34 +137,7 @@ impl ConnectionRepo {
         }
         let mut conn = self.lock()?;
         let tx = begin(&mut conn)?;
-        cfg.sort_order = next_connection_order(&tx, cfg.group_id)?;
-        let now = now_rfc3339()?;
-        let cols = ConnColumns::from_config(&cfg)?;
-        tx.execute(
-            "INSERT INTO connections (id, group_id, name, sort_order, kind, host, port, \
-             username, default_db, env_tag, read_only, secret_mode, ssh_json, ssl_json, \
-             options_json, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)",
-            params![
-                cfg.id.to_string(),
-                cfg.group_id.map(|g| g.to_string()),
-                cfg.name,
-                cfg.sort_order,
-                cols.kind,
-                cfg.host,
-                cfg.port,
-                cfg.username,
-                cfg.default_db,
-                cols.env_tag,
-                cfg.read_only,
-                cols.secret_mode,
-                cols.ssh_json,
-                cols.ssl_json,
-                cols.options_json,
-                now,
-            ],
-        )
-        .map_err(|e| internal("insert connection", e))?;
+        insert_connection(&tx, &mut cfg)?;
         let applied = self.apply_secrets(
             cfg.id,
             cfg.secret_mode,
@@ -231,39 +169,7 @@ impl ConnectionRepo {
         cfg.validate()?;
         let mut conn = self.lock()?;
         let tx = begin(&mut conn)?;
-        let current = load_connection(&tx, cfg.id)?;
-        cfg.sort_order = if current.group_id == cfg.group_id {
-            current.sort_order
-        } else {
-            next_connection_order(&tx, cfg.group_id)?
-        };
-        let now = now_rfc3339()?;
-        let cols = ConnColumns::from_config(&cfg)?;
-        tx.execute(
-            "UPDATE connections SET group_id = ?2, name = ?3, sort_order = ?4, kind = ?5, \
-             host = ?6, port = ?7, username = ?8, default_db = ?9, env_tag = ?10, \
-             read_only = ?11, secret_mode = ?12, ssh_json = ?13, ssl_json = ?14, \
-             options_json = ?15, updated_at = ?16 WHERE id = ?1",
-            params![
-                cfg.id.to_string(),
-                cfg.group_id.map(|g| g.to_string()),
-                cfg.name,
-                cfg.sort_order,
-                cols.kind,
-                cfg.host,
-                cfg.port,
-                cfg.username,
-                cfg.default_db,
-                cols.env_tag,
-                cfg.read_only,
-                cols.secret_mode,
-                cols.ssh_json,
-                cols.ssl_json,
-                cols.options_json,
-                now,
-            ],
-        )
-        .map_err(|e| internal("update connection", e))?;
+        update_connection_row(&tx, &mut cfg)?;
         self.apply_secrets(
             cfg.id,
             cfg.secret_mode,
@@ -307,28 +213,15 @@ impl ConnectionRepo {
     }
 
     pub fn create_group(&self, name: &str, parent: Option<Uuid>) -> Result<Group, DbError> {
-        validate_group_name(name)?;
         let mut conn = self.lock()?;
         let tx = begin(&mut conn)?;
-        let parent_str = parent.map(|p| p.to_string());
-        let sort_order: i64 = tx
-            .query_row(
-                "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM groups WHERE parent_id IS ?1",
-                params![parent_str],
-                |r| r.get(0),
-            )
-            .map_err(|e| internal("compute group order", e))?;
         let group = Group {
             id: Uuid::new_v4(),
             parent_id: parent,
             name: name.to_string(),
-            sort_order,
+            sort_order: 0,
         };
-        tx.execute(
-            "INSERT INTO groups (id, parent_id, name, sort_order) VALUES (?1, ?2, ?3, ?4)",
-            params![group.id.to_string(), parent_str, group.name, sort_order],
-        )
-        .map_err(|e| internal("insert group", e))?;
+        let group = insert_group(&tx, group)?;
         commit(tx)?;
         Ok(group)
     }
@@ -501,8 +394,35 @@ impl ConnectionRepo {
         Ok(())
     }
 
+    pub(crate) fn secret_store(&self) -> &dyn SecretStore {
+        &*self.secrets
+    }
+
+    /// All groups and connection configs, without touching the secret store.
+    pub(crate) fn snapshot(&self) -> Result<(Vec<Group>, Vec<ConnectionConfig>), DbError> {
+        let conn = self.lock()?;
+        let groups = load_groups(&conn)?;
+        let configs = load_raw_connections(&conn)?
+            .into_iter()
+            .map(RawConn::into_config)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((groups, configs))
+    }
+
+    /// Runs `f` in one SQLite transaction, committed only when `f` succeeds.
+    pub(crate) fn transaction<R>(
+        &self,
+        f: impl FnOnce(&Transaction<'_>) -> Result<R, DbError>,
+    ) -> Result<R, DbError> {
+        let mut conn = self.lock()?;
+        let tx = begin(&mut conn)?;
+        let out = f(&tx)?;
+        commit(tx)?;
+        Ok(out)
+    }
+
     /// Ask mode never keeps secrets: anything stored is removed. Otherwise applies each change.
-    fn apply_secrets(
+    pub(crate) fn apply_secrets(
         &self,
         id: Uuid,
         mode: SecretMode,
@@ -522,7 +442,7 @@ impl ConnectionRepo {
     }
 }
 
-fn set_or_keep(value: Option<SecretString>) -> SecretChange {
+pub(crate) fn set_or_keep(value: Option<SecretString>) -> SecretChange {
     value.map_or(SecretChange::Keep, SecretChange::Set)
 }
 
@@ -561,6 +481,13 @@ fn next_connection_order(conn: &Connection, group: Option<Uuid>) -> Result<i64, 
 }
 
 fn load_connection(conn: &Connection, id: Uuid) -> Result<ConnectionConfig, DbError> {
+    find_connection(conn, id)?.ok_or_else(|| not_found("connection", id))
+}
+
+pub(crate) fn find_connection(
+    conn: &Connection,
+    id: Uuid,
+) -> Result<Option<ConnectionConfig>, DbError> {
     conn.query_row(
         &format!("SELECT {CONN_COLUMNS} FROM connections WHERE id = ?1"),
         params![id.to_string()],
@@ -568,11 +495,185 @@ fn load_connection(conn: &Connection, id: Uuid) -> Result<ConnectionConfig, DbEr
     )
     .optional()
     .map_err(|e| internal("load connection", e))?
-    .ok_or_else(|| not_found("connection", id))?
-    .into_config()
+    .map(RawConn::into_config)
+    .transpose()
 }
 
-fn now_rfc3339() -> Result<String, DbError> {
+/// Inserts `cfg` (already validated) appended to its group; sets `cfg.sort_order`.
+pub(crate) fn insert_connection(
+    conn: &Connection,
+    cfg: &mut ConnectionConfig,
+) -> Result<(), DbError> {
+    cfg.sort_order = next_connection_order(conn, cfg.group_id)?;
+    let now = now_rfc3339()?;
+    let cols = ConnColumns::from_config(cfg)?;
+    conn.execute(
+        "INSERT INTO connections (id, group_id, name, sort_order, kind, host, port, \
+         username, default_db, env_tag, read_only, secret_mode, ssh_json, ssl_json, \
+         options_json, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)",
+        params![
+            cfg.id.to_string(),
+            cfg.group_id.map(|g| g.to_string()),
+            cfg.name,
+            cfg.sort_order,
+            cols.kind,
+            cfg.host,
+            cfg.port,
+            cfg.username,
+            cfg.default_db,
+            cols.env_tag,
+            cfg.read_only,
+            cols.secret_mode,
+            cols.ssh_json,
+            cols.ssl_json,
+            cols.options_json,
+            now,
+        ],
+    )
+    .map_err(|e| internal("insert connection", e))?;
+    Ok(())
+}
+
+/// Rewrites the stored row of `cfg` (already validated). Keeps its position unless the group
+/// changes, in which case it is appended to the new group; sets `cfg.sort_order`.
+pub(crate) fn update_connection_row(
+    conn: &Connection,
+    cfg: &mut ConnectionConfig,
+) -> Result<(), DbError> {
+    let current = load_connection(conn, cfg.id)?;
+    cfg.sort_order = if current.group_id == cfg.group_id {
+        current.sort_order
+    } else {
+        next_connection_order(conn, cfg.group_id)?
+    };
+    let now = now_rfc3339()?;
+    let cols = ConnColumns::from_config(cfg)?;
+    conn.execute(
+        "UPDATE connections SET group_id = ?2, name = ?3, sort_order = ?4, kind = ?5, \
+         host = ?6, port = ?7, username = ?8, default_db = ?9, env_tag = ?10, \
+         read_only = ?11, secret_mode = ?12, ssh_json = ?13, ssl_json = ?14, \
+         options_json = ?15, updated_at = ?16 WHERE id = ?1",
+        params![
+            cfg.id.to_string(),
+            cfg.group_id.map(|g| g.to_string()),
+            cfg.name,
+            cfg.sort_order,
+            cols.kind,
+            cfg.host,
+            cfg.port,
+            cfg.username,
+            cfg.default_db,
+            cols.env_tag,
+            cfg.read_only,
+            cols.secret_mode,
+            cols.ssh_json,
+            cols.ssl_json,
+            cols.options_json,
+            now,
+        ],
+    )
+    .map_err(|e| internal("update connection", e))?;
+    Ok(())
+}
+
+/// Names of the connections in `group` (None = root), other than `except`.
+pub(crate) fn connection_names_in_group(
+    conn: &Connection,
+    group: Option<Uuid>,
+    except: Uuid,
+) -> Result<HashSet<String>, DbError> {
+    let mut stmt = conn
+        .prepare("SELECT name FROM connections WHERE group_id IS ?1 AND id <> ?2")
+        .map_err(|e| internal("list connection names", e))?;
+    let names = stmt
+        .query_map(
+            params![group.map(|g| g.to_string()), except.to_string()],
+            |r| r.get(0),
+        )
+        .and_then(|rows| rows.collect::<Result<HashSet<String>, _>>())
+        .map_err(|e| internal("list connection names", e))?;
+    Ok(names)
+}
+
+pub(crate) fn group_exists(conn: &Connection, id: Uuid) -> Result<bool, DbError> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM groups WHERE id = ?1)",
+        params![id.to_string()],
+        |r| r.get(0),
+    )
+    .map_err(|e| internal("load group", e))
+}
+
+/// Inserts `group` with its id, appended among the children of its parent; returns it with
+/// the assigned `sort_order`.
+pub(crate) fn insert_group(conn: &Connection, mut group: Group) -> Result<Group, DbError> {
+    validate_group_name(&group.name)?;
+    let parent_str = group.parent_id.map(|p| p.to_string());
+    group.sort_order = conn
+        .query_row(
+            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM groups WHERE parent_id IS ?1",
+            params![parent_str],
+            |r| r.get(0),
+        )
+        .map_err(|e| internal("compute group order", e))?;
+    conn.execute(
+        "INSERT INTO groups (id, parent_id, name, sort_order) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            group.id.to_string(),
+            parent_str,
+            group.name,
+            group.sort_order
+        ],
+    )
+    .map_err(|e| internal("insert group", e))?;
+    Ok(group)
+}
+
+fn load_groups(conn: &Connection) -> Result<Vec<Group>, DbError> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, parent_id, name, sort_order FROM groups \
+             ORDER BY parent_id, sort_order, name",
+        )
+        .map_err(|e| internal("list groups", e))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<String>>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| internal("list groups", e))?;
+    rows.into_iter()
+        .map(|(id, parent, name, sort_order)| {
+            Ok(Group {
+                id: parse_uuid(&id)?,
+                parent_id: parent.as_deref().map(parse_uuid).transpose()?,
+                name,
+                sort_order,
+            })
+        })
+        .collect()
+}
+
+fn load_raw_connections(conn: &Connection) -> Result<Vec<RawConn>, DbError> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {CONN_COLUMNS} FROM connections ORDER BY group_id, sort_order, name"
+        ))
+        .map_err(|e| internal("list connections", e))?;
+    let rows = stmt
+        .query_map([], RawConn::from_row)
+        .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+        .map_err(|e| internal("list connections", e))?;
+    Ok(rows)
+}
+
+pub(crate) fn now_rfc3339() -> Result<String, DbError> {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .map_err(|e| internal("format timestamp", e))
