@@ -1,0 +1,151 @@
+name: dnt-test
+
+# Integration-test matrix. Start with:
+#   docker compose -f testdata/docker-compose.test.yml up -d --wait
+# Run `cargo run -p dnt-testkit --bin gen_fixtures` first (certs + ssh keys are mounted from here).
+
+x-mysql-args: &mysql-args
+  - --ssl-ca=/certs/ca.pem
+  - --ssl-cert=/certs/server.pem
+  - --ssl-key=/certs/server-key.pem
+  - --character-set-server=utf8mb4
+  - --collation-server=utf8mb4_unicode_ci
+
+x-mysql-health: &mysql-health
+  test: ["CMD-SHELL", "mysqladmin ping -h127.0.0.1 -uroot -pdnt_test --silent"]
+  interval: 5s
+  timeout: 5s
+  retries: 40
+  start_period: 20s
+
+x-mariadb-health: &mariadb-health
+  test: ["CMD-SHELL", "mariadb-admin ping -h127.0.0.1 -uroot -pdnt_test --silent"]
+  interval: 5s
+  timeout: 5s
+  retries: 40
+  start_period: 20s
+
+x-pg-health: &pg-health
+  test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d dnt_fixture"]
+  interval: 5s
+  timeout: 5s
+  retries: 40
+  start_period: 20s
+
+# PostgreSQL refuses a key file that is not 0600 and owned by the server user, which a Windows
+# bind mount can never satisfy. The wrapper copies the certs inside the container first.
+x-pg-command: &pg-command
+  - bash
+  - -c
+  - >-
+    mkdir -p /etc/dnt-ssl &&
+    cp /certs/ca.pem /certs/server.pem /certs/server-key.pem /etc/dnt-ssl/ &&
+    chown postgres:postgres /etc/dnt-ssl/* &&
+    chmod 600 /etc/dnt-ssl/server-key.pem &&
+    exec docker-entrypoint.sh postgres
+    -c ssl=on
+    -c ssl_ca_file=/etc/dnt-ssl/ca.pem
+    -c ssl_cert_file=/etc/dnt-ssl/server.pem
+    -c ssl_key_file=/etc/dnt-ssl/server-key.pem
+
+x-pg-env: &pg-env
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: dnt_test
+  POSTGRES_DB: dnt_fixture
+
+services:
+  mysql57:
+    image: mysql:5.7
+    platform: linux/amd64
+    command: *mysql-args
+    environment:
+      MYSQL_ROOT_PASSWORD: dnt_test
+      MYSQL_DATABASE: dnt_fixture
+    ports: ["33057:3306"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/mysql_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+      - ./sql/zero_dates.sql:/docker-entrypoint-initdb.d/02_zero_dates.sql:ro
+    healthcheck: *mysql-health
+
+  mysql8:
+    image: mysql:8.0
+    command: *mysql-args
+    environment:
+      MYSQL_ROOT_PASSWORD: dnt_test
+      MYSQL_DATABASE: dnt_fixture
+    ports: ["33080:3306"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/mysql_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+      - ./sql/mysql8.sql:/docker-entrypoint-initdb.d/02_mysql8.sql:ro
+    healthcheck: *mysql-health
+
+  mariadb106:
+    image: mariadb:10.6
+    command: *mysql-args
+    environment:
+      MARIADB_ROOT_PASSWORD: dnt_test
+      MARIADB_DATABASE: dnt_fixture
+    ports: ["33106:3306"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/mysql_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+      - ./sql/mariadb.sql:/docker-entrypoint-initdb.d/02_mariadb.sql:ro
+      - ./sql/zero_dates.sql:/docker-entrypoint-initdb.d/03_zero_dates.sql:ro
+    healthcheck: *mariadb-health
+
+  mariadb114:
+    image: mariadb:11.4
+    command: *mysql-args
+    environment:
+      MARIADB_ROOT_PASSWORD: dnt_test
+      MARIADB_DATABASE: dnt_fixture
+    ports: ["33114:3306"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/mysql_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+      - ./sql/mariadb.sql:/docker-entrypoint-initdb.d/02_mariadb.sql:ro
+      - ./sql/zero_dates.sql:/docker-entrypoint-initdb.d/03_zero_dates.sql:ro
+    healthcheck: *mariadb-health
+
+  pg12:
+    image: postgres:12
+    command: *pg-command
+    environment: *pg-env
+    ports: ["54312:5432"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/pg_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+    healthcheck: *pg-health
+
+  pg17:
+    image: postgres:17
+    command: *pg-command
+    environment: *pg-env
+    ports: ["54317:5432"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./sql/pg_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
+    healthcheck: *pg-health
+
+  ssh:
+    image: lscr.io/linuxserver/openssh-server
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: Etc/UTC
+      PASSWORD_ACCESS: "true"
+      USER_NAME: dnt
+      USER_PASSWORD: dnt_test
+      PUBLIC_KEY_FILE: /keys/id_ed25519.pub
+      DOCKER_MODS: linuxserver/mods:openssh-server-ssh-tunnel
+    ports: ["2222:2222"]
+    volumes:
+      - ./ssh/id_ed25519.pub:/keys/id_ed25519.pub:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 2222"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 30s

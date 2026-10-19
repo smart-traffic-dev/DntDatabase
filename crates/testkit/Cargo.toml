@@ -1,0 +1,19 @@
+[package]
+name = "dnt-testkit"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "dnt_testkit"
+
+[[bin]]
+name = "gen_fixtures"
+path = "src/bin/gen_fixtures.rs"
+
+[dependencies]
+dnt-core.workspace = true
+dnt-store = { path = "../store" }
+secrecy.workspace = true
+rcgen = "0.13"
+ssh-key = { version = "0.6", features = ["ed25519", "encryption", "getrandom"] }
