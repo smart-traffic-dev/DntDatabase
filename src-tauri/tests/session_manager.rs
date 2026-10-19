@@ -19,9 +19,9 @@ use dntdatabase::cache::NodeKey;
 use dntdatabase::session_manager::{ConnState, MetaFuture, SessionManager};
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 /// What the fake driver saw and did, shared with the test.
@@ -38,6 +38,17 @@ struct Log {
     lose_next: AtomicUsize,
     /// While set, every connect is refused.
     refuse: AtomicBool,
+    /// Every connect takes this long (ms).
+    connect_delay_ms: AtomicU64,
+    /// Every `list_objects` call takes this long (ms).
+    list_delay_ms: AtomicU64,
+}
+
+async fn delay(ms: &AtomicU64) {
+    let ms = ms.load(Ordering::SeqCst);
+    if ms > 0 {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
 }
 
 struct FakeDriver {
@@ -61,6 +72,7 @@ impl Driver for FakeDriver {
             .push(cfg.database.clone());
         *self.log.last_password.lock().unwrap() =
             cfg.password.as_ref().map(|p| p.expose_secret().to_string());
+        delay(&self.log.connect_delay_ms).await;
         if self.fail_connect || self.log.refuse.load(Ordering::SeqCst) {
             return Err(DbError::Connect {
                 message: "fake refused (10061)".into(),
@@ -139,6 +151,7 @@ impl Introspector for FakeSession {
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
         self.log.list_calls.fetch_add(1, Ordering::SeqCst);
+        delay(&self.log.list_delay_ms).await;
         let lose = self
             .log
             .lose_next
@@ -165,8 +178,11 @@ impl Introspector for FakeSession {
     }
 }
 
+/// Metadata call bound used by these tests instead of 30 s.
+const TEST_METADATA_TIMEOUT: Duration = Duration::from_millis(300);
+
 struct Fixture {
-    sm: SessionManager,
+    sm: Arc<SessionManager>,
     repo: Arc<ConnectionRepo>,
     log: Arc<Log>,
     _dir: tempfile::TempDir,
@@ -190,9 +206,10 @@ fn fixture(kind: DbKind, fail_connect: bool) -> Fixture {
         secrets,
         KnownHosts::new(dir.path().join("known_hosts")),
         HashMap::from([(kind, driver)]),
-    );
+    )
+    .with_metadata_timeout(TEST_METADATA_TIMEOUT);
     Fixture {
-        sm,
+        sm: Arc::new(sm),
         repo,
         log,
         _dir: dir,
@@ -487,4 +504,163 @@ async fn ssh_password_auth_without_password_is_rejected() {
         matches!(&err, DbError::Secret { message } if message == "password_required"),
         "{err:?}"
     );
+}
+
+/// Polls `cond` for up to 2 s.
+async fn wait_until(cond: impl Fn() -> bool) {
+    let started = Instant::now();
+    while !cond() {
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "condition not met"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[tokio::test]
+async fn close_during_slow_connect_ends_disconnected() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.log.connect_delay_ms.store(200, Ordering::SeqCst);
+    let sm = Arc::clone(&f.sm);
+    let open = tokio::spawn(async move { sm.open(id, None).await });
+    wait_until(|| f.log.connects.load(Ordering::SeqCst) == 1).await;
+    assert_eq!(
+        f.sm.state(id),
+        ConnState::Connecting {
+            stage: ConnectStage::ConnectDb
+        }
+    );
+
+    f.sm.close(id).await;
+    assert_eq!(f.sm.state(id), ConnState::Disconnected);
+    let err = open.await.unwrap().unwrap_err();
+    assert!(matches!(err, DbError::Cancelled), "{err:?}");
+    // The superseded open closed the session it got and installed nothing.
+    assert_eq!(f.sm.state(id), ConnState::Disconnected);
+    assert!(f.sm.open_connections().is_empty());
+    assert_eq!(f.log.closes.load(Ordering::SeqCst), 1);
+    assert!(f.repo.tree().unwrap().connections[0]
+        .last_connected_at
+        .is_none());
+}
+
+#[tokio::test]
+async fn browse_waiting_during_close_does_not_reconnect() {
+    let f = fixture(DbKind::Postgres, false);
+    let id = save(&f, config(DbKind::Postgres, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.log.list_delay_ms.store(150, Ordering::SeqCst);
+
+    // `a` holds the metadata link (connect database); `b` waits for it and would open a
+    // second session for database `b`.
+    let sm = Arc::clone(&f.sm);
+    let a = tokio::spawn(async move {
+        sm.browse(id, None, key(&["db:root"]), list("root", ObjectKind::Table))
+            .await
+    });
+    wait_until(|| f.log.list_calls.load(Ordering::SeqCst) == 1).await;
+    let sm = Arc::clone(&f.sm);
+    let b = tokio::spawn(async move {
+        sm.browse(id, Some("b"), key(&["db:b"]), list("b", ObjectKind::Table))
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    f.sm.close(id).await;
+    a.await.unwrap().unwrap();
+    let err = b.await.unwrap().unwrap_err();
+    assert!(matches!(err, DbError::ConnectionLost { .. }), "{err:?}");
+    assert_eq!(f.log.connects.load(Ordering::SeqCst), 1);
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.sm.state(id), ConnState::Disconnected);
+}
+
+#[tokio::test]
+async fn hanging_metadata_call_times_out_and_close_is_prompt() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.log.list_delay_ms.store(60_000, Ordering::SeqCst);
+
+    let started = Instant::now();
+    let err =
+        f.sm.browse(
+            id,
+            Some("shop"),
+            key(&["db:shop"]),
+            list("shop", ObjectKind::Table),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DbError::Timeout {
+                stage: ConnectStage::Execute
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // No retry, and the stuck session was dropped rather than closed.
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.log.closes.load(Ordering::SeqCst), 0);
+
+    // Close while another call hangs: it waits at most for the call bound.
+    let sm = Arc::clone(&f.sm);
+    let hung = tokio::spawn(async move {
+        sm.browse(
+            id,
+            Some("shop"),
+            key(&["db:shop"]),
+            list("shop", ObjectKind::Table),
+        )
+        .await
+    });
+    wait_until(|| f.log.list_calls.load(Ordering::SeqCst) == 2).await;
+    let started = Instant::now();
+    f.sm.close(id).await;
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(f.sm.state(id), ConnState::Disconnected);
+    let err = hung.await.unwrap().unwrap_err();
+    assert!(matches!(err, DbError::Timeout { .. }), "{err:?}");
+}
+
+#[tokio::test]
+async fn refresh_during_browse_does_not_cache_the_stale_result() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.log.list_delay_ms.store(100, Ordering::SeqCst);
+    let k = ["db:shop", "folder:Table"];
+
+    let sm = Arc::clone(&f.sm);
+    let call = tokio::spawn(async move {
+        sm.browse(id, Some("shop"), key(&k), list("shop", ObjectKind::Table))
+            .await
+    });
+    wait_until(|| f.log.list_calls.load(Ordering::SeqCst) == 1).await;
+    f.sm.refresh(id, &key(&["db:shop"]));
+    call.await.unwrap().unwrap();
+
+    f.log.list_delay_ms.store(0, Ordering::SeqCst);
+    list_tables(&f, id, Some("shop"), &k).await;
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn aborted_open_resets_pending() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.log.connect_delay_ms.store(5_000, Ordering::SeqCst);
+    let sm = Arc::clone(&f.sm);
+    let open = tokio::spawn(async move { sm.open(id, None).await });
+    wait_until(|| f.log.connects.load(Ordering::SeqCst) == 1).await;
+    assert!(matches!(f.sm.state(id), ConnState::Connecting { .. }));
+
+    open.abort();
+    assert!(open.await.unwrap_err().is_cancelled());
+    assert_eq!(f.sm.state(id), ConnState::Disconnected);
 }

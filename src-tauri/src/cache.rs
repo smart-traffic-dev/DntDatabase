@@ -22,36 +22,59 @@ impl NodeKey {
 }
 
 /// Browse results stored as JSON, so one map holds every result type.
+///
+/// Every invalidation bumps an epoch. A caller reads [`NodeCache::epoch`] before fetching
+/// and stores with [`NodeCache::insert_if_epoch`], so a result fetched across a refresh
+/// (and possibly stale) is not cached.
 #[derive(Debug, Default)]
 pub struct NodeCache {
-    entries: Mutex<HashMap<NodeKey, serde_json::Value>>,
+    inner: Mutex<Entries>,
+}
+
+#[derive(Debug, Default)]
+struct Entries {
+    map: HashMap<NodeKey, serde_json::Value>,
+    epoch: u64,
 }
 
 impl NodeCache {
-    fn lock(&self) -> MutexGuard<'_, HashMap<NodeKey, serde_json::Value>> {
+    fn lock(&self) -> MutexGuard<'_, Entries> {
         // The map stays consistent even if a holder panicked: every operation is one call.
-        self.entries.lock().unwrap_or_else(|p| p.into_inner())
+        self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub fn get(&self, key: &NodeKey) -> Option<serde_json::Value> {
-        self.lock().get(key).cloned()
+        self.lock().map.get(key).cloned()
     }
 
-    pub fn insert(&self, key: NodeKey, value: serde_json::Value) {
-        self.lock().insert(key, value);
+    pub fn epoch(&self) -> u64 {
+        self.lock().epoch
+    }
+
+    /// Stores `value` unless an invalidation happened since `epoch` was read; returns
+    /// whether it was stored.
+    pub fn insert_if_epoch(&self, key: NodeKey, value: serde_json::Value, epoch: u64) -> bool {
+        let mut entries = self.lock();
+        if entries.epoch != epoch {
+            return false;
+        }
+        entries.map.insert(key, value);
+        true
     }
 
     /// Drops every entry whose key starts with `prefix`.
     pub fn invalidate_prefix(&self, prefix: &NodeKey) {
-        self.lock().retain(|k, _| !k.starts_with(prefix));
+        let mut entries = self.lock();
+        entries.epoch += 1;
+        entries.map.retain(|k, _| !k.starts_with(prefix));
     }
 
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.lock().map.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
+        self.lock().map.is_empty()
     }
 }
 
@@ -80,13 +103,34 @@ mod tests {
         NodeKey(segments.iter().map(|s| s.to_string()).collect())
     }
 
+    fn put(cache: &NodeCache, key: NodeKey, value: serde_json::Value) {
+        assert!(cache.insert_if_epoch(key, value, cache.epoch()));
+    }
+
+    #[test]
+    fn result_fetched_across_an_invalidation_is_not_stored() {
+        let cache = NodeCache::default();
+        let before = cache.epoch();
+        // A refresh of any prefix lands while the fetch runs.
+        cache.invalidate_prefix(&key(&["db:other"]));
+        assert!(!cache.insert_if_epoch(key(&["db:a", "folder:Table"]), json!(1), before));
+        assert!(cache.is_empty());
+        // A fetch started after the refresh is stored.
+        put(&cache, key(&["db:a", "folder:Table"]), json!(2));
+        assert_eq!(cache.get(&key(&["db:a", "folder:Table"])), Some(json!(2)));
+    }
+
     #[test]
     fn invalidate_prefix_matches_whole_segments() {
         let cache = NodeCache::default();
-        cache.insert(key(&["db:shop", "folder:Table"]), json!(1));
-        cache.insert(key(&["db:shop", "obj:Table:orders", "ddl"]), json!(2));
-        cache.insert(key(&["db:shopping", "folder:Table"]), json!(3));
-        cache.insert(key(&["db:other"]), json!(4));
+        put(&cache, key(&["db:shop", "folder:Table"]), json!(1));
+        put(
+            &cache,
+            key(&["db:shop", "obj:Table:orders", "ddl"]),
+            json!(2),
+        );
+        put(&cache, key(&["db:shopping", "folder:Table"]), json!(3));
+        put(&cache, key(&["db:other"]), json!(4));
 
         cache.invalidate_prefix(&key(&["db:shop"]));
         assert_eq!(cache.len(), 2);
@@ -104,9 +148,9 @@ mod tests {
     #[test]
     fn deeper_prefix_keeps_siblings() {
         let cache = NodeCache::default();
-        cache.insert(key(&["db:a", "obj:Table:t", "detail"]), json!(1));
-        cache.insert(key(&["db:a", "obj:Table:t", "ddl"]), json!(2));
-        cache.insert(key(&["db:a", "obj:Table:u", "ddl"]), json!(3));
+        put(&cache, key(&["db:a", "obj:Table:t", "detail"]), json!(1));
+        put(&cache, key(&["db:a", "obj:Table:t", "ddl"]), json!(2));
+        put(&cache, key(&["db:a", "obj:Table:u", "ddl"]), json!(3));
         cache.invalidate_prefix(&key(&["db:a", "obj:Table:t"]));
         assert_eq!(cache.len(), 1);
         assert_eq!(
