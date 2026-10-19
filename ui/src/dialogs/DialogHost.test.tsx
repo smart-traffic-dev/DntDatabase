@@ -93,6 +93,22 @@ describe('DialogHost', () => {
     expect(useDialogs.getState().prompt).toBeNull();
   });
 
+  it('asks only for the key passphrase when the stored SSH key is encrypted', async () => {
+    mockBackend({ list_tree: () => sampleTree(), open_connection: () => openResult(serverInfo('MySql8')), list_databases: () => [] });
+    await seed();
+    // shop-prod: Saved mode, SSH key auth; pretend a stale SSH secret flag is set.
+    const stored = useConnections.getState().summaries.get(ids.prod)!;
+    useConnections.getState().summaries.set(ids.prod, { ...stored, has_ssh_secret: true });
+    useDialogs.getState().showPrompt({ kind: 'password', connectionId: ids.prod, error: backendError('key_passphrase_required') });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    expect(screen.queryByLabelText('Database password')).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText('Key passphrase'), 'kp');
+    await user.click(screen.getByRole('button', { name: 'Connect' }));
+    await waitFor(() => expect(callsOf('open_connection')).toHaveLength(1));
+    expect(callsOf('open_connection')[0]).toMatchObject({ id: ids.prod, prompt: { ssh_key_passphrase: 'kp' } });
+  });
+
   it('cancelling the prompt leaves the connection collapsed', async () => {
     mockBackend({ list_tree: () => sampleTree() });
     await seed();

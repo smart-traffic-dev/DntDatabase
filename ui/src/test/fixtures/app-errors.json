@@ -252,6 +252,28 @@
     "port": null,
     "field": null
   },
+  "key_passphrase_required": {
+    "kind": "password_required",
+    "message": "A password is required.",
+    "detail": null,
+    "stage": "open_tunnel",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 0
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
   "not_open": {
     "kind": "not_open",
     "message": "This connection is not open.",

@@ -7,6 +7,11 @@ use std::io::ErrorKind;
 use std::path::Path;
 use zeroize::Zeroizing;
 
+/// `Ssh{Auth}` message when the private key is encrypted and no passphrase was given:
+/// the app asks for the passphrase instead of reporting a failure.
+pub const KEY_PASSPHRASE_REQUIRED: &str =
+    "the SSH private key is encrypted: a passphrase is required";
+
 fn key_path_err(message: impl Into<String>) -> DbError {
     DbError::Config {
         field: Some("ssh.key_path".into()),
@@ -47,9 +52,7 @@ pub(crate) fn load_private_key(
     match decode_secret_key(&text, None) {
         Ok(key) => Ok(key),
         Err(KeyError::KeyIsEncrypted) => match passphrase {
-            None => Err(auth_err(
-                "the SSH private key is encrypted: a passphrase is required",
-            )),
+            None => Err(auth_err(KEY_PASSPHRASE_REQUIRED)),
             Some(p) => {
                 decrypt(p).map_err(|_| auth_err("wrong passphrase for the SSH private key"))
             }

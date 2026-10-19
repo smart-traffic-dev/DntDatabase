@@ -12,7 +12,7 @@ use crate::cache::{NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{Driver, ExecOptions, Introspector, RowSink, Session};
 pub use dnt_core::error::StageTiming;
-use dnt_core::error::{ConnectStage, DbError};
+use dnt_core::error::{ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
@@ -232,6 +232,31 @@ async fn connect_db(
         })?
 }
 
+/// Whether `cfg` (as typed) still points at the server, user and SSH bastion of `stored`.
+fn same_target(stored: &ConnectionConfig, cfg: &ConnectionConfig) -> bool {
+    let ssh = match (&stored.ssh, &cfg.ssh) {
+        (_, None) => true,
+        (Some(a), Some(b)) => a.host == b.host && a.port == b.port && a.user == b.user,
+        (None, Some(_)) => false,
+    };
+    stored.host == cfg.host && stored.port == cfg.port && stored.username == cfg.username && ssh
+}
+
+/// Opening a saved connection whose SSH key is encrypted and whose passphrase is not
+/// stored: ask for it (`password_required`) instead of failing the open.
+fn ask_for_missing_key_passphrase(e: DbError) -> DbError {
+    let missing = matches!(
+        e.unstaged(),
+        DbError::Ssh { stage: SshStage::Auth, message } if message == dnt_tunnel::KEY_PASSPHRASE_REQUIRED
+    );
+    match e {
+        DbError::AtStage { stage, timings, .. } if missing => {
+            DbError::at_stage(stage, timings, password_required())
+        }
+        e => e,
+    }
+}
+
 /// Errors after which the metadata session (and tunnel) is worth reopening once.
 fn is_lost(e: &DbError) -> bool {
     matches!(e, DbError::ConnectionLost { .. } | DbError::Connect { .. })
@@ -330,7 +355,9 @@ impl SessionManager {
     /// everything again. Nothing is stored and no runtime is kept.
     ///
     /// For a saved connection (non-nil id, `Saved` mode) secrets the user did not type fall
-    /// back to the stored ones; typed secrets always win. They never leave the backend.
+    /// back to the stored ones, but only while host, port and user (and, with SSH, the SSH
+    /// host, port and user) are those of the stored config: an edited target never gets
+    /// the stored secrets. Typed secrets always win. They never leave the backend.
     pub async fn test(
         &self,
         cfg: &ConnectionConfig,
@@ -358,7 +385,11 @@ impl SessionManager {
         secrets: NewSecrets,
     ) -> Result<ConnSecrets, DbError> {
         let mut secrets = ConnSecrets::from(secrets);
-        if cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil() {
+        let same_target = || match self.repo.get(cfg.id) {
+            Ok(stored) => same_target(&stored, cfg),
+            Err(_) => false,
+        };
+        if cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil() && same_target() {
             let fill = |slot: &mut Option<SecretString>, kind| -> Result<(), DbError> {
                 if slot.is_none() {
                     *slot = self.secrets.get(cfg.id, kind)?;
@@ -471,7 +502,8 @@ impl SessionManager {
             |stage| self.set_pending_if_current(id, generation, ConnState::Connecting { stage });
         let opened = self
             .connect_pipeline(&cfg, &secrets, timings, &report)
-            .await?;
+            .await
+            .map_err(ask_for_missing_key_passphrase)?;
         Ok((cfg, secrets, opened))
     }
 

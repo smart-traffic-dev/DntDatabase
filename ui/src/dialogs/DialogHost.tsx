@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { api, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
-import type { ConnectionConfig, SecretsInput } from '../bindings';
+import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt } from '../store/dialogs';
 import { useTree } from '../store/tree';
@@ -13,8 +13,12 @@ import { PasswordPrompt, type SecretNeed } from './PasswordPrompt';
 import { ConfirmDialog, NameDialog } from './SimpleDialogs';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
-function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean): SecretNeed[] {
+function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
   if (!cfg) return ['db_password'];
+  // Asked while opening the tunnel: the SSH key is encrypted and its passphrase is not stored.
+  if (error.stage === 'open_tunnel' && cfg.ssh?.auth === 'key' && cfg.secret_mode === 'saved') {
+    return ['ssh_key_passphrase'];
+  }
   const ask = cfg.secret_mode === 'ask';
   const needs: SecretNeed[] = [];
   if (ask || !hasDb) needs.push('db_password');
@@ -78,7 +82,7 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
   return (
     <PasswordPrompt
       connectionName={stored?.config.name ?? 'connection'}
-      needs={neededSecrets(stored?.config, !!stored?.has_db_password, !!stored?.has_ssh_secret)}
+      needs={neededSecrets(stored?.config, !!stored?.has_db_password, !!stored?.has_ssh_secret, prompt.error)}
       error={error}
       onSubmit={(secrets) => {
         setError(null);

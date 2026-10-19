@@ -3,6 +3,7 @@
 mod auth;
 mod known_hosts;
 
+pub use auth::KEY_PASSPHRASE_REQUIRED;
 pub use known_hosts::{fingerprint, HostKeyStatus, KnownHosts};
 
 use dnt_core::config::{SshAuth, SshConfig};

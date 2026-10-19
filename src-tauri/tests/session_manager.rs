@@ -534,6 +534,111 @@ async fn test_connection_falls_back_to_stored_secrets_and_typed_ones_win() {
 }
 
 #[tokio::test]
+async fn test_falls_back_to_stored_secrets_only_for_the_same_server_and_user() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(
+        &f,
+        config(DbKind::MySql, SecretMode::Saved),
+        Some("stored-pw"),
+    );
+    let stored = f.repo.get(id).unwrap();
+    type Edit = (&'static str, fn(&mut ConnectionConfig));
+    let edits: [Edit; 3] = [
+        ("host", |c| c.host = "evil.example.com".into()),
+        ("port", |c| c.port = 3307),
+        ("username", |c| c.username = "someone".into()),
+    ];
+    for (what, edit) in edits {
+        let mut cfg = stored.clone();
+        edit(&mut cfg);
+        f.sm.test(&cfg, secrets(None)).await.unwrap();
+        assert_eq!(
+            f.log.last_password.lock().unwrap().as_deref(),
+            None,
+            "changed {what}: the stored password must not be sent"
+        );
+        // A typed password is still used.
+        f.sm.test(&cfg, secrets(Some("typed"))).await.unwrap();
+        assert_eq!(
+            f.log.last_password.lock().unwrap().as_deref(),
+            Some("typed")
+        );
+    }
+    // Other edits (name, database, timeouts) keep the fallback.
+    let mut cfg = stored.clone();
+    cfg.name = "renamed".into();
+    cfg.default_db = Some("other".into());
+    f.sm.test(&cfg, secrets(None)).await.unwrap();
+    assert_eq!(
+        f.log.last_password.lock().unwrap().as_deref(),
+        Some("stored-pw")
+    );
+}
+
+#[tokio::test]
+async fn test_falls_back_to_stored_ssh_secret_only_for_the_same_ssh_server_and_user() {
+    let f = fixture(DbKind::MySql, false);
+    let mut cfg = config(DbKind::MySql, SecretMode::Saved);
+    cfg.options.ssh_timeout_s = 1;
+    cfg.ssh = Some(dnt_core::config::SshConfig {
+        // Nothing listens there: with the stored password the test fails at OpenTunnel.
+        host: "127.0.0.1".into(),
+        port: 9,
+        ..dnt_core::test_util::sample_ssh()
+    });
+    let id = f
+        .repo
+        .create(
+            cfg,
+            NewSecrets {
+                db_password: Some(SecretString::from("pw")),
+                ssh_password: Some(SecretString::from("ssh-pw")),
+                ssh_key_passphrase: None,
+            },
+        )
+        .unwrap()
+        .id;
+    let stored = f.repo.get(id).unwrap();
+
+    let err = f.sm.test(&stored, secrets(None)).await.unwrap_err();
+    assert_eq!(err.stage(), Some(ConnectStage::OpenTunnel), "{err:?}");
+
+    type Edit = (&'static str, fn(&mut dnt_core::config::SshConfig));
+    let edits: [Edit; 3] = [
+        ("ssh.host", |s| s.host = "localhost".into()),
+        ("ssh.port", |s| s.port = 10),
+        ("ssh.user", |s| s.user = "other".into()),
+    ];
+    for (what, edit) in edits {
+        let mut cfg = stored.clone();
+        edit(cfg.ssh.as_mut().unwrap());
+        let err = f.sm.test(&cfg, secrets(None)).await.unwrap_err();
+        assert_eq!(err.stage(), Some(ConnectStage::ResolveSecrets), "{what}");
+        assert!(
+            matches!(err.unstaged(), DbError::Secret { message } if message == "password_required"),
+            "changed {what}: {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn saved_encrypted_ssh_key_without_passphrase_asks_for_it() {
+    let f = fixture(DbKind::MySql, false);
+    let mut cfg = config(DbKind::MySql, SecretMode::Saved);
+    cfg.ssh = Some(dnt_core::config::SshConfig {
+        auth: dnt_core::config::SshAuth::Key,
+        key_path: Some(dnt_testkit::testdata("ssh/id_ed25519_enc")),
+        ..dnt_core::test_util::sample_ssh()
+    });
+    let id = save(&f, cfg, Some("pw"));
+    let err = f.sm.open(id, None).await.unwrap_err();
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "password_required", "{app:?}");
+    assert_eq!(app.stage.as_deref(), Some("open_tunnel"));
+    assert_eq!(f.log.connects.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn ask_mode_prompt_without_password_is_rejected() {
     let f = fixture(DbKind::MySql, false);
     let id = save(&f, config(DbKind::MySql, SecretMode::Ask), None);

@@ -164,6 +164,26 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         .await
         .unwrap_err();
     out.insert("not_open", err.into());
+    // Saved mode, encrypted SSH key, no stored passphrase: the key is loaded before dialing.
+    let keyed = create_connection_impl(
+        &state,
+        dnt_core::config::ConnectionConfig {
+            id: Uuid::nil(),
+            ssh: Some(dnt_core::config::SshConfig {
+                auth: dnt_core::config::SshAuth::Key,
+                key_path: Some(dnt_testkit::testdata("ssh/id_ed25519_enc")),
+                ..dnt_core::test_util::sample_ssh()
+            }),
+            ..sample_config()
+        },
+        serde_json::from_value(json!({ "db_password": "pw" })).unwrap(),
+    )
+    .await
+    .unwrap();
+    let err = open_connection_impl(&state, keyed.id, None)
+        .await
+        .unwrap_err();
+    out.insert("key_passphrase_required", err.into());
 
     // Trusting a host key that is not a valid OpenSSH public key.
     let err = trust_host_key_impl(
