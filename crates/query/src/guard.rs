@@ -82,7 +82,7 @@ pub fn verdict(
             continue;
         }
         any = true;
-        let rv = if read_only && lifts_toks(&r, &toks, dialect) {
+        let mut rv = if read_only && lifts_toks(&r, &toks, dialect) {
             Verdict::Block
         } else {
             match classify(&r, dialect) {
@@ -92,6 +92,11 @@ pub fn verdict(
                 StatementKind::Other => unsafe_verdict,
             }
         };
+        // `EXPLAIN ANALYZE …` typed in the editor runs its statement, like the
+        // `analyze` flag of `guard`: Confirm on Production, Allow on read-only.
+        if !read_only && explain_analyze(&toks, dialect) {
+            rv = strictest(rv, Verdict::Confirm);
+        }
         v = strictest(v, rv);
     }
     if !any && kind == StatementKind::Other {
@@ -134,7 +139,16 @@ pub fn other_whitelisted(stmt: &str, dialect: Dialect) -> bool {
 /// - a `SET` assigning `transaction_read_only`, `tx_read_only` or
 ///   `default_transaction_read_only` any value other than `1`/`on`/`true`
 ///   (so `0`/`off`/`false`, and also `DEFAULT` or an expression);
-/// - PG: any `RESET`, and `DISCARD ALL`.
+/// - PG: any `RESET`, and `DISCARD ALL`;
+/// - PG: a call `set_config(name, …)` anywhere in the statement (bare,
+///   `pg_catalog.set_config` or quoted `"set_config"`) whose first argument is
+///   the literal `'default_transaction_read_only'` or `'transaction_read_only'`,
+///   or is not a single string literal at all (a column, `||`, a `$1`).
+///   Functions that call `set_config` internally are invisible to this check;
+///   the server-side `READ ONLY` session (P1 §4.5) is the first layer there.
+///
+/// Read-only names are matched case-insensitively, quoted or not; a `SET`
+/// assignment whose name is neither a word nor a quoted name also counts.
 pub fn lifts_read_only(stmt: &str, dialect: Dialect) -> bool {
     readings(stmt, dialect)
         .iter()
@@ -250,8 +264,128 @@ fn mysql_session_set(toks: &[Token]) -> bool {
         })
 }
 
+/// The read-only switches a `SET` or `set_config` may turn off.
+const READ_ONLY_VARS: [&str; 3] = [
+    "transaction_read_only",
+    "tx_read_only",
+    "default_transaction_read_only",
+];
+
+/// The body of a quoted token, or `None` when it is unterminated or not quoted:
+/// `'…'`, `"…"`, `` `…` `` (a doubled quote stands for one), `E'…'` (backslashes
+/// dropped) and `$tag$…$tag$`.
+fn unquote(q: &str) -> Option<String> {
+    let b = q.as_bytes();
+    match *b.first()? {
+        c @ (b'\'' | b'"' | b'`') => (q.len() >= 2 && b[q.len() - 1] == c).then(|| {
+            let c = char::from(c);
+            q[1..q.len() - 1].replace(&format!("{c}{c}"), &c.to_string())
+        }),
+        b'E' | b'e' => Some(unquote(&q[1..])?.replace('\\', "")),
+        b'$' => {
+            let tag_len = q[1..].find('$')? + 2;
+            let tag = &q[..tag_len];
+            (q.len() >= 2 * tag_len && q.ends_with(tag))
+                .then(|| q[tag_len..q.len() - tag_len].to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The name at token `i`, lowercased: a word, or a quoted name unquoted.
+fn name_at(src: &str, toks: &[Token], i: usize) -> Option<String> {
+    let t = toks.get(i)?;
+    match t.kind {
+        TokKind::Word(w) => Some(w.to_ascii_lowercase()),
+        TokKind::Quoted => unquote(&src[t.start..t.end]).map(|n| n.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// `EXPLAIN|DESC|DESCRIBE ANALYZE …` (MySQL), `EXPLAIN ANALYZE|ANALYSE …` and
+/// `EXPLAIN (… ANALYZE [value] …) …` (PG) with a value other than
+/// `false`/`off`/`0`: the same option rules as `classify`.
+fn explain_analyze(toks: &[Token], dialect: Dialect) -> bool {
+    let explain = is_word(toks, 0, "EXPLAIN")
+        || (dialect.is_mysql() && (is_word(toks, 0, "DESC") || is_word(toks, 0, "DESCRIBE")));
+    if !explain {
+        return false;
+    }
+    let is_analyze = |opt: &[Token], i| is_word(opt, i, "ANALYZE") || is_word(opt, i, "ANALYSE");
+    if is_analyze(toks, 1) {
+        return true;
+    }
+    if toks.get(1).is_some_and(|t| t.kind == TokKind::Open) {
+        let close = toks
+            .iter()
+            .position(|t| t.kind == TokKind::Close)
+            .unwrap_or(toks.len());
+        return toks[2..close]
+            .split(|t| t.kind == TokKind::Punct(b','))
+            .any(|opt| {
+                is_analyze(opt, 0) && !["FALSE", "OFF", "0"].iter().any(|v| is_word(opt, 1, v))
+            });
+    }
+    false
+}
+
+/// PG: some `set_config(` call in `toks` whose first argument is a read-only
+/// switch or not a single string literal (see [`lifts_read_only`]).
+fn calls_set_config_read_only(src: &str, toks: &[Token]) -> bool {
+    (0..toks.len()).any(|i| {
+        let t = toks[i];
+        let is_fn = match t.kind {
+            TokKind::Word(w) => w.eq_ignore_ascii_case("set_config"),
+            TokKind::Quoted => {
+                let q = &src[t.start..t.end];
+                q.starts_with('"')
+                    && unquote(q).is_some_and(|n| n.eq_ignore_ascii_case("set_config"))
+            }
+            _ => false,
+        };
+        is_fn
+            && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Open)
+            && first_arg_lifts(src, &toks[i + 2..])
+    })
+}
+
+/// `rest` follows `set_config(`: the first argument ends at a depth-0 `,` or
+/// the closing `)`.
+fn first_arg_lifts(src: &str, rest: &[Token]) -> bool {
+    let mut depth = 0usize;
+    let end = rest
+        .iter()
+        .position(|t| match t.kind {
+            TokKind::Open => {
+                depth += 1;
+                false
+            }
+            TokKind::Close if depth == 0 => true,
+            TokKind::Close => {
+                depth -= 1;
+                false
+            }
+            TokKind::Punct(b',') => depth == 0,
+            _ => false,
+        })
+        .unwrap_or(rest.len());
+    match &rest[..end] {
+        [t] if t.kind == TokKind::Quoted && !src[t.start..].starts_with('"') => {
+            match unquote(&src[t.start..t.end]) {
+                Some(n) => ["default_transaction_read_only", "transaction_read_only"]
+                    .contains(&n.to_ascii_lowercase().as_str()),
+                None => true,
+            }
+        }
+        _ => true,
+    }
+}
+
 fn lifts_toks(src: &str, toks: &[Token], dialect: Dialect) -> bool {
     let mysql = dialect.is_mysql();
+    if !mysql && calls_set_config_read_only(src, toks) {
+        return true;
+    }
     let Some(first) = word(toks, 0) else {
         return false;
     };
@@ -270,34 +404,30 @@ fn lifts_toks(src: &str, toks: &[Token], dialect: Dialect) -> bool {
 }
 
 /// One `SET` assignment: `[SESSION|LOCAL|GLOBAL|PERSIST|PERSIST_ONLY] name` or
-/// `@@[scope.]name`, then `=`, `:=` or `TO`, then a value. True when `name` is a
-/// read-only switch and the value is not plainly on (`1`/`on`/`true`, optionally
-/// quoted); an unrecognised shape of such an assignment also counts as lifting.
+/// `@@[scope.]name`, then `=`, `:=` or `TO`, then a value. A name is a word or a
+/// quoted name (matched case-insensitively); any other name shape counts as
+/// lifting. True when `name` is a read-only switch and the value is not plainly
+/// on (`1`/`on`/`true`, optionally quoted); an unrecognised shape of such an
+/// assignment also counts as lifting.
 fn sets_read_only_off(src: &str, a: &[Token]) -> bool {
     const SCOPES: [&str; 5] = ["SESSION", "LOCAL", "GLOBAL", "PERSIST", "PERSIST_ONLY"];
     let mut i = usize::from(SCOPES.iter().any(|s| is_word(a, 0, s)));
-    let Some(name) = word(a, i) else {
-        return false;
+    let Some(name) = name_at(src, a, i) else {
+        return true;
     };
-    let name = name.to_ascii_lowercase();
     let var = match name.strip_prefix("@@") {
-        Some(_) if is_punct(a, i + 1, b'.') => {
-            i += 2;
-            match word(a, i) {
-                Some(w) => w.to_ascii_lowercase(),
-                None => return false,
+        // `@@scope.name`, or `@@` then a quoted name.
+        Some(rest) if rest.is_empty() || is_punct(a, i + 1, b'.') => {
+            i += if rest.is_empty() { 1 } else { 2 };
+            match name_at(src, a, i) {
+                Some(n) => n,
+                None => return true,
             }
         }
         Some(rest) => rest.to_string(),
         None => name,
     };
-    if ![
-        "transaction_read_only",
-        "tx_read_only",
-        "default_transaction_read_only",
-    ]
-    .contains(&var.as_str())
-    {
+    if !READ_ONLY_VARS.contains(&var.as_str()) {
         return false;
     }
     i += 1;
@@ -312,16 +442,8 @@ fn sets_read_only_off(src: &str, a: &[Token]) -> bool {
     if i + 1 != a.len() {
         return true;
     }
-    let value = match a[i].kind {
-        TokKind::Word(w) => w,
-        TokKind::Quoted => {
-            let q = &src[a[i].start..a[i].end];
-            match q.len() >= 2 && q.ends_with(&q[..1]) {
-                true => &q[1..q.len() - 1],
-                false => return true,
-            }
-        }
-        _ => return true,
+    let Some(value) = name_at(src, a, i) else {
+        return true;
     };
     !["1", "ON", "TRUE"]
         .iter()
@@ -618,6 +740,103 @@ mod tests {
             ("SET search_path = x", PG),
         ] {
             assert!(!lifts_read_only(s, d), "{s} ({d:?})");
+        }
+    }
+
+    fn ro(s: &str, d: Dialect) -> Verdict {
+        verdict(s, classify(s, d), d, None, true)
+    }
+
+    #[test]
+    fn quoted_read_only_names_still_lift() {
+        for (s, d) in [
+            (r#"SET "default_transaction_read_only" = off"#, PG),
+            (r#"SET LOCAL "Transaction_Read_Only" TO false"#, PG),
+            ("SET SESSION `transaction_read_only` = 0", MY),
+            ("SET @@session.`tx_read_only` = 0", MY),
+            ("SET @@`tx_read_only` = 0", MY),
+            ("SET NAMES utf8, `tx_read_only` = 0", MY),
+            // Any other name shape counts as lifting.
+            ("SET (x) = 1", PG),
+            ("SET @@session.(x) = 1", MY),
+        ] {
+            assert!(lifts_read_only(s, d), "{s} ({d:?})");
+            assert_eq!(ro(s, d), B, "{s} ({d:?})");
+        }
+        for (s, d) in [
+            (r#"SET "search_path" = x"#, PG),
+            ("SET `tx_read_only` = 1", MY),
+            (r#"SET "default_transaction_read_only" = 'on'"#, PG),
+            ("SET @'x' = 0", MY),
+        ] {
+            assert!(!lifts_read_only(s, d), "{s} ({d:?})");
+        }
+    }
+
+    #[test]
+    fn pg_set_config_lifts() {
+        for s in [
+            "SELECT set_config('default_transaction_read_only','off',false)",
+            "DECLARE c CURSOR FOR SELECT set_config('transaction_read_only','off',true)",
+            "SELECT set_config(name, 'off', false) FROM t",
+            "SELECT pg_catalog.set_config('Transaction_Read_Only', 'off', false)",
+            r#"SELECT "set_config"('default_transaction_read_only', 'off', false)"#,
+            "SELECT SET_CONFIG ($$default_transaction_read_only$$, 'off', false)",
+            "SELECT set_config($q$transaction_read_only$q$, 'off', false)",
+            "SELECT set_config(E'transaction_read_only', 'off', false)",
+            "SELECT set_config('default_' || 'transaction_read_only', 'off', false)",
+            "SELECT set_config($1, 'off', false)",
+            "SELECT set_config(('transaction_read_only'), 'off', false)",
+            "SELECT 1 FROM t WHERE set_config('transaction_read_only', 'off', false) IS NULL",
+        ] {
+            assert!(lifts_read_only(s, PG), "{s}");
+            assert_eq!(ro(s, PG), B, "{s}");
+        }
+        for s in [
+            "SELECT set_config('application_name','x',false)",
+            "SELECT 'set_config(''transaction_read_only'', ''off'', false)'",
+            "SELECT current_setting('transaction_read_only')",
+            "SELECT set_config",
+        ] {
+            assert!(!lifts_read_only(s, PG), "{s}");
+            assert_eq!(ro(s, PG), A, "{s}");
+        }
+        // MySQL has no set_config.
+        let s = "SELECT set_config('default_transaction_read_only','off',false)";
+        assert_eq!(ro(s, MY), A);
+        // Not read-only: an ordinary read.
+        let p = verdict(s, classify(s, PG), PG, Some(EnvTag::Production), false);
+        assert_eq!(p, A);
+    }
+
+    #[test]
+    fn typed_explain_analyze_matches_the_analyze_flag() {
+        for (s, d) in [
+            ("EXPLAIN ANALYZE SELECT 1", MY),
+            ("explain analyze format=tree SELECT 1", MY),
+            ("DESC ANALYZE SELECT 1", MY),
+            ("EXPLAIN ANALYZE SELECT 1", PG),
+            ("EXPLAIN ANALYSE VERBOSE SELECT 1", PG),
+            ("EXPLAIN (ANALYZE, BUFFERS) SELECT 1", PG),
+            ("EXPLAIN (BUFFERS, ANALYZE true) SELECT 1", PG),
+            ("EXPLAIN (analyse on, FORMAT JSON) TABLE t", PG),
+        ] {
+            assert_eq!(columns(s, d), [C, A, A], "{s} ({d:?})");
+            assert_eq!(plan_columns(s, d, false, false), [C, A, A], "{s} ({d:?})");
+        }
+        for (s, d) in [
+            ("EXPLAIN SELECT 1", MY),
+            ("EXPLAIN FORMAT=JSON SELECT 1", MY),
+            ("EXPLAIN SELECT 1", PG),
+            ("EXPLAIN (ANALYZE false) SELECT 1", PG),
+            ("EXPLAIN (ANALYZE off, FORMAT JSON) SELECT 1", PG),
+            ("EXPLAIN (FORMAT JSON) SELECT 1", PG),
+        ] {
+            assert_eq!(columns(s, d), [A, A, A], "{s} ({d:?})");
+        }
+        // The analyzed statement's own kind still applies.
+        for d in BOTH {
+            assert_eq!(columns("EXPLAIN ANALYZE DELETE FROM t", *d), [C, B, A]);
         }
     }
 
