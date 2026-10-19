@@ -154,6 +154,47 @@ fn tabs_save_validates_row_limit() {
 }
 
 #[test]
+fn tabs_load_survives_corrupt_rows() {
+    let conn = open_in_memory().unwrap();
+    // Corrupt rows cannot be written through the repository; bypass the FK as well.
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO query_tabs (id, title, sort_order, connection_id, database, sql_text,
+           cursor, file_path, dirty, continue_on_error, row_limit, updated_at) VALUES
+         ('a-good', 'Good', 0, NULL, NULL, 'SELECT 1', 3, NULL, 0, 0, 1000, 'now'),
+         ('b-bad-conn', 'Bad conn', 1, 'not-a-uuid', 'shop', 'SELECT 2', 1, NULL, 0, 0, 10000, 'now'),
+         ('c-bad-cursor', 'Bad cursor', 2, NULL, NULL, 'SELECT 3', -5, NULL, 0, 0, 10000, 'now'),
+         ('d-bad-limit', 'Bad limit', 3, NULL, NULL, 'SELECT 4', 99999999999, NULL, 0, 0, 7, 'now'),
+         ('e-broken', 'Broken', 4, NULL, NULL, X'FF00FF', 0, NULL, 0, 0, 10000, 'now'),
+         ('f-good', 'Good too', 5, NULL, NULL, 'SELECT 6', 0, NULL, 1, 1, 100000, 'now');
+         PRAGMA foreign_keys = ON;",
+    )
+    .unwrap();
+    let repo = ConnectionRepo::new(conn, Arc::new(MemorySecretStore::default()));
+
+    let tabs = repo.tabs_load().unwrap();
+    assert_eq!(
+        tabs.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+        [
+            "a-good",
+            "b-bad-conn",
+            "c-bad-cursor",
+            "d-bad-limit",
+            "f-good"
+        ]
+    );
+    assert_eq!(tabs[0].cursor, 3);
+    assert_eq!(tabs[0].row_limit, 1000);
+    assert_eq!(tabs[1].connection_id, None);
+    assert_eq!(tabs[1].database.as_deref(), Some("shop"));
+    assert_eq!(tabs[2].cursor, 0);
+    assert_eq!(tabs[3].cursor, 0);
+    assert_eq!(tabs[3].row_limit, 10_000);
+    assert_eq!(tabs[4].row_limit, 100_000);
+    assert!(tabs[4].dirty && tabs[4].continue_on_error);
+}
+
+#[test]
 fn history_prunes_oldest_beyond_keep() {
     let repo = repo();
     let conn = connection(&repo, "a");

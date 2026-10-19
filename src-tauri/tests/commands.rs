@@ -270,6 +270,30 @@ async fn file_roundtrip_utf8_without_bom() {
 }
 
 #[tokio::test]
+async fn file_write_replaces_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("existing.sql");
+    std::fs::write(&file, "OLD CONTENT THAT IS LONGER THAN THE NEW ONE").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    file_write_impl(path.clone(), "SELECT 2;".into())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2;");
+    // Writing into a missing directory fails and leaves nothing behind either.
+    let bad = dir.path().join("missing").join("x.sql");
+    assert!(
+        file_write_impl(bad.to_string_lossy().into_owned(), "x".into())
+            .await
+            .is_err()
+    );
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["existing.sql"], "temporary file left behind");
+}
+
+#[tokio::test]
 async fn file_read_rejects_non_utf8() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("latin1.sql");

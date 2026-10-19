@@ -34,49 +34,75 @@ pub struct QueryTabRecord {
     pub updated_at: String,
 }
 
+/// The row limit of a tab saved before limits were validated, or with a corrupt one.
+const DEFAULT_ROW_LIMIT: u32 = 10_000;
+
+/// One `query_tabs` row; see `tabs_load` for which bad values are repaired.
+fn read_tab(r: &rusqlite::Row<'_>) -> rusqlite::Result<QueryTabRecord> {
+    let connection_id = r
+        .get::<_, Option<String>>(3)
+        .ok()
+        .flatten()
+        .and_then(|s| parse_uuid(&s).ok());
+    let cursor = r
+        .get::<_, i64>(6)
+        .ok()
+        .and_then(|c| u32::try_from(c).ok())
+        .unwrap_or(0);
+    let row_limit = r
+        .get::<_, i64>(10)
+        .ok()
+        .and_then(|l| u32::try_from(l).ok())
+        .filter(|l| ROW_LIMITS.contains(l))
+        .unwrap_or(DEFAULT_ROW_LIMIT);
+    Ok(QueryTabRecord {
+        id: r.get(0)?,
+        title: r.get(1)?,
+        sort_order: r.get(2)?,
+        connection_id,
+        database: r.get(4)?,
+        sql_text: r.get(5)?,
+        cursor,
+        file_path: r.get(7)?,
+        dirty: r.get(8)?,
+        continue_on_error: r.get(9)?,
+        row_limit,
+        updated_at: r.get(11)?,
+    })
+}
+
 const TAB_COLUMNS: &str = "id, title, sort_order, connection_id, database, sql_text, cursor, \
     file_path, dirty, continue_on_error, row_limit, updated_at";
 
 impl ConnectionRepo {
     /// Every saved tab, in tab-bar order.
+    ///
+    /// One bad row never fails the restore: an unparsable `connection_id` becomes None, an
+    /// out-of-range `cursor` becomes 0 and an unknown `row_limit` becomes 10 000. Any other
+    /// unreadable row is skipped with a warning naming only the tab id.
     pub fn tabs_load(&self) -> Result<Vec<QueryTabRecord>, DbError> {
-        let raw = {
-            let conn = self.lock()?;
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {TAB_COLUMNS} FROM query_tabs ORDER BY sort_order, id"
-                ))
-                .map_err(|e| internal("list query tabs", e))?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        QueryTabRecord {
-                            id: r.get(0)?,
-                            title: r.get(1)?,
-                            sort_order: r.get(2)?,
-                            connection_id: None,
-                            database: r.get(4)?,
-                            sql_text: r.get(5)?,
-                            cursor: r.get(6)?,
-                            file_path: r.get(7)?,
-                            dirty: r.get(8)?,
-                            continue_on_error: r.get(9)?,
-                            row_limit: r.get(10)?,
-                            updated_at: r.get(11)?,
-                        },
-                        r.get::<_, Option<String>>(3)?,
-                    ))
-                })
-                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
-                .map_err(|e| internal("list query tabs", e))?;
-            rows
-        };
-        raw.into_iter()
-            .map(|(mut tab, conn_id)| {
-                tab.connection_id = conn_id.as_deref().map(parse_uuid).transpose()?;
-                Ok(tab)
-            })
-            .collect()
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {TAB_COLUMNS} FROM query_tabs ORDER BY sort_order, id"
+            ))
+            .map_err(|e| internal("list query tabs", e))?;
+        let mut rows = stmt.query([]).map_err(|e| internal("list query tabs", e))?;
+        let mut tabs = Vec::new();
+        while let Some(r) = rows.next().map_err(|e| internal("list query tabs", e))? {
+            match read_tab(r) {
+                Ok(tab) => tabs.push(tab),
+                Err(_) => {
+                    // The error may quote the row's content; log the id only.
+                    let id = r.get::<_, String>(0).ok();
+                    tracing::warn!(
+                        tab = id.as_deref().unwrap_or("<unreadable id>"),
+                        "skipping a saved query tab that cannot be read"
+                    );
+                }
+            }
+        }
+        Ok(tabs)
     }
 
     /// Inserts or replaces `tab` and stamps `updated_at`. A `connection_id` that no longer

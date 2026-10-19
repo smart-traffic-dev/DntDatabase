@@ -9,7 +9,7 @@ use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_store::history::{HistoryEntry, HistoryFilter, HistoryIds};
 use dnt_store::tabs::QueryTabRecord;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
@@ -75,7 +75,34 @@ fn write_text(path: &str, text: &str) -> Result<(), DbError> {
         return Err(no_path());
     }
     let text = text.strip_prefix(BOM).unwrap_or(text);
-    std::fs::write(Path::new(path), text.as_bytes()).map_err(|e| path_error("write", path, &e))
+    write_atomic(Path::new(path), text.as_bytes()).map_err(|e| path_error("write", path, &e))
+}
+
+/// Writes `bytes` to a temporary file next to `target`, syncs it, then renames it over
+/// `target` (which replaces an existing file, on Windows too), so a failed save never
+/// leaves a truncated file. The temporary file is removed when any step fails.
+fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let mut tmp_name = name.to_os_string();
+    tmp_name.push(format!(".dnt-tmp-{}", uuid::Uuid::new_v4().simple()));
+    let tmp = target.with_file_name(tmp_name);
+    let written = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&tmp, target)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
 }
 
 /// The UTF-8 text of `path`, without a leading BOM.

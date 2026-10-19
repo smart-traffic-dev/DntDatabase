@@ -127,6 +127,10 @@ const HISTORY_COLUMNS: &str = "id, connection_id, database, sql_text, redacted, 
 impl ConnectionRepo {
     /// Records one statement (with already redacted SQL) and prunes everything beyond the
     /// newest [`HISTORY_KEEP`] rows in the same transaction. Returns the new row id.
+    ///
+    /// `started_at` must be UTC RFC 3339 with fixed millisecond precision
+    /// (`%Y-%m-%dT%H:%M:%S%.3fZ`, e.g. `2026-10-20T10:00:00.000Z`): `history_list` orders
+    /// by comparing the strings, which is chronological only in that one fixed format.
     pub fn history_insert(&self, e: &NewHistoryEntry) -> Result<i64, DbError> {
         self.history_insert_keep(e, HISTORY_KEEP)
     }
