@@ -10,7 +10,9 @@ use dnt_core::driver::{
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{MySqlCapabilities, ServerInfo};
-use dnt_core::sql::{classify, split, strip_comments, Dialect, StatementKind, TxControl};
+use dnt_core::sql::{
+    classify, leading_keywords, readings, session_effect, split, Dialect, StatementKind, TxControl,
+};
 use dnt_core::value::ColumnMeta;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, DriverError, Error as MyError, Opts};
@@ -61,7 +63,7 @@ pub struct MySqlSession {
     /// Database of the last successful `USE`, re-applied after a reconnect.
     last_db: std::sync::Mutex<Option<String>>,
     /// Set once a statement changed session state that a reconnect cannot restore
-    /// (see [`changes_session_state`]); cleared on a fresh connection. While set, a lost
+    /// (see [`session_effect`]); cleared on a fresh connection. While set, a lost
     /// read is not silently re-run and `ConnectionLost` says the state was reset.
     session_custom: AtomicBool,
 }
@@ -156,13 +158,14 @@ impl MySqlSession {
     /// Tracking applied after a statement succeeded: remembers the last `USE` and
     /// whether session state was customised.
     fn track_after(&self, kind: StatementKind, sql: &str) {
-        if kind == StatementKind::Other {
-            if let Some(db) = use_target(sql) {
-                *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
-            }
+        let Some(effect) = session_effect(sql, Dialect::MYSQL) else {
+            return;
+        };
+        if let Some(db) = effect.use_db {
+            *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
         }
         // `SET autocommit` is transaction control, tracked and re-applied separately.
-        if !matches!(kind, StatementKind::Transaction(_)) && changes_session_state(sql) {
+        if !matches!(kind, StatementKind::Transaction(_)) && effect.custom {
             self.session_custom.store(true, Ordering::SeqCst);
         }
     }
@@ -278,20 +281,13 @@ fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
     }
 }
 
-/// Upper-cased leading keywords of `sql` with comments removed (at most `n`).
-fn leading_words(sql: &str, n: usize) -> Vec<String> {
-    strip_comments(sql, Dialect::MYSQL)
-        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-        .take(n)
-        .map(str::to_ascii_uppercase)
-        .collect()
-}
-
 /// `CALL proc(…)`: its inner statements may each autocommit, so its work can be
-/// partly applied even when the call as a whole fails or is killed.
+/// partly applied even when the call as a whole fails or is killed. Either reading
+/// of an executable comment counts.
 fn is_call(sql: &str) -> bool {
-    leading_words(sql, 1) == ["CALL"]
+    readings(sql, Dialect::MYSQL)
+        .iter()
+        .any(|r| leading_keywords(r, Dialect::MYSQL, 1) == ["CALL"])
 }
 
 /// Whether a statement of `kind` may have made a durable change by the time its
@@ -320,42 +316,6 @@ fn killed_outcome_unknown(kind: StatementKind, was_in_tx: bool, sql: &str) -> bo
         // may have committed before the kill landed.
         StatementKind::Ddl | StatementKind::Transaction(TxControl::Commit) => true,
         StatementKind::Write => !was_in_tx || is_call(sql),
-        _ => false,
-    }
-}
-
-/// Lexically: does a statement that succeeded change session state that a reconnect
-/// cannot restore? Session-scope `SET` (variables, user variables, `NAMES`, isolation
-/// level; `GLOBAL` / `PERSIST` survive the session), `CREATE TEMPORARY TABLE` and named
-/// prepared statements (`PREPARE`). `SET autocommit` is classified as transaction
-/// control and handled by the caller.
-fn changes_session_state(sql: &str) -> bool {
-    let words = leading_words(sql, 2);
-    match words
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
-        ["SET", ..] => {
-            let stripped = strip_comments(sql, Dialect::MYSQL);
-            let text = stripped.trim_start();
-            let Some(rest) = text
-                .get(..3)
-                .filter(|kw| kw.eq_ignore_ascii_case("SET"))
-                .and(text.get(3..))
-            else {
-                return false;
-            };
-            let rest = rest.trim_start().to_ascii_lowercase();
-            let first = rest.split_whitespace().next().unwrap_or("");
-            let global = ["global", "persist", "persist_only"].contains(&first)
-                || ["@@global.", "@@persist.", "@@persist_only."]
-                    .iter()
-                    .any(|p| rest.starts_with(p));
-            !global
-        }
-        ["CREATE", "TEMPORARY"] | ["PREPARE", ..] => true,
         _ => false,
     }
 }
@@ -512,28 +472,6 @@ fn failure_kind(
     } else {
         Failure::Server
     }
-}
-
-/// The database a successful statement switched to, if it is a `USE` (comments around
-/// it allowed). A `USE` inside an executable comment (`/*! USE db */`) is not tracked.
-fn use_target(sql: &str) -> Option<String> {
-    parse_use(&strip_comments(sql, Dialect::MYSQL))
-}
-
-/// The database named by a `USE db` statement (backticks removed), if `sql` is one.
-fn parse_use(sql: &str) -> Option<String> {
-    let s = sql.trim().trim_end_matches(';').trim_end();
-    let kw = s.get(..3)?;
-    let rest = &s[3..];
-    if !kw.eq_ignore_ascii_case("USE") || !rest.starts_with(|c: char| c.is_whitespace() || c == '`')
-    {
-        return None;
-    }
-    let name = rest.trim_start();
-    if let Some(inner) = name.strip_prefix('`').and_then(|n| n.strip_suffix('`')) {
-        return (!inner.is_empty()).then(|| inner.replace("``", "`"));
-    }
-    (!name.is_empty() && !name.contains(char::is_whitespace)).then(|| name.to_string())
 }
 
 #[async_trait]
@@ -711,27 +649,17 @@ mod tests {
     use mysql_async::ServerError;
 
     #[test]
-    fn parses_use_statements() {
-        assert_eq!(parse_use("USE shop"), Some("shop".into()));
-        assert_eq!(parse_use("  use `my db`;"), Some("my db".into()));
-        assert_eq!(parse_use("Use`a``b`"), Some("a`b".into()));
-        assert_eq!(parse_use("USER()"), None);
-        assert_eq!(parse_use("use"), None);
-        assert_eq!(parse_use("use a b"), None);
+    fn reconnect_quotes_the_use_target() {
         assert_eq!(quote_ident("a`b"), "`a``b`");
     }
 
     #[test]
-    fn use_behind_comments_is_tracked() {
-        assert_eq!(use_target("/* pick */ USE shop"), Some("shop".into()));
-        assert_eq!(use_target("-- pick\nUSE shop -- why"), Some("shop".into()));
-        assert_eq!(
-            use_target("# pick\nuse `my db` /* end */;"),
-            Some("my db".into())
-        );
-        assert_eq!(use_target("USE /* odd */ shop"), Some("shop".into()));
-        assert_eq!(use_target("/*!40101 USE shop */"), None);
-        assert_eq!(use_target("/* USE shop */ SELECT 1"), None);
+    fn call_detection_is_lexical() {
+        assert!(is_call("/* p */ call p()"));
+        assert!(is_call("/*!50000 CALL p() */"));
+        assert!(!is_call("-- CALL p()\nSELECT 1"));
+        assert!(!is_call("SELECT 'CALL'"));
+        assert!(!is_call("ưCALL p()"));
     }
 
     fn server(code: u16, message: &str) -> MyError {
@@ -903,34 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn session_state_changes_are_lexical() {
-        for sql in [
-            "SET @x = 1",
-            "set sql_mode = ''",
-            "/* c */ SET SESSION wait_timeout = 10",
-            "SET @@session.sql_mode = ''",
-            "SET NAMES latin1",
-            "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
-            "CREATE TEMPORARY TABLE tmp (a int)",
-            "create  temporary table if not exists tmp (a int)",
-            "PREPARE s FROM 'SELECT 1'",
-        ] {
-            assert!(changes_session_state(sql), "{sql}");
-        }
-        for sql in [
-            "SELECT 1",
-            "SET GLOBAL max_connections = 10",
-            "SET PERSIST max_connections = 10",
-            "SET @@global.sql_mode = ''",
-            "CREATE TABLE t (a int)",
-            "INSERT INTO t SELECT 'SET @x = 1'",
-            "-- SET @x = 1\nSELECT 1",
-        ] {
-            assert!(!changes_session_state(sql), "{sql}");
-        }
-    }
-
-    #[test]
     fn reset_notes_name_what_was_lost() {
         assert_eq!(reset_notes(false, false), "");
         assert!(reset_notes(true, false).contains("transaction was rolled back"));
@@ -971,13 +871,6 @@ mod tests {
     fn killed_ddl_inside_a_transaction_has_unknown_outcome() {
         // DDL implicitly committed the open transaction before it ran.
         assert!(killed_outcome_unknown(Ddl, true, "ALTER TABLE t ADD b int"));
-    }
-
-    #[test]
-    fn session_state_lexing_survives_non_ascii_starts() {
-        assert!(!changes_session_state("ưư SET @x = 1"));
-        assert!(!changes_session_state("ế"));
-        assert!(changes_session_state("/* ư */ SET @x = 1"));
     }
 
     #[test]

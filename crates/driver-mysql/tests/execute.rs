@@ -588,6 +588,27 @@ async fn reconnect_restores_autocommit_and_reports_reset_state() {
     }
 }
 
+/// A session `SET` inside an executable comment (mysqldump's `/*!40101 SET NAMES … */`)
+/// is session state a reconnect cannot restore: the read after a lost connection is not
+/// re-run silently, and the error says the settings were reset (M3).
+#[tokio::test]
+async fn exec_comment_set_reports_reset_state() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(&s, "/*!40101 SET NAMES latin1 */")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        kill(t, connection_id(&s).await).await;
+        match run(&s, "SELECT 1").await.err() {
+            Some(DbError::ConnectionLost { message, .. }) => {
+                assert!(message.contains("session settings"), "{t:?}: {message}")
+            }
+            other => panic!("{t:?}: the read was re-run silently: {other:?}"),
+        }
+    }
+}
+
 /// An interrupt we did not ask for (the server's statement time limit) is the server's
 /// own error with its code and text, not a Cancel. MySQL enforces `max_execution_time`
 /// on SELECTs (3024; a killed `SLEEP` would just return 1, hence the slow cross join),

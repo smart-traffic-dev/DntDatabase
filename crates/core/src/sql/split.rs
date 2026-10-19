@@ -19,7 +19,12 @@ pub fn split(sql: &str, dialect: Dialect) -> Vec<Statement> {
     let mut seg = 0;
     let mut i = 0;
     while i < b.len() {
-        if dialect.is_mysql() {
+        // Neither a delimiter nor a lexer construct starts with whitespace.
+        if b[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if dialect.is_mysql() && b[i].eq_ignore_ascii_case(&b'd') {
             if let Some((tok, next)) = delimiter_directive(sql, i) {
                 push(&mut out, sql, seg, i, dialect);
                 delim = tok;
@@ -101,12 +106,18 @@ pub fn strip_comments(stmt: &str, dialect: Dialect) -> String {
 fn delimiter_directive(sql: &str, i: usize) -> Option<(&str, usize)> {
     const KW: &[u8] = b"delimiter";
     let b = sql.as_bytes();
+    // Match the keyword before scanning back over the line's leading blanks: only a
+    // `d` preceded by blanks pays for that scan, and the scan stops at the first
+    // non-blank, so the blanks of a line are scanned at most once in all.
+    if !b.get(i..i + KW.len())?.eq_ignore_ascii_case(KW) {
+        return None;
+    }
     let line_start = b[..i]
         .iter()
         .rev()
         .take_while(|&&c| c != b'\n')
         .all(|&c| c == b' ' || c == b'\t');
-    if !line_start || !b.get(i..i + KW.len())?.eq_ignore_ascii_case(KW) {
+    if !line_start {
         return None;
     }
     let mut j = i + KW.len();
@@ -376,6 +387,28 @@ mod tests {
             texts(r"select `a\`; select 2", ansi),
             [r"select `a\`", "select 2"]
         );
+    }
+
+    /// `DELIMITER` detection must not rescan the leading blanks of a line at every
+    /// byte (that was quadratic in the line length).
+    #[test]
+    fn long_blank_line_splits_in_linear_time() {
+        let spaces = format!("{}SELECT 1", " ".repeat(1 << 20));
+        let tabs = format!("{}delimiter //\nSELECT 1//", "\t".repeat(1 << 20));
+        let dees = format!("{}SELECT 1", " d".repeat(1 << 19));
+        for (sql, want) in [
+            (spaces, "SELECT 1"),
+            (tabs, "SELECT 1"),
+            (dees.clone(), dees.trim()),
+        ] {
+            let started = std::time::Instant::now();
+            assert_eq!(texts(&sql, MYSQL), [want]);
+            assert!(
+                started.elapsed() < std::time::Duration::from_millis(500),
+                "{:?}",
+                started.elapsed()
+            );
+        }
     }
 
     #[test]

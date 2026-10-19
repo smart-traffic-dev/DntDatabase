@@ -21,9 +21,24 @@ pub enum TxControl {
 /// Classifies one statement by its leading keyword (after comments and
 /// opening parens). Strings, comments and quoted identifiers are lexed with
 /// the same per-dialect rules as [`split`](super::split::split).
+///
+/// Nested statements (CTE bodies, a parenthesised main query, executable-comment
+/// readings) are classified at most 64 levels deep; deeper input is
+/// `Ddl`, the strictest kind, so pasted pathological text can neither overflow the
+/// stack nor pass for a read.
 pub fn classify(stmt: &str, dialect: Dialect) -> StatementKind {
-    Classifier { dialect }.classify(stmt)
+    Classifier { dialect }
+        .classify_str(stmt, 0)
+        .unwrap_or(StatementKind::Ddl)
 }
+
+/// Nesting bound of [`classify`].
+const MAX_DEPTH: usize = 64;
+
+/// The input nests deeper than [`MAX_DEPTH`].
+struct TooDeep;
+
+type Kind = Result<StatementKind, TooDeep>;
 
 /// Carries the dialect through the recursive helpers.
 #[derive(Clone, Copy)]
@@ -31,8 +46,36 @@ struct Classifier {
     dialect: Dialect,
 }
 
+/// For each `Open` token, the distance to its matching `Close` (`usize::MAX` when it
+/// has none). Distances, unlike indices, stay valid in any sub-slice, so a nested
+/// statement's tokens are a plain sub-slice of `toks` and `skip`.
+fn paren_skips(toks: &[Token]) -> Vec<usize> {
+    let mut skip = vec![usize::MAX; toks.len()];
+    let mut open = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        match t.kind {
+            TokKind::Open => open.push(i),
+            TokKind::Close => {
+                if let Some(o) = open.pop() {
+                    skip[o] = i - o;
+                }
+            }
+            _ => {}
+        }
+    }
+    skip
+}
+
+/// The index of the `Close` matching the `Open` at `k`, if it lies inside `toks`.
+fn close_of(toks: &[Token], skip: &[usize], k: usize) -> Option<usize> {
+    k.checked_add(skip[k]).filter(|&c| c < toks.len())
+}
+
 impl Classifier {
-    fn classify(self, stmt: &str) -> StatementKind {
+    fn classify_str(self, stmt: &str, depth: usize) -> Kind {
+        if depth > MAX_DEPTH {
+            return Err(TooDeep);
+        }
         let toks = tokenize(stmt, self.dialect);
         // Only MySQL lexing yields ExecComment; in PG `/*!` is a plain comment.
         // Whether the server runs a body depends on its version, so classify
@@ -40,23 +83,52 @@ impl Classifier {
         if toks.iter().any(|t| t.kind == TokKind::ExecComment) {
             let [inlined, ignored]: [String; 2] = readings(stmt, self.dialect)
                 .try_into()
-                .expect("an executable comment yields two readings");
-            let (run, skip) = (self.classify(&inlined), self.classify(&ignored));
-            return if strictness(skip) > strictness(run) {
+                .map_err(|_| TooDeep)?;
+            let run = self.classify_str(&inlined, depth + 1)?;
+            let skip = self.classify_str(&ignored, depth + 1)?;
+            return Ok(if strictness(skip) > strictness(run) {
                 skip
             } else {
                 run
-            };
+            });
         }
-        let start = toks.iter().take_while(|t| t.kind == TokKind::Open).count();
-        let toks = &toks[start..];
+        self.classify_toks(stmt, &toks, &paren_skips(&toks), depth)
+    }
+
+    /// Classifies the statement made of `toks`, tokens of `src` (`skip`: their
+    /// [`paren_skips`]). Nested statements are sub-slices of the caller's tokens,
+    /// so nothing is lexed twice and each level only walks its own depth-0 tokens.
+    fn classify_toks(self, src: &str, toks: &[Token], skip: &[usize], depth: usize) -> Kind {
+        if depth > MAX_DEPTH {
+            return Err(TooDeep);
+        }
+        let (mut toks, mut skip) = (toks, skip);
+        // `EXPLAIN ANALYZE …` takes its inner statement's kind; prefixes are peeled
+        // in a loop, not by recursion.
+        loop {
+            let start = toks.iter().take_while(|t| t.kind == TokKind::Open).count();
+            (toks, skip) = (&toks[start..], &skip[start..]);
+            match word_at(toks, 0) {
+                Some(w) if w.eq_ignore_ascii_case("EXPLAIN") => match explain_inner(&toks[1..]) {
+                    Some(i) if i + 1 < toks.len() => {
+                        (toks, skip) = (&toks[i + 1..], &skip[i + 1..])
+                    }
+                    _ => return Ok(StatementKind::Read),
+                },
+                _ => break,
+            }
+        }
+        self.classify_main(src, toks, skip, depth)
+    }
+
+    /// `toks` starts after any opening parens and is not an `EXPLAIN`.
+    fn classify_main(self, src: &str, toks: &[Token], skip: &[usize], depth: usize) -> Kind {
         let Some(first) = word_at(toks, 0) else {
-            return StatementKind::Other;
+            return Ok(StatementKind::Other);
         };
         let tx = StatementKind::Transaction;
-        match first.to_ascii_uppercase().as_str() {
-            "SELECT" => select_kind(&toks[1..]),
-            "EXPLAIN" => self.explain(stmt, &toks[1..]),
+        Ok(match first.to_ascii_uppercase().as_str() {
+            "SELECT" => select_kind(&toks[1..], &skip[1..]),
             "SHOW" | "DESCRIBE" | "DESC" | "VALUES" | "TABLE" => StatementKind::Read,
             // `EXECUTE` runs a prepared statement whose body is unknown here.
             "INSERT" | "UPDATE" | "DELETE" | "REPLACE" | "MERGE" | "CALL" | "DO" | "LOAD"
@@ -97,10 +169,10 @@ impl Classifier {
                     tx(TxControl::Rollback)
                 }
             }
-            "SET" => set_autocommit(stmt, &toks[1..]).map_or(StatementKind::Other, tx),
-            "WITH" => self.classify_with(stmt, &toks[1..]),
+            "SET" => set_autocommit(src, &toks[1..]).map_or(StatementKind::Other, tx),
+            "WITH" => self.classify_with(src, &toks[1..], &skip[1..], depth)?,
             _ => StatementKind::Other,
-        }
+        })
     }
 
     /// After `WITH`: skips CTE definitions until the main statement, which is
@@ -109,10 +181,8 @@ impl Classifier {
     /// not yet had its body (`AS [NOT] [MATERIALIZED] (…)`); after a body only a
     /// `,` starts another CTE, so any other depth-0 `(` opens the main query.
     /// A data-modifying CTE body also makes the statement a write.
-    fn classify_with(self, src: &str, toks: &[Token]) -> StatementKind {
-        let mut depth = 0usize;
-        let mut body_start = 0;
-        let mut in_body = false;
+    /// Paren groups are jumped over through `skip`, so only depth-0 tokens are walked.
+    fn classify_with(self, src: &str, toks: &[Token], skip: &[usize], nesting: usize) -> Kind {
         let mut cte_done = false;
         let mut expect_name = true;
         let mut cte_writes = false;
@@ -123,73 +193,82 @@ impl Classifier {
                 main
             }
         };
-        for (idx, t) in toks.iter().enumerate() {
+        let mut idx = 0;
+        while let Some(t) = toks.get(idx) {
             match t.kind {
-                TokKind::Open if depth == 0 && cte_done => {
-                    return combine(self.classify(&src[t.start..]), cte_writes);
+                TokKind::Open if cte_done => {
+                    let main = self.classify_toks(src, &toks[idx..], &skip[idx..], nesting + 1)?;
+                    return Ok(combine(main, cte_writes));
                 }
                 TokKind::Open => {
-                    if depth == 0 {
-                        body_start = t.end;
-                        in_body = idx > 0
-                            && (is_kw(word_at(toks, idx - 1), "AS")
-                                || is_kw(word_at(toks, idx - 1), "MATERIALIZED"));
-                    }
-                    depth += 1;
-                }
-                TokKind::Close if depth > 0 => {
-                    depth -= 1;
-                    if depth == 0 && in_body {
+                    let in_body = idx > 0
+                        && (is_kw(word_at(toks, idx - 1), "AS")
+                            || is_kw(word_at(toks, idx - 1), "MATERIALIZED"));
+                    // An unclosed group swallows the rest.
+                    let Some(close) = close_of(toks, skip, idx) else {
+                        break;
+                    };
+                    if in_body {
                         cte_done = true;
-                        if self.classify(&src[body_start..t.start]) == StatementKind::Write {
+                        let (body, body_skip) = (&toks[idx + 1..close], &skip[idx + 1..close]);
+                        if self.classify_toks(src, body, body_skip, nesting + 1)?
+                            == StatementKind::Write
+                        {
                             cte_writes = true;
                         }
                     }
+                    idx = close;
                 }
-                TokKind::Punct(b',') if depth == 0 => {
+                TokKind::Punct(b',') => {
                     cte_done = false;
                     expect_name = true;
                 }
                 // The CTE name slot may hold a word such as `values`; it is never
                 // the main statement.
-                TokKind::Word(w) if depth == 0 && expect_name => {
+                TokKind::Word(w) if expect_name => {
                     if !(idx == 0 && w.eq_ignore_ascii_case("RECURSIVE")) {
                         expect_name = false;
                     }
                 }
-                TokKind::Quoted if depth == 0 => expect_name = false,
-                TokKind::Word(w) if depth == 0 => {
+                TokKind::Quoted => expect_name = false,
+                TokKind::Word(w) => {
                     let main = match w.to_ascii_uppercase().as_str() {
                         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => {
-                            StatementKind::Write
+                            Some(StatementKind::Write)
                         }
-                        "SELECT" => select_kind(&toks[idx + 1..]),
-                        "VALUES" | "TABLE" => StatementKind::Read,
-                        _ => continue,
+                        "SELECT" => Some(select_kind(&toks[idx + 1..], &skip[idx + 1..])),
+                        "VALUES" | "TABLE" => Some(StatementKind::Read),
+                        _ => None,
                     };
-                    return combine(main, cte_writes);
+                    if let Some(main) = main {
+                        return Ok(combine(main, cte_writes));
+                    }
                 }
                 _ => {}
             }
+            idx += 1;
         }
-        if cte_writes {
+        Ok(if cte_writes {
             StatementKind::Write
         } else {
             StatementKind::Other
-        }
+        })
     }
 }
 
 /// Tokens after `SELECT`: a depth-0 `INTO` that creates a file or table
 /// (`INTO OUTFILE|DUMPFILE`, PG `INTO [TEMP|UNLOGGED] [TABLE] t`) is Ddl;
-/// `INTO @var` stays Read.
-fn select_kind(toks: &[Token]) -> StatementKind {
-    let mut depth = 0usize;
-    for (i, t) in toks.iter().enumerate() {
+/// `INTO @var` stays Read. Paren groups are jumped over through `skip`.
+fn select_kind(toks: &[Token], skip: &[usize]) -> StatementKind {
+    let mut i = 0;
+    while let Some(t) = toks.get(i) {
         match t.kind {
-            TokKind::Open => depth += 1,
-            TokKind::Close => depth = depth.saturating_sub(1),
-            TokKind::Word(w) if depth == 0 && w.eq_ignore_ascii_case("INTO") => {
+            // An unclosed group swallows the rest.
+            TokKind::Open => match close_of(toks, skip, i) {
+                Some(close) => i = close,
+                None => break,
+            },
+            TokKind::Word(w) if w.eq_ignore_ascii_case("INTO") => {
                 return match toks.get(i + 1).map(|t| t.kind) {
                     None => StatementKind::Read,
                     Some(TokKind::Word(v)) if v.starts_with('@') => StatementKind::Read,
@@ -198,49 +277,45 @@ fn select_kind(toks: &[Token]) -> StatementKind {
             }
             _ => {}
         }
+        i += 1;
     }
     StatementKind::Read
 }
 
-impl Classifier {
-    /// Tokens after `EXPLAIN`. With ANALYZE the statement is executed, so it takes
-    /// the inner statement's kind; otherwise it is Read.
-    fn explain(self, src: &str, toks: &[Token]) -> StatementKind {
-        let is_analyze = |w: Option<&str>| is_kw(w, "ANALYZE") || is_kw(w, "ANALYSE");
-        let inner = if is_analyze(word_at(toks, 0)) {
-            // `EXPLAIN ANALYZE [VERBOSE] …` (PG) / `EXPLAIN ANALYZE [FORMAT=TREE] …` (MySQL)
-            let mut i = 1;
-            if is_kw(word_at(toks, i), "VERBOSE") {
-                i += 1;
-            }
-            if is_kw(word_at(toks, i), "FORMAT")
-                && toks.get(i + 1).map(|t| t.kind) == Some(TokKind::Punct(b'='))
-            {
-                i += 3;
-            }
-            Some(i)
-        } else if toks.first().map(|t| t.kind) == Some(TokKind::Open) {
-            // PG `EXPLAIN (option [value], …) …`
-            let close = toks
-                .iter()
-                .position(|t| t.kind == TokKind::Close)
-                .unwrap_or(toks.len());
-            let analyze = toks[1..close]
-                .split(|t| t.kind == TokKind::Punct(b','))
-                .any(|opt| {
-                    is_analyze(word_at(opt, 0))
-                        && !["FALSE", "OFF", "0"]
-                            .iter()
-                            .any(|v| is_kw(word_at(opt, 1), v))
-                });
-            analyze.then_some(close + 1)
-        } else {
-            None
-        };
-        match inner.and_then(|i| toks.get(i)) {
-            Some(t) => self.classify(&src[t.start..]),
-            None => StatementKind::Read,
+/// Tokens after `EXPLAIN`. With ANALYZE the statement is executed, so it takes the
+/// inner statement's kind: returns the index of the inner statement's first token
+/// (which may be past the end). `None`: no ANALYZE, the statement is Read.
+fn explain_inner(toks: &[Token]) -> Option<usize> {
+    let is_analyze = |w: Option<&str>| is_kw(w, "ANALYZE") || is_kw(w, "ANALYSE");
+    if is_analyze(word_at(toks, 0)) {
+        // `EXPLAIN ANALYZE [VERBOSE] …` (PG) / `EXPLAIN ANALYZE [FORMAT=TREE] …` (MySQL)
+        let mut i = 1;
+        if is_kw(word_at(toks, i), "VERBOSE") {
+            i += 1;
         }
+        if is_kw(word_at(toks, i), "FORMAT")
+            && toks.get(i + 1).map(|t| t.kind) == Some(TokKind::Punct(b'='))
+        {
+            i += 3;
+        }
+        Some(i)
+    } else if toks.first().map(|t| t.kind) == Some(TokKind::Open) {
+        // PG `EXPLAIN (option [value], …) …`
+        let close = toks
+            .iter()
+            .position(|t| t.kind == TokKind::Close)
+            .unwrap_or(toks.len());
+        let analyze = toks[1..close]
+            .split(|t| t.kind == TokKind::Punct(b','))
+            .any(|opt| {
+                is_analyze(word_at(opt, 0))
+                    && !["FALSE", "OFF", "0"]
+                        .iter()
+                        .any(|v| is_kw(word_at(opt, 1), v))
+            });
+        analyze.then_some(close + 1)
+    } else {
+        None
     }
 }
 
@@ -598,6 +673,59 @@ mod tests {
         assert_eq!(
             classify("EXPLAIN ANALYZE FORMAT=TREE UPDATE t SET a=1"),
             Write
+        );
+    }
+
+    /// Pasted pathological input must neither overflow the stack nor take
+    /// quadratic time; past the nesting bound the answer is the strictest kind.
+    #[test]
+    fn pathological_nesting_is_bounded() {
+        const N: usize = 200_000;
+        let started = std::time::Instant::now();
+        for d in [Dialect::MYSQL, Dialect::Postgres] {
+            let c = |s: &str| super::classify(s, d);
+            let explain = "EXPLAIN ANALYZE ".repeat(N);
+            assert_eq!(c(&format!("{explain}SELECT 1")), Read, "{d:?}");
+            assert_eq!(c(&format!("{explain}DELETE FROM t")), Write, "{d:?}");
+            let opts = "EXPLAIN (ANALYZE) ".repeat(N);
+            assert_eq!(c(&format!("{opts}DELETE FROM t")), Write, "{d:?}");
+            let nested = format!(
+                "{}SELECT 1{} SELECT 1",
+                "WITH x AS (".repeat(N),
+                ") SELECT 1".repeat(N - 1) + ")"
+            );
+            assert_eq!(c(&nested), Ddl, "{d:?}");
+            let main = format!(
+                "{}SELECT 1{}",
+                "WITH x AS (SELECT 1) (".repeat(N),
+                ")".repeat(N)
+            );
+            assert_eq!(c(&main), Ddl, "{d:?}");
+            // Deep expression parens are not statement nesting.
+            let parens = format!("SELECT {}1{} FROM t", "(".repeat(N), ")".repeat(N));
+            assert_eq!(c(&parens), Read, "{d:?}");
+            let in_cte = format!(
+                "WITH x AS (SELECT {}1{}) SELECT 1",
+                "(".repeat(N),
+                ")".repeat(N)
+            );
+            assert_eq!(c(&in_cte), Read, "{d:?}");
+            // Shallow nesting is still classified exactly.
+            let shallow = format!(
+                "{}SELECT 1{}",
+                "WITH x AS (SELECT 1) (".repeat(10),
+                ")".repeat(10)
+            );
+            assert_eq!(c(&shallow), Read, "{d:?}");
+        }
+        // Each unterminated `/*!` reading holds the next one: re-lexed per level, so
+        // bounded by the depth limit rather than by the input length.
+        let unterminated = format!("{}SELECT 1", "/*!".repeat(N / 10));
+        assert_eq!(classify(&unterminated), Ddl);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
         );
     }
 

@@ -10,8 +10,10 @@ use crate::server::DbKind;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, specta::Type)]
 pub struct MySqlMode {
     /// `ANSI_QUOTES`: `"…"` is a quoted identifier, with no backslash escape.
+    #[serde(default)]
     pub ansi_quotes: bool,
     /// `NO_BACKSLASH_ESCAPES`: `'…'` and `"…"` strings have no backslash escape.
+    #[serde(default)]
     pub no_backslash_escapes: bool,
 }
 
@@ -345,6 +347,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Dialect::Postgres).unwrap(),
             json!({"engine":"postgres"})
+        );
+    }
+
+    #[test]
+    fn mysql_mode_flags_default_when_missing() {
+        assert_eq!(
+            serde_json::from_value::<Dialect>(json!({"engine":"mysql"})).unwrap(),
+            Dialect::MYSQL
+        );
+        assert_eq!(
+            serde_json::from_value::<Dialect>(json!({"engine":"mysql","ansi_quotes":true}))
+                .unwrap(),
+            Dialect::MySql(MySqlMode {
+                ansi_quotes: true,
+                no_backslash_escapes: false,
+            })
         );
     }
 }

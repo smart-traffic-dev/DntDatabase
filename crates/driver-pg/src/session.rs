@@ -7,7 +7,9 @@ use dnt_core::driver::{
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::ServerInfo;
-use dnt_core::sql::{classify, split, strip_comments, Dialect, StatementKind, TxControl};
+use dnt_core::sql::{
+    classify, leading_keywords, session_effect, split, Dialect, StatementKind, TxControl,
+};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,7 +49,7 @@ pub struct PgSession {
     /// Last session-level `SET search_path …` that succeeded, re-applied after a reconnect.
     search_path: std::sync::Mutex<Option<String>>,
     /// Set once a statement changed session state that a reconnect cannot restore
-    /// (see [`changes_session_state`]); cleared when the connection is replaced. While
+    /// (see [`session_effect`]); cleared when the connection is replaced. While
     /// set, a lost read is not silently re-run and `ConnectionLost` says what was reset.
     session_custom: AtomicBool,
 }
@@ -109,13 +111,13 @@ impl PgSession {
         if let Some(in_tx) = tx_state_after(kind, sql, was_in_tx, None) {
             self.in_tx.store(in_tx, Ordering::SeqCst);
         }
-        if kind == StatementKind::Other {
-            if let Some(change) = search_path_change(sql) {
+        if let Some(effect) = session_effect(sql, Dialect::Postgres) {
+            if let Some(change) = effect.search_path {
                 *self.search_path.lock().unwrap_or_else(|p| p.into_inner()) = change;
             }
-        }
-        if changes_session_state(sql) {
-            self.session_custom.store(true, Ordering::SeqCst);
+            if effect.custom {
+                self.session_custom.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -347,20 +349,9 @@ fn failure_kind(
     }
 }
 
-/// Upper-cased leading words of `sql` with comments removed (at most `n`). Non-ASCII
-/// letters count as word characters, so `ưư SET …` does not start with `SET`.
-fn leading_words(sql: &str, n: usize) -> Vec<String> {
-    strip_comments(sql, Dialect::Postgres)
-        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .filter(|w| !w.is_empty())
-        .take(n)
-        .map(str::to_ascii_uppercase)
-        .collect()
-}
-
 /// Whether `sql` starts with the keywords `kw` (comments allowed before and between).
 fn starts_with_words(sql: &str, kw: &[&str]) -> bool {
-    leading_words(sql, kw.len()) == kw
+    leading_keywords(sql, Dialect::Postgres, kw.len()) == kw
 }
 
 /// `PREPARE TRANSACTION 'id'` ends the current transaction (it is handed to 2PC).
@@ -370,7 +361,7 @@ fn is_prepare_transaction(sql: &str) -> bool {
 
 /// `COMMIT` / `END` / `ROLLBACK` / `ABORT … AND CHAIN`: a new transaction starts at once.
 fn is_and_chain(sql: &str) -> bool {
-    let words = leading_words(sql, 5);
+    let words = leading_keywords(sql, Dialect::Postgres, 5);
     words.windows(2).any(|w| w[0] == "AND" && w[1] == "CHAIN")
 }
 
@@ -452,7 +443,7 @@ fn killed_outcome_unknown(was_in_tx: bool, sql: &str) -> bool {
 }
 
 fn is_non_atomic(sql: &str) -> bool {
-    let words = leading_words(sql, 6);
+    let words = leading_keywords(sql, Dialect::Postgres, 6);
     let w: Vec<&str> = words.iter().map(String::as_str).collect();
     let within = |n: usize, kw: &[&str]| w.iter().take(n).any(|x| kw.contains(x));
     match w.as_slice() {
@@ -464,28 +455,6 @@ fn is_non_atomic(sql: &str) -> bool {
         ["ALTER", "SYSTEM" | "SUBSCRIPTION", ..] => true,
         ["ALTER", "DATABASE", ..] => within(6, &["TABLESPACE"]),
         ["COMMIT" | "ROLLBACK", "PREPARED", ..] => true,
-        _ => false,
-    }
-}
-
-/// Lexically: does a statement that succeeded change session state that a reconnect
-/// cannot restore? Session-level `SET` other than the tracked `search_path` (not `SET
-/// LOCAL`, `SET TRANSACTION`, `SET CONSTRAINTS`, which end with the transaction),
-/// temporary tables / views / sequences, named prepared statements (`PREPARE`),
-/// `LISTEN` and cursors (`DECLARE`). Settings changed through functions (`set_config`)
-/// are not detected.
-fn changes_session_state(sql: &str) -> bool {
-    let words = leading_words(sql, 4);
-    let w: Vec<&str> = words.iter().map(String::as_str).collect();
-    match w.as_slice() {
-        ["SET", "LOCAL" | "TRANSACTION" | "CONSTRAINTS" | "SEARCH_PATH", ..] => false,
-        ["SET", "SESSION", "SEARCH_PATH", ..] => false,
-        ["SET", _, ..] => true,
-        ["CREATE", "TEMP" | "TEMPORARY", ..]
-        | ["CREATE", "GLOBAL" | "LOCAL", "TEMP" | "TEMPORARY", ..]
-        | ["CREATE", "OR", "REPLACE", "TEMP" | "TEMPORARY"] => true,
-        ["PREPARE", second, ..] => *second != "TRANSACTION",
-        ["LISTEN" | "DECLARE", ..] => true,
         _ => false,
     }
 }
@@ -519,22 +488,6 @@ fn stuck_error(
             unknown,
             format!("{STUCK}{notes}; reconnecting failed: {e}"),
         ),
-    }
-}
-
-/// For a session-level `search_path` change: `Some(Some(stmt))` for `SET [SESSION]
-/// search_path …` (the statement, comments removed, is replayed verbatim), `Some(None)`
-/// for `RESET search_path` / `RESET ALL`, `None` for anything else (`SET LOCAL` is
-/// transaction-scoped and not remembered).
-fn search_path_change(sql: &str) -> Option<Option<String>> {
-    let words = leading_words(sql, 3);
-    let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    match words.as_slice() {
-        ["SET", "SEARCH_PATH", ..] | ["SET", "SESSION", "SEARCH_PATH"] => Some(Some(
-            strip_comments(sql, Dialect::Postgres).trim().to_string(),
-        )),
-        ["RESET", "SEARCH_PATH" | "ALL", ..] => Some(None),
-        _ => None,
     }
 }
 
@@ -715,29 +668,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn search_path_statements() {
-        let set = |s: &str| Some(Some(s.to_string()));
-        assert_eq!(
-            search_path_change("SET search_path TO sales, public"),
-            set("SET search_path TO sales, public")
-        );
-        assert_eq!(
-            search_path_change("  set Search_Path=sales;"),
-            set("set Search_Path=sales;")
-        );
-        assert_eq!(
-            search_path_change("SET SESSION search_path = x"),
-            set("SET SESSION search_path = x")
-        );
-        assert_eq!(search_path_change("RESET search_path"), Some(None));
-        assert_eq!(search_path_change("reset all"), Some(None));
-        assert_eq!(search_path_change("SET LOCAL search_path = x"), None);
-        assert_eq!(search_path_change("SET search_path_x = 1"), None);
-        assert_eq!(search_path_change("SET statement_timeout = 0"), None);
-        assert_eq!(search_path_change("SELECT 1"), None);
-    }
-
-    #[test]
     fn prepare_transaction_detection() {
         assert!(is_prepare_transaction("PREPARE TRANSACTION 'x'"));
         assert!(is_prepare_transaction("prepare  transaction 'x'"));
@@ -745,72 +675,7 @@ mod tests {
         assert!(!is_prepare_transaction("PREPARE q AS SELECT 1"));
     }
 
-    #[test]
-    fn search_path_behind_comments_is_tracked() {
-        let set = |s: &str| Some(Some(s.to_string()));
-        assert_eq!(
-            search_path_change("/* pick */ SET search_path TO sales, public"),
-            set("SET search_path TO sales, public")
-        );
-        assert_eq!(
-            search_path_change("-- pick\nSET search_path = sales -- why"),
-            set("SET search_path = sales")
-        );
-        assert_eq!(
-            search_path_change("/* a */ /* b */ RESET search_path"),
-            Some(None)
-        );
-        assert_eq!(
-            search_path_change("/* SET search_path = x */ SELECT 1"),
-            None
-        );
-        // A comment inside the value is dropped from the replayed statement.
-        assert_eq!(
-            search_path_change("SET search_path = /* x */ sales"),
-            set("SET search_path =   sales")
-        );
-    }
-
     use StatementKind::{Ddl, Other, Read, Transaction, Write};
-
-    #[test]
-    fn session_state_changes_are_lexical() {
-        for sql in [
-            "SET statement_timeout = 0",
-            "set work_mem to '64MB'",
-            "/* c */ SET SESSION statement_timeout = 0",
-            "SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-            "SET ROLE dnt_limited",
-            "SET TIME ZONE 'UTC'",
-            "CREATE TEMP TABLE t (a int)",
-            "create temporary table t (a int)",
-            "CREATE GLOBAL TEMPORARY TABLE t (a int)",
-            "CREATE LOCAL TEMP TABLE t (a int)",
-            "CREATE OR REPLACE TEMP VIEW v AS SELECT 1",
-            "PREPARE q AS SELECT 1",
-            "LISTEN chan",
-            "DECLARE c CURSOR WITH HOLD FOR SELECT 1",
-        ] {
-            assert!(changes_session_state(sql), "{sql}");
-        }
-        for sql in [
-            "SELECT 1",
-            // Tracked and re-applied.
-            "SET search_path TO sales",
-            "SET SESSION search_path = sales",
-            // Transaction-scoped.
-            "SET LOCAL statement_timeout = 0",
-            "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-            "SET CONSTRAINTS ALL DEFERRED",
-            "PREPARE TRANSACTION 'x'",
-            "CREATE TABLE t (a int)",
-            "INSERT INTO t SELECT 'SET x = 1'",
-            "-- SET x = 1\nSELECT 1",
-            "ưư SET x = 1",
-        ] {
-            assert!(!changes_session_state(sql), "{sql}");
-        }
-    }
 
     #[test]
     fn reset_notes_name_what_was_lost() {
