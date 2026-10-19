@@ -3,5 +3,6 @@
 pub mod db;
 pub mod dntconn;
 pub mod keyring_store;
+pub mod ncx;
 pub mod repo;
 pub mod transfer;
