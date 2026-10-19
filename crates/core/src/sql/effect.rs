@@ -23,17 +23,18 @@ pub struct SessionEffect {
 ///
 /// - MySQL: an assignment of a session-scope `SET` (anything but `GLOBAL`,
 ///   `PERSIST`, `PERSIST_ONLY`, `@@global.`, `@@persist.`, `@@persist_only.`;
-///   user variables always), `CREATE TEMPORARY` and `PREPARE` are `custom`; an
-///   assignment to the session `sql_mode` also sets `sql_mode`; a plain `USE db`
-///   sets `use_db`.
+///   user variables always), `CREATE [OR REPLACE] TEMPORARY`, `PREPARE`, `LOCK
+///   TABLES` and a depth-0 user-variable assignment in any other statement (`@v
+///   := …`, `INTO @v`) are `custom`; an assignment to the session `sql_mode` also
+///   sets `sql_mode`; a plain `USE db` sets `use_db`. The `autocommit` assignment
+///   is transaction control, tracked by the drivers, and is skipped (the other
+///   assignments of the same `SET` still count).
 /// - PG: session-level `SET` other than `search_path` (not `SET LOCAL`, `SET
-///   TRANSACTION`, `SET CONSTRAINTS`), temporary tables / views / sequences,
-///   `PREPARE` (not `PREPARE TRANSACTION`), `LISTEN` and `DECLARE` are `custom`;
-///   `SET [SESSION] search_path` and `RESET search_path | ALL` set `search_path`.
-///   Settings changed through functions (`set_config`) are not detected.
-///
-/// `SET autocommit` is reported like any session `SET`; it is transaction control,
-/// tracked separately, so callers ignore `custom` for it.
+///   TRANSACTION`, `SET CONSTRAINTS`; quoted and dotted names included),
+///   temporary tables / views / sequences, `PREPARE` (not `PREPARE TRANSACTION`),
+///   `LISTEN` and `DECLARE` are `custom`; `SET [SESSION] search_path` and `RESET
+///   search_path | ALL` (plain or `"quoted"`) set `search_path`. Settings changed
+///   through functions (`set_config`) are not detected.
 pub fn session_effect(stmt: &str, dialect: Dialect) -> Option<SessionEffect> {
     let mut effect = SessionEffect::default();
     match dialect {
@@ -49,19 +50,51 @@ pub fn session_effect(stmt: &str, dialect: Dialect) -> Option<SessionEffect> {
 }
 
 fn mysql_effect(stmt: &str, dialect: Dialect, effect: &mut SessionEffect) {
-    let words = leading_keywords(stmt, dialect, 2);
+    let words = leading_keywords(stmt, dialect, 4);
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
+    let toks = tokenize(stmt, dialect);
     match words.as_slice() {
-        ["SET", ..] => {
-            let toks = tokenize(stmt, dialect);
-            // `SET` must be the first token, not a word after leading punctuation.
-            if matches!(toks[0].kind, TokKind::Word(w) if w.eq_ignore_ascii_case("SET")) {
-                set_assignments(&toks[1..], effect);
-            }
-        }
-        ["CREATE", "TEMPORARY"] | ["PREPARE", ..] => effect.custom = true,
-        _ => {}
+        // `SET` must be the first token, not a word after leading punctuation.
+        ["SET", ..] if is_word(toks.first(), "SET") => set_assignments(&toks[1..], effect),
+        ["CREATE", "TEMPORARY", ..]
+        | ["CREATE", "OR", "REPLACE", "TEMPORARY"]
+        | ["PREPARE", ..]
+        | ["LOCK", "TABLES" | "TABLE", ..] => effect.custom = true,
+        _ => effect.custom |= assigns_user_variable(&toks),
     }
+}
+
+fn is_word(t: Option<&Token>, kw: &str) -> bool {
+    matches!(t.map(|t| t.kind), Some(TokKind::Word(w)) if w.eq_ignore_ascii_case(kw))
+}
+
+/// A user variable (`@v`, not `@@v`) as a word.
+fn is_user_var(t: Option<&Token>) -> bool {
+    matches!(t.map(|t| t.kind), Some(TokKind::Word(w)) if w.starts_with('@') && !w.starts_with("@@"))
+}
+
+/// Whether a statement other than `SET` assigns a user variable at depth 0:
+/// `@v := …` or `… INTO @v`.
+fn assigns_user_variable(toks: &[Token]) -> bool {
+    let punct = |i: usize, c: u8| toks.get(i).map(|t| t.kind) == Some(TokKind::Punct(c));
+    let mut depth = 0usize;
+    for (i, t) in toks.iter().enumerate() {
+        match t.kind {
+            TokKind::Open => depth += 1,
+            TokKind::Close => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            TokKind::Word(w) if w.eq_ignore_ascii_case("INTO") && is_user_var(toks.get(i + 1)) => {
+                return true
+            }
+            TokKind::Word(_)
+                if is_user_var(Some(t)) && punct(i + 1, b':') && punct(i + 2, b'=') =>
+            {
+                return true
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Scope of one MySQL `SET` assignment.
@@ -128,7 +161,8 @@ fn assignment(a: &[Token], sticky: &mut Scope, effect: &mut SessionEffect) {
     } else {
         (*sticky, Some(first))
     };
-    if scope == Scope::Session {
+    // `autocommit` is transaction control, tracked and re-applied by the drivers.
+    if scope == Scope::Session && !name.is_some_and(|n| n.eq_ignore_ascii_case("autocommit")) {
         effect.custom = true;
         if name.is_some_and(|n| n.eq_ignore_ascii_case("sql_mode")) {
             effect.sql_mode = true;
@@ -153,12 +187,21 @@ fn parse_use(sql: &str) -> Option<String> {
 }
 
 fn pg_effect(stmt: &str, effect: &mut SessionEffect) {
+    let toks = tokenize(stmt, Dialect::Postgres);
+    if is_word(toks.first(), "SET") {
+        return pg_set(stmt, &toks, effect);
+    }
+    if is_word(toks.first(), "RESET") {
+        if pg_setting_name(stmt, &toks, 1)
+            .is_some_and(|n| n.eq_ignore_ascii_case("search_path") || n.eq_ignore_ascii_case("all"))
+        {
+            effect.search_path = Some(None);
+        }
+        return;
+    }
     let words = leading_keywords(stmt, Dialect::Postgres, 4);
     let w: Vec<&str> = words.iter().map(String::as_str).collect();
     effect.custom = match w.as_slice() {
-        ["SET", "LOCAL" | "TRANSACTION" | "CONSTRAINTS" | "SEARCH_PATH", ..] => false,
-        ["SET", "SESSION", "SEARCH_PATH", ..] => false,
-        ["SET", _, ..] => true,
         ["CREATE", "TEMP" | "TEMPORARY", ..]
         | ["CREATE", "GLOBAL" | "LOCAL", "TEMP" | "TEMPORARY", ..]
         | ["CREATE", "OR", "REPLACE", "TEMP" | "TEMPORARY"] => true,
@@ -166,13 +209,53 @@ fn pg_effect(stmt: &str, effect: &mut SessionEffect) {
         ["LISTEN" | "DECLARE", ..] => true,
         _ => false,
     };
-    effect.search_path = match w.as_slice() {
-        ["SET", "SEARCH_PATH", ..] | ["SET", "SESSION", "SEARCH_PATH", ..] => Some(Some(
-            strip_comments(stmt, Dialect::Postgres).trim().to_string(),
-        )),
-        ["RESET", "SEARCH_PATH" | "ALL", ..] => Some(None),
+}
+
+/// PG `SET …` (`toks[0]` is `SET`). `LOCAL`, `TRANSACTION` and `CONSTRAINTS` end with
+/// the transaction; `[SESSION] search_path` (plain or quoted) is tracked; any other
+/// setting, quoted or dotted names included, is custom.
+fn pg_set(stmt: &str, toks: &[Token], effect: &mut SessionEffect) {
+    let mut i = 1;
+    let word = |i: usize| match toks.get(i).map(|t| t.kind) {
+        Some(TokKind::Word(w)) => Some(w.to_ascii_uppercase()),
         _ => None,
     };
+    if word(i).as_deref() == Some("SESSION") {
+        i += 1;
+    } else if matches!(
+        word(i).as_deref(),
+        Some("LOCAL" | "TRANSACTION" | "CONSTRAINTS")
+    ) {
+        return;
+    }
+    if i >= toks.len() {
+        // A bare `SET` / `SET SESSION` is a syntax error; nothing ran.
+        return;
+    }
+    let dotted = toks.get(i + 1).map(|t| t.kind) == Some(TokKind::Punct(b'.'));
+    if !dotted
+        && pg_setting_name(stmt, toks, i).is_some_and(|n| n.eq_ignore_ascii_case("search_path"))
+    {
+        effect.search_path = Some(Some(
+            strip_comments(stmt, Dialect::Postgres).trim().to_string(),
+        ));
+    } else {
+        effect.custom = true;
+    }
+}
+
+/// The setting name at token `i`: a plain word, or a `"quoted"` identifier unquoted.
+fn pg_setting_name(stmt: &str, toks: &[Token], i: usize) -> Option<String> {
+    let t = toks.get(i)?;
+    match t.kind {
+        TokKind::Word(w) => Some(w.to_string()),
+        TokKind::Quoted => {
+            let q = &stmt[t.start..t.end];
+            let inner = q.strip_prefix('"')?.strip_suffix('"')?;
+            Some(inner.replace("\"\"", "\""))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +453,67 @@ mod tests {
     }
 
     #[test]
+    fn autocommit_assignment_alone_is_not_custom() {
+        for sql in [
+            "SET autocommit = 0",
+            "set @@autocommit := 1",
+            "SET SESSION autocommit = OFF",
+            "SET @@session.autocommit = 0",
+            "/*!40101 SET autocommit=0 */",
+        ] {
+            assert_eq!(session_effect(sql, MYSQL), None, "{sql}");
+        }
+        // The other assignments of the same `SET` still count.
+        for sql in [
+            "SET NAMES latin1, autocommit = 0",
+            "SET autocommit = 0, @x = 1",
+            "SET autocommit = 0, sql_mode = ''",
+        ] {
+            assert!(custom(sql, MYSQL), "{sql}");
+        }
+        // A user variable named like the setting is still a user variable.
+        assert!(custom("SET @autocommit = 0", MYSQL));
+    }
+
+    #[test]
+    fn mariadb_create_or_replace_temporary_is_custom() {
+        assert!(custom("CREATE OR REPLACE TEMPORARY TABLE t (a int)", MYSQL));
+        assert!(!custom("CREATE OR REPLACE TABLE t (a int)", MYSQL));
+    }
+
+    #[test]
+    fn lock_tables_is_custom() {
+        assert!(custom("LOCK TABLES t READ", MYSQL));
+        assert!(custom("lock table t write", MYSQL));
+        assert!(!custom("UNLOCK TABLES", MYSQL));
+    }
+
+    #[test]
+    fn user_variable_assignment_in_a_statement_is_custom() {
+        for sql in [
+            "SELECT a INTO @v FROM t",
+            "SELECT a FROM t INTO @v, @w",
+            "SELECT @v := a FROM t",
+            "SELECT @v:=1",
+            "UPDATE t SET a = @n := @n + 1",
+            "/*!40101 SELECT 1 INTO @v */",
+        ] {
+            assert!(custom(sql, MYSQL), "{sql}");
+        }
+        for sql in [
+            "SELECT @v FROM t",
+            "SELECT @@sql_mode INTO OUTFILE '/tmp/x'",
+            "SELECT a INTO OUTFILE '/tmp/x' FROM t",
+            "SELECT @v = 1",
+            "SELECT 'INTO @v'",
+            "SELECT (@v := 1)",
+            "SELECT @@x := 1",
+        ] {
+            assert!(!custom(sql, MYSQL), "{sql}");
+        }
+    }
+
+    #[test]
     fn pg_session_state_cases() {
         // Moved from driver-pg `session_state_changes_are_lexical`.
         for sql in [
@@ -387,9 +531,26 @@ mod tests {
             "PREPARE q AS SELECT 1",
             "LISTEN chan",
             "DECLARE c CURSOR WITH HOLD FOR SELECT 1",
+            // Quoted setting names.
+            r#"SET "TimeZone" = 'UTC'"#,
+            r#"SET "work_mem" = '64MB'"#,
+            r#"SET "myapp"."user" = 'bob'"#,
+            r#"SET SESSION "work_mem" = '64MB'"#,
         ] {
             assert!(custom(sql, PG), "{sql}");
         }
+        // A quoted `search_path` is tracked, not custom.
+        let sp = session_effect(r#"SET "search_path" = 'sales'"#, PG).unwrap();
+        assert!(!sp.custom, "{sp:?}");
+        assert_eq!(
+            sp.search_path,
+            Some(Some(r#"SET "search_path" = 'sales'"#.into()))
+        );
+        assert_eq!(
+            search_path_change(r#"SET "Search_Path" TO sales"#),
+            Some(Some(r#"SET "Search_Path" TO sales"#.into()))
+        );
+        assert_eq!(search_path_change(r#"RESET "search_path""#), Some(None));
         for sql in [
             "SELECT 1",
             // Tracked and re-applied.

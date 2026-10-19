@@ -157,15 +157,16 @@ impl MySqlSession {
 
     /// Tracking applied after a statement succeeded: remembers the last `USE` and
     /// whether session state was customised.
-    fn track_after(&self, kind: StatementKind, sql: &str) {
+    /// (`session_effect` already skips the `autocommit` assignment, which is
+    /// transaction control re-applied separately.)
+    fn track_after(&self, sql: &str) {
         let Some(effect) = session_effect(sql, Dialect::MYSQL) else {
             return;
         };
         if let Some(db) = effect.use_db {
             *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
         }
-        // `SET autocommit` is transaction control, tracked and re-applied separately.
-        if !matches!(kind, StatementKind::Transaction(_)) && effect.custom {
+        if effect.custom {
             self.session_custom.store(true, Ordering::SeqCst);
         }
     }
@@ -607,7 +608,7 @@ impl Session for MySqlSession {
                     return Err(DbError::cancelled());
                 }
             }
-            self.track_after(kind, &stmt.text);
+            self.track_after(&stmt.text);
         }
         Ok(summary)
     }
