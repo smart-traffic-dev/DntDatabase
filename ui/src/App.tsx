@@ -1,0 +1,54 @@
+import { useEffect } from 'react';
+import { ErrorBoundary } from './components/ErrorBoundary';
+import { Sidebar } from './components/Sidebar';
+import { StatusBar } from './components/StatusBar';
+import { TabBar } from './components/TabBar';
+import { Toolbar } from './components/Toolbar';
+import { useTabs } from './store/tabs';
+import { useTree } from './store/tree';
+
+function Workspace() {
+  const tab = useTabs((s) => s.tabs.find((t) => t.id === s.activeId));
+  return (
+    <main className="workspace">
+      <TabBar />
+      <section className="tab-content" aria-label="Tab content">
+        {tab ? (
+          <div className="empty">
+            <strong>{tab.title}</strong>
+            <span>
+              {tab.objectRef.database}
+              {tab.objectRef.schema ? `.${tab.objectRef.schema}` : ''} · {tab.objectRef.kind}
+            </span>
+          </div>
+        ) : (
+          <div className="empty">
+            <strong>No object open</strong>
+            <span>Double-click a table or view in the connection tree.</span>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+export default function App() {
+  useEffect(() => {
+    void useTree.getState().reloadStored();
+  }, []);
+
+  return (
+    <div className="app">
+      <Toolbar />
+      <div className="body">
+        <ErrorBoundary label="Sidebar">
+          <Sidebar />
+        </ErrorBoundary>
+        <ErrorBoundary label="Workspace">
+          <Workspace />
+        </ErrorBoundary>
+      </div>
+      <StatusBar />
+    </div>
+  );
+}
