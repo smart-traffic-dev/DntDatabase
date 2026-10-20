@@ -1,7 +1,7 @@
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
-import type { QueryTabRecord, TxAction, TxState } from '../bindings';
+import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { useTabs } from './tabs';
@@ -16,8 +16,15 @@ export const AUTOSAVE_MS = 1000;
 
 const SQL_FILTERS = [{ name: 'SQL', extensions: ['sql'] }];
 
-/** SQL dialect of a document: follows the engine of its connection. */
-export type Dialect = 'mysql' | 'postgres';
+/**
+ * SQL engine of a document: follows its connection. The backend `Dialect` (with the MySQL
+ * `sql_mode` flags) is `engineDialect(engine)` before a plan, `PlanView.dialect` after one.
+ */
+export type Engine = 'mysql' | 'postgres';
+
+/** The backend `Dialect` of an engine, without `sql_mode` flags (what `statement_ranges` takes). */
+export const engineDialect = (engine: Engine): Dialect =>
+  engine === 'postgres' ? { engine: 'postgres' } : { engine: 'mysql' };
 
 /** The editor document of a query tab, persisted in `query_tabs` (spec §7.2). */
 export interface QueryDoc {
@@ -34,7 +41,7 @@ export interface QueryDoc {
   continueOnError: boolean;
   rowLimit: RowLimit;
   sortOrder: number;
-  dialect: Dialect;
+  dialect: Engine;
 }
 
 interface QueryDocsState {
@@ -72,7 +79,7 @@ function nextTitle(docs: Iterable<QueryDoc>): string {
 /** The last component of a Windows or POSIX path. */
 export const fileName = (path: string): string => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
-export const dialectOfConnection = (connectionId: string | null): Dialect =>
+export const dialectOfConnection = (connectionId: string | null): Engine =>
   connectionId && useConnections.getState().summaries.get(connectionId)?.config.kind === 'postgres'
     ? 'postgres'
     : 'mysql';
@@ -120,9 +127,34 @@ export function fromRecord(r: QueryTabRecord): QueryDoc {
  * catches an open transaction through `query_close_tab`'s `transaction_open`.
  */
 let txStateOf: (tabId: string) => TxState = () => 'idle';
+/** Where the state a `query_tx` of the close guard leaves goes (the run store, as well). */
+let recordTxState: (tabId: string, state: TxState) => void = () => {};
 
-export function setTxStateSource(source: ((tabId: string) => TxState) | null) {
+export function setTxStateSource(
+  source: ((tabId: string) => TxState) | null,
+  record?: (tabId: string, state: TxState) => void,
+) {
   txStateOf = source ?? (() => 'idle');
+  recordTxState = (source && record) || (() => {});
+}
+
+const TX_STATES: readonly string[] = ['idle', 'active', 'aborted'] satisfies TxState[];
+
+/** `AppError.tx_state` (a plain string) as a `TxState`; null when absent or unknown. */
+export const asTxState = (s: string | null | undefined): TxState | null =>
+  s != null && TX_STATES.includes(s) ? (s as TxState) : null;
+
+/** `query_tx`, recording the state it leaves (or the one its failure reports). */
+export async function queryTxRecorded(tabId: string, action: TxAction): Promise<TxState> {
+  try {
+    const state = await api.queryTx(tabId, action);
+    recordTxState(tabId, state);
+    return state;
+  } catch (e) {
+    const state = asTxState(toAppError(e).tx_state);
+    if (state) recordTxState(tabId, state);
+    throw e;
+  }
 }
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -192,7 +224,7 @@ function settleTransaction(id: string, title: string): Promise<boolean> {
       kind: 'txClose',
       title,
       settle: async (action: TxAction) => {
-        await api.queryTx(id, action);
+        await queryTxRecorded(id, action);
       },
       done: (closed) => {
         useDialogs.getState().answer();

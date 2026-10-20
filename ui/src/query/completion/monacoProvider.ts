@@ -4,11 +4,9 @@ import type * as Monaco from 'monaco-editor';
 import { commands } from '../../bindings';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
-import { useQueryDocs } from '../../store/queryTabs';
+import { engineDialect, useQueryDocs, type Engine } from '../../store/queryTabs';
 import { localStatementRange } from './context';
 import { suggest, type Suggestion } from './provider';
-
-type Engine = 'mysql' | 'postgres';
 
 export interface CompletionTarget {
   tabId: string;
@@ -39,7 +37,7 @@ function itemKind(monaco: typeof Monaco, kind: Suggestion['kind']): Monaco.langu
 
 async function ranges(text: string, engine: Engine): Promise<[number, number][]> {
   try {
-    return await commands.statementRanges(text, engine === 'postgres' ? { engine: 'postgres' } : { engine: 'mysql' });
+    return await commands.statementRanges(text, engineDialect(engine));
   } catch {
     // No ranges: `analyze` still cuts the statement at `;`.
     return [];

@@ -2,6 +2,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect } from 'react';
 import { onQueryShortcut } from './components/queryShortcuts';
 import { installCloseGuard, useQueryDocs } from './store/queryTabs';
+// Registers the run store as the close guard's transaction source (before the guard runs).
+import './store/queryRun';
 import { DialogHost } from './dialogs/DialogHost';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
