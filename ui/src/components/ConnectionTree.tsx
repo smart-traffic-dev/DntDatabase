@@ -15,6 +15,8 @@ import {
   SchemaIcon,
   TableIcon,
 } from './icons';
+import { useDialogs } from '../store/dialogs';
+import { openNewQuery } from './newQuery';
 import { openObjectTab } from './openObject';
 import { ActionMenu, transferItems } from './ActionMenu';
 import { TreeContextMenu } from './TreeContextMenu';
@@ -205,6 +207,15 @@ export function ConnectionTree() {
     const at = nodeRows.findIndex((r) => r.key === selectedId);
     const current = nodeRows[at];
     const go = (r?: TreeRow) => r && tree.select(r.key);
+    if (e.ctrlKey || e.metaKey) {
+      if (e.altKey) return;
+      // Ctrl+Enter: the object's tab on DDL. Ctrl+Q: a new query bound to the node. Other Ctrl keys are not ours.
+      if (e.key === 'Enter' && current?.node.kind === 'object') openObjectTab(current.node, { ddl: true });
+      else if (e.key.toLowerCase() === 'q' && current) openNewQuery(current.node);
+      else return;
+      e.preventDefault();
+      return;
+    }
     switch (e.key) {
       case 'ArrowDown':
         go(nodeRows[at < 0 ? 0 : Math.min(at + 1, nodeRows.length - 1)]);
@@ -233,12 +244,26 @@ export function ConnectionTree() {
         if (current.node.kind === 'object') openObjectTab(current.node);
         else tree.toggle(current.key);
         break;
+      case 'F2': {
+        // Rename = the node's existing edit / rename dialog (connections, groups).
+        const connectionId = connectionIdOf(current?.key ?? '');
+        const dialogs = useDialogs.getState();
+        if (current?.node.kind === 'connection' && connectionId) dialogs.requestDialog({ kind: 'editConnection', id: connectionId });
+        else if (current?.node.kind === 'group') dialogs.requestDialog({ kind: 'renameGroup', id: current.key.slice('group:'.length) });
+        else return;
+        break;
+      }
       case 'F5':
         if (!current) return;
         void tree.refresh(current.key);
         break;
-      default:
-        return;
+      default: {
+        // Typing jumps to the filter: the text goes in, and the filter box takes over the typing.
+        if (e.key.length !== 1 || e.altKey || (e.key === ' ' && !filter)) return;
+        tree.setFilter(filter + e.key);
+        document.querySelector<HTMLInputElement>('input[aria-label="Filter objects"]')?.focus();
+        break;
+      }
     }
     e.preventDefault();
   };
