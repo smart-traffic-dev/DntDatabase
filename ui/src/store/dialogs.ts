@@ -30,6 +30,8 @@ export type Question =
       done(closed: boolean): void;
     }
   | { kind: 'discard'; file: string; done(discard: boolean): void }
+  /** Closing a tab whose query is still running: closing stops it first. */
+  | { kind: 'stopRun'; title: string; done(close: boolean): void }
   /** Quitting while `count` tabs could not be saved. */
   | { kind: 'saveFailed'; count: number; done(quit: boolean): void }
   | {

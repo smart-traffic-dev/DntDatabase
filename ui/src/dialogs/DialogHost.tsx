@@ -3,6 +3,7 @@ import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequir
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs';
+import { useRunPrompt } from '../store/runPrompt';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
@@ -12,6 +13,8 @@ import { HostKeyDialog } from './HostKeyDialog';
 import { ImportDialog } from './ImportDialog';
 import { PasswordPrompt, type SecretNeed } from './PasswordPrompt';
 import { SettingsDialog } from './SettingsDialog';
+import { RunBlockedDialog } from './RunBlockedDialog';
+import { RunConfirmDialog } from './RunConfirmDialog';
 import { ConfirmDialog, NameDialog } from './SimpleDialogs';
 import { AppCloseDialog } from './AppCloseDialog';
 import { TxCloseDialog } from './TxCloseDialog';
@@ -166,6 +169,17 @@ function QuestionHost({ question }: { question: Question }) {
       />
     );
   }
+  if (question.kind === 'stopRun') {
+    return (
+      <ConfirmDialog
+        title="Query is running"
+        message={`${question.title} is still running. Closing the tab stops the query.`}
+        confirmLabel="Stop and close"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
   if (question.kind === 'saveFailed') {
     return (
       <ConfirmDialog
@@ -178,6 +192,18 @@ function QuestionHost({ question }: { question: Question }) {
     );
   }
   return <AppCloseDialog tabs={question.tabs} onQuit={question.quit} onCancel={question.done} />;
+}
+
+/** The Production confirmation / read-only notice a run waits for (`useRunPrompt`). */
+function RunPromptHost() {
+  const pending = useRunPrompt((s) => s.pending);
+  const settle = useRunPrompt((s) => s.settle);
+  if (!pending) return null;
+  return pending.kind === 'confirm' ? (
+    <RunConfirmDialog key={pending.plan.plan_id} plan={pending.plan} onDone={settle} />
+  ) : (
+    <RunBlockedDialog plan={pending.plan} onClose={() => settle(false)} />
+  );
 }
 
 /** Mounts the dialogs the connection tree and toolbar ask for (`useDialogs`). */
@@ -302,6 +328,7 @@ export function DialogHost() {
       <InternalErrorToast />
       {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}:${prompt.error.fingerprint ?? ''}:${prompt.error.stage ?? ''}`} prompt={prompt} />}
       {question && <QuestionHost question={question} />}
+      <RunPromptHost />
     </>
   );
 }

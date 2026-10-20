@@ -419,3 +419,44 @@
   border-color: var(--danger);
   color: var(--danger);
 }
+
+.modal.env-production {
+  border: 2px solid var(--production);
+}
+
+.run-confirm-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.run-confirm-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+}
+
+.run-confirm-row.danger {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.run-confirm-no,
+.run-confirm-kind {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.run-confirm-row.danger .run-confirm-kind {
+  color: var(--danger);
+}
+
+.run-confirm-preview {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
