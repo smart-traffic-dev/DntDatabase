@@ -1,31 +1,36 @@
+/*
+ * App aliases over the dnt-note tokens in ui/src/theme/tokens.css.
+ * `--bg`, `--text`, `--border`, `--accent`, `--danger` come from the token file's
+ * legacy aliases; the rest are DntDatabase-specific names for the same values.
+ */
 :root {
-  --bg: #f3f4f6;
-  --panel: #ffffff;
-  --sidebar: #fafafb;
-  --border: #dcdfe4;
-  --text: #1b1f24;
-  --muted: #5a6370;
-  --accent: #1f5fd1;
-  --sel: #e3ebfa;
-  --tabstrip: #eceef1;
-  --icon: #3d4652;
-  --danger: #b42318;
-  --production: #b42318;
-  --production-bg: #fdecea;
-  --staging: #b54708;
-  --local: #1a7f37;
-  --chip-my-bg: #fdebd9;
-  --chip-my-fg: #8a4206;
-  --chip-pg-bg: #e3ecf8;
-  --chip-pg-fg: #1e4e8c;
-  --chip-ma-bg: #f1e6f7;
-  --chip-ma-fg: #6b2e85;
+  --panel: var(--studio-bg);
+  --sidebar: var(--studio-sidebar);
+  --muted: var(--studio-fg-secondary);
+  --sel: var(--studio-selected);
+  --hover: var(--studio-hover);
+  --tabstrip: var(--studio-sidebar);
+  --icon: var(--studio-fg-secondary);
+  --accent-fg: var(--studio-accent-fg);
+  --accent-hover: var(--studio-accent-hover);
+  --danger-fill: var(--studio-danger-fill);
+  --danger-border: var(--studio-danger-border);
+  --production: var(--studio-danger);
+  --production-bg: var(--studio-danger-fill);
+  /* P2 query editor (not in the dnt-note tokens): environment, chip and editor
+     colours that P2 CSS uses. Staging/Local stay neutral (design-tokens spec, option 3a). */
+  --staging: var(--studio-fg-secondary);
+  --local: var(--studio-fg-secondary);
+  --chip-ma-bg: var(--studio-subtle);
+  --chip-ma-fg: var(--studio-fg-secondary);
   --warning-bg: #fff4d6;
   --warning-fg: #7a4b00;
-  --current-stmt-bg: rgba(31, 95, 209, 0.08);
-  --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
-  color-scheme: light;
+  --current-stmt-bg: color-mix(in srgb, var(--studio-fg) 6%, transparent);
+}
+
+.dark {
+  --warning-bg: #3a3020;
+  --warning-fg: #f0c674;
 }
 
 * {
@@ -41,9 +46,13 @@ body,
 
 body {
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
   color: var(--text);
   background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
 }
 
 button {
@@ -56,9 +65,11 @@ button:disabled {
   cursor: default;
 }
 
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+/* The token base rules remove the focus ring on text fields; show focus on the border instead. */
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--studio-fg-tertiary);
 }
 
 .app {
@@ -66,6 +77,11 @@ button:disabled {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  /* The shell is dense: use the reference's control text size, not the body size. */
+  font-size: var(--text-callout);
+  line-height: var(--text-callout--line-height);
 }
 
 .body {
@@ -91,7 +107,7 @@ button:disabled {
   gap: 8px;
   padding-right: 16px;
   font-weight: 600;
-  font-size: 14px;
+  font-size: var(--text-body);
 }
 
 .brand svg {
@@ -107,9 +123,9 @@ button:disabled {
   min-height: 44px;
   padding: 4px 8px;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
-  font-size: 12px;
+  font-size: var(--text-footnote);
 }
 
 .tool svg {
@@ -117,11 +133,11 @@ button:disabled {
 }
 
 .tool:hover:not(:disabled) {
-  background: var(--sel);
+  background: var(--hover);
 }
 
 .tool:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
 /* Sidebar */
@@ -148,8 +164,8 @@ button:disabled {
   height: 30px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
+  border-radius: var(--radius-sm);
+  background: var(--studio-control);
   font: inherit;
 }
 
@@ -161,11 +177,11 @@ button:disabled {
   align-items: center;
   justify-content: center;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
+  border-radius: var(--radius-sm);
+  background: var(--studio-control);
   color: var(--icon);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .icon-btn.on {
@@ -180,12 +196,12 @@ button:disabled {
   gap: 8px;
   margin: 0 8px 6px;
   padding: 6px 8px;
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-footnote);
 }
 
 .banner.error {
-  background: var(--production-bg);
+  background: var(--danger-fill);
   color: var(--danger);
 }
 
@@ -203,7 +219,7 @@ button:disabled {
 }
 
 .tree:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--studio-fg-secondary);
   outline-offset: -2px;
 }
 
@@ -213,13 +229,13 @@ button:disabled {
   gap: 6px;
   height: 26px;
   padding-right: 8px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   white-space: nowrap;
   user-select: none;
 }
 
 .tree-row:hover {
-  background: #f0f2f5;
+  background: var(--studio-hover);
 }
 
 .tree-row.selected {
@@ -268,52 +284,58 @@ button:disabled {
 .chip {
   flex: none;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-caption);
   font-weight: 500;
   padding: 1px 4px;
-  border-radius: 3px;
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--studio-subtle);
+  color: var(--studio-fg-secondary);
 }
 
-.chip-MY {
-  background: var(--chip-my-bg);
-  color: var(--chip-my-fg);
-}
-
-.chip-PG {
-  background: var(--chip-pg-bg);
-  color: var(--chip-pg-fg);
-}
-
+/* The reference palette is monochrome: engines differ by label, not by hue. */
+.chip-MY,
+.chip-PG,
 .chip-MA {
-  background: var(--chip-ma-bg);
-  color: var(--chip-ma-fg);
+  background: var(--studio-subtle);
+  color: var(--studio-fg-secondary);
 }
 
-.env-dot {
+.env-tag {
   flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--studio-subtle);
+  color: var(--studio-fg-secondary);
+  font-size: var(--text-caption);
+  font-weight: 600;
+  line-height: 1;
 }
 
-.env-dot.env-production {
-  background: var(--production);
+/* Production is the only environment with a colour; S/L stay neutral and carry a letter. */
+.env-tag.env-production {
+  background: var(--studio-danger-fill);
+  border-color: var(--studio-danger-border);
+  color: var(--studio-danger);
 }
 
-.env-dot.env-staging {
-  background: var(--staging);
-}
-
-.env-dot.env-local {
-  background: var(--local);
+.env-tag.env-staging,
+.env-tag.env-local {
+  color: var(--studio-fg-secondary);
 }
 
 .ssh-tag {
   flex: none;
-  font-size: 10px;
+  font-size: var(--text-caption);
   color: var(--muted);
-  border: 1px solid #c9ced6;
-  border-radius: 3px;
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-sm);
   padding: 0 3px;
 }
 
@@ -321,7 +343,7 @@ button:disabled {
   margin-left: auto;
   flex: none;
   color: var(--muted);
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .muted {
@@ -362,14 +384,29 @@ button:disabled {
   height: 30px;
   padding: 0 10px;
   border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel);
+  border-radius: var(--radius-sm);
+  background: var(--studio-control);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.btn.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .btn.small {
   height: 20px;
   padding: 0 8px;
-  font-size: 11px;
+  font-size: var(--text-caption);
   flex: none;
 }
 
@@ -379,10 +416,11 @@ button:disabled {
   z-index: 50;
   min-width: 180px;
   padding: 4px;
-  background: var(--panel);
-  border: 1px solid #c9ced6;
-  border-radius: 6px;
-  box-shadow: 0 6px 20px rgba(20, 24, 31, 0.12);
+  background: var(--studio-popover);
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  font-size: var(--text-callout);
 }
 
 .context-menu button {
@@ -392,14 +430,14 @@ button:disabled {
   gap: 16px;
   padding: 5px 10px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   text-align: left;
 }
 
 .context-menu button:hover,
 .context-menu button:focus-visible {
-  background: var(--sel);
+  background: var(--hover);
 }
 
 .context-menu button.danger {
@@ -408,7 +446,7 @@ button:disabled {
 
 .context-menu kbd {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -438,7 +476,7 @@ button:disabled {
   height: 32px;
   border: 1px solid transparent;
   border-bottom: 0;
-  border-radius: 6px 6px 0 0;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   white-space: nowrap;
 }
 
@@ -448,17 +486,9 @@ button:disabled {
   font-weight: 500;
 }
 
-/* Environment stripe along the top of a tab (production red, like the tree and status bar). */
+/* Production is the only environment with a colour stripe; S/L show a letter badge. */
 .tab.env-production {
   box-shadow: inset 0 2px 0 var(--production);
-}
-
-.tab.env-staging {
-  box-shadow: inset 0 2px 0 var(--staging);
-}
-
-.tab.env-local {
-  box-shadow: inset 0 2px 0 var(--local);
 }
 
 .tab-label {
@@ -473,7 +503,7 @@ button:disabled {
 
 .tab-kind {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -490,20 +520,20 @@ button:disabled {
   height: 24px;
   margin-right: 4px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
 }
 
 .tab-close:hover {
-  background: var(--sel);
+  background: var(--hover);
 }
 
 .tab-content {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  background: var(--panel);
+  background: var(--studio-bg);
 }
 
 .empty {
@@ -518,15 +548,17 @@ button:disabled {
 
 .empty strong {
   color: var(--text);
+  font-size: var(--text-body);
+  line-height: var(--text-body--line-height);
   font-weight: 600;
 }
 
 .error-fallback {
   margin: 16px;
   padding: 12px 16px;
-  border: 1px solid var(--danger);
-  border-radius: 6px;
-  background: var(--production-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-fill);
   color: var(--danger);
 }
 
@@ -543,7 +575,7 @@ button:disabled {
   background: var(--panel);
   border-top: 1px solid var(--border);
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--text-footnote);
 }
 
 .statusbar.env-production {
@@ -572,18 +604,20 @@ button:disabled {
   flex: none;
   width: 8px;
   height: 8px;
-  border-radius: 4px;
-  background: #aab1bb;
+  border: 1px solid var(--studio-fg-tertiary);
+  border-radius: 50%;
+  background: transparent;
 }
 
 .dot.on {
-  background: var(--local);
+  border-color: var(--studio-fg);
+  background: var(--studio-fg);
 }
 
 .env-badge {
   flex: none;
   font-weight: 600;
-  font-size: 10px;
+  font-size: var(--text-caption);
   letter-spacing: 0.04em;
 }
 
@@ -597,12 +631,12 @@ button:disabled {
   width: 16px;
   padding: 0;
   border: 0;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   background: transparent;
 }
 
 .tool-more:hover {
-  background: var(--sel);
+  background: var(--hover);
 }
 
 .status-tx {

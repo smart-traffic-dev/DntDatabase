@@ -17,7 +17,7 @@ function openTab(connectionId: string, title: string) {
 describe('TabBar', () => {
   beforeEach(resetStores);
 
-  it('shows the environment colour of each tab connection', () => {
+  it('shows an environment badge for each tab connection', () => {
     const tagged = (id: string, name: string, env_tag: EnvTag | null) => config(id, name, { env_tag });
     act(() => {
       useConnections.getState().setStored([], [tagged(ids.prod, 'prod', 'production'), tagged(ids.analytics, 'stats', 'staging'), tagged(ids.legacy, 'crm', null)]);
@@ -28,9 +28,11 @@ describe('TabBar', () => {
     render(<TabBar />);
     const tab = (title: string) => screen.getByRole('tab', { name: new RegExp(title) }).closest('.tab')!;
     expect(tab('p_orders')).toHaveClass('env-production');
-    expect(tab('p_orders').querySelector('.env-dot.env-production')).toHaveAttribute('title', 'Environment: production');
-    expect(tab('s_orders').querySelector('.env-dot.env-staging')).not.toBeNull();
-    expect(tab('c_orders').querySelector('.env-dot')).toBeNull();
+    expect(tab('p_orders').querySelector('.env-tag.env-production')).toHaveAttribute('title', 'Environment: production');
+    expect(tab('p_orders').querySelector('.env-tag')?.textContent).toBe('P');
+    expect(tab('s_orders').querySelector('.env-tag.env-staging')).not.toBeNull();
+    expect(tab('s_orders').querySelector('.env-tag')?.textContent).toBe('S');
+    expect(tab('c_orders').querySelector('.env-tag')).toBeNull();
     expect(tab('c_orders')).not.toHaveClass('env-production');
   });
 

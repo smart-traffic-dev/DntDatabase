@@ -660,7 +660,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                     aria-selected={tab === t.id}
                     aria-controls={`cd-panel-${t.id}`}
                     tabIndex={tab === t.id ? 0 : -1}
-                    className={`tab${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
+                    className={`dlg-tab${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
                     onClick={() => setTab(t.id)}
                     onKeyDown={onTabKey}
                   >

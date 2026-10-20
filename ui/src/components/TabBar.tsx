@@ -2,6 +2,7 @@ import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs, type Tab } from '../store/tabs';
+import { EnvTag } from './EnvTag';
 import { CloseIcon } from './icons';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
@@ -47,7 +48,7 @@ export function TabBar() {
               onClick={() => activate(tab.id)}
               onAuxClick={(e) => e.button === 1 && closeTab(tab)}
             >
-              {env && <span className={`env-dot env-${env}`} title={`Environment: ${env}`} />}
+              {env && <EnvTag env={env} />}
               <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : KIND_LABEL[tab.objectRef.kind]}</span>
               <span>{tab.title}</span>
               {unsaved && (
