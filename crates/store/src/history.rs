@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use uuid::Uuid;
 
-/// Rows kept: older ones are pruned right after each insert.
+/// Rows kept: older ones are pruned right after each insert (or batch of inserts).
 pub const HISTORY_KEEP: i64 = 10_000;
 
 /// Upper bound of `HistoryFilter::limit`.
@@ -142,12 +142,42 @@ impl ConnectionRepo {
     /// tests; use `history_insert`.
     #[doc(hidden)]
     pub fn history_insert_keep(&self, e: &NewHistoryEntry, keep: i64) -> Result<i64, DbError> {
+        let ids = self.history_insert_batch_keep(std::slice::from_ref(e), keep)?;
+        ids.first().copied().ok_or_else(|| DbError::Internal {
+            message: "insert history entry: no row id".into(),
+        })
+    }
+
+    /// Records `entries` in order in ONE transaction, then prunes once (see
+    /// [`Self::history_insert`] for `started_at`). Returns the new row ids, in order.
+    /// A run's history writer sends whatever statements are queued as one batch, so a
+    /// long script costs one commit per batch, not one per statement.
+    pub fn history_insert_batch(&self, entries: &[NewHistoryEntry]) -> Result<Vec<i64>, DbError> {
+        self.history_insert_batch_keep(entries, HISTORY_KEEP)
+    }
+
+    /// [`Self::history_insert_batch`] with an explicit bound. Public only for the
+    /// integration tests; use `history_insert_batch`.
+    #[doc(hidden)]
+    pub fn history_insert_batch_keep(
+        &self,
+        entries: &[NewHistoryEntry],
+        keep: i64,
+    ) -> Result<Vec<i64>, DbError> {
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
         self.transaction(|tx| {
-            tx.execute(
-                "INSERT INTO query_history (connection_id, database, sql_text, redacted, kind, \
-                 started_at, elapsed_ms, status, row_count, affected, error_kind, error_code) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![
+            let mut stmt = tx
+                .prepare_cached(
+                    "INSERT INTO query_history (connection_id, database, sql_text, redacted, \
+                     kind, started_at, elapsed_ms, status, row_count, affected, error_kind, \
+                     error_code) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                )
+                .map_err(|err| internal("insert history entry", err))?;
+            let mut ids = Vec::with_capacity(entries.len());
+            for e in entries {
+                stmt.execute(params![
                     e.connection_id.to_string(),
                     e.database,
                     e.sql_text,
@@ -160,12 +190,13 @@ impl ConnectionRepo {
                     to_sql_u64(e.affected),
                     e.error_kind,
                     e.error_code,
-                ],
-            )
-            .map_err(|err| internal("insert history entry", err))?;
-            let id = tx.last_insert_rowid();
+                ])
+                .map_err(|err| internal("insert history entry", err))?;
+                ids.push(tx.last_insert_rowid());
+            }
+            drop(stmt);
             prune(tx, keep)?;
-            Ok(id)
+            Ok(ids)
         })
     }
 

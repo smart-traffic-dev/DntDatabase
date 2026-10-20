@@ -3,7 +3,7 @@
 use dnt_core::config::ConnectionConfig;
 use dnt_core::secret::MemorySecretStore;
 use dnt_core::test_util::sample_config;
-use dnt_store::db::open_in_memory;
+use dnt_store::db::{open, open_in_memory};
 use dnt_store::history::{HistoryFilter, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_store::tabs::QueryTabRecord;
@@ -293,6 +293,71 @@ fn history_filter_by_connection_and_search() {
         })
         .unwrap();
     assert_eq!(limited.len(), 1);
+}
+
+/// A file database in WAL mode: 10 000 rows in batches (as a long run's history
+/// writer sends them) go in one transaction per batch, fast, in order.
+#[test]
+fn history_batches_are_fast_and_ordered_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = ConnectionRepo::new(
+        open(&dir.path().join("app.db")).unwrap(),
+        Arc::new(MemorySecretStore::default()),
+    );
+    let conn = connection(&repo, "a");
+    let entries: Vec<NewHistoryEntry> = (0..10_000)
+        .map(|i| entry(conn, &format!("SELECT {i}")))
+        .collect();
+    let started = std::time::Instant::now();
+    let mut ids = Vec::new();
+    for batch in entries.chunks(500) {
+        ids.extend(repo.history_insert_batch(batch).unwrap());
+    }
+    let took = started.elapsed();
+    assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    assert_eq!(ids.len(), 10_000);
+    assert!(
+        ids.windows(2).all(|w| w[0] < w[1]),
+        "ids follow the order sent"
+    );
+    // Same `started_at`: newest first is by id.
+    let newest = repo.history_list(&all()).unwrap();
+    assert_eq!(newest.len(), 1000);
+    assert_eq!(newest[0].sql_text, "SELECT 9999");
+    assert_eq!(newest[999].sql_text, "SELECT 9000");
+    assert!(repo.history_insert_batch(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn history_batch_prunes_once_beyond_keep() {
+    let repo = repo();
+    let conn = connection(&repo, "a");
+    let batch: Vec<NewHistoryEntry> = (0..8)
+        .map(|i| entry(conn, &format!("SELECT {i}")))
+        .collect();
+    let ids = repo.history_insert_batch_keep(&batch, 5).unwrap();
+    let mut kept: Vec<i64> = repo
+        .history_list(&all())
+        .unwrap()
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    kept.sort();
+    assert_eq!(kept, ids[3..]);
+}
+
+#[test]
+fn file_database_uses_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = open(&dir.path().join("app.db")).unwrap();
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let sync: i64 = conn
+        .query_row("PRAGMA synchronous", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sync, 1, "NORMAL");
 }
 
 #[test]

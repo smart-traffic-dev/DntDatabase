@@ -46,9 +46,18 @@ fn migrations() -> Migrations<'static> {
 }
 
 /// Opens (creating if needed) the database file, enables foreign keys and migrates to latest.
+///
+/// The file is in WAL mode with `synchronous = NORMAL`: a commit is one append to the
+/// `-wal` file next to it (no fsync per commit), so the query history of a long run
+/// costs little; a power loss can lose the last commits, never corrupt the database.
 pub fn open(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path)
         .map_err(|e| internal(format!("open database {}", path.display()), e))?;
+    // WAL needs a file system with shared memory; elsewhere SQLite keeps its
+    // rollback journal, which still works (only slower).
+    let _mode: String = conn
+        .pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get(0))
+        .map_err(|e| internal("enable WAL", e))?;
     prepare(conn)
 }
 
@@ -61,6 +70,8 @@ pub fn open_in_memory() -> Result<Connection, DbError> {
 fn prepare(mut conn: Connection) -> Result<Connection, DbError> {
     conn.pragma_update(None, "foreign_keys", true)
         .map_err(|e| internal("enable foreign keys", e))?;
+    conn.pragma_update(None, "synchronous", "NORMAL")
+        .map_err(|e| internal("set synchronous", e))?;
     migrations()
         .to_latest(&mut conn)
         .map_err(|e| internal("migrate database", e))?;
