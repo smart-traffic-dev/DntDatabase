@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
 
 use async_trait::async_trait;
+use dnt_core::config::EnvTag;
 use dnt_core::driver::{
     CancelHandle, Canceller, ExecOptions, Introspector, ResultSummary, RowSink, Session,
     StmtOutcome,
@@ -24,7 +25,7 @@ use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::run::{
     error_offset, run, RunCancel, RunReport, RunSink, StopReason, ROLLED_BACK_NOTICE,
 };
-use dnt_query::{plan, PlannedStmt, ScriptPlan, Target, Verdict};
+use dnt_query::{guard, plan, PlannedStmt, ScriptPlan, Target, Verdict};
 use tokio::sync::Notify;
 
 // ---------------------------------------------------------------------------
@@ -743,6 +744,67 @@ async fn dialect_change_inside_delimiter_block_continues() {
     assert_eq!(r.stop, None);
 }
 
+/// Under the default mode the backslash escapes the quote, so the string runs to the
+/// end and the `SET` has one session assignment (Allow on Production). Under
+/// `NO_BACKSLASH_ESCAPES` the string ends at `\'` and `GLOBAL` is a second, global
+/// assignment (Confirm); the boundaries and the kind (`Other`) are the same.
+const VERDICT_FLIP: &str =
+    r"SET sql_mode='NO_BACKSLASH_ESCAPES'; SET @x = 'a\', GLOBAL max_connections = 1 -- '";
+
+#[tokio::test]
+async fn dialect_change_that_changes_a_verdict_stops() {
+    let mut p = all(VERDICT_FLIP, MY);
+    guard(&mut p, Some(EnvTag::Production), false, false);
+    assert_eq!(p.stmts.len(), 2);
+    assert_eq!(p.stmts[1].verdict, Verdict::Allow);
+    let s = FakeSession::new(MY, vec![ok().dialect(NBE)]);
+    let r = go(&s, &p, false, &mut Rec::default()).await;
+    assert_eq!(s.sent().len(), 1);
+    assert_eq!(r.stop, Some(StopReason::DialectChanged { index: 1 }));
+}
+
+#[tokio::test]
+async fn dialect_change_with_same_verdicts_continues() {
+    // Same script, not on Production: every verdict stays Allow.
+    let mut p = all(VERDICT_FLIP, MY);
+    guard(&mut p, Some(EnvTag::Local), false, false);
+    let s = FakeSession::new(MY, vec![ok().dialect(NBE)]);
+    let r = go(&s, &p, false, &mut Rec::default()).await;
+    assert_eq!(s.sent().len(), 2);
+    assert_eq!(r.stop, None);
+}
+
+#[tokio::test]
+async fn dialect_rechecked_after_a_failed_statement() {
+    // The failing statement still changed the session's mode (a driver re-reads a
+    // stale mode inside `execute_one`); continue_on_error must not skip the check.
+    let p = all(
+        r"SET sql_mode = 'NO_BACKSLASH_ESCAPES,X'; SELECT 'a\'; SELECT 2'",
+        MY,
+    );
+    assert_eq!(p.stmts.len(), 2);
+    let s = FakeSession::new(MY, vec![fail(server_err("bad mode")).dialect(NBE)]);
+    let r = go(&s, &p, true, &mut Rec::default()).await;
+    assert_eq!(s.sent().len(), 1);
+    assert!(r.stmts[0].result.is_err());
+    assert_eq!(r.stop, Some(StopReason::DialectChanged { index: 1 }));
+}
+
+#[tokio::test]
+async fn cancel_during_last_statement_that_completes_ok_gives_no_stop() {
+    let s = FakeSession::new(PG, vec![ok(), ok()]);
+    let p = all("SELECT 1; SELECT 2", PG);
+    let cancel = s.cancel();
+    let mut rec = Rec {
+        cancel_at_end: Some((1, cancel.clone())),
+        ..Rec::default()
+    };
+    let r = run(&s, &p, &ExecOptions::default(), false, &cancel, &mut rec).await;
+    assert_eq!(s.sent().len(), 2);
+    assert_eq!(r.stop, None);
+    assert!(cancel.is_cancelled());
+}
+
 // ---------------------------------------------------------------------------
 // Error offsets
 
@@ -757,22 +819,32 @@ fn stmt(range: (u32, u32), text: &str) -> PlannedStmt {
     }
 }
 
-fn pg_err(position: u32) -> AppError {
-    AppError::from(DbError::Server {
+/// `error_offset` reads the raw driver error (never the mapped `AppError`, whose
+/// `position` is already an editor offset).
+fn pg_err(position: u32) -> DbError {
+    DbError::Server {
         code: None,
         sqlstate: Some("42703".into()),
         message: "column does not exist".into(),
         position: Some(position),
-    })
+    }
 }
 
-fn my_err(message: &str) -> AppError {
-    AppError::from(DbError::Server {
+fn my_err(message: &str) -> DbError {
+    DbError::Server {
         code: Some("1064".into()),
         sqlstate: Some("42000".into()),
         message: message.into(),
         position: None,
-    })
+    }
+}
+
+#[test]
+fn error_offset_ignores_errors_without_a_place() {
+    let s = stmt((3, 14), "SELECT * FROM");
+    assert_eq!(error_offset(&s, &DbError::cancelled()), None);
+    let staged = DbError::at_stage(ConnectStage::Execute, vec![], pg_err(2));
+    assert_eq!(error_offset(&s, &staged), Some(4));
 }
 
 const MY_SYNTAX: &str = "You have an error in your SQL syntax; check the manual that \

@@ -29,24 +29,57 @@ use crate::plan::{ScriptPlan, Verdict};
 /// - Otherwise, when `plan.explain` is set (plain Explain), every statement but a
 ///   `Ddl` is Allow; a `Ddl` gets its ordinary verdict.
 /// - Otherwise, [`verdict`].
+///
+/// The inputs are kept in `plan.guard`, so `run` can judge the statements again
+/// when the session's `sql_mode` changes how they are lexed.
 pub fn guard(plan: &mut ScriptPlan, env: Option<EnvTag>, read_only: bool, analyze: bool) {
+    let ctx = GuardCtx {
+        env,
+        read_only,
+        analyze,
+    };
     let (dialect, explain) = (plan.dialect, plan.explain);
     for s in &mut plan.stmts {
-        s.verdict = if analyze {
-            let analyze_verdict = if !read_only && env == Some(EnvTag::Production) {
-                Verdict::Confirm
-            } else {
-                Verdict::Allow
-            };
-            strictest(
-                analyze_verdict,
-                verdict(&s.text, s.kind, dialect, env, read_only),
-            )
-        } else if explain && s.kind != StatementKind::Ddl {
-            Verdict::Allow
+        s.verdict = stmt_verdict(&s.text, s.kind, dialect, explain, ctx);
+    }
+    plan.guard = Some(ctx);
+}
+
+/// What [`guard`] judged a plan with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuardCtx {
+    pub env: Option<EnvTag>,
+    pub read_only: bool,
+    pub analyze: bool,
+}
+
+/// The verdict [`guard`] gives one statement of a plan (`explain`: the plan's flag).
+pub(crate) fn stmt_verdict(
+    text: &str,
+    kind: StatementKind,
+    dialect: Dialect,
+    explain: bool,
+    ctx: GuardCtx,
+) -> Verdict {
+    let GuardCtx {
+        env,
+        read_only,
+        analyze,
+    } = ctx;
+    if analyze {
+        let analyze_verdict = if !read_only && env == Some(EnvTag::Production) {
+            Verdict::Confirm
         } else {
-            verdict(&s.text, s.kind, dialect, env, read_only)
+            Verdict::Allow
         };
+        strictest(
+            analyze_verdict,
+            verdict(text, kind, dialect, env, read_only),
+        )
+    } else if explain && kind != StatementKind::Ddl {
+        Verdict::Allow
+    } else {
+        verdict(text, kind, dialect, env, read_only)
     }
 }
 

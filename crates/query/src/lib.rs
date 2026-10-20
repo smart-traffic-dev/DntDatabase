@@ -16,7 +16,7 @@ pub mod run;
 pub use explain::{
     explain_sql, parse_plan, self_cost, ExplainFormat, ExplainSql, PlanNode, PlanTree,
 };
-pub use guard::{guard, lifts_read_only, other_whitelisted, verdict};
+pub use guard::{guard, lifts_read_only, other_whitelisted, verdict, GuardCtx};
 pub use offsets::Utf16Map;
 pub use plan::{plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target, Verdict};
 pub use redact::{redact, Redacted, REDACTED};

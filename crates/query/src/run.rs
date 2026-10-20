@@ -11,6 +11,7 @@ use dnt_core::sql::{classify, Dialect, StatementKind, TxControl};
 use dnt_core::tx::{is_rollback_to, TxState};
 use serde::{Deserialize, Serialize};
 
+use crate::guard::stmt_verdict;
 use crate::offsets::Utf16Map;
 use crate::plan::{significant, PlannedStmt, ScriptPlan};
 
@@ -88,6 +89,11 @@ pub struct StmtReport {
 #[derive(Debug, Clone)]
 pub struct RunReport {
     /// `None`: every planned statement ran.
+    ///
+    /// For the UI: a cancel only shows here when it stopped something. A cancel that
+    /// lands while the LAST statement runs, when that statement still completes `Ok`,
+    /// gives `None` (everything ran); `RunCancel::is_cancelled` still says the user
+    /// pressed Stop.
     pub stop: Option<StopReason>,
     /// The statements sent, in order.
     pub stmts: Vec<StmtReport>,
@@ -114,7 +120,8 @@ pub fn reconnect_notice(total: u32) -> String {
 ///
 /// Every `execute_one` gets `opts` with `stop` replaced by `cancel.signal()`.
 /// Before each statement the run stops on a cancel, on a `sql_mode` change that
-/// splits the rest differently, and on an aborted transaction (anything but
+/// splits the rest differently or changes a guard verdict of the rest, and on an
+/// aborted transaction (anything but
 /// `ROLLBACK [TO]` / `COMMIT` / `END` / `ABORT`). After a failure it stops on a
 /// cancel, a lost connection, an unknown outcome, a statement sent inside a
 /// transaction or a transaction left open; otherwise only without
@@ -146,6 +153,11 @@ pub async fn run(
             break;
         }
         // A `SET sql_mode`, or a reconnect that reset it, may have changed the lexing.
+        // Checked before every statement, also after one that failed (and the run
+        // went on with `continue_on_error`): a failed statement can change the mode
+        // too, and the MySQL driver re-reads a mode it could not read after a
+        // failure (a stale mode) inside its next `execute_one`, so `dialect()` is
+        // only up to date once that call returned.
         let now = session.dialect();
         if now != dialect {
             if !same_rest(plan, i, now) {
@@ -188,9 +200,10 @@ pub async fn run(
             }
             Err(err) => {
                 let stop = stop_after_error(&err, after, continue_on_error, stmt.index);
+                let position = error_offset(stmt, &err);
                 let mut app = AppError::from(err);
                 app.tx_state = Some(after.as_str().into());
-                app.position = error_offset(stmt, &app);
+                app.position = position;
                 (Err(app), stop)
             }
         };
@@ -252,7 +265,9 @@ fn ends_aborted(stmt: &PlannedStmt, dialect: Dialect) -> bool {
 }
 
 /// Whether splitting with `dialect` gives the planned statements `i..` again (same
-/// boundaries, same kinds), so that the guard's verdicts still hold.
+/// boundaries, same kinds) and, for a guarded plan, the guard judges each of them as
+/// planned under `dialect` (the guard lexes the text, so a mode change can change a
+/// verdict without changing a boundary or a kind).
 ///
 /// Two readings are accepted: the text after the last statement run (`i - 1`) split
 /// on its own, as the spec says; or the whole source split again, which keeps a
@@ -280,7 +295,12 @@ fn same_rest(plan: &ScriptPlan, i: usize, dialect: Dialect) -> bool {
             .map(|s| (base + s.start, base + s.end, classify(&s.text, dialect)))
             .collect()
     };
-    resplit(from) == want || (from != 0 && resplit(0) == want)
+    let same_bounds = resplit(from) == want || (from != 0 && resplit(0) == want);
+    same_bounds
+        && plan.guard.is_none_or(|ctx| {
+            rest.iter()
+                .all(|s| stmt_verdict(&s.text, s.kind, dialect, plan.explain, ctx) == s.verdict)
+        })
 }
 
 /// The editor offset (UTF-16) of the error `err` of `stmt`, if the server said where:
@@ -289,14 +309,24 @@ fn same_rest(plan: &ScriptPlan, i: usize, dialect: Dialect) -> bool {
 /// - MySQL "… near '<snippet>' at line N": where the snippet's first 20 chars start
 ///   on line N of `stmt.text`, else the start of line N (the end of the statement for
 ///   an empty snippet: the input ended too early).
-pub fn error_offset(stmt: &PlannedStmt, err: &AppError) -> Option<u32> {
+///
+/// `err` is the RAW driver error, as `execute_one` returned it: `run` calls this
+/// before mapping it to the `AppError` it reports, whose `position` is then already
+/// the editor offset. Taking a `DbError` keeps it from being applied twice.
+pub fn error_offset(stmt: &PlannedStmt, err: &DbError) -> Option<u32> {
+    let DbError::Server {
+        message, position, ..
+    } = err.unstaged()
+    else {
+        return None;
+    };
     let text = stmt.text.as_str();
-    let byte = match err.position {
+    let byte = match position {
         Some(pos) => {
             let skip = pos.saturating_sub(1) as usize;
             text.char_indices().nth(skip).map_or(text.len(), |(b, _)| b)
         }
-        None => mysql_near(text, err.detail.as_deref().unwrap_or(&err.message))?,
+        None => mysql_near(text, message)?,
     };
     Some(stmt.range.0 + Utf16Map::new(text).to_u16(byte))
 }

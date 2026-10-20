@@ -3,6 +3,7 @@
 use dnt_core::sql::{classify, leading_blank_len, split, Dialect, Statement, StatementKind};
 use serde::{Deserialize, Serialize};
 
+use crate::guard::GuardCtx;
 use crate::offsets::Utf16Map;
 
 /// What the user asked to run. Offsets are UTF-16 code units into the editor text.
@@ -60,6 +61,9 @@ pub struct ScriptPlan {
     pub base: u32,
     pub stmts: Vec<PlannedStmt>,
     pub explain: bool,
+    /// Set by [`crate::guard::guard`]: what the verdicts were judged with (`None`:
+    /// not guarded, every verdict is `Allow`).
+    pub guard: Option<GuardCtx>,
 }
 
 /// Plans the statements `target` selects in the editor text `text`.
@@ -116,6 +120,7 @@ pub fn plan(text: &str, target: Target, dialect: Dialect) -> ScriptPlan {
         base: map.to_u16(from),
         stmts,
         explain: false,
+        guard: None,
     }
 }
 
