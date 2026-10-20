@@ -1,4 +1,5 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { DialogHost } from '../dialogs/DialogHost';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { EnvTag } from '../bindings';
 import userEvent from '@testing-library/user-event';
@@ -6,7 +7,7 @@ import { useConnections } from '../store/connections';
 import { emptyRun, useQueryRun } from '../store/queryRun';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
-import { callsOf, config, ids, mockBackend, resetStores } from '../test/backend';
+import { callsOf, config, fail, ids, mockBackend, resetStores } from '../test/backend';
 import { TabBar } from './TabBar';
 
 const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
@@ -72,6 +73,38 @@ describe('TabBar', () => {
     await waitFor(() => expect(useTabs.getState().tabs).toEqual([]));
     expect(callsOf('query_close_tab')).toEqual([{ tabId: id, force: false }]);
     expect(callsOf('tabs_delete')).toEqual([{ id }]);
+  });
+
+  it('closing a tab with an open transaction asks first and Cancel keeps it', async () => {
+    mockBackend({
+      tabs_save: () => null,
+      tabs_delete: () => null,
+      query_close_tab: (a) => {
+        if (!a.force) throw fail('transaction_open');
+        return null;
+      },
+      query_tx: () => 'idle',
+    });
+    const id = useQueryDocs.getState().newQuery(null, null);
+    render(
+      <>
+        <TabBar />
+        <DialogHost />
+      </>,
+    );
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'Close Query 1' }));
+    const dialog = await screen.findByRole('alertdialog');
+    expect(dialog).toHaveTextContent(/This tab has an open transaction/);
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([id]);
+    expect(useQueryDocs.getState().docs.has(id)).toBe(true);
+    // Never forced closed, never committed or rolled back behind the user's back.
+    expect(callsOf('query_close_tab')).toEqual([{ tabId: id, force: false }]);
+    expect(callsOf('query_tx')).toEqual([]);
+    expect(callsOf('tabs_delete')).toEqual([]);
   });
 
   it('query_tab_shows_sql_label', () => {

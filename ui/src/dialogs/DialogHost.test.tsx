@@ -204,6 +204,7 @@ describe('DialogHost', () => {
         return null;
       },
       get_table_page_size: () => 100,
+      get_confirm_unbounded_writes: () => true,
     });
     useDialogs.getState().requestDialog({ kind: 'settings' });
     const user = userEvent.setup();
@@ -227,6 +228,7 @@ describe('DialogHost', () => {
         size = a.size as number;
         return null;
       },
+      get_confirm_unbounded_writes: () => true,
     });
     useDialogs.getState().requestDialog({ kind: 'settings' });
     const user = userEvent.setup();
@@ -244,6 +246,52 @@ describe('DialogHost', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     const { useAppSettings } = await import('../store/appSettings');
     expect(useAppSettings.getState().tablePageSize).toBe(250);
+  });
+
+  it('settings toggles the unbounded-write confirmation (on by default)', async () => {
+    let on = true;
+    mockBackend({
+      get_log_level: () => 'Info',
+      get_table_page_size: () => 100,
+      get_confirm_unbounded_writes: () => on,
+      set_confirm_unbounded_writes: (a) => {
+        on = a.enabled as boolean;
+        return null;
+      },
+    });
+    useDialogs.getState().requestDialog({ kind: 'settings' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    const box = await screen.findByRole('checkbox', { name: 'Confirm UPDATE/DELETE without WHERE' });
+    await waitFor(() => expect(box).toBeEnabled());
+    expect(box).toBeChecked();
+    expect(box).toHaveAccessibleDescription(/non-Production connection\. Production connections always ask\./);
+    await user.click(box);
+    await waitFor(() => expect(callsOf('set_confirm_unbounded_writes')).toEqual([{ enabled: false }]));
+    expect(box).not.toBeChecked();
+    await user.click(box);
+    await waitFor(() => expect(callsOf('set_confirm_unbounded_writes')).toHaveLength(2));
+    expect(callsOf('set_confirm_unbounded_writes')[1]).toEqual({ enabled: true });
+    expect(box).toBeChecked();
+  });
+
+  it('a failed unbounded-write save keeps the box as it was and shows the error', async () => {
+    mockBackend({
+      get_log_level: () => 'Info',
+      get_table_page_size: () => 100,
+      get_confirm_unbounded_writes: () => true,
+      set_confirm_unbounded_writes: () => {
+        throw fail('busy');
+      },
+    });
+    useDialogs.getState().requestDialog({ kind: 'settings' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    const box = await screen.findByRole('checkbox', { name: 'Confirm UPDATE/DELETE without WHERE' });
+    await waitFor(() => expect(box).toBeEnabled());
+    await user.click(box);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(box).toBeChecked();
   });
 
   it('deleting a connection closes its tabs', async () => {
