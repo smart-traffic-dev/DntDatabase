@@ -219,6 +219,29 @@ describe('autocomplete', () => {
     expect(labels(ok.items)).toEqual(['id', 'customer_id', 'total']);
   });
 
+  it('tables_after_from_when_ranges_end_before_the_cursor', async () => {
+    // `statement_ranges` trims trailing blanks: `SELECT * FROM ` ends at 13, the cursor is at 14.
+    for (const engine of ['mysql', 'postgres'] as const) {
+      for (const sql of ['SELECT * FROM |', 'SELECT * FROM orders o JOIN |', 'UPDATE |', 'INSERT INTO  |']) {
+        const { text } = at(sql);
+        const end = text.trimEnd().length;
+        const { items } = await run(sql, engine, { ranges: [[0, end]] });
+        expect(ofKind(items, 'keyword')).toEqual([]);
+        expect(items.length).toBeGreaterThan(0);
+        expect(items.every((s) => s.kind === 'table' || s.kind === 'view')).toBe(true);
+      }
+    }
+    // Multi-line gap after the statement, still no `;`: the same statement.
+    const nl = at('SELECT *\nFROM\n  |');
+    expect(labels((await run('SELECT *\nFROM\n  |', 'mysql', { ranges: [[0, nl.text.trimEnd().length]] })).items)).toContain(
+      'orders',
+    );
+    // After a `;` the previous statement is over: default context.
+    const after = at('SELECT * FROM orders;\n|');
+    const def = await run('SELECT * FROM orders;\n|', 'mysql', { ranges: [[0, after.text.indexOf(';')]] });
+    expect(ofKind(def.items, 'keyword').length).toBeGreaterThan(0);
+  });
+
   it('no_suggestions_inside_strings_or_comments', async () => {
     expect((await run("SELECT 'FROM |'")).items).toEqual([]);
     expect((await run('SELECT 1 -- FROM |')).items).toEqual([]);
@@ -337,6 +360,43 @@ describe('monaco provider: fix round 1', () => {
     model.version = 2;
     await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
     expect(callsOf('statement_ranges')).toHaveLength(2);
+  });
+
+  it('ctrl_space_after_from_lists_tables_first', async () => {
+    // The backend trims the trailing blank: the range ends before the cursor.
+    mockBackend({
+      statement_ranges: () => [[0, 13]],
+      completion_scope: () => ({ database: 'shop', tables: mysqlScope.tables }),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const result = (await providers
+      .get('mysql')
+      ?.provideCompletionItems(fakeModel('SELECT * FROM |'), { lineNumber: 1 }, {}, live)) as {
+      suggestions: { label: string }[];
+      incomplete?: boolean;
+    };
+    expect(result.suggestions.slice(0, 3).map((s) => s.label)).toEqual(['orders', 'customers', 'order_totals']);
+    expect(result.suggestions.map((s) => s.label)).not.toContain('SELECT');
+    expect(result.incomplete).toBeFalsy();
+  });
+
+  it('failed_scope_marks_the_result_incomplete', async () => {
+    mockBackend({
+      statement_ranges: () => [],
+      completion_scope: () => {
+        throw { kind: 'not_open', message: 'x' };
+      },
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const result = (await providers
+      .get('mysql')
+      ?.provideCompletionItems(fakeModel('SELECT * FROM |'), { lineNumber: 1 }, {}, live)) as { incomplete?: boolean };
+    // Monaco asks again on the next keystroke instead of filtering a table-less list.
+    expect(result.incomplete).toBe(true);
   });
 
   it('cancelled_request_returns_nothing', async () => {

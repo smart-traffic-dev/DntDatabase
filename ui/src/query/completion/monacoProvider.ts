@@ -93,6 +93,9 @@ export function registerCompletion(
       const word = model.getWordUntilPosition(position);
       const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
       return {
+        // No scope (failed or not loaded): Monaco asks again on the next keystroke instead
+        // of only filtering a list without the tables.
+        incomplete: Boolean(connId && db) && scope === null,
         suggestions: items.map((s, i) => ({
           label: s.label,
           kind: itemKind(monaco, s.kind),
