@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, CellMode, Driver, ExecOptions, Introspector, ResultSummary, RowSink,
+    Session, StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{
@@ -18,14 +18,17 @@ use dnt_core::server::{detect_mysql, DbKind, ServerInfo};
 use dnt_core::sql::{Dialect, MySqlMode, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
-use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_query::edit::{Atomicity, CellInput, EditSet, RowEdit, RowRef};
 use dnt_query::Verdict;
 use dnt_store::db::open_in_memory;
 use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
 use dnt_tunnel::KnownHosts;
-use dntdatabase::edit_plans::{ApplyOutcome, ApplyReport};
+use dntdatabase::commands::data::{data_cell_load_file_impl, data_cell_save_file_impl};
+use dntdatabase::edit_plans::{ApplyOutcome, ApplyReport, CellPayload};
+use dntdatabase::file_picks::FileAccess;
 use dntdatabase::session_manager::SessionManager;
+use dntdatabase::state::{AppPaths, AppState};
 use secrecy::SecretString;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -219,11 +222,29 @@ impl Canceller for NoCancel {
     }
 }
 
-fn result(sink: &mut dyn RowSink, cols: &[ColumnMeta], rows: Vec<Vec<Value>>) -> StmtOutcome {
+/// One result of `rows`: display values, or complete ones in `CellMode::Full` (as the
+/// real drivers do).
+fn result(
+    sink: &mut dyn RowSink,
+    opts: &ExecOptions,
+    cols: &[ColumnMeta],
+    rows: Vec<Vec<Value>>,
+) -> StmtOutcome {
     sink.result_start(cols);
     let n = rows.len() as u64;
     if !rows.is_empty() {
-        sink.rows(rows);
+        match opts.cells {
+            CellMode::Preview => sink.rows(rows),
+            CellMode::Full { .. } => sink.full_rows(
+                rows.into_iter()
+                    .map(|r| {
+                        r.into_iter()
+                            .map(|v| FullValue::try_from_value(v).unwrap())
+                            .collect()
+                    })
+                    .collect(),
+            ),
+        }
     }
     let summary = ResultSummary {
         affected: None,
@@ -265,7 +286,7 @@ impl Session for FakeSession {
         &self,
         stmt: &str,
         _kind: StatementKind,
-        _opts: &ExecOptions,
+        opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         let s = &self.server;
@@ -332,7 +353,12 @@ impl Session for FakeSession {
                         ..MySqlMode::default()
                     });
                 }
-                Ok(result(sink, &[meta("cs")], vec![vec![Value::Text(cs)]]))
+                Ok(result(
+                    sink,
+                    opts,
+                    &[meta("cs")],
+                    vec![vec![Value::Text(cs)]],
+                ))
             }
             "SELECT" if stmt.starts_with("SELECT 1 FROM") => {
                 let rows = if s.recheck_found.load(Ordering::SeqCst) {
@@ -340,13 +366,23 @@ impl Session for FakeSession {
                 } else {
                     vec![]
                 };
-                Ok(result(sink, &[meta("1")], rows))
+                Ok(result(sink, opts, &[meta("1")], rows))
             }
             "SELECT" if stmt.contains("LIMIT 0") => {
-                Ok(result(sink, &s.metas.lock().unwrap(), vec![]))
+                Ok(result(sink, opts, &s.metas.lock().unwrap(), vec![]))
+            }
+            // A cell's complete value (`data_cell_fetch`): row 404 is gone.
+            "SELECT" if stmt.starts_with("SELECT `qty` FROM") => {
+                let rows = if stmt.ends_with("= 404") {
+                    vec![]
+                } else {
+                    vec![vec![Value::Int(7)]]
+                };
+                Ok(result(sink, opts, &[meta("qty")], rows))
             }
             "SELECT" => Ok(result(
                 sink,
+                opts,
                 &s.metas.lock().unwrap(),
                 vec![vec![Value::Int(41), Value::Int(5)]],
             )),
@@ -476,6 +512,7 @@ fn update(id: i64, qty: &str) -> RowEdit {
             key: vec![("id".into(), Value::Int(id))],
             original: vec![("id".into(), Value::Int(id)), ("qty".into(), Value::Int(0))],
             xmin: None,
+            loaded: vec![],
         },
         set: vec![("qty".into(), CellInput::Text { text: qty.into() })],
     }
@@ -1194,6 +1231,7 @@ async fn sql_mode_change_makes_plan_stale() {
                 ("note".into(), Value::Text("x".into())),
             ],
             xmin: None,
+            loaded: vec![],
         },
         set: vec![(
             "note".into(),
@@ -1215,4 +1253,231 @@ async fn sql_mode_change_makes_plan_stale() {
     assert!(!sent.iter().any(|s| s.starts_with("UPDATE")), "{sent:?}");
     assert!(!sent.iter().any(|s| s == "COMMIT"), "{sent:?}");
     assert!(sent.iter().any(|s| s == "ROLLBACK"), "{sent:?}");
+}
+
+// ---- complete cell values (`data_cell_fetch`) -----------------------------------------
+
+fn key(id: i64) -> Vec<(String, Value)> {
+    vec![("id".into(), Value::Int(id))]
+}
+
+fn field(e: &DbError) -> String {
+    match e {
+        DbError::Config { field, .. } => field.clone().unwrap_or_default(),
+        other => panic!("not a config error: {other:?}"),
+    }
+}
+
+fn message(e: &DbError) -> String {
+    match e {
+        DbError::Config { message, .. } => message.clone(),
+        other => panic!("not a config error: {other:?}"),
+    }
+}
+
+fn set_cell(column: &str, input: CellInput) -> EditSet {
+    edits(vec![RowEdit::Update {
+        row: RowRef {
+            key: key(1),
+            original: vec![("id".into(), Value::Int(1)), ("qty".into(), Value::Int(0))],
+            xmin: None,
+            loaded: vec![],
+        },
+        set: vec![(column.into(), input)],
+    }])
+}
+
+/// The cell is read by its key on a checked session, in full; its token stands for the
+/// value in a later edit of the same cell only.
+#[tokio::test]
+async fn cell_fetch_reads_by_key_and_token_binds_to_its_cell() {
+    let f = fixture().await;
+    let before = f.server.executed().len();
+    let cell =
+        f.sm.cell_fetch(f.id, object(), key(1), "qty".into())
+            .await
+            .unwrap();
+    assert_eq!(cell.payload, CellPayload::Text { text: "7".into() });
+    let sent = f.server.since(before);
+    let select = sent
+        .iter()
+        .position(|s| s == "SELECT `qty` FROM `shop`.`items` WHERE `id` = 1")
+        .unwrap_or_else(|| panic!("{sent:?}"));
+    // The session reads app-built literals as they were built (R12), checked first.
+    let check = sent
+        .iter()
+        .position(|s| s.contains("@@character_set_client"))
+        .unwrap_or_else(|| panic!("{sent:?}"));
+    assert!(check < select, "{sent:?}");
+
+    let p =
+        f.sm.edit_preview(
+            f.id,
+            set_cell("qty", CellInput::Loaded { token: cell.token }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        p.statements[0].starts_with("UPDATE `shop`.`items` SET `qty` = 7 WHERE"),
+        "{:?}",
+        p.statements
+    );
+    // Another column of the same table: refused.
+    let e =
+        f.sm.edit_preview(
+            f.id,
+            set_cell("id", CellInput::Loaded { token: cell.token }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "column:id", "{e:?}");
+    assert!(message(&e).contains("another"), "{e:?}");
+    // An unknown token.
+    let e =
+        f.sm.edit_preview(
+            f.id,
+            set_cell(
+                "qty",
+                CellInput::Loaded {
+                    token: Uuid::new_v4(),
+                },
+            ),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "column:qty", "{e:?}");
+}
+
+#[tokio::test]
+async fn cell_fetch_of_a_row_that_is_gone() {
+    let f = fixture().await;
+    let e =
+        f.sm.cell_fetch(f.id, object(), key(404), "qty".into())
+            .await
+            .unwrap_err();
+    assert_eq!(field(&e), "row", "{e:?}");
+    // Not a column of the table; a key that is not the table's key.
+    let e =
+        f.sm.cell_fetch(f.id, object(), key(1), "nope".into())
+            .await
+            .unwrap_err();
+    assert_eq!(field(&e), "column:nope", "{e:?}");
+    let e =
+        f.sm.cell_fetch(
+            f.id,
+            object(),
+            vec![("qty".into(), Value::Int(1))],
+            "qty".into(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "column:id", "{e:?}");
+}
+
+/// A session whose client character set is not utf8mb4 would misread the key's
+/// literals: nothing is read.
+#[tokio::test]
+async fn cell_fetch_refuses_a_session_without_utf8mb4() {
+    let f = fixture().await;
+    *f.server.charset.lock().unwrap() = "latin1".into();
+    let before = f.server.executed().len();
+    let e =
+        f.sm.cell_fetch(f.id, object(), key(1), "qty".into())
+            .await
+            .unwrap_err();
+    assert_eq!(kind(&e), "config", "{e:?}");
+    let sent = f.server.since(before);
+    assert!(
+        !sent.iter().any(|s| s.starts_with("SELECT `qty`")),
+        "{sent:?}"
+    );
+}
+
+/// A token lives as long as a plan: an expired one is refused with a clear reason.
+#[tokio::test]
+async fn expired_token_is_refused() {
+    let f = fixture().await;
+    let sm = f.sm.with_plan_ttl(Duration::from_millis(1));
+    let cell = sm
+        .cell_fetch(f.id, object(), key(1), "qty".into())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let e = sm
+        .edit_preview(
+            f.id,
+            set_cell("qty", CellInput::Loaded { token: cell.token }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "column:qty", "{e:?}");
+    assert!(message(&e).contains("load it again"), "{e:?}");
+}
+
+/// A value loaded from a file gets a token like a fetched one (binary columns keep the
+/// bytes, others need UTF-8 text).
+#[tokio::test]
+async fn cell_load_bytes_gives_a_token() {
+    let f = fixture().await;
+    let cell =
+        f.sm.cell_load(f.id, object(), "qty".into(), b"12".to_vec())
+            .await
+            .unwrap();
+    assert_eq!(cell.payload, CellPayload::Text { text: "12".into() });
+    let p =
+        f.sm.edit_preview(
+            f.id,
+            set_cell("qty", CellInput::Loaded { token: cell.token }),
+        )
+        .await
+        .unwrap();
+    assert!(
+        p.statements[0].contains("SET `qty` = 12"),
+        "{:?}",
+        p.statements
+    );
+    let e =
+        f.sm.cell_load(f.id, object(), "qty".into(), vec![0xff, 0xfe])
+            .await
+            .unwrap_err();
+    assert_eq!(field(&e), "path", "{e:?}");
+    // The saved value of a token, for "Save to file".
+    assert_eq!(f.sm.loaded_bytes(cell.token).unwrap(), b"12");
+    assert!(f.sm.loaded_bytes(Uuid::new_v4()).is_err());
+}
+/// Files are read and written only where the user picked them in the backend's dialog,
+/// each for its own use.
+#[tokio::test]
+async fn cell_files_only_through_the_dialog() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState::open(
+        AppPaths::in_dir(dir.path().join("data")),
+        Arc::new(MemorySecretStore::default()),
+    )
+    .unwrap();
+    let file = dir.path().join("x.bin");
+    let path = file.to_string_lossy().into_owned();
+    let e = data_cell_save_file_impl(&state, Uuid::new_v4(), path.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "path", "{e:?}");
+    let e = data_cell_load_file_impl(&state, Uuid::new_v4(), object(), "qty".into(), path.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "path", "{e:?}");
+    // Admitted for writing: still not for reading.
+    state
+        .file_picks
+        .admit(FileAccess::CellValueWrite, file.clone())
+        .unwrap();
+    let e = data_cell_load_file_impl(&state, Uuid::new_v4(), object(), "qty".into(), path.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "path", "{e:?}");
+    // The path passes; the token is unknown, and nothing is written.
+    let e = data_cell_save_file_impl(&state, Uuid::new_v4(), path)
+        .await
+        .unwrap_err();
+    assert_eq!(field(&e), "token", "{e:?}");
+    assert!(!file.exists());
 }

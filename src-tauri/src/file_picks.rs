@@ -7,7 +7,8 @@
 //!
 //! Each path is admitted for one [`FileAccess`]: a `.sql` file picked to open may also
 //! be saved (Ctrl+S writes back to it), a connections file picked to import is only
-//! read, one picked to export is only written. Admissions last for the app session
+//! read, one picked to export is only written; a cell value file picked to load is only
+//! read, one picked to save is only written. Admissions last for the app session
 //! (the `.sql` file of an open tab is saved again much later); the oldest are dropped
 //! past [`MAX_ADMITTED`] per access.
 
@@ -28,6 +29,8 @@ pub enum FileKind {
     Sql,
     /// A connections file: `.dntconn` / Navicat `.ncx` to import, `.dntconn` to export.
     Connections,
+    /// Any file holding one cell's value (the value editor's Load / Save).
+    CellValue,
 }
 
 /// What an admitted path may be used for.
@@ -39,6 +42,10 @@ pub enum FileAccess {
     ConnectionsImport,
     /// `export_connections`.
     ConnectionsExport,
+    /// `data_cell_load_file`.
+    CellValueRead,
+    /// `data_cell_save_file`.
+    CellValueWrite,
 }
 
 impl FileAccess {
@@ -48,6 +55,8 @@ impl FileAccess {
             (FileKind::Sql, _) => FileAccess::Sql,
             (FileKind::Connections, false) => FileAccess::ConnectionsImport,
             (FileKind::Connections, true) => FileAccess::ConnectionsExport,
+            (FileKind::CellValue, false) => FileAccess::CellValueRead,
+            (FileKind::CellValue, true) => FileAccess::CellValueWrite,
         }
     }
 }
@@ -166,6 +175,14 @@ mod tests {
         assert_eq!(
             FileAccess::of(FileKind::Connections, true),
             FileAccess::ConnectionsExport
+        );
+        assert_eq!(
+            FileAccess::of(FileKind::CellValue, false),
+            FileAccess::CellValueRead
+        );
+        assert_eq!(
+            FileAccess::of(FileKind::CellValue, true),
+            FileAccess::CellValueWrite
         );
     }
 }

@@ -614,6 +614,30 @@ pub fn exists_sql(
     Ok(format!("SELECT 1 FROM {relation} WHERE {cond}"))
 }
 
+/// `SELECT <cols> FROM <relation> WHERE <key>`: columns of the one row a key names (a
+/// cell's complete value, `data_cell_fetch`).
+pub fn select_by_key_sql(
+    t: &TableRef,
+    cols: &[ColumnTarget],
+    key: &RowKey,
+    d: Dialect,
+) -> Result<String, BuildError> {
+    let relation = relation_for(t, d)?;
+    if cols.is_empty() {
+        return Err(BuildError::Invalid {
+            column: String::new(),
+            reason: "a SELECT needs at least one column".into(),
+        });
+    }
+    let kind = kind_of(d);
+    let names: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+    let cond = row_condition(key, &RowGuard::KeyOnly, d)?;
+    Ok(format!(
+        "SELECT {} FROM {relation} WHERE {cond}",
+        names.join(", ")
+    ))
+}
+
 /// `<key col> = <lit> AND …` then the guard's comparisons, all joined with `AND`.
 fn row_condition(key: &RowKey, guard: &RowGuard, d: Dialect) -> Result<String, BuildError> {
     key.check()?;
@@ -890,6 +914,22 @@ mod dml_tests {
             update_sql(&pg_table(), &k, &[], &RowGuard::KeyOnly, Dialect::Postgres),
             Err(BuildError::Invalid { .. })
         ));
+        // One row's columns by its key (a cell's complete value).
+        let age = ColumnTarget {
+            name: "age".into(),
+            db_type: "int".into(),
+            logical: LogicalType::Integer,
+            collation: None,
+        };
+        assert_eq!(
+            select_by_key_sql(&pg_table(), &[age], &k, Dialect::Postgres).unwrap(),
+            "SELECT \"age\" FROM \"public\".\"users\" WHERE \"id\" = 5 AND \"name\" = 'a'"
+        );
+        assert!(matches!(
+            select_by_key_sql(&pg_table(), &[], &k, Dialect::Postgres),
+            Err(BuildError::Invalid { .. })
+        ));
+        assert!(select_by_key_sql(&pg_table(), &[], &k, Dialect::MYSQL).is_err());
     }
 
     #[test]

@@ -14,15 +14,20 @@ use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
 use dnt_driver_pg::PgDriver;
-use dnt_query::edit::{Atomicity, CellInput, EditSet, RowEdit, RowRef};
+use dnt_query::edit::{base64_decode, Atomicity, CellInput, EditSet, Protection, RowEdit, RowRef};
 use dnt_testkit::{require_db, Target, FIXTURE_DB, TEST_PASSWORD};
+use dnt_tunnel::KnownHosts;
 use dntdatabase::commands::connections::{
     create_connection_impl, open_connection_impl, SecretsInput,
 };
 use dntdatabase::commands::data::{
-    data_apply_impl, data_editable_impl, data_preview_impl, table_data_impl, ApplyOutcome,
-    ApplyReport, TableDataPage,
+    data_apply_impl, data_cell_fetch_impl, data_cell_load_file_impl, data_cell_save_file_impl,
+    data_editable_impl, data_preview_impl, table_data_impl, ApplyOutcome, ApplyReport, CellPayload,
+    LoadedCell, TableDataPage,
 };
+use dntdatabase::file_picks::FileAccess;
+use dntdatabase::session_manager::SessionManager;
+use dntdatabase::state::default_drivers;
 use dntdatabase::state::{AppPaths, AppState};
 use serde_json::json;
 use std::sync::Arc;
@@ -186,6 +191,7 @@ fn row_ref(p: &TableDataPage, i: usize, key: &[&str]) -> RowRef {
         key,
         original: cells,
         xmin: p.row_versions.as_ref().map(|v| v[i].clone()),
+        loaded: vec![],
     }
 }
 
@@ -878,6 +884,357 @@ async fn inserted_row_is_read_back() {
         assert_eq!(r.outcome, ApplyOutcome::Committed, "{t:?}: {r:?}");
         assert_eq!(int(&r.inserted[0][0]), 10, "{t:?}");
         assert_eq!(txt(&r.inserted[0][1]), "typed", "{t:?}");
+        drop_table(t, &name).await;
+    }
+}
+
+// ---- complete cell values (`data_cell_fetch`, load / save file) ------------------------
+
+const MIB: usize = 1024 * 1024;
+
+/// 1 MiB of the bytes 0..=255, repeated.
+fn mib() -> Vec<u8> {
+    (0..MIB).map(|i| (i % 256) as u8).collect()
+}
+
+/// `blobs`: `id INT PK, data` (binary) `, note` (long text) `, qty INT`; row 1 holds
+/// [`mib`] and 100 000 `n`s, row 2 NULL and `short`.
+async fn blobs(t: Target, tag: &str) -> String {
+    let name = create(
+        t,
+        tag,
+        "id INT NOT NULL PRIMARY KEY, data LONGBLOB NULL, note LONGTEXT NULL, qty INT NULL",
+        "id INT NOT NULL PRIMARY KEY, data BYTEA, note TEXT, qty INT",
+        "",
+    )
+    .await;
+    let hex: String = (0..=255u8).map(|b| format!("{b:02x}")).collect();
+    let blob = match t.kind() {
+        DbKind::MySql => format!("UNHEX(REPEAT('{hex}', 4096))"),
+        DbKind::Postgres => format!("decode(repeat('{hex}', 4096), 'hex')"),
+    };
+    admin(
+        t,
+        &format!(
+            "INSERT INTO {} VALUES (1, {blob}, REPEAT('n', 100000), 1), (2, NULL, 'short', 2)",
+            scratch(t, &name)
+        ),
+    )
+    .await;
+    name
+}
+
+fn bytes_of(cell: &LoadedCell) -> Vec<u8> {
+    match &cell.payload {
+        CellPayload::Base64 { data, len } => {
+            let b = base64_decode(data).expect("valid base64");
+            assert_eq!(*len, b.len() as f64);
+            b
+        }
+        other => panic!("not binary: {other:?}"),
+    }
+}
+
+fn config_field(e: &DbError) -> String {
+    match e {
+        DbError::Config { field, .. } => field.clone().unwrap_or_default(),
+        other => panic!("not a config error: {other:?}"),
+    }
+}
+
+async fn fetch(state: &AppState, id: Uuid, o: &ObjectRef, row: &RowRef, col: &str) -> LoadedCell {
+    data_cell_fetch_impl(state, id, o.clone(), row.key.clone(), col.into())
+        .await
+        .unwrap_or_else(|e| panic!("fetch {col}: {e:?}"))
+}
+
+#[tokio::test]
+async fn fetch_full_blob_by_key() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = blobs(t, "fetch").await;
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        let r = row_ref(&p, 0, &["id"]);
+        // The page has a preview and cut text only.
+        assert!(!r.original[1].1.is_complete(), "{t:?}");
+        let cell = fetch(&state, id, &o, &r, "data").await;
+        assert!(bytes_of(&cell) == mib(), "{t:?}");
+        let cell = fetch(&state, id, &o, &r, "note").await;
+        assert_eq!(
+            cell.payload,
+            CellPayload::Text {
+                text: "n".repeat(100_000)
+            },
+            "{t:?}"
+        );
+        let cell = fetch(&state, id, &o, &row_ref(&p, 1, &["id"]), "data").await;
+        assert_eq!(cell.payload, CellPayload::Null, "{t:?}");
+        drop_table(t, &name).await;
+    }
+}
+
+#[tokio::test]
+async fn fetch_over_limit_fails() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = app_state(dir.path());
+        state.sessions = SessionManager::new(
+            Arc::clone(&state.repo),
+            Arc::clone(&state.secrets),
+            KnownHosts::new(state.paths.known_hosts.clone()),
+            default_drivers(),
+        )
+        .with_cell_fetch_limit(MIB - 1);
+        let id = open(&state, t).await;
+        let name = blobs(t, "limit").await;
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        let r = row_ref(&p, 0, &["id"]);
+        let e = data_cell_fetch_impl(&state, id, o.clone(), r.key.clone(), "data".into())
+            .await
+            .unwrap_err();
+        assert_eq!(config_field(&e), "column:data", "{t:?}: {e:?}");
+        // Below the limit: read whole.
+        let cell = fetch(&state, id, &o, &r, "note").await;
+        assert!(matches!(cell.payload, CellPayload::Text { .. }), "{t:?}");
+        drop_table(t, &name).await;
+    }
+}
+
+#[tokio::test]
+async fn loaded_value_used_in_update() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = blobs(t, "upd").await;
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        let cell = fetch(&state, id, &o, &row_ref(&p, 0, &["id"]), "data").await;
+        let r = apply(
+            &state,
+            id,
+            set(
+                o.clone(),
+                vec![RowEdit::Update {
+                    row: row_ref(&p, 1, &["id"]),
+                    set: cells(&[("data", CellInput::Loaded { token: cell.token })]),
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.outcome, ApplyOutcome::Committed, "{t:?}: {r:?}");
+        let p = page(&state, id, o.clone()).await;
+        let copy = fetch(&state, id, &o, &row_ref(&p, 1, &["id"]), "data").await;
+        assert!(bytes_of(&copy) == mib(), "{t:?}");
+        drop_table(t, &name).await;
+    }
+}
+
+#[tokio::test]
+async fn token_for_other_column_rejected() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = blobs(t, "other").await;
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        let cell = fetch(&state, id, &o, &row_ref(&p, 0, &["id"]), "note").await;
+        let e = data_preview_impl(
+            &state,
+            id,
+            set(
+                o.clone(),
+                vec![RowEdit::Update {
+                    row: row_ref(&p, 1, &["id"]),
+                    set: cells(&[("data", CellInput::Loaded { token: cell.token })]),
+                }],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(config_field(&e), "column:data", "{t:?}: {e:?}");
+        // Another table of the same connection.
+        let other = blobs(t, "other2").await;
+        let o2 = obj(t, &other);
+        let p2 = page(&state, id, o2.clone()).await;
+        let e = data_preview_impl(
+            &state,
+            id,
+            set(
+                o2,
+                vec![RowEdit::Update {
+                    row: row_ref(&p2, 1, &["id"]),
+                    set: cells(&[("note", CellInput::Loaded { token: cell.token })]),
+                }],
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(config_field(&e), "column:note", "{t:?}: {e:?}");
+        drop_table(t, &name).await;
+        drop_table(t, &other).await;
+    }
+}
+
+/// MySQL compares a snapshot of the row: cut cells fetched in full join it, so a
+/// change to them is a conflict like any other.
+#[tokio::test]
+async fn original_snapshot_uses_loaded_full_value() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::mysql_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = blobs(t, "snapfull").await;
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        let mut r = row_ref(&p, 0, &["id"]);
+        for col in ["data", "note"] {
+            let cell = fetch(&state, id, &o, &r, col).await;
+            r.loaded.push((col.into(), cell.token));
+        }
+        let edit = |r: RowRef, qty: &str| {
+            set(
+                o.clone(),
+                vec![RowEdit::Update {
+                    row: r,
+                    set: cells(&[("qty", text(qty))]),
+                }],
+            )
+        };
+        let preview = data_preview_impl(&state, id, edit(r.clone(), "5"))
+            .await
+            .unwrap();
+        assert_eq!(
+            preview.protections[0],
+            Protection::Columns { unchecked: vec![] },
+            "{t:?}"
+        );
+        let applied = data_apply_impl(&state, preview.plan_id, false)
+            .await
+            .unwrap();
+        assert_eq!(
+            applied.outcome,
+            ApplyOutcome::Committed,
+            "{t:?}: {applied:?}"
+        );
+        // The cut text changes after it was fetched: a conflict, nothing applied.
+        admin(
+            t,
+            &format!(
+                "UPDATE {} SET note = CONCAT(note, 'x') WHERE id = 1",
+                scratch(t, &name)
+            ),
+        )
+        .await;
+        r.original[3].1 = Value::Int(5);
+        let res = apply(&state, id, edit(r, "6")).await.unwrap();
+        assert_eq!(res.outcome, ApplyOutcome::RolledBack, "{t:?}: {res:?}");
+        assert!(res.statements[0].conflict, "{t:?}");
+        let qty = admin(
+            t,
+            &format!("SELECT qty FROM {} WHERE id = 1", scratch(t, &name)),
+        )
+        .await;
+        assert_eq!(int(&qty[0][0]), 5, "{t:?}");
+        drop_table(t, &name).await;
+    }
+}
+
+/// Load a value from a file picked in the backend's dialog, write it with its token,
+/// and save a loaded value to a file; other paths are refused.
+#[tokio::test]
+async fn cell_file_round_trip() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = blobs(t, "file").await;
+        let o = obj(t, &name);
+        let input = dir.path().join("in.bin");
+        let bytes: Vec<u8> = mib().into_iter().rev().collect();
+        std::fs::write(&input, &bytes).unwrap();
+        let in_path = input.to_string_lossy().into_owned();
+        // Not picked in the dialog yet.
+        let e = data_cell_load_file_impl(&state, id, o.clone(), "data".into(), in_path.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(config_field(&e), "path", "{t:?}");
+        state
+            .file_picks
+            .admit(FileAccess::CellValueRead, input.clone())
+            .unwrap();
+        let cell = data_cell_load_file_impl(&state, id, o.clone(), "data".into(), in_path)
+            .await
+            .unwrap();
+        assert!(bytes_of(&cell) == bytes, "{t:?}");
+        let p = page(&state, id, o.clone()).await;
+        let r = apply(
+            &state,
+            id,
+            set(
+                o.clone(),
+                vec![RowEdit::Update {
+                    row: row_ref(&p, 1, &["id"]),
+                    set: cells(&[("data", CellInput::Loaded { token: cell.token })]),
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.outcome, ApplyOutcome::Committed, "{t:?}: {r:?}");
+
+        // Save the fetched value of row 1 to a file.
+        let out = dir.path().join("out.bin");
+        let out_path = out.to_string_lossy().into_owned();
+        let fetched = fetch(&state, id, &o, &row_ref(&p, 0, &["id"]), "data").await;
+        let e = data_cell_save_file_impl(&state, fetched.token, out_path.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(config_field(&e), "path", "{t:?}");
+        // A path admitted for reading is not one to write.
+        let e =
+            data_cell_save_file_impl(&state, fetched.token, input.to_string_lossy().into_owned())
+                .await
+                .unwrap_err();
+        assert_eq!(config_field(&e), "path", "{t:?}");
+        state
+            .file_picks
+            .admit(FileAccess::CellValueWrite, out.clone())
+            .unwrap();
+        data_cell_save_file_impl(&state, fetched.token, out_path)
+            .await
+            .unwrap();
+        assert!(std::fs::read(&out).unwrap() == mib(), "{t:?}");
+        let written = admin(
+            t,
+            &format!("SELECT data FROM {} WHERE id = 2", scratch(t, &name)),
+        )
+        .await;
+        match &written[0][0] {
+            Value::Bytes { len, preview } => {
+                assert_eq!(*len, MIB as u64, "{t:?}");
+                assert_eq!(preview[..4], bytes[..4], "{t:?}");
+            }
+            other => panic!("{t:?}: {other:?}"),
+        }
         drop_table(t, &name).await;
     }
 }

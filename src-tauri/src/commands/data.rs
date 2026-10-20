@@ -33,9 +33,15 @@
 //! ([`TableDataPage::hidden_key`]).
 
 use super::browse::table_detail_impl;
-use super::guard;
+use super::transfer::path_error;
+use super::workspace::write_atomic;
+use super::{blocking, guard};
 use crate::data_sessions::{BoundedPage, DataRequest, RawRead};
-pub use crate::edit_plans::{ApplyOutcome, ApplyReport, EditPreview, StmtApply};
+use crate::edit_plans::size_text;
+pub use crate::edit_plans::{
+    ApplyOutcome, ApplyReport, CellPayload, EditPreview, LoadedCell, StmtApply,
+};
+use crate::file_picks::FileAccess;
 use crate::session_manager::config_error;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -55,6 +61,8 @@ use dnt_query::edit::{atomicity, editable, NotEditable};
 pub use dnt_query::edit::{Atomicity, ProtectionKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::io::Read;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::State;
@@ -715,6 +723,112 @@ pub async fn data_apply_impl(
     confirmed: bool,
 ) -> Result<ApplyReport, DbError> {
     state.sessions.edit_apply(plan_id, confirmed).await
+}
+
+pub async fn data_cell_fetch_impl(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+    key: Vec<(String, Value)>,
+    column: String,
+) -> Result<LoadedCell, DbError> {
+    state.sessions.cell_fetch(id, obj, key, column).await
+}
+
+/// `path` must have been picked in the backend's dialog for `access` (see
+/// [`crate::file_picks`]).
+fn admitted(state: &AppState, access: FileAccess, path: &str) -> Result<(), DbError> {
+    if path.trim().is_empty() {
+        return Err(config_error("path", "No file was chosen."));
+    }
+    state.file_picks.check(access, path)
+}
+
+/// The bytes of `path`, at most `cap` (`config`, field `path`, beyond).
+fn read_capped(path: &str, cap: usize) -> Result<Vec<u8>, DbError> {
+    let file = std::fs::File::open(Path::new(path)).map_err(|e| path_error("read", path, &e))?;
+    let mut bytes = Vec::new();
+    // One byte past the limit tells "too large" apart from "exactly at the limit".
+    file.take(cap as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| path_error("read", path, &e))?;
+    if bytes.len() > cap {
+        return Err(config_error(
+            "path",
+            &format!("The file is larger than {}.", size_text(cap)),
+        ));
+    }
+    Ok(bytes)
+}
+
+pub async fn data_cell_load_file_impl(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+    column: String,
+    path: String,
+) -> Result<LoadedCell, DbError> {
+    admitted(state, FileAccess::CellValueRead, &path)?;
+    let cap = state.sessions.cell_fetch_cap;
+    let bytes = blocking(move || read_capped(&path, cap)).await?;
+    state.sessions.cell_load(id, obj, column, bytes).await
+}
+
+pub async fn data_cell_save_file_impl(
+    state: &AppState,
+    token: Uuid,
+    path: String,
+) -> Result<(), DbError> {
+    admitted(state, FileAccess::CellValueWrite, &path)?;
+    let bytes = state.sessions.loaded_bytes(token)?;
+    blocking(move || {
+        write_atomic(Path::new(&path), &bytes).map_err(|e| path_error("write", &path, &e))
+    })
+    .await
+}
+
+/// The complete value of one cell (`column` of the row of `obj` whose key is `key`, as
+/// `data_editable` reports the key), at most 64 MB, and a token that stands for it in
+/// `data_preview` (as a `loaded` cell input, or in `RowRef.loaded` for the conflict
+/// check) for as long as a plan lives. `config` errors: field `column:<name>` (bad
+/// column or key, or a value over the limit), `row` (the row is gone), `edit`.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_cell_fetch(
+    state: State<'_, AppState>,
+    id: Uuid,
+    obj: ObjectRef,
+    key: Vec<(String, Value)>,
+    column: String,
+) -> Result<LoadedCell, AppError> {
+    guard(data_cell_fetch_impl(&state, id, obj, key, column)).await
+}
+
+/// A value for `column` of `obj` read from `path` (picked through `file_pick_open` with
+/// kind `cell_value`; `config` error, field `path`, else), with its token.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_cell_load_file(
+    state: State<'_, AppState>,
+    id: Uuid,
+    obj: ObjectRef,
+    column: String,
+    path: String,
+) -> Result<LoadedCell, AppError> {
+    guard(data_cell_load_file_impl(&state, id, obj, column, path)).await
+}
+
+/// Writes loaded value `token` to `path` (picked through `file_pick_save` with kind
+/// `cell_value`; `config` error, field `path`, else): binary data as is, other values
+/// as UTF-8 text.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_cell_save_file(
+    state: State<'_, AppState>,
+    token: Uuid,
+    path: String,
+) -> Result<(), AppError> {
+    guard(data_cell_save_file_impl(&state, token, path)).await
 }
 
 /// Builds and stores the plan of the staged changes `set` (see the `edit_plans`

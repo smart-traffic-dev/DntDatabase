@@ -8,8 +8,8 @@ use dnt_core::config::EnvTag;
 use dnt_core::meta::{ColumnDetail, IndexDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
 use dnt_core::sql::build::{
-    delete_sql, exists_sql, insert_sql, literal, update_sql, BuildError, ColumnTarget, RowGuard,
-    RowKey, TableRef,
+    delete_sql, exists_sql, insert_sql, literal, select_by_key_sql, update_sql, BuildError,
+    ColumnTarget, RowGuard, RowKey, TableRef,
 };
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::{Dialect, StatementKind};
@@ -53,7 +53,17 @@ pub struct RowRef {
     pub key: Vec<(String, Value)>,
     pub original: Vec<(String, Value)>,
     pub xmin: Option<String>,
+    /// Cells of `original` the page may have cut that were fetched in full
+    /// (`data_cell_fetch`): column → token. Such a cell joins the row guard's snapshot
+    /// with its complete value; a cut cell without one stays unchecked.
+    #[serde(default)]
+    pub loaded: Vec<(String, Uuid)>,
 }
+
+/// Looks up a loaded value by token for a column of the table being planned: the
+/// complete value, or why it cannot be used (expired, another connection, table or
+/// column), as UI copy.
+pub type LoadedLookup<'a> = dyn Fn(Uuid, &str) -> Result<FullValue, String> + 'a;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -418,7 +428,7 @@ pub fn build_edit_plan(
     metas: &[ColumnMeta],
     dialect: Dialect,
     ctx: GuardCtx,
-    loaded: &dyn Fn(Uuid) -> Option<FullValue>,
+    loaded: &LoadedLookup<'_>,
 ) -> Result<EditPlan, EditError> {
     let kind = match dialect {
         Dialect::MySql(_) => DbKind::MySql,
@@ -512,7 +522,7 @@ struct Builder<'a> {
     dialect: Dialect,
     key: &'a [String],
     overwrite: bool,
-    loaded: &'a dyn Fn(Uuid) -> Option<FullValue>,
+    loaded: &'a LoadedLookup<'a>,
     table: TableRef,
 }
 
@@ -710,9 +720,7 @@ impl Builder<'_> {
                 }
             }
             CellInput::Loaded { token } => {
-                let v = (self.loaded)(*token).ok_or_else(|| {
-                    bad("the loaded value is no longer available; load it again".into())
-                })?;
+                let v = (self.loaded)(*token, &t.name).map_err(bad)?;
                 normalise(v, t, self.dialect).map_err(bad)?
             }
         };
@@ -766,7 +774,7 @@ impl Builder<'_> {
             if self.key.contains(&cd.name) {
                 continue;
             }
-            match self.snapshot_value(cd, row) {
+            match self.snapshot_value(cd, row)? {
                 Some(entry) => snapshot.push(entry),
                 None => unchecked.push(cd.name.clone()),
             }
@@ -782,9 +790,19 @@ impl Builder<'_> {
     }
 
     /// The column's loaded value when it can be compared exactly: not a float, MySQL
-    /// JSON, PostgreSQL `json`, array or unsupported type, and complete.
-    fn snapshot_value(&self, cd: &ColumnDetail, row: &RowRef) -> Option<(ColumnTarget, FullValue)> {
-        let meta = self.meta(&cd.name)?;
+    /// JSON, PostgreSQL `json`, array or unsupported type, and complete. A value the
+    /// page may have cut is compared with its complete value when the row carries a
+    /// token for it ([`RowRef::loaded`]); a token the store refuses, or a complete value
+    /// that does not continue what the page showed (the row changed in between), is an
+    /// error.
+    fn snapshot_value(
+        &self,
+        cd: &ColumnDetail,
+        row: &RowRef,
+    ) -> Result<Option<(ColumnTarget, FullValue)>, EditError> {
+        let Some(meta) = self.meta(&cd.name) else {
+            return Ok(None);
+        };
         let comparable = match meta.logical {
             LogicalType::Float | LogicalType::Array | LogicalType::Other => false,
             LogicalType::Json => {
@@ -793,20 +811,93 @@ impl Builder<'_> {
             _ => true,
         };
         if !comparable {
-            return None;
+            return Ok(None);
         }
-        let v = row.original.iter().find(|(n, _)| n == &cd.name)?.1.clone();
-        if v.may_be_page_truncated()
-            || !v.is_complete()
-            || matches!(v, Value::Float(_) | Value::Array(_) | Value::Other { .. })
-        {
-            return None;
+        let Some((_, v)) = row.original.iter().find(|(n, _)| n == &cd.name) else {
+            return Ok(None);
+        };
+        if matches!(v, Value::Float(_) | Value::Array(_) | Value::Other { .. }) {
+            return Ok(None);
         }
         let t = column_target(cd, meta.logical);
-        let fv = FullValue::try_from_value(v).ok()?;
-        let fv = normalise(fv, &t, self.dialect).ok()?;
-        Some((t, fv))
+        let fv = if v.may_be_page_truncated() || !v.is_complete() {
+            let Some((_, token)) = row.loaded.iter().find(|(n, _)| n == &cd.name) else {
+                return Ok(None);
+            };
+            let full = (self.loaded)(*token, &cd.name).map_err(|r| invalid(&cd.name, &r))?;
+            if !continues(v, &full) {
+                return Err(invalid(
+                    &cd.name,
+                    "the value changed since the row was loaded; reload the row",
+                ));
+            }
+            full
+        } else {
+            match FullValue::try_from_value(v.clone()) {
+                Ok(fv) => fv,
+                Err(_) => return Ok(None),
+            }
+        };
+        Ok(normalise(fv, &t, self.dialect).ok().map(|fv| (t, fv)))
     }
+}
+
+/// Whether `full` is the complete value of the cut page value `page`: binary data of
+/// the length the page reported starting with its preview, or text starting with the
+/// page's text.
+fn continues(page: &Value, full: &FullValue) -> bool {
+    match (page, full.as_bytes(), full.as_value()) {
+        (Value::Bytes { len, preview }, Some(b), _) => {
+            b.len() as u64 == *len && b.starts_with(preview)
+        }
+        (Value::Text(s) | Value::Json(s), _, Some(Value::Text(f) | Value::Json(f))) => {
+            f.starts_with(s.as_str())
+        }
+        _ => false,
+    }
+}
+
+/// `SELECT <column> FROM <table> WHERE <key>` (spec §5.3, `data_cell_fetch`): the read
+/// of one cell's complete value. The key is the table's row key (as
+/// [`editable`] finds it, whatever the connection's read-only flag: this is a read),
+/// with complete values; `column` must be a column of `detail`.
+pub fn cell_select(
+    detail: &TableDetail,
+    metas: &[ColumnMeta],
+    dialect: Dialect,
+    key: &[(String, Value)],
+    column: &str,
+) -> Result<String, EditError> {
+    let kind = match dialect {
+        Dialect::MySql(_) => DbKind::MySql,
+        Dialect::Postgres => DbKind::Postgres,
+    };
+    let ed = editable(detail, kind, false).map_err(EditError::NotEditable)?;
+    let refuse = |_: Uuid, _: &str| -> Result<FullValue, String> { Err(String::new()) };
+    let t = &detail.object;
+    let b = Builder {
+        detail,
+        metas,
+        dialect,
+        key: &ed.key,
+        overwrite: true,
+        loaded: &refuse,
+        table: TableRef {
+            kind,
+            database: t.database.clone(),
+            schema: t.schema.clone(),
+            name: t.name.clone(),
+        },
+    };
+    let target = b.loose_target(b.detail_column(column)?);
+    let row = RowRef {
+        key: key.to_vec(),
+        original: Vec::new(),
+        xmin: None,
+        loaded: Vec::new(),
+    };
+    let key = b.row_key(&row)?;
+    Ok(select_by_key_sql(&b.table, &[target], &key, dialect)?)
 }
 
 fn array_key(name: &str) -> EditError {
@@ -1072,8 +1163,27 @@ fn is_uuid(s: &str) -> bool {
             .all(|(g, n)| g.len() == n && g.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+/// Standard base64 (`+/`) with padding: binary data sent to the UI.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(char::from(ALPHABET[(n >> (18 - 6 * i) & 63) as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
 /// Standard base64 (`+/`), padding optional; anything else is `None`.
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
+pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
     let body = s.trim_end_matches('=');
     if s.len() - body.len() > 2 || body.len() % 4 == 1 {
         return None;
@@ -1246,8 +1356,8 @@ mod tests {
         }
     }
 
-    fn none(_: Uuid) -> Option<FullValue> {
-        None
+    fn none(_: Uuid, _: &str) -> Result<FullValue, String> {
+        Err("the loaded value is no longer available".into())
     }
 
     fn pairs<T: Clone>(items: &[(&str, T)]) -> Vec<(String, T)> {
@@ -1262,6 +1372,7 @@ mod tests {
             key: pairs(key),
             original: pairs(original),
             xmin: None,
+            loaded: vec![],
         }
     }
 
@@ -1590,6 +1701,7 @@ mod tests {
                 ("doc", Value::Json("{}".into())),
             ]),
             xmin: None,
+            loaded: vec![],
         };
         let p = plan_pg(&pg_set(vec![RowEdit::Delete { row: r }])).unwrap();
         assert_eq!(
@@ -1936,12 +2048,25 @@ mod tests {
         ));
     }
 
+    /// A token store holding `token` for `column` only.
+    fn store(
+        token: Uuid,
+        column: &'static str,
+        v: FullValue,
+    ) -> impl Fn(Uuid, &str) -> Result<FullValue, String> {
+        move |t: Uuid, c: &str| match (t == token, c == column) {
+            (true, true) => Ok(v.clone()),
+            (true, false) => Err("the loaded value belongs to another cell".into()),
+            (false, _) => Err("the loaded value is no longer available".into()),
+        }
+    }
+
     #[test]
     fn loaded_token_supplies_the_full_value() {
         let token = Uuid::from_u128(7);
         let big = "y".repeat(PAGE_CELL_CAP + 10);
         let full = FullValue::try_from_value(text(&big)).unwrap();
-        let loaded = move |t: Uuid| (t == token).then(|| full.clone());
+        let loaded = store(token, "payload", full);
         let (d, m) = my_items(INNODB);
         let s = set(vec![update(
             my_row(),
@@ -1962,6 +2087,189 @@ mod tests {
             build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &loaded),
             Err(EditError::Invalid { ref column, .. }) if column == "payload"
         ));
+        // The store's reason is passed on: a token for another column.
+        let s = set(vec![update(
+            my_row(),
+            &[("name", CellInput::Loaded { token })],
+        )]);
+        match build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &loaded) {
+            Err(EditError::Invalid { column, reason }) => {
+                assert_eq!(column, "name");
+                assert!(reason.contains("another cell"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn original_snapshot_uses_loaded_full_value() {
+        let token = Uuid::from_u128(9);
+        let full_text = format!("{}tail", "x".repeat(PAGE_CELL_CAP));
+        let cut = full_text[..PAGE_CELL_CAP].to_string();
+        let mut r = my_row();
+        r.original[4].1 = text(&cut);
+        r.loaded = vec![("payload".into(), token)];
+        let (d, m) = my_items(INNODB);
+        let s = set(vec![update(r.clone(), &[("qty", typed("4"))])]);
+        let full = FullValue::try_from_value(text(&full_text)).unwrap();
+        let loaded = store(token, "payload", full);
+        let p = build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &loaded).unwrap();
+        let st = &p.stmts[0];
+        // Compared with the whole value, not the page's cut one.
+        assert!(
+            st.sql
+                .contains(&format!("`payload` <=> _utf8mb4'{full_text}'")),
+            "{}",
+            &st.sql[st.sql.len().saturating_sub(200)..]
+        );
+        assert_eq!(
+            st.protection,
+            Protection::Columns {
+                unchecked: vec!["price".into()]
+            }
+        );
+        // Without a token the cut value stays unchecked (as before).
+        let mut plain = r.clone();
+        plain.loaded.clear();
+        let p = plan_my(
+            INNODB,
+            &set(vec![update(plain, &[("qty", typed("4"))])]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            p.stmts[0].protection,
+            Protection::Columns {
+                unchecked: vec!["price".into(), "payload".into()]
+            }
+        );
+        // A loaded value that does not continue what the page showed: the row changed
+        // between the page and the fetch.
+        let other = FullValue::try_from_value(text(&format!("z{full_text}"))).unwrap();
+        let changed = store(token, "payload", other);
+        assert!(matches!(
+            build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &changed),
+            Err(EditError::Invalid { ref column, .. }) if column == "payload"
+        ));
+        // A token the store refuses (expired, another cell) is an error, not unchecked.
+        assert!(matches!(
+            build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &none),
+            Err(EditError::Invalid { ref column, .. }) if column == "payload"
+        ));
+        // A complete page value ignores the token.
+        let mut whole = my_row();
+        whole.loaded = vec![("payload".into(), token)];
+        let p = plan_my(
+            INNODB,
+            &set(vec![update(whole, &[("qty", typed("4"))])]),
+            None,
+        )
+        .unwrap();
+        assert!(p.stmts[0].sql.contains("`payload` <=> _utf8mb4'{}'"));
+    }
+
+    #[test]
+    fn loaded_binary_snapshot_must_match_the_preview() {
+        let mut d = table(
+            None,
+            vec![
+                coldet("id", "int", false, None),
+                coldet("blob", "blob", true, None),
+            ],
+            Some(&["id"]),
+            INNODB,
+        );
+        d.object = object(ObjectKind::Table, None);
+        let m = vec![
+            meta("id", "int", LogicalType::Integer),
+            meta("blob", "blob", LogicalType::Binary),
+        ];
+        let bytes: Vec<u8> = (0..200u8).collect();
+        let token = Uuid::from_u128(3);
+        let r = RowRef {
+            key: pairs(&[("id", Value::Int(1))]),
+            original: pairs(&[("id", Value::Int(1)), ("blob", Value::bytes(&bytes))]),
+            xmin: None,
+            loaded: vec![("blob".into(), token)],
+        };
+        let s = set(vec![RowEdit::Delete { row: r }]);
+        let ok = store(token, "blob", FullValue::bytes(bytes.clone()));
+        let p = build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &ok).unwrap();
+        assert_eq!(
+            p.stmts[0].protection,
+            Protection::Columns { unchecked: vec![] }
+        );
+        assert!(
+            p.stmts[0].sql.contains("`blob` <=> X'000102"),
+            "{}",
+            p.stmts[0].sql
+        );
+        // Another length, or other leading bytes: not the value the page showed.
+        let mut longer = bytes.clone();
+        longer.push(1);
+        let mut other = bytes.clone();
+        other[0] = 9;
+        for v in [longer, other] {
+            let bad = store(token, "blob", FullValue::bytes(v));
+            assert!(matches!(
+                build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &bad),
+                Err(EditError::Invalid { ref column, .. }) if column == "blob"
+            ));
+        }
+    }
+
+    #[test]
+    fn cell_select_reads_one_cell_by_key() {
+        let (d, m) = my_items(INNODB);
+        let key = pairs(&[("id", Value::UInt(1))]);
+        assert_eq!(
+            cell_select(&d, &m, Dialect::MYSQL, &key, "payload").unwrap(),
+            "SELECT `payload` FROM `shop`.`items` WHERE `id` = 1"
+        );
+        // A read: allowed whatever the connection's read-only flag (it is not checked).
+        assert!(matches!(
+            cell_select(&d, &m, Dialect::MYSQL, &key, "nope"),
+            Err(EditError::Invalid { ref column, .. }) if column == "nope"
+        ));
+        assert!(matches!(
+            cell_select(&d, &m, Dialect::MYSQL, &[], "payload"),
+            Err(EditError::Invalid { ref column, .. }) if column == "id"
+        ));
+        let cut = pairs(&[("id", text(&"1".repeat(PAGE_CELL_CAP)))]);
+        assert!(matches!(
+            cell_select(&d, &m, Dialect::MYSQL, &cut, "payload"),
+            Err(EditError::KeyNotComplete { .. })
+        ));
+        let (pd, pm) = pg_items();
+        assert_eq!(
+            cell_select(
+                &pd,
+                &pm,
+                Dialect::Postgres,
+                &pairs(&[("id", Value::Int(4))]),
+                "doc"
+            )
+            .unwrap(),
+            "SELECT \"doc\" FROM \"public\".\"items\" WHERE \"id\" = 4"
+        );
+        // No key: nothing identifies the row.
+        let mut nokey = d.clone();
+        nokey.primary_key = None;
+        assert!(matches!(
+            cell_select(&nokey, &m, Dialect::MYSQL, &key, "payload"),
+            Err(EditError::NotEditable(NotEditable::NoKey))
+        ));
+    }
+
+    #[test]
+    fn base64_round_trip() {
+        for n in 0..10usize {
+            let bytes: Vec<u8> = (0..n as u8).map(|b| b.wrapping_mul(37)).collect();
+            assert_eq!(base64_decode(&base64_encode(&bytes)).unwrap(), bytes);
+        }
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        assert_eq!(base64_encode(b"M"), "TQ==");
     }
 
     #[test]

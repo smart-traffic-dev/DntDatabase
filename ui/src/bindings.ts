@@ -478,6 +478,46 @@ async dataApply(planId: string, confirmed: boolean) : Promise<Result<ApplyReport
 }
 },
 /**
+ * The complete value of one cell (`column` of the row of `obj` whose key is `key`, as
+ * `data_editable` reports the key), at most 64 MB, and a token that stands for it in
+ * `data_preview` (as a `loaded` cell input, or in `RowRef.loaded` for the conflict
+ * check) for as long as a plan lives. `config` errors: field `column:<name>` (bad
+ * column or key, or a value over the limit), `row` (the row is gone), `edit`.
+ */
+async dataCellFetch(id: string, obj: ObjectRef, key: ([string, Value])[], column: string) : Promise<Result<LoadedCell, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_cell_fetch", { id, obj, key, column }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A value for `column` of `obj` read from `path` (picked through `file_pick_open` with
+ * kind `cell_value`; `config` error, field `path`, else), with its token.
+ */
+async dataCellLoadFile(id: string, obj: ObjectRef, column: string, path: string) : Promise<Result<LoadedCell, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_cell_load_file", { id, obj, column, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Writes loaded value `token` to `path` (picked through `file_pick_save` with kind
+ * `cell_value`; `config` error, field `path`, else): binary data as is, other values
+ * as UTF-8 text.
+ */
+async dataCellSaveFile(token: string, path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_cell_save_file", { token, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Writes rows the UI holds (the loaded rows) to `path`. `kind`: the engine whose
  * quoting the SQL format uses.
  */
@@ -819,6 +859,19 @@ export type CellInput = { kind: "null" } |
  * A full value fetched earlier, by its token.
  */
 { kind: "loaded"; token: string }
+/**
+ * A complete cell value as the value editor gets it.
+ */
+export type CellPayload = { kind: "null" } | 
+/**
+ * Text, JSON, numbers, dates…: the value's text.
+ */
+{ kind: "text"; text: string } | 
+/**
+ * Binary data (standard base64, padded) of `len` bytes. Renamed explicitly, as
+ * `CellInput::Base64`.
+ */
+{ kind: "base64"; data: string; len: number }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -999,7 +1052,11 @@ export type FileKind =
 /**
  * A connections file: `.dntconn` / Navicat `.ncx` to import, `.dntconn` to export.
  */
-"connections"
+"connections" | 
+/**
+ * Any file holding one cell's value (the value editor's Load / Save).
+ */
+"cell_value"
 /**
  * One condition: `column op values`.
  */
@@ -1085,6 +1142,10 @@ definition: string | null }
  * `type JsInteger = number | string`), never constructed.
  */
 export type JsInteger = number | string
+/**
+ * A complete value and the token that stands for it in a later edit.
+ */
+export type LoadedCell = { token: string; payload: CellPayload }
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
 /**
@@ -1176,7 +1237,13 @@ export type RowEdit = { op: "update"; row: RowRef; set: ([string, CellInput])[] 
  * One loaded row: its key values, every loaded cell as it was, and (PostgreSQL) its
  * `xmin::text`.
  */
-export type RowRef = { key: ([string, Value])[]; original: ([string, Value])[]; xmin: string | null }
+export type RowRef = { key: ([string, Value])[]; original: ([string, Value])[]; xmin: string | null; 
+/**
+ * Cells of `original` the page may have cut that were fetched in full
+ * (`data_cell_fetch`): column → token. Such a cell joins the row guard's snapshot
+ * with its complete value; a cut cell without one stays unchecked.
+ */
+loaded?: ([string, string])[] }
 /**
  * One event of a run, in the order described in the module docs.
  */

@@ -12,7 +12,7 @@
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use crate::commands::browse::{folder_key, object_key};
 use crate::data_sessions::DataSessions;
-use crate::edit_plans::EditPlanStore;
+use crate::edit_plans::{EditPlanStore, LoadedStore, MAX_FETCH_BYTES};
 use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
@@ -322,6 +322,10 @@ pub struct SessionManager {
     pub(crate) plans: PlanStore,
     /// Edit plans of the data view (see `edit_plans`); they live for `plan_ttl` too.
     pub(crate) edit_plans: EditPlanStore,
+    /// Complete cell values by token (`data_cell_fetch`); they live for `plan_ttl` too.
+    pub(crate) loaded: LoadedStore,
+    /// Largest complete value a fetch or file load takes.
+    pub(crate) cell_fetch_cap: usize,
     pub(crate) plan_ttl: Duration,
     /// Runs in progress (see `query_sessions`).
     pub(crate) runs: Runs,
@@ -371,6 +375,8 @@ impl SessionManager {
             schema_error_ttl: SCHEMA_ERROR_TTL,
             plans: PlanStore::default(),
             edit_plans: EditPlanStore::default(),
+            loaded: LoadedStore::default(),
+            cell_fetch_cap: MAX_FETCH_BYTES,
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
             cancel_grace: DEFAULT_CANCEL_GRACE,
@@ -721,6 +727,7 @@ impl SessionManager {
         }
         self.plans.drop_conn(id);
         self.edit_plans.drop_conn(id);
+        self.loaded.drop_conn(id);
     }
 
     /// Every runtime, without holding the map's lock.
