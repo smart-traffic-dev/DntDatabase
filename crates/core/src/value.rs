@@ -3,6 +3,7 @@ use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specta::Type;
 use std::fmt;
+use std::sync::Arc;
 
 /// Largest integer magnitude a JS number represents exactly (2^53).
 const MAX_SAFE: u64 = 9_007_199_254_740_992;
@@ -67,6 +68,92 @@ impl Value {
             len: full.len() as u64,
             preview: full[..full.len().min(BYTES_PREVIEW_LEN)].to_vec(),
         }
+    }
+
+    /// False when the value lost data: a `Bytes` whose preview is shorter than its
+    /// length, also inside an `Array`.
+    pub fn is_complete(&self) -> bool {
+        match self {
+            Value::Bytes { len, preview } => preview.len() as u64 >= *len,
+            Value::Array(items) => items.iter().all(Value::is_complete),
+            _ => true,
+        }
+    }
+
+    /// True for a `Text` / `Json` long enough (at least `PAGE_CELL_CAP - 3` bytes) that
+    /// a data page may have cut it; such a value must not be written back or compared.
+    pub fn may_be_page_truncated(&self) -> bool {
+        match self {
+            Value::Text(s) | Value::Json(s) => s.len() >= PAGE_CELL_CAP - 3,
+            _ => false,
+        }
+    }
+}
+
+/// Largest cell a data page sends, in bytes; longer text is cut (spec §2 rule 8).
+pub const PAGE_CELL_CAP: usize = 64 * 1024;
+
+/// A cell value known to be complete: binary data with every byte, never a 64-byte
+/// preview. Built only from complete data (no `From<Value>`), so SQL built from it never
+/// carries a cut value. Not sent to the UI as is: see [`FullValue::to_display`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct FullValue(Repr);
+
+#[derive(Debug, Clone, PartialEq)]
+enum Repr {
+    /// Any value but `Bytes`, or an `Array` whose `Bytes` are all complete.
+    Plain(Value),
+    Bytes(Arc<[u8]>),
+}
+
+/// [`FullValue::try_from_value`] was given a value that lost data.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("value is not complete")]
+pub struct NotFull;
+
+impl FullValue {
+    pub fn bytes(b: impl Into<Arc<[u8]>>) -> FullValue {
+        FullValue(Repr::Bytes(b.into()))
+    }
+
+    /// Accepts a value only if [`Value::is_complete`]: a complete `Bytes` becomes the
+    /// bytes themselves, anything else is kept as is.
+    pub fn try_from_value(v: Value) -> Result<FullValue, NotFull> {
+        if !v.is_complete() {
+            return Err(NotFull);
+        }
+        Ok(match v {
+            Value::Bytes { preview, .. } => FullValue::bytes(preview),
+            v => FullValue(Repr::Plain(v)),
+        })
+    }
+
+    /// The value as the grid shows it: bytes become a `Value::Bytes` with a 64-byte
+    /// preview.
+    pub fn to_display(&self) -> Value {
+        match &self.0 {
+            Repr::Plain(v) => v.clone(),
+            Repr::Bytes(b) => Value::bytes(b),
+        }
+    }
+
+    /// The value, unless it is binary data (see [`FullValue::as_bytes`]).
+    pub fn as_value(&self) -> Option<&Value> {
+        match &self.0 {
+            Repr::Plain(v) => Some(v),
+            Repr::Bytes(_) => None,
+        }
+    }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match &self.0 {
+            Repr::Plain(_) => None,
+            Repr::Bytes(b) => Some(b),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self.0, Repr::Plain(Value::Null))
     }
 }
 
@@ -184,6 +271,62 @@ mod tests {
             serde_json::to_string(&Value::Decimal("12345678901234567890.123456".into())).unwrap(),
             r#"{"t":"Decimal","v":"12345678901234567890.123456"}"#
         );
+    }
+    #[test]
+    fn truncated_bytes_are_not_full() {
+        assert_eq!(
+            FullValue::try_from_value(Value::bytes(&[7; 100])),
+            Err(NotFull)
+        );
+        assert!(FullValue::try_from_value(Value::bytes(&[7; 64])).is_ok());
+        assert_eq!(
+            FullValue::try_from_value(Value::Array(vec![Value::bytes(&[1; 65])])),
+            Err(NotFull)
+        );
+    }
+    #[test]
+    fn full_bytes_display_as_preview() {
+        let f = FullValue::bytes(vec![9u8; 1000]);
+        assert_eq!(f.as_bytes().unwrap().len(), 1000);
+        assert_eq!(f.as_value(), None);
+        assert!(!f.is_null());
+        assert_eq!(f.to_display(), Value::bytes(&[9; 1000]));
+    }
+    /// Complete `Bytes` become the `Bytes` repr; other values stay plain.
+    #[test]
+    fn complete_values_convert() {
+        let b = FullValue::try_from_value(Value::bytes(&[3; 10])).unwrap();
+        assert_eq!(b.as_bytes(), Some(&[3u8; 10][..]));
+        assert_eq!(b, FullValue::bytes(vec![3u8; 10]));
+        let t = FullValue::try_from_value(Value::Text("x".into())).unwrap();
+        assert_eq!(t.as_value(), Some(&Value::Text("x".into())));
+        assert_eq!(t.as_bytes(), None);
+        assert_eq!(t.to_display(), Value::Text("x".into()));
+        assert!(FullValue::try_from_value(Value::Null).unwrap().is_null());
+        let arr = Value::Array(vec![Value::bytes(&[1; 64]), Value::Int(1)]);
+        assert_eq!(
+            FullValue::try_from_value(arr.clone()).unwrap().as_value(),
+            Some(&arr)
+        );
+    }
+    #[test]
+    fn is_complete_looks_into_arrays() {
+        assert!(Value::bytes(&[0; 64]).is_complete());
+        assert!(!Value::bytes(&[0; 65]).is_complete());
+        assert!(Value::Text("a".repeat(PAGE_CELL_CAP)).is_complete());
+        assert!(!Value::Array(vec![Value::Null, Value::bytes(&[0; 65])]).is_complete());
+        assert!(!Value::Array(vec![Value::Array(vec![Value::bytes(&[0; 65])])]).is_complete());
+    }
+    #[test]
+    fn long_text_may_be_page_truncated() {
+        assert_eq!(PAGE_CELL_CAP, 64 * 1024);
+        let at = PAGE_CELL_CAP - 3;
+        assert!(Value::Text("a".repeat(at)).may_be_page_truncated());
+        assert!(!Value::Text("a".repeat(at - 1)).may_be_page_truncated());
+        assert!(Value::Json("a".repeat(at)).may_be_page_truncated());
+        assert!(!Value::Json("a".repeat(at - 1)).may_be_page_truncated());
+        assert!(!Value::Decimal("1".repeat(at)).may_be_page_truncated());
+        assert!(!Value::bytes(&[0; 100]).may_be_page_truncated());
     }
     #[test]
     fn ints_deserialize_from_number_or_string() {

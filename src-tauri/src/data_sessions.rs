@@ -42,7 +42,7 @@ const DATA_CANCEL_GRACE: Duration = Duration::from_secs(5);
 const IDLE_PER_DATABASE: usize = 2;
 
 /// A text / JSON cell longer than this is cut (on a char boundary).
-pub const MAX_CELL_BYTES: usize = 64 * 1024;
+pub const MAX_CELL_BYTES: usize = dnt_core::value::PAGE_CELL_CAP;
 /// A page stops taking rows once its cells add up to this.
 pub const MAX_PAGE_BYTES: usize = 32 * 1024 * 1024;
 
