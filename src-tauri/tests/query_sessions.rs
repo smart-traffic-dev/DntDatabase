@@ -1782,6 +1782,7 @@ fn history(f: &Fixture, id: Uuid) -> Vec<dnt_store::history::HistoryEntry> {
         .history_list(&HistoryFilter {
             connection_id: Some(id),
             search: None,
+            origin: None,
             limit: 1000,
         })
         .unwrap();
@@ -2115,6 +2116,7 @@ async fn history_row_per_sent_statement() {
         .history_list(&HistoryFilter {
             connection_id: Some(id),
             search: None,
+            origin: None,
             limit: 100,
         })
         .unwrap();
@@ -2159,6 +2161,7 @@ async fn history_is_redacted_and_cancel_is_recorded() {
         .history_list(&HistoryFilter {
             connection_id: Some(id),
             search: None,
+            origin: None,
             limit: 100,
         })
         .unwrap();

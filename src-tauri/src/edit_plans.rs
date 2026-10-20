@@ -75,6 +75,7 @@
 use crate::commands::data::check_object;
 use crate::commands::settings::saved_confirm_unbounded;
 use crate::data_sessions::{BoundedPage, FirstCell, DATA_CANCEL_GRACE};
+use crate::run_events::utc_millis_now;
 use crate::session_manager::{config_error, is_lost, lock, ConnectionRuntime, SessionManager};
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::{CellMode, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
@@ -88,6 +89,7 @@ use dnt_query::edit::{
     EditError, EditPlan, EditSet, PlannedEdit, Protection,
 };
 use dnt_query::{redact, GuardCtx, Verdict};
+use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use futures_util::future::{select, Either};
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -897,6 +899,8 @@ impl SessionManager {
             self.return_data_session(&rt, taken, true);
             return Err(stale("the session's SQL mode changed"));
         }
+        let started_at = utc_millis_now();
+        let t0 = Instant::now();
         // Registered before anything is sent, so closing the connection finds it.
         let stop = StopSignal::new();
         let Some(running) = rt
@@ -939,9 +943,106 @@ impl SessionManager {
         }
         // The session is closed (or pooled) before closing is told the apply ended.
         self.return_data_session(&rt, taken, clean);
+        // Recorded before closing is told the apply ended.
+        if let Ok(report) = &result {
+            let entries = edit_history_entries(
+                stored.conn,
+                &stored.object.database,
+                plan,
+                report,
+                &started_at,
+                u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+            );
+            self.write_edit_history(entries).await;
+        }
         drop(running);
         result
     }
+
+    /// Records the statements an apply sent (a failed insert logs warn, never fails the
+    /// apply, which has already happened).
+    async fn write_edit_history(&self, entries: Vec<NewHistoryEntry>) {
+        if entries.is_empty() {
+            return;
+        }
+        let repo = Arc::clone(&self.repo);
+        let done = tokio::task::spawn_blocking(move || repo.history_insert_batch(&entries)).await;
+        match done {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "could not record the edit in the history"),
+            Err(e) => tracing::warn!(error = %e, "could not record the edit in the history"),
+        }
+    }
+}
+
+/// The history rows of an applied plan: one per statement that was sent (BEGIN,
+/// `COMMIT` and the rechecks are not statements of the plan; those never sent are not
+/// recorded), origin `data_edit`, the SQL redacted like a query run's. A statement of a
+/// rolled-back batch that ran fine is an `error` row `rolled_back` (it is not applied);
+/// a statement that matched no row is `conflict`. `outcome_unknown`: the statement
+/// without an answer, or every statement when the `COMMIT` has none. The statements of
+/// a plan are sent in a row, so every row has the apply's start and duration.
+/// Long literals are shortened as in the preview ([`display_sql`]).
+fn edit_history_entries(
+    conn: Uuid,
+    database: &str,
+    plan: &EditPlan,
+    report: &ApplyReport,
+    started_at: &str,
+    elapsed_ms: u64,
+) -> Vec<NewHistoryEntry> {
+    let unknown_at = match report.outcome {
+        ApplyOutcome::Unknown { at } => Some(at as usize),
+        _ => None,
+    };
+    let rolled_back = report.outcome == ApplyOutcome::RolledBack;
+    let commit_code = report
+        .error
+        .as_ref()
+        .and_then(|e| e.server_code.clone().or_else(|| e.sqlstate.clone()));
+    let mut out = Vec::with_capacity(report.statements.len());
+    for (pos, sent) in report.statements.iter().enumerate() {
+        let Some(st) = plan.stmts.get(pos) else {
+            break;
+        };
+        let sql = redact(&display_sql(&st.sql, plan.dialect), plan.dialect);
+        let (status, error_kind, error_code) = match &sent.error {
+            Some(e) => (
+                if e.kind == "cancelled" {
+                    HistoryStatus::Cancelled
+                } else {
+                    HistoryStatus::Error
+                },
+                Some(e.kind.clone()),
+                e.server_code.clone().or_else(|| e.sqlstate.clone()),
+            ),
+            None if sent.conflict => (HistoryStatus::Error, Some("conflict".into()), None),
+            None if rolled_back => (
+                HistoryStatus::Error,
+                Some("rolled_back".into()),
+                commit_code.clone(),
+            ),
+            None => (HistoryStatus::Ok, None, None),
+        };
+        let outcome_unknown = unknown_at.is_some_and(|at| at == pos || at >= plan.stmts.len());
+        out.push(NewHistoryEntry {
+            connection_id: conn,
+            database: Some(database.to_owned()),
+            sql_text: sql.text,
+            redacted: sql.changed,
+            kind: "write".into(),
+            started_at: started_at.to_owned(),
+            elapsed_ms: Some(elapsed_ms),
+            status,
+            row_count: None,
+            affected: sent.affected.map(|n| n as u64),
+            error_kind,
+            error_code,
+            origin: HistoryOrigin::DataEdit,
+            outcome_unknown,
+        });
+    }
+    out
 }
 
 /// What one statement of a plan did.

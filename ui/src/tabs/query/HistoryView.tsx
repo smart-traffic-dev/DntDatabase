@@ -16,19 +16,27 @@ const UNKNOWN_OUTCOME_KINDS = new Set(['timeout', 'connection_lost']);
 
 /**
  * The status cell of a row. A statement stopped by a timeout, a lost connection or a cancel may
- * have taken effect, so it never reads as a plain error ("not applied").
+ * have taken effect, so it never reads as a plain error ("not applied"). A row the backend marked
+ * outcome_unknown (any status: an unanswered COMMIT leaves ok statements unknown) reads the same.
  */
-export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'error_code'>): {
+export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'error_code' | 'outcome_unknown'>): {
   text: string;
   tone: HistoryStatus | 'unknown';
   hint: string | undefined;
 } {
   const code = row.error_code ? ` (${row.error_code})` : '';
-  if (row.status === 'ok') return { text: 'OK', tone: 'ok', hint: undefined };
-  if (row.error_kind !== null && UNKNOWN_OUTCOME_KINDS.has(row.error_kind)) {
-    const why = row.error_kind === 'timeout' ? 'timed out' : 'lost its connection';
+  if (row.outcome_unknown && row.status === 'ok') {
     return {
-      text: `Unknown outcome${code}`,
+      text: 'Outcome unknown',
+      tone: 'unknown',
+      hint: 'The server did not confirm the commit: this statement may or may not have been applied. Check the data before running it again.',
+    };
+  }
+  if (row.status === 'ok') return { text: 'OK', tone: 'ok', hint: undefined };
+  if (row.outcome_unknown || (row.error_kind !== null && UNKNOWN_OUTCOME_KINDS.has(row.error_kind))) {
+    const why = row.error_kind === 'timeout' ? 'timed out' : row.error_kind === 'cancelled' ? 'was cancelled' : 'lost its connection';
+    return {
+      text: `Outcome unknown${code}`,
       tone: 'unknown',
       hint: `The statement ${why} before the server confirmed it: it may have been applied. Check the data before running it again.`,
     };
@@ -100,6 +108,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
       const list = await api.historyList({
         connection_id: connectionId,
         search: search === '' ? null : search,
+        origin: null,
         limit: LIST_LIMIT,
       });
       if (mine !== seq.current) return;
@@ -291,6 +300,11 @@ export function HistoryView({ tabId }: { tabId: string }) {
                 <span className="hs-origin" data-testid="history-origin">
                   {summaries.get(row.connection_id)?.config.name ?? row.connection_id}
                   {row.database ? ` · ${row.database}` : ''}
+                </span>
+              )}
+              {row.origin === 'data_edit' && (
+                <span className="chip hs-data-edit" data-testid="history-data-edit">
+                  Data edit
                 </span>
               )}
               {explain && <span className="chip hs-explain" data-testid="history-explain">{explain.analyze ? 'Analyze' : 'Explain'}</span>}

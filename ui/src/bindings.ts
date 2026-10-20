@@ -1180,17 +1180,37 @@ export type Group = { id: string; parent_id: string | null; name: string;
  * Exported as a JS number (positions are small).
  */
 sort_order: number }
-export type HistoryEntry = { id: number; connection_id: string; database: string | null; sql_text: string; redacted: boolean; kind: string; started_at: string; elapsed_ms: number | null; status: HistoryStatus; row_count: number | null; affected: number | null; error_kind: string | null; error_code: string | null }
+export type HistoryEntry = { id: number; connection_id: string; database: string | null; sql_text: string; redacted: boolean; kind: string; started_at: string; elapsed_ms: number | null; status: HistoryStatus; row_count: number | null; affected: number | null; error_kind: string | null; error_code: string | null; origin: HistoryOrigin; 
+/**
+ * No answer came: the statement may or may not have been applied.
+ */
+outcome_unknown: boolean }
 export type HistoryFilter = { connection_id: string | null; 
 /**
  * Substring of the SQL text; `%`, `_` and `\` match literally.
  */
 search: string | null; 
 /**
+ * Only rows of this origin.
+ */
+origin: HistoryOrigin | null; 
+/**
  * At most [`HISTORY_LIST_MAX`]; larger values are clamped.
  */
 limit: number }
 export type HistoryIds = number[]
+/**
+ * What produced a history row.
+ */
+export type HistoryOrigin = 
+/**
+ * A statement the user ran from a query tab.
+ */
+"query" | 
+/**
+ * A statement the app built to apply edits of the data view.
+ */
+"data_edit"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it

@@ -4,7 +4,7 @@ use dnt_core::config::ConnectionConfig;
 use dnt_core::secret::MemorySecretStore;
 use dnt_core::test_util::sample_config;
 use dnt_store::db::{open, open_in_memory};
-use dnt_store::history::{HistoryFilter, HistoryStatus, NewHistoryEntry};
+use dnt_store::history::{HistoryFilter, HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_store::tabs::QueryTabRecord;
 use std::sync::Arc;
@@ -66,6 +66,8 @@ fn entry(connection_id: Uuid, sql: &str) -> NewHistoryEntry {
         affected: None,
         error_kind: None,
         error_code: None,
+        origin: HistoryOrigin::Query,
+        outcome_unknown: false,
     }
 }
 
@@ -73,6 +75,7 @@ fn all() -> HistoryFilter {
     HistoryFilter {
         connection_id: None,
         search: None,
+        origin: None,
         limit: 1000,
     }
 }
@@ -259,6 +262,7 @@ fn history_filter_by_connection_and_search() {
         .history_list(&HistoryFilter {
             connection_id: Some(a),
             search: None,
+            origin: None,
             limit: 1000,
         })
         .unwrap();
@@ -269,6 +273,7 @@ fn history_filter_by_connection_and_search() {
         .history_list(&HistoryFilter {
             connection_id: Some(a),
             search: Some("50%".into()),
+            origin: None,
             limit: 1000,
         })
         .unwrap();
@@ -280,6 +285,7 @@ fn history_filter_by_connection_and_search() {
         .history_list(&HistoryFilter {
             connection_id: None,
             search: Some("SELECT_".into()),
+            origin: None,
             limit: 1000,
         })
         .unwrap();
@@ -289,6 +295,7 @@ fn history_filter_by_connection_and_search() {
         .history_list(&HistoryFilter {
             connection_id: None,
             search: None,
+            origin: None,
             limit: 1,
         })
         .unwrap();
@@ -374,4 +381,35 @@ fn history_delete_and_clear() {
     assert_eq!(left[0].sql_text, "SELECT 3");
     repo.history_clear().unwrap();
     assert!(repo.history_list(&all()).unwrap().is_empty());
+}
+
+#[test]
+fn origin_and_unknown_outcome_round_trip_and_filter() {
+    let repo = repo();
+    let a = connection(&repo, "a");
+    repo.history_insert(&entry(a, "SELECT 1")).unwrap();
+    let mut edit = entry(a, "UPDATE t SET x = 1");
+    edit.origin = HistoryOrigin::DataEdit;
+    edit.outcome_unknown = true;
+    repo.history_insert(&edit).unwrap();
+
+    let listed = repo.history_list(&all()).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        (listed[0].origin, listed[0].outcome_unknown),
+        (HistoryOrigin::DataEdit, true)
+    );
+    assert_eq!(
+        (listed[1].origin, listed[1].outcome_unknown),
+        (HistoryOrigin::Query, false)
+    );
+
+    let only_edits = repo
+        .history_list(&HistoryFilter {
+            origin: Some(HistoryOrigin::DataEdit),
+            ..all()
+        })
+        .unwrap();
+    assert_eq!(only_edits.len(), 1);
+    assert_eq!(only_edits[0].sql_text, edit.sql_text);
 }
