@@ -23,14 +23,17 @@
 //! A request cancelled while its session is still opening is dropped before it starts
 //! (its fresh session, which ran nothing, does go to the pool).
 
-use crate::session_manager::{close_quietly, is_lost, lock, ConnectionRuntime, SessionManager};
+use crate::session_manager::{
+    close_quietly, config_error, is_lost, lock, ConnectionRuntime, SessionManager,
+};
 use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
 use dnt_core::error::DbError;
-use dnt_core::sql::StatementKind;
+use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, Value};
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -205,8 +208,10 @@ pub struct BoundedPage {
     pub columns: Vec<ColumnMeta>,
     pub rows: Vec<Vec<Value>>,
     pub bytes: usize,
-    /// Cells that were cut.
+    /// Cells of the kept rows that were cut.
     pub truncated_cells: u32,
+    /// Where those cells are: `(row, column)` indexes into `rows`.
+    pub truncated: Vec<(u32, u32)>,
     /// Rows were left out because the page reached `page_cap`.
     pub capped: bool,
     results: usize,
@@ -221,10 +226,16 @@ impl BoundedPage {
             rows: Vec::new(),
             bytes: 0,
             truncated_cells: 0,
+            truncated: Vec::new(),
             capped: false,
             results: 0,
         }
     }
+}
+
+/// An index as a page coordinate (pages are far smaller than `u32::MAX`).
+fn coord(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
 }
 
 impl RowSink for BoundedPage {
@@ -243,9 +254,10 @@ impl RowSink for BoundedPage {
                 return;
             }
             let mut size = 0;
-            for cell in &mut row {
+            let mut cut = Vec::new();
+            for (col, cell) in row.iter_mut().enumerate() {
                 if truncate_cell(cell, self.cell_cap) {
-                    self.truncated_cells = self.truncated_cells.saturating_add(1);
+                    cut.push(coord(col));
                 }
                 size += cell_bytes(cell);
             }
@@ -254,6 +266,9 @@ impl RowSink for BoundedPage {
                 self.capped = true;
                 return;
             }
+            let r = coord(self.rows.len());
+            self.truncated_cells = self.truncated_cells.saturating_add(coord(cut.len()));
+            self.truncated.extend(cut.into_iter().map(|c| (r, c)));
             self.bytes += size;
             self.rows.push(row);
         }
@@ -261,12 +276,32 @@ impl RowSink for BoundedPage {
     fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
+/// Builds a read from the dialect of the session it runs on (a raw `WHERE` must be
+/// lexed the way that session's server will read it). An error is returned before
+/// anything is sent.
+pub type BuildRead = dyn Fn(Dialect) -> Result<String, DbError> + Send + Sync;
+
+/// A read built around the user's raw `WHERE` text (see [`DataRequest::raw`]).
+#[derive(Clone)]
+pub struct RawRead(pub Arc<BuildRead>);
+
+impl fmt::Debug for RawRead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RawRead(..)")
+    }
+}
+
 /// One statement for [`SessionManager::data_exec`].
 #[derive(Debug, Clone, Default)]
 pub struct DataRequest {
     /// ONE read statement: built by the backend, or a user statement the plan / guard
-    /// classified as a read (export).
+    /// classified as a read (export). Ignored when `raw` is set.
     pub sql: String,
+    /// A read around the user's raw `WHERE` text, built with the session's dialect, then
+    /// run inside a read-only transaction that is always rolled back: PostgreSQL
+    /// `BEGIN READ ONLY` (after checking `standard_conforming_strings` is on, which the
+    /// raw text was lexed under), MySQL `START TRANSACTION READ ONLY`.
+    pub raw: Option<RawRead>,
     /// Bound values (see `ExecOptions::params`).
     pub params: Vec<String>,
     pub max_rows: usize,
@@ -331,14 +366,25 @@ impl SessionManager {
         params: Vec<String>,
         max_rows: usize,
     ) -> Result<BoundedPage, DbError> {
-        let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
         let request = DataRequest {
             sql: sql.to_string(),
             params,
             max_rows,
             ..DataRequest::default()
         };
-        self.data_exec(id, db, key, &request, &mut page).await?;
+        self.data_read_request(id, db, key, &request).await
+    }
+
+    /// [`Self::data_read`] of any [`DataRequest`] (e.g. a raw `WHERE` read).
+    pub async fn data_read_request(
+        &self,
+        id: Uuid,
+        db: Option<&str>,
+        key: &str,
+        request: &DataRequest,
+    ) -> Result<BoundedPage, DbError> {
+        let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
+        self.data_exec(id, db, key, request, &mut page).await?;
         Ok(page)
     }
 
@@ -415,9 +461,7 @@ impl SessionManager {
                 full_bytes: request.full_bytes,
                 ..ExecOptions::default()
             };
-            let outcome = session
-                .execute_one(&request.sql, StatementKind::Read, &opts, &mut sink)
-                .await;
+            let outcome = run_request(session.as_ref(), request, &opts, &mut sink).await;
             // A pooled session that went stale while idle (server restart, idle timeout):
             // one more attempt on a fresh session, unless the request was cancelled or
             // something already reached the sink.
@@ -428,7 +472,7 @@ impl SessionManager {
             // Only a session whose request was never cancelled goes back to the pool: a
             // cancel sent for it may still land on whatever runs there next.
             let current = data.finish(key, serial);
-            if outcome.is_ok() && current && reusable(&rt) {
+            if outcome.is_ok() && current && reusable(&rt) && !session.in_transaction() {
                 give_back(
                     &rt,
                     database,
@@ -440,7 +484,7 @@ impl SessionManager {
             } else {
                 tokio::spawn(close_quietly(session));
             }
-            return outcome.map(|_| ());
+            return outcome;
         }
     }
 
@@ -457,6 +501,97 @@ impl SessionManager {
         self.data_page_cap = page_cap;
         self
     }
+}
+
+/// Keeps the first cell of a result (`SHOW …`); drops everything else.
+#[derive(Default)]
+struct FirstCell(Option<Value>);
+
+impl RowSink for FirstCell {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        if self.0.is_none() {
+            self.0 = batch.into_iter().next().and_then(|r| r.into_iter().next());
+        }
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+/// Runs `request` on `session` (see [`DataRequest::raw`]).
+async fn run_request(
+    session: &dyn Session,
+    request: &DataRequest,
+    opts: &ExecOptions,
+    sink: &mut dyn RowSink,
+) -> Result<(), DbError> {
+    let Some(raw) = &request.raw else {
+        return session
+            .execute_one(&request.sql, StatementKind::Read, opts, sink)
+            .await
+            .map(|_| ());
+    };
+    let dialect = session.dialect();
+    // Checked and built before anything is sent.
+    let sql = (raw.0)(dialect)?;
+    let aux = ExecOptions {
+        max_rows: 1,
+        params: Vec::new(),
+        ..opts.clone()
+    };
+    let begin = match dialect {
+        Dialect::Postgres => {
+            // The raw text was lexed with standard strings (`'\'` is a whole string).
+            let mut scs = FirstCell::default();
+            session
+                .execute_one(
+                    "SHOW standard_conforming_strings",
+                    StatementKind::Read,
+                    &aux,
+                    &mut scs,
+                )
+                .await?;
+            match scs.0 {
+                Some(Value::Text(s)) if s.eq_ignore_ascii_case("on") => {}
+                _ => {
+                    return Err(config_error(
+                        "filter",
+                        "the server has standard_conforming_strings off: a raw WHERE filter \
+                         cannot be checked safely on this connection",
+                    ))
+                }
+            }
+            "BEGIN READ ONLY"
+        }
+        Dialect::MySql(_) => "START TRANSACTION READ ONLY",
+    };
+    session
+        .execute_one(
+            begin,
+            StatementKind::Transaction(TxControl::Begin),
+            &aux,
+            &mut FirstCell::default(),
+        )
+        .await?;
+    let read = session
+        .execute_one(&sql, StatementKind::Read, opts, sink)
+        .await;
+    // Always rolled back: nothing it did may stay. A stopped request's session is closed
+    // instead (it is never pooled), which ends the transaction as well.
+    let rollback = if opts.stop.is_stopped() {
+        Ok(())
+    } else {
+        session
+            .execute_one(
+                "ROLLBACK",
+                StatementKind::Transaction(TxControl::Rollback),
+                &aux,
+                &mut FirstCell::default(),
+            )
+            .await
+            .map(|_| ())
+    };
+    read?;
+    rollback
 }
 
 /// An idle session of `database` that is still usable (others are closed).
@@ -532,6 +667,43 @@ mod tests {
         assert_eq!(page.rows.len(), 2);
         assert_eq!(page.bytes, 20);
         assert!(page.capped);
+    }
+
+    #[test]
+    fn bounded_page_records_truncated_cells() {
+        let mut page = BoundedPage::new(4, 1000);
+        page.result_start(&[]);
+        page.rows(vec![
+            vec![
+                Value::Int(1),
+                Value::Text("short".into()),
+                Value::Text("ab".into()),
+            ],
+            vec![
+                Value::Int(2),
+                Value::Text("ok".into()),
+                Value::Json("[1,2,3]".into()),
+            ],
+        ]);
+        page.rows(vec![vec![
+            Value::Text("longer".into()),
+            Value::Null,
+            Value::Array(vec![Value::Text("abcdef".into())]),
+        ]]);
+        assert_eq!(page.truncated, [(0, 1), (1, 2), (2, 0), (2, 2)]);
+        assert_eq!(page.truncated_cells, 4);
+
+        // A row left out by the page cap records nothing.
+        let mut page = BoundedPage::new(4, 5);
+        page.result_start(&[]);
+        page.rows(vec![
+            vec![Value::Text("abcdefgh".into())],
+            vec![Value::Text("ijklmnop".into())],
+        ]);
+        assert_eq!(page.rows.len(), 1);
+        assert!(page.capped);
+        assert_eq!(page.truncated, [(0, 0)]);
+        assert_eq!(page.truncated_cells, 1);
     }
 
     #[test]

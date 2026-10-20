@@ -18,23 +18,42 @@
 //! The filter and sort arrive as a structured AST ([`DataFilter`], [`SortSpec`]), never
 //! as SQL: columns are checked against the object's real columns and quoted, values are
 //! bound parameters (see [`dnt_core::sql::filter`]).
+//!
+//! The one exception is a raw `WHERE` filter ([`DataFilter::raw_where`]): the user's own
+//! condition text, checked with [`dnt_core::sql::build::check_raw_where`] under the
+//! data session's dialect and run (page and count alike) inside a read-only
+//! transaction that is always rolled back (see [`crate::data_sessions::DataRequest`]).
+//!
+//! # Extra page columns
+//!
+//! A page of a table the data view may edit ([`dnt_query::edit::editable`]) also reads
+//! what an edit needs to find and guard its rows, before `*`, and returns it apart from
+//! `columns` / `rows`: PostgreSQL `xmin::text` ([`TableDataPage::row_versions`]) and key
+//! columns a `SELECT *` does not return, such as MySQL `INVISIBLE` columns
+//! ([`TableDataPage::hidden_key`]).
 
 use super::browse::table_detail_impl;
 use super::guard;
+use crate::data_sessions::{BoundedPage, DataRequest, RawRead};
 use crate::session_manager::config_error;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
+use dnt_core::sql::build::{raw_where_clause, BuildError};
 use dnt_core::sql::filter::{
     build_where, pg_unordered, WhereClause, MAX_CONDITIONS, MAX_IN_VALUES, MAX_SORT_KEYS,
     MAX_VALUE_BYTES,
 };
 pub use dnt_core::sql::filter::{DataFilter, FilterCond, FilterMode, FilterOp, SortDir, SortSpec};
-use dnt_core::sql::ident::{count_where_sql, qualified_name, select_sql};
+use dnt_core::sql::ident::{count_where_sql, qualified_name, quote_ident, select_sql};
+use dnt_core::sql::Dialect;
 use dnt_core::value::{ColumnMeta, Value};
+use dnt_query::edit::{atomicity, editable, NotEditable};
+pub use dnt_query::edit::{Atomicity, ProtectionKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
+use std::sync::Arc;
 use std::time::Instant;
 use tauri::State;
 use uuid::Uuid;
@@ -51,13 +70,39 @@ pub struct TableDataPage {
     pub has_more: bool,
     /// Text / JSON cells cut to 64 KB.
     pub truncated_cells: u32,
+    /// Where those cells are: `[row, column]` indexes into `rows`.
+    #[specta(type = Vec<[f64; 2]>)]
+    pub truncated: Vec<(u32, u32)>,
     /// The page reached its byte budget: rows were left for the next page.
     pub size_capped: bool,
     /// Without an explicit sort: the primary key columns the page is ordered by (stable
     /// paging); empty when there is no primary key or a sort was given.
     pub key_order: Vec<String>,
+    /// PostgreSQL tables the data view may edit: each row's `xmin`, in row order (the
+    /// row version an edit is guarded with). Null otherwise.
+    pub row_versions: Option<Vec<String>>,
+    /// Key columns a `SELECT *` does not return (MySQL `INVISIBLE`), read explicitly;
+    /// not part of `columns`.
+    pub hidden_key: Vec<ColumnMeta>,
+    /// Their values, one entry per row of `rows` (empty without `hidden_key`).
+    pub hidden_key_values: Vec<Vec<Value>>,
     #[specta(type = f64)]
     pub elapsed_ms: u64,
+}
+
+/// Whether the data view may edit an object, and how (`data_editable`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct EditableInfo {
+    pub editable: bool,
+    /// Why not, when not editable: `read_only_connection`, `not_a_table`, `no_key` or
+    /// `unsupported:<detail>` (machine-readable; the UI words it).
+    pub reason: Option<String>,
+    /// The columns that identify a row (empty when not editable).
+    pub key: Vec<String>,
+    /// Columns an UPDATE may set (empty when not editable).
+    pub editable_columns: Vec<String>,
+    pub atomic: Atomicity,
+    pub protection: ProtectionKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -201,38 +246,196 @@ pub fn page_order(
     Ok((by, Vec::new()))
 }
 
-/// Whether `filter` has any condition.
+/// Whether `filter` has any structured condition.
 fn filtered(filter: Option<&DataFilter>) -> bool {
     filter.is_some_and(|f| !f.conditions.is_empty())
 }
 
+/// The raw `WHERE` text of `filter`, if it is in raw mode.
+fn raw_text(filter: Option<&DataFilter>) -> Option<String> {
+    filter.and_then(|f| f.raw_where.clone())
+}
+
+/// A raw `WHERE` the checker refused: a `config` error on the filter.
+fn raw_error(e: BuildError) -> DbError {
+    let message = match e {
+        BuildError::Invalid { reason, .. } => reason,
+        other => other.to_string(),
+    };
+    config_error("filter", &message)
+}
+
+/// ` WHERE (<raw>\n)` for `dialect` (see [`raw_where_clause`]).
+fn raw_clause(raw: &str, dialect: Dialect) -> Result<String, DbError> {
+    Ok(raw_where_clause(raw, dialect).map_err(raw_error)?.sql)
+}
+
 /// What a data read of an object runs: the relation, `ORDER BY`, implicit key order and
-/// `WHERE` (with its parameters), all checked against the object's columns.
+/// `WHERE` (structured with its parameters, or raw), all checked against the object's
+/// columns.
 pub(crate) struct DataQuery {
     pub kind: DbKind,
     pub relation: String,
     pub order: OrderBy,
     pub keys: Vec<String>,
+    /// The structured `WHERE` (empty in raw mode).
     pub filter: WhereClause,
+    /// Raw mode: the user's `WHERE` text, checked when the read is built on its session.
+    pub raw_where: Option<String>,
+    /// The object's table detail, when it could be read.
+    pub detail: Option<TableDetail>,
 }
 
 impl DataQuery {
-    /// The `SELECT`, paged with `(limit, offset)` or whole.
-    pub fn select(&self, page: Option<(u64, u64)>) -> String {
-        let order: Vec<(&str, bool)> = self
-            .order
-            .iter()
-            .map(|(c, asc)| (c.as_str(), *asc))
-            .collect();
-        select_sql(
+    /// The read of `extra` columns then `*`, paged with `(limit, offset)` or whole.
+    pub fn request(
+        &self,
+        extra: &[String],
+        page: Option<(u64, u64)>,
+        max_rows: usize,
+    ) -> DataRequest {
+        let Some(raw) = self.raw_where.clone() else {
+            let order: Vec<(&str, bool)> = self
+                .order
+                .iter()
+                .map(|(c, asc)| (c.as_str(), *asc))
+                .collect();
+            return DataRequest {
+                sql: select_sql(
+                    self.kind,
+                    &self.relation,
+                    extra,
+                    &self.filter.sql,
+                    &order,
+                    page,
+                ),
+                params: self.filter.params.clone(),
+                max_rows,
+                ..DataRequest::default()
+            };
+        };
+        let (kind, relation, extra, order) = (
             self.kind,
-            &self.relation,
-            &[],
-            &self.filter.sql,
-            &order,
-            page,
-        )
+            self.relation.clone(),
+            extra.to_vec(),
+            self.order.clone(),
+        );
+        let build = move |dialect: Dialect| {
+            let order: Vec<(&str, bool)> =
+                order.iter().map(|(c, asc)| (c.as_str(), *asc)).collect();
+            let where_sql = raw_clause(&raw, dialect)?;
+            Ok(select_sql(
+                kind, &relation, &extra, &where_sql, &order, page,
+            ))
+        };
+        DataRequest {
+            raw: Some(RawRead(Arc::new(build))),
+            max_rows,
+            ..DataRequest::default()
+        }
     }
+}
+
+/// What a page reads besides `*` (see the module docs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageExtras {
+    /// PostgreSQL `xmin::text`, first.
+    pub row_version: bool,
+    /// Hidden key columns, after it.
+    pub hidden_key: Vec<String>,
+}
+
+impl PageExtras {
+    /// For a page of `detail`: only when the data view may edit it.
+    pub fn of(detail: &TableDetail, kind: DbKind, read_only: bool) -> PageExtras {
+        match editable(detail, kind, read_only) {
+            Ok(e) => PageExtras {
+                row_version: kind == DbKind::Postgres,
+                hidden_key: e.hidden_key,
+            },
+            Err(_) => PageExtras::default(),
+        }
+    }
+
+    /// How many columns come before `*`.
+    pub fn width(&self) -> usize {
+        usize::from(self.row_version) + self.hidden_key.len()
+    }
+
+    /// The select-list expressions, in order.
+    pub fn columns(&self, kind: DbKind) -> Vec<String> {
+        let version = self.row_version.then(|| "xmin::text".to_string());
+        version
+            .into_iter()
+            .chain(self.hidden_key.iter().map(|c| quote_ident(kind, c)))
+            .collect()
+    }
+}
+
+/// A fetched page split into its parts: `limit` rows at most, the extra columns taken
+/// off the front of `columns`, every row and the cut-cell coordinates.
+pub fn split_page(
+    page: BoundedPage,
+    extras: &PageExtras,
+    limit: u32,
+) -> Result<TableDataPage, DbError> {
+    let limit = limit as usize;
+    let n_ver = usize::from(extras.row_version);
+    let n_extra = extras.width();
+    let short = || DbError::Internal {
+        message: "the page has fewer columns than it selected".into(),
+    };
+    let mut columns = page.columns;
+    if columns.len() < n_extra {
+        return Err(short());
+    }
+    let rest = columns.split_off(n_extra);
+    let hidden_key = columns.split_off(n_ver);
+    let has_more = page.rows.len() > limit || page.capped;
+    let mut row_versions = extras.row_version.then(Vec::new);
+    let mut hidden_key_values = Vec::new();
+    let mut rows = Vec::with_capacity(page.rows.len().min(limit));
+    for mut row in page.rows.into_iter().take(limit) {
+        if row.len() < n_extra {
+            return Err(short());
+        }
+        let cells = row.split_off(n_extra);
+        let hidden = row.split_off(n_ver);
+        if let Some(versions) = row_versions.as_mut() {
+            match row.pop() {
+                Some(Value::Text(v)) => versions.push(v),
+                other => {
+                    return Err(DbError::Internal {
+                        message: format!("unexpected row version {other:?}"),
+                    })
+                }
+            }
+        }
+        if !extras.hidden_key.is_empty() {
+            hidden_key_values.push(hidden);
+        }
+        rows.push(cells);
+    }
+    let shift = u32::try_from(n_extra).unwrap_or(u32::MAX);
+    let truncated: Vec<(u32, u32)> = page
+        .truncated
+        .into_iter()
+        .filter(|&(r, c)| (r as usize) < limit && c >= shift)
+        .map(|(r, c)| (r, c - shift))
+        .collect();
+    Ok(TableDataPage {
+        columns: rest,
+        rows,
+        has_more,
+        truncated_cells: u32::try_from(truncated.len()).unwrap_or(u32::MAX),
+        truncated,
+        size_capped: page.capped,
+        key_order: Vec::new(),
+        row_versions,
+        hidden_key,
+        hidden_key_values,
+        elapsed_ms: 0,
+    })
 }
 
 /// Refuses an oversized sort or filter at once, before the object's columns are read
@@ -248,6 +451,20 @@ pub fn check_request_size(sort: &[SortSpec], filter: Option<&DataFilter>) -> Res
     let Some(filter) = filter else {
         return Ok(());
     };
+    if let Some(raw) = &filter.raw_where {
+        if !filter.conditions.is_empty() {
+            return Err(config_error(
+                "filter",
+                "a raw WHERE filter takes no other conditions",
+            ));
+        }
+        if raw.len() > MAX_VALUE_BYTES {
+            return Err(config_error(
+                "filter",
+                &format!("the WHERE text is too long (at most {MAX_VALUE_BYTES} bytes)"),
+            ));
+        }
+    }
     if filter.conditions.len() > MAX_CONDITIONS {
         return Err(config_error(
             "filter",
@@ -272,8 +489,8 @@ pub fn check_request_size(sort: &[SortSpec], filter: Option<&DataFilter>) -> Res
 }
 
 /// Builds the [`DataQuery`] of `obj`. The object's columns (the tree's cached table
-/// detail) are required for a sort or a filter; without either, a failed detail read
-/// only loses the stable key order.
+/// detail) are required for a sort or a structured filter; without either, a failed
+/// detail read only loses the stable key order (and the extra page columns).
 pub(crate) async fn data_query(
     state: &AppState,
     id: Uuid,
@@ -284,20 +501,21 @@ pub(crate) async fn data_query(
     check_request_size(sort, filter)?;
     let kind = state.repo.get(id)?.kind;
     check_object(kind, obj)?;
+    let raw_where = raw_text(filter);
+    let structured = if raw_where.is_some() { None } else { filter };
     // The detail is cached by the tree's Info view (a metadata call, short).
-    let (order, keys, filter) = if !sort.is_empty() || filtered(filter) {
-        let detail = table_detail_impl(state, id, obj.clone()).await?;
-        let (order, keys) = page_order(kind, &detail, sort)?;
-        (order, keys, build_where(kind, &detail.columns, filter)?)
+    let detail = if !sort.is_empty() || filtered(structured) {
+        Some(table_detail_impl(state, id, obj.clone()).await?)
     } else {
-        match table_detail_impl(state, id, obj.clone()).await {
-            Ok(detail) => {
-                let (order, keys) = page_order(kind, &detail, &[])?;
-                (order, keys, WhereClause::default())
-            }
-            // No stable order then; the SELECT reports a real problem itself.
-            Err(_) => (Vec::new(), Vec::new(), WhereClause::default()),
+        // No stable order without it; the SELECT reports a real problem itself.
+        table_detail_impl(state, id, obj.clone()).await.ok()
+    };
+    let (order, keys, filter) = match &detail {
+        Some(detail) => {
+            let (order, keys) = page_order(kind, detail, sort)?;
+            (order, keys, build_where(kind, &detail.columns, structured)?)
         }
+        None => (Vec::new(), Vec::new(), WhereClause::default()),
     };
     Ok(DataQuery {
         kind,
@@ -305,6 +523,8 @@ pub(crate) async fn data_query(
         order,
         keys,
         filter,
+        raw_where,
+        detail,
     })
 }
 
@@ -340,33 +560,27 @@ pub async fn table_data_impl(
 ) -> Result<TableDataPage, DbError> {
     check_limit(limit)?;
     let query = data_query(state, id, &obj, &sort, filter.as_ref()).await?;
+    let read_only = state.repo.get(id)?.read_only;
+    let extras = query
+        .detail
+        .as_ref()
+        .map(|d| PageExtras::of(d, query.kind, read_only))
+        .unwrap_or_default();
     let fetch = u64::from(limit) + 1;
-    let sql = query.select(Some((fetch, offset)));
+    let request = query.request(
+        &extras.columns(query.kind),
+        Some((fetch, offset)),
+        fetch as usize,
+    );
     let started = Instant::now();
     let page = state
         .sessions
-        .data_read_params(
-            id,
-            Some(&obj.database),
-            &request_key,
-            &sql,
-            query.filter.params,
-            fetch as usize,
-        )
+        .data_read_request(id, Some(&obj.database), &request_key, &request)
         .await?;
-    let keys = query.keys;
-    let mut rows = page.rows;
-    let has_more = rows.len() > limit as usize || page.capped;
-    rows.truncate(limit as usize);
-    Ok(TableDataPage {
-        columns: page.columns,
-        rows,
-        has_more,
-        truncated_cells: page.truncated_cells,
-        size_capped: page.capped,
-        key_order: keys,
-        elapsed_ms: elapsed_ms(started),
-    })
+    let mut page = split_page(page, &extras, limit)?;
+    page.key_order = query.keys;
+    page.elapsed_ms = elapsed_ms(started);
+    Ok(page)
 }
 
 /// The count from the first cell of a `COUNT(*)` result.
@@ -390,25 +604,39 @@ pub async fn table_row_count_impl(
     filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableRowCount, DbError> {
+    check_request_size(&[], filter.as_ref())?;
     let kind = state.repo.get(id)?.kind;
     check_object(kind, &obj)?;
-    let clause = if filtered(filter.as_ref()) {
-        let detail = table_detail_impl(state, id, obj.clone()).await?;
-        build_where(kind, &detail.columns, filter.as_ref())?
-    } else {
-        WhereClause::default()
+    let rel = relation(kind, &obj);
+    let request = match raw_text(filter.as_ref()) {
+        Some(raw) => {
+            let build =
+                move |dialect: Dialect| Ok(count_where_sql(&rel, &raw_clause(&raw, dialect)?));
+            DataRequest {
+                raw: Some(RawRead(Arc::new(build))),
+                max_rows: 1,
+                ..DataRequest::default()
+            }
+        }
+        None => {
+            let clause = if filtered(filter.as_ref()) {
+                let detail = table_detail_impl(state, id, obj.clone()).await?;
+                build_where(kind, &detail.columns, filter.as_ref())?
+            } else {
+                WhereClause::default()
+            };
+            DataRequest {
+                sql: count_where_sql(&rel, &clause.sql),
+                params: clause.params,
+                max_rows: 1,
+                ..DataRequest::default()
+            }
+        }
     };
     let started = Instant::now();
     let read = state
         .sessions
-        .data_read_params(
-            id,
-            Some(&obj.database),
-            &request_key,
-            &count_where_sql(&relation(kind, &obj), &clause.sql),
-            clause.params,
-            1,
-        )
+        .data_read_request(id, Some(&obj.database), &request_key, &request)
         .await?;
     let rows = count_value(read.rows.first().and_then(|r| r.first()))?;
     Ok(TableRowCount {
@@ -423,6 +651,64 @@ pub async fn table_data_cancel_impl(
     request_key: String,
 ) -> Result<bool, DbError> {
     Ok(state.sessions.data_cancel(id, &request_key))
+}
+
+/// The machine-readable reason of [`EditableInfo::reason`].
+fn reason_code(n: &NotEditable) -> String {
+    match n {
+        NotEditable::ReadOnlyConnection => "read_only_connection".into(),
+        NotEditable::NotATable => "not_a_table".into(),
+        NotEditable::NoKey => "no_key".into(),
+        NotEditable::Unsupported { reason } => format!("unsupported:{reason}"),
+    }
+}
+
+/// Whether the data view may edit `detail` on a connection of `kind`.
+pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> EditableInfo {
+    match editable(detail, kind, read_only) {
+        Ok(e) => EditableInfo {
+            editable: true,
+            reason: None,
+            key: e.key,
+            editable_columns: e.editable_columns,
+            atomic: e.atomic,
+            protection: e.protection_kind,
+        },
+        Err(n) => EditableInfo {
+            editable: false,
+            reason: Some(reason_code(&n)),
+            key: Vec::new(),
+            editable_columns: Vec::new(),
+            atomic: atomicity(detail, kind),
+            protection: match kind {
+                DbKind::Postgres => ProtectionKind::RowVersion,
+                DbKind::MySql => ProtectionKind::Snapshot,
+            },
+        },
+    }
+}
+
+pub async fn data_editable_impl(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+) -> Result<EditableInfo, DbError> {
+    let cfg = state.repo.get(id)?;
+    check_object(cfg.kind, &obj)?;
+    let detail = table_detail_impl(state, id, obj).await?;
+    Ok(editable_info(&detail, cfg.kind, cfg.read_only))
+}
+
+/// Whether the data view may edit `obj` (a table / view of the data view), and how:
+/// its key, the columns an UPDATE may set, atomicity and row-guard kind.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_editable(
+    state: State<'_, AppState>,
+    id: Uuid,
+    obj: ObjectRef,
+) -> Result<EditableInfo, AppError> {
+    guard(data_editable_impl(&state, id, obj)).await
 }
 
 /// A page of a table / view. `sort`: keys in order (empty: the primary key);
@@ -483,6 +769,7 @@ pub async fn table_data_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dnt_core::driver::RowSink;
     use dnt_core::meta::{IndexDetail, TableOptions};
 
     fn obj(schema: Option<&str>, kind: ObjectKind) -> ObjectRef {
@@ -531,6 +818,7 @@ mod tests {
         let filter = |conditions| DataFilter {
             mode: FilterMode::And,
             conditions,
+            raw_where: None,
         };
         let ok = filter(vec![cond(vec!["1".into()]); MAX_CONDITIONS]);
         assert!(check_request_size(&[], Some(&ok)).is_ok());
@@ -539,6 +827,21 @@ mod tests {
             filter(vec![cond(vec!["1".into()]); MAX_CONDITIONS + 1]),
             filter(vec![cond(vec!["1".into(); MAX_IN_VALUES + 1])]),
             filter(vec![cond(vec!["x".repeat(MAX_VALUE_BYTES + 1)])]),
+        ] {
+            assert_eq!(
+                field(check_request_size(&[], Some(&bad)).unwrap_err()).as_deref(),
+                Some("filter")
+            );
+        }
+        // Raw mode: the text is bounded and takes no conditions.
+        let raw = |text: String, conditions| DataFilter {
+            raw_where: Some(text),
+            ..filter(conditions)
+        };
+        assert!(check_request_size(&[], Some(&raw("id > 0".into(), vec![]))).is_ok());
+        for bad in [
+            raw("x".repeat(MAX_VALUE_BYTES + 1), vec![]),
+            raw("id > 0".into(), vec![cond(vec!["1".into()])]),
         ] {
             assert_eq!(
                 field(check_request_size(&[], Some(&bad)).unwrap_err()).as_deref(),
@@ -770,6 +1073,154 @@ mod tests {
         assert_eq!(count_value(Some(&Value::Decimal("42".into()))).unwrap(), 42);
         assert!(count_value(None).is_err());
         assert!(count_value(Some(&Value::Int(-1))).is_err());
+    }
+
+    fn meta(name: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.into(),
+            db_type: "text".into(),
+            logical: dnt_core::value::LogicalType::Text,
+            nullable: None,
+            origin_table: None,
+            origin_column: None,
+        }
+    }
+
+    #[test]
+    fn extra_columns_are_split_off_the_page() {
+        let mut page = BoundedPage::new(3, 1000);
+        page.result_start(&[meta("xmin"), meta("hid"), meta("a"), meta("b")]);
+        page.rows(vec![
+            vec![
+                Value::Text("701".into()),
+                Value::Int(1),
+                Value::Text("long".into()),
+                Value::Null,
+            ],
+            vec![
+                Value::Text("702".into()),
+                Value::Int(2),
+                Value::Null,
+                Value::Text("cut!".into()),
+            ],
+            // The look-ahead row.
+            vec![
+                Value::Text("703".into()),
+                Value::Int(3),
+                Value::Text("more".into()),
+                Value::Null,
+            ],
+        ]);
+        let extras = PageExtras {
+            row_version: true,
+            hidden_key: vec!["hid".into()],
+        };
+        assert_eq!(extras.columns(DbKind::Postgres), ["xmin::text", "\"hid\""]);
+        let p = split_page(page, &extras, 2).unwrap();
+        let names: Vec<&str> = p.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(p.rows.len(), 2);
+        assert_eq!(p.rows[1], [Value::Null, Value::Text("cut".into())]);
+        assert!(p.has_more);
+        assert_eq!(p.row_versions, Some(vec!["701".into(), "702".into()]));
+        assert_eq!(p.hidden_key, [meta("hid")]);
+        assert_eq!(
+            p.hidden_key_values,
+            [vec![Value::Int(1)], vec![Value::Int(2)]]
+        );
+        // Coordinates in `rows`, the look-ahead row's cut cell left out.
+        assert_eq!(p.truncated, [(0, 0), (1, 1)]);
+        assert_eq!(p.truncated_cells, 2);
+        assert_eq!(
+            serde_json::to_value(&p).unwrap()["truncated"],
+            serde_json::json!([[0, 0], [1, 1]])
+        );
+
+        // No extras: the page as read.
+        let mut page = BoundedPage::new(100, 1000);
+        page.result_start(&[meta("a")]);
+        page.rows(vec![vec![Value::Int(1)]]);
+        let p = split_page(page, &PageExtras::default(), 10).unwrap();
+        assert_eq!(p.rows, [vec![Value::Int(1)]]);
+        assert_eq!(p.row_versions, None);
+        assert!(p.hidden_key.is_empty() && p.hidden_key_values.is_empty());
+        assert!(!p.has_more);
+        assert_eq!(
+            PageExtras {
+                row_version: false,
+                hidden_key: vec!["my`id".into()]
+            }
+            .columns(DbKind::MySql),
+            ["`my``id`"]
+        );
+    }
+
+    #[test]
+    fn editability_reasons_are_machine_readable() {
+        let d = detail(Some(vec!["a"]));
+        let mut d = d;
+        d.columns[0].nullable = false;
+        let ok = editable_info(&d, DbKind::Postgres, false);
+        assert!(ok.editable);
+        assert_eq!(ok.key, ["a"]);
+        assert_eq!(ok.editable_columns, ["a", "b"]);
+        assert_eq!(ok.protection, ProtectionKind::RowVersion);
+        assert_eq!(ok.reason, None);
+
+        let ro = editable_info(&d, DbKind::MySql, true);
+        assert!(!ro.editable);
+        assert_eq!(ro.reason.as_deref(), Some("read_only_connection"));
+        assert!(ro.key.is_empty() && ro.editable_columns.is_empty());
+        assert_eq!(ro.protection, ProtectionKind::Snapshot);
+
+        let mut v = d.clone();
+        v.object.kind = ObjectKind::View;
+        assert_eq!(
+            editable_info(&v, DbKind::MySql, false).reason.as_deref(),
+            Some("not_a_table")
+        );
+        assert_eq!(
+            editable_info(&detail(None), DbKind::MySql, false)
+                .reason
+                .as_deref(),
+            Some("no_key")
+        );
+        assert_eq!(
+            reason_code(&NotEditable::Unsupported {
+                reason: "array key".into()
+            }),
+            "unsupported:array key"
+        );
+    }
+
+    #[test]
+    fn raw_where_is_checked_with_the_sessions_dialect() {
+        let q = DataQuery {
+            kind: DbKind::MySql,
+            relation: "`shop`.`orders`".into(),
+            order: vec![("id".into(), true)],
+            keys: vec!["id".into()],
+            filter: WhereClause::default(),
+            raw_where: Some("note = \"a;b\"".into()),
+            detail: None,
+        };
+        let r = q.request(&["`hid`".into()], Some((11, 0)), 11);
+        let build = r.raw.expect("a raw read").0;
+        assert_eq!(
+            build(Dialect::MYSQL).unwrap(),
+            "SELECT `hid`, `shop`.`orders`.* FROM `shop`.`orders` WHERE (note = \"a;b\"\n) \
+             ORDER BY `id` ASC LIMIT 11 OFFSET 0"
+        );
+        let e = DataQuery {
+            raw_where: Some("1; DROP TABLE t".into()),
+            ..q
+        }
+        .request(&[], None, 1)
+        .raw
+        .unwrap()
+        .0(Dialect::Postgres)
+        .unwrap_err();
+        assert_eq!(field(e).as_deref(), Some("filter"));
     }
 
     #[test]

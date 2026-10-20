@@ -5,9 +5,11 @@ use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::DbKind;
+use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
 use dnt_driver_pg::PgDriver;
+use dnt_query::edit::{Atomicity, ProtectionKind};
 use dnt_query::Target as Pick;
 use dnt_testkit::{require_db, Target, FIXTURE_DB, TEST_PASSWORD};
 use dnt_tunnel::KnownHosts;
@@ -16,8 +18,8 @@ use dntdatabase::commands::connections::{
     close_connection_impl, create_connection_impl, open_connection_impl, SecretsInput,
 };
 use dntdatabase::commands::data::{
-    table_data_cancel_impl, table_data_impl, table_row_count_impl, SortDir, SortSpec,
-    TableDataPage, TableRowCount,
+    data_editable_impl, table_data_cancel_impl, table_data_impl, table_row_count_impl, DataFilter,
+    FilterMode, SortDir, SortSpec, TableDataPage, TableRowCount,
 };
 use dntdatabase::data_sessions::MAX_CELL_BYTES;
 use dntdatabase::run_events::{EventSink, RunOptions};
@@ -554,6 +556,354 @@ async fn reads_outside_a_tab_transaction() {
         );
         run_on_tab(&state, "tab-1", id, "ROLLBACK").await;
         close_connection_impl(&state, id).await.unwrap();
+    }
+}
+
+// ---- P3: raw WHERE, row versions, hidden keys, editability ------------------------
+
+fn uuid8() -> String {
+    Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
+/// `name` qualified for an admin statement on `t`.
+fn scratch(t: Target, name: &str) -> String {
+    match t.kind() {
+        DbKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
+        DbKind::Postgres => format!("public.\"{name}\""),
+    }
+}
+
+/// Runs ONE statement (not split: a routine body keeps its `;`) on a fresh admin
+/// session.
+async fn admin_one(t: Target, sql: &str) -> Result<Vec<Vec<Value>>, DbError> {
+    struct Collect(Vec<Vec<Value>>);
+    impl RowSink for Collect {
+        fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+        fn rows(&mut self, batch: Vec<Vec<Value>>) {
+            self.0.extend(batch);
+        }
+        fn result_end(&mut self, _summary: &ResultSummary) {}
+    }
+    let driver: Box<dyn Driver> = match t.kind() {
+        DbKind::MySql => Box::new(MySqlDriver),
+        DbKind::Postgres => Box::new(PgDriver),
+    };
+    let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
+    let kind = classify(sql, session.dialect());
+    let mut sink = Collect(Vec::new());
+    let out = session
+        .execute_one(sql, kind, &ExecOptions::default(), &mut sink)
+        .await;
+    session.close().await;
+    out.map(|_| sink.0)
+}
+
+fn raw(text: &str) -> Option<DataFilter> {
+    Some(DataFilter {
+        mode: FilterMode::And,
+        conditions: vec![],
+        raw_where: Some(text.into()),
+    })
+}
+
+async fn filtered_page(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+    filter: Option<DataFilter>,
+) -> Result<TableDataPage, DbError> {
+    table_data_impl(state, id, obj, 100, 0, vec![], filter, "tab:page".into()).await
+}
+
+/// A raw WHERE runs inside a read-only transaction: a function that writes fails with
+/// the server's read-only error and writes nothing (page and count alike).
+#[tokio::test]
+async fn raw_where_runs_read_only() {
+    require_db!();
+    for t in Target::all() {
+        let tag = uuid8();
+        let log = format!("p3_log_{tag}");
+        let func = format!("p3_write_{tag}");
+        admin(t, &format!("CREATE TABLE {} (n INT)", scratch(t, &log))).await;
+        let created = match t.kind() {
+            DbKind::Postgres => {
+                admin_one(
+                    t,
+                    &format!(
+                        "CREATE FUNCTION public.{func}() RETURNS int LANGUAGE plpgsql AS $$ \
+                         BEGIN INSERT INTO {} VALUES (1); RETURN 1; END $$",
+                        scratch(t, &log)
+                    ),
+                )
+                .await
+            }
+            DbKind::MySql => {
+                admin_one(
+                    t,
+                    &format!(
+                        "CREATE FUNCTION `{FIXTURE_DB}`.`{func}`() RETURNS INT DETERMINISTIC \
+                         MODIFIES SQL DATA BEGIN INSERT INTO {} VALUES (1); RETURN 1; END",
+                        scratch(t, &log)
+                    ),
+                )
+                .await
+            }
+        };
+        if let Err(e) = created {
+            println!("{t:?}: skipped, the test user cannot create a function: {e:?}");
+            admin(t, &format!("DROP TABLE {}", scratch(t, &log))).await;
+            continue;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t, false).await;
+        let customers = obj(t, "customers");
+
+        // A harmless raw filter works, page and count.
+        let p = filtered_page(&state, id, customers.clone(), raw("id > 1 -- trailing"))
+            .await
+            .unwrap();
+        assert!(!p.rows.is_empty(), "{t:?}");
+        assert!(p.rows.iter().all(|r| int(&r[0]) > 1), "{t:?}");
+        let n = table_row_count_impl(
+            &state,
+            id,
+            customers.clone(),
+            raw("id > 1"),
+            "tab:count".into(),
+        )
+        .await
+        .unwrap()
+        .rows;
+        assert_eq!(n as usize, p.rows.len(), "{t:?}");
+
+        // A writing function: refused by the server, nothing written.
+        let writes = format!("id > 0 AND {func}() = 1");
+        let err = filtered_page(&state, id, customers.clone(), raw(&writes))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:?}").to_ascii_lowercase().contains("read")
+                && !matches!(err, DbError::Config { .. }),
+            "{t:?}: {err:?}"
+        );
+        let err = table_row_count_impl(
+            &state,
+            id,
+            customers.clone(),
+            raw(&writes),
+            "tab:count".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!matches!(err, DbError::Config { .. }), "{t:?}: {err:?}");
+        let rows = admin_one(t, &format!("SELECT COUNT(*) FROM {}", scratch(t, &log)))
+            .await
+            .unwrap();
+        assert_eq!(int(&rows[0][0]), 0, "{t:?}: the read-only filter wrote");
+
+        // The data session is usable afterwards (no transaction left open).
+        filtered_page(&state, id, customers, None).await.unwrap();
+        close_connection_impl(&state, id).await.unwrap();
+        let drop_fn = match t.kind() {
+            DbKind::Postgres => format!("DROP FUNCTION public.{func}()"),
+            DbKind::MySql => format!("DROP FUNCTION `{FIXTURE_DB}`.`{func}`"),
+        };
+        admin(t, &drop_fn).await;
+        admin(t, &format!("DROP TABLE {}", scratch(t, &log))).await;
+    }
+}
+
+/// A raw WHERE the checker refuses is a `config` error and nothing reaches the server.
+#[tokio::test]
+async fn raw_where_rejected_before_server() {
+    require_db!();
+    for t in Target::all() {
+        let victim = format!("p3_rej_{}", uuid8());
+        admin(t, &format!("CREATE TABLE {} (n INT)", scratch(t, &victim))).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t, false).await;
+        let drop = format!("1; DROP TABLE {}", scratch(t, &victim));
+        for text in [drop.as_str(), "1) OR (1", "'open", "", "id INTO @x"] {
+            let err = filtered_page(&state, id, obj(t, "customers"), raw(text))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, DbError::Config { field: Some(f), .. } if f == "filter"),
+                "{t:?} {text:?}: {err:?}"
+            );
+            let err = table_row_count_impl(
+                &state,
+                id,
+                obj(t, "customers"),
+                raw(text),
+                "tab:count".into(),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&err, DbError::Config { .. }),
+                "{t:?} {text:?}: {err:?}"
+            );
+        }
+        // The table is still there.
+        admin_one(t, &format!("SELECT COUNT(*) FROM {}", scratch(t, &victim)))
+            .await
+            .unwrap();
+        close_connection_impl(&state, id).await.unwrap();
+        admin(t, &format!("DROP TABLE {}", scratch(t, &victim))).await;
+    }
+}
+
+/// PostgreSQL pages of an editable table carry each row's `xmin`, outside the columns.
+#[tokio::test]
+async fn pg_page_has_row_versions() {
+    require_db!();
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t, false).await;
+        let p = page(&state, id, obj(t, "customers"), 2, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(ids(&p), [1, 2], "{t:?}");
+        assert!(p.columns.iter().all(|c| c.name != "xmin"), "{t:?}");
+        assert_eq!(p.columns[0].name, "id", "{t:?}");
+        assert!(p.truncated.is_empty(), "{t:?}");
+        match t.kind() {
+            DbKind::Postgres => {
+                let versions = p.row_versions.clone().expect("row versions");
+                assert_eq!(versions.len(), p.rows.len(), "{t:?}");
+                assert!(
+                    versions
+                        .iter()
+                        .all(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit())),
+                    "{t:?}: {versions:?}"
+                );
+                // Raw filters get them too.
+                let f = filtered_page(&state, id, obj(t, "customers"), raw("id = 1"))
+                    .await
+                    .unwrap();
+                assert_eq!(f.row_versions.as_ref().map(Vec::len), Some(1), "{t:?}");
+                assert_eq!(f.row_versions.unwrap()[0], versions[0], "{t:?}");
+            }
+            DbKind::MySql => assert_eq!(p.row_versions, None, "{t:?}"),
+        }
+        // A view is not editable: no versions.
+        let v = page(&state, id, view(t, "v_customer_orders"), 10, 0, None)
+            .await
+            .unwrap();
+        assert_eq!(v.row_versions, None, "{t:?}");
+        assert!(v.hidden_key.is_empty(), "{t:?}");
+        close_connection_impl(&state, id).await.unwrap();
+    }
+}
+
+/// A MySQL `INVISIBLE` primary key is selected explicitly and returned apart from the
+/// columns (MySQL >= 8.0.23).
+#[tokio::test]
+async fn invisible_key_column_is_selected_explicitly() {
+    require_db!();
+    let t = Target::MySql8;
+    let version = admin_one(t, "SELECT VERSION()").await.unwrap();
+    let version = text(&version[0][0]).to_string();
+    let parts: Vec<u32> = version
+        .split(['.', '-'])
+        .take(3)
+        .map(|p| p.parse().unwrap_or(0))
+        .collect();
+    if (parts[0], parts[1], parts[2]) < (8, 0, 23) {
+        println!("{t:?}: skipped, {version} has no invisible columns");
+        return;
+    }
+    let name = format!("p3_inv_{}", uuid8());
+    let table = scratch(t, &name);
+    admin(
+        t,
+        &format!(
+            "CREATE TABLE {table} (id INT NOT NULL AUTO_INCREMENT INVISIBLE PRIMARY KEY, \
+             label VARCHAR(20)) ENGINE=InnoDB"
+        ),
+    )
+    .await;
+    admin(
+        t,
+        &format!("INSERT INTO {table} (label) VALUES ('a'), ('b')"),
+    )
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path());
+    let id = open(&state, t, false).await;
+    let p = page(&state, id, obj(t, &name), 10, 0, None).await.unwrap();
+    let names: Vec<&str> = p.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["label"]);
+    assert_eq!(text(&p.rows[0][0]), "a");
+    let hidden: Vec<&str> = p.hidden_key.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(hidden, ["id"]);
+    let keys: Vec<i64> = p.hidden_key_values.iter().map(|r| int(&r[0])).collect();
+    assert_eq!(keys, [1, 2]);
+    assert_eq!(p.row_versions, None);
+    // A raw filter may name the invisible column.
+    let f = filtered_page(&state, id, obj(t, &name), raw("id = 2"))
+        .await
+        .unwrap();
+    assert_eq!(text(&f.rows[0][0]), "b");
+    assert_eq!(int(&f.hidden_key_values[0][0]), 2);
+    close_connection_impl(&state, id).await.unwrap();
+    admin(t, &format!("DROP TABLE {table}")).await;
+}
+
+/// `data_editable`: tables with a key are editable; views, tables without a key and
+/// read-only connections say why not.
+#[tokio::test]
+async fn data_editable_reports_reasons() {
+    require_db!();
+    for t in Target::all() {
+        let nokey = format!("p3_nokey_{}", uuid8());
+        admin(t, &format!("CREATE TABLE {} (n INT)", scratch(t, &nokey))).await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t, false).await;
+
+        let ok = data_editable_impl(&state, id, obj(t, "customers"))
+            .await
+            .unwrap();
+        assert!(ok.editable, "{t:?}: {ok:?}");
+        assert_eq!(ok.reason, None, "{t:?}");
+        assert_eq!(ok.key, ["id"], "{t:?}");
+        assert!(ok.editable_columns.iter().all(|c| c != "id"), "{t:?}");
+        assert!(!ok.editable_columns.is_empty(), "{t:?}");
+        match t.kind() {
+            DbKind::Postgres => {
+                assert_eq!(ok.atomic, Atomicity::Yes, "{t:?}");
+                assert_eq!(ok.protection, ProtectionKind::RowVersion, "{t:?}");
+            }
+            DbKind::MySql => assert_eq!(ok.protection, ProtectionKind::Snapshot, "{t:?}"),
+        }
+
+        let v = data_editable_impl(&state, id, view(t, "v_customer_orders"))
+            .await
+            .unwrap();
+        assert!(!v.editable, "{t:?}");
+        assert_eq!(v.reason.as_deref(), Some("not_a_table"), "{t:?}");
+
+        let n = data_editable_impl(&state, id, obj(t, &nokey))
+            .await
+            .unwrap();
+        assert!(!n.editable, "{t:?}");
+        assert_eq!(n.reason.as_deref(), Some("no_key"), "{t:?}");
+        assert!(n.key.is_empty(), "{t:?}");
+        close_connection_impl(&state, id).await.unwrap();
+
+        let ro = open(&state, t, true).await;
+        let r = data_editable_impl(&state, ro, obj(t, "customers"))
+            .await
+            .unwrap();
+        assert!(!r.editable, "{t:?}");
+        assert_eq!(r.reason.as_deref(), Some("read_only_connection"), "{t:?}");
+        close_connection_impl(&state, ro).await.unwrap();
+        admin(t, &format!("DROP TABLE {}", scratch(t, &nokey))).await;
     }
 }
 

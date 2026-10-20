@@ -85,6 +85,7 @@ fn and(conditions: Vec<FilterCond>) -> Option<DataFilter> {
     Some(DataFilter {
         mode: FilterMode::And,
         conditions,
+        raw_where: None,
     })
 }
 
@@ -255,6 +256,7 @@ async fn filters_sort_and_count_on_every_target() {
                         cond("id", FilterOp::Eq, &["1"]),
                         cond("id", FilterOp::Eq, &["3"]),
                     ],
+                    raw_where: None,
                 })
             )
             .await,

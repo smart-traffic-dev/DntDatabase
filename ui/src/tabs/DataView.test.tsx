@@ -47,8 +47,12 @@ function page(n: number, from = 1, hasMore = false, over: Partial<TableDataPage>
     rows: Array.from({ length: n }, (_, i) => [int(from + i), int(0), { t: 'Json', v: '{}' }]),
     has_more: hasMore,
     truncated_cells: 0,
+    truncated: [],
     size_capped: false,
     key_order: [],
+    row_versions: null,
+    hidden_key: [],
+    hidden_key_values: [],
     elapsed_ms: 2,
     ...over,
   };

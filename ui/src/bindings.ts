@@ -439,6 +439,18 @@ async tableDataCancel(id: string, requestKey: string) : Promise<Result<boolean, 
 }
 },
 /**
+ * Whether the data view may edit `obj` (a table / view of the data view), and how:
+ * its key, the columns an UPDATE may set, atomicity and row-guard kind.
+ */
+async dataEditable(id: string, obj: ObjectRef) : Promise<Result<EditableInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_editable", { id, obj }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Writes rows the UI holds (the loaded rows) to `path`. `kind`: the engine whose
  * quoting the SQL format uses.
  */
@@ -718,6 +730,10 @@ outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_o
  * the query layer; `None` from `From<DbError>`.
  */
 tx_state: string | null }
+/**
+ * Whether a set of edits can be applied all-or-nothing (spec §4.2a).
+ */
+export type Atomicity = "Yes" | "No" | "Unknown"
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -775,12 +791,37 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
  */
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
 /**
- * The data view's filter: conditions joined with `AND` or `OR`.
+ * The data view's filter: conditions joined with `AND` or `OR`, or (raw mode) the
+ * user's own `WHERE` text.
  */
-export type DataFilter = { mode: FilterMode; conditions: FilterCond[] }
+export type DataFilter = { mode: FilterMode; conditions: FilterCond[]; 
+/**
+ * Raw mode: a `WHERE` condition typed by the user. `conditions` must then be empty
+ * and `mode` is ignored. It is checked with
+ * [`crate::sql::build::check_raw_where`] and run inside a read-only transaction; it
+ * never goes through [`build_where`]. Absent / null: structured mode.
+ */
+raw_where?: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
+/**
+ * Whether the data view may edit an object, and how (`data_editable`).
+ */
+export type EditableInfo = { editable: boolean; 
+/**
+ * Why not, when not editable: `read_only_connection`, `not_a_table`, `no_key` or
+ * `unsupported:<detail>` (machine-readable; the UI words it).
+ */
+reason: string | null; 
+/**
+ * The columns that identify a row (empty when not editable).
+ */
+key: string[]; 
+/**
+ * Columns an UPDATE may set (empty when not editable).
+ */
+editable_columns: string[]; atomic: Atomicity; protection: ProtectionKind }
 export type EnvTag = "production" | "staging" | "local"
 export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
 /**
@@ -993,6 +1034,11 @@ export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialec
  * The tab session's transaction state when the plan was made.
  */
 tx_state: TxState }
+/**
+ * How a server reports a concurrent change to a row: PostgreSQL `xmin`, MySQL a
+ * snapshot of the row's values.
+ */
+export type ProtectionKind = "RowVersion" | "Snapshot"
 export type QueryTabRecord = { id: string; title: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -1179,6 +1225,10 @@ has_more: boolean;
  */
 truncated_cells: number; 
 /**
+ * Where those cells are: `[row, column]` indexes into `rows`.
+ */
+truncated: ([number, number])[]; 
+/**
  * The page reached its byte budget: rows were left for the next page.
  */
 size_capped: boolean; 
@@ -1186,7 +1236,21 @@ size_capped: boolean;
  * Without an explicit sort: the primary key columns the page is ordered by (stable
  * paging); empty when there is no primary key or a sort was given.
  */
-key_order: string[]; elapsed_ms: number }
+key_order: string[]; 
+/**
+ * PostgreSQL tables the data view may edit: each row's `xmin`, in row order (the
+ * row version an edit is guarded with). Null otherwise.
+ */
+row_versions: string[] | null; 
+/**
+ * Key columns a `SELECT *` does not return (MySQL `INVISIBLE`), read explicitly;
+ * not part of `columns`.
+ */
+hidden_key: ColumnMeta[]; 
+/**
+ * Their values, one entry per row of `rows` (empty without `hidden_key`).
+ */
+hidden_key_values: Value[][]; elapsed_ms: number }
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.
