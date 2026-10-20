@@ -30,4 +30,14 @@ describe('selectTopSql', () => {
   it('keeps non-ASCII names', () => {
     expect(selectTopSql(table('khách_hàng', 'cửa_hàng', null), 'mysql')).toBe('SELECT * FROM `cửa_hàng`.`khách_hàng` LIMIT 1000;');
   });
+
+  it('takes a limit, offset and quoted ORDER BY column', () => {
+    expect(selectTopSql(table('orders', 'shop', null), 'mysql', { limit: 100 })).toBe('SELECT * FROM `shop`.`orders` LIMIT 100;');
+    expect(
+      selectTopSql(table('đơn_hàng', 'shop', 'public'), 'postgres', { limit: 50, offset: 100, orderBy: { column: 'we"ird', dir: 'desc' } }),
+    ).toBe('SELECT * FROM "public"."đơn_hàng" ORDER BY "we""ird" DESC LIMIT 50 OFFSET 100;');
+    expect(selectTopSql(table('t', 'shop', null), 'mysql', { limit: 10, offset: 0, orderBy: { column: 'a`b', dir: 'asc' } })).toBe(
+      'SELECT * FROM `shop`.`t` ORDER BY `a``b` ASC LIMIT 10;',
+    );
+  });
 });

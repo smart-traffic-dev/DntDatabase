@@ -203,6 +203,7 @@ describe('DialogHost', () => {
         level = a.level as string;
         return null;
       },
+      get_table_page_size: () => 100,
     });
     useDialogs.getState().requestDialog({ kind: 'settings' });
     const user = userEvent.setup();
@@ -215,6 +216,34 @@ describe('DialogHost', () => {
     expect(box).toBeChecked();
     await user.click(screen.getByRole('button', { name: 'Close' }));
     expect(useDialogs.getState().request).toBeNull();
+  });
+
+  it('settings shows and saves the table data page size', async () => {
+    let size = 100;
+    mockBackend({
+      get_log_level: () => 'Info',
+      get_table_page_size: () => size,
+      set_table_page_size: (a) => {
+        size = a.size as number;
+        return null;
+      },
+    });
+    useDialogs.getState().requestDialog({ kind: 'settings' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    const input = await screen.findByRole('spinbutton', { name: 'Table data page size' });
+    await waitFor(() => expect(input).toHaveValue(100));
+    // Out of range: refused with a message, nothing saved.
+    await user.clear(input);
+    await user.type(input, '5{Enter}');
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter a whole number from 10 to 10,000.');
+    expect(callsOf('set_table_page_size')).toEqual([]);
+    await user.clear(input);
+    await user.type(input, '250{Enter}');
+    await waitFor(() => expect(callsOf('set_table_page_size')).toEqual([{ size: 250 }]));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    const { useAppSettings } = await import('../store/appSettings');
+    expect(useAppSettings.getState().tablePageSize).toBe(250);
   });
 
   it('deleting a connection closes its tabs', async () => {

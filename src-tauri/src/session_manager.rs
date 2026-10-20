@@ -11,6 +11,7 @@
 
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use crate::commands::browse::folder_key;
+use crate::data_sessions::DataSessions;
 use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
@@ -293,7 +294,7 @@ fn ask_for_missing_key_passphrase(e: DbError) -> DbError {
 }
 
 /// Errors after which the metadata session (and tunnel) is worth reopening once.
-fn is_lost(e: &DbError) -> bool {
+pub(crate) fn is_lost(e: &DbError) -> bool {
     matches!(e, DbError::ConnectionLost { .. } | DbError::Connect { .. })
 }
 
@@ -323,6 +324,10 @@ pub struct SessionManager {
     pub(crate) runs: Runs,
     /// `ExecOptions::cancel_grace` of query runs.
     pub(crate) cancel_grace: Duration,
+    /// Table data requests (see `data_sessions`).
+    pub(crate) data_timeout: Duration,
+    pub(crate) data_cell_cap: usize,
+    pub(crate) data_page_cap: usize,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -363,6 +368,9 @@ impl SessionManager {
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
             cancel_grace: DEFAULT_CANCEL_GRACE,
+            data_timeout: crate::data_sessions::DATA_READ_TIMEOUT,
+            data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,
+            data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
         }
     }
 
@@ -946,6 +954,8 @@ pub struct ConnectionRuntime {
     schema_tasks: Mutex<Vec<JoinHandle<()>>>,
     /// The query tabs on this connection, each with its own session.
     pub(crate) queries: QuerySessions,
+    /// Sessions of the table data view.
+    pub(crate) data: DataSessions,
 }
 
 impl ConnectionRuntime {
@@ -988,6 +998,7 @@ impl ConnectionRuntime {
             state: Mutex::new(ConnState::Connected),
             schema_tasks: Mutex::new(Vec::new()),
             queries: QuerySessions::default(),
+            data: DataSessions::default(),
             cfg,
         }
     }
@@ -1159,6 +1170,7 @@ impl ConnectionRuntime {
                 .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
         )
         .await;
+        self.data.shutdown().await;
         match tokio::time::timeout(SHUTDOWN_LOCK_TIMEOUT, self.link.lock()).await {
             Ok(mut link) => {
                 link.closed = true;

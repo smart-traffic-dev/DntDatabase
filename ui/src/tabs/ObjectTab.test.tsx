@@ -7,6 +7,8 @@ import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { backendError, callsOf, config, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
+import { useObjectData } from '../store/objectData';
+import { openObjectTab } from '../components/openObject';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -49,14 +51,21 @@ function detail(over: Partial<TableDetail> = {}): TableDetail {
 
 const DDL = 'CREATE TABLE `orders` (\n  `id` bigint NOT NULL\n)';
 
-function setup(tab: Tab, handlers: Record<string, (a: Record<string, unknown>) => unknown> = {}) {
+/**
+ * Renders the tab. Tables and views open on Data; these tests start them on Info unless
+ * `onData` (the Data view has its own tests, in DataView.test.tsx).
+ */
+function setup(tab: Tab, handlers: Record<string, (a: Record<string, unknown>) => unknown> = {}, onData = false) {
   mockBackend({
     table_detail: () => detail(),
     object_ddl: () => DDL,
     refresh_node: () => null,
+    get_table_page_size: () => 100,
+    table_data: () => ({ columns: [], rows: [], has_more: false, truncated_cells: 0, size_capped: false, key_order: [], elapsed_ms: 1 }),
     ...handlers,
   });
   useTabs.getState().open(tab);
+  if (!onData && tab.objectRef.kind !== 'Function') useObjectData.getState().setSub(tab.id, 'info');
   return render(<ObjectTab tab={tab} />);
 }
 
@@ -69,7 +78,7 @@ describe('ObjectTab', () => {
     const user = userEvent.setup();
     setup(makeTab('Table'));
     const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
-    expect(tabs).toEqual(['Info', 'DDL', 'Structure']);
+    expect(tabs).toEqual(['Data', 'Info', 'DDL', 'Structure']);
     expect(screen.getByRole('tab', { name: 'Info' })).toHaveAttribute('aria-selected', 'true');
 
     expect(await screen.findByText('Customer orders')).toBeInTheDocument();
@@ -100,9 +109,37 @@ describe('ObjectTab', () => {
     expect(callsOf('table_detail')).toHaveLength(1);
   });
 
-  it('materialized_view_has_three_subtabs', () => {
+  it('materialized_view_has_data_and_three_subtabs', () => {
     setup(makeTab('MaterializedView', 'mv_sales', 'public'));
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Info', 'DDL', 'Structure']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Data', 'Info', 'DDL', 'Structure']);
+  });
+
+  it.each(['Table', 'View', 'MaterializedView'] as const)('%s_opened_from_the_tree_shows_data_first', async (kind) => {
+    mockBackend({
+      table_detail: () => detail({ row_estimate: 12345 }),
+      get_table_page_size: () => 250,
+      table_data: () => ({
+        columns: [{ name: 'id', db_type: 'int', logical: 'Integer', nullable: false, origin_table: null, origin_column: null }],
+        rows: [[{ t: 'Int', v: 1 }]],
+        has_more: false,
+        truncated_cells: 0,
+        size_capped: false,
+        key_order: [],
+        elapsed_ms: 3,
+      }),
+    });
+    const objectRef = ref(kind, 'orders', kind === 'Table' ? null : 'public');
+    // What the tree's double-click (and Enter / "Open") does.
+    openObjectTab({ id: `conn:${ids.prod}/db:shop/obj`, kind: 'object', label: 'orders', objectRef });
+    const tab = useTabs.getState().tabs.at(-1) as Tab;
+    render(<ObjectTab tab={tab} />);
+    expect(screen.getAllByRole('tab')[0]).toHaveTextContent('Data');
+    expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByText('Rows 1–1')).toBeInTheDocument();
+    // The Settings default is the page size.
+    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 250, offset: 0, order: null, requestKey: `${tab.id}:page` }]);
+    // The detail's row estimate is shown next to the page.
+    expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
   });
 
   it('view_has_info_ddl_and_structure', async () => {
@@ -121,7 +158,7 @@ describe('ObjectTab', () => {
       comment: null,
     });
     setup(makeTab('View', 'v_open'), { table_detail: () => view });
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Info', 'DDL', 'Structure']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Data', 'Info', 'DDL', 'Structure']);
     // Info of a view lists what a view has (columns, comment), not a column of dashes.
     const cols = await screen.findByText('Columns');
     expect(cols.closest('.ot-info-row')).toHaveTextContent(String(view.columns.length));
@@ -308,7 +345,7 @@ describe('ObjectTab', () => {
     await user.keyboard('{End}');
     expect(screen.getByRole('tab', { name: 'Structure' })).toHaveFocus();
     await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Info' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
     await user.keyboard('{ArrowLeft}');
     expect(screen.getByRole('tab', { name: 'Structure' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tabpanel')).toHaveAccessibleName('Structure');

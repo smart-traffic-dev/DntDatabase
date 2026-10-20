@@ -8,6 +8,7 @@
 
 pub mod browse;
 pub mod connections;
+pub mod data;
 pub mod query;
 pub mod settings;
 pub mod transfer;
@@ -141,6 +142,11 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::get_log_level,
             settings::set_log_level,
             settings::open_log_folder,
+            settings::get_table_page_size,
+            settings::set_table_page_size,
+            data::table_data,
+            data::table_row_count,
+            data::table_data_cancel,
             workspace::tabs_load,
             workspace::tabs_save,
             workspace::tabs_delete,

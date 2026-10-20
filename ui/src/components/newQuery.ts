@@ -30,17 +30,28 @@ export function quoteIdent(kind: 'mysql' | 'postgres', name: string): string {
   return kind === 'postgres' ? `"${name.replaceAll('"', '""')}"` : `\`${name.replaceAll('`', '``')}\``;
 }
 
+export interface SelectOptions {
+  /** Default 1000. */
+  limit?: number;
+  /** Rows to skip (`OFFSET`); omitted when 0. */
+  offset?: number;
+  orderBy?: { column: string; dir: 'asc' | 'desc' } | null;
+}
+
 /**
  * `SELECT * ... LIMIT 1000` of a table or view, identifiers quoted for the connection's engine.
- * The one helper for this SQL: the tree's "Select top 1000" and the object tab's Query button.
+ * The one helper for this SQL: the tree's "Select top 1000", the object tab's Query button and
+ * the data view's "Open in query" (which passes its page size, offset and sort).
  */
-export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 'postgres'): string {
+export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 'postgres', opts: SelectOptions = {}): string {
   const ref = target.objectRef;
   if (!ref) return '';
   // PostgreSQL addresses a table by schema (a connection is one database); MySQL by database.
   const qualifier = kind === 'postgres' ? ref.schema : ref.database;
   const table = qualifier ? `${quoteIdent(kind, qualifier)}.${quoteIdent(kind, ref.name)}` : quoteIdent(kind, ref.name);
-  return `SELECT * FROM ${table} LIMIT 1000;`;
+  const order = opts.orderBy ? ` ORDER BY ${quoteIdent(kind, opts.orderBy.column)} ${opts.orderBy.dir === 'desc' ? 'DESC' : 'ASC'}` : '';
+  const offset = opts.offset ? ` OFFSET ${Math.trunc(opts.offset)}` : '';
+  return `SELECT * FROM ${table}${order} LIMIT ${Math.trunc(opts.limit ?? 1000)}${offset};`;
 }
 
 /** Opens a new query tab on a table / view node, with its first 1000 rows selected. */

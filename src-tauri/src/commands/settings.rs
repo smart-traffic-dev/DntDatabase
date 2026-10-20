@@ -63,6 +63,59 @@ pub async fn set_log_level(
     guard(set_log_level_impl(&state, &log, level)).await
 }
 
+/// `app_settings` key of the table data view's default page size.
+pub const TABLE_PAGE_SIZE_KEY: &str = "table_page_size";
+pub const DEFAULT_TABLE_PAGE_SIZE: u32 = 100;
+pub const MIN_TABLE_PAGE_SIZE: u32 = 10;
+pub const MAX_TABLE_PAGE_SIZE: u32 = 10_000;
+
+/// The stored page size; the default when none is stored, it is out of range or it
+/// cannot be read.
+pub fn saved_table_page_size(repo: &ConnectionRepo) -> u32 {
+    match repo.app_setting(TABLE_PAGE_SIZE_KEY) {
+        Ok(Some(v)) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (MIN_TABLE_PAGE_SIZE..=MAX_TABLE_PAGE_SIZE).contains(n))
+            .unwrap_or(DEFAULT_TABLE_PAGE_SIZE),
+        Ok(None) => DEFAULT_TABLE_PAGE_SIZE,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the saved table page size");
+            DEFAULT_TABLE_PAGE_SIZE
+        }
+    }
+}
+
+pub async fn get_table_page_size_impl(state: &AppState) -> Result<u32, DbError> {
+    let repo = Arc::clone(&state.repo);
+    blocking(move || Ok(saved_table_page_size(&repo))).await
+}
+
+pub async fn set_table_page_size_impl(state: &AppState, size: u32) -> Result<(), DbError> {
+    if !(MIN_TABLE_PAGE_SIZE..=MAX_TABLE_PAGE_SIZE).contains(&size) {
+        return Err(DbError::Config {
+            field: Some("size".into()),
+            message: format!(
+                "the page size must be between {MIN_TABLE_PAGE_SIZE} and {MAX_TABLE_PAGE_SIZE}"
+            ),
+        });
+    }
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.set_app_setting(TABLE_PAGE_SIZE_KEY, &size.to_string())).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn get_table_page_size(state: State<'_, AppState>) -> Result<u32, AppError> {
+    guard(get_table_page_size_impl(&state)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn set_table_page_size(state: State<'_, AppState>, size: u32) -> Result<(), AppError> {
+    guard(set_table_page_size_impl(&state, size)).await
+}
+
 /// Opens the log folder in the system file manager.
 #[tauri::command]
 #[specta::specta]

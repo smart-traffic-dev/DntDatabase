@@ -135,8 +135,23 @@ export function selectionCells(
   return rows;
 }
 
-/** Result of one statement in a Glide grid; cells are read straight from the chunks. */
-export function ResultGrid({ result }: { result: ResultSet }) {
+/**
+ * Result of one statement in a Glide grid; cells are read straight from the chunks.
+ * Optional (the data view): `onHeaderClicked` gets the clicked column's index,
+ * `headerMarks` draws a mark (a sort arrow) at the right of a column's header, and
+ * `firstRowNumber` is the number of the first row marker.
+ */
+export function ResultGrid({
+  result,
+  onHeaderClicked,
+  headerMarks,
+  firstRowNumber,
+}: {
+  result: ResultSet;
+  onHeaderClicked?: (column: number) => void;
+  headerMarks?: Record<number, string>;
+  firstRowNumber?: number;
+}) {
   const themeVersion = useThemeVersion();
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
   const { theme, nullStyle } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
@@ -221,9 +236,16 @@ export function ResultGrid({ result }: { result: ResultSet }) {
       ctx.fillStyle = t.textMedium;
       ctx.font = `${t.markerFontStyle} ${t.fontFamily}`;
       ctx.fillText(meta.db_type, rect.x + 8, rect.y + rect.height / 2 + 9);
+      const mark = headerMarks?.[columnIndex];
+      if (mark) {
+        ctx.fillStyle = t.textHeader;
+        ctx.font = `600 12px ${t.fontFamily}`;
+        ctx.textAlign = 'right';
+        ctx.fillText(mark, rect.x + rect.width - 8, rect.y + rect.height / 2 - 8);
+      }
       ctx.restore();
     },
-    [result.columns],
+    [result.columns, headerMarks],
   );
 
   return (
@@ -241,12 +263,13 @@ export function ResultGrid({ result }: { result: ResultSet }) {
         drawHeader={drawHeader}
         rowHeight={ROW_HEIGHT}
         headerHeight={HEADER_HEIGHT}
-        rowMarkers="number"
+        rowMarkers={firstRowNumber === undefined ? 'number' : { kind: 'number', startIndex: firstRowNumber }}
         rangeSelect="rect"
         theme={theme}
         smoothScrollX
         smoothScrollY
         onColumnResize={onColumnResize}
+        onHeaderClicked={onHeaderClicked ? (column) => onHeaderClicked(column) : undefined}
         minColumnWidth={MIN_COL_WIDTH}
         maxColumnWidth={2000}
         width={size?.w ?? '100%'}
