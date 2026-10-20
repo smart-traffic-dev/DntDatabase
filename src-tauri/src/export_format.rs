@@ -1556,8 +1556,8 @@ mod tests {
             let target = Target::new(path.to_str().unwrap()).unwrap();
             std::fs::write(&target.part, b"someone else's").unwrap();
             let rows = vec![vec![Value::Int(1)]];
-            let err = write_rows(&opts(format), DbKind::MySql, &target, &[col("a")], &rows)
-                .unwrap_err();
+            let err =
+                write_rows(&opts(format), DbKind::MySql, &target, &[col("a")], &rows).unwrap_err();
             assert!(
                 matches!(&err, DbError::Config { message, .. } if message.contains(".dntpart")),
                 "{format:?}: {err:?}"
@@ -1590,7 +1590,10 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
-        assert!(target.part.symlink_metadata().is_ok(), "the link is left alone");
+        assert!(
+            target.part.symlink_metadata().is_ok(),
+            "the link is left alone"
+        );
     }
 
     #[cfg(windows)]
@@ -1616,7 +1619,10 @@ mod tests {
         )
         .is_err());
         assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
-        assert!(target.part.symlink_metadata().is_ok(), "the link is left alone");
+        assert!(
+            target.part.symlink_metadata().is_ok(),
+            "the link is left alone"
+        );
     }
 
     #[test]

@@ -871,18 +871,29 @@ async fn replaced_tunnel_with_open_tx_drops_it_for_runs_and_exports() {
                 .unwrap_err()
         } else {
             let (emit, _events) = collector();
-            let err = f.sm.query_run(view.plan_id, false, opts(), emit)
-                .await
-                .unwrap_err();
+            let err =
+                f.sm.query_run(view.plan_id, false, opts(), emit)
+                    .await
+                    .unwrap_err();
             let state = tx_state_after(&err);
             (err, state)
         };
         assert!(
-            matches!(&err, DbError::ConnectionLost { was_in_tx: true, .. }),
+            matches!(
+                &err,
+                DbError::ConnectionLost {
+                    was_in_tx: true,
+                    ..
+                }
+            ),
             "{export_it}: {err:?}"
         );
         assert_eq!(state, Some(TxState::Idle), "{export_it}");
-        assert_eq!(f.log.closes(), 1, "{export_it}: the stale session is closed");
+        assert_eq!(
+            f.log.closes(),
+            1,
+            "{export_it}: the stale session is closed"
+        );
         f.log.set_tx(TxState::Idle);
         let err =
             f.sm.query_tx_reported("t1", TxAction::Commit)
@@ -890,7 +901,10 @@ async fn replaced_tunnel_with_open_tx_drops_it_for_runs_and_exports() {
                 .unwrap_err();
         assert_eq!(err.kind, "connection_lost", "{export_it}");
         assert_eq!(err.tx_state.as_deref(), Some("idle"), "{export_it}");
-        assert!(!f.log.executed().iter().any(|s| s == "COMMIT"), "{export_it}");
+        assert!(
+            !f.log.executed().iter().any(|s| s == "COMMIT"),
+            "{export_it}"
+        );
         // Nothing of the plan was sent.
         assert!(f.log.executed().is_empty(), "{export_it}");
     }
@@ -2137,9 +2151,7 @@ async fn an_export_refuses_a_run_id_in_use() {
     let mut b = ExportRows::default();
     let (first, ()) = tokio::join!(export(&f, slow.plan_id, run_id, &mut a), async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let (err, state) = export(&f, other.plan_id, run_id, &mut b)
-            .await
-            .unwrap_err();
+        let (err, state) = export(&f, other.plan_id, run_id, &mut b).await.unwrap_err();
         assert!(
             matches!(&err, DbError::Config { field: Some(f), .. } if f == "run_id"),
             "{err:?}"
