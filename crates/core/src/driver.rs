@@ -57,6 +57,14 @@ pub struct ExecOptions {
     /// running statement raises it too, and it stays raised, so a later run needs a
     /// fresh signal.
     pub stop: StopSignal,
+    /// Values bound to the statement's placeholders (`?` on MySQL, `$1…` on
+    /// PostgreSQL), in order, each sent as text: MySQL converts it like a string
+    /// literal, PostgreSQL parses it with the input function of the type it infers for
+    /// the placeholder (so `"col" = $1` reads the text as the column's type). Empty:
+    /// the statement runs unprepared, as before (the user's SQL never has params).
+    pub params: Vec<String>,
+    /// `Value::Bytes` carries every byte in `preview` instead of the first 64 (export).
+    pub full_bytes: bool,
 }
 
 impl Default for ExecOptions {
@@ -67,6 +75,8 @@ impl Default for ExecOptions {
             timeout: None,
             cancel_grace: DEFAULT_CANCEL_GRACE,
             stop: StopSignal::new(),
+            params: Vec::new(),
+            full_bytes: false,
         }
     }
 }

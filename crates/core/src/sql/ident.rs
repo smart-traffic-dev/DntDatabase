@@ -38,6 +38,19 @@ pub fn select_page_sql(
     limit: u64,
     offset: u64,
 ) -> String {
+    select_sql(kind, relation, "", order, Some((limit, offset)))
+}
+
+/// `SELECT * FROM <relation><where_sql> [ORDER BY …] [LIMIT <limit> OFFSET <offset>]`.
+/// `where_sql` must come from [`crate::sql::filter::build_where`] (empty or
+/// ` WHERE …` with placeholders only); `order` as in [`select_page_sql`].
+pub fn select_sql(
+    kind: DbKind,
+    relation: &str,
+    where_sql: &str,
+    order: &[(&str, bool)],
+    page: Option<(u64, u64)>,
+) -> String {
     let order = if order.is_empty() {
         String::new()
     } else {
@@ -53,12 +66,21 @@ pub fn select_page_sql(
             .collect();
         format!(" ORDER BY {}", keys.join(", "))
     };
-    format!("SELECT * FROM {relation}{order} LIMIT {limit} OFFSET {offset}")
+    let page = match page {
+        Some((limit, offset)) => format!(" LIMIT {limit} OFFSET {offset}"),
+        None => String::new(),
+    };
+    format!("SELECT * FROM {relation}{where_sql}{order}{page}")
 }
 
 /// `SELECT COUNT(*) FROM <relation>`.
 pub fn count_sql(relation: &str) -> String {
-    format!("SELECT COUNT(*) FROM {relation}")
+    count_where_sql(relation, "")
+}
+
+/// `SELECT COUNT(*) FROM <relation><where_sql>` (`where_sql` as in [`select_sql`]).
+pub fn count_where_sql(relation: &str, where_sql: &str) -> String {
+    format!("SELECT COUNT(*) FROM {relation}{where_sql}")
 }
 
 #[cfg(test)]
@@ -119,6 +141,29 @@ mod tests {
         assert_eq!(
             count_sql(&rel),
             "SELECT COUNT(*) FROM \"public\".\"đơn_hàng\""
+        );
+    }
+
+    #[test]
+    fn select_with_where_and_without_a_page() {
+        let rel = qualified_name(DbKind::Postgres, "shop", Some("public"), "t");
+        assert_eq!(
+            select_sql(
+                DbKind::Postgres,
+                &rel,
+                " WHERE (\"a\" = $1)",
+                &[("a", false)],
+                None
+            ),
+            "SELECT * FROM \"public\".\"t\" WHERE (\"a\" = $1) ORDER BY \"a\" DESC"
+        );
+        assert_eq!(
+            select_sql(DbKind::MySql, "`t`", " WHERE (`a` = ?)", &[], Some((5, 10))),
+            "SELECT * FROM `t` WHERE (`a` = ?) LIMIT 5 OFFSET 10"
+        );
+        assert_eq!(
+            count_where_sql("`t`", " WHERE (`a` IS NULL)"),
+            "SELECT COUNT(*) FROM `t` WHERE (`a` IS NULL)"
         );
     }
 }

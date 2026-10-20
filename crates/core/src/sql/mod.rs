@@ -2,6 +2,7 @@
 
 mod classify;
 mod effect;
+pub mod filter;
 pub mod ident;
 mod lexer;
 mod multi;
