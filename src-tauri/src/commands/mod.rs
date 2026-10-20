@@ -144,6 +144,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::open_log_folder,
             settings::get_table_page_size,
             settings::set_table_page_size,
+            settings::get_confirm_unbounded_writes,
+            settings::set_confirm_unbounded_writes,
             data::table_data,
             data::table_row_count,
             data::table_data_cancel,

@@ -377,6 +377,29 @@ async setTablePageSize(size: number) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * "Confirm UPDATE/DELETE without WHERE" for non-Production connections.
+ */
+async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_confirm_unbounded_writes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production
+ * connections confirm unbounded writes whatever it is.
+ */
+async setConfirmUnboundedWrites(enabled: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_confirm_unbounded_writes", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async tableData(id: string, obj: ObjectRef, limit: number, offset: number, order: SortSpec | null, requestKey: string) : Promise<Result<TableDataPage, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("table_data", { id, obj, limit, offset, order, requestKey }) };
@@ -645,7 +668,14 @@ range: [number, number]; kind: StmtKindLabel; verdict: Verdict;
 /**
  * The first [`PREVIEW_CHARS`] characters, line breaks turned into spaces.
  */
-preview: string }
+preview: string; 
+/**
+ * What of the statement changes every row of a table (`UPDATE`/`DELETE` without
+ * WHERE, `TRUNCATE`, …), whatever the verdict; empty for most statements. The
+ * guard makes such a statement Confirm (see `dnt_query::guard`). Always sent;
+ * optional in the bindings so older fixtures stay valid.
+ */
+unbounded?: UnboundedWrite[] }
 /**
  * A normalized explain result. `raw` is the engine's original output.
  */
@@ -874,12 +904,41 @@ export type TxState =
  * rejects everything but `ROLLBACK [TO SAVEPOINT]` / `COMMIT` until it ends.
  */
 "aborted"
+/**
+ * Why it changes every row.
+ */
+export type UnboundedReason = 
+/**
+ * No WHERE at depth 0.
+ */
+"no_where" | 
+/**
+ * A trivially-true WHERE (`WHERE 1`, `1=1`, `true`, `'a'='a'`).
+ */
+"always_true" | 
+/**
+ * `TRUNCATE` has no WHERE at all.
+ */
+"truncate"
+/**
+ * One unbounded write of a statement.
+ */
+export type UnboundedWrite = { op: WriteOp; reason: UnboundedReason; 
+/**
+ * The target table(s) as written (quotes kept), comma-separated; empty when the
+ * statement names none.
+ */
+table: string }
 export type Value = { t: "Null" } | { t: "Bool"; v: boolean } | { t: "Int"; v: JsInteger } | { t: "UInt"; v: JsInteger } | { t: "Float"; v: number } | { t: "Decimal"; v: string } | { t: "Text"; v: string } | { t: "Json"; v: string } | { t: "Uuid"; v: string } | { t: "Bytes"; v: { 
 /**
  * A byte length; far below 2^53 in practice, so a plain number.
  */
 len: number; preview: number[] } } | { t: "Date"; v: string } | { t: "Time"; v: string } | { t: "DateTime"; v: string } | { t: "TimestampTz"; v: string } | { t: "Array"; v: Value[] } | { t: "Other"; v: { type_name: string; text: string } }
 export type Verdict = "allow" | "confirm" | "block"
+/**
+ * The statement that changes every row.
+ */
+export type WriteOp = "update" | "delete" | "truncate"
 
 /** tauri-specta globals **/
 
