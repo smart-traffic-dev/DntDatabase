@@ -50,6 +50,8 @@ export type Question =
       done(closed: boolean): void;
     }
   | { kind: 'discard'; file: string; done(discard: boolean): void }
+  /** Leaving a data view (closing its tab, changing page or filter) that has staged changes. */
+  | { kind: 'discardEdits'; count: number; done(discard: boolean): void }
   /** Closing a tab whose query is still running: closing stops it first. */
   | { kind: 'stopRun'; title: string; done(close: boolean): void }
   /** Quitting while `count` tabs could not be saved. */

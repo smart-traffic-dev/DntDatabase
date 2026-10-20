@@ -5,6 +5,7 @@ import {
   GridCellKind,
   type DataEditorRef,
   type DrawHeaderCallback,
+  type EditableGridCell,
   type GridCell,
   type GridColumn,
   type GridSelection,
@@ -129,7 +130,13 @@ function useThemeVersion(): number {
   return version;
 }
 
-function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme>; font: GridFont; charPx: number } {
+function buildTheme(): {
+  theme: Partial<Theme>;
+  nullStyle: Partial<Theme>;
+  statusStyle: Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>;
+  font: GridFont;
+  charPx: number;
+} {
   const muted = cssVar('--muted', '#5a6370');
   const size = codeFontSizes();
   const family = monoFontFamily();
@@ -159,6 +166,13 @@ function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme>; font:
       headerFontStyle: `600 ${size.header}px`,
     },
     nullStyle: { textDark: muted, baseFontStyle: `italic ${size.body}px` },
+    // Staged changes: the same tokens as the `dnt-*` classes of dataEdit.css.
+    statusStyle: {
+      edited: { bgCell: cssVar('--warning-bg', '#fff4d6'), textDark: cssVar('--warning-fg', '#7a4b00') },
+      new: { bgCell: cssVar('--sel', '#e3ebfa') },
+      deleted: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
+      conflict: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
+    } satisfies Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>,
     font,
     charPx: bodyCharPx(font.body),
   };
@@ -266,6 +280,20 @@ interface Notice {
   warn: boolean;
 }
 
+/** In-place editing of the data view (absent: the grid is read-only). */
+export interface GridEditing {
+  /** Whether the cell takes typed edits (else it is read-only). */
+  isEditable(row: number, col: number): boolean;
+  /** How the cell differs from the server (painted), or null. */
+  status(row: number, col: number): 'edited' | 'new' | 'deleted' | 'conflict' | null;
+  /** A typed value was committed in a cell. */
+  onEdit(row: number, col: number, text: string): void;
+  /** Enter / double click on a cell (a read-only cell can open a viewer). */
+  onActivate?(row: number, col: number): void;
+  /** A key pressed on the grid, with the selected cell; true when it was handled. */
+  onKey?(e: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }, cell: { row: number; col: number } | null): boolean;
+}
+
 /**
  * Result of one statement in a Glide grid; cells are read straight from the chunks.
  * Optional (the data view): `onHeaderClicked` gets the clicked column's index,
@@ -285,7 +313,10 @@ export function ResultGrid({
   tableRef,
   cellsCapped = false,
   extraCellMenu,
+  editing,
 }: {
+  /** The data view's editing hooks. */
+  editing?: GridEditing;
   result: ResultSet;
   onHeaderClicked?: (column: number) => void;
   headerMarks?: Record<number, string>;
@@ -301,7 +332,7 @@ export function ResultGrid({
 }) {
   const themeVersion = useThemeVersion();
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
-  const { theme, nullStyle, font, charPx } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
+  const { theme, nullStyle, statusStyle, font, charPx } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const say = useCallback((text: string, warn: boolean) => {
@@ -355,18 +386,32 @@ export function ResultGrid({
       const view = cellView(value);
       const max = charsForWidth(widths[col] ?? MIN_COL_WIDTH, charPx);
       const clipped = view.text.length > max;
+      const status = editing?.status(row, col) ?? null;
       return {
         kind: GridCellKind.Text,
         data: view.text,
         displayData: fitCellText(view, max).replace(/\s+/g, ' '),
-        allowOverlay: true, // read-only overlay shows the full value
-        readonly: true,
+        allowOverlay: true, // a read-only overlay shows the full value
+        readonly: !(editing?.isEditable(row, col) ?? false),
         // A clipped number keeps its leading digits (left side) and gets an ellipsis.
         contentAlign: view.kind === 'number' && !clipped ? 'right' : 'left',
-        themeOverride: view.kind === 'null' ? nullStyle : undefined,
+        themeOverride: status ? { ...(view.kind === 'null' ? nullStyle : {}), ...statusStyle[status] } : view.kind === 'null' ? nullStyle : undefined,
       };
     },
-    [chunks, nullStyle, widths, charPx],
+    [chunks, nullStyle, statusStyle, widths, charPx, editing],
+  );
+
+  const onCellEdited = useCallback(
+    ([col, row]: Item, value: EditableGridCell) => {
+      if (value.kind === GridCellKind.Text) editing?.onEdit(row, col, value.data);
+    },
+    [editing],
+  );
+  const onCellActivated = useCallback(
+    ([col, row]: Item) => {
+      if (col >= 0) editing?.onActivate?.(row, col);
+    },
+    [editing],
   );
 
   const getCellsForSelection = useCallback(
@@ -560,6 +605,14 @@ export function ResultGrid({
       return;
     }
     if (!target.closest('.gt-canvas')) return;
+    if (editing?.onKey) {
+      const row = currentRow(selRef.current);
+      const col = currentCol(selRef.current);
+      if (editing.onKey(e, row === null || row === undefined ? null : { row, col: col ?? 0 })) {
+        handled();
+        return;
+      }
+    }
     if (mod && key === 'c') {
       handled();
       void copyWith(e.altKey ? 'insert' : e.shiftKey ? 'tsv-headers' : 'tsv');
@@ -672,6 +725,8 @@ export function ResultGrid({
             // Ctrl+F and Ctrl+G belong to the grid tools above, not Glide's built-in search.
             keybindings={{ search: false }}
             onCellClicked={onCellClicked}
+            onCellEdited={editing ? onCellEdited : undefined}
+            onCellActivated={editing ? onCellActivated : undefined}
             onCellContextMenu={onCellContextMenu}
             onColumnResize={onColumnResize}
             onHeaderClicked={onHeaderClicked ? (column) => onHeaderClicked(column) : undefined}

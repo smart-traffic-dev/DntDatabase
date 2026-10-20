@@ -1,7 +1,12 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ColumnMeta, ObjectRef, TableDataPage, Value } from '../bindings';
+import { fireEvent } from '@testing-library/react';
+import type { ApplyReport, ColumnMeta, EditPreview, EditableInfo, ObjectRef, TableDataPage, Value } from '../bindings';
+import { closeTab } from '../components/tabActions';
+import { DialogHost } from '../dialogs/DialogHost';
+import { ONE_AT_A_TIME, useDataEdits } from '../store/dataEdits';
+import { openValueEditor } from './data/valueEditor';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { draftToFilter, newFilterRow, nextSortKeys, splitList, useTableData } from '../store/tableData';
@@ -9,7 +14,7 @@ import { useDialogs } from '../store/dialogs';
 import { toggleFilterBar } from '../dialogs/resultExport';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { useAppSettings } from '../store/appSettings';
-import { callsOf, config, fail, ids, mockBackend, resetStores, serverInfo, sampleTree } from '../test/backend';
+import { appError, callsOf, config, fail, ids, mockBackend, resetStores, serverInfo, sampleTree } from '../test/backend';
 import { DataView, dataCellMenu, filterValueText, pageSizeOptions, pageToResult, sortMarks, unsortable } from './DataView';
 
 // The grid draws on a canvas: a stand-in with one header button per column (calls
@@ -20,22 +25,54 @@ vi.mock('./query/ResultGrid', () => ({
     onHeaderClicked,
     headerMarks,
     firstRowNumber,
+    editing,
   }: {
     result: { columns: { name: string }[]; rowCount: number };
     onHeaderClicked?: (i: number) => void;
     headerMarks?: Record<number, string>;
     firstRowNumber?: number;
+    editing?: {
+      isEditable(row: number, col: number): boolean;
+      status(row: number, col: number): string | null;
+      onEdit(row: number, col: number, text: string): void;
+      onActivate?(row: number, col: number): void;
+      onKey?(e: unknown, cell: { row: number; col: number } | null): boolean;
+    };
   }) => (
-    <div data-testid="grid" data-first-row={firstRowNumber}>
+    <div
+      data-testid="grid"
+      data-first-row={firstRowNumber}
+      onKeyDown={(e) => {
+        // The real grid reports the selected cell; the stand-in pretends row 0, column 1.
+        if (editing?.onKey?.(e, { row: 0, col: 1 })) e.stopPropagation();
+      }}
+    >
       {result.columns.map((c, i) => (
         <button key={c.name} type="button" data-mark={headerMarks?.[i] ?? ''} onClick={() => onHeaderClicked?.(i)}>
           {c.name}
         </button>
       ))}
+      {editing
+        ? Array.from({ length: result.rowCount }).flatMap((_, r) =>
+            result.columns.map((_c, ci) => (
+              <button
+                key={`${r},${ci}`}
+                type="button"
+                aria-label={`cell ${r},${ci}`}
+                data-status={editing.status(r, ci) ?? ''}
+                data-editable={String(editing.isEditable(r, ci))}
+                onClick={() => editing.onEdit(r, ci, 'edited')}
+                onDoubleClick={() => editing.onActivate?.(r, ci)}
+              />
+            )),
+          )
+        : null}
       <span data-testid="grid-rows">{result.rowCount}</span>
     </div>
   ),
 }));
+
+vi.mock('./data/valueEditor', () => ({ openValueEditor: vi.fn() }));
 
 const col = (name: string, db_type = 'int'): ColumnMeta => ({ name, db_type, logical: 'Integer', nullable: false, origin_table: null, origin_column: null });
 const int = (v: number): Value => ({ t: 'Int', v });
@@ -60,6 +97,42 @@ function page(n: number, from = 1, hasMore = false, over: Partial<TableDataPage>
 
 const objectRef: ObjectRef = { database: 'shop', schema: null, name: 'orders', kind: 'Table' };
 
+const readOnlyInfo: EditableInfo = {
+  editable: false,
+  reason: 'read_only_connection',
+  key: [],
+  hidden_key: [],
+  editable_columns: [],
+  atomic: 'yes',
+  protection: 'row_version',
+};
+const editableInfo = (over: Partial<EditableInfo> = {}): EditableInfo => ({
+  editable: true,
+  reason: null,
+  key: ['id'],
+  hidden_key: [],
+  editable_columns: ['we`ird"col', 'doc'],
+  atomic: 'yes',
+  protection: 'row_version',
+  ...over,
+});
+const previewOf = (over: Partial<EditPreview> = {}): EditPreview => ({
+  plan_id: 'p1',
+  statements: ['UPDATE `orders` SET `we``ird"col` = \'edited\' WHERE `id` = 1'],
+  verdict: 'allow',
+  atomic: 'yes',
+  protections: [{ level: 'full' }],
+  reason: null,
+  ...over,
+});
+const reportOf = (over: Partial<ApplyReport> = {}): ApplyReport => ({
+  outcome: { outcome: 'committed' },
+  statements: [{ index: 0, affected: 1, error: null, conflict: false }],
+  inserted: [],
+  error: null,
+  ...over,
+});
+
 function makeTab(ref: ObjectRef = objectRef): Tab {
   return { id: objectTabId(ids.prod, ref), kind: 'object', connectionId: ids.prod, objectRef: ref, title: ref.name };
 }
@@ -71,7 +144,12 @@ function setup(
   handlers: Record<string, (a: Record<string, unknown>) => unknown>,
   { estimate = null, tab = makeTab() }: { estimate?: number | null; tab?: Tab } = {},
 ) {
-  mockBackend({ get_table_page_size: () => 100, table_data_cancel: () => true, ...handlers });
+  mockBackend({
+    get_table_page_size: () => 100,
+    table_data_cancel: () => true,
+    data_editable: () => readOnlyInfo,
+    ...handlers,
+  });
   useTabs.getState().open(tab);
   return { tab, ...render(<DataView tab={tab} estimate={estimate} />) };
 }
@@ -636,3 +714,268 @@ describe('DataView filter and multi-sort', () => {
     await waitFor(() => expect(screen.queryByRole('search', { name: 'Filter' })).not.toBeInTheDocument());
   });
 });
+
+describe('DataView editing', () => {
+  const lastCall = (cmd: string) => callsOf(cmd).at(-1)!;
+  const cell = (r: number, c: number) => screen.getByRole('button', { name: `cell ${r},${c}` });
+  const rows3 = (over: Partial<TableDataPage> = {}) => page(3, 1, false, { row_versions: ['5', '6', '7'], ...over });
+
+  /** An editable table of 3 rows; the first cell of the first row is edited when `stage`. */
+  async function editable(
+    handlers: Record<string, (a: Record<string, unknown>) => unknown> = {},
+    { info = editableInfo(), stage = true, pageOver = {} as Partial<TableDataPage> } = {},
+  ) {
+    const user = userEvent.setup();
+    const view = setup({ table_data: () => rows3(pageOver), data_editable: () => info, ...handlers });
+    await screen.findByText('Rows 1–3');
+    await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-editable', String(info.editable)));
+    if (stage) await user.click(cell(0, 1));
+    return { user, ...view };
+  }
+
+  it('says why a table is read-only and edits nothing', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => rows3(), data_editable: () => ({ ...readOnlyInfo, reason: 'no_key' }) });
+    expect(await screen.findByText('Read-only: this table has no primary key or unique NOT NULL index.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add row' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'cell 0,1' })).not.toBeInTheDocument();
+    void user;
+  });
+
+  it('maps the other reasons', async () => {
+    setup({ table_data: () => rows3(), data_editable: () => ({ ...readOnlyInfo, reason: 'not_a_table' }) });
+    expect(await screen.findByText('Views are read-only.')).toBeInTheDocument();
+  });
+
+  it('only the editable columns of a row take edits', async () => {
+    await editable({}, { stage: false });
+    expect(cell(0, 0)).toHaveAttribute('data-editable', 'false');
+    expect(cell(0, 1)).toHaveAttribute('data-editable', 'true');
+  });
+
+  it('truncated_cell_opens_value_editor', async () => {
+    vi.mocked(openValueEditor).mockClear();
+    const { user } = await editable({}, { stage: false, pageOver: { truncated: [[0, 2]], truncated_cells: 1 } });
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
+    fireEvent.doubleClick(cell(0, 2));
+    expect(openValueEditor).toHaveBeenCalledWith(expect.objectContaining({ row: 0, col: 2, column: 'doc' }));
+    // Typing into it stages nothing.
+    await user.click(cell(0, 2));
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+  });
+
+  it('apply_shows_preview_then_reloads_on_commit', async () => {
+    const { user } = await editable({
+      data_preview: () => previewOf(),
+      data_apply: () => reportOf(),
+    });
+    expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toEqual({
+      id: ids.prod,
+      set: {
+        object: objectRef,
+        overwrite: false,
+        edits: [
+          {
+            op: 'update',
+            row: { key: [['id', int(1)]], original: [['we`ird"col', int(0)], ['doc', { t: 'Json', v: '{}' }]], xmin: '5' },
+            set: [['we`ird"col', { kind: 'text', text: 'edited' }]],
+          },
+        ],
+      },
+    });
+    expect(within(dialog).getByText(/UPDATE `orders` SET/)).toBeInTheDocument();
+    expect(within(dialog).getByText('allow')).toBeInTheDocument();
+    expect(callsOf('data_apply')).toEqual([]);
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
+    expect(callsOf('data_apply')).toEqual([{ planId: 'p1', confirmed: true }]);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    expect(cell(0, 1)).toHaveAttribute('data-status', '');
+  });
+
+  it('a blocked plan shows its reason and offers no Confirm', async () => {
+    const { user } = await editable({ data_preview: () => previewOf({ verdict: 'block', reason: 'Blocked: read-only connection.' }) });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(within(dialog).getByText('Blocked: read-only connection.')).toBeInTheDocument();
+    expect(within(dialog).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument();
+  });
+
+  it('warns about a table that cannot roll back and about unchecked columns', async () => {
+    const { user } = await editable({
+      data_editable: () => editableInfo({ atomic: 'no' }),
+      data_preview: () =>
+        previewOf({ atomic: 'no', protections: [{ level: 'columns', unchecked: ['price (double)', 'payload (truncated)'] }] }),
+    });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(within(dialog).getByText('Changes cannot be undone: statements that ran before an error stay applied.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Unchecked for conflicts: price (double), payload (truncated)')).toBeInTheDocument();
+  });
+
+  it('plan_stale_repreviews', async () => {
+    let applies = 0;
+    let previews = 0;
+    const { user } = await editable({
+      data_preview: () => previewOf({ plan_id: `p${++previews}` }),
+      data_apply: () => {
+        if (applies++ === 0) throw appError('plan_stale', 'The plan is stale.');
+        return reportOf();
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('The table or connection changed; review the statements again.')).toBeInTheDocument();
+    expect(callsOf('data_preview')).toHaveLength(2);
+    // Nothing ran: the user reviews the new plan and confirms again.
+    await user.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(callsOf('data_apply')).toEqual([{ planId: 'p1', confirmed: true }, { planId: 'p2', confirmed: true }]));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('conflict_keeps_stage_and_marks_row', async () => {
+    let applies = 0;
+    const { user } = await editable({
+      data_preview: (a) => previewOf({ plan_id: (a.set as { overwrite: boolean }).overwrite ? 'over' : 'p1' }),
+      data_apply: () =>
+        applies++ === 0
+          ? reportOf({ outcome: { outcome: 'rolled_back' }, statements: [{ index: 0, affected: 0, error: null, conflict: true }] })
+          : reportOf(),
+    });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-status', 'conflict'));
+    expect(screen.getByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reload row' })).toBeInTheDocument();
+
+    // Overwrite previews with overwrite: true and needs its own confirmation.
+    await user.click(screen.getByRole('button', { name: 'Overwrite' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({ set: { overwrite: true } });
+    expect(callsOf('data_apply')).toHaveLength(1);
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(callsOf('data_apply').at(-1)).toEqual({ planId: 'over', confirmed: true }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument());
+  });
+
+  it('Reload row drops that row\'s staged change and reloads', async () => {
+    const { user } = await editable({
+      data_preview: () => previewOf(),
+      data_apply: () => reportOf({ outcome: { outcome: 'rolled_back' }, statements: [{ index: 0, affected: 0, error: null, conflict: true }] }),
+    });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await user.click(await screen.findByRole('button', { name: 'Reload row' }));
+    await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    expect(cell(0, 1)).toHaveAttribute('data-status', '');
+  });
+
+  it('unknown_outcome_banner', async () => {
+    const { user } = await editable({
+      data_preview: () => previewOf(),
+      data_apply: () => reportOf({ outcome: { outcome: 'unknown', at: 1 } }),
+    });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Outcome unknown: the change may have been applied. Reload to check.')).toBeInTheDocument();
+    // The stage is kept.
+    expect(screen.getByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+    expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
+  });
+
+  it('a table that cannot roll back stages one change at a time', async () => {
+    const { user } = await editable({}, { info: editableInfo({ atomic: 'no' }) });
+    await user.click(cell(1, 1));
+    expect(await screen.findByText(ONE_AT_A_TIME)).toBeInTheDocument();
+    expect(cell(1, 1)).toHaveAttribute('data-status', '');
+  });
+
+  it('keys: Ctrl+N adds a row, Ctrl+Z undoes, Ctrl+0 sets NULL, Ctrl+Delete marks the row', async () => {
+    const { user } = await editable({ data_preview: () => previewOf() }, { stage: false });
+    const grid = screen.getByTestId('grid');
+    fireEvent.keyDown(grid, { key: 'n', ctrlKey: true });
+    expect(screen.getByTestId('grid-rows')).toHaveTextContent('4');
+    expect(cell(3, 1)).toHaveAttribute('data-status', 'new');
+    fireEvent.keyDown(grid, { key: 'z', ctrlKey: true });
+    expect(screen.getByTestId('grid-rows')).toHaveTextContent('3');
+
+    fireEvent.keyDown(grid, { key: '0', ctrlKey: true });
+    expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
+    fireEvent.keyDown(grid, { key: 'Delete', ctrlKey: true });
+    expect(cell(0, 1)).toHaveAttribute('data-status', 'deleted');
+    fireEvent.keyDown(grid, { key: 's', ctrlKey: true });
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({ set: { edits: [{ op: 'delete' }] } });
+    void user;
+  });
+
+  it('Ctrl+0 stages a NULL', async () => {
+    await editable({ data_preview: () => previewOf() }, { stage: false });
+    fireEvent.keyDown(screen.getByTestId('grid'), { key: '0', ctrlKey: true });
+    fireEvent.keyDown(screen.getByTestId('grid'), { key: 's', ctrlKey: true });
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({ set: { edits: [{ op: 'update', set: [['we`ird"col', { kind: 'null' }]] }] } });
+  });
+
+  it('closing_tab_with_staged_edits_asks', async () => {
+    const { tab } = await editable();
+    const closing = closeTab(tab);
+    const question = useDialogs.getState().question;
+    expect(question).toMatchObject({ kind: 'discardEdits', count: 1 });
+    if (question?.kind !== 'discardEdits') return;
+    question.done(false);
+    useDialogs.getState().answer();
+    expect(await closing).toBe(false);
+    expect(useTabs.getState().tabs.some((t) => t.id === tab.id)).toBe(true);
+    expect(useDataEdits.getState().hasStaged(tab.id)).toBe(true);
+
+    const again = closeTab(tab);
+    const second = useDialogs.getState().question;
+    if (second?.kind !== 'discardEdits') throw new Error('expected a question');
+    second.done(true);
+    expect(await again).toBe(true);
+    expect(useTabs.getState().tabs.some((t) => t.id === tab.id)).toBe(false);
+  });
+
+  it('changing the page with staged edits asks first; the question reads "Discard N unsaved changes?"', async () => {
+    const { user } = await editable({ table_data: () => rows3({ has_more: true }) });
+    render(<DialogHost />);
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    expect(await screen.findByText('Discard 1 unsaved changes?')).toBeInTheDocument();
+    expect(callsOf('table_data')).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(callsOf('table_data')).toHaveLength(1);
+    expect(useDataEdits.getState().hasStaged(makeTab().id)).toBe(true);
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await user.click(await screen.findByRole('button', { name: 'Discard' }));
+    await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
+    expect(useDataEdits.getState().hasStaged(makeTab().id)).toBe(false);
+  });
+
+  it('a raw WHERE is sent as raw_where and its config error shows under the bar', async () => {
+    const user = userEvent.setup();
+    setup({
+      table_data: (a) => {
+        if ((a.filter as { raw_where?: string } | null)?.raw_where) throw appError('config', 'Syntax error near "=="', { field: 'raw_where' });
+        return rows3();
+      },
+    });
+    await screen.findByText('Rows 1–3');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    const bar = screen.getByRole('search', { name: 'Filter' });
+    await user.click(within(bar).getByRole('button', { name: 'Raw WHERE' }));
+    await user.type(within(bar).getByRole('textbox', { name: 'Raw WHERE' }), 'id ==  1{Enter}');
+    await waitFor(() => expect(lastCallData().filter).toEqual({ mode: 'and', conditions: [], raw_where: 'id ==  1' }));
+    expect(await within(bar).findByRole('alert')).toHaveTextContent('Syntax error near "=="');
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+    expect(screen.getByText('Filtered (raw)')).toBeInTheDocument();
+  });
+});
+
+const lastCallData = () => callsOf('table_data').at(-1)!;

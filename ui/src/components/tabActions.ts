@@ -1,9 +1,12 @@
+import { confirmDiscard, useDataEdits } from '../store/dataEdits';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs, type Tab } from '../store/tabs';
 
 /** A query tab closes through its guards (open transaction, unsaved file), then drops its row. */
 export async function closeTab(tab: Tab): Promise<boolean> {
   if (tab.kind === 'query') return useQueryDocs.getState().closeTab(tab.id);
+  // Staged data edits are thrown away with the tab: ask first.
+  if (useDataEdits.getState().hasStaged(tab.id) && !(await confirmDiscard(tab.id))) return false;
   useTabs.getState().close(tab.id);
   return true;
 }

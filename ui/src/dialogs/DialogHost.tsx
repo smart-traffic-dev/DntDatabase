@@ -183,6 +183,17 @@ function QuestionHost({ question }: { question: Question }) {
       />
     );
   }
+  if (question.kind === 'discardEdits') {
+    return (
+      <ConfirmDialog
+        title="Unsaved changes"
+        message={`Discard ${question.count} unsaved changes?`}
+        confirmLabel="Discard"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
   if (question.kind === 'stopRun') {
     return (
       <ConfirmDialog

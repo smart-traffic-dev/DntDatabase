@@ -1,0 +1,96 @@
+/* Staged edits of the data view and their review dialog. Colours, type and radii come from tokens. */
+
+/* The statuses the grid paints on canvas (ResultGrid reads the same tokens); the legend uses the classes. */
+.dnt-cell-edited {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.dnt-row-new {
+  background: var(--sel);
+  color: var(--text);
+}
+
+.dnt-row-deleted {
+  background: var(--danger-fill);
+  color: var(--danger-fg);
+  text-decoration: line-through;
+}
+
+.dnt-row-conflict {
+  background: var(--danger-fill);
+  color: var(--danger-fg);
+}
+
+.de-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--text-footnote);
+}
+
+.de-chip {
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+}
+
+.de-bar .spacer {
+  flex: 1;
+}
+
+.de-banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+  font-size: var(--text-footnote);
+}
+
+.de-banner.de-error {
+  background: var(--danger-fill);
+  color: var(--danger-fg);
+}
+
+.de-conflict-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ep-verdict {
+  text-transform: uppercase;
+}
+
+.ep-block {
+  color: var(--danger-fg);
+}
+
+.ep-confirm {
+  color: var(--warning-fg);
+}
+
+.ep-statements {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow: auto;
+}
+
+.ep-statements code {
+  font-family: var(--font-mono);
+  font-size: var(--text-footnote);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
