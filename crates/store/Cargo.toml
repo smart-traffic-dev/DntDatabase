@@ -13,6 +13,8 @@ base64.workspace = true
 cbc.workspace = true
 chacha20poly1305.workspace = true
 dnt-core.workspace = true
+# Favorites refuse SQL holding a secret literal (`redact`).
+dnt-query.workspace = true
 hex.workspace = true
 keyring.workspace = true
 quick-xml.workspace = true

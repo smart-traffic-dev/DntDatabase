@@ -3,6 +3,7 @@ import { useDialogs } from '../store/dialogs';
 import { useTree } from '../store/tree';
 import { ROOT } from '../store/treeModel';
 import { ConnectionTree } from './ConnectionTree';
+import { FavoritesPanel } from './FavoritesPanel';
 import { PlusIcon, SystemIcon } from './icons';
 
 export function Sidebar() {
@@ -69,6 +70,7 @@ export function Sidebar() {
       ) : (
         <ConnectionTree />
       )}
+      <FavoritesPanel />
     </aside>
   );
 }

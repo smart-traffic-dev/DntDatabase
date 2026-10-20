@@ -397,7 +397,19 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
               {filtered ? 'No rows match the filter.' : `This ${tab.objectRef.kind === 'Table' ? 'table' : 'view'} has no rows.`}
             </p>
           ) : (
-            <ResultGrid result={result} onHeaderClicked={onHeaderClicked} headerMarks={marks} firstRowNumber={state.offset + 1} />
+            <ResultGrid
+              result={result}
+              onHeaderClicked={onHeaderClicked}
+              headerMarks={marks}
+              firstRowNumber={state.offset + 1}
+              engine={engine}
+              tableRef={tab.objectRef}
+              cellsCapped={truncated}
+              extraCellMenu={(ctx) => {
+                const column = result.columns[ctx.col];
+                return column ? dataCellMenu(tab)({ ...ctx, value: ctx.value as Value, column }) : [];
+              }}
+            />
           )
         ) : (
           <p className="dv-loading muted">Loading…</p>

@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { addQueryToFavorites } from '../../components/favoritesActions';
 import { useConnections } from '../../store/connections';
 import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
@@ -233,6 +234,15 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
         Stop
       </button>
       <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} why={why} />
+      <button
+        type="button"
+        className="qt-btn"
+        data-testid="query-add-favorite"
+        title="Add the selection, or the whole query, to favorites (Ctrl+Shift+D)"
+        onClick={() => addQueryToFavorites(doc.id)}
+      >
+        Add to favorites
+      </button>
       <span className="qt-sep" aria-hidden="true" />
       <select
         className="qt-select"

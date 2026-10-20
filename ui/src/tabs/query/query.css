@@ -75,10 +75,26 @@
   min-height: 0;
 }
 
+/* Editor over results: the editor pane's height comes from the layout store (QueryTab); the results take the rest. */
+.query-split {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.query-editor-pane {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* Results (spec 6.2) */
 .qr-panel {
-  flex: 0 0 40%;
-  min-height: 160px;
+  flex: 1;
+  min-height: 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -175,7 +191,8 @@
   min-height: 0;
   overflow: auto;
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  /* Scaled by the code font zoom (Ctrl+= / Ctrl+-): `--font-scale` is set on the root. */
+  font-size: calc(var(--text-footnote) * var(--font-scale, 1));
 }
 
 .qr-msg {

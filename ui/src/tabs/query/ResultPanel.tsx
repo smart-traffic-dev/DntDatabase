@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
 import { plural } from '../../lib/plural';
+import { dialectOfConnection, useQueryDocs } from '../../store/queryTabs';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { ExplainView } from './ExplainView';
@@ -40,6 +41,9 @@ function ResultPanelView({ tabId }: { tabId: string }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
   const setPanel = useQueryRun((s) => s.setPanel);
   const planAlive = usePlanAlive(tabId);
+  // The engine only quotes copied INSERT statements; a primitive, so typing does not re-render this.
+  const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
+  const engine = dialectOfConnection(connectionId);
   const stripRef = useRef<HTMLDivElement>(null);
   // Which result tab is open; reset by `key` when a new run starts.
   const [picked, setPicked] = useState<{ runId: string | null; at: number }>({ runId: run.runId, at: 0 });
@@ -173,7 +177,7 @@ function ResultPanelView({ tabId }: { tabId: string }) {
               Large result: {result.rowCount} rows are kept in memory.
             </div>
           )}
-          <ResultGrid key={result.id} result={result} />
+          <ResultGrid key={result.id} result={result} engine={engine} />
         </>
       ) : showExplain ? (
         <ExplainView tabId={tabId} />

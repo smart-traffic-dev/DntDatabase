@@ -34,7 +34,8 @@ serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
 specta-typescript.workspace = true
-tauri.workspace = true
+# `devtools`: `WebviewWindow::open_devtools` also exists in release builds (Tools > Developer tools).
+tauri = { workspace = true, features = ["devtools"] }
 tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
 tauri-specta.workspace = true

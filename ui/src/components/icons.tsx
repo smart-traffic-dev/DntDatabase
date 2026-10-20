@@ -114,6 +114,20 @@ export const EyeIcon = () => (
   </Icon>
 );
 
+/** Pushpin: pinned tabs. */
+export const PinIcon = () => (
+  <Icon size={11} strokeWidth={2.2}>
+    <path d="M9 4h6l-1 6 3 3H7l3-3zM12 13v7" />
+  </Icon>
+);
+
+/** Function / procedure glyph for the quick-open list. */
+export const FunctionIcon = () => (
+  <Icon>
+    <path d={TOOL_PATHS.fn} />
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon size={12} strokeWidth={2}>
     <path d="M6 6l12 12M18 6L6 18" />
