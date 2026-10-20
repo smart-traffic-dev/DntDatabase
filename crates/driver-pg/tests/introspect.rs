@@ -691,3 +691,27 @@ async fn limited_user_sees_partial_tree() {
         assert!(matches!(r, Err(DbError::Server { .. })), "{t:?}: {r:?}");
     }
 }
+
+#[tokio::test]
+async fn explicit_column_collation_is_reported() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let table = format!(
+            "p3_collation_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        exec(
+            &s,
+            &format!("CREATE TABLE public.{table} (a text COLLATE \"C\", b text, c int)"),
+        )
+        .await
+        .unwrap();
+        let d = detail(&s, t, "public", &table).await;
+        exec(&s, &format!("DROP TABLE public.{table}"))
+            .await
+            .unwrap();
+        let got: Vec<Option<&str>> = d.columns.iter().map(|c| c.collation.as_deref()).collect();
+        assert_eq!(got, [Some("C"), None, None], "{t:?}");
+    }
+}

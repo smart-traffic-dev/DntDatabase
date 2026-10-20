@@ -17,6 +17,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: "we`ird\"col"
     ordinal: 2
@@ -27,6 +28,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
 primary_key:
   name: weird_names_pkey

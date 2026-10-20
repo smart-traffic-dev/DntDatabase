@@ -17,6 +17,7 @@ columns:
     identity: ALWAYS
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: order_id
     ordinal: 2
@@ -27,6 +28,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: amount
     ordinal: 3
@@ -37,6 +39,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: amount_with_tax
     ordinal: 4
@@ -47,6 +50,7 @@ columns:
     identity: ~
     generated: "round((amount * 1.1), 2)"
     invisible: false
+    collation: ~
     comment: ~
   - name: tags
     ordinal: 5
@@ -57,6 +61,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: meta
     ordinal: 6
@@ -67,6 +72,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: issued_at
     ordinal: 7
@@ -77,6 +83,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: ttl
     ordinal: 8
@@ -87,6 +94,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
 primary_key:
   name: invoices_pkey

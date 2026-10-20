@@ -194,6 +194,7 @@ fn column_detail(r: &TextRow, maria: bool) -> Option<ColumnDetail> {
         identity: None,
         generated: non_empty(r, 6),
         invisible: extra.to_ascii_uppercase().contains("INVISIBLE"),
+        collation: non_empty(r, 8),
         comment: non_empty(r, 7),
     })
 }

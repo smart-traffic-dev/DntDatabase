@@ -100,11 +100,16 @@ pub(crate) fn relation() -> String {
 }
 
 /// Columns by `attnum` (`$1` = relation oid): name, attnum, type, not null, default /
-/// generation expression, `attidentity`, `attgenerated`, comment.
+/// generation expression, `attidentity`, `attgenerated`, comment, explicit (non-default)
+/// collation name.
 pub(crate) const COLUMNS: &str = "SELECT a.attname::text, a.attnum::int4, \
      format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_get_expr(ad.adbin, ad.adrelid), \
-     a.attidentity::text, a.attgenerated::text, col_description(a.attrelid, a.attnum) \
+     a.attidentity::text, a.attgenerated::text, col_description(a.attrelid, a.attnum), \
+     CASE WHEN a.attcollation <> 0 AND a.attcollation <> t.typcollation \
+          THEN co.collname::text END \
      FROM pg_attribute a \
+     JOIN pg_type t ON t.oid = a.atttypid \
+     LEFT JOIN pg_collation co ON co.oid = a.attcollation \
      LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum \
      WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped \
      ORDER BY a.attnum";

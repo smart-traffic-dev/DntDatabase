@@ -280,6 +280,7 @@ mod tests {
             identity: None,
             generated: None,
             invisible: false,
+            collation: None,
             comment: None,
         }
     }

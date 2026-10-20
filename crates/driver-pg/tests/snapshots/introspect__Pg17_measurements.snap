@@ -17,6 +17,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: taken_at
     ordinal: 2
@@ -27,6 +28,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: value
     ordinal: 3
@@ -37,6 +39,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
 primary_key:
   name: measurements_pkey

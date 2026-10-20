@@ -730,7 +730,12 @@ definition: string | null }
  * (e.g. `numeric(12,2)`).
  */
 export type ColumnBrief = { name: string; data_type: string }
-export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; comment: string | null }
+export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; 
+/**
+ * Collation of a text column (MySQL/MariaDB), or of a PostgreSQL column with an
+ * explicit non-default collation; `None` otherwise.
+ */
+collation: string | null; comment: string | null }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
 /**
  * A table or view offered by autocomplete after `db.` / `schema.`.

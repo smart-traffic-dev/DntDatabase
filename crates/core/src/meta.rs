@@ -99,6 +99,9 @@ pub struct ColumnDetail {
     pub identity: Option<String>,
     pub generated: Option<String>,
     pub invisible: bool,
+    /// Collation of a text column (MySQL/MariaDB), or of a PostgreSQL column with an
+    /// explicit non-default collation; `None` otherwise.
+    pub collation: Option<String>,
     pub comment: Option<String>,
 }
 

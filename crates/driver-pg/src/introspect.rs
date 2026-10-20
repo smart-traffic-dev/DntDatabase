@@ -179,6 +179,7 @@ fn column_detail(r: &Row) -> Result<ColumnDetail, DbError> {
         identity,
         generated,
         invisible: false,
+        collation: non_empty(r, 8)?,
         comment: non_empty(r, 7)?,
     })
 }
