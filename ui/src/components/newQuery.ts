@@ -29,7 +29,9 @@ export function selectTopSql(node: TreeNode, kind: 'mysql' | 'postgres'): string
   const ref = node.objectRef;
   if (!ref) return '';
   const q = kind === 'postgres' ? (s: string) => `"${s.replaceAll('"', '""')}"` : (s: string) => `\`${s.replaceAll('`', '``')}\``;
-  const table = kind === 'postgres' && ref.schema ? `${q(ref.schema)}.${q(ref.name)}` : `${q(ref.database)}.${q(ref.name)}`;
+  // PostgreSQL addresses a table by schema (a connection is one database); MySQL by database.
+  const qualifier = kind === 'postgres' ? ref.schema : ref.database;
+  const table = qualifier ? `${q(qualifier)}.${q(ref.name)}` : q(ref.name);
   return `SELECT * FROM ${table} LIMIT 1000;`;
 }
 

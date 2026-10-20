@@ -44,3 +44,9 @@
   margin: 4px 2px;
   background: var(--studio-hairline);
 }
+
+.tree-hint {
+  padding: 4px 10px;
+  color: var(--muted);
+  font-size: var(--text-caption);
+}

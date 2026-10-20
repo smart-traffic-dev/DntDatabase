@@ -92,5 +92,5 @@ function itemsFor(node: TreeNode): Item[] {
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {
-  return <ActionMenu label={`${node.label} actions`}x={x} y={y} items={itemsFor(node)} onClose={onClose} />;
+  return <ActionMenu label={`${node.label} actions`} x={x} y={y} items={itemsFor(node)} onClose={onClose} />;
 }

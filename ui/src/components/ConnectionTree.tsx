@@ -275,6 +275,7 @@ export function ConnectionTree() {
         void useTree.getState().move(drag, null);
       }}
     >
+      {filter.trim() && <div className="tree-hint">Searching loaded objects</div>}
       {filter.trim() && rows.length === 0 && (
         <div className="tree-empty" role="status">No objects match '{filter.trim()}' (loaded objects only)</div>
       )}

@@ -33,7 +33,8 @@ export const transferItems = () => [
 /** A small popup menu at a fixed position; closes on outside click and Esc. */
 export function ActionMenu({ label, x, y, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ left: x, top: y });
+  // Measured at (0, 0) first, so the box is not squeezed against the viewport edge.
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
 
   // Keep the whole menu inside the viewport.
   useLayoutEffect(() => {
@@ -45,6 +46,14 @@ export function ActionMenu({ label, x, y, items, onClose }: Props) {
       top: Math.max(margin, Math.min(y, window.innerHeight - box.height - margin)),
     });
   }, [x, y, items.length]);
+
+  // Hand the focus back to where it was when the menu closes.
+  useEffect(() => {
+    const previous = document.activeElement;
+    return () => {
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
+  }, []);
 
   useEffect(() => {
     ref.current?.querySelector<HTMLButtonElement>('button')?.focus();
@@ -87,7 +96,7 @@ export function ActionMenu({ label, x, y, items, onClose }: Props) {
   };
 
   return (
-    <div ref={ref} role="menu" aria-label={label} className="context-menu" style={pos} onKeyDown={onKeyDown}>
+    <div ref={ref} role="menu" aria-label={label} className="context-menu" style={pos ?? { left: 0, top: 0 }} onKeyDown={onKeyDown}>
       {items.map((item, i) =>
         'separator' in item ? (
           <div key={`sep-${i}`} role="separator" className="menu-sep" />

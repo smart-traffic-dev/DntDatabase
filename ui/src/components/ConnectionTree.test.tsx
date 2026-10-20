@@ -395,6 +395,56 @@ describe('ConnectionTree', () => {
     await waitFor(() => expect(row('Tables')).toHaveTextContent('1 / 3'));
   });
 
+  it('returns the focus to the tree when the menu closes (Esc, item, outside click)', async () => {
+    backend();
+    await renderTree();
+    const user = userEvent.setup();
+    const tree = screen.getByRole('tree');
+
+    await user.click(row('shop-prod'));
+    expect(tree).toHaveFocus();
+    await user.pointer({ keys: '[MouseRight]', target: row('shop-prod') });
+    expect(screen.getByRole('menu')).toContainElement(document.activeElement as HTMLElement);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(tree).toHaveFocus();
+
+    await user.pointer({ keys: '[MouseRight]', target: row('shop-prod') });
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Copy name' }));
+    expect(tree).toHaveFocus();
+
+    await user.pointer({ keys: '[MouseRight]', target: row('shop-prod') });
+    tree.blur();
+    await user.pointer({ keys: '[MouseLeft]', target: document.body });
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('measures the menu at the origin so a right-edge click still fits', async () => {
+    backend();
+    await renderTree();
+    const user = userEvent.setup();
+    Object.defineProperty(window, 'innerWidth', { value: 400, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 600, configurable: true });
+    // A real browser squeezes a fixed box near the right edge: the full width shows only at left 0.
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const atOrigin = this.getAttribute('role') === 'menu' && this.style.left === '0px';
+      const width = this.getAttribute('role') === 'menu' ? (atOrigin ? 180 : 60) : 0;
+      return { width, height: 100, top: 0, left: 0, right: width, bottom: 100, x: 0, y: 0, toJSON: () => ({}) };
+    });
+    await user.pointer({ keys: '[MouseRight]', target: row('shop-prod'), coords: { clientX: 390, clientY: 10 } });
+    const menu = screen.getByRole('menu');
+    await waitFor(() => expect(parseInt(menu.style.left, 10)).toBe(400 - 180 - 4));
+    rect.mockRestore();
+  });
+
+  it('shows the filter scope hint while filtering', async () => {
+    backend();
+    await renderTree();
+    expect(screen.queryByText('Searching loaded objects')).not.toBeInTheDocument();
+    act(() => useTree.getState().setFilter('shop'));
+    expect(await screen.findByText('Searching loaded objects')).toBeInTheDocument();
+  });
+
   it('shows the hint of an error under its message', async () => {
     backend({
       list_databases: () => {
