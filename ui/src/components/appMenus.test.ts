@@ -6,7 +6,9 @@ const base: MenuState = {
   theme: 'system',
   setTheme: () => {},
   sidebarVisible: true,
+  resultsVisible: true,
   hasTab: false,
+  canReopen: false,
   queryTabId: null,
   hasEditor: false,
   runnable: false,
@@ -40,9 +42,14 @@ describe('buildMenus', () => {
       'Export connections…',
       '-',
       'Close tab',
+      'Reopen closed tab',
       'Exit',
     ]);
     expect(item('File', 'New query')?.hint).toBe('Ctrl+T');
+    expect(item('File', 'New connection…')?.hint).toBe('Ctrl+Shift+N');
+    expect(item('File', 'Reopen closed tab')?.hint).toBe('Ctrl+Shift+T');
+    expect(item('File', 'Reopen closed tab')?.disabled).toBe(true);
+    expect(item('File', 'Reopen closed tab', { canReopen: true })?.disabled).toBe(false);
     expect(item('File', 'Exit')?.hint).toBe('Alt+F4');
   });
 
@@ -70,9 +77,9 @@ describe('buildMenus', () => {
 
   it('View ticks the current theme and the sidebar toggle', () => {
     const checked = (state: Partial<MenuState>) => items('View', state).filter((i) => i.checked).map((i) => i.label);
-    expect(checked({ theme: 'light', sidebarVisible: false })).toEqual(['Light']);
-    expect(checked({ theme: 'dark' })).toEqual(['Dark', 'Show sidebar']);
-    expect(checked({ theme: 'system' })).toEqual(['System', 'Show sidebar']);
+    expect(checked({ theme: 'light', sidebarVisible: false, resultsVisible: false })).toEqual(['Light']);
+    expect(checked({ theme: 'dark' })).toEqual(['Dark', 'Show sidebar', 'Show results']);
+    expect(checked({ theme: 'system', resultsVisible: false })).toEqual(['System', 'Show sidebar']);
     expect(item('View', 'Light')?.checked).toBe(false);
     expect(item('View', 'Reset layout')?.checked).toBeUndefined();
   });
@@ -104,6 +111,18 @@ describe('buildMenus', () => {
   it('Tools and Help entries', () => {
     expect(items('Tools').map((i) => i.label)).toEqual(['Settings…', 'Developer tools']);
     expect(item('Tools', 'Developer tools')?.hint).toBe('Ctrl+Shift+I');
+    expect(item('Tools', 'Settings…')?.hint).toBe('Ctrl+,');
+    expect(item('Help', 'Keyboard shortcuts')?.hint).toBe('F1');
+    expect(items('View').filter((i) => i.hint).map((i) => [i.label, i.hint])).toEqual([
+      ['Show sidebar', 'Ctrl+B'],
+      ['Show results', 'Ctrl+J'],
+      ['Focus connection tree', 'Ctrl+E'],
+      ['Command palette', 'Ctrl+Shift+P'],
+      ['Go to object', 'Ctrl+P'],
+      ['Zoom in', 'Ctrl+='],
+      ['Zoom out', 'Ctrl+-'],
+      ['Reset zoom', 'Ctrl+0'],
+    ]);
     expect(items('Help').map((i) => i.label)).toEqual(['Keyboard shortcuts', 'About DntDatabase']);
   });
 });

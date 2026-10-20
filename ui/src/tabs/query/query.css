@@ -191,7 +191,8 @@
   min-height: 0;
   overflow: auto;
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  /* Scaled by the code font zoom (Ctrl+= / Ctrl+-): `--font-scale` is set on the root. */
+  font-size: calc(var(--text-footnote) * var(--font-scale, 1));
 }
 
 .qr-msg {

@@ -58,6 +58,7 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   // The editor / results split: a fraction of the measured body height (not subscribed to the text).
   const ratio = useLayout((s) => s.editorRatio);
   const setEditorRatio = useLayout((s) => s.setEditorRatio);
+  const resultsVisible = useLayout((s) => s.resultsVisible);
   const splitRef = useRef<HTMLDivElement>(null);
   const [total, setTotal] = useState(0);
   const missing = !toolbarDoc;
@@ -82,19 +83,26 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
     <div className="query-tab">
       <QueryToolbar doc={toolbarDoc} />
       <div className="query-split" ref={splitRef}>
-        <div className="query-editor-pane" style={{ flex: editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px` }}>
+        <div
+          className="query-editor-pane"
+          style={{ flex: !resultsVisible ? '1 1 0' : editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px` }}
+        >
           <EditorHost tabId={tab.id} engine={engine} onMount={onMount} />
         </div>
-        <Splitter
-          orientation="horizontal"
-          label="Resize editor and results"
-          value={editor ?? 0}
-          min={EDITOR_MIN_PX}
-          max={Math.max(EDITOR_MIN_PX, total - RESULT_MIN_PX)}
-          defaultValue={editorPixels(EDITOR_RATIO_DEFAULT, total)}
-          onChange={(px) => total > 0 && setEditorRatio(px / total)}
-        />
-        <ResultPanel tabId={tab.id} />
+        {resultsVisible && (
+          <>
+            <Splitter
+              orientation="horizontal"
+              label="Resize editor and results"
+              value={editor ?? 0}
+              min={EDITOR_MIN_PX}
+              max={Math.max(EDITOR_MIN_PX, total - RESULT_MIN_PX)}
+              defaultValue={editorPixels(EDITOR_RATIO_DEFAULT, total)}
+              onChange={(px) => total > 0 && setEditorRatio(px / total)}
+            />
+            <ResultPanel tabId={tab.id} />
+          </>
+        )}
       </div>
     </div>
   );

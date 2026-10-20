@@ -10,15 +10,21 @@ import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
 import type { MenuAction, MenuEntry } from './ActionMenu';
 import { transferItems } from './ActionMenu';
 import { openNewQuery } from './newQuery';
-import { closeTab } from './tabActions';
+import { showCommandPalette, showQuickOpen } from '../store/palette';
+import { closeTab, reopenClosedTab } from './tabActions';
+import { focusConnectionTree, toggleResults, zoomIn, zoomOut, zoomReset } from './windowActions';
 
 /** What the menu model depends on: plain data, so the builder is a pure function. */
 export interface MenuState {
   theme: Theme;
   setTheme(theme: Theme): void;
   sidebarVisible: boolean;
+  /** The result panel of query tabs is shown. */
+  resultsVisible: boolean;
   /** A tab is open. */
   hasTab: boolean;
+  /** A closed tab can be reopened. */
+  canReopen: boolean;
   /** The active tab is a query tab: its id. */
   queryTabId: string | null;
   /** The active query tab has a mounted editor (the Edit menu acts on it). */
@@ -88,7 +94,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
       label: 'File',
       mnemonic: 'F',
       items: [
-        { label: 'New connection…', run: () => dialog({ kind: 'newConnection' }) },
+        { hint: 'Ctrl+Shift+N', label: 'New connection…', run: () => dialog({ kind: 'newConnection' }) },
         { label: 'New query', hint: 'Ctrl+T', run: () => openNewQuery() },
         { label: 'Open SQL file…', hint: 'Ctrl+O', run: () => void useQueryDocs.getState().openFile() },
         { label: 'Save', hint: 'Ctrl+S', disabled: !q, run: () => q && void useQueryDocs.getState().saveFile(q, false) },
@@ -105,6 +111,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
             if (tab) void closeTab(tab);
           },
         },
+        { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !s.canReopen, run: () => void reopenClosedTab() },
         { label: 'Exit', hint: 'Alt+F4', run: exitApp },
       ],
     },
@@ -141,6 +148,16 @@ export function buildMenus(s: MenuState): AppMenu[] {
         theme('System', 'system'),
         sep,
         { label: 'Show sidebar', hint: 'Ctrl+B', checked: s.sidebarVisible, run: () => useLayout.getState().toggleSidebar() },
+        { label: 'Show results', hint: 'Ctrl+J', checked: s.resultsVisible, run: toggleResults },
+        { label: 'Focus connection tree', hint: 'Ctrl+E', run: focusConnectionTree },
+        sep,
+        { label: 'Command palette', hint: 'Ctrl+Shift+P', run: showCommandPalette },
+        { label: 'Go to object', hint: 'Ctrl+P', run: showQuickOpen },
+        sep,
+        { label: 'Zoom in', hint: 'Ctrl+=', run: zoomIn },
+        { label: 'Zoom out', hint: 'Ctrl+-', run: zoomOut },
+        { label: 'Reset zoom', hint: 'Ctrl+0', run: zoomReset },
+        sep,
         { label: 'Reset layout', run: () => useLayout.getState().reset() },
       ],
     },
@@ -166,7 +183,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
       label: 'Tools',
       mnemonic: 'T',
       items: [
-        { label: 'Settings…', run: () => dialog({ kind: 'settings' }) },
+        { hint: 'Ctrl+,', label: 'Settings…', run: () => dialog({ kind: 'settings' }) },
         sep,
         { label: 'Developer tools', hint: 'Ctrl+Shift+I', run: () => void openDevtools() },
       ],
@@ -176,7 +193,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
       label: 'Help',
       mnemonic: 'H',
       items: [
-        { label: 'Keyboard shortcuts', run: () => dialog({ kind: 'shortcuts' }) },
+        { label: 'Keyboard shortcuts', hint: 'F1', run: () => dialog({ kind: 'shortcuts' }) },
         { label: 'About DntDatabase', run: () => dialog({ kind: 'about' }) },
       ],
     },

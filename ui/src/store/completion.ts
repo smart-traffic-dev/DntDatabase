@@ -113,6 +113,19 @@ export const useCompletion = {
     if (!e) return null;
     return e.settled ? e.settled.value : e.value;
   },
+  /**
+   * Every scope that is loaded right now (quick open). Reads the cache only: never starts a
+   * load, so it is safe to call on every keystroke.
+   */
+  loadedScopes(): { connId: string; db: string; scope: CompletionScope }[] {
+    const out: { connId: string; db: string; scope: CompletionScope }[] = [];
+    for (const [k, e] of entries) {
+      const [kind, connId, db] = k.split('\u0000');
+      const value = (e as Entry<CompletionScope | null>).settled?.value;
+      if (kind === 'scope' && connId && db !== undefined && value) out.push({ connId, db, scope: value });
+    }
+    return out;
+  },
   /** Drops what is cached for `db` of the connection (and its qualifier lists). */
   invalidate(connId: string, db: string): void {
     invalidateCompletion(connId, db);

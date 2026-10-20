@@ -188,7 +188,7 @@ describe('MenuBar', () => {
   it('Help items request their dialogs', () => {
     mount();
     fireEvent.click(top('Help'));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Keyboard shortcuts' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Keyboard shortcuts/ }));
     expect(useDialogs.getState().request).toEqual({ kind: 'shortcuts' });
     fireEvent.click(top('Help'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'About DntDatabase' }));

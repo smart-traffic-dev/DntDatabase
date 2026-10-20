@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   EDITOR_MIN_PX,
   EDITOR_RATIO_DEFAULT,
+  FONT_SCALE_MAX,
+  FONT_SCALE_MIN,
   RESULT_MIN_PX,
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
@@ -65,7 +67,13 @@ describe('layout store', () => {
     s.setSidebarWidth(350);
     s.setEditorRatio(0.25);
     s.toggleSidebar();
-    expect(JSON.parse(localStorage.getItem('dnt.layout') ?? '{}')).toEqual({ sidebarWidth: 350, sidebarVisible: false, editorRatio: 0.25 });
+    expect(JSON.parse(localStorage.getItem('dnt.layout') ?? '{}')).toEqual({
+      sidebarWidth: 350,
+      sidebarVisible: false,
+      editorRatio: 0.25,
+      resultsVisible: true,
+      fontScale: 1,
+    });
     useLayout.setState({ sidebarWidth: 1, sidebarVisible: true, editorRatio: 0.9 });
     reloadLayout();
     const r = useLayout.getState();
@@ -93,6 +101,55 @@ describe('layout store', () => {
     expect(useLayout.getState().sidebarWidth).toBe(SIDEBAR_DEFAULT);
     expect(() => useLayout.getState().setSidebarWidth(300)).not.toThrow();
     expect(useLayout.getState().sidebarWidth).toBe(300);
+  });
+});
+
+describe('result panel flag', () => {
+  it('toggles, persists and survives a reset as visible', () => {
+    expect(useLayout.getState().resultsVisible).toBe(true);
+    useLayout.getState().toggleResults();
+    expect(useLayout.getState().resultsVisible).toBe(false);
+    expect(JSON.parse(localStorage.getItem('dnt.layout') ?? '{}').resultsVisible).toBe(false);
+    useLayout.setState({ resultsVisible: true });
+    reloadLayout();
+    expect(useLayout.getState().resultsVisible).toBe(false);
+    useLayout.getState().reset();
+    expect(useLayout.getState().resultsVisible).toBe(true);
+  });
+});
+
+describe('font scale', () => {
+  afterEach(() => useLayout.getState().setFontScale(1));
+
+  it('clamps to 0.8 to 1.6 in 0.1 steps without float noise', () => {
+    const { setFontScale, zoomFont } = useLayout.getState();
+    setFontScale(5);
+    expect(useLayout.getState().fontScale).toBe(FONT_SCALE_MAX);
+    setFontScale(0.1);
+    expect(useLayout.getState().fontScale).toBe(FONT_SCALE_MIN);
+    setFontScale(Number.NaN);
+    expect(useLayout.getState().fontScale).toBe(1);
+    setFontScale(1);
+    for (let i = 0; i < 3; i++) zoomFont(1);
+    expect(useLayout.getState().fontScale).toBe(1.3);
+    for (let i = 0; i < 20; i++) zoomFont(1);
+    expect(useLayout.getState().fontScale).toBe(1.6);
+    for (let i = 0; i < 20; i++) zoomFont(-1);
+    expect(useLayout.getState().fontScale).toBe(0.8);
+  });
+
+  it('persists, is mirrored to --font-scale, and a reset keeps it', () => {
+    useLayout.getState().setFontScale(1.2);
+    expect(JSON.parse(localStorage.getItem('dnt.layout') ?? '{}').fontScale).toBe(1.2);
+    expect(document.documentElement.style.getPropertyValue('--font-scale')).toBe('1.2');
+    useLayout.getState().reset();
+    expect(useLayout.getState().fontScale).toBe(1.2);
+    useLayout.setState({ fontScale: 1 });
+    reloadLayout();
+    expect(useLayout.getState().fontScale).toBe(1.2);
+    localStorage.setItem('dnt.layout', JSON.stringify({ fontScale: 9 }));
+    reloadLayout();
+    expect(useLayout.getState().fontScale).toBe(1.6);
   });
 });
 
