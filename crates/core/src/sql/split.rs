@@ -441,4 +441,37 @@ mod tests {
             }
         }
     }
+
+    /// PostgreSQL's scanner ends a `--` comment at `\r` as well as `\n`
+    /// (`newline [\n\r]` in scan.l); MySQL only at `\n`.
+    #[test]
+    fn pg_line_comment_ends_at_carriage_return() {
+        let input = "SELECT 1 --\r; DROP TABLE t";
+        let stmts = split(input, Postgres);
+        let texts: Vec<&str> = stmts.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, ["SELECT 1 --", "DROP TABLE t"]);
+        assert_eq!(classify(&stmts[1].text, Postgres), StatementKind::Ddl);
+        for s in &stmts {
+            assert_eq!(&input[s.start..s.end], s.text);
+        }
+        // MySQL keeps the `;` inside the comment, as its server does.
+        assert_eq!(split(input, MYSQL).len(), 1);
+        // A CRLF script splits exactly as with LF.
+        for (crlf, dialect) in [
+            ("SELECT 1 -- c\r\nSELECT 2;", Postgres),
+            ("SELECT 1; -- c\r\nSELECT 2;\r\n", Postgres),
+            ("SELECT 1; -- c\r\nSELECT 2;\r\n", MYSQL),
+        ] {
+            let lf = crlf.replace("\r\n", "\n");
+            let a: Vec<String> = split(crlf, dialect).into_iter().map(|s| s.text).collect();
+            let b: Vec<String> = split(&lf, dialect).into_iter().map(|s| s.text).collect();
+            assert_eq!(a.len(), b.len(), "{crlf:?}");
+            for (x, y) in a.iter().zip(&b) {
+                assert_eq!(x.replace("\r\n", "\n"), *y, "{crlf:?}");
+            }
+            for s in split(crlf, dialect) {
+                assert_eq!(&crlf[s.start..s.end], s.text);
+            }
+        }
+    }
 }

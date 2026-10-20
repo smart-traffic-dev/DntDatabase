@@ -1092,6 +1092,11 @@ mod dml_tests {
         }
         // MySQL executable comments run their body: refused.
         assert!(check_raw_where("1=1 /*!50000 ; DROP TABLE t */", Dialect::MYSQL).is_err());
+        // PostgreSQL ends a `--` comment at `\r` too: what follows is live SQL.
+        assert!(matches!(
+            check_raw_where("1=1 --\r) ; DROP TABLE t; SELECT (1", Dialect::Postgres),
+            Err(BuildError::Invalid { .. })
+        ));
     }
 
     #[test]

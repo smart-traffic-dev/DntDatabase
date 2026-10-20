@@ -287,7 +287,12 @@ fn comment_bodies(src: &str, toks: &[Token], dialect: Dialect) -> Vec<(usize, us
             let rest = &b[i..hi];
             if rest.starts_with(b"--") || (rest[0] == b'#' && dialect.is_mysql()) {
                 let body = i + if rest[0] == b'#' { 1 } else { 2 };
-                let nl = rest.iter().position(|&c| c == b'\n').map_or(hi, |p| i + p);
+                // Same end as the lexer: PostgreSQL also ends a `--` comment at `\r`.
+                let pg = !dialect.is_mysql();
+                let nl = rest
+                    .iter()
+                    .position(|&c| c == b'\n' || (pg && c == b'\r'))
+                    .map_or(hi, |p| i + p);
                 let end = if nl > body && b[nl - 1] == b'\r' {
                     nl - 1
                 } else {
