@@ -23,6 +23,9 @@ pub const HISTORY_LIST_MAX: u32 = 1_000;
 pub enum HistoryStatus {
     Ok,
     Error,
+    /// The statement was stopped. Not "not applied": the stop may have come after it
+    /// took effect (the error's `outcome_unknown` is not stored), so the UI must not
+    /// show such a row as not applied.
     Cancelled,
 }
 

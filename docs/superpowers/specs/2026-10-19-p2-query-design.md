@@ -248,7 +248,7 @@ type RunEvent =
   | { t: "done"; stop: StopReason | null; elapsed_ms: number };
 ```
 
-- Lô `rows` dài tối đa `batch_size` (500). Backend gộp lô sao cho mỗi result có tối đa một event mỗi 50 ms, tránh làm ngập WebView.
+- Lô `rows` dài tối đa `batch_size` (500). Lô đủ 500 dòng được gửi ngay. Các lô lẻ được gộp lại và giữ tối đa 50 ms (hoặc tới `result_end`) rồi mới gửi, tránh làm ngập WebView. Bộ nhớ bị chặn bởi `max_rows`: mỗi result gửi tới UI không quá `max_rows` dòng, phần vượt bị driver đọc rồi bỏ.
 - `Value` dùng quy tắc serialize của P1 §3.1.
 - Vị trí lỗi:
   - PG có `position` (1-based, tính trong câu), đổi thành offset trong editor bằng `range.start`.

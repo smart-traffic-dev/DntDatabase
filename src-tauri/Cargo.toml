@@ -11,6 +11,11 @@ name = "dntdatabase"
 name = "dntdatabase"
 path = "src/main.rs"
 
+[features]
+# Plan internals for the integration tests (`take_plan` / `plan_statement`); never
+# enabled in the app, so nothing can run a plan around `query_run`'s guard.
+test-helpers = []
+
 [build-dependencies]
 tauri-build.workspace = true
 
@@ -43,5 +48,7 @@ uuid.workspace = true
 async-trait.workspace = true
 dnt-core = { workspace = true, features = ["test-util"] }
 dnt-testkit.workspace = true
+# The integration tests see the `test-helpers` API.
+dntdatabase = { path = ".", features = ["test-helpers"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

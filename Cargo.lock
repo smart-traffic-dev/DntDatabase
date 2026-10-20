@@ -1529,6 +1529,7 @@ dependencies = [
  "dnt-store",
  "dnt-testkit",
  "dnt-tunnel",
+ "dntdatabase",
  "futures-util",
  "secrecy",
  "serde",

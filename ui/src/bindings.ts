@@ -531,7 +531,13 @@ search: string | null;
  */
 limit: number }
 export type HistoryIds = number[]
-export type HistoryStatus = "ok" | "error" | "cancelled"
+export type HistoryStatus = "ok" | "error" | 
+/**
+ * The statement was stopped. Not "not applied": the stop may have come after it
+ * took effect (the error's `outcome_unknown` is not stored), so the UI must not
+ * show such a row as not applied.
+ */
+"cancelled"
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
@@ -651,7 +657,10 @@ export type RunEvent =
  */
 { t: "explain"; index: number; plan: PlanTree } | 
 /**
- * Stopping the running statement was requested (sent once per stop).
+ * Stopping the running statement was requested. Sent once per stop: a Stop
+ * pressed while a timeout is already stopping the statement sends nothing more
+ * (the user's stop is still recorded, and ends the run), and a second Stop of the
+ * same run sends nothing.
  */
 { t: "stopping"; reason: StopCause } | 
 /**

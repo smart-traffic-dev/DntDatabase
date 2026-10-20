@@ -78,7 +78,10 @@ pub enum RunEvent {
     Notice { index: u32, message: String },
     /// Explain mode: the normalized plan of statement `index`.
     Explain { index: u32, plan: PlanTree },
-    /// Stopping the running statement was requested (sent once per stop).
+    /// Stopping the running statement was requested. Sent once per stop: a Stop
+    /// pressed while a timeout is already stopping the statement sends nothing more
+    /// (the user's stop is still recorded, and ends the run), and a second Stop of the
+    /// same run sends nothing.
     Stopping { reason: StopCause },
     /// The statement did not stop within the cancel grace; its connection is being
     /// replaced.
@@ -96,7 +99,9 @@ pub enum RunEvent {
 }
 
 /// Where a run's events go (the Tauri channel in the app, a collector in tests).
-pub type EventSink = Arc<dyn Fn(RunEvent) + Send + Sync>;
+/// Returns whether the event was delivered: once it returns `false` (the window that
+/// listened is gone) the run is stopped and nothing more is sent.
+pub type EventSink = Arc<dyn Fn(RunEvent) -> bool + Send + Sync>;
 
 /// Per-run options from the toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -113,17 +118,17 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Stop state shared by a run's sink and `query_cancel`.
 #[derive(Default)]
 pub(crate) struct RunFlags {
-    /// The user stopped the run (`stopping{user}` was sent).
+    /// The user stopped the run (recorded even when no `stopping{user}` was sent).
     pub(crate) user: AtomicBool,
     /// A `stopping` event was sent for the current statement.
     pub(crate) stopping: AtomicBool,
 }
 
 impl RunFlags {
-    /// Sends `stopping{user}` unless the user already stopped this run.
+    /// Records the user's stop; sends `stopping{user}` unless a `stopping` was already
+    /// sent (by a timeout, or an earlier Stop).
     pub(crate) fn user_stop(&self, emit: &EventSink) {
-        if !self.user.swap(true, Ordering::SeqCst) {
-            self.stopping.store(true, Ordering::SeqCst);
+        if !self.user.swap(true, Ordering::SeqCst) && !self.stopping.swap(true, Ordering::SeqCst) {
             emit(RunEvent::Stopping {
                 reason: StopCause::User,
             });
@@ -262,8 +267,8 @@ pub(crate) struct ChannelSink {
     flags: Arc<RunFlags>,
     dialect: Dialect,
     history: HistoryCtx,
-    /// History inserts in flight on the blocking pool.
-    writes: Vec<tokio::task::JoinHandle<()>>,
+    /// The run's history writer, started with the first statement.
+    writer: Option<HistoryWriter>,
     next_result_id: u32,
     index: Arc<AtomicU32>,
     current: Option<Current>,
@@ -339,7 +344,7 @@ impl ChannelSink {
             flags,
             dialect,
             history,
-            writes: Vec::new(),
+            writer: None,
             next_result_id: 0,
             index: Arc::new(AtomicU32::new(0)),
             current: None,
@@ -362,9 +367,9 @@ impl ChannelSink {
         Arc::clone(&self.index)
     }
 
-    /// The history inserts still running (await them before `done`).
-    pub(crate) fn take_writes(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
-        std::mem::take(&mut self.writes)
+    /// The history writer, if anything was recorded (finish it before `done`).
+    pub(crate) fn take_writer(&mut self) -> Option<HistoryWriter> {
+        self.writer.take()
     }
 
     fn record(&mut self, stmt: &PlannedStmt, result: &Result<StmtOutcome, AppError>) {
@@ -382,6 +387,9 @@ impl ChannelSink {
                     .reduce(u64::saturating_add);
                 (HistoryStatus::Ok, rows, affected, None, None)
             }
+            // A `cancelled` row does not mean "not applied": the cancel may have landed
+            // after the statement took effect (`outcome_unknown`, which the history does
+            // not store). The UI must not render `cancelled` history rows as not applied.
             Err(e) => (
                 if e.kind == "cancelled" {
                     HistoryStatus::Cancelled
@@ -408,13 +416,46 @@ impl ChannelSink {
             error_kind,
             error_code,
         };
-        let repo = Arc::clone(&self.history.repo);
-        let connection = self.history.connection_id;
-        self.writes.push(tokio::task::spawn_blocking(move || {
-            if let Err(e) = repo.history_insert(&entry) {
-                tracing::warn!(connection = %connection, error = %e, "could not record query history");
+        let writer = self.writer.get_or_insert_with(|| {
+            HistoryWriter::start(Arc::clone(&self.history.repo), self.history.connection_id)
+        });
+        writer.send(entry);
+    }
+}
+
+/// The run's one history writer: a blocking task fed through a channel, so the rows are
+/// inserted in statement order and a long script costs one blocking task, not one per
+/// statement. A failed insert logs `warn` and never fails the run.
+pub(crate) struct HistoryWriter {
+    tx: std::sync::mpsc::Sender<NewHistoryEntry>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl HistoryWriter {
+    pub(crate) fn start(repo: Arc<ConnectionRepo>, connection: Uuid) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<NewHistoryEntry>();
+        let task = tokio::task::spawn_blocking(move || {
+            for entry in rx {
+                if let Err(e) = repo.history_insert(&entry) {
+                    tracing::warn!(connection = %connection, error = %e, "could not record query history");
+                }
             }
-        }));
+        });
+        HistoryWriter { tx, task }
+    }
+
+    pub(crate) fn send(&self, entry: NewHistoryEntry) {
+        // The writer only stops once every sender is gone.
+        let _ = self.tx.send(entry);
+    }
+
+    /// Waits until every row sent is written.
+    pub(crate) async fn finish(self) {
+        let HistoryWriter { tx, task } = self;
+        drop(tx);
+        if let Err(e) = task.await {
+            tracing::warn!(error = %e, "the query history writer failed");
+        }
     }
 }
 
@@ -467,7 +508,9 @@ impl RowSink for ChannelSink {
                     });
                 }
             }
-            ExecProgress::GraceExpired => (self.emit)(RunEvent::Abandoning),
+            ExecProgress::GraceExpired => {
+                (self.emit)(RunEvent::Abandoning);
+            }
         }
     }
 }
@@ -517,10 +560,12 @@ impl RunSink for ChannelSink {
                     (self.emit)(explain_event(stmt.index, ex));
                 }
             }
-            Err(error) => (self.emit)(RunEvent::StatementError {
-                index: stmt.index,
-                error: error.clone(),
-            }),
+            Err(error) => {
+                (self.emit)(RunEvent::StatementError {
+                    index: stmt.index,
+                    error: error.clone(),
+                });
+            }
         }
         self.record(stmt, result);
     }
@@ -544,7 +589,13 @@ mod tests {
     fn collector() -> (EventSink, Arc<Mutex<Vec<RunEvent>>>) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let out = Arc::clone(&seen);
-        (Arc::new(move |e| out.lock().unwrap().push(e)), seen)
+        (
+            Arc::new(move |e| {
+                out.lock().unwrap().push(e);
+                true
+            }),
+            seen,
+        )
     }
 
     fn row(i: i64) -> Vec<Value> {
@@ -602,6 +653,26 @@ mod tests {
             seen.lock().unwrap().last(),
             Some(RunEvent::Rows { result_id: 4, rows }) if rows.len() == 1
         ));
+    }
+
+    #[test]
+    fn user_stop_after_a_timeout_stop_sends_nothing_more() {
+        let (emit, seen) = collector();
+        let flags = RunFlags::default();
+        // A timeout's `stopping` was sent for the running statement.
+        flags.stopping.store(true, Ordering::SeqCst);
+        flags.user_stop(&emit);
+        flags.user_stop(&emit);
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(
+            flags.user.load(Ordering::SeqCst),
+            "the user's stop is recorded"
+        );
+
+        let flags = RunFlags::default();
+        flags.user_stop(&emit);
+        flags.user_stop(&emit);
+        assert_eq!(seen.lock().unwrap().len(), 1);
     }
 
     #[test]

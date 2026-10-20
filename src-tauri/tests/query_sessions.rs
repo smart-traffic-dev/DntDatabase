@@ -262,6 +262,9 @@ impl Session for FakeSession {
                 position: None,
             });
         }
+        if upper.contains("PANIC") {
+            panic!("the fake driver panics");
+        }
         if upper.contains("LOSE") {
             return Err(DbError::ConnectionLost {
                 was_in_tx: false,
@@ -620,7 +623,7 @@ async fn close_tab_closes_session() {
     f.sm.query_close_tab("t1", false).await.unwrap();
     assert_eq!(f.log.closes(), 1);
     // The tab's plans are gone with it.
-    let err = f.sm.take_plan(view.plan_id).unwrap_err();
+    let err = f.sm.test_take_plan(view.plan_id).unwrap_err();
     assert_eq!(AppError::from(err).kind, "plan_expired");
     // Closing an unknown (or already closed) tab is a no-op.
     f.sm.query_close_tab("t1", false).await.unwrap();
@@ -653,7 +656,7 @@ async fn close_connection_closes_tab_sessions() {
     plan(&f, "t2", id, None, "SELECT 1").await.unwrap();
     f.sm.close(id).await;
     assert_eq!(f.log.closes(), 3, "metadata + two tab sessions");
-    let err = f.sm.take_plan(view.plan_id).unwrap_err();
+    let err = f.sm.test_take_plan(view.plan_id).unwrap_err();
     assert_eq!(AppError::from(err).kind, "plan_expired");
 }
 
@@ -729,9 +732,9 @@ async fn expired_plan_is_rejected() {
     let id = open(&f, config(DbKind::MySql)).await;
     let view = plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let err = f.sm.take_plan(view.plan_id).unwrap_err();
+    let err = f.sm.test_take_plan(view.plan_id).unwrap_err();
     assert_eq!(AppError::from(err).kind, "plan_expired");
-    let err = f.sm.take_plan(Uuid::new_v4()).unwrap_err();
+    let err = f.sm.test_take_plan(Uuid::new_v4()).unwrap_err();
     assert_eq!(AppError::from(err).kind, "plan_expired");
 }
 
@@ -750,16 +753,16 @@ async fn taken_plan_is_guarded_and_runs_once() {
     let view = plan(&f, "t1", id, None, text).await.unwrap();
     assert_eq!(view.stmts.len(), 3);
 
-    let (tab, conn, p) = f.sm.take_plan(view.plan_id).unwrap();
+    let (tab, conn, p) = f.sm.test_take_plan(view.plan_id).unwrap();
     assert_eq!((tab.as_str(), conn), ("t1", id));
     assert!(p.guard.is_some(), "every stored plan is guarded");
     assert_eq!(p.stmts[1].verdict, Verdict::Confirm);
     // A plan runs once.
-    let err = f.sm.take_plan(view.plan_id).unwrap_err();
+    let err = f.sm.test_take_plan(view.plan_id).unwrap_err();
     assert_eq!(AppError::from(err).kind, "plan_expired");
 
     // Retry / Fetch all re-run one stored statement verbatim (DELIMITER context kept).
-    let (_, _, one) = f.sm.plan_statement(view.plan_id, 1).unwrap();
+    let (_, _, one) = f.sm.test_plan_statement(view.plan_id, 1).unwrap();
     assert_eq!(one.stmts.len(), 1);
     assert_eq!(one.stmts[0].index, 1);
     assert_eq!(
@@ -768,14 +771,14 @@ async fn taken_plan_is_guarded_and_runs_once() {
     );
     assert_eq!(one.stmts[0].verdict, Verdict::Confirm);
     assert!(one.guard.is_some());
-    let err = f.sm.plan_statement(view.plan_id, 3).unwrap_err();
+    let err = f.sm.test_plan_statement(view.plan_id, 3).unwrap_err();
     assert_eq!(AppError::from(err).kind, "plan_expired");
 
     // A newer plan of the tab drops its pending (never run) plans, not the one run.
     let pending = plan(&f, "t1", id, None, "SELECT 5").await.unwrap();
     plan(&f, "t1", id, None, "SELECT 6").await.unwrap();
-    assert!(f.sm.take_plan(pending.plan_id).is_err());
-    assert!(f.sm.plan_statement(view.plan_id, 0).is_ok());
+    assert!(f.sm.test_take_plan(pending.plan_id).is_err());
+    assert!(f.sm.test_plan_statement(view.plan_id, 0).is_ok());
 }
 
 fn kind(e: DbError) -> String {
@@ -834,15 +837,15 @@ async fn stored_statement_on_another_database_is_expired() {
         let view = plan(&f, "t1", id, Some("a"), "SELECT 1; SELECT 2")
             .await
             .unwrap();
-        f.sm.take_plan(view.plan_id).unwrap();
-        assert!(f.sm.plan_statement(view.plan_id, 1).is_ok());
+        f.sm.test_take_plan(view.plan_id).unwrap();
+        assert!(f.sm.test_plan_statement(view.plan_id, 1).is_ok());
         let pending = plan(&f, "t1", id, Some("b"), "SELECT 3").await.unwrap();
-        let err = f.sm.plan_statement(view.plan_id, 1).unwrap_err();
+        let err = f.sm.test_plan_statement(view.plan_id, 1).unwrap_err();
         assert_eq!(kind(err), "plan_expired", "{k:?}");
         // Back on `a`: a plan made on `b` does not run there.
         plan(&f, "t1", id, Some("a"), "SELECT 4").await.unwrap();
         assert_eq!(
-            kind(f.sm.take_plan(pending.plan_id).unwrap_err()),
+            kind(f.sm.test_take_plan(pending.plan_id).unwrap_err()),
             "plan_expired"
         );
     }
@@ -854,10 +857,10 @@ async fn plan_of_tab_moved_to_another_connection_is_expired() {
     let a = open(&f, config(DbKind::MySql)).await;
     let b = open(&f, config(DbKind::MySql)).await;
     let view = plan(&f, "t1", a, None, "SELECT 1").await.unwrap();
-    f.sm.take_plan(view.plan_id).unwrap();
+    f.sm.test_take_plan(view.plan_id).unwrap();
     plan(&f, "t1", b, None, "SELECT 1").await.unwrap();
     assert_eq!(
-        kind(f.sm.plan_statement(view.plan_id, 0).unwrap_err()),
+        kind(f.sm.test_plan_statement(view.plan_id, 0).unwrap_err()),
         "plan_expired"
     );
 }
@@ -869,15 +872,15 @@ async fn only_latest_taken_plan_is_kept_without_ttl() {
     });
     let id = open(&f, config(DbKind::MySql)).await;
     let first = plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
-    f.sm.take_plan(first.plan_id).unwrap();
+    f.sm.test_take_plan(first.plan_id).unwrap();
     let second = plan(&f, "t1", id, None, "SELECT 2").await.unwrap();
     // A plan of another tab does not affect t1's.
     let other = plan(&f, "t2", id, None, "SELECT 9").await.unwrap();
-    f.sm.take_plan(other.plan_id).unwrap();
-    assert!(f.sm.plan_statement(first.plan_id, 0).is_ok());
-    f.sm.take_plan(second.plan_id).unwrap();
+    f.sm.test_take_plan(other.plan_id).unwrap();
+    assert!(f.sm.test_plan_statement(first.plan_id, 0).is_ok());
+    f.sm.test_take_plan(second.plan_id).unwrap();
     assert_eq!(
-        kind(f.sm.plan_statement(first.plan_id, 0).unwrap_err()),
+        kind(f.sm.test_plan_statement(first.plan_id, 0).unwrap_err()),
         "plan_expired",
         "an older taken plan of the tab is dropped"
     );
@@ -885,17 +888,17 @@ async fn only_latest_taken_plan_is_kept_without_ttl() {
     let pending = plan(&f, "t1", id, None, "SELECT 3").await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     // The latest taken plans outlive the TTL; a pending plan does not.
-    let (_, _, one) = f.sm.plan_statement(second.plan_id, 0).unwrap();
+    let (_, _, one) = f.sm.test_plan_statement(second.plan_id, 0).unwrap();
     assert_eq!(one.stmts[0].text, "SELECT 2");
-    assert!(f.sm.plan_statement(other.plan_id, 0).is_ok());
+    assert!(f.sm.test_plan_statement(other.plan_id, 0).is_ok());
     assert_eq!(
-        kind(f.sm.take_plan(pending.plan_id).unwrap_err()),
+        kind(f.sm.test_take_plan(pending.plan_id).unwrap_err()),
         "plan_expired"
     );
 
     f.sm.query_close_tab("t1", false).await.unwrap();
-    assert!(f.sm.plan_statement(second.plan_id, 0).is_err());
-    assert!(f.sm.plan_statement(other.plan_id, 0).is_ok());
+    assert!(f.sm.test_plan_statement(second.plan_id, 0).is_err());
+    assert!(f.sm.test_plan_statement(other.plan_id, 0).is_ok());
 }
 
 #[tokio::test]
@@ -904,7 +907,7 @@ async fn plan_statement_carries_only_the_statement() {
     let id = open(&f, config(DbKind::MySql)).await;
     let text = format!("SELECT 1;\n{}\nSELECT 2", "-- filler\n".repeat(1000));
     let view = plan(&f, "t1", id, None, &text).await.unwrap();
-    let (_, _, one) = f.sm.plan_statement(view.plan_id, 1).unwrap();
+    let (_, _, one) = f.sm.test_plan_statement(view.plan_id, 1).unwrap();
     assert_eq!(one.source, "SELECT 2");
     assert_eq!(one.stmts[0].source_range, (0, 8));
     assert_eq!(one.stmts[0].range, view.stmts[1].range);
@@ -998,9 +1001,23 @@ fn collector() -> (EventSink, Arc<Events>) {
     (
         Arc::new(move |e| {
             out.0.lock().unwrap().push(serde_json::to_value(e).unwrap());
+            true
         }),
         events,
     )
+}
+
+fn history(f: &Fixture, id: Uuid) -> Vec<dnt_store::history::HistoryEntry> {
+    let mut rows = f
+        .repo
+        .history_list(&HistoryFilter {
+            connection_id: Some(id),
+            search: None,
+            limit: 1000,
+        })
+        .unwrap();
+    rows.sort_by_key(|r| r.id);
+    rows
 }
 
 fn opts() -> RunOptions {
@@ -1270,18 +1287,26 @@ async fn grace_expired_emits_abandoning() {
 async fn timeout_progress_emits_stopping_timeout() {
     // A `CancelSent` the user did not ask for is a timeout.
     let f = fixture_with(DbKind::MySql, |sm| {
-        sm.with_cancel_grace(Duration::from_millis(20))
+        sm.with_cancel_grace(Duration::from_millis(300))
     });
     let id = open(&f, config(DbKind::MySql)).await;
-    let view = plan(&f, "t1", id, None, "SELECT stuck").await.unwrap();
-    let (emit, events) = collector();
-    f.sm.query_run(view.plan_id, false, opts(), emit)
+    let view = plan(&f, "t1", id, None, "SELECT stuck; SELECT 2")
         .await
         .unwrap();
+    let (emit, events) = collector();
+    let run_id =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap();
     tokio::time::sleep(Duration::from_millis(30)).await;
     // The driver's own cancel (as a statement timeout does).
     f.log.cancelled.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Stop pressed while the timeout is stopping: no second `stopping`, but the user's
+    // stop is recorded and ends the run.
+    f.sm.query_cancel(run_id).await.unwrap();
     events.done(LONG).await;
+    assert_eq!(f.log.executed(), ["SELECT stuck"]);
     assert_eq!(
         events.of("stopping"),
         [json!({ "t": "stopping", "reason": "timeout" })]
@@ -1639,4 +1664,143 @@ async fn explain_json_v2_gives_a_clear_error() {
         .unwrap();
     events.done(LONG).await;
     assert_eq!(events.of("explain")[0]["plan"]["kind"], "tree");
+}
+
+// ---- Fix round 1 ----
+
+/// Plans statement `index` of `plan_id` again (Retry / Fetch all) and runs it.
+async fn rerun(f: &Fixture, plan_id: Uuid, index: u32, opts: RunOptions) -> Arc<Events> {
+    let view = f.sm.query_plan_statement(plan_id, index).await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts, emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    events
+}
+
+#[tokio::test]
+async fn retries_and_fetch_all_from_one_run_all_succeed() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT 0; SELECT 1; SELECT rows_7")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+
+    // Two Retries and a Fetch all, each from the original run.
+    let first = rerun(&f, view.plan_id, 0, opts()).await;
+    assert_eq!(first.of("statement_start")[0]["index"], 0);
+    let second = rerun(&f, view.plan_id, 1, opts()).await;
+    assert_eq!(second.of("statement_start")[0]["index"], 1);
+    let all = RunOptions {
+        max_rows: 1_000_000,
+        continue_on_error: false,
+    };
+    let fetched = rerun(&f, view.plan_id, 2, all).await;
+    assert_eq!(fetched.of("result_end")[0]["row_count"], 7);
+    // Retry of a retried statement works too, and the original is still there.
+    rerun(&f, view.plan_id, 0, opts()).await;
+    assert_eq!(
+        f.log.executed(),
+        [
+            "SELECT 0",
+            "SELECT 1",
+            "SELECT rows_7",
+            "SELECT 0",
+            "SELECT 1",
+            "SELECT rows_7",
+            "SELECT 0"
+        ]
+    );
+
+    // A new run of the tab (a user plan) replaces the original.
+    let next = plan(&f, "t1", id, None, "SELECT 9").await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(next.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    let err =
+        f.sm.query_plan_statement(view.plan_id, 0)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "plan_expired");
+    rerun(&f, next.plan_id, 0, opts()).await;
+}
+
+#[tokio::test]
+async fn dead_listener_stops_the_run() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT slow; SELECT 2")
+        .await
+        .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&calls);
+    // The window is gone: no event is delivered.
+    let emit: EventSink = Arc::new(move |_| {
+        seen.fetch_add(1, Ordering::SeqCst);
+        false
+    });
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    // The run stops and frees the tab well before `slow` would end (10 s).
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match plan(&f, "t1", id, None, "SELECT 1").await {
+                Ok(_) => return,
+                Err(e) => assert_eq!(kind(e), "busy"),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the run did not stop");
+    assert_eq!(f.log.executed(), ["SELECT slow"]);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "nothing is sent after a failure"
+    );
+}
+
+#[tokio::test]
+async fn history_is_written_in_statement_order() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let stmts: Vec<String> = (0..60).map(|i| format!("SELECT {i} AS n{i}")).collect();
+    run_text(&f, id, &stmts.join(";\n"), opts()).await;
+    let texts: Vec<String> = history(&f, id).into_iter().map(|r| r.sql_text).collect();
+    assert_eq!(texts, stmts);
+}
+
+#[tokio::test]
+async fn panicking_run_ends_and_drops_the_session() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT 1; SELECT panic")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    let done = events.done(LONG).await;
+    assert_eq!(done["stop"], json!({ "kind": "error", "index": 1 }));
+    assert_eq!(events.of("statement_error")[0]["error"]["kind"], "internal");
+    assert_eq!(
+        f.log.closes(),
+        1,
+        "the session in an unknown state is closed"
+    );
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3, "the next plan opens a fresh session");
+    // The statement that ran before the panic is in the history.
+    assert_eq!(history(&f, id).len(), 1);
 }

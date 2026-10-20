@@ -203,9 +203,12 @@ pub async fn query_run(
     opts: RunOptions,
     channel: Channel<RunEvent>,
 ) -> Result<Uuid, AppError> {
-    let emit: EventSink = Arc::new(move |event| {
-        if let Err(e) = channel.send(event) {
+    // An undelivered event (the window is gone) stops the run: see `query_run`.
+    let emit: EventSink = Arc::new(move |event| match channel.send(event) {
+        Ok(()) => true,
+        Err(e) => {
             tracing::debug!(error = %e, "a run event was not delivered");
+            false
         }
     });
     guard(query_run_impl(&state, plan_id, confirmed, opts, emit)).await

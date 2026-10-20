@@ -61,6 +61,7 @@ fn collector() -> (EventSink, Arc<Events>) {
     (
         Arc::new(move |e| {
             out.0.lock().unwrap().push(serde_json::to_value(e).unwrap());
+            true
         }),
         events,
     )

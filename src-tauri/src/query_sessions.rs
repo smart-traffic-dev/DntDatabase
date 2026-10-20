@@ -292,6 +292,9 @@ struct StoredPlan {
     at: Instant,
     /// `query_run` took it: it cannot be run again, only single statements of it.
     taken: bool,
+    /// A derived plan (`query_plan_statement`: Retry / Fetch all): the user plan it
+    /// was cut from. Taking it never evicts that plan.
+    source: Option<Uuid>,
 }
 
 /// A copy of a stored plan.
@@ -300,6 +303,9 @@ pub(crate) struct PlanCopy {
     target: PlanTarget,
     plan: ScriptPlan,
     explain: Option<ExplainPlan>,
+    /// See [`StoredPlan::source`]; for a statement copy, the plan it was cut from (its
+    /// own source when that plan is itself derived).
+    source: Option<Uuid>,
 }
 
 /// Statement `index` of `plan` as a one-statement plan: its text is the whole source
@@ -319,9 +325,11 @@ fn one_statement(plan: &ScriptPlan, index: u32) -> Option<ScriptPlan> {
 }
 
 /// Plans by id. A pending (never taken) plan lives for the plan TTL and only the newest
-/// one of a tab is kept. Of the taken plans only the latest of each tab is kept (its
-/// results are what the tab shows: Retry / Fetch all use it), with no TTL: it goes with
-/// the next take of the tab, or when the tab or its connection closes.
+/// one of a tab is kept. Of the taken user plans (`query_plan`, `query_explain`) only
+/// the latest of each tab is kept (its results are what the tab shows: Retry / Fetch
+/// all use it), with no TTL: it goes with the next take of a user plan of the tab, or
+/// when the tab or its connection closes. Taking a derived plan (Retry / Fetch all)
+/// keeps the user plan and only replaces the tab's previous taken derived plan.
 #[derive(Default)]
 pub(crate) struct PlanStore {
     plans: Mutex<HashMap<Uuid, StoredPlan>>,
@@ -340,6 +348,7 @@ impl PlanStore {
         target: PlanTarget,
         plan: ScriptPlan,
         explain: Option<ExplainPlan>,
+        source: Option<Uuid>,
     ) -> Uuid {
         debug_assert!(
             explain
@@ -361,6 +370,7 @@ impl PlanStore {
                 explain,
                 at: Instant::now(),
                 taken: false,
+                source,
             },
         );
         id
@@ -396,6 +406,7 @@ impl PlanStore {
             target: p.target.clone(),
             plan: p.plan.clone(),
             explain: p.explain.clone(),
+            source: p.source,
         })
     }
 
@@ -430,9 +441,13 @@ impl PlanStore {
             return Err(DbError::PlanExpired);
         }
         p.taken = true;
+        let derived = p.source.is_some();
         let taken = (p.target.tab.clone(), p.target.conn, p.plan.clone());
-        // Only the latest taken plan of a tab is kept.
-        plans.retain(|pid, p| *pid == id || !p.taken || p.target.tab != taken.0);
+        // Of the tab's taken plans, a user plan replaces all others; a derived plan
+        // replaces only the previous derived one (its source stays).
+        plans.retain(|pid, p| {
+            *pid == id || !p.taken || p.target.tab != taken.0 || (derived && p.source.is_none())
+        });
         Ok(taken)
     }
 
@@ -459,6 +474,7 @@ impl PlanStore {
             target: p.target.clone(),
             plan,
             explain,
+            source: Some(p.source.unwrap_or(id)),
         })
     }
 
@@ -645,7 +661,13 @@ impl SessionManager {
         let cfg = self.current_config(&rt);
         let mut planned = plan(text, target, dialect);
         guard(&mut planned, cfg.env_tag, cfg.read_only, false);
-        self.store_plan(&rt, &cfg, plan_target, planned, None, dialect, tx_state)
+        let copy = PlanCopy {
+            target: plan_target,
+            plan: planned,
+            explain: None,
+            source: None,
+        };
+        self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 
     /// Opens (or moves) the session of `tab` on `conn` / `database` and returns it held:
@@ -673,19 +695,23 @@ impl SessionManager {
         Ok((rt, ts))
     }
 
-    /// Stores a guarded plan (for an Explain, `planned` is the explain statement and
-    /// `explain.original` the guarded plan of the explained one) and returns its view.
-    #[allow(clippy::too_many_arguments)]
+    /// Stores a guarded plan (for an Explain, `copy.plan` is the explain statement and
+    /// `copy.explain.original` the guarded plan of the explained one) and returns its
+    /// view.
     fn store_plan(
         &self,
         rt: &ConnectionRuntime,
         cfg: &ConnectionConfig,
-        target: PlanTarget,
-        planned: ScriptPlan,
-        explain: Option<ExplainPlan>,
+        copy: PlanCopy,
         dialect: Dialect,
         tx_state: TxState,
     ) -> Result<PlanView, DbError> {
+        let PlanCopy {
+            target,
+            plan: planned,
+            explain,
+            source,
+        } = copy;
         let judged = explain.as_ref().map_or(&planned, |e| &e.original);
         let stmts = judged
             .stmts
@@ -703,7 +729,9 @@ impl SessionManager {
         if rt.closed.load(Ordering::SeqCst) {
             return Err(closed_error());
         }
-        let plan_id = self.plans.insert(self.plan_ttl, target, planned, explain);
+        let plan_id = self
+            .plans
+            .insert(self.plan_ttl, target, planned, explain, source);
         Ok(PlanView {
             plan_id,
             stmts,
@@ -813,6 +841,11 @@ impl SessionManager {
     /// (the server rolls the transaction back). Waits up to [`SLOT_CLOSE_WAIT`] for a
     /// holder of the session: without `force` that ends in `Busy`. Closing an unknown
     /// tab is a no-op.
+    ///
+    /// A run of the tab is stopped FIRST, before the open-transaction check: a call that
+    /// then returns `TransactionOpen` (or `Busy`, when the stopped run does not release
+    /// the session within [`SLOT_CLOSE_WAIT`]) has still stopped the run. The UI must
+    /// therefore ask the user before closing a tab whose run is active.
     pub async fn query_close_tab(&self, tab: &str, force: bool) -> Result<(), DbError> {
         validate_tab(tab)?;
         // A run of the tab is stopped first (it still ends with `done`), so closing does
@@ -847,8 +880,11 @@ impl SessionManager {
     /// connection was closed or reopened. Taking it drops the tab's previous taken plan.
     ///
     /// The plan was guarded with the config as it was when it was made (`plan.guard` is
-    /// set); `query_run` judges it again with the current config before it runs.
-    pub fn take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, ScriptPlan), DbError> {
+    /// set); `query_run` judges it again with the current config before it runs. Not
+    /// public: nothing outside may take a plan around `query_run`'s re-judgement (tests
+    /// use [`SessionManager::test_take_plan`]).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, ScriptPlan), DbError> {
         self.plans
             .take(self.plan_ttl, plan_id, &|t| self.plan_target_current(t))
     }
@@ -860,8 +896,10 @@ impl SessionManager {
     /// `source_range` is `(0, len)`, `base` its editor start). `PlanExpired` when the
     /// plan or index is unknown or the plan's target changed (see [`Self::take_plan`]).
     ///
-    /// To run it, [`Self::query_plan_statement`] stores it as a new plan.
-    pub fn plan_statement(
+    /// To run it, [`Self::query_plan_statement`] stores it as a new plan (tests use
+    /// [`SessionManager::test_plan_statement`]).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) fn plan_statement(
         &self,
         plan_id: Uuid,
         index: u32,
@@ -870,6 +908,24 @@ impl SessionManager {
             self.plan_target_current(t)
         })?;
         Ok((copy.target.tab, copy.target.conn, copy.plan))
+    }
+
+    /// [`Self::take_plan`] for integration tests (feature `test-helpers`).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
+    pub fn test_take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, ScriptPlan), DbError> {
+        self.take_plan(plan_id)
+    }
+
+    /// [`Self::plan_statement`] for integration tests (feature `test-helpers`).
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
+    pub fn test_plan_statement(
+        &self,
+        plan_id: Uuid,
+        index: u32,
+    ) -> Result<(String, Uuid, ScriptPlan), DbError> {
+        self.plan_statement(plan_id, index)
     }
 
     /// Retry / Fetch all: stores statement `index` of plan `plan_id` (taken or not) as a
@@ -903,15 +959,7 @@ impl SessionManager {
         };
         let analyze = judged.guard.is_some_and(|g| g.analyze);
         guard(judged, cfg.env_tag, cfg.read_only, analyze);
-        self.store_plan(
-            &rt,
-            &cfg,
-            copy.target,
-            copy.plan,
-            copy.explain,
-            dialect,
-            tx_state,
-        )
+        self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 }
 
@@ -1022,10 +1070,41 @@ fn rejudge(
     for (s, j) in run_plan.stmts.iter_mut().zip(&judged.stmts) {
         s.verdict = j.verdict;
     }
-    // The explain statement's own text is not what the guard judged: `run` must not
-    // judge it again after a `sql_mode` change (it only re-checks its boundaries).
+    // Intentional: an Explain plan skips `run`'s re-guard after a `sql_mode` change.
+    // The explain statement's own text is not what the guard judged (`query_run` just
+    // judged the explained statement with the current config), so `run` only re-checks
+    // its boundaries.
     run_plan.guard = None;
     Ok(run_plan)
+}
+
+/// Wraps a run's `emit` so that the first event it cannot deliver (the window whose
+/// channel listened is gone) stops the run: the stop signal is raised at once (no
+/// further statement is sent) and the running statement is cancelled in the
+/// background, so the run ends and frees the tab's session. Nothing is sent after that.
+fn stop_when_undelivered(emit: EventSink, cancel: RunCancel) -> EventSink {
+    let dead = Arc::new(AtomicBool::new(false));
+    Arc::new(move |event| {
+        if dead.load(Ordering::SeqCst) {
+            return false;
+        }
+        if emit(event) {
+            return true;
+        }
+        if !dead.swap(true, Ordering::SeqCst) {
+            tracing::warn!("a query run lost its listener; stopping it");
+            cancel.signal().stop();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let cancel = cancel.clone();
+                handle.spawn(async move {
+                    if let Err(e) = cancel.cancel().await {
+                        tracing::warn!(error = %e, "could not cancel a running query");
+                    }
+                });
+            }
+        }
+        false
+    })
 }
 
 /// Everything a spawned run owns.
@@ -1082,16 +1161,18 @@ impl RunTask {
         .await;
         ticker.abort();
         rows.flush();
-        for write in sink.take_writes() {
-            let _ = write.await;
+        if let Some(writer) = sink.take_writer() {
+            writer.finish().await;
         }
         let stop = match ran {
             Ok(Some(report)) => {
-                self.after_run(&report, &sink).await;
+                self.after_run(Some(&report), &sink).await;
                 report.stop
             }
             Ok(None) | Err(_) => {
                 tracing::error!(connection = %self.rt.cfg.id, "a query run failed unexpectedly");
+                // The session's state is unknown: drop it (or close it, with its tab).
+                self.after_run(None, &sink).await;
                 let at = index.load(Ordering::SeqCst);
                 let error = AppError::from(DbError::Internal {
                     message: "the run failed unexpectedly; see the log for details".into(),
@@ -1124,10 +1205,19 @@ impl RunTask {
     /// Applies what the run did to the tab's session: a lost connection drops it, a
     /// MySQL `USE` moves its database, a closed tab or connection closes it; a
     /// successful `Ddl` reloads the database's SchemaCache in the background.
-    async fn after_run(&mut self, report: &RunReport, sink: &ChannelSink) {
-        let lost = report.stmts.iter().any(
-            |s| matches!(&s.result, Err(e) if e.kind == "connection_lost" || e.kind == "connect"),
-        );
+    ///
+    /// `report: None` (the run task panicked, or the session vanished) is handled like
+    /// a lost connection: the session, in an unknown state, is dropped.
+    ///
+    /// The SchemaCache refresh covers only the session's current database (or the
+    /// connect database): DDL on another database (`CREATE TABLE other.t`) or another
+    /// PostgreSQL schema's database is not picked up until that cache is refreshed.
+    async fn after_run(&mut self, report: Option<&RunReport>, sink: &ChannelSink) {
+        let lost = report.is_none_or(|report| {
+            report.stmts.iter().any(|s| {
+                matches!(&s.result, Err(e) if e.kind == "connection_lost" || e.kind == "connect")
+            })
+        });
         let ts = &mut *self.ts;
         if lost {
             if let Some(dead) = ts.session.take() {
@@ -1207,6 +1297,7 @@ impl SessionManager {
             ..ExecOptions::default()
         };
         let cancel = RunCancel::new(session.cancel_handle());
+        let emit = stop_when_undelivered(emit, cancel.clone());
         let flags = Arc::new(RunFlags::default());
         let run_id = Uuid::new_v4();
         self.runs.insert(
@@ -1326,7 +1417,13 @@ impl SessionManager {
             format: sql.format,
             original,
         };
-        self.store_plan(&rt, &cfg, target, planned, Some(explain), dialect, tx_state)
+        let copy = PlanCopy {
+            target,
+            plan: planned,
+            explain: Some(explain),
+            source: None,
+        };
+        self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 }
 
