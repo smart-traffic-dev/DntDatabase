@@ -873,24 +873,18 @@ async fn run_as(s: &MySqlSession, sql: &str, kind: StatementKind) -> Result<Stmt
 /// A statement holding several pieces whose first one returns no rows (`SET …; SELECT`,
 /// `BEGIN; INSERT …`) reports one result per piece; it used to spin forever on the
 /// first OK result because nothing moved on to the next one.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_piece_statement_streams_every_piece() {
     require_db!();
     for t in Target::mysql_family() {
-        let s = connect(t).await;
-        let mut sink = Collect::default();
-        let res = tokio::time::timeout(
-            Duration::from_secs(10),
-            s.execute_one(
-                "SET @f1 = 1; DO 0; SELECT @f1 + 1",
-                StatementKind::Other,
-                &ExecOptions::default(),
-                &mut sink,
-            ),
+        let s = Arc::new(connect(t).await);
+        let (res, sink) = execute_one_guarded(
+            &s,
+            "SET @f1 = 1; DO 0; SELECT @f1 + 1",
+            StatementKind::Other,
         )
-        .await
-        .unwrap_or_else(|_| panic!("{t:?}: hung"))
-        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        .await;
+        let res = res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
         assert_eq!(res.results.len(), 3, "{t:?}");
         assert_eq!(sink.results.len(), 3, "{t:?}");
         assert_eq!(sink.results[0].affected, Some(0), "{t:?}");
@@ -902,39 +896,50 @@ async fn multi_piece_statement_streams_every_piece() {
             ("SET @f1 = 2; SELECT * FROM f1_no_such_table", 1),
             ("SELECT 1; SET @f1 = 3; SELECT * FROM f1_no_such_table", 2),
         ] {
-            let mut sink = Collect::default();
-            let err = tokio::time::timeout(
-                Duration::from_secs(10),
-                s.execute_one(
-                    sql,
-                    StatementKind::Other,
-                    &ExecOptions::default(),
-                    &mut sink,
-                ),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("{t:?}: hung"))
-            .err();
+            let (res, sink) = execute_one_guarded(&s, sql, StatementKind::Other).await;
+            let err = res.err();
             assert!(
                 matches!(err, Some(DbError::Server { .. })),
                 "{t:?}: {sql}: {err:?}"
             );
             assert_eq!(sink.results.len(), want, "{t:?}: {sql}");
         }
-        assert!(
-            run_as(
-                &s,
-                "SELECT 1; SELECT * FROM f1_no_such_table",
-                StatementKind::Read
-            )
-            .await
-            .is_err(),
-            "{t:?}"
-        );
+        let (res, _) = execute_one_guarded(
+            &s,
+            "SELECT 1; SELECT * FROM f1_no_such_table",
+            StatementKind::Read,
+        )
+        .await;
+        assert!(res.is_err(), "{t:?}");
         // The connection is still in sync.
         let (_, c) = run(&s, "SELECT @f1").await.unwrap();
         assert_eq!(as_u64(&scalar(&c)), 3, "{t:?}");
-        Box::new(s).close().await;
+    }
+}
+
+/// Runs `sql` as one statement on its own task and gives it 10 s. The statement runs
+/// on another worker (the caller needs a multi-thread runtime), so even a loop that
+/// never yields cannot stop this timeout from firing. A hung statement aborts the
+/// process: its worker keeps spinning, so the runtime could never shut down.
+async fn execute_one_guarded(
+    s: &Arc<MySqlSession>,
+    sql: &'static str,
+    kind: StatementKind,
+) -> (Result<StmtOutcome, DbError>, Collect) {
+    let s = s.clone();
+    let task = tokio::spawn(async move {
+        let mut sink = Collect::default();
+        let res = s
+            .execute_one(sql, kind, &ExecOptions::default(), &mut sink)
+            .await;
+        (res, sink)
+    });
+    match tokio::time::timeout(Duration::from_secs(10), task).await {
+        Ok(joined) => joined.expect("statement task panicked"),
+        Err(_) => {
+            eprintln!("execute_one hung on {sql:?}; aborting");
+            std::process::abort();
+        }
     }
 }
 
@@ -1061,6 +1066,8 @@ async fn single_piece_statements_issue_no_tx_probe() {
             "SELECT ';'",
             "COMMIT",
             "SELECT 1;",
+            // Left over by an interrupted earlier run.
+            "DROP PROCEDURE IF EXISTS f1_p",
             "CREATE PROCEDURE f1_p() BEGIN SELECT 1; SELECT 2; END",
             "DROP PROCEDURE f1_p",
         ] {
@@ -1450,6 +1457,15 @@ async fn unconfirmed_timeout_kill_stays_within_the_grace() {
 /// packet) is swallowed: the client has written it, the server never sees it. The test
 /// connections use no TLS, so the client's packets can be read.
 async fn kill_holding_proxy(upstream: u16) -> (u16, Arc<AtomicBool>) {
+    query_holding_proxy(upstream, &[b"KILL QUERY"]).await
+}
+
+/// [`kill_holding_proxy`] for any query: once `hold` is raised, the next `COM_QUERY`
+/// whose text starts with one of `prefixes` is swallowed.
+async fn query_holding_proxy(
+    upstream: u16,
+    prefixes: &'static [&'static [u8]],
+) -> (u16, Arc<AtomicBool>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let hold = Arc::new(AtomicBool::new(false));
@@ -1477,9 +1493,9 @@ async fn kill_holding_proxy(upstream: u16) -> (u16, Arc<AtomicBool>) {
                     if client_rx.read_exact(&mut payload).await.is_err() {
                         break;
                     }
-                    let is_kill =
-                        payload.first() == Some(&0x03) && payload[1..].starts_with(b"KILL QUERY");
-                    if is_kill && hold_kill.swap(false, Ordering::SeqCst) {
+                    let matches = payload.first() == Some(&0x03)
+                        && prefixes.iter().any(|p| payload[1..].starts_with(p));
+                    if matches && hold_kill.swap(false, Ordering::SeqCst) {
                         // Never forwarded; the sockets stay open until the proxy ends.
                         std::future::pending::<()>().await;
                     }
@@ -1556,6 +1572,124 @@ async fn late_result_with_unconfirmed_kill_is_kept() {
         assert_ne!(connection_id(&s).await, id, "{t:?}: same connection");
         let (_, c) = run(&s, "SELECT COUNT(*) FROM t5_late").await.unwrap();
         assert_eq!(as_u64(&scalar(&c)), 2, "{t:?}");
+    }
+}
+
+/// Ends server thread `id` if it is still there (an abandoned connection whose goodbye
+/// the proxy swallowed).
+async fn kill_quietly(t: Target, id: u64) {
+    let admin = connect(t).await;
+    let _ = run(&admin, &format!("KILL {id}")).await;
+    Box::new(admin).close().await;
+}
+
+/// Opts whose checks after a statement are bounded by 1 s (`cancel_grace`).
+fn short_grace() -> ExecOptions {
+    ExecOptions {
+        cancel_grace: Duration::from_secs(1),
+        ..ExecOptions::default()
+    }
+}
+
+/// F1 follow-up: a transaction-state probe the server never answers (the proxy swallows
+/// it) is abandoned after its limit. The statement's own result stands, the tracked
+/// state is kept, and the connection is given up: refused to other calls, replaced
+/// before the next statement (reported, since a transaction was open).
+#[tokio::test]
+async fn stalled_tx_probe_gives_up_the_connection() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let (port, hold) = query_holding_proxy(
+            t.host_port(),
+            &[b"SELECT @@in_transaction", b"SELECT @@autocommit"],
+        )
+        .await;
+        let mut cfg = t.resolved(Some(FIXTURE_DB));
+        cfg.port = port;
+        let s = MySqlDriver
+            .connect_session(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let id = connection_id(&s).await;
+        run(&s, "BEGIN").await.unwrap();
+        hold.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let mut sink = Collect::default();
+        s.execute_one(
+            "SELECT 1; SELECT 2",
+            StatementKind::Read,
+            &short_grace(),
+            &mut sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(4), "{t:?}: took {elapsed:?}");
+        assert_eq!(sink.results.len(), 2, "{t:?}");
+        assert_eq!(s.tx_probes(), 1, "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}: state kept");
+        // Other calls refuse the connection meanwhile.
+        let ping = s.ping().await;
+        assert!(
+            matches!(ping, Err(DbError::ConnectionLost { .. })),
+            "{t:?}: {ping:?}"
+        );
+        // The next statement finds it replaced; the open transaction was lost.
+        let (res, c) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        match &res {
+            Err(DbError::ConnectionLost {
+                was_in_tx: true,
+                message,
+                ..
+            }) => assert!(message.contains("stopped answering"), "{t:?}: {message}"),
+            other => panic!("{t:?}: {other:?}"),
+        }
+        assert!(c.results.is_empty(), "{t:?}: something was sent");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
+        assert_ne!(connection_id(&s).await, id, "{t:?}: same connection");
+        s.ping().await.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        kill_quietly(t, id).await;
+    }
+}
+
+/// The same for the `sql_mode` read after a `SET sql_mode`: bounded, the statement's
+/// result stands and the connection is replaced before the next statement.
+#[tokio::test]
+async fn stalled_sql_mode_read_gives_up_the_connection() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let (port, hold) =
+            query_holding_proxy(t.host_port(), &[b"SELECT @@SESSION.sql_mode"]).await;
+        let mut cfg = t.resolved(Some(FIXTURE_DB));
+        cfg.port = port;
+        let s = MySqlDriver
+            .connect_session(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let id = connection_id(&s).await;
+        hold.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let (res, _) = run_one(&s, "SET sql_mode = 'ANSI_QUOTES'", short_grace()).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_secs(4), "{t:?}: took {elapsed:?}");
+        assert!(
+            matches!(s.ping().await, Err(DbError::ConnectionLost { .. })),
+            "{t:?}"
+        );
+        // The changed `sql_mode` is session state a new connection does not have.
+        let (res, _) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        match &res {
+            Err(DbError::ConnectionLost {
+                was_in_tx: false,
+                message,
+                ..
+            }) => assert!(message.contains("stopped answering"), "{t:?}: {message}"),
+            other => panic!("{t:?}: {other:?}"),
+        }
+        assert_ne!(connection_id(&s).await, id, "{t:?}: same connection");
+        assert_eq!(s.dialect(), Dialect::MYSQL, "{t:?}: fresh sql_mode");
+        kill_quietly(t, id).await;
     }
 }
 

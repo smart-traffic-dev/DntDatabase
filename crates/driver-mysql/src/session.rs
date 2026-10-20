@@ -53,6 +53,23 @@ const STUCK_CANCEL: &str =
 /// timeout was still unanswered (see `run_timed`).
 const UNCONFIRMED: &str = "an earlier KILL QUERY could not be confirmed, so the connection \
                            was replaced before it could hit this statement";
+/// `ConnectionLost` message for a statement that found its connection given up after a
+/// check sent after the previous statement got no answer in time (see
+/// `MySqlSession::desync`).
+const STALLED: &str = "the connection stopped answering after the previous statement, so it \
+                       was replaced before this statement was sent";
+
+/// Upper bound on a check sent after a statement (`sql_mode` read, transaction-state
+/// probe); see [`check_limit`].
+const CHECK_LIMIT: Duration = Duration::from_secs(5);
+/// Lower bound, so a short `cancel_grace` (tests) never gives up a healthy connection.
+const CHECK_FLOOR: Duration = Duration::from_secs(1);
+
+/// How long a check sent after a statement may take: `cancel_grace`, kept between
+/// [`CHECK_FLOOR`] and [`CHECK_LIMIT`].
+fn check_limit(opts: &ExecOptions) -> Duration {
+    opts.cancel_grace.clamp(CHECK_FLOOR, CHECK_LIMIT)
+}
 
 /// One MySQL-family connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct MySqlSession {
@@ -93,6 +110,10 @@ pub struct MySqlSession {
     session_custom: AtomicBool,
     /// Successful [`MySqlSession::reconnect`]s ([`Session::reconnects`]).
     reconnects: AtomicU64,
+    /// Set by [`MySqlSession::desync`] (a check after a statement got no answer in
+    /// time, so the connection's protocol state is unknown); cleared by a reconnect.
+    /// The connection is poisoned too; until it is replaced, other calls refuse it.
+    desynced: AtomicBool,
     /// Transaction-state probes sent ([`MySqlSession::sync_tx`]), for tests.
     #[cfg(feature = "test-helpers")]
     tx_probes: AtomicU64,
@@ -150,6 +171,7 @@ impl MySqlSession {
             last_db: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
             reconnects: AtomicU64::new(0),
+            desynced: AtomicBool::new(false),
             #[cfg(feature = "test-helpers")]
             tx_probes: AtomicU64::new(0),
         }
@@ -168,7 +190,15 @@ impl MySqlSession {
 
     /// Locks the connection for a call that does not reconnect (metadata, ping).
     pub(crate) async fn live_conn(&self) -> Result<MappedMutexGuard<'_, Conn>, DbError> {
-        MutexGuard::try_map(self.conn.lock().await, Option::as_mut).map_err(|_| {
+        let slot = self.conn.lock().await;
+        if self.desynced.load(Ordering::SeqCst) {
+            return Err(lost(
+                false,
+                false,
+                "the connection stopped answering; it is replaced by the next statement run".into(),
+            ));
+        }
+        MutexGuard::try_map(slot, Option::as_mut).map_err(|_| {
             lost(
                 false,
                 false,
@@ -211,12 +241,30 @@ impl MySqlSession {
     }
 
     /// Reads the `sql_mode` of `conn` into `mode`; on failure the flags stay as they
-    /// were, marked stale (read again by the next `execute_one`).
-    async fn refresh_mode(&self, conn: &mut Conn) {
-        match read_sql_mode(conn).await {
-            Ok(mode) => self.set_mode(mode),
-            Err(_) => self.mode_stale.store(true, Ordering::SeqCst),
+    /// were, marked stale (read again by the next `execute_one`). Bounded by `limit`
+    /// ([`check_limit`]): past it the connection is given up ([`MySqlSession::desync`]).
+    async fn refresh_mode(&self, conn: &mut Conn, limit: Duration) {
+        match tokio::time::timeout(limit, read_sql_mode(conn)).await {
+            Ok(Ok(mode)) => self.set_mode(mode),
+            Ok(Err(_)) => self.mode_stale.store(true, Ordering::SeqCst),
+            Err(_) => {
+                self.mode_stale.store(true, Ordering::SeqCst);
+                self.desync("sql_mode read");
+            }
         }
+    }
+
+    /// A check sent after a statement (`sql_mode` read, transaction-state probe) got no
+    /// answer within its limit. Its query was abandoned mid-flight, so the connection's
+    /// protocol state is unknown: it is poisoned (replaced before the next statement,
+    /// reported as [`STALLED`]) and refused to every other call meanwhile.
+    fn desync(&self, what: &str) {
+        tracing::debug!(
+            check = what,
+            "no answer in time; the connection will be replaced"
+        );
+        self.desynced.store(true, Ordering::SeqCst);
+        self.cancel.poison();
     }
 
     /// Test-only (`test-helpers` feature): puts the session in the state a failed
@@ -276,10 +324,15 @@ impl MySqlSession {
     ///
     /// Only on a live connection the statement ended on: never on one poisoned by an
     /// unconfirmed `KILL QUERY` (it is replaced before anything else is sent), nor on a
-    /// lost or abandoned one (the reconnect already reset the state). A cancel arriving
-    /// meanwhile can only stop the probe. A failed probe never fails the statement: the
-    /// tracked state is kept.
-    async fn sync_tx(&self, slot: &mut Option<Conn>) {
+    /// lost or abandoned one (the reconnect already reset the state). A failed probe
+    /// never fails the statement: the tracked state is kept. That includes a cancel
+    /// still in flight (the user's Stop, sent while the statement ran) landing on the
+    /// probe instead: the probe fails with "interrupted", which is harmless.
+    ///
+    /// Bounded by `limit` ([`check_limit`]): a probe with no answer by then is
+    /// abandoned, the tracked state kept and the connection given up
+    /// ([`MySqlSession::desync`]).
+    async fn sync_tx(&self, slot: &mut Option<Conn>, limit: Duration) {
         if self.cancel.poisoned() {
             return;
         }
@@ -288,7 +341,11 @@ impl MySqlSession {
         };
         #[cfg(feature = "test-helpers")]
         self.tx_probes.fetch_add(1, Ordering::SeqCst);
-        match probe_tx(conn, self.info.variant).await {
+        let Ok(res) = tokio::time::timeout(limit, probe_tx(conn, self.info.variant)).await else {
+            self.desync("transaction-state probe");
+            return;
+        };
+        match res {
             Ok((in_tx, autocommit)) => {
                 self.autocommit_off.store(!autocommit, Ordering::SeqCst);
                 self.set_tx(if in_tx {
@@ -323,6 +380,8 @@ impl MySqlSession {
         if let Some(old) = slot.take() {
             abandon(old);
         }
+        // The connection that stopped answering is gone.
+        self.desynced.store(false, Ordering::SeqCst);
         let db = self
             .last_db
             .lock()
@@ -796,13 +855,19 @@ impl Session for MySqlSession {
         let mut reconnected = false;
         // An earlier call's `KILL QUERY` may still land on this connection (see
         // `run_timed`): replace it before anything is sent, silently only when nothing of
-        // the old session is lost.
+        // the old session is lost. Same for a connection that stopped answering a check
+        // after the previous statement (`desync`).
         if slot.is_some() && self.cancel.poisoned() {
             let was_in_tx = self.in_transaction();
             let custom = self.session_custom.load(Ordering::SeqCst);
             let notes = self.notes(was_in_tx);
+            let cause = if self.desynced.load(Ordering::SeqCst) {
+                STALLED
+            } else {
+                UNCONFIRMED
+            };
             if was_in_tx || custom {
-                let mut message = format!("{UNCONFIRMED}{notes}");
+                let mut message = format!("{cause}{notes}");
                 // Best effort so the next statement finds a live connection.
                 if let Err(e) = self.reconnect(&mut slot).await {
                     message.push_str(&format!("; reconnecting failed: {e}"));
@@ -814,7 +879,7 @@ impl Session for MySqlSession {
                 return Err(lost(
                     false,
                     false,
-                    format!("{UNCONFIRMED}; reconnecting failed: {e}"),
+                    format!("{cause}; reconnecting failed: {e}"),
                 ));
             }
             if stopped() {
@@ -836,7 +901,16 @@ impl Session for MySqlSession {
         // The last `sql_mode` read failed: read it again before lexing anything.
         if self.mode_stale.load(Ordering::SeqCst) {
             if let Some(conn) = slot.as_mut() {
-                self.refresh_mode(conn).await;
+                self.refresh_mode(conn, check_limit(opts)).await;
+            }
+            // It stopped answering: replaced now, and the statement is not sent.
+            if self.desynced.load(Ordering::SeqCst) {
+                let was_in_tx = self.in_transaction();
+                let mut message = format!("{STALLED}{}", self.notes(was_in_tx));
+                if let Err(e) = self.reconnect(&mut slot).await {
+                    message.push_str(&format!("; reconnecting failed: {e}"));
+                }
+                return Err(lost(was_in_tx, false, message));
             }
             if stopped() {
                 return Err(not_sent(self.in_transaction()));
@@ -876,7 +950,7 @@ impl Session for MySqlSession {
                     // It did run (a read cannot change the `sql_mode`).
                     self.track_after(kind, stmt, dialect);
                     if multi {
-                        self.sync_tx(&mut slot).await;
+                        self.sync_tx(&mut slot, check_limit(opts)).await;
                     }
                     return Err(DbError::Cancelled {
                         outcome_unknown: false,
@@ -898,7 +972,7 @@ impl Session for MySqlSession {
                         },
                     );
                     if multi {
-                        self.sync_tx(&mut slot).await;
+                        self.sync_tx(&mut slot, check_limit(opts)).await;
                     }
                     return Err(DbError::Timeout {
                         stage: ConnectStage::Execute,
@@ -923,7 +997,7 @@ impl Session for MySqlSession {
             if !conn_lost {
                 self.track_failed(kind, stmt, &err);
                 if multi {
-                    self.sync_tx(&mut slot).await;
+                    self.sync_tx(&mut slot, check_limit(opts)).await;
                 }
             }
             match failure_kind(
@@ -983,11 +1057,11 @@ impl Session for MySqlSession {
             if let Some(conn) = slot.as_mut() {
                 // On failure the flags are marked stale and read again by the next
                 // call (a lost connection is replaced, and its `sql_mode` read, then).
-                self.refresh_mode(conn).await;
+                self.refresh_mode(conn, check_limit(opts)).await;
             }
         }
         if multi {
-            self.sync_tx(&mut slot).await;
+            self.sync_tx(&mut slot, check_limit(opts)).await;
         }
         Ok(outcome)
     }
