@@ -200,36 +200,6 @@ function readStatement(tokens: Token[]): StatementInfo {
   return info;
 }
 
-/** Half the window `localStatementRange` reads around the cursor. */
-const LOCAL_WINDOW = 32 * 1024;
-
-/**
- * The statement around `offset` without `statement_ranges` (for very large texts): the
- * tokens of a ~64 KB window around the cursor, cut at the nearest `;` on each side that
- * is outside strings and comments. Returns absolute UTF-16 offsets.
- */
-export function localStatementRange(text: string, offset: number, engine: Engine): [number, number] {
-  let from = Math.max(0, offset - LOCAL_WINDOW);
-  if (from > 0) {
-    // Start at a line start: far less likely to fall inside a string than an arbitrary cut.
-    const nl = text.indexOf('\n', from);
-    if (nl >= 0 && nl < offset) from = nl + 1;
-  }
-  const to = Math.min(text.length, offset + LOCAL_WINDOW);
-  const local = offset - from;
-  let lo = 0;
-  let hi = to - from;
-  for (const t of tokenize(text.slice(from, to), engine)) {
-    if (t.kind !== 'punct' || t.value !== ';') continue;
-    if (t.end <= local) lo = t.end;
-    else if (t.start >= local) {
-      hi = t.start;
-      break;
-    }
-  }
-  return [from + lo, from + hi];
-}
-
 /** The context at `offset` of `stmt`, the identifier being typed and the statement's tables. */
 export function analyze(
   stmt: string,

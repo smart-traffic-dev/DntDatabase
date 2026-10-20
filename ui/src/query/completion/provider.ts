@@ -32,7 +32,8 @@ export interface SuggestInput {
   containers: string[];
   /** PostgreSQL: the schema unqualified names resolve to (default: `currentSchemaOf(scope)`). */
   currentSchema?: string | null;
-  loadObjects(qualifier: string): Promise<CompletionObject[] | null>;
+  /** The objects of `qualifier.`: a value when already loaded, else a promise. */
+  loadObjects(qualifier: string): CompletionObject[] | null | Promise<CompletionObject[] | null>;
 }
 
 /** `name` as the dialect needs it in SQL: quoted when it is not a plain lower/any-case word. */
@@ -107,8 +108,21 @@ export function currentSchemaOf(scope: CompletionScope | null): string | null {
   return schemas.includes('public') ? 'public' : (schemas[0] ?? null);
 }
 
+/** `tablesOf` per scope object: rebuilt only when the scope is (re)loaded, not per keystroke. */
+const tablesMemo = new WeakMap<CompletionScope, Map<string, Suggestion[]>>();
+
 function tablesOf(scope: CompletionScope | null, engine: Engine, currentSchema: string | null): Suggestion[] {
-  return (scope?.tables ?? []).map((t) => {
+  if (!scope) return [];
+  let perScope = tablesMemo.get(scope);
+  if (!perScope) tablesMemo.set(scope, (perScope = new Map()));
+  const k = `${engine}\u0000${currentSchema ?? ''}`;
+  let list = perScope.get(k);
+  if (!list) perScope.set(k, (list = buildTables(scope, engine, currentSchema)));
+  return list;
+}
+
+function buildTables(scope: CompletionScope, engine: Engine, currentSchema: string | null): Suggestion[] {
+  return scope.tables.map((t) => {
     const name = quoteIdent(t.name, engine);
     // A PG table of another schema than the current one is inserted as `schema.table`.
     const qualify = engine === 'postgres' && t.schema !== null && currentSchema !== null && t.schema !== currentSchema;
@@ -121,12 +135,28 @@ function tablesOf(scope: CompletionScope | null, engine: Engine, currentSchema: 
   });
 }
 
-const keywords = (engine: Engine): Suggestion[] =>
-  keywordsOf(engine).map((k) => ({ label: k, kind: 'keyword', insertText: k }));
-const functions = (engine: Engine): Suggestion[] =>
-  functionsOf(engine).map((f) => ({ label: f, kind: 'function', insertText: f }));
+/** Keyword and function suggestions per dialect: static, built once. */
+const staticLists = new Map<string, Suggestion[]>();
+function staticList(engine: Engine, kind: 'keyword' | 'function'): Suggestion[] {
+  const k = `${kind}:${engine}`;
+  let list = staticLists.get(k);
+  if (!list) {
+    const words = kind === 'keyword' ? keywordsOf(engine) : functionsOf(engine);
+    staticLists.set(k, (list = words.map((w) => ({ label: w, kind, insertText: w }))));
+  }
+  return list;
+}
+const keywords = (engine: Engine) => staticList(engine, 'keyword');
+const functions = (engine: Engine) => staticList(engine, 'function');
 
-export async function suggest(input: SuggestInput): Promise<Suggestion[]> {
+const objectSuggestions = (objects: CompletionObject[] | null, engine: Engine): Suggestion[] =>
+  (objects ?? []).map((o) => ({ label: o.name, kind: objectKind(o.kind), insertText: quoteIdent(o.name, engine) }));
+
+/**
+ * The suggestions at the cursor. Synchronous unless the objects of a `db.` qualifier still
+ * have to be loaded (then a promise).
+ */
+export function suggest(input: SuggestInput): Suggestion[] | Promise<Suggestion[]> {
   const { engine, scope } = input;
   const { stmt, offset } = currentStatement(input.text, input.offset, input.ranges);
   const { context, info } = analyze(stmt, offset, engine);
@@ -151,12 +181,10 @@ export async function suggest(input: SuggestInput): Promise<Suggestion[]> {
       if (ref) return columnsOf([resolve(scope, ref)], engine);
       const container = findBy(input.containers, (c) => c, q);
       if (container !== undefined) {
-        const objects = (await input.loadObjects(container)) ?? [];
-        return objects.map((o) => ({
-          label: o.name,
-          kind: objectKind(o.kind),
-          insertText: quoteIdent(o.name, engine),
-        }));
+        const objects = input.loadObjects(container);
+        return objects !== null && !Array.isArray(objects)
+          ? objects.then((o) => objectSuggestions(o, engine))
+          : objectSuggestions(objects, engine);
       }
       // A table of the database not (yet) named in FROM, e.g. while typing the SELECT list.
       return columnsOf([resolve(scope, { schema: null, table: q })], engine);

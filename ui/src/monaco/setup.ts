@@ -9,6 +9,7 @@ import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
 import 'monaco-editor/esm/vs/basic-languages/mysql/mysql.contribution';
 import 'monaco-editor/esm/vs/basic-languages/pgsql/pgsql.contribution';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import './monaco.css';
 
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 loader.config({ monaco });

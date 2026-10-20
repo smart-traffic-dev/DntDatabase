@@ -5,6 +5,7 @@ import { selectTopSql } from '../components/newQuery';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
+import { editorFontOptions } from '../monaco/fonts';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import type { ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
@@ -175,8 +176,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
             domReadOnly: true,
             automaticLayout: true,
             minimap: { enabled: false },
-            fontFamily: "ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace",
-            fontSize: 13,
+            ...editorFontOptions(),
             scrollBeyondLastLine: false,
             folding: false,
             renderLineHighlight: 'none',

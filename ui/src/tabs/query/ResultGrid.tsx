@@ -10,6 +10,7 @@ import {
   type Theme,
 } from '@glideapps/glide-data-grid';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { codeFontSizes, monoFontFamily } from '../../monaco/fonts';
 import { CHUNK, type ResultSet } from '../../store/queryRun';
 import {
   FIT_SAMPLE_ROWS,
@@ -24,8 +25,6 @@ import {
 
 const ROW_HEIGHT = 28;
 const HEADER_HEIGHT = 44;
-/** Cascadia Mono, not Code: the grid draws on a canvas and Code's ligatures would render >= as a single glyph. */
-const GRID_FONT = "'Cascadia Mono', Consolas, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace";
 
 type Resized = { cols: ResultSet['columns']; w: Record<number, number> };
 const NO_OVERRIDES: Record<number, number> = {};
@@ -85,6 +84,7 @@ function useThemeVersion(): number {
 
 function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme> } {
   const muted = cssVar('--muted', '#5a6370');
+  const size = codeFontSizes();
   return {
     theme: {
       accentColor: cssVar('--accent', '#1f5fd1'),
@@ -97,13 +97,14 @@ function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme> } {
       textMedium: muted,
       textHeader: cssVar('--text', '#1b1f24'),
       borderColor: cssVar('--border', '#dcdfe4'),
-      fontFamily: GRID_FONT,
+      // The same code font as the editor and every CSS mono surface (`--font-mono`).
+      fontFamily: monoFontFamily(),
       textLight: muted,
-      markerFontStyle: '11px',
-      baseFontStyle: '13px',
-      headerFontStyle: '600 12px',
+      markerFontStyle: `${size.marker}px`,
+      baseFontStyle: `${size.body}px`,
+      headerFontStyle: `600 ${size.header}px`,
     },
-    nullStyle: { textDark: muted, baseFontStyle: 'italic 13px' },
+    nullStyle: { textDark: muted, baseFontStyle: `italic ${size.body}px` },
   };
 }
 
@@ -215,10 +216,10 @@ export function ResultGrid({ result }: { result: ResultSet }) {
       ctx.clip();
       ctx.textBaseline = 'middle';
       ctx.fillStyle = t.textHeader;
-      ctx.font = `600 12px ${t.fontFamily}`;
+      ctx.font = `${t.headerFontStyle} ${t.fontFamily}`;
       ctx.fillText(meta.name, rect.x + 8, rect.y + rect.height / 2 - 8);
       ctx.fillStyle = t.textMedium;
-      ctx.font = `11px ${t.fontFamily}`;
+      ctx.font = `${t.markerFontStyle} ${t.fontFamily}`;
       ctx.fillText(meta.db_type, rect.x + 8, rect.y + rect.height / 2 + 9);
       ctx.restore();
     },
