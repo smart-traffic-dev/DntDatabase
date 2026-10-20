@@ -123,6 +123,12 @@ export function buildMenus(s: MenuState): AppMenu[] {
         sep,
         edit('Find', 'Ctrl+F', EDIT_COMMANDS.find),
         edit('Replace', 'Ctrl+H', EDIT_COMMANDS.replace),
+        sep,
+        edit('Format SQL', 'Ctrl+Shift+F', EDIT_COMMANDS.formatSql),
+        edit('Toggle comment', 'Ctrl+/', EDIT_COMMANDS.toggleComment),
+        edit('Duplicate line', 'Ctrl+D', EDIT_COMMANDS.duplicate),
+        edit('Upper case', 'Ctrl+Shift+U', EDIT_COMMANDS.upperCase),
+        edit('Lower case', 'Ctrl+U', EDIT_COMMANDS.lowerCase),
       ],
     },
     {
@@ -147,6 +153,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
         { label: 'Run all', hint: 'Ctrl+Shift+Enter', disabled: !q || !s.runnable, run: () => q && void runFromEditor(q, 'all') },
         {
           label: 'Run selection',
+          hint: 'Ctrl+Shift+R',
           disabled: !q || !s.runnable || !s.hasSelection,
           run: () => q && void runFromEditor(q, 'selection'),
         },

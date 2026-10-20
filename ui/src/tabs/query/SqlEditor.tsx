@@ -10,6 +10,7 @@ import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 import { editorOf, setActiveEditor } from './activeEditor';
+import { registerEditorCommands } from './editorCommands';
 
 export interface SqlEditorProps {
   doc: QueryDoc;
@@ -41,6 +42,8 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   const unsubscribe = useQueryRun.subscribe((s) => running.set(canStop(s.runs.get(tabId) ?? emptyRun)));
   editor.onDidDispose(unsubscribe);
   editor.addCommand(monaco.KeyCode.Escape, () => void stopQuery(tabId), 'dntRunning');
+  // F9 / Ctrl+R / Ctrl+Shift+R, Format SQL, case, duplicate, F12: Monaco actions (context menu).
+  registerEditorCommands(tabId, editor, monaco);
 }
 
 /**
@@ -60,8 +63,9 @@ function options(): Monaco.editor.IStandaloneEditorConstructionOptions {
     // Our provider has the keywords and the schema: Monaco's own scan of every word of the
     // model (on the editor worker, per keystroke) only competes with it and slows big scripts.
     wordBasedSuggestions: 'off',
-    snippetSuggestions: 'none',
-    suggest: { showWords: false, showSnippets: false, filterGraceful: true, localityBonus: false },
+    // Snippet-kind items come from our provider only (built-in and user snippets), ranked last.
+    snippetSuggestions: 'bottom',
+    suggest: { showWords: false, showSnippets: true, filterGraceful: true, localityBonus: false },
   };
   return editorOptions;
 }

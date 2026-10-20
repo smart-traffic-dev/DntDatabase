@@ -4,10 +4,23 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   {
     group: 'Query',
     items: [
-      ['Run the statement at the cursor', 'Ctrl+Enter'],
-      ['Run all statements', 'Ctrl+Shift+Enter'],
+      ['Run the statement at the cursor', 'Ctrl+Enter / F9'],
+      ['Run all statements', 'Ctrl+Shift+Enter / Ctrl+R'],
+      ['Run the selection', 'Ctrl+Shift+R'],
       ['Explain', 'Ctrl+Shift+E'],
       ['Stop the running query', 'Esc'],
+    ],
+  },
+  {
+    group: 'Editor',
+    items: [
+      ['Format SQL', 'Ctrl+Shift+F'],
+      ['Toggle comment', 'Ctrl+/'],
+      ['Duplicate line', 'Ctrl+D'],
+      ['Move line up / down', 'Alt+Up / Alt+Down'],
+      ['Upper / lower case', 'Ctrl+Shift+U / Ctrl+U'],
+      ['Open the table under the cursor (data / DDL)', 'F12 / Shift+F12'],
+      ['Suggestions and snippets (sel, ins, upd, …)', 'Ctrl+Space'],
     ],
   },
   {

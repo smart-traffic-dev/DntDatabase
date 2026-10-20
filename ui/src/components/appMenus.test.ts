@@ -65,7 +65,7 @@ describe('buildMenus', () => {
   it('Edit items need an editor', () => {
     for (const i of items('Edit')) expect(i.disabled, i.label).toBe(true);
     for (const i of items('Edit', { hasEditor: true })) expect(i.disabled, i.label).toBe(false);
-    expect(items('Edit').map((i) => i.label)).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Paste', 'Select all', 'Find', 'Replace']);
+    expect(items('Edit').map((i) => i.label)).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Paste', 'Select all', 'Find', 'Replace', 'Format SQL', 'Toggle comment', 'Duplicate line', 'Upper case', 'Lower case']);
   });
 
   it('View ticks the current theme and the sidebar toggle', () => {

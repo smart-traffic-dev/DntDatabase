@@ -4,6 +4,7 @@ import { callsOf, mockBackend } from '../../test/backend';
 import { forgetCompletionConnection, invalidateCompletion, useCompletion } from '../../store/completion';
 import { analyze } from './context';
 import { disposeCompletion, ensureCompletion, registerCompletion } from './monacoProvider';
+import { BUILTIN_SNIPPETS } from './snippets';
 import { splitIncremental, splitRanges } from './split';
 import { currentSchemaOf, suggest, type Suggestion } from './provider';
 import type { CompletionScope } from './provider';
@@ -482,7 +483,8 @@ describe('monaco provider: fix round 1', () => {
       result = p.provideCompletionItems(model, { lineNumber: 1 }, {}, live) as unknown as typeof result;
     }
     const perKeystroke = (performance.now() - t0) / runs;
-    expect(result?.suggestions.map((s) => s.label)).toEqual(['id', 'customer_id', 'total']);
+    const snippetLabels = new Set(BUILTIN_SNIPPETS.map((s) => s.label));
+    expect(result?.suggestions.map((s) => s.label).filter((l) => !snippetLabels.has(l))).toEqual(['id', 'customer_id', 'total']);
     expect(callsOf('statement_ranges')).toEqual([]);
     expect(perKeystroke).toBeLessThan(50);
     // Without content events every keystroke splits the whole script: still within budget.
