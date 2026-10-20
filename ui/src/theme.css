@@ -474,6 +474,11 @@ button:disabled {
   color: var(--muted);
 }
 
+.tab-dirty {
+  font-size: 10px;
+  color: var(--muted);
+}
+
 .tab-close {
   display: flex;
   align-items: center;

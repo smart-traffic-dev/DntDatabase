@@ -30,6 +30,7 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
     update(doc.id, { connectionId, database: null, dialect: dialectOfConnection(connectionId) });
     useTabs.getState().bind(doc.id, connectionId);
   };
+  // Running arrives with a later task; a tab without a connection must stay disabled then too.
   const canRun = false;
 
   return (
@@ -54,7 +55,7 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
         value={doc.connectionId ?? ''}
         onChange={(e) => bind(e.target.value || null)}
       >
-        <option value="">No connection</option>
+        <option value="">Choose a connection</option>
         {doc.connectionId && !summaries.has(doc.connectionId) && (
           <option value={doc.connectionId} disabled>
             (deleted connection)

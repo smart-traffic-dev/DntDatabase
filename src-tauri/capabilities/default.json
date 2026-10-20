@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Permissions of the main window. The opener plugin is used from Rust only (open_log_folder), so the UI gets no opener permission.",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "core:window:allow-destroy", "dialog:default"]
 }

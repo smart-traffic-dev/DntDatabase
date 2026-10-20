@@ -1,4 +1,7 @@
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect } from 'react';
+import { onQueryShortcut } from './components/queryShortcuts';
+import { installCloseGuard, useQueryDocs } from './store/queryTabs';
 import { DialogHost } from './dialogs/DialogHost';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
@@ -33,7 +36,29 @@ function Workspace() {
 
 export default function App() {
   useEffect(() => {
-    void useTree.getState().reloadStored();
+    void (async () => {
+      await useTree.getState().reloadStored();
+      // After the connections are known, so a tab bound to a deleted one comes back unbound.
+      await useQueryDocs.getState().restore();
+    })();
+  }, []);
+
+  useEffect(() => {
+    // Capture: the shortcuts work inside the editor too.
+    window.addEventListener('keydown', onQueryShortcut, true);
+    return () => window.removeEventListener('keydown', onQueryShortcut, true);
+  }, []);
+
+  useEffect(() => {
+    let unlisten: Promise<() => void>;
+    try {
+      unlisten = installCloseGuard(getCurrentWindow());
+    } catch {
+      return; // Not inside Tauri (plain browser preview).
+    }
+    return () => {
+      void unlisten.then((f) => f()).catch(() => {});
+    };
   }, []);
 
   return (
