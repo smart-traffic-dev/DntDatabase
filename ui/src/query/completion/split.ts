@@ -1,6 +1,11 @@
 // Statement ranges of a script, computed in the UI: a port of the backend splitter
 // (`crates/core/src/sql/split.rs` + `lexer.rs`, default MySQL mode) so autocomplete never
 // waits on a `statement_ranges` round trip per keystroke. One linear pass over char codes.
+//
+// UI ONLY: autocomplete context and the current-statement highlight. It must never decide
+// what is executed or guarded: running (`runQuery` → backend `plan`/`split`) and the
+// destructive-statement guard always use the backend splitter, which also knows the
+// server's SQL mode (ANSI_QUOTES, NO_BACKSLASH_ESCAPES) that this port assumes off.
 import type { Engine } from '../engine';
 
 const NL = 10;

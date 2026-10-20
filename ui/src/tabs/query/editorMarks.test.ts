@@ -158,5 +158,58 @@ describe('editor marks', () => {
       rerender({ run: finishedRun({ ...PLAN, plan_id: 'p2' }, done, 2) });
       expect(f.sets.at(-1)).toHaveLength(1);
     });
+
+    it('current_statement_highlight_is_local_no_ipc_while_typing', () => {
+      vi.useFakeTimers();
+      try {
+        resetStores();
+        const invoke = mockBackend({});
+        let text = 'SELECT 1;\nSELECT 2';
+        let cursor = text.length;
+        let onContent: (e?: { changes: { rangeOffset: number }[] }) => void = () => {};
+        const highlights: unknown[][] = [];
+        let collections = 0;
+        const textModel = {
+          getValue: () => text,
+          getOffsetAt: () => cursor,
+          getPositionAt: (o: number) => ({ lineNumber: text.slice(0, o).split('\n').length, column: o - text.lastIndexOf('\n', o - 1) }),
+        };
+        const editor = {
+          updateOptions: vi.fn(),
+          // The first collection is the highlight, the second the glyphs.
+          createDecorationsCollection: () => {
+            const mine = collections++ === 0;
+            return { set: (d: unknown[]) => void (mine && highlights.push(d)), clear: vi.fn() };
+          },
+          getModel: () => textModel,
+          getPosition: () => ({ lineNumber: 2, column: 1 }),
+          onDidChangeModelContent: (cb: typeof onContent) => {
+            onContent = cb;
+            return { dispose: vi.fn() };
+          },
+          onDidChangeCursorPosition: () => ({ dispose: vi.fn() }),
+        };
+        const monaco = { editor: { setModelMarkers: vi.fn() }, MarkerSeverity: { Error: 8, Warning: 4 } };
+        renderHook(() => useEditorMarks({ editor, monaco } as never, 'mysql', emptyRun));
+        vi.advanceTimersByTime(200);
+        // Second statement: line 2, columns 1..9.
+        expect(highlights.at(-1)).toEqual([
+          { range: { startLineNumber: 2, startColumn: 1, endLineNumber: 2, endColumn: 9 }, options: { className: 'current-stmt' } },
+        ]);
+        for (const ch of ' + 3 + 4') {
+          const at = text.length;
+          text += ch;
+          cursor = text.length;
+          onContent({ changes: [{ rangeOffset: at }] });
+        }
+        vi.advanceTimersByTime(200);
+        expect(highlights.at(-1)).toEqual([
+          { range: { startLineNumber: 2, startColumn: 1, endLineNumber: 2, endColumn: 17 }, options: { className: 'current-stmt' } },
+        ]);
+        expect(invoke).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

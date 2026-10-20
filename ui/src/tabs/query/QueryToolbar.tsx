@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useConnections } from '../../store/connections';
 import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
@@ -137,8 +137,20 @@ function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runn
   );
 }
 
+/** The fields of a document the toolbar shows: never its text (that changes per keystroke). */
+export type ToolbarDoc = Pick<QueryDoc, 'id' | 'connectionId' | 'database' | 'rowLimit' | 'continueOnError'>;
+
+const sameToolbarDoc = (a: { doc: ToolbarDoc }, b: { doc: ToolbarDoc }) =>
+  a.doc.id === b.doc.id &&
+  a.doc.connectionId === b.doc.connectionId &&
+  a.doc.database === b.doc.database &&
+  a.doc.rowLimit === b.doc.rowLimit &&
+  a.doc.continueOnError === b.doc.continueOnError;
+
 /** Run / Stop / Explain, connection, database, row limit and continue-on-error of a query tab. */
-export function QueryToolbar({ doc }: { doc: QueryDoc }) {
+export const QueryToolbar = memo(QueryToolbarView, sameToolbarDoc);
+
+function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   const summaries = useConnections((s) => s.summaries);
   const nodes = useTree((s) => s.nodes);
   const update = useQueryDocs((s) => s.update);
