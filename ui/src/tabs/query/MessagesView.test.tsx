@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppError } from '../../bindings';
@@ -109,11 +109,17 @@ describe('MessagesView', () => {
       expect(screen.queryByText('statement 9999')).toBeNull();
     });
 
-    it('keeps_list_semantics', () => {
+    it('has_valid_list_semantics', () => {
       render(<MessagesView tabId="t" run={runWith(lines(5))} />);
-      expect(screen.getByTestId('messages')).toHaveAttribute('role', 'log');
-      expect(screen.getAllByTestId('message-line')[0]).toHaveAttribute('aria-posinset', '1');
-      expect(screen.getAllByTestId('message-line')[0]).toHaveAttribute('aria-setsize', '5');
+      const log = screen.getByTestId('messages');
+      expect(log).toHaveAttribute('role', 'log');
+      expect(log).toHaveAttribute('aria-live', 'off');
+      const list = screen.getByRole('list');
+      expect(log).toContainElement(list);
+      const items = screen.getAllByRole('listitem');
+      expect(items[0]).toHaveAttribute('aria-posinset', '1');
+      expect(items[0]).toHaveAttribute('aria-setsize', '5');
+      expect(items[0]).toBe(screen.getAllByTestId('message-line')[0]);
     });
 
     it('retry_and_reconnect_work_on_a_virtualized_row', async () => {
@@ -129,37 +135,84 @@ describe('MessagesView', () => {
       expect(reopenConnection).toHaveBeenCalledWith(ids.prod);
     });
 
-    it('autoscrolls_to_newest_while_running_unless_scrolled_up', () => {
+    /** jsdom has no layout: back the scroll metrics with plain numbers. */
+    const metrics = (box: HTMLElement, scrollHeight = 13_000) => {
+      let top = 0;
+      Object.defineProperty(box, 'scrollHeight', { configurable: true, value: scrollHeight });
+      Object.defineProperty(box, 'clientHeight', { configurable: true, value: 600 });
+      Object.defineProperty(box, 'scrollTop', { configurable: true, get: () => top, set: (v: number) => (top = v) });
+      return (v: number) => {
+        top = v;
+        fireEvent.scroll(box);
+      };
+    };
+
+    it('autoscrolls_to_newest_unless_scrolled_up_and_resumes_at_bottom', () => {
       const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
       const { rerender } = render(<MessagesView tabId="t" run={runWith(lines(500), true)} />);
+      const box = screen.getByTestId('messages');
+      const scrollTopTo = metrics(box);
+      scrollTopTo(12_400); // at the bottom
       scrollTo.mockClear();
       rerender(<MessagesView tabId="t" run={runWith(lines(501), true)} />);
-      expect(scrollTo).toHaveBeenCalled();
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect((scrollTo.mock.calls[0]![0] as ScrollToOptions).top).toBeGreaterThan(12_300);
 
-      const box = screen.getByTestId('messages');
-      Object.defineProperty(box, 'scrollHeight', { configurable: true, value: 13_000 });
-      box.scrollTop = 0;
-      fireEvent.scroll(box);
+      scrollTopTo(5000); // user scrolls up
       scrollTo.mockClear();
       rerender(<MessagesView tabId="t" run={runWith(lines(502), true)} />);
       expect(scrollTo).not.toHaveBeenCalled();
 
-      // Back at the bottom: following resumes.
-      box.scrollTop = 13_000 - 600;
-      act(() => {
-        fireEvent.scroll(box);
-      });
+      scrollTopTo(12_900); // back to the bottom
+      scrollTo.mockClear();
       rerender(<MessagesView tabId="t" run={runWith(lines(503), true)} />);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect((scrollTo.mock.calls[0]![0] as ScrollToOptions).top).toBeGreaterThanOrEqual(12_400);
+      scrollTo.mockRestore();
+    });
+
+    it('content_growth_without_upward_scroll_keeps_following', () => {
+      const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
+      const { rerender } = render(<MessagesView tabId="t" run={runWith(lines(500), true)} />);
+      const box = screen.getByTestId('messages');
+      const scrollTopTo = metrics(box, 13_000);
+      scrollTopTo(12_400);
+      // Content grows (scrollHeight jumps) and a scroll event fires without moving up.
+      Object.defineProperty(box, 'scrollHeight', { configurable: true, value: 30_000 });
+      fireEvent.scroll(box);
+      scrollTo.mockClear();
+      rerender(<MessagesView tabId="t" run={runWith(lines(501), true)} />);
       expect(scrollTo).toHaveBeenCalled();
       scrollTo.mockRestore();
     });
 
-    it('does_not_autoscroll_when_not_running', () => {
+    it('follows_the_final_done_line_after_the_run_ends', () => {
       const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
-      const { rerender } = render(<MessagesView tabId="t" run={runWith(lines(500))} />);
+      const { rerender } = render(<MessagesView tabId="t" run={runWith(lines(500), true)} />);
       scrollTo.mockClear();
       rerender(<MessagesView tabId="t" run={runWith(lines(501))} />);
-      expect(scrollTo).not.toHaveBeenCalled();
+      expect(scrollTo).toHaveBeenCalled();
       scrollTo.mockRestore();
     });
-  });});
+
+    it('does_not_scroll_on_first_mount_of_a_finished_run', () => {
+      const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
+      render(<MessagesView tabId="t" run={runWith(lines(500))} />);
+      // The virtualizer itself restores offset 0 on mount; nothing may jump to the end.
+      expect(scrollTo.mock.calls.every(([o]) => ((o as ScrollToOptions).top ?? 0) === 0)).toBe(true);
+      scrollTo.mockRestore();
+    });
+
+    it('new_run_resumes_following', () => {
+      const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
+      const { rerender } = render(<MessagesView tabId="t" run={{ ...runWith(lines(500), true), runId: 'r1' }} />);
+      const scrollTopTo = metrics(screen.getByTestId('messages'));
+      scrollTopTo(5000);
+      scrollTo.mockClear();
+      rerender(<MessagesView tabId="t" run={{ ...runWith(lines(3), true), runId: 'r2' }} />);
+      rerender(<MessagesView tabId="t" run={{ ...runWith(lines(4), true), runId: 'r2' }} />);
+      expect(scrollTo).toHaveBeenCalled();
+      scrollTo.mockRestore();
+    });
+  });
+});

@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { needsReconnect } from '../../api';
 import type { TabRun } from '../../store/queryRun';
 import { reopenConnection } from '../../store/reopen';
@@ -9,7 +9,7 @@ import { rerunStatement } from './rerun';
 /** Minimum row height (one line); wrapped lines are measured and grow past it. */
 const ROW_MIN_HEIGHT = 26;
 /** Within this many px of the bottom the panel counts as "following" the run. */
-const FOLLOW_SLACK = 24;
+const FOLLOW_SLACK = 80;
 
 /**
  * The Messages panel: one line per statement, plus the final line of the run.
@@ -20,8 +20,10 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
   const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);
+  const lastTop = useRef(0);
+  const prevCount = useRef(run.messages.length);
+  const prevRunId = useRef(run.runId);
   const count = run.messages.length;
-  const running = run.phase.kind === 'running' || run.phase.kind === 'stopping';
 
   const virtualizer = useVirtualizer({
     count,
@@ -33,25 +35,41 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
     overscan: 8,
   });
 
-  // Follow the newest line while a run is in progress, unless the user scrolled up.
-  useEffect(() => {
-    if (running && following.current && count > 0) virtualizer.scrollToIndex(count - 1, { align: 'end' });
-  }, [count, running, virtualizer]);
+  // A new run starts at the top of a fresh list: drop cached row heights and follow again.
+  useLayoutEffect(() => {
+    if (prevRunId.current === run.runId) return;
+    prevRunId.current = run.runId;
+    following.current = true;
+    lastTop.current = 0;
+    virtualizer.measure();
+  }, [run.runId, virtualizer]);
 
+  // Follow the newest line (including the final Done line) when lines are appended,
+  // unless the user scrolled up. A finished run opens at the top, so no scroll on mount.
+  useEffect(() => {
+    const grew = count > prevCount.current;
+    prevCount.current = count;
+    if (grew && following.current) virtualizer.scrollToIndex(count - 1, { align: 'end' });
+  }, [count, virtualizer]);
   if (count === 0) return <div className="qr-empty">No messages yet.</div>;
   return (
     <div
       className="qr-messages"
       data-testid="messages"
       role="log"
+      aria-live="off"
       aria-label="Messages"
       ref={scrollRef}
       onScroll={(e) => {
+        // Only an upward move can stop following (content growth or our own scrolls cannot).
         const el = e.currentTarget;
-        following.current = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_SLACK;
+        const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_SLACK;
+        if (el.scrollTop < lastTop.current) following.current = nearBottom;
+        else if (nearBottom) following.current = true;
+        lastTop.current = el.scrollTop;
       }}
     >
-      <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+      <div role="list" style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => {
           const m = run.messages[item.index];
           if (!m) return null;
@@ -67,6 +85,7 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
               ref={virtualizer.measureElement}
               data-index={item.index}
               className={`qr-msg ${m.tone}`}
+              role="listitem"
               data-testid="message-line"
               aria-posinset={item.index + 1}
               aria-setsize={count}
