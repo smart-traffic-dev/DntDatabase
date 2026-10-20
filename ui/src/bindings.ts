@@ -238,6 +238,36 @@ async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppErro
 }
 },
 /**
+ * Sets the tab's commit mode and returns its transaction state. `Manual`: before every
+ * statement that needs a transaction while none is open, the run begins one; commit or
+ * roll it back with `query_tx`. MySQL statements that would commit it are flagged
+ * `implicit_commit` in the plan. A Manual transaction lost with the connection makes
+ * `query_run` fail with `connection_lost` until `query_tx` acknowledges it. Errors:
+ * `busy` while the tab runs, `transaction_open` when leaving Manual with a transaction
+ * open.
+ */
+async queryTxMode(tabId: string, mode: TxMode) : Promise<Result<TxState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx_mode", { tabId, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The tab's transaction: state, start (`since_ms`, Unix epoch ms) and statements run
+ * in it, for the idle-transaction warning (`get_idle_tx_warn_minutes`). `busy` while
+ * the tab runs.
+ */
+async queryTxInfo(tabId: string) : Promise<Result<TabTxInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx_info", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Closes the tab's session. With a transaction open and `force` false it returns
  * `transaction_open` and keeps the session (ask Commit / Rollback / Cancel, then call
  * again, or `query_tx` first); `force` closes anyway (the server rolls back).
@@ -256,12 +286,14 @@ async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppErr
  * `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
  * statement is blocked, `confirmation_required` when any needs confirmation and
  * `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
- * `busy` while the tab runs; `plan_expired` for a plan already run, expired or
- * replaced.
+ * On Production, `confirm_names` must hold exactly the `confirm_name`s of the plan's
+ * statements (case-sensitive), else `confirmation_required` too; pass `[]` when the
+ * plan asks for none. `busy` while the tab runs; `plan_expired` for a plan already
+ * run, expired or replaced.
  */
-async queryRun(planId: string, confirmed: boolean, opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
+async queryRun(planId: string, confirmed: boolean, confirmNames: string[], opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, opts, channel }) };
+    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, confirmNames, opts, channel }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -397,6 +429,30 @@ async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
 async setConfirmUnboundedWrites(enabled: boolean) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_confirm_unbounded_writes", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Minutes after which a query tab's open, unused transaction is warned about
+ * (default 5).
+ */
+async getIdleTxWarnMinutes() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_idle_tx_warn_minutes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the idle-transaction warning delay: 1 to 120 minutes, else `config` (field
+ * `minutes`).
+ */
+async setIdleTxWarnMinutes(minutes: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_idle_tx_warn_minutes", { minutes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -944,6 +1000,31 @@ export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 /**
+ * What a `DROP` removes.
+ */
+export type DropKind = 
+/**
+ * `DROP DATABASE`.
+ */
+"database" | 
+/**
+ * `DROP SCHEMA` (on MySQL a synonym of `DROP DATABASE`).
+ */
+"schema" | 
+/**
+ * Any other `DROP` (table, view, index, routine, user, …).
+ */
+"object"
+/**
+ * One name a `DROP` removes.
+ */
+export type DropTarget = { kind: DropKind; 
+/**
+ * The name as written, quotes removed (`` `shop`.`t` `` → `shop.t`); empty when
+ * the statement names nothing readable (`DROP OPERATOR + (int, int)`).
+ */
+name: string }
+/**
  * What `data_preview` returns: the stored plan's id and the statements `data_apply`
  * will send.
  */
@@ -1202,7 +1283,31 @@ preview: string;
  * guard makes such a statement Confirm (see `dnt_query::guard`). Always sent;
  * optional in the bindings so older fixtures stay valid.
  */
-unbounded?: UnboundedWrite[] }
+unbounded?: UnboundedWrite[]; 
+/**
+ * What a `DROP` of the statement removes (`DROP DATABASE` is confirmed on every
+ * connection, any other `DROP` on Staging and Production); empty for most
+ * statements. Always sent; optional in the bindings.
+ */
+drops?: DropTarget[]; 
+/**
+ * On Production, the name (a table, object, database or schema, unquoted) the user
+ * must type to run this Confirm statement: pass it in `query_run`'s
+ * `confirm_names`, exactly (case-sensitive). `None` when no name is asked.
+ */
+confirm_name?: string | null; 
+/**
+ * On Staging and Production, for an `UPDATE` / `DELETE` that changes every row:
+ * the server's estimate of the rows it changes (`EXPLAIN`, at most
+ * [`ESTIMATE_TIMEOUT`]), or `unavailable`. `None`: not estimated.
+ */
+estimate?: RowEstimate | null; 
+/**
+ * MySQL: the statement commits the transaction open when it runs (DDL and the
+ * like, in a Manual tab or after the user's `BEGIN`): what ran before it can no
+ * longer be rolled back. Always sent; optional in the bindings.
+ */
+implicit_commit?: boolean }
 /**
  * A normalized explain result. `raw` is the engine's original output.
  */
@@ -1247,6 +1352,15 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  */
 updated_at: string }
 export type RowEdit = { op: "update"; row: RowRef; set: ([string, CellInput])[] } | { op: "insert"; values: ([string, CellInput])[] } | { op: "delete"; row: RowRef }
+/**
+ * The estimated number of rows a flagged `UPDATE` / `DELETE` changes, from the
+ * server's `EXPLAIN` (no `ANALYZE`: nothing runs).
+ */
+export type RowEstimate = { kind: "rows"; n: number } | 
+/**
+ * The explain failed, timed out or said nothing usable.
+ */
+{ kind: "unavailable" }
 /**
  * One loaded row: its key values, every loaded cell as it was, and (PostgreSQL) its
  * `xmin::text`.
@@ -1434,6 +1548,20 @@ export type StopReason =
  * `index`: "sql_mode changed; run the remaining statements again".
  */
 { kind: "dialect_changed"; index: number }
+/**
+ * The transaction of a query tab, for the status bar and the idle-transaction warning.
+ */
+export type TabTxInfo = { state: TxState; 
+/**
+ * When the open transaction began (Unix epoch, milliseconds; as seen by the app:
+ * the start of the run or the `BEGIN` that opened it). `None` when no transaction
+ * is open, or its start is not known.
+ */
+since_ms: number | null; 
+/**
+ * Statements run in the open transaction (0 when none is open).
+ */
+statements: number }
 export type TableDataPage = { columns: ColumnMeta[]; 
 /**
  * At most `limit` rows, starting at `offset` (fewer when `size_capped`).
@@ -1492,6 +1620,14 @@ export type Target = { Cursor: number } | { Selection: [number, number] } | "All
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
 export type TxAction = "Commit" | "Rollback"
+/**
+ * How a query tab commits (spec §4.2e). `Auto`: every statement commits on its own
+ * unless the user opens a transaction. `Manual`: before every statement that needs a
+ * transaction (a write; PostgreSQL DDL that can run in one) while none is open, the run
+ * begins one (`BEGIN` / `START TRANSACTION`), which the user then commits or rolls back
+ * (`query_tx`).
+ */
+export type TxMode = "Auto" | "Manual"
 /**
  * Transaction state of a session as the query layer sees it.
  */

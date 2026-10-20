@@ -12,7 +12,7 @@
 use crate::session_manager::lock;
 use dnt_core::driver::{ExecProgress, ResultSummary, RowSink, StmtOutcome};
 use dnt_core::error::AppError;
-use dnt_core::sql::{session_effect, Dialect, StatementKind};
+use dnt_core::sql::{session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
@@ -274,6 +274,27 @@ pub(crate) struct ChannelSink {
     pub(crate) ddl_ok: bool,
     /// The database a successful MySQL `USE` moved the session to (the last one).
     pub(crate) use_db: Option<String>,
+    /// The session's transaction state as the run last reported it (set it to the
+    /// state at the start of the run: `run` reports changes only).
+    pub(crate) tx_now: TxState,
+    /// A statement lost the connection while a transaction was open (the drivers
+    /// reset their state to `Idle` on a lost connection, so the state after the run
+    /// cannot tell).
+    pub(crate) lost_in_tx: bool,
+    /// As `lost_in_tx`, but the statement that lost the connection commits the
+    /// transaction (`COMMIT`, MySQL `SET autocommit = 1`, DDL or another implicit
+    /// commit on MySQL): it may have committed, so the outcome is unknown.
+    pub(crate) lost_committing: bool,
+}
+
+/// Whether `stmt`, run while a transaction is open, commits it.
+fn commits_open_tx(stmt: &PlannedStmt, dialect: Dialect) -> bool {
+    match stmt.kind {
+        StatementKind::Transaction(TxControl::Commit) => true,
+        StatementKind::Transaction(TxControl::AutocommitOn) => dialect.is_mysql(),
+        StatementKind::Ddl => dialect.is_mysql(),
+        _ => stmt.implicit_commit,
+    }
 }
 
 /// `%Y-%m-%dT%H:%M:%S%.3fZ` of now, UTC (the history's fixed format).
@@ -352,6 +373,9 @@ impl ChannelSink {
             }),
             ddl_ok: false,
             use_db: None,
+            tx_now: TxState::Idle,
+            lost_in_tx: false,
+            lost_committing: false,
         }
     }
 
@@ -581,6 +605,13 @@ impl RunSink for ChannelSink {
                 }
             }
             Err(error) => {
+                if error.kind == "connection_lost" && self.tx_now != TxState::Idle {
+                    if commits_open_tx(stmt, self.dialect) {
+                        self.lost_committing = true;
+                    } else {
+                        self.lost_in_tx = true;
+                    }
+                }
                 (self.emit)(RunEvent::StatementError {
                     index: stmt.index,
                     error: error.clone(),
@@ -598,6 +629,7 @@ impl RunSink for ChannelSink {
     }
 
     fn tx_state(&mut self, state: TxState) {
+        self.tx_now = state;
         (self.emit)(RunEvent::TxState { state });
     }
 }

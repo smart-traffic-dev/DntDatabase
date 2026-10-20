@@ -1,12 +1,16 @@
 //! Which statements a run executes, with their editor ranges in UTF-16.
 
+use dnt_core::server::DbKind;
 use dnt_core::sql::{
     classify, leading_blank_len, split, Dialect, Statement, StatementKind, TxControl,
 };
+use dnt_core::tx::{next_autocommit_off, next_tx_state, StmtResult, TxState};
 use serde::{Deserialize, Serialize};
 
 use crate::guard::GuardCtx;
 use crate::offsets::Utf16Map;
+use crate::risk::{drop_targets, DropTarget, RowEstimate};
+use crate::run::manual_needs_tx;
 use crate::unbounded::{unbounded_writes, UnboundedWrite};
 
 /// What the user asked to run. Offsets are UTF-16 code units into the editor text.
@@ -59,6 +63,19 @@ pub struct PlannedStmt {
     /// ([`crate::unbounded::unbounded_writes`]); empty for most statements. Shown by
     /// the confirm dialog; the guard judges the text itself.
     pub unbounded: Vec<UnboundedWrite>,
+    /// What of this statement a `DROP` removes ([`crate::risk::drop_targets`]).
+    pub drops: Vec<DropTarget>,
+    /// Set by the guard on Production for a Confirm statement that changes every row
+    /// of a table or drops something ([`crate::risk::confirm_name`]): the run must be
+    /// confirmed with this name typed exactly.
+    pub confirm_name: Option<String>,
+    /// The server's estimate of the rows a flagged `UPDATE` / `DELETE` changes; set
+    /// (best-effort) by the backend when it plans on Staging / Production.
+    pub estimate: Option<RowEstimate>,
+    /// MySQL only: the statement commits the transaction that is open when it runs
+    /// (DDL and the other implicit-commit statements), so a later Rollback cannot undo
+    /// what ran before it. Set by [`mark_implicit_commits`]; `false` after planning.
+    pub implicit_commit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +135,10 @@ pub fn plan(text: &str, target: Target, dialect: Dialect) -> ScriptPlan {
             verdict: Verdict::Allow,
             source_range: (s.start, s.end),
             unbounded: unbounded_writes(&s.text, dialect),
+            drops: drop_targets(&s.text, dialect),
+            confirm_name: None,
+            estimate: None,
+            implicit_commit: false,
             text: s.text,
         })
         .collect();
@@ -176,6 +197,49 @@ pub fn statement_kind(text: &str, dialect: Dialect) -> StatementKind {
         Some(tx) => tx,
         None if other => StatementKind::Other,
         None => StatementKind::Read,
+    }
+}
+
+/// Sets [`PlannedStmt::implicit_commit`] on every statement of `plan` that commits an
+/// open transaction, assuming the session is in state `start` when the plan begins
+/// and every statement succeeds: on MySQL, a statement that is not transaction
+/// control and that `next_tx_state` says ends an open transaction (DDL, `LOCK
+/// TABLES`, `FLUSH`, …), when a transaction is open before it. Always `false` on
+/// PostgreSQL, whose DDL is transactional. The user's own `BEGIN` / `COMMIT` are not
+/// flagged: they are the transaction control the user wrote.
+///
+/// `manual_tx`: the plan runs with [`crate::run::RunConfig::manual_tx`], which begins a
+/// transaction before every statement that needs one ([`manual_needs_tx`]) while none
+/// is open; the walk does the same.
+pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: bool) {
+    let dialect = plan.dialect;
+    let mysql = dialect.is_mysql();
+    let mut state = start;
+    let mut autocommit_off = false;
+    for s in &mut plan.stmts {
+        s.implicit_commit = false;
+        if !mysql {
+            continue;
+        }
+        if manual_tx && state == TxState::Idle && manual_needs_tx(s.kind, &s.text, dialect) {
+            state = TxState::Active;
+        }
+        let commits = |prev| {
+            next_tx_state(DbKind::MySql, prev, false, s.kind, &s.text, StmtResult::Ok)
+                == TxState::Idle
+        };
+        s.implicit_commit = state != TxState::Idle
+            && !matches!(s.kind, StatementKind::Transaction(_))
+            && commits(TxState::Active);
+        state = next_tx_state(
+            DbKind::MySql,
+            state,
+            autocommit_off,
+            s.kind,
+            &s.text,
+            StmtResult::Ok,
+        );
+        autocommit_off = next_autocommit_off(DbKind::MySql, autocommit_off, s.kind, StmtResult::Ok);
     }
 }
 
@@ -461,6 +525,34 @@ mod tests {
             StmtResult::Ok,
         );
         assert_eq!(after, TxState::Idle);
+    }
+
+    fn flags(p: &ScriptPlan) -> Vec<bool> {
+        p.stmts.iter().map(|s| s.implicit_commit).collect()
+    }
+
+    /// MySQL DDL (and the other implicit-commit statements) run while a transaction is
+    /// open commit it; PostgreSQL DDL is transactional.
+    #[test]
+    fn implicit_commits_follow_the_transaction() {
+        use dnt_core::tx::TxState::{Active, Idle};
+        let text = "CREATE TABLE a (x INT); UPDATE t SET x = 1 WHERE id = 1; \
+                    DROP TABLE a; BEGIN; LOCK TABLES t WRITE; COMMIT; ALTER TABLE t ADD y INT";
+        let mut p = plan(text, Target::All, MY);
+        assert!(flags(&p).iter().all(|f| !f), "planning sets none");
+        mark_implicit_commits(&mut p, Idle, false);
+        // Idle: the first DDL commits nothing; after BEGIN the LOCK TABLES commits it.
+        assert_eq!(flags(&p), [false, false, false, false, true, false, false]);
+        mark_implicit_commits(&mut p, Active, false);
+        // Active: the CREATE commits it (and leaves the session idle).
+        assert_eq!(flags(&p), [true, false, false, false, true, false, false]);
+        // Manual: the UPDATE begins a transaction, which the DROP commits.
+        mark_implicit_commits(&mut p, Idle, true);
+        assert_eq!(flags(&p), [false, false, true, false, true, false, false]);
+
+        let mut p = plan(text, Target::All, Dialect::Postgres);
+        mark_implicit_commits(&mut p, Active, true);
+        assert!(flags(&p).iter().all(|f| !f));
     }
 
     #[test]

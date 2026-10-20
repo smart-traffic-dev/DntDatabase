@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
+import { plural } from '../lib/plural';
+import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
+import { useDialogs } from '../store/dialogs';
+import { refreshTxInfo, txOf, useTxMode } from '../store/txMode';
 import { useCursor } from '../store/cursor';
 import { canRun, emptyRun, lastRunText, runElapsedMs, runProgress, useQueryRun } from '../store/queryRun';
 import { txAction } from '../store/runQuery';
@@ -7,7 +11,7 @@ import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { LockIcon } from './icons';
-import { formatElapsed, shortVersion } from './statusFormat';
+import { formatClock, formatElapsed, shortVersion } from './statusFormat';
 
 /** `Date.now()`, ticking once a second while `active` (restarted when `key` changes). */
 function useNow(active: boolean, key: number | null): number {
@@ -36,6 +40,33 @@ function QueryStatus({ tabId }: { tabId: string }) {
   // Stopping / abandoning count from when that began, not from the run's start.
   const stopSeconds = phase.kind === 'stopping' || phase.kind === 'abandoning' ? wholeSeconds(Math.max(0, now - phase.since)) : null;
   const errors = (run.lastRun?.errors ?? 0) > 0;
+
+  // Manual commit: the open transaction's size and age, warned about once it idles too long.
+  const tx = useTxMode((s) => txOf(s.tabs, tabId));
+  const warnMinutes = useAppSettings((s) => s.idleTxWarnMinutes);
+  const open = run.txState === 'active';
+  const info = open && tx.info?.state === 'active' ? tx.info : null;
+  const txNow = useNow(open && info?.since_ms != null, info?.since_ms ?? null);
+  const ageMs = info?.since_ms != null ? Math.max(0, txNow - info.since_ms) : null;
+  const warn = open && ageMs !== null && ageMs >= warnMinutes * 60_000;
+  const openText = info
+    ? ['Transaction open', plural(info.statements, 'statement'), ...(ageMs !== null ? [formatClock(ageMs)] : [])].join(' · ')
+    : null;
+  useEffect(() => {
+    if (run.txState !== 'idle') void useAppSettings.getState().loadIdleTxWarnMinutes();
+  }, [run.txState]);
+  // Ask for the facts whenever the tab is at rest and may hold a transaction.
+  useEffect(() => {
+    if (idle && (run.txState !== 'idle' || tx.mode === 'Manual')) void refreshTxInfo(tabId);
+  }, [tabId, idle, run.txState, tx.mode, run.lastRun]);
+  const txSince = info?.since_ms ?? null;
+  useEffect(() => {
+    if (!warn || txSince === null || useTxMode.getState().tabs.get(tabId)?.warnedFor === txSince) return;
+    useTxMode.getState().patch(tabId, { warnedFor: txSince });
+    useDialogs
+      .getState()
+      .setNotice(`A transaction has been open for more than ${plural(warnMinutes, 'minute')}. Commit or roll it back.`);
+  }, [warn, txSince, tabId, warnMinutes]);
   return (
     <>
       {phase.kind === 'running' && elapsed !== null && progress && (
@@ -61,9 +92,9 @@ function QueryStatus({ tabId }: { tabId: string }) {
           Cancelled by user
         </span>
       )}
-      <span className={`status-tx tx-${run.txState}`} data-testid="status-tx">
-        {run.txState === 'idle' && 'Auto-commit'}
-        {run.txState === 'active' && 'In transaction'}
+      <span className={`status-tx tx-${run.txState}${warn ? ' warn' : ''}`} data-testid="status-tx">
+        {run.txState === 'idle' && (tx.mode === 'Manual' ? 'Manual commit' : 'Auto-commit')}
+        {run.txState === 'active' && (openText ?? 'In transaction')}
         {run.txState === 'aborted' && 'Transaction aborted'}
         {run.txState === 'active' && (
           <button type="button" className="status-btn" disabled={!idle} onClick={() => void txAction(tabId, 'Commit')}>
@@ -76,6 +107,16 @@ function QueryStatus({ tabId }: { tabId: string }) {
           </button>
         )}
       </span>
+      {tx.lost && (
+        <span className="status-tx tx-aborted" data-testid="status-tx-lost" role="alert">
+          {tx.lost.outcomeUnknown
+            ? 'Connection lost · the last statement may have been applied'
+            : 'Connection lost during a transaction'}
+          <button type="button" className="status-btn" disabled={!idle} onClick={() => void txAction(tabId, 'Rollback')}>
+            Rollback to continue
+          </button>
+        </span>
+      )}
       {(phase.kind === 'stopping' || phase.kind === 'abandoning') && stopSeconds !== null && (
         <span className="status-run" data-testid="status-run">
           {phase.kind === 'abandoning'

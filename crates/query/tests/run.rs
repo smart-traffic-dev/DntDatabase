@@ -23,7 +23,8 @@ use dnt_core::sql::{Dialect, MySqlMode, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::run::{
-    error_offset, run, RunCancel, RunReport, RunSink, StopReason, ROLLED_BACK_NOTICE,
+    error_offset, run, run_with, RunCancel, RunConfig, RunReport, RunSink, StopReason,
+    BEGIN_FAILED_NOTICE, ROLLED_BACK_NOTICE,
 };
 use dnt_query::{guard, plan, PlannedStmt, ScriptPlan, Target, Verdict};
 use tokio::sync::Notify;
@@ -256,6 +257,8 @@ struct Rec {
     cancel_at_end: Option<(u32, RunCancel)>,
     /// Notified at `statement_start` of statement 0.
     started: Option<Arc<Notify>>,
+    /// Cancelled (to completion) at the first `tx_state` event.
+    cancel_at_tx: Option<RunCancel>,
 }
 
 impl RowSink for Rec {
@@ -299,6 +302,9 @@ impl RunSink for Rec {
     }
     fn tx_state(&mut self, state: TxState) {
         self.tx.push(state);
+        if let Some(cancel) = self.cancel_at_tx.take() {
+            block_on(cancel.cancel()).unwrap();
+        }
     }
 }
 
@@ -907,6 +913,10 @@ fn stmt(range: (u32, u32), text: &str) -> PlannedStmt {
         verdict: Verdict::Allow,
         source_range: (0, text.len()),
         unbounded: Vec::new(),
+        drops: Vec::new(),
+        confirm_name: None,
+        estimate: None,
+        implicit_commit: false,
     }
 }
 
@@ -1040,4 +1050,163 @@ fn stop_reason_serde_shape() {
         serde_json::to_value(StopReason::DialectChanged { index: 1 }).unwrap(),
         serde_json::json!({"kind": "dialect_changed", "index": 1})
     );
+}
+
+// ---------------------------------------------------------------------------
+// Manual commit (`RunConfig::manual_tx`)
+
+async fn go_manual(session: &FakeSession, plan: &ScriptPlan, sink: &mut Rec) -> RunReport {
+    let cancel = session.cancel();
+    let cfg = RunConfig {
+        continue_on_error: false,
+        manual_tx: true,
+    };
+    run_with(session, plan, &ExecOptions::default(), cfg, &cancel, sink).await
+}
+
+#[tokio::test]
+async fn manual_tx_begins_again_after_a_commit() {
+    for (dialect, begin) in [(PG, "BEGIN"), (MY, "START TRANSACTION")] {
+        let s = FakeSession::new(
+            dialect,
+            vec![
+                ok(),
+                ok().tx(TxState::Active),
+                ok(),
+                ok().tx(TxState::Idle),
+                ok().tx(TxState::Active),
+                ok(),
+            ],
+        );
+        let mut rec = Rec::default();
+        let p = all(
+            "SELECT 1; UPDATE a SET x = 1; COMMIT; UPDATE b SET x = 1",
+            dialect,
+        );
+        let r = go_manual(&s, &p, &mut rec).await;
+        assert_eq!(r.stop, None);
+        assert_eq!(
+            s.sent(),
+            [
+                "SELECT 1",
+                begin,
+                "UPDATE a SET x = 1",
+                "COMMIT",
+                begin,
+                "UPDATE b SET x = 1"
+            ],
+            "{dialect:?}"
+        );
+        let began: Vec<bool> = r.stmts.iter().map(|s| s.began_tx).collect();
+        assert_eq!(began, [false, true, false, true], "{dialect:?}");
+        assert_eq!(rec.tx, [TxState::Active, TxState::Idle, TxState::Active]);
+        // Statement events are the plan's only: the BEGIN has none.
+        assert_eq!(
+            rec.events.iter().filter(|e| e.starts_with("start")).count(),
+            4
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_tx_does_not_begin_inside_a_transaction_or_for_non_writes() {
+    let s = FakeSession::new(PG, vec![]).in_state(TxState::Active);
+    let mut rec = Rec::default();
+    go_manual(&s, &all("UPDATE a SET x = 1", PG), &mut rec).await;
+    assert_eq!(s.sent(), ["UPDATE a SET x = 1"]);
+
+    let s = FakeSession::new(PG, vec![]);
+    let mut rec = Rec::default();
+    let text = "SELECT 1; SET work_mem = '64MB'; VACUUM t; CREATE INDEX CONCURRENTLY i ON t (a)";
+    go_manual(&s, &all(text, PG), &mut rec).await;
+    assert_eq!(s.sent().len(), 4, "{:?}", s.sent());
+    assert!(!s.sent().contains(&"BEGIN".to_string()));
+
+    // MySQL DDL never begins one (it would commit it at once).
+    let s = FakeSession::new(MY, vec![]);
+    let mut rec = Rec::default();
+    go_manual(&s, &all("CREATE TABLE t (a INT); SET @x = 1", MY), &mut rec).await;
+    assert_eq!(s.sent(), ["CREATE TABLE t (a INT)", "SET @x = 1"]);
+
+    // Plain `run` never begins.
+    let s = FakeSession::new(PG, vec![]);
+    let mut rec = Rec::default();
+    go(&s, &all("UPDATE a SET x = 1", PG), false, &mut rec).await;
+    assert_eq!(s.sent(), ["UPDATE a SET x = 1"]);
+}
+
+#[test]
+fn manual_needs_tx_rules() {
+    use StatementKind::{Ddl, Other, Read, Write};
+    for (kind, text, dialect, want) in [
+        (Write, "UPDATE t SET a = 1", PG, true),
+        (Write, "DELETE FROM t", MY, true),
+        (Ddl, "CREATE TABLE t (a INT)", PG, true),
+        (Ddl, "ALTER TABLE t ADD b INT", PG, true),
+        (Ddl, "CREATE TABLE t (a INT)", MY, false),
+        (Ddl, "VACUUM", PG, false),
+        (Ddl, "CREATE DATABASE d", PG, false),
+        (Ddl, "DROP TABLESPACE s", PG, false),
+        (
+            Ddl,
+            "CREATE UNIQUE INDEX CONCURRENTLY i ON t (a)",
+            PG,
+            false,
+        ),
+        (Ddl, "DROP INDEX CONCURRENTLY i", PG, false),
+        (Ddl, "CREATE INDEX i ON t (a)", PG, true),
+        (Ddl, "REINDEX TABLE CONCURRENTLY t", PG, false),
+        (Ddl, "REINDEX TABLE t", PG, true),
+        (Ddl, "ALTER SYSTEM SET work_mem = '1MB'", PG, false),
+        (Ddl, "DROP SUBSCRIPTION s", PG, false),
+        (Read, "SELECT 1", PG, false),
+        (Other, "SET x = 1", PG, false),
+    ] {
+        assert_eq!(
+            dnt_query::manual_needs_tx(kind, text, dialect),
+            want,
+            "{text}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_tx_failed_begin_stops_without_sending_the_statement() {
+    let lost = DbError::ConnectionLost {
+        was_in_tx: false,
+        outcome_unknown: false,
+        message: "gone".into(),
+    };
+    let s = FakeSession::new(PG, vec![fail(lost)]);
+    let mut rec = Rec::default();
+    let r = go_manual(&s, &all("UPDATE a SET x = 1; SELECT 2", PG), &mut rec).await;
+    assert_eq!(s.sent(), ["BEGIN"]);
+    assert_eq!(r.stop, Some(StopReason::Error { index: 0 }));
+    assert_eq!(r.stmts.len(), 1);
+    assert!(r.stmts[0].began_tx);
+    assert_eq!(err_of(&r, 0).kind, "connection_lost");
+    assert_eq!(rec.events, ["start 0", "end 0 err"]);
+    assert_eq!(rec.notices, [(0, BEGIN_FAILED_NOTICE.to_string())]);
+}
+
+/// A Stop that lands while the manual BEGIN runs: the statement is never sent.
+#[tokio::test]
+async fn manual_tx_stop_after_begin_sends_nothing_more() {
+    let s = FakeSession::new(PG, vec![ok().tx(TxState::Active)]);
+    let cancel = s.cancel();
+    let mut rec = Rec {
+        cancel_at_tx: Some(cancel.clone()),
+        ..Rec::default()
+    };
+    let cfg = RunConfig {
+        continue_on_error: false,
+        manual_tx: true,
+    };
+    let p = all("UPDATE a SET x = 1; SELECT 2", PG);
+    let r = run_with(&s, &p, &ExecOptions::default(), cfg, &cancel, &mut rec).await;
+    assert_eq!(s.sent(), ["BEGIN"]);
+    assert_eq!(r.stop, Some(StopReason::Cancelled));
+    assert!(r.stmts.is_empty());
+    assert!(r.began_unused);
+    assert!(rec.events.is_empty(), "{:?}", rec.events);
 }

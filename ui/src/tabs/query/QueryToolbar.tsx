@@ -3,7 +3,9 @@ import { addQueryToFavorites } from '../../components/favoritesActions';
 import { useConnections } from '../../store/connections';
 import { useExporting } from '../../store/queryExport';
 import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
-import { explainQuery, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
+import { explainQuery, note as noteError, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
+import { setTxMode, txOf, useTxMode } from '../../store/txMode';
+import type { TxMode } from '../../bindings';
 import { analyzeAvailable } from './explainTree';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc, type RowLimit } from '../../store/queryTabs';
 import { useTabs } from '../../store/tabs';
@@ -135,6 +137,57 @@ function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runn
           </button>
         </div>
       )}
+    </span>
+  );
+}
+
+const MANUAL_TIP =
+  'Each statement that changes data starts a transaction you commit or roll back yourself. Procedures that commit internally need Auto mode.';
+
+/**
+ * `Auto | Manual` commit mode of the tab. Locked while a run is active and while a Manual
+ * transaction is open (or lost, until acknowledged): Commit or Rollback first. When the backend
+ * refuses a switch the error goes to Messages and the mode stays.
+ */
+function CommitMode({ tabId, busy }: { tabId: string; busy: boolean }) {
+  const mode = useTxMode((s) => txOf(s.tabs, tabId).mode);
+  const lost = useTxMode((s) => txOf(s.tabs, tabId).lost !== null);
+  const txState = useQueryRun((s) => (s.runs.get(tabId) ?? emptyRun).txState);
+  const pending = useRef(false);
+  const holding = mode === 'Manual' && (txState !== 'idle' || lost);
+  const locked = busy || holding;
+  const lockWhy = holding ? 'Commit or roll back the open transaction first' : busy ? 'A statement is running' : undefined;
+
+  const choose = async (next: TxMode) => {
+    if (next === mode || locked || pending.current) return;
+    pending.current = true;
+    try {
+      const error = await setTxMode(tabId, next);
+      if (error) noteError(tabId, error.message, error);
+    } finally {
+      pending.current = false;
+    }
+  };
+
+  const option = (value: TxMode, tip: string) => (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={mode === value}
+      className={`qt-btn qt-seg${mode === value ? ' on' : ''}`}
+      data-testid={`query-tx-${value.toLowerCase()}`}
+      disabled={locked}
+      title={lockWhy ?? tip}
+      onClick={() => void choose(value)}
+    >
+      {value}
+    </button>
+  );
+
+  return (
+    <span className="qt-segs" role="radiogroup" aria-label="Commit mode">
+      {option('Auto', 'Every statement commits as it runs')}
+      {option('Manual', MANUAL_TIP)}
     </span>
   );
 }
@@ -309,6 +362,7 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
         />
         <span>Continue on error</span>
       </label>
+      <CommitMode tabId={doc.id} busy={!canRun(run) || starting || exporting} />
     </div>
   );
 }

@@ -9,10 +9,10 @@ use dntdatabase::commands::connections::{
     SecretsUpdateInput,
 };
 use dntdatabase::commands::settings::{
-    get_confirm_unbounded_writes_impl, get_log_level_impl, get_table_page_size_impl,
-    saved_confirm_unbounded, saved_log_level, saved_table_page_size,
-    set_confirm_unbounded_writes_impl, set_log_level_impl, set_table_page_size_impl,
-    CONFIRM_UNBOUNDED_KEY,
+    get_confirm_unbounded_writes_impl, get_idle_tx_warn_minutes_impl, get_log_level_impl,
+    get_table_page_size_impl, saved_confirm_unbounded, saved_idle_tx_warn_minutes, saved_log_level,
+    saved_table_page_size, set_confirm_unbounded_writes_impl, set_idle_tx_warn_minutes_impl,
+    set_log_level_impl, set_table_page_size_impl, CONFIRM_UNBOUNDED_KEY, IDLE_TX_WARN_KEY,
 };
 use dntdatabase::commands::transfer::{
     apply_import_impl, export_connections_impl, import_needs_passphrase_impl, preview_import_impl,
@@ -249,6 +249,33 @@ async fn confirm_unbounded_writes_defaults_on_and_persists() {
         .set_app_setting(CONFIRM_UNBOUNDED_KEY, "garbage")
         .unwrap();
     assert!(saved_confirm_unbounded(&state.repo));
+}
+
+#[tokio::test]
+async fn idle_tx_warn_minutes_defaults_to_5_and_is_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert_eq!(get_idle_tx_warn_minutes_impl(&state).await.unwrap(), 5);
+    for good in [1, 30, 120] {
+        set_idle_tx_warn_minutes_impl(&state, good).await.unwrap();
+        assert_eq!(get_idle_tx_warn_minutes_impl(&state).await.unwrap(), good);
+    }
+    for bad in [0, 121] {
+        let err = set_idle_tx_warn_minutes_impl(&state, bad)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, dnt_core::error::DbError::Config { field: Some(f), .. } if f == "minutes"),
+            "{err:?}"
+        );
+    }
+    assert_eq!(get_idle_tx_warn_minutes_impl(&state).await.unwrap(), 120);
+    // Survives a restart; a corrupt stored value falls back to the default.
+    drop(state);
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert_eq!(saved_idle_tx_warn_minutes(&state.repo), 120);
+    state.repo.set_app_setting(IDLE_TX_WARN_KEY, "999").unwrap();
+    assert_eq!(saved_idle_tx_warn_minutes(&state.repo), 5);
 }
 
 #[tokio::test]

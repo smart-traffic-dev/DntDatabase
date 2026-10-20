@@ -799,8 +799,13 @@ textarea:focus-visible,
   color: var(--warning-fg);
 }
 
-.status-tx.tx-aborted {
+.status-tx.tx-aborted,
+.status-tx.warn {
   color: var(--danger-fg);
+}
+
+.status-tx.warn {
+  font-weight: 600;
 }
 
 .status-btn {
