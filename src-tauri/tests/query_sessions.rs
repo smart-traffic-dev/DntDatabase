@@ -55,6 +55,8 @@ struct Log {
     cancelled: AtomicBool,
     /// While set, `COMMIT` / `ROLLBACK` lose the connection.
     lose_on_tx: AtomicBool,
+    /// Calls of the session's cancel handle.
+    cancel_calls: AtomicUsize,
 }
 
 impl Log {
@@ -127,6 +129,7 @@ struct FakeCancel(Arc<Log>);
 #[async_trait]
 impl Canceller for FakeCancel {
     async fn cancel(&self) -> Result<(), DbError> {
+        self.0.cancel_calls.fetch_add(1, Ordering::SeqCst);
         self.0.cancelled.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -1768,6 +1771,37 @@ async fn dead_listener_stops_the_run() {
         1,
         "nothing is sent after a failure"
     );
+}
+
+#[tokio::test]
+async fn failed_done_send_never_cancels() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT 1; SELECT rows_3")
+        .await
+        .unwrap();
+    let events = Arc::new(Events::default());
+    let out = Arc::clone(&events);
+    // Every event but `done` is delivered (the window closes right at the end).
+    let emit: EventSink = Arc::new(move |e| {
+        let json = serde_json::to_value(e).unwrap();
+        let done = json["t"] == "done";
+        out.0.lock().unwrap().push(json);
+        !done
+    });
+    let run_id =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap();
+    assert_eq!(events.done(LONG).await["stop"], Json::Null);
+    // The tab's next statements run undisturbed: no late cancel was sent.
+    let next = run_text(&f, id, "SELECT 3; SELECT 4", opts()).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(f.log.cancel_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(next.done(LONG).await["stop"], Json::Null);
+    // A Stop of the ended run sends nothing either.
+    f.sm.query_cancel(run_id).await.unwrap();
+    assert_eq!(f.log.cancel_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

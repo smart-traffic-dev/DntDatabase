@@ -992,12 +992,18 @@ pub(crate) struct RunEntry {
     cancel: RunCancel,
     flags: Arc<RunFlags>,
     emit: EventSink,
+    /// See [`RunTask::finished`].
+    finished: Arc<AtomicBool>,
 }
 
 impl RunEntry {
     /// Sends `stopping{user}` (once per run), then stops the run: no further statement
-    /// is sent and the running one is cancelled.
+    /// is sent and the running one is cancelled. A run whose statements are over is
+    /// left alone (a cancel then could hit the tab's next statement).
     async fn stop(&self) -> Result<(), DbError> {
+        if self.finished.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         self.flags.user_stop(&self.emit);
         self.cancel.cancel().await
     }
@@ -1082,7 +1088,16 @@ fn rejudge(
 /// channel listened is gone) stops the run: the stop signal is raised at once (no
 /// further statement is sent) and the running statement is cancelled in the
 /// background, so the run ends and frees the tab's session. Nothing is sent after that.
-fn stop_when_undelivered(emit: EventSink, cancel: RunCancel) -> EventSink {
+///
+/// Once `finished` is set (the run's statements are over, before the slot is released
+/// and `done` is sent) a failed send never cancels: the drivers' cancel targets the
+/// `execute_one` running when it is invoked (generation-scoped), so a late cancel
+/// could otherwise hit the next run or `query_tx` on the tab's session.
+fn stop_when_undelivered(
+    emit: EventSink,
+    cancel: RunCancel,
+    finished: Arc<AtomicBool>,
+) -> EventSink {
     let dead = Arc::new(AtomicBool::new(false));
     Arc::new(move |event| {
         if dead.load(Ordering::SeqCst) {
@@ -1091,12 +1106,17 @@ fn stop_when_undelivered(emit: EventSink, cancel: RunCancel) -> EventSink {
         if emit(event) {
             return true;
         }
-        if !dead.swap(true, Ordering::SeqCst) {
+        if !dead.swap(true, Ordering::SeqCst) && !finished.load(Ordering::SeqCst) {
             tracing::warn!("a query run lost its listener; stopping it");
             cancel.signal().stop();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let cancel = cancel.clone();
+                let finished = Arc::clone(&finished);
                 handle.spawn(async move {
+                    // The run may have ended meanwhile.
+                    if finished.load(Ordering::SeqCst) {
+                        return;
+                    }
                     if let Err(e) = cancel.cancel().await {
                         tracing::warn!(error = %e, "could not cancel a running query");
                     }
@@ -1123,6 +1143,8 @@ struct RunTask {
     emit: EventSink,
     repo: Arc<ConnectionRepo>,
     runs: Runs,
+    /// Set when the run's statements are over: no cancel may be sent any more.
+    finished: Arc<AtomicBool>,
 }
 
 impl RunTask {
@@ -1159,6 +1181,9 @@ impl RunTask {
         })
         .catch_unwind()
         .await;
+        // No statement runs any more: from here on nothing may cancel the session (a
+        // late cancel would hit the tab's next statement).
+        self.finished.store(true, Ordering::SeqCst);
         ticker.abort();
         rows.flush();
         if let Some(writer) = sink.take_writer() {
@@ -1297,7 +1322,8 @@ impl SessionManager {
             ..ExecOptions::default()
         };
         let cancel = RunCancel::new(session.cancel_handle());
-        let emit = stop_when_undelivered(emit, cancel.clone());
+        let finished = Arc::new(AtomicBool::new(false));
+        let emit = stop_when_undelivered(emit, cancel.clone(), Arc::clone(&finished));
         let flags = Arc::new(RunFlags::default());
         let run_id = Uuid::new_v4();
         self.runs.insert(
@@ -1308,6 +1334,7 @@ impl SessionManager {
                 cancel: cancel.clone(),
                 flags: Arc::clone(&flags),
                 emit: Arc::clone(&emit),
+                finished: Arc::clone(&finished),
             },
         );
         let task = RunTask {
@@ -1325,6 +1352,7 @@ impl SessionManager {
             emit,
             repo: Arc::clone(&self.repo),
             runs: self.runs.clone(),
+            finished,
         };
         tokio::spawn(task.execute());
         Ok(run_id)
