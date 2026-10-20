@@ -43,19 +43,29 @@ interface Pos {
   column: number;
 }
 
-/** The part of a Monaco editor the run keys need. */
+interface EditorRange {
+  startLineNumber: number;
+  startColumn: number;
+  endLineNumber: number;
+  endColumn: number;
+}
+
+/** The part of a Monaco editor the run keys (and `revealInEditor`) need. */
 export interface EditorLike {
-  getModel(): { getOffsetAt(p: Pos): number } | null;
+  getModel(): { getOffsetAt(p: Pos): number; getPositionAt?(offset: number): Pos } | null;
   getSelection(): { isEmpty(): boolean; getStartPosition(): Pos; getEndPosition(): Pos } | null;
   getPosition(): Pos | null;
   executeEdits?(
     source: string,
     edits: {
-      range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number };
+      range: EditorRange;
       text: string;
       forceMoveMarkers?: boolean;
     }[],
   ): unknown;
+  setSelection?(range: EditorRange): void;
+  revealRangeInCenterIfOutsideViewport?(range: EditorRange): void;
+  focus?(): void;
 }
 
 const editors = new Map<string, EditorLike>();
@@ -67,6 +77,41 @@ export function registerEditor(tabId: string, editor: EditorLike) {
 
 export function unregisterEditor(tabId: string, editor?: EditorLike) {
   if (!editor || editors.get(tabId) === editor) editors.delete(tabId);
+}
+
+/**
+ * Click-to-jump (F25): selects UTF-16 offsets `from`..`to` of the tab's editor text (a caret
+ * at `from` without `to`, e.g. an error position), scrolls it into view and focuses the
+ * editor (`focus: false` to keep focus where it is). Offsets are those of `PlanStmtView.range`,
+ * `MessageLine.retryRange` and error markers. Returns false when no editor is mounted; the
+ * tab's stored cursor then moves to `from`.
+ */
+export function revealInEditor(
+  tabId: string,
+  range: { from: number; to?: number },
+  opts: { focus?: boolean } = {},
+): boolean {
+  const from = Math.max(0, range.from);
+  const to = Math.max(from, range.to ?? from);
+  const editor = editors.get(tabId);
+  const model = editor?.getModel();
+  if (editor && model?.getPositionAt && editor.setSelection) {
+    const start = model.getPositionAt(from);
+    const end = model.getPositionAt(to);
+    const r: EditorRange = {
+      startLineNumber: start.lineNumber,
+      startColumn: start.column,
+      endLineNumber: end.lineNumber,
+      endColumn: end.column,
+    };
+    editor.setSelection(r);
+    editor.revealRangeInCenterIfOutsideViewport?.(r);
+    if (opts.focus ?? true) editor.focus?.();
+    return true;
+  }
+  const doc = useQueryDocs.getState().docs.get(tabId);
+  if (doc) useQueryDocs.getState().update(tabId, { cursor: Math.min(from, doc.sql.length) });
+  return false;
 }
 
 /**
@@ -102,6 +147,7 @@ export async function runFromEditor(tabId: string, mode: 'cursor' | 'selection' 
 function note(tabId: string, text: string, error: ReturnType<typeof toAppError> | null = null) {
   const line: MessageLine = {
     index: null,
+    statement: null,
     text,
     rows: null,
     affected: null,
@@ -128,7 +174,11 @@ function abort(tabId: string, text: string, error: ReturnType<typeof toAppError>
 }
 
 /** Guard dialogs, then `begin` + `query_run` + `attach` for a plan (the caller holds the starting flag). */
-async function execute(tabId: string, plan: PlanView, extra?: { maxRows?: number }): Promise<void> {
+async function execute(
+  tabId: string,
+  plan: PlanView,
+  extra?: { maxRows?: number; mode?: 'run' | 'explain' },
+): Promise<void> {
   const doc = useQueryDocs.getState().docs.get(tabId);
   if (!doc || plan.stmts.length === 0) return;
   if (plan.stmts.some((s) => s.verdict === 'block')) {
@@ -141,7 +191,7 @@ async function execute(tabId: string, plan: PlanView, extra?: { maxRows?: number
   // The tab may have been closed while the dialog was open.
   if (!canRun(useQueryRun.getState().get(tabId)) || !useQueryDocs.getState().docs.has(tabId)) return;
   pendingStop.delete(tabId);
-  useQueryRun.getState().begin(tabId, plan);
+  useQueryRun.getState().begin(tabId, plan, { mode: extra?.mode });
   try {
     const runId = await api.queryRun(
       plan.plan_id,
@@ -230,7 +280,7 @@ export async function explainQuery(tabId: string, analyze: boolean): Promise<voi
       return;
     }
     setExplainError(tabId, null);
-    await execute(tabId, plan);
+    await execute(tabId, plan, { mode: 'explain' });
   } finally {
     setStarting(tabId, false);
   }

@@ -16,10 +16,12 @@ import type {
   TxState,
   Value,
 } from '../bindings';
+import { formatCount, plural } from '../lib/plural';
 import { stmtsByIndex } from '../query/plan';
 import { forgetCompletionConnection, invalidateCompletion } from './completion';
 import { useConnections } from './connections';
 import { asTxState, queryTxRecorded, setTxStateSource, useQueryDocs } from './queryTabs';
+import { useTree } from './tree';
 
 /** At most this many result tabs per run; later results only get their Messages line. */
 export const MAX_RESULT_TABS = 50;
@@ -50,7 +52,16 @@ export interface ResultSet {
 export interface MessageLine {
   /** Statement index in the plan; null for the final line of the run. */
   index: number | null;
+  /**
+   * For a result line the statement's first preview line; for an error, the server message
+   * (shown under `statement`); for a notice, the notice; for the final line, the run summary.
+   */
   text: string;
+  /**
+   * First line of the statement's preview (spec §6.2: "#2 SELECT * FORM orders" above its
+   * error). Set on every line of a statement; null (or absent) for the final line and app notes.
+   */
+  statement?: string | null;
   rows: number | null;
   affected: number | null;
   elapsedMs: number | null;
@@ -60,6 +71,34 @@ export interface MessageLine {
   retryRange: [number, number] | null;
 }
 
+/**
+ * Figures of the last finished run (status bar, spec §9). Explain runs never replace them.
+ * Only `rows` and `elapsedMs` are always present; format with `lastRunText`.
+ */
+export interface LastRun {
+  /** Rows returned by the row-returning results. */
+  rows: number;
+  /** Whole run, from `done` (not the sum of statement times). */
+  elapsedMs: number;
+  /** Rows affected by statements without a result set (DML); null when none reported a count. */
+  affected?: number | null;
+  /** Row-returning results. */
+  resultSets?: number;
+  /** Statements in the plan. */
+  statements?: number;
+  /** Statements that failed (a plain user cancel is not one; an outcome-unknown failure is). */
+  errors?: number;
+}
+
+/**
+ * Run-state fields a status bar needs (all derivable, see `runElapsedMs` / `runProgress`):
+ * - `phase.kind !== 'idle'`: a run is active (`running`, `stopping`, `abandoning`).
+ * - `startedAt`: Date.now() at `begin`, kept while stopping; elapsed = now - startedAt.
+ * - `phase.index` / `phase.total` (running) or `current` / `plan.stmts.length`: statement N of M.
+ * - `phase.since` (stopping / abandoning): when that phase began.
+ * - `lastRun`: figures of the last finished (non-Explain) run; hide it while a run is active.
+ * - `stop`: undefined while running, null when every statement ran, else why it stopped.
+ */
 export interface TabRun {
   phase: RunPhase;
   runId: string | null;
@@ -81,7 +120,7 @@ export interface TabRun {
   explainError: string | null;
   panel: 'result' | 'messages' | 'history' | 'explain';
   activeResult: number;
-  lastRun: { rows: number; elapsedMs: number } | null;
+  lastRun: LastRun | null;
   /** The statement being run (from `statement_start`), null outside a run. */
   current: number | null;
   /** The result between its `result_start` and `result_end` (results never interleave). */
@@ -90,6 +129,15 @@ export interface TabRun {
   startedAt?: number;
   /** What the current stop is for: a `timeout` stop lets a continue-on-error run go on. */
   stopCause?: 'user' | 'timeout';
+  /** A normal run or an Explain (whose figures never become `lastRun`). */
+  mode: 'run' | 'explain';
+  /** Connection and database the run's plan was made on (null before the first run). */
+  origin: { connectionId: string; database: string | null } | null;
+  /**
+   * The backend no longer holds `plan` (its connection closed, or `query_plan_statement`
+   * answered `plan_expired`): Retry statement / Fetch all cannot use it. See `planAlive`.
+   */
+  planExpired: boolean;
 }
 
 export const emptyRun: TabRun = {
@@ -110,13 +158,66 @@ export const emptyRun: TabRun = {
   lastRun: null,
   current: null,
   openResult: null,
+  mode: 'run',
+  origin: null,
+  planExpired: false,
 };
 
 export const canRun = (r: TabRun): boolean => r.phase.kind === 'idle';
 export const canStop = (r: TabRun): boolean => r.phase.kind === 'running';
 
+/** Milliseconds since the active run started at `now`; null when no run is active. */
+export function runElapsedMs(r: TabRun, now: number): number | null {
+  if (r.phase.kind === 'idle') return null;
+  const started = r.phase.kind === 'running' ? r.phase.startedAt : r.startedAt;
+  return started === undefined ? null : Math.max(0, now - started);
+}
+
+/** "Statement `current` of `total`" (1-based) of the active run; null when no run is active. */
+export function runProgress(r: TabRun): { current: number; total: number } | null {
+  if (r.phase.kind === 'idle') return null;
+  const total = r.phase.kind === 'running' ? r.phase.total : (r.plan?.stmts.length ?? 0);
+  const index = r.phase.kind === 'running' ? r.phase.index : (r.current ?? 0);
+  return { current: Math.min(index + 1, Math.max(total, 1)), total };
+}
+
+/**
+ * Whether Retry statement / Fetch all can still derive from the run's plan (F12): there is
+ * one, the backend has not dropped it, and the tab is still on the connection and database
+ * it was made on (the backend's plan is bound to both). `doc`: the tab's current doc.
+ * A run without a recorded `origin` (begun outside `begin`, or on a tab without a connection)
+ * counts as alive: the backend's `plan_expired` answer is then the authority.
+ */
+export function planAlive(
+  r: TabRun,
+  doc: { connectionId: string | null; database: string | null } | undefined,
+): boolean {
+  if (!r.plan || r.planExpired) return false;
+  // No recorded origin (a run begun outside `begin`): only the backend can tell.
+  if (!r.origin) return true;
+  if (!doc) return false;
+  return doc.connectionId === r.origin.connectionId && doc.database === r.origin.database;
+}
+
+/** Status bar text of a finished run: "1 row affected · 3 ms", "10,000 rows · 1,234 ms". */
+export function lastRunText(last: LastRun): string {
+  const parts: string[] = [];
+  const affected = last.affected ?? null;
+  if ((last.resultSets ?? 1) > 0 || affected === null) parts.push(plural(last.rows, 'row'));
+  if (affected !== null) parts.push(`${plural(affected, 'row')} affected`);
+  if ((last.errors ?? 0) > 0) parts.push(plural(last.errors!, 'error'));
+  parts.push(`${formatCount(last.elapsedMs)} ms`);
+  return parts.join(' · ');
+}
+
+export interface StartOptions {
+  /** `explain`: an Explain run, which keeps `lastRun` (F46). Default `run`. */
+  mode?: TabRun['mode'];
+  origin?: TabRun['origin'];
+}
+
 /** A fresh run of `plan`: keeps the tab's tx state (as the plan saw it) and the last run's figures. */
-export function startRun(run: TabRun, plan: PlanView, now: number): TabRun {
+export function startRun(run: TabRun, plan: PlanView, now: number, opts: StartOptions = {}): TabRun {
   return {
     ...emptyRun,
     phase: { kind: 'running', index: 0, total: plan.stmts.length, startedAt: now },
@@ -124,12 +225,20 @@ export function startRun(run: TabRun, plan: PlanView, now: number): TabRun {
     txState: plan.tx_state,
     lastRun: run.lastRun,
     startedAt: now,
+    mode: opts.mode ?? 'run',
+    origin: opts.origin ?? null,
   };
 }
 
-/** The final Messages line of a run (spec §9). */
-export function stopReasonText(stop: StopReason | null, statements: number, elapsedMs: number): string {
-  if (stop === null) return `Done: ${statements} statement(s) in ${elapsedMs} ms.`;
+/**
+ * The final Messages line of a run (spec §9). `errors`: failed statements of a run that went
+ * on (continue on error); with any, the run "finished with errors" rather than "Done".
+ */
+export function stopReasonText(stop: StopReason | null, statements: number, elapsedMs: number, errors = 0): string {
+  if (stop === null) {
+    const what = `${plural(statements, 'statement')} in ${formatCount(elapsedMs)} ms.`;
+    return errors > 0 ? `Finished with ${plural(errors, 'error')} — ${what}` : `Done: ${what}`;
+  }
   switch (stop.kind) {
     case 'error':
       return `Stopped at statement ${stop.index + 1} after an error.`;
@@ -146,8 +255,19 @@ export function stopReasonText(stop: StopReason | null, statements: number, elap
 
 const stmtOf = (run: TabRun, index: number) => (run.plan ? stmtsByIndex(run.plan).get(index) : undefined);
 
+/** First line of statement `index`'s preview; null when the plan does not know it. */
+const statementOf = (run: TabRun, index: number | null): string | null => {
+  if (index === null) return null;
+  const preview = stmtOf(run, index)?.preview;
+  if (preview === undefined) return null;
+  // Previews have their line breaks turned into spaces; older plans may still hold one.
+  const cut = preview.search(/[\r\n]/);
+  return cut < 0 ? preview : preview.slice(0, cut);
+};
+
 const line = (fields: Partial<MessageLine> & Pick<MessageLine, 'text'>): MessageLine => ({
   index: null,
+  statement: null,
   rows: null,
   affected: null,
   elapsedMs: null,
@@ -197,20 +317,26 @@ function appendRows(chunks: Value[][][], rows: Value[][]): Value[][][] {
   return out;
 }
 
-function stopTone(stop: StopReason | null): MessageLine['tone'] {
-  if (stop === null || stop.kind === 'cancelled') return 'info';
+function stopTone(stop: StopReason | null, errors: number): MessageLine['tone'] {
+  if (stop === null) return errors > 0 ? 'warning' : 'info';
+  if (stop.kind === 'cancelled') return 'info';
   return stop.kind === 'error' ? 'error' : 'warning';
 }
 
+/** A statement failure (not a plain user cancel): what the final line counts as an error. */
+const isFailure = (m: MessageLine): boolean => m.index !== null && m.error !== null && m.tone !== 'info';
+
 function errorLine(run: TabRun, index: number, error: AppError): MessageLine {
+  const statement = statementOf(run, index);
   if (error.kind === 'cancelled' && !error.outcome_unknown) {
     // A stop the user asked for, before the statement took effect: not an error.
-    return line({ index, text: 'Cancelled.' });
+    return line({ index, statement, text: 'Cancelled.' });
   }
   if (error.outcome_unknown) {
     // Never "not applied", never retried blindly.
     return line({
       index,
+      statement,
       text: `${error.message} The statement may have been applied.`,
       error,
       tone: 'warning',
@@ -219,6 +345,7 @@ function errorLine(run: TabRun, index: number, error: AppError): MessageLine {
   const range = error.retryable ? stmtOf(run, index)?.range : undefined;
   return line({
     index,
+    statement,
     text: error.message,
     error,
     tone: 'error',
@@ -282,10 +409,13 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
         results = run.results.slice();
         results[at] = { ...r, truncated: ev.truncated, affected: ev.affected, elapsedMs: ev.elapsed_ms, done: true };
       }
-      const text = (index !== null ? stmtOf(run, index)?.preview : undefined)?.split(/\r?\n/)[0] ?? '';
+      // Every piece gets its own line, also a no-column piece after a result set of the
+      // same statement and a piece whose `result_start` never came (F14).
+      const statement = statementOf(run, index);
       const message = line({
         index,
-        text,
+        statement,
+        text: statement ?? '',
         rows: hasRows ? ev.row_count : null,
         affected: ev.affected,
         elapsedMs: ev.elapsed_ms,
@@ -310,7 +440,13 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
       };
     }
     case 'notice':
-      return { ...run, messages: append(run.messages, line({ index: ev.index, text: ev.message, tone: 'warning' })) };
+      return {
+        ...run,
+        messages: append(
+          run.messages,
+          line({ index: ev.index, statement: statementOf(run, ev.index), text: ev.message, tone: 'warning' }),
+        ),
+      };
     case 'explain':
       return { ...run, explain: ev.plan, panel: 'explain' };
     case 'stopping':
@@ -323,12 +459,27 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
       return { ...run, txState: ev.state };
     case 'done': {
       const statements = run.plan?.stmts.length ?? 0;
-      const rows = run.messages.reduce((n, m) => n + (m.index !== null && m.rows !== null ? m.rows : 0), 0);
+      let rows = 0;
+      let resultSets = 0;
+      let affected: number | null = null;
+      let errors = 0;
+      for (const m of run.messages) {
+        if (m.index === null) continue;
+        if (m.rows !== null) {
+          rows += m.rows;
+          resultSets += 1;
+        } else if (m.affected !== null) {
+          affected = (affected ?? 0) + m.affected;
+        }
+        if (isFailure(m)) errors += 1;
+      }
       const final = line({
-        text: stopReasonText(ev.stop, statements, ev.elapsed_ms),
+        text: stopReasonText(ev.stop, statements, ev.elapsed_ms, errors),
         elapsedMs: ev.elapsed_ms,
-        tone: stopTone(ev.stop),
+        tone: stopTone(ev.stop, errors),
       });
+      const lastRun: LastRun | null =
+        run.mode === 'explain' ? run.lastRun : { rows, affected, resultSets, statements, errors, elapsedMs: ev.elapsed_ms };
       const panel = run.results.length === 0 && run.explain === null ? 'messages' : run.panel;
       return {
         ...run,
@@ -339,7 +490,7 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
         stopCause: undefined,
         messages: append(run.messages, final),
         panel,
-        lastRun: { rows, elapsedMs: ev.elapsed_ms },
+        lastRun,
       };
     }
   }
@@ -349,8 +500,10 @@ interface QueryRunState {
   runs: Map<string, TabRun>;
   /** The tab's run, `emptyRun` when it never ran. */
   get(tabId: string): TabRun;
-  /** Starts a run of `plan` (before `query_run` returns its id). */
-  begin(tabId: string, plan: PlanView): void;
+  /** Starts a run of `plan` (before `query_run` returns its id); `mode: 'explain'` for Explain. */
+  begin(tabId: string, plan: PlanView, opts?: { mode?: TabRun['mode'] }): void;
+  /** The backend dropped plan `planId` (`plan_expired`): marks the tab's run if it is that plan. */
+  expirePlan(tabId: string, planId: string): void;
   attach(tabId: string, runId: string): void;
   /**
    * Reduces one event of the tab's run; events of a cleared tab are dropped.
@@ -385,14 +538,19 @@ export const useQueryRun = create<QueryRunState>()((set, get) => {
   return {
     runs: new Map(),
     get: (tabId) => get().runs.get(tabId) ?? emptyRun,
-    begin: (tabId, plan) => {
+    begin: (tabId, plan, opts) => {
       const doc = useQueryDocs.getState().docs.get(tabId);
       if (doc?.connectionId) {
         const open = useConnections.getState().info.has(doc.connectionId);
         origins.set(tabId, { connectionId: doc.connectionId, database: doc.database, open });
       }
       else origins.delete(tabId);
-      put(tabId, startRun(get().get(tabId), plan, Date.now()));
+      const origin = doc?.connectionId ? { connectionId: doc.connectionId, database: doc.database } : null;
+      put(tabId, startRun(get().get(tabId), plan, Date.now(), { mode: opts?.mode, origin }));
+    },
+    expirePlan: (tabId, planId) => {
+      const run = get().runs.get(tabId);
+      if (run && run.plan?.plan_id === planId && !run.planExpired) put(tabId, { ...run, planExpired: true });
     },
     attach: (tabId, runId) => patch(tabId, { runId }),
     apply: (tabId, ev, token) => {
@@ -440,21 +598,47 @@ const unsubscribeDocs = useQueryDocs.subscribe((s, prev) => {
 // A closed connection: its completion data goes, and its tabs' sessions closed with it.
 // A tab still running keeps its state until its `done` (see `apply`).
 const unsubscribeConnections = useConnections.subscribe((s, prev) => {
-  if (s.info === prev.info) return;
-  for (const conn of prev.info.keys()) {
-    if (s.info.has(conn)) continue;
-    forgetCompletionConnection(conn);
-    const { runs } = useQueryRun.getState();
-    for (const [tabId, run] of runs) {
-      const doc = useQueryDocs.getState().docs.get(tabId);
-      if (doc?.connectionId === conn && canRun(run) && run.txState !== 'idle') {
-        useQueryRun.getState().setTxState(tabId, 'idle');
+  if (s.info !== prev.info) {
+    for (const conn of prev.info.keys()) {
+      if (s.info.has(conn)) continue;
+      forgetCompletionConnection(conn);
+      const { runs } = useQueryRun.getState();
+      for (const [tabId, run] of runs) {
+        const doc = useQueryDocs.getState().docs.get(tabId);
+        if (doc?.connectionId === conn && canRun(run) && run.txState !== 'idle') {
+          useQueryRun.getState().setTxState(tabId, 'idle');
+        }
       }
     }
   }
+  // A deleted connection: its runtime, and the plans in it, are gone.
+  if (s.summaries !== prev.summaries) {
+    for (const conn of prev.summaries.keys()) if (!s.summaries.has(conn)) expireConnectionPlans(conn);
+  }
+});
+
+/** The backend runtime of `connectionId` is gone, and the plans of its tabs with it. */
+function expireConnectionPlans(connectionId: string) {
+  for (const [tabId, run] of useQueryRun.getState().runs) {
+    if (run.origin?.connectionId === connectionId && run.plan) useQueryRun.getState().expirePlan(tabId, run.plan.plan_id);
+  }
+}
+
+// Plans expire only when the backend runtime really goes (F12). Dropping the server info
+// alone is not that: the tree's Reconnect clears it and keeps the runtime and its plans. The
+// tree's `forgetConnection` is where a connection is shown closed because its runtime is
+// gone (Close calls it after `close_connection`; Import after replacing connections), so it
+// is wrapped here; anything else the backend dropped answers `plan_expired` (see rerun.ts).
+const treeForget = useTree.getState().forgetConnection;
+useTree.setState({
+  forgetConnection: (connectionId) => {
+    treeForget(connectionId);
+    expireConnectionPlans(connectionId);
+  },
 });
 
 import.meta.hot?.dispose(() => {
   unsubscribeDocs();
   unsubscribeConnections();
+  useTree.setState({ forgetConnection: treeForget });
 });

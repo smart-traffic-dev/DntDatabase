@@ -5,8 +5,22 @@
 import { api, toAppError } from '../../api';
 import { runChannel } from '../../api/query';
 import type { PlanView } from '../../bindings';
-import { canRun, useQueryRun } from '../../store/queryRun';
+import { canRun, emptyRun, planAlive, useQueryRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
+
+/** The Messages notice of a Retry / Fetch all whose plan is gone. */
+export const PLAN_GONE = 'This result is no longer linked to a plan; run the statement from the editor again.';
+
+/**
+ * Whether Retry statement / Fetch all can run for the tab (F12): its last plan is still held
+ * by the backend and the tab is on the connection and database it was made on. Hide or
+ * disable those buttons when false. (Whether a run is active is separate: `canRun`.)
+ */
+export function usePlanAlive(tabId: string): boolean {
+  const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
+  const doc = useQueryDocs((s) => s.docs.get(tabId));
+  return planAlive(run, doc);
+}
 
 export interface RerunOptions {
   /** Row limit of this run; defaults to the tab's row limit. */
@@ -65,6 +79,11 @@ const pending = new Set<string>();
 export async function rerunStatement(tabId: string, index: number, opts: RerunOptions = {}): Promise<void> {
   const run = useQueryRun.getState().get(tabId);
   if (!run.plan || !canRun(run) || pending.has(tabId)) return;
+  if (!planAlive(run, useQueryDocs.getState().docs.get(tabId))) {
+    // The backend no longer holds the plan: asking it would only answer plan_expired.
+    useQueryRun.getState().apply(tabId, { t: 'notice', index, message: PLAN_GONE });
+    return;
+  }
   const source = run.plan.plan_id;
   pending.add(tabId);
   try {
@@ -73,7 +92,9 @@ export async function rerunStatement(tabId: string, index: number, opts: RerunOp
       derived = await api.queryPlanStatement(source, index);
     } catch (e) {
       // e.g. plan_expired: the statement can only be run from the editor again.
-      useQueryRun.getState().apply(tabId, { t: 'notice', index, message: toAppError(e).message });
+      const error = toAppError(e);
+      useQueryRun.getState().apply(tabId, { t: 'notice', index, message: error.message });
+      if (error.kind === 'plan_expired') useQueryRun.getState().expirePlan(tabId, source);
       return;
     }
     // A run (or a newer plan) may have started while the plan was derived.

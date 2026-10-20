@@ -5,7 +5,16 @@ import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { useQueryDocs } from './queryTabs';
 import { useQueryRun } from './queryRun';
-import { registerEditor, runFromEditor, runPlanned, runQuery, stopQuery, txAction, unregisterEditor } from './runQuery';
+import {
+  registerEditor,
+  revealInEditor,
+  runFromEditor,
+  runPlanned,
+  runQuery,
+  stopQuery,
+  txAction,
+  unregisterEditor,
+} from './runQuery';
 import { useRunPrompt } from './runPrompt';
 import { currentPlanRunner } from '../tabs/query/rerun';
 
@@ -289,6 +298,39 @@ describe('runQuery', () => {
     await runFromEditor(tab, 'cursor');
     expect(callsOf('query_plan')[0]).toMatchObject({ target: { Cursor: 0 } });
     unregisterEditor(tab);
+  });
+
+  it('revealInEditor selects and reveals an offset range in the mounted editor', () => {
+    // A one-line model: offset n is column n + 1.
+    const at = (offset: number) => ({ lineNumber: 1, column: offset + 1 });
+    const setSelection = vi.fn();
+    const reveal = vi.fn();
+    const focus = vi.fn();
+    const editor = {
+      getModel: () => ({ getOffsetAt: () => 0, getPositionAt: at }),
+      getSelection: () => null,
+      getPosition: () => null,
+      setSelection,
+      revealRangeInCenterIfOutsideViewport: reveal,
+      focus,
+    };
+    registerEditor(tab, editor);
+    expect(revealInEditor(tab, { from: 10, to: 28 })).toBe(true);
+    const range = { startLineNumber: 1, startColumn: 11, endLineNumber: 1, endColumn: 29 };
+    expect(setSelection).toHaveBeenCalledWith(range);
+    expect(reveal).toHaveBeenCalledWith(range);
+    expect(focus).toHaveBeenCalledTimes(1);
+    // An error offset: a caret, no focus when asked not to.
+    expect(revealInEditor(tab, { from: 12 }, { focus: false })).toBe(true);
+    expect(setSelection).toHaveBeenLastCalledWith({ startLineNumber: 1, startColumn: 13, endLineNumber: 1, endColumn: 13 });
+    expect(focus).toHaveBeenCalledTimes(1);
+    unregisterEditor(tab, editor);
+  });
+
+  it('revealInEditor without an editor moves the stored cursor', () => {
+    expect(revealInEditor(tab, { from: 5, to: 9 })).toBe(false);
+    expect(useQueryDocs.getState().docs.get(tab)?.cursor).toBe(5);
+    expect(revealInEditor('no-such-tab', { from: 1 })).toBe(false);
   });
 
   it('stopQuery cancels the run and txAction settles the transaction', async () => {
