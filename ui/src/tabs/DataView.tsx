@@ -296,7 +296,10 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   const setCell = (row: number, col: number, input: CellInput, fetched: string | null | undefined = undefined): boolean => {
     if (!data || !info) return false;
     const name = data.columns[col]?.name;
-    if (!name || !info.editable_columns.includes(name)) return false;
+    if (!name || !info.editable_columns.includes(name)) {
+      setEditNotice('This column cannot be edited.');
+      return false;
+    }
     const edits = useDataEdits.getState();
     const n = data.rows.length;
     if (row < n) {
@@ -304,7 +307,14 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
       // The row as loaded now is what the change is guarded with, whatever the page shows later.
       const base = rowRef(data, info, row);
       // A cut cell is changed from the value editor only (`fetched` is then set: null or the token of its full value).
-      if (!id || !base || (fetched === undefined && truncatedCells.has(`${row},${col}`))) return false;
+      if (!id || !base) {
+        setEditNotice('This row has no complete key, so it cannot be edited.');
+        return false;
+      }
+      if (fetched === undefined && truncatedCells.has(`${row},${col}`)) {
+        setEditNotice('This value is cut short; open it in the value editor to change it.');
+        return false;
+      }
       // The token of a cut original fetched in full lets the backend check that column too.
       const ref = fetched ? { ...base, loaded: [[name, fetched] as [string, string]] } : base;
       setEditNotice(null);
@@ -313,7 +323,10 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
       return r.ok;
     }
     const insert = (useDataEdits.getState().byTab[tab.id]?.staged ?? NO_STAGED).inserts[row - n];
-    if (!insert) return false;
+    if (!insert) {
+      setEditNotice('That new row is gone.');
+      return false;
+    }
     const r = edits.stage(tab.id, { kind: 'insertCell', insert: insert.id, column: name, input });
     setEditNotice(r.ok ? null : r.message);
     return r.ok;
@@ -362,6 +375,12 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   };
 
   const editorCell = useValueEditors((s) => s.byTab[tab.id]);
+  // An editor left over from another page or row is closed, so it can never stage onto a different row.
+  useEffect(() => {
+    if (!editorCell || !data) return;
+    const stale = editorCell.row < data.rows.length ? rowIds[editorCell.row] !== editorCell.rowId : editorCell.rowId !== null;
+    if (stale) closeValueEditor(tab.id);
+  }, [editorCell, data, rowIds, tab.id]);
   // Stale after a reload that left the page smaller or another table's page.
   const valuePanel = (() => {
     if (!editorCell || !data || !shown) return null;
@@ -370,6 +389,8 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     const { row, col } = editorCell;
     const isNew = row >= data.rows.length;
     const id = rowIds[row] ?? null;
+    // The page changed under the editor (paging, reload, filter): the cell is another row now.
+    if (!isNew && editorCell.rowId !== id) return null;
     // What the cell holds now: a change staged for it (when it is text, NULL or a value), else the page's value.
     const change = isNew ? staged.inserts[row - data.rows.length]?.values.get(column.name) : id ? staged.updates.get(id)?.cells.get(column.name) : undefined;
     const showsChange = change !== undefined && (change.kind === 'text' || change.kind === 'null' || change.kind === 'value');
@@ -378,7 +399,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     const canEdit = editable && !!info?.editable_columns.includes(column.name) && (isNew || (!!id && !staged.deletes.has(id)));
     return (
       <ValueEditor
-        key={`${row},${col},${data.elapsed_ms},${String(showsChange)}`}
+        key={`${editorCell.rowId ?? 'new'},${row},${column.name},${String(showsChange)}`}
         connectionId={tab.connectionId}
         object={tab.objectRef}
         column={column}
@@ -387,7 +408,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
         fetchKey={!isNew && info ? rowKeyPairs(data, info, row) : null}
         editable={canEdit}
         onStage={(input, token) => {
-          if (setCell(row, col, input, cut ? token : undefined)) closeValueEditor(tab.id);
+          if (setCell(row, col, input, cut ? token : null)) closeValueEditor(tab.id);
         }}
         onClose={() => closeValueEditor(tab.id)}
       />

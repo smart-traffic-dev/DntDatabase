@@ -1,13 +1,13 @@
-// "Copy as" of the data view: the selected cells or rows as TSV, CSV, JSON or a Markdown table
+// "Copy as" of the data view: the selected cells or rows as JSON or a Markdown table
 // (pure), and as INSERT / UPDATE statements (built by the backend, which knows the column types).
 import { api } from '../../api';
 import type { EditableInfo, ObjectRef, TableDataPage, Value } from '../../bindings';
 import { rowRef } from '../../store/dataEdits';
 import { MAX_COPY_CELLS, cellView } from '../query/format';
-import { plainText, toCsv, toTsv } from '../query/gridCopy';
+import { plainText } from '../query/gridCopy';
 import { blockValues, selectionBlock, type Block, type SelectionLike } from '../query/gridSelection';
 
-export type CopyFormat = 'tsv' | 'csv' | 'json' | 'markdown';
+export type CopyFormat = 'json' | 'markdown';
 
 /** Why a row with a cut cell is not copied as SQL (the backend words it the same). */
 export const TRUNCATED_COPY = 'Some cells are truncated; open them first or use Export.';
@@ -66,12 +66,17 @@ const markdownCell = (v: Value) =>
 export function copyAs(format: CopyFormat, sel: SelectionLike | undefined, page: TableDataPage, meta: CopyCell = {}): string {
   const block = blockOf(sel, page, meta);
   const rows = blockValues({ chunks: [page.rows] }, block);
+  // Never copy a value the page cut short as if it were complete.
+  const cut = new Set(page.truncated.map(([r, c]) => `${r},${c}`));
+  const incomplete = block.rows.some((r, i) =>
+    block.cols.some((c, j) => {
+      const v = rows[i]![j]!;
+      return cut.has(`${r},${c}`) || (v.t === 'Bytes' && v.v.preview.length < v.v.len);
+    }),
+  );
+  if (incomplete) throw new Error(TRUNCATED_COPY);
   const header = block.cols.map((c) => page.columns[c]?.name ?? '');
   switch (format) {
-    case 'tsv':
-      return toTsv(rows, header);
-    case 'csv':
-      return toCsv(rows, header);
     case 'json':
       return JSON.stringify(rows.map((row) => Object.fromEntries(row.map((v, i) => [header[i], jsonValue(v)]))), null, 2);
     case 'markdown': {

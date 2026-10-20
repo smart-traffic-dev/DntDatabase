@@ -37,25 +37,8 @@ const rowsOf = (...r: number[]): SelectionLike => ({
   columns: none,
   rows: { length: r.length, toArray: () => r, first: () => r[0] },
 });
-const range = (x: number, y: number, width: number, height: number): SelectionLike => ({
-  current: { cell: [x, y], range: { x, y, width, height } },
-  columns: none,
-  rows: none,
-});
 
 describe('copyAs', () => {
-  it('copy_tsv_with_header', () => {
-    const p = page([[int(1), text('a')], [int(2), text('b')]]);
-    expect(copyAs('tsv', rowsOf(0, 1), p)).toBe('id\tname\r\n1\ta\r\n2\tb');
-    // A range copies the columns it covers, header included.
-    expect(copyAs('tsv', range(1, 0, 1, 2), p)).toBe('name\r\na\r\nb');
-  });
-
-  it('copy_csv_quotes_and_newlines', () => {
-    const p = page([[int(1), text('a,b')], [int(2), text('x"y')], [int(3), text('l1\nl2')], [int(4), { t: 'Null' }]]);
-    expect(copyAs('csv', rowsOf(0, 1, 2, 3), p)).toBe('id,name\r\n1,"a,b"\r\n2,"x""y"\r\n3,"l1\nl2"\r\n4,');
-  });
-
   it('copy_json_keeps_big_ints_as_strings', () => {
     const p = page([
       [int('9007199254740993'), text('a')],
@@ -77,9 +60,18 @@ describe('copyAs', () => {
     expect(copyAs('markdown', rowsOf(0, 1), p)).toBe('| id | name |\n| --- | --- |\n| 1 | a\\|b |\n| 2 | l1<br>l2 |');
   });
 
+  it('copy_json_and_markdown_refuse_truncated_cells', () => {
+    const cut = page([[int(1), text('a')], [int(2), text('b')], [int(3), { t: 'Bytes', v: { len: 10, preview: [1] } }]], { truncated: [[1, 1]], truncated_cells: 1 });
+    for (const f of ['json', 'markdown'] as const) {
+      expect(() => copyAs(f, rowsOf(0, 1), cut)).toThrow(TRUNCATED_COPY);
+      expect(() => copyAs(f, rowsOf(2), cut)).toThrow(TRUNCATED_COPY);
+      expect(() => copyAs(f, rowsOf(0), cut)).not.toThrow();
+    }
+  });
+
   it('copies the active cell when nothing is selected', () => {
     const p = page([[int(1), text('a')]]);
-    expect(copyAs('tsv', undefined, p, { cell: { row: 0, col: 1 } })).toBe('name\r\na');
+    expect(JSON.parse(copyAs('json', undefined, p, { cell: { row: 0, col: 1 } }))).toEqual([{ name: 'a' }]);
   });
 });
 

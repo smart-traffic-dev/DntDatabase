@@ -801,6 +801,46 @@ describe('DataView editing', () => {
       },
     });
   });
+  it('value_editor_closes_when_the_page_changes_and_never_stages_onto_another_row', async () => {
+    const { user, tab } = await editable(
+      { table_data: (a) => ((a.offset as number) === 0 ? page(3, 1, true, { row_versions: ['5', '6', '7'] }) : page(3, 4, false, { row_versions: ['8', '9', '10'] })) },
+      { stage: false },
+    );
+    act(() => openValueEditor({ tabId: tab.id, row: 0, col: 1, column: 'we`ird"col', rowId: JSON.stringify([['id', int(1)]]) }));
+    await screen.findByRole('textbox', { name: 'Value' });
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Rows 4–6');
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Value' })).not.toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+  });
+
+  it('value_editor_resaves_a_cut_cell_that_already_has_a_change', async () => {
+    const { user } = await editable(
+      {
+        data_cell_fetch: () => ({ token: 'tok-1', payload: { kind: 'text', text: 'full' } }),
+        data_preview: () => previewOf(),
+      },
+      { stage: false, pageOver: { truncated: [[0, 2]], truncated_cells: 1 } },
+    );
+    fireEvent.doubleClick(cell(0, 2));
+    let box = await screen.findByRole('textbox', { name: 'Value' });
+    await waitFor(() => expect(box).toHaveValue('full'));
+    await user.type(box, '!');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Value' })).not.toBeInTheDocument());
+    // Again: the staged text is shown and can be changed once more.
+    fireEvent.doubleClick(cell(0, 2));
+    box = await screen.findByRole('textbox', { name: 'Value' });
+    await waitFor(() => expect(box).toHaveValue('full!'));
+    await user.type(box, '?');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Value' })).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({
+      set: { edits: [{ row: { loaded: [['doc', 'tok-1']] }, set: [['doc', { kind: 'text', text: 'full!?' }]] }] },
+    });
+  });
   it('apply_shows_preview_then_reloads_on_commit', async () => {
     const { user } = await editable({
       data_preview: () => previewOf(),

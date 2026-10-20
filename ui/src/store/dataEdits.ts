@@ -309,8 +309,11 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
           // The row is captured by its first edit and stays as it was then.
           const u = next.updates.get(edit.row) ?? { ref: edit.ref, cells: new Map<string, CellInput>() };
           // A cut original fetched in full for this edit: its token lets the backend check that column.
-          const fetched = (edit.ref.loaded ?? []).filter(([c]) => !(u.ref.loaded ?? []).some(([have]) => have === c));
-          if (fetched.length > 0) u.ref = { ...u.ref, loaded: [...(u.ref.loaded ?? []), ...fetched] };
+          const fetched = edit.ref.loaded ?? [];
+          if (fetched.length > 0) {
+            const kept = (u.ref.loaded ?? []).filter(([c]) => !fetched.some(([f]) => f === c));
+            u.ref = { ...u.ref, loaded: [...kept, ...fetched] };
+          }
           u.cells.set(edit.column, edit.input);
           next.updates.set(edit.row, u);
           break;

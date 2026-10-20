@@ -57,6 +57,9 @@ describe('dataEdits loaded values', () => {
     edits().stage(TAB, { kind: 'update', row: id, ref: rowRef(p, info(), 0)!, column: 'qty', input: { kind: 'text', text: '6' } });
     const u = staged().updates.get(id)!;
     expect(u.ref.loaded).toEqual([['name', 'tok-a'], ['qty', 'tok-b']]);
+    // A newer token of the same column replaces the older one.
+    edits().stage(TAB, { kind: 'update', row: id, ref: withToken('name', 'tok-c'), column: 'name', input: { kind: 'text', text: 'y' } });
+    expect(staged().updates.get(id)!.ref.loaded).toEqual([['qty', 'tok-b'], ['name', 'tok-c']]);
     expect(u.ref.original).toEqual(rowRef(p, info(), 0)!.original);
   });
 });
