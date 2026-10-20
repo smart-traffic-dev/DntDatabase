@@ -166,6 +166,17 @@ function QuestionHost({ question }: { question: Question }) {
       />
     );
   }
+  if (question.kind === 'saveFailed') {
+    return (
+      <ConfirmDialog
+        title="Unsaved tabs"
+        message={`Could not save ${question.count} tab(s).`}
+        confirmLabel="Quit anyway"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
   return <AppCloseDialog tabs={question.tabs} onQuit={question.quit} onCancel={question.done} />;
 }
 

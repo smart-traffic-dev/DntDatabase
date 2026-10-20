@@ -30,6 +30,8 @@ export type Question =
       done(closed: boolean): void;
     }
   | { kind: 'discard'; file: string; done(discard: boolean): void }
+  /** Quitting while `count` tabs could not be saved. */
+  | { kind: 'saveFailed'; count: number; done(quit: boolean): void }
   | {
       kind: 'appClose';
       /** Titles of the tabs with an open transaction. */

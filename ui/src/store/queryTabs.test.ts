@@ -233,6 +233,28 @@ describe('shortcuts', () => {
     expect(press('t', { ctrlKey: false }).defaultPrevented).toBe(false);
   });
 
+  it('inputs outside the editor keep their own keys', () => {
+    backend();
+    const input = document.body.appendChild(document.createElement('input'));
+    const e = new KeyboardEvent('keydown', { key: 't', ctrlKey: true, cancelable: true, bubbles: true });
+    input.addEventListener('keydown', onQueryShortcut);
+    input.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(false);
+    expect(useTabs.getState().tabs).toHaveLength(0);
+    input.remove();
+
+    // The editor's own textarea still gets the shortcuts.
+    const editor = document.body.appendChild(document.createElement('div'));
+    editor.className = 'sql-editor';
+    const area = editor.appendChild(document.createElement('textarea'));
+    const e2 = new KeyboardEvent('keydown', { key: 't', ctrlKey: true, cancelable: true, bubbles: true });
+    area.addEventListener('keydown', onQueryShortcut);
+    area.dispatchEvent(e2);
+    expect(e2.defaultPrevented).toBe(true);
+    expect(useTabs.getState().tabs).toHaveLength(1);
+    editor.remove();
+  });
+
   it('Ctrl+S without an active query tab does nothing', () => {
     backend();
     expect(press('s').defaultPrevented).toBe(true);
@@ -337,6 +359,36 @@ describe('closing a tab', () => {
     await vi.advanceTimersByTimeAsync(AUTOSAVE_MS * 2);
     expect(callsOf('tabs_save')).toHaveLength(0);
     expect(callsOf('tabs_delete')).toEqual([{ id }]);
+  });
+
+  it('discard is asked before the transaction is settled', async () => {
+    backend();
+    const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    useQueryDocs.getState().update(id, { filePath: 'C:\\sql\\daily.sql', title: 'daily.sql' });
+    useQueryDocs.getState().update(id, { sql: 'changed' });
+    setTxStateSource(() => 'active');
+    render(createElement(DialogHost));
+    const user = userEvent.setup();
+
+    // Cancelling the discard leaves the transaction alone.
+    let closing = useQueryDocs.getState().closeTab(id);
+    expect(await screen.findByText('Discard unsaved changes to daily.sql?')).toBeInTheDocument();
+    expect(screen.queryByText('This tab has an open transaction.')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await closing).toBe(false);
+    expect(callsOf('query_tx')).toHaveLength(0);
+
+    closing = useQueryDocs.getState().closeTab(id);
+    await user.click(await screen.findByRole('button', { name: 'Discard' }));
+    await user.click(await screen.findByRole('button', { name: 'Commit' }));
+    expect(await closing).toBe(true);
+    expect(callsOf('query_tx')).toEqual([{ tabId: id, action: 'Commit' }]);
+  });
+
+  it('flush reports the tabs it could not save', async () => {
+    backend([], { tabs_save: () => { throw fail('internal'); } });
+    const id = useQueryDocs.getState().newQuery(null, null);
+    expect(await useQueryDocs.getState().flush()).toEqual([id]);
   });
 
   it('a busy session keeps the tab and says why', async () => {

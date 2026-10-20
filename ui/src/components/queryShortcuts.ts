@@ -9,6 +9,9 @@ import { openNewQuery } from './newQuery';
 export function onQueryShortcut(e: KeyboardEvent) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.repeat) return;
   if (document.querySelector('[aria-modal="true"]')) return;
+  // Fields outside the editor (the sidebar filter, toolbar selects) keep their own keys.
+  const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest('input, textarea, select, [contenteditable="true"]') && !target.closest('.sql-editor')) return;
   const key = e.key.toLowerCase();
   const docs = useQueryDocs.getState();
   if (key === 's') {

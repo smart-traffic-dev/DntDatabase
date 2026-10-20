@@ -48,7 +48,8 @@ interface QueryDocsState {
   /** Opens the tabs saved by `tabs_save`. Never connects. */
   restore(): Promise<void>;
   /** Saves every tab whose autosave is pending, now. */
-  flush(): Promise<void>;
+  /** Saves every pending (or previously failed) tab now; resolves with the ids that could not be saved. */
+  flush(): Promise<string[]>;
   /** Closes a query tab after its guards (open transaction, unsaved file); false when it stays. */
   closeTab(id: string): Promise<boolean>;
   /** Asks for a .sql file and opens it in a new tab. */
@@ -125,16 +126,24 @@ export function setTxStateSource(source: ((tabId: string) => TxState) | null) {
 }
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
-const inflight = new Map<string, Promise<void>>();
+const inflight = new Map<string, Promise<boolean>>();
+/** Tabs whose last save failed: `flush` tries them again. */
+const unsaved = new Set<string>();
 const closing = new Set<string>();
 
-/** Saves one tab now; failures are left to the next autosave (internal ones reach the toast). */
-function persist(id: string): Promise<void> {
+/**
+ * Saves one tab now; resolves `false` when `tabs_save` failed (internal errors also reach the
+ * toast). A failed tab is remembered and saved again by the next autosave or `flush`.
+ */
+function persist(id: string): Promise<boolean> {
   const timer = timers.get(id);
   if (timer !== undefined) clearTimeout(timer);
   timers.delete(id);
-  if (!useQueryDocs.getState().docs.has(id)) return Promise.resolve();
-  const previous = inflight.get(id) ?? Promise.resolve();
+  if (!useQueryDocs.getState().docs.has(id)) {
+    unsaved.delete(id);
+    return Promise.resolve(true);
+  }
+  const previous = inflight.get(id) ?? Promise.resolve(true);
   const p = previous
     .then(() => {
       // Saves the document as it is when its turn comes.
@@ -142,8 +151,14 @@ function persist(id: string): Promise<void> {
       return doc ? api.tabsSave(toRecord(doc)) : null;
     })
     .then(
-      () => undefined,
-      () => undefined,
+      () => {
+        unsaved.delete(id);
+        return true;
+      },
+      () => {
+        if (useQueryDocs.getState().docs.has(id)) unsaved.add(id);
+        return false;
+      },
     )
     .finally(() => {
       if (inflight.get(id) === p) inflight.delete(id);
@@ -166,6 +181,7 @@ async function forget(id: string) {
   const timer = timers.get(id);
   if (timer !== undefined) clearTimeout(timer);
   timers.delete(id);
+  unsaved.delete(id);
   await inflight.get(id);
 }
 
@@ -282,8 +298,10 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
     },
 
     flush: async () => {
-      await Promise.all([...timers.keys()].map((id) => persist(id)));
-      await Promise.all([...inflight.values()]);
+      const ids = new Set([...timers.keys(), ...unsaved, ...inflight.keys()]);
+      // `persist` chains behind a save in flight, so this also waits for those.
+      const results = await Promise.all([...ids].map(async (id) => [id, await persist(id)] as const));
+      return results.filter(([, ok]) => !ok).map(([id]) => id);
     },
 
     closeTab: async (id) => {
@@ -296,13 +314,14 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       closing.add(id);
       try {
         const title = get().docs.get(id)?.title ?? tab?.title ?? 'Query';
+        // Discard first: cancelling it must not leave a transaction committed or rolled back.
+        const doc = get().docs.get(id);
+        if (doc?.filePath && doc.dirty && !(await confirmDiscard(fileName(doc.filePath)))) return false;
         let settled = false;
         if (txStateOf(id) !== 'idle') {
           if (!(await settleTransaction(id, title))) return false;
           settled = true;
         }
-        const doc = get().docs.get(id);
-        if (doc?.filePath && doc.dirty && !(await confirmDiscard(fileName(doc.filePath)))) return false;
         for (;;) {
           try {
             // After Commit / Rollback the session may still report a transaction (MySQL
@@ -387,6 +406,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
       inflight.clear();
+      unsaved.clear();
       closing.clear();
       set({ docs: new Map() });
     },
@@ -399,32 +419,75 @@ export interface CloseGuardWindow {
   destroy(): Promise<void>;
 }
 
+function confirmQuitUnsaved(count: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    useDialogs.getState().ask({
+      kind: 'saveFailed',
+      count,
+      done: (quit) => {
+        useDialogs.getState().answer();
+        resolve(quit);
+      },
+    });
+  });
+}
+
 /**
- * App close (spec §7.2): saves every tab, then quits, unless tabs have an open
- * transaction: `AppCloseDialog` lists them with "Rollback all & quit" / "Cancel".
+ * The tabs to list before quitting: those the tx source reports non-idle, plus every tab
+ * whose session answers the probe `query_close_tab(id, false)` with `transaction_open`, or
+ * `busy` (listed as running). The probe stays as a backstop even with a source registered.
+ * It closes idle sessions on the way; if the quit is cancelled they reopen on the next plan.
+ *
+ * Why ask at all, when both engines roll back on disconnect: a statement still running
+ * holds its locks until it finishes on the server, and XA-prepared transactions survive
+ * the disconnect.
+ */
+async function openTransactions(): Promise<{ doc: QueryDoc; running: boolean }[]> {
+  const docs = [...useQueryDocs.getState().docs.values()].sort((a, b) => a.sortOrder - b.sortOrder);
+  const probed = await Promise.all(
+    docs.map(async (doc) => {
+      try {
+        await api.queryCloseTab(doc.id, false);
+        return { doc, open: txStateOf(doc.id) !== 'idle', running: false };
+      } catch (e) {
+        const kind = toAppError(e).kind;
+        return {
+          doc,
+          open: kind === 'transaction_open' || kind === 'busy' || txStateOf(doc.id) !== 'idle',
+          running: kind === 'busy',
+        };
+      }
+    }),
+  );
+  return probed.filter((p) => p.open).map(({ doc, running }) => ({ doc, running }));
+}
+
+/**
+ * App close (spec §7.2): saves every tab (a failed save asks "Quit anyway / Cancel"), then
+ * quits, unless tabs have an open transaction or a running statement: `AppCloseDialog` lists
+ * them with "Rollback all & quit" / "Cancel".
  */
 export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
   let busy = false;
   return win.onCloseRequested(async (event) => {
     event.preventDefault();
-    if (busy || useDialogs.getState().question?.kind === 'appClose') return;
+    const asking = useDialogs.getState().question?.kind;
+    if (busy || asking === 'appClose' || asking === 'saveFailed') return;
     busy = true;
     try {
-      const docs = useQueryDocs.getState();
-      await docs.flush();
-      const open = [...docs.docs.values()]
-        .filter((d) => txStateOf(d.id) !== 'idle')
-        .sort((a, b) => a.sortOrder - b.sortOrder);
+      const failed = await useQueryDocs.getState().flush();
+      if (failed.length && !(await confirmQuitUnsaved(failed.length))) return;
+      const open = await openTransactions();
       if (!open.length) {
         await win.destroy();
         return;
       }
       useDialogs.getState().ask({
         kind: 'appClose',
-        tabs: open.map((d) => d.title),
+        tabs: open.map(({ doc, running }) => (running ? `${doc.title} (running)` : doc.title)),
         quit: async () => {
           // A failed rollback does not hold the app: the server rolls back when the session drops.
-          await Promise.allSettled(open.map((d) => api.queryTx(d.id, 'Rollback')));
+          await Promise.allSettled(open.map(({ doc }) => api.queryTx(doc.id, 'Rollback')));
           await win.destroy();
         },
         done: () => useDialogs.getState().answer(),
