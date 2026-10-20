@@ -1029,6 +1029,9 @@ impl SessionManager {
     ///
     /// A failure comes with the session's transaction state after it (`None` when the
     /// statement never ran), as `query_tx_reported` reports it.
+    ///
+    /// [`Self::query_export_begin`] then [`ExportRun::execute`]; the export command
+    /// opens its file between the two, once the tab is held.
     pub async fn query_export(
         &self,
         plan_id: Uuid,
@@ -1037,6 +1040,22 @@ impl SessionManager {
         sink: &mut dyn RowSink,
         failed: &tokio::sync::Notify,
     ) -> Result<(), (DbError, Option<TxState>)> {
+        self.query_export_begin(plan_id, index, run_id)
+            .await?
+            .execute(sink, failed)
+            .await
+    }
+
+    /// The checks of [`Self::query_export`], up to the statement it will send: holds the
+    /// tab's session (refused while the tab runs), judges the statement, reopens the
+    /// session when needed and registers the run `run_id`. Nothing is sent and nothing
+    /// is written yet; dropping the returned run releases the tab and the run id.
+    pub async fn query_export_begin(
+        &self,
+        plan_id: Uuid,
+        index: u32,
+        run_id: Uuid,
+    ) -> Result<ExportRun, (DbError, Option<TxState>)> {
         let current = |t: &PlanTarget| self.plan_target_current(t);
         let early = |e: DbError| (e, None);
         let (tab, conn) = self
@@ -1090,17 +1109,84 @@ impl SessionManager {
                 },
             )
             .map_err(early)?;
+        let registration = Registration {
+            runs: self.runs.clone(),
+            run_id,
+        };
+        Ok(ExportRun {
+            rt,
+            tab,
+            slot,
+            ts,
+            stmt,
+            cancel,
+            finished,
+            cancel_grace: self.cancel_grace,
+            registration,
+        })
+    }
+}
+
+/// Removes a registered run when dropped: on every path out of an export, including a
+/// panic or the export's future being dropped.
+struct Registration {
+    runs: Runs,
+    run_id: Uuid,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.runs.remove(self.run_id);
+    }
+}
+
+/// An export holding its tab's session, its statement judged and its run registered
+/// ([`SessionManager::query_export_begin`]); [`Self::execute`] sends it.
+pub struct ExportRun {
+    rt: Arc<ConnectionRuntime>,
+    tab: String,
+    slot: TabSlot,
+    ts: OwnedMutexGuard<TabSession>,
+    stmt: PlannedStmt,
+    cancel: RunCancel,
+    finished: Arc<AtomicBool>,
+    cancel_grace: Duration,
+    registration: Registration,
+}
+
+impl ExportRun {
+    /// Sends the statement, streaming its rows into `sink` (see
+    /// [`SessionManager::query_export`]). As a run's task does, a panic while it runs
+    /// (driver or sink) is caught: the session, in an unknown state, is dropped and an
+    /// `Internal` error returned with `tx_state` `Idle`.
+    pub async fn execute(
+        self,
+        sink: &mut dyn RowSink,
+        failed: &tokio::sync::Notify,
+    ) -> Result<(), (DbError, Option<TxState>)> {
+        let ExportRun {
+            rt,
+            tab,
+            slot,
+            mut ts,
+            stmt,
+            cancel,
+            finished,
+            cancel_grace,
+            registration,
+        } = self;
         let exec = ExecOptions {
             max_rows: usize::MAX,
             batch_size: RUN_BATCH_SIZE,
             timeout: None,
-            cancel_grace: self.cancel_grace,
+            cancel_grace,
             stop: cancel.signal(),
             full_bytes: true,
             ..ExecOptions::default()
         };
-        tracing::info!(connection = %conn, "export reads a query result again on its tab");
-        let outcome = {
+        tracing::info!(connection = %rt.cfg.id, "export reads a query result again on its tab");
+        let ran = AssertUnwindSafe(async {
+            let session = ts.session.as_deref()?;
             let exec = std::pin::pin!(session.execute_one(&stmt.text, stmt.kind, &exec, sink));
             let watch = std::pin::pin!(async {
                 failed.notified().await;
@@ -1110,26 +1196,48 @@ impl SessionManager {
                 std::future::pending::<()>().await
             });
             match futures_util::future::select(exec, watch).await {
-                futures_util::future::Either::Left((outcome, _)) => outcome,
+                futures_util::future::Either::Left((outcome, _)) => {
+                    Some((outcome, session.tx_state()))
+                }
                 futures_util::future::Either::Right(((), _)) => {
                     unreachable!("the watcher never completes")
                 }
             }
-        };
+        })
+        .catch_unwind()
+        .await;
         // No statement runs any more: from here on nothing may cancel the session.
         finished.store(true, Ordering::SeqCst);
-        self.runs.remove(run_id);
-        let state = session.tx_state();
-        let lost = outcome.as_ref().err().filter(|e| is_lost(e)).cloned();
-        if let Some(e) = lost {
-            // As after a run: the next use opens a fresh session.
-            let in_tx = ts.tx_open();
-            if let Some(dead) = ts.session.take() {
-                close_quietly(dead).await;
-                ts.lost_tx = in_tx;
-                ts.reopen = !in_tx && AppError::from(e).retryable;
+        drop(registration);
+        let (outcome, state) = match ran {
+            Ok(Some((outcome, state))) => {
+                let lost = outcome.as_ref().err().filter(|e| is_lost(e)).cloned();
+                if let Some(e) = lost {
+                    // As after a run: the next use opens a fresh session.
+                    let in_tx = ts.tx_open();
+                    if let Some(dead) = ts.session.take() {
+                        close_quietly(dead).await;
+                        ts.lost_tx = in_tx;
+                        ts.reopen = !in_tx && AppError::from(e).retryable;
+                    }
+                }
+                (outcome.map(|_| ()), state)
             }
-        }
+            Ok(None) | Err(_) => {
+                tracing::error!(connection = %rt.cfg.id, "an export failed unexpectedly");
+                // As after a run that panicked: the session's state is unknown, drop it.
+                let in_tx = ts.tx_open();
+                if let Some(dead) = ts.session.take() {
+                    close_quietly(dead).await;
+                    ts.lost_tx = in_tx;
+                    ts.reopen = false;
+                }
+                let error = DbError::Internal {
+                    message: "the export failed unexpectedly; see the log for details".into(),
+                };
+                (Err(error), TxState::Idle)
+            }
+        };
         if rt.closed.load(Ordering::SeqCst) || !rt.queries.is_slot(&tab, &slot) || ts.closed {
             // The tab or connection was closed while the export held the session.
             ts.close().await;
@@ -1141,7 +1249,7 @@ impl SessionManager {
         } else {
             TxState::Idle
         };
-        outcome.map(|_| ()).map_err(|e| (e, Some(state)))
+        outcome.map_err(|e| (e, Some(state)))
     }
 }
 

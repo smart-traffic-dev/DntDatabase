@@ -2008,3 +2008,107 @@ async fn tx_action_after_the_session_died_in_a_transaction_is_connection_lost() 
         .iter()
         .any(|s| s == "COMMIT" || s == "ROLLBACK"));
 }
+
+/// Collects an export's rows; panics on its first batch when `panic` is set.
+#[derive(Default)]
+struct ExportRows {
+    rows: usize,
+    panic: bool,
+}
+
+impl RowSink for ExportRows {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        if self.panic {
+            panic!("the export sink panics");
+        }
+        self.rows += batch.len();
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+async fn export(
+    f: &Fixture,
+    plan_id: Uuid,
+    run_id: Uuid,
+    sink: &mut ExportRows,
+) -> Result<(), (DbError, Option<TxState>)> {
+    f.sm.query_export(plan_id, 0, run_id, sink, &Notify::new())
+        .await
+}
+
+/// A panic while an export runs (in the driver or in its sink) is caught as a run's
+/// is: the run id is released, the session (in an unknown state) dropped, and the tab
+/// works again.
+#[tokio::test]
+async fn a_panicking_export_releases_its_run_and_drops_the_session() {
+    for in_driver in [true, false] {
+        let f = fixture(DbKind::MySql);
+        let id = open(&f, config(DbKind::MySql)).await;
+        let text = if in_driver {
+            "SELECT panic"
+        } else {
+            "SELECT rows_3"
+        };
+        let view = plan(&f, "t1", id, None, text).await.unwrap();
+        f.log.set_tx(TxState::Active);
+        let run_id = Uuid::new_v4();
+        let mut sink = ExportRows {
+            panic: !in_driver,
+            ..ExportRows::default()
+        };
+        let (err, state) = export(&f, view.plan_id, run_id, &mut sink)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::Internal { .. }), "{err:?}");
+        assert_eq!(state, Some(TxState::Idle));
+        assert_eq!(f.log.closes(), 1, "the session was dropped");
+        // Its transaction is gone: a Commit must not look like it worked.
+        let err =
+            f.sm.query_tx_reported("t1", TxAction::Commit)
+                .await
+                .unwrap_err();
+        assert_eq!(err.kind, "connection_lost");
+        f.log.set_tx(TxState::Idle);
+
+        // The run id is free again, the tab is not busy, and the next export reopens
+        // the session.
+        let view = plan(&f, "t1", id, None, "SELECT rows_4").await.unwrap();
+        let mut sink = ExportRows::default();
+        export(&f, view.plan_id, run_id, &mut sink).await.unwrap();
+        assert_eq!(sink.rows, 4);
+    }
+}
+
+#[tokio::test]
+async fn an_export_refuses_a_run_id_in_use() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let slow = plan(&f, "t1", id, None, "SELECT slow").await.unwrap();
+    let other = plan(&f, "t2", id, None, "SELECT rows_2").await.unwrap();
+    let run_id = Uuid::new_v4();
+    let mut a = ExportRows::default();
+    let mut b = ExportRows::default();
+    let (first, ()) = tokio::join!(export(&f, slow.plan_id, run_id, &mut a), async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (err, state) = export(&f, other.plan_id, run_id, &mut b)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::Config { field: Some(f), .. } if f == "run_id"),
+            "{err:?}"
+        );
+        assert_eq!(state, None);
+        // The run registered under the id is the first export's: this stops it.
+        f.sm.query_cancel(run_id).await.unwrap();
+    });
+    assert!(
+        matches!(first, Err((DbError::Cancelled { .. }, _))),
+        "{first:?}"
+    );
+    assert_eq!(b.rows, 0);
+    assert!(
+        !f.log.executed().iter().any(|s| s == "SELECT rows_2"),
+        "nothing was sent for the refused export"
+    );
+}
