@@ -5,11 +5,11 @@
 //! into SQL.
 
 use crate::server::DbKind;
-use crate::sql::ident::{self, qualified_name, quote_ident};
+use crate::sql::filter::WhereClause;
+use crate::sql::ident::{qualified_name, quote_ident};
 use crate::sql::Dialect;
 use crate::sql::TokKind;
 use crate::value::{FullValue, LogicalType, Value};
-use serde::{Deserialize, Serialize};
 
 /// The column a value is written to or compared with.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -409,7 +409,7 @@ fn take_arrays(s: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------------------
-// Statements: filtered SELECT and key-based DML.
+// Statements: key-based DML and the raw WHERE check.
 // ---------------------------------------------------------------------------------------
 
 /// The table a statement reads or writes.
@@ -470,66 +470,6 @@ pub enum RowGuard {
     KeyOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-pub enum FilterOp {
-    Eq,
-    Ne,
-    Lt,
-    Le,
-    Gt,
-    Ge,
-    Contains,
-    StartsWith,
-    EndsWith,
-    IsNull,
-    IsNotNull,
-    In,
-    Between,
-}
-
-/// One condition of a structured filter: `column op values`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
-pub struct FilterCond {
-    pub column: String,
-    pub op: FilterOp,
-    pub values: Vec<Value>,
-    /// Pattern operators on PostgreSQL use `ILIKE` (MySQL follows the column collation).
-    pub case_insensitive: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
-#[serde(rename_all = "snake_case")]
-pub enum FilterJoin {
-    And,
-    Or,
-}
-
-/// The data view's filter: structured conditions, or a raw `WHERE` text checked by
-/// [`check_raw_where`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum Filter {
-    Conditions {
-        join: FilterJoin,
-        conds: Vec<FilterCond>,
-    },
-    Raw {
-        where_sql: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Page {
-    pub limit: u64,
-    pub offset: u64,
-}
-
-/// Most conditions in one structured filter.
-pub const MAX_FILTER_CONDITIONS: usize = crate::sql::filter::MAX_CONDITIONS;
-/// Most values of one `In` condition.
-pub const MAX_IN_VALUES: usize = 1000;
-
 /// Words that start a write or DDL statement: refused at depth 0 of a raw `WHERE`.
 const RAW_WHERE_FORBIDDEN: &[&str] = &[
     "INSERT", "UPDATE", "DELETE", "MERGE", "CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT",
@@ -552,52 +492,6 @@ fn relation_for(t: &TableRef, d: Dialect) -> Result<String, BuildError> {
         });
     }
     Ok(t.relation())
-}
-
-/// `SELECT [<extra_cols>, ]* FROM <relation>[ WHERE …][ ORDER BY …] LIMIT … OFFSET …`.
-///
-/// `extra_cols` are expressions the backend chose (`xmin::text`, quoted hidden key
-/// columns), spliced as is and placed before `*`; on MySQL the `*` is then qualified
-/// (`` `db`.`t`.* ``), since MySQL refuses a bare `*` after other items. `cols` are the
-/// table's columns, which the filter's conditions must name exactly; `order` lists
-/// `(column, ascending)`.
-pub fn select_sql(
-    t: &TableRef,
-    extra_cols: &[String],
-    filter: Option<&Filter>,
-    cols: &[ColumnTarget],
-    order: &[(String, bool)],
-    page: Page,
-    d: Dialect,
-) -> Result<String, BuildError> {
-    let relation = relation_for(t, d)?;
-    let where_sql = where_clause(filter, cols, d)?;
-    let list = if extra_cols.is_empty() {
-        "*".to_string()
-    } else {
-        let star = match d {
-            Dialect::MySql(_) => format!("{relation}.*"),
-            Dialect::Postgres => "*".into(),
-        };
-        format!("{}, {star}", extra_cols.join(", "))
-    };
-    Ok(format!(
-        "SELECT {list} FROM {relation}{where_sql}{}{}",
-        ident::order_by_clause(kind_of(d), order),
-        ident::page_clause(page.limit, page.offset)
-    ))
-}
-
-/// `SELECT COUNT(*) FROM <relation>[ WHERE …]`, the filter as in [`select_sql`].
-pub fn count_filtered_sql(
-    t: &TableRef,
-    filter: Option<&Filter>,
-    cols: &[ColumnTarget],
-    d: Dialect,
-) -> Result<String, BuildError> {
-    let relation = relation_for(t, d)?;
-    let where_sql = where_clause(filter, cols, d)?;
-    Ok(ident::count_where_sql(&relation, &where_sql))
 }
 
 /// One `INSERT INTO <relation> (<cols>) VALUES (…), (…)` for every row (each row has a
@@ -787,164 +681,9 @@ fn binary_charset(c: &ColumnTarget) -> Result<Option<&str>, BuildError> {
     }
 }
 
-/// The ` WHERE …` of a filter (with its leading space), or empty.
-fn where_clause(
-    filter: Option<&Filter>,
-    cols: &[ColumnTarget],
-    d: Dialect,
-) -> Result<String, BuildError> {
-    match filter {
-        None => Ok(String::new()),
-        Some(Filter::Raw { where_sql }) => {
-            check_raw_where(where_sql, d)?;
-            // The newline ends a trailing line comment before the closing parenthesis.
-            Ok(format!(" WHERE ({where_sql}\n)"))
-        }
-        Some(Filter::Conditions { join, conds }) => {
-            if conds.is_empty() {
-                return Ok(String::new());
-            }
-            if conds.len() > MAX_FILTER_CONDITIONS {
-                return Err(BuildError::Invalid {
-                    column: String::new(),
-                    reason: format!("a filter has at most {MAX_FILTER_CONDITIONS} conditions"),
-                });
-            }
-            let parts = conds
-                .iter()
-                .map(|c| condition(c, cols, d).map(|s| format!("({s})")))
-                .collect::<Result<Vec<_>, _>>()?;
-            let joiner = match join {
-                FilterJoin::And => " AND ",
-                FilterJoin::Or => " OR ",
-            };
-            Ok(format!(" WHERE {}", parts.join(joiner)))
-        }
-    }
-}
-
 /// `s` as a complete text value (text is always complete).
 fn text_value(s: &str) -> Result<FullValue, BuildError> {
     FullValue::try_from_value(Value::Text(s.into())).map_err(|_| BuildError::NotFull)
-}
-
-/// A text target named like `col`: pattern and text comparisons render the value as a
-/// plain string literal (no PG cast).
-fn text_target(col: &ColumnTarget) -> ColumnTarget {
-    ColumnTarget {
-        name: col.name.clone(),
-        db_type: "text".into(),
-        logical: LogicalType::Text,
-        collation: None,
-    }
-}
-
-fn condition(c: &FilterCond, cols: &[ColumnTarget], d: Dialect) -> Result<String, BuildError> {
-    let Some(col) = cols.iter().find(|t| t.name == c.column) else {
-        return Err(BuildError::Invalid {
-            column: c.column.clone(),
-            reason: "not a column of this table".into(),
-        });
-    };
-    let (min, max) = match c.op {
-        FilterOp::IsNull | FilterOp::IsNotNull => (0, 0),
-        FilterOp::Between => (2, 2),
-        FilterOp::In => (1, MAX_IN_VALUES),
-        _ => (1, 1),
-    };
-    let n = c.values.len();
-    if n < min || n > max {
-        let want = match (min, max) {
-            (0, 0) => "no value".to_string(),
-            (a, b) if a == b => format!("{a} value{}", if a == 1 { "" } else { "s" }),
-            (a, b) => format!("{a} to {b} values"),
-        };
-        return Err(invalid(
-            col,
-            &format!("the condition takes {want}, not {n}"),
-        ));
-    }
-    if c.values.iter().any(|v| matches!(v, Value::Null)) {
-        return Err(invalid(
-            col,
-            "compare with NULL using is null / is not null",
-        ));
-    }
-    let pg = d == Dialect::Postgres;
-    let q = quote_ident(kind_of(d), &col.name);
-    // PG types without equality / ordering compare as text.
-    let (cmp, target) = if pg && crate::sql::filter::pg_unordered(&col.db_type) {
-        (format!("{q}::text"), text_target(col))
-    } else {
-        (q.clone(), col.clone())
-    };
-    let lit = |v: &Value| -> Result<String, BuildError> {
-        let full = FullValue::try_from_value(v.clone()).map_err(|_| BuildError::NotFull)?;
-        literal(&full, &target, d)
-    };
-    Ok(match c.op {
-        FilterOp::Eq => format!("{cmp} = {}", lit(&c.values[0])?),
-        FilterOp::Ne => format!("{cmp} <> {}", lit(&c.values[0])?),
-        FilterOp::Lt => format!("{cmp} < {}", lit(&c.values[0])?),
-        FilterOp::Le => format!("{cmp} <= {}", lit(&c.values[0])?),
-        FilterOp::Gt => format!("{cmp} > {}", lit(&c.values[0])?),
-        FilterOp::Ge => format!("{cmp} >= {}", lit(&c.values[0])?),
-        FilterOp::In => {
-            let list = c.values.iter().map(lit).collect::<Result<Vec<_>, _>>()?;
-            format!("{cmp} IN ({})", list.join(", "))
-        }
-        FilterOp::Between => format!(
-            "{cmp} BETWEEN {} AND {}",
-            lit(&c.values[0])?,
-            lit(&c.values[1])?
-        ),
-        FilterOp::IsNull => format!("{q} IS NULL"),
-        FilterOp::IsNotNull => format!("{q} IS NOT NULL"),
-        FilterOp::Contains | FilterOp::StartsWith | FilterOp::EndsWith => pattern(c, col, &q, d)?,
-    })
-}
-
-/// `contains` / `starts with` / `ends with`: `LIKE` (PG `ILIKE` when case-insensitive)
-/// on the column's text, the value matched literally. The escape character is `\`
-/// (MySQL default mode writes it `'\\'`), or `!` under MySQL `NO_BACKSLASH_ESCAPES`.
-fn pattern(c: &FilterCond, col: &ColumnTarget, q: &str, d: Dialect) -> Result<String, BuildError> {
-    let text = match &c.values[0] {
-        Value::Text(s)
-        | Value::Uuid(s)
-        | Value::Decimal(s)
-        | Value::Date(s)
-        | Value::Time(s)
-        | Value::DateTime(s)
-        | Value::TimestampTz(s)
-        | Value::Json(s) => s.clone(),
-        Value::Int(i) => i.to_string(),
-        Value::UInt(u) => u.to_string(),
-        _ => return Err(invalid(col, "a pattern needs a text value")),
-    };
-    let (esc, esc_sql) = match d {
-        Dialect::MySql(m) if m.no_backslash_escapes => ('!', "'!'"),
-        Dialect::MySql(_) => ('\\', "'\\\\'"),
-        Dialect::Postgres => ('\\', "'\\'"),
-    };
-    let mut escaped = String::with_capacity(text.len() + 2);
-    for ch in text.chars() {
-        if ch == esc || ch == '%' || ch == '_' {
-            escaped.push(esc);
-        }
-        escaped.push(ch);
-    }
-    let pat = match c.op {
-        FilterOp::Contains => format!("%{escaped}%"),
-        FilterOp::StartsWith => format!("{escaped}%"),
-        _ => format!("%{escaped}"),
-    };
-    let lit = literal(&text_value(&pat)?, &text_target(col), d)?;
-    let (subject, like) = match d {
-        Dialect::Postgres if c.case_insensitive => (format!("{q}::text"), "ILIKE"),
-        Dialect::Postgres => (format!("{q}::text"), "LIKE"),
-        Dialect::MySql(_) => (q.to_string(), "LIKE"),
-    };
-    Ok(format!("{subject} {like} {lit} ESCAPE {esc_sql}"))
 }
 
 /// Checks a raw `WHERE` text from the user before it is wrapped as ` WHERE (<text>\n)`.
@@ -1009,6 +748,18 @@ pub fn check_raw_where(where_sql: &str, d: Dialect) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// The data view's raw `WHERE` text as a [`WhereClause`] (same leading-space convention
+/// as [`crate::sql::filter::build_where`], no parameters), after [`check_raw_where`]:
+/// ` WHERE (<raw>\n)`. The newline ends a trailing line comment before the closing
+/// parenthesis, so it cannot comment out the `ORDER BY` / `LIMIT` that follow.
+pub fn raw_where_clause(where_sql: &str, d: Dialect) -> Result<WhereClause, BuildError> {
+    check_raw_where(where_sql, d)?;
+    Ok(WhereClause {
+        sql: format!(" WHERE ({where_sql}\n)"),
+        params: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod dml_tests {
     use super::*;
@@ -1069,41 +820,6 @@ mod dml_tests {
     }
     fn key(cols: Vec<(ColumnTarget, FullValue)>) -> RowKey {
         RowKey::new(cols).unwrap()
-    }
-    fn cond(column: &str, op: FilterOp, values: Vec<Value>) -> FilterCond {
-        FilterCond {
-            column: column.into(),
-            op,
-            values,
-            case_insensitive: false,
-        }
-    }
-    fn and(conds: Vec<FilterCond>) -> Filter {
-        Filter::Conditions {
-            join: FilterJoin::And,
-            conds,
-        }
-    }
-    fn page() -> Page {
-        Page {
-            limit: 100,
-            offset: 0,
-        }
-    }
-    /// The WHERE clause a filter gives on the PG `users` table.
-    fn pg_where(f: &Filter) -> Result<String, BuildError> {
-        count_filtered_sql(
-            &pg_table(),
-            Some(f),
-            &[id_pg(), name_pg()],
-            Dialect::Postgres,
-        )
-        .map(|s| s.replace("SELECT COUNT(*) FROM \"public\".\"users\"", ""))
-    }
-    fn my_where(f: &Filter, d: Dialect) -> Result<String, BuildError> {
-        let cols = [id_my(), name_my("utf8mb4_0900_ai_ci")];
-        count_filtered_sql(&my_table(), Some(f), &cols, d)
-            .map(|s| s.replace("SELECT COUNT(*) FROM `shop`.`users`", ""))
     }
 
     #[test]
@@ -1322,186 +1038,29 @@ mod dml_tests {
     }
 
     #[test]
-    fn like_escapes_wildcards() {
-        let contains = |v: &str, ci: bool| {
-            let mut c = cond("name", FilterOp::Contains, vec![Value::Text(v.into())]);
-            c.case_insensitive = ci;
-            and(vec![c])
-        };
+    fn raw_where_clause_wraps_so_a_line_comment_cannot_eat_the_rest() {
         assert_eq!(
-            pg_where(&contains("50%_off", false)).unwrap(),
-            " WHERE (\"name\"::text LIKE '%50\\%\\_off%' ESCAPE '\\')"
+            raw_where_clause("id > 1 -- newest", Dialect::MYSQL).unwrap(),
+            WhereClause {
+                sql: " WHERE (id > 1 -- newest\n)".into(),
+                params: vec![],
+            }
         );
-        assert_eq!(
-            pg_where(&contains("a\\b", true)).unwrap(),
-            " WHERE (\"name\"::text ILIKE '%a\\\\b%' ESCAPE '\\')"
-        );
-        // MySQL default mode: the backslashes are doubled again by the string literal,
-        // and the escape character itself is written `'\\'`.
-        assert_eq!(
-            my_where(&contains("50%_off\\", false), Dialect::MYSQL).unwrap(),
-            " WHERE (`name` LIKE _utf8mb4'%50\\\\%\\\\_off\\\\\\\\%' ESCAPE '\\\\')"
-        );
-        // NO_BACKSLASH_ESCAPES: `!` is the escape character.
-        assert_eq!(
-            my_where(&contains("50%_off!\\", true), NBE).unwrap(),
-            " WHERE (`name` LIKE _utf8mb4'%50!%!_off!!\\%' ESCAPE '!')"
-        );
-        let op = |op: FilterOp| {
-            pg_where(&and(vec![cond("name", op, vec![Value::Text("x%".into())])])).unwrap()
-        };
-        assert_eq!(
-            op(FilterOp::StartsWith),
-            " WHERE (\"name\"::text LIKE 'x\\%%' ESCAPE '\\')"
-        );
-        assert_eq!(
-            op(FilterOp::EndsWith),
-            " WHERE (\"name\"::text LIKE '%x\\%' ESCAPE '\\')"
-        );
-        // A pattern on a number column matches its text.
-        assert_eq!(
-            pg_where(&and(vec![cond(
-                "id",
-                FilterOp::Contains,
-                vec![Value::Int(5)]
-            )]))
-            .unwrap(),
-            " WHERE (\"id\"::text LIKE '%5%' ESCAPE '\\')"
-        );
-    }
-
-    #[test]
-    fn filter_operators_render_literals_by_column_type() {
-        let f = Filter::Conditions {
-            join: FilterJoin::Or,
-            conds: vec![
-                cond("id", FilterOp::Eq, vec![Value::Text("5".into())]),
-                cond("id", FilterOp::Ne, vec![Value::Int(5)]),
-                cond("id", FilterOp::Lt, vec![Value::Int(5)]),
-                cond("id", FilterOp::Le, vec![Value::Int(5)]),
-                cond("id", FilterOp::Gt, vec![Value::Int(5)]),
-                cond("id", FilterOp::Ge, vec![Value::Int(5)]),
-                cond("id", FilterOp::In, vec![Value::Int(1), Value::Int(2)]),
-                cond("id", FilterOp::Between, vec![Value::Int(1), Value::Int(9)]),
-                cond("name", FilterOp::IsNull, vec![]),
-                cond("name", FilterOp::IsNotNull, vec![]),
-                cond("name", FilterOp::Eq, vec![Value::Text("it's".into())]),
-            ],
-        };
-        assert_eq!(
-            pg_where(&f).unwrap(),
-            " WHERE (\"id\" = '5'::int4) OR (\"id\" <> 5) OR (\"id\" < 5) OR (\"id\" <= 5) \
-             OR (\"id\" > 5) OR (\"id\" >= 5) OR (\"id\" IN (1, 2)) OR (\"id\" BETWEEN 1 AND 9) \
-             OR (\"name\" IS NULL) OR (\"name\" IS NOT NULL) OR (\"name\" = 'it''s')"
-        );
-        // PG types without equality compare as text.
-        let doc = c("doc", "json", LogicalType::Json, None);
-        let sql = count_filtered_sql(
-            &pg_table(),
-            Some(&and(vec![cond(
-                "doc",
-                FilterOp::Eq,
-                vec![Value::Json("{}".into())],
-            )])),
-            &[doc],
-            Dialect::Postgres,
-        )
-        .unwrap();
-        assert!(sql.ends_with(" WHERE (\"doc\"::text = '{}')"), "{sql}");
-        // No conditions: no WHERE.
-        assert_eq!(pg_where(&and(vec![])).unwrap(), "");
-    }
-
-    #[test]
-    fn filter_rejects_bad_conditions() {
-        let bad = [
-            cond("nope", FilterOp::IsNull, vec![]),
-            cond("ID", FilterOp::IsNull, vec![]),
-            cond("id", FilterOp::Eq, vec![]),
-            cond("id", FilterOp::Eq, vec![Value::Int(1), Value::Int(2)]),
-            cond("id", FilterOp::Between, vec![Value::Int(1)]),
-            cond("id", FilterOp::IsNull, vec![Value::Int(1)]),
-            cond("id", FilterOp::In, vec![]),
-            cond("id", FilterOp::In, vec![Value::Int(1); 1001]),
-            cond("id", FilterOp::Eq, vec![Value::Null]),
-            cond("name", FilterOp::Contains, vec![Value::Bool(true)]),
-        ];
-        for b in bad {
-            let r = pg_where(&and(vec![b.clone()]));
-            assert!(matches!(r, Err(BuildError::Invalid { .. })), "{b:?}: {r:?}");
-        }
-        assert!(pg_where(&and(vec![cond(
-            "id",
-            FilterOp::In,
-            vec![Value::Int(1); 1000]
-        )]))
-        .is_ok());
-        // A cut value is never compared.
-        let cut = Value::Bytes {
-            len: 100,
-            preview: vec![0; 64],
-        };
-        assert_eq!(
-            pg_where(&and(vec![cond("id", FilterOp::Eq, vec![cut])])),
-            Err(BuildError::NotFull)
-        );
-    }
-
-    #[test]
-    fn select_puts_extra_cols_first() {
-        let f = and(vec![cond("id", FilterOp::Eq, vec![Value::Int(5)])]);
-        assert_eq!(
-            select_sql(
-                &pg_table(),
-                &["xmin::text".into()],
-                Some(&f),
-                &[id_pg()],
-                &[("id".into(), true)],
-                page(),
-                Dialect::Postgres,
-            )
-            .unwrap(),
-            "SELECT xmin::text, * FROM \"public\".\"users\" WHERE (\"id\" = 5) \
-             ORDER BY \"id\" ASC LIMIT 100 OFFSET 0"
-        );
-        // MySQL only accepts `*` next to other items when it is qualified.
-        assert_eq!(
-            select_sql(
-                &my_table(),
-                &["`hid`".into()],
-                None,
-                &[],
-                &[("n`x".into(), false)],
-                Page {
-                    limit: 5,
-                    offset: 10
-                },
-                Dialect::MYSQL,
-            )
-            .unwrap(),
-            "SELECT `hid`, `shop`.`users`.* FROM `shop`.`users` ORDER BY `n``x` DESC \
-             LIMIT 5 OFFSET 10"
-        );
-        assert_eq!(
-            select_sql(&my_table(), &[], None, &[], &[], page(), Dialect::MYSQL).unwrap(),
-            "SELECT * FROM `shop`.`users` LIMIT 100 OFFSET 0"
-        );
-    }
-
-    #[test]
-    fn raw_where_is_wrapped_so_a_line_comment_cannot_eat_the_rest() {
-        let f = Filter::Raw {
-            where_sql: "id > 1 -- newest".into(),
-        };
-        assert_eq!(
-            select_sql(&my_table(), &[], Some(&f), &[], &[], page(), Dialect::MYSQL).unwrap(),
-            "SELECT * FROM `shop`.`users` WHERE (id > 1 -- newest\n) LIMIT 100 OFFSET 0"
-        );
-        let bad = Filter::Raw {
-            where_sql: "1=1; DROP TABLE t".into(),
-        };
         assert!(matches!(
-            count_filtered_sql(&my_table(), Some(&bad), &[], Dialect::MYSQL),
+            raw_where_clause("1=1; DROP TABLE t", Dialect::Postgres),
+            Err(BuildError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn dialect_must_match_the_table() {
+        assert!(matches!(
+            delete_sql(
+                &pg_table(),
+                &key(vec![(id_pg(), int(1))]),
+                &RowGuard::KeyOnly,
+                Dialect::MYSQL
+            ),
             Err(BuildError::Invalid { .. })
         ));
     }
@@ -1553,29 +1112,6 @@ mod dml_tests {
             check_raw_where("body = $$a;b) into$$", Dialect::Postgres),
             Ok(())
         );
-    }
-
-    #[test]
-    fn dialect_must_match_the_table() {
-        assert!(matches!(
-            select_sql(&pg_table(), &[], None, &[], &[], page(), Dialect::MYSQL),
-            Err(BuildError::Invalid { .. })
-        ));
-    }
-
-    #[test]
-    fn filter_serde_shape() {
-        let f: Filter = serde_json::from_str(
-            r#"{"mode":"conditions","join":"or","conds":[
-                {"column":"a","op":"starts_with","values":[{"t":"Text","v":"x"}],"case_insensitive":true}]}"#,
-        )
-        .unwrap();
-        assert!(
-            matches!(f, Filter::Conditions { join: FilterJoin::Or, ref conds }
-            if conds[0].op == FilterOp::StartsWith && conds[0].case_insensitive)
-        );
-        let raw: Filter = serde_json::from_str(r#"{"mode":"raw","where_sql":"a=1"}"#).unwrap();
-        assert!(matches!(raw, Filter::Raw { ref where_sql } if where_sql == "a=1"));
     }
 }
 

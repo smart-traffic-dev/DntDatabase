@@ -224,7 +224,14 @@ impl DataQuery {
             .iter()
             .map(|(c, asc)| (c.as_str(), *asc))
             .collect();
-        select_sql(self.kind, &self.relation, &self.filter.sql, &order, page)
+        select_sql(
+            self.kind,
+            &self.relation,
+            &[],
+            &self.filter.sql,
+            &order,
+            page,
+        )
     }
 }
 

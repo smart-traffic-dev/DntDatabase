@@ -38,48 +38,55 @@ pub fn select_page_sql(
     limit: u64,
     offset: u64,
 ) -> String {
-    select_sql(kind, relation, "", order, Some((limit, offset)))
+    select_sql(kind, relation, &[], "", order, Some((limit, offset)))
 }
 
-/// `SELECT * FROM <relation><where_sql> [ORDER BY …] [LIMIT <limit> OFFSET <offset>]`.
-/// `where_sql` must come from [`crate::sql::filter::build_where`] (empty or
-/// ` WHERE …` with placeholders only); `order` as in [`select_page_sql`].
+/// `SELECT [<extra_cols>, ]* FROM <relation><where_sql> [ORDER BY …] [LIMIT <limit> OFFSET
+/// <offset>]`. `where_sql` must come from [`crate::sql::filter::build_where`] or
+/// [`crate::sql::build::raw_where_clause`] (empty or ` WHERE …`); `order` as in
+/// [`select_page_sql`].
+///
+/// `extra_cols` are expressions the backend chose (PG `xmin::text`, quoted hidden key
+/// columns), spliced as is before `*`. On MySQL the `*` is then qualified
+/// (`` `db`.`t`.* ``): MySQL refuses a bare `*` after other select items. With no
+/// extra columns the statement is `SELECT * FROM …` as before.
 pub fn select_sql(
     kind: DbKind,
     relation: &str,
+    extra_cols: &[String],
     where_sql: &str,
     order: &[(&str, bool)],
     page: Option<(u64, u64)>,
 ) -> String {
-    let order = order_by_clause(kind, order);
+    let list = if extra_cols.is_empty() {
+        "*".to_string()
+    } else {
+        let star = match kind {
+            DbKind::MySql => format!("{relation}.*"),
+            DbKind::Postgres => "*".to_string(),
+        };
+        format!("{}, {star}", extra_cols.join(", "))
+    };
+    let order = if order.is_empty() {
+        String::new()
+    } else {
+        let keys: Vec<String> = order
+            .iter()
+            .map(|(column, asc)| {
+                format!(
+                    "{} {}",
+                    quote_ident(kind, column),
+                    if *asc { "ASC" } else { "DESC" }
+                )
+            })
+            .collect();
+        format!(" ORDER BY {}", keys.join(", "))
+    };
     let page = match page {
-        Some((limit, offset)) => page_clause(limit, offset),
+        Some((limit, offset)) => format!(" LIMIT {limit} OFFSET {offset}"),
         None => String::new(),
     };
-    format!("SELECT * FROM {relation}{where_sql}{order}{page}")
-}
-
-/// ` ORDER BY <col> ASC|DESC, …` with every column quoted, or empty for no keys.
-pub(crate) fn order_by_clause<S: AsRef<str>>(kind: DbKind, order: &[(S, bool)]) -> String {
-    if order.is_empty() {
-        return String::new();
-    }
-    let keys: Vec<String> = order
-        .iter()
-        .map(|(column, asc)| {
-            format!(
-                "{} {}",
-                quote_ident(kind, column.as_ref()),
-                if *asc { "ASC" } else { "DESC" }
-            )
-        })
-        .collect();
-    format!(" ORDER BY {}", keys.join(", "))
-}
-
-/// ` LIMIT <limit> OFFSET <offset>`, formatted from integers.
-pub(crate) fn page_clause(limit: u64, offset: u64) -> String {
-    format!(" LIMIT {limit} OFFSET {offset}")
+    format!("SELECT {list} FROM {relation}{where_sql}{order}{page}")
 }
 
 /// `SELECT COUNT(*) FROM <relation>`.
@@ -160,6 +167,7 @@ mod tests {
             select_sql(
                 DbKind::Postgres,
                 &rel,
+                &[],
                 " WHERE (\"a\" = $1)",
                 &[("a", false)],
                 None
@@ -167,12 +175,50 @@ mod tests {
             "SELECT * FROM \"public\".\"t\" WHERE (\"a\" = $1) ORDER BY \"a\" DESC"
         );
         assert_eq!(
-            select_sql(DbKind::MySql, "`t`", " WHERE (`a` = ?)", &[], Some((5, 10))),
+            select_sql(
+                DbKind::MySql,
+                "`t`",
+                &[],
+                " WHERE (`a` = ?)",
+                &[],
+                Some((5, 10))
+            ),
             "SELECT * FROM `t` WHERE (`a` = ?) LIMIT 5 OFFSET 10"
         );
         assert_eq!(
             count_where_sql("`t`", " WHERE (`a` IS NULL)"),
             "SELECT COUNT(*) FROM `t` WHERE (`a` IS NULL)"
+        );
+    }
+
+    #[test]
+    fn select_puts_extra_cols_first() {
+        let rel = qualified_name(DbKind::Postgres, "shop", Some("public"), "t");
+        assert_eq!(
+            select_sql(
+                DbKind::Postgres,
+                &rel,
+                &["xmin::text".into()],
+                " WHERE (\"id\" = $1)",
+                &[("id", true)],
+                Some((100, 0))
+            ),
+            "SELECT xmin::text, * FROM \"public\".\"t\" WHERE (\"id\" = $1) \
+             ORDER BY \"id\" ASC LIMIT 100 OFFSET 0"
+        );
+        // MySQL only accepts `*` after other items when it is qualified.
+        let rel = qualified_name(DbKind::MySql, "shop", None, "t");
+        assert_eq!(
+            select_sql(
+                DbKind::MySql,
+                &rel,
+                &["`hid`".into(), "`k2`".into()],
+                "",
+                &[("n`x", false)],
+                Some((5, 10))
+            ),
+            "SELECT `hid`, `k2`, `shop`.`t`.* FROM `shop`.`t` ORDER BY `n``x` DESC \
+             LIMIT 5 OFFSET 10"
         );
     }
 }
