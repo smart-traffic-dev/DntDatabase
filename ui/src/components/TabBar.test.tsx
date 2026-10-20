@@ -111,7 +111,7 @@ describe('TabBar', () => {
     render(<TabBar />);
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'List all tabs' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Query 1' }));
+    await user.click(screen.getByRole('menuitemradio', { name: 'Query 1' }));
     expect(useTabs.getState().activeId).toBe('q1');
   });
 
