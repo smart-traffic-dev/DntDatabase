@@ -125,9 +125,17 @@ fn float(f: f64, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError> {
     }
 }
 
+/// Most digits a MySQL `DECIMAL` (and an exact decimal literal) holds.
+const MYSQL_DECIMAL_DIGITS: usize = 65;
+
 fn decimal(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError> {
     if is_decimal(s) {
-        return Ok(s.into());
+        return match d {
+            // MySQL reads `1.5e3` as an approximate (DOUBLE) literal: write the digits.
+            Dialect::MySql(_) if s.contains(['e', 'E']) => expand_exponent(s)
+                .ok_or_else(|| invalid(col, "too many digits for an exact decimal")),
+            _ => Ok(s.into()),
+        };
     }
     // PG `numeric` also holds NaN and (PG 14+) ±Infinity.
     if d == Dialect::Postgres && matches!(s, "NaN" | "Infinity" | "-Infinity") {
@@ -153,6 +161,60 @@ fn is_decimal(s: &str) -> bool {
     digits(int)
         && frac.is_none_or(digits)
         && exp.is_none_or(|e| digits(e.strip_prefix(['-', '+']).unwrap_or(e)))
+}
+
+/// `s` (already [`is_decimal`], with an exponent) as plain digits, by moving the decimal
+/// point (string arithmetic, never a float). `None` when the result has more than
+/// [`MYSQL_DECIMAL_DIGITS`] digits, not counting leading zeros of the integer part.
+fn expand_exponent(s: &str) -> Option<String> {
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (mantissa, exp) = s.split_once(['e', 'E'])?;
+    let exp = exp.strip_prefix('+').unwrap_or(exp);
+    // Any exponent this large expands past the digit limit (or is all zeros, which
+    // is not worth a huge string): refuse before allocating.
+    if exp.trim_start_matches('-').len() > 4 {
+        return None;
+    }
+    let exp: i64 = exp.parse().ok()?;
+    let (int, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{int}{frac}");
+    let point = int.len() as i64 + exp;
+    let len = digits.len() as i64;
+    let (int_part, frac_part) = if point <= 0 {
+        (
+            "0".to_string(),
+            "0".repeat(usize::try_from(-point).ok()?) + &digits,
+        )
+    } else if point >= len {
+        (
+            digits.clone() + &"0".repeat(usize::try_from(point - len).ok()?),
+            String::new(),
+        )
+    } else {
+        let p = usize::try_from(point).ok()?;
+        (digits[..p].to_string(), digits[p..].to_string())
+    };
+    let int_part = match int_part.trim_start_matches('0') {
+        "" => "0",
+        t => t,
+    };
+    let significant = int_part.trim_start_matches('0').len() + frac_part.len();
+    if significant > MYSQL_DECIMAL_DIGITS {
+        return None;
+    }
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    out.push_str(int_part);
+    if !frac_part.is_empty() {
+        out.push('.');
+        out.push_str(&frac_part);
+    }
+    Some(out)
 }
 
 /// A text-like value: MySQL string literal; PG string literal cast to the column's type
@@ -197,54 +259,132 @@ fn mysql_string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, Build
     Ok(out)
 }
 
-/// The column's type as a PG cast target. It comes from the server's catalog, but it is
-/// still only accepted when it is a plain type name: words joined by `.` or a space,
-/// numeric modifiers `(10)` / `(40,10)`, and `[]` suffixes. Anything else (quotes,
-/// operators, comments, `;`) is refused rather than spliced into SQL.
-fn pg_cast_target(col: &ColumnTarget) -> Result<&str, BuildError> {
-    if is_plain_type_name(&col.db_type) {
-        Ok(&col.db_type)
+/// SQL type names PG prints as several words: `(head, tail)`, with an optional type
+/// modifier between them as PG prints it (`character varying(10)`,
+/// `timestamp(3) with time zone`).
+const PG_MULTI_WORD_TYPES: &[(&str, &str)] = &[
+    ("character varying", ""),
+    ("double precision", ""),
+    ("bit varying", ""),
+    ("timestamp", " with time zone"),
+    ("timestamp", " without time zone"),
+    ("time", " with time zone"),
+    ("time", " without time zone"),
+];
+
+/// The column's type as a PG cast target, rendered from its parsed structure and never
+/// spliced in as free text (`db_type` may be a raw catalog name such as `bool or true`).
+/// Accepted: `name` or `schema.name`, each part an unquoted identifier (emitted as is
+/// when it is a lower-case plain identifier, else through `quote_ident`) or a
+/// double-quoted one (`""` un-doubled, then re-quoted); or one of
+/// [`PG_MULTI_WORD_TYPES`]. Either may be followed by a type modifier of digits and
+/// commas in parentheses and any number of `[]`. Anything else is `Unsupported`.
+fn pg_cast_target(col: &ColumnTarget) -> Result<String, BuildError> {
+    render_pg_type(&col.db_type).ok_or_else(|| unsupported(col))
+}
+
+fn render_pg_type(t: &str) -> Option<String> {
+    for (head, tail) in PG_MULTI_WORD_TYPES {
+        if let Some(rest) = t.strip_prefix(head) {
+            let (typmod, rest) = take_typmod(rest);
+            if let Some(rest) = rest.strip_prefix(tail) {
+                // Space-separated, so `timestamp` alone never matches here.
+                if let Some(arrays) = take_arrays(rest) {
+                    return Some(format!("{head}{typmod}{tail}{arrays}"));
+                }
+            }
+        }
+    }
+    let (first, rest) = take_ident_part(t)?;
+    let (second, rest) = match rest.strip_prefix('.') {
+        Some(after) => {
+            let (p, r) = take_ident_part(after)?;
+            (Some(p), r)
+        }
+        None => (None, rest),
+    };
+    let (typmod, rest) = take_typmod(rest);
+    let arrays = take_arrays(rest)?;
+    let mut out = render_pg_part(&first);
+    if let Some(second) = second {
+        out.push('.');
+        out.push_str(&render_pg_part(&second));
+    }
+    out.push_str(typmod);
+    out.push_str(&arrays);
+    Some(out)
+}
+
+/// One name part at the start of `s`: `"…"` (with `""` un-doubled) or an unquoted
+/// identifier. Returns the name and what follows it.
+fn take_ident_part(s: &str) -> Option<(String, &str)> {
+    if let Some(body) = s.strip_prefix('"') {
+        let mut name = String::new();
+        let mut chars = body.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if c == '"' {
+                if body[i + 1..].starts_with('"') {
+                    chars.next();
+                    name.push('"');
+                } else {
+                    return (!name.is_empty() && !name.contains('\0'))
+                        .then(|| (name, &body[i + 1..]));
+                }
+            } else {
+                name.push(c);
+            }
+        }
+        return None; // unterminated
+    }
+    let mut chars = s.char_indices();
+    match chars.next() {
+        Some((_, c)) if c.is_alphabetic() || c == '_' => {}
+        _ => return None,
+    }
+    let end = chars
+        .find(|&(_, c)| !(c.is_alphanumeric() || c == '_' || c == '$'))
+        .map_or(s.len(), |(i, _)| i);
+    Some((s[..end].to_string(), &s[end..]))
+}
+
+fn render_pg_part(name: &str) -> String {
+    let mut chars = name.chars();
+    let plain = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
+    if plain {
+        name.to_string()
     } else {
-        Err(unsupported(col))
+        crate::sql::ident::quote_ident(crate::server::DbKind::Postgres, name)
     }
 }
 
-fn is_plain_type_name(t: &str) -> bool {
-    let b = t.as_bytes();
-    let word_start = |c: u8| c.is_ascii_alphabetic() || c == b'_';
-    let word_byte = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
-    let mut i = 0;
-    // Each step: a word, then any modifiers / `[]`, then a separator or the end.
-    loop {
-        if !b.get(i).copied().is_some_and(word_start) {
-            return false;
-        }
-        while b.get(i).copied().is_some_and(word_byte) {
-            i += 1;
-        }
-        if b.get(i) == Some(&b'(') {
-            let close = match b[i..].iter().position(|&c| c == b')') {
-                Some(p) => i + p,
-                None => return false,
-            };
-            let inner = &t[i + 1..close];
-            if !inner
+/// An optional `(digits[,digits…])` at the start of `s`: (the modifier, the rest).
+fn take_typmod(s: &str) -> (&str, &str) {
+    if let Some(body) = s.strip_prefix('(') {
+        if let Some(close) = body.find(')') {
+            let inner = &body[..close];
+            if inner
                 .split(',')
-                .all(|n| !n.trim().is_empty() && n.trim().bytes().all(|c| c.is_ascii_digit()))
+                .all(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
             {
-                return false;
+                return s.split_at(close + 2);
             }
-            i = close + 1;
-        }
-        while b[i..].starts_with(b"[]") {
-            i += 2;
-        }
-        match b.get(i) {
-            None => return true,
-            Some(b'.' | b' ') => i += 1,
-            Some(_) => return false,
         }
     }
+    ("", s)
+}
+
+/// `s` must be zero or more `[]` and nothing else.
+fn take_arrays(s: &str) -> Option<String> {
+    let mut rest = s;
+    let mut n = 0;
+    while let Some(r) = rest.strip_prefix("[]") {
+        rest = r;
+        n += 1;
+    }
+    rest.is_empty().then(|| "[]".repeat(n))
 }
 
 #[cfg(test)]
@@ -384,37 +524,66 @@ mod tests {
         lit(uuid(u), Ctx("char", LogicalType::Text, Dialect::MYSQL))
     }
 
+    fn pg_cast(db_type: &str) -> Result<String, BuildError> {
+        let c = ColumnTarget {
+            name: "c".into(),
+            db_type: db_type.into(),
+            logical: LogicalType::Enum,
+            collation: None,
+        };
+        literal(&t("x"), &c, Dialect::Postgres)
+    }
+
     #[test]
-    fn pg_cast_target_must_be_a_plain_type_name() {
-        for bad in ["uuid; DROP TABLE t", "x'y", "a--b", "\"weird\"", ""] {
-            let c = ColumnTarget {
-                name: "c".into(),
-                db_type: bad.into(),
-                logical: LogicalType::Enum,
-                collation: None,
-            };
+    fn pg_cast_target_is_rendered_from_structure() {
+        for bad in [
+            "bool or true",
+            "text is not null",
+            "numeric(1) or true",
+            "int); DROP TABLE x; --",
+            "uuid; DROP TABLE t",
+            "x'y",
+            "a--b",
+            "a\"b",
+            "\"unterminated",
+            "\"\"",
+            "a.b.c",
+            "int4[",
+            "numeric( 1)",
+            "timestamp with time zone or true",
+            "character varying(10) x",
+            "1abc",
+            "",
+        ] {
             assert!(
-                matches!(
-                    literal(&t("x"), &c, Dialect::Postgres),
-                    Err(BuildError::Unsupported { .. })
-                ),
-                "{bad}"
+                matches!(pg_cast(bad), Err(BuildError::Unsupported { .. })),
+                "{bad:?}: {:?}",
+                pg_cast(bad)
             );
         }
-        for good in [
-            "character varying(10)",
-            "public.order_status",
-            "numeric(40,10)",
+        for (db_type, cast) in [
+            ("OrderStatus", "\"OrderStatus\""),
+            (
+                "\"My Schema\".\"Weird\"\"T\"",
+                "\"My Schema\".\"Weird\"\"T\"",
+            ),
+            ("\"order_status\"", "order_status"),
+            ("public.order_status", "public.order_status"),
+            ("Sales.order_status", "\"Sales\".order_status"),
+            ("đơn_hàng", "\"đơn_hàng\""),
+            ("int4[]", "int4[]"),
+            ("numeric(40,10)", "numeric(40,10)"),
+            ("character varying(10)", "character varying(10)"),
+            ("character varying", "character varying"),
+            ("double precision[]", "double precision[]"),
+            ("timestamp(3) with time zone", "timestamp(3) with time zone"),
+            ("time without time zone", "time without time zone"),
+            ("timestamptz", "timestamptz"),
         ] {
-            let c = ColumnTarget {
-                name: "c".into(),
-                db_type: good.into(),
-                logical: LogicalType::Enum,
-                collation: None,
-            };
             assert_eq!(
-                literal(&t("x"), &c, Dialect::Postgres).unwrap(),
-                format!("'x'::{good}")
+                pg_cast(db_type).unwrap(),
+                format!("'x'::{cast}"),
+                "{db_type:?}"
             );
         }
     }
@@ -448,8 +617,46 @@ mod tests {
             "1e5",
             "-1.5E-3",
         ] {
-            assert_eq!(lit(dec(good), MY_DEC), good);
             assert_eq!(lit(dec(good), PG_NUM), good);
+        }
+        for good in ["0", "-12", "123456789012345678901234567890.1234567890"] {
+            assert_eq!(lit(dec(good), MY_DEC), good);
+        }
+    }
+
+    /// MySQL reads an exponent literal as DOUBLE: the digits are written out exactly.
+    #[test]
+    fn mysql_expands_decimal_exponents() {
+        for (input, out) in [
+            ("1234567890.0123456789e0", "1234567890.0123456789"),
+            ("1.5e3", "1500"),
+            ("-2.5e-3", "-0.0025"),
+            ("1e5", "100000"),
+            ("-1.5E-3", "-0.0015"),
+            ("1.50e1", "15.0"),
+            ("007e1", "70"),
+            ("12.5E+1", "125"),
+            ("0e0", "0"),
+            ("1e64", &format!("1{}", "0".repeat(64))),
+            ("1e-65", &format!("0.{}1", "0".repeat(64))),
+        ] {
+            assert_eq!(lit(dec(input), MY_DEC), out, "{input}");
+            // PG reads exponent literals as exact numeric: unchanged.
+            assert_eq!(lit(dec(input), PG_NUM), input, "{input}");
+        }
+        // 66 digits, however reached, is beyond an exact MySQL decimal.
+        for too_long in [
+            "1e65",
+            "1e-66",
+            "1.5e65",
+            "123456789012345678901234567890123456789012345678901234567890.123456e1",
+            "1e99999999999999999999",
+            "1e-99999",
+        ] {
+            assert!(
+                matches!(lit_err(dec(too_long), MY_DEC), BuildError::Invalid { .. }),
+                "{too_long}"
+            );
         }
     }
 

@@ -33,22 +33,68 @@ fn dialects() -> Vec<Dialect> {
 /// Builds the value a column holds from its text.
 type MakeValue = fn(String) -> Value;
 
-/// Columns whose literal is a quoted string: plain text, a PG cast, MySQL `CAST(… AS JSON)`.
-fn targets() -> Vec<(ColumnTarget, MakeValue)> {
-    let c = |db_type: &str, logical| ColumnTarget {
-        name: "c".into(),
-        db_type: db_type.into(),
-        logical,
-        collation: None,
-    };
-    vec![
-        (c("text", LogicalType::Text), Value::Text),
-        (c("jsonb", LogicalType::Json), Value::Json),
-        (c("uuid", LogicalType::Uuid), Value::Uuid),
-        (c("date", LogicalType::Date), Value::Date),
-        (c("order_status", LogicalType::Enum), Value::Text),
-    ]
-}
+/// Column kinds whose literal is a quoted string: plain text, a PG cast, MySQL
+/// `CAST(… AS JSON)`.
+const KINDS: &[(LogicalType, MakeValue)] = &[
+    (LogicalType::Text, Value::Text),
+    (LogicalType::Json, Value::Json),
+    (LogicalType::Uuid, Value::Uuid),
+    (LogicalType::Date, Value::Date),
+    (LogicalType::Enum, Value::Text),
+];
+
+/// `db_type`s as a catalog may report them (raw typnames can hold anything), and whether
+/// PG accepts them as a cast target.
+const DB_TYPES: &[(&str, bool)] = &[
+    ("jsonb", true),
+    ("uuid", true),
+    ("date", true),
+    ("order_status", true),
+    ("public.order_status", true),
+    ("OrderStatus", true),
+    ("\"My Schema\".\"Weird\"\"T\"", true),
+    ("\"a'b;--\"", true),
+    ("đơn_hàng", true),
+    ("int4[]", true),
+    ("numeric(40,10)", true),
+    ("character varying(10)", true),
+    ("timestamp(3) with time zone", true),
+    ("bool or true", false),
+    ("text is not null", false),
+    ("numeric(1) or true", false),
+    ("int); DROP TABLE x; --", false),
+    ("uuid; DROP TABLE t", false),
+    ("x'y", false),
+    ("a\"b", false),
+    ("a--b", false),
+    ("int4 /* c */", false),
+    ("$$x$$", false),
+    ("e'x'", false),
+    ("\"unterminated", false),
+    ("timestamp with time zone or true", false),
+];
+
+/// Words a literal may contain outside its string: the prefix / cast keywords and the
+/// lower-case parts of the accepted type names above. Never the `db_type` itself.
+const WORDS: &[&str] = &[
+    "_utf8mb4",
+    "CAST",
+    "AS",
+    "JSON",
+    "jsonb",
+    "uuid",
+    "date",
+    "order_status",
+    "public",
+    "int4",
+    "numeric",
+    "character",
+    "varying",
+    "timestamp",
+    "with",
+    "time",
+    "zone",
+];
 
 /// The text a quoted literal stands for, read the way the server reads it.
 fn decode(quoted: &str, d: Dialect) -> String {
@@ -76,37 +122,66 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
     #[test]
-    fn literal_never_escapes_its_quotes(s in text()) {
+    fn literal_never_escapes_its_quotes(
+        s in text(),
+        (db_type, cast_ok) in prop::sample::select(DB_TYPES),
+    ) {
         for d in dialects() {
-            for (col, make) in targets() {
+            for &(logical, make) in KINDS {
+                let col = ColumnTarget {
+                    name: "c".into(),
+                    db_type: db_type.into(),
+                    logical,
+                    collation: None,
+                };
+                // Only PG non-text columns use the db_type (as a cast target).
+                let casts = d == Dialect::Postgres && logical != LogicalType::Text;
                 let v = FullValue::try_from_value(make(s.clone())).unwrap();
+                let backslash = matches!(d, Dialect::MySql(m) if !m.no_backslash_escapes);
                 let sql = match literal(&v, &col, d) {
                     Ok(sql) => sql,
                     Err(BuildError::Invalid { .. }) => {
                         // Only a NUL that the dialect cannot write is refused.
-                        let backslash = matches!(d, Dialect::MySql(m) if !m.no_backslash_escapes);
                         prop_assert!(s.contains('\0') && !backslash, "{d:?} {s:?}");
+                        continue;
+                    }
+                    Err(BuildError::Unsupported { .. }) => {
+                        prop_assert!(casts && !cast_ok, "{d:?} {db_type:?} refused");
                         continue;
                     }
                     Err(e) => return Err(TestCaseError::fail(format!("{d:?} {s:?}: {e}"))),
                 };
+                prop_assert!(!casts || cast_ok, "{:?} {:?} accepted: {}", d, db_type, sql);
                 let toks = tokenize(&sql, d);
-                let quoted: Vec<_> = toks.iter().filter(|t| t.kind == TokKind::Quoted).collect();
-                prop_assert_eq!(quoted.len(), 1, "{:?} {:?} -> {}", d, s, sql);
-                prop_assert!(
-                    !toks.iter().any(|t| t.kind == TokKind::Punct(b';')),
-                    "{:?} -> {}", d, sql
-                );
-                // Everything around the string is the fixed prefix / cast.
+                // Exactly one string literal; any other quoted token is a PG
+                // double-quoted identifier of the cast target.
+                let strings: Vec<_> = toks
+                    .iter()
+                    .filter(|t| t.kind == TokKind::Quoted && sql[t.start..].starts_with('\''))
+                    .collect();
+                prop_assert_eq!(strings.len(), 1, "{:?} {:?} -> {}", d, s, sql);
                 for t in &toks {
-                    if let TokKind::Word(w) = t.kind {
-                        prop_assert!(
-                            ["_utf8mb4", "CAST", "AS", "JSON", col.db_type.as_str()].contains(&w),
+                    match t.kind {
+                        TokKind::Quoted => prop_assert!(
+                            sql[t.start..].starts_with('\'')
+                                || (casts && sql[t.start..].starts_with('"')),
+                            "{:?} -> {}", d, sql
+                        ),
+                        TokKind::Word(w) => prop_assert!(
+                            WORDS.contains(&w) || w.bytes().all(|b| b.is_ascii_digit()),
                             "{:?} -> {}: word {:?}", d, sql, w
-                        );
+                        ),
+                        TokKind::Punct(p) => prop_assert!(
+                            b":.,[]".contains(&p),
+                            "{:?} -> {}: punct {:?}", d, sql, p as char
+                        ),
+                        TokKind::Open | TokKind::Close => {}
+                        TokKind::ExecComment => {
+                            return Err(TestCaseError::fail(format!("{d:?} -> {sql}")))
+                        }
                     }
                 }
-                let q = quoted[0];
+                let q = strings[0];
                 let body = &sql[q.start..q.end];
                 prop_assert!(body.starts_with('\'') && body.ends_with('\'') && body.len() >= 2);
                 prop_assert_eq!(decode(body, d), s.clone(), "{:?} -> {}", d, sql);
