@@ -26,6 +26,7 @@ interface TabsState {
   activate(id: string): void;
   /** Rebinds a query tab to another connection (or none). */
   bind(id: string, connectionId: string | null): void;
+  rename(id: string, title: string): void;
   close(id: string): void;
   /** Closes every object tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
@@ -48,6 +49,8 @@ export const useTabs = create<TabsState>()((set) => ({
   activate: (id) => set((s) => (s.tabs.some((t) => t.id === id) ? { activeId: id } : s)),
   bind: (id, connectionId) =>
     set((s) => ({ tabs: s.tabs.map((t) => (t.id === id && t.kind === 'query' ? { ...t, connectionId } : t)) })),
+  rename: (id, title) =>
+    set((s) => (s.tabs.some((t) => t.id === id && t.title !== title) ? { tabs: s.tabs.map((t) => (t.id === id ? { ...t, title } : t)) } : s)),
   close: (id) =>
     set((s) => {
       const index = s.tabs.findIndex((t) => t.id === id);

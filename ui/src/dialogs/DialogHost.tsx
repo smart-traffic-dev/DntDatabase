@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { useConnections } from '../store/connections';
-import { useDialogs, type PendingPrompt } from '../store/dialogs';
+import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
@@ -13,6 +13,8 @@ import { ImportDialog } from './ImportDialog';
 import { PasswordPrompt, type SecretNeed } from './PasswordPrompt';
 import { SettingsDialog } from './SettingsDialog';
 import { ConfirmDialog, NameDialog } from './SimpleDialogs';
+import { AppCloseDialog } from './AppCloseDialog';
+import { TxCloseDialog } from './TxCloseDialog';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
 function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
@@ -148,8 +150,39 @@ function InternalErrorToast() {
   );
 }
 
+/** A question a store awaits (closing a query tab, quitting the app). */
+function QuestionHost({ question }: { question: Question }) {
+  if (question.kind === 'txClose') {
+    return <TxCloseDialog title={question.title} onSettle={question.settle} onDone={question.done} />;
+  }
+  if (question.kind === 'discard') {
+    return (
+      <ConfirmDialog
+        title="Unsaved changes"
+        message={`Discard unsaved changes to ${question.file}?`}
+        confirmLabel="Discard"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
+  if (question.kind === 'saveFailed') {
+    return (
+      <ConfirmDialog
+        title="Unsaved tabs"
+        message={`Could not save ${question.count} tab(s).`}
+        confirmLabel="Quit anyway"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
+  return <AppCloseDialog tabs={question.tabs} onQuit={question.quit} onCancel={question.done} />;
+}
+
 /** Mounts the dialogs the connection tree and toolbar ask for (`useDialogs`). */
 export function DialogHost() {
+  const question = useDialogs((s) => s.question);
   const request = useDialogs((s) => s.request);
   const prompt = useDialogs((s) => s.prompt);
   const closeRequest = useDialogs((s) => s.closeRequest);
@@ -268,6 +301,7 @@ export function DialogHost() {
       <Toast />
       <InternalErrorToast />
       {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}:${prompt.error.fingerprint ?? ''}:${prompt.error.stage ?? ''}`} prompt={prompt} />}
+      {question && <QuestionHost question={question} />}
     </>
   );
 }

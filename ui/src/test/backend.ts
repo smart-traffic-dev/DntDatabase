@@ -88,7 +88,7 @@ export function resetStores() {
   useConnections.getState().reset();
   useTabs.getState().reset();
   useQueryDocs.getState().reset();
-  useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null });
+  useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null, question: null });
 }
 
 export const ids = {

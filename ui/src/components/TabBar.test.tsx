@@ -1,11 +1,11 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { EnvTag } from '../bindings';
 import userEvent from '@testing-library/user-event';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
-import { config, ids, resetStores } from '../test/backend';
+import { callsOf, config, ids, mockBackend, resetStores } from '../test/backend';
 import { TabBar } from './TabBar';
 
 const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
@@ -35,11 +35,40 @@ describe('TabBar', () => {
   });
 
   it('closing a query tab removes its doc', async () => {
+    mockBackend({ tabs_save: () => null, tabs_delete: () => null, query_close_tab: () => null });
     const id = useQueryDocs.getState().newQuery(null, null);
     render(<TabBar />);
     await userEvent.setup().click(screen.getByRole('button', { name: 'Close Query 1' }));
-    expect(useTabs.getState().tabs).toEqual([]);
+    await waitFor(() => expect(useTabs.getState().tabs).toEqual([]));
     expect(useQueryDocs.getState().docs.has(id)).toBe(false);
+  });
+
+  it('dirty_dot_only_for_file_tabs', () => {
+    mockBackend({ tabs_save: () => null });
+    const plain = useQueryDocs.getState().newQuery(null, null);
+    const file = useQueryDocs.getState().newQuery(null, null);
+    act(() => {
+      useQueryDocs.getState().update(plain, { sql: 'edited', dirty: true });
+      useQueryDocs.getState().update(file, { filePath: 'C:\\sql\\daily.sql', title: 'daily.sql' });
+    });
+    render(<TabBar />);
+    const dot = (name: RegExp) => screen.getByRole('tab', { name }).querySelector('.tab-dirty');
+    expect(dot(/Query 1/)).toBeNull();
+    expect(dot(/daily\.sql/)).toBeNull();
+    act(() => useQueryDocs.getState().update(file, { sql: 'edited' }));
+    expect(dot(/daily\.sql/)).toHaveTextContent('●');
+    expect(dot(/daily\.sql/)).toHaveAttribute('title', 'Unsaved changes');
+    expect(dot(/Query 1/)).toBeNull();
+  });
+
+  it('closing a query tab goes through the close guards', async () => {
+    mockBackend({ tabs_save: () => null, tabs_delete: () => null, query_close_tab: () => null });
+    const id = useQueryDocs.getState().newQuery(null, null);
+    render(<TabBar />);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Close Query 1' }));
+    await waitFor(() => expect(useTabs.getState().tabs).toEqual([]));
+    expect(callsOf('query_close_tab')).toEqual([{ tabId: id, force: false }]);
+    expect(callsOf('tabs_delete')).toEqual([{ id }]);
   });
 
   it('query_tab_shows_sql_label', () => {
