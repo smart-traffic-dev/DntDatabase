@@ -344,6 +344,33 @@ impl PgSession {
     }
 }
 
+/// A bound value sent in the TEXT format, whatever type the server inferred for its
+/// placeholder: the server parses it with that type's input function, exactly like a
+/// quoted literal (see `ExecOptions::params`).
+#[derive(Debug)]
+struct TextParam<'a>(&'a str);
+
+impl ToSql for TextParam<'_> {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut tokio_postgres::types::private::BytesMut,
+    ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(tokio_postgres::types::IsNull::No)
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    fn encode_format(&self, _ty: &Type) -> tokio_postgres::types::Format {
+        tokio_postgres::types::Format::Text
+    }
+
+    tokio_postgres::types::to_sql_checked!();
+}
+
 /// Prepares one statement (for its column types), then streams its rows into `sink`, or
 /// runs it for its affected-row count when it returns no columns.
 async fn run_statement(
@@ -357,8 +384,13 @@ async fn run_statement(
     let started = Instant::now();
     let stmt = client.prepare(sql).await?;
     let cols = stmt.columns();
+    let text_params: Vec<TextParam<'_>> = opts.params.iter().map(|p| TextParam(p)).collect();
+    let params: Vec<&(dyn ToSql + Sync)> = text_params
+        .iter()
+        .map(|p| p as &(dyn ToSql + Sync))
+        .collect();
     if cols.is_empty() {
-        let affected = client.execute(&stmt, &[]).await?;
+        let affected = client.execute(&stmt, &params).await?;
         sink.result_start(&[]);
         *emitted = true;
         finish(sink, results, started, Some(affected), 0, false);
@@ -366,8 +398,7 @@ async fn run_statement(
     }
     let metas: Vec<ColumnMeta> = cols.iter().map(column_meta).collect();
     let types: Vec<Type> = cols.iter().map(|c| c.type_().clone()).collect();
-    let no_params: [&(dyn ToSql + Sync); 0] = [];
-    let rows = client.query_raw(&stmt, no_params).await?;
+    let rows = client.query_raw(&stmt, params).await?;
     sink.result_start(&metas);
     *emitted = true;
     let batch_size = opts.batch_size.max(1);
@@ -387,7 +418,14 @@ async fn run_statement(
             .enumerate()
             .map(|(i, ty)| {
                 let raw = row.try_get::<_, Raw>(i).ok().and_then(|r| r.0);
-                to_value(ty, raw)
+                match (to_value(ty, raw), raw) {
+                    // Export keeps every byte (bytea, or a domain over it).
+                    (Value::Bytes { len, .. }, Some(raw)) if opts.full_bytes => Value::Bytes {
+                        len,
+                        preview: raw.to_vec(),
+                    },
+                    (v, _) => v,
+                }
             })
             .collect();
         batch.push(values);

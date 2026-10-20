@@ -132,6 +132,17 @@ fn type_name(col: &Column) -> &'static str {
     }
 }
 
+/// [`to_value`], with every byte of a binary value kept when `full_bytes` (export).
+pub(crate) fn to_value_full(v: My, col: &Column, full_bytes: bool) -> Value {
+    match v {
+        My::Bytes(b) if full_bytes && logical(col) == LogicalType::Binary => Value::Bytes {
+            len: b.len() as u64,
+            preview: b,
+        },
+        v => to_value(v, col),
+    }
+}
+
 pub(crate) fn to_value(v: My, col: &Column) -> Value {
     match v {
         My::NULL => Value::Null,
@@ -405,6 +416,18 @@ mod tests {
             .with_flags(ColumnFlags::ENUM_FLAG);
         assert_eq!(to_value(bytes("large"), &en), Value::Text("large".into()));
         assert_eq!(column_meta(&en).logical, LogicalType::Enum);
+        // Export keeps every byte.
+        assert_eq!(
+            to_value_full(My::Bytes(vec![7; 100]), &bin, true),
+            Value::Bytes {
+                len: 100,
+                preview: vec![7; 100]
+            }
+        );
+        assert_eq!(
+            to_value_full(bytes("Nguyễn"), &text, true),
+            Value::Text("Nguyễn".into())
+        );
         let bit = col(ColumnType::MYSQL_TYPE_BIT).with_character_set(BINARY_CHARSET);
         assert_eq!(to_value(My::Bytes(vec![0xAA]), &bit), Value::bytes(&[0xAA]));
         let geo = col(ColumnType::MYSQL_TYPE_GEOMETRY).with_character_set(BINARY_CHARSET);

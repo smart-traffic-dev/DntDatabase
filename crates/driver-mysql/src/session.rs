@@ -3,7 +3,7 @@ use crate::map_mysql_error;
 use crate::queries::quote_ident;
 #[cfg(feature = "test-helpers")]
 use crate::values::value_text;
-use crate::values::{column_meta, to_value};
+use crate::values::{column_meta, to_value_full};
 use async_trait::async_trait;
 use dnt_core::driver::{
     CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, ServerNotice,
@@ -771,8 +771,34 @@ async fn run_statement(
     results: &mut Vec<ResultSummary>,
     emitted: &mut bool,
 ) -> Result<bool, MyError> {
-    let mut started = Instant::now();
-    let mut result = conn.query_iter(sql).await?;
+    let started = Instant::now();
+    if opts.params.is_empty() {
+        let result = conn.query_iter(sql).await?;
+        stream_results(result, started, opts, sink, results, emitted).await
+    } else {
+        // Bound values (the data view's filter): a prepared statement, each value sent
+        // as a string (see `ExecOptions::params`).
+        let params: Vec<mysql_async::Value> = opts
+            .params
+            .iter()
+            .map(|p| mysql_async::Value::Bytes(p.as_bytes().to_vec()))
+            .collect();
+        let result = conn
+            .exec_iter(sql, mysql_async::Params::Positional(params))
+            .await?;
+        stream_results(result, started, opts, sink, results, emitted).await
+    }
+}
+
+/// [`run_statement`] once the statement was sent: streams every result into `sink`.
+async fn stream_results<P: mysql_async::prelude::Protocol>(
+    mut result: mysql_async::QueryResult<'_, 'static, P>,
+    mut started: Instant,
+    opts: &ExecOptions,
+    sink: &mut dyn RowSink,
+    results: &mut Vec<ResultSummary>,
+    emitted: &mut bool,
+) -> Result<bool, MyError> {
     let batch_size = opts.batch_size.max(1);
     let mut had_columns = false;
     loop {
@@ -796,7 +822,7 @@ async fn run_statement(
                         .unwrap()
                         .into_iter()
                         .zip(cols.iter())
-                        .map(|(v, c)| to_value(v, c))
+                        .map(|(v, c)| to_value_full(v, c, opts.full_bytes))
                         .collect();
                     batch.push(values);
                     row_count += 1;
