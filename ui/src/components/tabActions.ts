@@ -2,14 +2,15 @@ import { useQueryDocs } from '../store/queryTabs';
 import { useTabs, type Tab } from '../store/tabs';
 
 /** A query tab closes through its guards (open transaction, unsaved file), then drops its row. */
-export async function closeTab(tab: Tab): Promise<void> {
-  if (tab.kind === 'query') await useQueryDocs.getState().closeTab(tab.id);
-  else useTabs.getState().close(tab.id);
+export async function closeTab(tab: Tab): Promise<boolean> {
+  if (tab.kind === 'query') return useQueryDocs.getState().closeTab(tab.id);
+  useTabs.getState().close(tab.id);
+  return true;
 }
 
-/** Closes `tabs` one after another (each query tab may ask a question first). */
+/** Closes `tabs` one after another (each query tab may ask a question first); stops when the user cancels one. */
 export async function closeTabs(tabs: Tab[]): Promise<void> {
-  for (const tab of tabs) await closeTab(tab);
+  for (const tab of tabs) if (!(await closeTab(tab))) return;
 }
 
 /** Activates the tab `step` positions away from the active one, wrapping around. */

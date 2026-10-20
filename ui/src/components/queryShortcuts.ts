@@ -17,6 +17,8 @@ export function onQueryShortcut(e: KeyboardEvent) {
   if (target?.closest('input, textarea, select, [contenteditable="true"]') && !target.closest('.sql-editor')) return;
   const key = e.key.toLowerCase();
   const docs = useQueryDocs.getState();
+  // Intentional: Ctrl+PageUp/PageDown switch tabs (as in VS Code) and override Monaco's own
+  // Ctrl+PageUp/PageDown editor scroll, because this listener runs in the capture phase.
   if (key === 'tab' || key === 'pagedown' || key === 'pageup') {
     e.preventDefault();
     cycleTab(key === 'pageup' || (key === 'tab' && e.shiftKey) ? -1 : 1);

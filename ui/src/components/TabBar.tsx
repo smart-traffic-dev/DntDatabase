@@ -4,10 +4,10 @@ import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
 import { useTabs, type Tab } from '../store/tabs';
-import { ActionMenu } from './ActionMenu';
 import { EnvTag } from './EnvTag';
 import { ChevronDownIcon, CloseIcon, LockIcon } from './icons';
 import { closeTab, closeTabs } from './tabActions';
+import { TabMenu, type TabMenuItem } from './TabMenu';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
   Table: 'TBL',
@@ -29,7 +29,7 @@ export function TabBar() {
   const docs = useQueryDocs((s) => s.docs);
   const runs = useQueryRun((s) => s.runs);
   const strip = useRef<HTMLDivElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; items: { label: string; run(): void }[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: TabMenuItem[] } | null>(null);
 
   // A new or activated tab is always visible, even when the strip overflows.
   useEffect(() => {
@@ -49,7 +49,8 @@ export function TabBar() {
       x: Math.max(8, r.right - 220),
       y: r.bottom,
       items: tabs.map((tab) => ({
-        label: `${tab.id === activeId ? '✓ ' : ''}${tab.title}`,
+        label: tab.title,
+        checked: tab.id === activeId,
         run: () => activate(tab.id),
       })),
     });
@@ -63,8 +64,8 @@ export function TabBar() {
       y: e.clientY,
       items: [
         { label: 'Close', run: () => void closeTab(tab) },
-        { label: 'Close others', run: () => void closeTabs(tabs.filter((t) => t.id !== tab.id)) },
-        { label: 'Close tabs to the right', run: () => void closeTabs(tabs.slice(at + 1)) },
+        { label: 'Close others', disabled: tabs.length < 2, run: () => void closeTabs(tabs.filter((t) => t.id !== tab.id)) },
+        { label: 'Close tabs to the right', disabled: at >= tabs.length - 1, run: () => void closeTabs(tabs.slice(at + 1)) },
       ],
     });
   };
@@ -131,7 +132,7 @@ export function TabBar() {
           <ChevronDownIcon />
         </button>
       )}
-      {menu && <ActionMenu label="Tabs" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {menu && <TabMenu label="Tabs" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </div>
   );
 }

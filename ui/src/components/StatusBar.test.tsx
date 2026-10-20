@@ -116,13 +116,17 @@ describe('StatusBar of a query tab', () => {
       lastRun: { rows: 1, elapsedMs: 10 },
     });
     render(<StatusBar />);
-    expect(screen.getByTestId('status-running')).toHaveTextContent('Running… 12 s · 2/6');
+    expect(screen.getByTestId('status-running')).toHaveTextContent('Running… 2/6 · 12 s');
     expect(screen.queryByTestId('status-last')).toBeNull();
     expect(screen.getByTestId('status-tx')).toHaveTextContent('Auto-commit');
+    const live = screen.getByRole('status');
+    expect(live.textContent).toBe('Running… 2/6');
     act(() => {
       vi.advanceTimersByTime(2000);
     });
-    expect(screen.getByTestId('status-running')).toHaveTextContent('Running… 14 s · 2/6');
+    expect(screen.getByTestId('status-running')).toHaveTextContent('Running… 2/6 · 14 s');
+    expect(screen.getByRole('status').textContent).toBe('Running… 2/6');
+    expect(screen.getByTestId('status-running').querySelector('[aria-hidden="true"]:not(.spinner)')).toHaveTextContent('14 s');
   });
 
   it('says so when the user cancelled the run', () => {

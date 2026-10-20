@@ -31,9 +31,13 @@ function QueryStatus({ tabId }: { tabId: string }) {
   return (
     <>
       {phase.kind === 'running' && seconds !== null && (
-        <span className="status-run running" data-testid="status-running" role="status">
+        <span className="status-run running" data-testid="status-running">
           <span className="spinner inline" aria-hidden="true" />
-          Running… {formatElapsed(seconds * 1000)} · {phase.index + 1}/{phase.total}
+          {/* Static text only: the live region announces statement changes, not every tick. */}
+          <span role="status" data-testid="status-running-live">
+            Running… {phase.index + 1}/{phase.total}
+          </span>
+          <span aria-hidden="true"> · {formatElapsed(seconds * 1000)}</span>
         </span>
       )}
       {idle && run.lastRun && (

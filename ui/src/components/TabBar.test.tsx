@@ -128,4 +128,21 @@ describe('TabBar', () => {
     await user.pointer({ keys: '[MouseRight]', target: keep });
     await user.click(screen.getByRole('menuitem', { name: 'Close others' }));
     await waitFor(() => expect(useTabs.getState().tabs.map((x) => x.title)).toEqual(['Query 2']));
-  });});
+  });
+
+  it('disables context-menu entries that would do nothing and marks the active tab in the overflow list', async () => {
+    act(() => {
+      useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: null, title: 'Query 1' });
+      useTabs.getState().open({ id: 'q2', kind: 'query', connectionId: null, title: 'Query 2' });
+    });
+    render(<TabBar />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'List all tabs' }));
+    expect(screen.getByRole('menuitemradio', { name: 'Query 2' })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByRole('menuitemradio', { name: 'Query 1' })).toHaveAttribute('aria-checked', 'false');
+    await user.keyboard('{Escape}');
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /Query 2/ }) });
+    expect(screen.getByRole('menuitem', { name: 'Close tabs to the right' })).toBeDisabled();
+    expect(screen.getByRole('menuitem', { name: 'Close others' })).toBeEnabled();
+  });
+});
