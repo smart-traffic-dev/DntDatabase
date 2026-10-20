@@ -1,5 +1,6 @@
 //! App-wide state: data paths, connection repository, secret store and sessions.
 
+use crate::export_paths::ExportPaths;
 use crate::session_manager::SessionManager;
 use dnt_core::driver::Driver;
 use dnt_core::error::DbError;
@@ -63,6 +64,8 @@ pub struct AppState {
     pub secrets: Arc<dyn SecretStore>,
     pub sessions: SessionManager,
     pub paths: AppPaths,
+    /// The files exports may write (picked in the backend's save dialog).
+    pub export_paths: ExportPaths,
 }
 
 impl AppState {
@@ -86,6 +89,7 @@ impl AppState {
             secrets,
             sessions,
             paths,
+            export_paths: ExportPaths::default(),
         })
     }
 }

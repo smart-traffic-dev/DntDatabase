@@ -34,6 +34,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -251,12 +252,82 @@ pub async fn export_query_impl(
         .map_err(|(e, _)| e)
 }
 
-/// Shows an exported file in the system file manager ("Open folder"). Only an existing
-/// file is shown; nothing is opened or run.
+/// `name` as a file name stem: characters Windows refuses (and control characters)
+/// become `_`, at most 100 characters; `export` when nothing is left.
+pub fn file_stem(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(100)
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        "export".into()
+    } else {
+        trimmed.into()
+    }
+}
+
+/// Opens the save dialog (from the backend, so the UI never names a path itself) for a
+/// `format` file called `base_name` by default, and approves what the user picked for
+/// the export commands (for a while; see the `export_paths` module). `None`: the dialog
+/// was cancelled.
 #[tauri::command]
 #[specta::specta]
-pub async fn reveal_export(app: AppHandle, path: String) -> Result<(), AppError> {
+pub async fn export_pick_path(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    base_name: String,
+    format: ExportFormat,
+) -> Result<Option<String>, AppError> {
     guard(async move {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let ext = format.extension();
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_file_name(format!("{}.{ext}", file_stem(&base_name)))
+            .add_filter(format.filter_name(), &[ext])
+            .save_file(move |picked| {
+                let _ = tx.send(picked);
+            });
+        let picked = rx.await.map_err(|_| DbError::Internal {
+            message: "the save dialog closed without an answer".into(),
+        })?;
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| DbError::Internal {
+            message: format!("the save dialog returned no file path: {e}"),
+        })?;
+        state.export_paths.approve(path).map(Some)
+    })
+    .await
+}
+
+/// Refuses a `path` the user did not pick through [`export_pick_path`].
+fn picked(state: &AppState, path: &str) -> Result<(), AppError> {
+    state.export_paths.check(path).map_err(AppError::from)
+}
+
+/// Shows an exported file in the system file manager ("Open folder"). Only a file an
+/// export wrote, and that still exists, is shown; nothing is opened or run.
+#[tauri::command]
+#[specta::specta]
+pub async fn reveal_export(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), AppError> {
+    guard(async move {
+        state.export_paths.check_written(&path)?;
         let file = std::path::Path::new(&path);
         if !file.is_file() {
             return Err(DbError::Config {
@@ -286,13 +357,17 @@ fn channel_progress(channel: Channel<ExportProgress>) -> Progress {
 #[tauri::command]
 #[specta::specta]
 pub async fn export_rows(
+    state: State<'_, AppState>,
     kind: DbKind,
     columns: Vec<ColumnMeta>,
     rows: Vec<Vec<Value>>,
     opts: ExportOptions,
     path: String,
 ) -> Result<ExportSummary, AppError> {
-    guard(export_rows_impl(kind, columns, rows, opts, path)).await
+    picked(&state, &path)?;
+    let summary = guard(export_rows_impl(kind, columns, rows, opts, path)).await?;
+    state.export_paths.written(&summary.path);
+    Ok(summary)
 }
 
 /// Every row of a table / view under the data view's `filter` and `sort`, streamed to
@@ -311,7 +386,8 @@ pub async fn export_table(
     request_key: String,
     channel: Channel<ExportProgress>,
 ) -> Result<ExportSummary, AppError> {
-    guard(export_table_impl(
+    picked(&state, &path)?;
+    let summary = guard(export_table_impl(
         &state,
         id,
         obj,
@@ -322,7 +398,9 @@ pub async fn export_table(
         request_key,
         channel_progress(channel),
     ))
-    .await
+    .await?;
+    state.export_paths.written(&summary.path);
+    Ok(summary)
 }
 
 /// Every row of statement `index` of plan `plan_id`, run again on the tab's session as
@@ -342,6 +420,7 @@ pub async fn export_query(
     run_id: Uuid,
     channel: Channel<ExportProgress>,
 ) -> Result<ExportSummary, AppError> {
+    picked(&state, &path)?;
     let reported = guard(async {
         Ok(export_query_reported(
             &state,
@@ -355,9 +434,27 @@ pub async fn export_query(
         .await)
     })
     .await?;
-    reported.map_err(|(e, tx)| {
+    let summary = reported.map_err(|(e, tx)| {
         let mut app = AppError::from(e);
         app.tx_state = tx.map(|s| s.as_str().to_string());
         app
-    })
+    })?;
+    state.export_paths.written(&summary.path);
+    Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::file_stem;
+
+    #[test]
+    fn file_stems_are_safe_names() {
+        assert_eq!(file_stem("orders"), "orders");
+        assert_eq!(file_stem("a/b\\c:d*?\"<>|"), "a_b_c_d______");
+        assert_eq!(file_stem("..\\..\\evil"), ".._.._evil");
+        assert_eq!(file_stem("x\u{0}y\n"), "x_y_");
+        assert_eq!(file_stem("  "), "export");
+        assert_eq!(file_stem("name."), "name");
+        assert_eq!(file_stem(&"é".repeat(300)).chars().count(), 100);
+    }
 }

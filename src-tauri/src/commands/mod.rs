@@ -154,6 +154,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             export::export_table,
             export::export_query,
             export::reveal_export,
+            export::export_pick_path,
             window::open_devtools,
             workspace::tabs_load,
             workspace::tabs_save,

@@ -51,6 +51,30 @@ pub enum ExportFormat {
     Markdown,
 }
 
+impl ExportFormat {
+    /// The file extension (no dot).
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::Xlsx => "xlsx",
+            ExportFormat::Sql => "sql",
+            ExportFormat::Markdown => "md",
+        }
+    }
+
+    /// The save dialog's filter name.
+    pub fn filter_name(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "CSV",
+            ExportFormat::Json => "JSON",
+            ExportFormat::Xlsx => "Excel workbook",
+            ExportFormat::Sql => "SQL",
+            ExportFormat::Markdown => "Markdown",
+        }
+    }
+}
+
 /// What the export dialog chose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ExportOptions {
