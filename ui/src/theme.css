@@ -35,9 +35,15 @@
    * comes first so CSS, Monaco and the canvas render the same face.
    */
   --font-mono: 'Cascadia Mono', Consolas, ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace;
+  /* Title bar close button (Windows' red), hover / pressed; the glyph turns white. */
+  --titlebar-close-bg: #c42b1c;
+  --titlebar-close-bg-pressed: #c8433a;
+  --titlebar-close-fg: #fff;
 }
 
 .dark {
+  --titlebar-close-bg: #c42b1c;
+  --titlebar-close-bg-pressed: #b2382f;
   --danger-fg: #ff7b7f;
   --warning-bg: #3a3020;
   --warning-fg: #f0c674;
@@ -109,19 +115,6 @@ textarea:focus {
   padding: 6px 12px;
   background: var(--panel);
   border-bottom: 1px solid var(--border);
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-right: 16px;
-  font-weight: 600;
-  font-size: var(--text-body);
-}
-
-.brand svg {
-  color: var(--accent);
 }
 
 .tool {

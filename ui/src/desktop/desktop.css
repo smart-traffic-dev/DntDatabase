@@ -1,0 +1,32 @@
+/*
+ * Desktop-app text selection: the chrome (bars, tree, tabs, buttons, menus) is not
+ * selectable like a web page; fields, the editor, results, messages and dialog text stay
+ * selectable so they can be copied.
+ */
+.titlebar,
+.toolbar,
+.tabbar,
+.sidebar,
+.statusbar,
+[role='menu'],
+[role='tablist'],
+[role='tree'],
+button,
+label {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sidebar input,
+.sidebar textarea,
+.toolbar input,
+.toolbar textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Images and links are not dragged out of the window. */
+img,
+a {
+  -webkit-user-drag: none;
+}
