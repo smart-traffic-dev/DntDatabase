@@ -339,6 +339,7 @@ async fn redacted_history_and_logs() {
             .history_list(&HistoryFilter {
                 connection_id: Some(id),
                 search: None,
+                origin: None,
                 limit: 10,
             })
             .unwrap();

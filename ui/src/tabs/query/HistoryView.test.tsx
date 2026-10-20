@@ -22,6 +22,8 @@ const entry = (id: number, patch: Partial<HistoryEntry> = {}): HistoryEntry => (
   affected: null,
   error_kind: null,
   error_code: null,
+  origin: 'query',
+  outcome_unknown: false,
   ...patch,
 });
 
@@ -104,11 +106,11 @@ describe('HistoryView', () => {
     await screen.findAllByTestId('history-row');
     const status = screen.getAllByTestId('history-status');
     expect(status.map((s) => s.textContent)).toEqual([
-      'Unknown outcome',
-      'Unknown outcome (2013)',
+      'Outcome unknown',
+      'Outcome unknown (2013)',
       'Cancelled — may have been applied',
       'Error (1062)',
-      'Unknown outcome',
+      'Outcome unknown',
     ]);
     for (const s of status.slice(0, 3)) {
       expect(s).not.toHaveTextContent(/^Error/);
@@ -116,6 +118,25 @@ describe('HistoryView', () => {
     }
     expect(status[0]!.getAttribute('title')).toMatch(/timed out/);
     expect(status[1]!.getAttribute('title')).toMatch(/connection/);
+  });
+
+  it('data_edit_rows_are_labelled_and_unknown_outcomes_are_flagged', async () => {
+    rows = [
+      entry(1),
+      entry(2, { origin: 'data_edit', sql_text: 'UPDATE t SET a = 1' }),
+      // An unanswered COMMIT: the statement itself ran fine.
+      entry(3, { origin: 'data_edit', outcome_unknown: true }),
+      entry(4, { origin: 'data_edit', status: 'error', error_kind: 'connection_lost', outcome_unknown: true }),
+    ];
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    expect(within(list[0]!).queryByTestId('history-data-edit')).toBeNull();
+    expect(within(list[1]!).getByTestId('history-data-edit')).toHaveTextContent('Data edit');
+    const status = screen.getAllByTestId('history-status');
+    expect(status.map((s) => s.textContent)).toEqual(['OK', 'OK', 'Outcome unknown', 'Outcome unknown']);
+    expect(status[2]!.getAttribute('title')).toMatch(/may or may not have been applied/);
+    expect(status[2]).not.toHaveTextContent(/^OK/);
+    expect(callsOf('history_list')[0]).toMatchObject({ filter: { origin: null } });
   });
 
   it('keyboard: arrows move a roving focus, Enter inserts, Delete deletes', async () => {

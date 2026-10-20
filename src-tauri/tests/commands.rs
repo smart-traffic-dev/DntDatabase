@@ -612,6 +612,8 @@ async fn history_commands() {
                 affected: None,
                 error_kind: None,
                 error_code: None,
+                origin: dnt_store::history::HistoryOrigin::Query,
+                outcome_unknown: false,
             })
             .unwrap();
         ids.push(id);
@@ -623,6 +625,11 @@ async fn history_commands() {
     assert_eq!(found.len(), 1);
     // The status is serialized in snake_case.
     assert_eq!(serde_json::to_value(&found[0]).unwrap()["status"], "ok");
+    assert_eq!(serde_json::to_value(&found[0]).unwrap()["origin"], "query");
+    assert_eq!(
+        serde_json::to_value(&found[0]).unwrap()["outcome_unknown"],
+        false
+    );
 
     let all: dnt_store::history::HistoryFilter =
         serde_json::from_value(json!({ "connection_id": null, "search": null, "limit": 50 }))

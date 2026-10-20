@@ -1482,3 +1482,128 @@ async fn cell_files_only_through_the_dialog() {
     assert_eq!(field(&e), "token", "{e:?}");
     assert!(!file.exists());
 }
+
+/// The history rows of data edits on `f`'s connection, oldest first.
+fn edit_history(f: &Fixture) -> Vec<dnt_store::history::HistoryEntry> {
+    use dnt_store::history::{HistoryFilter, HistoryOrigin};
+    let mut rows = f
+        .repo
+        .history_list(&HistoryFilter {
+            connection_id: Some(f.id),
+            search: None,
+            origin: Some(HistoryOrigin::DataEdit),
+            limit: 100,
+        })
+        .unwrap();
+    rows.reverse();
+    rows
+}
+
+/// One history row per statement that was sent (not `BEGIN` / `COMMIT`, not the ones
+/// after a failure), origin `data_edit`, with the SQL redacted like a query run's.
+#[tokio::test]
+async fn apply_writes_history_with_origin_and_redaction() {
+    use dnt_store::history::{HistoryOrigin, HistoryStatus};
+    let f = fixture().await;
+    // A statement that holds a secret: `password` is a text column here.
+    {
+        let mut d = f.server.detail.lock().unwrap();
+        d.columns[1] = ColumnDetail {
+            db_type: "varchar(40)".into(),
+            ..column("password", true)
+        };
+        f.server.metas.lock().unwrap()[1] = ColumnMeta {
+            db_type: "VARCHAR".into(),
+            logical: LogicalType::Text,
+            ..meta("password")
+        };
+    }
+    let secret = EditSet {
+        object: object(),
+        edits: vec![RowEdit::Update {
+            row: RowRef {
+                key: key(1),
+                original: vec![
+                    ("id".into(), Value::Int(1)),
+                    ("password".into(), Value::Text("old".into())),
+                ],
+                xmin: None,
+                loaded: vec![],
+            },
+            set: vec![(
+                "password".into(),
+                CellInput::Text {
+                    text: "hunter2".into(),
+                },
+            )],
+        }],
+        overwrite: false,
+    };
+    let p = f.sm.edit_preview(f.id, secret).await.unwrap();
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed);
+    let rows = edit_history(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let h = &rows[0];
+    assert_eq!(h.origin, HistoryOrigin::DataEdit);
+    assert_eq!(h.status, HistoryStatus::Ok);
+    assert_eq!(h.kind, "write");
+    assert_eq!(h.database.as_deref(), Some("shop"));
+    assert_eq!(h.affected, Some(1));
+    assert!(h.redacted);
+    assert!(!h.outcome_unknown);
+    assert!(
+        h.sql_text.starts_with("UPDATE `shop`.`items`"),
+        "{}",
+        h.sql_text
+    );
+    assert!(!h.sql_text.contains("hunter2"), "{}", h.sql_text);
+    assert!(h.error_kind.is_none());
+}
+
+/// A batch rolled back by a conflict: the statements that were sent are recorded as not
+/// applied, the one never sent is not recorded.
+#[tokio::test]
+async fn rolled_back_batch_records_only_the_statements_sent() {
+    use dnt_store::history::HistoryStatus;
+    let f = fixture().await;
+    let p = f.sm.edit_preview(f.id, updates(3)).await.unwrap();
+    f.server.script(vec![Ok(1), Ok(0), Ok(1)]);
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::RolledBack);
+    let rows = edit_history(&f);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0].sql_text.contains("`id` = 1"));
+    assert!(rows[1].sql_text.contains("`id` = 2"));
+    assert!(rows.iter().all(|h| h.status == HistoryStatus::Error));
+    assert_eq!(rows[0].error_kind.as_deref(), Some("rolled_back"));
+    assert_eq!(rows[1].error_kind.as_deref(), Some("conflict"));
+    assert!(rows.iter().all(|h| !h.outcome_unknown && !h.redacted));
+}
+
+/// A `COMMIT` without an answer: every statement of the batch may or may not be applied.
+/// A statement without an answer outside a transaction: that statement.
+#[tokio::test]
+async fn unknown_outcome_is_stored() {
+    use dnt_store::history::HistoryStatus;
+    let f = fixture().await;
+    let p = f.sm.edit_preview(f.id, updates(2)).await.unwrap();
+    *f.server.commit.lock().unwrap() = Some(lost(true));
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 2 });
+    let rows = edit_history(&f);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|h| h.outcome_unknown), "{rows:?}");
+    assert!(rows.iter().all(|h| h.status == HistoryStatus::Ok));
+
+    let g = fixture_with("MyISAM", None).await;
+    let p = g.sm.edit_preview(g.id, updates(1)).await.unwrap();
+    g.server.script(vec![Err(lost(true))]);
+    let r = g.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 0 });
+    let rows = edit_history(&g);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].outcome_unknown);
+    assert_eq!(rows[0].status, HistoryStatus::Error);
+    assert_eq!(rows[0].error_kind.as_deref(), Some("connection_lost"));
+}

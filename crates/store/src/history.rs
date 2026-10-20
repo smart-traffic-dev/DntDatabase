@@ -50,6 +50,35 @@ impl HistoryStatus {
     }
 }
 
+/// What produced a history row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HistoryOrigin {
+    /// A statement the user ran from a query tab.
+    Query,
+    /// A statement the app built to apply edits of the data view.
+    DataEdit,
+}
+
+impl HistoryOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            HistoryOrigin::Query => "query",
+            HistoryOrigin::DataEdit => "data_edit",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, DbError> {
+        match s {
+            "query" => Ok(HistoryOrigin::Query),
+            "data_edit" => Ok(HistoryOrigin::DataEdit),
+            other => Err(DbError::Internal {
+                message: format!("invalid history origin {other:?} in database"),
+            }),
+        }
+    }
+}
+
 /// A statement to record. `sql_text` is the **already redacted** text.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct NewHistoryEntry {
@@ -68,6 +97,9 @@ pub struct NewHistoryEntry {
     pub affected: Option<u64>,
     pub error_kind: Option<String>,
     pub error_code: Option<String>,
+    pub origin: HistoryOrigin,
+    /// No answer came: the statement may or may not have been applied.
+    pub outcome_unknown: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -89,6 +121,9 @@ pub struct HistoryEntry {
     pub affected: Option<u64>,
     pub error_kind: Option<String>,
     pub error_code: Option<String>,
+    pub origin: HistoryOrigin,
+    /// No answer came: the statement may or may not have been applied.
+    pub outcome_unknown: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -96,6 +131,8 @@ pub struct HistoryFilter {
     pub connection_id: Option<Uuid>,
     /// Substring of the SQL text; `%`, `_` and `\` match literally.
     pub search: Option<String>,
+    /// Only rows of this origin.
+    pub origin: Option<HistoryOrigin>,
     /// At most [`HISTORY_LIST_MAX`]; larger values are clamped.
     pub limit: u32,
 }
@@ -125,7 +162,8 @@ fn escape_like(s: &str) -> String {
 }
 
 const HISTORY_COLUMNS: &str = "id, connection_id, database, sql_text, redacted, kind, \
-    started_at, elapsed_ms, status, row_count, affected, error_kind, error_code";
+    started_at, elapsed_ms, status, row_count, affected, error_kind, error_code, origin, \
+    outcome_unknown";
 
 impl ConnectionRepo {
     /// Records one statement (with already redacted SQL) and prunes everything beyond the
@@ -172,7 +210,8 @@ impl ConnectionRepo {
                 .prepare_cached(
                     "INSERT INTO query_history (connection_id, database, sql_text, redacted, \
                      kind, started_at, elapsed_ms, status, row_count, affected, error_kind, \
-                     error_code) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     error_code, origin, outcome_unknown) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, \
+                     ?9, ?10, ?11, ?12, ?13, ?14)",
                 )
                 .map_err(|err| internal("insert history entry", err))?;
             let mut ids = Vec::with_capacity(entries.len());
@@ -190,6 +229,8 @@ impl ConnectionRepo {
                     to_sql_u64(e.affected),
                     e.error_kind,
                     e.error_code,
+                    e.origin.as_str(),
+                    e.outcome_unknown,
                 ])
                 .map_err(|err| internal("insert history entry", err))?;
                 ids.push(tx.last_insert_rowid());
@@ -215,12 +256,18 @@ impl ConnectionRepo {
                     "SELECT {HISTORY_COLUMNS} FROM query_history \
                      WHERE (?1 IS NULL OR connection_id = ?1) \
                        AND (?2 IS NULL OR sql_text LIKE ?2 ESCAPE '\\') \
-                     ORDER BY started_at DESC, id DESC LIMIT ?3"
+                       AND (?3 IS NULL OR origin = ?3) \
+                     ORDER BY started_at DESC, id DESC LIMIT ?4"
                 ))
                 .map_err(|e| internal("list history", e))?;
             let rows = stmt
                 .query_map(
-                    params![f.connection_id.map(|c| c.to_string()), pattern, limit],
+                    params![
+                        f.connection_id.map(|c| c.to_string()),
+                        pattern,
+                        f.origin.map(HistoryOrigin::as_str),
+                        limit
+                    ],
                     RawEntry::from_row,
                 )
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
@@ -281,6 +328,8 @@ struct RawEntry {
     affected: Option<i64>,
     error_kind: Option<String>,
     error_code: Option<String>,
+    origin: String,
+    outcome_unknown: bool,
 }
 
 impl RawEntry {
@@ -299,6 +348,8 @@ impl RawEntry {
             affected: r.get(10)?,
             error_kind: r.get(11)?,
             error_code: r.get(12)?,
+            origin: r.get(13)?,
+            outcome_unknown: r.get(14)?,
         })
     }
 
@@ -317,6 +368,8 @@ impl RawEntry {
             affected: from_sql_u64(self.affected),
             error_kind: self.error_kind,
             error_code: self.error_code,
+            origin: HistoryOrigin::parse(&self.origin)?,
+            outcome_unknown: self.outcome_unknown,
         })
     }
 }

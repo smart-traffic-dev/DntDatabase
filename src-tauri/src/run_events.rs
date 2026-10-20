@@ -18,7 +18,7 @@ use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
     parse_plan, redact, ExplainFormat, PlanTree, PlannedStmt, RunSink, StmtKindLabel, StopReason,
 };
-use dnt_store::history::{HistoryStatus, NewHistoryEntry};
+use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::ConnectionRepo;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -403,7 +403,7 @@ impl ChannelSink {
         let Some(cur) = self.current.take() else {
             return;
         };
-        let (status, row_count, affected, error_kind, error_code) = match result {
+        let (status, row_count, affected, error_kind, error_code, outcome_unknown) = match result {
             Ok(outcome) => {
                 let rows = (!outcome.results.is_empty())
                     .then(|| outcome.results.iter().map(|r| r.row_count).sum());
@@ -412,11 +412,11 @@ impl ChannelSink {
                     .iter()
                     .filter_map(|r| r.affected)
                     .reduce(u64::saturating_add);
-                (HistoryStatus::Ok, rows, affected, None, None)
+                (HistoryStatus::Ok, rows, affected, None, None, false)
             }
             // A `cancelled` row does not mean "not applied": the cancel may have landed
-            // after the statement took effect (`outcome_unknown`, which the history does
-            // not store). The UI must not render `cancelled` history rows as not applied.
+            // after the statement took effect (`outcome_unknown`, which the row records
+            // too). The UI must not render `cancelled` history rows as not applied.
             Err(e) => (
                 if e.kind == "cancelled" {
                     HistoryStatus::Cancelled
@@ -427,6 +427,7 @@ impl ChannelSink {
                 None,
                 Some(e.kind.clone()),
                 e.server_code.clone().or_else(|| e.sqlstate.clone()),
+                e.outcome_unknown,
             ),
         };
         let entry = NewHistoryEntry {
@@ -442,6 +443,8 @@ impl ChannelSink {
             affected,
             error_kind,
             error_code,
+            origin: HistoryOrigin::Query,
+            outcome_unknown,
         };
         let writer = self.writer.get_or_insert_with(|| {
             HistoryWriter::start(Arc::clone(&self.history.repo), self.history.connection_id)
@@ -771,6 +774,8 @@ mod tests {
                 affected: None,
                 error_kind: None,
                 error_code: None,
+                origin: HistoryOrigin::Query,
+                outcome_unknown: false,
             });
         }
         writer.finish().await;
@@ -780,6 +785,7 @@ mod tests {
             .history_list(&HistoryFilter {
                 connection_id: Some(conn),
                 search: None,
+                origin: None,
                 limit: 1000,
             })
             .unwrap();
