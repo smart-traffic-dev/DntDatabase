@@ -26,7 +26,10 @@ use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
-use dnt_core::sql::filter::{build_where, pg_unordered, WhereClause, MAX_SORT_KEYS};
+use dnt_core::sql::filter::{
+    build_where, pg_unordered, WhereClause, MAX_CONDITIONS, MAX_IN_VALUES, MAX_SORT_KEYS,
+    MAX_VALUE_BYTES,
+};
 pub use dnt_core::sql::filter::{DataFilter, FilterCond, FilterMode, FilterOp, SortDir, SortSpec};
 use dnt_core::sql::ident::{count_where_sql, qualified_name, select_sql};
 use dnt_core::value::{ColumnMeta, Value};
@@ -225,6 +228,42 @@ impl DataQuery {
     }
 }
 
+/// Refuses an oversized sort or filter at once, before the object's columns are read
+/// (the same bounds [`build_where`] / [`page_order`] apply, checked without them). The
+/// IPC payload itself is already deserialized by then: Tauri gives no hook before that.
+pub fn check_request_size(sort: &[SortSpec], filter: Option<&DataFilter>) -> Result<(), DbError> {
+    if sort.len() > MAX_SORT_KEYS {
+        return Err(config_error(
+            "order",
+            &format!("sort by at most {MAX_SORT_KEYS} columns"),
+        ));
+    }
+    let Some(filter) = filter else {
+        return Ok(());
+    };
+    if filter.conditions.len() > MAX_CONDITIONS {
+        return Err(config_error(
+            "filter",
+            &format!("a filter has at most {MAX_CONDITIONS} conditions"),
+        ));
+    }
+    for c in &filter.conditions {
+        if c.values.len() > MAX_IN_VALUES {
+            return Err(config_error(
+                "filter",
+                &format!("a condition has at most {MAX_IN_VALUES} values"),
+            ));
+        }
+        if c.column.len() > MAX_VALUE_BYTES || c.values.iter().any(|v| v.len() > MAX_VALUE_BYTES) {
+            return Err(config_error(
+                "filter",
+                &format!("a filter value is too long (at most {MAX_VALUE_BYTES} bytes)"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Builds the [`DataQuery`] of `obj`. The object's columns (the tree's cached table
 /// detail) are required for a sort or a filter; without either, a failed detail read
 /// only loses the stable key order.
@@ -235,6 +274,7 @@ pub(crate) async fn data_query(
     sort: &[SortSpec],
     filter: Option<&DataFilter>,
 ) -> Result<DataQuery, DbError> {
+    check_request_size(sort, filter)?;
     let kind = state.repo.get(id)?.kind;
     check_object(kind, obj)?;
     // The detail is cached by the tree's Info view (a metadata call, short).
@@ -471,6 +511,43 @@ mod tests {
             DbError::Config { field, .. } => field,
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn oversized_requests_are_refused_before_any_read() {
+        let cond = |values: Vec<String>| FilterCond {
+            column: "c".into(),
+            op: FilterOp::In,
+            values,
+        };
+        let filter = |conditions| DataFilter {
+            mode: FilterMode::And,
+            conditions,
+        };
+        let ok = filter(vec![cond(vec!["1".into()]); MAX_CONDITIONS]);
+        assert!(check_request_size(&[], Some(&ok)).is_ok());
+        assert!(check_request_size(&[], None).is_ok());
+        for bad in [
+            filter(vec![cond(vec!["1".into()]); MAX_CONDITIONS + 1]),
+            filter(vec![cond(vec!["1".into(); MAX_IN_VALUES + 1])]),
+            filter(vec![cond(vec!["x".repeat(MAX_VALUE_BYTES + 1)])]),
+        ] {
+            assert_eq!(
+                field(check_request_size(&[], Some(&bad)).unwrap_err()).as_deref(),
+                Some("filter")
+            );
+        }
+        let sort = vec![
+            SortSpec {
+                column: "a".into(),
+                dir: SortDir::Asc
+            };
+            MAX_SORT_KEYS + 1
+        ];
+        assert_eq!(
+            field(check_request_size(&sort, None).unwrap_err()).as_deref(),
+            Some("order")
+        );
     }
 
     #[test]
