@@ -9,6 +9,7 @@ import { canRun, canStop, settleTx, useQueryRun, type MessageLine } from './quer
 import { setRunningSource, useQueryDocs } from './queryTabs';
 import { promptHandles, reopenConnection } from './reopen';
 import { askRunConfirmation, showBlocked } from './runPrompt';
+import { setPlanRunner } from '../tabs/query/rerun';
 
 /** How long "Stop and close" waits for the run to end. */
 export const STOP_WAIT_MS = 30_000;
@@ -245,6 +246,10 @@ setRunningSource(
     return false;
   },
 );
+
+// Retry statement and Fetch all (rerun.ts) run their derived plans through this flow, so a
+// Confirm verdict asks and a Block verdict is refused exactly as for a normal run.
+setPlanRunner((tabId, plan, opts) => runPlanned(tabId, plan, { maxRows: opts.maxRows }));
 
 /** Commit / Rollback from the status bar. */
 export async function txAction(tabId: string, action: TxAction): Promise<void> {

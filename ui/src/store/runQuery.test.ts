@@ -7,6 +7,13 @@ import { useQueryDocs } from './queryTabs';
 import { useQueryRun } from './queryRun';
 import { registerEditor, runFromEditor, runPlanned, runQuery, stopQuery, txAction, unregisterEditor } from './runQuery';
 import { useRunPrompt } from './runPrompt';
+import { currentPlanRunner } from '../tabs/query/rerun';
+
+describe('retry and fetch all wiring', () => {
+  it('registers the confirm-aware run flow as the plan runner', () => {
+    expect(currentPlanRunner()).not.toBeNull();
+  });
+});
 
 vi.mock('./completion', () => ({ invalidateCompletion: vi.fn(), forgetCompletionConnection: vi.fn() }));
 

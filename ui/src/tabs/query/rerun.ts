@@ -23,6 +23,9 @@ export function setPlanRunner(runner: PlanRunner | null) {
   registered = runner;
 }
 
+/** The registered run flow, if any (for tests). */
+export const currentPlanRunner = (): PlanRunner | null => registered;
+
 /** Fallback when the run flow has not registered: runs plans that need no confirmation. */
 async function runAllowed(tabId: string, plan: PlanView, opts: RerunOptions): Promise<void> {
   const store = useQueryRun.getState();
