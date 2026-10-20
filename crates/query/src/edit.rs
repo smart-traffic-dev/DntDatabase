@@ -292,12 +292,12 @@ pub fn editable(
 }
 
 /// An UPDATE may set it: not auto-increment, identity or generated.
-fn updatable(c: &ColumnDetail) -> bool {
+pub fn updatable(c: &ColumnDetail) -> bool {
     !c.auto_increment && c.identity.is_none() && c.generated.is_none()
 }
 
 /// A new row may give it a value: not generated, not `GENERATED ALWAYS AS IDENTITY`.
-fn insertable(c: &ColumnDetail) -> bool {
+pub fn insertable(c: &ColumnDetail) -> bool {
     c.generated.is_none()
         && !c
             .identity
@@ -1009,7 +1009,8 @@ fn what(c: &ColumnDetail) -> &'static str {
     }
 }
 
-fn column_target(cd: &ColumnDetail, logical: LogicalType) -> ColumnTarget {
+/// The write target of column `cd` whose result type is `logical`.
+pub fn column_target(cd: &ColumnDetail, logical: LogicalType) -> ColumnTarget {
     ColumnTarget {
         name: cd.name.clone(),
         db_type: cd.db_type.clone(),
@@ -1031,7 +1032,7 @@ fn full(v: Value) -> FullValue {
 /// logical type (spec R16): e.g. a `Json` value for a text column (MariaDB reports JSON
 /// columns as text) becomes `Text`, so it is never written as `CAST(… AS JSON)`; text
 /// for a typed column is parsed. A value that does not fit is an error (the reason).
-fn normalise(v: FullValue, t: &ColumnTarget, d: Dialect) -> Result<FullValue, String> {
+pub fn normalise(v: FullValue, t: &ColumnTarget, d: Dialect) -> Result<FullValue, String> {
     use LogicalType as L;
     if v.is_null() {
         return Ok(v);

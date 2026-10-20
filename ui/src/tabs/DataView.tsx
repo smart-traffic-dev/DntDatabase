@@ -5,17 +5,19 @@ import type { MenuEntry } from '../components/ActionMenu';
 import { selectTopSql } from '../components/newQuery';
 import { dataExportRequest, requestExport, toggleTabFilterBar } from '../dialogs/resultExport';
 import { useAppSettings } from '../store/appSettings';
-import { confirmDiscard, readOnlyCopy, rowIdOf, rowRef, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
+import { confirmDiscard, readOnlyCopy, rowIdOf, rowKeyPairs, rowRef, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { CHUNK, type ResultSet } from '../store/queryRun';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { draftToFilter, newFilterRow, useTableData, type FilterRow } from '../store/tableData';
 import { cellStatus, effectivePage } from './data/editModel';
 import { EditPreviewDialog } from './data/EditPreviewDialog';
-import { openValueEditor } from './data/valueEditor';
+import { copyAs, copySql, type CopyFormat } from './data/copyAs';
+import { closeValueEditor, openValueEditor, useValueEditors } from './data/openValueEditor';
+import { ValueEditor } from './data/ValueEditor';
 import { FilterBar, type FilterBarHandle } from './FilterBar';
 import { cellView } from './query/format';
-import { ResultGrid, type GridEditing } from './query/ResultGrid';
+import { ResultGrid, writeClipboard, type GridEditing } from './query/ResultGrid';
 import './query/query.css';
 import './data/dataEdit.css';
 import './dataView.css';
@@ -23,6 +25,8 @@ import './dataView.css';
 const NO_STAGED: Staged = { updates: new Map(), inserts: [], deletes: new Map() };
 const NO_ROW_IDS: (RowId | null)[] = [];
 const NO_CONFLICTS: RowId[] = [];
+/** Stands in for the table's edit info until `data_editable` answers: no key, so no rows to copy as SQL. */
+const NO_INFO: EditableInfo = { editable: false, reason: null, key: [], hidden_key: [], editable_columns: [], atomic: 'unknown', protection: 'snapshot' };
 
 /** Page sizes always offered; the Settings default and the current size are added when different. */
 export const PAGE_SIZES = [100, 500, 1000];
@@ -289,26 +293,30 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   };
 
   /** Stages `input` for a grid cell (an existing row's update or a new row's value). */
-  const setCell = (row: number, col: number, input: CellInput) => {
-    if (!data || !info) return;
+  const setCell = (row: number, col: number, input: CellInput, fetched: string | null | undefined = undefined): boolean => {
+    if (!data || !info) return false;
     const name = data.columns[col]?.name;
-    if (!name || !info.editable_columns.includes(name)) return;
+    if (!name || !info.editable_columns.includes(name)) return false;
     const edits = useDataEdits.getState();
     const n = data.rows.length;
     if (row < n) {
       const id = rowIds[row];
       // The row as loaded now is what the change is guarded with, whatever the page shows later.
-      const ref = rowRef(data, info, row);
-      if (!id || !ref || truncatedCells.has(`${row},${col}`)) return;
+      const base = rowRef(data, info, row);
+      // A cut cell is changed from the value editor only (`fetched` is then set: null or the token of its full value).
+      if (!id || !base || (fetched === undefined && truncatedCells.has(`${row},${col}`))) return false;
+      // The token of a cut original fetched in full lets the backend check that column too.
+      const ref = fetched ? { ...base, loaded: [[name, fetched] as [string, string]] } : base;
       setEditNotice(null);
       const r = edits.stage(tab.id, { kind: 'update', row: id, ref, column: name, input });
       if (!r.ok) setEditNotice(r.message);
-    } else {
-      const insert = (useDataEdits.getState().byTab[tab.id]?.staged ?? NO_STAGED).inserts[row - n];
-      if (!insert) return;
-      const r = edits.stage(tab.id, { kind: 'insertCell', insert: insert.id, column: name, input });
-      setEditNotice(r.ok ? null : r.message);
+      return r.ok;
     }
+    const insert = (useDataEdits.getState().byTab[tab.id]?.staged ?? NO_STAGED).inserts[row - n];
+    if (!insert) return false;
+    const r = edits.stage(tab.id, { kind: 'insertCell', insert: insert.id, column: name, input });
+    setEditNotice(r.ok ? null : r.message);
+    return r.ok;
   };
 
   const truncatedCells = useMemo(() => new Set((data?.truncated ?? []).map(([r, c]) => `${r},${c}`)), [data]);
@@ -328,7 +336,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
         const name = names[col];
         if (!name) return;
         if (row < data.rows.length && truncatedCells.has(`${row},${col}`)) {
-          openValueEditor({ row, col, column: name, rowId: rowIds[row] ?? null });
+          openValueEditor({ tabId: tab.id, row, col, column: name, rowId: rowIds[row] ?? null });
           return;
         }
         const now = shown.rows[row]?.[col];
@@ -338,7 +346,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
       onActivate: (row, col) => {
         const name = names[col];
         if (name && row < data.rows.length && truncatedCells.has(`${row},${col}`)) {
-          openValueEditor({ row, col, column: name, rowId: rowIds[row] ?? null });
+          openValueEditor({ tabId: tab.id, row, col, column: name, rowId: rowIds[row] ?? null });
         }
       },
       onKey: handleEditKey,
@@ -346,6 +354,59 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     // `setCell` and `handleEditKey` read the latest values through the stores and these deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editable, data, shown, info, staged, conflicts, rowIds, truncatedCells]);
+
+  /** Opens the value editor on any cell (Shift+Enter, the cell menu). */
+  const openCell = (row: number, col: number) => {
+    const name = data?.columns[col]?.name;
+    if (name) openValueEditor({ tabId: tab.id, row, col, column: name, rowId: rowIds[row] ?? null });
+  };
+
+  const editorCell = useValueEditors((s) => s.byTab[tab.id]);
+  // Stale after a reload that left the page smaller or another table's page.
+  const valuePanel = (() => {
+    if (!editorCell || !data || !shown) return null;
+    const column = data.columns[editorCell.col];
+    if (!column || column.name !== editorCell.column || editorCell.row >= shown.rows.length) return null;
+    const { row, col } = editorCell;
+    const isNew = row >= data.rows.length;
+    const id = rowIds[row] ?? null;
+    // What the cell holds now: a change staged for it (when it is text, NULL or a value), else the page's value.
+    const change = isNew ? staged.inserts[row - data.rows.length]?.values.get(column.name) : id ? staged.updates.get(id)?.cells.get(column.name) : undefined;
+    const showsChange = change !== undefined && (change.kind === 'text' || change.kind === 'null' || change.kind === 'value');
+    const cut = !isNew && !showsChange && truncatedCells.has(`${row},${col}`);
+    const value = showsChange ? (shown.rows[row]?.[col] ?? { t: 'Null' as const }) : (data.rows[row]?.[col] ?? shown.rows[row]?.[col] ?? { t: 'Null' as const });
+    const canEdit = editable && !!info?.editable_columns.includes(column.name) && (isNew || (!!id && !staged.deletes.has(id)));
+    return (
+      <ValueEditor
+        key={`${row},${col},${data.elapsed_ms},${String(showsChange)}`}
+        connectionId={tab.connectionId}
+        object={tab.objectRef}
+        column={column}
+        value={value}
+        truncated={cut}
+        fetchKey={!isNew && info ? rowKeyPairs(data, info, row) : null}
+        editable={canEdit}
+        onStage={(input, token) => {
+          if (setCell(row, col, input, cut ? token : undefined)) closeValueEditor(tab.id);
+        }}
+        onClose={() => closeValueEditor(tab.id)}
+      />
+    );
+  })();
+
+  /** Copies the selection as `format` (text) or as SQL (built by the backend); says what happened. */
+  const copySelection = async (what: CopyFormat | 'insert' | 'update', selection: Parameters<typeof copyAs>[1], cell: { row: number; col: number }) => {
+    if (!data) return;
+    try {
+      const text =
+        what === 'insert' || what === 'update'
+          ? await copySql(what, selection, data, { connectionId: tab.connectionId, object: tab.objectRef, info: info ?? NO_INFO, cell })
+          : copyAs(what, selection, data, { cell });
+      setNotice((await writeClipboard(text)) ? null : 'Could not write to the clipboard');
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : toAppError(e).message);
+    }
+  };
 
   if (!state) return <p className="dv-loading muted">Loading…</p>;
 
@@ -636,6 +697,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
           {capped ? 'This page stopped early to stay small; Next continues after its last row.' : null}
         </p>
       ) : null}
+      <div className="dv-main">
       <div
         className="dv-body"
         onPointerDownCapture={(e) => {
@@ -664,6 +726,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
               tableRef={tab.objectRef}
               cellsCapped={truncated}
               editing={editing}
+              onOpenValue={openCell}
               extraCellMenu={(ctx) => {
                 const column = result.columns[ctx.col];
                 const filters = column
@@ -671,7 +734,15 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
                       'run' in entry ? { ...entry, run: () => guarded(() => entry.run()) } : entry,
                     )
                   : [];
-                if (!editing || !data) return filters;
+                if (!data) return filters;
+                const at = { row: ctx.row, col: ctx.col };
+                const copies: MenuEntry[] = [
+                  { label: 'Copy as JSON', run: () => void copySelection('json', ctx.selection, at) },
+                  { label: 'Copy as Markdown', run: () => void copySelection('markdown', ctx.selection, at) },
+                  { label: 'Copy as SQL INSERT', run: () => void copySelection('insert', ctx.selection, at) },
+                  { label: 'Copy as SQL UPDATE', run: () => void copySelection('update', ctx.selection, at) },
+                ];
+                if (!editing) return [...copies, ...(filters.length > 0 ? [{ separator: true } as MenuEntry, ...filters] : [])];
                 const editEntries: MenuEntry[] = [];
                 if (editing.isEditable(ctx.row, ctx.col)) {
                   editEntries.push({ label: 'Set to NULL', hint: 'Ctrl+0', run: () => setCell(ctx.row, ctx.col, { kind: 'null' }) });
@@ -681,13 +752,16 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
                   hint: 'Ctrl+Delete',
                   run: () => handleEditKey({ key: 'Delete', ctrlKey: true, metaKey: false, shiftKey: false, altKey: false }, { row: ctx.row, col: ctx.col }),
                 });
-                return filters.length > 0 ? [...editEntries, { separator: true }, ...filters] : editEntries;
+                const head = [...editEntries, { separator: true } as MenuEntry, ...copies];
+                return filters.length > 0 ? [...head, { separator: true }, ...filters] : head;
               }}
             />
           )
         ) : (
           <p className="dv-loading muted">Loading…</p>
         )}
+      </div>
+      {valuePanel}
       </div>
       {edit?.applying ? (
         <EditPreviewDialog

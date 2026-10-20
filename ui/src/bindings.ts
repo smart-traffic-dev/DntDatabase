@@ -574,6 +574,19 @@ async dataCellSaveFile(token: string, path: string) : Promise<Result<null, AppEr
 }
 },
 /**
+ * `INSERT` or `UPDATE` statements that recreate `rows` (as the grid holds them) of table
+ * `obj`, to copy to the clipboard; nothing is run. A row with a cell the page cut short
+ * is a `config` error, field `copy`.
+ */
+async dataCopySql(id: string, obj: ObjectRef, rows: RowRef[], format: CopySqlFormat) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_copy_sql", { id, obj, rows, format }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Writes rows the UI holds (the loaded rows) to `path`. `kind`: the engine whose
  * quoting the SQL format uses.
  */
@@ -984,6 +997,10 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
  * A connection as shown in the tree: config plus secret *presence* flags, never values.
  */
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
+/**
+ * What `data_copy_sql` writes for each row.
+ */
+export type CopySqlFormat = "insert" | "update"
 /**
  * The data view's filter: conditions joined with `AND` or `OR`, or (raw mode) the
  * user's own `WHERE` text.

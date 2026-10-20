@@ -6,7 +6,7 @@ import type { ApplyReport, ColumnMeta, EditPreview, EditableInfo, ObjectRef, Tab
 import { closeTab } from '../components/tabActions';
 import { DialogHost } from '../dialogs/DialogHost';
 import { ONE_AT_A_TIME, useDataEdits } from '../store/dataEdits';
-import { openValueEditor } from './data/valueEditor';
+import { openValueEditor } from './data/openValueEditor';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { draftToFilter, newFilterRow, nextSortKeys, splitList, useTableData } from '../store/tableData';
@@ -72,7 +72,13 @@ vi.mock('./query/ResultGrid', () => ({
   ),
 }));
 
-vi.mock('./data/valueEditor', () => ({ openValueEditor: vi.fn() }));
+vi.mock('./data/openValueEditor', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./data/openValueEditor')>();
+  return {
+    ...original,
+    openValueEditor: vi.fn(original.openValueEditor),
+  };
+});
 
 const col = (name: string, db_type = 'int'): ColumnMeta => ({ name, db_type, logical: 'Integer', nullable: false, origin_table: null, origin_column: null });
 const int = (v: number): Value => ({ t: 'Int', v });
@@ -759,12 +765,42 @@ describe('DataView editing', () => {
     const { user } = await editable({}, { stage: false, pageOver: { truncated: [[0, 2]], truncated_cells: 1 } });
     expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
     fireEvent.doubleClick(cell(0, 2));
-    expect(openValueEditor).toHaveBeenCalledWith(expect.objectContaining({ row: 0, col: 2, column: 'doc' }));
+    expect(openValueEditor).toHaveBeenCalledWith(expect.objectContaining({ tabId: expect.any(String), row: 0, col: 2, column: 'doc' }));
     // Typing into it stages nothing.
     await user.click(cell(0, 2));
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
 
+  it('value_editor_stages_a_cut_cell_with_the_token_of_its_full_value', async () => {
+    const { user } = await editable(
+      {
+        data_cell_fetch: () => ({ token: 'tok-9', payload: { kind: 'text', text: '{"full":true}' } }),
+        data_preview: () => previewOf(),
+      },
+      { stage: false, pageOver: { truncated: [[0, 2]], truncated_cells: 1 } },
+    );
+    fireEvent.doubleClick(cell(0, 2));
+    const box = await screen.findByRole('textbox', { name: 'Value' });
+    await waitFor(() => expect(box).toHaveValue('{"full":true}'));
+    expect(lastCall('data_cell_fetch')).toEqual({ id: ids.prod, obj: objectRef, key: [['id', int(1)]], column: 'doc' });
+    await user.type(box, '!');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    // The editor closes and the change is staged against the row as loaded, with the full original's token.
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Value' })).not.toBeInTheDocument());
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({
+      set: {
+        edits: [
+          {
+            op: 'update',
+            row: { key: [['id', int(1)]], loaded: [['doc', 'tok-9']] },
+            set: [['doc', { kind: 'text', text: '{"full":true}!' }]],
+          },
+        ],
+      },
+    });
+  });
   it('apply_shows_preview_then_reloads_on_commit', async () => {
     const { user } = await editable({
       data_preview: () => previewOf(),

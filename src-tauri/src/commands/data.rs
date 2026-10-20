@@ -47,7 +47,9 @@ use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
-use dnt_core::sql::build::{raw_where_clause, BuildError};
+use dnt_core::sql::build::{
+    insert_sql, raw_where_clause, update_sql, BuildError, ColumnTarget, RowGuard, RowKey, TableRef,
+};
 use dnt_core::sql::filter::{
     build_where, pg_unordered, WhereClause, MAX_CONDITIONS, MAX_IN_VALUES, MAX_SORT_KEYS,
     MAX_VALUE_BYTES,
@@ -55,9 +57,11 @@ use dnt_core::sql::filter::{
 pub use dnt_core::sql::filter::{DataFilter, FilterCond, FilterMode, FilterOp, SortDir, SortSpec};
 use dnt_core::sql::ident::{count_where_sql, qualified_name, quote_ident, select_sql};
 use dnt_core::sql::Dialect;
-use dnt_core::value::{ColumnMeta, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 pub use dnt_query::edit::EditSet;
-use dnt_query::edit::{atomicity, editable, NotEditable};
+use dnt_query::edit::{
+    atomicity, column_target, editable, insertable, normalise, updatable, NotEditable, RowRef,
+};
 pub use dnt_query::edit::{Atomicity, ProtectionKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -942,6 +946,154 @@ pub async fn table_data_cancel(
     guard(table_data_cancel_impl(&state, id, request_key)).await
 }
 
+/// What `data_copy_sql` writes for each row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum CopySqlFormat {
+    Insert,
+    Update,
+}
+
+/// Why `data_copy_sql` refuses a row holding a value the page cut short.
+pub const COPY_TRUNCATED: &str = "Some cells are truncated; open them first or use Export.";
+
+/// `INSERT` / `UPDATE` statements (one `INSERT` for all rows, one `UPDATE` per row, keyed
+/// and unguarded: [`RowGuard::KeyOnly`]) that recreate `rows` of the table `detail`
+/// describes. `metas` give the columns' result types. A value the page cut short is
+/// refused ([`COPY_TRUNCATED`]), never written truncated.
+pub fn copy_sql(
+    detail: &TableDetail,
+    metas: &[ColumnMeta],
+    dialect: Dialect,
+    rows: &[RowRef],
+    format: CopySqlFormat,
+) -> Result<String, DbError> {
+    let kind = match dialect {
+        Dialect::MySql(_) => DbKind::MySql,
+        Dialect::Postgres => DbKind::Postgres,
+    };
+    if rows.is_empty() {
+        return Err(config_error("copy", "There are no rows to copy."));
+    }
+    let table = TableRef {
+        kind,
+        database: detail.object.database.clone(),
+        schema: detail.object.schema.clone(),
+        name: detail.object.name.clone(),
+    };
+    let target = |cd: &ColumnDetail| {
+        let logical = metas
+            .iter()
+            .find(|m| m.name == cd.name)
+            .map_or(LogicalType::Other, |m| m.logical);
+        column_target(cd, logical)
+    };
+    let cell = |cd: &ColumnDetail, v: &Value| -> Result<FullValue, DbError> {
+        if v.may_be_page_truncated() || !v.is_complete() {
+            return Err(config_error("copy", COPY_TRUNCATED));
+        }
+        let full = FullValue::try_from_value(v.clone())
+            .map_err(|_| config_error("copy", COPY_TRUNCATED))?;
+        normalise(full, &target(cd), dialect)
+            .map_err(|reason| config_error("copy", &format!("{}: {reason}", cd.name)))
+    };
+    // The grid's rows keep the key columns apart from the other cells (`RowRef::key`).
+    let original = |row: &RowRef, name: &str| {
+        row.original
+            .iter()
+            .chain(&row.key)
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.clone())
+    };
+    let build = |e: BuildError| config_error("copy", &e.to_string());
+    match format {
+        CopySqlFormat::Insert => {
+            let cols: Vec<&ColumnDetail> = detail
+                .columns
+                .iter()
+                .filter(|c| insertable(c) && original(&rows[0], &c.name).is_some())
+                .collect();
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut line = Vec::with_capacity(cols.len());
+                for cd in &cols {
+                    let v = original(row, &cd.name).ok_or_else(|| {
+                        config_error("copy", &format!("{}: the row has no value", cd.name))
+                    })?;
+                    line.push(cell(cd, &v)?);
+                }
+                values.push(line);
+            }
+            let targets: Vec<ColumnTarget> = cols.iter().map(|c| target(c)).collect();
+            insert_sql(&table, &targets, &values, &[], dialect).map_err(build)
+        }
+        CopySqlFormat::Update => {
+            let ed = editable(detail, kind, false)
+                .map_err(|_| config_error("copy", "The table has no key to find its rows by."))?;
+            let mut out = Vec::with_capacity(rows.len());
+            for row in rows {
+                let mut key = Vec::with_capacity(ed.key.len());
+                for name in &ed.key {
+                    let missing =
+                        || config_error("copy", &format!("{name}: the row's key is missing"));
+                    let cd = detail
+                        .columns
+                        .iter()
+                        .find(|c| &c.name == name)
+                        .ok_or_else(missing)?;
+                    let v = row
+                        .key
+                        .iter()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, v)| v)
+                        .ok_or_else(missing)?;
+                    key.push((target(cd), cell(cd, v)?));
+                }
+                let key = RowKey::new(key).map_err(build)?;
+                let mut set = Vec::new();
+                for cd in &detail.columns {
+                    if ed.key.contains(&cd.name) || !updatable(cd) {
+                        continue;
+                    }
+                    if let Some(v) = original(row, &cd.name) {
+                        set.push((target(cd), cell(cd, &v)?));
+                    }
+                }
+                out.push(
+                    update_sql(&table, &key, &set, &RowGuard::KeyOnly, dialect).map_err(build)?,
+                );
+            }
+            Ok(out.join("\n"))
+        }
+    }
+}
+
+pub async fn data_copy_sql_impl(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+    rows: Vec<RowRef>,
+    format: CopySqlFormat,
+) -> Result<String, DbError> {
+    let (detail, metas, dialect) = state.sessions.copy_context(id, &obj).await?;
+    copy_sql(&detail, &metas, dialect, &rows, format)
+}
+
+/// `INSERT` or `UPDATE` statements that recreate `rows` (as the grid holds them) of table
+/// `obj`, to copy to the clipboard; nothing is run. A row with a cell the page cut short
+/// is a `config` error, field `copy`.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_copy_sql(
+    state: State<'_, AppState>,
+    id: Uuid,
+    obj: ObjectRef,
+    rows: Vec<RowRef>,
+    format: CopySqlFormat,
+) -> Result<String, AppError> {
+    guard(data_copy_sql_impl(&state, id, obj, rows, format)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1421,5 +1573,90 @@ mod tests {
     #[test]
     fn sort_dir_serializes_snake_case() {
         assert_eq!(serde_json::to_string(&SortDir::Desc).unwrap(), "\"desc\"");
+    }
+
+    fn copy_detail() -> TableDetail {
+        let mut d = detail(Some(vec!["id"]));
+        d.columns = vec![
+            ColumnDetail {
+                nullable: false,
+                ..typed("id", "bigint")
+            },
+            typed("name", "varchar(50)"),
+        ];
+        d
+    }
+
+    fn copy_metas() -> Vec<ColumnMeta> {
+        use dnt_core::value::LogicalType;
+        let m = |n: &str, t: &str, l| ColumnMeta {
+            name: n.into(),
+            db_type: t.into(),
+            logical: l,
+            nullable: None,
+            origin_table: None,
+            origin_column: None,
+        };
+        vec![
+            m("id", "bigint", LogicalType::Integer),
+            m("name", "varchar", LogicalType::Text),
+        ]
+    }
+
+    fn copy_row(id: i64, name: Value) -> dnt_query::edit::RowRef {
+        dnt_query::edit::RowRef {
+            key: vec![("id".into(), Value::Int(id))],
+            // As the grid builds it: the key apart from the other cells.
+            original: vec![("name".into(), name)],
+            xmin: None,
+            loaded: vec![],
+        }
+    }
+
+    #[test]
+    fn data_copy_sql_insert_and_update() {
+        let (d, m) = (copy_detail(), copy_metas());
+        let rows = [
+            copy_row(1, Value::Text("it's".into())),
+            copy_row(2, Value::Null),
+        ];
+        let sql = copy_sql(&d, &m, Dialect::MYSQL, &rows, CopySqlFormat::Insert).unwrap();
+        assert!(sql.starts_with("INSERT INTO `shop`.`orders` (`id`, `name`) VALUES"));
+        assert!(sql.contains("(1, _utf8mb4'it\\'s'), (2, NULL)"), "{sql}");
+        let sql = copy_sql(&d, &m, Dialect::MYSQL, &rows, CopySqlFormat::Update).unwrap();
+        assert!(
+            sql.contains("UPDATE `shop`.`orders` SET `name` = _utf8mb4'it\\'s' WHERE `id` = 1"),
+            "{sql}"
+        );
+        assert!(sql.contains("SET `name` = NULL WHERE `id` = 2"), "{sql}");
+        assert_eq!(sql.matches("UPDATE").count(), 2);
+    }
+
+    #[test]
+    fn data_copy_sql_refuses_truncated_cells() {
+        let (d, m) = (copy_detail(), copy_metas());
+        let cut = Value::Text("x".repeat(dnt_core::value::PAGE_CELL_CAP));
+        for f in [CopySqlFormat::Insert, CopySqlFormat::Update] {
+            let e = copy_sql(&d, &m, Dialect::MYSQL, &[copy_row(1, cut.clone())], f).unwrap_err();
+            match e {
+                DbError::Config { message, .. } => assert_eq!(
+                    message,
+                    "Some cells are truncated; open them first or use Export."
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
+        let bytes = Value::Bytes {
+            len: 10,
+            preview: vec![1, 2],
+        };
+        assert!(copy_sql(
+            &d,
+            &m,
+            Dialect::MYSQL,
+            &[copy_row(1, bytes)],
+            CopySqlFormat::Insert
+        )
+        .is_err());
     }
 }

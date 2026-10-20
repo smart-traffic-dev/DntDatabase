@@ -787,6 +787,21 @@ impl SessionManager {
     /// Builds and stores the plan of `set` on connection `id` (see the module docs).
     /// Errors: `config` (field `edit`, `one_at_a_time` or `column:<name>`) for a set that
     /// cannot be planned, `not_open`, driver errors of the reads.
+    /// What `data_copy_sql` needs: the table's current detail, its columns' result types and
+    /// the data session's dialect.
+    pub async fn copy_context(
+        &self,
+        id: Uuid,
+        obj: &ObjectRef,
+    ) -> Result<(TableDetail, Vec<ColumnMeta>, Dialect), DbError> {
+        let cfg = self.repo.get(id)?;
+        check_object(cfg.kind, obj)?;
+        let rt = self.runtime(id)?;
+        let detail = self.table_detail_fresh(id, obj).await?;
+        let (metas, dialect, _) = self.edit_metas(&rt, &detail).await?;
+        Ok((detail, metas, dialect))
+    }
+
     pub async fn edit_preview(&self, id: Uuid, set: EditSet) -> Result<EditPreview, DbError> {
         if set.edits.len() > MAX_EDITS {
             return Err(config_error(

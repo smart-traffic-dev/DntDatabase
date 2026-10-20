@@ -44,7 +44,7 @@ import {
   type Engine,
 } from './gridCopy';
 import { findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
-import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize } from './gridSelection';
+import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, type SelectionLike } from './gridSelection';
 import { selectionStats } from './selectionStats';
 import { GridStats } from './GridStats';
 import { RecordView } from './RecordView';
@@ -314,7 +314,10 @@ export function ResultGrid({
   cellsCapped = false,
   extraCellMenu,
   editing,
+  onOpenValue,
 }: {
+  /** Opens the value of a cell in the data view's editor (Shift+Enter, "Open value editor"). */
+  onOpenValue?: (row: number, col: number) => void;
   /** The data view's editing hooks. */
   editing?: GridEditing;
   result: ResultSet;
@@ -328,7 +331,7 @@ export function ResultGrid({
   /** The page reports cells cut at 64 KB: copying text of that size as INSERT is refused. */
   cellsCapped?: boolean;
   /** Entries appended to the cell context menu. */
-  extraCellMenu?: (ctx: { row: number; col: number; value: unknown; column: string }) => MenuEntry[];
+  extraCellMenu?: (ctx: { row: number; col: number; value: unknown; column: string; selection?: SelectionLike }) => MenuEntry[];
 }) {
   const themeVersion = useThemeVersion();
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
@@ -605,6 +608,14 @@ export function ResultGrid({
       return;
     }
     if (!target.closest('.gt-canvas')) return;
+    if (onOpenValue && !mod && !e.altKey && e.shiftKey && e.key === 'Enter') {
+      const row = currentRow(selRef.current);
+      if (row !== null && row !== undefined) {
+        handled();
+        onOpenValue(row, currentCol(selRef.current) ?? 0);
+        return;
+      }
+    }
     if (editing?.onKey) {
       const row = currentRow(selRef.current);
       const col = currentCol(selRef.current);
@@ -669,13 +680,16 @@ export function ResultGrid({
     ];
     if (onColumn) items.push({ label: 'Copy column name', run: () => void copyWith('column', col) });
     items.push({ separator: true }, { label: 'View record', hint: 'Shift+Space', run: () => setRecord(true) });
+    if (onOpenValue && onColumn && row >= 0 && row < result.rowCount) {
+      items.push({ label: 'Open value editor', hint: 'Shift+Enter', run: () => onOpenValue(row, col) });
+    }
     if (onColumn && row >= 0 && row < result.rowCount && extraCellMenu) {
       const value = cellValue(result, row, col);
-      const extra = extraCellMenu({ row, col, value, column: result.columns[col]?.name ?? '' });
+      const extra = extraCellMenu({ row, col, value, column: result.columns[col]?.name ?? '', selection: selRef.current });
       if (extra.length > 0) items.push({ separator: true }, ...extra);
     }
     return items;
-  }, [menu, copyWith, extraCellMenu, result]);
+  }, [menu, copyWith, extraCellMenu, onOpenValue, result]);
 
   return (
     <div

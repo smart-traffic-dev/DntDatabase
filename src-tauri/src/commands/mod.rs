@@ -162,6 +162,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data::data_cell_fetch,
             data::data_cell_load_file,
             data::data_cell_save_file,
+            data::data_copy_sql,
             export::export_rows,
             export::export_table,
             export::export_query,

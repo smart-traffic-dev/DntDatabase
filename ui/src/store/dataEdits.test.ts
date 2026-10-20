@@ -46,6 +46,20 @@ beforeEach(() => {
   useDataEdits.getState().setInfo(TAB, object, info());
 });
 
+describe('dataEdits loaded values', () => {
+  it('a fetched original joins the staged row and later edits keep it', () => {
+    const p = page([1]);
+    const withToken = (column: string, token: string) => ({ ...rowRef(p, info(), 0)!, loaded: [[column, token]] as [string, string][] });
+    const id = rowIdOf(p, info(), 0)!;
+    edits().stage(TAB, { kind: 'update', row: id, ref: withToken('name', 'tok-a'), column: 'name', input: { kind: 'text', text: 'x' } });
+    // A second edit of the row captures nothing new but adds the token of its own column.
+    edits().stage(TAB, { kind: 'update', row: id, ref: withToken('qty', 'tok-b'), column: 'qty', input: { kind: 'text', text: '5' } });
+    edits().stage(TAB, { kind: 'update', row: id, ref: rowRef(p, info(), 0)!, column: 'qty', input: { kind: 'text', text: '6' } });
+    const u = staged().updates.get(id)!;
+    expect(u.ref.loaded).toEqual([['name', 'tok-a'], ['qty', 'tok-b']]);
+    expect(u.ref.original).toEqual(rowRef(p, info(), 0)!.original);
+  });
+});
 describe('dataEdits store', () => {
   it('stage_update_then_undo', () => {
     const p = page([1, 2]);
