@@ -23,3 +23,21 @@ export function openNewQuery(node?: TreeNode): string {
   const { connectionId, database } = queryTargetOf(from);
   return useQueryDocs.getState().newQuery(connectionId, database);
 }
+
+/** `SELECT * ... LIMIT 1000` of a table or view, identifiers quoted for the connection's engine. */
+export function selectTopSql(node: TreeNode, kind: 'mysql' | 'postgres'): string {
+  const ref = node.objectRef;
+  if (!ref) return '';
+  const q = kind === 'postgres' ? (s: string) => `"${s.replaceAll('"', '""')}"` : (s: string) => `\`${s.replaceAll('`', '``')}\``;
+  const table = kind === 'postgres' && ref.schema ? `${q(ref.schema)}.${q(ref.name)}` : `${q(ref.database)}.${q(ref.name)}`;
+  return `SELECT * FROM ${table} LIMIT 1000;`;
+}
+
+/** Opens a new query tab on a table / view node, with its first 1000 rows selected. */
+export function openSelectTop(node: TreeNode): string {
+  const id = openNewQuery(node);
+  const connectionId = connectionIdOf(node.id);
+  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
+  useQueryDocs.getState().update(id, { sql: selectTopSql(node, kind ?? 'mysql') });
+  return id;
+}

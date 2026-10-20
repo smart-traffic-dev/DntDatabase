@@ -29,6 +29,8 @@ export interface TreeRow {
   level: number;
   expandable: boolean;
   expanded: boolean;
+  /** While filtering: how many direct children match (the loaded ones; meta counts all). */
+  matchCount?: number;
 }
 
 export interface RowSource {
@@ -152,7 +154,8 @@ export function computeRows(s: RowSource): TreeRow[] {
       if (!node) continue;
       if (query && !subtreeMatches(id)) continue;
       const expanded = query ? hasMatchingChild(id) : s.expanded.has(id);
-      rows.push({ key: id, type: 'node', node, level, expandable: isExpandable(node), expanded });
+      const matchCount = query ? (s.childIds.get(id) ?? []).filter(subtreeMatches).length : undefined;
+      rows.push({ key: id, type: 'node', node, level, expandable: isExpandable(node), expanded, ...(matchCount === undefined ? {} : { matchCount }) });
       if (!expanded) continue;
       walk(id, level + 1);
       if (query) continue;

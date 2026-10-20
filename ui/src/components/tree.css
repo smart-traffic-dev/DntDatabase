@@ -1,0 +1,46 @@
+/* Connection tree: read-only marker, two-line error row, filter hint, menu separators. */
+.ro-tag {
+  flex: none;
+  font-size: var(--text-caption);
+  font-weight: 600;
+  color: var(--studio-fg-secondary);
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-sm);
+  padding: 0 3px;
+}
+
+.tree-row.placeholder.error {
+  white-space: normal;
+}
+
+.error-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.error-body .error-text,
+.error-body .error-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error-hint {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.tree-empty {
+  padding: 12px 10px;
+  color: var(--muted);
+  font-size: var(--text-callout);
+}
+
+.context-menu .menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--studio-hairline);
+}

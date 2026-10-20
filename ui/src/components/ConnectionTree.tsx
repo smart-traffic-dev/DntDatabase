@@ -2,7 +2,8 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
-import { computeRows } from '../store/treeModel';
+import { useConnections } from '../store/connections';
+import { computeRows, connectionIdOf } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
 import {
   ChevronIcon,
@@ -17,8 +18,12 @@ import {
 import { openObjectTab } from './openObject';
 import { ActionMenu, transferItems } from './ActionMenu';
 import { TreeContextMenu } from './TreeContextMenu';
+import './tree.css';
 
 export const ROW_HEIGHT = 26;
+/** An error row carries the message and its hint on two lines. */
+export const ERROR_ROW_HEIGHT = 42;
+const heightOf = (row: TreeRow | undefined) => (row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : ROW_HEIGHT);
 
 const domId = (key: string) => `tn-${encodeURIComponent(key)}`;
 
@@ -59,6 +64,8 @@ interface RowProps {
 
 function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
   const { node } = row;
+  const connectionId = node.kind === 'connection' ? connectionIdOf(node.id) : undefined;
+  const readOnly = useConnections((s) => (connectionId ? s.summaries.get(connectionId)?.config.read_only === true : false));
   const indent = { paddingLeft: 6 + (row.level - 1) * 14 };
 
   if (row.type === 'loading') {
@@ -76,8 +83,9 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
     return (
       <div role="treeitem" aria-level={row.level} aria-disabled="true" aria-selected="false" data-testid="tree-row" className="tree-row placeholder error" style={{ ...style, ...indent }}>
         <span className="chev" />
-        <span className="error-text" title={error?.detail ?? error?.hint ?? undefined}>
-          {error?.message}
+        <span className="error-body" title={error?.detail ?? undefined}>
+          <span className="error-text">{error?.message}</span>
+          {error?.hint && <span className="error-hint">{error.hint}</span>}
         </span>
         <button
           type="button"
@@ -95,6 +103,9 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
   }
 
   const draggable = node.kind === 'group' || node.kind === 'connection';
+  // While filtering only loaded children are searched: show "matching / total" for a folder.
+  const countMeta =
+    row.matchCount && node.meta && /^\d+$/.test(node.meta) ? `${row.matchCount} / ${node.meta}` : node.meta;
   return (
     <div
       id={domId(row.key)}
@@ -138,10 +149,17 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       ) : (
         <NodeIcon node={node} />
       )}
-      <span className={`label${node.envTag === 'production' ? ' env-production' : ''}`}>{node.label}</span>
+      <span className={`label${node.envTag === 'production' ? ' env-production' : ''}`} title={node.label}>
+        {node.label}
+      </span>
+      {readOnly && (
+        <span className="ro-tag" title="Read-only connection">
+          RO
+        </span>
+      )}
       {node.ssh && <span className="ssh-tag">SSH</span>}
       {node.loading && <span className="spinner" aria-hidden="true" />}
-      {node.meta && <span className="meta">{node.meta}</span>}
+      {node.meta && <span className="meta">{countMeta}</span>}
     </div>
   );
 }
@@ -158,7 +176,7 @@ export function ConnectionTree() {
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
+    estimateSize: (index) => heightOf(rows[index]),
     overscan: 10,
     getItemKey: (index) => rows[index]?.key ?? index,
   });
@@ -257,6 +275,9 @@ export function ConnectionTree() {
         void useTree.getState().move(drag, null);
       }}
     >
+      {filter.trim() && rows.length === 0 && (
+        <div className="tree-empty" role="status">No objects match '{filter.trim()}' (loaded objects only)</div>
+      )}
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((item) => {
           const row = rows[item.index];
@@ -267,7 +288,7 @@ export function ConnectionTree() {
               row={row}
               selected={row.type === 'node' && row.key === selectedId}
               dropTarget={dropId === row.key}
-              style={{ position: 'absolute', top: 0, left: 0, right: 0, height: ROW_HEIGHT, transform: `translateY(${item.start}px)` }}
+              style={{ position: 'absolute', top: 0, left: 0, right: 0, height: item.size, transform: `translateY(${item.start}px)` }}
               onSelect={select}
               onToggle={(node) => useTree.getState().toggle(node.id)}
               onOpen={openObjectTab}

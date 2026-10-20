@@ -1,12 +1,15 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDialogs } from '../store/dialogs';
+import { useQueryDocs } from '../store/queryTabs';
 import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
 import {
+  appError,
   calls,
   callsOf,
+  config,
   fail,
   ids,
   mockBackend,
@@ -290,18 +293,118 @@ describe('ConnectionTree', () => {
     await user.pointer({ keys: '[MouseRight]', target: row('shop-prod') });
     const menu = screen.getByRole('menu');
     expect(within(menu).getAllByRole('menuitem').map((i) => i.textContent)).toEqual([
-      'Open',
+      'OpenEnter',
       'New query',
       'Edit',
       'Duplicate',
-      'Delete',
       'New group',
       'RefreshF5',
       'Copy name',
+      'Delete',
     ]);
+    // Groups of items are divided; Delete is last.
+    expect(within(menu).getAllByRole('separator').length).toBeGreaterThanOrEqual(2);
 
     await user.click(within(menu).getByRole('menuitem', { name: 'Edit' }));
     expect(useDialogs.getState().request).toEqual({ kind: 'editConnection', id: ids.prod });
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+  });
+
+  it('moves through the menu with the arrow keys, Home and End', async () => {
+    backend();
+    await renderTree();
+    const user = userEvent.setup();
+
+    await user.pointer({ keys: '[MouseRight]', target: row('shop-prod') });
+    const items = within(screen.getByRole('menu')).getAllByRole('menuitem');
+    expect(items[0]).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(items[1]).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(items[items.length - 1]).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(items[0]).toHaveFocus();
+    await user.keyboard('{ArrowUp}');
+    expect(items[items.length - 1]).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(items[0]).toHaveFocus();
+  });
+
+  it('clamps the menu into the viewport', async () => {
+    backend();
+    await renderTree();
+    const user = userEvent.setup();
+    Object.defineProperty(window, 'innerWidth', { value: 300, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { value: 200, configurable: true });
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      width: 180, height: 120, top: 0, left: 0, right: 180, bottom: 120, x: 0, y: 0, toJSON: () => ({}),
+    });
+    await user.pointer({ keys: '[MouseRight]', target: row('shop-prod'), coords: { clientX: 290, clientY: 190 } });
+    const menu = screen.getByRole('menu');
+    await waitFor(() => expect(parseInt(menu.style.left, 10)).toBeLessThanOrEqual(300 - 180));
+    expect(parseInt(menu.style.top, 10)).toBeLessThanOrEqual(200 - 120);
+    rect.mockRestore();
+  });
+
+  it('a table menu offers a SELECT of the first 1000 rows in a new query tab', async () => {
+    backend();
+    await renderTree();
+    await expandPath(prodNode, dbNode, tablesNode);
+    const user = userEvent.setup();
+
+    await user.pointer({ keys: '[MouseRight]', target: row('orders') });
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: /Select top 1000/ }));
+    const docs = [...useQueryDocs.getState().docs.values()];
+    expect(docs.at(-1)?.sql).toBe('SELECT * FROM `shop`.`orders` LIMIT 1000;');
+  });
+
+  it('marks a read-only connection in the tree', async () => {
+    backend({
+      list_tree: () => {
+        const t = sampleTree();
+        t.connections[0] = config(ids.prod, 'shop-prod', { group_id: ids.groupA, read_only: true });
+        return t;
+      },
+    });
+    await renderTree();
+    expect(within(row('shop-prod')).getByText('RO')).toHaveAttribute('title', 'Read-only connection');
+    expect(within(row('analytics')).queryByText('RO')).not.toBeInTheDocument();
+  });
+
+  it('shows the full name as a tooltip on the label', async () => {
+    backend();
+    await renderTree();
+    expect(within(row('shop-prod')).getByText('shop-prod')).toHaveAttribute('title', 'shop-prod');
+  });
+
+  it('says so when the filter matches nothing', async () => {
+    backend();
+    await renderTree();
+    act(() => useTree.getState().setFilter('zzz'));
+    expect(await screen.findByText("No objects match 'zzz' (loaded objects only)")).toBeInTheDocument();
+    act(() => useTree.getState().setFilter(''));
+    expect(screen.queryByText(/No objects match/)).not.toBeInTheDocument();
+  });
+
+  it('shows matches / total on a filtered folder', async () => {
+    backend();
+    await renderTree();
+    await expandPath(prodNode, dbNode, tablesNode);
+    expect(row('Tables')).toHaveTextContent('3');
+    act(() => useTree.getState().setFilter('ord'));
+    await waitFor(() => expect(row('Tables')).toHaveTextContent('1 / 3'));
+  });
+
+  it('shows the hint of an error under its message', async () => {
+    backend({
+      list_databases: () => {
+        throw appError('connect_failed', 'Could not connect to the database server.', { hint: 'Check the host and port.' });
+      },
+    });
+    await renderTree();
+    const user = userEvent.setup();
+    await user.dblClick(row('shop-prod'));
+    expect(await screen.findByText('Could not connect to the database server.')).toBeInTheDocument();
+    expect(screen.getByText('Check the host and port.')).toBeInTheDocument();
   });
 });
