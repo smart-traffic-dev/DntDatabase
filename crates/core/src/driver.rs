@@ -166,6 +166,13 @@ pub trait Session: Send + Sync {
     fn in_transaction(&self) -> bool {
         self.tx_state() != TxState::Idle
     }
+    /// How many times this session replaced its connection with a fresh one, in all.
+    /// The query layer compares it around each statement to tell the user about
+    /// reconnects that were otherwise silent (a statement that succeeded on a new
+    /// connection). Default: 0 (a session that never reconnects).
+    fn reconnects(&self) -> u64 {
+        0
+    }
     fn cancel_handle(&self) -> CancelHandle;
     /// Session types implement `Introspector` themselves and return `self`.
     fn introspector(&self) -> &dyn Introspector;

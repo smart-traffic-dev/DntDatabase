@@ -539,12 +539,15 @@ async fn reconnects_when_idle_connection_killed() {
         let s = connect(t).await;
         run(&s, "SET search_path TO sales, public").await.unwrap();
         let pid = backend_pid(&s).await;
+        assert_eq!(s.reconnects(), 0, "{t:?}");
         kill(t, pid).await;
         let (_, c) = run(&s, "select 1")
             .await
             .unwrap_or_else(|e| panic!("{t:?}: {e}"));
         assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
         assert_ne!(backend_pid(&s).await, pid, "{t:?}: same backend");
+        // The silent reconnect is counted, for the query layer to report.
+        assert_eq!(s.reconnects(), 1, "{t:?}");
         // The last `SET search_path` survives the reconnect ...
         let (_, c) = run(&s, "SHOW search_path").await.unwrap();
         assert_eq!(scalar(&c), Value::Text("sales, public".into()), "{t:?}");

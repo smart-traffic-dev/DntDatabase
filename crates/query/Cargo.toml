@@ -13,6 +13,8 @@ serde_json.workspace = true
 specta.workspace = true
 
 [dev-dependencies]
+# The scripted FakeSession of tests/run.rs.
+async-trait.workspace = true
 # Explain fixture capture only (tests/explain_capture.rs).
 dnt-driver-mysql.workspace = true
 dnt-driver-pg.workspace = true

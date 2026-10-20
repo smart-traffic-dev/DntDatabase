@@ -759,12 +759,15 @@ async fn reconnects_when_idle_connection_killed() {
         let s = connect(t).await;
         run(&s, "USE information_schema").await.unwrap();
         let id = connection_id(&s).await;
+        assert_eq!(s.reconnects(), 0, "{t:?}");
         kill(t, id).await;
         let (_, c) = run(&s, "select 1")
             .await
             .unwrap_or_else(|e| panic!("{t:?}: {e}"));
         assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
         assert_ne!(connection_id(&s).await, id, "{t:?}: same connection");
+        // The silent reconnect is counted, for the query layer to report.
+        assert_eq!(s.reconnects(), 1, "{t:?}");
         // The last `USE` survives the reconnect.
         let (_, c) = run(&s, "SELECT DATABASE()").await.unwrap();
         assert_eq!(

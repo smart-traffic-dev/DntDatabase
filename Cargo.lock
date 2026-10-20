@@ -1453,6 +1453,7 @@ dependencies = [
 name = "dnt-query"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "dnt-core",
  "dnt-driver-mysql",
  "dnt-driver-pg",

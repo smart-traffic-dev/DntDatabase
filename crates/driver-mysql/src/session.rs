@@ -18,7 +18,7 @@ use dnt_core::tx::{next_autocommit_off, next_tx_state, StmtResult, TxState};
 use dnt_core::value::ColumnMeta;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, DriverError, Error as MyError, Opts};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{MappedMutexGuard, Mutex, MutexGuard};
@@ -89,6 +89,8 @@ pub struct MySqlSession {
     /// (see [`session_effect`]); cleared on a fresh connection. While set, a lost
     /// read is not silently re-run and `ConnectionLost` says the state was reset.
     session_custom: AtomicBool,
+    /// Successful [`MySqlSession::reconnect`]s ([`Session::reconnects`]).
+    reconnects: AtomicU64,
 }
 
 /// How one statement attempt failed.
@@ -142,6 +144,7 @@ impl MySqlSession {
             cancel,
             last_db: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
+            reconnects: AtomicU64::new(0),
         }
     }
 
@@ -304,6 +307,7 @@ impl MySqlSession {
         self.cancel.set_connection(fresh.id());
         self.session_custom.store(false, Ordering::SeqCst);
         *slot = Some(fresh);
+        self.reconnects.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -891,6 +895,10 @@ impl Session for MySqlSession {
     /// MySQL with the session's current `sql_mode` lexing flags.
     fn dialect(&self) -> Dialect {
         Dialect::MySql(self.mode())
+    }
+
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
     }
 
     fn cancel_handle(&self) -> CancelHandle {

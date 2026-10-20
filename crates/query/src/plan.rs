@@ -132,7 +132,7 @@ pub fn statement_ranges(text: &str, dialect: Dialect) -> Vec<(u32, u32)> {
 /// `split`, with each statement's leading comments dropped: a comment above a
 /// statement is the gap between statements for the cursor rule and the editor
 /// highlight, and is not sent to the server.
-fn significant(source: &str, dialect: Dialect) -> Vec<Statement> {
+pub(crate) fn significant(source: &str, dialect: Dialect) -> Vec<Statement> {
     let mut stmts = split(source, dialect);
     for s in &mut stmts {
         let lead = leading_blank_len(&s.text, dialect);

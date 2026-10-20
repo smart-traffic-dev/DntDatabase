@@ -12,7 +12,7 @@ use dnt_core::sql::{leading_keywords, session_effect, Dialect, StatementKind, Tx
 use dnt_core::tx::{next_tx_state, StmtResult, TxState};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::StreamExt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -65,6 +65,8 @@ pub struct PgSession {
     /// (see [`session_effect`]); cleared when the connection is replaced. While
     /// set, a lost read is not silently re-run and `ConnectionLost` says what was reset.
     session_custom: AtomicBool,
+    /// Successful [`PgSession::reconnect`]s ([`Session::reconnects`]).
+    reconnects: AtomicU64,
 }
 
 /// How one statement attempt failed.
@@ -106,6 +108,7 @@ impl PgSession {
             cancel,
             search_path: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
+            reconnects: AtomicU64::new(0),
         }
     }
 
@@ -217,6 +220,7 @@ impl PgSession {
         // The old socket may be stuck behind a statement that ignored the cancel: drop it.
         let old = std::mem::replace(conn, fresh);
         old.task.abort();
+        self.reconnects.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
@@ -789,6 +793,10 @@ impl Session for PgSession {
 
     fn dialect(&self) -> Dialect {
         Dialect::Postgres
+    }
+
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
     }
 
     fn cancel_handle(&self) -> CancelHandle {
