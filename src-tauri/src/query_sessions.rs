@@ -1072,25 +1072,24 @@ impl SessionManager {
         }
         let session = ts.session.as_deref().ok_or((DbError::PlanExpired, None))?;
         still_one_read(&stmt, session.dialect(), &cfg).map_err(early)?;
-        if self.runs.get(run_id).is_some() {
-            return Err(early(config_error("run_id", "this run id is in use")));
-        }
 
         let cancel = RunCancel::new(session.cancel_handle());
         let finished = Arc::new(AtomicBool::new(false));
         // An export has no event stream: its rows go to the file.
         let emit: EventSink = Arc::new(|_| true);
-        self.runs.insert(
-            run_id,
-            RunEntry {
-                tab: tab.clone(),
-                conn,
-                cancel: cancel.clone(),
-                flags: Arc::new(RunFlags::default()),
-                emit,
-                finished: Arc::clone(&finished),
-            },
-        );
+        self.runs
+            .try_insert(
+                run_id,
+                RunEntry {
+                    tab: tab.clone(),
+                    conn,
+                    cancel: cancel.clone(),
+                    flags: Arc::new(RunFlags::default()),
+                    emit,
+                    finished: Arc::clone(&finished),
+                },
+            )
+            .map_err(early)?;
         let exec = ExecOptions {
             max_rows: usize::MAX,
             batch_size: RUN_BATCH_SIZE,
@@ -1254,8 +1253,19 @@ impl Runs {
         lock(&self.0).get(&id).cloned()
     }
 
-    fn insert(&self, id: Uuid, entry: RunEntry) {
-        lock(&self.0).insert(id, entry);
+    /// Registers run `id`: the check and the insert happen under one lock, so two calls
+    /// with the same id cannot both register it. An id in use is refused (`config`,
+    /// field `run_id`) and the registered run is left alone.
+    fn try_insert(&self, id: Uuid, entry: RunEntry) -> Result<(), DbError> {
+        match lock(&self.0).entry(id) {
+            std::collections::hash_map::Entry::Occupied(_) => {
+                Err(config_error("run_id", "this run id is in use"))
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(entry);
+                Ok(())
+            }
+        }
     }
 
     fn remove(&self, id: Uuid) {
@@ -1578,7 +1588,7 @@ impl SessionManager {
         let emit = stop_when_undelivered(emit, cancel.clone(), Arc::clone(&finished));
         let flags = Arc::new(RunFlags::default());
         let run_id = Uuid::new_v4();
-        self.runs.insert(
+        self.runs.try_insert(
             run_id,
             RunEntry {
                 tab: tab.clone(),
@@ -1588,7 +1598,7 @@ impl SessionManager {
                 emit: Arc::clone(&emit),
                 finished: Arc::clone(&finished),
             },
-        );
+        )?;
         let task = RunTask {
             run_id,
             tab,
@@ -1729,5 +1739,55 @@ mod tests {
         let a: TxAction = serde_json::from_str("\"Rollback\"").unwrap();
         assert_eq!(a, TxAction::Rollback);
         assert_eq!(TxAction::Commit.sql(), "COMMIT");
+    }
+
+    struct NoCancel;
+
+    #[async_trait::async_trait]
+    impl dnt_core::driver::Canceller for NoCancel {
+        async fn cancel(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn entry(tab: &str) -> RunEntry {
+        RunEntry {
+            tab: tab.into(),
+            conn: Uuid::nil(),
+            cancel: RunCancel::new(Arc::new(NoCancel)),
+            flags: Arc::new(RunFlags::default()),
+            emit: Arc::new(|_| true),
+            finished: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn a_run_id_registers_once() {
+        let runs = Runs::default();
+        let id = Uuid::new_v4();
+        runs.try_insert(id, entry("first")).unwrap();
+        let err = runs.try_insert(id, entry("second")).unwrap_err();
+        assert!(
+            matches!(&err, DbError::Config { field: Some(f), .. } if f == "run_id"),
+            "{err:?}"
+        );
+        // The registered run is untouched.
+        assert_eq!(runs.get(id).unwrap().tab, "first");
+
+        // Racing registrations of one id: exactly one wins.
+        let id = Uuid::new_v4();
+        let wins: usize = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..16)
+                .map(|i| {
+                    let runs = runs.clone();
+                    s.spawn(move || runs.try_insert(id, entry(&format!("t{i}"))).is_ok())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| usize::from(h.join().unwrap()))
+                .sum()
+        });
+        assert_eq!(wins, 1);
     }
 }
