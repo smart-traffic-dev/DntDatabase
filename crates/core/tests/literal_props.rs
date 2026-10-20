@@ -54,6 +54,8 @@ const DB_TYPES: &[(&str, bool)] = &[
     ("OrderStatus", true),
     ("\"My Schema\".\"Weird\"\"T\"", true),
     ("\"a'b;--\"", true),
+    ("\"char\"", true),
+    ("public.\"int\"", true),
     ("đơn_hàng", true),
     ("int4[]", true),
     ("numeric(40,10)", true),

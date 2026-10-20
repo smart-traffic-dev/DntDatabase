@@ -276,7 +276,7 @@ const PG_MULTI_WORD_TYPES: &[(&str, &str)] = &[
 /// spliced in as free text (`db_type` may be a raw catalog name such as `bool or true`).
 /// Accepted: `name` or `schema.name`, each part an unquoted identifier (emitted as is
 /// when it is a lower-case plain identifier, else through `quote_ident`) or a
-/// double-quoted one (`""` un-doubled, then re-quoted); or one of
+/// double-quoted one (`""` un-doubled, then always re-quoted); or one of
 /// [`PG_MULTI_WORD_TYPES`]. Either may be followed by a type modifier of digits and
 /// commas in parentheses and any number of `[]`. Anything else is `Unsupported`.
 fn pg_cast_target(col: &ColumnTarget) -> Result<String, BuildError> {
@@ -306,18 +306,24 @@ fn render_pg_type(t: &str) -> Option<String> {
     let (typmod, rest) = take_typmod(rest);
     let arrays = take_arrays(rest)?;
     let mut out = render_pg_part(&first);
-    if let Some(second) = second {
+    if let Some(second) = &second {
         out.push('.');
-        out.push_str(&render_pg_part(&second));
+        out.push_str(&render_pg_part(second));
     }
     out.push_str(typmod);
     out.push_str(&arrays);
     Some(out)
 }
 
+/// One parsed name part of a type: its text and whether the input quoted it.
+struct NamePart {
+    name: String,
+    quoted: bool,
+}
+
 /// One name part at the start of `s`: `"…"` (with `""` un-doubled) or an unquoted
-/// identifier. Returns the name and what follows it.
-fn take_ident_part(s: &str) -> Option<(String, &str)> {
+/// identifier. Returns the part and what follows it.
+fn take_ident_part(s: &str) -> Option<(NamePart, &str)> {
     if let Some(body) = s.strip_prefix('"') {
         let mut name = String::new();
         let mut chars = body.char_indices();
@@ -327,8 +333,10 @@ fn take_ident_part(s: &str) -> Option<(String, &str)> {
                     chars.next();
                     name.push('"');
                 } else {
-                    return (!name.is_empty() && !name.contains('\0'))
-                        .then(|| (name, &body[i + 1..]));
+                    return (!name.is_empty() && !name.contains('\0')).then(|| {
+                        let part = NamePart { name, quoted: true };
+                        (part, &body[i + 1..])
+                    });
                 }
             } else {
                 name.push(c);
@@ -344,14 +352,23 @@ fn take_ident_part(s: &str) -> Option<(String, &str)> {
     let end = chars
         .find(|&(_, c)| !(c.is_alphanumeric() || c == '_' || c == '$'))
         .map_or(s.len(), |(i, _)| i);
-    Some((s[..end].to_string(), &s[end..]))
+    let part = NamePart {
+        name: s[..end].to_string(),
+        quoted: false,
+    };
+    Some((part, &s[end..]))
 }
 
-fn render_pg_part(name: &str) -> String {
+/// A part quoted in the input is always re-quoted (`"char"` is not `char`, `"int"` is
+/// not `int`); an unquoted one is emitted bare only when it is a lower-case plain
+/// identifier.
+fn render_pg_part(part: &NamePart) -> String {
+    let name = part.name.as_str();
     let mut chars = name.chars();
-    let plain = chars
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+    let plain = !part.quoted
+        && chars
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$');
     if plain {
         name.to_string()
@@ -567,7 +584,11 @@ mod tests {
                 "\"My Schema\".\"Weird\"\"T\"",
                 "\"My Schema\".\"Weird\"\"T\"",
             ),
-            ("\"order_status\"", "order_status"),
+            // A quoted part stays quoted, even when it looks plain or is a keyword.
+            ("\"order_status\"", "\"order_status\""),
+            ("\"char\"", "\"char\""),
+            ("public.\"int\"", "public.\"int\""),
+            ("\"user\"", "\"user\""),
             ("public.order_status", "public.order_status"),
             ("Sales.order_status", "\"Sales\".order_status"),
             ("đơn_hàng", "\"đơn_hàng\""),
