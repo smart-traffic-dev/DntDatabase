@@ -27,7 +27,7 @@ use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
 use dnt_tunnel::KnownHosts;
 use dntdatabase::commands::settings::CONFIRM_UNBOUNDED_KEY;
 use dntdatabase::query_sessions::{
-    tx_state_after, with_tx_state, PlanView, TxAction, PREVIEW_CHARS,
+    tx_state_after, with_tx_state, PlanView, TabTxInfo, TxAction, TxMode, PREVIEW_CHARS,
 };
 use dntdatabase::run_events::{EventSink, RunOptions};
 use dntdatabase::session_manager::SessionManager;
@@ -61,6 +61,8 @@ struct Log {
     cancelled: AtomicBool,
     /// While set, `COMMIT` / `ROLLBACK` lose the connection.
     lose_on_tx: AtomicBool,
+    /// While set, `COMMIT` / `ROLLBACK` time out (the session stays).
+    timeout_on_tx: AtomicBool,
     /// Calls of the session's cancel handle.
     cancel_calls: AtomicUsize,
     /// Set once a `FLAKY` statement lost its connection (the next one succeeds).
@@ -217,13 +219,25 @@ impl Session for FakeSession {
         if upper == "COMMIT" || upper == "ROLLBACK" {
             if self.log.lose_on_tx.load(Ordering::SeqCst) {
                 self.log.set_tx(TxState::Idle);
+                // A driver that does not know the COMMIT went out: the session layer
+                // must still report the outcome as unknown.
                 return Err(DbError::ConnectionLost {
                     was_in_tx: true,
-                    outcome_unknown: upper == "COMMIT",
+                    outcome_unknown: false,
                     message: "server gone".into(),
                 });
             }
+            if self.log.timeout_on_tx.load(Ordering::SeqCst) {
+                return Err(DbError::Timeout {
+                    stage: ConnectStage::Execute,
+                    outcome_unknown: false,
+                    was_in_tx: true,
+                });
+            }
             self.log.set_tx(TxState::Idle);
+        }
+        if upper == "BEGIN" || upper == "START TRANSACTION" {
+            self.log.set_tx(TxState::Active);
         }
         let ok = |summary: ResultSummary| {
             Ok(StmtOutcome {
@@ -2852,4 +2866,223 @@ async fn an_export_refuses_a_run_id_in_use() {
         !f.log.executed().iter().any(|s| s == "SELECT rows_2"),
         "nothing was sent for the refused export"
     );
+}
+
+// ---- Manual commit mode (Task 13, spec §4.2d–e) ----
+
+/// The statements sent, without PostgreSQL's `search_path` probe after a run.
+fn sent(f: &Fixture) -> Vec<String> {
+    f.log
+        .executed()
+        .into_iter()
+        .filter(|s| !s.contains("current_schemas"))
+        .collect()
+}
+
+async fn manual(f: &Fixture, tab: &str) {
+    assert_eq!(
+        f.sm.query_tx_mode(tab, TxMode::Manual).await.unwrap(),
+        TxState::Idle
+    );
+}
+
+#[tokio::test]
+async fn manual_mode_begins_before_first_write() {
+    for (kind, begin) in [
+        (DbKind::MySql, "START TRANSACTION"),
+        (DbKind::Postgres, "BEGIN"),
+    ] {
+        let f = fixture(kind);
+        let id = open(&f, config(kind)).await;
+        manual(&f, "t1").await;
+        let info = f.sm.query_tx_info("t1").await.unwrap();
+        assert_eq!(
+            info,
+            TabTxInfo {
+                state: TxState::Idle,
+                since_ms: None,
+                statements: 0
+            }
+        );
+        let events = run_text(&f, id, "SELECT 1; UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+        assert_eq!(events.of("done")[0]["stop"], Json::Null, "{kind:?}");
+        assert_eq!(
+            sent(&f),
+            [begin, "SELECT 1", "UPDATE t SET a = 1 WHERE id = 1"],
+            "{kind:?}: the transaction begins before the run's first statement"
+        );
+        let info = f.sm.query_tx_info("t1").await.unwrap();
+        assert_eq!(info.state, TxState::Active, "{kind:?}");
+        assert_eq!(info.statements, 2, "{kind:?}");
+        assert!(info.since_ms.is_some_and(|ms| ms > 0.0), "{kind:?}");
+
+        // In the open transaction: no second BEGIN, the count goes on.
+        run_text(&f, id, "DELETE FROM t WHERE id = 2", opts()).await;
+        assert_eq!(sent(&f).len(), 4, "{kind:?}");
+        let later = f.sm.query_tx_info("t1").await.unwrap();
+        assert_eq!(later.statements, 3, "{kind:?}");
+        assert_eq!(later.since_ms, info.since_ms, "{kind:?}");
+
+        // Commit ends it; the next write begins again.
+        assert_eq!(
+            f.sm.query_tx("t1", TxAction::Commit).await.unwrap(),
+            TxState::Idle
+        );
+        let info = f.sm.query_tx_info("t1").await.unwrap();
+        assert_eq!(
+            (info.state, info.since_ms, info.statements),
+            (TxState::Idle, None, 0)
+        );
+        run_text(&f, id, "INSERT INTO t VALUES (1)", opts()).await;
+        assert_eq!(
+            sent(&f)[5..],
+            [begin, "INSERT INTO t VALUES (1)"],
+            "{kind:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_mode_keeps_the_users_transaction_control() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(&f, config(DbKind::Postgres)).await;
+    manual(&f, "t1").await;
+    // The user's own BEGIN opens the transaction: nothing is added.
+    run_text(
+        &f,
+        id,
+        "SELECT 1; BEGIN; UPDATE t SET a = 1 WHERE id = 1",
+        opts(),
+    )
+    .await;
+    assert_eq!(
+        sent(&f),
+        ["SELECT 1", "BEGIN", "UPDATE t SET a = 1 WHERE id = 1"]
+    );
+    let info = f.sm.query_tx_info("t1").await.unwrap();
+    assert_eq!(info.state, TxState::Active);
+    assert_eq!(info.statements, 1, "counted from the user's BEGIN");
+}
+
+#[tokio::test]
+async fn manual_mode_reads_do_not_begin() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    run_text(&f, id, "SELECT 1; SELECT 2", opts()).await;
+    assert_eq!(sent(&f), ["SELECT 1", "SELECT 2"]);
+    assert_eq!(f.sm.query_tx_info("t1").await.unwrap().state, TxState::Idle);
+    // Auto mode (the default) never begins.
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+    assert_eq!(sent(&f), ["UPDATE t SET a = 1 WHERE id = 1"]);
+}
+
+#[tokio::test]
+async fn switching_to_auto_with_open_tx_fails() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    // A tab without a session takes either mode.
+    manual(&f, "t1").await;
+    run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+    let err = f.sm.query_tx_mode("t1", TxMode::Auto).await.unwrap_err();
+    assert!(matches!(err, DbError::TransactionOpen), "{err:?}");
+    // Still Manual: the next write does not begin again, nor autocommit.
+    run_text(&f, id, "UPDATE t SET a = 2 WHERE id = 1", opts()).await;
+    assert_eq!(sent(&f).len(), 3);
+    f.sm.query_tx("t1", TxAction::Rollback).await.unwrap();
+    assert_eq!(
+        f.sm.query_tx_mode("t1", TxMode::Auto).await.unwrap(),
+        TxState::Idle
+    );
+    run_text(&f, id, "UPDATE t SET a = 3 WHERE id = 1", opts()).await;
+    assert_eq!(
+        sent(&f).last().map(String::as_str),
+        Some("UPDATE t SET a = 3 WHERE id = 1")
+    );
+    assert_eq!(sent(&f).len(), 5, "auto mode adds no BEGIN");
+    // Bad tab ids are refused.
+    let err = f.sm.query_tx_mode("", TxMode::Manual).await.unwrap_err();
+    assert_eq!(kind(err), "config");
+}
+
+#[tokio::test]
+async fn mysql_ddl_in_manual_tx_is_flagged_implicit_commit() {
+    let text = "UPDATE t SET a = 1 WHERE id = 1; CREATE TABLE u (a INT); SELECT 1";
+    for (kind, mode, want) in [
+        (DbKind::MySql, TxMode::Manual, [false, true, false]),
+        (DbKind::MySql, TxMode::Auto, [false, false, false]),
+        // PostgreSQL DDL is transactional.
+        (DbKind::Postgres, TxMode::Manual, [false, false, false]),
+    ] {
+        let f = fixture(kind);
+        let id = open(&f, config(kind)).await;
+        f.sm.query_tx_mode("t1", mode).await.unwrap();
+        let view = plan(&f, "t1", id, None, text).await.unwrap();
+        let got: Vec<bool> = view.stmts.iter().map(|s| s.implicit_commit).collect();
+        assert_eq!(got, want, "{kind:?} {mode:?}");
+        let (_, _, p) = f.sm.test_take_plan(view.plan_id).unwrap();
+        let got: Vec<bool> = p.stmts.iter().map(|s| s.implicit_commit).collect();
+        assert_eq!(got, want, "{kind:?} {mode:?}: on the stored plan too");
+    }
+    // In Auto mode, a transaction the user opened is committed by DDL too.
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    let view = plan(&f, "t1", id, None, "DROP TABLE u").await.unwrap();
+    assert!(view.stmts[0].implicit_commit);
+}
+
+#[tokio::test]
+async fn commit_lost_reports_outcome_unknown() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+
+    // COMMIT sent, connection lost: it may have committed.
+    f.log.set_tx(TxState::Active);
+    f.log.lose_on_tx.store(true, Ordering::SeqCst);
+    let err =
+        f.sm.query_tx_reported("t1", TxAction::Commit)
+            .await
+            .unwrap_err();
+    assert_eq!(err.kind, "connection_lost");
+    assert!(err.outcome_unknown, "{err:?}");
+    assert!(!err.retryable);
+    assert!(!err.message.contains("rolled back"), "{}", err.message);
+    assert_eq!(err.tx_state.as_deref(), Some("idle"));
+
+    // ROLLBACK lost: the server rolls back anyway; the outcome is known.
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    let err =
+        f.sm.query_tx_reported("t1", TxAction::Rollback)
+            .await
+            .unwrap_err();
+    assert_eq!(err.kind, "connection_lost");
+    assert!(!err.outcome_unknown, "{err:?}");
+    f.log.lose_on_tx.store(false, Ordering::SeqCst);
+
+    // COMMIT timed out: unknown as well.
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    f.log.timeout_on_tx.store(true, Ordering::SeqCst);
+    let err =
+        f.sm.query_tx_reported("t1", TxAction::Commit)
+            .await
+            .unwrap_err();
+    assert_eq!(err.kind, "timeout");
+    assert!(err.outcome_unknown, "{err:?}");
+}
+
+#[tokio::test]
+async fn closing_a_tab_forgets_its_mode() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    f.sm.query_close_tab("t1", false).await.unwrap();
+    run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+    assert_eq!(sent(&f), ["UPDATE t SET a = 1 WHERE id = 1"]);
 }

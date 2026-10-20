@@ -910,6 +910,7 @@ fn stmt(range: (u32, u32), text: &str) -> PlannedStmt {
         drops: Vec::new(),
         confirm_name: None,
         estimate: None,
+        implicit_commit: false,
     }
 }
 

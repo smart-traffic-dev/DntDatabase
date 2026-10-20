@@ -18,6 +18,9 @@
 //!   (the run still ends with `done`).
 //! - An export of all rows of a result (`query_export`) runs its statement again on the
 //!   tab's session as a run of the tab (no events: its rows go to a file).
+//! - A tab commits in [`TxMode::Auto`] or [`TxMode::Manual`] (`query_tx_mode`, spec
+//!   §4.2e): in Manual, a run that changes something starts by beginning a transaction
+//!   on the tab's session when none is open; the user ends it with `query_tx`.
 
 use crate::commands::settings::saved_confirm_unbounded;
 use crate::run_events::{
@@ -35,9 +38,10 @@ use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_with, parse_estimate,
-    plan, run, DropTarget, ExplainFormat, GuardCtx, PlannedStmt, RowEstimate, RunCancel, RunReport,
-    ScriptPlan, StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict, WriteOp,
+    confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_with,
+    mark_implicit_commits, parse_estimate, plan, run, DropTarget, ExplainFormat, GuardCtx,
+    PlannedStmt, RowEstimate, RunCancel, RunReport, ScriptPlan, StmtKindLabel, StopReason, Target,
+    UnboundedWrite, Verdict, WriteOp,
 };
 use dnt_store::repo::ConnectionRepo;
 use futures_util::FutureExt;
@@ -107,6 +111,11 @@ pub struct PlanStmtView {
     /// [`ESTIMATE_TIMEOUT`]), or `unavailable`. `None`: not estimated.
     #[serde(default)]
     pub estimate: Option<RowEstimate>,
+    /// MySQL: the statement commits the transaction open when it runs (DDL and the
+    /// like, in a Manual tab or after the user's `BEGIN`): what ran before it can no
+    /// longer be rolled back. Always sent; optional in the bindings.
+    #[serde(default)]
+    pub implicit_commit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
@@ -133,6 +142,103 @@ impl TxAction {
             TxAction::Commit => "COMMIT",
             TxAction::Rollback => "ROLLBACK",
         }
+    }
+}
+
+/// How a query tab commits (spec §4.2e). `Auto`: every statement commits on its own
+/// unless the user opens a transaction. `Manual`: a run that starts with no transaction
+/// open and changes something begins one first (`BEGIN` / `START TRANSACTION`), which
+/// the user then commits or rolls back (`query_tx`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub enum TxMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+/// The transaction of a query tab, for the status bar and the idle-transaction warning.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, specta::Type)]
+pub struct TabTxInfo {
+    pub state: TxState,
+    /// When the open transaction began (Unix epoch, milliseconds; as seen by the app:
+    /// the start of the run or the `BEGIN` that opened it). `None` when no transaction
+    /// is open, or its start is not known.
+    pub since_ms: Option<f64>,
+    /// Statements run in the open transaction (0 when none is open).
+    pub statements: u32,
+}
+
+impl TabTxInfo {
+    const IDLE: TabTxInfo = TabTxInfo {
+        state: TxState::Idle,
+        since_ms: None,
+        statements: 0,
+    };
+}
+
+/// Now, in Unix epoch milliseconds.
+fn now_ms() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_millis() as f64)
+}
+
+/// The statement a Manual tab sends before a run that changes something.
+fn begin_sql(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::MySql => "START TRANSACTION",
+        DbKind::Postgres => "BEGIN",
+    }
+}
+
+/// Rolls back the empty transaction a Manual tab began for a run that then did not
+/// start (its plan was gone, or the run could not be registered).
+async fn undo_begin(ts: &mut TabSession) {
+    if let Some(session) = ts.session.as_deref() {
+        if let Err(e) = execute_quietly(session, "ROLLBACK").await {
+            tracing::warn!(error = %e, "could not roll back a transaction no statement used");
+        }
+    }
+    ts.forget_tx_if_idle();
+}
+
+/// Whether a Manual tab with no transaction open begins one before running `plan`: the
+/// plan's first statement that is not a read changes something (a write, DDL or other
+/// statement). When it is the user's own transaction control (`BEGIN`, `COMMIT`, …),
+/// nothing is added: that statement decides, as the user wrote it, and a transaction
+/// begun before it would be ended or replaced by it anyway. Reads alone begin nothing.
+fn begins_implicitly(plan: &ScriptPlan) -> bool {
+    plan.stmts
+        .iter()
+        .find(|s| s.kind != StatementKind::Read)
+        .is_some_and(|s| !matches!(s.kind, StatementKind::Transaction(_)))
+}
+
+/// A `COMMIT` that was sent and then lost its connection or timed out may have
+/// committed (spec §4.2d): its error says the outcome is unknown, whatever the driver
+/// could tell. Other errors are kept.
+fn commit_outcome_unknown(e: DbError) -> DbError {
+    match e {
+        DbError::AtStage {
+            stage,
+            timings,
+            source,
+        } => DbError::AtStage {
+            stage,
+            timings,
+            source: Box::new(commit_outcome_unknown(*source)),
+        },
+        DbError::ConnectionLost { message, .. } => DbError::ConnectionLost {
+            was_in_tx: true,
+            outcome_unknown: true,
+            message,
+        },
+        DbError::Timeout { stage, .. } => DbError::Timeout {
+            stage,
+            outcome_unknown: true,
+            was_in_tx: true,
+        },
+        other => other,
     }
 }
 
@@ -191,6 +297,10 @@ pub struct TabSession {
     /// after its last read / write / DDL; cleared by a read, write or DDL that succeeded
     /// (a run, an export). See [`tx_fresh_after`].
     pub(crate) tx_fresh: bool,
+    /// Meaningful while the session's transaction is open: when it began (see
+    /// [`TabTxInfo::since_ms`]) and how many statements ran in it.
+    pub(crate) tx_since_ms: Option<f64>,
+    pub(crate) tx_statements: u32,
 }
 
 /// [`TabSession::tx_fresh`] after a run of `plan` that sent `report.stmts`, from
@@ -219,6 +329,65 @@ impl TabSession {
         self.session
             .as_ref()
             .is_some_and(|s| s.tx_state() != TxState::Idle)
+    }
+
+    fn tx_info(&self) -> TabTxInfo {
+        let state = self
+            .session
+            .as_deref()
+            .map_or(TxState::Idle, |s| s.tx_state());
+        if state == TxState::Idle {
+            return TabTxInfo::IDLE;
+        }
+        TabTxInfo {
+            state,
+            since_ms: self.tx_since_ms,
+            statements: self.tx_statements,
+        }
+    }
+
+    /// Forgets the transaction's start and statement count once none is open.
+    fn forget_tx_if_idle(&mut self) {
+        if !self.tx_open() {
+            self.tx_since_ms = None;
+            self.tx_statements = 0;
+        }
+    }
+
+    /// Updates the transaction's start and statement count after a run of `plan` that
+    /// sent `report.stmts`, started at `started_ms` with a transaction open or not
+    /// (`open_before`, after a Manual tab's `BEGIN`). A transaction-control statement
+    /// of the run (`BEGIN`, `COMMIT AND CHAIN`, …) starts the count again after it.
+    fn track_tx(
+        &mut self,
+        open_before: bool,
+        started_ms: f64,
+        plan: &ScriptPlan,
+        report: &RunReport,
+    ) {
+        if !self.tx_open() {
+            self.forget_tx_if_idle();
+            return;
+        }
+        let mut restarted = false;
+        let mut counted = 0u32;
+        for r in &report.stmts {
+            let Some(s) = plan.stmts.iter().find(|s| s.index == r.index) else {
+                continue;
+            };
+            if matches!(s.kind, StatementKind::Transaction(_)) {
+                restarted = true;
+                counted = 0;
+            } else {
+                counted = counted.saturating_add(1);
+            }
+        }
+        if restarted || !open_before || self.tx_since_ms.is_none() {
+            self.tx_since_ms = Some(started_ms);
+            self.tx_statements = counted;
+        } else {
+            self.tx_statements = self.tx_statements.saturating_add(counted);
+        }
     }
 
     async fn close(&mut self) {
@@ -868,6 +1037,7 @@ impl SessionManager {
             .as_deref()
             .map_or(TxState::Idle, |s| s.tx_state());
         drop(ts);
+        self.mark_implicit_commits(tab, &mut planned, tx_state);
         let copy = PlanCopy {
             target: plan_target,
             plan: planned,
@@ -1060,6 +1230,7 @@ impl SessionManager {
                 drops: s.drops.clone(),
                 confirm_name: s.confirm_name.clone(),
                 estimate: s.estimate,
+                implicit_commit: s.implicit_commit,
             })
             .collect();
         // The connection closed while we planned: `shutdown` closes the tab's session;
@@ -1112,6 +1283,68 @@ impl SessionManager {
             .find_map(|(_, rt)| rt.queries.get(tab).map(|slot| (rt, slot)))
     }
 
+    /// The commit mode of `tab` ([`TxMode::Auto`] until set).
+    fn tx_mode(&self, tab: &str) -> TxMode {
+        lock(&self.tx_modes).get(tab).copied().unwrap_or_default()
+    }
+
+    /// Flags the statements of `planned` that commit an open transaction
+    /// ([`mark_implicit_commits`]), from the tab session's state `state` when the plan
+    /// was made: a Manual tab that will begin a transaction before the run starts as if
+    /// it were open.
+    fn mark_implicit_commits(&self, tab: &str, planned: &mut ScriptPlan, state: TxState) {
+        let start = if state == TxState::Idle
+            && self.tx_mode(tab) == TxMode::Manual
+            && begins_implicitly(planned)
+        {
+            TxState::Active
+        } else {
+            state
+        };
+        mark_implicit_commits(planned, start);
+    }
+
+    /// Sets the commit mode of `tab` (spec §4.2e) and returns the tab's transaction
+    /// state. The mode belongs to the tab, whatever connection it is on, from now until
+    /// the tab is closed (`query_close_tab`); a tab without a session takes it too.
+    /// Errors: `config` (bad tab id), `busy` while the tab runs, `transaction_open` when
+    /// a Manual tab with a transaction open is switched to Auto (commit or roll back
+    /// first).
+    pub async fn query_tx_mode(&self, tab: &str, mode: TxMode) -> Result<TxState, DbError> {
+        validate_tab(tab)?;
+        // Held while the mode changes, so a run of the tab cannot start meanwhile.
+        let held = match self.find_tab_runtime(tab) {
+            Some((_, slot)) => Some(slot.try_lock_owned().map_err(|_| DbError::Busy)?),
+            None => None,
+        };
+        let state = held
+            .as_ref()
+            .and_then(|ts| ts.session.as_deref())
+            .map_or(TxState::Idle, |s| s.tx_state());
+        let mut modes = lock(&self.tx_modes);
+        let current = modes.get(tab).copied().unwrap_or_default();
+        if current == TxMode::Manual && mode == TxMode::Auto && state != TxState::Idle {
+            return Err(DbError::TransactionOpen);
+        }
+        match mode {
+            TxMode::Auto => modes.remove(tab),
+            TxMode::Manual => modes.insert(tab.to_string(), mode),
+        };
+        Ok(state)
+    }
+
+    /// The tab's transaction: its state, when it began and how many statements ran in
+    /// it (for the idle-transaction warning, setting `idle_tx_warn_minutes`). A tab
+    /// without a session is idle. `busy` while the tab runs.
+    pub async fn query_tx_info(&self, tab: &str) -> Result<TabTxInfo, DbError> {
+        validate_tab(tab)?;
+        let Some((_, slot)) = self.find_tab_runtime(tab) else {
+            return Ok(TabTxInfo::IDLE);
+        };
+        let ts = slot.try_lock_owned().map_err(|_| DbError::Busy)?;
+        Ok(ts.tx_info())
+    }
+
     /// Commits or rolls back the tab's transaction (`execute_one("COMMIT"/"ROLLBACK")`)
     /// and returns the session's new state. A tab without a session is `Idle`, except
     /// once after its session was dropped with a transaction open (a failed run, see
@@ -1122,7 +1355,9 @@ impl SessionManager {
 
     /// [`Self::query_tx`] for the UI: a failed `COMMIT` / `ROLLBACK` reports the
     /// session's transaction state after the failure in `AppError::tx_state` (`idle`
-    /// after a lost connection, whose transaction the server rolled back).
+    /// after a lost connection: the tab has no transaction any more). A `COMMIT` that
+    /// lost its connection or timed out after it was sent has `outcome_unknown` set: it
+    /// may have committed (spec §4.2d), so it is never reported as rolled back.
     // `AppError` is the IPC payload the command returns as is (see `commands`).
     #[allow(clippy::result_large_err)]
     pub async fn query_tx_reported(
@@ -1167,10 +1402,19 @@ impl SessionManager {
             }
             return Ok(TxState::Idle);
         };
-        match execute_quietly(session, action.sql()).await {
-            Ok(()) => Ok(session.tx_state()),
+        let sent = execute_quietly(session, action.sql()).await;
+        let state = session.tx_state();
+        match sent {
+            Ok(()) => {
+                ts.forget_tx_if_idle();
+                Ok(state)
+            }
             Err(e) => {
-                let state = session.tx_state();
+                // A COMMIT that may have gone through is never reported as rolled back.
+                let e = match action {
+                    TxAction::Commit => commit_outcome_unknown(e),
+                    TxAction::Rollback => e,
+                };
                 if is_lost(&e) {
                     // The next plan opens a fresh session.
                     if let Some(dead) = ts.session.take() {
@@ -1179,16 +1423,19 @@ impl SessionManager {
                     if rt.queries.is_slot(tab, &slot) {
                         rt.queries.sync_bound(tab, &ts);
                     }
+                    ts.forget_tx_if_idle();
                     Err((e, Some(TxState::Idle)))
                 } else {
+                    ts.forget_tx_if_idle();
                     Err((e, Some(state)))
                 }
             }
         }
     }
 
-    /// Closes the tab's session and forgets its plans. Without `force`, a session with a
-    /// transaction open is kept and `TransactionOpen` returned, so the UI can ask
+    /// Closes the tab's session and forgets its plans and commit mode. Without `force`,
+    /// a session with a transaction open is kept (with the mode) and `TransactionOpen`
+    /// returned, so the UI can ask
     /// Commit / Rollback / Cancel (spec §7.2); with `force` the session is closed anyway
     /// (the server rolls the transaction back). Waits up to [`SLOT_CLOSE_WAIT`] for a
     /// holder of the session: without `force` that ends in `Busy`. Closing an unknown
@@ -1223,6 +1470,7 @@ impl SessionManager {
             }
         }
         self.plans.drop_tab(tab);
+        lock(&self.tx_modes).remove(tab);
         Ok(())
     }
 
@@ -1323,6 +1571,9 @@ impl SessionManager {
         };
         let analyze = judged.guard.is_some_and(|g| g.analyze);
         guard_with(judged, self.guard_ctx(&cfg, analyze));
+        if copy.explain.is_none() {
+            self.mark_implicit_commits(&tab, &mut copy.plan, tx_state);
+        }
         self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 
@@ -1882,11 +2133,14 @@ struct RunTask {
     runs: Runs,
     /// Set when the run's statements are over: no cancel may be sent any more.
     finished: Arc<AtomicBool>,
+    /// A transaction was open when the run started (after a Manual tab's `BEGIN`).
+    tx_open_before: bool,
 }
 
 impl RunTask {
     async fn execute(mut self) {
         let started = Instant::now();
+        let started_ms = now_ms();
         let mut sink = ChannelSink::new(
             Arc::clone(&self.emit),
             Arc::clone(&self.flags),
@@ -1928,13 +2182,13 @@ impl RunTask {
         }
         let stop = match ran {
             Ok(Some(report)) => {
-                self.after_run(Some(&report), &sink).await;
+                self.after_run(Some(&report), &sink, started_ms).await;
                 report.stop
             }
             Ok(None) | Err(_) => {
                 tracing::error!(connection = %self.rt.cfg.id, "a query run failed unexpectedly");
                 // The session's state is unknown: drop it (or close it, with its tab).
-                self.after_run(None, &sink).await;
+                self.after_run(None, &sink, started_ms).await;
                 let at = index.load(Ordering::SeqCst);
                 let mut error = AppError::from(DbError::Internal {
                     message: "the run failed unexpectedly; see the log for details".into(),
@@ -1979,7 +2233,7 @@ impl RunTask {
     /// The SchemaCache refresh covers only the session's current database (or the
     /// connect database): DDL on another database (`CREATE TABLE other.t`) or another
     /// PostgreSQL schema's database is not picked up until that cache is refreshed.
-    async fn after_run(&mut self, report: Option<&RunReport>, sink: &ChannelSink) {
+    async fn after_run(&mut self, report: Option<&RunReport>, sink: &ChannelSink, started_ms: f64) {
         let lost_errors: Vec<&AppError> = report.map_or_else(Vec::new, |report| {
             report
                 .stmts
@@ -2002,8 +2256,12 @@ impl RunTask {
         } else if let Some(db) = &sink.use_db {
             ts.database = Some(db.clone());
         }
-        if let Some(report) = report {
-            ts.tx_fresh = tx_fresh_after(ts.tx_fresh, &self.plan, report);
+        match report {
+            Some(report) => {
+                ts.tx_fresh = tx_fresh_after(ts.tx_fresh, &self.plan, report);
+                ts.track_tx(self.tx_open_before, started_ms, &self.plan, report);
+            }
+            None => ts.forget_tx_if_idle(),
         }
         let current = self.rt.queries.is_slot(&self.tab, &self.slot);
         if self.rt.closed.load(Ordering::SeqCst) || !current || ts.closed {
@@ -2090,7 +2348,19 @@ impl SessionManager {
             rt.queries.sync_bound(&tab, &ts);
             ensured?;
         }
-        self.plans.take(self.plan_ttl, plan_id, &current)?;
+        // Manual mode: a run that changes something starts in a transaction.
+        let began = if copy.explain.is_none() && self.tx_mode(&tab) == TxMode::Manual {
+            self.begin_if_idle(&rt, &tab, &mut ts, &run_plan).await?
+        } else {
+            false
+        };
+        if let Err(e) = self.plans.take(self.plan_ttl, plan_id, &current) {
+            if began {
+                undo_begin(&mut ts).await;
+            }
+            return Err(e);
+        }
+        let tx_open_before = ts.tx_open();
         let session = ts.session.as_deref().ok_or(DbError::PlanExpired)?;
 
         let exec = ExecOptions {
@@ -2106,7 +2376,7 @@ impl SessionManager {
         let emit = stop_when_undelivered(emit, cancel.clone(), Arc::clone(&finished));
         let flags = Arc::new(RunFlags::default());
         let run_id = Uuid::new_v4();
-        self.runs.try_insert(
+        let registered = self.runs.try_insert(
             run_id,
             RunEntry {
                 tab: tab.clone(),
@@ -2116,8 +2386,15 @@ impl SessionManager {
                 emit: Arc::clone(&emit),
                 finished: Arc::clone(&finished),
             },
-        )?;
+        );
+        if let Err(e) = registered {
+            if began {
+                undo_begin(&mut ts).await;
+            }
+            return Err(e);
+        }
         let task = RunTask {
+            tx_open_before,
             run_id,
             tab,
             rt,
@@ -2136,6 +2413,49 @@ impl SessionManager {
         };
         tokio::spawn(task.execute());
         Ok(run_id)
+    }
+
+    /// Manual mode, before a run of `plan` on the held session `ts`: when no transaction
+    /// is open and the plan changes something ([`begins_implicitly`]), sends `BEGIN`
+    /// (PostgreSQL) / `START TRANSACTION` (MySQL) and returns `true`. The transaction is
+    /// fresh until the run's first statement uses it ([`TabSession::tx_fresh`]).
+    ///
+    /// When it fails nothing runs and the plan stays available: a lost connection drops
+    /// the session as after a run (no transaction was open, so the tab keeps its binding
+    /// and reopens on its next use).
+    async fn begin_if_idle(
+        &self,
+        rt: &ConnectionRuntime,
+        tab: &str,
+        ts: &mut TabSession,
+        plan: &ScriptPlan,
+    ) -> Result<bool, DbError> {
+        let Some(session) = ts.session.as_deref() else {
+            return Err(DbError::PlanExpired);
+        };
+        if session.tx_state() != TxState::Idle || !begins_implicitly(plan) {
+            return Ok(false);
+        }
+        match execute_quietly(session, begin_sql(rt.cfg.kind)).await {
+            Ok(()) => {
+                ts.tx_fresh = true;
+                ts.tx_since_ms = Some(now_ms());
+                ts.tx_statements = 0;
+                Ok(true)
+            }
+            Err(e) => {
+                if is_lost(&e) {
+                    tracing::warn!(connection = %rt.cfg.id, error = %e, "beginning a transaction lost the tab's session");
+                    if let Some(dead) = ts.session.take() {
+                        close_quietly(dead).await;
+                    }
+                    ts.lost_tx = false;
+                    ts.reopen = true;
+                    rt.queries.sync_bound(tab, ts);
+                }
+                Err(e)
+            }
+        }
     }
 
     /// Stops run `run_id`: emits `stopping{user}` (once), then cancels it. The run ends

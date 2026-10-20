@@ -322,6 +322,9 @@ pub struct SessionManager {
     pub(crate) plan_ttl: Duration,
     /// Runs in progress (see `query_sessions`).
     pub(crate) runs: Runs,
+    /// The commit mode of every query tab set to Manual (see `query_sessions`); a tab
+    /// not in it is Auto.
+    pub(crate) tx_modes: Mutex<HashMap<String, crate::query_sessions::TxMode>>,
     /// `ExecOptions::cancel_grace` of query runs.
     pub(crate) cancel_grace: Duration,
     /// Table data requests (see `data_sessions`).
@@ -367,6 +370,7 @@ impl SessionManager {
             plans: PlanStore::default(),
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
+            tx_modes: Mutex::new(HashMap::new()),
             cancel_grace: DEFAULT_CANCEL_GRACE,
             data_timeout: crate::data_sessions::DATA_READ_TIMEOUT,
             data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,

@@ -1,5 +1,6 @@
-//! Application settings: log level, table page size and the unbounded-write
-//! confirmation (persisted in `app_settings`), and the log folder.
+//! Application settings: log level, table page size, the unbounded-write
+//! confirmation and the idle-transaction warning delay (persisted in `app_settings`),
+//! and the log folder.
 
 use super::{blocking, guard};
 use crate::logging::{LogHandle, LogLevel};
@@ -164,6 +165,68 @@ pub async fn set_confirm_unbounded_writes(
     enabled: bool,
 ) -> Result<(), AppError> {
     guard(set_confirm_unbounded_writes_impl(&state, enabled)).await
+}
+
+/// `app_settings` key of the minutes after which an open transaction of a query tab
+/// that does nothing is warned about (spec §4.2e).
+pub const IDLE_TX_WARN_KEY: &str = "idle_tx_warn_minutes";
+pub const DEFAULT_IDLE_TX_WARN_MINUTES: u32 = 5;
+pub const MIN_IDLE_TX_WARN_MINUTES: u32 = 1;
+pub const MAX_IDLE_TX_WARN_MINUTES: u32 = 120;
+
+/// The stored idle-transaction warning delay in minutes; the default when none is
+/// stored, it is out of range or it cannot be read.
+pub fn saved_idle_tx_warn_minutes(repo: &ConnectionRepo) -> u32 {
+    match repo.app_setting(IDLE_TX_WARN_KEY) {
+        Ok(Some(v)) => v
+            .parse::<u32>()
+            .ok()
+            .filter(|n| (MIN_IDLE_TX_WARN_MINUTES..=MAX_IDLE_TX_WARN_MINUTES).contains(n))
+            .unwrap_or(DEFAULT_IDLE_TX_WARN_MINUTES),
+        Ok(None) => DEFAULT_IDLE_TX_WARN_MINUTES,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the idle transaction warning setting");
+            DEFAULT_IDLE_TX_WARN_MINUTES
+        }
+    }
+}
+
+pub async fn get_idle_tx_warn_minutes_impl(state: &AppState) -> Result<u32, DbError> {
+    let repo = Arc::clone(&state.repo);
+    blocking(move || Ok(saved_idle_tx_warn_minutes(&repo))).await
+}
+
+pub async fn set_idle_tx_warn_minutes_impl(state: &AppState, minutes: u32) -> Result<(), DbError> {
+    if !(MIN_IDLE_TX_WARN_MINUTES..=MAX_IDLE_TX_WARN_MINUTES).contains(&minutes) {
+        return Err(DbError::Config {
+            field: Some("minutes".into()),
+            message: format!(
+                "the warning delay must be between {MIN_IDLE_TX_WARN_MINUTES} and \
+                 {MAX_IDLE_TX_WARN_MINUTES} minutes"
+            ),
+        });
+    }
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.set_app_setting(IDLE_TX_WARN_KEY, &minutes.to_string())).await
+}
+
+/// Minutes after which a query tab's open, unused transaction is warned about
+/// (default 5).
+#[tauri::command]
+#[specta::specta]
+pub async fn get_idle_tx_warn_minutes(state: State<'_, AppState>) -> Result<u32, AppError> {
+    guard(get_idle_tx_warn_minutes_impl(&state)).await
+}
+
+/// Stores the idle-transaction warning delay: 1 to 120 minutes, else `config` (field
+/// `minutes`).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_idle_tx_warn_minutes(
+    state: State<'_, AppState>,
+    minutes: u32,
+) -> Result<(), AppError> {
+    guard(set_idle_tx_warn_minutes_impl(&state, minutes)).await
 }
 
 /// Opens the log folder in the system file manager.

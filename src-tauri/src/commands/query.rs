@@ -7,7 +7,7 @@
 
 use super::guard;
 use crate::cache::{CompletionObject, SchemaCache};
-use crate::query_sessions::{with_tx_state, PlanView, TxAction};
+use crate::query_sessions::{with_tx_state, PlanView, TabTxInfo, TxAction, TxMode};
 use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -199,6 +199,45 @@ pub async fn query_tx(
     guard(async { Ok(query_tx_impl(&state, tab_id, action).await) })
         .await
         .and_then(|r| r)
+}
+
+pub async fn query_tx_mode_impl(
+    state: &AppState,
+    tab_id: String,
+    mode: TxMode,
+) -> Result<TxState, DbError> {
+    state.sessions.query_tx_mode(&tab_id, mode).await
+}
+
+pub async fn query_tx_info_impl(state: &AppState, tab_id: String) -> Result<TabTxInfo, DbError> {
+    state.sessions.query_tx_info(&tab_id).await
+}
+
+/// Sets the tab's commit mode and returns its transaction state. `Manual`: a run that
+/// starts with no transaction open and changes something begins one first; commit or
+/// roll it back with `query_tx`. MySQL statements that would commit it are flagged
+/// `implicit_commit` in the plan. Errors: `busy` while the tab runs,
+/// `transaction_open` when leaving Manual with a transaction open.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_tx_mode(
+    state: State<'_, AppState>,
+    tab_id: String,
+    mode: TxMode,
+) -> Result<TxState, AppError> {
+    guard(query_tx_mode_impl(&state, tab_id, mode)).await
+}
+
+/// The tab's transaction: state, start (`since_ms`, Unix epoch ms) and statements run
+/// in it, for the idle-transaction warning (`get_idle_tx_warn_minutes`). `busy` while
+/// the tab runs.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_tx_info(
+    state: State<'_, AppState>,
+    tab_id: String,
+) -> Result<TabTxInfo, AppError> {
+    guard(query_tx_info_impl(&state, tab_id)).await
 }
 
 /// Runs plan `plan_id` (from `query_plan`, `query_explain` or `query_plan_statement`)

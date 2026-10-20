@@ -238,6 +238,34 @@ async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppErro
 }
 },
 /**
+ * Sets the tab's commit mode and returns its transaction state. `Manual`: a run that
+ * starts with no transaction open and changes something begins one first; commit or
+ * roll it back with `query_tx`. MySQL statements that would commit it are flagged
+ * `implicit_commit` in the plan. Errors: `busy` while the tab runs,
+ * `transaction_open` when leaving Manual with a transaction open.
+ */
+async queryTxMode(tabId: string, mode: TxMode) : Promise<Result<TxState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx_mode", { tabId, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The tab's transaction: state, start (`since_ms`, Unix epoch ms) and statements run
+ * in it, for the idle-transaction warning (`get_idle_tx_warn_minutes`). `busy` while
+ * the tab runs.
+ */
+async queryTxInfo(tabId: string) : Promise<Result<TabTxInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx_info", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Closes the tab's session. With a transaction open and `force` false it returns
  * `transaction_open` and keeps the session (ask Commit / Rollback / Cancel, then call
  * again, or `query_tx` first); `force` closes anyway (the server rolls back).
@@ -399,6 +427,30 @@ async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
 async setConfirmUnboundedWrites(enabled: boolean) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_confirm_unbounded_writes", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Minutes after which a query tab's open, unused transaction is warned about
+ * (default 5).
+ */
+async getIdleTxWarnMinutes() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_idle_tx_warn_minutes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the idle-transaction warning delay: 1 to 120 minutes, else `config` (field
+ * `minutes`).
+ */
+async setIdleTxWarnMinutes(minutes: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_idle_tx_warn_minutes", { minutes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1069,7 +1121,13 @@ confirm_name?: string | null;
  * the server's estimate of the rows it changes (`EXPLAIN`, at most
  * [`ESTIMATE_TIMEOUT`]), or `unavailable`. `None`: not estimated.
  */
-estimate?: RowEstimate | null }
+estimate?: RowEstimate | null; 
+/**
+ * MySQL: the statement commits the transaction open when it runs (DDL and the
+ * like, in a Manual tab or after the user's `BEGIN`): what ran before it can no
+ * longer be rolled back. Always sent; optional in the bindings.
+ */
+implicit_commit?: boolean }
 /**
  * A normalized explain result. `raw` is the engine's original output.
  */
@@ -1265,6 +1323,20 @@ export type StopReason =
  * `index`: "sql_mode changed; run the remaining statements again".
  */
 { kind: "dialect_changed"; index: number }
+/**
+ * The transaction of a query tab, for the status bar and the idle-transaction warning.
+ */
+export type TabTxInfo = { state: TxState; 
+/**
+ * When the open transaction began (Unix epoch, milliseconds; as seen by the app:
+ * the start of the run or the `BEGIN` that opened it). `None` when no transaction
+ * is open, or its start is not known.
+ */
+since_ms: number | null; 
+/**
+ * Statements run in the open transaction (0 when none is open).
+ */
+statements: number }
 export type TableDataPage = { columns: ColumnMeta[]; 
 /**
  * At most `limit` rows, starting at `offset` (fewer when `size_capped`).
@@ -1323,6 +1395,13 @@ export type Target = { Cursor: number } | { Selection: [number, number] } | "All
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
 export type TxAction = "Commit" | "Rollback"
+/**
+ * How a query tab commits (spec §4.2e). `Auto`: every statement commits on its own
+ * unless the user opens a transaction. `Manual`: a run that starts with no transaction
+ * open and changes something begins one first (`BEGIN` / `START TRANSACTION`), which
+ * the user then commits or rolls back (`query_tx`).
+ */
+export type TxMode = "Auto" | "Manual"
 /**
  * Transaction state of a session as the query layer sees it.
  */

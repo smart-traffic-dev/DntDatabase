@@ -26,7 +26,10 @@ pub use explain::{
 };
 pub use guard::{guard, guard_with, lifts_read_only, other_whitelisted, verdict, GuardCtx};
 pub use offsets::Utf16Map;
-pub use plan::{plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target, Verdict};
+pub use plan::{
+    mark_implicit_commits, plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target,
+    Verdict,
+};
 pub use redact::{redact, Redacted, REDACTED};
 pub use risk::{
     confirm_name, confirm_names_match, drop_targets, estimate_sql, estimate_table, parse_estimate,

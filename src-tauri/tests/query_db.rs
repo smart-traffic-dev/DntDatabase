@@ -546,3 +546,95 @@ async fn ddl_refreshes_completion_cache() {
         state.sessions.close(id).await;
     }
 }
+
+/// Manual commit mode (spec §4.2e): a write begins a transaction on the tab's session;
+/// Rollback brings the rows back. MySQL DDL in it is flagged as an implicit commit.
+#[tokio::test]
+async fn rollback_in_manual_mode_restores_rows() {
+    use dnt_core::tx::TxState;
+    use dntdatabase::query_sessions::{TxAction, TxMode};
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_in(dir.path());
+    for t in Target::all() {
+        let id = open(&state, t, false).await;
+        let table = format!("p3_manual_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let count_sql = format!("SELECT COUNT(*) FROM {table}");
+        let count = |events: Arc<Events>| {
+            let rows = events.of("rows");
+            let v = rows[0]["rows"][0][0]["v"].clone();
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap()
+        };
+        let setup = format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY);\nINSERT INTO {table} VALUES (1), (2), (3)"
+        );
+        let events = run_all(&state, "t1", id, &setup).await;
+        assert_eq!(events.of("done")[0]["stop"], Json::Null, "{t:?}");
+
+        let mode = state.sessions.query_tx_mode("t1", TxMode::Manual).await;
+        assert_eq!(mode.unwrap(), TxState::Idle, "{t:?}");
+        let events = run_all(
+            &state,
+            "t1",
+            id,
+            &format!("DELETE FROM {table} WHERE id <= 2"),
+        )
+        .await;
+        assert_eq!(
+            events.of("done")[0]["stop"],
+            Json::Null,
+            "{t:?}: {:?}",
+            events.list()
+        );
+        let info = state.sessions.query_tx_info("t1").await.unwrap();
+        assert_eq!(info.state, TxState::Active, "{t:?}");
+        assert_eq!(
+            count(run_all(&state, "t1", id, &count_sql).await),
+            1,
+            "{t:?}"
+        );
+        // Leaving Manual with the transaction open is refused.
+        let err = state
+            .sessions
+            .query_tx_mode("t1", TxMode::Auto)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::TransactionOpen), "{t:?}: {err:?}");
+
+        // MySQL DDL would commit the open transaction; PostgreSQL DDL would not.
+        let view = state
+            .sessions
+            .query_plan(
+                "t1",
+                id,
+                None,
+                &format!("ALTER TABLE {table} ADD x INT"),
+                Pick::All,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            view.stmts[0].implicit_commit,
+            t.kind() == DbKind::MySql,
+            "{t:?}"
+        );
+
+        let after = state.sessions.query_tx("t1", TxAction::Rollback).await;
+        assert_eq!(after.unwrap(), TxState::Idle, "{t:?}");
+        assert_eq!(
+            count(run_all(&state, "t1", id, &count_sql).await),
+            3,
+            "{t:?}"
+        );
+        // Reads in Manual mode open nothing.
+        let info = state.sessions.query_tx_info("t1").await.unwrap();
+        assert_eq!(info.state, TxState::Idle, "{t:?}");
+
+        let mode = state.sessions.query_tx_mode("t1", TxMode::Auto).await;
+        assert_eq!(mode.unwrap(), TxState::Idle, "{t:?}");
+        run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;
+        state.sessions.close(id).await;
+    }
+}
