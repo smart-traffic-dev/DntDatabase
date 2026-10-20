@@ -64,8 +64,15 @@ async fn connect_inner(cfg: &ResolvedConfig) -> Result<MySqlSession, DbError> {
             return Err(e);
         }
     };
+    let mode = match session::read_sql_mode(&mut conn).await {
+        Ok(mode) => mode,
+        Err(e) => {
+            let _ = conn.disconnect().await;
+            return Err(map_mysql_error(e, ConnectStage::DetectServer));
+        }
+    };
     let caps = MySqlCapabilities::for_server(&info);
-    Ok(MySqlSession::new(conn, info, caps, opts))
+    Ok(MySqlSession::new(conn, info, caps, opts, mode))
 }
 
 /// Opens the physical connection, returning the options that worked (for reconnects).

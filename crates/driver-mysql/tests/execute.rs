@@ -2,7 +2,8 @@ use dnt_core::driver::{
     ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
-use dnt_core::sql::{classify, StatementKind};
+use dnt_core::sql::{classify, Dialect, MySqlMode, StatementKind};
+use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
@@ -808,14 +809,27 @@ async fn transaction_flags_follow_statements() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
         run(&s, "START TRANSACTION").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
         assert!(s.in_transaction(), "{t:?}");
         run(&s, "COMMIT").await.unwrap();
-        assert!(!s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
         run(&s, "SET autocommit = 0").await.unwrap();
-        assert!(s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
+        // With autocommit off a COMMIT just starts the next transaction.
+        run(&s, "COMMIT").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
         run(&s, "SET autocommit = 1").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
         assert!(!s.in_transaction(), "{t:?}");
+        // A rejected `SET autocommit` changes nothing.
+        let err = run(&s, "SET autocommit = 7").await.err();
+        assert!(
+            matches!(err, Some(DbError::Server { .. })),
+            "{t:?}: {err:?}"
+        );
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
         run(
             &s,
             "DROP TABLE IF EXISTS t10_ddl; BEGIN; CREATE TABLE t10_ddl (a int); DROP TABLE t10_ddl",
@@ -823,7 +837,7 @@ async fn transaction_flags_follow_statements() {
         .await
         .unwrap();
         // DDL implicitly commits.
-        assert!(!s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
         // ... before it runs, so even failing DDL ends the transaction.
         run(&s, "BEGIN").await.unwrap();
         let err = run(&s, "DROP TABLE t10_no_such_table").await.err();
@@ -831,7 +845,120 @@ async fn transaction_flags_follow_statements() {
             matches!(err, Some(DbError::Server { .. })),
             "{t:?}: {err:?}"
         );
-        assert!(!s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
+        // ... unless it failed to parse: then it never ran.
+        run(&s, "BEGIN").await.unwrap();
+        let err = run(&s, "CREATE TABLE (").await.err();
+        assert!(
+            matches!(err, Some(DbError::Server { .. })),
+            "{t:?}: {err:?}"
+        );
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
+        run(&s, "ROLLBACK").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
+    }
+}
+
+/// The session's `sql_mode` lexing flags as the server reports them.
+async fn server_mode(s: &MySqlSession) -> MySqlMode {
+    let (_, c) = run(s, "SELECT @@SESSION.sql_mode").await.unwrap();
+    let mode = match scalar(&c) {
+        Value::Text(m) => m.to_ascii_uppercase(),
+        other => panic!("sql_mode: {other:?}"),
+    };
+    let flags: Vec<&str> = mode.split(',').map(str::trim).collect();
+    MySqlMode {
+        ansi_quotes: flags.contains(&"ANSI_QUOTES") || flags.contains(&"ANSI"),
+        no_backslash_escapes: flags.contains(&"NO_BACKSLASH_ESCAPES"),
+    }
+}
+
+fn mode_of(d: Dialect) -> MySqlMode {
+    match d {
+        Dialect::MySql(m) => m,
+        other => panic!("not MySQL: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ansi_quotes_session_splits_double_quotes_as_identifiers() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        assert_eq!(mode_of(s.dialect()), server_mode(&s).await, "{t:?}");
+        let (res, _) = run_one(
+            &s,
+            "SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')",
+            ExecOptions::default(),
+        )
+        .await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert!(mode_of(s.dialect()).ansi_quotes, "{t:?}");
+        let (summary, c) = run(
+            &s,
+            "CREATE TEMPORARY TABLE \"t;x\" (id INT); SELECT COUNT(*) FROM \"t;x\"",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(summary.results.len(), 2, "{t:?}");
+        assert_eq!(as_u64(&scalar(&c)), 0, "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn no_backslash_escapes_tracks_flag() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let (res, _) = run_one(
+            &s,
+            "SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')",
+            ExecOptions::default(),
+        )
+        .await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert!(mode_of(s.dialect()).no_backslash_escapes, "{t:?}");
+        let (summary, c) = run(&s, r"SELECT 'C:\'; SELECT 2")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(summary.results.len(), 2, "{t:?}");
+        assert_eq!(c.results[0].rows[0][0], Value::Text("C:\\".into()), "{t:?}");
+        assert_eq!(scalar(&c), Value::Int(2), "{t:?}");
+        // Turning it off again is tracked too.
+        run(
+            &s,
+            "SET sql_mode = REPLACE(@@sql_mode, 'NO_BACKSLASH_ESCAPES', '')",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert!(!mode_of(s.dialect()).no_backslash_escapes, "{t:?}");
+    }
+}
+
+/// A reconnect does not restore the user's `sql_mode` (it is session state, reported as
+/// reset); the session re-reads it, so `dialect()` matches what the new connection uses.
+#[tokio::test]
+async fn reconnect_rereads_sql_mode() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(
+            &s,
+            "SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert!(mode_of(s.dialect()).ansi_quotes, "{t:?}");
+        kill(t, connection_id(&s).await).await;
+        // The changed sql_mode is custom session state: the read is not re-run.
+        match run(&s, "SELECT 1").await {
+            Ok(_) => {}
+            Err(DbError::ConnectionLost { message, .. }) => {
+                assert!(message.contains("session settings"), "{t:?}: {message}")
+            }
+            Err(e) => panic!("{t:?}: {e}"),
+        }
+        assert_eq!(mode_of(s.dialect()), server_mode(&s).await, "{t:?}");
     }
 }
 

@@ -10,11 +10,11 @@ use dnt_core::driver::{
     SharedSink, StmtOutcome,
 };
 use dnt_core::error::{ConnectStage, DbError};
-use dnt_core::server::{MySqlCapabilities, ServerInfo};
+use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo};
 use dnt_core::sql::{
-    leading_keywords, readings, session_effect, Dialect, StatementKind, TxControl,
+    leading_keywords, readings, session_effect, Dialect, MySqlMode, StatementKind, TxControl,
 };
-use dnt_core::tx::TxState;
+use dnt_core::tx::{next_autocommit_off, next_tx_state, StmtResult, TxState};
 use dnt_core::value::ColumnMeta;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, DriverError, Error as MyError, Opts};
@@ -64,11 +64,17 @@ pub struct MySqlSession {
     /// Options of the established connection (TLS fallback applied); used to reconnect
     /// and by the canceller's temporary connection.
     opts: Opts,
-    /// Set by `BEGIN` / `START TRANSACTION`, cleared by `COMMIT` / `ROLLBACK` / DDL.
-    in_tx: AtomicBool,
-    /// Set while the user has `SET autocommit = 0`. A session setting rather than
-    /// transaction state: it survives a reconnect (re-applied on the new connection).
+    /// Transaction state, changed only as the server answered each statement
+    /// ([`next_tx_state`]). Reset to `Idle` by a reconnect (the server rolled the
+    /// transaction back); [`Session::tx_state`] adds `autocommit_off`.
+    tx: std::sync::Mutex<TxState>,
+    /// Set while the user has `SET autocommit = 0` ([`next_autocommit_off`]). A session
+    /// setting rather than transaction state: it survives a reconnect (re-applied on the
+    /// new connection).
     autocommit_off: AtomicBool,
+    /// The lexing flags of the session's `sql_mode`, as last read from the server: on
+    /// connect, after every reconnect and after every statement that may change it.
+    mode: std::sync::Mutex<MySqlMode>,
     cancel: Arc<CancelState>,
     /// Database of the last successful `USE`, re-applied after a reconnect.
     last_db: std::sync::Mutex<Option<String>>,
@@ -77,9 +83,6 @@ pub struct MySqlSession {
     /// read is not silently re-run and `ConnectionLost` says the state was reset.
     session_custom: AtomicBool,
 }
-
-/// InnoDB deadlock: the server rolled the whole transaction back.
-const ER_LOCK_DEADLOCK: u16 = 1213;
 
 /// How one statement attempt failed.
 enum StmtError {
@@ -110,7 +113,14 @@ enum Trigger {
 }
 
 impl MySqlSession {
-    pub(crate) fn new(conn: Conn, info: ServerInfo, caps: MySqlCapabilities, opts: Opts) -> Self {
+    /// `mode`: the connection's `sql_mode` flags ([`read_sql_mode`]).
+    pub(crate) fn new(
+        conn: Conn,
+        info: ServerInfo,
+        caps: MySqlCapabilities,
+        opts: Opts,
+        mode: MySqlMode,
+    ) -> Self {
         let cancel = Arc::new(CancelState::default());
         cancel.set_connection(conn.id());
         MySqlSession {
@@ -118,8 +128,9 @@ impl MySqlSession {
             info,
             caps,
             opts,
-            in_tx: AtomicBool::new(false),
+            tx: std::sync::Mutex::new(TxState::Idle),
             autocommit_off: AtomicBool::new(false),
+            mode: std::sync::Mutex::new(mode),
             cancel,
             last_db: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
@@ -160,35 +171,49 @@ impl MySqlSession {
         }
     }
 
-    fn reset_tx(&self) {
-        self.in_tx.store(false, Ordering::SeqCst);
-        self.autocommit_off.store(false, Ordering::SeqCst);
+    fn set_tx(&self, state: TxState) {
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = state;
     }
 
-    /// Transaction tracking applied before a statement runs.
-    fn track_before(&self, kind: StatementKind) {
-        let tx = match kind {
-            // MySQL commits implicitly before running DDL, even DDL that then fails.
-            StatementKind::Ddl => return self.in_tx.store(false, Ordering::SeqCst),
-            StatementKind::Transaction(tx) => tx,
-            _ => return,
+    fn mode(&self) -> MySqlMode {
+        *self.mode.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn set_mode(&self, mode: MySqlMode) {
+        *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+    }
+
+    /// Applies [`next_tx_state`] and [`next_autocommit_off`] for a statement that ended
+    /// with `result`, both reading the `autocommit` mode as it was before it.
+    fn track_tx(&self, kind: StatementKind, sql: &str, result: StmtResult<'_>) {
+        let mut tx = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+        let off = self.autocommit_off.load(Ordering::SeqCst);
+        *tx = next_tx_state(DbKind::MySql, *tx, off, kind, sql, result);
+        self.autocommit_off.store(
+            next_autocommit_off(DbKind::MySql, off, kind, result),
+            Ordering::SeqCst,
+        );
+    }
+
+    /// Transaction tracking for a statement the server answered with `err` (a
+    /// deadlock ends the transaction; failing DDL still committed it).
+    fn track_failed(&self, kind: StatementKind, sql: &str, err: &MyError) {
+        let (sqlstate, code) = match err {
+            MyError::Server(se) => (Some(se.state.as_str()), Some(se.code)),
+            _ => (None, None),
         };
-        match tx {
-            TxControl::Begin => self.in_tx.store(true, Ordering::SeqCst),
-            TxControl::Commit | TxControl::Rollback => self.in_tx.store(false, Ordering::SeqCst),
-            TxControl::AutocommitOff => self.autocommit_off.store(true, Ordering::SeqCst),
-            // Turning autocommit back on also commits the open transaction.
-            TxControl::AutocommitOn => self.reset_tx(),
-        }
+        self.track_tx(kind, sql, StmtResult::Failed { sqlstate, code });
     }
 
-    /// Tracking applied after a statement succeeded: remembers the last `USE` and
-    /// whether session state was customised.
+    /// Tracking applied after a statement succeeded: transaction state, the last `USE`
+    /// and whether session state was customised. `dialect`: the one `sql` was split
+    /// with. Returns whether the session `sql_mode` may have changed.
     /// (`session_effect` already skips the `autocommit` assignment, which is
     /// transaction control re-applied separately.)
-    fn track_after(&self, sql: &str) {
-        let Some(effect) = session_effect(sql, Dialect::MYSQL) else {
-            return;
+    fn track_after(&self, kind: StatementKind, sql: &str, dialect: Dialect) -> bool {
+        self.track_tx(kind, sql, StmtResult::Ok);
+        let Some(effect) = session_effect(sql, dialect) else {
+            return false;
         };
         if let Some(db) = effect.use_db {
             *self.last_db.lock().unwrap_or_else(|p| p.into_inner()) = Some(db);
@@ -196,6 +221,7 @@ impl MySqlSession {
         if effect.custom {
             self.session_custom.store(true, Ordering::SeqCst);
         }
+        effect.sql_mode
     }
 
     /// The `ConnectionLost` message suffix for losing the current connection.
@@ -205,11 +231,12 @@ impl MySqlSession {
 
     /// Abandons the connection in `slot` (if any) and opens a fresh one (startup
     /// statements come from `opts.init`), re-applying the last `USE` and
-    /// `autocommit = 0`. Clears the open transaction (the server rolls it back) and the
-    /// custom-session-state flag. On failure `slot` is left empty, so nothing ever runs
-    /// on the abandoned connection again.
+    /// `autocommit = 0`, and re-reads the `sql_mode` (a changed one is not restored: it
+    /// is custom session state, reported as reset). Clears the open transaction (the
+    /// server rolls it back) and the custom-session-state flag. On failure `slot` is
+    /// left empty, so nothing ever runs on the abandoned connection again.
     async fn reconnect(&self, slot: &mut Option<Conn>) -> Result<(), DbError> {
-        self.in_tx.store(false, Ordering::SeqCst);
+        self.set_tx(TxState::Idle);
         // From here on no cancel may kill anything: not the abandoned thread, and not the
         // fresh connection's before this call returned (see `RunGuard::retire`).
         self.cancel.clear_connection();
@@ -238,11 +265,15 @@ impl MySqlSession {
                     .await
                     .map_err(|e| map_mysql_error(e, ConnectStage::ConnectDb))?;
             }
-            Ok::<_, DbError>(fresh)
+            let mode = read_sql_mode(&mut fresh)
+                .await
+                .map_err(|e| map_mysql_error(e, ConnectStage::ConnectDb))?;
+            Ok::<_, DbError>((fresh, mode))
         };
-        let fresh = tokio::time::timeout(RECONNECT_TIMEOUT, open)
+        let (fresh, mode) = tokio::time::timeout(RECONNECT_TIMEOUT, open)
             .await
             .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))??;
+        self.set_mode(mode);
         self.cancel.set_connection(fresh.id());
         self.session_custom.store(false, Ordering::SeqCst);
         *slot = Some(fresh);
@@ -378,6 +409,27 @@ fn abandon(conn: Conn) {
     });
 }
 
+/// The lexing flags of a `sql_mode` value (comma-separated, any case): `ANSI_QUOTES` or
+/// the `ANSI` combination mode set `ansi_quotes`, `NO_BACKSLASH_ESCAPES` sets
+/// `no_backslash_escapes`.
+pub(crate) fn parse_sql_mode(s: &str) -> MySqlMode {
+    let mut mode = MySqlMode::default();
+    for flag in s.split(',').map(str::trim) {
+        if flag.eq_ignore_ascii_case("ANSI_QUOTES") || flag.eq_ignore_ascii_case("ANSI") {
+            mode.ansi_quotes = true;
+        } else if flag.eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES") {
+            mode.no_backslash_escapes = true;
+        }
+    }
+    mode
+}
+
+/// Reads the session `sql_mode` of `conn` ([`parse_sql_mode`]).
+pub(crate) async fn read_sql_mode(conn: &mut Conn) -> Result<MySqlMode, MyError> {
+    let mode: Option<String> = conn.query_first("SELECT @@SESSION.sql_mode").await?;
+    Ok(parse_sql_mode(mode.as_deref().unwrap_or_default()))
+}
+
 fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
     DbError::ConnectionLost {
         was_in_tx,
@@ -388,7 +440,8 @@ fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
 
 /// `CALL proc(…)`: its inner statements may each autocommit, so its work can be
 /// partly applied even when the call as a whole fails or is killed. Either reading
-/// of an executable comment counts.
+/// of an executable comment counts. The `sql_mode` flags do not matter: `CALL` leads the
+/// statement, before any quoted text.
 fn is_call(sql: &str) -> bool {
     readings(sql, Dialect::MYSQL)
         .iter()
@@ -601,6 +654,8 @@ impl Session for MySqlSession {
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         let mut slot = self.conn.lock().await;
+        // The dialect `stmt` was split with (the `sql_mode` before it ran).
+        let dialect = self.dialect();
         // Cancels only apply to this call from here on (see `cancel.rs`).
         let run = self.cancel.begin(&opts.stop);
         // Stopped before anything was sent.
@@ -654,7 +709,6 @@ impl Session for MySqlSession {
             }
         }
         let was_in_tx = self.in_transaction();
-        self.track_before(kind);
         loop {
             let mut emitted = false;
             let res = match slot.as_mut() {
@@ -679,16 +733,27 @@ impl Session for MySqlSession {
                 // dropped. Anything else completed (and may have committed): keep it;
                 // the raised stop signal stops the next statement.
                 Ok(done) if done.had_columns && kind == StatementKind::Read && run.cancelled() => {
+                    // It did run (a read cannot change the `sql_mode`).
+                    self.track_after(kind, stmt, dialect);
                     return Err(DbError::Cancelled {
                         outcome_unknown: false,
                         was_in_tx,
-                    })
+                    });
                 }
                 Ok(done) => {
                     outcome.late_completion = done.late_completion;
                     break;
                 }
                 Err(StmtError::Timeout) => {
+                    // Stopped by the `KILL QUERY` (killed DDL still committed).
+                    self.track_tx(
+                        kind,
+                        stmt,
+                        StmtResult::Failed {
+                            sqlstate: Some("70100"),
+                            code: Some(ER_QUERY_INTERRUPTED),
+                        },
+                    );
                     return Err(DbError::Timeout {
                         stage: ConnectStage::Execute,
                         outcome_unknown: killed_outcome_unknown(kind, was_in_tx, stmt),
@@ -705,13 +770,15 @@ impl Session for MySqlSession {
                 }
                 Err(StmtError::My(e)) => e,
             };
-            // InnoDB rolled the whole transaction back. Clear the flag before the
-            // cancel check so a coinciding cancel cannot skip it.
-            if matches!(&err, MyError::Server(se) if se.code == ER_LOCK_DEADLOCK) {
-                self.in_tx.store(false, Ordering::SeqCst);
+            let conn_lost = is_connection_lost(&err);
+            // Before the cancel check, so a coinciding cancel cannot skip it (a
+            // deadlock rolled the whole transaction back). A lost connection is
+            // tracked by the reconnect.
+            if !conn_lost {
+                self.track_failed(kind, stmt, &err);
             }
             match failure_kind(
-                is_connection_lost(&err),
+                conn_lost,
                 run.cancelled(),
                 is_interrupted(&err),
                 killed_outcome_unknown(kind, was_in_tx, stmt),
@@ -761,20 +828,34 @@ impl Session for MySqlSession {
                 return Err(not_sent(false));
             }
         }
-        self.track_after(stmt);
+        // A connection poisoned by an unconfirmed `KILL QUERY` is replaced before the
+        // next statement, and the replacement's `sql_mode` read then.
+        if self.track_after(kind, stmt, dialect) && !self.cancel.poisoned() {
+            if let Some(conn) = slot.as_mut() {
+                // Best effort: on failure the flags stay as they were; a lost
+                // connection is replaced (and its `sql_mode` read) by the next call.
+                if let Ok(mode) = read_sql_mode(conn).await {
+                    self.set_mode(mode);
+                }
+            }
+        }
         Ok(outcome)
     }
 
+    /// The tracked state, `Active` while `autocommit` is off (also right after a
+    /// reconnect re-applied it).
     fn tx_state(&self) -> TxState {
-        if self.in_tx.load(Ordering::SeqCst) || self.autocommit_off.load(Ordering::SeqCst) {
+        let tx = *self.tx.lock().unwrap_or_else(|p| p.into_inner());
+        if tx == TxState::Idle && self.autocommit_off.load(Ordering::SeqCst) {
             TxState::Active
         } else {
-            TxState::Idle
+            tx
         }
     }
 
+    /// MySQL with the session's current `sql_mode` lexing flags.
     fn dialect(&self) -> Dialect {
-        Dialect::MYSQL
+        Dialect::MySql(self.mode())
     }
 
     fn cancel_handle(&self) -> CancelHandle {
@@ -808,6 +889,36 @@ impl Session for MySqlSession {
 mod tests {
     use super::*;
     use mysql_async::ServerError;
+
+    #[test]
+    fn parse_sql_mode_flags() {
+        let ansi = MySqlMode {
+            ansi_quotes: true,
+            ..MySqlMode::default()
+        };
+        assert_eq!(parse_sql_mode("STRICT_TRANS_TABLES,ANSI_QUOTES"), ansi);
+        assert_eq!(parse_sql_mode("ansi"), ansi);
+        assert_eq!(
+            parse_sql_mode("NO_BACKSLASH_ESCAPES"),
+            MySqlMode {
+                no_backslash_escapes: true,
+                ..MySqlMode::default()
+            }
+        );
+        assert_eq!(parse_sql_mode(""), MySqlMode::default());
+        // Both, any case, padded; names that merely contain a flag do not count.
+        assert_eq!(
+            parse_sql_mode(" no_backslash_escapes , Ansi_Quotes "),
+            MySqlMode {
+                ansi_quotes: true,
+                no_backslash_escapes: true,
+            }
+        );
+        assert_eq!(
+            parse_sql_mode("REAL_AS_FLOAT,PIPES_AS_CONCAT,ONLY_FULL_GROUP_BY"),
+            MySqlMode::default()
+        );
+    }
 
     #[test]
     fn reconnect_quotes_the_use_target() {
