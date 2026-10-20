@@ -588,12 +588,20 @@ impl MySqlSession {
     }
 }
 
-/// `SHOW WARNINGS`, `SHOW ERRORS`, `SHOW COUNT(*) WARNINGS`…: statements that read
-/// the diagnostics of the previous statement.
+/// `SHOW WARNINGS`, `SHOW ERRORS`, `SHOW COUNT(*) WARNINGS`,
+/// `GET [CURRENT | STACKED] DIAGNOSTICS`: statements that read the diagnostics of the
+/// previous statement.
 fn shows_diagnostics(stmt: &str, dialect: Dialect) -> bool {
     let words = leading_keywords(stmt, dialect, 3);
-    words.first().is_some_and(|w| w == "SHOW")
-        && words.iter().any(|w| w == "WARNINGS" || w == "ERRORS")
+    match words.first().map(String::as_str) {
+        Some("SHOW") => words.iter().any(|w| w == "WARNINGS" || w == "ERRORS"),
+        Some("GET") => match words.get(1).map(String::as_str) {
+            Some("DIAGNOSTICS") => true,
+            Some("CURRENT" | "STACKED") => words.get(2).is_some_and(|w| w == "DIAGNOSTICS"),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Column `i` of a `SHOW WARNINGS` row as text (empty when missing).
@@ -1224,6 +1232,30 @@ mod tests {
     #[test]
     fn reconnect_quotes_the_use_target() {
         assert_eq!(quote_ident("a`b"), "`a``b`");
+    }
+
+    #[test]
+    fn diagnostics_statements_skip_the_warning_fetch() {
+        let d = Dialect::MYSQL;
+        for sql in [
+            "SHOW WARNINGS",
+            "show errors limit 5",
+            "SHOW COUNT(*) WARNINGS",
+            "GET DIAGNOSTICS @n = NUMBER",
+            "get current diagnostics condition 1 @m = MESSAGE_TEXT",
+            "GET STACKED DIAGNOSTICS @n = NUMBER",
+            "/* c */ GET DIAGNOSTICS @n = NUMBER",
+        ] {
+            assert!(shows_diagnostics(sql, d), "{sql}");
+        }
+        for sql in [
+            "SELECT CAST('x' AS SIGNED)",
+            "SHOW TABLES",
+            "SELECT 'GET DIAGNOSTICS'",
+            "GET_LOCK('a', 1)",
+        ] {
+            assert!(!shows_diagnostics(sql, d), "{sql}");
+        }
     }
 
     #[test]
