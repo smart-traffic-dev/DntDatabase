@@ -57,7 +57,7 @@ async fn capture(t: Target, name: &str) {
         QUERY_MYSQL
     };
     for (analyze, suffix) in [(false, "plain"), (true, "analyze")] {
-        let Ok(ex) = explain_sql(stmt, s.server_info(), analyze) else {
+        let Ok(ex) = explain_sql(stmt, s.server_info(), s.dialect(), analyze) else {
             assert!(analyze && t == Target::MySql57, "{t:?} analyze={analyze}");
             continue;
         };

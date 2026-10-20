@@ -103,7 +103,9 @@ fn password_required() -> DbError {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+/// Locks `m`, recovering the data of a poisoned mutex (a panic elsewhere must not
+/// take the connection or query state down with it). Shared by the backend modules.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

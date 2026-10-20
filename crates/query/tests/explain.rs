@@ -3,6 +3,7 @@
 
 use dnt_core::error::DbError;
 use dnt_core::server::{detect_mysql, detect_pg, ServerInfo};
+use dnt_core::sql::{Dialect, MySqlMode};
 use dnt_core::value::Value;
 use dnt_query::explain::{explain_sql, parse_plan, self_cost, ExplainFormat, PlanNode, PlanTree};
 use serde::Deserialize;
@@ -122,7 +123,7 @@ fn explain_sql_per_engine() {
         ),
     ];
     for (info, analyze, sql, format) in cases {
-        let got = explain_sql("SELECT 1", &info, analyze).unwrap();
+        let got = explain_sql("SELECT 1", &info, dialect(&info), analyze).unwrap();
         assert_eq!(
             (got.sql.as_str(), got.format),
             (sql, format),
@@ -132,12 +133,53 @@ fn explain_sql_per_engine() {
     for v in ["8.0.17", "5.7.44-log"] {
         assert!(
             matches!(
-                explain_sql("SELECT 1", &mysql(v), true),
+                explain_sql("SELECT 1", &mysql(v), Dialect::MYSQL, true),
                 Err(DbError::Unsupported { .. })
             ),
             "{v}"
         );
     }
+}
+
+fn dialect(info: &ServerInfo) -> Dialect {
+    Dialect::for_kind(info.kind)
+}
+
+/// A statement planned under a MySQL `DELIMITER` may hold several statements; an
+/// explain of it would run them all.
+#[test]
+fn explain_sql_refuses_several_statements() {
+    let nbe = Dialect::MySql(MySqlMode {
+        no_backslash_escapes: true,
+        ..Default::default()
+    });
+    for (stmt, d) in [
+        (
+            "SELECT * FROM t; DELETE FROM t WHERE id = 1;",
+            Dialect::MYSQL,
+        ),
+        ("SELECT 1; SELECT 2", Dialect::MYSQL),
+        ("/*!40101 SELECT 1; DELETE FROM t */", Dialect::MYSQL),
+        // Lexed with the session's sql_mode: here `'C:\'` is a whole string.
+        (r"SELECT 'C:\'; DELETE FROM t", nbe),
+    ] {
+        for analyze in [false, true] {
+            let err = explain_sql(stmt, &mysql("8.0.36"), d, analyze).unwrap_err();
+            assert!(
+                matches!(&err, DbError::Config { field: Some(f), message }
+                    if f == "explain" && message.contains("one statement")),
+                "{stmt}: {err:?}"
+            );
+        }
+    }
+    // One statement, `;` only inside literals or a trailing one: fine.
+    let ok = explain_sql(
+        "SELECT ';' FROM t;",
+        &mysql("8.0.36"),
+        Dialect::MYSQL,
+        false,
+    );
+    assert_eq!(ok.unwrap().sql, "EXPLAIN FORMAT=JSON SELECT ';' FROM t;");
 }
 
 #[test]

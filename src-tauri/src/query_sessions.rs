@@ -21,7 +21,7 @@ use crate::run_events::{
     tick_rows, ChannelSink, EventSink, HistoryCtx, RunEvent, RunFlags, RunOptions,
 };
 use crate::session_manager::{
-    close_quietly, closed_error, config_error, connect_db, with_database, ConnState,
+    close_quietly, closed_error, config_error, connect_db, lock, with_database, ConnState,
     ConnectionRuntime, SessionManager,
 };
 use dnt_core::config::{ConnectionConfig, EnvTag};
@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
@@ -110,10 +110,6 @@ pub fn preview(text: &str) -> String {
         .collect()
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Tab ids are the UI's tab keys: non-empty, at most 64 characters.
 fn validate_tab(tab: &str) -> Result<(), DbError> {
     if tab.is_empty() || tab.chars().count() > 64 {
@@ -129,15 +125,25 @@ fn validate_tab(tab: &str) -> Result<(), DbError> {
 ///
 /// After a run (or `query_tx`) whose statement failed with `ConnectionLost` or
 /// `Connect`, `session` is dropped, so the next plan opens a fresh session instead of
-/// reusing a dead one. A `USE db` the user ran (MySQL, `dnt_core::sql::session_effect`)
-/// updates `database` once it succeeded, so the tab's next plan switches back to the
-/// database the UI shows.
+/// reusing a dead one. When every such error of the run is retryable (no transaction
+/// was lost, the outcome is known), the tab stays bound to its database (`reopen`), so
+/// its plans stay valid: Retry / Fetch all (`query_plan_statement`) and `query_run`
+/// reopen the session. A `USE db` the user ran (MySQL,
+/// `dnt_core::sql::session_effect`) updates `database` once it succeeded, so the tab's
+/// next plan switches back to the database the UI shows.
 #[derive(Default)]
 pub struct TabSession {
     /// The database the session is on: the one the tab asked for, else the connect
-    /// database. Meaningful only while `session` is set.
+    /// database. Meaningful only while `session` is set, or `reopen`.
     pub(crate) database: Option<String>,
     pub(crate) session: Option<Box<dyn Session>>,
+    /// `session` was dropped after a retryable lost connection: the tab keeps its
+    /// binding to `database` and the session is reopened on its next use.
+    pub(crate) reopen: bool,
+    /// `session` was dropped with a transaction open (the server rolled it back): the
+    /// next `query_tx` reports `ConnectionLost` instead of `Idle`. Cleared once
+    /// reported, or when a session opens again.
+    pub(crate) lost_tx: bool,
     /// `ConnectionRuntime::tunnel_gen` when `session` was opened.
     pub(crate) tunnel_gen: u64,
     /// Set once the slot was closed (tab or connection closed): a caller that was
@@ -197,7 +203,7 @@ impl QuerySessions {
     /// every change of `ts.session` / `ts.database`, still holding the slot.
     pub(crate) fn sync_bound(&self, tab: &str, ts: &TabSession) {
         let mut tabs = lock(&self.tabs);
-        if ts.session.is_some() && !ts.closed {
+        if (ts.session.is_some() || ts.reopen) && !ts.closed {
             tabs.bound.insert(tab.to_string(), ts.database.clone());
         } else {
             tabs.bound.remove(tab);
@@ -569,6 +575,8 @@ impl ConnectionRuntime {
             ts.session = Some(session);
             ts.tunnel_gen = generation;
             ts.database = target;
+            ts.reopen = false;
+            ts.lost_tx = false;
             return Ok(());
         };
         if ts.database == target {
@@ -775,7 +783,9 @@ impl SessionManager {
     }
 
     /// Commits or rolls back the tab's transaction (`execute_one("COMMIT"/"ROLLBACK")`)
-    /// and returns the session's new state. A tab without a session is `Idle`.
+    /// and returns the session's new state. A tab without a session is `Idle`, except
+    /// once after its session was dropped with a transaction open (a failed run, see
+    /// [`TabSession::lost_tx`]): that is `ConnectionLost { was_in_tx }`.
     pub async fn query_tx(&self, tab: &str, action: TxAction) -> Result<TxState, DbError> {
         self.query_tx_inner(tab, action).await.map_err(|(e, _)| e)
     }
@@ -813,6 +823,18 @@ impl SessionManager {
             .try_lock_owned()
             .map_err(|_| (DbError::Busy, None))?;
         let Some(session) = ts.session.as_deref() else {
+            if std::mem::take(&mut ts.lost_tx) {
+                // The session died with a transaction open: the server rolled it
+                // back, so a Commit must not look like it worked.
+                let lost = DbError::ConnectionLost {
+                    was_in_tx: true,
+                    outcome_unknown: false,
+                    message: "the tab's session was closed during the transaction; \
+                              the server rolled it back"
+                        .into(),
+                };
+                return Err((lost, Some(TxState::Idle)));
+            }
             return Ok(TxState::Idle);
         };
         match execute_quietly(session, action.sql()).await {
@@ -943,12 +965,24 @@ impl SessionManager {
         let (tab, conn) = self.plans.locate(self.plan_ttl, plan_id, &current)?;
         let rt = self.runtime(conn)?;
         let slot = rt.queries.get(&tab).ok_or(DbError::PlanExpired)?;
-        let ts = slot.try_lock_owned().map_err(|_| DbError::Busy)?;
+        let mut ts = Arc::clone(&slot)
+            .try_lock_owned()
+            .map_err(|_| DbError::Busy)?;
         let mut copy = self
             .plans
             .statement(self.plan_ttl, plan_id, index, &current)?;
         if ts.closed || ts.database != copy.target.database {
             return Err(DbError::PlanExpired);
+        }
+        if ts.session.is_none() && ts.reopen {
+            // Dropped after a lost connection: reopen on the tab's database.
+            let ensured = rt
+                .ensure_tab_session(&mut ts, copy.target.database.clone())
+                .await;
+            if rt.queries.is_slot(&tab, &slot) {
+                rt.queries.sync_bound(&tab, &ts);
+            }
+            ensured?;
         }
         let (dialect, tx_state, _) = session_facts(&ts)?;
         drop(ts);
@@ -1199,9 +1233,11 @@ impl RunTask {
                 // The session's state is unknown: drop it (or close it, with its tab).
                 self.after_run(None, &sink).await;
                 let at = index.load(Ordering::SeqCst);
-                let error = AppError::from(DbError::Internal {
+                let mut error = AppError::from(DbError::Internal {
                     message: "the run failed unexpectedly; see the log for details".into(),
                 });
+                // A statement that was sent and never ended may have been applied.
+                error.outcome_unknown = sink.in_statement();
                 (self.emit)(RunEvent::StatementError { index: at, error });
                 Some(StopReason::Error { index: at })
             }
@@ -1232,21 +1268,33 @@ impl RunTask {
     /// successful `Ddl` reloads the database's SchemaCache in the background.
     ///
     /// `report: None` (the run task panicked, or the session vanished) is handled like
-    /// a lost connection: the session, in an unknown state, is dropped.
+    /// a lost connection: the session, in an unknown state, is dropped (and the tab's
+    /// binding with it). After a lost connection whose errors are all retryable the
+    /// tab keeps its binding ([`TabSession::reopen`]); a session dropped with a
+    /// transaction open sets [`TabSession::lost_tx`].
     ///
     /// The SchemaCache refresh covers only the session's current database (or the
     /// connect database): DDL on another database (`CREATE TABLE other.t`) or another
     /// PostgreSQL schema's database is not picked up until that cache is refreshed.
     async fn after_run(&mut self, report: Option<&RunReport>, sink: &ChannelSink) {
-        let lost = report.is_none_or(|report| {
-            report.stmts.iter().any(|s| {
-                matches!(&s.result, Err(e) if e.kind == "connection_lost" || e.kind == "connect")
-            })
+        let lost_errors: Vec<&AppError> = report.map_or_else(Vec::new, |report| {
+            report
+                .stmts
+                .iter()
+                .filter_map(|s| s.result.as_ref().err())
+                .filter(|e| e.kind == "connection_lost" || e.kind == "connect")
+                .collect()
         });
+        let lost = report.is_none() || !lost_errors.is_empty();
         let ts = &mut *self.ts;
         if lost {
+            let in_tx = ts.tx_open();
             if let Some(dead) = ts.session.take() {
                 close_quietly(dead).await;
+                ts.lost_tx = in_tx;
+                // Retry / Fetch all may run the tab's statements again on a fresh
+                // session, unless a transaction was lost or an outcome is unknown.
+                ts.reopen = report.is_some() && !in_tx && lost_errors.iter().all(|e| e.retryable);
             }
         } else if let Some(db) = &sink.use_db {
             ts.database = Some(db.clone());
@@ -1298,12 +1346,14 @@ impl SessionManager {
             .try_lock_owned()
             .map_err(|_| DbError::Busy)?;
         let copy = self.plans.pending(self.plan_ttl, plan_id, &current)?;
-        if ts.closed || ts.session.is_none() || ts.database != copy.target.database {
+        if ts.closed || (ts.session.is_none() && !ts.reopen) || ts.database != copy.target.database
+        {
             return Err(DbError::PlanExpired);
         }
         let cfg = self.current_config(&rt);
         let run_plan = rejudge(&copy, &cfg, confirmed)?;
-        if rt.is_stale(&ts) {
+        // A stale session is replaced; one dropped after a lost connection reopens.
+        if rt.is_stale(&ts) || ts.session.is_none() {
             let ensured = rt
                 .ensure_tab_session(&mut ts, copy.target.database.clone())
                 .await;
@@ -1426,7 +1476,7 @@ impl SessionManager {
                 "Explain Analyze is only available for read statements",
             ));
         }
-        let sql = explain_sql(&stmt.text, &info, analyze)?;
+        let sql = explain_sql(&stmt.text, &info, dialect, analyze)?;
         let cfg = self.current_config(&rt);
         original.explain = true;
         guard(&mut original, cfg.env_tag, cfg.read_only, analyze);

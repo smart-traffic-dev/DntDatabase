@@ -3,8 +3,11 @@
 
 use dnt_core::error::DbError;
 use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::sql::Dialect;
 use dnt_core::value::Value;
 use serde::{Deserialize, Serialize};
+
+use crate::guard::resplits;
 
 /// Shape of what an explain statement returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,10 +38,28 @@ fn unsupported(feature: &str, info: &ServerInfo) -> DbError {
     }
 }
 
-/// Builds the explain statement for `stmt` on the server `info` describes.
-/// `analyze` makes the server execute the statement. This function does not refuse
-/// non-`Read` statements under `analyze`; the caller (`query_explain`, Task 15) must.
-pub fn explain_sql(stmt: &str, info: &ServerInfo, analyze: bool) -> Result<ExplainSql, DbError> {
+/// Builds the explain statement for `stmt` on the server `info` describes, `stmt`
+/// lexed as `dialect` (the session's, with its `sql_mode`). `analyze` makes the
+/// server execute the statement. This function does not refuse non-`Read`
+/// statements under `analyze`; the caller (`query_explain`, Task 15) must.
+///
+/// A `stmt` that holds several statements for the server ([`resplits`]: a MySQL
+/// `DELIMITER` left on) is refused with `Config { field: "explain" }`: the server
+/// would run every statement after the first one.
+pub fn explain_sql(
+    stmt: &str,
+    info: &ServerInfo,
+    dialect: Dialect,
+    analyze: bool,
+) -> Result<ExplainSql, DbError> {
+    if resplits(stmt, dialect) {
+        return Err(DbError::Config {
+            field: Some("explain".into()),
+            message: "Explain needs exactly one statement; this text holds several \
+                      (is a DELIMITER still in effect?)"
+                .into(),
+        });
+    }
     let (prefix, format) = match (info.kind, info.variant, analyze) {
         (DbKind::Postgres, _, false) => ("EXPLAIN (FORMAT JSON)", ExplainFormat::PgJson),
         (DbKind::Postgres, _, true) => (

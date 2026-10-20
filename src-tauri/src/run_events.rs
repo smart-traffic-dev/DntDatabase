@@ -9,6 +9,7 @@
 //! is being stopped. `done` is always the last event of a run, also when the run was
 //! cancelled, its connection or tab closed, or the run task failed.
 
+use crate::session_manager::lock;
 use dnt_core::driver::{ExecProgress, ResultSummary, RowSink, StmtOutcome};
 use dnt_core::error::AppError;
 use dnt_core::sql::{session_effect, Dialect, StatementKind};
@@ -21,7 +22,7 @@ use dnt_store::history::{HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::ConnectionRepo;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -109,10 +110,6 @@ pub struct RunOptions {
     /// Row limit per result; clamped to 1..=1 000 000.
     pub max_rows: u32,
     pub continue_on_error: bool,
-}
-
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Stop state shared by a run's sink and `query_cancel`.
@@ -367,6 +364,12 @@ impl ChannelSink {
         Arc::clone(&self.index)
     }
 
+    /// Whether a statement was started and has not ended (it was sent, so it may
+    /// have been applied).
+    pub(crate) fn in_statement(&self) -> bool {
+        self.current.is_some()
+    }
+
     /// The history writer, if anything was recorded (finish it before `done`).
     pub(crate) fn take_writer(&mut self) -> Option<HistoryWriter> {
         self.writer.take()
@@ -423,9 +426,13 @@ impl ChannelSink {
     }
 }
 
+/// Rows the history writer inserts in one transaction at most.
+const HISTORY_BATCH: usize = 500;
+
 /// The run's one history writer: a blocking task fed through a channel, so the rows are
 /// inserted in statement order and a long script costs one blocking task, not one per
-/// statement. A failed insert logs `warn` and never fails the run.
+/// statement. Whatever is queued (up to [`HISTORY_BATCH`] rows) is written in one
+/// transaction. A failed insert logs `warn` and never fails the run.
 pub(crate) struct HistoryWriter {
     tx: std::sync::mpsc::Sender<NewHistoryEntry>,
     task: tokio::task::JoinHandle<()>,
@@ -435,9 +442,22 @@ impl HistoryWriter {
     pub(crate) fn start(repo: Arc<ConnectionRepo>, connection: Uuid) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<NewHistoryEntry>();
         let task = tokio::task::spawn_blocking(move || {
-            for entry in rx {
-                if let Err(e) = repo.history_insert(&entry) {
-                    tracing::warn!(connection = %connection, error = %e, "could not record query history");
+            // Waits for the next row, then takes whatever else is already queued.
+            while let Ok(first) = rx.recv() {
+                let mut batch = vec![first];
+                while batch.len() < HISTORY_BATCH {
+                    match rx.try_recv() {
+                        Ok(entry) => batch.push(entry),
+                        Err(_) => break,
+                    }
+                }
+                if let Err(e) = repo.history_insert_batch(&batch) {
+                    tracing::warn!(
+                        connection = %connection,
+                        error = %e,
+                        rows = batch.len(),
+                        "could not record query history"
+                    );
                 }
             }
         });
@@ -673,6 +693,70 @@ mod tests {
         flags.user_stop(&emit);
         flags.user_stop(&emit);
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    /// 10 000 statements' history, sent as fast as a script runs, is written in
+    /// batches on a file database: quickly, and in order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn history_writer_batches_10k_rows_in_order() {
+        use dnt_core::config::ConnectionConfig;
+        use dnt_core::secret::MemorySecretStore;
+        use dnt_store::history::{HistoryFilter, HistoryStatus};
+        use dnt_store::repo::NewSecrets;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Arc::new(ConnectionRepo::new(
+            dnt_store::db::open(&dir.path().join("app.db")).unwrap(),
+            Arc::new(MemorySecretStore::default()),
+        ));
+        let conn = repo
+            .create(
+                ConnectionConfig {
+                    id: Uuid::nil(),
+                    ..dnt_core::test_util::sample_config()
+                },
+                NewSecrets {
+                    db_password: None,
+                    ssh_password: None,
+                    ssh_key_passphrase: None,
+                },
+            )
+            .unwrap()
+            .id;
+        let started = Instant::now();
+        let writer = HistoryWriter::start(Arc::clone(&repo), conn);
+        for i in 0..10_000 {
+            writer.send(NewHistoryEntry {
+                connection_id: conn,
+                database: None,
+                sql_text: format!("SELECT {i}"),
+                redacted: false,
+                kind: "read".into(),
+                started_at: "2026-10-20T10:00:00.000Z".into(),
+                elapsed_ms: Some(1),
+                status: HistoryStatus::Ok,
+                row_count: Some(1),
+                affected: None,
+                error_kind: None,
+                error_code: None,
+            });
+        }
+        writer.finish().await;
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(5), "took {took:?}");
+        let newest = repo
+            .history_list(&HistoryFilter {
+                connection_id: Some(conn),
+                search: None,
+                limit: 1000,
+            })
+            .unwrap();
+        let texts: Vec<String> = newest.into_iter().map(|e| e.sql_text).collect();
+        let want: Vec<String> = (9_000..10_000)
+            .rev()
+            .map(|i| format!("SELECT {i}"))
+            .collect();
+        assert_eq!(texts, want);
     }
 
     #[test]

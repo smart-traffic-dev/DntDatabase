@@ -57,6 +57,8 @@ struct Log {
     lose_on_tx: AtomicBool,
     /// Calls of the session's cancel handle.
     cancel_calls: AtomicUsize,
+    /// Set once a `FLAKY` statement lost its connection (the next one succeeds).
+    flaked: AtomicBool,
 }
 
 impl Log {
@@ -188,7 +190,8 @@ impl Session for FakeSession {
     /// Scripted by the statement text (upper-cased):
     /// `ROWS_<n>` streams n rows in `batch_size` batches; `TRICKLE` streams 10 batches
     /// of 10 rows; `EXPLAIN …` returns a one-cell plan; `FAIL` is a server error 1146;
-    /// `LOSE` loses the connection; `SLOW` streams a row every 20 ms for 10 s until
+    /// `LOSE` loses the connection (`LOSE_TX`: during a transaction; `FLAKY`: only the
+    /// first time); `SLOW` streams a row every 20 ms for 10 s until
     /// stopped (then `Cancelled`); `STUCK` ignores a cancel for the whole grace.
     async fn execute_one(
         &self,
@@ -267,6 +270,21 @@ impl Session for FakeSession {
         }
         if upper.contains("PANIC") {
             panic!("the fake driver panics");
+        }
+        if upper.contains("LOSE_TX") {
+            self.log.set_tx(TxState::Idle);
+            return Err(DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                message: "server gone".into(),
+            });
+        }
+        if upper.contains("FLAKY") && !self.log.flaked.swap(true, Ordering::SeqCst) {
+            return Err(DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: false,
+                message: "server gone".into(),
+            });
         }
         if upper.contains("LOSE") {
             return Err(DbError::ConnectionLost {
@@ -1829,6 +1847,11 @@ async fn panicking_run_ends_and_drops_the_session() {
     assert_eq!(done["stop"], json!({ "kind": "error", "index": 1 }));
     assert_eq!(events.of("statement_error")[0]["error"]["kind"], "internal");
     assert_eq!(
+        events.of("statement_error")[0]["error"]["outcome_unknown"],
+        true,
+        "the panicking statement was sent and never ended: it may have been applied"
+    );
+    assert_eq!(
         f.log.closes(),
         1,
         "the session in an unknown state is closed"
@@ -1837,4 +1860,149 @@ async fn panicking_run_ends_and_drops_the_session() {
     assert_eq!(f.log.connects(), 3, "the next plan opens a fresh session");
     // The statement that ran before the panic is in the history.
     assert_eq!(history(&f, id).len(), 1);
+}
+
+// ---- Final review fixes ----
+
+/// Production: a forgotten `DELIMITER ;` leaves `SELECT …; DELETE …;` as one planned
+/// statement, which the server runs as two. The DELETE makes it Confirm (read-only:
+/// Block), and Explain refuses it.
+#[tokio::test]
+async fn forgotten_delimiter_cannot_bypass_the_guard() {
+    let text = "DELIMITER $$\nSELECT * FROM t; DELETE FROM t WHERE id = 1;";
+    let f = fixture(DbKind::MySql);
+    let prod = open_tagged(&f, Some(EnvTag::Production), false).await;
+    let view = plan(&f, "t1", prod, None, text).await.unwrap();
+    assert_eq!(view.stmts.len(), 1);
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+
+    let ro = open_tagged(&f, None, true).await;
+    let view = plan(&f, "t2", ro, None, text).await.unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Block);
+
+    for analyze in [false, true] {
+        let err =
+            f.sm.query_explain("t1", prod, None, text, 20, analyze)
+                .await
+                .unwrap_err();
+        let app = AppError::from(err);
+        assert_eq!(
+            (app.kind.as_str(), app.field.as_deref()),
+            ("config", Some("explain"))
+        );
+    }
+    assert!(f.log.executed().is_empty());
+
+    // A mysqldump procedure block stays one Ddl statement, allowed off Production.
+    let dump = "DELIMITER $$\nCREATE DEFINER=`root`@`localhost` PROCEDURE `p`()\nBEGIN\n  SELECT 1;\n  DELETE FROM t;\nEND$$\nDELIMITER ;";
+    let view = plan(&f, "t1", prod, None, dump).await.unwrap();
+    assert_eq!(
+        (view.stmts.len(), view.stmts[0].kind, view.stmts[0].verdict),
+        (1, StmtKindLabel::Ddl, Verdict::Confirm)
+    );
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let view = plan(&f, "t3", local, None, dump).await.unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Allow);
+}
+
+#[tokio::test]
+async fn retry_after_a_lost_connection_reopens_the_session() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, Some("shop"), "SELECT 1; SELECT flaky")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    let error = &events.of("statement_error")[0]["error"];
+    assert_eq!(error["kind"], "connection_lost");
+    assert_eq!(error["retryable"], true);
+    assert_eq!(f.log.closes(), 1, "the dead session is closed");
+    assert_eq!(f.log.connects(), 2);
+
+    // Retry of the lost statement: planned and run on a reopened session, on the
+    // tab's database.
+    let retried = rerun(&f, view.plan_id, 1, opts()).await;
+    assert_eq!(retried.of("statement_start")[0]["index"], 1);
+    assert_eq!(retried.done(LONG).await["stop"], Json::Null);
+    assert_eq!(f.log.connects(), 3, "one fresh session");
+    assert_eq!(
+        f.log.databases.lock().unwrap().last().cloned().flatten(),
+        Some("shop".into())
+    );
+    assert_eq!(
+        f.log.executed(),
+        ["SELECT 1", "SELECT flaky", "SELECT flaky"]
+    );
+    // Fetch all / Retry of the other statement still works, on the same session.
+    rerun(&f, view.plan_id, 0, opts()).await;
+    assert_eq!(f.log.connects(), 3);
+}
+
+#[tokio::test]
+async fn retry_after_a_lost_transaction_is_refused() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT 1; SELECT lose_tx")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    let error = &events.of("statement_error")[0]["error"];
+    assert_eq!(error["kind"], "connection_lost");
+    assert_eq!(error["retryable"], false);
+    // The run's statements belonged to the lost transaction: none runs again.
+    for index in [0, 1] {
+        let err =
+            f.sm.query_plan_statement(view.plan_id, index)
+                .await
+                .unwrap_err();
+        assert_eq!(kind(err), "plan_expired");
+    }
+    assert_eq!(f.log.connects(), 2);
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3, "the next plan opens a fresh session");
+}
+
+#[tokio::test]
+async fn tx_action_after_the_session_died_in_a_transaction_is_connection_lost() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT panic").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(f.log.closes(), 1, "the session was dropped");
+    // Its transaction is gone: a Commit must not look like it worked.
+    let err =
+        f.sm.query_tx_reported("t1", TxAction::Commit)
+            .await
+            .unwrap_err();
+    assert_eq!(err.kind, "connection_lost");
+    assert_eq!(err.tx_state.as_deref(), Some("idle"));
+    // Reported once; nothing is sent.
+    assert_eq!(
+        f.sm.query_tx("t1", TxAction::Rollback).await.unwrap(),
+        TxState::Idle
+    );
+    assert!(!f
+        .log
+        .executed()
+        .iter()
+        .any(|s| s == "COMMIT" || s == "ROLLBACK"));
 }

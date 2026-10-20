@@ -13,11 +13,15 @@
 //! On a read-only connection, a statement that lifts the session's read-only
 //! mode ([`lifts_read_only`]) is Block whatever its kind.
 //!
+//! A planned statement that holds several statements for the server (a MySQL
+//! `DELIMITER` left on, see [`resplits`]) gets the strictest verdict over all of
+//! them, and plain Explain does not cover it.
+//!
 //! Keyword positions are read from [`tokenize`], which keeps quoted tokens in
 //! place, so `SET \`a\` GLOBAL …` never passes for a session `SET`.
 
 use dnt_core::config::EnvTag;
-use dnt_core::sql::{classify, readings, tokenize, Dialect, StatementKind, TokKind, Token};
+use dnt_core::sql::{classify, readings, split, tokenize, Dialect, StatementKind, TokKind, Token};
 
 use crate::plan::{ScriptPlan, Verdict};
 
@@ -76,7 +80,9 @@ pub(crate) fn stmt_verdict(
             analyze_verdict,
             verdict(text, kind, dialect, env, read_only),
         )
-    } else if explain && kind != StatementKind::Ddl {
+    } else if explain && kind != StatementKind::Ddl && !resplits(text, dialect) {
+        // `explain_sql` refuses a text that re-splits; judged like a run should
+        // one reach here.
         Verdict::Allow
     } else {
         verdict(text, kind, dialect, env, read_only)
@@ -106,6 +112,24 @@ pub fn verdict(
         StatementKind::Write | StatementKind::Ddl => unsafe_verdict,
         _ => Verdict::Allow,
     };
+    let judge = |r: &str, toks: &[Token]| {
+        let mut rv = if read_only && lifts_toks(r, toks, dialect) {
+            Verdict::Block
+        } else {
+            match classify(r, dialect) {
+                StatementKind::Read | StatementKind::Transaction(_) => Verdict::Allow,
+                StatementKind::Write | StatementKind::Ddl => unsafe_verdict,
+                StatementKind::Other if whitelisted_toks(toks, dialect) => Verdict::Allow,
+                StatementKind::Other => unsafe_verdict,
+            }
+        };
+        // `EXPLAIN ANALYZE …` typed in the editor runs its statement, like the
+        // `analyze` flag of `guard`: Confirm on Production, Allow on read-only.
+        if !read_only && explain_analyze(toks, dialect) {
+            rv = strictest(rv, Verdict::Confirm);
+        }
+        rv
+    };
     let mut any = false;
     for r in readings(stmt, dialect) {
         let toks = tokenize(&r, dialect);
@@ -115,22 +139,15 @@ pub fn verdict(
             continue;
         }
         any = true;
-        let mut rv = if read_only && lifts_toks(&r, &toks, dialect) {
-            Verdict::Block
-        } else {
-            match classify(&r, dialect) {
-                StatementKind::Read | StatementKind::Transaction(_) => Verdict::Allow,
-                StatementKind::Write | StatementKind::Ddl => unsafe_verdict,
-                StatementKind::Other if whitelisted_toks(&toks, dialect) => Verdict::Allow,
-                StatementKind::Other => unsafe_verdict,
+        v = strictest(v, judge(&r, &toks));
+        // A reading that holds several statements (see `resplits`): the server
+        // runs each of them, so each is judged too.
+        for piece in pieces(&r, &toks, dialect).into_iter().flatten() {
+            let ptoks = tokenize(&piece, dialect);
+            if !ptoks.is_empty() {
+                v = strictest(v, judge(&piece, &ptoks));
             }
-        };
-        // `EXPLAIN ANALYZE …` typed in the editor runs its statement, like the
-        // `analyze` flag of `guard`: Confirm on Production, Allow on read-only.
-        if !read_only && explain_analyze(&toks, dialect) {
-            rv = strictest(rv, Verdict::Confirm);
         }
-        v = strictest(v, rv);
     }
     if !any && kind == StatementKind::Other {
         v = strictest(v, unsafe_verdict);
@@ -186,6 +203,98 @@ pub fn lifts_read_only(stmt: &str, dialect: Dialect) -> bool {
     readings(stmt, dialect)
         .iter()
         .any(|r| lifts_toks(r, &tokenize(r, dialect), dialect))
+}
+
+/// Whether `stmt` (one planned statement) holds more than one statement for the
+/// server: some reading of it, split again with the default `;` delimiter, gives
+/// several pieces. Under a MySQL `DELIMITER` a planned statement may hold depth-0
+/// `;` (a forgotten `DELIMITER ;`), and with multi-statements on the server runs
+/// every piece. Compound statements ([`compound_body`]) never re-split: their `;`
+/// belong to the body. A PostgreSQL statement never re-splits (PG has no
+/// `DELIMITER`, so `split` already cut at every depth-0 `;`).
+pub fn resplits(stmt: &str, dialect: Dialect) -> bool {
+    readings(stmt, dialect).iter().any(|r| {
+        let toks = tokenize(r, dialect);
+        pieces(r, &toks, dialect).is_some()
+    })
+}
+
+/// The statements of reading `r` (tokens `toks`) split again with the default `;`
+/// delimiter, when there are several (see [`resplits`]).
+fn pieces(r: &str, toks: &[Token], dialect: Dialect) -> Option<Vec<String>> {
+    if compound_body(toks) {
+        return None;
+    }
+    let found = split(r, dialect);
+    (found.len() > 1).then(|| found.into_iter().map(|s| s.text).collect())
+}
+
+/// MySQL/MariaDB compound statements, whose body holds `;`:
+/// `CREATE [OR REPLACE] [DEFINER = user] [AGGREGATE] PROCEDURE|FUNCTION|TRIGGER|EVENT`
+/// and `BEGIN NOT ATOMIC`. A user is `CURRENT_USER[()]` or a name (word or quoted)
+/// with an optional `@host`.
+fn compound_body(toks: &[Token]) -> bool {
+    if is_word(toks, 0, "BEGIN") && is_word(toks, 1, "NOT") && is_word(toks, 2, "ATOMIC") {
+        return true;
+    }
+    if !is_word(toks, 0, "CREATE") {
+        return false;
+    }
+    let mut i = 1;
+    if is_word(toks, i, "OR") && is_word(toks, i + 1, "REPLACE") {
+        i += 2;
+    }
+    if is_word(toks, i, "DEFINER") {
+        if !is_punct(toks, i + 1, b'=') {
+            return false;
+        }
+        match skip_user(toks, i + 2) {
+            Some(next) => i = next,
+            None => return false,
+        }
+    }
+    if is_word(toks, i, "AGGREGATE") {
+        i += 1;
+    }
+    ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
+        .iter()
+        .any(|k| is_word(toks, i, k))
+}
+
+/// The index past the user spec of a `DEFINER =` starting at token `i`.
+fn skip_user(toks: &[Token], mut i: usize) -> Option<usize> {
+    let first = toks.get(i)?;
+    match first.kind {
+        TokKind::Word(w) if w.eq_ignore_ascii_case("CURRENT_USER") => {
+            i += 1;
+            if toks.get(i).is_some_and(|t| t.kind == TokKind::Open)
+                && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Close)
+            {
+                i += 2;
+            }
+            return Some(i);
+        }
+        TokKind::Word(_) | TokKind::Quoted => {}
+        _ => return None,
+    }
+    let ends_at = |t: &Token| matches!(t.kind, TokKind::Word(w) if w.ends_with('@'));
+    let mut prev = *first;
+    i += 1;
+    // The host: `@host` / `@'host'` (`@` is a word byte, so `@` may stand alone or
+    // open the next word).
+    while let Some(t) = toks.get(i) {
+        let host = match t.kind {
+            TokKind::Word(w) if w.starts_with('@') => true,
+            TokKind::Word(_) | TokKind::Quoted => ends_at(&prev),
+            _ => false,
+        };
+        if !host {
+            break;
+        }
+        prev = *t;
+        i += 1;
+    }
+    Some(i)
 }
 
 fn rank(v: Verdict) -> u8 {
@@ -487,7 +596,7 @@ fn sets_read_only_off(src: &str, a: &[Token]) -> bool {
 mod tests {
     use super::*;
     use crate::plan::{plan, Target};
-    use dnt_core::sql::classify;
+    use dnt_core::sql::{classify, split};
     use Verdict::{Allow as A, Block as B, Confirm as C};
 
     const MY: Dialect = Dialect::MYSQL;
@@ -999,6 +1108,100 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
         for s in &p.stmts {
             let session_set = s.text.contains("SET ") && !s.text.starts_with("SET @@GLOBAL.");
             assert_eq!(s.verdict, if session_set { A } else { B }, "{}", s.text);
+        }
+    }
+
+    /// A forgotten `DELIMITER ;`: under `$$` one planned statement holds two
+    /// statements, which the server runs as such (multi-statements are on).
+    const FORGOTTEN_DELIMITER: &str = "DELIMITER $$\nSELECT * FROM t; DELETE FROM t WHERE id = 1;";
+
+    #[test]
+    fn statement_with_depth0_semicolons_is_judged_on_every_piece() {
+        let p = plan(FORGOTTEN_DELIMITER, Target::All, MY);
+        assert_eq!(p.stmts.len(), 1);
+        assert_eq!(p.stmts[0].kind, StatementKind::Read);
+        assert_eq!(
+            plan_columns(FORGOTTEN_DELIMITER, MY, false, false),
+            [C, B, A]
+        );
+        // Pieces whose leading statement is whitelisted are still judged.
+        for s in [
+            "SET NAMES utf8; DELETE FROM t",
+            "SELECT 1; DROP TABLE t",
+            "USE shop; SET GLOBAL x = 1",
+            "/*!40101 SELECT 1; DELETE FROM t */",
+        ] {
+            assert_eq!(columns(s, MY), [C, B, A], "{s}");
+        }
+        // Read-only lifting in a later piece blocks.
+        assert_eq!(columns("SELECT 1; SET tx_read_only = 0", MY), [A, B, A]);
+        // Every piece a read: unchanged.
+        assert_eq!(columns("SELECT 1; SELECT 2;", MY), [A, A, A]);
+    }
+
+    const DUMP_PROCEDURE: &str = "DELIMITER $$
+CREATE DEFINER=`root`@`localhost` PROCEDURE `p`(IN x INT)
+BEGIN
+  SELECT * FROM t WHERE id = x;
+  UPDATE t SET n = n + 1 WHERE id = x;
+END$$
+DELIMITER ;";
+
+    #[test]
+    fn compound_bodies_keep_their_own_verdict() {
+        let p = plan(DUMP_PROCEDURE, Target::All, MY);
+        assert_eq!(p.stmts.len(), 1);
+        assert_eq!(p.stmts[0].kind, StatementKind::Ddl);
+        assert!(!resplits(&p.stmts[0].text, MY));
+        // Ddl: Confirm on Production, Block read-only, Allow elsewhere.
+        assert_eq!(plan_columns(DUMP_PROCEDURE, MY, false, false), [C, B, A]);
+        for s in [
+            "CREATE PROCEDURE p() BEGIN SELECT 1; DELETE FROM t; END",
+            "create or replace definer = current_user() function f() returns int begin return 1; end",
+            "CREATE DEFINER=root@localhost TRIGGER tr BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.a = 1; END",
+            "CREATE DEFINER='u'@'%' EVENT e ON SCHEDULE EVERY 1 DAY DO BEGIN DELETE FROM t; END",
+            "CREATE OR REPLACE AGGREGATE FUNCTION f(x INT) RETURNS INT BEGIN RETURN 1; END",
+            "/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER tr BEFORE INSERT ON t FOR EACH ROW BEGIN SET NEW.a = 1; END */",
+        ] {
+            assert!(!resplits(s, MY), "{s}");
+            assert_eq!(columns(s, MY), [C, B, A], "{s}");
+        }
+        let s = "BEGIN NOT ATOMIC SELECT 1; SELECT 2; END";
+        assert!(!resplits(s, MY));
+        assert_eq!(columns(s, MY), [C, B, A]);
+        // Anything else with a depth-0 `;` re-splits.
+        for s in [
+            "CREATE TABLE t (a int); DELETE FROM t",
+            "CREATE VIEW v AS SELECT 1; DELETE FROM t",
+            FORGOTTEN_DELIMITER.trim_start_matches("DELIMITER $$\n"),
+        ] {
+            assert!(resplits(s, MY), "{s}");
+        }
+    }
+
+    #[test]
+    fn plain_explain_of_several_pieces_is_judged_as_a_run() {
+        // Plain Explain allows everything but Ddl, unless the text is several
+        // statements: then it is judged like any run.
+        let text = "DELIMITER $$\nSELECT 1; DELETE FROM t";
+        assert_eq!(plan_columns(text, MY, true, false), [C, B, A]);
+    }
+
+    #[test]
+    fn pg_statements_never_hold_a_depth0_semicolon() {
+        for text in [
+            "SELECT 1; DELETE FROM t",
+            "DELIMITER $$\nSELECT 1; DELETE FROM t;",
+            "create function f() returns int as $$ begin return 1; end $$ language plpgsql; select 1",
+            "select $tag$ ; $$ ; $tag$; select E'a\\';b'; /* a /* b; */ c; */ select 2",
+            "SELECT ';'; SELECT \"a;b\"",
+            "DO $$ BEGIN PERFORM 1; END $$; SELECT 1",
+        ] {
+            let p = plan(text, Target::All, PG);
+            for s in &p.stmts {
+                assert_eq!(split(&s.text, PG).len(), 1, "{text:?}: {}", s.text);
+                assert!(!resplits(&s.text, PG), "{}", s.text);
+            }
         }
     }
 
