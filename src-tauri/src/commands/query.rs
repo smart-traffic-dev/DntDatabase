@@ -7,7 +7,7 @@
 
 use super::guard;
 use crate::cache::{CompletionObject, SchemaCache};
-use crate::query_sessions::{PlanView, TxAction};
+use crate::query_sessions::{with_tx_state, PlanView, TxAction};
 use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -137,6 +137,17 @@ pub async fn query_close_tab_impl(
     state.sessions.query_close_tab(&tab_id, force).await
 }
 
+/// [`guard`] for the calls that open or move a tab's session: an error that dropped
+/// the tab's transaction reports the tab's state after it in `AppError::tx_state`
+/// (see [`with_tx_state`]).
+async fn guard_tab<T>(
+    fut: impl std::future::Future<Output = Result<T, DbError>>,
+) -> Result<T, AppError> {
+    guard(async { Ok(fut.await.map_err(with_tx_state)) })
+        .await
+        .and_then(|r| r)
+}
+
 /// UTF-16 ranges (end-exclusive) of every statement of `text`, as `query_plan` would
 /// split it with `Target::All`. Pure: no session needed.
 pub fn statement_ranges_impl(text: &str, dialect: Dialect) -> Vec<(u32, u32)> {
@@ -148,7 +159,9 @@ pub fn statement_ranges_impl(text: &str, dialect: Dialect) -> Vec<(u32, u32)> {
 /// tab's session on first use and moves it when the connection or database changed.
 /// Errors: `not_open`, `busy` (the tab is running), `transaction_open` (changing the
 /// connection or database of a tab with an open transaction), connect errors. The plan
-/// is kept 2 minutes for `query_run`.
+/// is kept 2 minutes for `query_run`. A `connection_lost` that dropped the tab's
+/// transaction (its SSH tunnel was replaced) carries `tx_state: "idle"`, here and in
+/// `query_run`, `query_explain` and `query_plan_statement`.
 #[tauri::command]
 #[specta::specta]
 pub async fn query_plan(
@@ -159,7 +172,7 @@ pub async fn query_plan(
     text: String,
     target: Target,
 ) -> Result<PlanView, AppError> {
-    guard(query_plan_impl(
+    guard_tab(query_plan_impl(
         &state, tab_id, conn_id, database, text, target,
     ))
     .await
@@ -211,7 +224,7 @@ pub async fn query_run(
             false
         }
     });
-    guard(query_run_impl(&state, plan_id, confirmed, opts, emit)).await
+    guard_tab(query_run_impl(&state, plan_id, confirmed, opts, emit)).await
 }
 
 /// Stops run `run_id` (emits `stopping{user}` first). Unknown or finished runs: no-op.
@@ -236,7 +249,7 @@ pub async fn query_explain(
     cursor: u32,
     analyze: bool,
 ) -> Result<PlanView, AppError> {
-    guard(query_explain_impl(
+    guard_tab(query_explain_impl(
         &state, tab_id, conn_id, database, text, cursor, analyze,
     ))
     .await
@@ -251,7 +264,7 @@ pub async fn query_plan_statement(
     plan_id: Uuid,
     index: u32,
 ) -> Result<PlanView, AppError> {
-    guard(query_plan_statement_impl(&state, plan_id, index)).await
+    guard_tab(query_plan_statement_impl(&state, plan_id, index)).await
 }
 
 /// Closes the tab's session. With a transaction open and `force` false it returns

@@ -6,7 +6,7 @@ import type { PlanView, Target, TxAction } from '../bindings';
 import { useConnections } from './connections';
 import { exportRunOf, useExporting } from './queryExport';
 import { canRun, canStop, settleTx, useQueryRun, type MessageLine } from './queryRun';
-import { setRunningSource, useQueryDocs } from './queryTabs';
+import { asTxState, setRunningSource, useQueryDocs } from './queryTabs';
 import { promptHandles, reopenConnection } from './reopen';
 import { askRunConfirmation, showBlocked } from './runPrompt';
 import { setPlanRunner } from '../tabs/query/rerun';
@@ -162,8 +162,11 @@ function note(tabId: string, text: string, error: ReturnType<typeof toAppError> 
     retryRange: null,
   };
   const run = useQueryRun.getState().get(tabId);
+  // A failure that dropped the tab's transaction (`connection_lost` after the tunnel was replaced)
+  // reports the state it left.
+  const txState = asTxState(error?.tx_state) ?? run.txState;
   useQueryRun.setState((s) => ({
-    runs: new Map(s.runs).set(tabId, { ...run, messages: [...run.messages, line], panel: 'messages' }),
+    runs: new Map(s.runs).set(tabId, { ...run, messages: [...run.messages, line], panel: 'messages', txState }),
   }));
 }
 

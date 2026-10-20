@@ -563,6 +563,9 @@ impl ConnectionRuntime {
                 close_quietly(old).await;
             }
             if in_tx {
+                // As after a run that lost its session in a transaction: a Commit now
+                // must not look like it worked.
+                ts.lost_tx = true;
                 return Err(DbError::ConnectionLost {
                     was_in_tx: true,
                     outcome_unknown: false,
@@ -1087,7 +1090,10 @@ impl SessionManager {
                 .ensure_tab_session(&mut ts, copy.target.database.clone())
                 .await;
             rt.queries.sync_bound(&tab, &ts);
-            ensured.map_err(early)?;
+            ensured.map_err(|e| {
+                let state = tx_state_after(&e);
+                (e, state)
+            })?;
         }
         let session = ts.session.as_deref().ok_or((DbError::PlanExpired, None))?;
         still_one_read(&stmt, session.dialect(), &cfg).map_err(early)?;
@@ -1304,6 +1310,31 @@ fn still_one_read(stmt: &PlannedStmt, now: Dialect, cfg: &ConnectionConfig) -> R
              now reads differently. Run it again, then export.",
         ))
     }
+}
+
+/// The tab's transaction state to report with `e`, an error of a call that opens or
+/// moves the tab's session (`query_plan`, `query_explain`, `query_plan_statement`,
+/// `query_run`, `query_export`) before anything runs: a stale session dropped with its
+/// transaction open (`ConnectionLost { was_in_tx: true }`, see
+/// `ensure_tab_session`) leaves the tab without a session, so `Idle` (the server
+/// rolled the transaction back). `None` otherwise: the state did not change.
+pub fn tx_state_after(e: &DbError) -> Option<TxState> {
+    matches!(
+        e.unstaged(),
+        DbError::ConnectionLost {
+            was_in_tx: true,
+            ..
+        }
+    )
+    .then_some(TxState::Idle)
+}
+
+/// `e` for the UI, with [`tx_state_after`] in `AppError::tx_state`.
+pub fn with_tx_state(e: DbError) -> AppError {
+    let state = tx_state_after(&e);
+    let mut app = AppError::from(e);
+    app.tx_state = state.map(|s| s.as_str().to_string());
+    app
 }
 
 fn is_lost(e: &DbError) -> bool {

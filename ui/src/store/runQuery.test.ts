@@ -162,6 +162,25 @@ describe('runQuery', () => {
     expect(useQueryRun.getState().get(tab).phase.kind).toBe('idle');
   });
 
+  it('a plan error that dropped the transaction updates the tab state', async () => {
+    useQueryRun.setState((s) => ({ runs: new Map(s.runs).set(tab, { ...s.get(tab), txState: 'active' }) }));
+    mockBackend({
+      query_plan: () =>
+        Promise.reject({
+          kind: 'connection_lost',
+          message: 'The connection was lost during a transaction; it was rolled back.',
+          tx_state: 'idle',
+        }),
+    });
+    await runQuery(tab, 'All');
+    expect(useQueryRun.getState().get(tab).txState).toBe('idle');
+    // Without a state the tab keeps its own.
+    useQueryRun.setState((s) => ({ runs: new Map(s.runs).set(tab, { ...s.get(tab), txState: 'active' }) }));
+    mockBackend({ query_plan: () => Promise.reject({ kind: 'syntax', message: 'bad plan', position: null }) });
+    await runQuery(tab, 'All');
+    expect(useQueryRun.getState().get(tab).txState).toBe('active');
+  });
+
   it('a failed query_run returns the tab to idle with the error', async () => {
     mockBackend({
       query_plan: () => plan,

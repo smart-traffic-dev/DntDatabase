@@ -22,7 +22,7 @@ use dnt_store::db::open_in_memory;
 use dnt_store::history::{HistoryFilter, HistoryStatus};
 use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
 use dnt_tunnel::KnownHosts;
-use dntdatabase::query_sessions::{TxAction, PREVIEW_CHARS};
+use dntdatabase::query_sessions::{tx_state_after, with_tx_state, TxAction, PREVIEW_CHARS};
 use dntdatabase::run_events::{EventSink, RunOptions};
 use dntdatabase::session_manager::SessionManager;
 use secrecy::SecretString;
@@ -844,10 +844,56 @@ async fn replaced_tunnel_with_open_tx_reports_lost_once() {
         "{err:?}"
     );
     assert_eq!(f.log.closes(), 1);
+    // Reported with the tab's state after it: no session, no transaction.
+    assert_eq!(tx_state_after(&err), Some(TxState::Idle));
+    assert_eq!(with_tx_state(err).tx_state.as_deref(), Some("idle"));
     // The server rolled the transaction back; the next plan reopens.
     f.log.set_tx(TxState::Idle);
     plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
     assert_eq!(f.log.connects(), 3);
+}
+
+/// `query_run` and `query_export` of a plan made before the tunnel was replaced under
+/// an open transaction: `ConnectionLost { was_in_tx }` with the tab's state `Idle`, and
+/// a Commit afterwards does not look like it worked (`lost_tx`).
+#[tokio::test]
+async fn replaced_tunnel_with_open_tx_drops_it_for_runs_and_exports() {
+    for export_it in [false, true] {
+        let f = fixture(DbKind::MySql);
+        let id = open(&f, config(DbKind::MySql)).await;
+        let view = plan(&f, "t1", id, None, "SELECT rows_2").await.unwrap();
+        f.log.set_tx(TxState::Active);
+        f.sm.simulate_tunnel_replaced(id);
+        let (err, state) = if export_it {
+            let mut sink = ExportRows::default();
+            export(&f, view.plan_id, Uuid::new_v4(), &mut sink)
+                .await
+                .unwrap_err()
+        } else {
+            let (emit, _events) = collector();
+            let err = f.sm.query_run(view.plan_id, false, opts(), emit)
+                .await
+                .unwrap_err();
+            let state = tx_state_after(&err);
+            (err, state)
+        };
+        assert!(
+            matches!(&err, DbError::ConnectionLost { was_in_tx: true, .. }),
+            "{export_it}: {err:?}"
+        );
+        assert_eq!(state, Some(TxState::Idle), "{export_it}");
+        assert_eq!(f.log.closes(), 1, "{export_it}: the stale session is closed");
+        f.log.set_tx(TxState::Idle);
+        let err =
+            f.sm.query_tx_reported("t1", TxAction::Commit)
+                .await
+                .unwrap_err();
+        assert_eq!(err.kind, "connection_lost", "{export_it}");
+        assert_eq!(err.tx_state.as_deref(), Some("idle"), "{export_it}");
+        assert!(!f.log.executed().iter().any(|s| s == "COMMIT"), "{export_it}");
+        // Nothing of the plan was sent.
+        assert!(f.log.executed().is_empty(), "{export_it}");
+    }
 }
 
 #[tokio::test]
