@@ -2,6 +2,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useTabs } from '../store/tabs';
 import { LogoIcon } from './icons';
+import { MenuBar } from './MenuBar';
 import './titleBar.css';
 
 /** The window calls the title bar makes (a subset of Tauri's `Window`). */
@@ -88,10 +89,13 @@ export function TitleBar() {
   const maxLabel = maximized ? 'Restore down' : 'Maximize';
   return (
     <div className={`titlebar${focused ? '' : ' inactive'}`}>
-      <div className="titlebar-drag" data-testid="titlebar-drag" onMouseDown={onDragMouseDown}>
+      <div className="titlebar-brand" onMouseDown={onDragMouseDown}>
         <span className="titlebar-icon" aria-hidden="true">
           <LogoIcon />
         </span>
+      </div>
+      <MenuBar />
+      <div className="titlebar-drag" data-testid="titlebar-drag" onMouseDown={onDragMouseDown}>
         <span className="titlebar-title" data-testid="titlebar-title">
           {title ? `${title} - ` : ''}
           <span>DntDatabase</span>

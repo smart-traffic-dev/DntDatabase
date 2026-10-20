@@ -9,7 +9,9 @@
 //!
 //! Release builds only turn the accelerator keys off: debug builds keep them natively, so
 //! F12 opens DevTools and (with the Vite dev server, where the UI guard allows it) F5 / Ctrl+R
-//! reload. DevTools themselves are compiled out of release builds by Tauri.
+//! reload. The F12 / Ctrl+Shift+I accelerator keys stay off in release builds; DevTools are
+//! still compiled in (the `devtools` feature of `tauri`) and open only from Tools > Developer
+//! tools (the `open_devtools` command) or the app's own Ctrl+Shift+I shortcut.
 
 use tauri::{Manager, Runtime};
 

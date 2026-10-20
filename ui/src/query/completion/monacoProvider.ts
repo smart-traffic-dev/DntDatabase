@@ -6,6 +6,7 @@ import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import type { Engine } from '../engine';
 import { suggest, type Suggestion } from './provider';
+import { allSnippets } from './snippets';
 import { splitIncremental, type SplitState } from './split';
 
 export interface CompletionTarget {
@@ -38,6 +39,24 @@ function itemKind(monaco: typeof Monaco, kind: Suggestion['kind']): Monaco.langu
 /** `sortText` of the i-th item (keeps the provider's order), built once per index. */
 const sortTexts: string[] = [];
 const sortText = (i: number) => (sortTexts[i] ??= String(i).padStart(5, '0'));
+
+/** `Snippet` item kind and `InsertAsSnippet` rule (27 and 4 in Monaco), tolerant of partial test doubles. */
+function snippetItems(monaco: typeof Monaco, range: Monaco.IRange): Monaco.languages.CompletionItem[] {
+  const kind = monaco.languages.CompletionItemKind?.Snippet ?? 27;
+  const rules = monaco.languages.CompletionItemInsertTextRule?.InsertAsSnippet ?? 4;
+  // 'zz' sorts after the 5-digit indexes of columns, tables, keywords and functions.
+  return allSnippets().map((s, i) => ({
+    label: s.label,
+    kind,
+    detail: s.description,
+    documentation: { value: '```sql\n' + s.body.replace(/\$\{\d+:([^}]*)\}/g, '$1') + '\n```' },
+    insertText: s.body,
+    insertTextRules: rules,
+    filterText: s.prefix,
+    sortText: `zz${String(i).padStart(4, '0')}`,
+    range,
+  }));
+}
 
 /** Starts loading the autocomplete data of a target (e.g. when its editor opens). Never waits. */
 export function prefetchCompletion(target: CompletionTarget): void {
@@ -150,16 +169,21 @@ export function registerCompletion(
           ]),
         );
       }
+      // Snippets are not offered after a `.` (a member name follows).
+      const dotted = text[offset - (word.endColumn - word.startColumn) - 1] === '.';
       const toList = (list: Suggestion[]): Monaco.languages.CompletionList => ({
         incomplete,
-        suggestions: list.map((s, i) => ({
-          label: s.label,
-          kind: itemKind(monaco, s.kind),
-          detail: s.detail,
-          insertText: s.insertText,
-          sortText: sortText(i),
-          range,
-        })),
+        suggestions: [
+          ...list.map((s, i) => ({
+            label: s.label,
+            kind: itemKind(monaco, s.kind),
+            detail: s.detail,
+            insertText: s.insertText,
+            sortText: sortText(i),
+            range,
+          })),
+          ...(dotted ? [] : snippetItems(monaco, range)),
+        ],
       });
       if (Array.isArray(items)) return toList(items);
       // Only the objects of a `db.` qualifier not loaded yet: the one case that waits.
