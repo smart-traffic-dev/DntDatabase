@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useConnections } from '../store/connections';
+import { useCursor } from '../store/cursor';
 import { canRun, emptyRun, lastRunText, runElapsedMs, runProgress, useQueryRun } from '../store/queryRun';
 import { txAction } from '../store/runQuery';
 import { useTabs } from '../store/tabs';
@@ -86,6 +87,18 @@ function QueryStatus({ tabId }: { tabId: string }) {
   );
 }
 
+/** "Ln 12, Col 8" and "(34 selected)" of the active query tab; the only part that follows the caret. */
+export function CursorStatus({ tabId }: { tabId: string }) {
+  const pos = useCursor((s) => s.byTab[tabId]);
+  if (!pos) return null;
+  return (
+    <span className="status-cursor" data-testid="status-cursor">
+      Ln {pos.line}, Col {pos.col}
+      {pos.selected > 0 && ` (${pos.selected} selected)`}
+    </span>
+  );
+}
+
 /**
  * The connection of the active tab (else of the selected tree node), its server version
  * and whether it goes through SSH; coloured by its environment tag.
@@ -125,7 +138,10 @@ export function StatusBar() {
         <span className="status-conn">No connection selected</span>
       )}
       {queryTabId && <QueryStatus tabId={queryTabId} />}
-      <span className="status-right">UTF-8</span>
+      <span className="status-right">
+        {queryTabId && <CursorStatus tabId={queryTabId} />}
+        UTF-8
+      </span>
     </footer>
   );
 }

@@ -2,10 +2,11 @@ import Editor, { type OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 import { memo, useEffect, useState } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
-import { editorFontOptions } from '../../monaco/fonts';
+import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
 import type { Engine } from '../../query/engine';
+import { clearCursor, reportCursor } from '../../store/cursor';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
@@ -31,6 +32,17 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
     setHasSelection(tabId, false);
   });
   editor.onDidChangeCursorSelection((e) => setHasSelection(tabId, !e.selection.isEmpty()));
+  // Ln / Col / selected characters for the status bar: coalesced per frame in the cursor store.
+  const reportPosition = () => {
+    const p = editor.getPosition();
+    if (!p) return;
+    const model = editor.getModel();
+    const selected = model ? (editor.getSelections() ?? []).reduce((n, s) => n + model.getValueLengthInRange(s), 0) : 0;
+    reportCursor(tabId, { line: p.lineNumber, col: p.column, selected });
+  };
+  editor.onDidChangeCursorSelection(reportPosition);
+  reportPosition();
+  editor.onDidDispose(() => clearCursor(tabId));
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'cursor'));
   editor.addCommand(
     monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
@@ -146,6 +158,7 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
           setContentLeft(editor.getLayoutInfo().contentLeft);
           editor.onDidLayoutChange((l) => setContentLeft(l.contentLeft));
           bindRunKeys(doc.id, editor, monaco);
+          bindEditorFontScale(editor);
           onMount?.(editor, monaco);
         }}
         options={options()}

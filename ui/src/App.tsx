@@ -1,4 +1,6 @@
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getCurrentWindow, UserAttentionType } from '@tauri-apps/api/window';
+import { CommandPalette } from './components/CommandPalette';
+import { installRunNotifier } from './desktop/runNotifier';
 import { useEffect, type CSSProperties } from 'react';
 import { Splitter } from './components/Splitter';
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useLayout } from './store/layout';
@@ -87,6 +89,28 @@ export default function App() {
     return () => window.removeEventListener('keydown', onQueryShortcut, true);
   }, []);
 
+  // A long run that ends while the window is in the background flashes the taskbar and shows in the title.
+  useEffect(() => {
+    let win: ReturnType<typeof getCurrentWindow>;
+    try {
+      win = getCurrentWindow();
+    } catch {
+      return; // Not inside Tauri (plain browser preview).
+    }
+    return installRunNotifier({
+      win,
+      attention: UserAttentionType.Informational,
+      baseTitle: 'DntDatabase',
+      titleOf: (id) => useTabs.getState().tabs.find((t) => t.id === id)?.title,
+      hasFocus: () => document.hasFocus(),
+      now: () => Date.now(),
+      onFocus: (listener) => {
+        window.addEventListener('focus', listener);
+        return () => window.removeEventListener('focus', listener);
+      },
+    });
+  }, []);
+
   useEffect(() => {
     let unlisten: Promise<() => void>;
     try {
@@ -125,6 +149,7 @@ export default function App() {
         </ErrorBoundary>
       </div>
       <StatusBar />
+      <CommandPalette />
       <DialogHost />
     </div>
   );
