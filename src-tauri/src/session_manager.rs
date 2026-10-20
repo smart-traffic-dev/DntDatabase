@@ -23,6 +23,7 @@ use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::sql::StatementKind;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::{KnownHosts, SshSecrets, Tunnel};
@@ -866,6 +867,72 @@ impl SessionManager {
         }
         Ok(objects)
     }
+
+    /// Runs ONE read-only statement (`SELECT` built by the backend, never user text) on
+    /// the metadata session for `db` and returns its first result, at most `max_rows`
+    /// rows. Used by the table data view: it never touches a query tab's session (nor its
+    /// open transaction), and it is not cached.
+    ///
+    /// The statement runs under a server-side cancel after the connection's query timeout,
+    /// capped at 2/3 of the metadata call bound (with a cancel grace of 1/6 of it), so a
+    /// slow table is stopped before the metadata session would be given up.
+    pub async fn metadata_read(
+        &self,
+        id: Uuid,
+        db: Option<&str>,
+        sql: String,
+        max_rows: usize,
+    ) -> Result<ReadResult, DbError> {
+        let rt = self.runtime(id)?;
+        let cap = rt.metadata_timeout * 2 / 3;
+        let timeout = match rt.cfg.options.query_timeout_s {
+            0 => cap,
+            s => Duration::from_secs(s.into()).min(cap),
+        };
+        let cancel_grace = rt.metadata_timeout / 6;
+        rt.with_session(db, |s| {
+            let sql = sql.clone();
+            Box::pin(async move {
+                // A fresh options value (and stop signal) per attempt: a retry after a
+                // reopen must not inherit a raised signal.
+                let opts = ExecOptions {
+                    max_rows,
+                    timeout: Some(timeout),
+                    cancel_grace,
+                    ..ExecOptions::default()
+                };
+                let mut sink = ReadResult::default();
+                s.execute_one(&sql, StatementKind::Read, &opts, &mut sink)
+                    .await?;
+                Ok(sink)
+            })
+        })
+        .await
+    }
+}
+
+/// The first result of a [`SessionManager::metadata_read`].
+#[derive(Debug, Default)]
+pub struct ReadResult {
+    pub columns: Vec<ColumnMeta>,
+    pub rows: Vec<Vec<Value>>,
+    /// Further results (never expected from a `SELECT`) are ignored.
+    results: usize,
+}
+
+impl RowSink for ReadResult {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.results += 1;
+        if self.results == 1 {
+            self.columns = cols.to_vec();
+        }
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        if self.results == 1 {
+            self.rows.extend(batch);
+        }
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 pub(crate) fn config_error(field: &str, message: &str) -> DbError {

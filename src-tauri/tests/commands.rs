@@ -8,7 +8,10 @@ use dntdatabase::commands::connections::{
     create_connection_impl, list_tree_impl, update_connection_impl, SecretsInput,
     SecretsUpdateInput,
 };
-use dntdatabase::commands::settings::{get_log_level_impl, saved_log_level, set_log_level_impl};
+use dntdatabase::commands::settings::{
+    get_log_level_impl, get_table_page_size_impl, saved_log_level, saved_table_page_size,
+    set_log_level_impl, set_table_page_size_impl,
+};
 use dntdatabase::commands::transfer::{
     apply_import_impl, export_connections_impl, import_needs_passphrase_impl, preview_import_impl,
 };
@@ -200,6 +203,32 @@ async fn log_level_is_persisted_and_restored() {
         .await
         .unwrap();
     assert_eq!(saved_log_level(&state.repo), LogLevel::Info);
+}
+
+#[tokio::test]
+async fn table_page_size_defaults_to_100_and_is_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert_eq!(get_table_page_size_impl(&state).await.unwrap(), 100);
+    set_table_page_size_impl(&state, 500).await.unwrap();
+    assert_eq!(get_table_page_size_impl(&state).await.unwrap(), 500);
+    for bad in [0, 9, 10_001] {
+        let err = set_table_page_size_impl(&state, bad).await.unwrap_err();
+        assert!(
+            matches!(&err, dnt_core::error::DbError::Config { field: Some(f), .. } if f == "size"),
+            "{err:?}"
+        );
+    }
+    assert_eq!(get_table_page_size_impl(&state).await.unwrap(), 500);
+    // Survives a restart; a corrupt stored value falls back to the default.
+    drop(state);
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert_eq!(saved_table_page_size(&state.repo), 500);
+    state
+        .repo
+        .set_app_setting("table_page_size", "abc")
+        .unwrap();
+    assert_eq!(saved_table_page_size(&state.repo), 100);
 }
 
 #[test]
