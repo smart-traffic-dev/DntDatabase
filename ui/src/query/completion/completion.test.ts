@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CompletionObject, SchemaCache } from '../../bindings';
 import { callsOf, mockBackend } from '../../test/backend';
-import { invalidateCompletion, useCompletion } from '../../store/completion';
-import { analyze } from './context';
-import { registerCompletion } from './monacoProvider';
-import { suggest, type Suggestion } from './provider';
+import { forgetCompletionConnection, invalidateCompletion, useCompletion } from '../../store/completion';
+import { analyze, localStatementRange } from './context';
+import { disposeCompletion, ensureCompletion, registerCompletion } from './monacoProvider';
+import { currentSchemaOf, suggest, type Suggestion } from './provider';
 import type { CompletionScope } from './provider';
 
 /** `text` with a `|` marking the cursor. */
@@ -256,6 +256,7 @@ describe('monaco provider', () => {
     const { text, offset } = at('SELECT o.| FROM orders o');
     const model = {
       getValue: () => text,
+      getVersionId: () => 1,
       getOffsetAt: () => offset,
       getWordUntilPosition: () => ({ startColumn: offset + 1, endColumn: offset + 1 }),
     };
@@ -270,6 +271,147 @@ describe('monaco provider', () => {
     expect(callsOf('completion_scope')).toEqual([{ connId: conn, database: 'shop' }]);
     reg.dispose();
     expect(dispose).toHaveBeenCalledTimes(2);
+  });
+});
+
+type FakeProvider = {
+  provideCompletionItems(
+    model: unknown,
+    position: unknown,
+    context?: unknown,
+    token?: { isCancellationRequested: boolean },
+  ): Promise<{ suggestions: { label: string; insertText: string }[] }>;
+};
+
+function fakeMonaco() {
+  const providers = new Map<string, FakeProvider>();
+  const registered: string[] = [];
+  const disposed: string[] = [];
+  const monaco = {
+    languages: {
+      CompletionItemKind: { Keyword: 1, Function: 2, Struct: 3, Interface: 4, Field: 5, Module: 6 },
+      registerCompletionItemProvider: (lang: string, p: FakeProvider) => {
+        providers.set(lang, p);
+        registered.push(lang);
+        return { dispose: () => disposed.push(lang) };
+      },
+    },
+    Range: class {},
+  };
+  return { monaco, providers, registered, disposed };
+}
+
+function fakeModel(marked: string, version = 1) {
+  const { text, offset } = at(marked);
+  const model = {
+    version,
+    getValue: () => text,
+    getVersionId: () => model.version,
+    getOffsetAt: () => offset,
+    getWordUntilPosition: () => ({ startColumn: 1, endColumn: 1 }),
+  };
+  return model;
+}
+
+describe('monaco provider: fix round 1', () => {
+  const conn = '11111111-1111-4111-8111-111111111111';
+  const target = () => ({ tabId: 't', connId: conn, db: 'shop', engine: 'mysql' as const });
+  const live = { isCancellationRequested: false };
+
+  beforeEach(() => {
+    useCompletion.reset();
+    mockBackend({
+      statement_ranges: () => [],
+      completion_scope: () => ({ database: 'shop', tables: mysqlScope.tables }),
+      list_databases: () => [{ name: 'shop' }],
+    });
+  });
+
+  it('ranges_are_cached_per_model_version', async () => {
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    const model = fakeModel('SELECT o.| FROM orders o');
+    await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    expect(callsOf('statement_ranges')).toHaveLength(1);
+    model.version = 2;
+    await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    expect(callsOf('statement_ranges')).toHaveLength(2);
+  });
+
+  it('cancelled_request_returns_nothing', async () => {
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const result = await providers
+      .get('mysql')
+      ?.provideCompletionItems(fakeModel('SELECT o.| FROM orders o'), { lineNumber: 1 }, {}, { isCancellationRequested: true });
+    expect(result?.suggestions).toEqual([]);
+  });
+
+  it('large_text_skips_statement_ranges', async () => {
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    // > 1 MB of earlier statements, one with a `;` inside a string, then the current one.
+    const filler = "SELECT 'a;b' FROM customers o;\n".repeat(40_000);
+    const result = await providers
+      .get('mysql')
+      ?.provideCompletionItems(fakeModel(`${filler}SELECT o.| FROM orders o; SELECT 2`), { lineNumber: 1 }, {}, live);
+    expect(callsOf('statement_ranges')).toEqual([]);
+    expect(result?.suggestions.map((s) => s.label)).toEqual(['id', 'customer_id', 'total']);
+  });
+
+  it('local_statement_range_cuts_at_semicolons_outside_strings', () => {
+    const { text, offset } = at("SELECT ';' x; SELECT 'a;b', | FROM t; SELECT 3");
+    const [lo, hi] = localStatementRange(text, offset, 'mysql');
+    expect(text.slice(lo, hi).trim()).toBe("SELECT 'a;b',  FROM t");
+  });
+
+  it('registers_once_per_monaco_instance', () => {
+    const { monaco, registered, disposed } = fakeMonaco();
+    ensureCompletion(monaco as never);
+    ensureCompletion(monaco as never);
+    expect(registered).toEqual(['mysql', 'pgsql']);
+    disposeCompletion(monaco as never);
+    expect(disposed).toEqual(['mysql', 'pgsql']);
+    ensureCompletion(monaco as never);
+    expect(registered).toHaveLength(4);
+    disposeCompletion(monaco as never);
+  });
+
+  it('dollar_quoted_body_is_a_string', () => {
+    const { text, offset } = at('SELECT $fn$ FROM o.| $fn$, 1');
+    expect(analyze(text, offset, 'postgres').context).toEqual({ kind: 'none' });
+    const after = at('SELECT $$x$$ FROM |');
+    expect(analyze(after.text, after.offset, 'postgres').context).toEqual({ kind: 'table' });
+  });
+
+  it('pg_tables_outside_current_schema_are_qualified', async () => {
+    const scope: CompletionScope = {
+      database: 'analytics',
+      tables: [
+        ...pgScope.tables,
+        { schema: 'audit', name: 'Log Entries', kind: 'Table', columns: [] },
+        { schema: 'audit', name: 'events', kind: 'View', columns: [] },
+      ],
+    };
+    const items = await suggest({
+      text: 'SELECT * FROM ',
+      offset: 14,
+      ranges: [],
+      engine: 'postgres',
+      scope,
+      containers: [],
+      currentSchema: 'public',
+      loadObjects: async () => [],
+    });
+    const insert = (label: string) => items.find((s) => s.label === label)?.insertText;
+    expect(insert('orders')).toBe('orders');
+    expect(insert('Order Items')).toBe('"Order Items"');
+    expect(insert('Log Entries')).toBe('audit."Log Entries"');
+    expect(insert('events')).toBe('audit.events');
+    expect(currentSchemaOf(scope)).toBe('public');
+    expect(currentSchemaOf({ database: 'x', tables: [{ schema: 'app', name: 't', kind: 'Table', columns: [] }] })).toBe('app');
   });
 });
 
@@ -300,6 +442,25 @@ describe('completion cache', () => {
     await useCompletion.scope(conn, 'shop');
     await useCompletion.scope(conn, 'crm');
     expect(callsOf('completion_scope')).toHaveLength(5);
+  });
+
+  it('connection_close_forgets_only_that_connection', async () => {
+    const other = '22222222-2222-4222-8222-222222222222';
+    mockBackend({
+      completion_scope: ({ database }) => cache(database as string),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    await useCompletion.scope(conn, 'shop');
+    await useCompletion.scope(conn, 'crm');
+    await useCompletion.containers(conn, 'shop', 'mysql');
+    await useCompletion.scope(other, 'shop');
+    forgetCompletionConnection(conn);
+    await useCompletion.scope(conn, 'shop');
+    await useCompletion.scope(conn, 'crm');
+    await useCompletion.containers(conn, 'shop', 'mysql');
+    await useCompletion.scope(other, 'shop');
+    expect(callsOf('completion_scope')).toHaveLength(5);
+    expect(callsOf('list_databases')).toHaveLength(2);
   });
 
   it('failed_scope_is_null_and_retried_later', async () => {

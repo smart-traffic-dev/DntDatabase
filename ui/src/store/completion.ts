@@ -88,6 +88,11 @@ export const useCompletion = {
   },
 };
 
+/** Called when a connection closes (or is deleted): drops everything cached for it. */
+export function forgetCompletionConnection(connectionId: string): void {
+  invalidateCompletion(connectionId);
+}
+
 /**
  * Called after a DDL statement ran without error in a tab (spec §7.3), or when a connection
  * closes. Without `database`, every database of the connection is dropped.

@@ -59,6 +59,9 @@ function scanQuoted(text: string, from: number, quote: string, backslash: boolea
   return { end: text.length, open: true };
 }
 
+/** A PostgreSQL dollar-quote tag, matched in place (sticky) at `lastIndex`. */
+const DOLLAR_TAG = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/y;
+
 function tokenize(text: string, engine: Engine): Token[] {
   const tokens: Token[] = [];
   let i = 0;
@@ -99,7 +102,8 @@ function tokenize(text: string, engine: Engine): Token[] {
       continue;
     }
     if (c === '$' && engine === 'postgres') {
-      const tag = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(text.slice(i));
+      DOLLAR_TAG.lastIndex = i;
+      const tag = DOLLAR_TAG.exec(text);
       if (tag) {
         const close = text.indexOf(tag[0], i + tag[0].length);
         i = close < 0 ? text.length : close + tag[0].length;
@@ -194,6 +198,36 @@ function readStatement(tokens: Token[]): StatementInfo {
     }
   }
   return info;
+}
+
+/** Half the window `localStatementRange` reads around the cursor. */
+const LOCAL_WINDOW = 32 * 1024;
+
+/**
+ * The statement around `offset` without `statement_ranges` (for very large texts): the
+ * tokens of a ~64 KB window around the cursor, cut at the nearest `;` on each side that
+ * is outside strings and comments. Returns absolute UTF-16 offsets.
+ */
+export function localStatementRange(text: string, offset: number, engine: Engine): [number, number] {
+  let from = Math.max(0, offset - LOCAL_WINDOW);
+  if (from > 0) {
+    // Start at a line start: far less likely to fall inside a string than an arbitrary cut.
+    const nl = text.indexOf('\n', from);
+    if (nl >= 0 && nl < offset) from = nl + 1;
+  }
+  const to = Math.min(text.length, offset + LOCAL_WINDOW);
+  const local = offset - from;
+  let lo = 0;
+  let hi = to - from;
+  for (const t of tokenize(text.slice(from, to), engine)) {
+    if (t.kind !== 'punct' || t.value !== ';') continue;
+    if (t.end <= local) lo = t.end;
+    else if (t.start >= local) {
+      hi = t.start;
+      break;
+    }
+  }
+  return [from + lo, from + hi];
 }
 
 /** The context at `offset` of `stmt`, the identifier being typed and the statement's tables. */

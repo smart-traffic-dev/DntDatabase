@@ -29,6 +29,8 @@ export interface SuggestInput {
   scope: CompletionScope | null;
   /** MySQL databases or PostgreSQL schemas: the qualifiers that `x.` lists objects of. */
   containers: string[];
+  /** PostgreSQL: the schema unqualified names resolve to (default: `currentSchemaOf(scope)`). */
+  currentSchema?: string | null;
   loadObjects(qualifier: string): Promise<CompletionObject[] | null>;
 }
 
@@ -87,13 +89,28 @@ function columnsOf(tables: (SchemaCacheTable | undefined)[], engine: Engine): Su
   return out;
 }
 
-function tablesOf(scope: CompletionScope | null, engine: Engine): Suggestion[] {
-  return (scope?.tables ?? []).map((t) => ({
-    label: t.name,
-    kind: objectKind(t.kind),
-    detail: t.schema ?? undefined,
-    insertText: quoteIdent(t.name, engine),
-  }));
+/**
+ * The schema unqualified names resolve to on PostgreSQL. The scope does not say which
+ * `search_path` entry comes first, so: `public` when the scope has it, else the schema
+ * of the first table.
+ */
+export function currentSchemaOf(scope: CompletionScope | null): string | null {
+  const schemas = (scope?.tables ?? []).map((t) => t.schema).filter((s): s is string => s !== null);
+  return schemas.includes('public') ? 'public' : (schemas[0] ?? null);
+}
+
+function tablesOf(scope: CompletionScope | null, engine: Engine, currentSchema: string | null): Suggestion[] {
+  return (scope?.tables ?? []).map((t) => {
+    const name = quoteIdent(t.name, engine);
+    // A PG table of another schema than the current one is inserted as `schema.table`.
+    const qualify = engine === 'postgres' && t.schema !== null && currentSchema !== null && t.schema !== currentSchema;
+    return {
+      label: t.name,
+      kind: objectKind(t.kind),
+      detail: t.schema ?? undefined,
+      insertText: qualify ? `${quoteIdent(t.schema as string, engine)}.${name}` : name,
+    };
+  });
 }
 
 const keywords = (engine: Engine): Suggestion[] =>
@@ -105,13 +122,14 @@ export async function suggest(input: SuggestInput): Promise<Suggestion[]> {
   const { engine, scope } = input;
   const { stmt, offset } = currentStatement(input.text, input.offset, input.ranges);
   const { context, info } = analyze(stmt, offset, engine);
+  const current = input.currentSchema === undefined ? currentSchemaOf(scope) : input.currentSchema;
   switch (context.kind) {
     case 'none':
       return [];
     case 'table': {
       const containerKind = engine === 'postgres' ? 'schema' : 'database';
       return [
-        ...tablesOf(scope, engine),
+        ...tablesOf(scope, engine, current),
         ...input.containers.map((c) => ({ label: c, kind: containerKind, insertText: quoteIdent(c, engine) }) as Suggestion),
       ];
     }
@@ -136,6 +154,6 @@ export async function suggest(input: SuggestInput): Promise<Suggestion[]> {
       return columnsOf([resolve(scope, { schema: null, table: q })], engine);
     }
     default:
-      return [...keywords(engine), ...functions(engine), ...tablesOf(scope, engine)];
+      return [...keywords(engine), ...functions(engine), ...tablesOf(scope, engine, current)];
   }
 }
