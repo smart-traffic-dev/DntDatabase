@@ -314,6 +314,41 @@ describe('reduceRun', () => {
     expect(run.messages.at(-1)!.text).toBe('Cancelled by user.');
   });
 
+  it('a timeout stop goes back to running when continue on error lets the run go on', () => {
+    const plan = planOf([stmt(0, 'SELECT 1', [0, 8]), stmt(1, 'SELECT sleep(9)', [9, 24]), stmt(2, 'SELECT 3', [25, 33])]);
+    let run = startRun(emptyRun, plan, 1000);
+    run = reduceRun(run, { t: 'statement_start', index: 1, range: [9, 24] }, 1100);
+    run = reduceRun(run, { t: 'stopping', reason: 'timeout' }, 2000);
+    expect(canStop(run)).toBe(false);
+    run = reduceRun(run, { t: 'statement_error', index: 1, error: err('timeout', 'Timed out') }, 2100);
+    run = reduceRun(run, { t: 'statement_start', index: 2, range: [25, 33] }, 2200);
+    expect(run.phase).toEqual({ kind: 'running', index: 2, total: 3, startedAt: 1000 });
+    expect(canStop(run)).toBe(true);
+    run = reduceRun(run, { t: 'stopping', reason: 'timeout' }, 3000);
+    expect(run.phase).toEqual({ kind: 'stopping', since: 3000, reason: 'timeout' });
+  });
+
+  it('an abandoned timeout also goes back to running at the next statement', () => {
+    const plan = planOf([stmt(0, 'SELECT 1', [0, 8]), stmt(1, 'SELECT 2', [9, 17])]);
+    let run = startRun(emptyRun, plan, 1000);
+    run = reduceRun(run, { t: 'statement_start', index: 0, range: [0, 8] }, 1001);
+    run = reduceRun(run, { t: 'stopping', reason: 'timeout' }, 2000);
+    run = reduceRun(run, { t: 'abandoning' }, 12000);
+    run = reduceRun(run, { t: 'statement_start', index: 1, range: [9, 17] }, 13000);
+    expect(run.phase).toEqual({ kind: 'running', index: 1, total: 2, startedAt: 1000 });
+  });
+
+  it('a user stop stays stopping', () => {
+    let run = startRun(emptyRun, PLAN, 1000);
+    run = reduceRun(run, { t: 'statement_start', index: 0, range: [0, 8] }, 1001);
+    run = reduceRun(run, { t: 'stopping', reason: 'user' }, 2000);
+    run = reduceRun(run, { t: 'statement_start', index: 1, range: [10, 28] }, 2100);
+    expect(run.phase).toEqual({ kind: 'stopping', since: 2000, reason: 'user' });
+    run = reduceRun(run, { t: 'abandoning' }, 12000);
+    run = reduceRun(run, { t: 'statement_start', index: 1, range: [10, 28] }, 12100);
+    expect(run.phase).toEqual({ kind: 'abandoning', since: 12000 });
+  });
+
   it('run_locked_until_done', () => {
     let run = startRun(emptyRun, PLAN, 1000);
     expect(canRun(run)).toBe(false);
@@ -532,6 +567,35 @@ describe('useQueryRun', () => {
       useQueryRun.getState().apply(TAB, ev);
     }
     expect(invalidateCompletion).toHaveBeenCalledWith('conn-1', undefined);
+  });
+
+  const info = { kind: 'postgres', variant: 'Postgres', version: [16, 0, 0], version_string: '16' } as const;
+
+  it('a connection closed during a run leaves the tx state idle once the run is done', () => {
+    useConnections.setState({ info: new Map([['conn-1', { ...info, version: [16, 0, 0] }]]) });
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().apply(TAB, { t: 'tx_state', state: 'active' });
+    useConnections.getState().clearInfo('conn-1');
+    // Still running: the run's own events decide until `done`.
+    expect(useQueryRun.getState().get(TAB).txState).toBe('active');
+    useQueryRun.getState().apply(TAB, { t: 'done', stop: { kind: 'cancelled' }, elapsed_ms: 3 });
+    expect(useQueryRun.getState().get(TAB).txState).toBe('idle');
+  });
+
+  it('a run that ends on an open connection keeps its tx state', () => {
+    useConnections.setState({ info: new Map([['conn-1', { ...info, version: [16, 0, 0] }]]) });
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().apply(TAB, { t: 'tx_state', state: 'active' });
+    useQueryRun.getState().apply(TAB, { t: 'done', stop: null, elapsed_ms: 3 });
+    expect(useQueryRun.getState().get(TAB).txState).toBe('active');
+  });
+
+  it('events carrying another run token are ignored', () => {
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().apply(TAB, { t: 'tx_state', state: 'aborted' }, 'stale-plan');
+    expect(useQueryRun.getState().get(TAB).txState).toBe('idle');
+    useQueryRun.getState().apply(TAB, { t: 'tx_state', state: 'aborted' }, PLAN.plan_id);
+    expect(useQueryRun.getState().get(TAB).txState).toBe('aborted');
   });
 
   it('closing a connection forgets its completion data and idle tx states', () => {
