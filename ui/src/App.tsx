@@ -1,5 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useEffect } from 'react';
+import { useEffect, type CSSProperties } from 'react';
+import { Splitter } from './components/Splitter';
+import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useLayout } from './store/layout';
 import { openNewQuery } from './components/newQuery';
 import { onQueryShortcut } from './components/queryShortcuts';
 import { installCloseGuard, useQueryDocs } from './store/queryTabs';
@@ -67,6 +69,9 @@ function Workspace() {
 }
 
 export default function App() {
+  const sidebarWidth = useLayout((s) => s.sidebarWidth);
+  const sidebarVisible = useLayout((s) => s.sidebarVisible);
+  const setSidebarWidth = useLayout((s) => s.setSidebarWidth);
   useEffect(() => {
     void (async () => {
       await useTree.getState().reloadStored();
@@ -95,13 +100,26 @@ export default function App() {
   }, []);
 
   return (
-    <div className="app">
+    <div className="app" style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
       <TitleBar />
       <Toolbar />
       <div className="body">
-        <ErrorBoundary label="Sidebar">
-          <Sidebar />
-        </ErrorBoundary>
+        {sidebarVisible && (
+          <>
+            <ErrorBoundary label="Sidebar">
+              <Sidebar />
+            </ErrorBoundary>
+            <Splitter
+              orientation="vertical"
+              label="Resize sidebar"
+              value={sidebarWidth}
+              min={SIDEBAR_MIN}
+              max={SIDEBAR_MAX}
+              defaultValue={SIDEBAR_DEFAULT}
+              onChange={setSidebarWidth}
+            />
+          </>
+        )}
         <ErrorBoundary label="Workspace">
           <Workspace />
         </ErrorBoundary>
