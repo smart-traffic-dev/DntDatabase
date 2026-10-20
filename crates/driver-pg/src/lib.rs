@@ -146,14 +146,11 @@ pub(crate) async fn open(params: &ConnectParams) -> Result<PgConn, DbError> {
         // Errors surface on the client (`is_closed`, failing requests).
         while let Some(Ok(message)) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
             if let AsyncMessage::Notice(n) = message {
+                let notice = server_notice(n.parsed_severity(), n.severity(), n.message());
                 notices
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .push(ServerNotice {
-                        level: n.severity().to_string(),
-                        code: None,
-                        message: n.message().to_string(),
-                    });
+                    .push(notice);
             }
         }
     });
@@ -165,6 +162,34 @@ pub(crate) async fn open(params: &ConnectParams) -> Result<PgConn, DbError> {
         }
     }
     Ok(conn)
+}
+
+/// Longest notice message kept, in bytes; a longer one is cut (on a char boundary)
+/// and ends with `…`.
+const MAX_NOTICE_BYTES: usize = 4096;
+
+/// A server notice as Messages shows it. `parsed`: the untranslated severity
+/// (PostgreSQL 9.6+); `localized`: the one translated by `lc_messages`, used only
+/// when the other is missing.
+fn server_notice(
+    parsed: Option<tokio_postgres::error::Severity>,
+    localized: &str,
+    message: &str,
+) -> ServerNotice {
+    let message = if message.len() > MAX_NOTICE_BYTES {
+        let mut cut = MAX_NOTICE_BYTES;
+        while !message.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}…", &message[..cut])
+    } else {
+        message.to_string()
+    };
+    ServerNotice {
+        level: parsed.map_or_else(|| localized.to_string(), |s| s.to_string()),
+        code: None,
+        message,
+    }
 }
 
 /// Closes a connection gracefully (Terminate message), bounded in time.
@@ -278,4 +303,39 @@ pub(crate) fn map_pg_error(e: tokio_postgres::Error, stage: ConnectStage) -> DbE
 /// The `io::Error` behind a socket-level failure, if any.
 pub(crate) fn io_error(e: &tokio_postgres::Error) -> Option<&std::io::Error> {
     e.source()?.downcast_ref::<std::io::Error>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_postgres::error::Severity;
+
+    /// The level is the server's untranslated severity (`lc_messages` may translate
+    /// the other one); the localized text only when that is missing.
+    #[test]
+    fn notice_level_is_the_untranslated_severity() {
+        let n = server_notice(Some(Severity::Notice), "HINWEIS", "hallo");
+        assert_eq!(n.level, "NOTICE");
+        assert_eq!(n.code, None);
+        assert_eq!(n.message, "hallo");
+        assert_eq!(
+            server_notice(Some(Severity::Warning), "WARNUNG", "x").level,
+            "WARNING"
+        );
+        assert_eq!(server_notice(None, "HINWEIS", "x").level, "HINWEIS");
+    }
+
+    /// A long message is cut to about `MAX_NOTICE_BYTES` on a char boundary, marked.
+    #[test]
+    fn long_notice_messages_are_truncated() {
+        let short = "a".repeat(MAX_NOTICE_BYTES);
+        assert_eq!(server_notice(None, "NOTICE", &short).message, short);
+        let long = "é".repeat(MAX_NOTICE_BYTES); // 2 bytes each
+        let got = server_notice(None, "NOTICE", &long).message;
+        assert!(got.ends_with('…'), "{}", got.len());
+        let body = got.strip_suffix('…').unwrap();
+        assert!(body.len() <= MAX_NOTICE_BYTES);
+        assert!(body.len() > MAX_NOTICE_BYTES - 4);
+        assert!(body.chars().all(|c| c == 'é'));
+    }
 }

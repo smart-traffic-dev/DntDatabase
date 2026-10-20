@@ -495,11 +495,13 @@ const HINT_DNS: &str = "Host name could not be resolved: check the host, or your
 const HINT_SSH_DNS: &str =
     "SSH host name could not be resolved: check the SSH host, or your DNS / VPN.";
 
-/// A name-resolution failure (`msg` lowercased): WinSock 11001 / 11004, getaddrinfo's
-/// texts on Linux and macOS.
+/// A name-resolution failure (`msg` lowercased): WinSock 11001 / 11002 (WSATRY_AGAIN) /
+/// 11004, getaddrinfo's texts on Linux and macOS.
 fn is_dns_failure(msg: &str) -> bool {
     msg.contains("os error 11001")
+        || msg.contains("os error 11002")
         || msg.contains("os error 11004")
+        || msg.contains("temporary error during hostname resolution")
         || msg.contains("no such host is known")
         || msg.contains("failed to lookup address")
         || msg.contains("name or service not known")
@@ -663,6 +665,9 @@ mod tests {
             "failed to lookup address information: nodename nor servname provided, or not known",
             "failed to lookup address information: Temporary failure in name resolution",
             "error connecting to server: failed to lookup address information: No address associated with hostname",
+            // WSATRY_AGAIN.
+            "This is usually a temporary error during hostname resolution and means that the local server did not receive a response from an authoritative server. (os error 11002)",
+            "temporary error during hostname resolution",
         ] {
             let e = DbError::Connect {
                 message: message.into(),
