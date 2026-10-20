@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { api, needsReconnect } from '../api';
+import { api, needsReconnect, toAppError } from '../api';
 import type { AppError, CellInput, ColumnMeta, EditableInfo, FilterOp, SortSpec, TableDataPage, Value } from '../bindings';
 import type { MenuEntry } from '../components/ActionMenu';
 import { selectTopSql } from '../components/newQuery';
 import { dataExportRequest, requestExport, toggleTabFilterBar } from '../dialogs/resultExport';
 import { useAppSettings } from '../store/appSettings';
-import { confirmDiscard, readOnlyCopy, rowIdOf, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
+import { confirmDiscard, readOnlyCopy, rowIdOf, rowRef, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { CHUNK, type ResultSet } from '../store/queryRun';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
@@ -20,7 +20,7 @@ import './query/query.css';
 import './data/dataEdit.css';
 import './dataView.css';
 
-const NO_STAGED: Staged = { updates: new Map(), inserts: [], deletes: new Set() };
+const NO_STAGED: Staged = { updates: new Map(), inserts: [], deletes: new Map() };
 const NO_ROW_IDS: (RowId | null)[] = [];
 const NO_CONFLICTS: RowId[] = [];
 
@@ -181,6 +181,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   const state = useTableData((s) => s.byTab[tab.id]);
   const settingsDefault = useAppSettings((s) => s.tablePageSize);
   const [notice, setNotice] = useState<string | null>(null);
+  const [editableError, setEditableError] = useState<string | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [focusTick, setFocusTick] = useState(0);
   const barRef = useRef<FilterBarHandle>(null);
@@ -211,7 +212,12 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     const set = (info: EditableInfo | null) => {
       if (live && useTabs.getState().tabs.some((t) => t.id === tab.id)) useDataEdits.getState().setInfo(tab.id, tab.objectRef, info);
     };
-    api.dataEditable(tab.connectionId, tab.objectRef).then(set, () => set(null));
+    setEditableError(null);
+    api.dataEditable(tab.connectionId, tab.objectRef).then(set, (e) => {
+      // Read-only meanwhile; the reason is shown.
+      if (live) setEditableError(toAppError(e).message);
+      set(null);
+    });
     return () => {
       live = false;
     };
@@ -266,7 +272,8 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     if (e.key === 'Delete') {
       if (cell.row < n) {
         const id = rowIds[cell.row];
-        if (id) report(edits.stage(tab.id, { kind: 'delete', row: id }));
+        const ref = info ? rowRef(dataNow, info, cell.row) : null;
+        if (id && ref) report(edits.stage(tab.id, { kind: 'delete', row: id, ref }));
       } else {
         const insert = staged.inserts[cell.row - n];
         if (insert) report(edits.stage(tab.id, { kind: 'dropInsert', insert: insert.id }));
@@ -290,9 +297,11 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     const n = data.rows.length;
     if (row < n) {
       const id = rowIds[row];
-      if (!id || truncatedCells.has(`${row},${col}`)) return;
+      // The row as loaded now is what the change is guarded with, whatever the page shows later.
+      const ref = rowRef(data, info, row);
+      if (!id || !ref || truncatedCells.has(`${row},${col}`)) return;
       setEditNotice(null);
-      const r = edits.stage(tab.id, { kind: 'update', row: id, column: name, input });
+      const r = edits.stage(tab.id, { kind: 'update', row: id, ref, column: name, input });
       if (!r.ok) setEditNotice(r.message);
     } else {
       const insert = (useDataEdits.getState().byTab[tab.id]?.staged ?? NO_STAGED).inserts[row - n];
@@ -406,7 +415,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
       ? [page.error.message, page.error.hint].filter(Boolean).join(' ')
       : null;
   const changes = edit ? useDataEdits.getState().changeCount(tab.id) : 0;
-  const nUpdated = [...staged.updates.values()].reduce((n, cells) => n + cells.size, 0);
+  const nUpdated = [...staged.updates.values()].reduce((n, u) => n + u.cells.size, 0);
 
   const truncated = data !== null && data.truncated_cells > 0;
   const capped = data?.size_capped === true;
@@ -547,6 +556,11 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
           ) : null}
         </div>
       ) : null}
+      {editableError ? (
+        <p role="status" className="dv-note dv-note-error">
+          Couldn't check whether this table is editable: {editableError}
+        </p>
+      ) : null}
       {info && !info.editable ? (
         <p role="status" className="dv-note">
           {readOnlyCopy(info.reason)}
@@ -560,8 +574,17 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
       {edit?.unknown ? (
         <p role="status" className="de-banner de-error">
           <span>{UNKNOWN_OUTCOME}</span>
-          <button type="button" className="qt-btn" onClick={() => void store.load(tab)}>
-            Reload
+          {/* Reloading would paint the staged values over what the server holds: show the server's. */}
+          <button
+            type="button"
+            className="qt-btn"
+            onClick={() =>
+              void confirmDiscard(tab.id).then((go) => {
+                if (go) void store.load(tab);
+              })
+            }
+          >
+            Discard staged changes and reload
           </button>
         </p>
       ) : null}
@@ -583,12 +606,17 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
                 <button type="button" className="qt-btn" onClick={() => useDataEdits.getState().reloadRow(tab, id)}>
                   Reload row
                 </button>
+                <button
+                  type="button"
+                  className="qt-btn"
+                  title="Apply this row's change without the conflict check; the other changes stay staged"
+                  onClick={() => void useDataEdits.getState().startApply(tab, { overwrite: true, only: id })}
+                >
+                  Overwrite
+                </button>
               </span>
             );
           })}
-          <button type="button" className="qt-btn" title="Apply the staged changes without the conflict check" onClick={() => void useDataEdits.getState().startApply(tab, true)}>
-            Overwrite
-          </button>
         </div>
       ) : null}
       {count?.status === 'error' ? (

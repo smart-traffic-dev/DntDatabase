@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, toAppError } from '../api';
 import type { ConflictPolicy, DbKind, ImportPreview } from '../bindings';
+import { confirmDiscardConnection } from '../components/tabActions';
 import { useDialogs } from '../store/dialogs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
@@ -125,7 +126,8 @@ export function ImportDialog({ onClose }: Props) {
       // The backend closed the replaced connections: drop what the UI still shows of them.
       for (const id of r.overwritten_ids) {
         useTree.getState().forgetConnection(id);
-        useTabs.getState().closeConnection(id);
+        // The connection is gone on the backend; tabs with staged edits stay if the user keeps them.
+        if (await confirmDiscardConnection(id)) useTabs.getState().closeConnection(id);
       }
       await useTree.getState().reloadStored();
       if (my !== token.current) return;

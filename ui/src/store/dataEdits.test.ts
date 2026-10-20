@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { ColumnMeta, EditableInfo, ObjectRef, TableDataPage, Value } from '../bindings';
-import { ONE_AT_A_TIME, readOnlyCopy, rowIdOf, useDataEdits } from './dataEdits';
+import type { CellInput, ColumnMeta, EditableInfo, ObjectRef, TableDataPage, Value } from '../bindings';
+import { ONE_AT_A_TIME, readOnlyCopy, rowIdOf, rowRef, useDataEdits } from './dataEdits';
 
 const col = (name: string): ColumnMeta => ({ name, db_type: 'int', logical: 'Integer', nullable: false, origin_table: null, origin_column: null });
 const int = (v: number): Value => ({ t: 'Int', v });
@@ -36,6 +36,10 @@ function page(ids: number[], over: Partial<TableDataPage> = {}): TableDataPage {
 const TAB = 't1';
 const edits = () => useDataEdits.getState();
 const staged = () => edits().byTab[TAB]!.staged;
+const update = (p: TableDataPage, i: number, column: string, input: CellInput) =>
+  edits().stage(TAB, { kind: 'update', row: rowIdOf(p, info(), i)!, ref: rowRef(p, info(), i)!, column, input });
+const remove = (p: TableDataPage, i: number) =>
+  edits().stage(TAB, { kind: 'delete', row: rowIdOf(p, info(), i)!, ref: rowRef(p, info(), i)! });
 
 beforeEach(() => {
   useDataEdits.getState().reset();
@@ -47,17 +51,17 @@ describe('dataEdits store', () => {
     const p = page([1, 2]);
     const id1 = rowIdOf(p, info(), 0)!;
     expect(edits().hasStaged(TAB)).toBe(false);
-    expect(edits().stage(TAB, { kind: 'update', row: id1, column: 'name', input: { kind: 'text', text: 'x' } })).toEqual({ ok: true });
+    expect(update(p, 0, 'name', { kind: 'text', text: 'x' })).toEqual({ ok: true });
     expect(edits().hasStaged(TAB)).toBe(true);
-    expect(staged().updates.get(id1)?.get('name')).toEqual({ kind: 'text', text: 'x' });
+    expect(staged().updates.get(id1)?.cells.get('name')).toEqual({ kind: 'text', text: 'x' });
     // A second cell of the same row is the same change.
-    edits().stage(TAB, { kind: 'update', row: id1, column: 'qty', input: { kind: 'null' } });
+    update(p, 0, 'qty', { kind: 'null' });
     expect(edits().changeCount(TAB)).toBe(1);
     edits().undo(TAB);
-    expect(staged().updates.get(id1)?.has('qty')).toBe(false);
+    expect(staged().updates.get(id1)?.cells.has('qty')).toBe(false);
     edits().undo(TAB);
     expect(edits().hasStaged(TAB)).toBe(false);
-    edits().stage(TAB, { kind: 'delete', row: id1 });
+    remove(p, 0);
     edits().discard(TAB);
     expect(edits().hasStaged(TAB)).toBe(false);
   });
@@ -79,15 +83,12 @@ describe('dataEdits store', () => {
 
   it('to_edit_set_includes_xmin_and_originals', () => {
     const p = page([1, 2, 3]);
-    const i = info();
-    const id1 = rowIdOf(p, i, 0)!;
-    const id3 = rowIdOf(p, i, 2)!;
-    edits().stage(TAB, { kind: 'update', row: id1, column: 'name', input: { kind: 'text', text: 'new' } });
-    edits().stage(TAB, { kind: 'delete', row: id3 });
+    update(p, 0, 'name', { kind: 'text', text: 'new' });
+    remove(p, 2);
     edits().stage(TAB, { kind: 'insert' });
     const seq = staged().inserts[0]!.id;
     edits().stage(TAB, { kind: 'insertCell', insert: seq, column: 'qty', input: { kind: 'text', text: '4' } });
-    const set = edits().toEditSet(TAB, p);
+    const set = edits().toEditSet(TAB);
     expect(set.object).toEqual(object);
     expect(set.overwrite).toBe(false);
     expect(set.edits).toEqual([
@@ -99,17 +100,35 @@ describe('dataEdits store', () => {
       { op: 'delete', row: { key: [['id', int(3)]], original: [['name', { t: 'Text', v: 'n3' }], ['qty', int(30)]], xmin: '300' } },
       { op: 'insert', values: [['qty', { kind: 'text', text: '4' }]] },
     ]);
-    expect(edits().toEditSet(TAB, p, true).overwrite).toBe(true);
+    expect(edits().toEditSet(TAB, true).overwrite).toBe(true);
+  });
+
+  it('the row is captured by its first edit and later edits of the row do not replace it', () => {
+    const first = page([1]);
+    const reloaded = page([1], { rows: [[int(1), { t: 'Text', v: 'changed on server' }, int(99)]], row_versions: ['777'] });
+    update(first, 0, 'name', { kind: 'text', text: 'a' });
+    update(reloaded, 0, 'qty', { kind: 'null' });
+    const [edit] = edits().toEditSet(TAB).edits;
+    expect(edit).toMatchObject({ op: 'update', row: { xmin: '100', original: [['name', { t: 'Text', v: 'n1' }], ['qty', int(10)]] } });
+    expect(edit).toMatchObject({ set: [['name', { kind: 'text', text: 'a' }], ['qty', { kind: 'null' }]] });
+  });
+
+  it('only restricts the edit set to one row', () => {
+    const p = page([1, 2]);
+    update(p, 0, 'name', { kind: 'null' });
+    update(p, 1, 'name', { kind: 'null' });
+    edits().stage(TAB, { kind: 'insert' });
+    const only = edits().toEditSet(TAB, true, rowIdOf(p, info(), 1));
+    expect(only.edits).toHaveLength(1);
+    expect(only.edits[0]).toMatchObject({ op: 'update', row: { key: [['id', int(2)]] } });
   });
 
   it('a table that cannot roll back a batch takes one change at a time', () => {
     useDataEdits.getState().setInfo(TAB, object, info({ atomic: 'no' }));
     const p = page([1, 2]);
-    const a = rowIdOf(p, info(), 0)!;
-    const b = rowIdOf(p, info(), 1)!;
-    expect(edits().stage(TAB, { kind: 'update', row: a, column: 'name', input: { kind: 'null' } })).toEqual({ ok: true });
-    expect(edits().stage(TAB, { kind: 'update', row: a, column: 'qty', input: { kind: 'null' } })).toEqual({ ok: true });
-    expect(edits().stage(TAB, { kind: 'update', row: b, column: 'name', input: { kind: 'null' } })).toEqual({ ok: false, message: ONE_AT_A_TIME });
+    expect(update(p, 0, 'name', { kind: 'null' })).toEqual({ ok: true });
+    expect(update(p, 0, 'qty', { kind: 'null' })).toEqual({ ok: true });
+    expect(update(p, 1, 'name', { kind: 'null' })).toEqual({ ok: false, message: ONE_AT_A_TIME });
     expect(edits().stage(TAB, { kind: 'insert' })).toEqual({ ok: false, message: ONE_AT_A_TIME });
     expect(edits().changeCount(TAB)).toBe(1);
     expect(ONE_AT_A_TIME).toBe("This table can't roll back a batch: apply this change first.");
@@ -118,11 +137,11 @@ describe('dataEdits store', () => {
   it('deleting a row drops its staged updates; a deleted row takes no more edits', () => {
     const p = page([1]);
     const id = rowIdOf(p, info(), 0)!;
-    edits().stage(TAB, { kind: 'update', row: id, column: 'name', input: { kind: 'null' } });
-    edits().stage(TAB, { kind: 'delete', row: id });
+    update(p, 0, 'name', { kind: 'null' });
+    remove(p, 0);
     expect(staged().updates.size).toBe(0);
     expect(staged().deletes.has(id)).toBe(true);
-    expect(edits().stage(TAB, { kind: 'update', row: id, column: 'name', input: { kind: 'null' } }).ok).toBe(false);
+    expect(update(p, 0, 'name', { kind: 'null' }).ok).toBe(false);
   });
 
   it('maps a machine-readable reason to the read-only copy', () => {

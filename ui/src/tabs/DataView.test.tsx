@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent } from '@testing-library/react';
@@ -847,20 +847,32 @@ describe('DataView editing', () => {
           ? reportOf({ outcome: { outcome: 'rolled_back' }, statements: [{ index: 0, affected: 0, error: null, conflict: true }] })
           : reportOf(),
     });
+    // A second row is staged too: Overwrite must leave it alone.
+    await user.click(cell(1, 1));
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await user.click(await screen.findByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-status', 'conflict'));
     expect(screen.getByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reload row' })).toBeInTheDocument();
+    expect(cell(1, 1)).toHaveAttribute('data-status', 'edited');
 
-    // Overwrite previews with overwrite: true and needs its own confirmation.
+    // Overwrite acts on the conflicting row only, with overwrite: true, and needs its own confirmation.
     await user.click(screen.getByRole('button', { name: 'Overwrite' }));
     const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
-    expect(lastCall('data_preview')).toMatchObject({ set: { overwrite: true } });
+    const sent = lastCall('data_preview').set as { overwrite: boolean; edits: { row: { key: unknown } }[] };
+    expect(sent.overwrite).toBe(true);
+    expect(sent.edits).toHaveLength(1);
+    expect(sent.edits[0]!.row.key).toEqual([['id', int(1)]]);
     expect(callsOf('data_apply')).toHaveLength(1);
     await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(callsOf('data_apply').at(-1)).toEqual({ planId: 'over', confirmed: true }));
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument());
+    await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-status', ''));
+    // The other row is still staged, and its next plan keeps the full row guard.
+    expect(cell(1, 1)).toHaveAttribute('data-status', 'edited');
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview').set).toMatchObject({ overwrite: false });
+    expect((lastCall('data_preview').set as { edits: unknown[] }).edits).toHaveLength(1);
   });
 
   it('Reload row drops that row\'s staged change and reloads', async () => {
@@ -887,6 +899,78 @@ describe('DataView editing', () => {
     // The stage is kept.
     expect(screen.getByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
     expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
+    // Reloading would paint the staged values over the server's: it asks to discard them first.
+    await user.click(screen.getByRole('button', { name: 'Discard staged changes and reload' }));
+    expect(useDialogs.getState().question).toMatchObject({ kind: 'discardEdits', count: 1 });
+    expect(callsOf('table_data')).toHaveLength(1);
+  });
+
+  it('Apply sends the rows as they were when staged, also after a reload changed or removed them', async () => {
+    let version = 0;
+    const { user } = await editable({
+      table_data: () => {
+        version++;
+        // The reload brings other server values and versions, and row 2 is gone.
+        return version === 1
+          ? rows3()
+          : page(1, 1, false, { rows: [[int(1), int(555), { t: 'Json', v: '{"x":1}' }]], row_versions: ['99'] });
+      },
+      data_preview: () => previewOf(),
+    });
+    await user.click(cell(1, 1));
+    // An unguarded reload (Retry, Reconnect, Reload row of another row): the stage is untouched.
+    await act(async () => {
+      await useTableData.getState().load(makeTab());
+    });
+    await screen.findByText('Rows 1–1');
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    const edits = (lastCall('data_preview').set as { edits: { row: { key: unknown; xmin: string | null; original: unknown } }[] }).edits;
+    expect(edits).toHaveLength(2);
+    // Row 1: the original and xmin of the first load, not the reloaded ones.
+    expect(edits[0]!.row).toMatchObject({ xmin: '5', original: [['we`ird"col', int(0)], ['doc', { t: 'Json', v: '{}' }]] });
+    // Row 2 is not on the page any more and is still sent.
+    expect(edits[1]!.row).toMatchObject({ key: [['id', int(2)]], xmin: '6' });
+  });
+
+  it('partially applied drops what ran: a re-Apply does not run an INSERT twice', async () => {
+    const { user } = await editable(
+      {
+        data_preview: () => previewOf({ atomic: 'no' }),
+        data_apply: () =>
+          reportOf({
+            outcome: { outcome: 'partially_applied', applied: 1 },
+            statements: [
+              { index: 0, affected: 1, error: null, conflict: false },
+              { index: 1, affected: null, error: appError('server', 'boom'), conflict: false },
+            ],
+          }),
+      },
+      { stage: false },
+    );
+    // Staged by hand: this table is atomic for the store, the report is what matters here.
+    fireEvent.keyDown(screen.getByTestId('grid'), { key: 'n', ctrlKey: true });
+    await user.click(cell(0, 1));
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('Outcome unknown: the change may have been applied. Reload to check.')).toBeInTheDocument();
+    // The update (edit 0) ran; the INSERT (edit 1) did not: only the INSERT stays staged.
+    expect(cell(0, 1)).toHaveAttribute('data-status', '');
+    expect(screen.getByTestId('grid-rows')).toHaveTextContent('4');
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect((lastCall('data_preview').set as { edits: { op: string }[] }).edits.map((e) => e.op)).toEqual(['insert']);
+  });
+
+  it("a failed data_editable says so and stays read-only", async () => {
+    setup({
+      table_data: () => rows3(),
+      data_editable: () => {
+        throw appError('server', 'permission denied for table orders');
+      },
+    });
+    expect(await screen.findByText("Couldn't check whether this table is editable: permission denied for table orders")).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add row' })).not.toBeInTheDocument();
   });
 
   it('a table that cannot roll back stages one change at a time', async () => {
@@ -909,6 +993,8 @@ describe('DataView editing', () => {
     expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
     fireEvent.keyDown(grid, { key: 'Delete', ctrlKey: true });
     expect(cell(0, 1)).toHaveAttribute('data-status', 'deleted');
+    // A row marked for deletion takes no more edits.
+    expect(cell(0, 1)).toHaveAttribute('data-editable', 'false');
     fireEvent.keyDown(grid, { key: 's', ctrlKey: true });
     await screen.findByRole('dialog', { name: 'Review changes' });
     expect(lastCall('data_preview')).toMatchObject({ set: { edits: [{ op: 'delete' }] } });

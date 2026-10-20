@@ -1,4 +1,4 @@
-import { confirmDiscard, useDataEdits } from '../store/dataEdits';
+import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataEdits';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs, type Tab } from '../store/tabs';
 
@@ -9,6 +9,18 @@ export async function closeTab(tab: Tab): Promise<boolean> {
   if (useDataEdits.getState().hasStaged(tab.id) && !(await confirmDiscard(tab.id))) return false;
   useTabs.getState().close(tab.id);
   return true;
+}
+
+/**
+ * Asks before the object tabs of a connection that is going away (deleted, replaced by an import)
+ * lose their staged data edits; false when the user keeps them.
+ */
+export function confirmDiscardConnection(connectionId: string): Promise<boolean> {
+  const ids = useTabs
+    .getState()
+    .tabs.filter((t) => t.kind === 'object' && t.connectionId === connectionId)
+    .map((t) => t.id);
+  return confirmDiscardMany(ids);
 }
 
 /** Closes `tabs` one after another (each query tab may ask a question first); stops when the user cancels one. */

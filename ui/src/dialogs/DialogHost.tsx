@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
+import { confirmDiscardConnection } from '../components/tabActions';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs';
 import { useRunPrompt } from '../store/runPrompt';
@@ -369,6 +370,8 @@ export function DialogHost() {
           if (node.type === 'group') {
             await api.deleteGroup(node.id);
           } else {
+            // Staged data edits of its tabs go with it: ask before anything is deleted.
+            if (!(await confirmDiscardConnection(node.id))) return closeRequest();
             await api.deleteConnection(node.id);
             useConnections.getState().clearInfo(node.id);
             // The objects of a deleted connection cannot be shown any more.

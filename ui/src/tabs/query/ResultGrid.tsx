@@ -681,6 +681,8 @@ export function ResultGrid({
     <div
       className="qr-grid"
       data-testid="result-grid"
+      // Window shortcuts that clash with the editing keys (Ctrl+0) look for this.
+      data-editing-grid={editing ? 'true' : undefined}
       onKeyDownCapture={onKeyDownCapture}
       onFocusCapture={() => commands.current && activateGrid(commands.current)}
       onContextMenuCapture={(e) => {
@@ -725,6 +727,8 @@ export function ResultGrid({
             // Ctrl+F and Ctrl+G belong to the grid tools above, not Glide's built-in search.
             keybindings={{ search: false }}
             onCellClicked={onCellClicked}
+            // No `onDelete`: Delete / Backspace on a cell do nothing (they never stage an empty text);
+            // NULL is explicit (Ctrl+0 or the cell menu).
             onCellEdited={editing ? onCellEdited : undefined}
             onCellActivated={editing ? onCellActivated : undefined}
             onCellContextMenu={onCellContextMenu}

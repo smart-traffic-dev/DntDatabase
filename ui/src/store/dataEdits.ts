@@ -13,6 +13,7 @@ import type {
   Value,
 } from '../bindings';
 import { useDialogs } from './dialogs';
+import { setStagedEditsSource } from './queryTabs';
 import type { ObjectTabRef as Tab } from './tabs';
 import { useTabs } from './tabs';
 import { useTableData } from './tableData';
@@ -28,14 +29,16 @@ export interface InsertRow {
 
 /** The staged changes of one data tab. */
 export interface Staged {
-  updates: Map<RowId, Map<string, CellInput>>;
+  /** Staged cell edits per row, with the row as it was loaded when its first edit was staged. */
+  updates: Map<RowId, { ref: RowRef; cells: Map<string, CellInput> }>;
   inserts: InsertRow[];
-  deletes: Set<RowId>;
+  /** Rows to delete, as they were loaded when the delete was staged. */
+  deletes: Map<RowId, RowRef>;
 }
 
 export type StageEdit =
-  | { kind: 'update'; row: RowId; column: string; input: CellInput }
-  | { kind: 'delete'; row: RowId }
+  | { kind: 'update'; row: RowId; ref: RowRef; column: string; input: CellInput }
+  | { kind: 'delete'; row: RowId; ref: RowRef }
   | { kind: 'insert' }
   | { kind: 'insertCell'; insert: number; column: string; input: CellInput }
   | { kind: 'dropInsert'; insert: number };
@@ -46,12 +49,17 @@ export const ONE_AT_A_TIME = "This table can't roll back a batch: apply this cha
 export const STALE_NOTICE = 'The table or connection changed; review the statements again.';
 export const UNKNOWN_OUTCOME = 'Outcome unknown: the change may have been applied. Reload to check.';
 
+/** The staged item behind one edit of a plan. */
+export type EditKey = { kind: 'update' | 'delete'; row: RowId } | { kind: 'insert'; id: number };
+
 /** The plan the user reviews before anything is sent (`data_preview`), and where that review stands. */
 export interface PendingApply {
   preview: EditPreview;
   overwrite: boolean;
-  /** The row of each edit of the plan (null for an INSERT), to mark a conflict on its row. */
-  rows: (RowId | null)[];
+  /** What each edit of the plan stands for, to mark a conflict on its row or drop what was applied. */
+  keys: EditKey[];
+  /** Overwrite of one conflicting row only (null: the whole stage). */
+  only: RowId | null;
   /** Set after `plan_stale`: the statements are new. */
   notice: string | null;
   busy: boolean;
@@ -76,13 +84,13 @@ export interface EditState {
 
 const HISTORY_LIMIT = 100;
 
-const emptyStaged = (): Staged => ({ updates: new Map(), inserts: [], deletes: new Set() });
+const emptyStaged = (): Staged => ({ updates: new Map(), inserts: [], deletes: new Map() });
 
 function cloneStaged(s: Staged): Staged {
   return {
-    updates: new Map([...s.updates].map(([id, cells]) => [id, new Map(cells)])),
+    updates: new Map([...s.updates].map(([id, u]) => [id, { ref: u.ref, cells: new Map(u.cells) }])),
     inserts: s.inserts.map((i) => ({ id: i.id, values: new Map(i.values) })),
-    deletes: new Set(s.deletes),
+    deletes: new Map(s.deletes),
   };
 }
 
@@ -134,7 +142,8 @@ export function rowIdOf(page: TableDataPage, info: EditableInfo, i: number): Row
   return pairs ? JSON.stringify(pairs) : null;
 }
 
-function rowRef(page: TableDataPage, info: EditableInfo, i: number): RowRef | null {
+/** Row `i` of the page as a guarded UPDATE / DELETE needs it. Captured when a change is staged, never rebuilt later. */
+export function rowRef(page: TableDataPage, info: EditableInfo, i: number): RowRef | null {
   const key = rowKeyPairs(page, info, i);
   const row = page.rows[i];
   if (!key || !row) return null;
@@ -159,49 +168,55 @@ interface DataEditsStore {
   hasStaged(tabId: string): boolean;
   /** How many rows have staged changes. */
   changeCount(tabId: string): number;
-  /** The staged changes as the `EditSet` `data_preview` takes, against the page on screen. */
-  toEditSet(tabId: string, page: TableDataPage, overwrite?: boolean): EditSet;
-  /** Previews the staged changes; the dialog opens when `applying` is set. */
-  startApply(tab: Tab, overwrite?: boolean): Promise<void>;
+  /**
+   * The staged changes as the `EditSet` `data_preview` takes. Rows are the ones captured when
+   * each change was staged (never the page on screen); `only` restricts it to one row.
+   */
+  toEditSet(tabId: string, overwrite?: boolean, only?: RowId | null): EditSet;
+  /** Previews the staged changes; the dialog opens when `applying` is set. `only`: one row (Overwrite). */
+  startApply(tab: Tab, opts?: { overwrite?: boolean; only?: RowId }): Promise<void>;
   cancelApply(tabId: string): void;
   /** Sends the previewed plan; the outcome decides what stays staged. */
   confirmApply(tab: Tab): Promise<void>;
-  /** Forgets the staged changes of one conflicting row and reads the page again. */
+  /** Forgets the staged changes of one conflicting row and reads the page again; other rows keep theirs. */
   reloadRow(tab: Tab, row: RowId): void;
   clearBanner(tabId: string): void;
   reset(): void;
 }
 
-function build(state: EditState, page: TableDataPage, overwrite: boolean): { set: EditSet; rows: (RowId | null)[] } {
-  const { info, object, staged } = state;
-  if (!info || !object) throw new Error('data_editable has not answered for this tab');
+function build(state: EditState, overwrite: boolean, only: RowId | null): { set: EditSet; keys: EditKey[] } {
+  const { object, staged } = state;
+  if (!object) throw new Error('data_editable has not answered for this tab');
   const edits: RowEdit[] = [];
-  const rows: (RowId | null)[] = [];
-  const updates: RowEdit[] = [];
-  const deletes: RowEdit[] = [];
-  const updateRows: RowId[] = [];
-  const deleteRows: RowId[] = [];
-  page.rows.forEach((_, i) => {
-    const id = rowIdOf(page, info, i);
-    if (!id) return;
-    const cells = staged.updates.get(id);
-    const ref = cells || staged.deletes.has(id) ? rowRef(page, info, i) : null;
-    if (!ref) return;
-    if (cells) {
-      updates.push({ op: 'update', row: ref, set: [...cells] });
-      updateRows.push(id);
-    } else {
-      deletes.push({ op: 'delete', row: ref });
-      deleteRows.push(id);
-    }
-  });
-  edits.push(...updates, ...deletes);
-  rows.push(...updateRows, ...deleteRows);
-  for (const insert of staged.inserts) {
-    edits.push({ op: 'insert', values: [...insert.values] });
-    rows.push(null);
+  const keys: EditKey[] = [];
+  for (const [row, u] of staged.updates) {
+    if (only && row !== only) continue;
+    edits.push({ op: 'update', row: u.ref, set: [...u.cells] });
+    keys.push({ kind: 'update', row });
   }
-  return { set: { object, edits, overwrite }, rows };
+  for (const [row, ref] of staged.deletes) {
+    if (only && row !== only) continue;
+    edits.push({ op: 'delete', row: ref });
+    keys.push({ kind: 'delete', row });
+  }
+  if (!only) {
+    for (const insert of staged.inserts) {
+      edits.push({ op: 'insert', values: [...insert.values] });
+      keys.push({ kind: 'insert', id: insert.id });
+    }
+  }
+  return { set: { object, edits, overwrite }, keys };
+}
+
+/** `staged` without the items `done` names. */
+function without(staged: Staged, done: EditKey[]): Staged {
+  const next = cloneStaged(staged);
+  for (const k of done) {
+    if (k.kind === 'update') next.updates.delete(k.row);
+    else if (k.kind === 'delete') next.deletes.delete(k.row);
+    else if (k.kind === 'insert') next.inserts = next.inserts.filter((i) => i.id !== k.id);
+  }
+  return next;
 }
 
 export const useDataEdits = create<DataEditsStore>()((set, get) => {
@@ -216,20 +231,14 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
     if (current) patch(tabId, { applying: { ...current, ...change } });
   };
 
-  const currentPage = (tab: Tab): TableDataPage | null => {
-    const page = useTableData.getState().byTab[tab.id]?.page;
-    return page?.status === 'ok' ? page.data : null;
-  };
-
   /** Stores the plan of the staged changes for the dialog. `notice` marks a plan made again after `plan_stale`. */
-  async function preview(tab: Tab, overwrite: boolean, notice: string | null): Promise<void> {
+  async function preview(tab: Tab, overwrite: boolean, only: RowId | null, notice: string | null): Promise<void> {
     const state = get().byTab[tab.id];
-    const page = currentPage(tab);
-    if (!state || !page) return;
+    if (!state) return;
     try {
-      const { set: editSet, rows } = build(state, page, overwrite);
+      const { set: editSet, keys } = build(state, overwrite, only);
       const made = await api.dataPreview(tab.connectionId, editSet);
-      patch(tab.id, { error: null, applying: { preview: made, overwrite, rows, notice, busy: false, error: null } });
+      patch(tab.id, { error: null, applying: { preview: made, overwrite, keys, only, notice, busy: false, error: null } });
     } catch (e) {
       const message = toAppError(e).message;
       // While the dialog is open the failure belongs in it; else in the banner.
@@ -238,21 +247,46 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
     }
   }
 
-  function finish(tab: Tab, report: ApplyReport, rows: (RowId | null)[]) {
-    const outcome = report.outcome.outcome;
-    if (outcome === 'committed') {
-      patch(tab.id, { staged: emptyStaged(), history: [], conflicts: [], unknown: false, error: null, applying: null });
+  function finish(tab: Tab, report: ApplyReport, pending: PendingApply) {
+    const state = get().byTab[tab.id];
+    if (!state) return;
+    const { keys, only } = pending;
+    const outcome = report.outcome;
+    if (outcome.outcome === 'committed') {
+      if (only) {
+        patch(tab.id, {
+          staged: without(state.staged, keys),
+          history: [],
+          conflicts: state.conflicts.filter((r) => r !== only),
+          error: null,
+          applying: null,
+        });
+      } else {
+        patch(tab.id, { staged: emptyStaged(), history: [], conflicts: [], unknown: false, error: null, applying: null });
+      }
       void useTableData.getState().load(tab);
-    } else if (outcome === 'rolled_back') {
-      const conflicts = report.statements.filter((s) => s.conflict).map((s) => rows[s.index]).filter((r): r is RowId => !!r);
+    } else if (outcome.outcome === 'rolled_back') {
+      const conflicts = report.statements
+        .filter((s) => s.conflict)
+        .map((s) => keys[s.index])
+        .filter((k): k is EditKey & { row: RowId } => !!k && k.kind !== 'insert')
+        .map((k) => k.row);
       const failed = report.statements.find((s) => s.error)?.error ?? report.error;
       patch(tab.id, {
-        conflicts,
+        conflicts: only ? [...new Set([...state.conflicts, ...conflicts])] : conflicts,
         applying: null,
         error: conflicts.length > 0 ? null : (failed?.message ?? 'The changes were rolled back; nothing was applied.'),
       });
     } else {
-      patch(tab.id, { unknown: true, applying: null, error: null });
+      // Without a transaction the first statements are applied for good: they must not run again.
+      const applied = outcome.outcome === 'partially_applied' ? keys.filter((_, i) => i < outcome.applied) : [];
+      patch(tab.id, {
+        staged: applied.length ? without(state.staged, applied) : state.staged,
+        history: [],
+        unknown: true,
+        applying: null,
+        error: null,
+      });
     }
   }
 
@@ -272,15 +306,19 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
       switch (edit.kind) {
         case 'update': {
           if (next.deletes.has(edit.row)) return { ok: false, message: 'This row is marked for deletion.' };
-          const cells = next.updates.get(edit.row) ?? new Map<string, CellInput>();
-          cells.set(edit.column, edit.input);
-          next.updates.set(edit.row, cells);
+          // The row is captured by its first edit and stays as it was then.
+          const u = next.updates.get(edit.row) ?? { ref: edit.ref, cells: new Map<string, CellInput>() };
+          u.cells.set(edit.column, edit.input);
+          next.updates.set(edit.row, u);
           break;
         }
-        case 'delete':
+        case 'delete': {
+          // A delete after edits keeps the row as it was loaded before them.
+          const ref = next.updates.get(edit.row)?.ref ?? edit.ref;
           next.updates.delete(edit.row);
-          next.deletes.add(edit.row);
+          next.deletes.set(edit.row, ref);
           break;
+        }
         case 'insert':
           next.inserts.push({ id: ++insertSeq, values: new Map() });
           break;
@@ -311,14 +349,14 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
     },
     hasStaged: (tabId) => countOf(get().byTab[tabId]?.staged ?? emptyStaged()) > 0,
     changeCount: (tabId) => countOf(get().byTab[tabId]?.staged ?? emptyStaged()),
-    toEditSet(tabId, page, overwrite = false) {
+    toEditSet(tabId, overwrite = false, only = null) {
       const state = get().byTab[tabId];
       if (!state) throw new Error('no staged changes');
-      return build(state, page, overwrite).set;
+      return build(state, overwrite, only).set;
     },
-    async startApply(tab, overwrite = false) {
+    async startApply(tab, opts = {}) {
       if (!get().hasStaged(tab.id)) return;
-      await preview(tab, overwrite, null);
+      await preview(tab, opts.overwrite ?? false, opts.only ?? null, null);
     },
     cancelApply(tabId) {
       patch(tabId, { applying: null });
@@ -330,12 +368,12 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
       try {
         // The dialog is the confirmation, also of a Production plan.
         const report = await api.dataApply(pending.preview.plan_id, true);
-        finish(tab, report, pending.rows);
+        finish(tab, report, pending);
       } catch (e) {
         const error = toAppError(e);
         if (error.kind === 'plan_stale') {
           // Nothing was sent: show the new statements for another review.
-          await preview(tab, pending.overwrite, STALE_NOTICE);
+          await preview(tab, pending.overwrite, pending.only, STALE_NOTICE);
         } else {
           patchApplying(tab.id, { busy: false, error: error.message });
         }
@@ -359,9 +397,10 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
   };
 });
 
-/** Asks before staged changes are thrown away (closing the tab, changing the page or the filter); true to go on. */
-export function confirmDiscard(tabId: string): Promise<boolean> {
-  const count = useDataEdits.getState().changeCount(tabId);
+/** Asks before the staged changes of `tabIds` are thrown away (closing, quitting, a connection going); true to go on. */
+export function confirmDiscardMany(tabIds: string[]): Promise<boolean> {
+  const { changeCount } = useDataEdits.getState();
+  const count = tabIds.reduce((n, id) => n + changeCount(id), 0);
   if (count === 0) return Promise.resolve(true);
   return new Promise((resolve) => {
     useDialogs.getState().ask({
@@ -369,12 +408,22 @@ export function confirmDiscard(tabId: string): Promise<boolean> {
       count,
       done: (discard) => {
         useDialogs.getState().answer();
-        if (discard) useDataEdits.getState().discard(tabId);
+        if (discard) for (const id of tabIds) useDataEdits.getState().discard(id);
         resolve(discard);
       },
     });
   });
 }
+
+/** Asks before staged changes are thrown away (closing the tab, changing the page or the filter); true to go on. */
+export const confirmDiscard = (tabId: string) => confirmDiscardMany([tabId]);
+
+/** The ids of the tabs with staged changes. */
+export const tabsWithStaged = () =>
+  Object.keys(useDataEdits.getState().byTab).filter((id) => useDataEdits.getState().hasStaged(id));
+
+// Quitting the app asks about staged changes too (the close guard lives in `queryTabs`).
+setStagedEditsSource(() => confirmDiscardMany(tabsWithStaged()));
 
 // Forget the changes of closed tabs.
 useTabs.subscribe((state) => {

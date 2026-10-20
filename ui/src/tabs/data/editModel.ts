@@ -33,7 +33,7 @@ export function effectivePage(page: TableDataPage, staged: Staged, rowIds: (RowI
   const names = page.columns.map((c) => c.name);
   const rows = page.rows.map((row, i) => {
     const id = rowIds[i];
-    const cells = id ? staged.updates.get(id) : undefined;
+    const cells = id ? staged.updates.get(id)?.cells : undefined;
     if (!cells) return row;
     return row.map((value, at) => {
       const input = cells.get(names[at] ?? '');
@@ -63,5 +63,5 @@ export function cellStatus(
   if (!id) return null;
   if (conflicts.includes(id)) return 'conflict';
   if (staged.deletes.has(id)) return 'deleted';
-  return staged.updates.get(id)?.has(name) ? 'edited' : null;
+  return staged.updates.get(id)?.cells.has(name) ? 'edited' : null;
 }

@@ -141,6 +141,15 @@ export function setTxStateSource(
  * Whether a tab has a run in progress, and how to stop it: `stop` asks for the stop and resolves
  * once the run ended (true) or after a bounded wait (false). The run flow registers itself here.
  */
+/**
+ * Staged data edits of the object tabs (registered by `dataEdits`, which this store cannot import):
+ * `confirm` asks "Discard N unsaved changes?" when there are any and answers whether to go on.
+ */
+const stagedEdits: { confirm(): Promise<boolean> } = { confirm: () => Promise.resolve(true) };
+export function setStagedEditsSource(confirm: (() => Promise<boolean>) | null) {
+  stagedEdits.confirm = confirm ?? (() => Promise.resolve(true));
+}
+
 let runningOf: (tabId: string) => boolean = () => false;
 let stopRunOf: (tabId: string) => Promise<boolean> = async () => true;
 export function setRunningSource(source: ((tabId: string) => boolean) | null, stop?: (tabId: string) => Promise<boolean>) {
@@ -575,9 +584,11 @@ export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
   return win.onCloseRequested(async (event) => {
     event.preventDefault();
     const asking = useDialogs.getState().question?.kind;
-    if (busy || asking === 'appClose' || asking === 'saveFailed') return;
+    if (busy || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits') return;
     busy = true;
     try {
+      // Staged data edits are not saved anywhere: quitting throws them away, so ask first.
+      if (!(await stagedEdits.confirm())) return;
       const failed = await useQueryDocs.getState().flush();
       if (failed.length && !(await confirmQuitUnsaved(failed.length))) return;
       const open = await openTransactions();
