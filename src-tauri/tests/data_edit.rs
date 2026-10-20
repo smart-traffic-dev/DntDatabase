@@ -28,8 +28,10 @@ use dntdatabase::edit_plans::{ApplyOutcome, ApplyReport};
 use dntdatabase::session_manager::SessionManager;
 use secrecy::SecretString;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 /// What the fake server holds and answers, and what it saw.
@@ -49,11 +51,29 @@ struct Server {
     commit: Mutex<Option<DbError>>,
     /// A recheck (`SELECT 1 FROM …`) finds its row.
     recheck_found: AtomicBool,
+    /// Silent reconnects of the sessions so far (`Session::reconnects`).
+    reconnects: AtomicU64,
+    /// The next statement starting with this replaces its connection first (a silent
+    /// reconnect before it is sent), counted in `reconnects`.
+    reconnect_before: Mutex<Option<&'static str>>,
+    /// The `character_set_client` check flips the session's `sql_mode` once it is read.
+    flip_dialect_after_check: AtomicBool,
+    /// While set, reading the table detail waits for it (`detail_entered` says so).
+    detail_gate: Mutex<Option<Arc<Notify>>>,
+    detail_entered: Notify,
 }
+
+/// A write that reports no affected count.
+const NO_COUNT: u64 = u64::MAX;
 
 impl Server {
     fn new(engine: &str) -> Arc<Server> {
         Arc::new(Server {
+            reconnects: AtomicU64::new(0),
+            reconnect_before: Mutex::default(),
+            flip_dialect_after_check: AtomicBool::new(false),
+            detail_gate: Mutex::default(),
+            detail_entered: Notify::new(),
             detail: Mutex::new(items(engine)),
             metas: vec![meta("id"), meta("qty")],
             dialect: Mutex::new(Dialect::MYSQL),
@@ -244,6 +264,13 @@ impl Session for FakeSession {
             .lock()
             .unwrap()
             .push((self.number, stmt.to_string()));
+        {
+            let mut before = s.reconnect_before.lock().unwrap();
+            if before.is_some_and(|p| stmt.starts_with(p)) {
+                *before = None;
+                s.reconnects.fetch_add(1, Ordering::SeqCst);
+            }
+        }
         let word = stmt.split_whitespace().next().unwrap_or("").to_uppercase();
         match word.as_str() {
             "START" | "BEGIN" => {
@@ -264,6 +291,7 @@ impl Session for FakeSession {
             "UPDATE" | "DELETE" | "INSERT" => {
                 let next = s.writes.lock().unwrap().pop_front().unwrap_or(Ok(1));
                 match next {
+                    Ok(NO_COUNT) => Ok(done(None)),
                     Ok(n) => Ok(done(Some(n))),
                     Err(e) => {
                         if matches!(e, DbError::ConnectionLost { .. }) {
@@ -275,6 +303,12 @@ impl Session for FakeSession {
             }
             "SELECT" if stmt.contains("@@character_set_client") => {
                 let cs = s.charset.lock().unwrap().clone();
+                if s.flip_dialect_after_check.swap(false, Ordering::SeqCst) {
+                    *s.dialect.lock().unwrap() = Dialect::MySql(MySqlMode {
+                        no_backslash_escapes: true,
+                        ..MySqlMode::default()
+                    });
+                }
                 Ok(result(sink, &[meta("cs")], vec![vec![Value::Text(cs)]]))
             }
             "SELECT" if stmt.starts_with("SELECT 1 FROM") => {
@@ -306,7 +340,15 @@ impl Session for FakeSession {
     fn introspector(&self) -> &dyn Introspector {
         self
     }
+    fn reconnects(&self) -> u64 {
+        self.server.reconnects.load(Ordering::SeqCst)
+    }
     async fn ping(&self) -> Result<(), DbError> {
+        self.server
+            .executed
+            .lock()
+            .unwrap()
+            .push((self.number, "PING".into()));
         Ok(())
     }
     async fn close(self: Box<Self>) {
@@ -333,6 +375,11 @@ impl Introspector for FakeSession {
         Ok(vec![])
     }
     async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
+        let gate = self.server.detail_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            self.server.detail_entered.notify_one();
+            gate.notified().await;
+        }
         Ok(self.server.detail.lock().unwrap().clone())
     }
     async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
@@ -816,5 +863,142 @@ async fn inserted_row_is_read_back() {
         sent.iter()
             .any(|s| s == "SELECT `id`, `qty` FROM `shop`.`items` WHERE `id` = LAST_INSERT_ID()"),
         "{sent:?}"
+    );
+}
+
+// ---- review fixes (R22, R24, pooling) ------------------------------------------------
+
+/// Without a transaction the driver may replace a dead connection silently: right
+/// before its statement the session is pinged and checked again, and a `sql_mode` that
+/// changed meanwhile stops the plan before anything is written.
+#[tokio::test]
+async fn non_atomic_dialect_flip_between_check_and_write_is_stale() {
+    let f = fixture_with("MyISAM", None).await;
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    f.server
+        .flip_dialect_after_check
+        .store(true, Ordering::SeqCst);
+    let before = f.server.executed().len();
+    let e = f.sm.edit_apply(p.plan_id, false).await.unwrap_err();
+    assert!(matches!(e, DbError::PlanStale { .. }), "{e:?}");
+    let sent = f.server.since(before);
+    assert_eq!(sent.first().map(String::as_str), Some("PING"), "{sent:?}");
+    assert!(!sent.iter().any(|s| s.starts_with("UPDATE")), "{sent:?}");
+}
+
+/// A silent reconnect during the checks: the checks no longer describe the connection
+/// the write would use, so nothing is written.
+#[tokio::test]
+async fn non_atomic_reconnect_during_checks_is_stale() {
+    let f = fixture_with("MyISAM", None).await;
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    *f.server.reconnect_before.lock().unwrap() = Some("SELECT @@character_set_client");
+    let before = f.server.executed().len();
+    let e = f.sm.edit_apply(p.plan_id, false).await.unwrap_err();
+    assert!(matches!(e, DbError::PlanStale { .. }), "{e:?}");
+    let sent = f.server.since(before);
+    assert!(!sent.iter().any(|s| s.starts_with("UPDATE")), "{sent:?}");
+}
+
+/// A silent reconnect seen only after the write: it ran on a connection the checks did
+/// not cover, so its outcome is not vouched for.
+#[tokio::test]
+async fn non_atomic_reconnect_before_the_write_is_unknown() {
+    let f = fixture_with("MyISAM", None).await;
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    *f.server.reconnect_before.lock().unwrap() = Some("UPDATE");
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 0 }, "{r:?}");
+}
+
+/// A row count other than 0 or the one expected (or none at all) cannot be read as
+/// "applied" or "not applied".
+#[tokio::test]
+async fn non_atomic_unexpected_count_is_unknown() {
+    let f = fixture_with("MyISAM", None).await;
+    for count in [NO_COUNT, 2] {
+        let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+        f.server.script(vec![Ok(count)]);
+        let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+        assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 0 }, "{count}: {r:?}");
+        assert!(!r.statements[0].conflict, "{count}");
+    }
+}
+
+/// Whether the apply session went back to the pool (`true`) or was closed.
+async fn pooled(f: &Fixture, closes_before: usize) -> bool {
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    f.server.closes.load(Ordering::SeqCst) == closes_before
+}
+
+/// A session is pooled only after a commit or a conflict's clean rollback. After a
+/// statement that failed (a timeout or cancel sent KILL QUERY / a cancel request that
+/// may still land) or a lost COMMIT, it is closed.
+#[tokio::test]
+async fn atomic_session_is_pooled_only_after_success_or_conflict() {
+    let f = fixture().await;
+
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    let closes = f.server.closes.load(Ordering::SeqCst);
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed);
+    assert!(pooled(&f, closes).await, "commit: pooled");
+
+    let p = f.sm.edit_preview(f.id, updates(2)).await.unwrap();
+    f.server.script(vec![Ok(1), Ok(0)]);
+    let closes = f.server.closes.load(Ordering::SeqCst);
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::RolledBack);
+    assert!(pooled(&f, closes).await, "conflict: pooled");
+
+    let p = f.sm.edit_preview(f.id, updates(2)).await.unwrap();
+    f.server.script(vec![
+        Ok(1),
+        Err(DbError::Timeout {
+            stage: dnt_core::error::ConnectStage::Execute,
+            outcome_unknown: false,
+            was_in_tx: true,
+        }),
+    ]);
+    let closes = f.server.closes.load(Ordering::SeqCst);
+    let before = f.server.executed().len();
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::RolledBack);
+    assert_eq!(
+        r.statements[1].error.as_ref().map(|e| e.kind.as_str()),
+        Some("timeout")
+    );
+    // Still rolled back explicitly, then closed rather than pooled.
+    assert!(f.server.since(before).iter().any(|s| s == "ROLLBACK"));
+    assert!(!pooled(&f, closes).await, "timeout: closed");
+
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    *f.server.commit.lock().unwrap() = Some(lost(true));
+    let closes = f.server.closes.load(Ordering::SeqCst);
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 1 });
+    assert!(!pooled(&f, closes).await, "lost COMMIT: closed");
+}
+
+/// The SSH tunnel is replaced while Apply reads the table: the session it then takes
+/// (opened through the new tunnel) is not the connection the plan was made for.
+#[tokio::test]
+async fn tunnel_replaced_during_apply_checks_is_stale() {
+    let f = fixture().await;
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    let gate = Arc::new(Notify::new());
+    *f.server.detail_gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let before = f.server.executed().len();
+    let (r, ()) = tokio::join!(f.sm.edit_apply(p.plan_id, false), async {
+        f.server.detail_entered.notified().await;
+        f.sm.simulate_tunnel_replaced(f.id);
+        gate.notify_one();
+    });
+    let e = r.unwrap_err();
+    assert!(matches!(e, DbError::PlanStale { .. }), "{e:?}");
+    assert!(
+        !f.server.since(before).iter().any(|s| is_write_or_tx(s)),
+        "{:?}",
+        f.server.since(before)
     );
 }

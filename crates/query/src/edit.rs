@@ -34,7 +34,9 @@ pub enum CellInput {
     Value {
         value: Value,
     },
-    /// Binary data (standard base64).
+    /// Binary data (standard base64). Renamed explicitly: specta's snake_case would
+    /// export `base_64` while serde reads and writes `base64`.
+    #[serde(rename = "base64")]
     Base64 {
         data: String,
     },
@@ -112,7 +114,8 @@ pub struct PlannedEdit {
     pub read_back: Option<String>,
     /// MySQL UPDATE: `SELECT 1` of the guarded row (the UPDATE's own condition), run
     /// when the UPDATE reports 0 rows: MySQL counts changed rows, so an UPDATE that
-    /// writes the values a row already has reports 0 without a conflict.
+    /// writes the values a row already has reports 0 without a conflict. A locking read
+    /// (`FOR UPDATE`): it sees the latest committed row, as the UPDATE does.
     pub recheck: Option<String>,
 }
 
@@ -542,7 +545,10 @@ impl Builder<'_> {
                 let (guard, protection) = self.row_guard(row)?;
                 let sql = update_sql(&self.table, &key, &assignments, &guard, d)?;
                 if mysql {
-                    recheck = Some(exists_sql(&self.table, &key, &guard, d)?);
+                    // A locking read sees the latest committed row, as the UPDATE did;
+                    // a plain SELECT would read the transaction's snapshot (InnoDB).
+                    let exists = exists_sql(&self.table, &key, &guard, d)?;
+                    recheck = Some(format!("{exists} FOR UPDATE"));
                 }
                 (sql, protection, false)
             }
@@ -2233,6 +2239,22 @@ mod tests {
         assert_eq!(p.stmts[0].recheck, None);
     }
 
+    #[test]
+    fn base64_input_is_tagged_base64() {
+        let v = serde_json::json!(CellInput::Base64 {
+            data: "AA==".into()
+        });
+        assert_eq!(v, serde_json::json!({"kind": "base64", "data": "AA=="}));
+        let back: CellInput =
+            serde_json::from_value(serde_json::json!({"kind": "base64", "data": "AA=="})).unwrap();
+        assert_eq!(
+            back,
+            CellInput::Base64 {
+                data: "AA==".into()
+            }
+        );
+    }
+
     /// MySQL counts changed rows, not matched ones: an UPDATE that writes the values a
     /// row already has reports 0. Such a statement carries a SELECT of its guarded row.
     #[test]
@@ -2250,7 +2272,9 @@ mod tests {
         let cond = upd.sql.split_once(" WHERE ").unwrap().1;
         assert_eq!(
             upd.recheck.as_deref(),
-            Some(format!("SELECT 1 FROM `shop`.`items` WHERE {cond}").as_str())
+            // A locking (current) read, like the UPDATE's own: a plain SELECT reads the
+            // transaction's snapshot and could still see a row a concurrent commit changed.
+            Some(format!("SELECT 1 FROM `shop`.`items` WHERE {cond} FOR UPDATE").as_str())
         );
         assert_eq!(del.recheck, None);
         assert_eq!(del.read_back, None);

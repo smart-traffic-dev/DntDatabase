@@ -811,9 +811,10 @@ export type CellInput = { kind: "null" } |
  */
 { kind: "text"; text: string } | { kind: "value"; value: Value } | 
 /**
- * Binary data (standard base64).
+ * Binary data (standard base64). Renamed explicitly: specta's snake_case would
+ * export `base_64` while serde reads and writes `base64`.
  */
-{ kind: "base_64"; data: string } | 
+{ kind: "base64"; data: string } | 
 /**
  * A full value fetched earlier, by its token.
  */

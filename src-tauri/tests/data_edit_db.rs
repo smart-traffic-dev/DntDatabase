@@ -542,6 +542,90 @@ async fn update_to_the_same_value_is_not_a_conflict() {
     }
 }
 
+/// A concurrent commit lands inside the batch, after an earlier recheck read the table:
+/// the recheck of the next UPDATE must see that commit (a locking read), not the
+/// transaction's snapshot, or the batch would commit and report an edit applied that was
+/// never written.
+///
+/// Row 2 is held by another transaction; statement 1 writes row 1's own value (0
+/// changed rows: rechecked, which on InnoDB would start the snapshot); statement 2 waits
+/// for row 2's lock; the other transaction then changes row 2 and commits.
+#[tokio::test]
+async fn recheck_sees_a_commit_made_during_the_batch() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::mysql_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = items(t, "snap").await;
+        let q = scratch(t, &name);
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        // The other transaction holds row 2.
+        let other = MySqlDriver
+            .connect(&t.resolved(Some(FIXTURE_DB)))
+            .await
+            .unwrap();
+        let run = |sql: String| {
+            let other = &other;
+            async move {
+                let kind = classify(&sql, other.dialect());
+                other
+                    .execute_one(&sql, kind, &ExecOptions::default(), &mut Collect(vec![]))
+                    .await
+                    .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+            }
+        };
+        run("START TRANSACTION".into()).await;
+        run(format!("SELECT * FROM {q} WHERE id = 2 FOR UPDATE")).await;
+        let edits = set(
+            o,
+            vec![
+                RowEdit::Update {
+                    row: row_ref(&p, 0, &["id"]),
+                    set: cells(&[("qty", text("1"))]),
+                },
+                RowEdit::Update {
+                    row: row_ref(&p, 1, &["id"]),
+                    set: cells(&[("name", text("mine"))]),
+                },
+            ],
+        );
+        let waiting = format!(
+            "SELECT COUNT(*) FROM information_schema.processlist \
+             WHERE info LIKE 'UPDATE {q} SET `name`%'"
+        );
+        let (r, ()) = tokio::join!(apply(&state, id, edits), async {
+            // Until statement 2 waits for the lock.
+            let mut blocked = false;
+            for _ in 0..100 {
+                if int(&admin(t, &waiting).await[0][0]) > 0 {
+                    blocked = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert!(blocked, "{t:?}: statement 2 never waited for the lock");
+            run(format!("UPDATE {q} SET qty = 99 WHERE id = 2")).await;
+            run("COMMIT".into()).await;
+        });
+        other.close().await;
+        let r = r.unwrap();
+        assert_eq!(r.outcome, ApplyOutcome::RolledBack, "{t:?}: {r:?}");
+        assert!(
+            !r.statements[0].conflict && r.statements[1].conflict,
+            "{t:?}: {r:?}"
+        );
+        assert_eq!(
+            contents(t, &name).await,
+            [(1, "a".into(), 1), (2, "b".into(), 99)],
+            "{t:?}"
+        );
+        drop_table(t, &name).await;
+    }
+}
+
 /// A non-transactional table: one change at a time, no transaction, and a statement
 /// that applied nothing is reported as such (statements before it would stay).
 #[tokio::test]

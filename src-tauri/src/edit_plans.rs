@@ -29,11 +29,18 @@
 //!   leaves nothing applied ([`ApplyOutcome::RolledBack`]: rolled back, or the server
 //!   rolls back when the connection is gone); a `COMMIT` without an answer is
 //!   [`ApplyOutcome::Unknown`].
-//! - otherwise the plan has one statement, run without a transaction after the session
-//!   checks; a lost connection or timeout while it runs is `Unknown { at: 0 }`.
+//! - otherwise the plan has one statement, run without a transaction. Right before it
+//!   the session is pinged and checked again; a silent reconnect during the checks is
+//!   `PlanStale` (nothing sent), one seen only after the write, a lost connection or
+//!   timeout while it runs, or a row count that is neither 0 nor the one expected is
+//!   `Unknown { at: 0 }`.
+//!
+//! A session goes back to the pool only after a commit or a conflict's clean rollback:
+//! after a failed statement a cancel request may still be on its way to it.
 //!
 //! MySQL counts changed rows, not matched ones: an UPDATE that reports 0 rows is checked
-//! with its `recheck` SELECT before it is called a conflict. An INSERT's row is read back
+//! with its `recheck` (a locking `SELECT … FOR UPDATE`, which sees the latest committed
+//! row as the UPDATE did) before it is called a conflict. An INSERT's row is read back
 //! (PostgreSQL `RETURNING`, MySQL its `read_back` SELECT) into [`ApplyReport::inserted`].
 
 use crate::commands::data::check_object;
@@ -380,6 +387,12 @@ impl SessionManager {
         let taken = self
             .take_data_session(&rt, Some(&stored.object.database))
             .await?;
+        // The tunnel may have been replaced while the table was read (R24): the session
+        // taken now must come through the tunnel the plan was made for.
+        if taken.tunnel_gen != stored.tunnel_gen {
+            self.return_data_session(&rt, taken, true);
+            return Err(stale("the connection's SSH tunnel was replaced"));
+        }
         if taken.session.dialect() != plan.dialect {
             self.return_data_session(&rt, taken, true);
             return Err(stale("the session's SQL mode changed"));
@@ -443,10 +456,8 @@ fn report(
 }
 
 impl Apply<'_> {
-    /// Runs `sql` (one statement of kind `kind`): the rows it affected and its first
-    /// result's rows. A statement that returns rows (PostgreSQL `INSERT … RETURNING`)
-    /// reports no affected count: every row it wrote is returned, so it is the count of
-    /// rows.
+    /// Runs `sql` (one statement of kind `kind`): the rows it affected (as the driver
+    /// reports them) and its first result's rows.
     async fn exec(
         &self,
         sql: &str,
@@ -460,11 +471,7 @@ impl Apply<'_> {
         );
         let mut page = BoundedPage::new(self.cell_cap, self.page_cap);
         let out = self.s.execute_one(sql, kind, &self.opts, &mut page).await?;
-        let affected = out
-            .results
-            .first()
-            .and_then(|r| r.affected.or_else(|| (!r.truncated).then_some(r.row_count)));
-        Ok((affected, page.rows))
+        Ok((out.results.first().and_then(|r| r.affected), page.rows))
     }
 
     async fn tx(&self, sql: &str, c: TxControl) -> Result<(), DbError> {
@@ -526,6 +533,11 @@ impl Apply<'_> {
     /// left empty.
     async fn statement(&self, st: &PlannedEdit, strict: bool) -> Result<Done, DbError> {
         let (mut affected, rows) = self.exec(&st.sql, StatementKind::Write).await?;
+        // PostgreSQL `INSERT … RETURNING` reports rows, not an affected count: every
+        // row it wrote is returned (a single-row insert is never cut by `max_rows`).
+        if affected.is_none() && st.returning && self.plan.dialect == Dialect::Postgres {
+            affected = Some(rows.len() as u64);
+        }
         if affected == Some(0) {
             if let Some(recheck) = &st.recheck {
                 let (_, found) = self.exec(recheck, StatementKind::Read).await?;
@@ -568,9 +580,13 @@ impl Apply<'_> {
             return (Err(e), false);
         }
         // Inside the transaction: the driver never silently replaces the connection now.
+        // After any failure the session is closed, never pooled: a timeout or cancel
+        // sent a KILL QUERY / cancel request that could still land on the next request.
         if let Err(e) = self.check_session().await {
-            let clean = !is_lost(&e) && self.rollback().await;
-            return (Err(e), clean);
+            if !is_lost(&e) {
+                self.rollback().await;
+            }
+            return (Err(e), false);
         }
         let mut statements = Vec::with_capacity(self.plan.stmts.len());
         let mut inserted = Vec::new();
@@ -595,8 +611,10 @@ impl Apply<'_> {
                 }
                 Err(e) => {
                     // Not committed: rolled back here, or by the server once the
-                    // connection is gone (the session is then closed, never reused).
-                    let clean = !is_lost(&e) && self.rollback().await;
+                    // connection is gone. Either way the session is closed (see above).
+                    if !is_lost(&e) {
+                        self.rollback().await;
+                    }
                     statements.push(StmtApply {
                         index: st.index,
                         affected: None,
@@ -605,7 +623,7 @@ impl Apply<'_> {
                     });
                     return (
                         Ok(report(ApplyOutcome::RolledBack, statements, vec![], None)),
-                        clean,
+                        false,
                     );
                 }
             }
@@ -650,25 +668,46 @@ impl Apply<'_> {
                 true,
             );
         };
+        // No transaction, so the driver may replace a dead connection silently before a
+        // statement (R22). Right before it: ping, then check the session again, and note
+        // its reconnect count. A reconnect during the checks stops the plan (nothing
+        // sent); one seen only after the write means it ran on a connection the checks
+        // did not cover.
+        if let Err(e) = self.s.ping().await {
+            return (Err(e), false);
+        }
+        let reconnects = self.s.reconnects();
         if let Err(e) = self.check_session().await {
             return (Err(e), false);
         }
+        if self.s.reconnects() != reconnects {
+            return (
+                Err(stale("the connection was replaced while it was checked")),
+                false,
+            );
+        }
         match self.statement(st, false).await {
             Ok(done) => {
-                let conflict = done.affected != Some(st.expect_affected);
-                let outcome = if done.affected == Some(0) {
-                    ApplyOutcome::PartiallyApplied { applied: 0 }
-                } else {
-                    ApplyOutcome::Committed
+                let replaced = self.s.reconnects() != reconnects;
+                let (outcome, conflict) = match done.affected {
+                    _ if replaced => (ApplyOutcome::Unknown { at: 0 }, false),
+                    Some(n) if n == st.expect_affected => (ApplyOutcome::Committed, false),
+                    Some(0) => (ApplyOutcome::PartiallyApplied { applied: 0 }, true),
+                    // No count, or another one: whether it applied cannot be told.
+                    _ => (ApplyOutcome::Unknown { at: 0 }, false),
                 };
+                let clean = !matches!(outcome, ApplyOutcome::Unknown { .. });
                 let stmt = StmtApply {
                     index: st.index,
                     affected: done.affected.map(|n| n as f64),
                     error: None,
                     conflict,
                 };
-                let inserted = done.inserted.into_iter().collect();
-                (Ok(report(outcome, vec![stmt], inserted, None)), true)
+                let inserted = match outcome {
+                    ApplyOutcome::Committed => done.inserted.into_iter().collect(),
+                    _ => vec![],
+                };
+                (Ok(report(outcome, vec![stmt], inserted, None)), clean)
             }
             Err(e) => {
                 let outcome = if outcome_unknown(&e) {
