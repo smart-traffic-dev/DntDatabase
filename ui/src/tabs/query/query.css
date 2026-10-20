@@ -65,3 +65,129 @@
   flex: 1;
   min-height: 0;
 }
+
+/* Results (spec 6.2) */
+.qr-panel {
+  flex: 0 0 40%;
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.qr-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  background: var(--tabstrip);
+  border-bottom: 1px solid var(--border);
+}
+
+.qr-tab {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.qr-tab.active {
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.qr-summary {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.qr-grid {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.qr-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  background: var(--sel);
+  border-bottom: 1px solid var(--border);
+}
+
+.qr-banner.warning {
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.qr-empty {
+  padding: 12px;
+  color: var(--muted);
+}
+
+.qr-messages {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.qr-msg {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.qr-msg.error {
+  color: var(--danger);
+  background: var(--production-bg);
+}
+
+.qr-msg.warning {
+  color: var(--warning-fg);
+  background: var(--warning-bg);
+}
+
+.qr-msg-n {
+  color: var(--muted);
+}
+
+.qr-msg-text {
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.qr-msg-meta {
+  color: var(--muted);
+}
+
+/* Editor decorations */
+.current-stmt {
+  background: var(--current-stmt-bg);
+}
+
+.stmt-done {
+  background: var(--local);
+  border-radius: 50%;
+  width: 8px !important;
+  height: 8px !important;
+  margin: 6px 0 0 4px;
+}
+.qr-notice {
+  position: absolute;
+  top: 44px;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  cursor: pointer;
+}

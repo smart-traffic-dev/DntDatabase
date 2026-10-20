@@ -20,6 +20,9 @@
   --chip-pg-fg: #1e4e8c;
   --chip-ma-bg: #f1e6f7;
   --chip-ma-fg: #6b2e85;
+  --warning-bg: #fff4d6;
+  --warning-fg: #7a4b00;
+  --current-stmt-bg: rgba(31, 95, 209, 0.08);
   --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
   color-scheme: light;
