@@ -42,7 +42,7 @@ async function runAllowed(tabId: string, plan: PlanView, opts: RerunOptions): Pr
       plan.plan_id,
       false,
       { max_rows: opts.maxRows ?? doc?.rowLimit ?? 10000, continue_on_error: doc?.continueOnError ?? false },
-      runChannel((ev) => useQueryRun.getState().apply(tabId, ev)),
+      runChannel((ev) => useQueryRun.getState().apply(tabId, ev, plan.plan_id)),
     );
     useQueryRun.getState().attach(tabId, runId);
   } catch (e) {
@@ -52,20 +52,32 @@ async function runAllowed(tabId: string, plan: PlanView, opts: RerunOptions): Pr
   }
 }
 
+/** Tabs with a derive-and-run in flight: a second click meanwhile does nothing. */
+const pending = new Set<string>();
+
 /**
  * Runs statement `index` of the tab's last run again. Does nothing while a run is active or
  * before any run. Derived plans do not evict the source plan, so this works repeatedly.
  */
 export async function rerunStatement(tabId: string, index: number, opts: RerunOptions = {}): Promise<void> {
   const run = useQueryRun.getState().get(tabId);
-  if (!run.plan || !canRun(run)) return;
-  let derived: PlanView;
+  if (!run.plan || !canRun(run) || pending.has(tabId)) return;
+  const source = run.plan.plan_id;
+  pending.add(tabId);
   try {
-    derived = await api.queryPlanStatement(run.plan.plan_id, index);
-  } catch (e) {
-    // e.g. plan_expired: the statement can only be run from the editor again.
-    useQueryRun.getState().apply(tabId, { t: 'notice', index, message: toAppError(e).message });
-    return;
+    let derived: PlanView;
+    try {
+      derived = await api.queryPlanStatement(source, index);
+    } catch (e) {
+      // e.g. plan_expired: the statement can only be run from the editor again.
+      useQueryRun.getState().apply(tabId, { t: 'notice', index, message: toAppError(e).message });
+      return;
+    }
+    // A run (or a newer plan) may have started while the plan was derived.
+    const now = useQueryRun.getState().get(tabId);
+    if (!canRun(now) || now.plan?.plan_id !== source) return;
+    await (registered ?? runAllowed)(tabId, derived, opts);
+  } finally {
+    pending.delete(tabId);
   }
-  await (registered ?? runAllowed)(tabId, derived, opts);
 }

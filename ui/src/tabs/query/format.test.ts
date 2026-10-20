@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Value } from '../../bindings';
-import { MEMORY_WARNING_ROWS, cellView, currentStatement, toTsv } from './format';
+import { MAX_COPY_CELLS, MEMORY_WARNING_ROWS, cellView, copyText, currentStatement, truncateText } from './format';
 
 describe('cellView', () => {
   it('null_is_grey_italic_kind', () => {
@@ -39,17 +39,44 @@ describe('cellView', () => {
   });
 });
 
-describe('toTsv', () => {
+describe('cellView limits', () => {
+  it('big_json_is_capped_and_parsed_at_most_once', () => {
+    const big: Value = { t: 'Json', v: JSON.stringify({ a: 'x'.repeat(100_000) }) };
+    const parse = vi.spyOn(JSON, 'parse');
+    const t0 = performance.now();
+    const v = cellView(big);
+    for (let i = 0; i < 50; i++) cellView(big);
+    expect(performance.now() - t0).toBeLessThan(200);
+    expect(parse.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(v.text.length).toBeLessThanOrEqual(10_001);
+    expect(v.text.endsWith('…')).toBe(true);
+  });
+
+  it('small_json_is_cached_per_value', () => {
+    const v: Value = { t: 'Json', v: '{ "a": 1 }' };
+    const parse = vi.spyOn(JSON, 'parse');
+    cellView(v);
+    cellView(v);
+    expect(parse.mock.calls.length).toBe(1);
+  });
+
+  it('truncate_keeps_code_points', () => {
+    const s = 'ab😀cd';
+    expect(truncateText(s, 3)).toBe('ab…'); // would split the emoji
+    expect(truncateText(s, 4)).toBe('ab😀…');
+    expect(truncateText('abc', 3)).toBe('abc');
+  });
+
   it('tsv_replaces_tabs_and_newlines', () => {
-    const rows: Value[][] = [
-      [{ t: 'Text', v: 'a\tb' }, { t: 'Null' }, { t: 'Text', v: 'x\r\ny\nz' }],
-      [{ t: 'Int', v: 1 }, { t: 'Text', v: 'q' }, { t: 'Text', v: 'unused' }],
-    ];
-    expect(toTsv(rows, [0, 1, 2])).toBe('a b\tNULL\tx  y z\n1\tq\tunused');
-    expect(toTsv(rows, [1])).toBe('NULL\nq');
+    expect(copyText({ t: 'Text', v: 'a\tb' })).toBe('a b');
+    expect(copyText({ t: 'Text', v: 'x\r\ny\nz' })).toBe('x  y z');
+    expect(copyText({ t: 'Null' })).toBe('NULL');
+  });
+
+  it('copy_cap_constant', () => {
+    expect(MAX_COPY_CELLS).toBe(100_000);
   });
 });
-
 describe('currentStatement', () => {
   // "SELECT 1;\nSELECT 2;\n\nSELECT 3" -> 0..8, 10..18, 21..29 (end-exclusive, as statement_ranges)
   const ranges: [number, number][] = [

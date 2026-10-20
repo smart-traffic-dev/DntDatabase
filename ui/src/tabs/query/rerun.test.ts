@@ -64,6 +64,26 @@ describe('rerunStatement', () => {
     expect(useQueryRun.getState().get(tab()).plan?.plan_id).toBe('source');
   });
 
+  it('double_click_while_pending_runs_once', async () => {
+    mockBackend({ query_plan_statement: () => plan('d'), query_run: () => 'r' });
+    await Promise.all([rerunStatement(tab(), 0), rerunStatement(tab(), 0)]);
+    expect(callsOf('query_plan_statement')).toHaveLength(1);
+    expect(callsOf('query_run')).toHaveLength(1);
+  });
+
+  it('run_started_meanwhile_wins', async () => {
+    mockBackend({
+      query_plan_statement: () => {
+        useQueryRun.getState().begin(tab(), plan('other'));
+        return plan('d');
+      },
+      query_run: () => 'r',
+    });
+    await rerunStatement(tab(), 0);
+    expect(callsOf('query_run')).toEqual([]);
+    expect(useQueryRun.getState().get(tab()).plan?.plan_id).toBe('other');
+  });
+
   it('ignored_while_a_run_is_active', async () => {
     mockBackend({ query_plan_statement: () => plan('d'), query_run: () => 'r' });
     useQueryRun.getState().begin(tab(), plan('busy'));

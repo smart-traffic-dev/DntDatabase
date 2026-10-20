@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { emptyRun, useQueryRun, type ResultSet } from '../../store/queryRun';
+import { canRun, emptyRun, useQueryRun, type ResultSet } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { MessagesView } from './MessagesView';
 import { ResultGrid } from './ResultGrid';
@@ -65,10 +65,11 @@ export function ResultPanel({ tabId }: { tabId: string }) {
           {result.truncated && (
             <div className="qr-banner" role="status">
               <span>Showing first {result.rowCount} rows</span>
-              {readStatement && (
+              {readStatement && result.rowCount < FETCH_ALL_ROWS && (
                 <button
                   type="button"
                   className="btn small"
+                  disabled={!canRun(run)}
                   onClick={() => void rerunStatement(tabId, result.index, { maxRows: FETCH_ALL_ROWS })}
                 >
                   Fetch all

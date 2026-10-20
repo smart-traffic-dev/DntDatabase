@@ -121,8 +121,8 @@
 }
 
 .qr-banner.warning {
-  background: #fff4d6;
-  color: #7a4b00;
+  background: var(--warning-bg);
+  color: var(--warning-fg);
 }
 
 .qr-empty {
@@ -152,8 +152,8 @@
 }
 
 .qr-msg.warning {
-  color: #7a4b00;
-  background: #fff4d6;
+  color: var(--warning-fg);
+  background: var(--warning-bg);
 }
 
 .qr-msg-n {
@@ -173,7 +173,7 @@
 
 /* Editor decorations */
 .current-stmt {
-  background: rgba(31, 95, 209, 0.08);
+  background: var(--current-stmt-bg);
 }
 
 .stmt-done {
@@ -182,4 +182,12 @@
   width: 8px !important;
   height: 8px !important;
   margin: 6px 0 0 4px;
+}
+.qr-notice {
+  position: absolute;
+  top: 44px;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  cursor: pointer;
 }

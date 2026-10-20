@@ -30,9 +30,10 @@ const PLAN = {
 const col = { name: 'a', db_type: 'int4', logical: 'Integer' as const, nullable: true, origin_table: null, origin_column: null };
 const rowsOf = (n: number): Value[][] => Array.from({ length: n }, (_, i) => [{ t: 'Int', v: i }]);
 
-function play(events: RunEvent[]): TabRun {
+function play(events: RunEvent[], finish = true): TabRun {
   let run = startRun(emptyRun, PLAN, 0);
   events.forEach((ev, i) => (run = reduceRun(run, ev, i + 1)));
+  if (finish && run.phase.kind !== 'idle') run = reduceRun(run, { t: 'done', stop: null, elapsed_ms: 1 }, 99);
   return run;
 }
 
@@ -75,6 +76,17 @@ describe('ResultPanel', () => {
     expect(screen.getByText('Showing first 20 rows')).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Fetch all' }));
     expect(rerunStatement).toHaveBeenCalledWith('t', 0, { maxRows: 1_000_000 });
+  });
+
+  it('fetch_all_disabled_while_running_and_hidden_at_cap', () => {
+    const running = play([...result(1, 0, 20, true), { t: 'statement_start', index: 1, range: [10, 18] }], false);
+    const { unmount } = show(running);
+    expect(screen.getByRole('button', { name: 'Fetch all' })).toBeDisabled();
+    unmount();
+    const capped = play(result(1, 0, 20, true));
+    capped.results[0]!.rowCount = 1_000_000;
+    show(capped);
+    expect(screen.queryByRole('button', { name: 'Fetch all' })).toBeNull();
   });
 
   it('no_fetch_all_for_write', () => {

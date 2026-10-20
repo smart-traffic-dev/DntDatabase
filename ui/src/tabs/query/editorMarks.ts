@@ -78,6 +78,7 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
     glyphs.current ??= editor.createDecorationsCollection();
     let timer: ReturnType<typeof setTimeout> | undefined;
     let alive = true;
+    let requests = 0;
     const paint = () => {
       const model = editor.getModel();
       const pos = editor.getPosition();
@@ -91,10 +92,11 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
       clearTimeout(timer);
       timer = setTimeout(() => {
         const sql = editor.getModel()?.getValue() ?? '';
+        const request = ++requests;
         api
           .statementRanges(sql, engineDialect(engine))
           .then((r) => {
-            if (!alive) return;
+            if (!alive || request !== requests) return;
             ranges.current = r;
             paint();
           })
@@ -102,9 +104,21 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
       }, HIGHLIGHT_DEBOUNCE_MS);
     };
     refresh();
-    const subs = [editor.onDidChangeModelContent(refresh), editor.onDidChangeCursorPosition(paint)];
+    const subs = [
+      editor.onDidChangeModelContent(() => {
+        // Markers of the last run describe text that has changed.
+        const model = editor.getModel();
+        if (model) mounted.monaco.editor.setModelMarkers(model, MARKER_OWNER, []);
+        refresh();
+      }),
+      editor.onDidChangeCursorPosition(paint),
+    ];
     return () => {
       alive = false;
+      highlight.current?.clear();
+      glyphs.current?.clear();
+      highlight.current = null;
+      glyphs.current = null;
       clearTimeout(timer);
       subs.forEach((s) => s.dispose());
     };
