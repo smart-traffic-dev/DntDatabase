@@ -51,26 +51,35 @@ pub fn select_sql(
     order: &[(&str, bool)],
     page: Option<(u64, u64)>,
 ) -> String {
-    let order = if order.is_empty() {
-        String::new()
-    } else {
-        let keys: Vec<String> = order
-            .iter()
-            .map(|(column, asc)| {
-                format!(
-                    "{} {}",
-                    quote_ident(kind, column),
-                    if *asc { "ASC" } else { "DESC" }
-                )
-            })
-            .collect();
-        format!(" ORDER BY {}", keys.join(", "))
-    };
+    let order = order_by_clause(kind, order);
     let page = match page {
-        Some((limit, offset)) => format!(" LIMIT {limit} OFFSET {offset}"),
+        Some((limit, offset)) => page_clause(limit, offset),
         None => String::new(),
     };
     format!("SELECT * FROM {relation}{where_sql}{order}{page}")
+}
+
+/// ` ORDER BY <col> ASC|DESC, …` with every column quoted, or empty for no keys.
+pub(crate) fn order_by_clause<S: AsRef<str>>(kind: DbKind, order: &[(S, bool)]) -> String {
+    if order.is_empty() {
+        return String::new();
+    }
+    let keys: Vec<String> = order
+        .iter()
+        .map(|(column, asc)| {
+            format!(
+                "{} {}",
+                quote_ident(kind, column.as_ref()),
+                if *asc { "ASC" } else { "DESC" }
+            )
+        })
+        .collect();
+    format!(" ORDER BY {}", keys.join(", "))
+}
+
+/// ` LIMIT <limit> OFFSET <offset>`, formatted from integers.
+pub(crate) fn page_clause(limit: u64, offset: u64) -> String {
+    format!(" LIMIT {limit} OFFSET {offset}")
 }
 
 /// `SELECT COUNT(*) FROM <relation>`.
