@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { PlanNode } from '../../bindings';
 import { emptyRun, useQueryRun } from '../../store/queryRun';
-import { costsAreCumulative, hottestNode, selfCosts } from './explainTree';
+import { hottestNode, selfCosts } from './explainTree';
 
 type Costs = Map<PlanNode, number | null>;
 
@@ -58,11 +58,11 @@ function TreeNode({ node, hot, costs }: { node: PlanNode; hot: PlanNode | null; 
 }
 
 /** The plan tree, its own costs computed once per plan. */
-function PlanTreeView({ root, cumulative }: { root: PlanNode; cumulative: boolean }) {
+function PlanTreeView({ root }: { root: PlanNode }) {
   const { costs, hot } = useMemo(() => {
-    const costs = selfCosts(root, { cumulative });
+    const costs = selfCosts(root);
     return { costs, hot: hottestNode(root, costs) };
-  }, [root, cumulative]);
+  }, [root]);
   return (
     <ul className="ex-tree">
       <TreeNode node={root} hot={hot} costs={costs} />
@@ -113,7 +113,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
       </table>
     );
   } else {
-    body = <PlanTreeView root={plan.root} cumulative={costsAreCumulative(run.plan?.dialect)} />;
+    body = <PlanTreeView root={plan.root} />;
   }
 
   return (

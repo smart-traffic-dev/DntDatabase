@@ -141,15 +141,16 @@ describe('ObjectTab', () => {
     setup(makeTab('Table'));
     await user.click(await screen.findByRole('button', { name: 'Query' }));
     const doc = [...useQueryDocs.getState().docs.values()].at(-1)!;
-    expect(doc).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT * FROM `shop`.`orders` LIMIT 1000' });
+    expect(doc).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT * FROM `shop`.`orders` LIMIT 1000;' });
     expect(useTabs.getState().activeId).toBe(doc.id);
   });
 
   it.each([
-    ['postgres schema-qualified', 'postgres', 'orders', 'sales', 'SELECT * FROM "sales"."orders" LIMIT 1000'],
-    ['quote in a postgres name', 'postgres', 'we"ird', 'public', 'SELECT * FROM "public"."we""ird" LIMIT 1000'],
-    ['backtick in a mysql name', 'mysql', 'we`ird', null, 'SELECT * FROM `shop`.`we``ird` LIMIT 1000'],
-    ['vietnamese name', 'mysql', 'đơn_hàng', null, 'SELECT * FROM `shop`.`đơn_hàng` LIMIT 1000'],
+    // The same SQL as the tree's "Select top 1000" (one helper: components/newQuery.ts).
+    ['postgres schema-qualified', 'postgres', 'orders', 'sales', 'SELECT * FROM "sales"."orders" LIMIT 1000;'],
+    ['quote in a postgres name', 'postgres', 'we"ird', 'public', 'SELECT * FROM "public"."we""ird" LIMIT 1000;'],
+    ['backtick in a mysql name', 'mysql', 'we`ird', null, 'SELECT * FROM `shop`.`we``ird` LIMIT 1000;'],
+    ['vietnamese name', 'mysql', 'đơn_hàng', null, 'SELECT * FROM `shop`.`đơn_hàng` LIMIT 1000;'],
   ])('query_button_quotes_%s', async (_label, kind, name, schema, sql) => {
     const user = userEvent.setup();
     useConnections.getState().setStored([], [config(ids.prod, 'c', { kind: kind as 'mysql' | 'postgres' })]);

@@ -336,6 +336,15 @@ textarea:focus {
   color: var(--production-fg);
 }
 
+/* The spelled-out chip of dialog headers (F50): same colours, room for the name. */
+.env-tag.env-chip {
+  height: auto;
+  padding: 1px 6px;
+  font-family: var(--font-sans);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 .env-tag.env-staging,
 .env-tag.env-local {
   color: var(--studio-fg-secondary);
@@ -683,6 +692,11 @@ textarea:focus {
 
 .status-last.cancelled {
   color: var(--warning-fg);
+}
+
+.status-last.errors {
+  color: var(--danger-fg);
+  font-weight: 600;
 }
 
 .status-run.running {

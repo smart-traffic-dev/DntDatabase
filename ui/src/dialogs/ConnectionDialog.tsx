@@ -14,6 +14,7 @@ import type {
   SslMode,
   StageTiming,
 } from '../bindings';
+import { EnvTag as EnvTagBadge } from '../components/EnvTag';
 import { useConnections } from '../store/connections';
 import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
@@ -642,13 +643,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         closable
         className="wide"
         initialFocus="#cd-name"
-        badge={
-          form.envTag === 'production' ? (
-            <span className="chip env-production" data-testid="env-chip">
-              Production
-            </span>
-          ) : undefined
-        }
+        badge={form.envTag === 'production' ? <EnvTagBadge env="production" variant="chip" testId="env-chip" /> : undefined}
       >
         <form
           className="conn-form"

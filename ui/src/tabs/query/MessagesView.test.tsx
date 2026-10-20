@@ -90,6 +90,30 @@ describe('MessagesView', () => {
     expect(row.querySelector('.qr-msg-meta')?.textContent).toBe('3 rows affected · 12 ms');
   });
 
+  it('server_warnings_are_yellow_and_notices_are_info', () => {
+    let run = startRun(emptyRun, PLAN, 0);
+    for (const message of ['NOTICE: table "t" does not exist, skipping', 'WARNING: no transaction', "Warning 1292: Truncated 'x'", '2 more server messages not shown']) {
+      run = reduceRun(run, { t: 'notice', index: 0, message }, 1);
+    }
+    render(<MessagesView tabId="t" run={run} />);
+    const [notice, warning, mysqlWarning, more] = screen.getAllByTestId('message-line');
+    expect(notice).toHaveClass('info');
+    expect(notice).not.toHaveClass('warning');
+    expect(warning).toHaveClass('warning');
+    expect(mysqlWarning).toHaveClass('warning');
+    expect(more).toHaveClass('info');
+  });
+
+  it('meta_uses_singular_for_one_row', () => {
+    const run = reduceRun(
+      reduceRun(startRun(emptyRun, PLAN, 0), { t: 'result_start', result_id: 1, index: 0, columns: [] }, 1),
+      { t: 'result_end', result_id: 1, row_count: 0, affected: 1, truncated: false, elapsed_ms: 1200 },
+      2,
+    );
+    render(<MessagesView tabId="t" run={run} />);
+    expect(screen.getByTestId('message-line').querySelector('.qr-msg-meta')?.textContent).toBe('1 row affected · 1,200 ms');
+  });
+
   it('running_placeholder_text_is_exact', () => {
     render(<MessagesView tabId="t" run={startRun(emptyRun, PLAN, 0)} />);
     expect(screen.getByText('Running…')).toBeInTheDocument();

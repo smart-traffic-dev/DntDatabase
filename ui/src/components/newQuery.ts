@@ -1,3 +1,4 @@
+import type { ObjectRef } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTree, type TreeNode } from '../store/tree';
@@ -24,14 +25,21 @@ export function openNewQuery(node?: TreeNode): string {
   return useQueryDocs.getState().newQuery(connectionId, database);
 }
 
-/** `SELECT * ... LIMIT 1000` of a table or view, identifiers quoted for the connection's engine. */
-export function selectTopSql(node: TreeNode, kind: 'mysql' | 'postgres'): string {
-  const ref = node.objectRef;
+/** Quotes an identifier the way the engine does (the quote character inside it doubled). */
+export function quoteIdent(kind: 'mysql' | 'postgres', name: string): string {
+  return kind === 'postgres' ? `"${name.replaceAll('"', '""')}"` : `\`${name.replaceAll('`', '``')}\``;
+}
+
+/**
+ * `SELECT * ... LIMIT 1000` of a table or view, identifiers quoted for the connection's engine.
+ * The one helper for this SQL: the tree's "Select top 1000" and the object tab's Query button.
+ */
+export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 'postgres'): string {
+  const ref = target.objectRef;
   if (!ref) return '';
-  const q = kind === 'postgres' ? (s: string) => `"${s.replaceAll('"', '""')}"` : (s: string) => `\`${s.replaceAll('`', '``')}\``;
   // PostgreSQL addresses a table by schema (a connection is one database); MySQL by database.
   const qualifier = kind === 'postgres' ? ref.schema : ref.database;
-  const table = qualifier ? `${q(qualifier)}.${q(ref.name)}` : q(ref.name);
+  const table = qualifier ? `${quoteIdent(kind, qualifier)}.${quoteIdent(kind, ref.name)}` : quoteIdent(kind, ref.name);
   return `SELECT * FROM ${table} LIMIT 1000;`;
 }
 

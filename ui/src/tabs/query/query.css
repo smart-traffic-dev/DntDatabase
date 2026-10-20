@@ -124,7 +124,7 @@
   margin-left: 6px;
   padding: 0 5px;
   border-radius: 8px;
-  background: var(--danger-fg, var(--danger));
+  background: var(--danger-fg);
   color: var(--panel);
   font-size: 11px;
   line-height: 16px;
@@ -187,7 +187,7 @@
 }
 
 .qr-msg.error {
-  color: var(--danger-fg, var(--danger));
+  color: var(--danger-fg);
   background: var(--production-bg);
 }
 
@@ -252,7 +252,7 @@
 }
 
 .stmt-failed {
-  background: var(--danger-fg, var(--danger));
+  background: var(--danger-fg);
 }
 
 .qr-notice {
@@ -436,7 +436,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .hs-list {
@@ -471,7 +471,7 @@
 }
 
 .hs-status.error {
-  color: var(--danger-fg, var(--danger));
+  color: var(--danger-fg);
 }
 
 .hs-status.cancelled,

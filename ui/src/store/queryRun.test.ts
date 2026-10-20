@@ -20,7 +20,9 @@ import {
   canRun,
   canStop,
   emptyRun,
+  expireConnectionPlans,
   lastRunText,
+  noticeTone,
   planAlive,
   reduceRun,
   runElapsedMs,
@@ -90,7 +92,7 @@ const rows = (n: number, from = 0): Value[][] =>
 
 const PLAN = planOf([stmt(0, 'SELECT 1', [0, 8]), stmt(1, 'UPDATE t SET a = 1', [10, 28], 'write')]);
 
-/** Starts `plan` at t=1000 and reduces `events` (t = 1000 + 10Â·i). */
+/** Starts `plan` at t=1000 and reduces `events` (t = 1000 + 10·i). */
 function play(events: RunEvent[], plan: PlanView = PLAN, from: TabRun = emptyRun): TabRun {
   let run = startRun(from, plan, 1000);
   events.forEach((ev, i) => {
@@ -293,6 +295,23 @@ describe('reduceRun', () => {
       { t: 'notice', index: 0, message: 'Transaction was rolled back' },
     ]);
     expect(run.messages[0]).toMatchObject({ index: 0, text: 'Transaction was rolled back', error: null });
+  });
+
+  // F03: server messages arrive text-prefixed with their level (dnt_core ServerNotice::line).
+  it.each([
+    ['NOTICE: relation "t" already exists, skipping', 'info'],
+    ['INFO: vacuuming "public.t"', 'info'],
+    ['Note 1051: Unknown table \'shop.t\'', 'info'],
+    ['3 more server messages not shown', 'info'],
+    ['1 more server message not shown', 'info'],
+    ['WARNING: there is no transaction in progress', 'warning'],
+    ["Warning 1292: Truncated incorrect DOUBLE value: 'x'", 'warning'],
+    // App notes (reconnects, plan gone…) stay warnings.
+    ['Transaction was rolled back', 'warning'],
+  ])('notice %j has tone %s', (message, tone) => {
+    expect(noticeTone(message)).toBe(tone);
+    const run = play([{ t: 'notice', index: 0, message }]);
+    expect(run.messages[0]).toMatchObject({ text: message, tone });
   });
 
   it('messages_panel_selected_when_no_results', () => {
@@ -523,7 +542,7 @@ describe('reduceRun', () => {
     expect(lastRunText({ rows: 10000, resultSets: 1, affected: null, elapsedMs: 1234 })).toBe('10,000 rows · 1,234 ms');
     expect(lastRunText({ rows: 3, resultSets: 1, affected: 4, elapsedMs: 40 })).toBe('3 rows · 4 rows affected · 40 ms');
     expect(lastRunText({ rows: 0, resultSets: 0, affected: 2, errors: 1, elapsedMs: 9 })).toBe(
-      '2 rows affected · 1 error · 9 ms',
+      'Finished with 1 error · 2 rows affected · 9 ms',
     );
     // Nothing returned and nothing affected (DDL): still "0 rows".
     expect(lastRunText({ rows: 0, resultSets: 0, affected: null, elapsedMs: 1 })).toBe('0 rows · 1 ms');
@@ -852,6 +871,24 @@ describe('useQueryRun', () => {
     vi.mocked(invoke).mockResolvedValueOnce(null);
     await useTree.getState().closeConnection('conn-1');
     expect(vi.mocked(invoke)).toHaveBeenCalledWith('close_connection', expect.anything());
+    expect(useQueryRun.getState().get(TAB).planExpired).toBe(true);
+  });
+
+  it('expireConnectionPlans expires the plans of that connection only', () => {
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().apply(TAB, { t: 'done', stop: null, elapsed_ms: 1 });
+    expireConnectionPlans('conn-2');
+    expect(useQueryRun.getState().get(TAB).planExpired).toBe(false);
+    expireConnectionPlans('conn-1');
+    expect(useQueryRun.getState().get(TAB).planExpired).toBe(true);
+  });
+
+  // The tree calls it itself: a reset of the tree store's state (tests, HMR) cannot lose it.
+  it('forgetConnection expires plans even after the tree store is reset', () => {
+    useTree.setState(useTree.getInitialState(), true);
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().apply(TAB, { t: 'done', stop: null, elapsed_ms: 1 });
+    useTree.getState().forgetConnection('conn-1');
     expect(useQueryRun.getState().get(TAB).planExpired).toBe(true);
   });
 

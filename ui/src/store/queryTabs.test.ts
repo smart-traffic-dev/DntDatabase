@@ -142,6 +142,13 @@ describe('restore', () => {
     expect(select.selectedOptions[0]).toHaveTextContent('Choose a connection');
     expect(screen.getByTestId('query-run')).toBeDisabled();
   });
+
+  it('keeps_every_binding_when_the_connections_are_unknown', async () => {
+    const gone = '99999999-9999-4999-8999-999999999999';
+    backend([record({ id: 'orphan', connection_id: gone, database: 'old' })]);
+    await useQueryDocs.getState().restore({ connectionsKnown: false });
+    expect(doc('orphan')).toMatchObject({ connectionId: gone, database: 'old' });
+  });
 });
 
 describe('files', () => {

@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { Dialect, PlanNode } from '../../bindings';
+import type { PlanNode } from '../../bindings';
 import { serverInfo } from '../../test/backend';
-import { analyzeAvailable, costsAreCumulative, hottestNode, selfCost, selfCosts } from './explainTree';
-
-const MYSQL = { cumulative: true };
+import { analyzeAvailable, hottestNode, selfCost, selfCosts } from './explainTree';
 
 const node = (label: string, est_cost: number | null, children: PlanNode[] = []): PlanNode => ({
   label,
@@ -44,28 +42,38 @@ describe('explainTree', () => {
     expect(hottestNode(root)).toBe(b);
   });
 
-  // F04: MySQL `prefix_cost`s are cumulative along the join order.
-  it('mysql_prefix_costs_are_turned_into_per_node_costs', () => {
-    const o = node('index o', 0.55);
-    const c = node('eq_ref c', 0.9);
-    const root = node('Query block #1', 0.9, [node('Nested loop', null, [o, c])]);
-    const costs = selfCosts(root, MYSQL);
-    expect(costs.get(root)).toBe(0);
-    expect(costs.get(o)).toBeCloseTo(0.55);
-    expect(costs.get(c)).toBeCloseTo(0.35);
-    // Never the root by its cumulative cost.
-    expect(hottestNode(root, costs)).toBe(o);
-    // Already normalised (backend fix): the same answer.
-    const o2 = node('index o', 0.55);
-    const c2 = node('eq_ref c', 0.35);
-    const normalised = node('Query block #1', 0.9, [node('Nested loop', null, [o2, c2])]);
-    expect(hottestNode(normalised, selfCosts(normalised, MYSQL))).toBe(o2);
+  // F04: the backend (crates/query explain.rs) normalises MySQL `prefix_cost`s into
+  // per-subtree costs; these are the values it yields for the mysql80/84 fixtures
+  // (crates/query/tests/explain.rs `mysql_json_costs_are_per_subtree`).
+  it('mysql_fixture_costs_mark_a_table_access_not_the_query_block', () => {
+    for (const [total, oCost, cCost] of [
+      [2.4, 1.3, 1.1],
+      [1.55, 1.2, 0.35],
+    ] as const) {
+      const o = node('index o', oCost);
+      const c = node('eq_ref c', cCost);
+      const loop = node('Nested loop', null, [o, c]);
+      const root = node('Query block #1', total, [loop]);
+      const costs = selfCosts(root);
+      expect(costs.get(root)).toBeCloseTo(0);
+      expect(costs.get(loop)).toBeNull();
+      expect(costs.get(o)).toBeCloseTo(oCost);
+      expect(costs.get(c)).toBeCloseTo(cCost);
+      expect(hottestNode(root, costs)).toBe(o);
+    }
   });
 
-  it('cumulative_costs_are_only_read_for_mysql', () => {
-    expect(costsAreCumulative({ engine: 'mysql', ansi_quotes: false, no_backslash_escapes: false } as Dialect)).toBe(true);
-    expect(costsAreCumulative({ engine: 'postgres' })).toBe(false);
-    expect(costsAreCumulative(undefined)).toBe(false);
+  // The costs are already per subtree: they must never be corrected a second time as if
+  // they were running totals (that would credit `c` only 4 − 2 = 2 here).
+  it('ordered_costs_above_the_parent_are_not_read_as_running_totals', () => {
+    const b = node('ALL b', 2);
+    const c = node('ALL c', 4);
+    const root = node('Query block #1', 5, [node('Nested loop', null, [b, c])]);
+    const costs = selfCosts(root);
+    expect(costs.get(root)).toBeNull();
+    expect(costs.get(b)).toBe(2);
+    expect(costs.get(c)).toBe(4);
+    expect(hottestNode(root, costs)).toBe(c);
   });
 
   // PostgreSQL costs are per subtree: a Merge Join's inputs can sum above it and still not
@@ -81,33 +89,25 @@ describe('explainTree', () => {
     expect(hottestNode(join, costs)).toBe(index);
   });
 
-  // MySQL `query_cost` vs the last `prefix_cost` of its tables.
-  it('mysql_query_cost_above_or_below_the_last_prefix_cost', () => {
-    // Above (a sort or temporary table on top): the block keeps the difference.
-    const o = node('index o', 0.55);
-    const c = node('eq_ref c', 0.9);
-    const sorted = node('Query block #1', 1.2, [node('Nested loop', null, [o, c])]);
-    const costs = selfCosts(sorted, MYSQL);
-    expect(costs.get(sorted)).toBeCloseTo(0.3);
-    expect(costs.get(c)).toBeCloseTo(0.35);
-    expect(hottestNode(sorted, costs)).toBe(o);
-    // Below the last prefix cost: the tables still get per-node shares; the block's own is unknown.
-    const o2 = node('index o', 0.55);
-    const c2 = node('eq_ref c', 0.9);
-    const below = node('Query block #1', 0.8, [node('Nested loop', null, [o2, c2])]);
-    const costs2 = selfCosts(below, MYSQL);
-    expect(costs2.get(below)).toBeNull();
-    expect(costs2.get(c2)).toBeCloseTo(0.35);
-    expect(hottestNode(below, costs2)).toBe(o2);
+  // A MySQL block with a sort on top (backend: subquery under a table, block raised to its parts).
+  it('mysql_block_keeps_the_rest_of_its_cost', () => {
+    const a = node('ALL a', 1.5);
+    const b = node('ALL b', 3);
+    const d = node('ALL d', 5.5, [node('Query block #2', 3, [b])]);
+    const root = node('Query block #1', 8, [node('Nested loop', null, [a, d])]);
+    const costs = selfCosts(root);
+    expect(costs.get(root)).toBeCloseTo(1);
+    expect(costs.get(d)).toBeCloseTo(2.5);
+    expect(costs.get(b)).toBeCloseTo(3);
+    expect(hottestNode(root, costs)).toBe(b);
   });
 
-  it('costs_that_are_neither_additive_nor_cumulative_mark_nothing_by_them', () => {
+  it('costs_that_are_not_additive_mark_nothing_by_them', () => {
     // Children out of order and above the parent: the parent's own cost is unknown.
     const x = node('x', 9);
     const y = node('y', 4);
     const root = node('root', 5, [x, y]);
     expect(selfCost(root)).toBeNull();
-    expect(selfCosts(root, MYSQL).get(root)).toBeNull();
     expect(hottestNode(root)).toBe(x);
   });
 

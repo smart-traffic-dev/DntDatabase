@@ -70,7 +70,8 @@ export default function App() {
     void (async () => {
       await useTree.getState().reloadStored();
       // After the connections are known, so a tab bound to a deleted one comes back unbound.
-      await useQueryDocs.getState().restore();
+      // A tree that failed to load leaves them unknown: then every binding is kept.
+      await useQueryDocs.getState().restore({ connectionsKnown: !useTree.getState().error });
     })();
   }, []);
 

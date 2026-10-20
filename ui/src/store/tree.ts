@@ -12,6 +12,7 @@ import {
 import type { AppError, ConnectionSummary, Group, ServerInfo } from '../bindings';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
+import { expireConnectionPlans } from './queryRun';
 import {
   ROOT,
   computeRows,
@@ -429,6 +430,8 @@ export const useTree = create<TreeState>()((set, get) => {
         });
       }
       commit(d);
+      // The runtime is gone: so are the plans of the tabs that ran on it (F12).
+      expireConnectionPlans(connectionId);
     },
 
     duplicateConnection: async (connectionId) => {

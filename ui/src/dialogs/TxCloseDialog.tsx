@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { toAppError } from '../api';
 import type { TxAction } from '../bindings';
+import { EnvTag } from '../components/EnvTag';
 import { Modal } from './Modal';
 
 interface Props {
@@ -36,13 +37,7 @@ export function TxCloseDialog({ title, connectionName, production = false, onSet
   return (
     <Modal
       title={`Close ${title}`}
-      badge={
-        production ? (
-          <span className="chip env-production" data-testid="env-chip">
-            Production
-          </span>
-        ) : undefined
-      }
+      badge={production ? <EnvTag env="production" variant="chip" testId="env-chip" /> : undefined}
       onClose={() => onDone(false)}
       className="narrow"
       role="alertdialog"

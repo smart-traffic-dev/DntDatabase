@@ -1,6 +1,7 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { useEffect, useLayoutEffect, useMemo, useRef, type KeyboardEvent, type MouseEvent } from 'react';
 import { needsReconnect } from '../../api';
+import { formatCount, plural } from '../../lib/plural';
 import { stmtsByIndex } from '../../query/plan';
 import { planAlive, type MessageLine, type TabRun } from '../../store/queryRun';
 import { reopenConnection } from '../../store/reopen';
@@ -92,9 +93,9 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
           const m = run.messages[item.index];
           if (!m) return null;
           const detail = [
-            m.rows !== null ? `${m.rows} rows` : null,
-            m.affected !== null ? `${m.affected} rows affected` : null,
-            m.elapsedMs !== null && m.index !== null ? `${m.elapsedMs} ms` : null,
+            m.rows !== null ? plural(m.rows, 'row') : null,
+            m.affected !== null ? `${plural(m.affected, 'row')} affected` : null,
+            m.elapsedMs !== null && m.index !== null ? `${formatCount(m.elapsedMs)} ms` : null,
           ].filter(Boolean);
           const reconnect = m.error !== null && needsReconnect(m.error) && connectionId !== null;
           const target = targetOf(m);

@@ -1,4 +1,6 @@
 import type { PlanView, StmtKindLabel } from '../bindings';
+import { EnvTag } from '../components/EnvTag';
+import { plural } from '../lib/plural';
 import { Modal } from './Modal';
 
 interface Props {
@@ -19,16 +21,12 @@ const LABEL: Record<StmtKindLabel, string> = {
 export function RunConfirmDialog({ plan, onDone }: Props) {
   const total = plan.stmts.length;
   const confirm = plan.stmts.filter((s) => s.verdict === 'confirm');
-  const count = `${total} ${total === 1 ? 'statement' : 'statements'}`;
+  const count = plural(total, 'statement');
   const need = confirm.length;
   return (
     <Modal
       title="Confirm run on Production"
-      badge={
-        <span className="chip env-production" data-testid="env-chip">
-          Production
-        </span>
-      }
+      badge={<EnvTag env="production" variant="chip" testId="env-chip" />}
       onClose={() => onDone(false)}
       className="wide env-production"
       role="alertdialog"

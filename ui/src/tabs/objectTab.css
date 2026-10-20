@@ -66,7 +66,7 @@
   border: 1px solid var(--danger-border);
   border-radius: var(--radius-md);
   background: var(--danger-fill);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .ot-error p {

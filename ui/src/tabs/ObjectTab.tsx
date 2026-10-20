@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import Editor from '@monaco-editor/react';
 import { needsReconnect } from '../api';
+import { selectTopSql } from '../components/newQuery';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
@@ -115,10 +116,6 @@ function InfoRows({ rows }: { rows: [string, string][] }) {
   );
 }
 
-/** Quotes an identifier the way the connection's SQL dialect does. */
-const quoteIdent = (dialect: string, name: string) =>
-  dialect === 'postgres' ? `"${name.replace(/"/g, '""')}"` : `\`${name.replace(/`/g, '``')}\``;
-
 /** Tables and views can be queried; routines, sequences and the like cannot. */
 const queryable = (kind: Tab['objectRef']['kind']) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
 
@@ -129,17 +126,7 @@ function openQuery(tab: Tab, sql: string) {
   docs.update(id, { sql });
 }
 
-function selectAllOf(tab: Tab): string {
-  const { objectRef } = tab;
-  const dialect = dialectOfConnection(tab.connectionId);
-  // PostgreSQL addresses a table by schema; MySQL by database.
-  const qualifier = dialect === 'postgres' ? objectRef.schema : objectRef.database;
-  const name = [qualifier, objectRef.name]
-    .filter((p): p is string => !!p)
-    .map((p) => quoteIdent(dialect, p))
-    .join('.');
-  return `SELECT * FROM ${name} LIMIT 1000`;
-}
+const selectAllOf = (tab: Tab): string => selectTopSql(tab, dialectOfConnection(tab.connectionId));
 
 function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const monacoTheme = useDntMonacoTheme();

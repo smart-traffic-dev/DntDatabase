@@ -52,11 +52,12 @@ describe('ExplainView', () => {
     expect(hot[0]).toHaveTextContent('Seq Scan');
   });
 
-  // F04: LD-62, a MySQL plan with cumulative `prefix_cost`s under an uncosted nested loop.
+  // F04: LD-62, a MySQL plan (mysql84 fixture costs, already per subtree from the backend)
+  // under an uncosted nested loop.
   it('marks_the_costliest_table_of_a_mysql_plan_not_the_query_block', () => {
     const tree: PlanTree = {
       kind: 'tree',
-      root: node('Query block #1', 0.9, [node('Nested loop', null, [node('index o', 0.55), node('eq_ref c', 0.9)])]),
+      root: node('Query block #1', 1.55, [node('Nested loop', null, [node('index o', 1.2), node('eq_ref c', 0.35)])]),
       raw: '{}',
     };
     show({ explain: tree, plan: planIn({ engine: 'mysql' } as Dialect) });
@@ -64,8 +65,21 @@ describe('ExplainView', () => {
     const hot = nodes.filter((n) => n.classList.contains('hot'));
     expect(hot).toHaveLength(1);
     expect(hot[0]).toHaveTextContent('index o');
-    expect(nodes[0]).toHaveTextContent('cost 0.90 · self 0');
-    expect(nodes[3]).toHaveTextContent('cost 0.90 · self 0.35');
+    expect(nodes[0]).toHaveTextContent('cost 1.55 · self 0');
+    expect(nodes[3]).toHaveTextContent('cost 0.35 · self 0.35');
+  });
+
+  // The backend already normalised MySQL costs: the UI must not correct them again.
+  it('does_not_read_mysql_costs_as_running_totals', () => {
+    const tree: PlanTree = {
+      kind: 'tree',
+      root: node('Query block #1', 5, [node('Nested loop', null, [node('ALL b', 2), node('ALL c', 4)])]),
+      raw: '{}',
+    };
+    show({ explain: tree, plan: planIn({ engine: 'mysql' } as Dialect) });
+    const hot = screen.getAllByTestId('explain-node').filter((n) => n.classList.contains('hot'));
+    expect(hot).toHaveLength(1);
+    expect(hot[0]).toHaveTextContent('ALL c');
   });
 
   it('reads_postgres_costs_per_subtree', () => {

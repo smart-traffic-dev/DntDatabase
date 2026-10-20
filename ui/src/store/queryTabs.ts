@@ -6,7 +6,6 @@ import type { Engine } from '../query/engine';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { useTabs } from './tabs';
-import { useTree } from './tree';
 
 export type RowLimit = 1000 | 10000 | 100000 | 1000000;
 export const ROW_LIMITS: RowLimit[] = [1000, 10000, 100000, 1000000];
@@ -50,8 +49,11 @@ interface QueryDocsState {
   update(id: string, patch: Partial<QueryDoc>): void;
   /** Drops the document from memory only (no backend call). */
   remove(id: string): void;
-  /** Opens the tabs saved by `tabs_save`. Never connects. */
-  restore(): Promise<void>;
+  /**
+   * Opens the tabs saved by `tabs_save`. Never connects. `connectionsKnown: false` (the tree
+   * failed to load the stored connections) keeps every binding, since none can be checked.
+   */
+  restore(opts?: { connectionsKnown?: boolean }): Promise<void>;
   /** Saves every tab whose autosave is pending, now. */
   /** Saves every pending (or previously failed) tab now; resolves with the ids that could not be saved. */
   flush(): Promise<string[]>;
@@ -326,7 +328,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       });
     },
 
-    restore: async () => {
+    restore: async ({ connectionsKnown = true } = {}) => {
       let records: QueryTabRecord[];
       try {
         records = await api.tabsLoad();
@@ -335,7 +337,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
         return;
       }
       // Without the stored connections (the tree failed to load) a binding cannot be checked: keep it.
-      const known = useTree.getState().error ? null : useConnections.getState().summaries;
+      const known = connectionsKnown ? useConnections.getState().summaries : null;
       const fresh = [...records]
         .sort((a, b) => a.sort_order - b.sort_order)
         .filter((r) => !get().docs.has(r.id))

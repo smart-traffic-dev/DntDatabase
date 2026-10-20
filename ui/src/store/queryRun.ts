@@ -21,7 +21,6 @@ import { stmtsByIndex } from '../query/plan';
 import { forgetCompletionConnection, invalidateCompletion } from './completion';
 import { useConnections } from './connections';
 import { asTxState, queryTxRecorded, setTxStateSource, useQueryDocs } from './queryTabs';
-import { useTree } from './tree';
 
 /** At most this many result tabs per run; later results only get their Messages line. */
 export const MAX_RESULT_TABS = 50;
@@ -199,13 +198,31 @@ export function planAlive(
   return doc.connectionId === r.origin.connectionId && doc.database === r.origin.database;
 }
 
-/** Status bar text of a finished run: "1 row affected · 3 ms", "10,000 rows · 1,234 ms". */
+/** Server messages that only inform: PostgreSQL NOTICE / INFO / LOG / DEBUG, MySQL Note. */
+const INFO_NOTICE = /^(?:NOTICE|INFO|LOG|DEBUG\d?|Note)(?: \d+)?: /;
+const OMITTED_NOTICES = /^\d[\d,]* more server messages? not shown$/;
+
+/**
+ * Tone of a `notice` line. The backend prefixes server messages with their level
+ * ("NOTICE: …", "WARNING: …", "Warning 1292: …", dnt_core `ServerNotice::line`): informative
+ * levels and the "N more server messages not shown" tally are info; WARNING / Warning, and
+ * the app's own notes (reconnected, plan gone…), are warnings.
+ */
+export function noticeTone(message: string): 'info' | 'warning' {
+  return INFO_NOTICE.test(message) || OMITTED_NOTICES.test(message) ? 'info' : 'warning';
+}
+
+/**
+ * Status bar text of a finished run: "1 row affected · 3 ms", "10,000 rows · 1,234 ms", and
+ * with failed statements (continue on error) "Finished with 2 errors · 3 rows · 12 ms", as
+ * the Messages' final line says it (`stopReasonText`).
+ */
 export function lastRunText(last: LastRun): string {
   const parts: string[] = [];
   const affected = last.affected ?? null;
+  if ((last.errors ?? 0) > 0) parts.push(`Finished with ${plural(last.errors!, 'error')}`);
   if ((last.resultSets ?? 1) > 0 || affected === null) parts.push(plural(last.rows, 'row'));
   if (affected !== null) parts.push(`${plural(affected, 'row')} affected`);
-  if ((last.errors ?? 0) > 0) parts.push(plural(last.errors!, 'error'));
   parts.push(`${formatCount(last.elapsedMs)} ms`);
   return parts.join(' · ');
 }
@@ -444,7 +461,7 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
         ...run,
         messages: append(
           run.messages,
-          line({ index: ev.index, statement: statementOf(run, ev.index), text: ev.message, tone: 'warning' }),
+          line({ index: ev.index, statement: statementOf(run, ev.index), text: ev.message, tone: noticeTone(ev.message) }),
         ),
       };
     case 'explain':
@@ -617,28 +634,20 @@ const unsubscribeConnections = useConnections.subscribe((s, prev) => {
   }
 });
 
-/** The backend runtime of `connectionId` is gone, and the plans of its tabs with it. */
-function expireConnectionPlans(connectionId: string) {
+/**
+ * The backend runtime of `connectionId` is gone, and the plans of its tabs with it (F12).
+ * Called by the tree's `forgetConnection` (Close after `close_connection`; Import after
+ * replacing connections) and on delete (above). Dropping the server info alone is not that:
+ * the tree's Reconnect clears it and keeps the runtime and its plans. Anything else the
+ * backend dropped answers `plan_expired` (see rerun.ts).
+ */
+export function expireConnectionPlans(connectionId: string) {
   for (const [tabId, run] of useQueryRun.getState().runs) {
     if (run.origin?.connectionId === connectionId && run.plan) useQueryRun.getState().expirePlan(tabId, run.plan.plan_id);
   }
 }
 
-// Plans expire only when the backend runtime really goes (F12). Dropping the server info
-// alone is not that: the tree's Reconnect clears it and keeps the runtime and its plans. The
-// tree's `forgetConnection` is where a connection is shown closed because its runtime is
-// gone (Close calls it after `close_connection`; Import after replacing connections), so it
-// is wrapped here; anything else the backend dropped answers `plan_expired` (see rerun.ts).
-const treeForget = useTree.getState().forgetConnection;
-useTree.setState({
-  forgetConnection: (connectionId) => {
-    treeForget(connectionId);
-    expireConnectionPlans(connectionId);
-  },
-});
-
 import.meta.hot?.dispose(() => {
   unsubscribeDocs();
   unsubscribeConnections();
-  useTree.setState({ forgetConnection: treeForget });
 });

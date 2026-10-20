@@ -144,6 +144,19 @@ describe('StatusBar of a query tab', () => {
     render(<StatusBar />);
     expect(screen.getByTestId('status-last')).toHaveTextContent('10,000 rows · 5 ms');
   });
+
+  // The shared run text (store/queryRun `lastRunText`): affected rows and errors too.
+  it('shows affected rows and errors of the last run', () => {
+    setRun({ lastRun: { rows: 0, resultSets: 0, affected: 1, statements: 1, errors: 0, elapsedMs: 3 } });
+    const { unmount } = render(<StatusBar />);
+    expect(screen.getByTestId('status-last')).toHaveTextContent(/^1 row affected · 3 ms$/);
+    unmount();
+    setRun({ lastRun: { rows: 3, resultSets: 1, affected: null, statements: 4, errors: 2, elapsedMs: 12 } });
+    render(<StatusBar />);
+    expect(screen.getByTestId('status-last')).toHaveTextContent(/^Finished with 2 errors · 3 rows · 12 ms$/);
+    expect(screen.getByTestId('status-last')).toHaveClass('errors');
+  });
+
   it('shows_transaction_states_with_buttons', async () => {
     render(<StatusBar />);
     expect(screen.getByTestId('status-tx')).toHaveTextContent('Auto-commit');

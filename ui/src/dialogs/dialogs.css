@@ -99,19 +99,6 @@
   opacity: 0.4;
 }
 
-.chip.env-production {
-  background: var(--danger-fill);
-  color: var(--danger);
-  border: 1px solid var(--danger-border);
-  border-radius: var(--radius-sm);
-  padding: 1px 6px;
-  font-family: var(--font-sans);
-  font-size: var(--text-caption);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-
 /* Connection dialog */
 .conn-form {
   display: flex;
@@ -192,7 +179,7 @@
 
 .dlg-tab.has-error::after {
   content: ' !';
-  color: var(--danger);
+  color: var(--danger-fg);
   font-weight: 700;
 }
 
@@ -264,7 +251,7 @@
 
 .field-error {
   margin: 0;
-  color: var(--danger);
+  color: var(--danger-fg);
   font-size: var(--text-footnote);
 }
 
@@ -339,7 +326,7 @@
 .result.bad {
   background: var(--studio-danger-fill);
   border-color: var(--studio-danger-border);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .result p {
@@ -481,7 +468,7 @@
   gap: 8px;
   max-width: 520px;
   border-color: var(--danger-border);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .modal.env-production {
@@ -504,7 +491,7 @@
 }
 
 .run-confirm-row.danger {
-  color: var(--danger);
+  color: var(--danger-fg);
   font-weight: 600;
 }
 
@@ -516,7 +503,7 @@
 }
 
 .run-confirm-row.danger .run-confirm-kind {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .run-confirm-preview {
