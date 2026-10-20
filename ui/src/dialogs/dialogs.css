@@ -72,6 +72,13 @@
   gap: 10px;
 }
 
+/* The result export form: a fieldset only to disable every control while exporting. */
+fieldset.export-form {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+}
+
 .modal-foot {
   display: flex;
   align-items: center;

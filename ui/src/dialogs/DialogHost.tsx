@@ -9,6 +9,7 @@ import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
 import { ConnectionDialog } from './ConnectionDialog';
 import { ExportDialog } from './ExportDialog';
+import { ResultExportDialog } from './ResultExportDialog';
 import { HostKeyDialog } from './HostKeyDialog';
 import { ImportDialog } from './ImportDialog';
 import { PasswordPrompt, type SecretNeed } from './PasswordPrompt';
@@ -310,6 +311,8 @@ export function DialogHost() {
     );
   } else if (request?.kind === 'export') {
     dialog = <ExportDialog preselected={request.preselected} onClose={closeRequest} />;
+  } else if (request?.kind === 'exportResult') {
+    dialog = <ResultExportDialog request={request.request} onClose={closeRequest} />;
   } else if (request?.kind === 'import') {
     dialog = <ImportDialog onClose={closeRequest} />;
   } else if (request?.kind === 'settings') {

@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react';
+import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
 import { plural } from '../../lib/plural';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
@@ -60,6 +61,11 @@ function ResultPanelView({ tabId }: { tabId: string }) {
     wasActive.current = active;
     if (ended && run.stop?.kind === 'error' && run.panel === 'result') setPanel(tabId, 'messages');
   }, [run.phase.kind, run.stop, run.panel, setPanel, tabId]);
+
+  // `openExportDialog` (menu hook) exports the result shown here.
+  useEffect(() => {
+    shownResult.set(tabId, at);
+  }, [tabId, at]);
 
   // With dozens of result tabs the strip scrolls inside itself; keep the open one in view.
   useEffect(() => {
@@ -126,6 +132,18 @@ function ResultPanelView({ tabId }: { tabId: string }) {
           History
         </button>
         {showResult && <Summary result={result} />}
+        {showResult && result.columns.length > 0 && (
+          <button
+            type="button"
+            className="btn small"
+            style={{ marginLeft: 8, flex: 'none' }}
+            data-testid="result-export"
+            title="Export this result to a file"
+            onClick={() => requestExport(queryExportRequest(tabId, at))}
+          >
+            Export…
+          </button>
+        )}
       </div>
       {showResult ? (
         <>
