@@ -1,0 +1,106 @@
+/* Table data view (the object tab's Data sub-tab). Colours, type and radii come from tokens. */
+
+/* The Data panel hands its whole area to the grid (other sub-tabs keep their padding). */
+.ot-panel.ot-panel-data {
+  padding: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.data-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dv-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--color-sidebar);
+  font-size: var(--text-callout);
+}
+
+.dv-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.dv-status,
+.dv-total,
+.dv-sort {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dv-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dv-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font-size: var(--text-footnote);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.dv-toolbar .spacer {
+  flex: 1;
+}
+
+.dv-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dv-loading,
+.dv-empty {
+  margin: 0;
+  padding: 16px;
+}
+
+.dv-count-error {
+  margin: 0;
+  padding: 4px 12px;
+  color: var(--color-danger);
+  font-size: var(--text-footnote);
+}
+
+.dv-error {
+  max-width: 640px;
+  margin: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-md);
+  background: var(--color-danger-fill);
+}
+
+.dv-error p {
+  margin: 4px 0;
+}
+
+.dv-error pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-footnote);
+}
+
+.dv-error .qt-btn {
+  margin-top: 8px;
+}

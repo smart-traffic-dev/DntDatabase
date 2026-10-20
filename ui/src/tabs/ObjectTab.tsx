@@ -4,6 +4,8 @@ import { needsReconnect } from '../api';
 import { selectTopSql } from '../components/newQuery';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
+import { useTableData } from '../store/tableData';
+import { DataView } from './DataView';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import type { ObjectTabRef as Tab } from '../store/tabs';
@@ -11,7 +13,7 @@ import './objectTab.css';
 
 const DASH = '—';
 
-const SUB_LABEL: Record<SubTab, string> = { info: 'Info', ddl: 'DDL', structure: 'Structure' };
+const SUB_LABEL: Record<SubTab, string> = { data: 'Data', info: 'Info', ddl: 'DDL', structure: 'Structure' };
 
 /** Base-1024 size with one decimal: 1536 -> "1.5 KB". */
 export function formatBytes(bytes: number): string {
@@ -28,11 +30,15 @@ export function formatBytes(bytes: number): string {
 
 const formatCount = (n: number) => `≈ ${n.toLocaleString('en-US')}`;
 
-/** Tables and views (incl. materialized) have Info, DDL and Structure; other objects DDL only. */
+/**
+ * Tables and views (incl. materialized) open on their Data (like Navicat), then Info, DDL and
+ * Structure; other objects have DDL only.
+ */
 function subTabsOf(kind: Tab['objectRef']['kind']): SubTab[] {
-  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['info', 'ddl', 'structure'] : ['ddl'];
+  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['data', 'info', 'ddl', 'structure'] : ['ddl'];
 }
 
+// Data also loads the (cached) detail: its row estimate is shown next to the page.
 const resourceOf = (sub: SubTab): Resource => (sub === 'ddl' ? 'ddl' : 'detail');
 
 interface Recovery {
@@ -127,6 +133,10 @@ function openQuery(tab: Tab, sql: string) {
 }
 
 const selectAllOf = (tab: Tab): string => selectTopSql(tab, dialectOfConnection(tab.connectionId));
+
+/** The row estimate of a loaded detail (views have none). */
+const estimateOf = (detail: Loadable<TableDetail> | undefined): number | null =>
+  detail?.status === 'ok' ? detail.data.row_estimate : null;
 
 function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const monacoTheme = useDntMonacoTheme();
@@ -385,7 +395,14 @@ export function ObjectTab({ tab }: { tab: Tab }) {
               Query
             </button>
           )}
-          <button type="button" className="btn" onClick={() => void useObjectData.getState().refresh(tab, resource)}>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              void useObjectData.getState().refresh(tab, resource);
+              if (sub === 'data') void useTableData.getState().load(tab);
+            }}
+          >
             Refresh
           </button>
         </div>
@@ -411,8 +428,15 @@ export function ObjectTab({ tab }: { tab: Tab }) {
           </button>
         ))}
       </div>
-      <div role="tabpanel" id={`${uid}-panel`} aria-labelledby={`${uid}-tab-${sub}`} className="ot-panel">
-        {sub === 'ddl' ? (
+      <div
+        role="tabpanel"
+        id={`${uid}-panel`}
+        aria-labelledby={`${uid}-tab-${sub}`}
+        className={sub === 'data' ? 'ot-panel ot-panel-data' : 'ot-panel'}
+      >
+        {sub === 'data' ? (
+          <DataView tab={tab} estimate={estimateOf(state as Loadable<TableDetail> | undefined)} />
+        ) : sub === 'ddl' ? (
           <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
             {(ddl) => <DdlPanel ddl={ddl} tab={tab} />}
           </Loaded>

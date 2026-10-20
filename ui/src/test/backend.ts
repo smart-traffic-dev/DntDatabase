@@ -10,7 +10,9 @@ import type {
   Tree,
 } from '../bindings';
 import backendErrors from './fixtures/app-errors.json';
+import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
+import { useTableData } from '../store/tableData';
 import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
@@ -88,6 +90,8 @@ export function resetStores() {
   useConnections.getState().reset();
   useTabs.getState().reset();
   useQueryDocs.getState().reset();
+  useAppSettings.getState().reset();
+  useTableData.getState().reset();
   useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null, question: null });
 }
 

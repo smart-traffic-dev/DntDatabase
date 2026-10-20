@@ -134,8 +134,11 @@ export function selectionCells(
   return rows;
 }
 
-/** Result of one statement in a Glide grid; cells are read straight from the chunks. */
-export function ResultGrid({ result }: { result: ResultSet }) {
+/**
+ * Result of one statement in a Glide grid; cells are read straight from the chunks.
+ * `onHeaderClicked` (optional) receives the clicked column's index (the data view sorts by it).
+ */
+export function ResultGrid({ result, onHeaderClicked }: { result: ResultSet; onHeaderClicked?: (column: number) => void }) {
   const themeVersion = useThemeVersion();
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
   const { theme, nullStyle } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
@@ -246,6 +249,7 @@ export function ResultGrid({ result }: { result: ResultSet }) {
         smoothScrollX
         smoothScrollY
         onColumnResize={onColumnResize}
+        onHeaderClicked={onHeaderClicked ? (column) => onHeaderClicked(column) : undefined}
         minColumnWidth={MIN_COL_WIDTH}
         maxColumnWidth={2000}
         width={size?.w ?? '100%'}

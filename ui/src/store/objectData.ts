@@ -7,7 +7,7 @@ import { useTabs } from './tabs';
 import { objectNodeKey } from './treeModel';
 
 export type Resource = 'detail' | 'ddl';
-export type SubTab = 'info' | 'ddl' | 'structure';
+export type SubTab = 'data' | 'info' | 'ddl' | 'structure';
 
 export type Loadable<T> =
   | { status: 'loading' }
