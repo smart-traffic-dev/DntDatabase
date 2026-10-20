@@ -1,5 +1,6 @@
 //! `SessionManager`: the staged connect pipeline and one `ConnectionRuntime` per open
-//! connection (tunnel, dedicated metadata sessions, `NodeCache`, `SchemaCache`).
+//! connection (tunnel, dedicated metadata sessions, `NodeCache`, `SchemaCache`, and the
+//! query tabs' sessions of [`crate::query_sessions`]).
 //!
 //! Introspection only ever runs on metadata sessions, never on a user's query session:
 //! MySQL keeps one (key `None`); PostgreSQL one per database (key `Some(db)`), because its
@@ -10,6 +11,7 @@
 
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use crate::commands::browse::folder_key;
+use crate::query_sessions::{close_slot, PlanStore, QuerySessions, PLAN_TTL, SLOT_CLOSE_WAIT};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session};
 pub use dnt_core::error::StageTiming;
@@ -55,7 +57,7 @@ const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Returned by metadata calls on a runtime that was closed (also to calls that were
 /// waiting while `close` ran): the connection is gone and is not reopened.
-fn closed_error() -> DbError {
+pub(crate) fn closed_error() -> DbError {
     DbError::ConnectionLost {
         was_in_tx: false,
         outcome_unknown: false,
@@ -211,7 +213,7 @@ fn resolved_config(
 }
 
 /// `base` pointed at another database.
-fn with_database(base: &ResolvedConfig, database: Option<String>) -> ResolvedConfig {
+pub(crate) fn with_database(base: &ResolvedConfig, database: Option<String>) -> ResolvedConfig {
     ResolvedConfig {
         kind: base.kind,
         host: base.host.clone(),
@@ -228,7 +230,7 @@ fn with_database(base: &ResolvedConfig, database: Option<String>) -> ResolvedCon
 }
 
 /// Driver connect bounded by the configured timeout, reported as the `ConnectDb` stage.
-async fn connect_db(
+pub(crate) async fn connect_db(
     driver: &dyn Driver,
     resolved: &ResolvedConfig,
 ) -> Result<Box<dyn Session>, DbError> {
@@ -289,13 +291,13 @@ fn is_lost(e: &DbError) -> bool {
     matches!(e, DbError::ConnectionLost { .. } | DbError::Connect { .. })
 }
 
-async fn close_quietly(session: Box<dyn Session>) {
+pub(crate) async fn close_quietly(session: Box<dyn Session>) {
     let _ = tokio::time::timeout(CLOSE_DEAD_TIMEOUT, session.close()).await;
 }
 
 pub struct SessionManager {
     drivers: HashMap<DbKind, Arc<dyn Driver>>,
-    repo: Arc<ConnectionRepo>,
+    pub(crate) repo: Arc<ConnectionRepo>,
     secrets: Arc<dyn SecretStore>,
     known_hosts: KnownHosts,
     runtimes: RwLock<HashMap<Uuid, Arc<ConnectionRuntime>>>,
@@ -308,6 +310,9 @@ pub struct SessionManager {
     generations: Mutex<HashMap<Uuid, u64>>,
     metadata_timeout: Duration,
     schema_error_ttl: Duration,
+    /// Run plans of query tabs (see `query_sessions`).
+    pub(crate) plans: PlanStore,
+    pub(crate) plan_ttl: Duration,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -344,6 +349,8 @@ impl SessionManager {
             generations: Mutex::new(HashMap::new()),
             metadata_timeout: METADATA_CALL_TIMEOUT,
             schema_error_ttl: SCHEMA_ERROR_TTL,
+            plans: PlanStore::default(),
+            plan_ttl: PLAN_TTL,
         }
     }
 
@@ -665,7 +672,7 @@ impl SessionManager {
             .cloned()
     }
 
-    fn runtime(&self, id: Uuid) -> Result<Arc<ConnectionRuntime>, DbError> {
+    pub(crate) fn runtime(&self, id: Uuid) -> Result<Arc<ConnectionRuntime>, DbError> {
         self.runtime_opt(id).ok_or(DbError::NotOpen)
     }
 
@@ -682,6 +689,17 @@ impl SessionManager {
         if let Some(rt) = rt {
             rt.shutdown().await;
         }
+        self.plans.drop_conn(id);
+    }
+
+    /// Every runtime, without holding the map's lock.
+    pub(crate) fn runtimes_snapshot(&self) -> Vec<(Uuid, Arc<ConnectionRuntime>)> {
+        self.runtimes
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(id, rt)| (*id, Arc::clone(rt)))
+            .collect()
     }
 
     pub fn state(&self, id: Uuid) -> ConnState {
@@ -879,26 +897,26 @@ impl SchemaSlot {
 }
 
 /// Resolved address and metadata sessions, held by one metadata call at a time.
-struct Link {
-    resolved: ResolvedConfig,
+pub(crate) struct Link {
+    pub(crate) resolved: ResolvedConfig,
     metadata: HashMap<Option<String>, Box<dyn Session>>,
     /// Set by `shutdown` once it holds the link: nothing may be (re)opened any more.
     closed: bool,
 }
 
 pub struct ConnectionRuntime {
-    cfg: ConnectionConfig,
+    pub(crate) cfg: ConnectionConfig,
     info: ServerInfo,
     secrets: ConnSecrets,
-    driver: Arc<dyn Driver>,
+    pub(crate) driver: Arc<dyn Driver>,
     known_hosts: KnownHosts,
     /// Metadata key of the connect database's session.
     home: Option<String>,
     /// Outside `link` so `shutdown` can close it while a metadata call holds the link.
     tunnel: Mutex<Option<Tunnel>>,
-    link: tokio::sync::Mutex<Link>,
+    pub(crate) link: tokio::sync::Mutex<Link>,
     /// Set first thing by `shutdown`, even when it cannot get the link.
-    closed: AtomicBool,
+    pub(crate) closed: AtomicBool,
     metadata_timeout: Duration,
     schema_error_ttl: Duration,
     cache: NodeCache,
@@ -908,6 +926,8 @@ pub struct ConnectionRuntime {
     /// Background SchemaCache loads (home database on open, refreshes); aborted by
     /// `shutdown`.
     schema_tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The query tabs on this connection, each with its own session.
+    pub(crate) queries: QuerySessions,
 }
 
 impl ConnectionRuntime {
@@ -948,6 +968,7 @@ impl ConnectionRuntime {
             schema_caches: Mutex::new(HashMap::new()),
             state: Mutex::new(ConnState::Connected),
             schema_tasks: Mutex::new(Vec::new()),
+            queries: QuerySessions::default(),
             cfg,
         }
     }
@@ -956,7 +977,7 @@ impl ConnectionRuntime {
         lock(&self.state).clone()
     }
 
-    fn set_state(&self, state: ConnState) {
+    pub(crate) fn set_state(&self, state: ConnState) {
         *lock(&self.state) = state;
     }
 
@@ -1039,47 +1060,56 @@ impl ConnectionRuntime {
         if let Some(old) = link.metadata.remove(key) {
             close_quietly(old).await;
         }
-        if let Some(ssh) = &self.cfg.ssh {
-            if self.tunnel_dead() {
-                // Every session went through the dead tunnel.
-                for (_, s) in link.metadata.drain() {
-                    close_quietly(s).await;
-                }
-                // The dead tunnel stays until a new one is up, so a failed attempt is
-                // retried by the next call.
-                let tunnel = open_tunnel(ssh, &self.cfg, &self.secrets, &self.known_hosts).await?;
-                let port = tunnel.local_addr().port();
-                let old = {
-                    let mut slot = lock(&self.tunnel);
-                    if self.closed.load(Ordering::SeqCst) {
-                        // `shutdown` ran meanwhile: do not resurrect the connection.
-                        Err(tunnel)
-                    } else {
-                        Ok(slot.replace(tunnel))
-                    }
-                };
-                match old {
-                    Err(fresh) => {
-                        fresh.close().await;
-                        return Err(closed_error());
-                    }
-                    Ok(Some(old)) => old.close().await,
-                    Ok(None) => {}
-                }
-                link.resolved.port = port;
-            }
-        }
+        self.replace_dead_tunnel(link).await?;
         let resolved = with_database(&link.resolved, key.clone());
         let session = connect_db(self.driver.as_ref(), &resolved).await?;
         link.metadata.insert(key.clone(), session);
         Ok(())
     }
 
-    fn tunnel_dead(&self) -> bool {
+    /// With SSH and a dead tunnel: closes every metadata session (they all went through
+    /// it), opens a new tunnel and points `link` at it. Otherwise does nothing. (Query
+    /// tab sessions through the dead tunnel fail on their next use.)
+    pub(crate) async fn replace_dead_tunnel(&self, link: &mut Link) -> Result<(), DbError> {
+        let Some(ssh) = &self.cfg.ssh else {
+            return Ok(());
+        };
+        if !self.tunnel_dead() {
+            return Ok(());
+        }
+        for (_, s) in link.metadata.drain() {
+            close_quietly(s).await;
+        }
+        // The dead tunnel stays until a new one is up, so a failed attempt is retried by
+        // the next call.
+        let tunnel = open_tunnel(ssh, &self.cfg, &self.secrets, &self.known_hosts).await?;
+        let port = tunnel.local_addr().port();
+        let old = {
+            let mut slot = lock(&self.tunnel);
+            if self.closed.load(Ordering::SeqCst) {
+                // `shutdown` ran meanwhile: do not resurrect the connection.
+                Err(tunnel)
+            } else {
+                Ok(slot.replace(tunnel))
+            }
+        };
+        match old {
+            Err(fresh) => {
+                fresh.close().await;
+                return Err(closed_error());
+            }
+            Ok(Some(old)) => old.close().await,
+            Ok(None) => {}
+        }
+        link.resolved.port = port;
+        Ok(())
+    }
+
+    pub(crate) fn tunnel_dead(&self) -> bool {
         lock(&self.tunnel).as_ref().is_some_and(|t| !t.is_alive())
     }
 
-    fn ensure_open(&self, link: &Link) -> Result<(), DbError> {
+    pub(crate) fn ensure_open(&self, link: &Link) -> Result<(), DbError> {
         if link.closed || self.closed.load(Ordering::SeqCst) {
             Err(closed_error())
         } else {
@@ -1102,6 +1132,13 @@ impl ConnectionRuntime {
         for (_, slot) in lock(&self.schema_caches).drain() {
             slot.abort_load();
         }
+        // `closed` is set: no tab slot can be created any more.
+        let tabs = self.queries.drain();
+        futures_util::future::join_all(
+            tabs.into_iter()
+                .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
+        )
+        .await;
         match tokio::time::timeout(SHUTDOWN_LOCK_TIMEOUT, self.link.lock()).await {
             Ok(mut link) => {
                 link.closed = true;
@@ -1122,7 +1159,7 @@ impl ConnectionRuntime {
     }
 
     /// The connect database: PostgreSQL's `home`, MySQL's default database (if any).
-    fn home_database(&self) -> Option<String> {
+    pub(crate) fn home_database(&self) -> Option<String> {
         match self.cfg.kind {
             DbKind::MySql => self.cfg.default_db.clone(),
             DbKind::Postgres => self.home.clone(),

@@ -200,6 +200,53 @@ async completionObjects(connId: string, database: string, schema: string | null)
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Plans what `target` selects in `text` for tab `tab_id` on `conn_id` / `database`
+ * (null: the connect database) and returns every statement's guard verdict. Opens the
+ * tab's session on first use and moves it when the connection or database changed.
+ * Errors: `not_open`, `busy` (the tab is running), `transaction_open` (changing the
+ * connection or database of a tab with an open transaction), connect errors. The plan
+ * is kept 2 minutes for `query_run`.
+ */
+async queryPlan(tabId: string, connId: string, database: string | null, text: string, target: Target) : Promise<Result<PlanView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_plan", { tabId, connId, database, text, target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Statement ranges for highlighting the statement under the cursor (debounced 150 ms).
+ */
+async statementRanges(text: string, dialect: Dialect) : Promise<([number, number])[]> {
+    return await TAURI_INVOKE("statement_ranges", { text, dialect });
+},
+/**
+ * Commits or rolls back the tab's transaction; returns the new state. `busy` while the
+ * tab runs.
+ */
+async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx", { tabId, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Closes the tab's session. With a transaction open and `force` false it returns
+ * `transaction_open` and keeps the session (ask Commit / Rollback / Cancel, then call
+ * again, or `query_tx` first); `force` closes anyway (the server rolls back).
+ */
+async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_close_tab", { tabId, force }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async exportConnections(ids: NodeId[], passphrase: string | null, path: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_connections", { ids, passphrase, path }) };
@@ -405,6 +452,7 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
+export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 export type EnvTag = "production" | "staging" | "local"
 export type ForeignKeyDetail = { name: string; columns: string[]; ref_schema: string | null; ref_table: string; ref_columns: string[]; on_update: string; on_delete: string; 
 /**
@@ -459,6 +507,18 @@ definition: string | null }
 export type JsInteger = number | string
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
+/**
+ * The MySQL `sql_mode` flags that change how a script is lexed.
+ */
+export type MySqlMode = { 
+/**
+ * `ANSI_QUOTES`: `"…"` is a quoted identifier, with no backslash escape.
+ */
+ansi_quotes?: boolean; 
+/**
+ * `NO_BACKSLASH_ESCAPES`: `'…'` and `"…"` strings have no backslash escape.
+ */
+no_backslash_escapes?: boolean }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
@@ -468,6 +528,20 @@ export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | 
  */
 row_estimate: number | null }
 export type OpenResult = { info: ServerInfo; timings: StageTiming[] }
+export type PlanStmtView = { index: number; 
+/**
+ * UTF-16 range in the editor text (end-exclusive).
+ */
+range: [number, number]; kind: StmtKindLabel; verdict: Verdict; 
+/**
+ * The first [`PREVIEW_CHARS`] characters, line breaks turned into spaces.
+ */
+preview: string }
+export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialect; connection_name: string; env_tag: EnvTag | null; read_only: boolean; 
+/**
+ * The tab session's transaction state when the plan was made.
+ */
+tx_state: TxState }
 export type QueryTabRecord = { id: string; title: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -525,19 +599,43 @@ export type StageTiming = { stage: ConnectStage;
  * Exported as a JS number (milliseconds).
  */
 ms: number }
+export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other"
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.
  */
 row_estimate: number | null; size_bytes: number | null; comment: string | null }
 export type TableOptions = { engine: string | null; collation: string | null; tablespace: string | null; partitioned_by: string | null; system_versioned: boolean }
+/**
+ * What the user asked to run. Offsets are UTF-16 code units into the editor text.
+ */
+export type Target = { Cursor: number } | { Selection: [number, number] } | "All"
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
+export type TxAction = "Commit" | "Rollback"
+/**
+ * Transaction state of a session as the query layer sees it.
+ */
+export type TxState = 
+/**
+ * No transaction is open (autocommit).
+ */
+"idle" | 
+/**
+ * A transaction is open (or MySQL `autocommit = 0` is in effect).
+ */
+"active" | 
+/**
+ * PostgreSQL only: a statement failed inside a transaction block; the server
+ * rejects everything but `ROLLBACK [TO SAVEPOINT]` / `COMMIT` until it ends.
+ */
+"aborted"
 export type Value = { t: "Null" } | { t: "Bool"; v: boolean } | { t: "Int"; v: JsInteger } | { t: "UInt"; v: JsInteger } | { t: "Float"; v: number } | { t: "Decimal"; v: string } | { t: "Text"; v: string } | { t: "Json"; v: string } | { t: "Uuid"; v: string } | { t: "Bytes"; v: { 
 /**
  * A byte length; far below 2^53 in practice, so a plain number.
  */
 len: number; preview: number[] } } | { t: "Date"; v: string } | { t: "Time"; v: string } | { t: "DateTime"; v: string } | { t: "TimestampTz"; v: string } | { t: "Array"; v: Value[] } | { t: "Other"; v: { type_name: string; text: string } }
+export type Verdict = "allow" | "confirm" | "block"
 
 /** tauri-specta globals **/
 

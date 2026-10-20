@@ -19,6 +19,7 @@ dirs.workspace = true
 dnt-core.workspace = true
 dnt-driver-mysql.workspace = true
 dnt-driver-pg.workspace = true
+dnt-query.workspace = true
 dnt-store.workspace = true
 dnt-tunnel.workspace = true
 futures-util = { workspace = true, features = ["std"] }

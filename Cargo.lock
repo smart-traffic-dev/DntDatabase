@@ -1525,6 +1525,7 @@ dependencies = [
  "dnt-core",
  "dnt-driver-mysql",
  "dnt-driver-pg",
+ "dnt-query",
  "dnt-store",
  "dnt-testkit",
  "dnt-tunnel",
