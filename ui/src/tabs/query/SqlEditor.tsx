@@ -17,7 +17,7 @@ type Monaco = Parameters<OnMount>[1];
 function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   registerEditor(tabId, editor);
   editor.onDidDispose(() => unregisterEditor(tabId, editor));
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'selection'));
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'cursor'));
   editor.addCommand(
     monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
     () => void runFromEditor(tabId, 'all'),

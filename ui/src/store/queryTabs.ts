@@ -140,8 +140,10 @@ export function setTxStateSource(
 
 /** Whether a tab has a run in progress (the run flow registers itself here). */
 let runningOf: (tabId: string) => boolean = () => false;
-export function setRunningSource(source: ((tabId: string) => boolean) | null) {
+let stopRunOf: (tabId: string) => Promise<boolean> = async () => true;
+export function setRunningSource(source: ((tabId: string) => boolean) | null, stop?: (tabId: string) => Promise<boolean>) {
   runningOf = source ?? (() => false);
+  stopRunOf = stop ?? (async () => true);
 }
 
 function confirmStopRun(title: string): Promise<boolean> {
@@ -365,8 +367,8 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       closing.add(id);
       try {
         const title = get().docs.get(id)?.title ?? tab?.title ?? 'Query';
-        // Closing stops the run (the backend does it); ask first.
-        if (runningOf(id) && !(await confirmStopRun(title))) return false;
+        // Ask, then stop the run and wait for it to end, so a transaction it holds can be settled.
+        if (runningOf(id) && (!(await confirmStopRun(title)) || !(await stopRunOf(id)))) return false;
         // Discard first: cancelling it must not leave a transaction committed or rolled back.
         const doc = get().docs.get(id);
         if (doc?.filePath && doc.dirty && !(await confirmDiscard(fileName(doc.filePath)))) return false;

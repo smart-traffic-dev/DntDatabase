@@ -200,7 +200,7 @@ function RunPromptHost() {
   const settle = useRunPrompt((s) => s.settle);
   if (!pending) return null;
   return pending.kind === 'confirm' ? (
-    <RunConfirmDialog plan={pending.plan} onDone={settle} />
+    <RunConfirmDialog key={pending.plan.plan_id} plan={pending.plan} onDone={settle} />
   ) : (
     <RunBlockedDialog plan={pending.plan} onClose={() => settle(false)} />
   );

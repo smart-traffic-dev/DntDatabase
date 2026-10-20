@@ -5,7 +5,7 @@ import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { useQueryDocs } from './queryTabs';
 import { useQueryRun } from './queryRun';
-import { runQuery, stopQuery, txAction } from './runQuery';
+import { registerEditor, runFromEditor, runPlanned, runQuery, stopQuery, txAction, unregisterEditor } from './runQuery';
 import { useRunPrompt } from './runPrompt';
 
 vi.mock('./completion', () => ({ invalidateCompletion: vi.fn(), forgetCompletionConnection: vi.fn() }));
@@ -170,6 +170,101 @@ describe('runQuery', () => {
     if (q?.kind === 'stopRun') q.done(false);
     expect(await closing).toBe(false);
     expect(callsOf('query_close_tab')).toEqual([]);
+  });
+
+  it('events of an earlier channel are ignored by a new run', async () => {
+    await runQuery(tab, 'All');
+    const first = callsOf('query_run')[0]!.channel as { onmessage(ev: unknown): void };
+    first.onmessage({ t: 'done', stop: null, elapsed_ms: 1 });
+    plan = { ...planOf([stmt(0, 'read', 'allow')]), plan_id: 'plan-2' };
+    await runQuery(tab, 'All');
+    first.onmessage({ t: 'done', stop: null, elapsed_ms: 2 });
+    first.onmessage({ t: 'notice', index: 0, message: 'late' });
+    const run = useQueryRun.getState().get(tab);
+    expect(run.phase.kind).toBe('running');
+    expect(run.messages.map((m) => m.text)).not.toContain('late');
+  });
+
+  it('two rapid runs make exactly one plan and one run', async () => {
+    await Promise.all([runQuery(tab, 'All'), runQuery(tab, 'All')]);
+    expect(callsOf('query_plan')).toHaveLength(1);
+    expect(callsOf('query_run')).toHaveLength(1);
+  });
+
+  it('runPlanned runs an already planned view through the guard dialogs', async () => {
+    plan = planOf([stmt(0, 'write', 'confirm')]);
+    const done = runPlanned(tab, plan);
+    await vi.waitFor(() => expect(useRunPrompt.getState().pending?.kind).toBe('confirm'));
+    useRunPrompt.getState().settle(true);
+    await done;
+    expect(callsOf('query_plan')).toEqual([]);
+    expect(callsOf('query_run')[0]).toMatchObject({ planId: 'plan-1', confirmed: true });
+  });
+
+  it('a Stop before attach is sent at attach', async () => {
+    let release!: (id: string) => void;
+    mockBackend({
+      query_plan: () => plan,
+      query_run: () => new Promise((r) => (release = r)),
+      query_cancel: () => null,
+    });
+    const running = runQuery(tab, 'All');
+    await vi.waitFor(() => expect(callsOf('query_run')).toHaveLength(1));
+    await stopQuery(tab);
+    expect(callsOf('query_cancel')).toEqual([]);
+    release('run-9');
+    await running;
+    expect(callsOf('query_cancel')).toEqual([{ runId: 'run-9' }]);
+  });
+
+  describe('Stop and close', () => {
+    const answerStop = async () => {
+      await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('stopRun'));
+      const q = useDialogs.getState().question;
+      if (q?.kind === 'stopRun') q.done(true);
+    };
+
+    it('waits for done, then asks about the transaction', async () => {
+      await runQuery(tab, 'All');
+      useQueryRun.getState().apply(tab, { t: 'tx_state', state: 'active' });
+      const closing = useQueryDocs.getState().closeTab(tab);
+      await answerStop();
+      await vi.waitFor(() => expect(callsOf('query_cancel')).toHaveLength(1));
+      expect(useDialogs.getState().question).toBeNull();
+      useQueryRun.getState().apply(tab, { t: 'done', stop: { kind: 'cancelled' }, elapsed_ms: 1 });
+      await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('txClose'));
+      const q = useDialogs.getState().question;
+      if (q?.kind === 'txClose') q.done(false);
+      expect(await closing).toBe(false);
+    });
+
+    it('a run that does not stop keeps the tab open', async () => {
+      await runQuery(tab, 'All');
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const closing = useQueryDocs.getState().closeTab(tab);
+        await answerStop();
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(await closing).toBe(false);
+        expect(callsOf('query_close_tab')).toEqual([]);
+        expect(useDialogs.getState().notice).toMatch(/could not stop/i);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('run selection runs only a selection', async () => {
+    registerEditor(tab, {
+      getModel: () => ({ getOffsetAt: () => 0 }),
+      getSelection: () => ({ isEmpty: () => true, getStartPosition: () => ({ lineNumber: 1, column: 1 }), getEndPosition: () => ({ lineNumber: 1, column: 1 }) }),
+      getPosition: () => ({ lineNumber: 1, column: 1 }),
+    });
+    await runFromEditor(tab, 'selection');
+    expect(callsOf('query_plan')).toEqual([]);
+    await runFromEditor(tab, 'cursor');
+    expect(callsOf('query_plan')[0]).toMatchObject({ target: { Cursor: 0 } });
+    unregisterEditor(tab);
   });
 
   it('stopQuery cancels the run and txAction settles the transaction', async () => {
