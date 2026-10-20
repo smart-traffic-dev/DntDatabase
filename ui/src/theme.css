@@ -603,7 +603,8 @@ textarea:focus-visible,
   color: var(--muted);
 }
 
-.tab-ro {
+.tab-ro,
+.tab-pin {
   display: inline-flex;
   color: var(--muted);
 }
@@ -710,6 +711,11 @@ textarea:focus-visible,
 
 .status-right {
   margin-left: auto;
+}
+
+.status-cursor {
+  margin-right: 14px;
+  font-variant-numeric: tabular-nums;
 }
 
 .ro-badge {

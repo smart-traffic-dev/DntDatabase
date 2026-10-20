@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 
 export interface TabMenuItem {
   label: string;
+  /** Shortcut shown on the right. */
+  hint?: string;
   run(): void;
   disabled?: boolean;
   /** Set for a "pick one" menu: the item becomes a `menuitemradio` with this state. */
@@ -39,6 +41,7 @@ export function TabMenu({ label, x, y, items, onClose }: { label: string; x: num
           }}
         >
           <span>{item.label}</span>
+          {item.hint && <kbd aria-hidden="true">{item.hint}</kbd>}
           {item.checked && <span aria-hidden="true">●</span>}
         </button>
       ))}

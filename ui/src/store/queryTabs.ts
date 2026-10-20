@@ -47,6 +47,8 @@ interface QueryDocsState {
   newQuery(connectionId: string | null, database: string | null): string;
   /** Changes a document and schedules its autosave (`AUTOSAVE_MS`). */
   update(id: string, patch: Partial<QueryDoc>): void;
+  /** Brings a closed document back as a tab (same text, file and settings); returns its id. */
+  reopen(doc: QueryDoc): string;
   /** Drops the document from memory only (no backend call). */
   remove(id: string): void;
   /**
@@ -316,6 +318,24 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       schedule(id);
     },
 
+    reopen: (doc) => {
+      if (get().docs.has(doc.id)) {
+        useTabs.getState().activate(doc.id);
+        return doc.id;
+      }
+      // The connection may have been deleted since: the tab comes back unbound.
+      const stale = doc.connectionId !== null && !useConnections.getState().summaries.has(doc.connectionId);
+      const next: QueryDoc = {
+        ...doc,
+        ...(stale ? { connectionId: null, database: null, dialect: dialectOfConnection(null) } : {}),
+        sortOrder: Math.max(-1, ...[...get().docs.values()].map((d) => d.sortOrder)) + 1,
+      };
+      set((s) => ({ docs: new Map(s.docs).set(next.id, next) }));
+      useTabs.getState().open({ id: next.id, kind: 'query', connectionId: next.connectionId, title: next.title });
+      schedule(next.id);
+      return next.id;
+    },
+
     remove: (id) => {
       const timer = timers.get(id);
       if (timer !== undefined) clearTimeout(timer);
@@ -413,7 +433,10 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
         } catch {
           // The row stays and the tab comes back on the next start; nothing else to do.
         }
+        // The text as it is now, for "Reopen closed tab".
+        const snapshot = get().docs.get(id);
         useTabs.getState().close(id);
+        if (snapshot) useTabs.getState().pushClosed({ kind: 'query', doc: snapshot });
         get().remove(id);
         return true;
       } finally {
