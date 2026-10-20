@@ -83,6 +83,10 @@ export interface TabRun {
   current: number | null;
   /** The result between its `result_start` and `result_end` (results never interleave). */
   openResult: { id: number; index: number; hasColumns: boolean } | null;
+  /** When the run started (kept while stopping, to resume `running` after a timeout). */
+  startedAt?: number;
+  /** What the current stop is for: a `timeout` stop lets a continue-on-error run go on. */
+  stopCause?: 'user' | 'timeout';
 }
 
 export const emptyRun: TabRun = {
@@ -115,6 +119,7 @@ export function startRun(run: TabRun, plan: PlanView, now: number): TabRun {
     plan,
     txState: plan.tx_state,
     lastRun: run.lastRun,
+    startedAt: now,
   };
 }
 
@@ -194,9 +199,21 @@ function errorLine(run: TabRun, index: number, error: AppError): MessageLine {
 export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
   switch (ev.t) {
     case 'statement_start': {
-      const phase: RunPhase =
-        run.phase.kind === 'running' ? { ...run.phase, index: ev.index } : run.phase;
-      return { ...run, phase, current: ev.index };
+      if (run.phase.kind === 'running') {
+        return { ...run, phase: { ...run.phase, index: ev.index }, current: ev.index };
+      }
+      // Continue on error after a timeout: the run goes on with the next statement. A
+      // user stop never starts another statement, so it stays stopping.
+      if (run.phase.kind !== 'idle' && run.stopCause === 'timeout') {
+        const phase: RunPhase = {
+          kind: 'running',
+          index: ev.index,
+          total: run.plan?.stmts.length ?? 0,
+          startedAt: run.startedAt ?? now,
+        };
+        return { ...run, phase, stopCause: undefined, current: ev.index };
+      }
+      return { ...run, current: ev.index };
     }
     case 'result_start': {
       const openResult = { id: ev.result_id, index: ev.index, hasColumns: ev.columns.length > 0 };
@@ -268,7 +285,7 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
       return { ...run, explain: ev.plan, panel: 'explain' };
     case 'stopping':
       if (run.phase.kind !== 'running') return run;
-      return { ...run, phase: { kind: 'stopping', since: now, reason: ev.reason } };
+      return { ...run, phase: { kind: 'stopping', since: now, reason: ev.reason }, stopCause: ev.reason };
     case 'abandoning':
       if (run.phase.kind === 'abandoning' || run.phase.kind === 'idle') return run;
       return { ...run, phase: { kind: 'abandoning', since: now } };
@@ -289,6 +306,7 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
         stop: ev.stop,
         current: null,
         openResult: null,
+        stopCause: undefined,
         messages: [...run.messages, final],
         panel,
         lastRun: { rows, elapsedMs: ev.elapsed_ms },
@@ -304,15 +322,21 @@ interface QueryRunState {
   /** Starts a run of `plan` (before `query_run` returns its id). */
   begin(tabId: string, plan: PlanView): void;
   attach(tabId: string, runId: string): void;
-  /** Reduces one event of the tab's run; events of a cleared tab are dropped. */
-  apply(tabId: string, ev: RunEvent): void;
+  /**
+   * Reduces one event of the tab's run; events of a cleared tab are dropped.
+   *
+   * The caller must bind each run's Channel callback to that run: pass the `plan_id` of
+   * the plan given to `begin` as `token`, so late events of an earlier run of the same
+   * tab (its channel can still deliver after a new `begin`) are ignored.
+   */
+  apply(tabId: string, ev: RunEvent, token?: string): void;
   setPanel(tabId: string, p: TabRun['panel']): void;
   setTxState(tabId: string, s: TxState): void;
   clear(tabId: string): void;
 }
 
 /** Connection and database each tab's current run was started on. */
-const origins = new Map<string, { connectionId: string; database: string | null }>();
+const origins = new Map<string, { connectionId: string; database: string | null; open: boolean }>();
 
 /** Spec §7.3: a DDL statement that completed without error drops the completion cache. */
 function afterDone(tabId: string, run: TabRun) {
@@ -332,15 +356,24 @@ export const useQueryRun = create<QueryRunState>()((set, get) => {
     get: (tabId) => get().runs.get(tabId) ?? emptyRun,
     begin: (tabId, plan) => {
       const doc = useQueryDocs.getState().docs.get(tabId);
-      if (doc?.connectionId) origins.set(tabId, { connectionId: doc.connectionId, database: doc.database });
+      if (doc?.connectionId) {
+        const open = useConnections.getState().info.has(doc.connectionId);
+        origins.set(tabId, { connectionId: doc.connectionId, database: doc.database, open });
+      }
       else origins.delete(tabId);
       put(tabId, startRun(get().get(tabId), plan, Date.now()));
     },
     attach: (tabId, runId) => patch(tabId, { runId }),
-    apply: (tabId, ev) => {
+    apply: (tabId, ev, token) => {
       const run = get().runs.get(tabId);
       if (!run) return;
-      const next = reduceRun(run, ev, Date.now());
+      if (token !== undefined && run.plan?.plan_id !== token) return;
+      let next = reduceRun(run, ev, Date.now());
+      if (ev.t === 'done') {
+        // The connection closed during the run: its session (and transaction) went with it.
+        const origin = origins.get(tabId);
+        if (origin?.open && !useConnections.getState().info.has(origin.connectionId)) next = { ...next, txState: 'idle' };
+      }
       put(tabId, next);
       if (ev.t === 'done') afterDone(tabId, next);
     },
@@ -368,13 +401,14 @@ setTxStateSource(
 );
 
 // A closed tab drops its run state.
-useQueryDocs.subscribe((s, prev) => {
+const unsubscribeDocs = useQueryDocs.subscribe((s, prev) => {
   if (s.docs === prev.docs) return;
   for (const id of prev.docs.keys()) if (!s.docs.has(id)) useQueryRun.getState().clear(id);
 });
 
 // A closed connection: its completion data goes, and its tabs' sessions closed with it.
-useConnections.subscribe((s, prev) => {
+// A tab still running keeps its state until its `done` (see `apply`).
+const unsubscribeConnections = useConnections.subscribe((s, prev) => {
   if (s.info === prev.info) return;
   for (const conn of prev.info.keys()) {
     if (s.info.has(conn)) continue;
@@ -387,4 +421,9 @@ useConnections.subscribe((s, prev) => {
       }
     }
   }
+});
+
+import.meta.hot?.dispose(() => {
+  unsubscribeDocs();
+  unsubscribeConnections();
 });
