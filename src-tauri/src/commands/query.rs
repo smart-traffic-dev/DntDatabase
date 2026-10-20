@@ -8,11 +8,14 @@
 use super::guard;
 use crate::cache::{CompletionObject, SchemaCache};
 use crate::query_sessions::{PlanView, TxAction};
+use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::sql::Dialect;
 use dnt_core::tx::TxState;
 use dnt_query::Target;
+use std::sync::Arc;
+use tauri::ipc::Channel;
 use tauri::State;
 use uuid::Uuid;
 
@@ -82,8 +85,48 @@ pub async fn query_tx_impl(
     state: &AppState,
     tab_id: String,
     action: TxAction,
-) -> Result<TxState, DbError> {
-    state.sessions.query_tx(&tab_id, action).await
+) -> Result<TxState, AppError> {
+    state.sessions.query_tx_reported(&tab_id, action).await
+}
+
+pub async fn query_run_impl(
+    state: &AppState,
+    plan_id: Uuid,
+    confirmed: bool,
+    opts: RunOptions,
+    emit: EventSink,
+) -> Result<Uuid, DbError> {
+    state
+        .sessions
+        .query_run(plan_id, confirmed, opts, emit)
+        .await
+}
+
+pub async fn query_cancel_impl(state: &AppState, run_id: Uuid) -> Result<(), DbError> {
+    state.sessions.query_cancel(run_id).await
+}
+
+pub async fn query_explain_impl(
+    state: &AppState,
+    tab_id: String,
+    conn_id: Uuid,
+    database: Option<String>,
+    text: String,
+    cursor: u32,
+    analyze: bool,
+) -> Result<PlanView, DbError> {
+    state
+        .sessions
+        .query_explain(&tab_id, conn_id, database, &text, cursor, analyze)
+        .await
+}
+
+pub async fn query_plan_statement_impl(
+    state: &AppState,
+    plan_id: Uuid,
+    index: u32,
+) -> Result<PlanView, DbError> {
+    state.sessions.query_plan_statement(plan_id, index).await
 }
 
 pub async fn query_close_tab_impl(
@@ -130,7 +173,8 @@ pub async fn statement_ranges(text: String, dialect: Dialect) -> Vec<(u32, u32)>
 }
 
 /// Commits or rolls back the tab's transaction; returns the new state. `busy` while the
-/// tab runs.
+/// tab runs. A failed statement reports the session's state after it in
+/// `AppError.tx_state`.
 #[tauri::command]
 #[specta::specta]
 pub async fn query_tx(
@@ -138,7 +182,73 @@ pub async fn query_tx(
     tab_id: String,
     action: TxAction,
 ) -> Result<TxState, AppError> {
-    guard(query_tx_impl(&state, tab_id, action)).await
+    guard(async { Ok(query_tx_impl(&state, tab_id, action).await) })
+        .await
+        .and_then(|r| r)
+}
+
+/// Runs plan `plan_id` (from `query_plan`, `query_explain` or `query_plan_statement`)
+/// and returns the run id at once; every result streams through `channel` (see
+/// `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
+/// statement is blocked, `confirmation_required` when any needs confirmation and
+/// `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
+/// `busy` while the tab runs; `plan_expired` for a plan already run, expired or
+/// replaced.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_run(
+    state: State<'_, AppState>,
+    plan_id: Uuid,
+    confirmed: bool,
+    opts: RunOptions,
+    channel: Channel<RunEvent>,
+) -> Result<Uuid, AppError> {
+    let emit: EventSink = Arc::new(move |event| {
+        if let Err(e) = channel.send(event) {
+            tracing::debug!(error = %e, "a run event was not delivered");
+        }
+    });
+    guard(query_run_impl(&state, plan_id, confirmed, opts, emit)).await
+}
+
+/// Stops run `run_id` (emits `stopping{user}` first). Unknown or finished runs: no-op.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_cancel(state: State<'_, AppState>, run_id: Uuid) -> Result<(), AppError> {
+    guard(query_cancel_impl(&state, run_id)).await
+}
+
+/// Plans an Explain (or Explain Analyze, `analyze`) of the statement at `cursor`;
+/// run it with `query_run`, which streams one `explain` event. `config` (field
+/// `explain`) for a DDL statement, or Analyze of a statement that is not a read;
+/// `unsupported` where the server has no such explain (Analyze on MySQL 5.7).
+#[tauri::command]
+#[specta::specta]
+pub async fn query_explain(
+    state: State<'_, AppState>,
+    tab_id: String,
+    conn_id: Uuid,
+    database: Option<String>,
+    text: String,
+    cursor: u32,
+    analyze: bool,
+) -> Result<PlanView, AppError> {
+    guard(query_explain_impl(
+        &state, tab_id, conn_id, database, text, cursor, analyze,
+    ))
+    .await
+}
+
+/// Retry statement / Fetch all: plans statement `index` of plan `plan_id` again, its
+/// stored text verbatim, judged with the current guard. Run it with `query_run`.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_plan_statement(
+    state: State<'_, AppState>,
+    plan_id: Uuid,
+    index: u32,
+) -> Result<PlanView, AppError> {
+    guard(query_plan_statement_impl(&state, plan_id, index)).await
 }
 
 /// Closes the tab's session. With a transaction open and `force` false it returns

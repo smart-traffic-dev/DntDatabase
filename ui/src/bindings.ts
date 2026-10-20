@@ -224,7 +224,8 @@ async statementRanges(text: string, dialect: Dialect) : Promise<([number, number
 },
 /**
  * Commits or rolls back the tab's transaction; returns the new state. `busy` while the
- * tab runs.
+ * tab runs. A failed statement reports the session's state after it in
+ * `AppError.tx_state`.
  */
 async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppError>> {
     try {
@@ -242,6 +243,60 @@ async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppErro
 async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("query_close_tab", { tabId, force }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Runs plan `plan_id` (from `query_plan`, `query_explain` or `query_plan_statement`)
+ * and returns the run id at once; every result streams through `channel` (see
+ * `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
+ * statement is blocked, `confirmation_required` when any needs confirmation and
+ * `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
+ * `busy` while the tab runs; `plan_expired` for a plan already run, expired or
+ * replaced.
+ */
+async queryRun(planId: string, confirmed: boolean, opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, opts, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops run `run_id` (emits `stopping{user}` first). Unknown or finished runs: no-op.
+ */
+async queryCancel(runId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_cancel", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Plans an Explain (or Explain Analyze, `analyze`) of the statement at `cursor`;
+ * run it with `query_run`, which streams one `explain` event. `config` (field
+ * `explain`) for a DDL statement, or Analyze of a statement that is not a read;
+ * `unsupported` where the server has no such explain (Analyze on MySQL 5.7).
+ */
+async queryExplain(tabId: string, connId: string, database: string | null, text: string, cursor: number, analyze: boolean) : Promise<Result<PlanView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_explain", { tabId, connId, database, text, cursor, analyze }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retry statement / Fetch all: plans statement `index` of plan `plan_id` again, its
+ * stored text verbatim, judged with the current guard. Run it with `query_run`.
+ */
+async queryPlanStatement(planId: string, index: number) : Promise<Result<PlanView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_plan_statement", { planId, index }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -528,6 +583,10 @@ export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | 
  */
 row_estimate: number | null }
 export type OpenResult = { info: ServerInfo; timings: StageTiming[] }
+/**
+ * One node of a normalized plan.
+ */
+export type PlanNode = { label: string; detail: string | null; est_cost: number | null; est_rows: number | null; actual_rows: number | null; actual_ms: number | null; loops: number | null; children: PlanNode[] }
 export type PlanStmtView = { index: number; 
 /**
  * UTF-16 range in the editor text (end-exclusive).
@@ -537,6 +596,10 @@ range: [number, number]; kind: StmtKindLabel; verdict: Verdict;
  * The first [`PREVIEW_CHARS`] characters, line breaks turned into spaces.
  */
 preview: string }
+/**
+ * A normalized explain result. `raw` is the engine's original output.
+ */
+export type PlanTree = { kind: "tree"; root: PlanNode; raw: string } | { kind: "table"; columns: string[]; rows: string[][]; raw: string }
 export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialect; connection_name: string; env_tag: EnvTag | null; read_only: boolean; 
 /**
  * The tab session's transaction state when the plan was made.
@@ -555,6 +618,65 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+/**
+ * One event of a run, in the order described in the module docs.
+ */
+export type RunEvent = 
+/**
+ * Statement `index` of the plan is sent; `range` is its UTF-16 range in the editor.
+ */
+{ t: "statement_start"; index: number; range: [number, number] } | 
+/**
+ * A result set of statement `index` begins. `result_id` counts up from 0 per run.
+ */
+{ t: "result_start"; result_id: number; index: number; columns: ColumnMeta[] } | 
+/**
+ * At most 500 (`batch_size`) rows of result `result_id`, in order.
+ */
+{ t: "rows"; result_id: number; rows: Value[][] } | { t: "result_end"; result_id: number; affected: number | null; row_count: number; truncated: boolean; elapsed_ms: number } | 
+/**
+ * Statement `index` failed. `error.position` is a UTF-16 offset into the editor
+ * text, `error.tx_state` the session's state after the failure, and
+ * `error.outcome_unknown` set when the statement may have been applied (show it as
+ * such, never as "not applied").
+ */
+{ t: "statement_error"; index: number; error: AppError } | 
+/**
+ * A Messages line about statement `index` (a silent reconnect, a rolled-back
+ * transaction…).
+ */
+{ t: "notice"; index: number; message: string } | 
+/**
+ * Explain mode: the normalized plan of statement `index`.
+ */
+{ t: "explain"; index: number; plan: PlanTree } | 
+/**
+ * Stopping the running statement was requested (sent once per stop).
+ */
+{ t: "stopping"; reason: StopCause } | 
+/**
+ * The statement did not stop within the cancel grace; its connection is being
+ * replaced.
+ */
+{ t: "abandoning" } | 
+/**
+ * The session's transaction state changed.
+ */
+{ t: "tx_state"; state: TxState } | 
+/**
+ * The run ended. `stop: null` means every planned statement ran. A Stop that lands
+ * while the LAST statement runs, when that statement still completes, also ends
+ * with `stop: null` (after a `stopping` event): everything ran.
+ */
+{ t: "done"; stop: StopReason | null; elapsed_ms: number }
+/**
+ * Per-run options from the toolbar.
+ */
+export type RunOptions = { 
+/**
+ * Row limit per result; clamped to 1..=1 000 000.
+ */
+max_rows: number; continue_on_error: boolean }
 /**
  * Table / view names and their columns (with types) of one database (PostgreSQL: of the
  * schemas in `current_schemas(false)` of that database's metadata session). One per
@@ -600,6 +722,43 @@ export type StageTiming = { stage: ConnectStage;
  */
 ms: number }
 export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other"
+/**
+ * Why a run is being stopped.
+ */
+export type StopCause = 
+/**
+ * The user pressed Stop (or closed the tab / connection).
+ */
+"user" | 
+/**
+ * The statement's time limit expired.
+ */
+"timeout"
+/**
+ * Why a run ended before its last statement.
+ */
+export type StopReason = 
+/**
+ * Statement `index` failed.
+ */
+{ kind: "error"; index: number } | 
+/**
+ * The user stopped the run.
+ */
+{ kind: "cancelled" } | 
+/**
+ * The PostgreSQL transaction is aborted: only `ROLLBACK [TO]` / `COMMIT` may run.
+ */
+{ kind: "tx_aborted" } | 
+/**
+ * A statement finished after its timeout; the rest was not run.
+ */
+{ kind: "late_completion" } | 
+/**
+ * The session's `sql_mode` now splits the rest differently, starting at statement
+ * `index`: "sql_mode changed; run the remaining statements again".
+ */
+{ kind: "dialect_changed"; index: number }
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.

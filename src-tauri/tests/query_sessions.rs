@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, Driver, ExecOptions, ExecProgress, Introspector, ResultSummary,
+    RowSink, Session, StmtOutcome,
 };
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{
@@ -16,17 +16,23 @@ use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
 use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
+use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_query::{StmtKindLabel, Target, Verdict};
 use dnt_store::db::open_in_memory;
+use dnt_store::history::{HistoryFilter, HistoryStatus};
 use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
 use dnt_tunnel::KnownHosts;
 use dntdatabase::query_sessions::{TxAction, PREVIEW_CHARS};
+use dntdatabase::run_events::{EventSink, RunOptions};
 use dntdatabase::session_manager::SessionManager;
 use secrecy::SecretString;
+use serde_json::{json, Value as Json};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::Notify;
 use uuid::Uuid;
 
@@ -45,6 +51,10 @@ struct Log {
     gate: Mutex<Option<Arc<Notify>>>,
     /// Signalled (one permit) when a connect reaches the gate.
     entered: Notify,
+    /// Set by the session's cancel handle; cleared when a statement starts.
+    cancelled: AtomicBool,
+    /// While set, `COMMIT` / `ROLLBACK` lose the connection.
+    lose_on_tx: AtomicBool,
 }
 
 impl Log {
@@ -112,12 +122,58 @@ struct FakeSession {
     log: Arc<Log>,
 }
 
-struct NoopCancel;
+struct FakeCancel(Arc<Log>);
 
 #[async_trait]
-impl Canceller for NoopCancel {
+impl Canceller for FakeCancel {
     async fn cancel(&self) -> Result<(), DbError> {
+        self.0.cancelled.store(true, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+fn column(name: &str) -> ColumnMeta {
+    ColumnMeta {
+        name: name.into(),
+        db_type: "INT".into(),
+        logical: LogicalType::Integer,
+        nullable: Some(false),
+        origin_table: None,
+        origin_column: None,
+    }
+}
+
+/// Streams `n` rows (`Int(0..n)`) in batches of `batch`.
+fn stream_rows(sink: &mut dyn RowSink, n: i64, batch: usize) -> ResultSummary {
+    sink.result_start(&[column("n")]);
+    let rows: Vec<Vec<Value>> = (0..n).map(|i| vec![Value::Int(i)]).collect();
+    for chunk in rows.chunks(batch.max(1)) {
+        sink.rows(chunk.to_vec());
+    }
+    let summary = ResultSummary {
+        affected: None,
+        row_count: n as u64,
+        truncated: false,
+        elapsed_ms: 1,
+    };
+    sink.result_end(&summary);
+    summary
+}
+
+/// The number after `prefix` in `upper` (`ROWS_1200` → 1200).
+fn number_after(upper: &str, prefix: &str) -> Option<i64> {
+    let at = upper.find(prefix)? + prefix.len();
+    upper[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .ok()
+}
+
+impl FakeSession {
+    fn stop_requested(&self, opts: &ExecOptions) -> bool {
+        opts.stop.is_stopped() || self.log.cancelled.load(Ordering::SeqCst)
     }
 }
 
@@ -126,17 +182,127 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
+    /// Scripted by the statement text (upper-cased):
+    /// `ROWS_<n>` streams n rows in `batch_size` batches; `TRICKLE` streams 10 batches
+    /// of 10 rows; `EXPLAIN …` returns a one-cell plan; `FAIL` is a server error 1146;
+    /// `LOSE` loses the connection; `SLOW` streams a row every 20 ms for 10 s until
+    /// stopped (then `Cancelled`); `STUCK` ignores a cancel for the whole grace.
     async fn execute_one(
         &self,
         stmt: &str,
         _kind: StatementKind,
-        _opts: &ExecOptions,
+        opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         self.log.executed.lock().unwrap().push(stmt.to_string());
+        self.log.cancelled.store(false, Ordering::SeqCst);
+        if opts.stop.is_stopped() {
+            return Err(DbError::cancelled());
+        }
         let upper = stmt.trim().to_ascii_uppercase();
         if upper == "COMMIT" || upper == "ROLLBACK" {
+            if self.log.lose_on_tx.load(Ordering::SeqCst) {
+                self.log.set_tx(TxState::Idle);
+                return Err(DbError::ConnectionLost {
+                    was_in_tx: true,
+                    outcome_unknown: upper == "COMMIT",
+                    message: "server gone".into(),
+                });
+            }
             self.log.set_tx(TxState::Idle);
+        }
+        let ok = |summary: ResultSummary| {
+            Ok(StmtOutcome {
+                results: vec![summary],
+                late_completion: false,
+            })
+        };
+        if let Some(n) = number_after(&upper, "ROWS_") {
+            return ok(stream_rows(sink, n, opts.batch_size));
+        }
+        if upper.contains("TRICKLE") {
+            sink.result_start(&[column("n")]);
+            for b in 0..10 {
+                sink.rows((0..10).map(|i| vec![Value::Int(b * 10 + i)]).collect());
+            }
+            let summary = ResultSummary {
+                affected: None,
+                row_count: 100,
+                truncated: false,
+                elapsed_ms: 1,
+            };
+            sink.result_end(&summary);
+            return ok(summary);
+        }
+        if upper.starts_with("EXPLAIN") {
+            let plan = if upper.starts_with("EXPLAIN ANALYZE") {
+                "-> Rows fetched before execution  (cost=0.00..0.00 rows=1) (actual time=0.001..0.001 rows=1 loops=1)"
+            } else if upper.contains("JSONV2") {
+                // `explain_json_format_version = 2` (MySQL 8.3+).
+                r#"{"query": "/* select#1 */ select 1", "operation": "Rows fetched before execution", "access_type": "rows_fetched_before_execution", "estimated_rows": 1.0}"#
+            } else {
+                r#"{"query_block": {"select_id": 1, "cost_info": {"query_cost": "1.00"}, "table": {"table_name": "t", "access_type": "ALL", "rows_examined_per_scan": 1}}}"#
+            };
+            sink.result_start(&[column("EXPLAIN")]);
+            sink.rows(vec![vec![Value::Text(plan.into())]]);
+            let summary = ResultSummary {
+                affected: None,
+                row_count: 1,
+                truncated: false,
+                elapsed_ms: 1,
+            };
+            sink.result_end(&summary);
+            return ok(summary);
+        }
+        if upper.contains("FAIL") {
+            return Err(DbError::Server {
+                code: Some("1146".into()),
+                sqlstate: Some("42S02".into()),
+                message: "Table 'shop.fail' doesn't exist".into(),
+                position: None,
+            });
+        }
+        if upper.contains("LOSE") {
+            return Err(DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: false,
+                message: "server gone".into(),
+            });
+        }
+        if upper.contains("SLOW") {
+            sink.result_start(&[column("n")]);
+            for i in 0..500 {
+                if self.stop_requested(opts) {
+                    sink.progress(ExecProgress::CancelSent);
+                    return Err(DbError::Cancelled {
+                        outcome_unknown: false,
+                        was_in_tx: false,
+                    });
+                }
+                sink.rows(vec![vec![Value::Int(i)]]);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let summary = ResultSummary {
+                affected: None,
+                row_count: 500,
+                truncated: false,
+                elapsed_ms: 10_000,
+            };
+            sink.result_end(&summary);
+            return ok(summary);
+        }
+        if upper.contains("STUCK") {
+            while !self.stop_requested(opts) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            sink.progress(ExecProgress::CancelSent);
+            tokio::time::sleep(opts.cancel_grace).await;
+            sink.progress(ExecProgress::GraceExpired);
+            return Err(DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: true,
+                message: "the statement did not stop; the connection was replaced".into(),
+            });
         }
         let summary = ResultSummary {
             affected: Some(0),
@@ -146,10 +312,7 @@ impl Session for FakeSession {
         };
         sink.result_start(&[]);
         sink.result_end(&summary);
-        Ok(StmtOutcome {
-            results: vec![summary],
-            late_completion: false,
-        })
+        ok(summary)
     }
     fn tx_state(&self) -> TxState {
         self.log.tx.lock().unwrap().unwrap_or(TxState::Idle)
@@ -158,7 +321,7 @@ impl Session for FakeSession {
         Dialect::for_kind(self.info.kind)
     }
     fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoopCancel)
+        Arc::new(FakeCancel(Arc::clone(&self.log)))
     }
     fn introspector(&self) -> &dyn Introspector {
         self
@@ -790,4 +953,690 @@ async fn tab_id_is_validated() {
         .await
         .unwrap();
     assert_eq!(f.log.connects(), 2);
+}
+
+// ---- Runs (Task 15) ----
+
+/// Collects a run's events as JSON (the wire shape).
+#[derive(Default)]
+struct Events(Mutex<Vec<Json>>);
+
+impl Events {
+    fn list(&self) -> Vec<Json> {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn tags(&self) -> Vec<String> {
+        self.list()
+            .iter()
+            .map(|e| e["t"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    fn of(&self, tag: &str) -> Vec<Json> {
+        self.list().into_iter().filter(|e| e["t"] == tag).collect()
+    }
+
+    /// Waits for `done`; panics after `within`.
+    async fn done(&self, within: Duration) -> Json {
+        tokio::time::timeout(within, async {
+            loop {
+                if let Some(done) = self.of("done").pop() {
+                    return done;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no done within {within:?}: {:?}", self.tags()))
+    }
+}
+
+fn collector() -> (EventSink, Arc<Events>) {
+    let events = Arc::new(Events::default());
+    let out = Arc::clone(&events);
+    (
+        Arc::new(move |e| {
+            out.0.lock().unwrap().push(serde_json::to_value(e).unwrap());
+        }),
+        events,
+    )
+}
+
+fn opts() -> RunOptions {
+    RunOptions {
+        max_rows: 10_000,
+        continue_on_error: false,
+    }
+}
+
+async fn open_tagged(f: &Fixture, env_tag: Option<EnvTag>, read_only: bool) -> Uuid {
+    open(
+        f,
+        ConnectionConfig {
+            env_tag,
+            read_only,
+            ..config(DbKind::MySql)
+        },
+    )
+    .await
+}
+
+/// Plans `text` on tab `t1` and runs it; returns the events once the run is done.
+async fn run_text(f: &Fixture, id: Uuid, text: &str, opts: RunOptions) -> Arc<Events> {
+    let view = plan(f, "t1", id, None, text).await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, true, opts, emit)
+        .await
+        .unwrap();
+    events.done(Duration::from_secs(5)).await;
+    events
+}
+
+const LONG: Duration = Duration::from_secs(5);
+
+#[tokio::test]
+async fn run_without_confirmation_is_refused_on_production() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Production), false).await;
+    let view = plan(
+        &f,
+        "t1",
+        id,
+        None,
+        "SELECT 1; DELETE FROM t; UPDATE t SET a = 1",
+    )
+    .await
+    .unwrap();
+    let (emit, events) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit.clone())
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(err, DbError::ConfirmationRequired { count: 2 }),
+        "{err:?}"
+    );
+    assert!(f.log.executed().is_empty(), "execute_one is never called");
+    assert!(events.list().is_empty());
+    // The plan is still there: confirmed, it runs.
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(f.log.executed().len(), 3);
+}
+
+#[tokio::test]
+async fn blocked_plan_is_refused_even_if_confirmed() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Production), true).await;
+    let view = plan(&f, "t1", id, None, "SELECT 1; DELETE FROM t")
+        .await
+        .unwrap();
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, true, opts(), emit)
+            .await
+            .unwrap_err();
+    assert!(matches!(err, DbError::Blocked { count: 1 }), "{err:?}");
+    assert!(f.log.executed().is_empty());
+}
+
+#[tokio::test]
+async fn guard_is_rechecked_at_run() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let view = plan(&f, "t1", id, None, "DELETE FROM t").await.unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Allow);
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.env_tag = Some(EnvTag::Production);
+    let keep = SecretUpdate {
+        db_password: SecretChange::Keep,
+        ssh_password: SecretChange::Keep,
+        ssh_key_passphrase: SecretChange::Keep,
+    };
+    f.repo.update(cfg.clone(), keep).unwrap();
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit.clone())
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+
+    // Read-only now: blocked even when confirmed.
+    cfg.read_only = true;
+    let keep = SecretUpdate {
+        db_password: SecretChange::Keep,
+        ssh_password: SecretChange::Keep,
+        ssh_key_passphrase: SecretChange::Keep,
+    };
+    f.repo.update(cfg, keep).unwrap();
+    let err =
+        f.sm.query_run(view.plan_id, true, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "blocked");
+    assert!(f.log.executed().is_empty());
+}
+
+#[tokio::test]
+async fn second_run_on_busy_tab_is_busy() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT slow").await.unwrap();
+    let (emit, events) = collector();
+    let run_id =
+        f.sm.query_run(view.plan_id, false, opts(), emit.clone())
+            .await
+            .unwrap();
+    // The run holds the tab: running (or planning, or Retry) again is refused.
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "busy");
+    let err = plan(&f, "t1", id, None, "SELECT 1").await.unwrap_err();
+    assert_eq!(kind(err), "busy");
+    let err =
+        f.sm.query_plan_statement(view.plan_id, 0)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "busy");
+    f.sm.query_cancel(run_id).await.unwrap();
+    events.done(LONG).await;
+    // Done: the plan ran once.
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "plan_expired");
+}
+
+#[tokio::test]
+async fn events_follow_contract() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let events = run_text(&f, id, "SELECT rows_1200", opts()).await;
+    assert_eq!(
+        events.tags(),
+        [
+            "statement_start",
+            "result_start",
+            "rows",
+            "rows",
+            "rows",
+            "result_end",
+            "done"
+        ]
+    );
+    let list = events.list();
+    assert_eq!(
+        list[0],
+        json!({ "t": "statement_start", "index": 0, "range": [0, 16] })
+    );
+    assert_eq!(list[1]["result_id"], 0);
+    assert_eq!(list[1]["index"], 0);
+    assert_eq!(list[1]["columns"][0]["name"], "n");
+    let sizes: Vec<usize> = events
+        .of("rows")
+        .iter()
+        .map(|e| e["rows"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(sizes, [500, 500, 200]);
+    assert_eq!(list[5]["row_count"], 1200);
+    assert_eq!(list[5]["truncated"], false);
+    assert_eq!(list[6]["stop"], Json::Null);
+    assert!(list[6]["elapsed_ms"].is_number());
+}
+
+#[tokio::test]
+async fn partial_batches_are_coalesced() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let events = run_text(&f, id, "SELECT trickle", opts()).await;
+    let rows = events.of("rows");
+    assert!((1..=2).contains(&rows.len()), "{} rows events", rows.len());
+    let all: Vec<i64> = rows
+        .iter()
+        .flat_map(|e| e["rows"].as_array().unwrap().clone())
+        .map(|r| r[0]["v"].as_i64().unwrap())
+        .collect();
+    assert_eq!(all, (0..100).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn cancel_emits_stopping_once_and_done_cancelled() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT slow; SELECT 2")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    let run_id =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let t0 = Instant::now();
+    f.sm.query_cancel(run_id).await.unwrap();
+    f.sm.query_cancel(run_id).await.unwrap();
+    let done = events.done(LONG).await;
+    assert!(t0.elapsed() < Duration::from_secs(1));
+    assert_eq!(done["stop"], json!({ "kind": "cancelled" }));
+    let stopping = events.of("stopping");
+    assert_eq!(stopping, [json!({ "t": "stopping", "reason": "user" })]);
+    let error = &events.of("statement_error")[0]["error"];
+    assert_eq!(error["kind"], "cancelled");
+    assert_eq!(error["tx_state"], "idle");
+    // The second statement was never sent.
+    assert_eq!(f.log.executed(), ["SELECT slow"]);
+    // Unknown or finished runs: no-op.
+    f.sm.query_cancel(run_id).await.unwrap();
+    f.sm.query_cancel(Uuid::new_v4()).await.unwrap();
+}
+
+#[tokio::test]
+async fn grace_expired_emits_abandoning() {
+    let f = fixture_with(DbKind::MySql, |sm| {
+        sm.with_cancel_grace(Duration::from_millis(50))
+    });
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "UPDATE stuck SET a = 1")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    let run_id =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    f.sm.query_cancel(run_id).await.unwrap();
+    let done = events.done(LONG).await;
+    let tags = events.tags();
+    let stopping = tags.iter().position(|t| t == "stopping").unwrap();
+    let abandoning = tags.iter().position(|t| t == "abandoning").unwrap();
+    assert!(stopping < abandoning, "{tags:?}");
+    assert_eq!(tags.iter().filter(|t| *t == "stopping").count(), 1);
+    // A statement that may have been applied is reported as such.
+    let error = &events.of("statement_error")[0]["error"];
+    assert_eq!(error["kind"], "connection_lost");
+    assert_eq!(error["outcome_unknown"], true);
+    assert_eq!(done["stop"], json!({ "kind": "error", "index": 0 }));
+}
+
+#[tokio::test]
+async fn timeout_progress_emits_stopping_timeout() {
+    // A `CancelSent` the user did not ask for is a timeout.
+    let f = fixture_with(DbKind::MySql, |sm| {
+        sm.with_cancel_grace(Duration::from_millis(20))
+    });
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT stuck").await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    // The driver's own cancel (as a statement timeout does).
+    f.log.cancelled.store(true, Ordering::SeqCst);
+    events.done(LONG).await;
+    assert_eq!(
+        events.of("stopping"),
+        [json!({ "t": "stopping", "reason": "timeout" })]
+    );
+}
+
+#[tokio::test]
+async fn history_row_per_sent_statement() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let events = run_text(
+        &f,
+        id,
+        "SELECT rows_3; SELECT * FROM fail; SELECT 3",
+        opts(),
+    )
+    .await;
+    assert_eq!(
+        events.done(LONG).await["stop"],
+        json!({ "kind": "error", "index": 1 })
+    );
+    let rows = f
+        .repo
+        .history_list(&HistoryFilter {
+            connection_id: Some(id),
+            search: None,
+            limit: 100,
+        })
+        .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let ok = rows.iter().find(|r| r.status == HistoryStatus::Ok).unwrap();
+    assert_eq!(ok.sql_text, "SELECT rows_3");
+    assert_eq!(ok.kind, "read");
+    assert_eq!(ok.row_count, Some(3));
+    assert!(!ok.redacted);
+    assert_eq!(ok.started_at.len(), "2026-10-20T10:00:00.000Z".len());
+    let err = rows
+        .iter()
+        .find(|r| r.status == HistoryStatus::Error)
+        .unwrap();
+    assert_eq!(err.sql_text, "SELECT * FROM fail");
+    assert_eq!(err.error_kind.as_deref(), Some("server"));
+    assert_eq!(err.error_code.as_deref(), Some("1146"));
+}
+
+#[tokio::test]
+async fn history_is_redacted_and_cancel_is_recorded() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    run_text(
+        &f,
+        id,
+        "CREATE USER 'u'@'%' IDENTIFIED BY 'hunter2-fake'",
+        opts(),
+    )
+    .await;
+    let view = plan(&f, "t1", id, None, "SELECT slow").await.unwrap();
+    let (emit, events) = collector();
+    let run_id =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    f.sm.query_cancel(run_id).await.unwrap();
+    events.done(LONG).await;
+    let rows = f
+        .repo
+        .history_list(&HistoryFilter {
+            connection_id: Some(id),
+            search: None,
+            limit: 100,
+        })
+        .unwrap();
+    let created = rows.iter().find(|r| r.kind == "ddl").unwrap();
+    assert!(created.redacted);
+    assert!(!created.sql_text.contains("hunter2-fake"), "{created:?}");
+    let cancelled = rows.iter().find(|r| r.kind == "read").unwrap();
+    assert_eq!(cancelled.status, HistoryStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn close_connection_during_run_ends_run() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT slow; SELECT 2")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let t0 = Instant::now();
+    f.sm.close(id).await;
+    let done = events.done(Duration::from_secs(2)).await;
+    assert!(t0.elapsed() < Duration::from_secs(2));
+    assert_eq!(done["stop"], json!({ "kind": "cancelled" }));
+    assert_eq!(f.log.executed(), ["SELECT slow"]);
+    // The metadata session and the tab's session are closed.
+    tokio::time::timeout(LONG, async {
+        while f.log.closes() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn close_tab_during_run_stops_it() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, None, "SELECT slow").await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let t0 = Instant::now();
+    f.sm.query_close_tab("t1", false).await.unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(1), "close did not wait");
+    events.done(LONG).await;
+    assert_eq!(f.log.closes(), 1, "the tab's session is closed");
+    // The tab starts over with a fresh session.
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3);
+}
+
+#[tokio::test]
+async fn retry_runs_the_stored_statement_verbatim() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let text = "SELECT 0;\nDELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2";
+    let view = plan(&f, "t1", id, None, text).await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+
+    let retry = f.sm.query_plan_statement(view.plan_id, 1).await.unwrap();
+    assert_eq!(retry.stmts.len(), 1);
+    assert_eq!(retry.stmts[0].index, 1);
+    assert_eq!(retry.stmts[0].range, view.stmts[1].range);
+    let (emit, events) = collector();
+    f.sm.query_run(retry.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(
+        events.of("statement_start")[0]["index"],
+        1,
+        "the statement keeps its index"
+    );
+    let executed = f.log.executed();
+    assert_eq!(
+        executed.last().unwrap(),
+        "CREATE PROCEDURE p() BEGIN SELECT 1; END"
+    );
+}
+
+#[tokio::test]
+async fn retry_is_judged_with_the_current_config() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, None, false).await;
+    let view = plan(&f, "t1", id, None, "SELECT 1; DELETE FROM t")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.env_tag = Some(EnvTag::Production);
+    let keep = SecretUpdate {
+        db_password: SecretChange::Keep,
+        ssh_password: SecretChange::Keep,
+        ssh_key_passphrase: SecretChange::Keep,
+    };
+    f.repo.update(cfg, keep).unwrap();
+    let retry = f.sm.query_plan_statement(view.plan_id, 1).await.unwrap();
+    assert_eq!(retry.stmts[0].verdict, Verdict::Confirm);
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(retry.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+}
+
+#[tokio::test]
+async fn use_moves_the_tracked_database() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", id, Some("a"), "USE b").await.unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    // The UI still shows `a`: the next plan must switch back.
+    plan(&f, "t1", id, Some("a"), "SELECT 1").await.unwrap();
+    assert_eq!(f.log.executed(), ["USE b", "USE `a`"]);
+}
+
+#[tokio::test]
+async fn lost_connection_drops_the_tab_session() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let events = run_text(&f, id, "SELECT lose", opts()).await;
+    assert_eq!(
+        events.of("statement_error")[0]["error"]["kind"],
+        "connection_lost"
+    );
+    assert_eq!(f.log.connects(), 2);
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3, "the next plan opens a fresh session");
+}
+
+#[tokio::test]
+async fn failed_tx_reports_tx_state() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    f.log.lose_on_tx.store(true, Ordering::SeqCst);
+    let err =
+        f.sm.query_tx_reported("t1", TxAction::Commit)
+            .await
+            .unwrap_err();
+    assert_eq!(err.kind, "connection_lost");
+    assert!(err.outcome_unknown);
+    assert_eq!(err.tx_state.as_deref(), Some("idle"));
+    f.log.lose_on_tx.store(false, Ordering::SeqCst);
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3, "the dead session was dropped");
+    // Busy has no transaction state to report.
+    let err =
+        f.sm.query_tx_reported("", TxAction::Commit)
+            .await
+            .unwrap_err();
+    assert_eq!((err.kind.as_str(), err.tx_state), ("config", None));
+}
+
+#[tokio::test]
+async fn explain_ddl_is_not_available() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let err =
+        f.sm.query_explain("t1", id, None, "CREATE TABLE t (a INT)", 0, false)
+            .await
+            .unwrap_err();
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "config");
+    assert_eq!(app.field.as_deref(), Some("explain"));
+    assert!(app.message.contains("Explain is not available"), "{app:?}");
+    assert!(f.log.executed().is_empty());
+}
+
+#[tokio::test]
+async fn explain_analyze_of_a_write_is_refused() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let err =
+        f.sm.query_explain("t1", id, None, "DELETE FROM t", 0, true)
+            .await
+            .unwrap_err();
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "config");
+    assert!(
+        app.message.contains("only available for read statements"),
+        "{app:?}"
+    );
+    // Plain Explain of the DELETE is fine (it does not execute it).
+    let view =
+        f.sm.query_explain("t1", id, None, "DELETE FROM t", 0, false)
+            .await
+            .unwrap();
+    assert_eq!(view.stmts[0].kind, StmtKindLabel::Write);
+    assert_eq!(view.stmts[0].verdict, Verdict::Allow);
+}
+
+#[tokio::test]
+async fn explain_analyze_needs_confirmation_on_production() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Production), false).await;
+    let text = "SELECT 1;\nSELECT * FROM t WHERE a = 1";
+    let view =
+        f.sm.query_explain("t1", id, None, text, 15, true)
+            .await
+            .unwrap();
+    assert_eq!(view.stmts.len(), 1);
+    assert_eq!(view.stmts[0].kind, StmtKindLabel::Read);
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(view.stmts[0].range, (10, 37));
+    let (emit, events) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit.clone())
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+    assert!(f.log.executed().is_empty());
+
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    let done = events.done(LONG).await;
+    assert_eq!(done["stop"], Json::Null);
+    assert_eq!(
+        f.log.executed(),
+        ["EXPLAIN ANALYZE SELECT * FROM t WHERE a = 1"]
+    );
+    assert_eq!(
+        events.tags(),
+        ["statement_start", "explain", "done"],
+        "rows are collected, not streamed"
+    );
+    let explain = &events.of("explain")[0];
+    assert_eq!(explain["index"], 0);
+    assert_eq!(explain["plan"]["kind"], "tree");
+}
+
+#[tokio::test]
+async fn explain_json_v2_gives_a_clear_error() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view =
+        f.sm.query_explain("t1", id, None, "SELECT jsonv2", 0, false)
+            .await
+            .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    let error = &events.of("statement_error")[0]["error"];
+    assert_eq!(error["kind"], "internal");
+    assert!(
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("explain_json_format_version"),
+        "{error}"
+    );
+
+    // Format version 1 parses into a tree.
+    let view =
+        f.sm.query_explain("t1", id, None, "SELECT * FROM t", 0, false)
+            .await
+            .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(events.of("explain")[0]["plan"]["kind"], "tree");
 }

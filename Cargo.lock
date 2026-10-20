@@ -1541,6 +1541,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-specta",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
  "tracing-appender",

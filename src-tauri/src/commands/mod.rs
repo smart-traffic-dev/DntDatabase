@@ -130,6 +130,10 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             query::statement_ranges,
             query::query_tx,
             query::query_close_tab,
+            query::query_run,
+            query::query_cancel,
+            query::query_explain,
+            query::query_plan_statement,
             transfer::export_connections,
             transfer::preview_import,
             transfer::apply_import,
@@ -146,6 +150,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             workspace::history_delete,
             workspace::history_clear,
         ])
+        // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
+        // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.
+        .events(tauri_specta::collect_events![])
         .typ::<Value>()
         .typ::<ColumnMeta>()
 }

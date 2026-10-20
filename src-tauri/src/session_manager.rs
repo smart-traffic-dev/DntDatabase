@@ -11,9 +11,13 @@
 
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use crate::commands::browse::folder_key;
-use crate::query_sessions::{close_slot, PlanStore, QuerySessions, PLAN_TTL, SLOT_CLOSE_WAIT};
+use crate::query_sessions::{
+    close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
+};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
-use dnt_core::driver::{Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session};
+use dnt_core::driver::{
+    Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session, DEFAULT_CANCEL_GRACE,
+};
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
@@ -313,6 +317,10 @@ pub struct SessionManager {
     /// Run plans of query tabs (see `query_sessions`).
     pub(crate) plans: PlanStore,
     pub(crate) plan_ttl: Duration,
+    /// Runs in progress (see `query_sessions`).
+    pub(crate) runs: Runs,
+    /// `ExecOptions::cancel_grace` of query runs.
+    pub(crate) cancel_grace: Duration,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -351,6 +359,8 @@ impl SessionManager {
             schema_error_ttl: SCHEMA_ERROR_TTL,
             plans: PlanStore::default(),
             plan_ttl: PLAN_TTL,
+            runs: Runs::default(),
+            cancel_grace: DEFAULT_CANCEL_GRACE,
         }
     }
 
@@ -679,6 +689,9 @@ impl SessionManager {
     /// Closes the tunnel and every metadata session and forgets the connection. An `open`
     /// in flight is superseded (it closes what it opened and returns `Cancelled`).
     pub async fn close(&self, id: Uuid) {
+        // A running query is stopped first, so closing does not wait for it; the run
+        // still ends with its `done` event.
+        self.stop_runs(|r| r.conn == id).await;
         self.bump_generation(id);
         let rt = self
             .runtimes
@@ -1250,7 +1263,7 @@ impl ConnectionRuntime {
     /// Replaces the slot of `database` with an empty one, aborts the load running on the
     /// old one (so the two loads do not compete for the metadata link), and loads the new
     /// one in the background. Callers waiting on the old slot follow the new one.
-    fn refresh_schema_cache(self: &Arc<Self>, database: &str) {
+    pub(crate) fn refresh_schema_cache(self: &Arc<Self>, database: &str) {
         let old = lock(&self.schema_caches).insert(database.to_string(), Arc::default());
         if let Some(old) = old {
             old.abort_load();
