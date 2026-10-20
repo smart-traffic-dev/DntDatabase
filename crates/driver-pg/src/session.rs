@@ -1,6 +1,6 @@
 use crate::cancel::{send_cancel, CancelState, CancelTarget, PgCanceller, RunGuard};
 use crate::values::{column_meta, to_value, Raw};
-use crate::{close_conn, io_error, map_pg_error, open, ConnectParams, PgConn};
+use crate::{close_conn, io_error, map_pg_error, open, take_notices, ConnectParams, PgConn};
 use async_trait::async_trait;
 use dnt_core::driver::{
     CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
@@ -602,6 +602,9 @@ impl Session for PgSession {
     /// while the timeout's cancel request was not confirmed (see `run_timed`). A user's
     /// cancel request that was never confirmed has the connection replaced before the
     /// next statement is sent (see `cancel.rs`).
+    ///
+    /// The server's notices (`RAISE NOTICE`, warnings…) that arrive while the statement
+    /// runs go to `sink.server_notices` once, before this returns, also on failure.
     async fn execute_one(
         &self,
         stmt: &str,
@@ -610,6 +613,65 @@ impl Session for PgSession {
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         let mut conn = self.conn.lock().await;
+        // Whatever arrived before (introspection, an earlier statement's stragglers).
+        take_notices(&self.params.notices);
+        let res = self.execute_locked(&mut conn, stmt, kind, opts, sink).await;
+        let notices = take_notices(&self.params.notices);
+        if !notices.is_empty() {
+            sink.server_notices(notices);
+        }
+        res
+    }
+
+    fn tx_state(&self) -> TxState {
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn dialect(&self) -> Dialect {
+        Dialect::Postgres
+    }
+
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(PgCanceller {
+            target: CancelTarget::new(&self.params),
+            state: self.cancel.clone(),
+        })
+    }
+
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+
+    async fn ping(&self) -> Result<(), DbError> {
+        self.conn
+            .lock()
+            .await
+            .client
+            .simple_query("")
+            .await
+            .map(|_| ())
+            .map_err(|e| map_pg_error(e, ConnectStage::Execute))
+    }
+
+    async fn close(self: Box<Self>) {
+        close_conn(self.conn.into_inner()).await;
+    }
+}
+
+impl PgSession {
+    /// [`Session::execute_one`] once the connection is locked.
+    async fn execute_locked(
+        &self,
+        conn: &mut PgConn,
+        stmt: &str,
+        kind: StatementKind,
+        opts: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<StmtOutcome, DbError> {
         // Cancels only apply to this call from here on (see `cancel.rs`).
         let run = self.cancel.begin(&opts.stop, opts.cancel_grace);
         let was_in_tx = self.in_transaction();
@@ -651,13 +713,13 @@ impl Session for PgSession {
             if was_in_tx || custom {
                 let mut message = format!("{cause}{notes}");
                 // Best effort so the next statement finds a live connection.
-                if let Err(e) = self.reconnect(&mut conn).await {
+                if let Err(e) = self.reconnect(conn).await {
                     message.push_str(&format!("; reconnecting failed: {e}"));
                 }
                 return Err(lost(was_in_tx, false, message));
             }
             reconnected = true;
-            if let Err(e) = self.reconnect(&mut conn).await {
+            if let Err(e) = self.reconnect(conn).await {
                 return Err(lost(
                     false,
                     false,
@@ -672,7 +734,7 @@ impl Session for PgSession {
             let mut emitted = false;
             let res = self
                 .run_timed(
-                    &conn,
+                    conn,
                     stmt,
                     opts,
                     &run,
@@ -704,7 +766,7 @@ impl Session for PgSession {
                     let unknown = may_have_committed(kind, was_in_tx, stmt);
                     // No cancel aimed at this call may reach the fresh connection.
                     run.retire();
-                    let replaced = self.reconnect(&mut conn).await;
+                    let replaced = self.reconnect(conn).await;
                     return Err(abandoned_error(cause, unknown, was_in_tx, &notes, replaced));
                 }
                 Err(StmtError::Unconfirmed { failed, cancel }) => {
@@ -727,7 +789,7 @@ impl Session for PgSession {
                         }
                     };
                     run.retire();
-                    let replaced = self.reconnect(&mut conn).await;
+                    let replaced = self.reconnect(conn).await;
                     return Err(abandoned_error(&cause, unknown, in_tx, &notes, replaced));
                 }
                 Err(StmtError::Pg(e)) => e,
@@ -762,7 +824,7 @@ impl Session for PgSession {
             if was_in_tx {
                 // The server rolled the transaction back; never replay anything.
                 // Best effort so the next statement finds a live connection.
-                return Err(match self.reconnect(&mut conn).await {
+                return Err(match self.reconnect(conn).await {
                     Ok(()) => lost(true, unknown, cause),
                     Err(e) => lost(true, unknown, format!("{cause}; reconnecting failed: {e}")),
                 });
@@ -771,7 +833,7 @@ impl Session for PgSession {
                 return Err(lost(false, unknown, cause));
             }
             reconnected = true;
-            if let Err(e) = self.reconnect(&mut conn).await {
+            if let Err(e) = self.reconnect(conn).await {
                 return Err(lost(
                     false,
                     unknown,
@@ -790,44 +852,6 @@ impl Session for PgSession {
         }
         self.track_after(kind, stmt);
         Ok(outcome)
-    }
-
-    fn tx_state(&self) -> TxState {
-        *self.tx.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    fn dialect(&self) -> Dialect {
-        Dialect::Postgres
-    }
-
-    fn reconnects(&self) -> u64 {
-        self.reconnects.load(Ordering::SeqCst)
-    }
-
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(PgCanceller {
-            target: CancelTarget::new(&self.params),
-            state: self.cancel.clone(),
-        })
-    }
-
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-
-    async fn ping(&self) -> Result<(), DbError> {
-        self.conn
-            .lock()
-            .await
-            .client
-            .simple_query("")
-            .await
-            .map(|_| ())
-            .map_err(|e| map_pg_error(e, ConnectStage::Execute))
-    }
-
-    async fn close(self: Box<Self>) {
-        close_conn(self.conn.into_inner()).await;
     }
 }
 

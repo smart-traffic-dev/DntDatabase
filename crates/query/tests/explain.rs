@@ -210,6 +210,102 @@ fn mysql80_json() {
     assert!(nodes(root(&tree)).iter().any(|n| n.est_cost.is_some()));
 }
 
+fn find<'a>(r: &'a PlanNode, label: &str) -> &'a PlanNode {
+    nodes(r)
+        .into_iter()
+        .find(|n| n.label == label)
+        .unwrap_or_else(|| panic!("no node {label:?} in {r:#?}"))
+}
+
+fn approx(got: Option<f64>, want: f64) -> bool {
+    got.is_some_and(|g| (g - want).abs() < 1e-9)
+}
+
+/// The node with the highest self cost.
+fn hottest(r: &PlanNode) -> &PlanNode {
+    nodes(r)
+        .into_iter()
+        .filter(|n| self_cost(n).is_some())
+        .max_by(|a, b| self_cost(a).partial_cmp(&self_cost(b)).unwrap())
+        .expect("a costed node")
+}
+
+/// MySQL `prefix_cost` is cumulative over the join order: normalized, every node's
+/// `est_cost` covers its own subtree (as on PostgreSQL), a table's own cost is
+/// `read_cost + eval_cost`, and the query block is not the hottest node.
+#[test]
+fn mysql_json_costs_are_per_subtree() {
+    // (fixture, query_cost, o: read + eval, c: read + eval); prefix costs o, o + c.
+    for (name, total, o_cost, c_cost) in [
+        ("mysql80_plain", 2.40, 1.30, 1.10),
+        ("mysql84_plain", 1.55, 1.20, 0.35),
+    ] {
+        let tree = parse(name, ExplainFormat::MySqlJson);
+        let r = root(&tree);
+        assert!(r.label.starts_with("Query block"), "{name}: {}", r.label);
+        let close = |got: Option<f64>, want: f64| got.is_some_and(|g| (g - want).abs() < 1e-6);
+        assert!(close(r.est_cost, total), "{name}: {:?}", r.est_cost);
+        let o = find(r, "index o");
+        let c = find(r, "eq_ref c");
+        assert!(close(o.est_cost, o_cost), "{name}: o {:?}", o.est_cost);
+        assert!(close(c.est_cost, c_cost), "{name}: c {:?}", c.est_cost);
+        // Operations without a cost of their own stay without one.
+        assert_eq!(find(r, "Nested loop").est_cost, None, "{name}");
+        assert!(close(self_cost(r), 0.0), "{name}: {:?}", self_cost(r));
+        assert_eq!(hottest(r).label, "index o", "{name}");
+    }
+}
+
+/// MariaDB table costs are already per table; the query block's total is their sum.
+#[test]
+fn mariadb_json_costs_are_per_subtree() {
+    for name in ["mariadb114_plain", "mariadb114_analyze"] {
+        let tree = parse(name, ExplainFormat::MariaDbJson);
+        let r = root(&tree);
+        assert!(approx(r.est_cost, 0.010588495), "{name}: {:?}", r.est_cost);
+        assert!(approx(find(r, "index o").est_cost, 0.007085975), "{name}");
+        assert!(approx(find(r, "eq_ref c").est_cost, 0.00350252), "{name}");
+        assert!(self_cost(r).unwrap() < 1e-9, "{name}: {:?}", self_cost(r));
+        assert_eq!(hottest(r).label, "index o", "{name}");
+    }
+}
+
+/// A table with a subquery below it covers the subquery's cost; a query block whose
+/// total is below its parts (rounding) is raised to them, so no self cost is negative.
+#[test]
+fn mysql_json_table_cost_includes_its_subtree() {
+    let raw = r#"{"query_block": {"select_id": 1, "cost_info": {"query_cost": "5.00"},
+      "nested_loop": [
+        {"table": {"table_name": "a", "access_type": "ALL",
+          "cost_info": {"read_cost": "1.00", "eval_cost": "0.50", "prefix_cost": "1.50"}}},
+        {"table": {"table_name": "d", "access_type": "ALL",
+          "cost_info": {"read_cost": "2.00", "eval_cost": "0.50", "prefix_cost": "4.00"},
+          "materialized_from_subquery": {"query_block": {"select_id": 2,
+            "cost_info": {"query_cost": "3.00"},
+            "table": {"table_name": "b", "access_type": "ALL",
+              "cost_info": {"read_cost": "2.50", "eval_cost": "0.50", "prefix_cost": "3.00"}}}}}}
+      ]}}"#;
+    let tree = parse_plan(
+        ExplainFormat::MySqlJson,
+        &["EXPLAIN".to_string()],
+        &[vec![Value::Json(raw.into())]],
+    )
+    .unwrap();
+    let r = root(&tree);
+    assert!(approx(find(r, "ALL a").est_cost, 1.5));
+    assert!(approx(find(r, "ALL b").est_cost, 3.0));
+    assert!(approx(find(r, "Query block #2").est_cost, 3.0));
+    // d: 2.50 of its own + the subquery's 3.00.
+    let d = find(r, "ALL d");
+    assert!(approx(d.est_cost, 5.5), "{:?}", d.est_cost);
+    assert!(approx(self_cost(d), 2.5));
+    // 5.00 < 1.50 + 5.50: raised to 7.00.
+    assert!(approx(r.est_cost, 7.0), "{:?}", r.est_cost);
+    assert!(nodes(r)
+        .iter()
+        .all(|n| self_cost(n).is_none_or(|s| s >= 0.0)));
+}
+
 #[test]
 fn mysql84_json() {
     let tree = assert_tree("mysql84_plain", ExplainFormat::MySqlJson);
@@ -302,6 +398,22 @@ fn self_cost_subtracts_children() {
     assert_eq!(self_cost(&n), Some(3.0));
     assert_eq!(self_cost(&node(None, vec![])), None);
     assert_eq!(self_cost(&node(Some(2.5), vec![])), Some(2.5));
+}
+
+/// A child without a cost is looked through: its nearest costed descendants count.
+#[test]
+fn self_cost_subtracts_the_nearest_costed_descendants() {
+    let n = node(
+        Some(10.0),
+        vec![node(
+            None,
+            vec![
+                node(Some(3.0), vec![node(Some(2.0), vec![])]),
+                node(Some(4.0), vec![]),
+            ],
+        )],
+    );
+    assert_eq!(self_cost(&n), Some(3.0));
 }
 
 #[test]

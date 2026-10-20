@@ -81,6 +81,76 @@ pub struct StmtOutcome {
     pub late_completion: bool,
 }
 
+/// Most server messages kept per statement ([`ServerNotices`]); the rest are counted.
+pub const MAX_SERVER_NOTICES: usize = 50;
+
+/// A message the server sent about a statement besides its result: a PostgreSQL
+/// `NOTICE` / `WARNING` / `INFO`, a MySQL `Warning` / `Note` (`SHOW WARNINGS`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerNotice {
+    /// The level as the server names it (`NOTICE`, `WARNING`, `Warning`, `Note`…).
+    pub level: String,
+    /// The MySQL code (`1292`); `None` on PostgreSQL.
+    pub code: Option<String>,
+    pub message: String,
+}
+
+impl ServerNotice {
+    /// The Messages line: `NOTICE: …`, `Warning 1292: …`.
+    pub fn line(&self) -> String {
+        match &self.code {
+            Some(code) => format!("{} {code}: {}", self.level, self.message),
+            None => format!("{}: {}", self.level, self.message),
+        }
+    }
+}
+
+/// The server messages of one statement, in order: the first [`MAX_SERVER_NOTICES`]
+/// kept, the rest only counted (`omitted`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerNotices {
+    pub kept: Vec<ServerNotice>,
+    pub omitted: u64,
+}
+
+impl ServerNotices {
+    pub fn push(&mut self, notice: ServerNotice) {
+        if self.kept.len() < MAX_SERVER_NOTICES {
+            self.kept.push(notice);
+        } else {
+            self.omitted = self.omitted.saturating_add(1);
+        }
+    }
+
+    /// Counts `n` messages that were not read at all.
+    pub fn add_omitted(&mut self, n: u64) {
+        self.omitted = self.omitted.saturating_add(n);
+    }
+
+    /// Appends `other` (kept up to the bound, the rest counted).
+    pub fn extend(&mut self, other: ServerNotices) {
+        for n in other.kept {
+            self.push(n);
+        }
+        self.add_omitted(other.omitted);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.kept.is_empty() && self.omitted == 0
+    }
+
+    /// One Messages line per kept message, then one for the omitted ones.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.kept.iter().map(ServerNotice::line).collect();
+        match self.omitted {
+            0 => {}
+            1 => lines.push("1 more server message not shown".into()),
+            n => lines.push(format!("{n} more server messages not shown")),
+        }
+        lines
+    }
+}
+
 /// Progress of a statement being stopped, reported through [`RowSink::progress`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecProgress {
@@ -188,6 +258,9 @@ pub trait RowSink: Send {
     fn result_end(&mut self, summary: &ResultSummary);
     /// Progress while a statement is being stopped. Default: ignored.
     fn progress(&mut self, _p: ExecProgress) {}
+    /// The messages the server sent about the statement (notices, warnings), at most
+    /// once per `execute_one`, before it returns (also when it fails). Default: ignored.
+    fn server_notices(&mut self, _notices: ServerNotices) {}
 }
 
 /// A [`RowSink`] shared between a running statement (which streams into `&SharedSink`)
@@ -226,6 +299,9 @@ impl RowSink for &SharedSink<'_> {
     }
     fn progress(&mut self, p: ExecProgress) {
         SharedSink::progress(self, p);
+    }
+    fn server_notices(&mut self, notices: ServerNotices) {
+        self.with(|s| s.server_notices(notices));
     }
 }
 
@@ -293,6 +369,82 @@ mod tests {
         };
         s.result_end(&summary);
         assert_eq!(s.0, [summary]);
+    }
+
+    fn notice(level: &str, code: Option<&str>, message: &str) -> ServerNotice {
+        ServerNotice {
+            level: level.into(),
+            code: code.map(Into::into),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn server_notice_lines_name_the_level() {
+        assert_eq!(notice("NOTICE", None, "hello").line(), "NOTICE: hello");
+        assert_eq!(
+            notice(
+                "Warning",
+                Some("1292"),
+                "Truncated incorrect INTEGER value: 'abc'"
+            )
+            .line(),
+            "Warning 1292: Truncated incorrect INTEGER value: 'abc'"
+        );
+    }
+
+    /// At most [`MAX_SERVER_NOTICES`] are kept; the rest are counted and summed up in
+    /// one last line.
+    #[test]
+    fn server_notices_are_bounded() {
+        let mut n = ServerNotices::default();
+        assert!(n.is_empty());
+        assert!(n.lines().is_empty());
+        for i in 0..MAX_SERVER_NOTICES + 3 {
+            n.push(notice("NOTICE", None, &format!("n{i}")));
+        }
+        assert_eq!(n.kept.len(), MAX_SERVER_NOTICES);
+        assert_eq!(n.omitted, 3);
+        let lines = n.lines();
+        assert_eq!(lines.len(), MAX_SERVER_NOTICES + 1);
+        assert_eq!(lines[0], "NOTICE: n0");
+        assert_eq!(
+            lines[MAX_SERVER_NOTICES],
+            "3 more server messages not shown"
+        );
+        n.add_omitted(1);
+        assert_eq!(
+            n.lines().last().unwrap(),
+            "4 more server messages not shown"
+        );
+        let mut one = ServerNotices::default();
+        one.add_omitted(1);
+        assert!(!one.is_empty());
+        assert_eq!(one.lines(), ["1 more server message not shown"]);
+    }
+
+    /// A sink without `server_notices` ignores them; `&SharedSink` forwards them.
+    #[test]
+    fn server_notices_reach_the_sink() {
+        struct Keep(Vec<ServerNotices>);
+        impl RowSink for Keep {
+            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+            fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+            fn result_end(&mut self, _summary: &ResultSummary) {}
+            fn server_notices(&mut self, notices: ServerNotices) {
+                self.0.push(notices);
+            }
+        }
+        let mut batch = ServerNotices::default();
+        batch.push(notice("WARNING", None, "careful"));
+        Ends(vec![]).server_notices(batch.clone());
+        let mut keep = Keep(vec![]);
+        {
+            let shared = SharedSink::new(&mut keep);
+            let mut handle = &shared;
+            handle.server_notices(batch.clone());
+        }
+        assert_eq!(keep.0, [batch]);
     }
 
     /// A session that is its own introspector, as the drivers are built. Records the

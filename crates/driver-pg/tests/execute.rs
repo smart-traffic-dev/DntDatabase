@@ -1,5 +1,6 @@
 use dnt_core::driver::{
-    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
+    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices, Session,
+    StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::sql::classify;
@@ -22,9 +23,13 @@ struct Res {
 struct Collect {
     results: Vec<Res>,
     progress: Vec<ExecProgress>,
+    notices: Vec<ServerNotices>,
 }
 
 impl RowSink for Collect {
+    fn server_notices(&mut self, notices: ServerNotices) {
+        self.notices.push(notices);
+    }
     fn progress(&mut self, p: ExecProgress) {
         self.progress.push(p);
     }
@@ -111,6 +116,62 @@ async fn kill(t: Target, pid: i64) {
     Box::new(admin).close().await;
     // Let the client notice the closed socket.
     tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// `RAISE NOTICE` / `RAISE WARNING` reach the sink once, after the statement, with
+/// their level; also from a statement that fails afterwards. Only the statement's own:
+/// the next statement starts with none.
+#[tokio::test]
+async fn server_notices_reach_the_sink() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let (res, c) = run_one(
+            &s,
+            "DO $$ BEGIN RAISE NOTICE 'hello %', 1; RAISE WARNING 'careful'; END $$",
+            ExecOptions::default(),
+        )
+        .await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(c.notices.len(), 1, "{t:?}: {:?}", c.notices);
+        assert_eq!(
+            c.notices[0].lines(),
+            ["NOTICE: hello 1", "WARNING: careful"],
+            "{t:?}"
+        );
+
+        let (res, c) = run_one(
+            &s,
+            "DO $$ BEGIN RAISE NOTICE 'before'; RAISE EXCEPTION 'boom'; END $$",
+            ExecOptions::default(),
+        )
+        .await;
+        assert!(res.is_err(), "{t:?}");
+        assert_eq!(c.notices.len(), 1, "{t:?}: {:?}", c.notices);
+        assert_eq!(c.notices[0].lines(), ["NOTICE: before"], "{t:?}");
+
+        let (res, c) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        res.unwrap();
+        assert!(
+            c.notices.iter().all(ServerNotices::is_empty),
+            "{t:?}: {:?}",
+            c.notices
+        );
+
+        // Bounded: the rest are counted.
+        let (res, c) = run_one(
+            &s,
+            "DO $$ BEGIN FOR i IN 1..60 LOOP RAISE NOTICE 'n%', i; END LOOP; END $$",
+            ExecOptions::default(),
+        )
+        .await;
+        res.unwrap();
+        let n = &c.notices[0];
+        assert_eq!(n.kept.len(), MAX_SERVER_NOTICES, "{t:?}");
+        assert_eq!(n.omitted, 10, "{t:?}");
+        assert_eq!(n.kept[0].message, "n1", "{t:?}");
+        Box::new(s).close().await;
+    }
 }
 
 #[tokio::test]

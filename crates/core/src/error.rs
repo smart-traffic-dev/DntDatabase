@@ -491,6 +491,23 @@ const HINT_PG_HBA: &str = "pg_hba.conf rejects connections from this host/user."
 const HINT_REFUSED: &str =
     "Connection refused: check host, port, firewall, or whether an SSH tunnel is needed.";
 
+const HINT_DNS: &str = "Host name could not be resolved: check the host, or your DNS / VPN.";
+const HINT_SSH_DNS: &str =
+    "SSH host name could not be resolved: check the SSH host, or your DNS / VPN.";
+
+/// A name-resolution failure (`msg` lowercased): WinSock 11001 / 11004, getaddrinfo's
+/// texts on Linux and macOS.
+fn is_dns_failure(msg: &str) -> bool {
+    msg.contains("os error 11001")
+        || msg.contains("os error 11004")
+        || msg.contains("no such host is known")
+        || msg.contains("failed to lookup address")
+        || msg.contains("name or service not known")
+        || msg.contains("nodename nor servname")
+        || msg.contains("temporary failure in name resolution")
+        || msg.contains("no address associated with hostname")
+}
+
 fn is_access_denied(msg: &str) -> bool {
     msg.contains("(1045)") || msg.contains("[1045]")
 }
@@ -550,7 +567,9 @@ fn static_hint(err: &DbError) -> Option<&'static str> {
         }
         DbError::Connect { message } => {
             let m = message.to_lowercase();
-            if m.contains("10061")
+            if is_dns_failure(&m) {
+                Some(HINT_DNS)
+            } else if m.contains("10061")
                 || m.contains("econnrefused")
                 || m.contains("refused")
                 || m.contains("(2003)")
@@ -564,6 +583,10 @@ fn static_hint(err: &DbError) -> Option<&'static str> {
             stage: SshStage::Auth,
             ..
         } => Some("SSH authentication failed. If the key has a passphrase, enter it."),
+        DbError::Ssh {
+            stage: SshStage::Connect,
+            message,
+        } if is_dns_failure(&message.to_lowercase()) => Some(HINT_SSH_DNS),
         _ => None,
     }
 }
@@ -627,6 +650,42 @@ mod tests {
         assert_eq!(
             static_hint(&e),
             Some("Connection refused: check host, port, firewall, or whether an SSH tunnel is needed.")
+        );
+    }
+    /// Name-resolution failures, as the drivers and the SSH tunnel word them on
+    /// Windows, Linux and macOS.
+    #[test]
+    fn hint_dns_failure() {
+        for message in [
+            "No such host is known. (os error 11001)",
+            "The requested name is valid, but no data of the requested type was found. (os error 11004)",
+            "failed to lookup address information: Name or service not known",
+            "failed to lookup address information: nodename nor servname provided, or not known",
+            "failed to lookup address information: Temporary failure in name resolution",
+            "error connecting to server: failed to lookup address information: No address associated with hostname",
+        ] {
+            let e = DbError::Connect {
+                message: message.into(),
+            };
+            assert_eq!(static_hint(&e), Some(HINT_DNS), "{message}");
+            let staged = DbError::at_stage(ConnectStage::ConnectDb, vec![], e);
+            let app = AppError::from(staged);
+            assert_eq!(app.hint.as_deref(), Some(HINT_DNS), "{message}");
+        }
+        let ssh = DbError::Ssh {
+            stage: SshStage::Connect,
+            message: "No such host is known. (os error 11001)".into(),
+        };
+        assert_eq!(static_hint(&ssh), Some(HINT_SSH_DNS));
+        // Other connect failures keep their own hint (or none).
+        let other = DbError::Ssh {
+            stage: SshStage::Connect,
+            message: "connection reset".into(),
+        };
+        assert_eq!(static_hint(&other), None);
+        assert_eq!(
+            HINT_DNS,
+            "Host name could not be resolved: check the host, or your DNS / VPN."
         );
     }
     #[test]
