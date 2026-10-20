@@ -1,19 +1,44 @@
 import { create } from 'zustand';
 import { api, isCancelled, notOpenError, toAppError } from '../api';
-import type { AppError, SortSpec, TableDataPage } from '../bindings';
+import type { AppError, DataFilter, FilterMode, FilterOp, SortSpec, TableDataPage } from '../bindings';
 import type { Loadable } from './objectData';
 import { promptHandles, reopenConnection } from './reopen';
 import type { ObjectTabRef as Tab } from './tabs';
 import { useTabs } from './tabs';
 
-/** The data view of one object tab: its paging, sort and the page on screen. */
+/** One condition row of the filter bar, as typed (values are parsed on Apply). */
+export interface FilterRow {
+  id: number;
+  column: string;
+  op: FilterOp;
+  /** The value; `IN` takes a comma-separated list here. */
+  value: string;
+  /** The upper bound of `BETWEEN`. */
+  value2: string;
+}
+
+/** The filter bar of a tab as edited (applied only by Apply). */
+export interface FilterDraft {
+  mode: FilterMode;
+  rows: FilterRow[];
+}
+
+/** The data view of one object tab: its paging, filter, sort and the page on screen. */
 export interface TableDataState {
   connectionId: string;
   pageSize: number;
   offset: number;
   /** Offsets of the pages Next left, so Prev returns exactly (pages can stop early). */
   back: number[];
-  sort: SortSpec | null;
+  /** Sort keys in order (empty: the primary key). */
+  sort: SortSpec[];
+  /** The filter the pages are read with (null: all rows). */
+  filter: DataFilter | null;
+  /** What the filter bar shows. */
+  draft: FilterDraft;
+  filterBarOpen: boolean;
+  /** Column names of the last page read (the filter bar offers them while a page loads). */
+  columns: string[];
   page?: Loadable<TableDataPage>;
   /** Exact row count (`table_row_count`), fetched on demand; cleared by any page load. */
   count?: Loadable<number>;
@@ -32,9 +57,19 @@ interface TableDataStore {
   setPageSize(tab: Tab, pageSize: number): void;
   next(tab: Tab): void;
   prev(tab: Tab): void;
-  /** Header click: none -> ascending -> descending -> none; another column starts ascending. */
-  toggleSort(tab: Tab, column: string): void;
+  /**
+   * Header click: that column becomes the only key, cycling none -> ascending -> descending -> none.
+   * With `additive` (Shift+click) the column is added as a further key, or cycled in place.
+   */
+  toggleSort(tab: Tab, column: string, additive?: boolean): void;
   clearSort(tab: Tab): void;
+  /** Reads pages with `filter` from the first page (null: all rows). */
+  applyFilter(tab: Tab, filter: DataFilter | null): void;
+  /** Empties the filter bar and drops the filter. */
+  clearFilter(tab: Tab): void;
+  setDraft(tab: Tab, draft: FilterDraft): void;
+  /** Shows / hides the filter bar; `open` forces it. */
+  toggleFilterBar(tab: Tab, open?: boolean): void;
   count(tab: Tab): Promise<void>;
   /** Stops the page load / the count running for the tab (the backend cancels the statement). */
   cancelPage(tab: Tab): void;
@@ -48,10 +83,66 @@ interface TableDataStore {
 export const pageKey = (tabId: string) => `${tabId}:page`;
 export const countKey = (tabId: string) => `${tabId}:count`;
 
-/** The next sort after a click on `column`. */
-export function nextSort(current: SortSpec | null, column: string): SortSpec | null {
-  if (!current || current.column !== column) return { column, dir: 'asc' };
-  return current.dir === 'asc' ? { column, dir: 'desc' } : null;
+type Dir = SortSpec['dir'];
+const cycle = (dir: Dir | undefined): Dir | null => (dir === undefined ? 'asc' : dir === 'asc' ? 'desc' : null);
+
+/**
+ * The sort after a header click on `column`: a plain click makes it the only key (cycling it
+ * when it already is); Shift+click (`additive`) adds it as a further key, or cycles it in place.
+ */
+export function nextSortKeys(current: SortSpec[], column: string, additive = false): SortSpec[] {
+  const at = current.findIndex((k) => k.column === column);
+  if (!additive) {
+    const sole = current.length === 1 && at === 0;
+    const dir = sole ? cycle(current[0]!.dir) : 'asc';
+    return dir ? [{ column, dir }] : [];
+  }
+  const dir = cycle(current[at]?.dir);
+  if (at < 0) return [...current, { column, dir: 'asc' }];
+  return dir ? current.map((k, i) => (i === at ? { column, dir } : k)) : current.filter((_, i) => i !== at);
+}
+
+let rowIds = 0;
+/** A new condition row on `column` (default `=`). */
+export function newFilterRow(column: string, op: FilterOp = 'eq', value = ''): FilterRow {
+  return { id: ++rowIds, column, op, value, value2: '' };
+}
+
+export const emptyDraft = (): FilterDraft => ({ mode: 'and', rows: [] });
+
+/** How many values each operator takes in the bar: 0, 1, 2 (BETWEEN) or a list (IN). */
+export function opArity(op: FilterOp): 0 | 1 | 2 | 'list' {
+  if (op === 'is_null' || op === 'is_not_null') return 0;
+  if (op === 'between') return 2;
+  if (op === 'in') return 'list';
+  return 1;
+}
+
+/** `a, b ,c` -> `['a', 'b', 'c']` (empty items dropped). */
+export function splitList(text: string): string[] {
+  return text
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/** The filter AST of a draft; rows without a column are skipped. An error names the first bad row. */
+export function draftToFilter(draft: FilterDraft): { filter: DataFilter | null; error: string | null } {
+  const conditions = [];
+  for (const row of draft.rows) {
+    if (!row.column) continue;
+    const arity = opArity(row.op);
+    let values: string[];
+    if (arity === 0) values = [];
+    else if (arity === 1) values = [row.value];
+    else if (arity === 2) values = [row.value, row.value2];
+    else {
+      values = splitList(row.value);
+      if (values.length === 0) return { filter: null, error: `IN on ${row.column} needs at least one value.` };
+    }
+    conditions.push({ column: row.column, op: row.op, values });
+  }
+  return { filter: conditions.length ? { mode: draft.mode, conditions } : null, error: null };
 }
 
 let counter = 0;
@@ -72,7 +163,7 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       return { byTab: { ...s.byTab, [tabId]: { ...current, ...change } } };
     });
 
-  /** Moves to a new position (offset / size / sort) and loads it. */
+  /** Moves to a new position (offset / size / sort / filter) and loads it. */
   const go = (tab: Tab, change: Partial<TableDataState>, keepCount: boolean) => {
     patch(tab.id, change);
     void get().load(tab, { keepCount });
@@ -82,7 +173,22 @@ export const useTableData = create<TableDataStore>()((set, get) => {
     byTab: {},
     init(tab, pageSize) {
       if (get().byTab[tab.id]) return;
-      set((s) => ({ byTab: { ...s.byTab, [tab.id]: { connectionId: tab.connectionId, pageSize, offset: 0, back: [], sort: null } } }));
+      set((s) => ({
+        byTab: {
+          ...s.byTab,
+          [tab.id]: {
+            connectionId: tab.connectionId,
+            pageSize,
+            offset: 0,
+            back: [],
+            sort: [],
+            filter: null,
+            draft: emptyDraft(),
+            filterBarOpen: false,
+            columns: [],
+          },
+        },
+      }));
       void get().load(tab);
     },
     async load(tab, opts = {}) {
@@ -102,8 +208,8 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       const latest = () => tokens.get(key) === token && isOpen(tab.id);
       try {
         // The backend cancels the previous request of this key itself.
-        const data = await api.tableData(tab.connectionId, tab.objectRef, state.pageSize, state.offset, state.sort, key);
-        if (latest()) patch(tab.id, { page: { status: 'ok', data } });
+        const data = await api.tableData(tab.connectionId, tab.objectRef, state.pageSize, state.offset, state.sort, state.filter, key);
+        if (latest()) patch(tab.id, { page: { status: 'ok', data }, columns: data.columns.map((c) => c.name) });
       } catch (e) {
         // A superseded request fails with `cancelled`: only the latest one is shown.
         if (latest()) patch(tab.id, { page: { status: 'error', error: toAppError(e) } });
@@ -126,22 +232,40 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       const offset = s.back.at(-1) ?? Math.max(0, s.offset - s.pageSize);
       go(tab, { offset, back }, true);
     },
-    toggleSort(tab, column) {
+    toggleSort(tab, column, additive = false) {
       const s = get().byTab[tab.id];
-      if (s) go(tab, { sort: nextSort(s.sort, column), offset: 0, back: [] }, false);
+      // Sorting never changes the count.
+      if (s) go(tab, { sort: nextSortKeys(s.sort, column, additive), offset: 0, back: [] }, true);
     },
     clearSort(tab) {
-      if (get().byTab[tab.id]?.sort) go(tab, { sort: null, offset: 0, back: [] }, false);
+      if (get().byTab[tab.id]?.sort.length) go(tab, { sort: [], offset: 0, back: [] }, true);
+    },
+    applyFilter(tab, filter) {
+      if (get().byTab[tab.id]) go(tab, { filter, offset: 0, back: [] }, false);
+    },
+    clearFilter(tab) {
+      const s = get().byTab[tab.id];
+      if (!s) return;
+      patch(tab.id, { draft: { ...s.draft, rows: [] } });
+      if (s.filter) go(tab, { filter: null, offset: 0, back: [] }, false);
+    },
+    setDraft(tab, draft) {
+      patch(tab.id, { draft });
+    },
+    toggleFilterBar(tab, open) {
+      const s = get().byTab[tab.id];
+      if (s) patch(tab.id, { filterBarOpen: open ?? !s.filterBarOpen });
     },
     async count(tab) {
-      if (!get().byTab[tab.id]) return;
+      const state = get().byTab[tab.id];
+      if (!state) return;
       const token = ++counter;
       const key = countKey(tab.id);
       tokens.set(key, token);
       patch(tab.id, { count: { status: 'loading' } });
       const latest = () => tokens.get(key) === token && isOpen(tab.id);
       try {
-        const { rows } = await api.tableRowCount(tab.connectionId, tab.objectRef, key);
+        const { rows } = await api.tableRowCount(tab.connectionId, tab.objectRef, state.filter, key);
         if (latest()) patch(tab.id, { count: { status: 'ok', data: rows } });
       } catch (e) {
         if (!latest()) return;

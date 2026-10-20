@@ -137,7 +137,7 @@ describe('ObjectTab', () => {
     expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findByText('Rows 1–1')).toBeInTheDocument();
     // The Settings default is the page size.
-    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 250, offset: 0, order: null, requestKey: `${tab.id}:page` }]);
+    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 250, offset: 0, sort: [], filter: null, requestKey: `${tab.id}:page` }]);
     // The detail's row estimate is shown next to the page.
     expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
   });

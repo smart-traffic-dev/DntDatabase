@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
+import type { ExportRequest } from '../dialogs/resultExport';
 
 /** A prompt the connection tree needs answered before it can open a connection. */
 export interface PendingPrompt {
@@ -17,7 +18,9 @@ export type UiRequest =
   | { kind: 'deleteNode'; node: NodeId; label: string }
   | { kind: 'export'; preselected?: NodeId[] }
   | { kind: 'import' }
-  | { kind: 'settings' };
+  | { kind: 'settings' }
+  /** Export a query result or the data view to a file. */
+  | { kind: 'exportResult'; request: ExportRequest };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =

@@ -86,6 +86,86 @@
   color: var(--color-danger);
 }
 
+/* A toggled toolbar button (the filter bar is open): a background tint, no stripe. */
+.qt-btn.dv-on {
+  background: var(--sel);
+}
+
+.dv-filtered {
+  color: var(--text-secondary);
+  font-size: var(--text-footnote);
+  white-space: nowrap;
+}
+
+/* The filter bar (Navicat Filter): condition rows under the toolbar. */
+.filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--color-sidebar);
+  font-size: var(--text-callout);
+}
+
+.fb-head,
+.fb-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fb-head .spacer {
+  flex: 1;
+}
+
+.fb-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+}
+
+.fb-op {
+  min-width: 110px;
+}
+
+.fb-value {
+  height: 28px;
+  min-width: 160px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--studio-control);
+  color: var(--text);
+  font: inherit;
+}
+
+.fb-and {
+  color: var(--text-secondary);
+}
+
+.fb-remove {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.fb-remove:hover {
+  background: var(--hover);
+}
+
+.fb-error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--text-footnote);
+}
+
 /* Implicit primary-key order: a quiet hint, not a sort state. */
 .dv-key-order {
   color: var(--text-faint);

@@ -4,11 +4,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ColumnMeta, ObjectRef, TableDataPage, Value } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
-import { nextSort, useTableData } from '../store/tableData';
+import { draftToFilter, newFilterRow, nextSortKeys, splitList, useTableData } from '../store/tableData';
+import { useDialogs } from '../store/dialogs';
+import { toggleFilterBar } from '../dialogs/resultExport';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { useAppSettings } from '../store/appSettings';
 import { callsOf, config, fail, ids, mockBackend, resetStores, serverInfo, sampleTree } from '../test/backend';
-import { DataView, pageSizeOptions, pageToResult, sortMarks, unsortable } from './DataView';
+import { DataView, dataCellMenu, filterValueText, pageSizeOptions, pageToResult, sortMarks, unsortable } from './DataView';
 
 // The grid draws on a canvas: a stand-in with one header button per column (calls
 // `onHeaderClicked` like Glide's header click, shows the header mark) and the row numbering.
@@ -95,7 +97,7 @@ describe('DataView', () => {
       table_data: (a) => ((a.offset as number) === 0 ? page(10, 1, true) : page(3, 11, false)),
     });
     expect(await screen.findByText('Rows 1–10')).toBeInTheDocument();
-    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 10, offset: 0, order: null, requestKey: PAGE_KEY }]);
+    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 10, offset: 0, sort: [], filter: null, requestKey: PAGE_KEY }]);
     expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     expect(screen.getByTestId('grid')).toHaveAttribute('data-first-row', '1');
 
@@ -130,19 +132,19 @@ describe('DataView', () => {
 
     await user.click(header());
     await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
-    expect(callsOf('table_data')[1]).toMatchObject({ offset: 0, order: { column: 'we`ird"col', dir: 'asc' } });
+    expect(callsOf('table_data')[1]).toMatchObject({ offset: 0, sort: [{ column: 'we`ird"col', dir: 'asc' }] });
     // The column keeps its name (copy / export use it); the arrow is drawn in the header.
     await waitFor(() => expect(header()).toHaveAttribute('data-mark', '↑'));
     expect(screen.getByText(/Sorted by we`ird"col ↑/)).toBeInTheDocument();
 
     await user.click(header());
     await waitFor(() => expect(callsOf('table_data')).toHaveLength(3));
-    expect(callsOf('table_data')[2]).toMatchObject({ order: { column: 'we`ird"col', dir: 'desc' } });
+    expect(callsOf('table_data')[2]).toMatchObject({ sort: [{ column: 'we`ird"col', dir: 'desc' }] });
     await waitFor(() => expect(header()).toHaveAttribute('data-mark', '↓'));
 
     await user.click(header());
     await waitFor(() => expect(callsOf('table_data')).toHaveLength(4));
-    expect(callsOf('table_data')[3]).toMatchObject({ order: null });
+    expect(callsOf('table_data')[3]).toMatchObject({ sort: [] });
     await waitFor(() => expect(header()).toHaveAttribute('data-mark', ''));
     expect(screen.queryByText(/Sorted by/)).not.toBeInTheDocument();
   });
@@ -171,9 +173,9 @@ describe('DataView', () => {
     await screen.findByText('Rows 11–20');
     await user.click(grid().getByRole('button', { name: 'id' }));
     await screen.findByText('Rows 1–10');
-    expect(callsOf('table_data').at(-1)).toMatchObject({ offset: 0, order: { column: 'id', dir: 'asc' } });
+    expect(callsOf('table_data').at(-1)).toMatchObject({ offset: 0, sort: [{ column: 'id', dir: 'asc' }] });
     await user.click(screen.getByRole('button', { name: 'Clear sort' }));
-    await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ order: null }));
+    await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ sort: [] }));
   });
 
   it('the page size select changes only this tab', async () => {
@@ -268,10 +270,10 @@ describe('DataView', () => {
     expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Count' }));
     expect(await screen.findByText('12,400 rows')).toBeInTheDocument();
-    expect(callsOf('table_row_count')).toEqual([{ id: ids.prod, obj: objectRef, requestKey: COUNT_KEY }]);
+    expect(callsOf('table_row_count')).toEqual([{ id: ids.prod, obj: objectRef, filter: null, requestKey: COUNT_KEY }]);
   });
 
-  it('refresh or sorting clears the exact count; paging keeps it', async () => {
+  it('refresh clears the exact count; paging and sorting keep it', async () => {
     const user = userEvent.setup();
     setup(
       { table_data: (a) => page(3, (a.offset as number) + 1, true), table_row_count: () => ({ rows: 999, elapsed_ms: 5 }) },
@@ -285,20 +287,15 @@ describe('DataView', () => {
     await user.click(screen.getByRole('button', { name: 'Previous page' }));
     await screen.findByText('Rows 1–3');
     expect(screen.getByText('999 rows')).toBeInTheDocument();
+    // Sorting does not change how many rows there are.
+    await user.click(grid().getByRole('button', { name: 'id' }));
+    await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
+    expect(await screen.findByText('999 rows')).toBeInTheDocument();
     expect(callsOf('table_row_count')).toHaveLength(1);
 
-    for (const act of [
-      () => user.click(screen.getByRole('button', { name: 'Refresh' })),
-      () => user.click(grid().getByRole('button', { name: 'id' })),
-    ]) {
-      if (!screen.queryByText('999 rows')) {
-        await user.click(screen.getByRole('button', { name: 'Count' }));
-        expect(await screen.findByText('999 rows')).toBeInTheDocument();
-      }
-      await act();
-      expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
-      expect(screen.queryByText('999 rows')).not.toBeInTheDocument();
-    }
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
+    expect(screen.queryByText('999 rows')).not.toBeInTheDocument();
   });
 
   it('Prev after a page that stopped early returns to the exact previous offset', async () => {
@@ -386,11 +383,24 @@ describe('DataView', () => {
 });
 
 describe('data view helpers', () => {
-  it('nextSort cycles asc, desc, none and restarts on another column', () => {
-    expect(nextSort(null, 'a')).toEqual({ column: 'a', dir: 'asc' });
-    expect(nextSort({ column: 'a', dir: 'asc' }, 'a')).toEqual({ column: 'a', dir: 'desc' });
-    expect(nextSort({ column: 'a', dir: 'desc' }, 'a')).toBeNull();
-    expect(nextSort({ column: 'a', dir: 'desc' }, 'b')).toEqual({ column: 'b', dir: 'asc' });
+  it('a header click cycles asc, desc, none on one key and restarts on another column', () => {
+    expect(nextSortKeys([], 'a')).toEqual([{ column: 'a', dir: 'asc' }]);
+    expect(nextSortKeys([{ column: 'a', dir: 'asc' }], 'a')).toEqual([{ column: 'a', dir: 'desc' }]);
+    expect(nextSortKeys([{ column: 'a', dir: 'desc' }], 'a')).toEqual([]);
+    expect(nextSortKeys([{ column: 'a', dir: 'desc' }], 'b')).toEqual([{ column: 'b', dir: 'asc' }]);
+  });
+
+  it('Shift+click adds a key, cycles it in place and drops it after descending', () => {
+    const a = { column: 'a', dir: 'asc' } as const;
+    expect(nextSortKeys([a], 'b', true)).toEqual([a, { column: 'b', dir: 'asc' }]);
+    expect(nextSortKeys([a, { column: 'b', dir: 'asc' }], 'b', true)).toEqual([a, { column: 'b', dir: 'desc' }]);
+    expect(nextSortKeys([a, { column: 'b', dir: 'desc' }], 'b', true)).toEqual([a]);
+    expect(nextSortKeys([a, { column: 'b', dir: 'desc' }], 'a', true)).toEqual([
+      { column: 'a', dir: 'desc' },
+      { column: 'b', dir: 'desc' },
+    ]);
+    // A plain click replaces every key.
+    expect(nextSortKeys([a, { column: 'b', dir: 'desc' }], 'b')).toEqual([{ column: 'b', dir: 'asc' }]);
   });
 
   it('page sizes include the settings default and the current size', () => {
@@ -405,13 +415,220 @@ describe('data view helpers', () => {
     expect(r.chunks.map((c) => c.length)).toEqual([500, 500, 200]);
     expect(r.rowCount).toBe(1200);
     expect(r.columns.map((c) => c.name)).toEqual(['id', 'we`ird"col', 'doc']);
-    expect(sortMarks(big, { column: 'doc', dir: 'desc' })).toEqual({ 2: '↓' });
-    expect(sortMarks(big, null)).toEqual({});
+    expect(sortMarks(big, [{ column: 'doc', dir: 'desc' }])).toEqual({ 2: '↓' });
+    expect(sortMarks(big, [])).toEqual({});
+    // Several keys are numbered.
+    expect(
+      sortMarks(big, [
+        { column: 'doc', dir: 'desc' },
+        { column: 'id', dir: 'asc' },
+      ]),
+    ).toEqual({ 2: '↓1', 0: '↑2' });
   });
 
   it('unsortable matches the backend list', () => {
     for (const t of ['json', 'JSON', 'xml', 'point', 'polygon', 'json[]', 'pg_catalog.json']) expect(unsortable('postgres', t)).toBe(true);
     for (const t of ['jsonb', 'text', 'integer', 'int[]']) expect(unsortable('postgres', t)).toBe(false);
     expect(unsortable('mysql', 'json')).toBe(false);
+  });
+
+  it('draftToFilter parses lists and pairs; rows without a column are skipped', () => {
+    const rows = [
+      { ...newFilterRow('a', 'in'), value: ' 1, 2 ,,3 ' },
+      { ...newFilterRow('b', 'between'), value: 'x', value2: 'y' },
+      { ...newFilterRow('c', 'is_null'), value: 'ignored' },
+      { ...newFilterRow('', 'eq'), value: 'skipped' },
+      { ...newFilterRow('d', 'eq'), value: '' },
+    ];
+    expect(draftToFilter({ mode: 'or', rows })).toEqual({
+      filter: {
+        mode: 'or',
+        conditions: [
+          { column: 'a', op: 'in', values: ['1', '2', '3'] },
+          { column: 'b', op: 'between', values: ['x', 'y'] },
+          { column: 'c', op: 'is_null', values: [] },
+          // An empty string is a value like any other.
+          { column: 'd', op: 'eq', values: [''] },
+        ],
+      },
+      error: null,
+    });
+    expect(draftToFilter({ mode: 'and', rows: [] })).toEqual({ filter: null, error: null });
+    expect(draftToFilter({ mode: 'and', rows: [{ ...newFilterRow('a', 'in'), value: ' , ' }] }).error).toMatch(/IN on a needs/);
+    expect(splitList('a,b')).toEqual(['a', 'b']);
+  });
+
+  it('filterValueText matches what the backend binds', () => {
+    expect(filterValueText({ t: 'Int', v: 7 }, 'mysql')).toBe('7');
+    expect(filterValueText({ t: 'Bool', v: true }, 'mysql')).toBe('1');
+    expect(filterValueText({ t: 'Bool', v: false }, 'postgres')).toBe('false');
+    expect(filterValueText({ t: 'DateTime', v: '2024-01-01 10:00:00' }, 'mysql')).toBe('2024-01-01 10:00:00');
+    expect(filterValueText({ t: 'Other', v: { type_name: 'inet', text: '10.0.0.1' } }, 'postgres')).toBe('10.0.0.1');
+    expect(filterValueText({ t: 'Bytes', v: { len: 2, preview: [1, 2] } }, 'mysql')).toBeNull();
+    expect(filterValueText({ t: 'Array', v: [] }, 'postgres')).toBeNull();
+    expect(filterValueText({ t: 'Text', v: 'x'.repeat(65_536) }, 'mysql')).toBeNull();
+  });
+});
+
+describe('DataView filter and multi-sort', () => {
+  const lastData = () => callsOf('table_data').at(-1)!;
+
+  it('the filter bar sends a structured filter; Apply reads from the first page and Count uses it; Clear drops it', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => page(3), table_row_count: () => ({ rows: 2, elapsed_ms: 1 }) }, { estimate: 99 });
+    await screen.findByText('Rows 1–3');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    const bar = screen.getByRole('search', { name: 'Filter' });
+    // Opening an empty bar offers a first condition on the first column.
+    expect(within(bar).getByRole('combobox', { name: 'Column 1' })).toHaveValue('id');
+    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Column 1' }), 'we`ird"col');
+    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 1' }), 'contains');
+    await user.type(within(bar).getByRole('textbox', { name: 'Value 1' }), "50%'; DROP");
+    await user.click(within(bar).getByRole('button', { name: 'Apply' }));
+    const filter = { mode: 'and', conditions: [{ column: 'we`ird"col', op: 'contains', values: ["50%'; DROP"] }] };
+    await waitFor(() => expect(lastData()).toMatchObject({ offset: 0, filter }));
+    expect(await screen.findByText('Filtered (1)')).toBeInTheDocument();
+    // The estimate is of the whole table: not shown under a filter.
+    expect(screen.queryByText('~99 rows')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Count' }));
+    expect(await screen.findByText('2 rows')).toBeInTheDocument();
+    expect(callsOf('table_row_count').at(-1)).toMatchObject({ filter });
+
+    // A second row: BETWEEN takes two values; OR for the bar.
+    await user.click(within(bar).getByRole('button', { name: '+ Condition' }));
+    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'between');
+    await user.type(within(bar).getByRole('textbox', { name: 'From 2' }), '1');
+    await user.type(within(bar).getByRole('textbox', { name: 'To 2' }), '9{Enter}');
+    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Match conditions' }), 'or');
+    await user.click(within(bar).getByRole('button', { name: 'Apply' }));
+    await waitFor(() =>
+      expect(lastData()).toMatchObject({
+        filter: { mode: 'or', conditions: [filter.conditions[0], { column: 'id', op: 'between', values: ['1', '9'] }] },
+      }),
+    );
+
+    // IS NULL takes no value; IN needs at least one.
+    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'in');
+    await user.clear(within(bar).getByRole('textbox', { name: 'Value 2' }));
+    await user.click(within(bar).getByRole('button', { name: 'Apply' }));
+    expect(within(bar).getByRole('alert')).toHaveTextContent('IN on id needs at least one value.');
+    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'is_null');
+    expect(within(bar).queryByRole('textbox', { name: /2$/ })).toBeNull();
+    await user.click(within(bar).getByRole('button', { name: 'Remove condition 2' }));
+    expect(within(bar).getAllByTestId('filter-row')).toHaveLength(1);
+
+    await user.click(within(bar).getByRole('button', { name: 'Clear' }));
+    await waitFor(() => expect(lastData()).toMatchObject({ filter: null, offset: 0 }));
+    expect(screen.queryByText(/Filtered/)).not.toBeInTheDocument();
+    expect(within(bar).queryAllByTestId('filter-row')).toHaveLength(0);
+  });
+
+  it('F3 opens the filter bar and focuses it; the filter is kept per tab', async () => {
+    const user = userEvent.setup();
+    const { tab, unmount } = setup({ table_data: () => page(2) });
+    await screen.findByText('Rows 1–2');
+    screen.getByRole('button', { name: 'Refresh' }).focus();
+    await user.keyboard('{F3}');
+    const value = await screen.findByRole('textbox', { name: 'Value 1' });
+    await waitFor(() => expect(value).toHaveFocus());
+    await user.type(value, '5{Enter}');
+    await waitFor(() => expect(lastData()).toMatchObject({ filter: { conditions: [{ column: 'id', op: 'eq', values: ['5'] }] } }));
+    unmount();
+    render(<DataView tab={tab} estimate={null} />);
+    expect(await screen.findByRole('textbox', { name: 'Value 1' })).toHaveValue('5');
+    expect(screen.getByText('Filtered (1)')).toBeInTheDocument();
+  });
+
+  it('an empty filtered result says no rows match', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: (a) => (a.filter ? page(0) : page(2)) });
+    await screen.findByText('Rows 1–2');
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    await user.type(screen.getByRole('textbox', { name: 'Value 1' }), 'x{Enter}');
+    expect(await screen.findByText('No rows match the filter.')).toBeInTheDocument();
+  });
+
+  it('Shift+click adds a sort key; the header marks are numbered', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => page(3) });
+    await screen.findByText('Rows 1–3');
+    await user.click(grid().getByRole('button', { name: 'id' }));
+    await waitFor(() => expect(lastData()).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
+    await user.keyboard('{Shift>}');
+    await user.click(grid().getByRole('button', { name: 'doc' }));
+    await user.keyboard('{/Shift}');
+    await waitFor(() =>
+      expect(lastData()).toMatchObject({
+        sort: [
+          { column: 'id', dir: 'asc' },
+          { column: 'doc', dir: 'asc' },
+        ],
+      }),
+    );
+    expect(await screen.findByText(/Sorted by id ↑, doc ↑/)).toBeInTheDocument();
+    await waitFor(() => expect(grid().getByRole('button', { name: 'doc' })).toHaveAttribute('data-mark', '↑2'));
+    // A plain click starts over with one key.
+    await user.click(grid().getByRole('button', { name: 'doc' }));
+    await waitFor(() => expect(lastData()).toMatchObject({ sort: [{ column: 'doc', dir: 'asc' }] }));
+  });
+
+  it('"Filter = this value" from the grid menu adds and applies a condition', async () => {
+    setup({ table_data: () => page(3) });
+    await screen.findByText('Rows 1–3');
+    const tab = makeTab();
+    const menu = dataCellMenu(tab);
+    const entries = menu({ row: 0, col: 0, value: int(7), column: col('id') });
+    expect(entries.map((e) => ('label' in e ? e.label : '-'))).toEqual(['Filter: id = 7', 'Filter: id <> 7']);
+    (entries[0] as { run(): void }).run();
+    await waitFor(() =>
+      expect(lastData()).toMatchObject({ offset: 0, filter: { mode: 'and', conditions: [{ column: 'id', op: 'eq', values: ['7'] }] } }),
+    );
+    expect(await screen.findByRole('search', { name: 'Filter' })).toBeInTheDocument();
+    // A second value is ANDed with the first.
+    const nulls = menu({ row: 0, col: 1, value: { t: 'Null' }, column: col('we`ird"col') });
+    expect(nulls.map((e) => ('label' in e ? e.label : '-'))).toEqual(['Filter: we`ird"col IS NULL', 'Filter: we`ird"col IS NOT NULL']);
+    (nulls[0] as { run(): void }).run();
+    await waitFor(() =>
+      expect(lastData()).toMatchObject({
+        filter: {
+          conditions: [
+            { column: 'id', op: 'eq', values: ['7'] },
+            { column: 'we`ird"col', op: 'is_null', values: [] },
+          ],
+        },
+      }),
+    );
+    expect(menu({ row: 0, col: 2, value: { t: 'Bytes', v: { len: 1, preview: [1] } }, column: col('b') })).toEqual([]);
+  });
+
+  it('Export… asks for the export dialog with the page, the sort and the filter', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => page(3, 1, false, { truncated_cells: 1 }) });
+    await screen.findByText('Rows 1–3');
+    await user.click(grid().getByRole('button', { name: 'id' }));
+    await waitFor(() => expect(lastData()).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
+    await screen.findByText(/Sorted by id/);
+    await user.click(screen.getByRole('button', { name: 'Export…' }));
+    const request = useDialogs.getState().request;
+    expect(request?.kind).toBe('exportResult');
+    if (request?.kind !== 'exportResult') return;
+    expect(request.request).toMatchObject({
+      title: 'Export orders',
+      engine: 'mysql',
+      tableName: 'orders',
+      loadedCount: 3,
+      all: { kind: 'table', connectionId: ids.prod, obj: objectRef, sort: [{ column: 'id', dir: 'asc' }], filter: null },
+    });
+    expect(request.request.loadedNote).toMatch(/1 value of this page/);
+    expect(request.request.rows()).toHaveLength(3);
+  });
+
+  it('toggleFilterBar (menu hook) toggles the bar of the active object tab', async () => {
+    setup({ table_data: () => page(2) });
+    await screen.findByText('Rows 1–2');
+    toggleFilterBar();
+    expect(await screen.findByRole('search', { name: 'Filter' })).toBeInTheDocument();
+    toggleFilterBar();
+    await waitFor(() => expect(screen.queryByRole('search', { name: 'Filter' })).not.toBeInTheDocument());
   });
 });
