@@ -4,7 +4,7 @@ use crate::{close_conn, io_error, map_pg_error, open, ConnectParams, PgConn};
 use async_trait::async_trait;
 use dnt_core::driver::{
     CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
-    SharedSink, StmtOutcome,
+    SharedSink, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{DbKind, ServerInfo};
@@ -413,6 +413,16 @@ fn finish(
     results.push(result);
 }
 
+/// How often [`stop_raised`] looks at the stop signal (it has no wake-up of its own).
+const STOP_POLL: Duration = Duration::from_millis(20);
+
+/// Completes once `stop` is raised.
+async fn stop_raised(stop: &StopSignal) {
+    while !stop.is_stopped() {
+        tokio::time::sleep(STOP_POLL).await;
+    }
+}
+
 fn sqlstate(e: &tokio_postgres::Error) -> Option<&str> {
     e.code().map(|c| c.code())
 }
@@ -605,9 +615,11 @@ impl Session for PgSession {
         }
         // An earlier call's cancel request may still be on its way: wait until it was
         // confirmed (harmless from then on) or given up (the connection is poisoned).
+        // A Stop (or a cancel aimed at this call) ends the wait: nothing was sent.
         tokio::select! {
             biased;
             () = run.cancel_requested() => return Err(not_sent),
+            () = stop_raised(&opts.stop) => return Err(not_sent),
             () = self.cancel.settled() => {}
         }
         let mut outcome = StmtOutcome::default();

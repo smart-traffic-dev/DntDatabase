@@ -9,6 +9,7 @@ use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 /// One result as seen by the sink.
@@ -1067,6 +1068,120 @@ async fn unconfirmed_timeout_kill_stays_within_the_grace() {
         assert!(elapsed < Duration::from_secs(5), "{t:?}: took {elapsed:?}");
         assert_ne!(connection_id(&s).await, id, "{t:?}");
         kill(t, id).await;
+    }
+}
+
+/// A TCP proxy to `upstream` on 127.0.0.1 that forwards every connection, except that
+/// once `hold` is raised the next `KILL QUERY` a client sends (a plaintext `COM_QUERY`
+/// packet) is swallowed: the client has written it, the server never sees it. The test
+/// connections use no TLS, so the client's packets can be read.
+async fn kill_holding_proxy(upstream: u16) -> (u16, Arc<AtomicBool>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hold = Arc::new(AtomicBool::new(false));
+    let hold_kill = hold.clone();
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let hold_kill = hold_kill.clone();
+            tokio::spawn(async move {
+                let Ok(server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+                    return;
+                };
+                let (mut client_rx, mut client_tx) = client.into_split();
+                let (mut server_rx, mut server_tx) = server.into_split();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut server_rx, &mut client_tx).await;
+                });
+                // Client -> server, packet by packet: 3-byte length, sequence, payload.
+                loop {
+                    let mut head = [0u8; 4];
+                    if client_rx.read_exact(&mut head).await.is_err() {
+                        break;
+                    }
+                    let len = u32::from_le_bytes([head[0], head[1], head[2], 0]) as usize;
+                    let mut payload = vec![0u8; len];
+                    if client_rx.read_exact(&mut payload).await.is_err() {
+                        break;
+                    }
+                    let is_kill =
+                        payload.first() == Some(&0x03) && payload[1..].starts_with(b"KILL QUERY");
+                    if is_kill && hold_kill.swap(false, Ordering::SeqCst) {
+                        // Never forwarded; the sockets stay open until the proxy ends.
+                        std::future::pending::<()>().await;
+                    }
+                    if server_tx.write_all(&head).await.is_err()
+                        || server_tx.write_all(&payload).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (port, hold)
+}
+
+/// A statement that completes during the grace period while the timeout's `KILL QUERY`
+/// is still unanswered (the proxy swallows it) reports its real result, a
+/// success with `late_completion` or its own error. The kill may still land, so the
+/// connection is replaced before the next statement (silently: nothing of the session is
+/// lost).
+#[tokio::test]
+async fn late_result_with_unconfirmed_kill_is_kept() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let (port, hold) = kill_holding_proxy(t.host_port()).await;
+        let mut cfg = t.resolved(Some(FIXTURE_DB));
+        cfg.port = port;
+        let s = MySqlDriver
+            .connect_session(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        run(
+            &s,
+            "CREATE TABLE IF NOT EXISTS t5_late (id int PRIMARY KEY); \
+             DELETE FROM t5_late; INSERT INTO t5_late VALUES (1)",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let opts = ExecOptions {
+            timeout: Some(Duration::from_millis(300)),
+            cancel_grace: Duration::from_secs(2),
+            ..ExecOptions::default()
+        };
+
+        // Succeeds after its timeout: kept, late.
+        let id = connection_id(&s).await;
+        hold.store(true, Ordering::SeqCst);
+        let (res, c) = run_one(
+            &s,
+            "INSERT INTO t5_late (id) SELECT 2 FROM (SELECT SLEEP(1)) AS s",
+            opts.clone(),
+        )
+        .await;
+        let outcome = res.unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+        assert!(outcome.late_completion, "{t:?}");
+        assert_eq!(c.results[0].affected, Some(1), "{t:?}");
+        assert_ne!(connection_id(&s).await, id, "{t:?}: same connection");
+
+        // Fails on its own after its timeout: its own error, not a lost connection.
+        let id = connection_id(&s).await;
+        hold.store(true, Ordering::SeqCst);
+        let (res, _) = run_one(
+            &s,
+            "INSERT INTO t5_late (id) SELECT 1 FROM (SELECT SLEEP(1)) AS s",
+            opts.clone(),
+        )
+        .await;
+        match &res {
+            Err(DbError::Server { code, .. }) => {
+                assert_eq!(code.as_deref(), Some("1062"), "{t:?}")
+            }
+            other => panic!("{t:?}: {other:?}"),
+        }
+        assert_ne!(connection_id(&s).await, id, "{t:?}: same connection");
+        let (_, c) = run(&s, "SELECT COUNT(*) FROM t5_late").await.unwrap();
+        assert_eq!(as_u64(&scalar(&c)), 2, "{t:?}");
     }
 }
 

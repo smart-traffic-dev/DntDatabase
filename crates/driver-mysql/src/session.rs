@@ -46,10 +46,11 @@ const STUCK: &str = "the statement did not stop after the timeout, so its connec
 /// `ConnectionLost` message for a statement that ignored the user's cancel.
 const STUCK_CANCEL: &str =
     "the statement did not stop after it was cancelled, so its connection was closed";
-/// `ConnectionLost` message for a statement that ended during the grace period while the
-/// `KILL QUERY` sent after its timeout was still unanswered at the deadline.
-const UNCONFIRMED: &str = "the KILL QUERY sent after the timeout could not be confirmed, so \
-                           the connection was closed before it could hit the next statement";
+/// `ConnectionLost` message for a statement that found its connection poisoned: an
+/// earlier statement ended during its grace period while the `KILL QUERY` sent after its
+/// timeout was still unanswered (see `run_timed`).
+const UNCONFIRMED: &str = "an earlier KILL QUERY could not be confirmed, so the connection \
+                           was replaced before it could hit this statement";
 
 /// One MySQL-family connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct MySqlSession {
@@ -256,9 +257,10 @@ impl MySqlSession {
     /// actually sent) and the statement is awaited until `opts.cancel_grace` after that,
     /// so the connection stays in sync. On expiry the kill runs while the statement is
     /// awaited, under that same deadline: a slow kill never extends it. A statement still
-    /// running at the deadline is `Stuck` (after [`ExecProgress::GraceExpired`]); one
-    /// that ended while the timeout's kill was still unanswered is `Stuck` too
-    /// ([`UNCONFIRMED`]), since the kill could still stop the next statement.
+    /// running at the deadline is `Stuck` (after [`ExecProgress::GraceExpired`]). One
+    /// that ended while the timeout's kill was still unanswered keeps its own result, but
+    /// the kill could still stop the next statement, so the connection is poisoned and
+    /// replaced before that one is sent ([`UNCONFIRMED`]).
     ///
     /// After a timeout, a statement that completes during the grace period reports what
     /// really happened (it may have committed) with `late_completion`, except a result
@@ -318,28 +320,36 @@ impl MySqlSession {
             }
             Trigger::Timeout => {
                 let id = self.cancel.kill_target(run.gen());
-                let mut kill = std::pin::pin!(kill_query(&self.opts, || id));
+                let mut kill = std::pin::pin!(kill_query(&self.opts, || id, opts.cancel_grace));
                 let expired = tokio::time::sleep_until(deadline);
                 let mut expired = std::pin::pin!(expired);
-                let (mut ended, mut killed) = (None, false);
+                let (mut ended, mut killed) = (None, None);
                 // Until both the statement ended and the kill was answered (it then
                 // cannot hit a later statement), or the deadline.
-                while ended.is_none() || !killed {
+                while ended.is_none() || killed.is_none() {
                     tokio::select! {
                         res = fut.as_mut(), if ended.is_none() => ended = Some(res),
-                        _ = kill.as_mut(), if !killed => killed = true,
+                        res = kill.as_mut(), if killed.is_none() => killed = Some(res),
                         () = expired.as_mut() => break,
                     }
                 }
-                match ended {
-                    None => {
-                        shared.progress(ExecProgress::GraceExpired);
-                        return Err(StmtError::Stuck(STUCK));
-                    }
-                    // The `KILL QUERY` may still land, on whatever runs next.
-                    Some(_) if !killed => return Err(StmtError::Stuck(UNCONFIRMED)),
-                    Some(res) => res,
+                let Some(res) = ended else {
+                    shared.progress(ExecProgress::GraceExpired);
+                    return Err(StmtError::Stuck(STUCK));
+                };
+                let unconfirmed = match killed {
+                    Some(Ok(())) => false,
+                    Some(Err(f)) => f.maybe_sent,
+                    // Still pending: abandoned with this future, maybe already written.
+                    None => true,
+                };
+                // The kill's own "interrupted" error: the `KILL QUERY` already ran.
+                if unconfirmed && !matches!(&res, Err(e) if is_interrupted(e)) {
+                    // It may still land, on whatever runs next: the statement's own
+                    // result stands, but the connection is replaced before the next one.
+                    self.cancel.poison();
                 }
+                res
             }
         };
         let late = trigger == Trigger::Timeout;
@@ -604,6 +614,33 @@ impl Session for MySqlSession {
         }
         let mut outcome = StmtOutcome::default();
         let mut reconnected = false;
+        // An earlier call's `KILL QUERY` may still land on this connection (see
+        // `run_timed`): replace it before anything is sent, silently only when nothing of
+        // the old session is lost.
+        if slot.is_some() && self.cancel.poisoned() {
+            let was_in_tx = self.in_transaction();
+            let custom = self.session_custom.load(Ordering::SeqCst);
+            let notes = self.notes(was_in_tx);
+            if was_in_tx || custom {
+                let mut message = format!("{UNCONFIRMED}{notes}");
+                // Best effort so the next statement finds a live connection.
+                if let Err(e) = self.reconnect(&mut slot).await {
+                    message.push_str(&format!("; reconnecting failed: {e}"));
+                }
+                return Err(lost(was_in_tx, false, message));
+            }
+            reconnected = true;
+            if let Err(e) = self.reconnect(&mut slot).await {
+                return Err(lost(
+                    false,
+                    false,
+                    format!("{UNCONFIRMED}; reconnecting failed: {e}"),
+                ));
+            }
+            if stopped() {
+                return Err(not_sent(false));
+            }
+        }
         // An earlier call abandoned the connection and could not replace it (and
         // reported that). Nothing was sent yet, so opening one now is safe for any
         // statement.

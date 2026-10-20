@@ -13,7 +13,7 @@ use dnt_core::driver::{Canceller, StopSignal};
 use dnt_core::error::{ConnectStage, DbError};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -28,6 +28,8 @@ pub(crate) struct CancelState {
     /// Server thread id of the session's current physical connection; 0 while there is
     /// none, including while an abandoned connection is being replaced.
     connection_id: AtomicU32,
+    /// See [`CancelState::poison`]; cleared by [`CancelState::set_connection`].
+    poisoned: AtomicBool,
     /// Last generation handed out to an `execute_one` call.
     last_gen: AtomicU64,
     /// Generation of the `execute_one` call holding the connection; 0 when idle.
@@ -43,9 +45,22 @@ pub(crate) struct CancelState {
 }
 
 impl CancelState {
-    /// The thread id of the session's (new) physical connection.
+    /// The thread id of the session's (new) physical connection. A new connection is
+    /// never poisoned.
     pub(crate) fn set_connection(&self, id: u32) {
+        self.poisoned.store(false, Ordering::SeqCst);
         self.connection_id.store(id, Ordering::SeqCst);
+    }
+
+    /// A `KILL QUERY` aimed at the current connection may still land (it was not
+    /// answered by the deadline): the connection must be replaced before anything else
+    /// is sent on it.
+    pub(crate) fn poison(&self) {
+        self.poisoned.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::SeqCst)
     }
 
     /// No connection to kill any more: called before an abandoned connection is
@@ -165,33 +180,61 @@ impl Canceller for MySqlCanceller {
         }
         self.state.request_cancel(gen);
         let state = &self.state;
-        kill_query(&self.opts, || state.kill_target(gen)).await
+        kill_query(&self.opts, || state.kill_target(gen), CANCEL_TIMEOUT)
+            .await
+            .map_err(|f| f.error)
     }
+}
+
+/// A `KILL QUERY` that did not complete (see [`kill_query`]).
+#[derive(Debug)]
+pub(crate) struct KillFailed {
+    pub(crate) error: DbError,
+    /// The `KILL QUERY` may have been written without the server answering it, so it
+    /// may still stop whatever the target thread runs later. False when it was never
+    /// sent, or when the server answered it (even with an error).
+    pub(crate) maybe_sent: bool,
 }
 
 /// Opens a temporary connection, asks `target` for the thread id to kill (`None`: the
 /// target is gone, send nothing), runs `KILL QUERY <id>`, then closes the connection.
+/// The whole exchange is bounded by `limit`. `Ok` once the server answered the kill
+/// (it then stopped the statement or found nothing to stop).
 pub(crate) async fn kill_query(
     opts: &Opts,
     target: impl Fn() -> Option<u32> + Send + Sync,
-) -> Result<(), DbError> {
+    limit: Duration,
+) -> Result<(), KillFailed> {
+    let sending = AtomicBool::new(false);
+    let answered = AtomicBool::new(false);
     let work = async {
         let mut conn = Conn::new(opts.clone())
             .await
             .map_err(|e| map_mysql_error(e, ConnectStage::ConnectDb))?;
         let res = match target() {
-            Some(id) => conn
-                .query_drop(format!("KILL QUERY {id}"))
-                .await
-                .map_err(|e| map_mysql_error(e, ConnectStage::Execute)),
+            Some(id) => {
+                sending.store(true, Ordering::SeqCst);
+                let res = conn.query_drop(format!("KILL QUERY {id}")).await;
+                if matches!(res, Ok(()) | Err(mysql_async::Error::Server(_))) {
+                    answered.store(true, Ordering::SeqCst);
+                }
+                res.map_err(|e| map_mysql_error(e, ConnectStage::Execute))
+            }
             None => Ok(()),
         };
         let _ = conn.disconnect().await;
         res
     };
-    tokio::time::timeout(CANCEL_TIMEOUT, work)
-        .await
-        .map_err(|_| DbError::timeout(ConnectStage::Execute))?
+    let res = match tokio::time::timeout(limit, work).await {
+        Ok(res) => res,
+        // Answered before the goodbye ran out of time: done.
+        Err(_) if answered.load(Ordering::SeqCst) => Ok(()),
+        Err(_) => Err(DbError::timeout(ConnectStage::Execute)),
+    };
+    res.map_err(|error| KillFailed {
+        error,
+        maybe_sent: sending.load(Ordering::SeqCst) && !answered.load(Ordering::SeqCst),
+    })
 }
 
 #[cfg(test)]
@@ -272,6 +315,42 @@ mod tests {
         let _next = state.begin(&StopSignal::new());
         assert_eq!(state.kill_target(2), Some(9));
         assert_eq!(state.kill_target(1), None, "stale generation");
+    }
+
+    fn opts_for(port: u16) -> Opts {
+        Opts::from_url(&format!("mysql://u:p@127.0.0.1:{port}/")).unwrap()
+    }
+
+    /// No server at the address: the `KILL` was never sent, so nothing can follow.
+    #[tokio::test]
+    async fn refused_kill_was_not_sent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let err = kill_query(&opts_for(port), || Some(7), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(!err.maybe_sent, "{err:?}");
+    }
+
+    /// A server that never greets: bounded by `limit`, and never sent.
+    #[tokio::test]
+    async fn silent_server_is_bounded_by_the_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _keep = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let started = std::time::Instant::now();
+        let err = kill_query(&opts_for(port), || Some(7), Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3), "{err:?}");
+        assert!(!err.maybe_sent, "{err:?}");
+        assert!(matches!(err.error, DbError::Timeout { .. }), "{err:?}");
     }
 
     #[test]

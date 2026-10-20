@@ -407,6 +407,63 @@ async fn unconfirmed_user_cancel_replaces_the_connection() {
     }
 }
 
+/// The next call waits for an earlier cancel request still in flight, but a Stop raised
+/// meanwhile (the raw stop signal, no cancel) ends that wait at once: `Cancelled`,
+/// nothing sent.
+#[tokio::test]
+async fn stop_ends_the_wait_for_an_earlier_cancel() {
+    require_db!();
+    for t in Target::pg() {
+        let (port, mut held) = proxy(t.host_port()).await;
+        let mut cfg = t.resolved(Some(FIXTURE_DB));
+        cfg.port = port;
+        let s = PgDriver
+            .connect_session(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        // A user cancel the proxy holds: in flight for up to the 5 s grace.
+        let opts = ExecOptions {
+            cancel_grace: Duration::from_secs(5),
+            ..ExecOptions::default()
+        };
+        let handle = s.cancel_handle();
+        let canceller = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            handle.cancel().await
+        });
+        let mut sink = Collect::default();
+        run_one(&s, "SELECT pg_sleep(0.5)", &opts, &mut sink)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+        let swallowed = held.recv().await;
+        let next = ExecOptions::default();
+        let stop = next.stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            stop.stop();
+        });
+        let started = Instant::now();
+        let res = run_one(&s, "SELECT 1", &next, &mut sink).await;
+        assert!(
+            matches!(
+                res,
+                Err(DbError::Cancelled {
+                    outcome_unknown: false,
+                    was_in_tx: false
+                })
+            ),
+            "{t:?}: {res:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{t:?}: waited {:?}",
+            started.elapsed()
+        );
+        drop(swallowed);
+        let _ = canceller.await;
+    }
+}
+
 /// M1: statements that end right around their timeout (finished, late, cancelled or
 /// given up) never leave a cancel signal behind for the next statement.
 #[tokio::test]
