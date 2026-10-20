@@ -1,7 +1,8 @@
-import { render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppError } from '../../bindings';
+import type { MessageLine } from '../../store/queryRun';
 import { emptyRun, reduceRun, startRun, type TabRun } from '../../store/queryRun';
 import { reopenConnection } from '../../store/reopen';
 import { useQueryDocs } from '../../store/queryTabs';
@@ -79,4 +80,86 @@ describe('MessagesView', () => {
     expect(row).toHaveTextContent('3 rows affected');
     expect(row).toHaveTextContent('12 ms');
   });
-});
+
+  describe('virtualized', () => {
+    const lines = (n: number, over: Partial<MessageLine> = {}): MessageLine[] =>
+      Array.from({ length: n }, (_, i) => ({
+        index: i,
+        text: `statement ${i}`,
+        rows: null,
+        affected: null,
+        elapsedMs: 1,
+        error: null,
+        tone: 'info' as const,
+        retryRange: null,
+        ...over,
+      }));
+    const runWith = (messages: MessageLine[], running = false): TabRun => ({
+      ...emptyRun,
+      messages,
+      phase: running ? { kind: 'running', index: 0, total: messages.length, startedAt: 0 } : emptyRun.phase,
+    });
+
+    it('mounts_only_a_window_of_10k_rows', () => {
+      render(<MessagesView tabId="t" run={runWith(lines(10_000))} />);
+      const mounted = screen.getAllByTestId('message-line').length;
+      expect(mounted).toBeGreaterThan(0);
+      expect(mounted).toBeLessThan(100);
+      expect(screen.getByText('statement 0')).toBeInTheDocument();
+      expect(screen.queryByText('statement 9999')).toBeNull();
+    });
+
+    it('keeps_list_semantics', () => {
+      render(<MessagesView tabId="t" run={runWith(lines(5))} />);
+      expect(screen.getByTestId('messages')).toHaveAttribute('role', 'log');
+      expect(screen.getAllByTestId('message-line')[0]).toHaveAttribute('aria-posinset', '1');
+      expect(screen.getAllByTestId('message-line')[0]).toHaveAttribute('aria-setsize', '5');
+    });
+
+    it('retry_and_reconnect_work_on_a_virtualized_row', async () => {
+      const err = appError('connection_lost', 'Lost.', { outcome_unknown: true, retryable: true });
+      const id = useQueryDocs.getState().newQuery(ids.prod, null);
+      const msgs = lines(5000);
+      msgs[3] = { ...msgs[3]!, tone: 'error', error: err, retryRange: [0, 5] };
+      render(<MessagesView tabId={id} run={runWith(msgs)} />);
+      const u = userEvent.setup();
+      await u.click(screen.getByRole('button', { name: 'Retry statement' }));
+      expect(rerunStatement).toHaveBeenCalledWith(id, 3);
+      await u.click(screen.getByRole('button', { name: 'Reconnect' }));
+      expect(reopenConnection).toHaveBeenCalledWith(ids.prod);
+    });
+
+    it('autoscrolls_to_newest_while_running_unless_scrolled_up', () => {
+      const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
+      const { rerender } = render(<MessagesView tabId="t" run={runWith(lines(500), true)} />);
+      scrollTo.mockClear();
+      rerender(<MessagesView tabId="t" run={runWith(lines(501), true)} />);
+      expect(scrollTo).toHaveBeenCalled();
+
+      const box = screen.getByTestId('messages');
+      Object.defineProperty(box, 'scrollHeight', { configurable: true, value: 13_000 });
+      box.scrollTop = 0;
+      fireEvent.scroll(box);
+      scrollTo.mockClear();
+      rerender(<MessagesView tabId="t" run={runWith(lines(502), true)} />);
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      // Back at the bottom: following resumes.
+      box.scrollTop = 13_000 - 600;
+      act(() => {
+        fireEvent.scroll(box);
+      });
+      rerender(<MessagesView tabId="t" run={runWith(lines(503), true)} />);
+      expect(scrollTo).toHaveBeenCalled();
+      scrollTo.mockRestore();
+    });
+
+    it('does_not_autoscroll_when_not_running', () => {
+      const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
+      const { rerender } = render(<MessagesView tabId="t" run={runWith(lines(500))} />);
+      scrollTo.mockClear();
+      rerender(<MessagesView tabId="t" run={runWith(lines(501))} />);
+      expect(scrollTo).not.toHaveBeenCalled();
+      scrollTo.mockRestore();
+    });
+  });});
