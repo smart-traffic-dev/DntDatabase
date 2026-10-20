@@ -9,15 +9,37 @@ import {
   type Rectangle,
   type Theme,
 } from '@glideapps/glide-data-grid';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CHUNK, type ResultSet } from '../../store/queryRun';
-import { MAX_COPY_CELLS, cellView, copyText, truncateText } from './format';
+import {
+  FIT_SAMPLE_ROWS,
+  MAX_COPY_CELLS,
+  MIN_COL_WIDTH,
+  cellView,
+  charsForWidth,
+  copyText,
+  fitCellText,
+  fitColumnWidth,
+  noLigatures,
+} from './format';
 
 const ROW_HEIGHT = 28;
 const HEADER_HEIGHT = 44;
-const COLUMN_WIDTH = 150;
-/** Longest text handed to the canvas; the full value is still copied. */
-const DISPLAY_CHARS = 300;
+const NO_OVERRIDES: Record<number, number> = {};
+
+/** Initial column widths: header plus the first rows of the first chunk (no per-paint work). */
+export function initialWidths(result: ResultSet): number[] {
+  const rows = result.chunks[0] ?? [];
+  const n = Math.min(rows.length, FIT_SAMPLE_ROWS);
+  return result.columns.map((c, i) => {
+    const samples: string[] = [];
+    for (let r = 0; r < n; r++) {
+      const v = rows[r]?.[i];
+      if (v) samples.push(cellView(v).text);
+    }
+    return fitColumnWidth(c.name, c.db_type, samples);
+  });
+}
 
 export const tooLargeMessage = (cells: number) =>
   `Selection too large to copy (${cells} cells); narrow the selection`;
@@ -62,6 +84,8 @@ function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme> } {
       textHeader: cssVar('--text', '#1b1f24'),
       borderColor: cssVar('--border', '#dcdfe4'),
       fontFamily: cssVar('--font-mono', 'ui-monospace, monospace'),
+      textLight: muted,
+      markerFontStyle: '11px',
       baseFontStyle: '13px',
       headerFontStyle: '600 12px',
     },
@@ -102,10 +126,39 @@ export function ResultGrid({ result }: { result: ResultSet }) {
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
   const { theme, nullStyle } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
   const [notice, setNotice] = useState<string | null>(null);
+  const fitted = useMemo(() => initialWidths(result), [result.columns]); // eslint-disable-line react-hooks/exhaustive-deps
+  // User-resized widths belong to one result: a new result starts from the fitted widths.
+  const [resized, setResized] = useState<{ cols: ResultSet['columns']; w: Record<number, number> }>({ cols: result.columns, w: {} });
+  const overrides = resized.cols === result.columns ? resized.w : NO_OVERRIDES;
+  const widths = useMemo(() => fitted.map((w, i) => overrides[i] ?? w), [fitted, overrides]);
   const columns = useMemo<GridColumn[]>(
-    () => result.columns.map((c, i) => ({ id: String(i), title: c.name, width: COLUMN_WIDTH })),
+    () => result.columns.map((c, i) => ({ id: String(i), title: c.name, width: widths[i] ?? MIN_COL_WIDTH })),
+    [result.columns, widths],
+  );
+  const onColumnResize = useCallback(
+    (_col: GridColumn, newSize: number, index: number) => {
+      const w = Math.max(MIN_COL_WIDTH, Math.min(newSize, 2000));
+      setResized((prev) => ({ cols: result.columns, w: { ...(prev.cols === result.columns ? prev.w : {}), [index]: w } }));
+    },
     [result.columns],
   );
+
+  // The canvas only follows its container when given explicit pixels (F06).
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const w = Math.floor(el.clientWidth);
+      const h = Math.floor(el.clientHeight);
+      if (w > 0 && h > 0) setSize((p) => (p && p.w === w && p.h === h ? p : { w, h }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const { chunks } = result;
 
   const getCellContent = useCallback(
@@ -113,17 +166,20 @@ export function ResultGrid({ result }: { result: ResultSet }) {
       const value = chunks[Math.floor(row / CHUNK)]?.[row % CHUNK]?.[col];
       if (!value) return { kind: GridCellKind.Text, data: '', displayData: '', allowOverlay: false };
       const view = cellView(value);
+      const max = charsForWidth(widths[col] ?? MIN_COL_WIDTH);
+      const clipped = view.text.length > max;
       return {
         kind: GridCellKind.Text,
         data: view.text,
-        displayData: truncateText(view.text, DISPLAY_CHARS).replace(/\s+/g, ' '),
-        allowOverlay: false,
+        displayData: noLigatures(fitCellText(view, max).replace(/\s+/g, ' ')),
+        allowOverlay: true, // read-only overlay shows the full value
         readonly: true,
-        contentAlign: view.kind === 'number' ? 'right' : 'left',
+        // A clipped number keeps its leading digits (left side) and gets an ellipsis.
+        contentAlign: view.kind === 'number' && !clipped ? 'right' : 'left',
         themeOverride: view.kind === 'null' ? nullStyle : undefined,
       };
     },
-    [chunks, nullStyle],
+    [chunks, nullStyle, widths],
   );
 
   const getCellsForSelection = useCallback(
@@ -155,7 +211,7 @@ export function ResultGrid({ result }: { result: ResultSet }) {
   );
 
   return (
-    <div className="qr-grid" data-testid="result-grid">
+    <div className="qr-grid" data-testid="result-grid" ref={boxRef}>
       {notice && (
         <div className="qr-banner warning qr-notice" role="status" onClick={() => setNotice(null)}>
           {notice}
@@ -174,8 +230,11 @@ export function ResultGrid({ result }: { result: ResultSet }) {
         theme={theme}
         smoothScrollX
         smoothScrollY
-        width="100%"
-        height="100%"
+        onColumnResize={onColumnResize}
+        minColumnWidth={MIN_COL_WIDTH}
+        maxColumnWidth={2000}
+        width={size?.w ?? '100%'}
+        height={size?.h ?? '100%'}
       />
     </div>
   );

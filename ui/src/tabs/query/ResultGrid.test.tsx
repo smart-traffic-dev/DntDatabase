@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ResultSet } from '../../store/queryRun';
-import { selectionCells, tooLargeMessage } from './ResultGrid';
+import { initialWidths, selectionCells, tooLargeMessage } from './ResultGrid';
 
 const result: ResultSet = {
   id: 1,
@@ -13,6 +13,19 @@ const result: ResultSet = {
   elapsedMs: 1,
   done: true,
 };
+
+describe('initialWidths', () => {
+  it('fits_each_column_to_its_sampled_values', () => {
+    const wide: ResultSet = {
+      ...result,
+      chunks: [[[{ t: 'Int', v: '9223372036854775807' }, { t: 'Null' }]]],
+      rowCount: 1,
+    };
+    const [a, b] = initialWidths(wide);
+    expect(a).toBeGreaterThanOrEqual(19 * 7.9);
+    expect(b).toBe(60);
+  });
+});
 
 describe('selectionCells', () => {
   it('copies_cells_with_sanitized_text', () => {
