@@ -1024,11 +1024,11 @@ export type TxState =
  */
 export type UnboundedReason = 
 /**
- * No WHERE at depth 0.
+ * No WHERE at depth 0 (or one with an empty condition).
  */
 "no_where" | 
 /**
- * A trivially-true WHERE (`WHERE 1`, `1=1`, `true`, `'a'='a'`).
+ * A trivially-true WHERE (`WHERE 1`, `1=1`, `true`, `'a'='a'`, `id = id`).
  */
 "always_true" | 
 /**

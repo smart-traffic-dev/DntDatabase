@@ -9,15 +9,39 @@
 //! - it is a `DELETE` without a WHERE at depth 0 (MySQL `DELETE t1, t2 FROM …` and
 //!   `DELETE FROM t1 USING …`, PG `DELETE FROM t USING …` included);
 //! - it is a `TRUNCATE`;
-//! - its depth-0 WHERE is trivially true: the whole condition, or one operand of a
-//!   depth-0 `OR`, is (inside any wrapping parens) `TRUE`, a non-zero integer
-//!   (`WHERE 1`), or `x = x` with the same integer or `'string'` on both sides
-//!   (`1=1`, `'a'='a'`). Nothing else is judged.
+//! - its depth-0 WHERE has an empty condition (`DELETE FROM t WHERE`, a dangling
+//!   `WHERE` before `ORDER BY` / `LIMIT`): counted as no WHERE;
+//! - its depth-0 WHERE is trivially true (see below).
+//!
+//! A `WHERE` (and `SET`, `ORDER`, `OR`, …) next to a `.` is part of a qualified name
+//! (`t.where`, `shop.where`, `where.u`), never the keyword.
+//!
+//! Trivially true, read inside any wrapping parens:
+//!
+//! - a depth-0 `OR` (MySQL also `||`: the server's `PIPES_AS_CONCAT` is not known
+//!   here, so the strict reading is taken) with one trivially-true operand;
+//! - a depth-0 `AND` (MySQL also `&&`) whose operands are all trivially true
+//!   (`1=1 AND 1=1`);
+//! - `TRUE`, a non-zero integer with an optional sign (`WHERE 1`, `-1`, `+2`);
+//! - MySQL: a quoted non-zero integer string (`'1'`, `'-3'`); PG: a quoted boolean
+//!   true string (`'t'`, `'true'`, `'y'`, `'yes'`, `'on'`, `'1'`);
+//! - `NOT` (MySQL also `!`) of `FALSE` or a zero integer (`NOT 0`, `NOT FALSE`);
+//! - `x = x` (MySQL also `x <=> x`) with the same (signed) integer, the same quoted
+//!   string or the same bare / quoted / qualified identifier on both sides (`1=1`,
+//!   `'a'='a'`, `id = id`, `` `a` = `a` ``; `NULL = NULL` is not true);
+//! - `x <> y` / `x != y` with two different integers (`1 <> 0`).
+//!
+//! Nothing else is judged.
 //!
 //! Where the statement runs: after a PG/MySQL `WITH …` (the main statement, and every
-//! data-modifying CTE body), after `EXPLAIN ANALYZE` (which runs it) and after MariaDB
-//! `SET STATEMENT … FOR`. A WHERE inside a paren group (a subquery in `SET`, `USING`,
-//! a join) is not the statement's WHERE.
+//! data-modifying CTE body), after `EXPLAIN ANALYZE` (which runs it), after MariaDB
+//! `SET STATEMENT … FOR`, and the body after `AS` of a PG `PREPARE p [(types)] AS …`.
+//! A WHERE inside a paren group (a subquery in `SET`, `USING`, a join) is not the
+//! statement's WHERE.
+//!
+//! Not judged (out of scope): `MERGE` (its `WHEN [NOT] MATCHED … DELETE / UPDATE`
+//! arms may change every row, e.g. `ON true`, but are never flagged), MySQL `PREPARE … FROM '…'` (the text is a
+//! string) and `EXECUTE` of a prepared statement.
 //!
 //! Like the guard, every [`readings`] of a MySQL executable comment is judged (so
 //! `DELETE FROM t /*!50000 WHERE id = 1 */` is flagged: an older server drops the
@@ -42,9 +66,9 @@ pub enum WriteOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum UnboundedReason {
-    /// No WHERE at depth 0.
+    /// No WHERE at depth 0 (or one with an empty condition).
     NoWhere,
-    /// A trivially-true WHERE (`WHERE 1`, `1=1`, `true`, `'a'='a'`).
+    /// A trivially-true WHERE (`WHERE 1`, `1=1`, `true`, `'a'='a'`, `id = id`).
     AlwaysTrue,
     /// `TRUNCATE` has no WHERE at all.
     Truncate,
@@ -110,6 +134,17 @@ fn is_punct(toks: &[Token], i: usize, c: u8) -> bool {
     toks.get(i).is_some_and(|t| t.kind == TokKind::Punct(c))
 }
 
+/// The keyword `kw` at `i`: the word, not part of a qualified name (`t.where`,
+/// `where.u`).
+fn is_kw(toks: &[Token], i: usize, kw: &str) -> bool {
+    is_word(toks, i, kw) && !(i > 0 && is_punct(toks, i - 1, b'.')) && !is_punct(toks, i + 1, b'.')
+}
+
+/// The two-byte operator `op` (e.g. `||`) at `i`: two adjacent punct tokens.
+fn is_op2(toks: &[Token], i: usize, op: &[u8; 2]) -> bool {
+    is_punct(toks, i, op[0]) && is_punct(toks, i + 1, op[1]) && toks[i].end == toks[i + 1].start
+}
+
 /// The index of the `Close` matching the `Open` at `open` (`toks.len()` when none).
 fn close_of(toks: &[Token], open: usize) -> usize {
     let mut depth = 0usize;
@@ -162,8 +197,14 @@ fn scan(src: &str, toks: &[Token], dialect: Dialect, depth: usize, out: &mut Vec
         return;
     };
     match first.to_ascii_uppercase().as_str() {
-        "UPDATE" => update(src, toks, out),
-        "DELETE" => delete(src, toks, out),
+        "UPDATE" => update(src, toks, dialect, out),
+        "DELETE" => delete(src, toks, dialect, out),
+        // PG `PREPARE p [(types)] AS <statement>`: judge the body.
+        "PREPARE" if !dialect.is_mysql() => {
+            if let Some(at) = depth0(toks).into_iter().find(|&k| is_kw(toks, k, "AS")) {
+                scan(src, &toks[at + 1..], dialect, depth + 1, out);
+            }
+        }
         "TRUNCATE" => out.push(UnboundedWrite {
             op: WriteOp::Truncate,
             reason: UnboundedReason::Truncate,
@@ -259,9 +300,9 @@ fn name_list(src: &str, toks: &[Token], mut i: usize) -> (Vec<String>, usize) {
 
 /// The statement's depth-0 WHERE (`toks`: tokens of `src`): `None` when bounded, else
 /// why it is not.
-fn where_status(src: &str, toks: &[Token]) -> Option<UnboundedReason> {
+fn where_status(src: &str, toks: &[Token], dialect: Dialect) -> Option<UnboundedReason> {
     let idx = depth0(toks);
-    let Some(pos) = idx.iter().position(|&k| is_word(toks, k, "WHERE")) else {
+    let Some(pos) = idx.iter().position(|&k| is_kw(toks, k, "WHERE")) else {
         return Some(UnboundedReason::NoWhere);
     };
     let from = idx[pos] + 1;
@@ -271,10 +312,15 @@ fn where_status(src: &str, toks: &[Token]) -> Option<UnboundedReason> {
         .find(|&k| {
             ["ORDER", "LIMIT", "RETURNING"]
                 .iter()
-                .any(|kw| is_word(toks, k, kw))
+                .any(|kw| is_kw(toks, k, kw))
         })
         .unwrap_or_else(|| idx.last().map_or(toks.len(), |&l| close_end(toks, l)));
-    always_true(src, &toks[from..to.max(from)]).then_some(UnboundedReason::AlwaysTrue)
+    let cond = &toks[from..to.max(from)];
+    if cond.is_empty() {
+        // A dangling WHERE bounds nothing.
+        return Some(UnboundedReason::NoWhere);
+    }
+    always_true(src, cond, dialect).then_some(UnboundedReason::AlwaysTrue)
 }
 
 /// The index past the depth-0 token at `k` (past its group for an `Open`).
@@ -286,72 +332,196 @@ fn close_end(toks: &[Token], k: usize) -> usize {
     }
 }
 
-/// Whether the condition `cond` (tokens of `src`) is trivially true (see the module
-/// docs).
-fn always_true(src: &str, cond: &[Token]) -> bool {
-    let mut cond = cond;
-    // Wrapping parens.
+/// `cond` without its wrapping parens.
+fn unwrap_parens<'a, 'b>(mut cond: &'b [Token<'a>]) -> &'b [Token<'a>] {
     while cond.first().is_some_and(|t| t.kind == TokKind::Open)
         && close_of(cond, 0) == cond.len() - 1
     {
         cond = &cond[1..cond.len() - 1];
     }
-    // A depth-0 OR: any trivially-true operand makes it true.
-    let idx = depth0(cond);
-    let ors: Vec<usize> = idx
-        .iter()
-        .copied()
-        .filter(|&k| is_word(cond, k, "OR"))
-        .collect();
-    if !ors.is_empty() {
-        let mut from = 0;
-        for k in ors.into_iter().chain(std::iter::once(cond.len())) {
-            if always_true(src, &cond[from..k]) {
-                return true;
-            }
-            from = k + 1;
+    cond
+}
+
+/// The operands of `cond` around its depth-0 operators (`op(k)`: the token count of
+/// the operator at `k`, 0 when none is there); `None` when it has no operator.
+fn split_on<'a, 'b>(
+    cond: &'b [Token<'a>],
+    op: impl Fn(usize) -> usize,
+) -> Option<Vec<&'b [Token<'a>]>> {
+    let mut parts = Vec::new();
+    let mut from = 0;
+    for k in depth0(cond) {
+        if k < from {
+            continue;
         }
+        let n = op(k);
+        if n > 0 {
+            parts.push(&cond[from..k]);
+            from = k + n;
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(&cond[from.min(cond.len())..]);
+    Some(parts)
+}
+
+/// Whether the condition `cond` (tokens of `src`) is trivially true (see the module
+/// docs).
+fn always_true(src: &str, cond: &[Token], dialect: Dialect) -> bool {
+    let cond = unwrap_parens(cond);
+    if cond.is_empty() {
         return false;
     }
-    match cond {
-        [t] => match t.kind {
-            TokKind::Word(w) => w.eq_ignore_ascii_case("TRUE") || nonzero_int(w),
+    let my = dialect.is_mysql();
+    // OR (lowest precedence): any trivially-true operand makes it true.
+    let or = |k: usize| {
+        if is_kw(cond, k, "OR") {
+            1
+        } else if my && is_op2(cond, k, b"||") {
+            2
+        } else {
+            0
+        }
+    };
+    if let Some(parts) = split_on(cond, or) {
+        return parts.iter().any(|p| always_true(src, p, dialect));
+    }
+    // AND: every operand must be trivially true.
+    let and = |k: usize| {
+        if is_kw(cond, k, "AND") {
+            1
+        } else if my && is_op2(cond, k, b"&&") {
+            2
+        } else {
+            0
+        }
+    };
+    if let Some(parts) = split_on(cond, and) {
+        return parts.iter().all(|p| always_true(src, p, dialect));
+    }
+    if is_kw(cond, 0, "NOT") || (my && is_punct(cond, 0, b'!') && !is_op2(cond, 0, b"!=")) {
+        return always_false(src, &cond[1..]);
+    }
+    // A comparison: the first depth-0 run of adjacent `<`, `=`, `>`, `!`.
+    let is_cmp = |k: usize| {
+        cond.get(k)
+            .is_some_and(|t| matches!(t.kind, TokKind::Punct(b'<' | b'=' | b'>' | b'!')))
+    };
+    if let Some(at) = depth0(cond).into_iter().find(|&k| is_cmp(k)) {
+        let mut end = at + 1;
+        while is_cmp(end) && cond[end - 1].end == cond[end].start {
+            end += 1;
+        }
+        let op = &src[cond[at].start..cond[end - 1].end];
+        let (l, r) = (value(src, &cond[..at]), value(src, &cond[end..]));
+        return match op {
+            "=" => same_value(l, r, false),
+            "<=>" if my => same_value(l, r, true),
+            "<>" | "!=" => {
+                matches!((l, r), (Some(a @ Val::Int(..)), Some(b @ Val::Int(..))) if a != b)
+            }
             _ => false,
-        },
-        [a, eq, b] if eq.kind == TokKind::Punct(b'=') => same_literal(src, a, b),
-        _ => false,
+        };
+    }
+    value(src, cond).is_some_and(|v| truthy(v, dialect))
+}
+
+/// Whether `cond` is `FALSE` or a zero integer (inside any wrapping parens).
+fn always_false(src: &str, cond: &[Token]) -> bool {
+    match value(src, cond) {
+        Some(Val::Int(_, digits)) => digits.is_empty(),
+        Some(Val::Text(t)) => t.eq_ignore_ascii_case("FALSE"),
+        None => false,
     }
 }
 
-fn nonzero_int(w: &str) -> bool {
-    !w.is_empty() && w.bytes().all(|c| c.is_ascii_digit()) && w.bytes().any(|c| c != b'0')
+/// A plain operand of a condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Val<'s> {
+    /// An integer with an optional sign: (negative, digits without leading zeros);
+    /// zero is `(false, "")`.
+    Int(bool, &'s str),
+    /// A (qualified) name, a keyword, a quoted string or identifier, as written.
+    Text(&'s str),
 }
 
-fn is_int(w: &str) -> bool {
-    !w.is_empty() && w.bytes().all(|c| c.is_ascii_digit())
+/// `side` (tokens of `src`) as a [`Val`], `None` when it is anything else.
+fn value<'s>(src: &'s str, side: &[Token]) -> Option<Val<'s>> {
+    let side = unwrap_parens(side);
+    let (neg, rest) = match side.first()?.kind {
+        TokKind::Punct(b'-') => (true, &side[1..]),
+        TokKind::Punct(b'+') => (false, &side[1..]),
+        _ => (false, side),
+    };
+    if let [t] = rest {
+        if let TokKind::Word(w) = t.kind {
+            if !w.is_empty() && w.bytes().all(|c| c.is_ascii_digit()) {
+                let digits = src[t.start..t.end].trim_start_matches('0');
+                return Some(Val::Int(neg && !digits.is_empty(), digits));
+            }
+        }
+    }
+    if rest.len() != side.len() {
+        // A sign before something else than an integer.
+        return None;
+    }
+    let (text, _) = name_at(src, side, 0)?;
+    let whole = &src[side[0].start..side[side.len() - 1].end];
+    (text == whole).then_some(Val::Text(whole))
 }
 
-/// The same integer, or the same single-quoted string, on both sides.
-fn same_literal(src: &str, a: &Token, b: &Token) -> bool {
-    match (a.kind, b.kind) {
-        (TokKind::Word(x), TokKind::Word(y)) => is_int(x) && x == y,
-        (TokKind::Quoted, TokKind::Quoted) => {
-            let (x, y) = (&src[a.start..a.end], &src[b.start..b.end]);
-            // Single-quoted strings only: `"a" = "a"` may compare columns (PG,
-            // ANSI_QUOTES).
-            x.len() >= 2 && x.starts_with('\'') && x.ends_with('\'') && x == y
+/// `l = r` (or `l <=> r` when `null_safe`) holds on every row.
+fn same_value(l: Option<Val>, r: Option<Val>, null_safe: bool) -> bool {
+    match (l, r) {
+        (Some(Val::Int(a, x)), Some(Val::Int(b, y))) => a == b && x == y,
+        (Some(Val::Text(x)), Some(Val::Text(y))) => {
+            x == y && (null_safe || !x.eq_ignore_ascii_case("NULL"))
         }
         _ => false,
     }
 }
 
-fn update(src: &str, toks: &[Token], out: &mut Vec<UnboundedWrite>) {
+/// Whether the single operand `v` is true as a whole condition.
+fn truthy(v: Val, dialect: Dialect) -> bool {
+    let text = match v {
+        Val::Int(_, digits) => return !digits.is_empty(),
+        Val::Text(t) => t,
+    };
+    if text.eq_ignore_ascii_case("TRUE") {
+        return true;
+    }
+    let quoted = |q: char| text.len() >= 2 && text.starts_with(q) && text.ends_with(q);
+    match dialect {
+        Dialect::MySql(m) => {
+            // A string is read as a number: `'1'` is true.
+            if !(quoted('\'') || (!m.ansi_quotes && quoted('"'))) {
+                return false;
+            }
+            let body = text[1..text.len() - 1].trim();
+            let digits = body.strip_prefix(['-', '+']).unwrap_or(body);
+            !digits.is_empty()
+                && digits.bytes().all(|c| c.is_ascii_digit())
+                && digits.bytes().any(|c| c != b'0')
+        }
+        Dialect::Postgres => {
+            // An unknown-typed literal read as a boolean.
+            quoted('\'')
+                && ["t", "true", "y", "yes", "on", "1"]
+                    .iter()
+                    .any(|b| text[1..text.len() - 1].trim().eq_ignore_ascii_case(b))
+        }
+    }
+}
+
+fn update(src: &str, toks: &[Token], dialect: Dialect, out: &mut Vec<UnboundedWrite>) {
     let i = skip_words(toks, 1, &["LOW_PRIORITY", "IGNORE", "ONLY"]);
     let idx = depth0(toks);
     let set = idx
         .iter()
         .copied()
-        .find(|&k| k >= i && is_word(toks, k, "SET"))
+        .find(|&k| k >= i && is_kw(toks, k, "SET"))
         .unwrap_or(toks.len());
     // The table references before SET: the first name and every name after a depth-0
     // `,` or `… JOIN`.
@@ -374,7 +544,7 @@ fn update(src: &str, toks: &[Token], out: &mut Vec<UnboundedWrite>) {
             expect = true;
         }
     }
-    if let Some(reason) = where_status(src, &toks[set.min(toks.len())..]) {
+    if let Some(reason) = where_status(src, &toks[set.min(toks.len())..], dialect) {
         out.push(UnboundedWrite {
             op: WriteOp::Update,
             reason,
@@ -383,7 +553,7 @@ fn update(src: &str, toks: &[Token], out: &mut Vec<UnboundedWrite>) {
     }
 }
 
-fn delete(src: &str, toks: &[Token], out: &mut Vec<UnboundedWrite>) {
+fn delete(src: &str, toks: &[Token], dialect: Dialect, out: &mut Vec<UnboundedWrite>) {
     let i = skip_words(toks, 1, &["LOW_PRIORITY", "QUICK", "IGNORE"]);
     let names = if is_word(toks, i, "FROM") {
         // `DELETE FROM t …`, `DELETE FROM t1, t2 USING …`
@@ -392,7 +562,7 @@ fn delete(src: &str, toks: &[Token], out: &mut Vec<UnboundedWrite>) {
         // MySQL `DELETE t1, t2 FROM …`
         name_list(src, toks, i).0
     };
-    if let Some(reason) = where_status(src, &toks[i.min(toks.len())..]) {
+    if let Some(reason) = where_status(src, &toks[i.min(toks.len())..], dialect) {
         out.push(UnboundedWrite {
             op: WriteOp::Delete,
             reason,
@@ -539,17 +709,186 @@ mod tests {
                 "DELETE FROM t WHERE 0",
                 "DELETE FROM t WHERE false",
                 "DELETE FROM t WHERE 1 = 2",
-                "DELETE FROM t WHERE a = a",
+                "DELETE FROM t WHERE a = b",
+                "DELETE FROM t WHERE a = t.a",
+                "DELETE FROM t WHERE NULL = NULL",
                 "DELETE FROM t WHERE 1=1 AND id = 3",
+                "DELETE FROM t WHERE 1=1 AND 1=0",
                 "DELETE FROM t WHERE (id = 3 OR id = 4)",
                 "UPDATE t SET a = 1 WHERE id = 1 ORDER BY id LIMIT 1",
                 "DELETE FROM t WHERE 'a' = 'b'",
+                "DELETE FROM t WHERE 'a' <> 'b'",
+                "DELETE FROM t WHERE 1 <> 1",
+                "DELETE FROM t WHERE 1 != 01",
+                "DELETE FROM t WHERE 1 = -1",
+                "DELETE FROM t WHERE -0",
+                "DELETE FROM t WHERE NOT 1",
+                "DELETE FROM t WHERE NOT TRUE",
+                "DELETE FROM t WHERE NOT 0 = 0",
+                "DELETE FROM t WHERE NOT a",
+                "DELETE FROM t WHERE '0'",
+                "DELETE FROM t WHERE 'abc'",
+                "DELETE FROM t WHERE a BETWEEN 1 AND 2",
+                "DELETE FROM t WHERE a > 1",
+                "DELETE FROM t WHERE -a",
             ] {
                 assert_eq!(flags(s, d), [], "{s} ({d:?})");
             }
         }
-        assert_eq!(flags(r#"DELETE FROM t WHERE "a" = "a""#, PG), []);
         assert_eq!(flags("DELETE FROM t WHERE CURRENT OF c", PG), []);
+        // `||` is concatenation in PG, `&&` an array operator.
+        assert_eq!(flags("DELETE FROM t WHERE a = 'x' || 1", PG), []);
+        assert_eq!(flags("DELETE FROM t WHERE a || 1", PG), []);
+        assert_eq!(flags("DELETE FROM t WHERE a && 1", PG), []);
+        // `<=>` is MySQL only.
+        assert_eq!(flags("DELETE FROM t WHERE a <=> a", PG), []);
+        // Under ANSI_QUOTES `"1"` is an identifier.
+        let ansi = Dialect::MySql(dnt_core::sql::MySqlMode {
+            ansi_quotes: true,
+            no_backslash_escapes: false,
+        });
+        assert_eq!(flags(r#"DELETE FROM t WHERE "1""#, ansi), []);
+        assert_eq!(flags(r#"DELETE FROM t WHERE "1""#, PG), []);
+    }
+
+    #[test]
+    fn a_where_in_a_qualified_name_is_not_the_keyword() {
+        for d in BOTH {
+            assert_eq!(
+                flags("UPDATE t SET a = t.where", d),
+                one(Update, NoWhere, "t"),
+                "{d:?}"
+            );
+            assert_eq!(
+                flags("DELETE FROM shop.where", d),
+                one(Delete, NoWhere, "shop.where")
+            );
+            assert_eq!(
+                flags("UPDATE t SET a = where.b", d),
+                one(Update, NoWhere, "t")
+            );
+            assert_eq!(flags("UPDATE t SET a = t.where WHERE id = 1", d), []);
+            assert_eq!(flags("DELETE FROM shop.where WHERE id = 1", d), []);
+        }
+        assert_eq!(
+            flags("DELETE FROM t ORDER BY t.where LIMIT 5", MY),
+            one(Delete, NoWhere, "t")
+        );
+        assert_eq!(
+            flags("UPDATE t SET a = 1 FROM where.u", PG),
+            one(Update, NoWhere, "t")
+        );
+        assert_eq!(
+            flags("UPDATE x.set SET a = 1", MY),
+            one(Update, NoWhere, "x.set")
+        );
+        // `t.order` / `t.limit` do not end the condition.
+        assert_eq!(
+            flags("DELETE FROM t WHERE 1 = 1 AND t.order = t.order", MY),
+            one(Delete, AlwaysTrue, "t")
+        );
+        assert_eq!(flags("DELETE FROM t WHERE t.limit = 1", MY), []);
+    }
+
+    #[test]
+    fn a_dangling_where_is_no_where() {
+        for d in BOTH {
+            for s in [
+                "DELETE FROM t WHERE",
+                "DELETE FROM t WHERE;",
+                "UPDATE t SET a = 1 WHERE",
+                "DELETE FROM t WHERE -- id = 1",
+            ] {
+                assert_eq!(flags(s, d).len(), 1, "{s} ({d:?})");
+                assert_eq!(flags(s, d)[0].1, NoWhere, "{s} ({d:?})");
+            }
+        }
+        assert_eq!(
+            flags("DELETE FROM t WHERE ORDER BY id LIMIT 1", MY),
+            one(Delete, NoWhere, "t")
+        );
+        assert_eq!(
+            flags("DELETE FROM t WHERE RETURNING *", PG),
+            one(Delete, NoWhere, "t")
+        );
+    }
+
+    #[test]
+    fn more_trivially_true_forms() {
+        for d in BOTH {
+            for s in [
+                "DELETE FROM t WHERE 1=1 AND 1=1",
+                "DELETE FROM t WHERE (1 = 1) AND true AND 2",
+                "DELETE FROM t WHERE id = 3 OR (1=1 AND 1)",
+                "DELETE FROM t WHERE NOT 0",
+                "DELETE FROM t WHERE NOT FALSE",
+                "DELETE FROM t WHERE NOT (0)",
+                "DELETE FROM t WHERE -1",
+                "DELETE FROM t WHERE +1",
+                "DELETE FROM t WHERE (-5)",
+                "DELETE FROM t WHERE 1 <> 0",
+                "DELETE FROM t WHERE 1 != 2",
+                "DELETE FROM t WHERE -1 <> 1",
+                "DELETE FROM t WHERE -1 = -1",
+                "DELETE FROM t WHERE 01 = 1",
+                "DELETE FROM t WHERE a = a",
+                "DELETE FROM t WHERE t.a = t.a",
+                "DELETE FROM t WHERE id = 1 OR a = a",
+            ] {
+                assert_eq!(flags(s, d), one(Delete, AlwaysTrue, "t"), "{s} ({d:?})");
+            }
+        }
+        for s in [
+            "DELETE FROM t WHERE id = 5 || 1",
+            "DELETE FROM t WHERE id = 5||1=1",
+            "DELETE FROM t WHERE 1 && 1",
+            "DELETE FROM t WHERE !0",
+            "DELETE FROM t WHERE ! FALSE",
+            "DELETE FROM t WHERE '1'",
+            "DELETE FROM t WHERE '-2'",
+            "DELETE FROM t WHERE ' 10 '",
+            "DELETE FROM t WHERE \"1\"",
+            "DELETE FROM t WHERE `a` = `a`",
+            "DELETE FROM t WHERE a <=> a",
+            "DELETE FROM t WHERE NULL <=> NULL",
+        ] {
+            assert_eq!(flags(s, MY), one(Delete, AlwaysTrue, "t"), "{s}");
+        }
+        for s in [
+            "DELETE FROM t WHERE 't'",
+            "DELETE FROM t WHERE 'TRUE'",
+            "DELETE FROM t WHERE 'yes'",
+            "DELETE FROM t WHERE 'on'",
+            "DELETE FROM t WHERE '1'",
+            r#"DELETE FROM t WHERE "a" = "a""#,
+        ] {
+            assert_eq!(flags(s, PG), one(Delete, AlwaysTrue, "t"), "{s}");
+        }
+        assert_eq!(flags("DELETE FROM t WHERE 'f'", PG), []);
+        assert_eq!(flags("DELETE FROM t WHERE 'yes'", MY), []);
+    }
+
+    #[test]
+    fn pg_prepare_body_is_judged() {
+        assert_eq!(
+            flags("PREPARE p AS DELETE FROM t", PG),
+            one(Delete, NoWhere, "t")
+        );
+        assert_eq!(
+            flags("PREPARE p (int) AS UPDATE t SET a = $1", PG),
+            one(Update, NoWhere, "t")
+        );
+        assert_eq!(
+            flags("prepare p(int, text) as delete from t where 1 = 1", PG),
+            one(Delete, AlwaysTrue, "t")
+        );
+        assert_eq!(
+            flags("PREPARE p (int) AS DELETE FROM t WHERE id = $1", PG),
+            []
+        );
+        assert_eq!(flags("PREPARE p AS SELECT * FROM t", PG), []);
+        // MySQL's text is a string.
+        assert_eq!(flags("PREPARE p FROM 'DELETE FROM t'", MY), []);
     }
 
     #[test]
