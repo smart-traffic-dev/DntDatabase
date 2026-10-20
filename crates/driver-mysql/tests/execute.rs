@@ -655,28 +655,28 @@ async fn exec_comment_set_reports_reset_state() {
 }
 
 /// An interrupt we did not ask for (the server's statement time limit) is the server's
-/// own error with its code and text, not a Cancel. MySQL enforces `max_execution_time`
-/// on SELECTs (3024; a killed `SLEEP` would just return 1, hence the slow cross join),
-/// MariaDB `max_statement_time` (1969).
+/// own error with its code and text, not a Cancel. MySQL enforces the
+/// `MAX_EXECUTION_TIME` hint on SELECTs (3024), MariaDB a statement-scoped
+/// `max_statement_time` (1969). The query sleeps per row of a multi-row source: a
+/// killed `SLEEP` just returns 1, but the server then notices the limit before the next
+/// row, so the interruption is always reported as an error (not as a normal result).
 #[tokio::test]
 async fn server_statement_time_limit_is_a_server_error() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
-        let (setup, sql, code) = match t {
+        let (sql, code) = match t {
             Target::MySql57 | Target::MySql8 => (
-                "SET SESSION max_execution_time = 200",
-                "SELECT COUNT(*) FROM information_schema.columns a, \
-                 information_schema.columns b, information_schema.columns c",
+                "SELECT /*+ MAX_EXECUTION_TIME(200) */ COUNT(*) \
+                 FROM (SELECT 1 a UNION ALL SELECT 2) d WHERE SLEEP(5) = 0",
                 "3024",
             ),
             _ => (
-                "SET SESSION max_statement_time = 0.2",
-                "SELECT SLEEP(5)",
+                "SET STATEMENT max_statement_time=0.2 FOR SELECT COUNT(*) \
+                 FROM (SELECT 1 a UNION ALL SELECT 2) d WHERE SLEEP(5) = 0",
                 "1969",
             ),
         };
-        run(&s, setup).await.unwrap();
         match run(&s, sql).await {
             Err(DbError::Server {
                 code: Some(c),
@@ -952,13 +952,35 @@ async fn reconnect_rereads_sql_mode() {
         kill(t, connection_id(&s).await).await;
         // The changed sql_mode is custom session state: the read is not re-run.
         match run(&s, "SELECT 1").await {
-            Ok(_) => {}
             Err(DbError::ConnectionLost { message, .. }) => {
                 assert!(message.contains("session settings"), "{t:?}: {message}")
             }
-            Err(e) => panic!("{t:?}: {e}"),
+            other => panic!("{t:?}: the read was re-run silently: {other:?}"),
         }
         assert_eq!(mode_of(s.dialect()), server_mode(&s).await, "{t:?}");
+    }
+}
+
+/// A `sql_mode` read that failed after a statement (e.g. a Stop's `KILL QUERY` landed
+/// in it) leaves the flags stale: the next `execute_one` re-reads them before it lexes
+/// its statement.
+#[tokio::test]
+async fn stale_sql_mode_is_reread_before_the_next_statement() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let real = mode_of(s.dialect());
+        let wrong = MySqlMode {
+            ansi_quotes: !real.ansi_quotes,
+            no_backslash_escapes: !real.no_backslash_escapes,
+        };
+        // The state a failed read leaves behind: old flags, marked stale.
+        s.mark_mode_stale(wrong);
+        assert_eq!(mode_of(s.dialect()), wrong, "{t:?}");
+        let (res, _) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(mode_of(s.dialect()), real, "{t:?}");
+        assert_eq!(real, server_mode(&s).await, "{t:?}");
     }
 }
 

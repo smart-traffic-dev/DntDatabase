@@ -74,7 +74,14 @@ pub struct MySqlSession {
     autocommit_off: AtomicBool,
     /// The lexing flags of the session's `sql_mode`, as last read from the server: on
     /// connect, after every reconnect and after every statement that may change it.
+    /// Changes `session_effect` does not see are not tracked: `SET sql_mode` run through
+    /// `PREPARE` / `EXECUTE`, and MariaDB `SET STATEMENT sql_mode=… FOR …` (which only
+    /// lasts for its own statement anyway).
     mode: std::sync::Mutex<MySqlMode>,
+    /// Set when reading the `sql_mode` after a statement failed (e.g. a Stop's
+    /// `KILL QUERY` landed in it): `mode` may be out of date, so the next
+    /// `execute_one` reads it again before lexing its statement.
+    mode_stale: AtomicBool,
     cancel: Arc<CancelState>,
     /// Database of the last successful `USE`, re-applied after a reconnect.
     last_db: std::sync::Mutex<Option<String>>,
@@ -131,6 +138,7 @@ impl MySqlSession {
             tx: std::sync::Mutex::new(TxState::Idle),
             autocommit_off: AtomicBool::new(false),
             mode: std::sync::Mutex::new(mode),
+            mode_stale: AtomicBool::new(false),
             cancel,
             last_db: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
@@ -179,8 +187,27 @@ impl MySqlSession {
         *self.mode.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// Records flags just read from the server (no longer stale).
     fn set_mode(&self, mode: MySqlMode) {
         *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+        self.mode_stale.store(false, Ordering::SeqCst);
+    }
+
+    /// Reads the `sql_mode` of `conn` into `mode`; on failure the flags stay as they
+    /// were, marked stale (read again by the next `execute_one`).
+    async fn refresh_mode(&self, conn: &mut Conn) {
+        match read_sql_mode(conn).await {
+            Ok(mode) => self.set_mode(mode),
+            Err(_) => self.mode_stale.store(true, Ordering::SeqCst),
+        }
+    }
+
+    /// Test-only (`test-helpers` feature): puts the session in the state a failed
+    /// `sql_mode` read leaves behind, with `assumed` as the out-of-date flags.
+    #[cfg(feature = "test-helpers")]
+    pub fn mark_mode_stale(&self, assumed: MySqlMode) {
+        *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = assumed;
+        self.mode_stale.store(true, Ordering::SeqCst);
     }
 
     /// Applies [`next_tx_state`] and [`next_autocommit_off`] for a statement that ended
@@ -654,8 +681,6 @@ impl Session for MySqlSession {
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         let mut slot = self.conn.lock().await;
-        // The dialect `stmt` was split with (the `sql_mode` before it ran).
-        let dialect = self.dialect();
         // Cancels only apply to this call from here on (see `cancel.rs`).
         let run = self.cancel.begin(&opts.stop);
         // Stopped before anything was sent.
@@ -708,6 +733,18 @@ impl Session for MySqlSession {
                 return Err(not_sent(self.in_transaction()));
             }
         }
+        // The last `sql_mode` read failed: read it again before lexing anything.
+        if self.mode_stale.load(Ordering::SeqCst) {
+            if let Some(conn) = slot.as_mut() {
+                self.refresh_mode(conn).await;
+            }
+            if stopped() {
+                return Err(not_sent(self.in_transaction()));
+            }
+        }
+        // The `sql_mode` `stmt` runs under, read from the connection it is sent on
+        // (after any reconnect above).
+        let dialect = self.dialect();
         let was_in_tx = self.in_transaction();
         loop {
             let mut emitted = false;
@@ -832,11 +869,9 @@ impl Session for MySqlSession {
         // next statement, and the replacement's `sql_mode` read then.
         if self.track_after(kind, stmt, dialect) && !self.cancel.poisoned() {
             if let Some(conn) = slot.as_mut() {
-                // Best effort: on failure the flags stay as they were; a lost
-                // connection is replaced (and its `sql_mode` read) by the next call.
-                if let Ok(mode) = read_sql_mode(conn).await {
-                    self.set_mode(mode);
-                }
+                // On failure the flags are marked stale and read again by the next
+                // call (a lost connection is replaced, and its `sql_mode` read, then).
+                self.refresh_mode(conn).await;
             }
         }
         Ok(outcome)

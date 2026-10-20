@@ -28,7 +28,9 @@ pub struct SessionEffect {
 ///   any depth, depth-0 `INTO @v`) are `custom`; an assignment to the session `sql_mode` also
 ///   sets `sql_mode`; a plain `USE db` sets `use_db`. The `autocommit` assignment
 ///   is transaction control, tracked by the drivers, and is skipped (the other
-///   assignments of the same `SET` still count).
+///   assignments of the same `SET` still count). Not detected: a `SET sql_mode`
+///   run through `PREPARE` / `EXECUTE` (only the `PREPARE` is `custom`), and MariaDB
+///   `SET STATEMENT sql_mode=… FOR …`, which only lasts for its own statement.
 /// - PG: session-level `SET` other than `search_path` (not `SET LOCAL`, `SET
 ///   TRANSACTION`, `SET CONSTRAINTS`; quoted and dotted names included),
 ///   temporary tables / views / sequences, `PREPARE` (not `PREPARE TRANSACTION`),
