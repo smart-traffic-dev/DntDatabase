@@ -213,11 +213,13 @@ pub async fn query_tx_info_impl(state: &AppState, tab_id: String) -> Result<TabT
     state.sessions.query_tx_info(&tab_id).await
 }
 
-/// Sets the tab's commit mode and returns its transaction state. `Manual`: a run that
-/// starts with no transaction open and changes something begins one first; commit or
+/// Sets the tab's commit mode and returns its transaction state. `Manual`: before every
+/// statement that needs a transaction while none is open, the run begins one; commit or
 /// roll it back with `query_tx`. MySQL statements that would commit it are flagged
-/// `implicit_commit` in the plan. Errors: `busy` while the tab runs,
-/// `transaction_open` when leaving Manual with a transaction open.
+/// `implicit_commit` in the plan. A Manual transaction lost with the connection makes
+/// `query_run` fail with `connection_lost` until `query_tx` acknowledges it. Errors:
+/// `busy` while the tab runs, `transaction_open` when leaving Manual with a transaction
+/// open.
 #[tauri::command]
 #[specta::specta]
 pub async fn query_tx_mode(

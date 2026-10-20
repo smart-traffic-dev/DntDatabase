@@ -274,6 +274,13 @@ pub(crate) struct ChannelSink {
     pub(crate) ddl_ok: bool,
     /// The database a successful MySQL `USE` moved the session to (the last one).
     pub(crate) use_db: Option<String>,
+    /// The session's transaction state as the run last reported it (set it to the
+    /// state at the start of the run: `run` reports changes only).
+    pub(crate) tx_now: TxState,
+    /// A statement lost the connection while a transaction was open (the drivers
+    /// reset their state to `Idle` on a lost connection, so the state after the run
+    /// cannot tell).
+    pub(crate) lost_in_tx: bool,
 }
 
 /// `%Y-%m-%dT%H:%M:%S%.3fZ` of now, UTC (the history's fixed format).
@@ -352,6 +359,8 @@ impl ChannelSink {
             }),
             ddl_ok: false,
             use_db: None,
+            tx_now: TxState::Idle,
+            lost_in_tx: false,
         }
     }
 
@@ -581,6 +590,9 @@ impl RunSink for ChannelSink {
                 }
             }
             Err(error) => {
+                if error.kind == "connection_lost" && self.tx_now != TxState::Idle {
+                    self.lost_in_tx = true;
+                }
                 (self.emit)(RunEvent::StatementError {
                     index: stmt.index,
                     error: error.clone(),
@@ -598,6 +610,7 @@ impl RunSink for ChannelSink {
     }
 
     fn tx_state(&mut self, state: TxState) {
+        self.tx_now = state;
         (self.emit)(RunEvent::TxState { state });
     }
 }

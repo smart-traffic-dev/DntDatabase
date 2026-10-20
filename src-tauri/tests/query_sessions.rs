@@ -239,6 +239,10 @@ impl Session for FakeSession {
         if upper == "BEGIN" || upper == "START TRANSACTION" {
             self.log.set_tx(TxState::Active);
         }
+        // MySQL DDL commits the open transaction.
+        if self.info.kind == DbKind::MySql && upper.starts_with("CREATE TABLE") {
+            self.log.set_tx(TxState::Idle);
+        }
         let ok = |summary: ResultSummary| {
             Ok(StmtOutcome {
                 results: vec![summary],
@@ -2908,19 +2912,19 @@ async fn manual_mode_begins_before_first_write() {
         assert_eq!(events.of("done")[0]["stop"], Json::Null, "{kind:?}");
         assert_eq!(
             sent(&f),
-            [begin, "SELECT 1", "UPDATE t SET a = 1 WHERE id = 1"],
-            "{kind:?}: the transaction begins before the run's first statement"
+            ["SELECT 1", begin, "UPDATE t SET a = 1 WHERE id = 1"],
+            "{kind:?}: the transaction begins right before the first write"
         );
         let info = f.sm.query_tx_info("t1").await.unwrap();
         assert_eq!(info.state, TxState::Active, "{kind:?}");
-        assert_eq!(info.statements, 2, "{kind:?}");
+        assert_eq!(info.statements, 1, "{kind:?}");
         assert!(info.since_ms.is_some_and(|ms| ms > 0.0), "{kind:?}");
 
         // In the open transaction: no second BEGIN, the count goes on.
         run_text(&f, id, "DELETE FROM t WHERE id = 2", opts()).await;
         assert_eq!(sent(&f).len(), 4, "{kind:?}");
         let later = f.sm.query_tx_info("t1").await.unwrap();
-        assert_eq!(later.statements, 3, "{kind:?}");
+        assert_eq!(later.statements, 2, "{kind:?}");
         assert_eq!(later.since_ms, info.since_ms, "{kind:?}");
 
         // Commit ends it; the next write begins again.
@@ -3075,6 +3079,21 @@ async fn commit_lost_reports_outcome_unknown() {
             .unwrap_err();
     assert_eq!(err.kind, "timeout");
     assert!(err.outcome_unknown, "{err:?}");
+    // The session (still `Active` in the fake) is dropped: no Rollback can look like it
+    // undid a COMMIT that may have landed.
+    assert_eq!(err.tx_state.as_deref(), Some("idle"));
+    assert_eq!(f.sm.query_tx_info("t1").await.unwrap().state, TxState::Idle);
+    f.log.timeout_on_tx.store(false, Ordering::SeqCst);
+    let sent_before = f.log.executed().len();
+    assert_eq!(
+        f.sm.query_tx("t1", TxAction::Rollback).await.unwrap(),
+        TxState::Idle
+    );
+    assert_eq!(f.log.executed().len(), sent_before, "nothing to roll back");
+    // The tab keeps its database and reopens on its next use.
+    let connects = f.log.connects();
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), connects + 1);
 }
 
 #[tokio::test]
@@ -3085,4 +3104,152 @@ async fn closing_a_tab_forgets_its_mode() {
     f.sm.query_close_tab("t1", false).await.unwrap();
     run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
     assert_eq!(sent(&f), ["UPDATE t SET a = 1 WHERE id = 1"]);
+}
+
+#[tokio::test]
+async fn manual_mysql_ddl_commits_and_the_next_write_begins_again() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    let text = "UPDATE a SET x = 1 WHERE id = 1; CREATE TABLE x (a INT); \
+                UPDATE b SET x = 1 WHERE id = 1";
+    let view = plan(&f, "t1", id, None, text).await.unwrap();
+    let flags: Vec<bool> = view.stmts.iter().map(|s| s.implicit_commit).collect();
+    assert_eq!(flags, [false, true, false]);
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(
+        sent(&f),
+        [
+            "START TRANSACTION",
+            "UPDATE a SET x = 1 WHERE id = 1",
+            "CREATE TABLE x (a INT)",
+            "START TRANSACTION",
+            "UPDATE b SET x = 1 WHERE id = 1"
+        ]
+    );
+    // `a` was committed by the DDL; `b` waits in a new open transaction.
+    let info = f.sm.query_tx_info("t1").await.unwrap();
+    assert_eq!(info.state, TxState::Active);
+    assert_eq!(info.statements, 1);
+}
+
+#[tokio::test]
+async fn manual_commit_mid_run_begins_again() {
+    for (kind, begin) in [
+        (DbKind::MySql, "START TRANSACTION"),
+        (DbKind::Postgres, "BEGIN"),
+    ] {
+        let f = fixture(kind);
+        let id = open(&f, config(kind)).await;
+        manual(&f, "t1").await;
+        let text = "UPDATE a SET x = 1 WHERE id = 1; COMMIT; UPDATE b SET x = 1 WHERE id = 1";
+        run_text(&f, id, text, opts()).await;
+        assert_eq!(
+            sent(&f),
+            [
+                begin,
+                "UPDATE a SET x = 1 WHERE id = 1",
+                "COMMIT",
+                begin,
+                "UPDATE b SET x = 1 WHERE id = 1"
+            ],
+            "{kind:?}"
+        );
+        let info = f.sm.query_tx_info("t1").await.unwrap();
+        assert_eq!(
+            (info.state, info.statements),
+            (TxState::Active, 1),
+            "{kind:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn manual_vacuum_and_set_do_not_begin() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(&f, config(DbKind::Postgres)).await;
+    manual(&f, "t1").await;
+    run_text(&f, id, "VACUUM", opts()).await;
+    run_text(&f, id, "SET work_mem = '64MB'", opts()).await;
+    assert_eq!(sent(&f), ["VACUUM", "SET work_mem = '64MB'"]);
+
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    run_text(&f, id, "SET @x = 1", opts()).await;
+    assert_eq!(sent(&f), ["SET @x = 1"]);
+    assert_eq!(f.sm.query_tx_info("t1").await.unwrap().state, TxState::Idle);
+}
+
+#[tokio::test]
+async fn manual_lost_tx_blocks_runs_until_acknowledged() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+    let events = run_text(&f, id, "UPDATE t SET a = 2 WHERE lose_tx = 1", opts()).await;
+    assert_eq!(
+        events.of("statement_error")[0]["error"]["kind"],
+        "connection_lost"
+    );
+    let before = sent(&f).len();
+
+    // A new plan reopens the session, but the run is refused: nothing is sent, and
+    // no new transaction begins.
+    let view = plan(&f, "t1", id, None, "UPDATE t SET a = 3 WHERE id = 1")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, true, opts(), emit.clone())
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(with_tx_state(err).tx_state.as_deref(), Some("idle"));
+    assert_eq!(sent(&f).len(), before);
+    assert!(events.list().is_empty());
+
+    // Rolling back acknowledges the loss (nothing is sent); then the tab runs again.
+    let ack =
+        f.sm.query_tx_reported("t1", TxAction::Rollback)
+            .await
+            .unwrap_err();
+    assert_eq!(ack.kind, "connection_lost");
+    assert!(!ack.outcome_unknown);
+    assert_eq!(ack.tx_state.as_deref(), Some("idle"));
+    assert_eq!(sent(&f).len(), before);
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(
+        sent(&f)[before..],
+        ["START TRANSACTION", "UPDATE t SET a = 3 WHERE id = 1"]
+    );
+
+    // An Auto tab forgets the loss once its session reopens (unchanged behaviour).
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    run_text(&f, id, "UPDATE t SET a = 2 WHERE lose_tx = 1", opts()).await;
+    run_text(&f, id, "UPDATE t SET a = 3 WHERE id = 1", opts()).await;
+    assert_eq!(
+        sent(&f).last().map(String::as_str),
+        Some("UPDATE t SET a = 3 WHERE id = 1")
+    );
 }

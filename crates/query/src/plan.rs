@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::guard::GuardCtx;
 use crate::offsets::Utf16Map;
 use crate::risk::{drop_targets, DropTarget, RowEstimate};
+use crate::run::manual_needs_tx;
 use crate::unbounded::{unbounded_writes, UnboundedWrite};
 
 /// What the user asked to run. Offsets are UTF-16 code units into the editor text.
@@ -206,14 +207,22 @@ pub fn statement_kind(text: &str, dialect: Dialect) -> StatementKind {
 /// TABLES`, `FLUSH`, …), when a transaction is open before it. Always `false` on
 /// PostgreSQL, whose DDL is transactional. The user's own `BEGIN` / `COMMIT` are not
 /// flagged: they are the transaction control the user wrote.
-pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState) {
-    let mysql = plan.dialect.is_mysql();
+///
+/// `manual_tx`: the plan runs with [`crate::run::RunConfig::manual_tx`], which begins a
+/// transaction before every statement that needs one ([`manual_needs_tx`]) while none
+/// is open; the walk does the same.
+pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: bool) {
+    let dialect = plan.dialect;
+    let mysql = dialect.is_mysql();
     let mut state = start;
     let mut autocommit_off = false;
     for s in &mut plan.stmts {
         s.implicit_commit = false;
         if !mysql {
             continue;
+        }
+        if manual_tx && state == TxState::Idle && manual_needs_tx(s.kind, &s.text, dialect) {
+            state = TxState::Active;
         }
         let commits = |prev| {
             next_tx_state(DbKind::MySql, prev, false, s.kind, &s.text, StmtResult::Ok)
@@ -531,15 +540,18 @@ mod tests {
                     DROP TABLE a; BEGIN; LOCK TABLES t WRITE; COMMIT; ALTER TABLE t ADD y INT";
         let mut p = plan(text, Target::All, MY);
         assert!(flags(&p).iter().all(|f| !f), "planning sets none");
-        mark_implicit_commits(&mut p, Idle);
+        mark_implicit_commits(&mut p, Idle, false);
         // Idle: the first DDL commits nothing; after BEGIN the LOCK TABLES commits it.
         assert_eq!(flags(&p), [false, false, false, false, true, false, false]);
-        mark_implicit_commits(&mut p, Active);
+        mark_implicit_commits(&mut p, Active, false);
         // Active: the CREATE commits it (and leaves the session idle).
         assert_eq!(flags(&p), [true, false, false, false, true, false, false]);
+        // Manual: the UPDATE begins a transaction, which the DROP commits.
+        mark_implicit_commits(&mut p, Idle, true);
+        assert_eq!(flags(&p), [false, false, true, false, true, false, false]);
 
         let mut p = plan(text, Target::All, Dialect::Postgres);
-        mark_implicit_commits(&mut p, Active);
+        mark_implicit_commits(&mut p, Active, true);
         assert!(flags(&p).iter().all(|f| !f));
     }
 

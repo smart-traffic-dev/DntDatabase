@@ -632,6 +632,63 @@ async fn rollback_in_manual_mode_restores_rows() {
         let info = state.sessions.query_tx_info("t1").await.unwrap();
         assert_eq!(info.state, TxState::Idle, "{t:?}");
 
+        // A transaction that ends mid-run (the user's COMMIT; on MySQL also DDL, which
+        // commits it) is begun again before the next write: the first UPDATE stays, the
+        // second is rolled back.
+        let side = format!("{table}_x");
+        let mut mids = vec!["COMMIT".to_string()];
+        if t.kind() == DbKind::MySql {
+            mids.push(format!("CREATE TABLE {side} (a INT)"));
+        }
+        for mid in mids {
+            let reset = format!("DELETE FROM {table};\nINSERT INTO {table} VALUES (1), (2), (3)");
+            let events = run_all(&state, "t1", id, &reset).await;
+            assert_eq!(events.of("done")[0]["stop"], Json::Null, "{t:?}");
+            let after = state.sessions.query_tx("t1", TxAction::Commit).await;
+            assert_eq!(after.unwrap(), TxState::Idle, "{t:?}");
+            let script = format!(
+                "UPDATE {table} SET id = 10 WHERE id = 1;\n{mid};\n\
+                 UPDATE {table} SET id = 20 WHERE id = 2"
+            );
+            let events = run_all(&state, "t1", id, &script).await;
+            assert_eq!(
+                events.of("done")[0]["stop"],
+                Json::Null,
+                "{t:?} {mid}: {:?}",
+                events.list()
+            );
+            let info = state.sessions.query_tx_info("t1").await.unwrap();
+            assert_eq!(
+                (info.state, info.statements),
+                (TxState::Active, 1),
+                "{t:?} {mid}"
+            );
+            let after = state.sessions.query_tx("t1", TxAction::Rollback).await;
+            assert_eq!(after.unwrap(), TxState::Idle, "{t:?}");
+            let events = run_all(
+                &state,
+                "t1",
+                id,
+                &format!("SELECT id FROM {table} ORDER BY id"),
+            )
+            .await;
+            let ids: Vec<i64> = events.of("rows")[0]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let v = &r[0]["v"];
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(ids, [2, 3, 10], "{t:?} {mid}");
+        }
+        if t.kind() == DbKind::MySql {
+            run_all(&state, "t1", id, &format!("DROP TABLE {side}")).await;
+        }
+
         let mode = state.sessions.query_tx_mode("t1", TxMode::Auto).await;
         assert_eq!(mode.unwrap(), TxState::Idle, "{t:?}");
         run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;

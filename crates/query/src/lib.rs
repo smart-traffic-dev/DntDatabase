@@ -36,6 +36,7 @@ pub use risk::{
     DropKind, DropTarget, RowEstimate,
 };
 pub use run::{
-    error_offset, run, RunCancel, RunReport, RunSink, StmtReport, StopReason, ROLLED_BACK_NOTICE,
+    begin_sql, error_offset, manual_needs_tx, run, run_with, RunCancel, RunConfig, RunReport,
+    RunSink, StmtReport, StopReason, BEGIN_FAILED_NOTICE, ROLLED_BACK_NOTICE,
 };
 pub use unbounded::{unbounded_writes, UnboundedReason, UnboundedWrite, WriteOp};

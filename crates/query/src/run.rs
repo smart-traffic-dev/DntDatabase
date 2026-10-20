@@ -10,7 +10,7 @@ use dnt_core::driver::{
     StmtOutcome, StopSignal,
 };
 use dnt_core::error::{AppError, DbError};
-use dnt_core::sql::{Dialect, StatementKind, TxControl};
+use dnt_core::sql::{classify, leading_keywords, Dialect, StatementKind, TxControl};
 use dnt_core::tx::{is_rollback_to, TxState};
 use dnt_core::value::{ColumnMeta, Value};
 use serde::{Deserialize, Serialize};
@@ -90,7 +90,78 @@ pub enum StopReason {
 pub struct StmtReport {
     pub index: u32,
     pub result: Result<StmtOutcome, AppError>,
+    /// A manual-commit run ([`RunConfig::manual_tx`]) began a transaction right before
+    /// this statement. When that `BEGIN` failed, `result` is its error and the
+    /// statement itself was not sent.
+    pub began_tx: bool,
 }
+
+/// How [`run_with`] runs a plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RunConfig {
+    /// Go on after a failed statement when nothing else stops the run.
+    pub continue_on_error: bool,
+    /// Manual commit (spec §4.2e): before every statement that needs a transaction
+    /// ([`manual_needs_tx`]) while the session has none open, send `BEGIN` (PostgreSQL)
+    /// / `START TRANSACTION` (MySQL). So a transaction that ends during the run (the
+    /// user's `COMMIT`, a MySQL implicit commit) is begun again before the next write.
+    pub manual_tx: bool,
+}
+
+/// The statement a manual-commit run sends to begin a transaction.
+pub fn begin_sql(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::MySql(_) => "START TRANSACTION",
+        Dialect::Postgres => "BEGIN",
+    }
+}
+
+/// Whether a manual-commit run begins a transaction before a statement of kind `kind`
+/// (text `text`) when none is open:
+///
+/// - `Write` on both engines;
+/// - PostgreSQL `Ddl` (transactional there), except what cannot run inside a
+///   transaction block: `CREATE` / `DROP DATABASE`, `CREATE` / `DROP TABLESPACE`,
+///   `VACUUM`, `REINDEX … CONCURRENTLY`, `CREATE` / `DROP INDEX CONCURRENTLY`,
+///   `ALTER SYSTEM`, `CREATE` / `ALTER` / `DROP SUBSCRIPTION`;
+/// - nothing else: MySQL DDL commits any transaction anyway (it is flagged
+///   `implicit_commit` when one is open), and reads, `SET`, `USE` and the user's own
+///   transaction control run as they are.
+pub fn manual_needs_tx(kind: StatementKind, text: &str, dialect: Dialect) -> bool {
+    match (kind, dialect) {
+        (StatementKind::Write, _) => true,
+        (StatementKind::Ddl, Dialect::Postgres) => !pg_outside_tx_block(text),
+        _ => false,
+    }
+}
+
+/// PostgreSQL statements that fail inside a transaction block (see
+/// [`manual_needs_tx`]; `CLUSTER` without a table is an accepted omission).
+fn pg_outside_tx_block(text: &str) -> bool {
+    let words = leading_keywords(text, Dialect::Postgres, 5);
+    let w: Vec<&str> = words.iter().map(String::as_str).collect();
+    let concurrently = w.contains(&"CONCURRENTLY");
+    match w.as_slice() {
+        ["CREATE" | "DROP", "DATABASE" | "TABLESPACE", ..] => true,
+        ["CREATE" | "ALTER" | "DROP", "SUBSCRIPTION", ..] => true,
+        ["ALTER", "SYSTEM", ..] | ["VACUUM", ..] => true,
+        ["REINDEX", ..] => concurrently,
+        ["CREATE" | "DROP", rest @ ..] => concurrently && rest.contains(&"INDEX"),
+        _ => false,
+    }
+}
+
+/// A [`RowSink`] that drops everything (a manual-commit `BEGIN`).
+struct Discard;
+
+impl RowSink for Discard {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+/// Messages line when a manual-commit run could not begin a transaction.
+pub const BEGIN_FAILED_NOTICE: &str = "Could not begin a transaction; the statement was not sent";
 
 #[derive(Debug, Clone)]
 pub struct RunReport {
@@ -140,6 +211,25 @@ pub async fn run(
     cancel: &RunCancel,
     sink: &mut dyn RunSink,
 ) -> RunReport {
+    let cfg = RunConfig {
+        continue_on_error,
+        manual_tx: false,
+    };
+    run_with(session, plan, opts, cfg, cancel, sink).await
+}
+
+/// [`run`] with a [`RunConfig`]. With `manual_tx`, a `BEGIN` that fails ends the run
+/// at that statement (not sent): its `statement_start` / `statement_end` carry the
+/// `BEGIN`'s error, followed by [`BEGIN_FAILED_NOTICE`].
+pub async fn run_with(
+    session: &dyn Session,
+    plan: &ScriptPlan,
+    opts: &ExecOptions,
+    cfg: RunConfig,
+    cancel: &RunCancel,
+    sink: &mut dyn RunSink,
+) -> RunReport {
+    let continue_on_error = cfg.continue_on_error;
     let opts = ExecOptions {
         stop: cancel.signal(),
         ..opts.clone()
@@ -180,6 +270,40 @@ pub async fn run(
         if before == TxState::Aborted && !ends_aborted(stmt, dialect) {
             report.stop = Some(StopReason::TxAborted);
             break;
+        }
+        let mut began_tx = false;
+        if cfg.manual_tx
+            && before == TxState::Idle
+            && manual_needs_tx(stmt.kind, &stmt.text, dialect)
+        {
+            let begin = begin_sql(dialect);
+            let begun = session
+                .execute_one(begin, classify(begin, dialect), &opts, &mut Discard)
+                .await;
+            let now = session.tx_state();
+            if now != shown_tx {
+                shown_tx = now;
+                sink.tx_state(now);
+            }
+            match begun {
+                Ok(_) => began_tx = true,
+                Err(err) => {
+                    let stop = stop_after_error(&err, now, false, stmt.index);
+                    let mut app = AppError::from(err);
+                    app.tx_state = Some(now.as_str().into());
+                    let result = Err(app);
+                    sink.statement_start(stmt);
+                    sink.statement_end(stmt, &result);
+                    sink.notice(stmt.index, BEGIN_FAILED_NOTICE);
+                    report.stmts.push(StmtReport {
+                        index: stmt.index,
+                        result,
+                        began_tx: true,
+                    });
+                    report.stop = stop;
+                    break;
+                }
+            }
         }
 
         sink.statement_start(stmt);
@@ -237,6 +361,7 @@ pub async fn run(
         report.stmts.push(StmtReport {
             index: stmt.index,
             result,
+            began_tx,
         });
         if stop.is_some() {
             report.stop = stop;
