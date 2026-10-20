@@ -17,12 +17,7 @@
   --danger-border: var(--studio-danger-border);
   --production: var(--studio-danger);
   --production-bg: var(--studio-danger-fill);
-  /* P2 query editor (not in the dnt-note tokens): environment, chip and editor
-     colours that P2 CSS uses. Staging/Local stay neutral (design-tokens spec, option 3a). */
-  --staging: var(--studio-fg-secondary);
-  --local: var(--studio-fg-secondary);
-  --chip-ma-bg: var(--studio-subtle);
-  --chip-ma-fg: var(--studio-fg-secondary);
+  /* P2 query editor (not in the dnt-note tokens): warning and current-statement colours. */
   --warning-bg: #fff4d6;
   --warning-fg: #7a4b00;
   --current-stmt-bg: color-mix(in srgb, var(--studio-fg) 6%, transparent);
@@ -646,7 +641,7 @@ textarea:focus {
 }
 
 .status-tx.tx-active {
-  color: #b54708;
+  color: var(--warning-fg);
 }
 
 .status-tx.tx-aborted {
