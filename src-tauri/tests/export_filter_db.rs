@@ -454,6 +454,7 @@ fn opts(format: ExportFormat) -> ExportOptions {
         quote_all: false,
         bom: false,
         table_name: "t".into(),
+        formula_guard: false,
     }
 }
 

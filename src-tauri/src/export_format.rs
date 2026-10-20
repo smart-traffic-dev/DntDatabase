@@ -5,15 +5,28 @@
 //! constant-memory mode, which keeps one row in memory and the rest in a temp file). The
 //! common value rules:
 //!
-//! - NULL: an empty unquoted CSV field (an empty string is `""` when quoted), JSON
-//!   `null`, an empty Excel cell, SQL `NULL`, Markdown `NULL`.
-//! - Binary: hex, `0x…` in text formats; `X'…'` (MySQL) / `'\x…'` (PostgreSQL) in SQL.
+//! - NULL: an empty unquoted CSV field (an empty string is always `""`), JSON `null`, an
+//!   empty Excel cell, SQL `NULL`, Markdown `NULL`.
+//! - Binary: hex, `0x…` in text formats; `X'…'` (MySQL) / `'\x…'::bytea` (PostgreSQL) in
+//!   SQL. A binary value the UI only holds a preview of (the loaded rows: its first 64
+//!   bytes) is never written as if it were whole: it becomes `NULL` (SQL, JSON) or an
+//!   empty cell (CSV, Excel, Markdown) and is counted ([`Written::partial_binaries`]).
+//! - Column names repeated in a result (`SELECT a.id, b.id`) get a suffix (`id`, `id_2`)
+//!   in headers and JSON keys; the SQL format refuses them (an `INSERT` cannot name a
+//!   column twice).
+//! - JSON integers beyond ±(2^53 − 1) are strings (JavaScript reads larger ones wrongly).
+//! - SQL files import the same whatever the server's `sql_mode` /
+//!   `standard_conforming_strings`: MySQL files start with `SET NAMES utf8mb4;` and write
+//!   a string holding `\` or NUL as `_utf8mb4 X'…'`; PostgreSQL writes such a string as
+//!   `E'…'` (backslashes doubled).
 //! - Dates and times: ISO 8601 (`2024-01-31`, `2024-01-31T10:00:00`, a timestamp with
 //!   time zone keeps its offset); SQL keeps the server's `2024-01-31 10:00:00`, which
 //!   both engines read back; Excel gets real date cells when the value fits Excel's
 //!   calendar (1900 onwards), else text.
 //! - CSV follows RFC 4180: CRLF line ends, a field is quoted when it holds the
-//!   delimiter, a quote, CR or LF (or always with "quote all"), quotes doubled.
+//!   delimiter, a quote, CR or LF, or is empty (or always with "quote all"), quotes
+//!   doubled. With "protect against formula injection", a text cell starting with
+//!   `=` `+` `-` `@`, a tab or CR gets a leading `'` (spreadsheets then show it as text).
 
 use crate::commands::transfer::path_error;
 use dnt_core::driver::{ResultSummary, RowSink};
@@ -52,6 +65,9 @@ pub struct ExportOptions {
     pub bom: bool,
     /// SQL: the table the `INSERT`s go into (one identifier, quoted per engine).
     pub table_name: String,
+    /// CSV: prefix `'` to text cells a spreadsheet would read as a formula.
+    #[serde(default)]
+    pub formula_guard: bool,
 }
 
 /// The file written.
@@ -62,8 +78,18 @@ pub struct ExportSummary {
     pub path: String,
     /// Excel: text cells cut to Excel's 32,767 characters.
     pub cut_cells: u32,
+    /// Binary values only partly loaded, written as NULL / empty (see the module docs).
+    pub partial_binaries: u32,
     #[specta(type = f64)]
     pub elapsed_ms: u64,
+}
+
+/// What a writer wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Written {
+    pub rows: u64,
+    pub cut_cells: u32,
+    pub partial_binaries: u32,
 }
 
 /// Progress of an export streaming to its file.
@@ -141,15 +167,35 @@ fn float_text(f: f64) -> String {
     }
 }
 
-/// A PostgreSQL array literal: `{1,2,"a b",NULL}`.
+/// A binary value of which only a preview is held (the loaded rows).
+pub fn is_partial(v: &Value) -> bool {
+    matches!(v, Value::Bytes { len, preview } if *len > preview.len() as u64)
+}
+
+/// The partly loaded binary values of `row` (array items included).
+pub fn count_partial(row: &[Value]) -> u32 {
+    row.iter()
+        .map(|v| match v {
+            Value::Array(items) => count_partial(items),
+            v => u32::from(is_partial(v)),
+        })
+        .fold(0u32, u32::saturating_add)
+}
+
+/// A PostgreSQL array literal: `{1,2,"a b",NULL}`; a `bytea` item is `"\\x…"` (its
+/// text form, as PostgreSQL prints it).
 fn array_literal(items: &[Value]) -> String {
     let parts: Vec<String> = items
         .iter()
         .map(|v| match v {
             Value::Null => "NULL".into(),
+            v if is_partial(v) => "NULL".into(),
             Value::Array(inner) => array_literal(inner),
             other => {
-                let t = cell_text(other).unwrap_or_default();
+                let t = match other {
+                    Value::Bytes { preview, .. } => format!("\\x{}", hex(preview)),
+                    other => cell_text(other).unwrap_or_default(),
+                };
                 let plain = !t.is_empty()
                     && !t.eq_ignore_ascii_case("null")
                     && !t
@@ -166,10 +212,12 @@ fn array_literal(items: &[Value]) -> String {
     format!("{{{}}}", parts.join(","))
 }
 
-/// The text of a cell in text formats; `None` for NULL.
+/// The text of a cell in text formats; `None` for NULL; empty for a partly loaded
+/// binary value.
 pub fn cell_text(v: &Value) -> Option<String> {
     Some(match v {
         Value::Null => return None,
+        v if is_partial(v) => String::new(),
         Value::Bool(b) => b.to_string(),
         Value::Int(n) => n.to_string(),
         Value::UInt(n) => n.to_string(),
@@ -229,17 +277,35 @@ struct Csv {
     delim: char,
     header: bool,
     quote_all: bool,
+    formula_guard: bool,
+}
+
+/// Whether a spreadsheet may read a cell starting like `s` as a formula.
+fn formula_like(s: &str) -> bool {
+    s.starts_with(['=', '+', '-', '@', '\t', '\r'])
 }
 
 impl Csv {
+    /// A non-NULL field: quoted when needed; an empty string is always `""` (an empty
+    /// unquoted field is NULL).
     fn field(&self, s: &str) -> String {
         let needs = self.quote_all
+            || s.is_empty()
             || s.contains(self.delim)
             || s.contains('"')
             || s.contains('\r')
             || s.contains('\n');
         if needs {
             format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    }
+
+    /// `s` with a leading `'` when formula protection is on and `s` looks like one.
+    fn guarded(&self, s: &str) -> String {
+        if self.formula_guard && formula_like(s) {
+            format!("'{s}")
         } else {
             s.to_string()
         }
@@ -255,7 +321,10 @@ impl Csv {
 impl FormatWriter for Csv {
     fn begin(&mut self, cols: &[ColumnMeta]) -> Result<(), DbError> {
         if self.header {
-            let names = cols.iter().map(|c| self.field(&c.name)).collect();
+            let names = unique_names(cols)
+                .iter()
+                .map(|n| self.field(&self.guarded(n)))
+                .collect();
             self.line(names)?;
         }
         Ok(())
@@ -263,9 +332,15 @@ impl FormatWriter for Csv {
     fn row(&mut self, row: &[Value]) -> Result<(), DbError> {
         let fields = row
             .iter()
-            .map(|v| match cell_text(v) {
-                None => String::new(),
-                Some(t) => self.field(&t),
+            .map(|v| match (v, cell_text(v)) {
+                // A partly loaded binary value is left empty, like NULL.
+                (_, None) => String::new(),
+                (v, Some(_)) if is_partial(v) => String::new(),
+                // Numbers are never guarded (`-5` stays a number).
+                (Value::Int(_) | Value::UInt(_) | Value::Float(_) | Value::Decimal(_), Some(t)) => {
+                    self.field(&t)
+                }
+                (_, Some(t)) => self.field(&self.guarded(&t)),
             })
             .collect();
         self.line(fields)
@@ -306,13 +381,19 @@ fn is_json_number(s: &str) -> bool {
     )
 }
 
+/// Largest integer JavaScript reads exactly (`Number.MAX_SAFE_INTEGER`, 2^53 − 1).
+const JSON_MAX_SAFE: u64 = (1 << 53) - 1;
+
 fn json_value(v: &Value) -> String {
     let string = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "null".into());
     match v {
         Value::Null => "null".into(),
+        v if is_partial(v) => "null".into(),
         Value::Bool(b) => b.to_string(),
-        Value::Int(n) => n.to_string(),
-        Value::UInt(n) => n.to_string(),
+        Value::Int(n) if n.unsigned_abs() <= JSON_MAX_SAFE => n.to_string(),
+        Value::UInt(n) if *n <= JSON_MAX_SAFE => n.to_string(),
+        Value::Int(n) => string(&n.to_string()),
+        Value::UInt(n) => string(&n.to_string()),
         Value::Float(f) if f.is_finite() => {
             serde_json::to_string(f).unwrap_or_else(|_| string(&float_text(*f)))
         }
@@ -374,7 +455,7 @@ fn md_cell(s: &str) -> String {
 
 impl FormatWriter for Markdown {
     fn begin(&mut self, cols: &[ColumnMeta]) -> Result<(), DbError> {
-        let names: Vec<String> = cols.iter().map(|c| md_cell(&c.name)).collect();
+        let names: Vec<String> = unique_names(cols).iter().map(|n| md_cell(n)).collect();
         let rule: Vec<&str> = cols.iter().map(|_| "---").collect();
         self.out.put(&format!(
             "| {} |\n| {} |\n",
@@ -403,33 +484,89 @@ struct Sql {
     columns: String,
 }
 
-/// A string literal for `kind`: quotes doubled; on MySQL backslashes and NUL escaped
-/// too (its default `sql_mode` reads backslash escapes, as `mysqldump` assumes).
+/// A string literal for `kind` that reads back the same under any server setting:
+///
+/// - MySQL: quotes doubled; a string holding `\` or NUL (which `NO_BACKSLASH_ESCAPES`
+///   reads differently from the default mode) is written as `_utf8mb4 X'…'`, its UTF-8
+///   bytes in hex.
+/// - PostgreSQL: quotes doubled; a string holding `\` is an escape string `E'…'` with
+///   backslashes doubled (the same with `standard_conforming_strings` on or off).
 pub fn sql_string(kind: DbKind, s: &str) -> String {
+    let quoted = || s.replace('\'', "''");
     match kind {
-        DbKind::MySql => format!(
-            "'{}'",
-            s.replace('\\', "\\\\")
-                .replace('\'', "''")
-                .replace('\0', "\\0")
-        ),
-        DbKind::Postgres => format!("'{}'", s.replace('\'', "''")),
+        DbKind::MySql if s.contains(['\\', '\0']) => format!("_utf8mb4 X'{}'", hex(s.as_bytes())),
+        DbKind::Postgres if s.contains('\\') => {
+            format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+        }
+        _ => format!("'{}'", quoted()),
     }
 }
 
-fn is_sql_number(s: &str) -> bool {
-    let body = s.strip_prefix('-').unwrap_or(s);
-    !body.is_empty()
-        && body
-            .chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'))
-        && body.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+/// Whether `s` is a plain SQL number: `-?(D+(.D*)?|.D+)([eE][+-]?D+)?`.
+pub fn is_sql_number(s: &str) -> bool {
+    let b = s.as_bytes();
+    let mut i = usize::from(b.first() == Some(&b'-'));
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while b.get(*i).is_some_and(u8::is_ascii_digit) {
+            *i += 1;
+        }
+        *i - start
+    };
+    let int = digits(&mut i);
+    let mut frac = 0;
+    if b.get(i) == Some(&b'.') {
+        i += 1;
+        frac = digits(&mut i);
+    }
+    if int == 0 && frac == 0 {
+        return false;
+    }
+    if matches!(b.get(i), Some(b'e' | b'E')) {
+        i += 1;
+        if matches!(b.get(i), Some(b'+' | b'-')) {
+            i += 1;
+        }
+        if digits(&mut i) == 0 {
+            return false;
+        }
+    }
+    i == b.len()
+}
+
+/// Whether `items` (an array value) hold a binary value anywhere.
+fn has_bytes(items: &[Value]) -> bool {
+    items.iter().any(|v| match v {
+        Value::Bytes { .. } => true,
+        Value::Array(inner) => has_bytes(inner),
+        _ => false,
+    })
+}
+
+/// A PostgreSQL `ARRAY[…]` of `bytea` items (a `bytea[]` array literal would need
+/// doubly escaped backslashes).
+fn pg_bytea_array(items: &[Value]) -> String {
+    let parts: Vec<String> = items
+        .iter()
+        .map(|v| match v {
+            Value::Array(inner) => pg_bytea_array(inner),
+            v => sql_literal(DbKind::Postgres, v),
+        })
+        .collect();
+    format!("ARRAY[{}]", parts.join(", "))
+}
+
+/// A MySQL geometry value (its internal form in hex) as a binary literal.
+fn mysql_geometry(text: &str) -> Option<String> {
+    (!text.is_empty() && text.len() % 2 == 0 && text.bytes().all(|c| c.is_ascii_hexdigit()))
+        .then(|| format!("X'{text}'"))
 }
 
 /// The SQL literal of a value for `kind`.
 pub fn sql_literal(kind: DbKind, v: &Value) -> String {
     match v {
         Value::Null => "NULL".into(),
+        v if is_partial(v) => "NULL".into(),
         Value::Bool(true) => "TRUE".into(),
         Value::Bool(false) => "FALSE".into(),
         Value::Int(n) => n.to_string(),
@@ -439,8 +576,14 @@ pub fn sql_literal(kind: DbKind, v: &Value) -> String {
         Value::Decimal(s) if is_sql_number(s) => s.clone(),
         Value::Bytes { preview, .. } => match kind {
             DbKind::MySql => format!("X'{}'", hex(preview)),
-            DbKind::Postgres => format!("'\\x{}'", hex(preview)),
+            DbKind::Postgres => format!("'\\x{}'::bytea", hex(preview)),
         },
+        Value::Array(items) if kind == DbKind::Postgres && has_bytes(items) => {
+            format!("{}::bytea[]", pg_bytea_array(items))
+        }
+        Value::Other { type_name, text } if kind == DbKind::MySql && type_name == "geometry" => {
+            mysql_geometry(text).unwrap_or_else(|| sql_string(kind, text))
+        }
         Value::DateTime(s) | Value::TimestampTz(s) => sql_string(kind, s),
         other => sql_string(kind, &cell_text(other).unwrap_or_default()),
     }
@@ -448,11 +591,23 @@ pub fn sql_literal(kind: DbKind, v: &Value) -> String {
 
 impl FormatWriter for Sql {
     fn begin(&mut self, cols: &[ColumnMeta]) -> Result<(), DbError> {
+        let mut seen = std::collections::HashSet::new();
+        if let Some(dup) = cols.iter().find(|c| !seen.insert(c.name.as_str())) {
+            return Err(export_error(format!(
+                "The result has two columns named \"{}\"; an INSERT cannot name a column \
+                 twice. Give them different names (AS …) or export to another format.",
+                dup.name
+            )));
+        }
         let names: Vec<String> = cols
             .iter()
             .map(|c| quote_ident(self.kind, &c.name))
             .collect();
         self.columns = names.join(", ");
+        if self.kind == DbKind::MySql {
+            // The file's strings are UTF-8 whatever the importing client's charset.
+            self.out.put("SET NAMES utf8mb4;\n")?;
+        }
         Ok(())
     }
     fn row(&mut self, row: &[Value]) -> Result<(), DbError> {
@@ -547,7 +702,7 @@ impl FormatWriter for Xlsx {
         }
         let r = self.next_row()?;
         let header = self.header.clone();
-        let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
+        let names = unique_names(cols);
         let sheet = self.sheet()?;
         for (i, name) in names.into_iter().enumerate() {
             sheet
@@ -570,6 +725,7 @@ impl FormatWriter for Xlsx {
             }
             let cell = match v {
                 Value::Null => Cell::Skip,
+                v if is_partial(v) => Cell::Skip,
                 Value::Bool(b) => Cell::Bool(*b),
                 Value::Int(n) if n.unsigned_abs() <= 1 << 53 => Cell::Num(*n as f64),
                 Value::UInt(n) if *n <= 1 << 53 => Cell::Num(*n as f64),
@@ -655,6 +811,7 @@ pub fn open_writer(
                 delim: delimiter(opts)?,
                 header: opts.header,
                 quote_all: opts.quote_all,
+                formula_guard: opts.formula_guard,
             })
         }
         ExportFormat::Json => Box::new(Json {
@@ -721,6 +878,7 @@ pub struct ExportSink {
     error: Option<DbError>,
     results: usize,
     rows: u64,
+    partial: u32,
     last: Instant,
     progress: Box<dyn FnMut(u64) + Send>,
     abort: Box<dyn Fn() + Send>,
@@ -737,6 +895,7 @@ impl ExportSink {
             error: None,
             results: 0,
             rows: 0,
+            partial: 0,
             last: Instant::now(),
             progress,
             abort,
@@ -758,9 +917,8 @@ impl ExportSink {
         }
     }
 
-    /// Completes the file: `(rows, cut cells)`. A statement without a result still
-    /// gets a valid empty file.
-    pub fn finish(mut self) -> Result<(u64, u32), DbError> {
+    /// Completes the file. A statement without a result still gets a valid empty file.
+    pub fn finish(mut self) -> Result<Written, DbError> {
         if let Some(e) = self.error.take() {
             return Err(e);
         }
@@ -769,7 +927,11 @@ impl ExportSink {
         }
         self.writer.finish()?;
         (self.progress)(self.rows);
-        Ok((self.rows, self.writer.cut_cells()))
+        Ok(Written {
+            rows: self.rows,
+            cut_cells: self.writer.cut_cells(),
+            partial_binaries: self.partial,
+        })
     }
 }
 
@@ -792,6 +954,7 @@ impl RowSink for ExportSink {
                 return;
             }
             self.rows += 1;
+            self.partial = self.partial.saturating_add(count_partial(&row));
         }
         if self.last.elapsed() >= PROGRESS_EVERY {
             self.last = Instant::now();
@@ -808,16 +971,22 @@ pub fn write_rows(
     target: &Target,
     columns: &[ColumnMeta],
     rows: &[Vec<Value>],
-) -> Result<(u64, u32), DbError> {
+) -> Result<Written, DbError> {
     let shown = target.final_path.to_string_lossy().to_string();
     let result = (|| {
         let mut w = open_writer(opts, kind, &target.part, &shown)?;
         w.begin(columns)?;
+        let mut partial = 0u32;
         for row in rows {
             w.row(row)?;
+            partial = partial.saturating_add(count_partial(row));
         }
         w.finish()?;
-        Ok((rows.len() as u64, w.cut_cells()))
+        Ok(Written {
+            rows: rows.len() as u64,
+            cut_cells: w.cut_cells(),
+            partial_binaries: partial,
+        })
     })();
     match result {
         Ok(done) => {
@@ -855,6 +1024,7 @@ mod tests {
             quote_all: false,
             bom: false,
             table_name: "t".into(),
+            formula_guard: false,
         }
     }
 
@@ -892,7 +1062,7 @@ mod tests {
         let path = dir.path().join("out.file");
         let target = Target::new(path.to_str().unwrap()).unwrap();
         let (cols, rows) = sample();
-        assert_eq!(write_rows(o, kind, &target, &cols, &rows).unwrap().0, 3);
+        assert_eq!(write_rows(o, kind, &target, &cols, &rows).unwrap().rows, 3);
         assert!(!target.part.exists());
         (dir, path)
     }
@@ -909,7 +1079,173 @@ mod tests {
             "id,name,blob,at\r\n\
              1,\"a,\"\"b\"\"\nc\",0xdead,2024-01-31T10:00:00\r\n\
              2,,,2024-02-01\r\n\
-             3,,0x0001,2024-01-31T10:00:00+00:00\r\n"
+             3,\"\",0x0001,2024-01-31T10:00:00+00:00\r\n"
+        );
+    }
+
+    fn one_row(
+        o: &ExportOptions,
+        kind: DbKind,
+        cols: &[ColumnMeta],
+        row: Vec<Value>,
+    ) -> (String, Written) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("one.out");
+        let target = Target::new(path.to_str().unwrap()).unwrap();
+        let written = write_rows(o, kind, &target, cols, &[row]).unwrap();
+        // Excel files are binary: only the text formats are read back.
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        (text, written)
+    }
+
+    #[test]
+    fn csv_formula_protection_is_opt_in_and_spares_numbers() {
+        let cols = [col("a"), col("b"), col("c"), col("d"), col("e")];
+        let row = || {
+            vec![
+                Value::Text("=1+1".into()),
+                Value::Text("@SUM(A1)".into()),
+                Value::Int(-5),
+                Value::Text("\tx".into()),
+                Value::Text("plain".into()),
+            ]
+        };
+        let plain = ExportOptions {
+            header: false,
+            ..opts(ExportFormat::Csv)
+        };
+        let (text, _) = one_row(&plain, DbKind::MySql, &cols, row());
+        assert_eq!(text, "=1+1,@SUM(A1),-5,\tx,plain\r\n");
+        let guarded = ExportOptions {
+            formula_guard: true,
+            ..plain
+        };
+        let (text, _) = one_row(&guarded, DbKind::MySql, &cols, row());
+        assert_eq!(text, "'=1+1,'@SUM(A1),-5,'\tx,plain\r\n");
+        assert!(formula_like("+1") && formula_like("-a") && formula_like("\rx"));
+        assert!(!formula_like("a=1") && !formula_like(""));
+    }
+
+    #[test]
+    fn partial_binaries_are_never_written_as_whole() {
+        let partial = || Value::Bytes {
+            len: 1000,
+            preview: vec![0xab; 64],
+        };
+        let cols = [col("id"), col("blob"), col("arr")];
+        let row = || {
+            vec![
+                Value::Int(1),
+                partial(),
+                Value::Array(vec![partial(), Value::bytes(&[1])]),
+            ]
+        };
+        let (text, w) = one_row(&opts(ExportFormat::Csv), DbKind::Postgres, &cols, row());
+        assert_eq!(w.partial_binaries, 2);
+        assert_eq!(
+            text.lines().nth(1).unwrap(),
+            "1,,\"{NULL,\"\"\\\\x01\"\"}\""
+        );
+        let (text, w) = one_row(&opts(ExportFormat::Json), DbKind::Postgres, &cols, row());
+        assert_eq!(w.partial_binaries, 2);
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v[0]["blob"], serde_json::Value::Null);
+        assert_eq!(v[0]["arr"], serde_json::json!([null, "0x01"]));
+        let (text, _) = one_row(
+            &opts(ExportFormat::Sql),
+            DbKind::MySql,
+            &cols[..2],
+            row()[..2].to_vec(),
+        );
+        assert!(text.contains("VALUES (1, NULL);"), "{text}");
+        let (text, _) = one_row(
+            &opts(ExportFormat::Markdown),
+            DbKind::MySql,
+            &cols[..2],
+            row()[..2].to_vec(),
+        );
+        assert_eq!(text.lines().nth(2).unwrap(), "| 1 |  |");
+        let (_, w) = one_row(
+            &opts(ExportFormat::Xlsx),
+            DbKind::MySql,
+            &cols[..2],
+            row()[..2].to_vec(),
+        );
+        assert_eq!(w.partial_binaries, 1);
+        // A whole value (the streamed rows) is written and not counted.
+        assert_eq!(count_partial(&[Value::bytes(&[1, 2])]), 0);
+    }
+
+    #[test]
+    fn duplicate_column_names() {
+        let cols = [col("id"), col("id")];
+        let row = vec![Value::Int(1), Value::Int(2)];
+        let (text, _) = one_row(&opts(ExportFormat::Csv), DbKind::MySql, &cols, row.clone());
+        assert!(text.starts_with("id,id_2\r\n"), "{text}");
+        let (text, _) = one_row(
+            &opts(ExportFormat::Markdown),
+            DbKind::MySql,
+            &cols,
+            row.clone(),
+        );
+        assert!(text.starts_with("| id | id_2 |"), "{text}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup.sql");
+        let target = Target::new(path.to_str().unwrap()).unwrap();
+        let err = write_rows(
+            &opts(ExportFormat::Sql),
+            DbKind::MySql,
+            &target,
+            &cols,
+            &[row],
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("two columns named \"id\""),
+            "{err}"
+        );
+        assert!(!path.exists() && !target.part.exists());
+    }
+
+    #[test]
+    fn strict_sql_numbers() {
+        for ok in [
+            "0",
+            "-12.5",
+            "1.",
+            ".5",
+            "1e10",
+            "1E+3",
+            "-2.5e-3",
+            "123456789012345678901234567890",
+        ] {
+            assert!(is_sql_number(ok), "{ok}");
+        }
+        for bad in [
+            "", "-", ".", "1-2", "1e+", "1e", "--1", "+1", "1.2.3", "e5", "1e5.5", "NaN", "1 ",
+            "0x10", "1e+-2",
+        ] {
+            assert!(!is_sql_number(bad), "{bad}");
+        }
+        assert_eq!(
+            sql_literal(DbKind::MySql, &Value::Decimal("1-2".into())),
+            "'1-2'"
+        );
+    }
+
+    #[test]
+    fn json_big_integers_are_strings() {
+        let max = (1i64 << 53) - 1;
+        assert_eq!(json_value(&Value::Int(max)), max.to_string());
+        assert_eq!(json_value(&Value::Int(-max)), (-max).to_string());
+        assert_eq!(json_value(&Value::Int(max + 1)), format!("\"{}\"", max + 1));
+        assert_eq!(
+            json_value(&Value::Int(-max - 1)),
+            format!("\"{}\"", -max - 1)
+        );
+        assert_eq!(
+            json_value(&Value::UInt(max as u64 + 1)),
+            format!("\"{}\"", max + 1)
         );
     }
 
@@ -970,7 +1306,10 @@ mod tests {
         );
         assert_eq!(json_value(&Value::Json("not json".into())), "\"not json\"");
         assert_eq!(json_value(&Value::Float(f64::NAN)), "\"NaN\"");
-        assert_eq!(json_value(&Value::UInt(u64::MAX)), "18446744073709551615");
+        assert_eq!(
+            json_value(&Value::UInt(u64::MAX)),
+            "\"18446744073709551615\""
+        );
         assert_eq!(
             json_value(&Value::Array(vec![Value::Int(1), Value::Null])),
             "[1,null]"
@@ -1017,7 +1356,8 @@ mod tests {
         };
         let (_d, p) = export(&o, DbKind::MySql);
         let text = read(&p);
-        let first = text.lines().next().unwrap();
+        assert_eq!(text.lines().next(), Some("SET NAMES utf8mb4;"));
+        let first = text.lines().nth(1).unwrap();
         assert_eq!(
             first,
             "INSERT INTO `we``ird\"t` (`id`, `name`, `blob`, `at`) VALUES (1, 'a,\"b\"",
@@ -1033,7 +1373,7 @@ mod tests {
             text.starts_with("INSERT INTO \"we`ird\"\"t\" (\"id\", \"name\", \"blob\", \"at\")"),
             "{text}"
         );
-        assert!(text.contains("'\\xdead'"), "{text}");
+        assert!(text.contains("'\\xdead'::bytea"), "{text}");
         let empty = ExportOptions {
             table_name: "  ".into(),
             ..opts(ExportFormat::Sql)
@@ -1045,9 +1385,35 @@ mod tests {
     fn sql_literals_escape_strings() {
         let my = |v: Value| sql_literal(DbKind::MySql, &v);
         let pg = |v: Value| sql_literal(DbKind::Postgres, &v);
-        assert_eq!(my(Value::Text("it's \\ ok".into())), "'it''s \\\\ ok'");
-        assert_eq!(pg(Value::Text("it's \\ ok".into())), "'it''s \\ ok'");
-        assert_eq!(my(Value::Text("a\0b".into())), "'a\\0b'");
+        // A backslash or NUL: hex on MySQL (the same with NO_BACKSLASH_ESCAPES), an
+        // escape string on PostgreSQL.
+        assert_eq!(
+            my(Value::Text("it's \\ ok".into())),
+            "_utf8mb4 X'69742773205c206f6b'"
+        );
+        assert_eq!(my(Value::Text("it's ok".into())), "'it''s ok'");
+        assert_eq!(pg(Value::Text("it's \\ ok".into())), "E'it''s \\\\ ok'");
+        assert_eq!(pg(Value::Text("it's ok".into())), "'it''s ok'");
+        assert_eq!(my(Value::Text("a\0b".into())), "_utf8mb4 X'610062'");
+        assert_eq!(my(Value::Text("é".into())), "'é'");
+        // bytea and bytea[].
+        assert_eq!(pg(Value::bytes(&[0xde, 0xad])), "'\\xdead'::bytea");
+        assert_eq!(
+            pg(Value::Array(vec![
+                Value::bytes(&[1]),
+                Value::Null,
+                Value::Array(vec![Value::bytes(&[2])])
+            ])),
+            "ARRAY['\\x01'::bytea, NULL, ARRAY['\\x02'::bytea]]::bytea[]"
+        );
+        // MySQL geometry (its internal form, hex) as a binary literal.
+        let geo = |text: &str| Value::Other {
+            type_name: "geometry".into(),
+            text: text.into(),
+        };
+        assert_eq!(my(geo("00000000010100")), "X'00000000010100'");
+        assert_eq!(my(geo("not hex")), "'not hex'");
+        assert_eq!(pg(geo("0101")), "'0101'");
         assert_eq!(my(Value::Bool(true)), "TRUE");
         assert_eq!(my(Value::Decimal("-12.5".into())), "-12.5");
         assert_eq!(pg(Value::Decimal("NaN".into())), "'NaN'");
@@ -1081,7 +1447,7 @@ mod tests {
         let path = dir.path().join("big.xlsx");
         let target = Target::new(path.to_str().unwrap()).unwrap();
         let rows = vec![vec![Value::Text("x".repeat(XLSX_MAX_CHARS + 5))]];
-        let (n, cut) = write_rows(
+        let w = write_rows(
             &opts(ExportFormat::Xlsx),
             DbKind::MySql,
             &target,
@@ -1089,7 +1455,7 @@ mod tests {
             &rows,
         )
         .unwrap();
-        assert_eq!((n, cut), (1, 1));
+        assert_eq!((w.rows, w.cut_cells), (1, 1));
     }
 
     #[test]
@@ -1142,7 +1508,8 @@ mod tests {
         sink.result_start(&[col("b")]);
         sink.rows(vec![vec![Value::Int(9)]]);
         assert_eq!(sink.row_count(), 2);
-        assert_eq!(sink.finish().unwrap(), (2, 0));
+        let w = sink.finish().unwrap();
+        assert_eq!((w.rows, w.cut_cells), (2, 0));
         assert_eq!(read(&path), "a\r\n1\r\n2\r\n");
         assert_eq!(seen.lock().unwrap().last(), Some(&2));
     }

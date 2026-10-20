@@ -18,7 +18,7 @@ use super::{blocking, guard};
 use crate::data_sessions::DataRequest;
 use crate::export_format::{
     check_options, open_writer, write_rows, ExportOptions, ExportProgress, ExportSink,
-    ExportSummary, Target,
+    ExportSummary, Target, Written,
 };
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -41,6 +41,16 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
+fn summary(w: Written, path: String, started: Instant) -> ExportSummary {
+    ExportSummary {
+        rows: w.rows,
+        path,
+        cut_cells: w.cut_cells,
+        partial_binaries: w.partial_binaries,
+        elapsed_ms: elapsed_ms(started),
+    }
+}
+
 pub async fn export_rows_impl(
     kind: DbKind,
     columns: Vec<ColumnMeta>,
@@ -51,14 +61,9 @@ pub async fn export_rows_impl(
     let started = Instant::now();
     blocking(move || {
         let target = Target::new(&path)?;
-        let (rows, cut_cells) = write_rows(&opts, kind, &target, &columns, &rows)?;
-        tracing::info!(rows, format = ?opts.format, "loaded rows exported");
-        Ok(ExportSummary {
-            rows,
-            path,
-            cut_cells,
-            elapsed_ms: elapsed_ms(started),
-        })
+        let written = write_rows(&opts, kind, &target, &columns, &rows)?;
+        tracing::info!(rows = written.rows, format = ?opts.format, "loaded rows exported");
+        Ok(summary(written, path, started))
     })
     .await
 }
@@ -103,7 +108,7 @@ async fn stream_to_file(
         target.discard();
         return Err(e);
     }
-    let (rows, cut_cells) = blocking(move || {
+    let written = blocking(move || {
         let done = sink.finish();
         match done {
             Ok(done) => {
@@ -117,13 +122,8 @@ async fn stream_to_file(
         }
     })
     .await?;
-    tracing::info!(rows, format = ?opts.format, "rows exported");
-    Ok(ExportSummary {
-        rows,
-        path,
-        cut_cells,
-        elapsed_ms: elapsed_ms(started),
-    })
+    tracing::info!(rows = written.rows, format = ?opts.format, "rows exported");
+    Ok(summary(written, path, started))
 }
 
 /// Every row of `obj` matching `filter`, in `sort` order (empty: the primary key).
