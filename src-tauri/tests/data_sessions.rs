@@ -364,6 +364,42 @@ async fn a_cancel_during_open_drops_the_request() {
     assert!(!f.sm.data_cancel(f.id, "tab-1:count"), "nothing left");
 }
 
+/// A raw `WHERE` read may leave session state a ROLLBACK does not undo (a MySQL
+/// `GET_LOCK`, a PostgreSQL advisory lock): its session is closed, never pooled.
+#[tokio::test]
+async fn a_raw_where_session_is_never_pooled() {
+    use dntdatabase::data_sessions::{DataRequest, RawRead};
+    let f = fixture().await;
+    let raw = DataRequest {
+        raw: Some(RawRead(Arc::new(|_| Ok("SELECT RAW".to_string())))),
+        max_rows: 10,
+        ..DataRequest::default()
+    };
+    let page = f.sm.data_read_request(f.id, DB, "k", &raw).await.unwrap();
+    assert_eq!(page.rows.len(), 1);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(
+        f.log.closes.load(Ordering::SeqCst),
+        1,
+        "closed after its read"
+    );
+    // The next read opens a fresh session.
+    f.sm.data_read(f.id, DB, "k", "QUICK", 10).await.unwrap();
+    let executed = f.log.executed.lock().unwrap().clone();
+    assert_eq!(
+        executed,
+        [
+            (1, "START TRANSACTION READ ONLY".to_string()),
+            (1, "SELECT RAW".to_string()),
+            (1, "ROLLBACK".to_string()),
+            (2, "QUICK".to_string()),
+        ]
+    );
+    // A plain read's session is pooled as before.
+    f.sm.data_read(f.id, DB, "k", "QUICK", 10).await.unwrap();
+    assert_eq!(f.log.sessions.load(Ordering::SeqCst), 3);
+}
+
 /// A pooled session that went stale is replaced once, transparently.
 #[tokio::test]
 async fn a_stale_pooled_session_is_retried_on_a_fresh_one() {

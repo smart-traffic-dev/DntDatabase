@@ -10,8 +10,9 @@
 //! dead) reopens the tunnel and that session once and is retried once.
 
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
-use crate::commands::browse::folder_key;
+use crate::commands::browse::{folder_key, object_key};
 use crate::data_sessions::DataSessions;
+use crate::edit_plans::EditPlanStore;
 use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
@@ -21,7 +22,7 @@ use dnt_core::driver::{
 };
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
-use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
+use dnt_core::meta::{ColumnBrief, ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
@@ -319,6 +320,8 @@ pub struct SessionManager {
     schema_error_ttl: Duration,
     /// Run plans of query tabs (see `query_sessions`).
     pub(crate) plans: PlanStore,
+    /// Edit plans of the data view (see `edit_plans`); they live for `plan_ttl` too.
+    pub(crate) edit_plans: EditPlanStore,
     pub(crate) plan_ttl: Duration,
     /// Runs in progress (see `query_sessions`).
     pub(crate) runs: Runs,
@@ -365,6 +368,7 @@ impl SessionManager {
             metadata_timeout: METADATA_CALL_TIMEOUT,
             schema_error_ttl: SCHEMA_ERROR_TTL,
             plans: PlanStore::default(),
+            edit_plans: EditPlanStore::default(),
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
             cancel_grace: DEFAULT_CANCEL_GRACE,
@@ -713,6 +717,7 @@ impl SessionManager {
             rt.shutdown().await;
         }
         self.plans.drop_conn(id);
+        self.edit_plans.drop_conn(id);
     }
 
     /// Every runtime, without holding the map's lock.
@@ -778,6 +783,28 @@ impl SessionManager {
         })?;
         rt.cache.insert_if_epoch(key, json, epoch);
         Ok(value)
+    }
+
+    /// The table detail of `obj` as the server has it now (never the cached one), which
+    /// then replaces the cached one: what an edit plan is built and checked against.
+    pub async fn table_detail_fresh(
+        &self,
+        id: Uuid,
+        obj: &ObjectRef,
+    ) -> Result<TableDetail, DbError> {
+        let rt = self.runtime(id)?;
+        let epoch = rt.cache.epoch();
+        let detail = rt
+            .with_session(Some(&obj.database), |s| {
+                let obj = obj.clone();
+                Box::pin(async move { s.introspector().table_detail(&obj).await })
+            })
+            .await?;
+        if let Ok(json) = serde_json::to_value(&detail) {
+            rt.cache
+                .insert_if_epoch(object_key(obj, "detail"), json, epoch);
+        }
+        Ok(detail)
     }
 
     /// Drops every cached browse result of `id` under `prefix`, and reloads (in the

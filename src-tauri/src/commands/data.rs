@@ -35,6 +35,7 @@
 use super::browse::table_detail_impl;
 use super::guard;
 use crate::data_sessions::{BoundedPage, DataRequest, RawRead};
+pub use crate::edit_plans::{ApplyOutcome, ApplyReport, EditPreview, StmtApply};
 use crate::session_manager::config_error;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -49,6 +50,7 @@ pub use dnt_core::sql::filter::{DataFilter, FilterCond, FilterMode, FilterOp, So
 use dnt_core::sql::ident::{count_where_sql, qualified_name, quote_ident, select_sql};
 use dnt_core::sql::Dialect;
 use dnt_core::value::{ColumnMeta, Value};
+pub use dnt_query::edit::EditSet;
 use dnt_query::edit::{atomicity, editable, NotEditable};
 pub use dnt_query::edit::{Atomicity, ProtectionKind};
 use serde::{Deserialize, Serialize};
@@ -697,6 +699,49 @@ pub async fn data_editable_impl(
     check_object(cfg.kind, &obj)?;
     let detail = table_detail_impl(state, id, obj).await?;
     Ok(editable_info(&detail, cfg.kind, cfg.read_only))
+}
+
+pub async fn data_preview_impl(
+    state: &AppState,
+    id: Uuid,
+    set: EditSet,
+) -> Result<EditPreview, DbError> {
+    state.sessions.edit_preview(id, set).await
+}
+
+pub async fn data_apply_impl(
+    state: &AppState,
+    plan_id: Uuid,
+    confirmed: bool,
+) -> Result<ApplyReport, DbError> {
+    state.sessions.edit_apply(plan_id, confirmed).await
+}
+
+/// Builds and stores the plan of the staged changes `set` (see the `edit_plans`
+/// module): the exact statements `data_apply` will send, their verdict,
+/// atomicity and conflict checks. A set that cannot be planned is a `config` error with
+/// field `edit`, `one_at_a_time` (the table is not atomic: one change at a time) or
+/// `column:<name>`.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_preview(
+    state: State<'_, AppState>,
+    id: Uuid,
+    set: EditSet,
+) -> Result<EditPreview, AppError> {
+    guard(data_preview_impl(&state, id, set)).await
+}
+
+/// Runs the plan `plan_id` once (`confirmed`: the user confirmed a Production plan).
+/// `plan_stale`: preview again. Once anything was sent, the outcome is in the report.
+#[tauri::command]
+#[specta::specta]
+pub async fn data_apply(
+    state: State<'_, AppState>,
+    plan_id: Uuid,
+    confirmed: bool,
+) -> Result<ApplyReport, AppError> {
+    guard(data_apply_impl(&state, plan_id, confirmed)).await
 }
 
 /// Whether the data view may edit `obj` (a table / view of the data view), and how:

@@ -451,6 +451,33 @@ async dataEditable(id: string, obj: ObjectRef) : Promise<Result<EditableInfo, Ap
 }
 },
 /**
+ * Builds and stores the plan of the staged changes `set` (see the `edit_plans`
+ * module): the exact statements `data_apply` will send, their verdict,
+ * atomicity and conflict checks. A set that cannot be planned is a `config` error with
+ * field `edit`, `one_at_a_time` (the table is not atomic: one change at a time) or
+ * `column:<name>`.
+ */
+async dataPreview(id: string, set: EditSet) : Promise<Result<EditPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_preview", { id, set }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Runs the plan `plan_id` once (`confirmed`: the user confirmed a Production plan).
+ * `plan_stale`: preview again. Once anything was sent, the outcome is in the report.
+ */
+async dataApply(planId: string, confirmed: boolean) : Promise<Result<ApplyReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_apply", { planId, confirmed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Writes rows the UI holds (the loaded rows) to `path`. `kind`: the engine whose
  * quoting the SQL format uses.
  */
@@ -731,9 +758,66 @@ outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_o
  */
 tx_state: string | null }
 /**
+ * What became of an applied plan (spec §4.2d).
+ */
+export type ApplyOutcome = 
+/**
+ * Every statement was applied.
+ */
+{ outcome: "committed" } | 
+/**
+ * Nothing was applied: the transaction was rolled back (or the server rolls it back
+ * because the connection is gone).
+ */
+{ outcome: "rolled_back" } | 
+/**
+ * No transaction: the first `applied` statements are applied, the next one was not.
+ */
+{ outcome: "partially_applied"; applied: number } | 
+/**
+ * The statement at position `at` of the plan (`statements.len()`: the `COMMIT`) got
+ * no answer: it may or may not have been applied.
+ */
+{ outcome: "unknown"; at: number }
+export type ApplyReport = { outcome: ApplyOutcome; 
+/**
+ * The statements that were sent, in order (those after a failure were not).
+ */
+statements: StmtApply[]; 
+/**
+ * One row per applied INSERT, in order: every column of the table (in its column
+ * order) as the server stored it; empty when it could not be read back. Empty when
+ * nothing was applied.
+ */
+inserted: Value[][]; 
+/**
+ * The error that ended the apply outside a statement (the `COMMIT`).
+ */
+error: AppError | null }
+/**
  * Whether a set of edits can be applied all-or-nothing (spec §4.2a).
  */
-export type Atomicity = "Yes" | "No" | "Unknown"
+export type Atomicity = "yes" | "no" | "unknown"
+/**
+ * What the user typed or picked for one cell.
+ */
+export type CellInput = { kind: "null" } | 
+/**
+ * The column's default (new rows only).
+ */
+{ kind: "default" } | 
+/**
+ * Text typed in the grid, parsed by the column's logical type.
+ */
+{ kind: "text"; text: string } | { kind: "value"; value: Value } | 
+/**
+ * Binary data (standard base64).
+ */
+{ kind: "base_64"; data: string } | 
+/**
+ * A full value fetched earlier, by its token.
+ */
+{ kind: "loaded"; token: string }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -805,6 +889,24 @@ raw_where?: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
+/**
+ * What `data_preview` returns: the stored plan's id and exactly the statements
+ * `data_apply` will send.
+ */
+export type EditPreview = { plan_id: string; statements: string[]; verdict: Verdict; atomic: Atomicity; 
+/**
+ * The conflict check of each statement, in order.
+ */
+protections: Protection[]; 
+/**
+ * Why the verdict is `block` (UI copy).
+ */
+reason: string | null }
+export type EditSet = { object: ObjectRef; edits: RowEdit[]; 
+/**
+ * Drop every row guard (an explicit "Overwrite" after a conflict).
+ */
+overwrite: boolean }
 /**
  * Whether the data view may edit an object, and how (`data_editable`).
  */
@@ -1035,10 +1137,26 @@ export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialec
  */
 tx_state: TxState }
 /**
+ * How much of a row a statement's guard checks (spec §5.2).
+ */
+export type Protection = 
+/**
+ * Any change to the row since it was loaded is a conflict.
+ */
+{ level: "full" } | 
+/**
+ * Changes only in `unchecked` columns go unnoticed.
+ */
+{ level: "columns"; unchecked: string[] } | 
+/**
+ * The key only.
+ */
+{ level: "key_only" }
+/**
  * How a server reports a concurrent change to a row: PostgreSQL `xmin`, MySQL a
  * snapshot of the row's values.
  */
-export type ProtectionKind = "RowVersion" | "Snapshot"
+export type ProtectionKind = "row_version" | "snapshot"
 export type QueryTabRecord = { id: string; title: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -1052,6 +1170,12 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+export type RowEdit = { op: "update"; row: RowRef; set: ([string, CellInput])[] } | { op: "insert"; values: ([string, CellInput])[] } | { op: "delete"; row: RowRef }
+/**
+ * One loaded row: its key values, every loaded cell as it was, and (PostgreSQL) its
+ * `xmin::text`.
+ */
+export type RowRef = { key: ([string, Value])[]; original: ([string, Value])[]; xmin: string | null }
 /**
  * One event of a run, in the order described in the module docs.
  */
@@ -1173,6 +1297,23 @@ export type StageTiming = { stage: ConnectStage;
  * Exported as a JS number (milliseconds).
  */
 ms: number }
+/**
+ * One statement of an applied plan.
+ */
+export type StmtApply = { 
+/**
+ * The edit's index in the `EditSet`.
+ */
+index: number; 
+/**
+ * Rows the statement matched.
+ */
+affected: number | null; error: AppError | null; 
+/**
+ * It matched no row (or not the rows expected): the row changed or went away since
+ * it was loaded.
+ */
+conflict: boolean }
 export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other"
 /**
  * Why a run is being stopped.

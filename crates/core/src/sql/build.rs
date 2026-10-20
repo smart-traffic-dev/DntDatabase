@@ -601,6 +601,19 @@ pub fn delete_sql(
     Ok(format!("DELETE FROM {relation} WHERE {cond}"))
 }
 
+/// `SELECT 1 FROM <relation> WHERE <key>[ AND <guard>]`: whether the row an `UPDATE` /
+/// `DELETE` with the same key and guard targets is there (the same condition).
+pub fn exists_sql(
+    t: &TableRef,
+    key: &RowKey,
+    guard: &RowGuard,
+    d: Dialect,
+) -> Result<String, BuildError> {
+    let relation = relation_for(t, d)?;
+    let cond = row_condition(key, guard, d)?;
+    Ok(format!("SELECT 1 FROM {relation} WHERE {cond}"))
+}
+
 /// `<key col> = <lit> AND …` then the guard's comparisons, all joined with `AND`.
 fn row_condition(key: &RowKey, guard: &RowGuard, d: Dialect) -> Result<String, BuildError> {
     key.check()?;
@@ -865,6 +878,12 @@ mod dml_tests {
         assert_eq!(
             delete_sql(&pg_table(), &k, &RowGuard::KeyOnly, Dialect::Postgres).unwrap(),
             "DELETE FROM \"public\".\"users\" WHERE \"id\" = 5 AND \"name\" = 'a'"
+        );
+        // The same condition, as a check that the row is there.
+        assert_eq!(
+            exists_sql(&pg_table(), &k, &snap, Dialect::Postgres).unwrap(),
+            "SELECT 1 FROM \"public\".\"users\" \
+             WHERE \"id\" = 5 AND \"name\" = 'a' AND \"age\" IS NOT DISTINCT FROM NULL"
         );
         // Nothing to set is an error, not `UPDATE … SET WHERE`.
         assert!(matches!(

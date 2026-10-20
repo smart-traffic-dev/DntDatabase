@@ -8,8 +8,10 @@ use dnt_core::config::EnvTag;
 use dnt_core::meta::{ColumnDetail, IndexDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
 use dnt_core::sql::build::{
-    delete_sql, insert_sql, update_sql, BuildError, ColumnTarget, RowGuard, RowKey, TableRef,
+    delete_sql, exists_sql, insert_sql, literal, update_sql, BuildError, ColumnTarget, RowGuard,
+    RowKey, TableRef,
 };
+use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use serde::{Deserialize, Serialize};
@@ -76,6 +78,7 @@ pub struct EditSet {
 
 /// Whether a set of edits can be applied all-or-nothing (spec §4.2a).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
 pub enum Atomicity {
     Yes,
     No,
@@ -103,6 +106,14 @@ pub struct PlannedEdit {
     pub protection: Protection,
     /// Read the inserted row back (PG `RETURNING`, MySQL `LAST_INSERT_ID()`).
     pub returning: bool,
+    /// MySQL INSERT: the `SELECT` of every column of the new row, by its key (the
+    /// auto-increment part by `LAST_INSERT_ID()`), run right after it. `None` on
+    /// PostgreSQL (`RETURNING`) and when no key value is known.
+    pub read_back: Option<String>,
+    /// MySQL UPDATE: `SELECT 1` of the guarded row (the UPDATE's own condition), run
+    /// when the UPDATE reports 0 rows: MySQL counts changed rows, so an UPDATE that
+    /// writes the values a row already has reports 0 without a conflict.
+    pub recheck: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +130,7 @@ pub struct EditPlan {
 /// How a server reports a concurrent change to a row: PostgreSQL `xmin`, MySQL a
 /// snapshot of the row's values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "snake_case")]
 pub enum ProtectionKind {
     RowVersion,
     Snapshot,
@@ -440,9 +452,30 @@ pub fn build_edit_plan(
         stmts.push(b.edit(index, edit)?);
     }
 
+    let (verdict, reason) = edit_verdict(&stmts, ed.atomic, dialect, ctx);
+    Ok(EditPlan {
+        stmts,
+        atomic: ed.atomic,
+        verdict,
+        reason,
+        fingerprint: fingerprint(detail),
+        dialect,
+    })
+}
+
+/// The verdict of a plan's statements under `ctx` (also used to judge a stored plan
+/// again at Apply): the guard's verdict for a write; at least Confirm on Production for
+/// a key-only statement; Block on Production when the table is not atomic (with
+/// [`NOT_ATOMIC_ON_PRODUCTION`] as the reason).
+pub fn edit_verdict(
+    stmts: &[PlannedEdit],
+    atomic: Atomicity,
+    dialect: Dialect,
+    ctx: GuardCtx,
+) -> (Verdict, Option<String>) {
     let production = ctx.env == Some(EnvTag::Production);
     let mut verdict = Verdict::Allow;
-    for s in &stmts {
+    for s in stmts {
         verdict = strictest(
             verdict,
             crate::guard::verdict(
@@ -457,19 +490,10 @@ pub fn build_edit_plan(
             verdict = strictest(verdict, Verdict::Confirm);
         }
     }
-    let mut reason = None;
-    if production && ed.atomic != Atomicity::Yes {
-        verdict = Verdict::Block;
-        reason = Some(NOT_ATOMIC_ON_PRODUCTION.to_string());
+    if production && atomic != Atomicity::Yes {
+        return (Verdict::Block, Some(NOT_ATOMIC_ON_PRODUCTION.to_string()));
     }
-    Ok(EditPlan {
-        stmts,
-        atomic: ed.atomic,
-        verdict,
-        reason,
-        fingerprint: fingerprint(detail),
-        dialect,
-    })
+    (verdict, None)
 }
 
 fn invalid(column: &str, reason: &str) -> EditError {
@@ -492,6 +516,9 @@ struct Builder<'a> {
 impl Builder<'_> {
     fn edit(&self, index: u32, edit: &RowEdit) -> Result<PlannedEdit, EditError> {
         let d = self.dialect;
+        let mysql = matches!(d, Dialect::MySql(_));
+        let mut read_back = None;
+        let mut recheck = None;
         let (sql, protection, returning) = match edit {
             RowEdit::Update { row, set } => {
                 let mut assignments: Vec<(ColumnTarget, FullValue)> = Vec::new();
@@ -514,6 +541,9 @@ impl Builder<'_> {
                 let key = self.row_key(row)?;
                 let (guard, protection) = self.row_guard(row)?;
                 let sql = update_sql(&self.table, &key, &assignments, &guard, d)?;
+                if mysql {
+                    recheck = Some(exists_sql(&self.table, &key, &guard, d)?);
+                }
                 (sql, protection, false)
             }
             RowEdit::Delete { row } => {
@@ -554,6 +584,9 @@ impl Builder<'_> {
                     .iter()
                     .map(|c| self.loose_target(c))
                     .collect();
+                if mysql {
+                    read_back = self.read_back(&cols, &row, &returning)?;
+                }
                 let sql = insert_sql(&self.table, &cols, &[row], &returning, d)?;
                 (sql, Protection::Full, true)
             }
@@ -564,7 +597,42 @@ impl Builder<'_> {
             expect_affected: 1,
             protection,
             returning,
+            read_back,
+            recheck,
         })
+    }
+
+    /// MySQL: `SELECT <every column> FROM <table> WHERE <key>` for a row inserted with
+    /// `cols` = `row`: a key column given a value is matched by it, an auto-increment one
+    /// left to the server (DEFAULT or NULL) by `LAST_INSERT_ID()`. `None` when a key
+    /// column has neither (e.g. a server-side default).
+    fn read_back(
+        &self,
+        cols: &[ColumnTarget],
+        row: &[FullValue],
+        every: &[ColumnTarget],
+    ) -> Result<Option<String>, EditError> {
+        let kind = self.table.kind;
+        let mut conds = Vec::with_capacity(self.key.len());
+        for k in self.key {
+            let given = cols
+                .iter()
+                .zip(row)
+                .find(|(c, v)| &c.name == k && !v.is_null());
+            let cond = match given {
+                Some((c, v)) => literal(v, c, self.dialect)?,
+                None if self.detail_column(k)?.auto_increment => "LAST_INSERT_ID()".into(),
+                None => return Ok(None),
+            };
+            conds.push(format!("{} = {cond}", quote_ident(kind, k)));
+        }
+        let list: Vec<String> = every.iter().map(|c| quote_ident(kind, &c.name)).collect();
+        Ok(Some(format!(
+            "SELECT {} FROM {} WHERE {}",
+            list.join(", "),
+            self.table.relation(),
+            conds.join(" AND ")
+        )))
     }
 
     fn detail_column(&self, name: &str) -> Result<&ColumnDetail, EditError> {
@@ -2100,5 +2168,115 @@ mod tests {
             .unwrap(),
             serde_json::json!({"level": "columns", "unchecked": ["a"]})
         );
+    }
+
+    #[test]
+    fn atomicity_and_protection_kind_serialize_snake_case() {
+        assert_eq!(serde_json::json!(Atomicity::Yes), "yes");
+        assert_eq!(serde_json::json!(Atomicity::Unknown), "unknown");
+        assert_eq!(serde_json::json!(ProtectionKind::RowVersion), "row_version");
+        assert_eq!(serde_json::json!(ProtectionKind::Snapshot), "snapshot");
+    }
+
+    /// MySQL has no `RETURNING`: the new row is read back by its key, the
+    /// auto-increment part by `LAST_INSERT_ID()`.
+    #[test]
+    fn mysql_insert_reads_back_by_last_insert_id_or_key() {
+        let (mut d, m) = my_items(INNODB);
+        d.columns[0].auto_increment = true;
+        let insert = |values: &[(&str, CellInput)]| {
+            let s = set(vec![RowEdit::Insert {
+                values: pairs(values),
+            }]);
+            build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &none).unwrap()
+        };
+        let all = "SELECT `id`, `name`, `qty`, `price`, `payload` FROM `shop`.`items`";
+        let p = insert(&[("name", typed("n"))]);
+        let st = &p.stmts[0];
+        assert!(st.returning);
+        assert!(st
+            .sql
+            .starts_with("INSERT INTO `shop`.`items` (`name`) VALUES ("));
+        assert_eq!(
+            st.read_back.as_deref(),
+            Some(format!("{all} WHERE `id` = LAST_INSERT_ID()").as_str())
+        );
+        // NULL and DEFAULT let the server number the row too.
+        for v in [CellInput::Null, CellInput::Default] {
+            assert_eq!(
+                insert(&[("id", v)]).stmts[0].read_back.as_deref(),
+                Some(format!("{all} WHERE `id` = LAST_INSERT_ID()").as_str())
+            );
+        }
+        // A key the user typed is read back by its value (LAST_INSERT_ID() is not set).
+        assert_eq!(
+            insert(&[("id", typed("18446744073709551615"))]).stmts[0]
+                .read_back
+                .as_deref(),
+            Some(format!("{all} WHERE `id` = 18446744073709551615").as_str())
+        );
+        // A key column that is neither typed nor auto-increment: nothing to read back by.
+        let (d2, m2) = my_items(INNODB);
+        let s = set(vec![RowEdit::Insert {
+            values: pairs(&[("name", typed("n"))]),
+        }]);
+        let p = build_edit_plan(&s, &d2, &m2, Dialect::MYSQL, ctx(None), &none).unwrap();
+        assert!(p.stmts[0].returning);
+        assert_eq!(p.stmts[0].read_back, None);
+        // PostgreSQL reads it from RETURNING.
+        let s = pg_set(vec![RowEdit::Insert {
+            values: pairs(&[("id", typed("1"))]),
+        }]);
+        let p = plan_pg(&s).unwrap();
+        assert!(p.stmts[0].returning);
+        assert_eq!(p.stmts[0].read_back, None);
+        assert_eq!(p.stmts[0].recheck, None);
+    }
+
+    /// MySQL counts changed rows, not matched ones: an UPDATE that writes the values a
+    /// row already has reports 0. Such a statement carries a SELECT of its guarded row.
+    #[test]
+    fn mysql_update_rechecks_the_guarded_row() {
+        let p = plan_my(
+            INNODB,
+            &set(vec![
+                update(my_row(), &[("qty", typed("4"))]),
+                RowEdit::Delete { row: my_row() },
+            ]),
+            None,
+        )
+        .unwrap();
+        let (upd, del) = (&p.stmts[0], &p.stmts[1]);
+        let cond = upd.sql.split_once(" WHERE ").unwrap().1;
+        assert_eq!(
+            upd.recheck.as_deref(),
+            Some(format!("SELECT 1 FROM `shop`.`items` WHERE {cond}").as_str())
+        );
+        assert_eq!(del.recheck, None);
+        assert_eq!(del.read_back, None);
+        let mut r = row(&[("id", Value::Int(1))], &[]);
+        r.xmin = Some("7".into());
+        let p = plan_pg(&pg_set(vec![update(r, &[("name", typed("x"))])])).unwrap();
+        assert_eq!(p.stmts[0].recheck, None);
+    }
+
+    /// The verdict of a stored plan is judged again with the connection as it is now.
+    #[test]
+    fn edit_verdict_judges_with_the_current_context() {
+        let one = set(vec![update(my_row(), &[("qty", typed("4"))])]);
+        let p = plan_my(INNODB, &one, None).unwrap();
+        assert_eq!(p.verdict, Verdict::Allow);
+        let judge = |ctx: GuardCtx| edit_verdict(&p.stmts, p.atomic, p.dialect, ctx);
+        assert_eq!(judge(ctx(None)), (Verdict::Allow, None));
+        assert_eq!(judge(ctx(Some(EnvTag::Production))).0, Verdict::Confirm);
+        let mut ro = ctx(None);
+        ro.read_only = true;
+        assert_eq!(judge(ro).0, Verdict::Block);
+        // Not atomic on Production: blocked with its reason.
+        let p = plan_my(Some("MyISAM"), &one, None).unwrap();
+        let (v, reason) =
+            edit_verdict(&p.stmts, p.atomic, p.dialect, ctx(Some(EnvTag::Production)));
+        assert_eq!(v, Verdict::Block);
+        assert_eq!(reason.as_deref(), Some(NOT_ATOMIC_ON_PRODUCTION));
     }
 }

@@ -40,7 +40,7 @@ use uuid::Uuid;
 /// Statement timeout of a data request when the connection sets no query timeout.
 pub const DATA_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Grace after a timeout / cancel before the driver gives the connection up.
-const DATA_CANCEL_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const DATA_CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// Idle data sessions kept per database.
 const IDLE_PER_DATABASE: usize = 2;
 
@@ -52,6 +52,16 @@ pub const MAX_PAGE_BYTES: usize = 32 * 1024 * 1024;
 struct Idle {
     session: Box<dyn Session>,
     tunnel_gen: u64,
+}
+
+/// A data session taken for one exclusive use ([`SessionManager::take_data_session`]).
+pub(crate) struct TakenSession {
+    pub session: Box<dyn Session>,
+    /// `ConnectionRuntime::tunnel_gen` when the session was opened.
+    pub tunnel_gen: u64,
+    database: Option<String>,
+    /// It came from the pool (it may have gone stale while idle).
+    pub pooled: bool,
 }
 
 /// Where the current request of a key is.
@@ -470,9 +480,17 @@ impl SessionManager {
                 continue;
             }
             // Only a session whose request was never cancelled goes back to the pool: a
-            // cancel sent for it may still land on whatever runs there next.
+            // cancel sent for it may still land on whatever runs there next. A raw
+            // `WHERE` read never does either: the user's condition may have left session
+            // state that its ROLLBACK does not undo (a MySQL `GET_LOCK`, a PostgreSQL
+            // session advisory lock, a sequence's `currval`).
             let current = data.finish(key, serial);
-            if outcome.is_ok() && current && reusable(&rt) && !session.in_transaction() {
+            if outcome.is_ok()
+                && current
+                && request.raw.is_none()
+                && reusable(&rt)
+                && !session.in_transaction()
+            {
                 give_back(
                     &rt,
                     database,
@@ -494,6 +512,58 @@ impl SessionManager {
         self.runtime_opt(id).is_some_and(|rt| rt.data.cancel(key))
     }
 
+    /// A data session of `db` for one exclusive use outside the request keys (an edit
+    /// preview or apply): an idle pooled one, else a fresh one. Nothing is retried here;
+    /// give it back with [`Self::return_data_session`].
+    pub(crate) async fn take_data_session(
+        &self,
+        rt: &ConnectionRuntime,
+        db: Option<&str>,
+    ) -> Result<TakenSession, DbError> {
+        let database = db.map(str::to_string);
+        let (session, tunnel_gen, pooled) = match take_idle(rt, &database) {
+            Some(idle) => (idle.session, idle.tunnel_gen, true),
+            None => {
+                let (session, gen) = rt.open_query_session(database.clone()).await?;
+                (session, gen, false)
+            }
+        };
+        Ok(TakenSession {
+            session,
+            tunnel_gen,
+            database,
+            pooled,
+        })
+    }
+
+    /// Gives a taken session back to the pool when `clean` (it ran to the end, nothing
+    /// failed on it), its transaction is closed and its connection still current;
+    /// otherwise closes it.
+    pub(crate) fn return_data_session(
+        &self,
+        rt: &ConnectionRuntime,
+        taken: TakenSession,
+        clean: bool,
+    ) {
+        let reusable = clean
+            && !taken.session.in_transaction()
+            && !rt.closed.load(Ordering::SeqCst)
+            && !rt.tunnel_dead()
+            && taken.tunnel_gen == rt.tunnel_gen.load(Ordering::SeqCst);
+        if reusable {
+            give_back(
+                rt,
+                taken.database,
+                Idle {
+                    session: taken.session,
+                    tunnel_gen: taken.tunnel_gen,
+                },
+            );
+        } else {
+            tokio::spawn(close_quietly(taken.session));
+        }
+    }
+
     /// Overrides [`DATA_READ_TIMEOUT`] and the page bounds (tests).
     pub fn with_data_limits(mut self, timeout: Duration, cell_cap: usize, page_cap: usize) -> Self {
         self.data_timeout = timeout;
@@ -505,7 +575,7 @@ impl SessionManager {
 
 /// Keeps the first cell of a result (`SHOW …`); drops everything else.
 #[derive(Default)]
-struct FirstCell(Option<Value>);
+pub(crate) struct FirstCell(pub Option<Value>);
 
 impl RowSink for FirstCell {
     fn result_start(&mut self, _cols: &[ColumnMeta]) {}

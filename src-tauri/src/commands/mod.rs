@@ -153,6 +153,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data::table_row_count,
             data::table_data_cancel,
             data::data_editable,
+            data::data_preview,
+            data::data_apply,
             export::export_rows,
             export::export_table,
             export::export_query,

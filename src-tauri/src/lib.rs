@@ -5,6 +5,7 @@ pub mod cache;
 pub mod commands;
 pub mod data_sessions;
 pub mod desktop;
+pub mod edit_plans;
 pub mod export_format;
 pub mod export_paths;
 pub mod file_picks;

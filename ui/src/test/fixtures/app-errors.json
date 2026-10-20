@@ -513,6 +513,25 @@
     "field": null,
     "tx_state": null
   },
+  "plan_stale": {
+    "kind": "plan_stale",
+    "message": "The table or connection changed since the preview; review the changes again.",
+    "detail": "the table's structure changed",
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
+  },
   "server_db_missing": {
     "kind": "server",
     "message": "Unknown database 'shop'",

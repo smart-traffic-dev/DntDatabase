@@ -756,6 +756,54 @@ async fn raw_where_rejected_before_server() {
     }
 }
 
+/// A raw WHERE can take a session lock that its ROLLBACK does not release (MySQL
+/// `GET_LOCK`, a PostgreSQL advisory lock): its session is closed, never pooled, so the
+/// lock goes with it.
+#[tokio::test]
+async fn raw_where_session_is_closed_not_pooled() {
+    require_db!();
+    for t in [Target::MySql8, Target::Pg17] {
+        let tag = uuid8();
+        let table = format!("p3_lk_{tag}");
+        admin(t, &format!("CREATE TABLE {} (n INT)", scratch(t, &table))).await;
+        admin(t, &format!("INSERT INTO {} VALUES (1)", scratch(t, &table))).await;
+        let key = u32::from_str_radix(&tag, 16).unwrap() & 0x7fff_ffff;
+        let (lock, held) = match t.kind() {
+            DbKind::MySql => (
+                format!("GET_LOCK('p3_lock_{tag}', 0) = 1"),
+                format!("SELECT IS_USED_LOCK('p3_lock_{tag}') IS NOT NULL"),
+            ),
+            DbKind::Postgres => (
+                format!("pg_try_advisory_lock({key})"),
+                format!(
+                    "SELECT count(*) > 0 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND objid = {key}"
+                ),
+            ),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t, false).await;
+        let p = filtered_page(&state, id, obj(t, &table), raw(&lock))
+            .await
+            .unwrap();
+        assert_eq!(p.rows.len(), 1, "{t:?}");
+        // The lock goes away with the session (closed in the background).
+        let mut released = false;
+        for _ in 0..50 {
+            let rows = admin_one(t, &held).await.unwrap();
+            if matches!(rows[0][0], Value::Bool(false) | Value::Int(0)) {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(released, "{t:?}: the raw read's session kept its lock");
+        close_connection_impl(&state, id).await.unwrap();
+        admin(t, &format!("DROP TABLE {}", scratch(t, &table))).await;
+    }
+}
+
 /// PostgreSQL pages of an editable table carry each row's `xmin`, outside the columns.
 #[tokio::test]
 async fn pg_page_has_row_versions() {

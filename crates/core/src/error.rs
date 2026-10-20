@@ -137,6 +137,11 @@ pub enum DbError {
     /// The run plan the UI confirmed is gone (expired or replaced).
     #[error("the run plan expired")]
     PlanExpired,
+    /// An edit plan no longer matches what it was made for (the connection, its
+    /// settings, the table's structure or the session's SQL dialect changed since the
+    /// preview): nothing was sent; preview again.
+    #[error("the edit plan is stale: {reason}")]
+    PlanStale { reason: String },
     /// The guard blocked `count` statements that change data on a read-only connection.
     #[error("{count} statement(s) blocked on a read-only connection")]
     Blocked { count: u32 },
@@ -464,6 +469,13 @@ impl From<DbError> for AppError {
             DbError::PlanExpired => {
                 AppError::base("plan_expired", "The run plan expired; run it again.")
             }
+            DbError::PlanStale { reason } => AppError {
+                detail: Some(reason),
+                ..AppError::base(
+                    "plan_stale",
+                    "The table or connection changed since the preview; review the changes again.",
+                )
+            },
             DbError::Blocked { count } => AppError {
                 detail: Some(statements(count)),
                 ..AppError::base(
@@ -1078,6 +1090,22 @@ mod tests {
             assert!(!a.outcome_unknown, "{kind}");
             assert_eq!(a.tx_state, None, "{kind}");
         }
+    }
+
+    #[test]
+    fn plan_stale_has_its_own_kind_and_keeps_the_reason() {
+        let a: AppError = DbError::PlanStale {
+            reason: "the table's structure changed".into(),
+        }
+        .into();
+        assert_eq!(a.kind, "plan_stale");
+        assert_eq!(
+            a.message,
+            "The table or connection changed since the preview; review the changes again."
+        );
+        assert_eq!(a.detail.as_deref(), Some("the table's structure changed"));
+        assert!(!a.retryable);
+        assert!(!a.outcome_unknown);
     }
 
     #[test]
