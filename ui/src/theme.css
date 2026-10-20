@@ -17,6 +17,15 @@
   --danger-border: var(--studio-danger-border);
   --production: var(--studio-danger);
   --production-bg: var(--studio-danger-fill);
+  /*
+   * Text-safe red: the token danger (#d7373f on #fdeeee = 4.1:1, dark #e5484d on #3a2224 = 3.7:1)
+   * fails WCAG AA at 11-12 px. These give 5.8:1 (light) / 5.9:1 (dark) on the danger fill.
+   * `--production` stays for borders and stripes.
+   */
+  --danger-fg: #b42318;
+  --production-fg: var(--danger-fg);
+  /* Selected tree row: visibly stronger than --sel (#e8e8e8 on #f9f9f9 is ~1.2:1). */
+  --sel-strong: color-mix(in srgb, var(--studio-fg) 14%, var(--studio-sidebar));
   /* P2 query editor (not in the dnt-note tokens): warning and current-statement colours. */
   --warning-bg: #fff4d6;
   --warning-fg: #7a4b00;
@@ -24,6 +33,7 @@
 }
 
 .dark {
+  --danger-fg: #ff7b7f;
   --warning-bg: #3a3020;
   --warning-fg: #f0c674;
 }
@@ -197,7 +207,7 @@ textarea:focus {
 
 .banner.error {
   background: var(--danger-fill);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .banner span {
@@ -213,8 +223,13 @@ textarea:focus {
   outline: none;
 }
 
+/* Keyboard focus is shown on the active row, not around the whole tree. */
 .tree:focus-visible {
-  outline: 2px solid var(--studio-fg-secondary);
+  outline: none;
+}
+
+.tree:focus-visible .tree-row.selected {
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
 
@@ -234,7 +249,8 @@ textarea:focus {
 }
 
 .tree-row.selected {
-  background: var(--sel);
+  background: var(--sel-strong);
+  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .tree-row.drop-target {
@@ -256,7 +272,7 @@ textarea:focus {
 }
 
 .label.env-production {
-  color: var(--production);
+  color: var(--production-fg);
 }
 
 .chev {
@@ -317,7 +333,7 @@ textarea:focus {
 .env-tag.env-production {
   background: var(--studio-danger-fill);
   border-color: var(--studio-danger-border);
-  color: var(--studio-danger);
+  color: var(--production-fg);
 }
 
 .env-tag.env-staging,
@@ -350,7 +366,7 @@ textarea:focus {
 }
 
 .placeholder.error {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .error-text {
@@ -436,7 +452,7 @@ textarea:focus {
 }
 
 .context-menu button.danger {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .context-menu kbd {
@@ -454,18 +470,50 @@ textarea:focus {
   flex-direction: column;
 }
 
+.tabstrip {
+  display: flex;
+  align-items: flex-end;
+  min-height: 39px;
+  background: var(--tabstrip);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Scrolls sideways inside itself; the scrollbar is hidden so it cannot shift the layout. */
 .tabbar {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: flex-end;
   gap: 2px;
   padding: 6px 8px 0;
-  background: var(--tabstrip);
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
-  min-height: 39px;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
 
+.tabbar::-webkit-scrollbar {
+  display: none;
+}
+
+.tab-overflow {
+  flex: none;
+  width: 28px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+}
+
+.tab-overflow:hover {
+  background: var(--hover);
+}
 .tab {
+  flex: none;
+  max-width: 260px;
   display: flex;
   align-items: center;
   height: 32px;
@@ -502,9 +550,28 @@ textarea:focus {
   color: var(--muted);
 }
 
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .tab-dirty {
   font-size: 10px;
   color: var(--muted);
+}
+
+.tab-ro {
+  display: inline-flex;
+  color: var(--muted);
+}
+
+/* Open transaction: a warning-coloured dot. */
+.tab-tx {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warning-fg);
 }
 
 .tab-close {
@@ -554,7 +621,7 @@ textarea:focus {
   border: 1px solid var(--danger-border);
   border-radius: var(--radius-md);
   background: var(--danger-fill);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .error-fallback p {
@@ -571,17 +638,24 @@ textarea:focus {
   border-top: 1px solid var(--border);
   color: var(--muted);
   font-size: var(--text-footnote);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.statusbar > * {
+  flex: none;
 }
 
 .statusbar.env-production {
   background: var(--production-bg);
-  color: var(--production);
+  color: var(--production-fg);
 }
 
 .status-conn {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 1 auto;
   min-width: 0;
 }
 
@@ -593,6 +667,33 @@ textarea:focus {
 
 .status-right {
   margin-left: auto;
+}
+
+.ro-badge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-caption);
+  font-weight: 600;
+}
+
+.status-last.cancelled {
+  color: var(--warning-fg);
+}
+
+.status-run.running {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.spinner.inline {
+  margin-left: 0;
 }
 
 .dot {
@@ -645,7 +746,7 @@ textarea:focus {
 }
 
 .status-tx.tx-aborted {
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
 .status-btn {
@@ -658,5 +759,94 @@ textarea:focus {
 }
 
 .status-run {
-  color: var(--danger);
+  color: var(--danger-fg);
+}
+
+/* Disabled "later phase" tools: grouped after a separator, compact, labels dropped on narrow windows. */
+.tool-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-left: 8px;
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+}
+
+.tool-group .tool {
+  min-width: 52px;
+}
+
+.tool-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 1180px) {
+  .tool-group .tool span {
+    display: none;
+  }
+
+  .tool-group .tool {
+    min-width: 36px;
+  }
+}
+
+/* Sidebar first-start state */
+.sidebar-empty,
+.empty {
+  text-align: center;
+}
+
+.sidebar-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--muted);
+}
+
+.sidebar-empty strong {
+  color: var(--text);
+  font-size: var(--text-body);
+  font-weight: 600;
+}
+
+.empty kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  padding: 0 4px;
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-sm);
+}
+
+.empty .btn {
+  margin-top: 8px;
+}
+
+/*
+ * Code text: Cascadia Code ligatures turn `>=` into a single glyph, which misleads in SQL.
+ * Switched off on every monospace surface (editor, DDL, messages, grid, chips).
+ */
+code,
+pre,
+kbd,
+samp,
+textarea,
+.monaco-editor,
+.monaco-editor *,
+.chip,
+.tab-kind,
+.icon-btn,
+.mono,
+[class*='ddl'],
+[class*='sql'],
+[class*='qr-msg'],
+[class*='message'] {
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0, 'calt' 0;
 }

@@ -5,6 +5,8 @@ import { txAction } from '../store/runQuery';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
+import { LockIcon } from './icons';
+import { formatElapsed, shortVersion } from './statusFormat';
 
 /** Seconds since `since`, ticking once a second while mounted. */
 function useElapsedSeconds(since: number | null): number | null {
@@ -18,17 +20,32 @@ function useElapsedSeconds(since: number | null): number | null {
   return since === null ? null : Math.max(0, Math.floor((now - since) / 1000));
 }
 
-/** Last run, transaction state and stop progress of a query tab (spec §6.2). */
+/** Last run, transaction state and run/stop progress of a query tab (spec §6.2). */
 function QueryStatus({ tabId }: { tabId: string }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
-  const since = run.phase.kind === 'stopping' || run.phase.kind === 'abandoning' ? run.phase.since : null;
+  const phase = run.phase;
+  const since = phase.kind === 'idle' ? null : phase.kind === 'running' ? phase.startedAt : phase.since;
   const seconds = useElapsedSeconds(since);
   const idle = canRun(run);
+  const cancelled = idle && run.stop?.kind === 'cancelled';
   return (
     <>
-      {run.lastRun && (
-        <span className="status-last">
-          {run.lastRun.rows} rows · {run.lastRun.elapsedMs} ms
+      {phase.kind === 'running' && seconds !== null && (
+        <span className="status-run running" data-testid="status-running" role="status">
+          <span className="spinner inline" aria-hidden="true" />
+          Running… {formatElapsed(seconds * 1000)} · {phase.index + 1}/{phase.total}
+        </span>
+      )}
+      {idle && run.lastRun && (
+        <span className={`status-last${cancelled ? ' cancelled' : ''}`} data-testid="status-last">
+          {cancelled
+            ? `Cancelled by user after ${formatElapsed(run.lastRun.elapsedMs)}`
+            : `${run.lastRun.rows.toLocaleString('en-US')} ${run.lastRun.rows === 1 ? 'row' : 'rows'} · ${run.lastRun.elapsedMs.toLocaleString('en-US')} ms`}
+        </span>
+      )}
+      {idle && !run.lastRun && cancelled && (
+        <span className="status-last cancelled" data-testid="status-last">
+          Cancelled by user
         </span>
       )}
       <span className={`status-tx tx-${run.txState}`} data-testid="status-tx">
@@ -46,9 +63,9 @@ function QueryStatus({ tabId }: { tabId: string }) {
           </button>
         )}
       </span>
-      {seconds !== null && (
+      {(phase.kind === 'stopping' || phase.kind === 'abandoning') && seconds !== null && (
         <span className="status-run" data-testid="status-run">
-          {run.phase.kind === 'abandoning'
+          {phase.kind === 'abandoning'
             ? `Server not responding — replacing connection… ${seconds} s`
             : `Stopping… ${seconds} s`}
         </span>
@@ -75,17 +92,22 @@ export function StatusBar() {
 
   const cfg = summary?.config;
   const production = cfg?.env_tag === 'production';
+  const text = cfg
+    ? `${cfg.name} · ${info ? shortVersion(info) : 'not connected'}${cfg.ssh ? ` · via SSH ${cfg.ssh.host}` : ''}`
+    : '';
   return (
     <footer className={`statusbar${production ? ' env-production' : ''}`}>
       {cfg ? (
         <span className="status-conn">
           <span className={`dot${info ? ' on' : ''}`} aria-hidden="true" />
-          <span>
-            {cfg.name}
-            {info ? ` · ${info.version_string}` : ' · not connected'}
-            {cfg.ssh ? ` · via SSH ${cfg.ssh.host}` : ''}
-          </span>
+          <span title={info ? `${text}\n${info.version_string}` : text}>{text}</span>
           {production && <span className="env-badge">PRODUCTION</span>}
+          {cfg.read_only && (
+            <span className="ro-badge" title="Read-only connection: statements that change data are blocked">
+              <LockIcon />
+              read-only
+            </span>
+          )}
         </span>
       ) : (
         <span className="status-conn">No connection selected</span>

@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useDialogs } from '../store/dialogs';
 import { ActionMenu, transferItems } from './ActionMenu';
 import { openNewQuery } from './newQuery';
-import { ChevronIcon, LogoIcon, TOOL_PATHS, ToolIcon } from './icons';
+import { ChevronDownIcon, LogoIcon, TOOL_PATHS, ToolIcon } from './icons';
 
 const LATER = 'Coming in a later phase';
 
@@ -46,7 +46,7 @@ export function Toolbar() {
             setMenu({ x: r.left, y: r.bottom });
           }}
         >
-          <ChevronIcon />
+          <ChevronDownIcon />
         </button>
       </div>
       {menu && (
@@ -66,12 +66,14 @@ export function Toolbar() {
         <ToolIcon path={TOOL_PATHS.query} />
         <span>New query</span>
       </button>
-      {DISABLED_TOOLS.map((t) => (
-        <button key={t.label} type="button" className="tool" disabled title={LATER}>
-          <ToolIcon path={t.path} />
-          <span>{t.label}</span>
-        </button>
-      ))}
+      <div className="tool-group" role="group" aria-label={LATER} title={LATER}>
+        {DISABLED_TOOLS.map((t) => (
+          <button key={t.label} type="button" className="tool" disabled aria-label={`${t.label} (${LATER.toLowerCase()})`}>
+            <ToolIcon path={t.path} />
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </div>
     </header>
   );
 }

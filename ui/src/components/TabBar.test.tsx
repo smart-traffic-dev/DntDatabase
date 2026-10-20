@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { EnvTag } from '../bindings';
 import userEvent from '@testing-library/user-event';
 import { useConnections } from '../store/connections';
+import { emptyRun, useQueryRun } from '../store/queryRun';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
 import { callsOf, config, ids, mockBackend, resetStores } from '../test/backend';
@@ -85,4 +86,46 @@ describe('TabBar', () => {
     expect(q1.closest('.tab')).toHaveClass('env-production');
     expect(screen.getByRole('tab', { name: /Query 2/ })).toHaveTextContent('SQL');
   });
-});
+  it('marks read-only connections and tabs with an open transaction', () => {
+    act(() => {
+      useConnections.getState().setStored([], [config(ids.prod, 'prod', { read_only: true })]);
+      useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: ids.prod, title: 'Query 1' });
+      useTabs.getState().open({ id: 'q2', kind: 'query', connectionId: null, title: 'Query 2' });
+      useQueryRun.setState({ runs: new Map([['q1', { ...emptyRun, txState: 'active' }]]) });
+    });
+    render(<TabBar />);
+    const q1 = screen.getByRole('tab', { name: /Query 1/ });
+    expect(q1.querySelector('.tab-ro')).not.toBeNull();
+    expect(q1.querySelector('.tab-tx')).toHaveAttribute('title', 'Open transaction');
+    const q2 = screen.getByRole('tab', { name: /Query 2/ });
+    expect(q2.querySelector('.tab-ro')).toBeNull();
+    expect(q2.querySelector('.tab-tx')).toBeNull();
+    expect(q1.closest('.tab')).toHaveAttribute('title', expect.stringContaining('Read-only'));
+  });
+
+  it('lists all tabs in an overflow menu and activates the picked one', async () => {
+    act(() => {
+      useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: null, title: 'Query 1' });
+      useTabs.getState().open({ id: 'q2', kind: 'query', connectionId: null, title: 'Query 2' });
+    });
+    render(<TabBar />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: 'List all tabs' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Query 1' }));
+    expect(useTabs.getState().activeId).toBe('q1');
+  });
+
+  it('closes the other tabs from the context menu', async () => {
+    mockBackend({ tabs_save: () => null, tabs_delete: () => null, query_close_tab: () => null });
+    act(() => {
+      useQueryDocs.getState().newQuery(null, null);
+      useQueryDocs.getState().newQuery(null, null);
+      useQueryDocs.getState().newQuery(null, null);
+    });
+    render(<TabBar />);
+    const keep = screen.getByRole('tab', { name: /Query 2/ });
+    const user = userEvent.setup();
+    await user.pointer({ keys: '[MouseRight]', target: keep });
+    await user.click(screen.getByRole('menuitem', { name: 'Close others' }));
+    await waitFor(() => expect(useTabs.getState().tabs.map((x) => x.title)).toEqual(['Query 2']));
+  });});

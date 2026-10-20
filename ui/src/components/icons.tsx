@@ -39,6 +39,30 @@ export const ChevronIcon = () => (
   </Icon>
 );
 
+export const ChevronDownIcon = () => (
+  <Icon size={10} strokeWidth={2.5}>
+    <path d="M6 9l6 6 6-6" />
+  </Icon>
+);
+
+/** Padlock: read-only connections. */
+export const LockIcon = () => (
+  <Icon size={11} strokeWidth={2.2}>
+    <rect x="5" y="11" width="14" height="9" rx="2" />
+    <path d="M8 11V8a4 4 0 018 0v3" />
+  </Icon>
+);
+
+/** Database with a gear: system databases / schemas. */
+export const SystemIcon = () => (
+  <Icon>
+    <ellipse cx="10" cy="5" rx="6.5" ry="2.5" />
+    <path d="M3.5 5v12c0 1.4 2.9 2.5 6.5 2.5M3.5 11c0 1.4 2.9 2.5 6.5 2.5" />
+    <circle cx="17.5" cy="16.5" r="2.5" />
+    <path d="M17.5 11.5v2M17.5 19.5v2M12.5 16.5h2M20.5 16.5h2" />
+  </Icon>
+);
+
 export const PlusIcon = () => (
   <Icon size={14} strokeWidth={2}>
     <path d="M12 5v14M5 12h14" />

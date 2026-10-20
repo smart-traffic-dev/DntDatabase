@@ -1,7 +1,9 @@
+import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { useTree } from '../store/tree';
+import { ROOT } from '../store/treeModel';
 import { ConnectionTree } from './ConnectionTree';
-import { PlusIcon } from './icons';
+import { PlusIcon, SystemIcon } from './icons';
 
 export function Sidebar() {
   const filter = useTree((s) => s.filter);
@@ -10,6 +12,10 @@ export function Sidebar() {
   const setShowSystem = useTree((s) => s.setShowSystem);
   const error = useTree((s) => s.error);
   const requestDialog = useDialogs((s) => s.requestDialog);
+  // Loaded and nothing stored: show the first-start call to action instead of a blank tree.
+  const treeEmpty = useTree((s) => s.childIds.get(ROOT)?.length === 0);
+  const storedCount = useConnections((c) => c.summaries.size);
+  const noConnections = treeEmpty && storedCount === 0;
 
   return (
     <aside className="sidebar">
@@ -24,12 +30,12 @@ export function Sidebar() {
         <button
           type="button"
           className={`icon-btn${showSystem ? ' on' : ''}`}
-          aria-label="Show system databases"
+          aria-label="Show system schemas"
           aria-pressed={showSystem}
-          title="Show system databases"
+          title="Show system schemas"
           onClick={() => setShowSystem(!showSystem)}
         >
-          S
+          <SystemIcon />
         </button>
         <button
           type="button"
@@ -49,7 +55,20 @@ export function Sidebar() {
           </button>
         </div>
       )}
-      <ConnectionTree />
+      {noConnections ? (
+        <div className="sidebar-empty" data-testid="sidebar-empty">
+          <strong>No connections yet</strong>
+          <span>Add a database connection to browse its tables.</span>
+          <button type="button" className="btn primary" onClick={() => requestDialog({ kind: 'newConnection' })}>
+            New connection
+          </button>
+          <button type="button" className="btn" onClick={() => requestDialog({ kind: 'import' })}>
+            Import…
+          </button>
+        </div>
+      ) : (
+        <ConnectionTree />
+      )}
     </aside>
   );
 }
