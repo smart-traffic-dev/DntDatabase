@@ -11,6 +11,8 @@ dnt-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 specta.workspace = true
+# `CellInput::Loaded` tokens (full values fetched with the data view).
+uuid.workspace = true
 
 [dev-dependencies]
 # The scripted FakeSession of tests/run.rs.

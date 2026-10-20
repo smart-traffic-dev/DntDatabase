@@ -259,7 +259,7 @@ fn rank(v: Verdict) -> u8 {
     }
 }
 
-fn strictest(a: Verdict, b: Verdict) -> Verdict {
+pub(crate) fn strictest(a: Verdict, b: Verdict) -> Verdict {
     if rank(b) > rank(a) {
         b
     } else {
