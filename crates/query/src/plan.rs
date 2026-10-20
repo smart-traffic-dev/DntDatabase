@@ -1,6 +1,8 @@
 //! Which statements a run executes, with their editor ranges in UTF-16.
 
-use dnt_core::sql::{classify, leading_blank_len, split, Dialect, Statement, StatementKind};
+use dnt_core::sql::{
+    classify, leading_blank_len, split, Dialect, Statement, StatementKind, TxControl,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::guard::GuardCtx;
@@ -107,7 +109,7 @@ pub fn plan(text: &str, target: Target, dialect: Dialect) -> ScriptPlan {
         .map(|(index, s)| PlannedStmt {
             index: index as u32,
             range: range(&s),
-            kind: classify(&s.text, dialect),
+            kind: statement_kind(&s.text, dialect),
             verdict: Verdict::Allow,
             source_range: (s.start, s.end),
             text: s.text,
@@ -121,6 +123,53 @@ pub fn plan(text: &str, target: Target, dialect: Dialect) -> ScriptPlan {
         stmts,
         explain: false,
         guard: None,
+    }
+}
+
+/// The kind of one planned statement: [`classify`], or, when the statement holds
+/// several statements for the server (a MySQL `DELIMITER` left on, see
+/// [`crate::guard::resplits`]), the strictest over the statement and its pieces, so
+/// the driver's outcome rules (`may_have_committed`, a late result of a `Read`) and the
+/// confirm dialog see what really runs:
+///
+/// - any `Ddl` piece → `Ddl`; else any `Write` → `Write`;
+/// - else, with a transaction-control piece: the LAST one (`SELECT 1; BEGIN` is
+///   `Transaction(Begin)`), so tx tracking sees the state the text ends in; except
+///   that a `ROLLBACK` / `SET autocommit = 0` (which the drivers treat as never
+///   committing) next to an `Other` piece gives `Other`, whose effect may be durable;
+/// - else `Other` if any piece is, else `Read`.
+///
+/// Accepted limit: with a `Write`/`Ddl` piece, a `BEGIN`/`COMMIT` piece is not seen by
+/// tx tracking (the outcome rules, which matter for "may have been applied", win).
+pub fn statement_kind(text: &str, dialect: Dialect) -> StatementKind {
+    let whole = classify(text, dialect);
+    let pieces = crate::guard::piece_kinds(text, dialect);
+    if pieces.is_empty() {
+        return whole;
+    }
+    let all = || std::iter::once(whole).chain(pieces.iter().copied());
+    let any = |k: StatementKind| all().any(|p| p == k);
+    if any(StatementKind::Ddl) {
+        return StatementKind::Ddl;
+    }
+    if any(StatementKind::Write) {
+        return StatementKind::Write;
+    }
+    let other = any(StatementKind::Other);
+    match pieces
+        .iter()
+        .rev()
+        .copied()
+        .find(|k| matches!(k, StatementKind::Transaction(_)))
+    {
+        Some(StatementKind::Transaction(TxControl::Rollback | TxControl::AutocommitOff))
+            if other =>
+        {
+            StatementKind::Other
+        }
+        Some(tx) => tx,
+        None if other => StatementKind::Other,
+        None => StatementKind::Read,
     }
 }
 
@@ -337,6 +386,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A statement holding several statements (a `DELIMITER` left on) takes the
+    /// strictest kind of what runs, so the driver's outcome rules see the DELETE.
+    #[test]
+    fn multi_piece_statement_takes_the_strictest_kind() {
+        use dnt_core::sql::TxControl::{AutocommitOff, Begin, Commit};
+        use StatementKind::*;
+        let p = plan(
+            "DELIMITER $$\nSELECT * FROM t; DELETE FROM t WHERE id = 1;",
+            Target::All,
+            MY,
+        );
+        assert_eq!(p.stmts.len(), 1);
+        assert_eq!(p.stmts[0].kind, Write);
+        assert_eq!(StmtKindLabel::from(p.stmts[0].kind), StmtKindLabel::Write);
+        for (text, want) in [
+            ("SELECT 1; DROP TABLE t", Ddl),
+            ("DELETE FROM t; CREATE TABLE u (a int)", Ddl),
+            ("SELECT 1; SELECT 2;", Read),
+            ("SELECT 1; SET NAMES utf8", Other),
+            // Tx tracking sees the transaction the text ends in.
+            ("SELECT 1; BEGIN", Transaction(Begin)),
+            ("BEGIN; SELECT 1; COMMIT", Transaction(Commit)),
+            ("SELECT 1; SET autocommit = 0", Transaction(AutocommitOff)),
+            // A rollback next to a possibly durable `Other`: `Other`.
+            ("SET GLOBAL x = 1; ROLLBACK", Other),
+            // Write wins over transaction control.
+            ("BEGIN; DELETE FROM t", Write),
+            ("/*!40101 SELECT 1; DELETE FROM t */", Write),
+            // Compound bodies keep their own kind; single statements are unchanged.
+            ("CREATE PROCEDURE p() BEGIN SELECT 1; END", Ddl),
+            ("BEGIN", Transaction(Begin)),
+            ("SELECT ';'", Read),
+        ] {
+            assert_eq!(statement_kind(text, MY), want, "{text}");
+        }
+        // PG never re-splits.
+        assert_eq!(statement_kind("SELECT 1", Dialect::Postgres), Read);
+    }
+
+    /// The drivers track the transaction from the planned kind: `SELECT 1; BEGIN`
+    /// leaves the session in a transaction.
+    #[test]
+    fn multi_piece_begin_is_tracked() {
+        use dnt_core::server::DbKind;
+        use dnt_core::tx::{next_tx_state, StmtResult, TxState};
+        let p = plan("DELIMITER $$\nSELECT 1; BEGIN$$", Target::All, MY);
+        let s = &p.stmts[0];
+        let after = next_tx_state(
+            DbKind::MySql,
+            TxState::Idle,
+            false,
+            s.kind,
+            &s.text,
+            StmtResult::Ok,
+        );
+        assert_eq!(after, TxState::Active);
+        let p = plan("DELIMITER $$\nSELECT 1; COMMIT$$", Target::All, MY);
+        let s = &p.stmts[0];
+        let after = next_tx_state(
+            DbKind::MySql,
+            TxState::Active,
+            false,
+            s.kind,
+            &s.text,
+            StmtResult::Ok,
+        );
+        assert_eq!(after, TxState::Idle);
     }
 
     #[test]

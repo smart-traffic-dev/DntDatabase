@@ -219,6 +219,17 @@ pub fn resplits(stmt: &str, dialect: Dialect) -> bool {
     })
 }
 
+/// The kinds of the pieces of `stmt` ([`resplits`]), reading by reading, each in
+/// order; empty when it does not re-split.
+pub(crate) fn piece_kinds(stmt: &str, dialect: Dialect) -> Vec<StatementKind> {
+    readings(stmt, dialect)
+        .iter()
+        .filter_map(|r| pieces(r, &tokenize(r, dialect), dialect))
+        .flatten()
+        .map(|p| classify(&p, dialect))
+        .collect()
+}
+
 /// The statements of reading `r` (tokens `toks`) split again with the default `;`
 /// delimiter, when there are several (see [`resplits`]).
 fn pieces(r: &str, toks: &[Token], dialect: Dialect) -> Option<Vec<String>> {
@@ -1119,7 +1130,8 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
     fn statement_with_depth0_semicolons_is_judged_on_every_piece() {
         let p = plan(FORGOTTEN_DELIMITER, Target::All, MY);
         assert_eq!(p.stmts.len(), 1);
-        assert_eq!(p.stmts[0].kind, StatementKind::Read);
+        // `plan` gives it the strictest kind of its pieces.
+        assert_eq!(p.stmts[0].kind, StatementKind::Write);
         assert_eq!(
             plan_columns(FORGOTTEN_DELIMITER, MY, false, false),
             [C, B, A]

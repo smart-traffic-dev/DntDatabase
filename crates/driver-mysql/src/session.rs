@@ -1092,6 +1092,26 @@ mod tests {
         }
     }
 
+    /// Under a `DELIMITER` left on, `SELECT …; DELETE …` is one statement; the planner
+    /// (`dnt_query::plan`) gives it the strictest kind of its pieces, `Write`. Lost
+    /// after the DELETE piece may have run, it is outcome-unknown and not retryable.
+    #[test]
+    fn multi_statement_planned_as_write_is_outcome_unknown_when_lost() {
+        let sql = "SELECT * FROM t; DELETE FROM t WHERE id = 1;";
+        let unknown = may_have_committed(Write, false, sql);
+        assert!(unknown);
+        let app = dnt_core::error::AppError::from(lost(false, unknown, "gone".into()));
+        assert!(app.outcome_unknown && !app.retryable);
+        // Classified by its first piece alone (`Read`) it would have looked safe.
+        assert!(!may_have_committed(Read, false, sql));
+        // `SELECT 1; BEGIN` plans as `Transaction(Begin)`: may have committed too.
+        assert!(may_have_committed(
+            Transaction(TxControl::Begin),
+            false,
+            "SELECT 1; BEGIN"
+        ));
+    }
+
     #[test]
     fn killed_write_outside_a_transaction_or_call_has_unknown_outcome() {
         assert!(killed_outcome_unknown(

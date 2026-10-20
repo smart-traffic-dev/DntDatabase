@@ -7,13 +7,13 @@
 
 use dnt_core::driver::{CancelHandle, ExecOptions, RowSink, Session, StmtOutcome, StopSignal};
 use dnt_core::error::{AppError, DbError};
-use dnt_core::sql::{classify, Dialect, StatementKind, TxControl};
+use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::tx::{is_rollback_to, TxState};
 use serde::{Deserialize, Serialize};
 
 use crate::guard::stmt_verdict;
 use crate::offsets::Utf16Map;
-use crate::plan::{significant, PlannedStmt, ScriptPlan};
+use crate::plan::{significant, statement_kind, PlannedStmt, ScriptPlan};
 
 /// Where a run reports what happens. Results stream through the [`RowSink`] part,
 /// between `statement_start` and `statement_end` of their statement.
@@ -292,7 +292,13 @@ fn same_rest(plan: &ScriptPlan, i: usize, dialect: Dialect) -> bool {
         significant(&plan.source[base..], dialect)
             .into_iter()
             .filter(|s| base + s.end > from && base + s.start < to)
-            .map(|s| (base + s.start, base + s.end, classify(&s.text, dialect)))
+            .map(|s| {
+                (
+                    base + s.start,
+                    base + s.end,
+                    statement_kind(&s.text, dialect),
+                )
+            })
             .collect()
     };
     let same_bounds = resplit(from) == want || (from != 0 && resplit(0) == want);

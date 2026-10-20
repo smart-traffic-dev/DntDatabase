@@ -1875,6 +1875,8 @@ async fn forgotten_delimiter_cannot_bypass_the_guard() {
     let view = plan(&f, "t1", prod, None, text).await.unwrap();
     assert_eq!(view.stmts.len(), 1);
     assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    // The confirm dialog shows what really runs: a write.
+    assert_eq!(view.stmts[0].kind, StmtKindLabel::Write);
     let (emit, _) = collector();
     let err =
         f.sm.query_run(view.plan_id, false, opts(), emit)
