@@ -201,4 +201,5 @@ describe('ResultPanel', () => {
     const btn = screen.getByRole('button', { name: 'Fetch all' });
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute('title', PLAN_GONE);
-  });});
+  });
+});

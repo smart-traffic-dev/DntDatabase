@@ -62,7 +62,7 @@ export function ResultPanel({ tabId }: { tabId: string }) {
   // With dozens of result tabs the strip scrolls inside itself; keep the open one in view.
   useEffect(() => {
     stripRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
-  }, [at, showResult, run.results.length]);
+  }, [at, showResult]);
 
   return (
     <div className="qr-panel" data-testid="result-panel">

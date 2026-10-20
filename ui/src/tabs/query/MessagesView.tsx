@@ -67,7 +67,7 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
   const jump = (target: { from: number; to: number }) => revealInEditor(tabId, target, { focus: true });
 
   if (count === 0) {
-    const text = run.phase.kind === 'idle' ? 'No messages yet.' : run.mode === 'explain' ? 'Explainingâ€¦' : 'Runningâ€¦';
+    const text = run.phase.kind === 'idle' ? 'No messages yet.' : run.mode === 'explain' ? 'Explaining…' : 'Running…';
     return <div className="qr-empty">{text}</div>;
   }
   return (
@@ -109,6 +109,7 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
               data-testid="message-line"
               tabIndex={target ? 0 : undefined}
               title={target ? 'Show in the editor' : undefined}
+              aria-description={target ? 'Show in editor' : undefined}
               onClick={target ? (e: MouseEvent) => !(e.target as HTMLElement).closest('button') && jump(target) : undefined}
               onKeyDown={
                 target
@@ -137,7 +138,7 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
               ) : (
                 <span className="qr-msg-text">{m.text}</span>
               )}
-              {detail.length > 0 && <span className="qr-msg-meta">{detail.join(' Ã‚Â· ')}</span>}
+              {detail.length > 0 && <span className="qr-msg-meta">{detail.join(' · ')}</span>}
               {m.retryRange !== null && m.index !== null && (
                 <button
                   type="button"

@@ -87,6 +87,17 @@ describe('MessagesView', () => {
     expect(row).toHaveClass('info');
     expect(row).toHaveTextContent('3 rows affected');
     expect(row).toHaveTextContent('12 ms');
+    expect(row.querySelector('.qr-msg-meta')?.textContent).toBe('3 rows affected · 12 ms');
+  });
+
+  it('running_placeholder_text_is_exact', () => {
+    render(<MessagesView tabId="t" run={startRun(emptyRun, PLAN, 0)} />);
+    expect(screen.getByText('Running…')).toBeInTheDocument();
+  });
+
+  it('clickable_rows_announce_show_in_editor', () => {
+    render(<MessagesView tabId="t" run={withError(appError('query', 'x'))} />);
+    expect(screen.getByTestId('message-line')).toHaveAttribute('aria-description', 'Show in editor');
   });
 
   it('error_row_shows_statement_then_server_message', () => {
