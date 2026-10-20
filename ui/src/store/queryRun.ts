@@ -21,6 +21,7 @@ import { stmtsByIndex } from '../query/plan';
 import { forgetCompletionConnection, invalidateCompletion } from './completion';
 import { useConnections } from './connections';
 import { asTxState, queryTxRecorded, setTxStateSource, useQueryDocs } from './queryTabs';
+import { useTree } from './tree';
 
 /** At most this many result tabs per run; later results only get their Messages line. */
 export const MAX_RESULT_TABS = 50;
@@ -184,6 +185,8 @@ export function runProgress(r: TabRun): { current: number; total: number } | nul
  * Whether Retry statement / Fetch all can still derive from the run's plan (F12): there is
  * one, the backend has not dropped it, and the tab is still on the connection and database
  * it was made on (the backend's plan is bound to both). `doc`: the tab's current doc.
+ * A run without a recorded `origin` (begun outside `begin`, or on a tab without a connection)
+ * counts as alive: the backend's `plan_expired` answer is then the authority.
  */
 export function planAlive(
   r: TabRun,
@@ -595,23 +598,47 @@ const unsubscribeDocs = useQueryDocs.subscribe((s, prev) => {
 // A closed connection: its completion data goes, and its tabs' sessions closed with it.
 // A tab still running keeps its state until its `done` (see `apply`).
 const unsubscribeConnections = useConnections.subscribe((s, prev) => {
-  if (s.info === prev.info) return;
-  for (const conn of prev.info.keys()) {
-    if (s.info.has(conn)) continue;
-    forgetCompletionConnection(conn);
-    const { runs } = useQueryRun.getState();
-    for (const [tabId, run] of runs) {
-      const doc = useQueryDocs.getState().docs.get(tabId);
-      if (doc?.connectionId === conn && canRun(run) && run.txState !== 'idle') {
-        useQueryRun.getState().setTxState(tabId, 'idle');
+  if (s.info !== prev.info) {
+    for (const conn of prev.info.keys()) {
+      if (s.info.has(conn)) continue;
+      forgetCompletionConnection(conn);
+      const { runs } = useQueryRun.getState();
+      for (const [tabId, run] of runs) {
+        const doc = useQueryDocs.getState().docs.get(tabId);
+        if (doc?.connectionId === conn && canRun(run) && run.txState !== 'idle') {
+          useQueryRun.getState().setTxState(tabId, 'idle');
+        }
       }
-      // The backend drops the tab's plans with the connection (Retry / Fetch all go).
-      if (run.origin?.connectionId === conn && run.plan) useQueryRun.getState().expirePlan(tabId, run.plan.plan_id);
     }
   }
+  // A deleted connection: its runtime, and the plans in it, are gone.
+  if (s.summaries !== prev.summaries) {
+    for (const conn of prev.summaries.keys()) if (!s.summaries.has(conn)) expireConnectionPlans(conn);
+  }
+});
+
+/** The backend runtime of `connectionId` is gone, and the plans of its tabs with it. */
+function expireConnectionPlans(connectionId: string) {
+  for (const [tabId, run] of useQueryRun.getState().runs) {
+    if (run.origin?.connectionId === connectionId && run.plan) useQueryRun.getState().expirePlan(tabId, run.plan.plan_id);
+  }
+}
+
+// Plans expire only when the backend runtime really goes (F12). Dropping the server info
+// alone is not that: the tree's Reconnect clears it and keeps the runtime and its plans. The
+// tree's `forgetConnection` is where a connection is shown closed because its runtime is
+// gone (Close calls it after `close_connection`; Import after replacing connections), so it
+// is wrapped here; anything else the backend dropped answers `plan_expired` (see rerun.ts).
+const treeForget = useTree.getState().forgetConnection;
+useTree.setState({
+  forgetConnection: (connectionId) => {
+    treeForget(connectionId);
+    expireConnectionPlans(connectionId);
+  },
 });
 
 import.meta.hot?.dispose(() => {
   unsubscribeDocs();
   unsubscribeConnections();
+  useTree.setState({ forgetConnection: treeForget });
 });
