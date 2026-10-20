@@ -995,6 +995,45 @@ impl SessionManager {
         guard(judged, cfg.env_tag, cfg.read_only, analyze);
         self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
+
+    /// Export of all rows: statement `index` of plan `plan_id` (taken or not), to be
+    /// read again on a data session: `(connection, database, text)`. Only a statement
+    /// the planner classified as a read (one statement for the server, not an Explain)
+    /// and the guard allows with the connection's current config (no confirmation
+    /// needed) qualifies; anything else is a `config` error (field `scope`): export the
+    /// loaded rows instead. `PlanExpired` as for [`Self::query_plan_statement`].
+    pub fn export_statement(
+        &self,
+        plan_id: Uuid,
+        index: u32,
+    ) -> Result<(Uuid, Option<String>, String), DbError> {
+        let current = |t: &PlanTarget| self.plan_target_current(t);
+        let mut copy = self
+            .plans
+            .statement(self.plan_ttl, plan_id, index, &current)?;
+        let rt = self.runtime(copy.target.conn)?;
+        let cfg = self.current_config(&rt);
+        let not_read = || {
+            config_error(
+                "scope",
+                "Only the result of a read statement can be read again for export; \
+                 export the loaded rows instead.",
+            )
+        };
+        if copy.explain.is_some() || copy.plan.explain {
+            return Err(not_read());
+        }
+        guard(&mut copy.plan, cfg.env_tag, cfg.read_only, false);
+        let dialect = copy.plan.dialect;
+        let stmt = copy.plan.stmts.first().ok_or(DbError::PlanExpired)?;
+        if stmt.kind != StatementKind::Read
+            || stmt.verdict != Verdict::Allow
+            || dnt_core::sql::resplits(&stmt.text, dialect)
+        {
+            return Err(not_read());
+        }
+        Ok((copy.target.conn, copy.target.database, stmt.text.clone()))
+    }
 }
 
 fn is_lost(e: &DbError) -> bool {

@@ -5,6 +5,7 @@ pub mod cache;
 pub mod commands;
 pub mod data_sessions;
 pub mod desktop;
+pub mod export_format;
 pub mod logging;
 pub mod query_sessions;
 pub mod run_events;

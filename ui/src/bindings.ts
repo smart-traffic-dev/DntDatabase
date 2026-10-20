@@ -377,17 +377,25 @@ async setTablePageSize(size: number) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async tableData(id: string, obj: ObjectRef, limit: number, offset: number, order: SortSpec | null, requestKey: string) : Promise<Result<TableDataPage, AppError>> {
+/**
+ * A page of a table / view. `sort`: keys in order (empty: the primary key);
+ * `filter`: a structured filter (columns checked, values bound; `config` error with
+ * field `filter` / `order` for a bad one).
+ */
+async tableData(id: string, obj: ObjectRef, limit: number, offset: number, sort: SortSpec[], filter: DataFilter | null, requestKey: string) : Promise<Result<TableDataPage, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("table_data", { id, obj, limit, offset, order, requestKey }) };
+    return { status: "ok", data: await TAURI_INVOKE("table_data", { id, obj, limit, offset, sort, filter, requestKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async tableRowCount(id: string, obj: ObjectRef, requestKey: string) : Promise<Result<TableRowCount, AppError>> {
+/**
+ * Exact `COUNT(*)` of the rows matching `filter` (null: all rows).
+ */
+async tableRowCount(id: string, obj: ObjectRef, filter: DataFilter | null, requestKey: string) : Promise<Result<TableRowCount, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("table_row_count", { id, obj, requestKey }) };
+    return { status: "ok", data: await TAURI_INVOKE("table_row_count", { id, obj, filter, requestKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -400,6 +408,55 @@ async tableRowCount(id: string, obj: ObjectRef, requestKey: string) : Promise<Re
 async tableDataCancel(id: string, requestKey: string) : Promise<Result<boolean, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("table_data_cancel", { id, requestKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Writes rows the UI holds (the loaded rows) to `path`. `kind`: the engine whose
+ * quoting the SQL format uses.
+ */
+async exportRows(kind: DbKind, columns: ColumnMeta[], rows: Value[][], opts: ExportOptions, path: string) : Promise<Result<ExportSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_rows", { kind, columns, rows, opts, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every row of a table / view under the data view's `filter` and `sort`, streamed to
+ * `path`; progress through `channel`; `table_data_cancel(id, request_key)` stops it.
+ */
+async exportTable(id: string, obj: ObjectRef, sort: SortSpec[], filter: DataFilter | null, opts: ExportOptions, path: string, requestKey: string, channel: TAURI_CHANNEL<ExportProgress>) : Promise<Result<ExportSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_table", { id, obj, sort, filter, opts, path, requestKey, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Every row of statement `index` of plan `plan_id`, read again (a read statement
+ * only: `config` error with field `scope` otherwise), streamed to `path`; progress
+ * through `channel`; `table_data_cancel(<the tab's connection>, request_key)` stops it.
+ */
+async exportQuery(planId: string, index: number, opts: ExportOptions, path: string, requestKey: string, channel: TAURI_CHANNEL<ExportProgress>) : Promise<Result<ExportSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_query", { planId, index, opts, path, requestKey, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Shows an exported file in the system file manager ("Open folder"). Only an existing
+ * file is shown; nothing is opened or run.
+ */
+async revealExport(path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reveal_export", { path }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -549,10 +606,68 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
  * A connection as shown in the tree: config plus secret *presence* flags, never values.
  */
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
+/**
+ * The data view's filter: conditions joined with `AND` or `OR`.
+ */
+export type DataFilter = { mode: FilterMode; conditions: FilterCond[] }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 export type EnvTag = "production" | "staging" | "local"
+export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
+/**
+ * What the export dialog chose.
+ */
+export type ExportOptions = { format: ExportFormat; 
+/**
+ * CSV: the field delimiter, one character (`,` `;` tab `|`…).
+ */
+delimiter: string; 
+/**
+ * CSV: a first row with the column names.
+ */
+header: boolean; 
+/**
+ * CSV: quote every non-NULL field.
+ */
+quote_all: boolean; 
+/**
+ * CSV: start with a UTF-8 byte order mark (Excel reads the file as UTF-8 then).
+ */
+bom: boolean; 
+/**
+ * SQL: the table the `INSERT`s go into (one identifier, quoted per engine).
+ */
+table_name: string }
+/**
+ * Progress of an export streaming to its file.
+ */
+export type ExportProgress = { rows: number }
+/**
+ * The file written.
+ */
+export type ExportSummary = { rows: number; path: string; 
+/**
+ * Excel: text cells cut to Excel's 32,767 characters.
+ */
+cut_cells: number; elapsed_ms: number }
+/**
+ * One condition: `column op values`.
+ */
+export type FilterCond = { column: string; op: FilterOp; values: string[] }
+/**
+ * How the conditions of a filter combine.
+ */
+export type FilterMode = "and" | "or"
+export type FilterOp = "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "like" | "not_like" | "contains" | "starts_with" | "ends_with" | 
+/**
+ * One or more values.
+ */
+"in" | 
+/**
+ * Exactly two values: low, high.
+ */
+"between" | "is_null" | "is_not_null"
 export type ForeignKeyDetail = { name: string; columns: string[]; ref_schema: string | null; ref_table: string; ref_columns: string[]; on_update: string; on_delete: string; 
 /**
  * Verbatim server constraint definition when the backend provides one

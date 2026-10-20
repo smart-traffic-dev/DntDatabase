@@ -9,6 +9,7 @@
 pub mod browse;
 pub mod connections;
 pub mod data;
+pub mod export;
 pub mod query;
 pub mod settings;
 pub mod transfer;
@@ -147,6 +148,10 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data::table_data,
             data::table_row_count,
             data::table_data_cancel,
+            export::export_rows,
+            export::export_table,
+            export::export_query,
+            export::reveal_export,
             workspace::tabs_load,
             workspace::tabs_save,
             workspace::tabs_delete,

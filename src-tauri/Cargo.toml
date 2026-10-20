@@ -28,6 +28,7 @@ dnt-query.workspace = true
 dnt-store.workspace = true
 dnt-tunnel.workspace = true
 futures-util = { workspace = true, features = ["std"] }
+rust_xlsxwriter.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
