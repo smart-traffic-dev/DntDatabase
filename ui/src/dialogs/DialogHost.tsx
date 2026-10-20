@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
+import { confirmDiscardConnection } from '../components/tabActions';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs';
 import { useRunPrompt } from '../store/runPrompt';
@@ -183,6 +184,29 @@ function QuestionHost({ question }: { question: Question }) {
       />
     );
   }
+  if (question.kind === 'discardEdits') {
+    return (
+      <ConfirmDialog
+        title="Unsaved changes"
+        message={`Discard ${question.count} unsaved changes?`}
+        confirmLabel="Discard"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
+  if (question.kind === 'discardForImport') {
+    return (
+      <ConfirmDialog
+        title="Unsaved changes"
+        message={`The import replaces connections that have ${question.count} unsaved changes in open tabs. Discard them and import?`}
+        confirmLabel="Discard and import"
+        cancelLabel="Cancel import"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
   if (question.kind === 'stopRun') {
     return (
       <ConfirmDialog
@@ -358,6 +382,8 @@ export function DialogHost() {
           if (node.type === 'group') {
             await api.deleteGroup(node.id);
           } else {
+            // Staged data edits of its tabs go with it: ask before anything is deleted.
+            if (!(await confirmDiscardConnection(node.id))) return closeRequest();
             await api.deleteConnection(node.id);
             useConnections.getState().clearInfo(node.id);
             // The objects of a deleted connection cannot be shown any more.

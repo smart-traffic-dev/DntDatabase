@@ -58,6 +58,8 @@ async function runAllowed(tabId: string, plan: PlanView, opts: RerunOptions): Pr
     const runId = await api.queryRun(
       plan.plan_id,
       false,
+      // No typed names: only plans that need no confirmation run from here.
+      [],
       { max_rows: opts.maxRows ?? doc?.rowLimit ?? 10000, continue_on_error: doc?.continueOnError ?? false },
       runChannel((ev) => useQueryRun.getState().apply(tabId, ev, plan.plan_id)),
     );

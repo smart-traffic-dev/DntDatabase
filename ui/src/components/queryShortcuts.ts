@@ -36,7 +36,11 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
   // Ctrl+Shift+= is Ctrl++ on most layouts.
   if (key === '=' || key === '+' || e.code === 'NumpadAdd') return run(zoomIn);
   if (key === '-' || key === '_' || e.code === 'NumpadSubtract') return run(zoomOut);
-  if (plain && (key === '0' || e.code === 'Numpad0')) return run(zoomReset);
+  if (plain && (key === '0' || e.code === 'Numpad0')) {
+    // In an editable data grid Ctrl+0 means "set the cell to NULL": the grid gets it.
+    if (e.target instanceof Element && e.target.closest('[data-editing-grid]')) return false;
+    return run(zoomReset);
+  }
   return false;
 }
 

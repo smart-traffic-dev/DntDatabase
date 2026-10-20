@@ -62,12 +62,14 @@ interface ConfirmProps {
   title: string;
   message: string;
   confirmLabel: string;
+  /** The label of the button that closes without confirming (default "Cancel"). */
+  cancelLabel?: string;
   onConfirm(): Promise<void>;
   onClose(): void;
 }
 
 /** Destructive confirmation (delete connection / group). */
-export function ConfirmDialog({ title, message, confirmLabel, onConfirm, onClose }: ConfirmProps) {
+export function ConfirmDialog({ title, message, confirmLabel, cancelLabel = 'Cancel', onConfirm, onClose }: ConfirmProps) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -94,7 +96,7 @@ export function ConfirmDialog({ title, message, confirmLabel, onConfirm, onClose
       </div>
       <footer className="modal-foot">
         <button type="button" className="btn" data-cancel onClick={onClose}>
-          Cancel
+          {cancelLabel}
         </button>
         <button type="button" className="btn danger" disabled={busy} onClick={() => void confirm()}>
           {confirmLabel}

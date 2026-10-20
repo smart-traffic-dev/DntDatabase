@@ -10,8 +10,9 @@
 //! dead) reopens the tunnel and that session once and is retried once.
 
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
-use crate::commands::browse::folder_key;
+use crate::commands::browse::{folder_key, object_key};
 use crate::data_sessions::DataSessions;
+use crate::edit_plans::{EditPlanStore, LoadedStore, LOADED_TTL, MAX_FETCH_BYTES};
 use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
@@ -21,7 +22,7 @@ use dnt_core::driver::{
 };
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
-use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
+use dnt_core::meta::{ColumnBrief, ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
@@ -319,15 +320,28 @@ pub struct SessionManager {
     schema_error_ttl: Duration,
     /// Run plans of query tabs (see `query_sessions`).
     pub(crate) plans: PlanStore,
+    /// Edit plans of the data view (see `edit_plans`); they live for `plan_ttl` too.
+    pub(crate) edit_plans: EditPlanStore,
+    /// Complete cell values by token (`data_cell_fetch`); each lives `loaded_ttl` after
+    /// its last use.
+    pub(crate) loaded: LoadedStore,
+    pub(crate) loaded_ttl: Duration,
+    /// Largest complete value a fetch or file load takes.
+    pub(crate) cell_fetch_cap: usize,
     pub(crate) plan_ttl: Duration,
     /// Runs in progress (see `query_sessions`).
     pub(crate) runs: Runs,
+    /// The commit mode of every query tab set to Manual (see `query_sessions`); a tab
+    /// not in it is Auto.
+    pub(crate) tx_modes: Mutex<HashMap<String, crate::query_sessions::TxMode>>,
     /// `ExecOptions::cancel_grace` of query runs.
     pub(crate) cancel_grace: Duration,
     /// Table data requests (see `data_sessions`).
     pub(crate) data_timeout: Duration,
     pub(crate) data_cell_cap: usize,
     pub(crate) data_page_cap: usize,
+    /// How long `close` waits for a running edit apply before it cancels it.
+    pub(crate) apply_close_wait: Duration,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -365,12 +379,18 @@ impl SessionManager {
             metadata_timeout: METADATA_CALL_TIMEOUT,
             schema_error_ttl: SCHEMA_ERROR_TTL,
             plans: PlanStore::default(),
+            edit_plans: EditPlanStore::default(),
+            loaded: LoadedStore::default(),
+            loaded_ttl: LOADED_TTL,
+            cell_fetch_cap: MAX_FETCH_BYTES,
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
+            tx_modes: Mutex::new(HashMap::new()),
             cancel_grace: DEFAULT_CANCEL_GRACE,
             data_timeout: crate::data_sessions::DATA_READ_TIMEOUT,
             data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,
             data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
+            apply_close_wait: SLOT_CLOSE_WAIT,
         }
     }
 
@@ -539,12 +559,12 @@ impl SessionManager {
         };
         guard.done = true;
         let Some(replaced) = installed else {
-            rt.shutdown().await;
+            rt.shutdown(SLOT_CLOSE_WAIT).await;
             return Err(DbError::cancelled());
         };
         if let Some(old) = replaced {
             // Cannot normally happen (every open/close bumps the generation); never leak it.
-            old.shutdown().await;
+            old.shutdown(SLOT_CLOSE_WAIT).await;
         }
         if let Err(e) = self.repo.touch_connected(id) {
             tracing::warn!(connection = %id, error = %e, "could not record the connection time");
@@ -710,9 +730,11 @@ impl SessionManager {
             .remove(&id);
         lock(&self.pending).remove(&id);
         if let Some(rt) = rt {
-            rt.shutdown().await;
+            rt.shutdown(self.apply_close_wait).await;
         }
         self.plans.drop_conn(id);
+        self.edit_plans.drop_conn(id);
+        self.loaded.drop_conn(id);
     }
 
     /// Every runtime, without holding the map's lock.
@@ -778,6 +800,28 @@ impl SessionManager {
         })?;
         rt.cache.insert_if_epoch(key, json, epoch);
         Ok(value)
+    }
+
+    /// The table detail of `obj` as the server has it now (never the cached one), which
+    /// then replaces the cached one: what an edit plan is built and checked against.
+    pub async fn table_detail_fresh(
+        &self,
+        id: Uuid,
+        obj: &ObjectRef,
+    ) -> Result<TableDetail, DbError> {
+        let rt = self.runtime(id)?;
+        let epoch = rt.cache.epoch();
+        let detail = rt
+            .with_session(Some(&obj.database), |s| {
+                let obj = obj.clone();
+                Box::pin(async move { s.introspector().table_detail(&obj).await })
+            })
+            .await?;
+        if let Ok(json) = serde_json::to_value(&detail) {
+            rt.cache
+                .insert_if_epoch(object_key(obj, "detail"), json, epoch);
+        }
+        Ok(detail)
     }
 
     /// Drops every cached browse result of `id` under `prefix`, and reloads (in the
@@ -1151,8 +1195,10 @@ impl ConnectionRuntime {
     /// Makes the runtime terminal: stops the SchemaCache task and closes every session and
     /// the tunnel. A metadata call holding the link longer than `SHUTDOWN_LOCK_TIMEOUT`
     /// keeps its sessions until it returns (they are dropped with the runtime); the
-    /// tunnel is closed regardless, and the call finds the runtime closed.
-    async fn shutdown(&self) {
+    /// tunnel is closed regardless, and the call finds the runtime closed. A running edit
+    /// apply gets up to `apply_wait` to end before it is cancelled (it then reports what
+    /// is known, see `edit_plans`).
+    async fn shutdown(&self, apply_wait: Duration) {
         {
             let mut tasks = lock(&self.schema_tasks);
             self.closed.store(true, Ordering::SeqCst);
@@ -1165,9 +1211,12 @@ impl ConnectionRuntime {
         }
         // `closed` is set: no tab slot can be created any more.
         let tabs = self.queries.drain();
-        futures_util::future::join_all(
-            tabs.into_iter()
-                .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
+        futures_util::future::join(
+            futures_util::future::join_all(
+                tabs.into_iter()
+                    .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
+            ),
+            self.data.end_applies(apply_wait),
         )
         .await;
         self.data.shutdown().await;

@@ -1,0 +1,118 @@
+/* The value editor panel of the data view. Colours, type and radii come from tokens. */
+.ve {
+  width: 360px;
+  min-width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.ve-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ve-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ve-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ve-tab {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--text-footnote);
+  cursor: pointer;
+}
+
+.ve-tab:hover {
+  background: var(--hover);
+}
+
+.ve-on {
+  background: var(--sel);
+}
+
+.ve-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+}
+
+.ve-tools {
+  display: flex;
+  gap: 8px;
+}
+
+.ve-text {
+  flex: 1;
+  min-height: 120px;
+  resize: none;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-footnote);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ve-hex {
+  white-space: normal;
+}
+
+.ve-image {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.ve-image img {
+  display: block;
+  max-width: 100%;
+}
+
+.ve-note {
+  margin: 0;
+  font-size: var(--text-footnote);
+}
+
+.ve-error {
+  margin: 0;
+  color: var(--danger-fg);
+  font-size: var(--text-footnote);
+}
+
+.ve-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+}

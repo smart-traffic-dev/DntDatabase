@@ -84,9 +84,9 @@ pub(super) fn skip_at(b: &[u8], i: usize, dialect: Dialect) -> Option<(Skipped, 
             if mysql && !matches!(b.get(i + 2), None | Some(&(0..=b' '))) {
                 return None;
             }
-            Some((Skipped::Comment, line_end(b, i)))
+            Some((Skipped::Comment, line_end(b, i, !mysql)))
         }
-        b'#' if mysql => Some((Skipped::Comment, line_end(b, i))),
+        b'#' if mysql => Some((Skipped::Comment, line_end(b, i, false))),
         b'/' if next == Some(b'*') => {
             let rest = &b[i + 2..];
             let kind = if mysql && (rest.starts_with(b"!") || rest.starts_with(b"M!")) {
@@ -119,10 +119,13 @@ pub(super) fn skip_at(b: &[u8], i: usize, dialect: Dialect) -> Option<(Skipped, 
     }
 }
 
-fn line_end(b: &[u8], i: usize) -> usize {
+/// Where a line comment starting at `i` ends: before its newline. PostgreSQL's scanner
+/// takes `\r` as a newline too (`newline [\n\r]` in scan.l); MySQL / MariaDB end `--`
+/// and `#` comments only at `\n` (sql_lex.cc `MY_LEX_COMMENT`).
+fn line_end(b: &[u8], i: usize, cr_ends: bool) -> usize {
     b[i..]
         .iter()
-        .position(|&c| c == b'\n')
+        .position(|&c| c == b'\n' || (cr_ends && c == b'\r'))
         .map_or(b.len(), |p| i + p)
 }
 

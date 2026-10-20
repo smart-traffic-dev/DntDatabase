@@ -111,11 +111,18 @@ pub struct FilterCond {
     pub values: Vec<String>,
 }
 
-/// The data view's filter: conditions joined with `AND` or `OR`.
+/// The data view's filter: conditions joined with `AND` or `OR`, or (raw mode) the
+/// user's own `WHERE` text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct DataFilter {
     pub mode: FilterMode,
     pub conditions: Vec<FilterCond>,
+    /// Raw mode: a `WHERE` condition typed by the user. `conditions` must then be empty
+    /// and `mode` is ignored. It is checked with
+    /// [`crate::sql::build::check_raw_where`] and run inside a read-only transaction; it
+    /// never goes through [`build_where`]. Absent / null: structured mode.
+    #[serde(default)]
+    pub raw_where: Option<String>,
 }
 
 /// A `WHERE` clause (with its leading space, or empty) and its parameters, in order.
@@ -237,6 +244,12 @@ pub fn build_where(
     let Some(filter) = filter else {
         return Ok(WhereClause::default());
     };
+    if filter.raw_where.is_some() {
+        // A raw filter is never silently dropped (or mixed with conditions).
+        return Err(filter_error(
+            "a raw WHERE filter is not a structured filter".into(),
+        ));
+    }
     if filter.conditions.is_empty() {
         return Ok(WhereClause::default());
     }
@@ -303,6 +316,7 @@ mod tests {
             identity: None,
             generated: None,
             invisible: false,
+            collation: None,
             comment: None,
         }
     }
@@ -326,7 +340,22 @@ mod tests {
     }
 
     fn filter(mode: FilterMode, conditions: Vec<FilterCond>) -> DataFilter {
-        DataFilter { mode, conditions }
+        DataFilter {
+            mode,
+            conditions,
+            raw_where: None,
+        }
+    }
+
+    #[test]
+    fn a_raw_filter_is_never_built_as_structured() {
+        let mut raw = filter(FilterMode::And, vec![]);
+        raw.raw_where = Some("id > 0".into());
+        let (field, _) = field_of(build(DbKind::MySql, &raw).unwrap_err());
+        assert_eq!(field.as_deref(), Some("filter"));
+        // Absent from the JSON: structured mode.
+        let f: DataFilter = serde_json::from_str(r#"{"mode":"and","conditions":[]}"#).unwrap();
+        assert_eq!(f.raw_where, None);
     }
 
     fn build(kind: DbKind, f: &DataFilter) -> Result<WhereClause, DbError> {

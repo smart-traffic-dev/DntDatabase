@@ -190,11 +190,9 @@ pub async fn export_table_impl(
     check_options(&opts)?;
     let query = data_query(state, id, &obj, &sort, filter.as_ref()).await?;
     let request = DataRequest {
-        sql: query.select(None),
-        params: query.filter.params.clone(),
-        max_rows: usize::MAX,
         full_bytes: true,
         no_timeout: true,
+        ..query.request(&[], None, usize::MAX)
     };
     stream_to_file(
         state,

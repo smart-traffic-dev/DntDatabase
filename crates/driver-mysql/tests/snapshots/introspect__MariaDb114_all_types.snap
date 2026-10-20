@@ -17,6 +17,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_tinyint
     ordinal: 2
@@ -27,6 +28,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_tinyint_u
     ordinal: 3
@@ -37,6 +39,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_smallint
     ordinal: 4
@@ -47,6 +50,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_smallint_u
     ordinal: 5
@@ -57,6 +61,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_mediumint
     ordinal: 6
@@ -67,6 +72,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_mediumint_u
     ordinal: 7
@@ -77,6 +83,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_int
     ordinal: 8
@@ -87,6 +94,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_int_u
     ordinal: 9
@@ -97,6 +105,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_bigint
     ordinal: 10
@@ -107,6 +116,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_bigint_u
     ordinal: 11
@@ -117,6 +127,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_decimal
     ordinal: 12
@@ -127,6 +138,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_float
     ordinal: 13
@@ -137,6 +149,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_double
     ordinal: 14
@@ -147,6 +160,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_bit
     ordinal: 15
@@ -157,6 +171,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_date
     ordinal: 16
@@ -167,6 +182,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_datetime
     ordinal: 17
@@ -177,6 +193,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_timestamp
     ordinal: 18
@@ -187,6 +204,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_time
     ordinal: 19
@@ -197,6 +215,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_year
     ordinal: 20
@@ -207,6 +226,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_char
     ordinal: 21
@@ -217,6 +237,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: utf8mb4_unicode_ci
     comment: ~
   - name: c_varchar
     ordinal: 22
@@ -227,6 +248,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: utf8mb4_unicode_ci
     comment: ~
   - name: c_text
     ordinal: 23
@@ -237,6 +259,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: utf8mb4_unicode_ci
     comment: ~
   - name: c_binary
     ordinal: 24
@@ -247,6 +270,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_varbinary
     ordinal: 25
@@ -257,6 +281,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_blob
     ordinal: 26
@@ -267,6 +292,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: c_enum
     ordinal: 27
@@ -277,6 +303,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: utf8mb4_unicode_ci
     comment: ~
   - name: c_set
     ordinal: 28
@@ -287,6 +314,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: utf8mb4_unicode_ci
     comment: ~
   - name: c_json
     ordinal: 29
@@ -297,11 +325,13 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: utf8mb4_bin
     comment: ~
 primary_key:
   name: PRIMARY
   unique: true
   primary: true
+  partial: false
   columns:
     - id
   expression: ~

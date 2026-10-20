@@ -12,6 +12,7 @@ import type {
 import backendErrors from './fixtures/app-errors.json';
 import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
+import { useDataEdits } from '../store/dataEdits';
 import { useTableData } from '../store/tableData';
 import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
@@ -92,6 +93,7 @@ export function resetStores() {
   useQueryDocs.getState().reset();
   useAppSettings.getState().reset();
   useTableData.getState().reset();
+  useDataEdits.getState().reset();
   useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null, question: null });
 }
 

@@ -72,6 +72,24 @@ export function cellView(v: Value): CellView {
   }
 }
 
+/**
+ * The text a cell is edited as in place: the value itself, as stored (JSON as written, so a
+ * 20-digit number or `1.10` stays exact). Null when the grid's text is not the value — binary
+ * data, arrays, text or JSON longer than `MAX_CELL_CHARS` — such cells go to the value editor.
+ */
+export function editText(v: Value): string | null {
+  switch (v.t) {
+    case 'Bytes':
+    case 'Array':
+      return null;
+    case 'Text':
+    case 'Json':
+      return v.v.length > MAX_CELL_CHARS ? null : v.v;
+    default:
+      return cellView(v).text;
+  }
+}
+
 export const MIN_COL_WIDTH = 60;
 export const MAX_COL_WIDTH = 400;
 /** Rows sampled when fitting a column to its content. */

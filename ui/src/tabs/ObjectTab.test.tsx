@@ -27,14 +27,14 @@ function detail(over: Partial<TableDetail> = {}): TableDetail {
   return {
     object: ref('Table'),
     columns: [
-      { name: 'id', ordinal: 1, db_type: 'bigint', nullable: false, default: null, auto_increment: true, identity: null, generated: null, invisible: false, comment: 'surrogate key' },
-      { name: 'status', ordinal: 2, db_type: 'varchar(20)', nullable: true, default: "'new'", auto_increment: false, identity: null, generated: null, invisible: false, comment: null },
-      { name: 'total', ordinal: 3, db_type: 'decimal(10,2)', nullable: false, default: 'NULL', auto_increment: false, identity: null, generated: 'STORED', invisible: true, comment: null },
+      { name: 'id', ordinal: 1, db_type: 'bigint', nullable: false, default: null, auto_increment: true, identity: null, generated: null, invisible: false, collation: null, comment: 'surrogate key' },
+      { name: 'status', ordinal: 2, db_type: 'varchar(20)', nullable: true, default: "'new'", auto_increment: false, identity: null, generated: null, invisible: false, collation: null, comment: null },
+      { name: 'total', ordinal: 3, db_type: 'decimal(10,2)', nullable: false, default: 'NULL', auto_increment: false, identity: null, generated: 'STORED', invisible: true, collation: null, comment: null },
     ],
-    primary_key: { name: 'PRIMARY', unique: true, primary: true, columns: ['id'], expression: null, method: 'BTREE', definition: null },
+    primary_key: { name: 'PRIMARY', unique: true, primary: true, partial: false, columns: ['id'], expression: null, method: 'BTREE', definition: null },
     indexes: [
-      { name: 'PRIMARY', unique: true, primary: true, columns: ['id'], expression: null, method: 'BTREE', definition: null },
-      { name: 'idx_status', unique: false, primary: false, columns: ['status'], expression: null, method: 'BTREE', definition: null },
+      { name: 'PRIMARY', unique: true, primary: true, partial: false, columns: ['id'], expression: null, method: 'BTREE', definition: null },
+      { name: 'idx_status', unique: false, primary: false, partial: false, columns: ['status'], expression: null, method: 'BTREE', definition: null },
     ],
     foreign_keys: [
       { name: 'fk_customer', columns: ['customer_id'], ref_schema: 'crm', ref_table: 'customers', ref_columns: ['id'], on_update: 'CASCADE', on_delete: 'SET NULL', definition: null },

@@ -164,6 +164,9 @@ for (const e of engines) {
       await typeInEditor('DROP TABLE e2e_guard');
       await runCurrent();
       await confirmRun();
+      // P3: DROP on a Production connection needs its name typed before Run enables.
+      await expect(byId('run-confirm-run')).toBeDisabled();
+      await byId('run-confirm-name').setValue('e2e_guard');
       await byId('run-confirm-run').click();
       await byId('run-confirm').waitForDisplayed({ reverse: true, timeout: 15_000 });
       await browser.waitUntil(async () => (await $$('[data-testid="message-line"]')).length > 0, { timeout: 30_000 });

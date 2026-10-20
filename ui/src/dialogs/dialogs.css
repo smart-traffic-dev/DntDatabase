@@ -547,6 +547,34 @@ fieldset.export-form {
   min-width: 0;
 }
 
+/* Per-statement facts under a row: the row estimate, the names a DROP removes, an implicit commit. */
+.run-confirm-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.run-confirm-note {
+  padding-left: 24px;
+  font-size: var(--text-footnote);
+  color: var(--muted);
+}
+
+.run-confirm-note.warn {
+  color: var(--danger-fg);
+}
+
+/* "Type <name> to confirm" boxes. */
+.run-confirm-type {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.run-confirm-warning .run-confirm-note {
+  color: inherit;
+}
+
 .run-confirm-warning .run-confirm-no {
   color: inherit;
 }

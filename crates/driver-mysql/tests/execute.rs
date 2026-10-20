@@ -1,11 +1,14 @@
 use dnt_core::driver::{
-    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices, Session,
-    StmtOutcome, MAX_SERVER_NOTICES,
+    CellMode, ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices,
+    Session, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
+use dnt_core::server::DbKind;
+use dnt_core::sql::build::{literal, BuildError, ColumnTarget};
+use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::{classify, Dialect, MySqlMode, StatementKind};
 use dnt_core::tx::TxState;
-use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1788,4 +1791,223 @@ async fn timeout_in_tx_carries_was_in_tx() {
         }
         run(&s, "ROLLBACK").await.unwrap();
     }
+}
+
+/// Collects complete values ([`CellMode::Full`]); display rows must not arrive.
+#[derive(Debug, Default)]
+struct FullCollect {
+    cols: Vec<ColumnMeta>,
+    rows: Vec<Vec<FullValue>>,
+}
+
+impl RowSink for FullCollect {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.cols = cols.to_vec();
+    }
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {
+        panic!("rows() called in CellMode::Full");
+    }
+    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+        self.rows.extend(batch);
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+fn full_opts(max_cell_bytes: usize) -> ExecOptions {
+    ExecOptions {
+        cells: CellMode::Full { max_cell_bytes },
+        ..ExecOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn full_mode_reads_blob_intact() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let mut sink = FullCollect::default();
+        s.execute(
+            "SELECT CAST(REPEAT('ab', 524288) AS BINARY) AS b, 'Nguyễn' AS t, 42 AS n",
+            full_opts(2 << 20),
+            &mut sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(sink.rows.len(), 1, "{t:?}");
+        let b = sink.rows[0][0].as_bytes().expect("binary cell");
+        assert_eq!(b.len(), 1_048_576, "{t:?}");
+        assert!(b.chunks(2).all(|p| p == b"ab"), "{t:?}");
+        assert_eq!(
+            sink.rows[0][1].as_value(),
+            Some(&Value::Text("Nguyễn".into())),
+            "{t:?}"
+        );
+        assert_eq!(sink.rows[0][2].to_display(), Value::Int(42), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn full_mode_rejects_oversized_cell() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        for sql in [
+            "SELECT CAST(REPEAT('x', n) AS BINARY) AS b \
+             FROM (SELECT 1 AS k, 10 AS n UNION ALL SELECT 2, 2000) d ORDER BY k",
+            "SELECT REPEAT('x', n) AS t \
+             FROM (SELECT 1 AS k, 10 AS n UNION ALL SELECT 2, 2000) d ORDER BY k",
+        ] {
+            let mut sink = FullCollect::default();
+            let res = s.execute(sql, full_opts(1024), &mut sink).await;
+            match res {
+                Err(DbError::Unsupported { feature, .. }) => {
+                    assert_eq!(feature, "cell larger than 1024 bytes", "{t:?}")
+                }
+                other => panic!("{t:?}: {other:?}"),
+            }
+            // Nothing cut reached the sink: only the small row, if any.
+            assert!(sink.rows.len() <= 1, "{t:?}: {} rows", sink.rows.len());
+            assert!(
+                sink.rows.iter().flatten().all(|v| v.byte_len() == 10),
+                "{t:?}"
+            );
+        }
+        // The session is still usable.
+        let (_, c) = run(&s, "SELECT 1").await.unwrap();
+        assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
+    }
+}
+
+/// Runs `sql` in [`CellMode::Full`] and returns its columns and rows.
+async fn full_select(s: &MySqlSession, sql: &str) -> Result<FullCollect, String> {
+    let mut sink = FullCollect::default();
+    s.execute(sql, full_opts(1 << 20), &mut sink)
+        .await
+        .map_err(|e| format!("{sql}: {e}"))?;
+    Ok(sink)
+}
+
+fn full(v: Value) -> FullValue {
+    FullValue::try_from_value(v).unwrap()
+}
+
+/// Row 1 of `all_types` with awkward text, JSON and bytes in place of the originals.
+/// `nul`: whether the text may hold a NUL (not under `NO_BACKSLASH_ESCAPES`).
+fn awkward_row(row1: &[FullValue], cols: &[ColumnMeta], nul: bool) -> Vec<FullValue> {
+    let z = if nul { "\0" } else { "" };
+    let mut row = row1.to_vec();
+    for (v, c) in row.iter_mut().zip(cols) {
+        *v = match c.name.as_str() {
+            "c_char" => full(Value::Text(format!("a'\\\"`;{z}"))),
+            "c_varchar" => full(Value::Text(format!(
+                "it's C:\\x \"q\" `b` -- ;/* ễ 😀 */ # {z}\\"
+            ))),
+            "c_text" => full(Value::Text(format!("\\'{z}'' \\\\ \n\r\t\u{1a} — end\\"))),
+            "c_binary" => FullValue::bytes(vec![0, b'\'', b'\\', 0xff, b'"', 0x1a, b'\n', 0]),
+            "c_varbinary" => FullValue::bytes(vec![b'\\', b'\'', 0, 0x80]),
+            "c_blob" => FullValue::bytes((0..=255u8).collect::<Vec<_>>()),
+            // MariaDB's JSON is a LONGTEXT alias, reported as text (and has no
+            // `CAST(… AS JSON)`): write the value as that column reads it.
+            "c_json" => {
+                let j = r#"{"a": "it's \\ \"x\" ễ"}"#.to_string();
+                full(match c.logical {
+                    LogicalType::Json => Value::Json(j),
+                    _ => Value::Text(j),
+                })
+            }
+            _ => continue,
+        };
+    }
+    row
+}
+
+/// Every `all_types` value (and awkward text / bytes) written back with
+/// `build::literal` and read in [`CellMode::Full`] comes back equal, under the default
+/// `sql_mode` and with `NO_BACKSLASH_ESCAPES`.
+#[tokio::test]
+async fn literal_round_trip_all_types() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let table = quote_ident(
+            DbKind::MySql,
+            &format!("p3_lit_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+        );
+        run(&s, &format!("CREATE TABLE {table} LIKE all_types"))
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let res = mysql_literal_round_trip(&s, &table).await;
+        run(&s, &format!("DROP TABLE {table}"))
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: drop: {e}"));
+        Box::new(s).close().await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+    }
+}
+
+async fn mysql_literal_round_trip(s: &MySqlSession, table: &str) -> Result<(), String> {
+    let src = full_select(s, "SELECT * FROM all_types ORDER BY id").await?;
+    let targets: Vec<ColumnTarget> = src
+        .cols
+        .iter()
+        .map(|c| ColumnTarget {
+            name: c.name.clone(),
+            db_type: c.db_type.clone(),
+            logical: c.logical,
+            collation: None,
+        })
+        .collect();
+    let mut id = 0;
+    for nbe in [false, true] {
+        if nbe {
+            run(
+                s,
+                "SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')",
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        }
+        let d = s.dialect();
+        if !matches!(d, Dialect::MySql(m) if m.no_backslash_escapes == nbe) {
+            return Err(format!("session dialect {d:?}, expected nbe={nbe}"));
+        }
+        let mut rows = src.rows.clone();
+        rows.push(awkward_row(&src.rows[0], &src.cols, !nbe));
+        if nbe {
+            // A NUL cannot be written without backslash escapes.
+            let with_nul = awkward_row(&src.rows[0], &src.cols, true);
+            let i = src.cols.iter().position(|c| c.name == "c_text").unwrap();
+            match literal(&with_nul[i], &targets[i], d) {
+                Err(BuildError::Invalid { .. }) => {}
+                other => return Err(format!("NUL under NO_BACKSLASH_ESCAPES: {other:?}")),
+            }
+        }
+        for mut row in rows {
+            id += 1;
+            row[0] = full(Value::Int(id));
+            let lits = row
+                .iter()
+                .zip(&targets)
+                .map(|(v, c)| literal(v, c, d))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("row {id}: {e}"))?;
+            let sql = format!("INSERT INTO {table} VALUES ({})", lits.join(", "));
+            let (res, _) = run_one(s, &sql, ExecOptions::default()).await;
+            res.map_err(|e| format!("{sql}: {e}"))?;
+            let key = literal(&row[0], &targets[0], d).unwrap();
+            let back = full_select(s, &format!("SELECT * FROM {table} WHERE id = {key}")).await?;
+            if back.rows.len() != 1 {
+                return Err(format!("row {id}: {} rows read back", back.rows.len()));
+            }
+            for ((want, got), c) in row.iter().zip(&back.rows[0]).zip(&src.cols) {
+                if want != got {
+                    return Err(format!(
+                        "row {id} (nbe={nbe}) {}: wrote {want:?}, read {got:?}\n{sql}",
+                        c.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }

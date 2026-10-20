@@ -194,6 +194,7 @@ fn column_detail(r: &TextRow, maria: bool) -> Option<ColumnDetail> {
         identity: None,
         generated: non_empty(r, 6),
         invisible: extra.to_ascii_uppercase().contains("INVISIBLE"),
+        collation: non_empty(r, 8),
         comment: non_empty(r, 7),
     })
 }
@@ -206,6 +207,7 @@ fn group_indexes(rows: &[TextRow]) -> BTreeMap<String, IndexDetail> {
         let idx = out.entry(name.clone()).or_insert_with(|| IndexDetail {
             primary: name == "PRIMARY",
             unique: col(r, 1).as_deref() == Some("0"),
+            partial: false,
             name,
             columns: Vec::new(),
             expression: None,

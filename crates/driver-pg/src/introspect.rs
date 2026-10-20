@@ -179,6 +179,7 @@ fn column_detail(r: &Row) -> Result<ColumnDetail, DbError> {
         identity,
         generated,
         invisible: false,
+        collation: non_empty(r, 8)?,
         comment: non_empty(r, 7)?,
     })
 }
@@ -209,6 +210,7 @@ fn index_details(
             name: get(r, 0)?,
             unique: get(r, 1)?,
             primary: get(r, 2)?,
+            partial: get(r, 8)?,
             method: non_empty(r, 3)?,
             columns: get(r, 4)?,
             expression: non_empty(r, 5)?,

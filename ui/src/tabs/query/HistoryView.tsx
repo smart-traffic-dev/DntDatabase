@@ -16,19 +16,27 @@ const UNKNOWN_OUTCOME_KINDS = new Set(['timeout', 'connection_lost']);
 
 /**
  * The status cell of a row. A statement stopped by a timeout, a lost connection or a cancel may
- * have taken effect, so it never reads as a plain error ("not applied").
+ * have taken effect, so it never reads as a plain error ("not applied"). A row the backend marked
+ * outcome_unknown (any status: an unanswered COMMIT leaves ok statements unknown) reads the same.
  */
-export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'error_code'>): {
+export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'error_code' | 'outcome_unknown'>): {
   text: string;
   tone: HistoryStatus | 'unknown';
   hint: string | undefined;
 } {
   const code = row.error_code ? ` (${row.error_code})` : '';
-  if (row.status === 'ok') return { text: 'OK', tone: 'ok', hint: undefined };
-  if (row.error_kind !== null && UNKNOWN_OUTCOME_KINDS.has(row.error_kind)) {
-    const why = row.error_kind === 'timeout' ? 'timed out' : 'lost its connection';
+  if (row.outcome_unknown && row.status === 'ok') {
     return {
-      text: `Unknown outcome${code}`,
+      text: 'Outcome unknown',
+      tone: 'unknown',
+      hint: 'The server did not confirm the commit: this statement may or may not have been applied. Check the data before running it again.',
+    };
+  }
+  if (row.status === 'ok') return { text: 'OK', tone: 'ok', hint: undefined };
+  if (row.outcome_unknown || (row.error_kind !== null && UNKNOWN_OUTCOME_KINDS.has(row.error_kind))) {
+    const why = row.error_kind === 'timeout' ? 'timed out' : row.error_kind === 'cancelled' ? 'was cancelled' : 'lost its connection';
+    return {
+      text: `Outcome unknown${code}`,
       tone: 'unknown',
       hint: `The statement ${why} before the server confirmed it: it may have been applied. Check the data before running it again.`,
     };
@@ -46,6 +54,15 @@ export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'erro
     hint: row.error_kind ? `Failed (${row.error_kind}${row.error_code ? `, code ${row.error_code}` : ''}).` : undefined,
   };
 }
+
+/** Why a data-edit row is not inserted into the editor. */
+export const NOT_RE_RUNNABLE = "This statement was shortened or redacted for history and can't be re-run.";
+
+/**
+ * Whether a row's text may go back into the editor. A data edit marked redacted holds a
+ * shortened literal (`'abc…' /* N chars *\/`) or a placeholder: valid SQL, but not what ran.
+ */
+export const canReRun = (row: Pick<HistoryEntry, 'origin' | 'redacted'>) => !(row.origin === 'data_edit' && row.redacted);
 
 type Modifiers = Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>;
 
@@ -77,6 +94,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<HistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
   /** The row that takes Tab focus (roving tabIndex). */
@@ -100,6 +118,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
       const list = await api.historyList({
         connection_id: connectionId,
         search: search === '' ? null : search,
+        origin: null,
         limit: LIST_LIMIT,
       });
       if (mine !== seq.current) return;
@@ -148,6 +167,16 @@ export function HistoryView({ tabId }: { tabId: string }) {
     listRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[to]?.focus();
   };
 
+  /** Inserts a row's statement at the cursor; a data edit whose text is not what ran is refused. */
+  const insert = (row: HistoryEntry) => {
+    if (!canReRun(row)) {
+      setNotice(NOT_RE_RUNNABLE);
+      return;
+    }
+    setNotice(null);
+    insertAtCursor(tabId, row.sql_text);
+  };
+
   const onRowKey = (e: KeyboardEvent, row: HistoryEntry, index: number) => {
     switch (e.key) {
       case 'ArrowDown':
@@ -160,7 +189,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
         return moveTo(e, rows.length - 1);
       case 'Enter':
         e.preventDefault();
-        insertAtCursor(tabId, row.sql_text);
+        insert(row);
         return;
       case ' ':
         e.preventDefault();
@@ -254,6 +283,11 @@ export function HistoryView({ tabId }: { tabId: string }) {
           {error}
         </div>
       )}
+      {notice && (
+        <div className="qr-msg" role="status">
+          {notice}
+        </div>
+      )}
       <div
         ref={listRef}
         className="hs-list"
@@ -279,7 +313,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
               data-testid="history-row"
               title={row.sql_text}
               onClick={(e) => pick(e, row, i)}
-              onDoubleClick={() => insertAtCursor(tabId, row.sql_text)}
+              onDoubleClick={() => insert(row)}
               onKeyDown={(e) => onRowKey(e, row, i)}
             >
               <span className="hs-time">{timeText(row.started_at)}</span>
@@ -291,6 +325,11 @@ export function HistoryView({ tabId }: { tabId: string }) {
                 <span className="hs-origin" data-testid="history-origin">
                   {summaries.get(row.connection_id)?.config.name ?? row.connection_id}
                   {row.database ? ` · ${row.database}` : ''}
+                </span>
+              )}
+              {row.origin === 'data_edit' && (
+                <span className="chip hs-data-edit" data-testid="history-data-edit">
+                  Data edit
                 </span>
               )}
               {explain && <span className="chip hs-explain" data-testid="history-explain">{explain.analyze ? 'Analyze' : 'Explain'}</span>}

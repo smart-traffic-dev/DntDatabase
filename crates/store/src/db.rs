@@ -56,11 +56,20 @@ CREATE TABLE snippets (
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 ";
 
+/// Where a history row came from (a query tab, or a statement the app built for a data
+/// edit) and whether its outcome is unknown (no answer: it may or may not have applied).
+const MIGRATION_4: &str = "
+ALTER TABLE query_history ADD COLUMN origin TEXT NOT NULL DEFAULT 'query'
+  CHECK (origin IN ('query','data_edit'));
+ALTER TABLE query_history ADD COLUMN outcome_unknown INTEGER NOT NULL DEFAULT 0;
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
         M::up(MIGRATION_2),
         M::up(MIGRATION_3),
+        M::up(MIGRATION_4),
     ])
 }
 
@@ -112,7 +121,7 @@ mod tests {
         migrations().validate().unwrap();
     }
 
-    /// A database at schema version 2 (before favorites) migrates to 3 and keeps its rows.
+    /// A database at schema version 2 (before favorites) migrates to the latest version and keeps its rows.
     #[test]
     fn migrates_version_2_database_to_favorites() {
         let dir = tempfile::tempdir().unwrap();
@@ -137,7 +146,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3);
+        assert_eq!(v, 4);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -150,6 +159,45 @@ mod tests {
         }
     }
 
+    /// A version 3 database with history rows migrates to 4: old rows are `query`
+    /// rows with a known outcome.
+    #[test]
+    fn migration_adds_origin_with_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            Migrations::new(vec![
+                M::up(MIGRATION_1),
+                M::up(MIGRATION_2),
+                M::up(MIGRATION_3),
+            ])
+            .to_latest(&mut conn)
+            .unwrap();
+            conn.execute(
+                "INSERT INTO connections (id, name, sort_order, kind, host, port, username, \
+                 secret_mode, created_at, updated_at) \
+                 VALUES ('c1', 'c', 0, 'mysql', 'h', 3306, 'u', 'ask', 'now', 'now')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO query_history (connection_id, sql_text, redacted, kind, \
+                 started_at, status) VALUES ('c1', 'SELECT 1', 0, 'read', 'now', 'ok')",
+                [],
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let (origin, unknown): (String, i64) = conn
+            .query_row(
+                "SELECT origin, outcome_unknown FROM query_history",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((origin.as_str(), unknown), ("query", 0));
+    }
     #[test]
     fn foreign_keys_enabled() {
         let conn = open_in_memory().unwrap();

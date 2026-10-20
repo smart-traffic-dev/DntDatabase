@@ -12,13 +12,13 @@
 use crate::session_manager::lock;
 use dnt_core::driver::{ExecProgress, ResultSummary, RowSink, StmtOutcome};
 use dnt_core::error::AppError;
-use dnt_core::sql::{session_effect, Dialect, StatementKind};
+use dnt_core::sql::{session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
     parse_plan, redact, ExplainFormat, PlanTree, PlannedStmt, RunSink, StmtKindLabel, StopReason,
 };
-use dnt_store::history::{HistoryStatus, NewHistoryEntry};
+use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::ConnectionRepo;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -274,6 +274,30 @@ pub(crate) struct ChannelSink {
     pub(crate) ddl_ok: bool,
     /// The database a successful MySQL `USE` moved the session to (the last one).
     pub(crate) use_db: Option<String>,
+    /// The session's transaction state as the run last reported it (set it to the
+    /// state at the start of the run: `run` reports changes only).
+    pub(crate) tx_now: TxState,
+    /// A statement lost the connection while a transaction was open (the drivers
+    /// reset their state to `Idle` on a lost connection, so the state after the run
+    /// cannot tell).
+    pub(crate) lost_in_tx: bool,
+    /// As `lost_in_tx`, but the statement that lost the connection commits the
+    /// transaction (`COMMIT`, MySQL `SET autocommit = 1`, DDL or another implicit
+    /// commit on MySQL): it may have committed, so the outcome is unknown.
+    pub(crate) lost_committing: bool,
+}
+
+/// Whether `stmt`, run while a transaction is open, commits it.
+fn commits_open_tx(stmt: &PlannedStmt, dialect: Dialect) -> bool {
+    match stmt.kind {
+        StatementKind::Transaction(TxControl::Commit) => true,
+        // MySQL `BEGIN` / `START TRANSACTION` commit the open transaction first.
+        StatementKind::Transaction(TxControl::Begin | TxControl::AutocommitOn) => {
+            dialect.is_mysql()
+        }
+        StatementKind::Ddl => dialect.is_mysql(),
+        _ => stmt.implicit_commit,
+    }
 }
 
 /// `%Y-%m-%dT%H:%M:%S%.3fZ` of now, UTC (the history's fixed format).
@@ -352,6 +376,9 @@ impl ChannelSink {
             }),
             ddl_ok: false,
             use_db: None,
+            tx_now: TxState::Idle,
+            lost_in_tx: false,
+            lost_committing: false,
         }
     }
 
@@ -379,7 +406,7 @@ impl ChannelSink {
         let Some(cur) = self.current.take() else {
             return;
         };
-        let (status, row_count, affected, error_kind, error_code) = match result {
+        let (status, row_count, affected, error_kind, error_code, outcome_unknown) = match result {
             Ok(outcome) => {
                 let rows = (!outcome.results.is_empty())
                     .then(|| outcome.results.iter().map(|r| r.row_count).sum());
@@ -388,11 +415,11 @@ impl ChannelSink {
                     .iter()
                     .filter_map(|r| r.affected)
                     .reduce(u64::saturating_add);
-                (HistoryStatus::Ok, rows, affected, None, None)
+                (HistoryStatus::Ok, rows, affected, None, None, false)
             }
             // A `cancelled` row does not mean "not applied": the cancel may have landed
-            // after the statement took effect (`outcome_unknown`, which the history does
-            // not store). The UI must not render `cancelled` history rows as not applied.
+            // after the statement took effect (`outcome_unknown`, which the row records
+            // too). The UI must not render `cancelled` history rows as not applied.
             Err(e) => (
                 if e.kind == "cancelled" {
                     HistoryStatus::Cancelled
@@ -403,6 +430,7 @@ impl ChannelSink {
                 None,
                 Some(e.kind.clone()),
                 e.server_code.clone().or_else(|| e.sqlstate.clone()),
+                e.outcome_unknown,
             ),
         };
         let entry = NewHistoryEntry {
@@ -418,6 +446,8 @@ impl ChannelSink {
             affected,
             error_kind,
             error_code,
+            origin: HistoryOrigin::Query,
+            outcome_unknown,
         };
         let writer = self.writer.get_or_insert_with(|| {
             HistoryWriter::start(Arc::clone(&self.history.repo), self.history.connection_id)
@@ -581,6 +611,13 @@ impl RunSink for ChannelSink {
                 }
             }
             Err(error) => {
+                if error.kind == "connection_lost" && self.tx_now != TxState::Idle {
+                    if commits_open_tx(stmt, self.dialect) {
+                        self.lost_committing = true;
+                    } else {
+                        self.lost_in_tx = true;
+                    }
+                }
                 (self.emit)(RunEvent::StatementError {
                     index: stmt.index,
                     error: error.clone(),
@@ -598,6 +635,7 @@ impl RunSink for ChannelSink {
     }
 
     fn tx_state(&mut self, state: TxState) {
+        self.tx_now = state;
         (self.emit)(RunEvent::TxState { state });
     }
 }
@@ -739,6 +777,8 @@ mod tests {
                 affected: None,
                 error_kind: None,
                 error_code: None,
+                origin: HistoryOrigin::Query,
+                outcome_unknown: false,
             });
         }
         writer.finish().await;
@@ -748,6 +788,7 @@ mod tests {
             .history_list(&HistoryFilter {
                 connection_id: Some(conn),
                 search: None,
+                origin: None,
                 limit: 1000,
             })
             .unwrap();
@@ -757,6 +798,22 @@ mod tests {
             .map(|i| format!("SELECT {i}"))
             .collect();
         assert_eq!(texts, want);
+    }
+
+    /// A MySQL `BEGIN` / `START TRANSACTION` commits the open transaction: a connection
+    /// lost during it leaves the outcome unknown, never "rolled back".
+    #[test]
+    fn mysql_begin_commits_the_open_transaction() {
+        let p = dnt_query::plan(
+            "BEGIN; START TRANSACTION; SELECT 1",
+            dnt_query::Target::All,
+            Dialect::MYSQL,
+        );
+        assert!(commits_open_tx(&p.stmts[0], Dialect::MYSQL));
+        assert!(commits_open_tx(&p.stmts[1], Dialect::MYSQL));
+        assert!(!commits_open_tx(&p.stmts[2], Dialect::MYSQL));
+        let p = dnt_query::plan("BEGIN", dnt_query::Target::All, Dialect::Postgres);
+        assert!(!commits_open_tx(&p.stmts[0], Dialect::Postgres));
     }
 
     #[test]

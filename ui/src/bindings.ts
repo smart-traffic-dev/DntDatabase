@@ -238,6 +238,36 @@ async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppErro
 }
 },
 /**
+ * Sets the tab's commit mode and returns its transaction state. `Manual`: before every
+ * statement that needs a transaction while none is open, the run begins one; commit or
+ * roll it back with `query_tx`. MySQL statements that would commit it are flagged
+ * `implicit_commit` in the plan. A Manual transaction lost with the connection makes
+ * `query_run` fail with `connection_lost` until `query_tx` acknowledges it. Errors:
+ * `busy` while the tab runs, `transaction_open` when leaving Manual with a transaction
+ * open.
+ */
+async queryTxMode(tabId: string, mode: TxMode) : Promise<Result<TxState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx_mode", { tabId, mode }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The tab's transaction: state, start (`since_ms`, Unix epoch ms) and statements run
+ * in it, for the idle-transaction warning (`get_idle_tx_warn_minutes`). `busy` while
+ * the tab runs.
+ */
+async queryTxInfo(tabId: string) : Promise<Result<TabTxInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx_info", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Closes the tab's session. With a transaction open and `force` false it returns
  * `transaction_open` and keeps the session (ask Commit / Rollback / Cancel, then call
  * again, or `query_tx` first); `force` closes anyway (the server rolls back).
@@ -256,12 +286,14 @@ async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppErr
  * `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
  * statement is blocked, `confirmation_required` when any needs confirmation and
  * `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
- * `busy` while the tab runs; `plan_expired` for a plan already run, expired or
- * replaced.
+ * On Production, `confirm_names` must hold exactly the `confirm_name`s of the plan's
+ * statements (case-sensitive), else `confirmation_required` too; pass `[]` when the
+ * plan asks for none. `busy` while the tab runs; `plan_expired` for a plan already
+ * run, expired or replaced.
  */
-async queryRun(planId: string, confirmed: boolean, opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
+async queryRun(planId: string, confirmed: boolean, confirmNames: string[], opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, opts, channel }) };
+    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, confirmNames, opts, channel }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -380,7 +412,7 @@ async setTablePageSize(size: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * "Confirm UPDATE/DELETE without WHERE" for non-Production connections.
+ * "Confirm UPDATE/DELETE without WHERE" for Local and untagged connections.
  */
 async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
     try {
@@ -391,12 +423,36 @@ async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
 }
 },
 /**
- * Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production
- * connections confirm unbounded writes whatever it is.
+ * Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production and
+ * Staging connections confirm unbounded writes whatever it is.
  */
 async setConfirmUnboundedWrites(enabled: boolean) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_confirm_unbounded_writes", { enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Minutes after which a query tab's open, unused transaction is warned about
+ * (default 5).
+ */
+async getIdleTxWarnMinutes() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_idle_tx_warn_minutes") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the idle-transaction warning delay: 1 to 120 minutes, else `config` (field
+ * `minutes`).
+ */
+async setIdleTxWarnMinutes(minutes: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_idle_tx_warn_minutes", { minutes }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -433,6 +489,98 @@ async tableRowCount(id: string, obj: ObjectRef, filter: DataFilter | null, reque
 async tableDataCancel(id: string, requestKey: string) : Promise<Result<boolean, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("table_data_cancel", { id, requestKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Whether the data view may edit `obj` (a table / view of the data view), and how:
+ * its key, the columns an UPDATE may set, atomicity and row-guard kind.
+ */
+async dataEditable(id: string, obj: ObjectRef) : Promise<Result<EditableInfo, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_editable", { id, obj }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Builds and stores the plan of the staged changes `set` (see the `edit_plans`
+ * module): the exact statements `data_apply` will send, their verdict,
+ * atomicity and conflict checks. A set that cannot be planned is a `config` error with
+ * field `edit`, `one_at_a_time` (the table is not atomic: one change at a time) or
+ * `column:<name>`.
+ */
+async dataPreview(id: string, set: EditSet) : Promise<Result<EditPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_preview", { id, set }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Runs the plan `plan_id` once (`confirmed`: the user confirmed a Production plan).
+ * `plan_stale`: preview again. Once anything was sent, the outcome is in the report.
+ */
+async dataApply(planId: string, confirmed: boolean) : Promise<Result<ApplyReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_apply", { planId, confirmed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The complete value of one cell (`column` of the row of `obj` whose key is `key`, as
+ * `data_editable` reports the key), at most 64 MB, and a token that stands for it in
+ * `data_preview` (as a `loaded` cell input, or in `RowRef.loaded` for the conflict
+ * check) for as long as a plan lives. `config` errors: field `column:<name>` (bad
+ * column or key, or a value over the limit), `row` (the row is gone), `edit`.
+ */
+async dataCellFetch(id: string, obj: ObjectRef, key: ([string, Value])[], column: string) : Promise<Result<LoadedCell, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_cell_fetch", { id, obj, key, column }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A value for `column` of `obj` read from `path` (picked through `file_pick_open` with
+ * kind `cell_value`; `config` error, field `path`, else), with its token.
+ */
+async dataCellLoadFile(id: string, obj: ObjectRef, column: string, path: string) : Promise<Result<LoadedCell, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_cell_load_file", { id, obj, column, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Writes loaded value `token` to `path` (picked through `file_pick_save` with kind
+ * `cell_value`; `config` error, field `path`, else): binary data as is, other values
+ * as UTF-8 text.
+ */
+async dataCellSaveFile(token: string, path: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_cell_save_file", { token, path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * `INSERT` or `UPDATE` statements that recreate `rows` (as the grid holds them) of table
+ * `obj`, to copy to the clipboard; nothing is run. A row with a cell the page cut short
+ * is a `config` error, field `copy`.
+ */
+async dataCopySql(id: string, obj: ObjectRef, rows: RowRef[], format: CopySqlFormat) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("data_copy_sql", { id, obj, rows, format }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -718,6 +866,81 @@ outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_o
  * the query layer; `None` from `From<DbError>`.
  */
 tx_state: string | null }
+/**
+ * What became of an applied plan (spec §4.2d).
+ */
+export type ApplyOutcome = 
+/**
+ * Every statement was applied.
+ */
+{ outcome: "committed" } | 
+/**
+ * Nothing was applied: the transaction was rolled back (or the server rolls it back
+ * because the connection is gone).
+ */
+{ outcome: "rolled_back" } | 
+/**
+ * No transaction: the first `applied` statements are applied, the next one was not.
+ */
+{ outcome: "partially_applied"; applied: number } | 
+/**
+ * The statement at position `at` of the plan (`statements.len()`: the `COMMIT`) got
+ * no answer: it may or may not have been applied.
+ */
+{ outcome: "unknown"; at: number }
+export type ApplyReport = { outcome: ApplyOutcome; 
+/**
+ * The statements that were sent, in order (those after a failure were not).
+ */
+statements: StmtApply[]; 
+/**
+ * One row per applied INSERT, in order: every column of the table (in its column
+ * order) as the server stored it; empty when it could not be read back. Empty when
+ * nothing was applied.
+ */
+inserted: Value[][]; 
+/**
+ * The error that ended the apply outside a statement (the `COMMIT`).
+ */
+error: AppError | null }
+/**
+ * Whether a set of edits can be applied all-or-nothing (spec §4.2a).
+ */
+export type Atomicity = "yes" | "no" | "unknown"
+/**
+ * What the user typed or picked for one cell.
+ */
+export type CellInput = { kind: "null" } | 
+/**
+ * The column's default (new rows only).
+ */
+{ kind: "default" } | 
+/**
+ * Text typed in the grid, parsed by the column's logical type.
+ */
+{ kind: "text"; text: string } | { kind: "value"; value: Value } | 
+/**
+ * Binary data (standard base64). Renamed explicitly: specta's snake_case would
+ * export `base_64` while serde reads and writes `base64`.
+ */
+{ kind: "base64"; data: string } | 
+/**
+ * A full value fetched earlier, by its token.
+ */
+{ kind: "loaded"; token: string }
+/**
+ * A complete cell value as the value editor gets it.
+ */
+export type CellPayload = { kind: "null" } | 
+/**
+ * Text, JSON, numbers, dates…: the value's text.
+ */
+{ kind: "text"; text: string } | 
+/**
+ * Binary data (standard base64, padded) of `len` bytes. Renamed explicitly, as
+ * `CellInput::Base64`.
+ */
+{ kind: "base64"; data: string; len: number }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -730,7 +953,12 @@ definition: string | null }
  * (e.g. `numeric(12,2)`).
  */
 export type ColumnBrief = { name: string; data_type: string }
-export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; comment: string | null }
+export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; 
+/**
+ * Collation of a text column (MySQL/MariaDB), or of a PostgreSQL column with an
+ * explicit non-default collation; `None` otherwise.
+ */
+collation: string | null; comment: string | null }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
 /**
  * A table or view offered by autocomplete after `db.` / `schema.`.
@@ -770,12 +998,98 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
  */
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
 /**
- * The data view's filter: conditions joined with `AND` or `OR`.
+ * What `data_copy_sql` writes for each row.
  */
-export type DataFilter = { mode: FilterMode; conditions: FilterCond[] }
+export type CopySqlFormat = "insert" | "update"
+/**
+ * The data view's filter: conditions joined with `AND` or `OR`, or (raw mode) the
+ * user's own `WHERE` text.
+ */
+export type DataFilter = { mode: FilterMode; conditions: FilterCond[]; 
+/**
+ * Raw mode: a `WHERE` condition typed by the user. `conditions` must then be empty
+ * and `mode` is ignored. It is checked with
+ * [`crate::sql::build::check_raw_where`] and run inside a read-only transaction; it
+ * never goes through [`build_where`]. Absent / null: structured mode.
+ */
+raw_where?: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
+/**
+ * What a `DROP` removes.
+ */
+export type DropKind = 
+/**
+ * `DROP DATABASE`.
+ */
+"database" | 
+/**
+ * `DROP SCHEMA` (on MySQL a synonym of `DROP DATABASE`).
+ */
+"schema" | 
+/**
+ * Any other `DROP` (table, view, index, routine, user, …).
+ */
+"object"
+/**
+ * One name a `DROP` removes.
+ */
+export type DropTarget = { kind: DropKind; 
+/**
+ * The name as written, quotes removed (`` `shop`.`t` `` → `shop.t`); empty when
+ * the statement names nothing readable (`DROP OPERATOR + (int, int)`).
+ */
+name: string }
+/**
+ * What `data_preview` returns: the stored plan's id and the statements `data_apply`
+ * will send.
+ */
+export type EditPreview = { plan_id: string; 
+/**
+ * The statements, for display: exactly what is sent, except that string literals
+ * over 4 KiB are shortened to their start (`X'0a1b…'`, `'abc…'`) followed by an SQL
+ * comment with their size in bytes or chars; the stored plan keeps and runs them in
+ * full.
+ */
+statements: string[]; verdict: Verdict; atomic: Atomicity; 
+/**
+ * The conflict check of each statement, in order.
+ */
+protections: Protection[]; 
+/**
+ * Why the verdict is `block` (UI copy).
+ */
+reason: string | null }
+export type EditSet = { object: ObjectRef; edits: RowEdit[]; 
+/**
+ * Drop every row guard (an explicit "Overwrite" after a conflict).
+ */
+overwrite: boolean }
+/**
+ * Whether the data view may edit an object, and how (`data_editable`).
+ */
+export type EditableInfo = { editable: boolean; 
+/**
+ * Why not, when not editable: `read_only_connection`, `not_a_table`, `no_key` or
+ * `unsupported:<detail>` (machine-readable; the UI words it).
+ */
+reason: string | null; 
+/**
+ * The columns that identify a row: set whenever the table has a usable key, even
+ * when it is not editable (e.g. a read-only connection), so complete cells can be
+ * fetched by key (`data_cell_fetch`); empty otherwise.
+ */
+key: string[]; 
+/**
+ * Key columns a `SELECT *` does not return (MySQL `INVISIBLE`); a page returns them
+ * apart (`TableDataPage::hidden_key`).
+ */
+hidden_key: string[]; 
+/**
+ * Columns an UPDATE may set (empty when not editable).
+ */
+editable_columns: string[]; atomic: Atomicity; protection: ProtectionKind }
 export type EnvTag = "production" | "staging" | "local"
 export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
 /**
@@ -850,7 +1164,11 @@ export type FileKind =
 /**
  * A connections file: `.dntconn` / Navicat `.ncx` to import, `.dntconn` to export.
  */
-"connections"
+"connections" | 
+/**
+ * Any file holding one cell's value (the value editor's Load / Save).
+ */
+"cell_value"
 /**
  * One condition: `column op values`.
  */
@@ -879,17 +1197,37 @@ export type Group = { id: string; parent_id: string | null; name: string;
  * Exported as a JS number (positions are small).
  */
 sort_order: number }
-export type HistoryEntry = { id: number; connection_id: string; database: string | null; sql_text: string; redacted: boolean; kind: string; started_at: string; elapsed_ms: number | null; status: HistoryStatus; row_count: number | null; affected: number | null; error_kind: string | null; error_code: string | null }
+export type HistoryEntry = { id: number; connection_id: string; database: string | null; sql_text: string; redacted: boolean; kind: string; started_at: string; elapsed_ms: number | null; status: HistoryStatus; row_count: number | null; affected: number | null; error_kind: string | null; error_code: string | null; origin: HistoryOrigin; 
+/**
+ * No answer came: the statement may or may not have been applied.
+ */
+outcome_unknown: boolean }
 export type HistoryFilter = { connection_id: string | null; 
 /**
  * Substring of the SQL text; `%`, `_` and `\` match literally.
  */
 search: string | null; 
 /**
+ * Only rows of this origin.
+ */
+origin: HistoryOrigin | null; 
+/**
  * At most [`HISTORY_LIST_MAX`]; larger values are clamped.
  */
 limit: number }
 export type HistoryIds = number[]
+/**
+ * What produced a history row.
+ */
+export type HistoryOrigin = 
+/**
+ * A statement the user ran from a query tab.
+ */
+"query" | 
+/**
+ * A statement the app built to apply edits of the data view.
+ */
+"data_edit"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it
@@ -913,7 +1251,18 @@ skipped: number;
  * uses the old settings).
  */
 overwritten_ids: string[] }
-export type IndexDetail = { name: string; unique: boolean; primary: boolean; columns: string[]; expression: string | null; method: string | null; 
+export type IndexDetail = { name: string; 
+/**
+ * Unique and usable as such. PostgreSQL reports an invalid index (`indisvalid =
+ * false`, e.g. after a failed `CREATE UNIQUE INDEX CONCURRENTLY`) as not unique: the
+ * rows already in the table may hold duplicates.
+ */
+unique: boolean; primary: boolean; 
+/**
+ * A partial index (PostgreSQL `… WHERE <predicate>`): it covers only some rows, so
+ * it never identifies a row. Always false on MySQL/MariaDB.
+ */
+partial: boolean; columns: string[]; expression: string | null; method: string | null; 
 /**
  * Either a full `CREATE INDEX …` statement or, for an index backing a table
  * constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).
@@ -925,6 +1274,10 @@ definition: string | null }
  * `type JsInteger = number | string`), never constructed.
  */
 export type JsInteger = number | string
+/**
+ * A complete value and the token that stands for it in a later edit.
+ */
+export type LoadedCell = { token: string; payload: CellPayload }
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
 /**
@@ -967,7 +1320,31 @@ preview: string;
  * guard makes such a statement Confirm (see `dnt_query::guard`). Always sent;
  * optional in the bindings so older fixtures stay valid.
  */
-unbounded?: UnboundedWrite[] }
+unbounded?: UnboundedWrite[]; 
+/**
+ * What a `DROP` of the statement removes (`DROP DATABASE` is confirmed on every
+ * connection, any other `DROP` on Staging and Production); empty for most
+ * statements. Always sent; optional in the bindings.
+ */
+drops?: DropTarget[]; 
+/**
+ * On Production, the name (a table, object, database or schema, unquoted) the user
+ * must type to run this Confirm statement: pass it in `query_run`'s
+ * `confirm_names`, exactly (case-sensitive). `None` when no name is asked.
+ */
+confirm_name?: string | null; 
+/**
+ * On Staging and Production, for an `UPDATE` / `DELETE` that changes every row:
+ * the server's estimate of the rows it changes (`EXPLAIN`, at most
+ * [`ESTIMATE_TIMEOUT`]), or `unavailable`. `None`: not estimated.
+ */
+estimate?: RowEstimate | null; 
+/**
+ * MySQL: the statement commits the transaction open when it runs (DDL and the
+ * like, in a Manual tab or after the user's `BEGIN`): what ran before it can no
+ * longer be rolled back. Always sent; optional in the bindings.
+ */
+implicit_commit?: boolean }
 /**
  * A normalized explain result. `raw` is the engine's original output.
  */
@@ -977,6 +1354,27 @@ export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialec
  * The tab session's transaction state when the plan was made.
  */
 tx_state: TxState }
+/**
+ * How much of a row a statement's guard checks (spec §5.2).
+ */
+export type Protection = 
+/**
+ * Any change to the row since it was loaded is a conflict.
+ */
+{ level: "full" } | 
+/**
+ * Changes only in `unchecked` columns go unnoticed.
+ */
+{ level: "columns"; unchecked: string[] } | 
+/**
+ * The key only.
+ */
+{ level: "key_only" }
+/**
+ * How a server reports a concurrent change to a row: PostgreSQL `xmin`, MySQL a
+ * snapshot of the row's values.
+ */
+export type ProtectionKind = "row_version" | "snapshot"
 export type QueryTabRecord = { id: string; title: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -990,6 +1388,27 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+export type RowEdit = { op: "update"; row: RowRef; set: ([string, CellInput])[] } | { op: "insert"; values: ([string, CellInput])[] } | { op: "delete"; row: RowRef }
+/**
+ * The estimated number of rows a flagged `UPDATE` / `DELETE` changes, from the
+ * server's `EXPLAIN` (no `ANALYZE`: nothing runs).
+ */
+export type RowEstimate = { kind: "rows"; n: number } | 
+/**
+ * The explain failed, timed out or said nothing usable.
+ */
+{ kind: "unavailable" }
+/**
+ * One loaded row: its key values, every loaded cell as it was, and (PostgreSQL) its
+ * `xmin::text`.
+ */
+export type RowRef = { key: ([string, Value])[]; original: ([string, Value])[]; xmin: string | null; 
+/**
+ * Cells of `original` the page may have cut that were fetched in full
+ * (`data_cell_fetch`): column → token. Such a cell joins the row guard's snapshot
+ * with its complete value; a cut cell without one stays unchecked.
+ */
+loaded?: ([string, string])[] }
 /**
  * One event of a run, in the order described in the module docs.
  */
@@ -1111,6 +1530,23 @@ export type StageTiming = { stage: ConnectStage;
  * Exported as a JS number (milliseconds).
  */
 ms: number }
+/**
+ * One statement of an applied plan.
+ */
+export type StmtApply = { 
+/**
+ * The edit's index in the `EditSet`.
+ */
+index: number; 
+/**
+ * Rows the statement matched.
+ */
+affected: number | null; error: AppError | null; 
+/**
+ * It matched no row (or not the rows expected): the row changed or went away since
+ * it was loaded.
+ */
+conflict: boolean }
 export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other"
 /**
  * Why a run is being stopped.
@@ -1149,6 +1585,20 @@ export type StopReason =
  * `index`: "sql_mode changed; run the remaining statements again".
  */
 { kind: "dialect_changed"; index: number }
+/**
+ * The transaction of a query tab, for the status bar and the idle-transaction warning.
+ */
+export type TabTxInfo = { state: TxState; 
+/**
+ * When the open transaction began (Unix epoch, milliseconds; as seen by the app:
+ * the start of the run or the `BEGIN` that opened it). `None` when no transaction
+ * is open, or its start is not known.
+ */
+since_ms: number | null; 
+/**
+ * Statements run in the open transaction (0 when none is open).
+ */
+statements: number }
 export type TableDataPage = { columns: ColumnMeta[]; 
 /**
  * At most `limit` rows, starting at `offset` (fewer when `size_capped`).
@@ -1163,6 +1613,10 @@ has_more: boolean;
  */
 truncated_cells: number; 
 /**
+ * Where those cells are: `[row, column]` indexes into `rows`.
+ */
+truncated: ([number, number])[]; 
+/**
  * The page reached its byte budget: rows were left for the next page.
  */
 size_capped: boolean; 
@@ -1170,7 +1624,21 @@ size_capped: boolean;
  * Without an explicit sort: the primary key columns the page is ordered by (stable
  * paging); empty when there is no primary key or a sort was given.
  */
-key_order: string[]; elapsed_ms: number }
+key_order: string[]; 
+/**
+ * PostgreSQL tables the data view may edit: each row's `xmin`, in row order (the
+ * row version an edit is guarded with). Null otherwise.
+ */
+row_versions: string[] | null; 
+/**
+ * Key columns a `SELECT *` does not return (MySQL `INVISIBLE`), read explicitly;
+ * not part of `columns`.
+ */
+hidden_key: ColumnMeta[]; 
+/**
+ * Their values, one entry per row of `rows` (empty without `hidden_key`).
+ */
+hidden_key_values: Value[][]; elapsed_ms: number }
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.
@@ -1189,6 +1657,14 @@ export type Target = { Cursor: number } | { Selection: [number, number] } | "All
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
 export type TxAction = "Commit" | "Rollback"
+/**
+ * How a query tab commits (spec §4.2e). `Auto`: every statement commits on its own
+ * unless the user opens a transaction. `Manual`: before every statement that needs a
+ * transaction (a write; PostgreSQL DDL that can run in one) while none is open, the run
+ * begins one (`BEGIN` / `START TRANSACTION`), which the user then commits or rolls back
+ * (`query_tx`).
+ */
+export type TxMode = "Auto" | "Manual"
 /**
  * Transaction state of a session as the query layer sees it.
  */

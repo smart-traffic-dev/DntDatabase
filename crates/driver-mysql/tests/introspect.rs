@@ -483,3 +483,92 @@ async fn limited_user_sees_partial_tree() {
         assert!(matches!(r, Err(DbError::Server { .. })), "{t:?}: {r:?}");
     }
 }
+
+fn scratch(test: &str) -> String {
+    format!(
+        "p3_{test}_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..8]
+    )
+}
+
+#[tokio::test]
+async fn column_collation_is_reported() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let customers = detail(&s, t, "customers").await;
+        let name = customers.columns.iter().find(|c| c.name == "name").unwrap();
+        assert_eq!(
+            name.collation.as_deref(),
+            Some("utf8mb4_unicode_ci"),
+            "{t:?}"
+        );
+        // Non-text columns have no collation.
+        assert_eq!(customers.columns[0].collation, None, "{t:?}");
+
+        let table = scratch("collation");
+        s.query_row_text(&format!(
+            "CREATE TABLE {FIXTURE_DB}.{table} (a varchar(10) COLLATE utf8mb4_bin, b int)"
+        ))
+        .await
+        .unwrap();
+        let d = detail(&s, t, &table).await;
+        s.query_row_text(&format!("DROP TABLE {FIXTURE_DB}.{table}"))
+            .await
+            .unwrap();
+        assert_eq!(
+            d.columns[0].collation.as_deref(),
+            Some("utf8mb4_bin"),
+            "{t:?}"
+        );
+        assert_eq!(d.columns[1].collation, None, "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn myisam_engine_is_reported() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let table = scratch("myisam");
+        s.query_row_text(&format!(
+            "CREATE TABLE {FIXTURE_DB}.{table} (id int) ENGINE=MyISAM"
+        ))
+        .await
+        .unwrap();
+        let d = detail(&s, t, &table).await;
+        s.query_row_text(&format!("DROP TABLE {FIXTURE_DB}.{table}"))
+            .await
+            .unwrap();
+        assert_eq!(d.options.engine.as_deref(), Some("MyISAM"), "{t:?}");
+        let orders = detail(&s, t, "orders").await;
+        assert_eq!(orders.options.engine.as_deref(), Some("InnoDB"), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn invisible_column_flag() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        if !s.capabilities().invisible_columns {
+            continue;
+        }
+        let table = scratch("invisible");
+        s.query_row_text(&format!(
+            "CREATE TABLE {FIXTURE_DB}.{table} (id int, hidden int INVISIBLE)"
+        ))
+        .await
+        .unwrap();
+        let d = detail(&s, t, &table).await;
+        s.query_row_text(&format!("DROP TABLE {FIXTURE_DB}.{table}"))
+            .await
+            .unwrap();
+        let flags: Vec<(&str, bool)> = d
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.invisible))
+            .collect();
+        assert_eq!(flags, [("id", false), ("hidden", true)], "{t:?}");
+    }
+}

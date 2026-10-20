@@ -1,5 +1,6 @@
 //! SQL script handling: dialect-aware statement splitting and statement classification.
 
+pub mod build;
 mod classify;
 mod effect;
 pub mod filter;

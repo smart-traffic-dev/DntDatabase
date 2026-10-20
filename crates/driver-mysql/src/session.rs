@@ -3,11 +3,12 @@ use crate::map_mysql_error;
 use crate::queries::quote_ident;
 #[cfg(feature = "test-helpers")]
 use crate::values::value_text;
-use crate::values::{column_meta, to_value_full};
+use crate::values::{column_meta, to_full_value, to_value_full};
 use async_trait::async_trait;
 use dnt_core::driver::{
-    CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, ServerNotice,
-    ServerNotices, Session, SharedSink, StmtOutcome, MAX_SERVER_NOTICES,
+    check_cell_size, CancelHandle, CellMode, ExecOptions, ExecProgress, Introspector,
+    ResultSummary, RowSink, ServerNotice, ServerNotices, Session, SharedSink, StmtOutcome,
+    MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo, ServerVariant};
@@ -16,7 +17,7 @@ use dnt_core::sql::{
     TxControl,
 };
 use dnt_core::tx::{next_autocommit_off, next_tx_state, StmtResult, TxState};
-use dnt_core::value::ColumnMeta;
+use dnt_core::value::{ColumnMeta, FullValue, Value};
 use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, DriverError, Error as MyError, Opts, Row};
@@ -501,6 +502,7 @@ impl MySqlSession {
         sink: &mut dyn RowSink,
         results: &mut Vec<ResultSummary>,
         emitted: &mut bool,
+        cell_error: &mut Option<DbError>,
     ) -> Result<Done, StmtError> {
         let shared = SharedSink::new(sink);
         let mut handle = &shared;
@@ -510,7 +512,8 @@ impl MySqlSession {
             opts,
             &mut handle,
             results,
-            emitted
+            emitted,
+            cell_error
         ));
         let expiry = async {
             match opts.timeout {
@@ -762,7 +765,9 @@ fn stuck_error(
 }
 
 /// Streams every result of one statement into `sink`. Returns whether any result had
-/// columns (a result set rather than an OK status).
+/// columns (a result set rather than an OK status). `cell_error`: set when a cell was
+/// larger than [`CellMode::Full`] allows; the statement is still read to its end, and the
+/// error is reported once it is tracked.
 async fn run_statement(
     conn: &mut Conn,
     sql: &str,
@@ -770,11 +775,12 @@ async fn run_statement(
     sink: &mut dyn RowSink,
     results: &mut Vec<ResultSummary>,
     emitted: &mut bool,
+    cell_error: &mut Option<DbError>,
 ) -> Result<bool, MyError> {
     let started = Instant::now();
     if opts.params.is_empty() {
         let result = conn.query_iter(sql).await?;
-        stream_results(result, started, opts, sink, results, emitted).await
+        stream_results(result, started, opts, sink, results, emitted, cell_error).await
     } else {
         // Bound values (the data view's filter): a prepared statement, each value sent
         // as a string (see `ExecOptions::params`).
@@ -786,7 +792,7 @@ async fn run_statement(
         let result = conn
             .exec_iter(sql, mysql_async::Params::Positional(params))
             .await?;
-        stream_results(result, started, opts, sink, results, emitted).await
+        stream_results(result, started, opts, sink, results, emitted, cell_error).await
     }
 }
 
@@ -798,6 +804,7 @@ async fn stream_results<P: mysql_async::prelude::Protocol>(
     sink: &mut dyn RowSink,
     results: &mut Vec<ResultSummary>,
     emitted: &mut bool,
+    cell_error: &mut Option<DbError>,
 ) -> Result<bool, MyError> {
     let batch_size = opts.batch_size.max(1);
     let mut had_columns = false;
@@ -810,29 +817,61 @@ async fn stream_results<P: mysql_async::prelude::Protocol>(
         let mut row_count = 0u64;
         let mut truncated = false;
         if !cols.is_empty() {
-            let mut batch = Vec::with_capacity(batch_size.min(opts.max_rows.max(1)));
+            let cap = batch_size.min(opts.max_rows.max(1));
+            let mut batch: Vec<Vec<Value>> = Vec::new();
+            let mut full_batch: Vec<Vec<FullValue>> = Vec::new();
+            match opts.cells {
+                CellMode::Preview => batch.reserve(cap),
+                CellMode::Full { .. } => full_batch.reserve(cap),
+            }
             result
                 .for_each(|row| {
-                    // Past `max_rows` the rest of the set is still read, just discarded.
+                    // Past `max_rows`, or once a cell was too large, the rest of the set
+                    // is still read (the connection stays in sync), just discarded.
+                    if cell_error.is_some() {
+                        return;
+                    }
                     if row_count as usize >= opts.max_rows {
                         truncated = true;
                         return;
                     }
-                    let values = row
-                        .unwrap()
-                        .into_iter()
-                        .zip(cols.iter())
-                        .map(|(v, c)| to_value_full(v, c, opts.full_bytes))
-                        .collect();
-                    batch.push(values);
-                    row_count += 1;
-                    if batch.len() >= batch_size {
-                        sink.rows(std::mem::take(&mut batch));
+                    let row = row.unwrap().into_iter().zip(cols.iter());
+                    match opts.cells {
+                        CellMode::Preview => {
+                            batch.push(
+                                row.map(|(v, c)| to_value_full(v, c, opts.full_bytes))
+                                    .collect(),
+                            );
+                            if batch.len() >= batch_size {
+                                sink.rows(std::mem::take(&mut batch));
+                            }
+                        }
+                        CellMode::Full { max_cell_bytes } => {
+                            let values: Vec<FullValue> =
+                                row.map(|(v, c)| to_full_value(v, c)).collect();
+                            if let Some(e) = values
+                                .iter()
+                                .find_map(|v| check_cell_size(v, max_cell_bytes).err())
+                            {
+                                // Never a cut value: no further row reaches the sink.
+                                *cell_error = Some(e);
+                                full_batch.clear();
+                                return;
+                            }
+                            full_batch.push(values);
+                            if full_batch.len() >= batch_size {
+                                sink.full_rows(std::mem::take(&mut full_batch));
+                            }
+                        }
                     }
+                    row_count += 1;
                 })
                 .await?;
             if !batch.is_empty() {
                 sink.rows(batch);
+            }
+            if !full_batch.is_empty() {
+                sink.full_rows(full_batch);
             }
         }
         let affected = cols.is_empty().then(|| result.affected_rows());
@@ -1052,6 +1091,8 @@ impl Session for MySqlSession {
         // Several pieces for the server: its transaction state is read back afterwards
         // (`sync_tx`), on every path that keeps this connection.
         let mut multi = resplits(stmt, dialect);
+        // Only set once rows were emitted, and such a statement is never re-run.
+        let mut cell_error = None;
         loop {
             let mut emitted = false;
             let res = match slot.as_mut() {
@@ -1065,6 +1106,7 @@ impl Session for MySqlSession {
                         sink,
                         &mut outcome.results,
                         &mut emitted,
+                        &mut cell_error,
                     )
                     .await
                 }
@@ -1202,6 +1244,10 @@ impl Session for MySqlSession {
         }
         if multi {
             self.sync_tx(&mut slot, check_limit(opts)).await;
+        }
+        // The statement ran (and is tracked); only its rows were refused.
+        if let Some(e) = cell_error {
+            return Err(e);
         }
         Ok(outcome)
     }

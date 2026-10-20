@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, toAppError } from '../api';
 import type { ConflictPolicy, DbKind, ImportPreview } from '../bindings';
+import { confirmDiscardForImport } from '../components/tabActions';
 import { useDialogs } from '../store/dialogs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
@@ -119,6 +120,18 @@ export function ImportDialog({ onClose }: Props) {
     setApplying(true);
     setError(null);
     try {
+      // Overwriting replaces a connection under its open tabs: their staged edits cannot be kept
+      // (they would be applied to whatever server the new settings point at).
+      if (policy === 'overwrite') {
+        const replaced = preview.rows.filter((r) => r.conflict === 'same_id').map((r) => r.id);
+        if (!(await confirmDiscardForImport(replaced))) {
+          if (my === token.current) {
+            setBusy(false);
+            setApplying(false);
+          }
+          return;
+        }
+      }
       const r = await api.applyImport(path, used, policy);
       // The import happened on the backend: always surface it, even if the dialog went away.
       useDialogs.getState().setNotice(`Imported ${r.imported} · Overwritten ${r.overwritten} · Skipped ${r.skipped}`);

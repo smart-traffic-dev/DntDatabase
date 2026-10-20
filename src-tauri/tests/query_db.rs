@@ -339,6 +339,7 @@ async fn redacted_history_and_logs() {
             .history_list(&HistoryFilter {
                 connection_id: Some(id),
                 search: None,
+                origin: None,
                 limit: 10,
             })
             .unwrap();
@@ -412,6 +413,105 @@ async fn explain_tree_per_engine() {
     }
 }
 
+/// Row estimates (spec §4.3): on a Staging connection a DELETE without WHERE gets the
+/// server's `EXPLAIN` estimate, which deletes nothing and keeps the tab's transaction.
+#[tokio::test]
+async fn estimate_on_staging_delete() {
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_in(dir.path());
+    for t in Target::all() {
+        let mut cfg = config(t, false);
+        cfg.env_tag = Some(dnt_core::config::EnvTag::Staging);
+        let id = state
+            .repo
+            .create(
+                cfg,
+                NewSecrets {
+                    db_password: Some(SecretString::from(TEST_PASSWORD)),
+                    ssh_password: None,
+                    ssh_key_passphrase: None,
+                },
+            )
+            .unwrap()
+            .id;
+        state.sessions.open(id, None).await.unwrap();
+        let table = format!("p3_estimate_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let values: Vec<String> = (1..=300).map(|i| format!("({i})")).collect();
+        let analyze = match t.kind() {
+            DbKind::MySql => format!("ANALYZE TABLE {table}"),
+            DbKind::Postgres => format!("ANALYZE {table}"),
+        };
+        let setup = format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY);\n\
+             INSERT INTO {table} VALUES {};\n{analyze}",
+            values.join(", ")
+        );
+        let events = run_all(&state, "t1", id, &setup).await;
+        assert_eq!(
+            events.of("done")[0]["stop"],
+            Json::Null,
+            "{t:?}: {:?}",
+            events.list()
+        );
+
+        for (text, in_tx) in [
+            (format!("DELETE FROM {table}"), false),
+            (format!("UPDATE {table} SET id = id WHERE 1 = 1"), true),
+        ] {
+            if in_tx {
+                run_all(&state, "t1", id, "BEGIN").await;
+                // Nothing has read in the transaction yet: no estimate (it would take
+                // the transaction's first snapshot).
+                let view = state
+                    .sessions
+                    .query_plan("t1", id, None, &text, Pick::All)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    view.stmts[0].estimate,
+                    Some(dnt_query::RowEstimate::Unavailable),
+                    "{t:?}"
+                );
+                run_all(&state, "t1", id, "SELECT 1").await;
+            }
+            let view = state
+                .sessions
+                .query_plan("t1", id, None, &text, Pick::All)
+                .await
+                .unwrap();
+            let s = &view.stmts[0];
+            assert_eq!(s.verdict, Verdict::Confirm, "{t:?}");
+            assert_eq!(s.confirm_name, None, "{t:?}: no typed name off Production");
+            match s.estimate {
+                Some(dnt_query::RowEstimate::Rows { n }) => assert!(n > 0.0, "{t:?}: {n}"),
+                other => panic!("{t:?} {text}: {other:?}"),
+            }
+            let want = if in_tx {
+                dnt_core::tx::TxState::Active
+            } else {
+                dnt_core::tx::TxState::Idle
+            };
+            assert_eq!(view.tx_state, want, "{t:?}");
+            if in_tx {
+                let after = state
+                    .sessions
+                    .query_tx("t1", dntdatabase::query_sessions::TxAction::Rollback)
+                    .await
+                    .unwrap();
+                assert_eq!(after, dnt_core::tx::TxState::Idle, "{t:?}");
+            }
+        }
+        // Nothing was deleted.
+        let events = run_all(&state, "t1", id, &format!("SELECT COUNT(*) FROM {table}")).await;
+        let rows = events.of("rows");
+        let count = &rows[0]["rows"][0][0]["v"];
+        assert!(count == 300 || count == "300", "{t:?}: {count}");
+        run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;
+        state.sessions.close(id).await;
+    }
+}
+
 #[tokio::test]
 async fn ddl_refreshes_completion_cache() {
     require_db!();
@@ -444,6 +544,155 @@ async fn ddl_refreshes_completion_cache() {
         .await;
         assert!(found.is_ok(), "{t:?}: the cache was not refreshed");
         run_all(&state, "t1", id, "DROP TABLE p2_ddl_cache").await;
+        state.sessions.close(id).await;
+    }
+}
+
+/// Manual commit mode (spec §4.2e): a write begins a transaction on the tab's session;
+/// Rollback brings the rows back. MySQL DDL in it is flagged as an implicit commit.
+#[tokio::test]
+async fn rollback_in_manual_mode_restores_rows() {
+    use dnt_core::tx::TxState;
+    use dntdatabase::query_sessions::{TxAction, TxMode};
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_in(dir.path());
+    for t in Target::all() {
+        let id = open(&state, t, false).await;
+        let table = format!("p3_manual_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let count_sql = format!("SELECT COUNT(*) FROM {table}");
+        let count = |events: Arc<Events>| {
+            let rows = events.of("rows");
+            let v = rows[0]["rows"][0][0]["v"].clone();
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                .unwrap()
+        };
+        let setup = format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY);\nINSERT INTO {table} VALUES (1), (2), (3)"
+        );
+        let events = run_all(&state, "t1", id, &setup).await;
+        assert_eq!(events.of("done")[0]["stop"], Json::Null, "{t:?}");
+
+        let mode = state.sessions.query_tx_mode("t1", TxMode::Manual).await;
+        assert_eq!(mode.unwrap(), TxState::Idle, "{t:?}");
+        let events = run_all(
+            &state,
+            "t1",
+            id,
+            &format!("DELETE FROM {table} WHERE id <= 2"),
+        )
+        .await;
+        assert_eq!(
+            events.of("done")[0]["stop"],
+            Json::Null,
+            "{t:?}: {:?}",
+            events.list()
+        );
+        let info = state.sessions.query_tx_info("t1").await.unwrap();
+        assert_eq!(info.state, TxState::Active, "{t:?}");
+        assert_eq!(
+            count(run_all(&state, "t1", id, &count_sql).await),
+            1,
+            "{t:?}"
+        );
+        // Leaving Manual with the transaction open is refused.
+        let err = state
+            .sessions
+            .query_tx_mode("t1", TxMode::Auto)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, DbError::TransactionOpen), "{t:?}: {err:?}");
+
+        // MySQL DDL would commit the open transaction; PostgreSQL DDL would not.
+        let view = state
+            .sessions
+            .query_plan(
+                "t1",
+                id,
+                None,
+                &format!("ALTER TABLE {table} ADD x INT"),
+                Pick::All,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            view.stmts[0].implicit_commit,
+            t.kind() == DbKind::MySql,
+            "{t:?}"
+        );
+
+        let after = state.sessions.query_tx("t1", TxAction::Rollback).await;
+        assert_eq!(after.unwrap(), TxState::Idle, "{t:?}");
+        assert_eq!(
+            count(run_all(&state, "t1", id, &count_sql).await),
+            3,
+            "{t:?}"
+        );
+        // Reads in Manual mode open nothing.
+        let info = state.sessions.query_tx_info("t1").await.unwrap();
+        assert_eq!(info.state, TxState::Idle, "{t:?}");
+
+        // A transaction that ends mid-run (the user's COMMIT; on MySQL also DDL, which
+        // commits it) is begun again before the next write: the first UPDATE stays, the
+        // second is rolled back.
+        let side = format!("{table}_x");
+        let mut mids = vec!["COMMIT".to_string()];
+        if t.kind() == DbKind::MySql {
+            mids.push(format!("CREATE TABLE {side} (a INT)"));
+        }
+        for mid in mids {
+            let reset = format!("DELETE FROM {table};\nINSERT INTO {table} VALUES (1), (2), (3)");
+            let events = run_all(&state, "t1", id, &reset).await;
+            assert_eq!(events.of("done")[0]["stop"], Json::Null, "{t:?}");
+            let after = state.sessions.query_tx("t1", TxAction::Commit).await;
+            assert_eq!(after.unwrap(), TxState::Idle, "{t:?}");
+            let script = format!(
+                "UPDATE {table} SET id = 10 WHERE id = 1;\n{mid};\n\
+                 UPDATE {table} SET id = 20 WHERE id = 2"
+            );
+            let events = run_all(&state, "t1", id, &script).await;
+            assert_eq!(
+                events.of("done")[0]["stop"],
+                Json::Null,
+                "{t:?} {mid}: {:?}",
+                events.list()
+            );
+            let info = state.sessions.query_tx_info("t1").await.unwrap();
+            assert_eq!(
+                (info.state, info.statements),
+                (TxState::Active, 1),
+                "{t:?} {mid}"
+            );
+            let after = state.sessions.query_tx("t1", TxAction::Rollback).await;
+            assert_eq!(after.unwrap(), TxState::Idle, "{t:?}");
+            let events = run_all(
+                &state,
+                "t1",
+                id,
+                &format!("SELECT id FROM {table} ORDER BY id"),
+            )
+            .await;
+            let ids: Vec<i64> = events.of("rows")[0]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| {
+                    let v = &r[0]["v"];
+                    v.as_i64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(ids, [2, 3, 10], "{t:?} {mid}");
+        }
+        if t.kind() == DbKind::MySql {
+            run_all(&state, "t1", id, &format!("DROP TABLE {side}")).await;
+        }
+
+        let mode = state.sessions.query_tx_mode("t1", TxMode::Auto).await;
+        assert_eq!(mode.unwrap(), TxState::Idle, "{t:?}");
+        run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;
         state.sessions.close(id).await;
     }
 }

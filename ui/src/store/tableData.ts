@@ -21,6 +21,10 @@ export interface FilterRow {
 export interface FilterDraft {
   mode: FilterMode;
   rows: FilterRow[];
+  /** Raw WHERE mode: the single SQL input replaces the condition rows. */
+  rawMode?: boolean;
+  /** The typed WHERE condition (sent as raw_where). */
+  rawText?: string;
 }
 
 /** The data view of one object tab: its paging, filter, sort and the page on screen. */
@@ -108,7 +112,7 @@ export function newFilterRow(column: string, op: FilterOp = 'eq', value = ''): F
   return { id: ++rowIds, column, op, value, value2: '' };
 }
 
-export const emptyDraft = (): FilterDraft => ({ mode: 'and', rows: [] });
+export const emptyDraft = (): FilterDraft => ({ mode: 'and', rows: [], rawMode: false, rawText: '' });
 
 /** How many values each operator takes in the bar: 0, 1, 2 (BETWEEN) or a list (IN). */
 export function opArity(op: FilterOp): 0 | 1 | 2 | 'list' {
@@ -128,6 +132,10 @@ export function splitList(text: string): string[] {
 
 /** The filter AST of a draft; rows without a column are skipped. An error names the first bad row. */
 export function draftToFilter(draft: FilterDraft): { filter: DataFilter | null; error: string | null } {
+  if (draft.rawMode) {
+    const raw = (draft.rawText ?? '').trim();
+    return { filter: raw ? { mode: 'and', conditions: [], raw_where: raw } : null, error: null };
+  }
   const conditions = [];
   for (const row of draft.rows) {
     if (!row.column) continue;
@@ -246,7 +254,7 @@ export const useTableData = create<TableDataStore>()((set, get) => {
     clearFilter(tab) {
       const s = get().byTab[tab.id];
       if (!s) return;
-      patch(tab.id, { draft: { ...s.draft, rows: [] } });
+      patch(tab.id, { draft: { ...s.draft, rows: [], rawText: '' } });
       if (s.filter) go(tab, { filter: null, offset: 0, back: [] }, false);
     },
     setDraft(tab, draft) {

@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImportPreview } from '../bindings';
+import { useDataEdits } from '../store/dataEdits';
 import { useDialogs } from '../store/dialogs';
 import { useConnections } from '../store/connections';
 import { objectTabId, useTabs } from '../store/tabs';
@@ -183,5 +184,83 @@ describe('ImportDialog', () => {
     await waitFor(() => expect(open).toHaveBeenCalled());
     expect(calls()).toEqual(['file_pick_open']);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+describe('ImportDialog with staged data edits', () => {
+  /** A tab of connection `a` (the one the preview's first row overwrites) with a staged change. */
+  function stagedTabOfA() {
+    const obj = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
+    const id = objectTabId('a', obj);
+    useTabs.getState().open({ id, kind: 'object', connectionId: 'a', objectRef: obj, title: 'orders' });
+    useDataEdits.getState().setInfo(id, obj, {
+      editable: true, reason: null, key: ['id'], hidden_key: [], editable_columns: ['name'], atomic: 'yes', protection: 'row_version',
+    });
+    useDataEdits.getState().stage(id, {
+      kind: 'update',
+      row: 'r1',
+      ref: { key: [['id', { t: 'Int', v: 1 }]], original: [], xmin: null },
+      column: 'name',
+      input: { kind: 'null' },
+    });
+    return id;
+  }
+
+  async function overwriteImport() {
+    const user = userEvent.setup();
+    backend({
+      import_needs_passphrase: () => false,
+      preview_import: () => preview,
+      apply_import: () => ({ imported: 0, overwritten: 1, skipped: 0, overwritten_ids: ['a'] }),
+      list_tree: () => sampleTree(),
+    });
+    const onClose = vi.fn();
+    render(<ImportDialog onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Choose file…' }));
+    await screen.findByText('shop');
+    await user.click(screen.getByRole('radio', { name: /Overwrite/ }));
+    await user.click(screen.getByRole('button', { name: 'Import' }));
+    return { onClose };
+  }
+
+  const asked = () => {
+    const q = useDialogs.getState().question;
+    if (q?.kind !== 'discardForImport') throw new Error('expected the discardForImport question');
+    return q;
+  };
+
+  it('offers only Discard and import / Cancel import; Cancel performs no import', async () => {
+    const id = stagedTabOfA();
+    const { onClose } = await overwriteImport();
+    await waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardForImport'));
+    expect(asked().count).toBe(1);
+    asked().done(false);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Import' })).toBeEnabled());
+    expect(callsOf('apply_import')).toEqual([]);
+    expect(onClose).not.toHaveBeenCalled();
+    expect(useDataEdits.getState().hasStaged(id)).toBe(true);
+    expect(useTabs.getState().tabs).toHaveLength(1);
+  });
+
+  it('Discard and import discards the edits, closes the tabs and imports', async () => {
+    const id = stagedTabOfA();
+    const { onClose } = await overwriteImport();
+    await waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardForImport'));
+    asked().done(true);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('apply_import')).toEqual([{ path: FILE, passphrase: null, policy: 'overwrite' }]);
+    expect(useDataEdits.getState().hasStaged(id)).toBe(false);
+    expect(useTabs.getState().tabs).toHaveLength(0);
+  });
+
+  it('the question has no keep option: its buttons are Discard and import / Cancel import', async () => {
+    stagedTabOfA();
+    await overwriteImport();
+    await waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardForImport'));
+    const { DialogHost } = await import('./DialogHost');
+    render(<DialogHost />);
+    const names = (await screen.findAllByRole('button')).map((b) => b.textContent);
+    expect(names).toEqual(expect.arrayContaining(['Discard and import', 'Cancel import']));
+    expect(names).not.toContain('Keep');
   });
 });

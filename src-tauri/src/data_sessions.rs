@@ -11,7 +11,10 @@
 //!   request under the same key cancels the one still running, and
 //!   [`SessionManager::data_cancel`] cancels it on demand, through the driver's cancel
 //!   (`KILL QUERY` / PostgreSQL cancel request);
-//! - closing the connection cancels the running requests and closes the idle sessions.
+//! - closing the connection cancels the running requests and closes the idle sessions;
+//!   an edit apply (which runs on a taken session, see `edit_plans`) is registered with
+//!   [`DataSessions::register_apply`] so closing can wait for it (at most
+//!   `SessionManager::apply_close_wait`) and then cancel it.
 //!
 //! # Cancels never reach a reused session
 //!
@@ -23,32 +26,46 @@
 //! A request cancelled while its session is still opening is dropped before it starts
 //! (its fresh session, which ran nothing, does go to the pool).
 
-use crate::session_manager::{close_quietly, is_lost, lock, ConnectionRuntime, SessionManager};
+use crate::session_manager::{
+    close_quietly, config_error, is_lost, lock, ConnectionRuntime, SessionManager,
+};
 use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
 use dnt_core::error::DbError;
-use dnt_core::sql::StatementKind;
+use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, Value};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::fmt;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{watch, Notify};
 use uuid::Uuid;
 
 /// Statement timeout of a data request when the connection sets no query timeout.
 pub const DATA_READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Grace after a timeout / cancel before the driver gives the connection up.
-const DATA_CANCEL_GRACE: Duration = Duration::from_secs(5);
+pub(crate) const DATA_CANCEL_GRACE: Duration = Duration::from_secs(5);
 /// Idle data sessions kept per database.
 const IDLE_PER_DATABASE: usize = 2;
 
 /// A text / JSON cell longer than this is cut (on a char boundary).
-pub const MAX_CELL_BYTES: usize = 64 * 1024;
+pub const MAX_CELL_BYTES: usize = dnt_core::value::PAGE_CELL_CAP;
 /// A page stops taking rows once its cells add up to this.
 pub const MAX_PAGE_BYTES: usize = 32 * 1024 * 1024;
 
 struct Idle {
     session: Box<dyn Session>,
     tunnel_gen: u64,
+}
+
+/// A data session taken for one exclusive use ([`SessionManager::take_data_session`]).
+pub(crate) struct TakenSession {
+    pub session: Box<dyn Session>,
+    /// `ConnectionRuntime::tunnel_gen` when the session was opened.
+    pub tunnel_gen: u64,
+    database: Option<String>,
+    /// It came from the pool (it may have gone stale while idle).
+    pub pooled: bool,
 }
 
 /// Where the current request of a key is.
@@ -67,6 +84,48 @@ struct Request {
     phase: Phase,
 }
 
+/// How long closing waits, after cancelling a running edit apply, for it to end.
+const APPLY_ABORT_WAIT: Duration = Duration::from_secs(1);
+
+/// What closing needs of a running edit apply.
+struct ApplyCtl {
+    stop: StopSignal,
+    cancel: CancelHandle,
+    abort: Arc<Notify>,
+    /// Its sender is dropped when the apply ends.
+    done: watch::Receiver<()>,
+}
+
+impl ApplyCtl {
+    async fn ended(&mut self) {
+        // Nothing is ever sent: `changed` returns once the sender is dropped.
+        let _ = self.done.changed().await;
+    }
+}
+
+#[derive(Default)]
+struct Applies {
+    serial: u64,
+    running: HashMap<u64, ApplyCtl>,
+    /// Set by `end_applies`: no apply may start any more.
+    closing: bool,
+}
+
+/// A registered edit apply; dropping it unregisters it.
+pub(crate) struct ApplyGuard<'a> {
+    data: &'a DataSessions,
+    id: u64,
+    /// Notified when closing gives up waiting: the apply must stop now.
+    pub(crate) abort: Arc<Notify>,
+    _done: watch::Sender<()>,
+}
+
+impl Drop for ApplyGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.data.applies).running.remove(&self.id);
+    }
+}
+
 /// The data sessions of one connection runtime.
 #[derive(Default)]
 pub(crate) struct DataSessions {
@@ -75,6 +134,8 @@ pub(crate) struct DataSessions {
     /// serial) was cancelled or superseded.
     requests: Mutex<HashMap<String, Request>>,
     serial: AtomicU64,
+    /// Edit applies running on this connection.
+    applies: Mutex<Applies>,
 }
 
 /// Stops a request taken out of the map.
@@ -96,6 +157,70 @@ impl DataSessions {
         }
         let idle: Vec<Idle> = lock(&self.idle).drain().flat_map(|(_, v)| v).collect();
         futures_util::future::join_all(idle.into_iter().map(|i| close_quietly(i.session))).await;
+    }
+
+    /// Registers an edit apply about to run on `session` with `stop` in its options.
+    /// `None` once the connection is closing (`closed` is the runtime's flag, set before
+    /// `end_applies` runs): nothing may be sent then.
+    pub(crate) fn register_apply(
+        &self,
+        closed: &AtomicBool,
+        session: &dyn Session,
+        stop: &StopSignal,
+    ) -> Option<ApplyGuard<'_>> {
+        let mut applies = lock(&self.applies);
+        if applies.closing || closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        applies.serial += 1;
+        let id = applies.serial;
+        let abort = Arc::new(Notify::new());
+        let (tx, rx) = watch::channel(());
+        applies.running.insert(
+            id,
+            ApplyCtl {
+                stop: stop.clone(),
+                cancel: session.cancel_handle(),
+                abort: Arc::clone(&abort),
+                done: rx,
+            },
+        );
+        Some(ApplyGuard {
+            data: self,
+            id,
+            abort,
+            _done: tx,
+        })
+    }
+
+    /// Closing: refuses new applies, waits up to `wait` for each running one, then
+    /// cancels it (stop signal, the driver's cancel, and `abort`, which makes the apply
+    /// report what is known and close its session) and waits briefly for it to end.
+    pub(crate) async fn end_applies(&self, wait: Duration) {
+        let running: Vec<ApplyCtl> = {
+            let mut applies = lock(&self.applies);
+            applies.closing = true;
+            applies.running.drain().map(|(_, c)| c).collect()
+        };
+        futures_util::future::join_all(running.into_iter().map(|mut c| async move {
+            if tokio::time::timeout(wait, c.ended()).await.is_ok() {
+                return;
+            }
+            tracing::warn!("an edit apply is still running; cancelling it to close");
+            c.stop.stop();
+            c.abort.notify_one();
+            let cancel = Arc::clone(&c.cancel);
+            tokio::spawn(async move {
+                let _ = cancel.cancel().await;
+            });
+            if tokio::time::timeout(APPLY_ABORT_WAIT, c.ended())
+                .await
+                .is_err()
+            {
+                tracing::warn!("a cancelled edit apply did not end; closing without it");
+            }
+        }))
+        .await;
     }
 
     /// Cancels the request of `key` (running or still opening); whether there was one.
@@ -178,11 +303,14 @@ fn cut(s: &mut String, max: usize) -> bool {
     true
 }
 
-/// `v` with long text cut to `max` bytes; whether anything was cut.
+/// `v` with long text cut to `max` bytes; whether the cell is now incomplete: text was
+/// cut here, or a binary value came from the driver as a shorter preview (rule 8: a
+/// cell that is not whole is never written from).
 fn truncate_cell(v: &mut Value, max: usize) -> bool {
     match v {
         Value::Text(s) | Value::Json(s) => cut(s, max),
         Value::Other { text, .. } => cut(text, max),
+        Value::Bytes { preview, len } => (preview.len() as u64) < *len,
         // Every item is cut (no short circuit).
         Value::Array(items) => {
             items
@@ -205,8 +333,10 @@ pub struct BoundedPage {
     pub columns: Vec<ColumnMeta>,
     pub rows: Vec<Vec<Value>>,
     pub bytes: usize,
-    /// Cells that were cut.
+    /// Cells of the kept rows that were cut.
     pub truncated_cells: u32,
+    /// Where those cells are: `(row, column)` indexes into `rows`.
+    pub truncated: Vec<(u32, u32)>,
     /// Rows were left out because the page reached `page_cap`.
     pub capped: bool,
     results: usize,
@@ -221,10 +351,16 @@ impl BoundedPage {
             rows: Vec::new(),
             bytes: 0,
             truncated_cells: 0,
+            truncated: Vec::new(),
             capped: false,
             results: 0,
         }
     }
+}
+
+/// An index as a page coordinate (pages are far smaller than `u32::MAX`).
+fn coord(i: usize) -> u32 {
+    u32::try_from(i).unwrap_or(u32::MAX)
 }
 
 impl RowSink for BoundedPage {
@@ -243,9 +379,10 @@ impl RowSink for BoundedPage {
                 return;
             }
             let mut size = 0;
-            for cell in &mut row {
+            let mut cut = Vec::new();
+            for (col, cell) in row.iter_mut().enumerate() {
                 if truncate_cell(cell, self.cell_cap) {
-                    self.truncated_cells = self.truncated_cells.saturating_add(1);
+                    cut.push(coord(col));
                 }
                 size += cell_bytes(cell);
             }
@@ -254,6 +391,9 @@ impl RowSink for BoundedPage {
                 self.capped = true;
                 return;
             }
+            let r = coord(self.rows.len());
+            self.truncated_cells = self.truncated_cells.saturating_add(coord(cut.len()));
+            self.truncated.extend(cut.into_iter().map(|c| (r, c)));
             self.bytes += size;
             self.rows.push(row);
         }
@@ -261,12 +401,32 @@ impl RowSink for BoundedPage {
     fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
+/// Builds a read from the dialect of the session it runs on (a raw `WHERE` must be
+/// lexed the way that session's server will read it). An error is returned before
+/// anything is sent.
+pub type BuildRead = dyn Fn(Dialect) -> Result<String, DbError> + Send + Sync;
+
+/// A read built around the user's raw `WHERE` text (see [`DataRequest::raw`]).
+#[derive(Clone)]
+pub struct RawRead(pub Arc<BuildRead>);
+
+impl fmt::Debug for RawRead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RawRead(..)")
+    }
+}
+
 /// One statement for [`SessionManager::data_exec`].
 #[derive(Debug, Clone, Default)]
 pub struct DataRequest {
     /// ONE read statement: built by the backend, or a user statement the plan / guard
-    /// classified as a read (export).
+    /// classified as a read (export). Ignored when `raw` is set.
     pub sql: String,
+    /// A read around the user's raw `WHERE` text, built with the session's dialect, then
+    /// run inside a read-only transaction that is always rolled back: PostgreSQL
+    /// `BEGIN READ ONLY` (after checking `standard_conforming_strings` is on, which the
+    /// raw text was lexed under), MySQL `START TRANSACTION READ ONLY`.
+    pub raw: Option<RawRead>,
     /// Bound values (see `ExecOptions::params`).
     pub params: Vec<String>,
     pub max_rows: usize,
@@ -331,14 +491,25 @@ impl SessionManager {
         params: Vec<String>,
         max_rows: usize,
     ) -> Result<BoundedPage, DbError> {
-        let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
         let request = DataRequest {
             sql: sql.to_string(),
             params,
             max_rows,
             ..DataRequest::default()
         };
-        self.data_exec(id, db, key, &request, &mut page).await?;
+        self.data_read_request(id, db, key, &request).await
+    }
+
+    /// [`Self::data_read`] of any [`DataRequest`] (e.g. a raw `WHERE` read).
+    pub async fn data_read_request(
+        &self,
+        id: Uuid,
+        db: Option<&str>,
+        key: &str,
+        request: &DataRequest,
+    ) -> Result<BoundedPage, DbError> {
+        let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
+        self.data_exec(id, db, key, request, &mut page).await?;
         Ok(page)
     }
 
@@ -415,9 +586,7 @@ impl SessionManager {
                 full_bytes: request.full_bytes,
                 ..ExecOptions::default()
             };
-            let outcome = session
-                .execute_one(&request.sql, StatementKind::Read, &opts, &mut sink)
-                .await;
+            let outcome = run_request(session.as_ref(), request, &opts, &mut sink).await;
             // A pooled session that went stale while idle (server restart, idle timeout):
             // one more attempt on a fresh session, unless the request was cancelled or
             // something already reached the sink.
@@ -426,9 +595,17 @@ impl SessionManager {
                 continue;
             }
             // Only a session whose request was never cancelled goes back to the pool: a
-            // cancel sent for it may still land on whatever runs there next.
+            // cancel sent for it may still land on whatever runs there next. A raw
+            // `WHERE` read never does either: the user's condition may have left session
+            // state that its ROLLBACK does not undo (a MySQL `GET_LOCK`, a PostgreSQL
+            // session advisory lock, a sequence's `currval`).
             let current = data.finish(key, serial);
-            if outcome.is_ok() && current && reusable(&rt) {
+            if outcome.is_ok()
+                && current
+                && request.raw.is_none()
+                && reusable(&rt)
+                && !session.in_transaction()
+            {
                 give_back(
                     &rt,
                     database,
@@ -440,7 +617,7 @@ impl SessionManager {
             } else {
                 tokio::spawn(close_quietly(session));
             }
-            return outcome.map(|_| ());
+            return outcome;
         }
     }
 
@@ -450,6 +627,65 @@ impl SessionManager {
         self.runtime_opt(id).is_some_and(|rt| rt.data.cancel(key))
     }
 
+    /// A data session of `db` for one exclusive use outside the request keys (an edit
+    /// preview or apply): an idle pooled one, else a fresh one. Nothing is retried here;
+    /// give it back with [`Self::return_data_session`].
+    pub(crate) async fn take_data_session(
+        &self,
+        rt: &ConnectionRuntime,
+        db: Option<&str>,
+    ) -> Result<TakenSession, DbError> {
+        let database = db.map(str::to_string);
+        let (session, tunnel_gen, pooled) = match take_idle(rt, &database) {
+            Some(idle) => (idle.session, idle.tunnel_gen, true),
+            None => {
+                let (session, gen) = rt.open_query_session(database.clone()).await?;
+                (session, gen, false)
+            }
+        };
+        Ok(TakenSession {
+            session,
+            tunnel_gen,
+            database,
+            pooled,
+        })
+    }
+
+    /// Gives a taken session back to the pool when `clean` (it ran to the end, nothing
+    /// failed on it), its transaction is closed and its connection still current;
+    /// otherwise closes it.
+    pub(crate) fn return_data_session(
+        &self,
+        rt: &ConnectionRuntime,
+        taken: TakenSession,
+        clean: bool,
+    ) {
+        let reusable = clean
+            && !taken.session.in_transaction()
+            && !rt.closed.load(Ordering::SeqCst)
+            && !rt.tunnel_dead()
+            && taken.tunnel_gen == rt.tunnel_gen.load(Ordering::SeqCst);
+        if reusable {
+            give_back(
+                rt,
+                taken.database,
+                Idle {
+                    session: taken.session,
+                    tunnel_gen: taken.tunnel_gen,
+                },
+            );
+        } else {
+            tokio::spawn(close_quietly(taken.session));
+        }
+    }
+
+    /// Overrides how long closing a connection waits for a running edit apply before it
+    /// cancels it (default `SLOT_CLOSE_WAIT`; tests).
+    pub fn with_apply_close_wait(mut self, wait: Duration) -> Self {
+        self.apply_close_wait = wait;
+        self
+    }
+
     /// Overrides [`DATA_READ_TIMEOUT`] and the page bounds (tests).
     pub fn with_data_limits(mut self, timeout: Duration, cell_cap: usize, page_cap: usize) -> Self {
         self.data_timeout = timeout;
@@ -457,6 +693,97 @@ impl SessionManager {
         self.data_page_cap = page_cap;
         self
     }
+}
+
+/// Keeps the first cell of a result (`SHOW …`); drops everything else.
+#[derive(Default)]
+pub(crate) struct FirstCell(pub Option<Value>);
+
+impl RowSink for FirstCell {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        if self.0.is_none() {
+            self.0 = batch.into_iter().next().and_then(|r| r.into_iter().next());
+        }
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+/// Runs `request` on `session` (see [`DataRequest::raw`]).
+async fn run_request(
+    session: &dyn Session,
+    request: &DataRequest,
+    opts: &ExecOptions,
+    sink: &mut dyn RowSink,
+) -> Result<(), DbError> {
+    let Some(raw) = &request.raw else {
+        return session
+            .execute_one(&request.sql, StatementKind::Read, opts, sink)
+            .await
+            .map(|_| ());
+    };
+    let dialect = session.dialect();
+    // Checked and built before anything is sent.
+    let sql = (raw.0)(dialect)?;
+    let aux = ExecOptions {
+        max_rows: 1,
+        params: Vec::new(),
+        ..opts.clone()
+    };
+    let begin = match dialect {
+        Dialect::Postgres => {
+            // The raw text was lexed with standard strings (`'\'` is a whole string).
+            let mut scs = FirstCell::default();
+            session
+                .execute_one(
+                    "SHOW standard_conforming_strings",
+                    StatementKind::Read,
+                    &aux,
+                    &mut scs,
+                )
+                .await?;
+            match scs.0 {
+                Some(Value::Text(s)) if s.eq_ignore_ascii_case("on") => {}
+                _ => {
+                    return Err(config_error(
+                        "filter",
+                        "the server has standard_conforming_strings off: a raw WHERE filter \
+                         cannot be checked safely on this connection",
+                    ))
+                }
+            }
+            "BEGIN READ ONLY"
+        }
+        Dialect::MySql(_) => "START TRANSACTION READ ONLY",
+    };
+    session
+        .execute_one(
+            begin,
+            StatementKind::Transaction(TxControl::Begin),
+            &aux,
+            &mut FirstCell::default(),
+        )
+        .await?;
+    let read = session
+        .execute_one(&sql, StatementKind::Read, opts, sink)
+        .await;
+    // Always rolled back: nothing it did may stay. A stopped request's session is closed
+    // instead (it is never pooled), which ends the transaction as well.
+    let rollback = if opts.stop.is_stopped() {
+        Ok(())
+    } else {
+        session
+            .execute_one(
+                "ROLLBACK",
+                StatementKind::Transaction(TxControl::Rollback),
+                &aux,
+                &mut FirstCell::default(),
+            )
+            .await
+            .map(|_| ())
+    };
+    read?;
+    rollback
 }
 
 /// An idle session of `database` that is still usable (others are closed).
@@ -532,6 +859,71 @@ mod tests {
         assert_eq!(page.rows.len(), 2);
         assert_eq!(page.bytes, 20);
         assert!(page.capped);
+    }
+
+    #[test]
+    fn bounded_page_records_truncated_cells() {
+        let mut page = BoundedPage::new(4, 1000);
+        page.result_start(&[]);
+        page.rows(vec![
+            vec![
+                Value::Int(1),
+                Value::Text("short".into()),
+                Value::Text("ab".into()),
+            ],
+            vec![
+                Value::Int(2),
+                Value::Text("ok".into()),
+                Value::Json("[1,2,3]".into()),
+            ],
+        ]);
+        page.rows(vec![vec![
+            Value::Text("longer".into()),
+            Value::Null,
+            Value::Array(vec![Value::Text("abcdef".into())]),
+        ]]);
+        assert_eq!(page.truncated, [(0, 1), (1, 2), (2, 0), (2, 2)]);
+        assert_eq!(page.truncated_cells, 4);
+
+        // A row left out by the page cap records nothing.
+        let mut page = BoundedPage::new(4, 5);
+        page.result_start(&[]);
+        page.rows(vec![
+            vec![Value::Text("abcdefgh".into())],
+            vec![Value::Text("ijklmnop".into())],
+        ]);
+        assert_eq!(page.rows.len(), 1);
+        assert!(page.capped);
+        assert_eq!(page.truncated, [(0, 0)]);
+        assert_eq!(page.truncated_cells, 1);
+    }
+
+    #[test]
+    fn bounded_page_records_binary_previews_as_truncated() {
+        let mut page = BoundedPage::new(100, 1_000_000);
+        page.result_start(&[]);
+        page.rows(vec![vec![
+            Value::Int(1),
+            // A 1000-byte value delivered as its 64-byte preview.
+            Value::Bytes {
+                len: 1000,
+                preview: vec![7; 64],
+            },
+            // A whole small value is not cut.
+            Value::Bytes {
+                len: 3,
+                preview: vec![1, 2, 3],
+            },
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Bytes {
+                    len: 500,
+                    preview: vec![0; 64],
+                },
+            ]),
+        ]]);
+        assert_eq!(page.truncated, [(0, 1), (0, 3)]);
+        assert_eq!(page.truncated_cells, 2);
     }
 
     #[test]

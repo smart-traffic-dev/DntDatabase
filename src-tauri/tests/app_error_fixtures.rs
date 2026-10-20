@@ -426,6 +426,14 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
     out.insert("busy", DbError::Busy.into());
     out.insert("transaction_open", DbError::TransactionOpen.into());
     out.insert("plan_expired", DbError::PlanExpired.into());
+    // Data view edits: the table or connection changed between preview and apply.
+    out.insert(
+        "plan_stale",
+        DbError::PlanStale {
+            reason: "the table's structure changed".into(),
+        }
+        .into(),
+    );
     out.insert("blocked", DbError::Blocked { count: 2 }.into());
     out.insert(
         "confirmation_required",

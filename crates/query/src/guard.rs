@@ -15,10 +15,15 @@
 //!
 //! On top of that table, a statement that runs and changes every row of a table
 //! ([`crate::unbounded`]: `UPDATE`/`DELETE` without WHERE or with an always-true one,
-//! `TRUNCATE`) is at least Confirm on EVERY connection: always on Production, and
-//! elsewhere while [`GuardCtx::confirm_unbounded`] (the "Confirm UPDATE/DELETE without
-//! WHERE" setting, on by default) is set. A plain Explain runs nothing and is not
+//! `TRUNCATE`) is at least Confirm: always on Production and Staging, and on Local and
+//! untagged connections while [`GuardCtx::confirm_unbounded`] (the "Confirm UPDATE/DELETE
+//! without WHERE" setting, on by default) is set. A plain Explain runs nothing and is not
 //! affected; read-only Block stays Block.
+//!
+//! Spec §4.3 adds ([`crate::risk`]): a `DROP` of an object is Confirm on Staging;
+//! `DROP DATABASE` / `DROP SCHEMA` is Confirm on every connection; and on
+//! Production a Confirm statement that changes every row of a table or drops something
+//! carries [`crate::plan::PlannedStmt::confirm_name`], the name the user must type.
 //!
 //! A planned statement that holds several statements for the server (a MySQL
 //! `DELIMITER` left on, see [`resplits`]) gets the strictest verdict over all of
@@ -33,6 +38,7 @@ use dnt_core::sql::{
 };
 
 use crate::plan::{ScriptPlan, Verdict};
+use crate::risk::DropKind;
 
 /// Sets the verdict of every statement in `plan`.
 ///
@@ -65,6 +71,12 @@ pub fn guard_with(plan: &mut ScriptPlan, ctx: GuardCtx) {
     let (dialect, explain) = (plan.dialect, plan.explain);
     for s in &mut plan.stmts {
         s.verdict = stmt_verdict(&s.text, s.kind, dialect, explain, ctx);
+        // Production asks the name of what a risky statement changes or drops.
+        s.confirm_name = if ctx.env == Some(EnvTag::Production) && s.verdict == Verdict::Confirm {
+            crate::risk::confirm_name(&s.unbounded, &s.drops)
+        } else {
+            None
+        };
     }
     plan.guard = Some(ctx);
 }
@@ -75,8 +87,8 @@ pub struct GuardCtx {
     pub env: Option<EnvTag>,
     pub read_only: bool,
     pub analyze: bool,
-    /// Confirm unbounded writes on a connection that is not Production (the "Confirm
-    /// UPDATE/DELETE without WHERE" setting). Production always confirms them.
+    /// Confirm unbounded writes on Local and untagged connections (the "Confirm
+    /// UPDATE/DELETE without WHERE" setting). Production and Staging always confirm them.
     pub confirm_unbounded: bool,
 }
 
@@ -111,13 +123,38 @@ pub(crate) fn stmt_verdict(
     } else {
         verdict(text, kind, dialect, env, read_only)
     };
-    if v == Verdict::Allow
-        && (confirm_unbounded || env == Some(EnvTag::Production))
-        && crate::unbounded::is_unbounded(text, dialect)
-    {
+    if v != Verdict::Allow {
+        return v;
+    }
+    // §4.3: a write that changes every row of a table (UPDATE / DELETE without WHERE,
+    // TRUNCATE) is confirmed on Production and Staging whatever the setting; the setting
+    // decides on Local and untagged connections (R43).
+    let writes = crate::unbounded::unbounded_writes(text, dialect);
+    let tagged = matches!(env, Some(EnvTag::Production | EnvTag::Staging));
+    if !writes.is_empty() && (confirm_unbounded || tagged) {
         return Verdict::Confirm;
     }
+    // §4.3: a DROP of an object is confirmed on Staging (Production confirms it as DDL
+    // already); DROP DATABASE / SCHEMA everywhere.
+    if mentions_drop(text) {
+        let drops = crate::risk::drop_targets(text, dialect);
+        let staging_object =
+            env == Some(EnvTag::Staging) && drops.iter().any(|d| d.kind == DropKind::Object);
+        let database = drops
+            .iter()
+            .any(|d| matches!(d.kind, DropKind::Database | DropKind::Schema));
+        if staging_object || database {
+            return Verdict::Confirm;
+        }
+    }
     v
+}
+
+/// A cheap pre-check before lexing for `DROP`: whether `text` holds the letters.
+fn mentions_drop(text: &str) -> bool {
+    text.as_bytes()
+        .windows(4)
+        .any(|w| w.eq_ignore_ascii_case(b"drop"))
 }
 
 /// The §5.1 verdict of one statement: the strictest over its [`readings`], each
@@ -259,7 +296,7 @@ fn rank(v: Verdict) -> u8 {
     }
 }
 
-fn strictest(a: Verdict, b: Verdict) -> Verdict {
+pub(crate) fn strictest(a: Verdict, b: Verdict) -> Verdict {
     if rank(b) > rank(a) {
         b
     } else {
@@ -370,7 +407,7 @@ const READ_ONLY_VARS: [&str; 3] = [
 /// The body of a quoted token, or `None` when it is unterminated or not quoted:
 /// `'…'`, `"…"`, `` `…` `` (a doubled quote stands for one), `E'…'` (backslashes
 /// dropped) and `$tag$…$tag$`.
-fn unquote(q: &str) -> Option<String> {
+pub(crate) fn unquote(q: &str) -> Option<String> {
     let b = q.as_bytes();
     match *b.first()? {
         c @ (b'\'' | b'"' | b'`') => (q.len() >= 2 && b[q.len() - 1] == c).then(|| {
@@ -1206,10 +1243,12 @@ DELIMITER ;";
         for d in BOTH {
             for env in envs {
                 let prod = env == Some(EnvTag::Production);
+                let staging = env == Some(EnvTag::Staging);
                 for setting in [true, false] {
                     for &s in UNBOUNDED {
-                        // Production always confirms; elsewhere the setting decides.
-                        let want = if prod || setting { C } else { A };
+                        // Production and Staging always confirm (§4.3, R43); the setting
+                        // decides on Local and untagged connections only.
+                        let want = if prod || staging || setting { C } else { A };
                         assert_eq!(
                             judged(s, *d, ctx(env, false, setting)),
                             [want],
@@ -1310,6 +1349,161 @@ DELIMITER ;";
             // The flag is still there for the UI.
             assert_eq!(p.stmts[0].unbounded.len(), 1);
         }
+    }
+
+    /// Verdict and typed name of a one-statement plan.
+    fn judged_named(text: &str, d: Dialect, c: GuardCtx) -> (Verdict, Option<String>) {
+        let mut p = plan(text, Target::All, d);
+        guard_with(&mut p, c);
+        assert_eq!(p.stmts.len(), 1, "{text}");
+        (p.stmts[0].verdict, p.stmts[0].confirm_name.clone())
+    }
+
+    /// §4.3: DROP / TRUNCATE by env tag (Local, untagged, Staging, Production) and
+    /// setting; read-only blocks everything.
+    #[test]
+    fn drop_matrix_by_env() {
+        let n = |s: &str| Some(s.to_string());
+        type Row = (&'static str, [(Verdict, Option<&'static str>); 4]);
+        // Columns: Local, None, Staging, Production (setting off: only the table decides).
+        let rows: &[Row] = &[
+            (
+                "DROP TABLE IF EXISTS a, `b`",
+                [(A, None), (A, None), (C, None), (C, Some("a"))],
+            ),
+            (
+                "DROP VIEW shop.v",
+                [(A, None), (A, None), (C, None), (C, Some("shop.v"))],
+            ),
+            (
+                "/*!40000 DROP TABLE t */",
+                [(A, None), (A, None), (C, None), (C, Some("t"))],
+            ),
+            (
+                "TRUNCATE `orders`",
+                [(A, None), (A, None), (C, None), (C, Some("orders"))],
+            ),
+            (
+                "DROP DATABASE shop",
+                [(C, None), (C, None), (C, None), (C, Some("shop"))],
+            ),
+            (
+                "DROP SCHEMA `Sales`",
+                [(C, None), (C, None), (C, None), (C, Some("Sales"))],
+            ),
+            (
+                "/*!32312 DROP DATABASE d */",
+                [(C, None), (C, None), (C, None), (C, Some("d"))],
+            ),
+            // Not risky: Production confirms a write but needs no typed name.
+            (
+                "DELETE FROM t WHERE id = 1",
+                [(A, None), (A, None), (A, None), (C, None)],
+            ),
+            (
+                "CREATE TABLE t (a int)",
+                [(A, None), (A, None), (A, None), (C, None)],
+            ),
+            ("SELECT 'DROP DATABASE d'", [(A, None); 4]),
+        ];
+        let envs = [
+            Some(EnvTag::Local),
+            None,
+            Some(EnvTag::Staging),
+            Some(EnvTag::Production),
+        ];
+        for (s, want) in rows {
+            for (env, (v, name)) in envs.iter().zip(want) {
+                assert_eq!(
+                    judged_named(s, MY, ctx(*env, false, false)),
+                    (*v, name.map(str::to_string)),
+                    "{s} {env:?}"
+                );
+                // Read-only blocks whatever the tag, and asks no name.
+                if *s != "SELECT 'DROP DATABASE d'" {
+                    assert_eq!(
+                        judged_named(s, MY, ctx(*env, true, false)),
+                        (B, None),
+                        "{s} {env:?} ro"
+                    );
+                }
+            }
+        }
+        // PG quoting.
+        assert_eq!(
+            judged_named(
+                r#"DROP SCHEMA "Sales" CASCADE"#,
+                PG,
+                ctx(Some(EnvTag::Production), false, true)
+            ),
+            (C, n("Sales"))
+        );
+        assert_eq!(
+            judged_named("DROP DATABASE d", PG, ctx(None, false, false)),
+            (C, None)
+        );
+        // With the setting on, TRUNCATE is confirmed on Local too (the unbounded rule).
+        assert_eq!(
+            judged_named("TRUNCATE t", MY, ctx(Some(EnvTag::Local), false, true)),
+            (C, None)
+        );
+        // A DROP in a forgotten-delimiter piece counts.
+        assert_eq!(
+            judged_named(
+                "DELIMITER $$\nSELECT 1; DROP DATABASE d;",
+                MY,
+                ctx(Some(EnvTag::Local), false, false)
+            ),
+            (C, None)
+        );
+        // A routine body's DROP does not.
+        assert_eq!(
+            judged_named(
+                "DELIMITER $$\nCREATE PROCEDURE p() BEGIN DROP TABLE t; END$$",
+                MY,
+                ctx(Some(EnvTag::Staging), false, false)
+            ),
+            (A, None)
+        );
+    }
+
+    #[test]
+    fn production_unbounded_requires_typed_table() {
+        let prod = ctx(Some(EnvTag::Production), false, false);
+        for (s, d, name) in [
+            ("DELETE FROM orders", MY, "orders"),
+            ("UPDATE `shop`.`orders` SET a = 1", MY, "shop.orders"),
+            (
+                "DELETE FROM t1, t2 USING t1 JOIN t2 ON t1.id = t2.id",
+                MY,
+                "t1",
+            ),
+            (r#"DELETE FROM "Orders" WHERE 1 = 1"#, PG, "Orders"),
+            ("UPDATE t SET a = 1", PG, "t"),
+        ] {
+            assert_eq!(judged_named(s, d, prod), (C, Some(name.to_string())), "{s}");
+        }
+        // Elsewhere the setting confirms without a typed name.
+        for env in [Some(EnvTag::Staging), Some(EnvTag::Local), None] {
+            assert_eq!(
+                judged_named("DELETE FROM orders", MY, ctx(env, false, true)),
+                (C, None)
+            );
+        }
+        // Plain Explain runs nothing: no confirmation, no name.
+        let mut p = plan("DELETE FROM orders", Target::All, MY);
+        p.explain = true;
+        guard_with(&mut p, prod);
+        assert_eq!(
+            (p.stmts[0].verdict, p.stmts[0].confirm_name.clone()),
+            (A, None)
+        );
+        // Judged again with another context, the name follows.
+        let mut p = plan("DELETE FROM orders", Target::All, MY);
+        guard_with(&mut p, prod);
+        assert!(p.stmts[0].confirm_name.is_some());
+        guard_with(&mut p, ctx(Some(EnvTag::Local), false, true));
+        assert_eq!(p.stmts[0].confirm_name, None);
     }
 
     #[test]

@@ -47,7 +47,7 @@ export function FilterBar({ columns, draft, active, error, onChange, onApply, on
   useImperativeHandle(handle, () => ({
     focus() {
       // The first value box, else the first column, else "+ Condition".
-      for (const selector of ['.fb-value', '.fb-row select', '.fb-add']) {
+      for (const selector of ['.fb-raw', '.fb-value', '.fb-row select', '.fb-add']) {
         const el = root.current?.querySelector<HTMLElement>(selector);
         if (el) {
           el.focus();
@@ -69,33 +69,64 @@ export function FilterBar({ columns, draft, active, error, onChange, onApply, on
     }
   };
 
+  const raw = draft.rawMode === true;
+  const rawText = draft.rawText ?? '';
+
   return (
     <div className="filter-bar" role="search" aria-label="Filter" ref={root}>
       <div className="fb-head">
-        <label className="fb-mode">
-          <span>Match</span>
-          <select
-            className="qt-select"
-            aria-label="Match conditions"
-            value={draft.mode}
-            onChange={(e) => onChange({ ...draft, mode: e.target.value as FilterMode })}
-          >
-            <option value="and">all (AND)</option>
-            <option value="or">any (OR)</option>
-          </select>
-        </label>
-        <button type="button" className="qt-btn fb-add" onClick={add} disabled={columns.length === 0}>
-          + Condition
+        {raw ? null : (
+          <>
+            <label className="fb-mode">
+              <span>Match</span>
+              <select
+                className="qt-select"
+                aria-label="Match conditions"
+                value={draft.mode}
+                onChange={(e) => onChange({ ...draft, mode: e.target.value as FilterMode })}
+              >
+                <option value="and">all (AND)</option>
+                <option value="or">any (OR)</option>
+              </select>
+            </label>
+            <button type="button" className="qt-btn fb-add" onClick={add} disabled={columns.length === 0}>
+              + Condition
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          className={`qt-btn${raw ? ' dv-on' : ''}`}
+          aria-pressed={raw}
+          title="Type the WHERE condition as SQL"
+          onClick={() => onChange({ ...draft, rawMode: !raw })}
+        >
+          Raw WHERE
         </button>
         <span className="spacer" />
         <button type="button" className="qt-btn" onClick={onApply}>
           Apply
         </button>
-        <button type="button" className="qt-btn" onClick={onClear} disabled={!active && draft.rows.length === 0}>
+        <button type="button" className="qt-btn" onClick={onClear} disabled={!active && (raw ? rawText === '' : draft.rows.length === 0)}>
           Clear
         </button>
       </div>
-      {draft.rows.map((row, i) => {
+      {raw ? (
+        <div className="fb-row">
+          <span className="fb-and">WHERE</span>
+          <input
+            className="fb-raw"
+            aria-label="Raw WHERE"
+            placeholder="total > 100 AND status = 'paid'"
+            spellCheck={false}
+            autoComplete="off"
+            value={rawText}
+            onChange={(e) => onChange({ ...draft, rawText: e.target.value })}
+            onKeyDown={onKeyDown}
+          />
+        </div>
+      ) : null}
+      {(raw ? [] : draft.rows).map((row, i) => {
         const arity = opArity(row.op);
         const n = i + 1;
         return (

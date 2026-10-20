@@ -1,11 +1,51 @@
+import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataEdits';
+import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs, type Tab } from '../store/tabs';
 
 /** A query tab closes through its guards (open transaction, unsaved file), then drops its row. */
 export async function closeTab(tab: Tab): Promise<boolean> {
   if (tab.kind === 'query') return useQueryDocs.getState().closeTab(tab.id);
+  // Staged data edits are thrown away with the tab: ask first.
+  if (useDataEdits.getState().hasStaged(tab.id) && !(await confirmDiscard(tab.id))) return false;
   useTabs.getState().close(tab.id);
   return true;
+}
+
+/**
+ * Asks before the object tabs of a connection that is going away (deleted, replaced by an import)
+ * lose their staged data edits; false when the user keeps them.
+ */
+export function confirmDiscardConnection(connectionId: string): Promise<boolean> {
+  const ids = useTabs
+    .getState()
+    .tabs.filter((t) => t.kind === 'object' && t.connectionId === connectionId)
+    .map((t) => t.id);
+  return confirmDiscardMany(ids);
+}
+
+/**
+ * An import that overwrites `connectionIds` while their tabs hold staged data edits: the only
+ * choices are "Discard and import" (true; the edits are discarded) and "Cancel import" (false).
+ */
+export function confirmDiscardForImport(connectionIds: string[]): Promise<boolean> {
+  const ids = useTabs
+    .getState()
+    .tabs.filter((t) => t.kind === 'object' && connectionIds.includes(t.connectionId))
+    .map((t) => t.id);
+  const count = ids.reduce((n, id) => n + useDataEdits.getState().changeCount(id), 0);
+  if (count === 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    useDialogs.getState().ask({
+      kind: 'discardForImport',
+      count,
+      done: (discard) => {
+        useDialogs.getState().answer();
+        if (discard) for (const id of ids) useDataEdits.getState().discard(id);
+        resolve(discard);
+      },
+    });
+  });
 }
 
 /** Closes `tabs` one after another (each query tab may ask a question first); stops when the user cancels one. */

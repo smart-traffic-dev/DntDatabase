@@ -5,6 +5,7 @@ import {
   GridCellKind,
   type DataEditorRef,
   type DrawHeaderCallback,
+  type EditableGridCell,
   type GridCell,
   type GridColumn,
   type GridSelection,
@@ -27,6 +28,7 @@ import {
   cellView,
   charsForWidth,
   copyText,
+  editText,
   fitCellText,
   fitColumnWidth,
   type GridFont,
@@ -43,7 +45,7 @@ import {
   type Engine,
 } from './gridCopy';
 import { findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
-import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize } from './gridSelection';
+import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, type SelectionLike } from './gridSelection';
 import { selectionStats } from './selectionStats';
 import { GridStats } from './GridStats';
 import { RecordView } from './RecordView';
@@ -129,7 +131,13 @@ function useThemeVersion(): number {
   return version;
 }
 
-function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme>; font: GridFont; charPx: number } {
+function buildTheme(): {
+  theme: Partial<Theme>;
+  nullStyle: Partial<Theme>;
+  statusStyle: Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>;
+  font: GridFont;
+  charPx: number;
+} {
   const muted = cssVar('--muted', '#5a6370');
   const size = codeFontSizes();
   const family = monoFontFamily();
@@ -159,6 +167,13 @@ function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme>; font:
       headerFontStyle: `600 ${size.header}px`,
     },
     nullStyle: { textDark: muted, baseFontStyle: `italic ${size.body}px` },
+    // Staged changes: the same tokens as the `dnt-*` classes of dataEdit.css.
+    statusStyle: {
+      edited: { bgCell: cssVar('--warning-bg', '#fff4d6'), textDark: cssVar('--warning-fg', '#7a4b00') },
+      new: { bgCell: cssVar('--sel', '#e3ebfa') },
+      deleted: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
+      conflict: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
+    } satisfies Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>,
     font,
     charPx: bodyCharPx(font.body),
   };
@@ -266,6 +281,20 @@ interface Notice {
   warn: boolean;
 }
 
+/** In-place editing of the data view (absent: the grid is read-only). */
+export interface GridEditing {
+  /** Whether the cell takes typed edits (else it is read-only). */
+  isEditable(row: number, col: number): boolean;
+  /** How the cell differs from the server (painted), or null. */
+  status(row: number, col: number): 'edited' | 'new' | 'deleted' | 'conflict' | null;
+  /** A typed value was committed in a cell. */
+  onEdit(row: number, col: number, text: string): void;
+  /** Enter / double click on a cell (a read-only cell can open a viewer). */
+  onActivate?(row: number, col: number): void;
+  /** A key pressed on the grid, with the selected cell; true when it was handled. */
+  onKey?(e: { key: string; ctrlKey: boolean; metaKey: boolean; shiftKey: boolean; altKey: boolean }, cell: { row: number; col: number } | null): boolean;
+}
+
 /**
  * Result of one statement in a Glide grid; cells are read straight from the chunks.
  * Optional (the data view): `onHeaderClicked` gets the clicked column's index,
@@ -285,7 +314,13 @@ export function ResultGrid({
   tableRef,
   cellsCapped = false,
   extraCellMenu,
+  editing,
+  onOpenValue,
 }: {
+  /** Opens the value of a cell in the data view's editor (Shift+Enter, "Open value editor"). */
+  onOpenValue?: (row: number, col: number) => void;
+  /** The data view's editing hooks. */
+  editing?: GridEditing;
   result: ResultSet;
   onHeaderClicked?: (column: number) => void;
   headerMarks?: Record<number, string>;
@@ -297,11 +332,11 @@ export function ResultGrid({
   /** The page reports cells cut at 64 KB: copying text of that size as INSERT is refused. */
   cellsCapped?: boolean;
   /** Entries appended to the cell context menu. */
-  extraCellMenu?: (ctx: { row: number; col: number; value: unknown; column: string }) => MenuEntry[];
+  extraCellMenu?: (ctx: { row: number; col: number; value: unknown; column: string; selection?: SelectionLike }) => MenuEntry[];
 }) {
   const themeVersion = useThemeVersion();
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
-  const { theme, nullStyle, font, charPx } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
+  const { theme, nullStyle, statusStyle, font, charPx } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const say = useCallback((text: string, warn: boolean) => {
@@ -355,18 +390,34 @@ export function ResultGrid({
       const view = cellView(value);
       const max = charsForWidth(widths[col] ?? MIN_COL_WIDTH, charPx);
       const clipped = view.text.length > max;
+      const status = editing?.status(row, col) ?? null;
+      const editable = editing?.isEditable(row, col) ?? false;
       return {
         kind: GridCellKind.Text,
-        data: view.text,
+        // The overlay edits the value as stored, never the display text (compacted JSON, cut text).
+        data: editable ? (editText(value) ?? view.text) : view.text,
         displayData: fitCellText(view, max).replace(/\s+/g, ' '),
-        allowOverlay: true, // read-only overlay shows the full value
-        readonly: true,
+        allowOverlay: true, // a read-only overlay shows the full value
+        readonly: !editable,
         // A clipped number keeps its leading digits (left side) and gets an ellipsis.
         contentAlign: view.kind === 'number' && !clipped ? 'right' : 'left',
-        themeOverride: view.kind === 'null' ? nullStyle : undefined,
+        themeOverride: status ? { ...(view.kind === 'null' ? nullStyle : {}), ...statusStyle[status] } : view.kind === 'null' ? nullStyle : undefined,
       };
     },
-    [chunks, nullStyle, widths, charPx],
+    [chunks, nullStyle, statusStyle, widths, charPx, editing],
+  );
+
+  const onCellEdited = useCallback(
+    ([col, row]: Item, value: EditableGridCell) => {
+      if (value.kind === GridCellKind.Text) editing?.onEdit(row, col, value.data);
+    },
+    [editing],
+  );
+  const onCellActivated = useCallback(
+    ([col, row]: Item) => {
+      if (col >= 0) editing?.onActivate?.(row, col);
+    },
+    [editing],
   );
 
   const getCellsForSelection = useCallback(
@@ -560,6 +611,22 @@ export function ResultGrid({
       return;
     }
     if (!target.closest('.gt-canvas')) return;
+    if (onOpenValue && !mod && !e.altKey && e.shiftKey && e.key === 'Enter') {
+      const row = currentRow(selRef.current);
+      if (row !== null && row !== undefined) {
+        handled();
+        onOpenValue(row, currentCol(selRef.current) ?? 0);
+        return;
+      }
+    }
+    if (editing?.onKey) {
+      const row = currentRow(selRef.current);
+      const col = currentCol(selRef.current);
+      if (editing.onKey(e, row === null || row === undefined ? null : { row, col: col ?? 0 })) {
+        handled();
+        return;
+      }
+    }
     if (mod && key === 'c') {
       handled();
       void copyWith(e.altKey ? 'insert' : e.shiftKey ? 'tsv-headers' : 'tsv');
@@ -616,18 +683,23 @@ export function ResultGrid({
     ];
     if (onColumn) items.push({ label: 'Copy column name', run: () => void copyWith('column', col) });
     items.push({ separator: true }, { label: 'View record', hint: 'Shift+Space', run: () => setRecord(true) });
+    if (onOpenValue && onColumn && row >= 0 && row < result.rowCount) {
+      items.push({ label: 'Open value editor', hint: 'Shift+Enter', run: () => onOpenValue(row, col) });
+    }
     if (onColumn && row >= 0 && row < result.rowCount && extraCellMenu) {
       const value = cellValue(result, row, col);
-      const extra = extraCellMenu({ row, col, value, column: result.columns[col]?.name ?? '' });
+      const extra = extraCellMenu({ row, col, value, column: result.columns[col]?.name ?? '', selection: selRef.current });
       if (extra.length > 0) items.push({ separator: true }, ...extra);
     }
     return items;
-  }, [menu, copyWith, extraCellMenu, result]);
+  }, [menu, copyWith, extraCellMenu, onOpenValue, result]);
 
   return (
     <div
       className="qr-grid"
       data-testid="result-grid"
+      // Window shortcuts that clash with the editing keys (Ctrl+0) look for this.
+      data-editing-grid={editing ? 'true' : undefined}
       onKeyDownCapture={onKeyDownCapture}
       onFocusCapture={() => commands.current && activateGrid(commands.current)}
       onContextMenuCapture={(e) => {
@@ -672,6 +744,10 @@ export function ResultGrid({
             // Ctrl+F and Ctrl+G belong to the grid tools above, not Glide's built-in search.
             keybindings={{ search: false }}
             onCellClicked={onCellClicked}
+            // No `onDelete`: Delete / Backspace on a cell do nothing (they never stage an empty text);
+            // NULL is explicit (Ctrl+0 or the cell menu).
+            onCellEdited={editing ? onCellEdited : undefined}
+            onCellActivated={editing ? onCellActivated : undefined}
             onCellContextMenu={onCellContextMenu}
             onColumnResize={onColumnResize}
             onHeaderClicked={onHeaderClicked ? (column) => onHeaderClicked(column) : undefined}

@@ -22,6 +22,8 @@ const entry = (id: number, patch: Partial<HistoryEntry> = {}): HistoryEntry => (
   affected: null,
   error_kind: null,
   error_code: null,
+  origin: 'query',
+  outcome_unknown: false,
   ...patch,
 });
 
@@ -104,11 +106,11 @@ describe('HistoryView', () => {
     await screen.findAllByTestId('history-row');
     const status = screen.getAllByTestId('history-status');
     expect(status.map((s) => s.textContent)).toEqual([
-      'Unknown outcome',
-      'Unknown outcome (2013)',
+      'Outcome unknown',
+      'Outcome unknown (2013)',
       'Cancelled — may have been applied',
       'Error (1062)',
-      'Unknown outcome',
+      'Outcome unknown',
     ]);
     for (const s of status.slice(0, 3)) {
       expect(s).not.toHaveTextContent(/^Error/);
@@ -116,6 +118,25 @@ describe('HistoryView', () => {
     }
     expect(status[0]!.getAttribute('title')).toMatch(/timed out/);
     expect(status[1]!.getAttribute('title')).toMatch(/connection/);
+  });
+
+  it('data_edit_rows_are_labelled_and_unknown_outcomes_are_flagged', async () => {
+    rows = [
+      entry(1),
+      entry(2, { origin: 'data_edit', sql_text: 'UPDATE t SET a = 1' }),
+      // An unanswered COMMIT: the statement itself ran fine.
+      entry(3, { origin: 'data_edit', outcome_unknown: true }),
+      entry(4, { origin: 'data_edit', status: 'error', error_kind: 'connection_lost', outcome_unknown: true }),
+    ];
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    expect(within(list[0]!).queryByTestId('history-data-edit')).toBeNull();
+    expect(within(list[1]!).getByTestId('history-data-edit')).toHaveTextContent('Data edit');
+    const status = screen.getAllByTestId('history-status');
+    expect(status.map((s) => s.textContent)).toEqual(['OK', 'OK', 'Outcome unknown', 'Outcome unknown']);
+    expect(status[2]!.getAttribute('title')).toMatch(/may or may not have been applied/);
+    expect(status[2]).not.toHaveTextContent(/^OK/);
+    expect(callsOf('history_list')[0]).toMatchObject({ filter: { origin: null } });
   });
 
   it('keyboard: arrows move a roving focus, Enter inserts, Delete deletes', async () => {
@@ -175,6 +196,25 @@ describe('HistoryView', () => {
     expect(edits[0]!.text).toBe("CREATE USER a IDENTIFIED BY '[REDACTED]'");
     expect(edits[0]!.range).toEqual({ startLineNumber: 2, startColumn: 5, endLineNumber: 2, endColumn: 5 });
     unregisterEditor(tab, editor);
+  });
+
+  it('a shortened data-edit statement is never inserted: Enter and double click are refused with a notice', async () => {
+    const shortened = "UPDATE `t` SET `note` = 'aaaa…' /* 1048576 chars */ WHERE `id` = 1";
+    rows = [entry(1, { origin: 'data_edit', kind: 'write', redacted: true, sql_text: shortened }), entry(2, { origin: 'data_edit', kind: 'write', sql_text: 'UPDATE t SET a = 1' })];
+    const user = userEvent.setup();
+    useQueryDocs.getState().update(tab, { sql: '', cursor: 0 });
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    await user.dblClick(list[0]!);
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('');
+    expect(screen.getByRole('status')).toHaveTextContent("This statement was shortened or redacted for history and can't be re-run.");
+    list[0]!.focus();
+    await user.keyboard('{Enter}');
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('');
+    // A whole data-edit statement is inserted as before, and the notice goes.
+    await user.dblClick(list[1]!);
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('UPDATE t SET a = 1');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
   });
 
   it('double_click_without_an_editor_inserts_at_the_stored_cursor', async () => {

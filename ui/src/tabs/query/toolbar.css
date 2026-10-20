@@ -7,6 +7,28 @@
   opacity: 0.75;
 }
 
+/* Auto | Manual commit mode: two joined buttons. */
+.qt-segs {
+  display: inline-flex;
+}
+
+.qt-seg:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.qt-seg:last-child {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.qt-seg.on {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
 @media (max-width: 1100px) {
   .qt-kbd {
     display: none;

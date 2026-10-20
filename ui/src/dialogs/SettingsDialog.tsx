@@ -2,9 +2,13 @@ import { useEffect, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { LogLevel } from '../bindings';
 import {
+  DEFAULT_IDLE_TX_WARN_MINUTES,
   DEFAULT_TABLE_PAGE_SIZE,
+  MAX_IDLE_TX_WARN_MINUTES,
   MAX_TABLE_PAGE_SIZE,
+  MIN_IDLE_TX_WARN_MINUTES,
   MIN_TABLE_PAGE_SIZE,
+  isValidIdleTxMinutes,
   isValidPageSize,
   useAppSettings,
 } from '../store/appSettings';
@@ -91,10 +95,83 @@ function PageSizeField() {
   );
 }
 
+/** "Warn when a transaction stays open for (minutes)": after this long the status bar warns (Manual commit). */
+function IdleTxField() {
+  const stored = useAppSettings((s) => s.idleTxWarnMinutes);
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    void useAppSettings.getState().loadIdleTxWarnMinutes();
+  }, []);
+
+  const value = text ?? String(stored);
+  const commit = async () => {
+    if (text === null) return;
+    const n = Number(text.trim());
+    if (text.trim() === '' || !isValidIdleTxMinutes(n)) {
+      setError(`Enter a whole number from ${MIN_IDLE_TX_WARN_MINUTES} to ${MAX_IDLE_TX_WARN_MINUTES}.`);
+      return;
+    }
+    setError(null);
+    if (n === stored) {
+      setText(null);
+      return;
+    }
+    try {
+      await useAppSettings.getState().setIdleTxWarnMinutes(n);
+      setText(null);
+      setSaved(true);
+    } catch (e) {
+      setError(toAppError(e).message);
+    }
+  };
+
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor="settings-idle-tx">
+        Warn when a transaction stays open for (minutes)
+      </label>
+      <input
+        id="settings-idle-tx"
+        type="number"
+        inputMode="numeric"
+        min={MIN_IDLE_TX_WARN_MINUTES}
+        max={MAX_IDLE_TX_WARN_MINUTES}
+        step={1}
+        value={value}
+        aria-invalid={error ? true : undefined}
+        aria-describedby="settings-idle-tx-hint"
+        onChange={(e) => {
+          setSaved(false);
+          setText(e.target.value);
+        }}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void commit();
+          }
+        }}
+      />
+      <p id="settings-idle-tx-hint" className="hint">
+        The status bar turns red, and a notice appears once, when a Manual-commit transaction stays open this long (
+        {DEFAULT_IDLE_TX_WARN_MINUTES} by default).{saved ? ' Saved.' : ''}
+      </p>
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 /**
  * "Confirm UPDATE/DELETE without WHERE" (stored in app.db, on by default): asks before a
- * statement that changes every row of a table runs on a connection that is not Production.
- * Production connections always ask.
+ * statement that changes every row of a table runs on a Local or untagged connection.
+ * Production and Staging connections always ask.
  */
 function UnboundedWritesField() {
   const [on, setOn] = useState<boolean | null>(null);
@@ -142,8 +219,8 @@ function UnboundedWritesField() {
         <span>Confirm UPDATE/DELETE without WHERE</span>
       </label>
       <p id="settings-unbounded-hint" className="hint">
-        Asks before a statement that changes every row of a table (UPDATE or DELETE without WHERE, TRUNCATE) runs on a
-        non-Production connection. Production connections always ask.
+        Asks before a statement that changes every row of a table (UPDATE or DELETE without WHERE, TRUNCATE) runs on
+        Local and untagged connections. Production and Staging connections always ask.
       </p>
       {error && (
         <p role="alert" className="field-error">
@@ -222,6 +299,7 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
         <p className="hint">Writes more detail to the log files. Passwords are never logged.</p>
         <PageSizeField />
         <UnboundedWritesField />
+        <IdleTxField />
         {error && (
           <p role="alert" className="field-error">
             {error}

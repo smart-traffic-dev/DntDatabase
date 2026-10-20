@@ -7,7 +7,7 @@
 
 use super::guard;
 use crate::cache::{CompletionObject, SchemaCache};
-use crate::query_sessions::{with_tx_state, PlanView, TxAction};
+use crate::query_sessions::{with_tx_state, PlanView, TabTxInfo, TxAction, TxMode};
 use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -93,12 +93,13 @@ pub async fn query_run_impl(
     state: &AppState,
     plan_id: Uuid,
     confirmed: bool,
+    confirm_names: Vec<String>,
     opts: RunOptions,
     emit: EventSink,
 ) -> Result<Uuid, DbError> {
     state
         .sessions
-        .query_run(plan_id, confirmed, opts, emit)
+        .query_run_named(plan_id, confirmed, confirm_names, opts, emit)
         .await
 }
 
@@ -200,19 +201,63 @@ pub async fn query_tx(
         .and_then(|r| r)
 }
 
+pub async fn query_tx_mode_impl(
+    state: &AppState,
+    tab_id: String,
+    mode: TxMode,
+) -> Result<TxState, DbError> {
+    state.sessions.query_tx_mode(&tab_id, mode).await
+}
+
+pub async fn query_tx_info_impl(state: &AppState, tab_id: String) -> Result<TabTxInfo, DbError> {
+    state.sessions.query_tx_info(&tab_id).await
+}
+
+/// Sets the tab's commit mode and returns its transaction state. `Manual`: before every
+/// statement that needs a transaction while none is open, the run begins one; commit or
+/// roll it back with `query_tx`. MySQL statements that would commit it are flagged
+/// `implicit_commit` in the plan. A Manual transaction lost with the connection makes
+/// `query_run` fail with `connection_lost` until `query_tx` acknowledges it. Errors:
+/// `busy` while the tab runs, `transaction_open` when leaving Manual with a transaction
+/// open.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_tx_mode(
+    state: State<'_, AppState>,
+    tab_id: String,
+    mode: TxMode,
+) -> Result<TxState, AppError> {
+    guard(query_tx_mode_impl(&state, tab_id, mode)).await
+}
+
+/// The tab's transaction: state, start (`since_ms`, Unix epoch ms) and statements run
+/// in it, for the idle-transaction warning (`get_idle_tx_warn_minutes`). `busy` while
+/// the tab runs.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_tx_info(
+    state: State<'_, AppState>,
+    tab_id: String,
+) -> Result<TabTxInfo, AppError> {
+    guard(query_tx_info_impl(&state, tab_id)).await
+}
+
 /// Runs plan `plan_id` (from `query_plan`, `query_explain` or `query_plan_statement`)
 /// and returns the run id at once; every result streams through `channel` (see
 /// `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
 /// statement is blocked, `confirmation_required` when any needs confirmation and
 /// `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
-/// `busy` while the tab runs; `plan_expired` for a plan already run, expired or
-/// replaced.
+/// On Production, `confirm_names` must hold exactly the `confirm_name`s of the plan's
+/// statements (case-sensitive), else `confirmation_required` too; pass `[]` when the
+/// plan asks for none. `busy` while the tab runs; `plan_expired` for a plan already
+/// run, expired or replaced.
 #[tauri::command]
 #[specta::specta]
 pub async fn query_run(
     state: State<'_, AppState>,
     plan_id: Uuid,
     confirmed: bool,
+    confirm_names: Vec<String>,
     opts: RunOptions,
     channel: Channel<RunEvent>,
 ) -> Result<Uuid, AppError> {
@@ -224,7 +269,15 @@ pub async fn query_run(
             false
         }
     });
-    guard_tab(query_run_impl(&state, plan_id, confirmed, opts, emit)).await
+    guard_tab(query_run_impl(
+        &state,
+        plan_id,
+        confirmed,
+        confirm_names,
+        opts,
+        emit,
+    ))
+    .await
 }
 
 /// Stops run `run_id` (emits `stopping{user}` first). Unknown or finished runs: no-op.

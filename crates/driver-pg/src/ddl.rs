@@ -280,6 +280,7 @@ mod tests {
             identity: None,
             generated: None,
             invisible: false,
+            collation: None,
             comment: None,
         }
     }
@@ -289,6 +290,7 @@ mod tests {
             name: name.into(),
             unique,
             primary: false,
+            partial: false,
             columns: Vec::new(),
             expression: None,
             method: Some("btree".into()),

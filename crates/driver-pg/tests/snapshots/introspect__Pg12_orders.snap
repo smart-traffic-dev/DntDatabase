@@ -17,6 +17,7 @@ columns:
     identity: BY DEFAULT
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: customer_id
     ordinal: 2
@@ -27,6 +28,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: status
     ordinal: 3
@@ -37,6 +39,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: total
     ordinal: 4
@@ -47,6 +50,7 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
   - name: created_at
     ordinal: 5
@@ -57,11 +61,13 @@ columns:
     identity: ~
     generated: ~
     invisible: false
+    collation: ~
     comment: ~
 primary_key:
   name: orders_pkey
   unique: true
   primary: true
+  partial: false
   columns:
     - id
   expression: ~
@@ -71,6 +77,7 @@ indexes:
   - name: idx_orders_customer_status
     unique: false
     primary: false
+    partial: false
     columns:
       - customer_id
       - status

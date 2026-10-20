@@ -9,6 +9,7 @@
 import type { Engine } from '../engine';
 
 const NL = 10;
+const CR = 13;
 const SPACE = 32;
 const TAB = 9;
 const BACKSLASH = 92;
@@ -44,9 +45,14 @@ function isTrimSpace(c: number): boolean {
 
 const DELIMITER_KW = 'delimiter';
 
-function lineEnd(text: string, i: number): number {
-  const nl = text.indexOf('\n', i);
-  return nl < 0 ? text.length : nl;
+/** `lexer::line_end`: the next `\n`, or also `\r` when `crEnds` (a PostgreSQL `--` comment). */
+function lineEnd(text: string, i: number, crEnds: boolean): number {
+  const n = text.length;
+  for (let j = i; j < n; j++) {
+    const c = text.charCodeAt(j);
+    if (c === NL || (crEnds && c === CR)) return j;
+  }
+  return n;
 }
 
 function blockCommentEnd(text: string, i: number, nested: boolean): number {
@@ -108,9 +114,9 @@ function skipAt(text: string, i: number, mysql: boolean): Skip | null {
     case 45: // -
       if (next !== 45) return null;
       if (mysql && i + 2 < text.length && text.charCodeAt(i + 2) > SPACE) return null;
-      return { comment: true, end: lineEnd(text, i) };
+      return { comment: true, end: lineEnd(text, i, !mysql) };
     case 35: // #
-      return mysql ? { comment: true, end: lineEnd(text, i) } : null;
+      return mysql ? { comment: true, end: lineEnd(text, i, false) } : null;
     case 47: {
       // /
       if (next !== 42) return null;

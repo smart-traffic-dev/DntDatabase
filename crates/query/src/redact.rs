@@ -287,7 +287,12 @@ fn comment_bodies(src: &str, toks: &[Token], dialect: Dialect) -> Vec<(usize, us
             let rest = &b[i..hi];
             if rest.starts_with(b"--") || (rest[0] == b'#' && dialect.is_mysql()) {
                 let body = i + if rest[0] == b'#' { 1 } else { 2 };
-                let nl = rest.iter().position(|&c| c == b'\n').map_or(hi, |p| i + p);
+                // Same end as the lexer: PostgreSQL also ends a `--` comment at `\r`.
+                let pg = !dialect.is_mysql();
+                let nl = rest
+                    .iter()
+                    .position(|&c| c == b'\n' || (pg && c == b'\r'))
+                    .map_or(hi, |p| i + p);
                 let end = if nl > body && b[nl - 1] == b'\r' {
                     nl - 1
                 } else {
@@ -939,6 +944,18 @@ mod tests {
                 PG,
                 "SELECT 1 -- ALTER USER u IDENTIFIED BY 'pw'\r\n; SELECT 2",
                 "SELECT 1 -- ALTER USER u IDENTIFIED BY '[REDACTED]'\r\n; SELECT 2",
+            ),
+            // A PostgreSQL `--` comment also ends at a bare `\r` (R44): the body before
+            // it is redacted, and the statement after it is read as code.
+            (
+                PG,
+                "SELECT 1 -- CREATE ROLE r PASSWORD 'pw'\r; SELECT 2",
+                "SELECT 1 -- CREATE ROLE r PASSWORD '[REDACTED]'\r; SELECT 2",
+            ),
+            (
+                PG,
+                "SELECT 1 -- note\rALTER ROLE r PASSWORD 'pw'; SELECT 2",
+                "SELECT 1 -- note\rALTER ROLE r PASSWORD '[REDACTED]'; SELECT 2",
             ),
             (
                 MY,

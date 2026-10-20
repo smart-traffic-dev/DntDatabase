@@ -7,7 +7,7 @@ use crate::meta::{
 use crate::server::{DbKind, ServerInfo};
 use crate::sql::{classify, split, Dialect, StatementKind};
 use crate::tx::TxState;
-use crate::value::{ColumnMeta, Value};
+use crate::value::{ColumnMeta, FullValue, Value};
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -65,6 +65,32 @@ pub struct ExecOptions {
     pub params: Vec<String>,
     /// `Value::Bytes` carries every byte in `preview` instead of the first 64 (export).
     pub full_bytes: bool,
+    /// How rows reach the sink: [`RowSink::rows`] (display values) or, for
+    /// [`CellMode::Full`], [`RowSink::full_rows`] (complete values).
+    pub cells: CellMode,
+}
+
+/// How a driver delivers cell values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CellMode {
+    /// Display values through [`RowSink::rows`]: `Bytes` keep a 64-byte preview.
+    #[default]
+    Preview,
+    /// Complete values through [`RowSink::full_rows`]; a cell larger than
+    /// `max_cell_bytes` is an error rather than a cut value.
+    Full { max_cell_bytes: usize },
+}
+
+/// [`CellMode::Full`]: a cell whose [`FullValue::byte_len`] exceeds `max_cell_bytes` is
+/// an error that stops the statement; it is never cut.
+pub fn check_cell_size(v: &FullValue, max_cell_bytes: usize) -> Result<(), DbError> {
+    if v.byte_len() > max_cell_bytes {
+        return Err(DbError::Unsupported {
+            feature: format!("cell larger than {max_cell_bytes} bytes"),
+            version: String::new(),
+        });
+    }
+    Ok(())
 }
 
 impl Default for ExecOptions {
@@ -77,6 +103,7 @@ impl Default for ExecOptions {
             stop: StopSignal::new(),
             params: Vec::new(),
             full_bytes: false,
+            cells: CellMode::Preview,
         }
     }
 }
@@ -263,6 +290,16 @@ pub trait Session: Send + Sync {
 pub trait RowSink: Send {
     fn result_start(&mut self, cols: &[ColumnMeta]);
     fn rows(&mut self, batch: Vec<Vec<Value>>);
+    /// Rows of complete values ([`CellMode::Full`]). Default: their display form goes
+    /// to [`RowSink::rows`].
+    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+        self.rows(
+            batch
+                .into_iter()
+                .map(|row| row.iter().map(FullValue::to_display).collect())
+                .collect(),
+        );
+    }
     /// The result that `result_start` opened is complete (`summary` is also returned
     /// in the call's summary).
     fn result_end(&mut self, summary: &ResultSummary);
@@ -303,6 +340,9 @@ impl RowSink for &SharedSink<'_> {
     }
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
         self.with(|s| s.rows(batch));
+    }
+    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+        self.with(|s| s.full_rows(batch));
     }
     fn result_end(&mut self, summary: &ResultSummary) {
         self.with(|s| s.result_end(summary));
@@ -345,6 +385,72 @@ mod tests {
         );
         assert_eq!(o.cancel_grace, DEFAULT_CANCEL_GRACE);
         assert!(!o.stop.is_stopped());
+    }
+
+    #[test]
+    fn oversized_cell_is_an_error() {
+        assert!(check_cell_size(&FullValue::bytes(vec![0u8; 1024]), 1024).is_ok());
+        let err = check_cell_size(&FullValue::bytes(vec![0u8; 1025]), 1024);
+        assert!(
+            matches!(
+                &err,
+                Err(DbError::Unsupported { feature, version })
+                    if feature == "cell larger than 1024 bytes" && version.is_empty()
+            ),
+            "{err:?}"
+        );
+        let text = FullValue::try_from_value(Value::Text("a".repeat(11))).unwrap();
+        assert!(check_cell_size(&text, 10).is_err());
+    }
+
+    #[test]
+    fn exec_options_default_cells_is_preview() {
+        assert_eq!(ExecOptions::default().cells, CellMode::Preview);
+    }
+
+    /// A sink that only implements `rows()` receives the display form (a 64-byte
+    /// `Value::Bytes` preview) of what `full_rows()` is given.
+    #[test]
+    fn default_full_rows_forwards_display_values() {
+        #[derive(Default)]
+        struct Rows(Vec<Vec<Vec<Value>>>);
+        impl RowSink for Rows {
+            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+            fn rows(&mut self, batch: Vec<Vec<Value>>) {
+                self.0.push(batch);
+            }
+            fn result_end(&mut self, _summary: &ResultSummary) {}
+        }
+        let mut sink = Rows::default();
+        sink.full_rows(vec![vec![
+            FullValue::bytes(vec![5u8; 300]),
+            FullValue::try_from_value(Value::Int(1)).unwrap(),
+        ]]);
+        assert_eq!(sink.0, [vec![vec![Value::bytes(&[5; 300]), Value::Int(1)]]]);
+    }
+
+    /// `&SharedSink` hands `full_rows` to the inner sink's own `full_rows`.
+    #[test]
+    fn shared_sink_forwards_full_rows() {
+        #[derive(Default)]
+        struct Full(Vec<Vec<Vec<FullValue>>>);
+        impl RowSink for Full {
+            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+            fn rows(&mut self, _batch: Vec<Vec<Value>>) {
+                panic!("rows() called instead of full_rows()");
+            }
+            fn result_end(&mut self, _summary: &ResultSummary) {}
+            fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+                self.0.push(batch);
+            }
+        }
+        let mut full = Full::default();
+        {
+            let shared = SharedSink::new(&mut full);
+            let mut handle = &shared;
+            handle.full_rows(vec![vec![FullValue::bytes(vec![1u8; 100])]]);
+        }
+        assert_eq!(full.0, [vec![vec![FullValue::bytes(vec![1u8; 100])]]]);
     }
 
     #[test]

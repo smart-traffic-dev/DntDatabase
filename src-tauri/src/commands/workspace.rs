@@ -110,7 +110,7 @@ fn write_text(path: &str, text: &str) -> Result<(), DbError> {
 /// Writes `bytes` to a temporary file next to `target`, syncs it, then renames it over
 /// `target` (which replaces an existing file, on Windows too), so a failed save never
 /// leaves a truncated file. The temporary file is removed when any step fails.
-fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let name = target
         .file_name()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
@@ -175,6 +175,7 @@ async fn pick_file(
             .add_filter("Navicat connections", &["ncx"])
             .add_filter("All files", &["*"]),
         (FileKind::Connections, true) => dialog.add_filter("DntDatabase connections", &["dntconn"]),
+        (FileKind::CellValue, _) => dialog.add_filter("All files", &["*"]),
     };
     if let Some(name) = default_name.filter(|n| !n.trim().is_empty()) {
         dialog = dialog.set_file_name(file_stem(&name));

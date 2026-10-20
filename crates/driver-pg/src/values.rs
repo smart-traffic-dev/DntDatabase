@@ -5,7 +5,7 @@
 //! BC dates and far-future values survive unchanged.
 
 use crate::numeric::decode_numeric;
-use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use tokio_postgres::types::{FromSql, Kind, Type};
 use tokio_postgres::Column;
 
@@ -86,19 +86,33 @@ pub(crate) fn logical(ty: &Type) -> LogicalType {
 }
 
 pub(crate) fn to_value(ty: &Type, raw: Option<&[u8]>) -> Value {
+    decode_cell(ty, raw, false)
+}
+
+/// [`to_value`] as a complete value ([`CellMode::Full`](dnt_core::driver::CellMode)):
+/// `bytea` keeps every byte, also inside arrays and domains.
+pub(crate) fn to_full_value(ty: &Type, raw: Option<&[u8]>) -> FullValue {
+    // Only `bytea` builds `Bytes`, and with `full` it keeps every byte, so the result
+    // is always complete.
+    FullValue::try_from_value(decode_cell(ty, raw, true))
+        .expect("bytea values are read whole in full mode")
+}
+
+/// [`to_value`]; `full`: `bytea` keeps every byte instead of a 64-byte preview.
+fn decode_cell(ty: &Type, raw: Option<&[u8]>, full: bool) -> Value {
     let Some(raw) = raw else {
         return Value::Null;
     };
-    decode(ty, raw).unwrap_or_else(|| other(ty, raw))
+    decode(ty, raw, full).unwrap_or_else(|| other(ty, raw))
 }
 
 /// `None` when the type is not in the mapping table or the bytes are malformed.
-fn decode(ty: &Type, raw: &[u8]) -> Option<Value> {
+fn decode(ty: &Type, raw: &[u8], full: bool) -> Option<Value> {
     match ty.kind() {
         // A domain is sent in its base type's format.
-        Kind::Domain(base) => return Some(to_value(base, Some(raw))),
+        Kind::Domain(base) => return Some(decode_cell(base, Some(raw), full)),
         Kind::Enum(_) => return Some(Value::Text(text(raw))),
-        Kind::Array(elem) => return decode_array(elem, raw),
+        Kind::Array(elem) => return decode_array(elem, raw, full),
         _ => {}
     }
     Some(match *ty {
@@ -121,6 +135,10 @@ fn decode(ty: &Type, raw: &[u8]) -> Option<Value> {
             _ => return None,
         },
         Type::UUID => Value::Uuid(uuid(&fixed::<16>(raw)?)),
+        Type::BYTEA if full => Value::Bytes {
+            len: raw.len() as u64,
+            preview: raw.to_vec(),
+        },
         Type::BYTEA => Value::bytes(raw),
         Type::DATE => Value::Date(date(i32::from_be_bytes(fixed(raw)?))),
         Type::TIME => Value::Time(time_of_day(i64::from_be_bytes(fixed(raw)?))?),
@@ -406,7 +424,7 @@ fn uuid(b: &[u8; 16]) -> String {
 /// Binary array: `int32 ndim, int32 has_null, uint32 elem_oid`, then `(int32 len,
 /// int32 lbound)` per dimension, then each element as `int32 len` (-1 = NULL) + bytes.
 /// Multi-dimensional arrays become nested `Array`s.
-fn decode_array(elem: &Type, raw: &[u8]) -> Option<Value> {
+fn decode_array(elem: &Type, raw: &[u8], full: bool) -> Option<Value> {
     let int = |at: usize| -> Option<i32> {
         Some(i32::from_be_bytes(raw.get(at..at + 4)?.try_into().ok()?))
     };
@@ -427,7 +445,7 @@ fn decode_array(elem: &Type, raw: &[u8]) -> Option<Value> {
             flat.push(Value::Null);
         } else {
             let end = at.checked_add(usize::try_from(len).ok()?)?;
-            flat.push(to_value(elem, Some(raw.get(at..end)?)));
+            flat.push(decode_cell(elem, Some(raw.get(at..end)?), full));
             at = end;
         }
     }
@@ -661,6 +679,45 @@ mod tests {
             Value::Uuid("123e4567-e89b-12d3-a456-426614174000".into())
         );
         assert_eq!(v(&Type::BYTEA, &[0, 0xff]), Value::bytes(&[0, 0xff]));
+    }
+
+    #[test]
+    fn to_full_value_keeps_all_bytes() {
+        let f = to_full_value(&Type::BYTEA, Some(&[7; 100]));
+        assert_eq!(f.as_bytes().unwrap().len(), 100);
+        assert!(to_full_value(&Type::BYTEA, None).is_null());
+        assert_eq!(
+            to_full_value(&Type::TEXT, Some(b"abc")).as_value(),
+            Some(&Value::Text("abc".into()))
+        );
+    }
+
+    /// `bytea[]` elements keep every byte too.
+    #[test]
+    fn to_full_value_keeps_bytea_array_elements() {
+        let mut raw = Vec::new();
+        for x in [1i32, 0, Type::BYTEA.oid() as i32, 2, 1] {
+            raw.extend_from_slice(&x.to_be_bytes());
+        }
+        raw.extend_from_slice(&100i32.to_be_bytes());
+        raw.extend_from_slice(&[5; 100]);
+        raw.extend_from_slice(&(-1i32).to_be_bytes());
+        let f = to_full_value(&Type::BYTEA_ARRAY, Some(&raw));
+        assert_eq!(
+            f.as_value(),
+            Some(&Value::Array(vec![
+                Value::Bytes {
+                    len: 100,
+                    preview: vec![5; 100]
+                },
+                Value::Null
+            ]))
+        );
+        // The display path still keeps a 64-byte preview.
+        assert_eq!(
+            to_value(&Type::BYTEA_ARRAY, Some(&raw)),
+            Value::Array(vec![Value::bytes(&[5; 100]), Value::Null])
+        );
     }
 
     #[test]
