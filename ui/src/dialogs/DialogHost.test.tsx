@@ -26,6 +26,19 @@ const seed = async () => {
 };
 
 describe('DialogHost', () => {
+  it('a new connection saved into a group expands the group and selects the row', async () => {
+    const created = sampleTree().connections[2]!.config;
+    mockBackend({ list_tree: () => sampleTree(), create_connection: () => created });
+    await seed();
+    useDialogs.getState().requestDialog({ kind: 'newConnection' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    await user.type(screen.getByTestId('conn-name'), 'legacy-crm');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(useTree.getState().selectedId).toBe(`conn:${ids.legacy}`));
+    expect(useTree.getState().expanded.has(`group:${ids.groupB}`)).toBe(true);
+  });
+
   it('password prompt opens the connection and expands it', async () => {
     const info = serverInfo('MySql8');
     mockBackend({

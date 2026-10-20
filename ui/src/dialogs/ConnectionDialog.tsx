@@ -9,6 +9,7 @@ import type {
   SecretChangeInput,
   SecretsInput,
   SecretsUpdateInput,
+  ServerVariant,
   SshAuth,
   SslMode,
   StageTiming,
@@ -16,6 +17,8 @@ import type {
 import { useConnections } from '../store/connections';
 import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
+import { PasswordInput } from './PasswordInput';
+import { ConfirmDialog } from './SimpleDialogs';
 
 type TabId = 'general' | 'ssh' | 'ssl' | 'advanced';
 type Engine = 'mysql' | 'mariadb' | 'postgres';
@@ -67,7 +70,19 @@ interface FieldError {
   value: string;
 }
 
-const timingsText = (timings: StageTiming[]) => timings.map((t) => ` · ${stageLabel(t.stage)} ${t.ms} ms`).join('');
+/** Per-stage timings; stages that took 0 ms are noise and are left out. */
+const timingsText = (timings: StageTiming[]) =>
+  timings
+    .filter((t) => t.ms > 0)
+    .map((t) => ` · ${stageLabel(t.stage)} ${t.ms} ms`)
+    .join('');
+
+const ENGINE_NAME: Record<ServerVariant, string> = {
+  MySql57: 'MySQL',
+  MySql8: 'MySQL',
+  MariaDb: 'MariaDB',
+  Postgres: 'PostgreSQL',
+};
 
 const defaultPort = (engine: Engine) => (engine === 'postgres' ? 5432 : 3306);
 
@@ -181,6 +196,9 @@ interface Props {
 export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshSecret = false, onClose }: Props) {
   const groups = useConnections((s) => s.groups);
   const [form, setForm] = useState<Form>(() => initialForm(initial));
+  const [baseline] = useState(() => JSON.stringify(initialForm(initial)));
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const dirty = JSON.stringify(form) !== baseline;
   const [tab, setTab] = useState<TabId>('general');
   const [rawFieldError, setFieldError] = useState<FieldError | null>(null);
   const [saveError, setSaveError] = useState<AppError | null>(null);
@@ -197,7 +215,6 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       : null;
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
-  const mariadb = form.engine === 'mariadb';
 
   // Move the cursor to the input a backend error points at.
   useEffect(() => {
@@ -344,6 +361,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     }
   };
 
+  /** Esc, the × and Cancel: ask before throwing away a filled form. */
+  const requestClose = () => {
+    if (saving) return;
+    if (dirty) setConfirmDiscard(true);
+    else onClose();
+  };
+
   const browse = async (field: 'sshKeyPath' | 'sslCa' | 'sslCert' | 'sslKey') => {
     try {
       const picked = await pickFile({ multiple: false, directory: false });
@@ -450,10 +474,10 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         </div>
         <div className="field">
           <label htmlFor="cd-password">Password</label>
-          <input
+          <PasswordInput
             id="cd-password"
+            label="Password"
             data-testid="conn-password"
-            type="password"
             autoComplete="new-password"
             value={form.password}
             placeholder={mode === 'edit' && hasDbPassword && !form.passwordTouched ? '••••••••' : undefined}
@@ -526,9 +550,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           {form.sshAuth === 'password' ? (
             <div className="field span2">
               <label htmlFor="cd-ssh-password">SSH password</label>
-              <input
+              <PasswordInput
                 id="cd-ssh-password"
-                type="password"
+                label="SSH password"
                 autoComplete="new-password"
                 value={form.sshPassword}
                 placeholder={mode === 'edit' && hasSshSecret && !form.sshPasswordTouched ? '••••••••' : undefined}
@@ -540,9 +564,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               <div className="span2">{pathInput('cd-ssh-key', 'Key file', 'sshKeyPath', 'ssh.key_path')}</div>
               <div className="field span2">
                 <label htmlFor="cd-ssh-passphrase">Key passphrase</label>
-                <input
+                <PasswordInput
                   id="cd-ssh-passphrase"
-                  type="password"
+                  label="Key passphrase"
                   autoComplete="new-password"
                   value={form.passphrase}
                   placeholder={mode === 'edit' && hasSshSecret && !form.passphraseTouched ? '••••••••' : undefined}
@@ -614,7 +638,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     <>
       <Modal
         title={mode === 'edit' ? 'Edit connection' : 'New connection'}
-        onClose={() => !saving && onClose()}
+        onClose={requestClose}
+        closable
         className="wide"
         initialFocus="#cd-name"
         badge={
@@ -633,8 +658,10 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           }}
         >
           <div className="conn-body">
-            <fieldset className="engines">
-              <legend>Engine</legend>
+            <fieldset className="engines" role="radiogroup" aria-labelledby="cd-engine-title">
+              <span id="cd-engine-title" className="engines-title">
+                Engine
+              </span>
               {engines.map((en) => (
                 <label key={en.id} className={`engine${form.engine === en.id ? ' on' : ''}`}>
                   <input
@@ -647,7 +674,6 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                   <span>{en.label}</span>
                 </label>
               ))}
-              {mariadb && <span className="chip chip-ma">MariaDB</span>}
             </fieldset>
             <div className="conn-main">
               <div role="tablist" aria-label="Connection settings" className="tabs">
@@ -674,6 +700,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             </div>
           </div>
 
+          <div className="result-slot">
           {test.state === 'running' && (
             <div className="result" role="status">
               Testing connection…
@@ -681,7 +708,10 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           )}
           {test.state === 'ok' && (
             <div className="result ok" role="status" data-testid="test-result">
-              Connected · {test.result.info.version_string}
+              <span className="result-check" aria-hidden="true">
+                ✓
+              </span>
+              Connected to {ENGINE_NAME[test.result.info.variant]} {test.result.info.version_string}
               {timingsText(test.result.timings)}
             </div>
           )}
@@ -702,8 +732,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                     <span>{test.error.message}</span>
                   </div>
                   {test.error.hint && <p className="hint-line">{test.error.hint}</p>}
-                  {test.error.timings && test.error.timings.length > 0 && (
-                    <p className="hint-line">Completed{timingsText(test.error.timings)}</p>
+                  {test.error.timings && timingsText(test.error.timings) !== '' && (
+                    <p className="hint-line">Steps completed:{timingsText(test.error.timings).replace(/^ ·/, '')}</p>
                   )}
                 </>
               )}
@@ -725,8 +755,10 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           {saveError && (
             <div className="result bad" role="alert">
               {saveError.message}
+              {saveError.hint && <p className="hint-line">{saveError.hint}</p>}
             </div>
           )}
+          </div>
 
           <footer className="modal-foot">
             <button
@@ -739,7 +771,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               Test
             </button>
             <span className="spacer" />
-            <button type="button" className="btn" onClick={() => onClose()} disabled={saving}>
+            <button type="button" className="btn" onClick={requestClose} disabled={saving}>
               Cancel
             </button>
             <button type="submit" className="btn primary" data-testid="conn-save" disabled={saving}>
@@ -748,9 +780,22 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           </footer>
         </form>
       </Modal>
+      {confirmDiscard && (
+        <ConfirmDialog
+          title="Discard changes?"
+          message="This connection has unsaved changes. Close it and discard them?"
+          confirmLabel="Discard"
+          onClose={() => setConfirmDiscard(false)}
+          onConfirm={async () => {
+            setConfirmDiscard(false);
+            onClose();
+          }}
+        />
+      )}
       {hostKey && (
         <HostKeyDialog
           {...hostKey}
+          context="test"
           onDone={(trusted) => {
             setHostKey(null);
             if (trusted) void runTest();

@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import type { SecretsInput } from '../bindings';
 import { Modal } from './Modal';
+import { PasswordInput } from './PasswordInput';
 
 export type SecretNeed = 'db_password' | 'ssh_password' | 'ssh_key_passphrase';
 
@@ -9,6 +10,8 @@ interface Props {
   needs: SecretNeed[];
   /** Message of the previous failed attempt. */
   error?: string | null;
+  /** Backend hint for that failure; a generic one is shown when absent. */
+  errorHint?: string | null;
   onSubmit(secrets: SecretsInput): void;
   onCancel(): void;
 }
@@ -20,8 +23,10 @@ const LABELS: Record<SecretNeed, string> = {
 };
 
 /** Asks only for the secrets a connection needs. Values live in this component's state only. */
-export function PasswordPrompt({ connectionName, needs, error, onSubmit, onCancel }: Props) {
+export function PasswordPrompt({ connectionName, needs, error, errorHint, onSubmit, onCancel }: Props) {
   const [values, setValues] = useState<Partial<Record<SecretNeed, string>>>({});
+
+  const onlyPassphrase = needs.length === 1 && needs[0] === 'ssh_key_passphrase';
 
   // A key passphrase may legitimately be empty (unencrypted key); the passwords may not.
   const complete = needs.every((n) => n === 'ssh_key_passphrase' || (values[n] ?? '') !== '');
@@ -35,15 +40,19 @@ export function PasswordPrompt({ connectionName, needs, error, onSubmit, onCance
   };
 
   return (
-    <Modal title={`Password for ${connectionName}`} onClose={onCancel} className="narrow">
+    <Modal
+      title={onlyPassphrase ? `Unlock key for ${connectionName}` : `Password for ${connectionName}`}
+      onClose={onCancel}
+      className="narrow"
+    >
       <form onSubmit={submit}>
         <div className="modal-body stack">
           {needs.map((n) => (
             <div className="field" key={n}>
               <label htmlFor={`pp-${n}`}>{LABELS[n]}</label>
-              <input
+              <PasswordInput
                 id={`pp-${n}`}
-                type="password"
+                label={LABELS[n]}
                 autoComplete="off"
                 value={values[n] ?? ''}
                 onChange={(e) => setValues((v) => ({ ...v, [n]: e.target.value }))}
@@ -51,9 +60,12 @@ export function PasswordPrompt({ connectionName, needs, error, onSubmit, onCance
             </div>
           ))}
           {error && (
-            <p role="alert" className="field-error">
-              {error}
-            </p>
+            <div role="alert" className="field-error">
+              <p>{error}</p>
+              <p className="hint">
+                {errorHint ?? (onlyPassphrase ? 'Check the passphrase and try again.' : 'Check the password and try again.')}
+              </p>
+            </div>
           )}
         </div>
         <footer className="modal-foot">

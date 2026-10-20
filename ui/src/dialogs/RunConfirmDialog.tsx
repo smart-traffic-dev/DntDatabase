@@ -3,7 +3,7 @@ import { Modal } from './Modal';
 
 interface Props {
   plan: PlanView;
-  /** `true` for "Run N statement(s)", `false` for Cancel / Esc. */
+  /** `true` for "Run all N", `false` for Cancel / Esc. */
   onDone(run: boolean): void;
 }
 
@@ -20,12 +20,14 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
   const total = plan.stmts.length;
   const confirm = plan.stmts.filter((s) => s.verdict === 'confirm');
   const count = `${total} ${total === 1 ? 'statement' : 'statements'}`;
+  const need = confirm.length;
   return (
     <Modal
-      title={
-        <>
-          Run {count} on <strong>{plan.connection_name}</strong> (Production)?
-        </>
+      title="Confirm run on Production"
+      badge={
+        <span className="chip env-production" data-testid="env-chip">
+          Production
+        </span>
       }
       onClose={() => onDone(false)}
       className="wide env-production"
@@ -34,6 +36,10 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
       testId="run-confirm"
     >
       <div className="modal-body stack">
+        <p data-testid="run-confirm-summary">
+          {count} will run on <strong>{plan.connection_name}</strong> (PRODUCTION). {need} {need === 1 ? 'needs' : 'need'}{' '}
+          confirmation:
+        </p>
         <ul className="run-confirm-list">
           {confirm.map((s) => (
             <li
@@ -53,7 +59,7 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
           Cancel
         </button>
         <button type="button" className="btn danger" data-testid="run-confirm-run" onClick={() => onDone(true)}>
-          Run {count}
+          {total === 1 ? 'Run 1 statement' : `Run all ${total}`}
         </button>
       </footer>
     </Modal>

@@ -504,3 +504,82 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Secondary buttons and fields stay visible in dark dialogs (F34). */
+.modal .btn:not(.primary):not(.danger) {
+  border-color: var(--dlg-line);
+}
+
+.modal-close {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--studio-fg-secondary);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.modal-close:hover {
+  background: var(--hover);
+  color: var(--studio-fg);
+}
+
+/* Disabled fields (e.g. SSH off) look disabled (F27). */
+.field input:disabled,
+.field select:disabled,
+fieldset:disabled input,
+fieldset:disabled select {
+  background: var(--studio-subtle);
+  color: var(--studio-fg-tertiary);
+  border-style: dashed;
+  cursor: not-allowed;
+}
+
+fieldset:disabled .field label,
+fieldset:disabled .field-label {
+  color: var(--studio-fg-tertiary);
+}
+
+/* One reveal control for every password field; hide the engine's own eye. */
+input::-ms-reveal,
+input::-ms-clear {
+  display: none;
+}
+
+.pw-wrap {
+  position: relative;
+  display: flex;
+}
+
+.pw-wrap input {
+  flex: 1;
+  width: 100%;
+  padding-right: 52px;
+}
+
+.pw-toggle {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  transform: translateY(-50%);
+  padding: 2px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--studio-fg-secondary);
+  font-size: var(--text-caption);
+}
+
+.pw-toggle:hover {
+  background: var(--hover);
+  color: var(--studio-fg);
+}
+
+.export-bulk {
+  display: flex;
+  gap: 6px;
+}
