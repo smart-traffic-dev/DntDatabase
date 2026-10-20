@@ -24,6 +24,20 @@ describe('QueryToolbar', () => {
     expect(screen.getByTestId('query-run-selection')).toBeDisabled();
   });
 
+  it('run_all_runs_every_statement_and_says_why_it_is_disabled', () => {
+    const none = useQueryDocs.getState().newQuery(null, null);
+    const view = render(<QueryToolbar doc={useQueryDocs.getState().docs.get(none)!} />);
+    expect(screen.getByTestId('query-run-all')).toBeDisabled();
+    expect(screen.getByTestId('query-run-all')).toHaveAttribute('title', 'Choose a connection to run queries');
+    expect(screen.getByTestId('query-run-selection')).toHaveAttribute('title', 'Choose a connection to run queries');
+    view.unmount();
+    const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    expect(screen.getByTestId('query-run-all')).toBeEnabled();
+    expect(screen.getByTestId('query-run-all')).toHaveTextContent('Ctrl+Shift+Enter');
+    expect(screen.getByTestId('query-run')).toHaveTextContent('Ctrl+Enter');
+    expect(screen.getByTestId('query-run-selection')).toHaveAttribute('title', 'Select text in the editor to run only that');
+  });
   it('explain_is_enabled_with_a_connection', () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);

@@ -3,8 +3,10 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectKind, ObjectRef, TableDetail } from '../bindings';
 import { useDialogs } from '../store/dialogs';
+import { useConnections } from '../store/connections';
+import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
-import { backendError, callsOf, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
+import { backendError, callsOf, config, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -120,24 +122,64 @@ describe('ObjectTab', () => {
     });
     setup(makeTab('View', 'v_open'), { table_detail: () => view });
     expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Info', 'DDL', 'Structure']);
-    const info = await screen.findByText('Row estimate');
-    expect(info.closest('.ot-info-row')).toHaveTextContent('—');
+    // Info of a view lists what a view has (columns, comment), not a column of dashes.
+    const cols = await screen.findByText('Columns');
+    expect(cols.closest('.ot-info-row')).toHaveTextContent(String(view.columns.length));
+    for (const gone of ['Row estimate', 'Size', 'Engine', 'Tablespace', 'Partitioned by', 'System versioned']) {
+      expect(screen.queryByText(gone)).toBeNull();
+    }
     expect(callsOf('table_detail')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
     await user.click(screen.getByRole('tab', { name: 'Structure' }));
     expect(await screen.findByRole('region', { name: 'Columns' })).toBeInTheDocument();
     await user.click(screen.getByTestId('object-tab-ddl'));
-    expect(await screen.findByTestId('object-ddl-text')).toHaveTextContent('CREATE TABLE');
+    expect(await screen.findByTestId('monaco-mock')).toHaveValue(DDL);
     expect(callsOf('object_ddl')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
   });
 
+  it('query_button_opens_a_select_in_a_new_tab', async () => {
+    const user = userEvent.setup();
+    setup(makeTab('Table'));
+    await user.click(await screen.findByRole('button', { name: 'Query' }));
+    const doc = [...useQueryDocs.getState().docs.values()].at(-1)!;
+    expect(doc).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT * FROM `shop`.`orders` LIMIT 1000' });
+    expect(useTabs.getState().activeId).toBe(doc.id);
+  });
+
+  it.each([
+    ['postgres schema-qualified', 'postgres', 'orders', 'sales', 'SELECT * FROM "sales"."orders" LIMIT 1000'],
+    ['quote in a postgres name', 'postgres', 'we"ird', 'public', 'SELECT * FROM "public"."we""ird" LIMIT 1000'],
+    ['backtick in a mysql name', 'mysql', 'we`ird', null, 'SELECT * FROM `shop`.`we``ird` LIMIT 1000'],
+    ['vietnamese name', 'mysql', 'đơn_hàng', null, 'SELECT * FROM `shop`.`đơn_hàng` LIMIT 1000'],
+  ])('query_button_quotes_%s', async (_label, kind, name, schema, sql) => {
+    const user = userEvent.setup();
+    useConnections.getState().setStored([], [config(ids.prod, 'c', { kind: kind as 'mysql' | 'postgres' })]);
+    setup(makeTab('Table', name, schema));
+    await user.click(await screen.findByRole('button', { name: 'Query' }));
+    expect([...useQueryDocs.getState().docs.values()].at(-1)!.sql).toBe(sql);
+  });
+  it('functions_have_no_query_button', async () => {
+    setup(makeTab('Function', 'fn'));
+    await screen.findByTestId('monaco-mock');
+    expect(screen.queryByRole('button', { name: 'Query' })).toBeNull();
+  });
+
+  it('open_in_editor_puts_the_ddl_in_a_new_query_tab', async () => {
+    const user = userEvent.setup();
+    setup(makeTab('Table'));
+    await user.click(screen.getByTestId('object-tab-ddl'));
+    await screen.findByTestId('monaco-mock');
+    await user.click(screen.getByRole('button', { name: 'Open in editor' }));
+    const doc = [...useQueryDocs.getState().docs.values()].at(-1)!;
+    expect(doc).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: DDL });
+  });
   it('copy_ddl_writes_clipboard', async () => {
     const user = userEvent.setup();
     const write = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue();
     setup(makeTab('Table'));
     await user.click(screen.getByTestId('object-tab-ddl'));
     expect(screen.getByRole('tab', { name: 'DDL' })).toHaveAttribute('aria-selected', 'true');
-    const pre = await screen.findByTestId('object-ddl-text');
-    expect(pre.textContent).toBe(DDL);
+    const pre = await screen.findByTestId('monaco-mock');
+    expect(pre).toHaveValue(DDL);
     await user.click(screen.getByRole('button', { name: 'Copy' }));
     expect(write).toHaveBeenCalledWith(DDL);
     expect(await screen.findByRole('button', { name: 'Copied' })).toBeInTheDocument();
@@ -148,7 +190,7 @@ describe('ObjectTab', () => {
     const write = vi.spyOn(navigator.clipboard, 'writeText').mockRejectedValueOnce(new Error('denied'));
     // A function opens on its only sub-tab, DDL.
     setup(makeTab('Function', 'f_add'));
-    await screen.findByTestId('object-ddl-text');
+    await screen.findByTestId('monaco-mock');
     await user.click(screen.getByRole('button', { name: 'Copy' }));
     expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't copy — select the text and press Ctrl+C.");
     expect(screen.queryByRole('button', { name: 'Copied' })).not.toBeInTheDocument();
@@ -163,13 +205,13 @@ describe('ObjectTab', () => {
     setup(makeTab('Table'));
     await screen.findByText('Customer orders');
     await user.click(screen.getByTestId('object-tab-ddl'));
-    await screen.findByTestId('object-ddl-text');
+    await screen.findByTestId('monaco-mock');
     expect(callsOf('object_ddl')).toHaveLength(1);
     await user.click(screen.getByRole('tab', { name: 'Info' }));
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(callsOf('table_detail')).toHaveLength(2));
     await user.click(screen.getByTestId('object-tab-ddl'));
-    await screen.findByTestId('object-ddl-text');
+    await screen.findByTestId('monaco-mock');
     expect(callsOf('object_ddl')).toHaveLength(2);
   });
 

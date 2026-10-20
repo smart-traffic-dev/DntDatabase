@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import Editor from '@monaco-editor/react';
 import { needsReconnect } from '../api';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
+import { useDntMonacoTheme } from '../monaco/dntTheme';
+import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import type { ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
 
@@ -75,8 +78,17 @@ function Loaded<T>({
   return <>{children(state.data)}</>;
 }
 
-function InfoPanel({ detail }: { detail: TableDetail }) {
+function InfoPanel({ detail, kind }: { detail: TableDetail; kind: Tab['objectRef']['kind'] }) {
   const { options } = detail;
+  // A plain view has no storage: its Info lists what it does have rather than a column of dashes.
+  if (kind === 'View') {
+    const viewRows: [string, string][] = [
+      ['Columns', String(detail.columns.length)],
+      ...(options.collation ? ([['Collation', options.collation]] as [string, string][]) : []),
+      ['Comment', detail.comment || DASH],
+    ];
+    return <InfoRows rows={viewRows} />;
+  }
   const rows: [string, string][] = [
     ['Row estimate', detail.row_estimate === null ? DASH : formatCount(detail.row_estimate)],
     ['Size', detail.size_bytes === null ? DASH : formatBytes(detail.size_bytes)],
@@ -87,6 +99,10 @@ function InfoPanel({ detail }: { detail: TableDetail }) {
     ['System versioned', options.system_versioned ? 'Yes' : 'No'],
     ['Comment', detail.comment || DASH],
   ];
+  return <InfoRows rows={rows} />;
+}
+
+function InfoRows({ rows }: { rows: [string, string][] }) {
   return (
     <dl className="ot-info">
       {rows.map(([label, value]) => (
@@ -99,7 +115,34 @@ function InfoPanel({ detail }: { detail: TableDetail }) {
   );
 }
 
-function DdlPanel({ ddl }: { ddl: string }) {
+/** Quotes an identifier the way the connection's SQL dialect does. */
+const quoteIdent = (dialect: string, name: string) =>
+  dialect === 'postgres' ? `"${name.replace(/"/g, '""')}"` : `\`${name.replace(/`/g, '``')}\``;
+
+/** Tables and views can be queried; routines, sequences and the like cannot. */
+const queryable = (kind: Tab['objectRef']['kind']) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
+
+/** Opens a new query tab on the object's connection and database, holding `sql`. */
+function openQuery(tab: Tab, sql: string) {
+  const docs = useQueryDocs.getState();
+  const id = docs.newQuery(tab.connectionId, tab.objectRef.database);
+  docs.update(id, { sql });
+}
+
+function selectAllOf(tab: Tab): string {
+  const { objectRef } = tab;
+  const dialect = dialectOfConnection(tab.connectionId);
+  // PostgreSQL addresses a table by schema; MySQL by database.
+  const qualifier = dialect === 'postgres' ? objectRef.schema : objectRef.database;
+  const name = [qualifier, objectRef.name]
+    .filter((p): p is string => !!p)
+    .map((p) => quoteIdent(dialect, p))
+    .join('.');
+  return `SELECT * FROM ${name} LIMIT 1000`;
+}
+
+function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
+  const monacoTheme = useDntMonacoTheme();
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const timer = useRef<number | undefined>(undefined);
@@ -122,6 +165,9 @@ function DdlPanel({ ddl }: { ddl: string }) {
   return (
     <div className="ot-ddl">
       <div className="ot-ddl-bar">
+        <button type="button" className="btn small" onClick={() => openQuery(tab, ddl)}>
+          Open in editor
+        </button>
         <button type="button" className="btn small" onClick={() => void copy()}>
           {copied ? 'Copied' : 'Copy'}
         </button>
@@ -131,9 +177,27 @@ function DdlPanel({ ddl }: { ddl: string }) {
           Couldn't copy — select the text and press Ctrl+C.
         </div>
       ) : null}
-      <pre className="ot-ddl-text" data-testid="object-ddl-text" tabIndex={0} aria-label="DDL">
-        {ddl}
-      </pre>
+      <div className="ot-ddl-text" data-testid="object-ddl-text">
+        <Editor
+          language={dialectOfConnection(tab.connectionId) === 'postgres' ? 'pgsql' : 'mysql'}
+          value={ddl}
+          theme={monacoTheme.theme}
+          beforeMount={monacoTheme.beforeMount}
+          options={{
+            readOnly: true,
+            domReadOnly: true,
+            automaticLayout: true,
+            minimap: { enabled: false },
+            fontFamily: "ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace",
+            fontSize: 13,
+            scrollBeyondLastLine: false,
+            folding: false,
+            renderLineHighlight: 'none',
+            lightbulb: { enabled: 'off' as never },
+            ariaLabel: 'DDL',
+          }}
+        />
+      </div>
     </div>
   );
 }
@@ -328,13 +392,16 @@ export function ObjectTab({ tab }: { tab: Tab }) {
           <strong>{objectRef.name}</strong>
           <span className="muted mono">{path}</span>
         </div>
-        <button
-          type="button"
-          className="btn"
-          onClick={() => void useObjectData.getState().refresh(tab, resource)}
-        >
-          Refresh
-        </button>
+        <div className="ot-actions">
+          {queryable(objectRef.kind) && (
+            <button type="button" className="btn" title="Open a query tab with SELECT * on this object" onClick={() => openQuery(tab, selectAllOf(tab))}>
+              Query
+            </button>
+          )}
+          <button type="button" className="btn" onClick={() => void useObjectData.getState().refresh(tab, resource)}>
+            Refresh
+          </button>
+        </div>
       </header>
       <div role="tablist" aria-label="Object sections" className="ot-tabs" onKeyDown={onKeyDown}>
         {subs.map((s) => (
@@ -360,11 +427,11 @@ export function ObjectTab({ tab }: { tab: Tab }) {
       <div role="tabpanel" id={`${uid}-panel`} aria-labelledby={`${uid}-tab-${sub}`} className="ot-panel">
         {sub === 'ddl' ? (
           <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
-            {(ddl) => <DdlPanel ddl={ddl} />}
+            {(ddl) => <DdlPanel ddl={ddl} tab={tab} />}
           </Loaded>
         ) : (
           <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
-            {(detail) => (sub === 'info' ? <InfoPanel detail={detail} /> : <StructurePanel detail={detail} />)}
+            {(detail) => (sub === 'info' ? <InfoPanel detail={detail} kind={objectRef.kind} /> : <StructurePanel detail={detail} />)}
           </Loaded>
         )}
       </div>
