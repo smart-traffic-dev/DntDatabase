@@ -13,6 +13,7 @@ pub mod favorites;
 pub mod query;
 pub mod settings;
 pub mod transfer;
+pub mod window;
 pub mod workspace;
 
 use dnt_core::error::{AppError, DbError};
@@ -148,6 +149,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data::table_data,
             data::table_row_count,
             data::table_data_cancel,
+            window::open_devtools,
             workspace::tabs_load,
             workspace::tabs_save,
             workspace::tabs_delete,

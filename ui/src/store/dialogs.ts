@@ -29,7 +29,9 @@ export type UiRequest =
       fromSelection: boolean;
     }
   /** The user snippets manager. */
-  | { kind: 'snippets' };
+  | { kind: 'snippets' }
+  | { kind: 'shortcuts' }
+  | { kind: 'about' };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =

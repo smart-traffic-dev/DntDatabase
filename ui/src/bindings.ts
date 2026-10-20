@@ -405,6 +405,14 @@ async tableDataCancel(id: string, requestKey: string) : Promise<Result<boolean, 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Opens the webview's DevTools. The `devtools` feature of `tauri` keeps this available in
+ * release builds too; the F12 / Ctrl+Shift+I accelerator keys stay off there (see
+ * `desktop.rs`), so this command (Tools > Developer tools) is the way in.
+ */
+async openDevtools() : Promise<void> {
+    await TAURI_INVOKE("open_devtools");
+},
 async tabsLoad() : Promise<Result<QueryTabRecord[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("tabs_load") };
