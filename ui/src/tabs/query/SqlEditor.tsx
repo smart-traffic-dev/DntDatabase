@@ -1,7 +1,7 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import { ensureCompletion } from '../../query/completion/monacoProvider';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
-import { registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
+import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 
 export interface SqlEditorProps {
@@ -13,7 +13,7 @@ export interface SqlEditorProps {
 type Editor = Parameters<OnMount>[0];
 type Monaco = Parameters<OnMount>[1];
 
-/** Ctrl+Enter / Ctrl+Shift+Enter run, Esc stops while running (spec §5.2). Not S/O/T: those are window shortcuts. */
+/** Ctrl+Enter / Ctrl+Shift+Enter run, Ctrl+Shift+E explains, Esc stops while running (spec §5.2). Not S/O/T: those are window shortcuts. */
 function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   registerEditor(tabId, editor);
   editor.onDidDispose(() => {
@@ -26,6 +26,7 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
     monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
     () => void runFromEditor(tabId, 'all'),
   );
+  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE, () => void explainQuery(tabId, false));
   // Esc keeps its editor meaning (close widgets, collapse cursors) unless a run can be stopped.
   const running = editor.createContextKey<boolean>('dntRunning', canStop(useQueryRun.getState().get(tabId)));
   const unsubscribe = useQueryRun.subscribe((s) => running.set(canStop(s.runs.get(tabId) ?? emptyRun)));

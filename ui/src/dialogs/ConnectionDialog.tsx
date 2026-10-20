@@ -102,6 +102,7 @@ interface Form {
   connectTimeout: string;
   sshTimeout: string;
   appName: string;
+  queryTimeout: string;
 }
 
 function initialForm(initial: ConnectionConfig | undefined): Form {
@@ -137,6 +138,7 @@ function initialForm(initial: ConnectionConfig | undefined): Form {
     connectTimeout: String(initial?.options.connect_timeout_s ?? 10),
     sshTimeout: String(initial?.options.ssh_timeout_s ?? 10),
     appName: initial?.options.application_name ?? '',
+    queryTimeout: String(initial?.options.query_timeout_s ?? 0),
   };
 }
 
@@ -242,7 +244,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       ssh_timeout_s: num(form.sshTimeout, 10),
       charset: initial?.options.charset ?? null,
       application_name: orNull(form.appName),
-      query_timeout_s: initial?.options.query_timeout_s ?? 0,
+      // 0 = no timeout; never negative or fractional.
+      query_timeout_s: Math.max(0, Math.floor(num(form.queryTimeout, 0))),
     },
   });
 
@@ -571,6 +574,19 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         <div className="field">
           <label htmlFor="cd-ssh-timeout">SSH timeout (s)</label>
           <input id="cd-ssh-timeout" type="number" min={1} value={form.sshTimeout} onChange={(e) => set('sshTimeout', e.target.value)} />
+        </div>
+        <div className="field span2">
+          <label htmlFor="cd-query-timeout">Query timeout (s)</label>
+          <input
+            id="cd-query-timeout"
+            data-testid="conn-query-timeout"
+            type="number"
+            min={0}
+            step={1}
+            value={form.queryTimeout}
+            onChange={(e) => set('queryTimeout', e.target.value)}
+          />
+          <p className="hint">0 means no timeout. A query that runs longer is stopped.</p>
         </div>
         <div className="field span2">
           <label htmlFor="cd-app">Application name</label>

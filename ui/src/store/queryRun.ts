@@ -76,6 +76,8 @@ export interface TabRun {
   /** Statements that completed a result and did not fail, in order. */
   finished: number[];
   explain: PlanTree | null;
+  /** Why Explain did not start (`query_explain` refused), shown in the Explain panel. */
+  explainError: string | null;
   panel: 'result' | 'messages' | 'history' | 'explain';
   activeResult: number;
   lastRun: { rows: number; elapsedMs: number } | null;
@@ -101,6 +103,7 @@ export const emptyRun: TabRun = {
   markers: [],
   finished: [],
   explain: null,
+  explainError: null,
   panel: 'result',
   activeResult: 0,
   lastRun: null,

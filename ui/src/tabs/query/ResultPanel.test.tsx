@@ -3,11 +3,14 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanStmtView, RunEvent, Value } from '../../bindings';
 import { emptyRun, reduceRun, startRun, useQueryRun, type TabRun } from '../../store/queryRun';
-import { resetStores } from '../../test/backend';
+import { mockBackend, resetStores } from '../../test/backend';
 import { ResultPanel } from './ResultPanel';
 import { rerunStatement } from './rerun';
 
-vi.mock('./rerun', () => ({ rerunStatement: vi.fn(async () => {}) }));
+vi.mock('./rerun', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./rerun')>()),
+  rerunStatement: vi.fn(async () => {}),
+}));
 
 const stmt = (index: number, kind: PlanStmtView['kind']): PlanStmtView => ({
   index,
@@ -125,5 +128,23 @@ describe('ResultPanel', () => {
     expect(screen.getAllByTestId('message-line').length).toBeGreaterThan(0);
     act(() => useQueryRun.getState().setPanel('t', 'result'));
     expect(screen.getByTestId('result-summary')).toBeInTheDocument();
+  });
+
+  it('history_tab_shows_the_history_view', async () => {
+    mockBackend({ history_list: () => [] });
+    show(play(result(1, 0, 3)));
+    expect(screen.queryByTestId('explain-view')).toBeNull();
+    await userEvent.setup().click(screen.getByTestId('panel-history'));
+    expect(useQueryRun.getState().get('t').panel).toBe('history');
+    expect(await screen.findByTestId('history-view')).toBeInTheDocument();
+    expect(screen.queryByTestId('result-summary')).toBeNull();
+  });
+
+  it('explain_event_opens_the_explain_panel', () => {
+    const tree = { kind: 'table' as const, columns: ['id'], rows: [['1']], raw: 'r' };
+    show(play([{ t: 'explain', index: 0, plan: tree }]));
+    expect(useQueryRun.getState().get('t').panel).toBe('explain');
+    expect(screen.getByTestId('explain-view')).toBeInTheDocument();
+    expect(screen.getByTestId('panel-explain')).toHaveAttribute('aria-selected', 'true');
   });
 });

@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { canRun, emptyRun, useQueryRun, type ResultSet } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
+import { ExplainView } from './ExplainView';
+import { HistoryView } from './HistoryView';
 import { MessagesView } from './MessagesView';
 import { ResultGrid } from './ResultGrid';
 import { rerunStatement } from './rerun';
@@ -26,7 +28,10 @@ export function ResultPanel({ tabId }: { tabId: string }) {
   const [picked, setPicked] = useState<{ runId: string | null; at: number }>({ runId: run.runId, at: 0 });
   const at = Math.min(picked.runId === run.runId ? picked.at : 0, Math.max(0, run.results.length - 1));
   const result = run.results[at];
-  const showResult = run.panel !== 'messages' && result !== undefined;
+  const showResult = run.panel === 'result' && result !== undefined;
+  const showExplain = run.panel === 'explain';
+  const showHistory = run.panel === 'history';
+  const hasExplain = run.explain !== null || run.explainError !== null;
   const readStatement = result ? run.plan?.stmts.find((s) => s.index === result.index)?.kind === 'read' : false;
 
   return (
@@ -51,12 +56,34 @@ export function ResultPanel({ tabId }: { tabId: string }) {
         <button
           type="button"
           role="tab"
-          aria-selected={!showResult}
-          className={`qr-tab${!showResult ? ' active' : ''}`}
+          aria-selected={!showResult && !showExplain && !showHistory}
+          className={`qr-tab${!showResult && !showExplain && !showHistory ? ' active' : ''}`}
           data-testid="panel-messages"
           onClick={() => setPanel(tabId, 'messages')}
         >
           Messages
+        </button>
+        {(hasExplain || showExplain) && (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={showExplain}
+            className={`qr-tab${showExplain ? ' active' : ''}`}
+            data-testid="panel-explain"
+            onClick={() => setPanel(tabId, 'explain')}
+          >
+            Explain
+          </button>
+        )}
+        <button
+          type="button"
+          role="tab"
+          aria-selected={showHistory}
+          className={`qr-tab${showHistory ? ' active' : ''}`}
+          data-testid="panel-history"
+          onClick={() => setPanel(tabId, 'history')}
+        >
+          History
         </button>
         {showResult && <Summary result={result} />}
       </div>
@@ -84,6 +111,10 @@ export function ResultPanel({ tabId }: { tabId: string }) {
           )}
           <ResultGrid key={result.id} result={result} />
         </>
+      ) : showExplain ? (
+        <ExplainView tabId={tabId} />
+      ) : showHistory ? (
+        <HistoryView tabId={tabId} />
       ) : (
         <MessagesView tabId={tabId} run={run} />
       )}

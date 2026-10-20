@@ -51,6 +51,14 @@ export interface EditorLike {
   getModel(): { getOffsetAt(p: Pos): number } | null;
   getSelection(): { isEmpty(): boolean; getStartPosition(): Pos; getEndPosition(): Pos } | null;
   getPosition(): Pos | null;
+  executeEdits?(
+    source: string,
+    edits: {
+      range: { startLineNumber: number; startColumn: number; endLineNumber: number; endColumn: number };
+      text: string;
+      forceMoveMarkers?: boolean;
+    }[],
+  ): unknown;
 }
 
 const editors = new Map<string, EditorLike>();
@@ -154,6 +162,23 @@ async function execute(tabId: string, plan: PlanView, extra?: { maxRows?: number
   }
 }
 
+/** The tab's connection id once it is open (reopening it if needed); null when the run cannot go on. */
+async function openedConnection(tabId: string, connectionId: string | null): Promise<string | null> {
+  if (!connectionId) {
+    note(tabId, 'Choose a connection first.');
+    return null;
+  }
+  if (!useConnections.getState().info.has(connectionId)) {
+    const failure = await reopenConnection(connectionId);
+    if (failure) {
+      // A password / host key prompt takes over; any other failure is shown here.
+      if (!promptHandles(failure)) note(tabId, failure.message, failure);
+      return null;
+    }
+  }
+  return connectionId;
+}
+
 /** Runs the tab's `target`: opens the connection, plans, asks the guards, runs. */
 export async function runQuery(tabId: string, target: Target, extra?: { maxRows?: number }): Promise<void> {
   if (isStarting(tabId) || !canRun(useQueryRun.getState().get(tabId))) return;
@@ -161,19 +186,8 @@ export async function runQuery(tabId: string, target: Target, extra?: { maxRows?
   if (!doc) return;
   setStarting(tabId, true);
   try {
-    if (!doc.connectionId) {
-      note(tabId, 'Choose a connection first.');
-      return;
-    }
-    const connectionId = doc.connectionId;
-    if (!useConnections.getState().info.has(connectionId)) {
-      const failure = await reopenConnection(connectionId);
-      if (failure) {
-        // A password / host key prompt takes over; any other failure is shown here.
-        if (!promptHandles(failure)) note(tabId, failure.message, failure);
-        return;
-      }
-    }
+    const connectionId = await openedConnection(tabId, doc.connectionId);
+    if (!connectionId) return;
     let plan: PlanView;
     try {
       plan = await api.queryPlan(tabId, connectionId, doc.database, doc.sql, target);
@@ -186,6 +200,74 @@ export async function runQuery(tabId: string, target: Target, extra?: { maxRows?
   } finally {
     setStarting(tabId, false);
   }
+}
+
+/** Sets the Explain panel's refusal text (null clears it) and, for a refusal, shows that panel. */
+function setExplainError(tabId: string, text: string | null) {
+  const run = useQueryRun.getState().get(tabId);
+  if (run.explainError === text && (text === null || run.panel === 'explain')) return;
+  useQueryRun.setState((s) => ({
+    runs: new Map(s.runs).set(tabId, { ...run, explainError: text, panel: text === null ? run.panel : 'explain' }),
+  }));
+}
+
+/**
+ * Explain (or Explain Analyze) of the statement at the cursor (spec 8.2): `query_explain` builds
+ * the plan, which then goes through the normal run flow, so Analyze on Production asks first.
+ */
+export async function explainQuery(tabId: string, analyze: boolean): Promise<void> {
+  if (isStarting(tabId) || !canRun(useQueryRun.getState().get(tabId))) return;
+  const doc = useQueryDocs.getState().docs.get(tabId);
+  if (!doc) return;
+  setStarting(tabId, true);
+  try {
+    const connectionId = await openedConnection(tabId, doc.connectionId);
+    if (!connectionId) return;
+    const target = targetOf(tabId, 'cursor');
+    const cursor = target === null || target === 'All' ? 0 : 'Cursor' in target ? target.Cursor : target.Selection[0];
+    let plan: PlanView;
+    try {
+      plan = await api.queryExplain(tabId, connectionId, doc.database, doc.sql, cursor, analyze);
+    } catch (e) {
+      setExplainError(tabId, toAppError(e).message);
+      return;
+    }
+    setExplainError(tabId, null);
+    await execute(tabId, plan);
+  } finally {
+    setStarting(tabId, false);
+  }
+}
+
+/** Inserts `text` at the cursor of the tab's editor (replacing the selection). */
+export function insertAtCursor(tabId: string, text: string): void {
+  const editor = editors.get(tabId);
+  const sel = editor?.getSelection();
+  const pos = editor?.getPosition();
+  if (editor?.executeEdits && (sel || pos)) {
+    const start = sel?.getStartPosition() ?? pos!;
+    const end = sel?.getEndPosition() ?? pos!;
+    editor.executeEdits('history', [
+      {
+        range: {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        },
+        text,
+        forceMoveMarkers: true,
+      },
+    ]);
+    return;
+  }
+  // No editor mounted: edit the document at its stored cursor.
+  const doc = useQueryDocs.getState().docs.get(tabId);
+  if (!doc) return;
+  const at = Math.min(Math.max(doc.cursor, 0), doc.sql.length);
+  useQueryDocs
+    .getState()
+    .update(tabId, { sql: doc.sql.slice(0, at) + text + doc.sql.slice(at), cursor: at + text.length, dirty: true });
 }
 
 /** Runs a plan that already exists (Retry, Fetch all) through the same guards and run flow. */

@@ -191,3 +191,234 @@
   z-index: 2;
   cursor: pointer;
 }
+
+/* Toolbar: Explain split button and its menu */
+.qt-split {
+  position: relative;
+  display: inline-flex;
+}
+
+.qt-split-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.qt-split-caret {
+  padding: 0 6px;
+  border-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.qt-menu {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 5;
+  min-width: 160px;
+  margin-top: 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.qt-menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+
+.qt-menu-item:hover:not(:disabled) {
+  background: var(--sel);
+}
+
+.qt-menu-item:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+}
+
+/* Explain panel (spec 8.2) */
+.ex-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ex-bar {
+  display: flex;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.ex-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.ex-tree,
+.ex-tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 18px;
+}
+
+.ex-tree {
+  padding: 6px 12px;
+}
+
+.ex-node {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.ex-node.hot {
+  background: var(--warning-bg);
+  color: var(--staging);
+  box-shadow: inset 3px 0 0 var(--staging);
+}
+
+.ex-toggle {
+  width: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+}
+
+.ex-label {
+  font-weight: 600;
+}
+
+.ex-detail,
+.ex-metrics {
+  color: var(--muted);
+}
+
+.ex-node.hot .ex-detail,
+.ex-node.hot .ex-metrics {
+  color: inherit;
+}
+
+.ex-raw {
+  margin: 0;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ex-table {
+  border-collapse: collapse;
+  margin: 8px 12px;
+}
+
+.ex-table th,
+.ex-table td {
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+/* History panel (spec 8.1) */
+.hs-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.hs-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.hs-bar .spacer {
+  flex: 1;
+}
+
+.hs-search {
+  height: 26px;
+  min-width: 220px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 8px;
+  font: inherit;
+}
+
+.hs-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--danger);
+}
+
+.hs-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.hs-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 3px 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: default;
+  user-select: none;
+}
+
+.hs-row.selected {
+  background: var(--sel);
+}
+
+.hs-time,
+.hs-elapsed {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.hs-status {
+  min-width: 64px;
+}
+
+.hs-status.error {
+  color: var(--danger);
+}
+
+.hs-status.cancelled {
+  color: var(--staging);
+}
+
+.hs-elapsed {
+  min-width: 60px;
+  text-align: right;
+}
+
+.hs-sql {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.hs-redacted {
+  background: var(--chip-ma-bg);
+  color: var(--chip-ma-fg);
+}

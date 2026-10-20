@@ -1,11 +1,11 @@
+import { useState } from 'react';
 import { useConnections } from '../../store/connections';
 import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
-import { runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
+import { explainQuery, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
+import { analyzeAvailable } from './explainTree';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc, type RowLimit } from '../../store/queryTabs';
 import { useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
-
-const SOON = 'Available once running is wired up';
 
 /** Run / Stop / Explain, connection, database, row limit and continue-on-error of a query tab. */
 export function QueryToolbar({ doc }: { doc: QueryDoc }) {
@@ -37,6 +37,8 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
   const hasSelection = useSelection((s) => s.ids.has(doc.id));
   const starting = useStarting((s) => s.ids.has(doc.id));
   const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const analyzeOk = analyzeAvailable(useConnections((s) => (doc.connectionId ? s.info.get(doc.connectionId) : undefined)));
 
   return (
     <div className="query-toolbar" role="toolbar" aria-label="Query">
@@ -70,9 +72,49 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
       >
         Stop
       </button>
-      <button type="button" className="qt-btn" data-testid="query-explain" disabled title={SOON}>
-        Explain
-      </button>
+      <span className="qt-split">
+        <button
+          type="button"
+          className="qt-btn qt-split-main"
+          data-testid="query-explain"
+          disabled={!runnable}
+          title={runnable ? 'Explain (Ctrl+Shift+E)' : undefined}
+          onClick={() => void explainQuery(doc.id, false)}
+        >
+          Explain
+        </button>
+        <button
+          type="button"
+          className="qt-btn qt-split-caret"
+          data-testid="query-explain-menu"
+          aria-label="Explain options"
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          disabled={!runnable}
+          onClick={() => setMenuOpen((v) => !v)}
+          onKeyDown={(e) => e.key === 'Escape' && setMenuOpen(false)}
+        >
+          ▾
+        </button>
+        {menuOpen && (
+          <div className="qt-menu" role="menu" onKeyDown={(e) => e.key === 'Escape' && setMenuOpen(false)}>
+            <button
+              type="button"
+              role="menuitem"
+              className="qt-menu-item"
+              data-testid="query-explain-analyze"
+              disabled={!analyzeOk}
+              title={analyzeOk ? 'Runs the statement and reports real timings' : 'Explain Analyze needs MySQL 8.0.18 or later'}
+              onClick={() => {
+                setMenuOpen(false);
+                void explainQuery(doc.id, true);
+              }}
+            >
+              Explain Analyze
+            </button>
+          </div>
+        )}
+      </span>
       <span className="qt-sep" aria-hidden="true" />
       <select
         className="qt-select"
