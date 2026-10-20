@@ -63,18 +63,28 @@ function options(): Monaco.editor.IStandaloneEditorConstructionOptions {
   return editorOptions;
 }
 
-/** The text most recently sent to the store by each editor (`onChange`), per tab. */
-const emitted = new Map<string, string>();
+/** The mounted editor of each tab: what it holds right now. */
+const editors = new Map<string, { getValue(): string }>();
+/**
+ * Per tab, the text the editor last held as far as React knows: what it typed (`onChange`)
+ * or the `value` it was last rendered with (applied without an `onChange`). Used when no
+ * editor instance is mounted yet.
+ */
+const shownText = new Map<string, string>();
 
 /**
  * Re-render only when something the editor shows changed. Every keystroke updates the
- * document in the store; re-rendering the editor for its own text is wasted work.
+ * document in the store; re-rendering the editor for its own text is wasted work. The text
+ * is skipped only when it equals what the editor holds now: a text loaded from history or
+ * a file always reaches it, even one equal to an earlier typed text.
  */
 function sameEditor(prev: SqlEditorProps, next: SqlEditorProps): boolean {
   if (prev.engine !== next.engine || prev.doc.id !== next.doc.id) return false;
   if (prev.doc.connectionId !== next.doc.connectionId || prev.doc.database !== next.doc.database) return false;
   if ((prev.doc.sql === '') !== (next.doc.sql === '')) return false;
-  return prev.doc.sql === next.doc.sql || next.doc.sql === emitted.get(next.doc.id);
+  const id = next.doc.id;
+  const holds = editors.get(id)?.getValue() ?? shownText.get(id);
+  return next.doc.sql === holds;
 }
 
 /** The Monaco editor of a query document. Monaco itself is bundled by `monaco/setup.ts`. */
@@ -89,7 +99,15 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
   useEffect(() => {
     prefetchCompletion({ tabId: doc.id, connId: connectionId, db: database, engine });
   }, [doc.id, connectionId, database, engine]);
-  useEffect(() => () => void emitted.delete(doc.id), [doc.id]);
+  // This render hands `doc.sql` to the editor as its value (applied without an onChange).
+  shownText.set(doc.id, doc.sql);
+  useEffect(
+    () => () => {
+      shownText.delete(doc.id);
+      editors.delete(doc.id);
+    },
+    [doc.id],
+  );
   return (
     <div className="sql-editor" data-testid="query-editor">
       {doc.sql === '' && (
@@ -109,11 +127,15 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
         theme={monacoTheme.theme}
         beforeMount={monacoTheme.beforeMount}
         onChange={(sql) => {
-          emitted.set(doc.id, sql ?? '');
+          shownText.set(doc.id, sql ?? '');
           useQueryDocs.getState().update(doc.id, { sql: sql ?? '', dirty: true });
         }}
         onMount={(editor, monaco) => {
           ensureCompletion(monaco);
+          editors.set(doc.id, editor);
+          editor.onDidDispose(() => {
+            if (editors.get(doc.id) === editor) editors.delete(doc.id);
+          });
           setContentLeft(editor.getLayoutInfo().contentLeft);
           editor.onDidLayoutChange((l) => setContentLeft(l.contentLeft));
           bindRunKeys(doc.id, editor, monaco);

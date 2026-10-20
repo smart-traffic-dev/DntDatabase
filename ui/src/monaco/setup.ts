@@ -13,3 +13,7 @@ import './monaco.css';
 
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 loader.config({ monaco });
+
+// Monaco measures glyph widths once; a code font that finishes loading later would leave the
+// cursor and selections misaligned until it measures again.
+void document.fonts?.ready.then(() => monaco.editor.remeasureFonts());

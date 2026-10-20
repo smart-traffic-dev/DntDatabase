@@ -23,11 +23,24 @@ function isIdentCode(c: number): boolean {
 /** ASCII whitespace as the splitter sees it (`u8::is_ascii_whitespace`). */
 const isAsciiSpace = (c: number) => c === SPACE || c === TAB || c === NL || c === 13 || c === 12;
 
-/** Whitespace as `str::trim` sees it (Unicode), with an ASCII fast path. */
-const isSpaceAt = (text: string, i: number) => {
-  const c = text.charCodeAt(i);
-  return c < 128 ? isAsciiSpace(c) || c === 11 : /\s/.test(text.charAt(i));
-};
+/**
+ * Whitespace as Rust's `str::trim` sees it (the Unicode `White_Space` property), used to trim
+ * statement ranges. Not JS `\s`: that adds U+FEFF and misses U+0085.
+ */
+function isTrimSpace(c: number): boolean {
+  if (c < 128) return (c >= 9 && c <= 13) || c === SPACE;
+  return (
+    c === 0x85 ||
+    c === 0xa0 ||
+    c === 0x1680 ||
+    (c >= 0x2000 && c <= 0x200a) ||
+    c === 0x2028 ||
+    c === 0x2029 ||
+    c === 0x202f ||
+    c === 0x205f ||
+    c === 0x3000
+  );
+}
 
 const DELIMITER_KW = 'delimiter';
 
@@ -150,7 +163,8 @@ function delimiterDirective(text: string, i: number): { delim: string; next: num
 function significantStart(text: string, from: number, to: number, mysql: boolean): number {
   let i = from;
   while (i < to) {
-    if (isSpaceAt(text, i)) {
+    // `leading_blank_len`: ASCII whitespace only.
+    if (isAsciiSpace(text.charCodeAt(i))) {
       i++;
       continue;
     }
@@ -162,11 +176,13 @@ function significantStart(text: string, from: number, to: number, mysql: boolean
 }
 
 function push(out: [number, number][], text: string, from: number, to: number, mysql: boolean): void {
-  if (significantStart(text, from, to, mysql) >= to) return;
+  // Like the backend: trim (Unicode White_Space), then drop the fragment when the trimmed
+  // text is only ASCII whitespace and comments.
   let lo = from;
   let hi = to;
-  while (lo < hi && isSpaceAt(text, lo)) lo++;
-  while (hi > lo && isSpaceAt(text, hi - 1)) hi--;
+  while (lo < hi && isTrimSpace(text.charCodeAt(lo))) lo++;
+  while (hi > lo && isTrimSpace(text.charCodeAt(hi - 1))) hi--;
+  if (significantStart(text, lo, hi, mysql) >= hi) return;
   out.push([lo, hi]);
 }
 
@@ -204,7 +220,8 @@ export function splitIncremental(prev: SplitState | null, text: string, engine: 
   let start: Bound = { at: 0, delim: ';', nRanges: 0 };
   let bounds: Bound[] = [start];
   let out: [number, number][] = [];
-  if (prev && prev.engine === engine && changedFrom > 0) {
+  // An unknown edit offset (Infinity, NaN) means nothing can be reused: a full split.
+  if (prev && prev.engine === engine && Number.isFinite(changedFrom) && changedFrom > 0) {
     // The last boundary strictly before the edit (binary search: bounds are ascending).
     let lo = 0;
     let hi = prev.bounds.length - 1;

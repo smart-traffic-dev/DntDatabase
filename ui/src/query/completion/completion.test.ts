@@ -398,6 +398,50 @@ describe('monaco provider: fix round 1', () => {
     expect(callsOf('completion_scope')).toHaveLength(1);
   });
 
+  it('open_suggest_widget_is_refreshed_once_the_scope_loads', async () => {
+    let resolveScope: (v: unknown) => void = () => {};
+    mockBackend({
+      completion_scope: () => new Promise((r) => (resolveScope = r)),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    const model = fakeModel('SELECT * FROM |');
+    const widget = document.createElement('div');
+    const dom = document.createElement('div');
+    dom.appendChild(widget);
+    const trigger = vi.fn();
+    const editors = [{ getModel: () => model, getDomNode: () => dom, trigger }];
+    const withEditors = { ...monaco, editor: { getEditors: () => editors } };
+    registerCompletion(withEditors as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    p.provideCompletionItems(model, { lineNumber: 1 }, {}, live); // still loading: one refresh, not two
+    widget.className = 'suggest-widget visible';
+    resolveScope({ database: 'shop', tables: mysqlScope.tables });
+    await loaded();
+    await Promise.resolve();
+    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(trigger).toHaveBeenCalledWith('dnt', 'editor.action.triggerSuggest', {});
+  });
+
+  it('closed_suggest_widget_is_not_reopened_when_the_scope_loads', async () => {
+    let resolveScope: (v: unknown) => void = () => {};
+    mockBackend({
+      completion_scope: () => new Promise((r) => (resolveScope = r)),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    const model = fakeModel('SELECT * FROM |');
+    const trigger = vi.fn();
+    const editors = [{ getModel: () => model, getDomNode: () => document.createElement('div'), trigger }];
+    registerCompletion({ ...monaco, editor: { getEditors: () => editors } } as never, target);
+    (providers.get('mysql') as FakeProvider).provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    resolveScope({ database: 'shop', tables: mysqlScope.tables });
+    await loaded();
+    await Promise.resolve();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
   it('large_script_completion_is_fast', async () => {
     await loaded();
     const { monaco, providers } = fakeMonaco();
@@ -449,6 +493,27 @@ describe('monaco provider: fix round 1', () => {
       p.provideCompletionItems(plain, { lineNumber: 1 }, {}, live);
     }
     expect((performance.now() - t1) / 5).toBeLessThan(50);
+  });
+
+  it('split_whitespace_matches_rust', () => {
+    // Statement trimming is Rust's `str::trim` (Unicode White_Space): NEL and NBSP are
+    // trimmed, a BOM is not (JS `\s` would get both wrong).
+    const nel = 'select 1\u0085;  select 2 ';
+    expect(splitRanges(nel, 'mysql').map(([s, e]) => nel.slice(s, e))).toEqual(['select 1', 'select 2']);
+    const bom = '﻿select 1';
+    expect(splitRanges(bom, 'mysql').map(([s, e]) => bom.slice(s, e))).toEqual(['﻿select 1']);
+    // Blank-fragment detection is ASCII only: an NBSP between comments is significant.
+    const nbsp = 'select 1; /* a */ /* b */';
+    expect(splitRanges(nbsp, 'mysql')).toHaveLength(2);
+  });
+
+  it('incremental_split_without_a_known_edit_offset_is_a_full_split', () => {
+    const before = 'SELECT 1; SELECT 2; SELECT 3';
+    const prev = splitIncremental(null, before, 'mysql', 0);
+    // The edit offset is unknown (Infinity): reusing the old boundaries would be wrong here.
+    const after = "SELECT ';"; // the first statement now opens a string that swallows the rest
+    expect(splitIncremental(prev, after, 'mysql', Infinity).ranges).toEqual(splitRanges(after, 'mysql'));
+    expect(splitIncremental(prev, after, 'mysql', Number.NaN).ranges).toEqual(splitRanges(after, 'mysql'));
   });
 
   it('incremental_split_matches_a_full_split', () => {

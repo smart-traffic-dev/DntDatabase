@@ -83,4 +83,23 @@ describe('SqlEditor options', () => {
     expect(renders.at(-1)?.value).toBe('select 99');
     expect(renders.at(-1)?.options).toBe(first?.options);
   });
+
+  it('loading_the_last_typed_text_again_reaches_the_editor', () => {
+    // The editor applies an external `value` without calling onChange.
+    let setSql: (sql: string) => void = () => {};
+    function Host() {
+      const [sql, set] = useState('');
+      setSql = set;
+      return <SqlEditor doc={{ ...doc, id: 'q-desync', sql }} engine="mysql" />;
+    }
+    render(<ThemeProvider><Host /></ThemeProvider>);
+    act(() => {
+      renders.at(-1)?.onChange?.('SELECT 1'); // typed
+      setSql('SELECT 1'); // store echo
+    });
+    act(() => setSql('SELECT 2')); // loaded from history / a file
+    expect(renders.at(-1)?.value).toBe('SELECT 2');
+    act(() => setSql('SELECT 1')); // the first text loaded again
+    expect(renders.at(-1)?.value).toBe('SELECT 1');
+  });
 });

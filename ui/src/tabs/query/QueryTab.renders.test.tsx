@@ -1,7 +1,7 @@
 // Typing must stay cheap (user report: laggy typing): a keystroke updates the document in
 // the store, and only the editor may care. The toolbar, the result panel and its messages
 // must not re-render for it.
-import { act, render } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { Profiler } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { emptyRun, startRun, useQueryRun } from '../../store/queryRun';
@@ -12,13 +12,18 @@ import { QueryTab } from './QueryTab';
 
 const counts = vi.hoisted(() => ({ toolbar: 0, panel: 0 }));
 
-// Plain (non-memo) stand-ins: they render whenever QueryTab renders them.
-vi.mock('./QueryToolbar', () => ({
-  QueryToolbar: () => {
-    counts.toolbar++;
-    return null;
-  },
-}));
+// Plain (non-memo) counters: they render whenever QueryTab renders them. The toolbar one
+// renders the real toolbar inside, so its buttons can be checked too.
+vi.mock('./QueryToolbar', async (importOriginal) => {
+  const { createElement } = await import('react');
+  const actual = await importOriginal<typeof import('./QueryToolbar')>();
+  return {
+    QueryToolbar: (props: Parameters<typeof actual.QueryToolbar>[0]) => {
+      counts.toolbar++;
+      return createElement(actual.QueryToolbar, props);
+    },
+  };
+});
 vi.mock('./ResultPanel', () => ({
   ResultPanel: () => {
     counts.panel++;
@@ -29,7 +34,17 @@ vi.mock('./ResultPanel', () => ({
 /** The real result panel (the module itself is replaced by a counter above). */
 const realPanel = async () => (await vi.importActual<typeof import('./ResultPanel')>('./ResultPanel')).ResultPanel;
 
-const typeChars = (id: string, n: number) => {
+const PLAN = {
+  plan_id: 'p1',
+  stmts: [{ index: 0, range: [0, 8] as [number, number], kind: 'read' as const, verdict: 'allow' as const, preview: 'S0' }],
+  dialect: { engine: 'mysql' as const },
+  connection_name: 'c',
+  env_tag: null,
+  read_only: false,
+  tx_state: 'idle' as const,
+};
+
+const typeChars =(id: string, n: number) => {
   for (let i = 1; i <= n; i++) {
     act(() => useQueryDocs.getState().update(id, { sql: 'x'.repeat(i) }));
   }
@@ -56,22 +71,19 @@ describe('typing re-renders', () => {
     // A field the toolbar shows still reaches it.
     act(() => useQueryDocs.getState().update(id, { rowLimit: 1000 }));
     expect(counts.toolbar - toolbarBefore).toBe(1);
+    // So does the run state: a started run disables Run and enables Stop.
+    expect(screen.getByTestId('query-run')).toBeEnabled();
+    expect(screen.getByTestId('query-stop')).toBeDisabled();
+    act(() => useQueryRun.setState({ runs: new Map([[id, startRun(emptyRun, PLAN as never, 0)]]) }));
+    expect(screen.getByTestId('query-run')).toBeDisabled();
+    expect(screen.getByTestId('query-stop')).toBeEnabled();
   });
 
   it('messages_view_ignores_keystrokes', async () => {
     const ResultPanel = await realPanel();
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     // A run with a plan: the Messages tab (and its plan-alive check) is mounted.
-    const plan = {
-      plan_id: 'p1',
-      stmts: [{ index: 0, range: [0, 8] as [number, number], kind: 'read' as const, verdict: 'allow' as const, preview: 'S0' }],
-      dialect: { engine: 'mysql' as const },
-      connection_name: 'c',
-      env_tag: null,
-      read_only: false,
-      tx_state: 'idle' as const,
-    };
-    const run = { ...startRun(emptyRun, plan as never, 0), origin: { connectionId: ids.prod, database: 'shop' } };
+    const run = { ...startRun(emptyRun, PLAN as never, 0), origin: { connectionId: ids.prod, database: 'shop' } };
     useQueryRun.setState({ runs: new Map([[id, run]]) });
     let commits = 0;
     render(

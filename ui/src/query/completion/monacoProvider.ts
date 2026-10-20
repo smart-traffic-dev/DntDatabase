@@ -95,6 +95,26 @@ export function registerCompletion(
     return { text: snap.text, ranges: snap.split.ranges };
   };
 
+  /** The load each model's open suggest list waits for (one refresh per load, not per keystroke). */
+  const waiting = new WeakMap<object, Promise<unknown>>();
+  /**
+   * Once `load` settles, asks again in the editors of `model` whose suggest list is still
+   * open, so the tables appear without another keystroke. A closed list stays closed.
+   */
+  const refreshWhenLoaded = (model: Monaco.editor.ITextModel, load: Promise<unknown>) => {
+    if (waiting.get(model) === load) return;
+    waiting.set(model, load);
+    void load.then(() => {
+      if (waiting.get(model) !== load) return;
+      waiting.delete(model);
+      for (const editor of monaco.editor?.getEditors?.() ?? []) {
+        if (editor.getModel() !== model) continue;
+        if (!editor.getDomNode()?.querySelector('.suggest-widget.visible')) continue;
+        editor.trigger('dnt', 'editor.action.triggerSuggest', {});
+      }
+    });
+  };
+
   const provider: Monaco.languages.CompletionItemProvider = {
     triggerCharacters: ['.'],
     provideCompletionItems(model, position, _context, token) {
@@ -121,6 +141,15 @@ export function registerCompletion(
       // No scope (loading or failed): Monaco asks again on the next keystroke instead of
       // only filtering a list without the tables.
       const incomplete = (Boolean(connId && db) && !scope) || containers === undefined;
+      if (connId && (scope === undefined || containers === undefined)) {
+        refreshWhenLoaded(
+          model,
+          Promise.all([
+            db ? useCompletion.scope(connId, db) : null,
+            db || engine === 'mysql' ? useCompletion.containers(connId, db ?? '', engine) : null,
+          ]),
+        );
+      }
       const toList = (list: Suggestion[]): Monaco.languages.CompletionList => ({
         incomplete,
         suggestions: list.map((s, i) => ({

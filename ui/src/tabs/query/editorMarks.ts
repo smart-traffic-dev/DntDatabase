@@ -169,9 +169,10 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
     refresh();
     const subs = [
       editor.onDidChangeModelContent((e) => {
-        // No change list (or a flush): split everything again.
-        const offsets = e?.changes?.map((c) => c.rangeOffset) ?? [0];
-        changedFrom = Math.min(changedFrom, ...offsets);
+        // No offsets (no event data, an empty change list): split everything again.
+        const changes = e?.changes ?? [];
+        if (changes.length === 0) changedFrom = 0;
+        for (const c of changes) if (c.rangeOffset < changedFrom) changedFrom = c.rangeOffset;
         // Markers and "done" dots of the last run describe text that has changed (F08).
         const model = editor.getModel();
         if (model) mounted.monaco.editor.setModelMarkers(model, MARKER_OWNER, []);

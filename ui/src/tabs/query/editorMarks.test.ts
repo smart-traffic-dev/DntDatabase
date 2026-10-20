@@ -207,6 +207,14 @@ describe('editor marks', () => {
           { range: { startLineNumber: 2, startColumn: 1, endLineNumber: 2, endColumn: 17 }, options: { className: 'current-stmt' } },
         ]);
         expect(invoke).not.toHaveBeenCalled();
+        // A change event without offsets (e.g. a flush): everything is split again.
+        text = 'SELECT 12345;\nSELECT 2';
+        cursor = 3;
+        onContent({ changes: [] });
+        vi.advanceTimersByTime(200);
+        expect(highlights.at(-1)).toEqual([
+          { range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 13 }, options: { className: 'current-stmt' } },
+        ]);
       } finally {
         vi.useRealTimers();
       }
