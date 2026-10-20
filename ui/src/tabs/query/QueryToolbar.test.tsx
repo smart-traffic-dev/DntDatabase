@@ -49,4 +49,76 @@ describe('QueryToolbar', () => {
     act(() => useConnections.getState().setInfo(ids.prod, serverInfo('MySql8', [8, 0, 36])));
     expect(screen.getByRole('menuitem', { name: 'Explain Analyze' })).toBeEnabled();
   });
+
+  describe('explain menu keyboard', () => {
+    const open = async () => {
+      const user = userEvent.setup();
+      useConnections.getState().setInfo(ids.prod, serverInfo('MySql8', [8, 0, 36]));
+      const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+      render(
+        <>
+          <QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />
+          <button type="button">elsewhere</button>
+        </>,
+      );
+      await user.click(screen.getByTestId('query-explain-menu'));
+      return user;
+    };
+    const items = () => screen.getAllByRole('menuitem');
+
+    it('focus moves into the menu on open and arrows cycle the items', async () => {
+      const user = await open();
+      expect(items().map((i) => i.textContent)).toEqual(['Explain', 'Explain Analyze']);
+      expect(items()[0]).toHaveFocus();
+      await user.keyboard('{ArrowDown}');
+      expect(items()[1]).toHaveFocus();
+      await user.keyboard('{ArrowDown}');
+      expect(items()[0]).toHaveFocus();
+      await user.keyboard('{ArrowUp}');
+      expect(items()[1]).toHaveFocus();
+      await user.keyboard('{Home}');
+      expect(items()[0]).toHaveFocus();
+      await user.keyboard('{End}');
+      expect(items()[1]).toHaveFocus();
+    });
+
+    it('Escape closes and gives focus back to the caret', async () => {
+      const user = await open();
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('menu')).toBeNull();
+      expect(screen.getByTestId('query-explain-menu')).toHaveFocus();
+      expect(screen.getByTestId('query-explain-menu')).toHaveAttribute('aria-expanded', 'false');
+    });
+
+    it('an outside click closes it', async () => {
+      const user = await open();
+      await user.click(screen.getByRole('button', { name: 'elsewhere' }));
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('focus leaving the menu closes it', async () => {
+      const user = await open();
+      await user.tab();
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('ArrowDown on the caret opens the menu', async () => {
+      const user = await open();
+      await user.keyboard('{Escape}');
+      await user.keyboard('{ArrowDown}');
+      expect(screen.getByRole('menu')).toBeInTheDocument();
+      expect(items()[0]).toHaveFocus();
+    });
+
+    it('a disabled Explain Analyze is skipped by the arrows', async () => {
+      const user = userEvent.setup();
+      useConnections.getState().setInfo(ids.prod, serverInfo('MySql57', [5, 7, 44]));
+      const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+      render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+      await user.click(screen.getByTestId('query-explain-menu'));
+      expect(items()[0]).toHaveFocus();
+      await user.keyboard('{ArrowDown}');
+      expect(items()[0]).toHaveFocus();
+    });
+  });
 });

@@ -4,7 +4,8 @@ import type * as Monaco from 'monaco-editor';
 import { commands } from '../../bindings';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
-import { engineDialect, useQueryDocs, type Engine } from '../../store/queryTabs';
+import { engineDialect, useQueryDocs } from '../../store/queryTabs';
+import type { Engine } from '../engine';
 import { localStatementRange } from './context';
 import { suggest, type Suggestion } from './provider';
 

@@ -18,6 +18,7 @@ import {
   type TabRun,
 } from './queryRun';
 import { runChannel } from '../api/query';
+import { stmtsByIndex } from '../query/plan';
 
 vi.mock('./completion', () => ({ invalidateCompletion: vi.fn(), forgetCompletionConnection: vi.fn() }));
 
@@ -75,7 +76,7 @@ const rows = (n: number, from = 0): Value[][] =>
 
 const PLAN = planOf([stmt(0, 'SELECT 1', [0, 8]), stmt(1, 'UPDATE t SET a = 1', [10, 28], 'write')]);
 
-/** Starts `plan` at t=1000 and reduces `events` (t = 1000 + 10·i). */
+/** Starts `plan` at t=1000 and reduces `events` (t = 1000 + 10Â·i). */
 function play(events: RunEvent[], plan: PlanView = PLAN, from: TabRun = emptyRun): TabRun {
   let run = startRun(from, plan, 1000);
   events.forEach((ev, i) => {
@@ -412,6 +413,52 @@ describe('reduceRun', () => {
     ]);
     expect(run.explain).toEqual(tree);
     expect(run.panel).toBe('explain');
+  });
+
+  it('a 10k-statement script reduces in linear time', () => {
+    const N = 10_000;
+    const plan = planOf(Array.from({ length: N }, (_, i) => stmt(i, `UPDATE t SET a = ${i}`, [i * 30, i * 30 + 25], 'write')));
+    const t0 = performance.now();
+    let run = startRun(emptyRun, plan, 0);
+    for (let i = 0; i < N; i++) {
+      run = reduceRun(run, { t: 'statement_start', index: i, range: [i * 30, i * 30 + 25] }, i);
+      if (i % 10 === 9) {
+        run = reduceRun(run, { t: 'statement_error', index: i, error: err('query', 'Duplicate entry') }, i);
+        continue;
+      }
+      run = reduceRun(run, { t: 'result_start', result_id: i, index: i, columns: [] }, i);
+      run = reduceRun(run, resultEnd(i, 0, { affected: 1 }), i);
+    }
+    run = reduceRun(run, { t: 'done', stop: null, elapsed_ms: 1 }, N);
+    const elapsed = performance.now() - t0;
+    expect(run.messages).toHaveLength(N + 1);
+    expect(run.messages[0]!.text).toBe('UPDATE t SET a = 0');
+    expect(run.finished).toHaveLength(N - N / 10);
+    expect(run.finished.includes(9)).toBe(false);
+    expect(run.finished.includes(8)).toBe(true);
+    // Generous: ~750 ms with the linear statement lookups and scans this replaced, ~300 ms now.
+    expect(elapsed).toBeLessThan(1000);
+    // Statement lookups go through one map per plan.
+    expect(stmtsByIndex(plan)).toBe(stmtsByIndex(plan));
+    expect(stmtsByIndex(plan).get(4321)?.preview).toBe('UPDATE t SET a = 4321');
+  });
+
+  it('reducing returns new references and leaves the previous state untouched', () => {
+    const a = play([
+      { t: 'statement_start', index: 0, range: [0, 8] },
+      { t: 'result_start', result_id: 0, index: 0, columns: [] },
+    ]);
+    const b = reduceRun(a, resultEnd(0, 0), 5000);
+    expect(b).not.toBe(a);
+    expect(b.messages).not.toBe(a.messages);
+    expect(b.finished).not.toBe(a.finished);
+    expect(a.messages).toHaveLength(0);
+    expect(a.finished).toEqual([]);
+    expect(b.finished).toEqual([0]);
+    const c = reduceRun(b, { t: 'statement_error', index: 0, error: err('query', 'x') }, 5001);
+    expect(c.finished).toEqual([]);
+    expect(b.finished).toEqual([0]);
+    expect(b.messages).toHaveLength(1);
   });
 
   it('a new run starts clean but keeps the tx state and last run', () => {

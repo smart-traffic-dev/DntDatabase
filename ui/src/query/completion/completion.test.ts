@@ -6,6 +6,7 @@ import { analyze, localStatementRange } from './context';
 import { disposeCompletion, ensureCompletion, registerCompletion } from './monacoProvider';
 import { currentSchemaOf, suggest, type Suggestion } from './provider';
 import type { CompletionScope } from './provider';
+import type { Engine } from '../engine';
 
 /** `text` with a `|` marking the cursor. */
 function at(marked: string) {
@@ -55,8 +56,6 @@ const pgScope: CompletionScope = {
     { schema: 'public', name: 'orders', kind: 'Table', columns: [{ name: 'id', data_type: 'bigint' }] },
   ],
 };
-
-type Engine = 'mysql' | 'postgres';
 
 async function run(
   marked: string,

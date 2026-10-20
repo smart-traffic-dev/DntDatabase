@@ -1,7 +1,13 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { installCloseGuard, setTxStateSource, useQueryDocs, type CloseGuardWindow } from '../store/queryTabs';
+import {
+  installCloseGuard,
+  setRunningSource,
+  setTxStateSource,
+  useQueryDocs,
+  type CloseGuardWindow,
+} from '../store/queryTabs';
 import { callsOf, calls, fail, mockBackend, resetStores } from '../test/backend';
 import { AppCloseDialog } from './AppCloseDialog';
 import { DialogHost } from './DialogHost';
@@ -53,6 +59,7 @@ function backend(
 beforeEach(() => {
   resetStores();
   setTxStateSource(null);
+  setRunningSource(null);
 });
 
 describe('AppCloseDialog', () => {
@@ -155,6 +162,56 @@ describe('app close guard', () => {
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
     expect(callsOf('query_close_tab')).toHaveLength(2);
     expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('a running tab is listed without being probed, and quitting stops it before the rollback', async () => {
+    const { win, requestClose } = fakeWindow();
+    backend(win.order);
+    const a = useQueryDocs.getState().newQuery(null, null);
+    const b = useQueryDocs.getState().newQuery(null, null);
+    let running = true;
+    const stop = vi.fn(async (id: string) => {
+      win.order.push(`stop:${id}`);
+      running = false;
+      return true;
+    });
+    setRunningSource((id) => id === a && running, stop);
+    render(<DialogHost />);
+    await installCloseGuard(win);
+    await requestClose();
+    await screen.findByRole('alertdialog');
+    expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Query 1 (running)']);
+    // query_close_tab stops a run before closing: the running tab is never sent one.
+    expect(callsOf('query_close_tab')).toEqual([{ tabId: b, force: false }]);
+    expect(stop).not.toHaveBeenCalled();
+    expect(win.destroy).not.toHaveBeenCalled();
+
+    // Cancel leaves the run alone.
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(stop).not.toHaveBeenCalled();
+
+    await requestClose();
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Rollback all & quit' }));
+    await waitFor(() => expect(win.destroy).toHaveBeenCalled());
+    expect(win.order.filter((s) => s.startsWith('stop') || s.startsWith('query_tx') || s === 'destroy')).toEqual([
+      `stop:${a}`,
+      `query_tx:${a}:Rollback`,
+      'destroy',
+    ]);
+    expect(callsOf('query_close_tab').map((c) => c.tabId)).not.toContain(a);
+  });
+
+  it('a run that does not stop in time does not hold the quit', async () => {
+    const { win, requestClose } = fakeWindow();
+    backend(win.order);
+    const a = useQueryDocs.getState().newQuery(null, null);
+    setRunningSource((id) => id === a, async () => false);
+    render(<DialogHost />);
+    await installCloseGuard(win);
+    await requestClose();
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Rollback all & quit' }));
+    await waitFor(() => expect(win.destroy).toHaveBeenCalled());
+    expect(callsOf('query_close_tab')).toEqual([]);
   });
 
   it('a failed save asks; Cancel keeps the app open', async () => {

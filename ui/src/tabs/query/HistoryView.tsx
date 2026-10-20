@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { api, toAppError } from '../../api';
 import type { HistoryEntry, HistoryStatus } from '../../bindings';
 import { useConnections } from '../../store/connections';
@@ -10,10 +10,45 @@ export const SEARCH_DEBOUNCE_MS = 300;
 /** Rows asked for per list (the backend clamps larger values). */
 const LIST_LIMIT = 500;
 
-// A cancelled statement may have taken effect, so it is never shown as "not applied".
-const STATUS_TEXT: Record<HistoryStatus, string> = { ok: 'OK', error: 'Error', cancelled: 'Cancelled' };
+/** Error kinds after which the server may or may not have applied the statement. */
+const UNKNOWN_OUTCOME_KINDS = new Set(['timeout', 'connection_lost']);
 
-const firstLine = (sql: string) => sql.split(/\r?\n/, 1)[0] ?? '';
+/**
+ * The status cell of a row. A statement stopped by a timeout, a lost connection or a cancel may
+ * have taken effect, so it never reads as a plain error ("not applied").
+ */
+export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'error_code'>): {
+  text: string;
+  tone: HistoryStatus | 'unknown';
+  hint: string | undefined;
+} {
+  const code = row.error_code ? ` (${row.error_code})` : '';
+  if (row.status === 'ok') return { text: 'OK', tone: 'ok', hint: undefined };
+  if (row.error_kind !== null && UNKNOWN_OUTCOME_KINDS.has(row.error_kind)) {
+    const why = row.error_kind === 'timeout' ? 'timed out' : 'lost its connection';
+    return {
+      text: `Unknown outcome${code}`,
+      tone: 'unknown',
+      hint: `The statement ${why} before the server confirmed it: it may have been applied. Check the data before running it again.`,
+    };
+  }
+  if (row.status === 'cancelled' || row.error_kind === 'cancelled') {
+    return {
+      text: `Cancelled — may have been applied${code}`,
+      tone: 'cancelled',
+      hint: 'The statement was cancelled while it ran: the server may have applied it before the cancel arrived.',
+    };
+  }
+  return {
+    text: `Error${code}`,
+    tone: 'error',
+    hint: row.error_kind ? `Failed (${row.error_kind}${row.error_code ? `, code ${row.error_code}` : ''}).` : undefined,
+  };
+}
+
+type Modifiers = Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>;
+
+const firstLine =(sql: string) => sql.split(/\r?\n/, 1)[0] ?? '';
 
 /** `2026-10-20T08:15:30Z` as the local date and time. */
 function timeText(iso: string): string {
@@ -32,8 +67,12 @@ export function HistoryView({ tabId }: { tabId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
+  /** The row that takes Tab focus (roving tabIndex). */
+  const [active, setActive] = useState(0);
   const anchor = useRef<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const seq = useRef(0);
+  const focusable = Math.min(active, Math.max(rows.length - 1, 0));
 
   const connectionId = scope === 'tab' ? tabConnection : null;
 
@@ -67,7 +106,8 @@ export function HistoryView({ tabId }: { tabId: string }) {
     void load();
   }, [load]);
 
-  const pick = (e: MouseEvent, row: HistoryEntry, index: number) => {
+  const pick = (e: Modifiers, row: HistoryEntry, index: number) => {
+    setActive(index);
     if (e.shiftKey && anchor.current !== null) {
       const from = rows.findIndex((r) => r.id === anchor.current);
       const [a, b] = from < 0 ? [index, index] : [Math.min(from, index), Math.max(from, index)];
@@ -86,9 +126,45 @@ export function HistoryView({ tabId }: { tabId: string }) {
     }
   };
 
-  const remove = async () => {
+  /** Moves the focused row (roving tabIndex), selecting it unless Ctrl is held; Shift extends. */
+  const moveTo = (e: KeyboardEvent, index: number) => {
+    const to = Math.min(Math.max(index, 0), rows.length - 1);
+    if (to < 0) return;
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) setActive(to);
+    else pick(e, rows[to]!, to);
+    listRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[to]?.focus();
+  };
+
+  const onRowKey = (e: KeyboardEvent, row: HistoryEntry, index: number) => {
+    switch (e.key) {
+      case 'ArrowDown':
+        return moveTo(e, index + 1);
+      case 'ArrowUp':
+        return moveTo(e, index - 1);
+      case 'Home':
+        return moveTo(e, 0);
+      case 'End':
+        return moveTo(e, rows.length - 1);
+      case 'Enter':
+        e.preventDefault();
+        insertAtCursor(tabId, row.sql_text);
+        return;
+      case ' ':
+        e.preventDefault();
+        pick({ shiftKey: e.shiftKey, ctrlKey: true, metaKey: false }, row, index);
+        return;
+      case 'Delete':
+        e.preventDefault();
+        // The selection, or the focused row when nothing is selected.
+        void remove(selected.size > 0 ? [...selected] : [row.id]);
+        return;
+    }
+  };
+
+  const remove = async (ids: number[] = [...selected]) => {
     try {
-      await api.historyDelete([...selected]);
+      await api.historyDelete(ids);
       setSelected(new Set());
       await load();
     } catch (e) {
@@ -166,26 +242,43 @@ export function HistoryView({ tabId }: { tabId: string }) {
           {error}
         </div>
       )}
-      <div className="hs-list" role="listbox" aria-multiselectable="true" aria-label="History">
+      <div
+        ref={listRef}
+        className="hs-list"
+        role="listbox"
+        aria-multiselectable="true"
+        aria-label="History"
+        aria-describedby={`hs-keys-${tabId}`}
+      >
+        <span id={`hs-keys-${tabId}`} hidden>
+          Arrow keys move, Enter inserts the statement at the cursor, Space selects, Delete deletes.
+        </span>
         {rows.length === 0 && !error && <div className="qr-empty">No history.</div>}
-        {rows.map((row, i) => (
-          <div
-            key={row.id}
-            role="option"
-            aria-selected={selected.has(row.id)}
-            className={`hs-row ${row.status}${selected.has(row.id) ? ' selected' : ''}`}
-            data-testid="history-row"
-            title={row.sql_text}
-            onClick={(e) => pick(e, row, i)}
-            onDoubleClick={() => insertAtCursor(tabId, row.sql_text)}
-          >
-            <span className="hs-time">{timeText(row.started_at)}</span>
-            <span className={`hs-status ${row.status}`}>{STATUS_TEXT[row.status]}</span>
-            <span className="hs-elapsed">{row.elapsed_ms === null ? '' : `${row.elapsed_ms} ms`}</span>
-            <span className="hs-sql">{firstLine(row.sql_text)}</span>
-            {row.redacted && <span className="chip hs-redacted">redacted</span>}
-          </div>
-        ))}
+        {rows.map((row, i) => {
+          const status = statusOf(row);
+          return (
+            <div
+              key={row.id}
+              role="option"
+              aria-selected={selected.has(row.id)}
+              tabIndex={i === focusable ? 0 : -1}
+              className={`hs-row ${status.tone}${selected.has(row.id) ? ' selected' : ''}`}
+              data-testid="history-row"
+              title={row.sql_text}
+              onClick={(e) => pick(e, row, i)}
+              onDoubleClick={() => insertAtCursor(tabId, row.sql_text)}
+              onKeyDown={(e) => onRowKey(e, row, i)}
+            >
+              <span className="hs-time">{timeText(row.started_at)}</span>
+              <span className={`hs-status ${status.tone}`} data-testid="history-status" title={status.hint}>
+                {status.text}
+              </span>
+              <span className="hs-elapsed">{row.elapsed_ms === null ? '' : `${row.elapsed_ms} ms`}</span>
+              <span className="hs-sql">{firstLine(row.sql_text)}</span>
+              {row.redacted && <span className="chip hs-redacted">redacted</span>}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

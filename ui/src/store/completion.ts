@@ -4,8 +4,7 @@
 // same window the backend keeps a failed load.
 import { commands, type CompletionObject, type Result } from '../bindings';
 import type { CompletionScope } from '../query/completion/provider';
-
-type Engine = 'mysql' | 'postgres';
+import type { Engine } from '../query/engine';
 
 /** How long a failed fetch is remembered before the next completion tries again. */
 const FAILURE_TTL_MS = 10_000;

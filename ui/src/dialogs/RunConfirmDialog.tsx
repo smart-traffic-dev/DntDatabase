@@ -3,7 +3,7 @@ import { Modal } from './Modal';
 
 interface Props {
   plan: PlanView;
-  /** `true` for "Run N statements", `false` for Cancel / Esc. */
+  /** `true` for "Run N statement(s)", `false` for Cancel / Esc. */
   onDone(run: boolean): void;
 }
 
@@ -19,11 +19,12 @@ const LABEL: Record<StmtKindLabel, string> = {
 export function RunConfirmDialog({ plan, onDone }: Props) {
   const total = plan.stmts.length;
   const confirm = plan.stmts.filter((s) => s.verdict === 'confirm');
+  const count = `${total} ${total === 1 ? 'statement' : 'statements'}`;
   return (
     <Modal
       title={
         <>
-          Run {total} statements on <strong>{plan.connection_name}</strong> (Production)?
+          Run {count} on <strong>{plan.connection_name}</strong> (Production)?
         </>
       }
       onClose={() => onDone(false)}
@@ -52,7 +53,7 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
           Cancel
         </button>
         <button type="button" className="btn danger" data-testid="run-confirm-run" onClick={() => onDone(true)}>
-          Run {total} statements
+          Run {count}
         </button>
       </footer>
     </Modal>

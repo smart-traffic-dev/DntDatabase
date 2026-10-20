@@ -1,7 +1,8 @@
 // Turns a completion context into suggestions (spec §7.3). Pure: the scope, the container
 // names and the object loader come from the caller (`monacoProvider.ts`).
 import type { CompletionObject, ObjectKind, SchemaCacheTable } from '../../bindings';
-import { analyze, type Engine, type TableRef } from './context';
+import type { Engine } from '../engine';
+import { analyze, type TableRef } from './context';
 import { functionsOf, keywordsOf, reservedOf } from './keywords';
 
 export type { CompletionContext, StatementInfo, TableRef } from './context';

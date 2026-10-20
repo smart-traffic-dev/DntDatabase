@@ -1,12 +1,13 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import { ensureCompletion } from '../../query/completion/monacoProvider';
+import type { Engine } from '../../query/engine';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 
 export interface SqlEditorProps {
   doc: QueryDoc;
-  engine: 'mysql' | 'postgres';
+  engine: Engine;
   onMount?: (editor: Parameters<OnMount>[0], monaco: Parameters<OnMount>[1]) => void;
 }
 

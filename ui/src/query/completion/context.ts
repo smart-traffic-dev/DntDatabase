@@ -1,7 +1,7 @@
 // Reads the completion context from the tokens of the current statement (spec §7.3).
 // No syntax tree: a light tokenizer plus the `name [AS] alias` pattern after FROM/JOIN/UPDATE.
 
-export type Engine = 'mysql' | 'postgres';
+import type { Engine } from '../engine';
 
 export type CompletionContext =
   | { kind: 'default' }

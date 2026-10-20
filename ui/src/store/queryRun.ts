@@ -16,6 +16,7 @@ import type {
   TxState,
   Value,
 } from '../bindings';
+import { stmtsByIndex } from '../query/plan';
 import { forgetCompletionConnection, invalidateCompletion } from './completion';
 import { useConnections } from './connections';
 import { asTxState, queryTxRecorded, setTxStateSource, useQueryDocs } from './queryTabs';
@@ -143,7 +144,7 @@ export function stopReasonText(stop: StopReason | null, statements: number, elap
   }
 }
 
-const stmtOf = (run: TabRun, index: number) => run.plan?.stmts.find((s) => s.index === index);
+const stmtOf = (run: TabRun, index: number) => (run.plan ? stmtsByIndex(run.plan).get(index) : undefined);
 
 const line = (fields: Partial<MessageLine> & Pick<MessageLine, 'text'>): MessageLine => ({
   index: null,
@@ -155,6 +156,32 @@ const line = (fields: Partial<MessageLine> & Pick<MessageLine, 'text'>): Message
   retryRange: null,
   ...fields,
 });
+
+/** A copy of `list` with `item` at the end (`slice` + `push`: a flat copy, much cheaper than a spread). */
+function append<T>(list: readonly T[], item: T): T[] {
+  const out = list.slice();
+  out.push(item);
+  return out;
+}
+
+/**
+ * `finished` with `index` added. Statements run one after another, so a repeat (a statement with
+ * several results) is the last entry: an O(1) check, with a scan only for an out-of-order index.
+ */
+function addFinished(finished: number[], index: number): number[] {
+  const last = finished.at(-1);
+  if (last === index) return finished;
+  if (last !== undefined && index < last && finished.includes(index)) return finished;
+  return append(finished, index);
+}
+
+/** `finished` without `index` (an error after a result of that statement): normally its last entry. */
+function dropFinished(finished: number[], index: number): number[] {
+  const last = finished.at(-1);
+  if (last === index) return finished.slice(0, -1);
+  if (last === undefined || index > last || !finished.includes(index)) return finished;
+  return finished.filter((i) => i !== index);
+}
 
 /** Appends `rows` to `chunks`, filling the last chunk up to `CHUNK` first. */
 function appendRows(chunks: Value[][][], rows: Value[][]): Value[][][] {
@@ -263,8 +290,8 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
         affected: ev.affected,
         elapsedMs: ev.elapsed_ms,
       });
-      const finished = index !== null && !run.finished.includes(index) ? [...run.finished, index] : run.finished;
-      return { ...run, results, openResult: null, messages: [...run.messages, message], finished };
+      const finished = index !== null ? addFinished(run.finished, index) : run.finished;
+      return { ...run, results, openResult: null, messages: append(run.messages, message), finished };
     }
     case 'statement_error': {
       const { index, error } = ev;
@@ -276,14 +303,14 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
           : run.markers;
       return {
         ...run,
-        messages: [...run.messages, message],
+        messages: append(run.messages, message),
         markers,
-        finished: run.finished.filter((i) => i !== index),
+        finished: dropFinished(run.finished, index),
         txState: asTxState(error.tx_state) ?? run.txState,
       };
     }
     case 'notice':
-      return { ...run, messages: [...run.messages, line({ index: ev.index, text: ev.message, tone: 'warning' })] };
+      return { ...run, messages: append(run.messages, line({ index: ev.index, text: ev.message, tone: 'warning' })) };
     case 'explain':
       return { ...run, explain: ev.plan, panel: 'explain' };
     case 'stopping':
@@ -310,7 +337,7 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
         current: null,
         openResult: null,
         stopCause: undefined,
-        messages: [...run.messages, final],
+        messages: append(run.messages, final),
         panel,
         lastRun: { rows, elapsedMs: ev.elapsed_ms },
       };
@@ -346,7 +373,8 @@ function afterDone(tabId: string, run: TabRun) {
   const origin = origins.get(tabId);
   origins.delete(tabId);
   if (!origin || !run.plan) return;
-  const ddl = run.plan.stmts.some((s) => s.kind === 'ddl' && run.finished.includes(s.index));
+  const byIndex = stmtsByIndex(run.plan);
+  const ddl = run.finished.some((i) => byIndex.get(i)?.kind === 'ddl');
   if (ddl) invalidateCompletion(origin.connectionId, origin.database ?? undefined);
 }
 

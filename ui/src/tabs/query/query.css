@@ -400,8 +400,15 @@
   color: var(--danger);
 }
 
-.hs-status.cancelled {
+.hs-status.cancelled,
+.hs-status.unknown {
   color: var(--staging);
+  white-space: nowrap;
+}
+
+.hs-row:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
 }
 
 .hs-elapsed {

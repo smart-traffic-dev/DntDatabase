@@ -5,7 +5,9 @@ import type * as Monaco from 'monaco-editor';
 import { useEffect, useRef } from 'react';
 import { api } from '../../api';
 import type { PlanView } from '../../bindings';
-import { engineDialect, type Engine } from '../../store/queryTabs';
+import { stmtsByIndex } from '../../query/plan';
+import type { Engine } from '../../query/engine';
+import { engineDialect } from '../../store/queryTabs';
 import type { TabRun } from '../../store/queryRun';
 import { currentStatement } from './format';
 
@@ -45,8 +47,9 @@ export function applyErrorMarkers(monaco: MonacoLike, model: Model, markers: Tab
 
 /** One gutter glyph on the first line of each finished statement. */
 export function finishedGlyphs(model: Model, plan: PlanView, finished: number[]) {
+  const byIndex = stmtsByIndex(plan);
   return finished.flatMap((i) => {
-    const stmt = plan.stmts.find((s) => s.index === i);
+    const stmt = byIndex.get(i);
     if (!stmt) return [];
     const start = model.getPositionAt(Math.min(stmt.range[0], model.getValueLength()));
     return [

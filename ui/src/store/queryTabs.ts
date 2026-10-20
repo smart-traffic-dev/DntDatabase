@@ -2,6 +2,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
 import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
+import type { Engine } from '../query/engine';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { useTabs } from './tabs';
@@ -16,11 +17,8 @@ export const AUTOSAVE_MS = 1000;
 
 const SQL_FILTERS = [{ name: 'SQL', extensions: ['sql'] }];
 
-/**
- * SQL engine of a document: follows its connection. The backend `Dialect` (with the MySQL
- * `sql_mode` flags) is `engineDialect(engine)` before a plan, `PlanView.dialect` after one.
- */
-export type Engine = 'mysql' | 'postgres';
+// The SQL engine of a document follows its connection. The backend `Dialect` (with the MySQL
+// `sql_mode` flags) is `engineDialect(engine)` before a plan, `PlanView.dialect` after one.
 
 /** The backend `Dialect` of an engine, without `sql_mode` flags (what `statement_ranges` takes). */
 export const engineDialect = (engine: Engine): Dialect =>
@@ -138,7 +136,10 @@ export function setTxStateSource(
   recordTxState = (source && record) || (() => {});
 }
 
-/** Whether a tab has a run in progress (the run flow registers itself here). */
+/**
+ * Whether a tab has a run in progress, and how to stop it: `stop` asks for the stop and resolves
+ * once the run ended (true) or after a bounded wait (false). The run flow registers itself here.
+ */
 let runningOf: (tabId: string) => boolean = () => false;
 let stopRunOf: (tabId: string) => Promise<boolean> = async () => true;
 export function setRunningSource(source: ((tabId: string) => boolean) | null, stop?: (tabId: string) => Promise<boolean>) {
@@ -368,7 +369,13 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       try {
         const title = get().docs.get(id)?.title ?? tab?.title ?? 'Query';
         // Ask, then stop the run and wait for it to end, so a transaction it holds can be settled.
-        if (runningOf(id) && (!(await confirmStopRun(title)) || !(await stopRunOf(id)))) return false;
+        if (runningOf(id)) {
+          if (!(await confirmStopRun(title))) return false;
+          if (!(await stopRunOf(id))) {
+            notice('Could not stop the query; the tab stays open.');
+            return false;
+          }
+        }
         // Discard first: cancelling it must not leave a transaction committed or rolled back.
         const doc = get().docs.get(id);
         if (doc?.filePath && doc.dirty && !(await confirmDiscard(fileName(doc.filePath)))) return false;
@@ -488,10 +495,12 @@ function confirmQuitUnsaved(count: number): Promise<boolean> {
 }
 
 /**
- * The tabs to list before quitting: those the tx source reports non-idle, plus every tab
- * whose session answers the probe `query_close_tab(id, false)` with `transaction_open`, or
- * `busy` (listed as running). The probe stays as a backstop even with a source registered.
- * It closes idle sessions on the way; if the quit is cancelled they reopen on the next plan.
+ * The tabs to list before quitting: those with a run in progress (listed as running, and never
+ * probed: `query_close_tab` stops a run before closing, which would cancel it before the user
+ * decides), those the tx source reports non-idle, plus every idle tab whose session answers the
+ * probe `query_close_tab(id, false)` with `transaction_open`, or `busy` (listed as running). The
+ * probe stays as a backstop even with a source registered. It closes idle sessions on the way;
+ * if the quit is cancelled they reopen on the next plan.
  *
  * Why ask at all, when both engines roll back on disconnect: a statement still running
  * holds its locks until it finishes on the server, and XA-prepared transactions survive
@@ -501,6 +510,7 @@ async function openTransactions(): Promise<{ doc: QueryDoc; running: boolean }[]
   const docs = [...useQueryDocs.getState().docs.values()].sort((a, b) => a.sortOrder - b.sortOrder);
   const probed = await Promise.all(
     docs.map(async (doc) => {
+      if (runningOf(doc.id)) return { doc, open: true, running: true };
       try {
         await api.queryCloseTab(doc.id, false);
         return { doc, open: txStateOf(doc.id) !== 'idle', running: false };
@@ -541,7 +551,10 @@ export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
         kind: 'appClose',
         tabs: open.map(({ doc, running }) => (running ? `${doc.title} (running)` : doc.title)),
         quit: async () => {
-          // A failed rollback does not hold the app: the server rolls back when the session drops.
+          // Running tabs are stopped first (bounded wait), so their transaction can be rolled back.
+          // A run that does not stop, or a failed rollback, does not hold the app: the server
+          // rolls back when the session drops.
+          await Promise.allSettled(open.filter((t) => runningOf(t.doc.id)).map(({ doc }) => stopRunOf(doc.id)));
           await Promise.allSettled(open.map(({ doc }) => api.queryTx(doc.id, 'Rollback')));
           await win.destroy();
         },

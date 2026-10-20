@@ -4,7 +4,6 @@ import { api, toAppError } from '../api';
 import { runChannel } from '../api/query';
 import type { PlanView, Target, TxAction } from '../bindings';
 import { useConnections } from './connections';
-import { useDialogs } from './dialogs';
 import { canRun, canStop, settleTx, useQueryRun, type MessageLine } from './queryRun';
 import { setRunningSource, useQueryDocs } from './queryTabs';
 import { promptHandles, reopenConnection } from './reopen';
@@ -14,29 +13,27 @@ import { setPlanRunner } from '../tabs/query/rerun';
 /** How long "Stop and close" waits for the run to end. */
 export const STOP_WAIT_MS = 30_000;
 
+/** A store holding a set of tab ids, and its setter: a new Set only when membership changes. */
+function tabIdSet() {
+  const store = create<{ ids: Set<string> }>()(() => ({ ids: new Set() }));
+  const toggle = (tabId: string, on: boolean) =>
+    store.setState((s) => {
+      if (s.ids.has(tabId) === on) return s;
+      const ids = new Set(s.ids);
+      if (on) ids.add(tabId);
+      else ids.delete(tabId);
+      return { ids };
+    });
+  return [store, toggle] as const;
+}
+
 /** Tabs between the Run click and the run being under way (planning, dialogs, `query_run`). */
-export const useStarting = create<{ ids: Set<string> }>()(() => ({ ids: new Set() }));
-const setStarting = (tabId: string, on: boolean) =>
-  useStarting.setState((s) => {
-    if (s.ids.has(tabId) === on) return s;
-    const ids = new Set(s.ids);
-    if (on) ids.add(tabId);
-    else ids.delete(tabId);
-    return { ids };
-  });
+const [startingStore, setStarting] = tabIdSet();
+export const useStarting = startingStore;
 const isStarting = (tabId: string) => useStarting.getState().ids.has(tabId);
 
 /** Tabs whose editor has selected text (Run selection needs one). */
-export const useSelection = create<{ ids: Set<string> }>()(() => ({ ids: new Set() }));
-export function setHasSelection(tabId: string, on: boolean) {
-  useSelection.setState((s) => {
-    if (s.ids.has(tabId) === on) return s;
-    const ids = new Set(s.ids);
-    if (on) ids.add(tabId);
-    else ids.delete(tabId);
-    return { ids };
-  });
-}
+export const [useSelection, setHasSelection] = tabIdSet();
 
 /** Tabs whose Stop came before `query_run` returned the run id. */
 const pendingStop = new Set<string>();
@@ -319,15 +316,8 @@ function stopAndWait(tabId: string): Promise<boolean> {
   });
 }
 
-// Closing a tab asks first while its run is active, then stops it and waits.
-setRunningSource(
-  (tabId) => !canRun(useQueryRun.getState().get(tabId)),
-  async (tabId) => {
-    if (await stopAndWait(tabId)) return true;
-    useDialogs.getState().setNotice('Could not stop the query; the tab stays open.');
-    return false;
-  },
-);
+// Closing a tab (or quitting) asks first while its run is active, then stops it and waits.
+setRunningSource((tabId) => !canRun(useQueryRun.getState().get(tabId)), stopAndWait);
 
 // Retry statement and Fetch all (rerun.ts) run their derived plans through this flow, so a
 // Confirm verdict asks and a Block verdict is refused exactly as for a normal run.

@@ -79,4 +79,10 @@ describe('RunConfirmDialog', () => {
     await userEvent.setup().click(run);
     expect(onDone).toHaveBeenCalledWith(true);
   });
+
+  it('a single statement is singular in the title and the button', () => {
+    render(<RunConfirmDialog plan={prodPlan([stmt(0, 'write', 'confirm', 'DELETE FROM t')])} onDone={vi.fn()} />);
+    expect(screen.getByTestId('run-confirm')).toHaveTextContent('Run 1 statement on shop-prod (Production)?');
+    expect(screen.getByTestId('run-confirm-run')).toHaveTextContent(/^Run 1 statement$/);
+  });
 });

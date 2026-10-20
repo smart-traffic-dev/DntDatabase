@@ -92,6 +92,60 @@ describe('HistoryView', () => {
     expect(list[2]).toHaveTextContent(/error/i);
   });
 
+  it('timeouts, lost connections and cancels never read as not applied', async () => {
+    rows = [
+      entry(1, { status: 'error', error_kind: 'timeout', error_code: null }),
+      entry(2, { status: 'error', error_kind: 'connection_lost', error_code: '2013' }),
+      entry(3, { status: 'cancelled', error_kind: 'cancelled' }),
+      entry(4, { status: 'error', error_kind: 'query', error_code: '1062' }),
+      entry(5, { status: 'cancelled', error_kind: 'timeout' }),
+    ];
+    render(<HistoryView tabId={tab} />);
+    await screen.findAllByTestId('history-row');
+    const status = screen.getAllByTestId('history-status');
+    expect(status.map((s) => s.textContent)).toEqual([
+      'Unknown outcome',
+      'Unknown outcome (2013)',
+      'Cancelled — may have been applied',
+      'Error (1062)',
+      'Unknown outcome',
+    ]);
+    for (const s of status.slice(0, 3)) {
+      expect(s).not.toHaveTextContent(/^Error/);
+      expect(s.getAttribute('title')).toMatch(/may have applied|may have been applied/);
+    }
+    expect(status[0]!.getAttribute('title')).toMatch(/timed out/);
+    expect(status[1]!.getAttribute('title')).toMatch(/connection/);
+  });
+
+  it('keyboard: arrows move a roving focus, Enter inserts, Delete deletes', async () => {
+    rows = [entry(1), entry(2), entry(3)];
+    const user = userEvent.setup();
+    useQueryDocs.getState().update(tab, { sql: '', cursor: 0 });
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    // One tab stop for the whole list.
+    expect(list.map((r) => r.tabIndex)).toEqual([0, -1, -1]);
+    list[0]!.focus();
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(list[1]);
+    expect(list[1]).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByTestId('history-row').map((r) => r.tabIndex)).toEqual([-1, 0, -1]);
+    await user.keyboard('{End}');
+    expect(document.activeElement).toBe(list[2]);
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(list[2]);
+    await user.keyboard('{Home}{ArrowUp}');
+    expect(document.activeElement).toBe(list[0]);
+
+    await user.keyboard('{Enter}');
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('SELECT 1\nFROM t');
+
+    await user.keyboard('{ArrowDown}{Delete}');
+    expect(callsOf('history_delete')[0]).toEqual({ ids: [2] });
+    await waitFor(() => expect(screen.getAllByTestId('history-row')).toHaveLength(2));
+  });
+
   it('redacted_badge', async () => {
     render(<HistoryView tabId={tab} />);
     const list = await screen.findAllByTestId('history-row');
