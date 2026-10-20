@@ -24,8 +24,6 @@
    */
   --danger-fg: #b42318;
   --production-fg: var(--danger-fg);
-  /* Selected tree row: visibly stronger than --sel (#e8e8e8 on #f9f9f9 is ~1.2:1). */
-  --sel-strong: color-mix(in srgb, var(--studio-fg) 14%, var(--studio-sidebar));
   /* P2 query editor (not in the dnt-note tokens): warning and current-statement colours. */
   --warning-bg: #fff4d6;
   --warning-fg: #7a4b00;
@@ -229,8 +227,8 @@ textarea:focus {
 }
 
 .tree:focus-visible .tree-row.selected {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline: 1px solid var(--studio-fg-tertiary);
+  outline-offset: -1px;
 }
 
 .tree-row {
@@ -249,12 +247,29 @@ textarea:focus {
 }
 
 .tree-row.selected {
-  background: var(--sel-strong);
-  box-shadow: inset 3px 0 0 var(--accent);
+  background: var(--sel);
 }
 
 .tree-row.drop-target {
-  outline: 1px dashed var(--accent);
+  outline: 1px dashed var(--studio-fg-tertiary);
+  outline-offset: -1px;
+}
+
+/* Keyboard focus: one thin token ring everywhere (the token base rule is a 2px ring). */
+:focus-visible {
+  outline: 1px solid var(--studio-fg-tertiary);
+  outline-offset: -1px;
+}
+
+input:focus-visible,
+textarea:focus-visible,
+.cm-editor :focus-visible,
+[contenteditable='true']:focus-visible,
+[role='menuitem']:focus-visible,
+[role='menuitemradio']:focus-visible,
+[role='option']:focus-visible,
+.tree:focus-visible {
+  outline: none;
 }
 
 .tree-row.kind-group .label {
@@ -538,9 +553,9 @@ textarea:focus {
   font-weight: 500;
 }
 
-/* Production is the only environment with a colour stripe; S/L show a letter badge. */
-.tab.env-production {
-  box-shadow: inset 0 2px 0 var(--production);
+/* Production is identified by the red title and the P tag, not by a stripe. */
+.tab.env-production .tab-title {
+  color: var(--production-fg);
 }
 
 .tab-label {
@@ -565,7 +580,7 @@ textarea:focus {
 }
 
 .tab-dirty {
-  font-size: 10px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -766,10 +781,10 @@ textarea:focus {
 .status-btn {
   padding: 0 6px;
   border: 1px solid currentColor;
-  border-radius: 3px;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: inherit;
-  font-size: 11px;
+  font-size: var(--text-caption);
 }
 
 .status-run {

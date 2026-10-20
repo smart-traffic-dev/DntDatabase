@@ -165,14 +165,18 @@
 .dlg-tab {
   padding: 6px 12px;
   border: 0;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   background: none;
   font-size: var(--text-callout);
   color: var(--studio-fg-secondary);
 }
 
+.dlg-tab:hover {
+  background: var(--hover);
+}
+
 .dlg-tab.on {
-  border-bottom-color: var(--accent);
+  background: var(--sel);
   color: var(--accent);
   font-weight: 600;
 }
@@ -498,7 +502,7 @@
 .run-confirm-no,
 .run-confirm-kind {
   flex: none;
-  font-size: 11px;
+  font-size: var(--text-caption);
   color: var(--muted);
 }
 
@@ -526,7 +530,7 @@
   border-radius: var(--radius-sm);
   background: none;
   color: var(--studio-fg-secondary);
-  font-size: 18px;
+  font-size: var(--text-headline);
   line-height: 1;
 }
 
