@@ -9,15 +9,51 @@ import {
   type Rectangle,
   type Theme,
 } from '@glideapps/glide-data-grid';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CHUNK, type ResultSet } from '../../store/queryRun';
-import { MAX_COPY_CELLS, cellView, copyText, truncateText } from './format';
+import {
+  FIT_SAMPLE_ROWS,
+  MAX_COPY_CELLS,
+  MIN_COL_WIDTH,
+  cellView,
+  charsForWidth,
+  copyText,
+  fitCellText,
+  fitColumnWidth,
+} from './format';
 
 const ROW_HEIGHT = 28;
 const HEADER_HEIGHT = 44;
-const COLUMN_WIDTH = 150;
-/** Longest text handed to the canvas; the full value is still copied. */
-const DISPLAY_CHARS = 300;
+/** Cascadia Mono, not Code: the grid draws on a canvas and Code's ligatures would render >= as a single glyph. */
+const GRID_FONT = "'Cascadia Mono', Consolas, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace";
+
+type Resized = { cols: ResultSet['columns']; w: Record<number, number> };
+const NO_OVERRIDES: Record<number, number> = {};
+
+/** Initial column widths: header plus the first rows of the first chunk (no per-paint work). */
+/** The widths the user set for this result (a new result has none). */
+export function overridesFor(r: Resized, cols: ResultSet['columns']): Record<number, number> {
+  return r.cols === cols ? r.w : NO_OVERRIDES;
+}
+
+/** `prev` with column `index` of the result `cols` set to `size` (clamped). */
+export function withResize(prev: Resized, cols: ResultSet['columns'], index: number, size: number): Resized {
+  const w = Math.max(MIN_COL_WIDTH, Math.min(size, 2000));
+  return { cols, w: { ...overridesFor(prev, cols), [index]: w } };
+}
+
+export function initialWidths(result: ResultSet): number[] {
+  const rows = result.chunks[0] ?? [];
+  const n = Math.min(rows.length, FIT_SAMPLE_ROWS);
+  return result.columns.map((c, i) => {
+    const samples: string[] = [];
+    for (let r = 0; r < n; r++) {
+      const v = rows[r]?.[i];
+      if (v) samples.push(cellView(v).text);
+    }
+    return fitColumnWidth(c.name, c.db_type, samples);
+  });
+}
 
 export const tooLargeMessage = (cells: number) =>
   `Selection too large to copy (${cells} cells); narrow the selection`;
@@ -61,7 +97,9 @@ function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme> } {
       textMedium: muted,
       textHeader: cssVar('--text', '#1b1f24'),
       borderColor: cssVar('--border', '#dcdfe4'),
-      fontFamily: cssVar('--font-mono', 'ui-monospace, monospace'),
+      fontFamily: GRID_FONT,
+      textLight: muted,
+      markerFontStyle: '11px',
       baseFontStyle: '13px',
       headerFontStyle: '600 12px',
     },
@@ -102,10 +140,40 @@ export function ResultGrid({ result }: { result: ResultSet }) {
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
   const { theme, nullStyle } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
   const [notice, setNotice] = useState<string | null>(null);
+  // Re-fitted once when the first rows arrive (columns can come before rows), never per rows event.
+  const hasRows = (result.chunks[0]?.length ?? 0) > 0;
+  const fitted = useMemo(() => initialWidths(result), [result.columns, hasRows]); // eslint-disable-line react-hooks/exhaustive-deps
+  // User-resized widths belong to one result: a new result starts from the fitted widths.
+  const [resized, setResized] = useState<Resized>({ cols: result.columns, w: {} });
+  const overrides = overridesFor(resized, result.columns);
+  const widths = useMemo(() => fitted.map((w, i) => overrides[i] ?? w), [fitted, overrides]);
   const columns = useMemo<GridColumn[]>(
-    () => result.columns.map((c, i) => ({ id: String(i), title: c.name, width: COLUMN_WIDTH })),
+    () => result.columns.map((c, i) => ({ id: String(i), title: c.name, width: widths[i] ?? MIN_COL_WIDTH })),
+    [result.columns, widths],
+  );
+  const onColumnResize = useCallback(
+    (_col: GridColumn, newSize: number, index: number) => {
+      setResized((prev) => withResize(prev, result.columns, index, newSize));
+    },
     [result.columns],
   );
+
+  // The canvas only follows its container when given explicit pixels (F06).
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState<{ w: number; h: number } | null>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const measure = () => {
+      const w = Math.floor(el.clientWidth);
+      const h = Math.floor(el.clientHeight);
+      if (w > 0 && h > 0) setSize((p) => (p && p.w === w && p.h === h ? p : { w, h }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const { chunks } = result;
 
   const getCellContent = useCallback(
@@ -113,17 +181,20 @@ export function ResultGrid({ result }: { result: ResultSet }) {
       const value = chunks[Math.floor(row / CHUNK)]?.[row % CHUNK]?.[col];
       if (!value) return { kind: GridCellKind.Text, data: '', displayData: '', allowOverlay: false };
       const view = cellView(value);
+      const max = charsForWidth(widths[col] ?? MIN_COL_WIDTH);
+      const clipped = view.text.length > max;
       return {
         kind: GridCellKind.Text,
         data: view.text,
-        displayData: truncateText(view.text, DISPLAY_CHARS).replace(/\s+/g, ' '),
-        allowOverlay: false,
+        displayData: fitCellText(view, max).replace(/\s+/g, ' '),
+        allowOverlay: true, // read-only overlay shows the full value
         readonly: true,
-        contentAlign: view.kind === 'number' ? 'right' : 'left',
+        // A clipped number keeps its leading digits (left side) and gets an ellipsis.
+        contentAlign: view.kind === 'number' && !clipped ? 'right' : 'left',
         themeOverride: view.kind === 'null' ? nullStyle : undefined,
       };
     },
-    [chunks, nullStyle],
+    [chunks, nullStyle, widths],
   );
 
   const getCellsForSelection = useCallback(
@@ -155,7 +226,7 @@ export function ResultGrid({ result }: { result: ResultSet }) {
   );
 
   return (
-    <div className="qr-grid" data-testid="result-grid">
+    <div className="qr-grid" data-testid="result-grid" ref={boxRef}>
       {notice && (
         <div className="qr-banner warning qr-notice" role="status" onClick={() => setNotice(null)}>
           {notice}
@@ -174,8 +245,11 @@ export function ResultGrid({ result }: { result: ResultSet }) {
         theme={theme}
         smoothScrollX
         smoothScrollY
-        width="100%"
-        height="100%"
+        onColumnResize={onColumnResize}
+        minColumnWidth={MIN_COL_WIDTH}
+        maxColumnWidth={2000}
+        width={size?.w ?? '100%'}
+        height={size?.h ?? '100%'}
       />
     </div>
   );

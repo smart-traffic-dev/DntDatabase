@@ -1,6 +1,49 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Value } from '../../bindings';
-import { MAX_COPY_CELLS, MEMORY_WARNING_ROWS, cellView, copyText, currentStatement, truncateText } from './format';
+import {
+  MAX_COL_WIDTH,
+  MAX_COPY_CELLS,
+  MEMORY_WARNING_ROWS,
+  MIN_COL_WIDTH,
+  cellView,
+  charsForWidth,
+  copyText,
+  currentStatement,
+  fitCellText,
+  fitColumnWidth,
+  truncateText,
+} from './format';
+
+describe('column fitting', () => {
+  it('fits_header_and_is_clamped', () => {
+    expect(fitColumnWidth('id', 'int4', ['1'])).toBe(MIN_COL_WIDTH);
+    expect(fitColumnWidth('a_rather_long_column_name', 'text', [])).toBeGreaterThan(150);
+    expect(fitColumnWidth('c', 't', ['x'.repeat(500)])).toBe(MAX_COL_WIDTH);
+  });
+
+  it('fits_a_full_bigint', () => {
+    expect(fitColumnWidth('n', 'int8', ['9223372036854775807'])).toBeGreaterThanOrEqual(19 * 7.9);
+  });
+
+  it('chars_for_width_never_zero', () => {
+    expect(charsForWidth(10)).toBe(1);
+    expect(charsForWidth(200)).toBe(22);
+  });
+
+  it('fit_text_keeps_start_with_ellipsis', () => {
+    expect(fitCellText({ text: '9223372036854775807', kind: 'number' }, 8)).toBe('9223372…');
+    expect(fitCellText({ text: 'abc', kind: 'text' }, 8)).toBe('abc');
+  });
+
+  it('fit_text_keeps_byte_count', () => {
+    const v = cellView({ t: 'Bytes', v: { len: 3000, preview: Array.from({ length: 32 }, (_, i) => i) } });
+    const out = fitCellText(v, 30);
+    expect(out.endsWith('(3000 bytes)')).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(30);
+    expect(fitCellText(v, 5)).toBe('(3000 bytes)');
+  });
+
+});
 
 describe('cellView', () => {
   it('null_is_grey_italic_kind', () => {

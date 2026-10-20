@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ResultSet } from '../../store/queryRun';
-import { selectionCells, tooLargeMessage } from './ResultGrid';
+import { initialWidths, overridesFor, withResize, selectionCells, tooLargeMessage } from './ResultGrid';
 
 const result: ResultSet = {
   id: 1,
@@ -13,6 +13,30 @@ const result: ResultSet = {
   elapsedMs: 1,
   done: true,
 };
+
+describe('initialWidths', () => {
+  it('fits_each_column_to_its_sampled_values', () => {
+    const wide: ResultSet = {
+      ...result,
+      chunks: [[[{ t: 'Int', v: '9223372036854775807' }, { t: 'Null' }]]],
+      rowCount: 1,
+    };
+    const [a, b] = initialWidths(wide);
+    expect(a).toBeGreaterThanOrEqual(19 * 7.9);
+    expect(b).toBe(60);
+  });
+});
+
+describe('resize overrides', () => {
+  it('kept_for_the_result_and_reset_for_a_new_one', () => {
+    const r = withResize({ cols: result.columns, w: {} }, result.columns, 1, 250);
+    expect(overridesFor(r, result.columns)).toEqual({ 1: 250 });
+    expect(withResize(r, result.columns, 0, 10).w).toEqual({ 0: 60, 1: 250 });
+    const other = [...result.columns];
+    expect(overridesFor(r, other)).toEqual({});
+    expect(withResize(r, other, 0, 100).w).toEqual({ 0: 100 });
+  });
+});
 
 describe('selectionCells', () => {
   it('copies_cells_with_sanitized_text', () => {
