@@ -3,9 +3,10 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ObjectKind, ObjectRef, TableDetail } from '../bindings';
 import { useDialogs } from '../store/dialogs';
+import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
-import { backendError, callsOf, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
+import { backendError, callsOf, config, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -144,6 +145,18 @@ describe('ObjectTab', () => {
     expect(useTabs.getState().activeId).toBe(doc.id);
   });
 
+  it.each([
+    ['postgres schema-qualified', 'postgres', 'orders', 'sales', 'SELECT * FROM "sales"."orders" LIMIT 1000'],
+    ['quote in a postgres name', 'postgres', 'we"ird', 'public', 'SELECT * FROM "public"."we""ird" LIMIT 1000'],
+    ['backtick in a mysql name', 'mysql', 'we`ird', null, 'SELECT * FROM `shop`.`we``ird` LIMIT 1000'],
+    ['vietnamese name', 'mysql', 'đơn_hàng', null, 'SELECT * FROM `shop`.`đơn_hàng` LIMIT 1000'],
+  ])('query_button_quotes_%s', async (_label, kind, name, schema, sql) => {
+    const user = userEvent.setup();
+    useConnections.getState().setStored([], [config(ids.prod, 'c', { kind: kind as 'mysql' | 'postgres' })]);
+    setup(makeTab('Table', name, schema));
+    await user.click(await screen.findByRole('button', { name: 'Query' }));
+    expect([...useQueryDocs.getState().docs.values()].at(-1)!.sql).toBe(sql);
+  });
   it('functions_have_no_query_button', async () => {
     setup(makeTab('Function', 'fn'));
     await screen.findByTestId('monaco-mock');

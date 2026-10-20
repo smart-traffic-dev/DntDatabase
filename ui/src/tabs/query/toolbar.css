@@ -21,7 +21,6 @@
 .sql-editor-placeholder {
   position: absolute;
   top: 0;
-  left: 64px;
   right: 16px;
   padding-top: 1px;
   line-height: 19px;
@@ -47,4 +46,9 @@
 
 .hs-explain {
   flex: none;
+}
+
+/* Marker hover: only the message, without the "View Problem / Quick Fix" status bar. */
+.sql-editor .monaco-hover .hover-row.status-bar {
+  display: none;
 }

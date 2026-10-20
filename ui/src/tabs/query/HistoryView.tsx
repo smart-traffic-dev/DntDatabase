@@ -51,11 +51,15 @@ type Modifiers = Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>;
 
 const firstLine =(sql: string) => sql.split(/\r?\n/, 1)[0] ?? '';
 
-/** An Explain run is stored as its wrapper (`EXPLAIN [ANALYZE] [FORMAT=JSON | (…)] <statement>`): the statement inside. */
-function explainOf(row: Pick<HistoryEntry, 'sql_text' | 'kind'>): { inner: string; analyze: boolean } | null {
-  const m = /^\s*EXPLAIN\s+(ANALYZE\s+)?(?:FORMAT\s*=\s*\w+\s+|\([^)]*\)\s+)?/i.exec(row.sql_text);
-  if (!m && row.kind !== 'explain') return null;
-  return { inner: m ? row.sql_text.slice(m[0].length) : row.sql_text, analyze: !!m?.[1] || /\(\s*ANALYZE/i.test(row.sql_text.slice(0, 40)) };
+/**
+ * An Explain run is stored as its wrapper (`EXPLAIN [ANALYZE] [FORMAT=JSON | (ANALYZE, FORMAT JSON)] <stmt>`,
+ * or MariaDB's `ANALYZE [FORMAT=JSON] <stmt>`): the statement inside, and whether it was an Analyze.
+ */
+function explainOf(row: Pick<HistoryEntry, 'sql_text'>): { inner: string; analyze: boolean } | null {
+  const m = /^\s*(EXPLAIN|ANALYZE)\s+(?:FORMAT\s*=\s*\w+\s+|\(([^)]*)\)\s+|(ANALYZE\s+)(?:FORMAT\s*=\s*\w+\s+)?)?/i.exec(row.sql_text);
+  if (!m) return null;
+  const analyze = m[1]!.toUpperCase() === 'ANALYZE' || !!m[3] || /\bANALYZE\b/i.test(m[2] ?? '');
+  return { inner: row.sql_text.slice(m[0].length), analyze };
 }
 
 /** `2026-10-20T08:15:30Z` as the local date and time. */
@@ -289,7 +293,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
                   {row.database ? ` · ${row.database}` : ''}
                 </span>
               )}
-              {explain && <span className="chip hs-explain" data-testid="history-explain">Explain{explain.analyze ? ' Analyze' : ''}</span>}
+              {explain && <span className="chip hs-explain" data-testid="history-explain">{explain.analyze ? 'Analyze' : 'Explain'}</span>}
               <span className="hs-sql">{firstLine(explain ? explain.inner : row.sql_text)}</span>
               {row.redacted && <span className="chip hs-redacted">redacted</span>}
             </div>

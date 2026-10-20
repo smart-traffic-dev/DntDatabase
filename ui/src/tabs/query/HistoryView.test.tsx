@@ -223,12 +223,29 @@ describe('HistoryView', () => {
   });
 
   it('explain_rows_are_marked_and_show_the_inner_statement', async () => {
-    rows = [entry(1, { sql_text: 'EXPLAIN FORMAT=JSON SELECT * FROM orders', kind: 'explain' }), entry(2)];
+    rows = [entry(1, { sql_text: 'EXPLAIN FORMAT=JSON SELECT * FROM orders' }), entry(2)];
     render(<HistoryView tabId={tab} />);
     const list = await screen.findAllByTestId('history-row');
     expect(within(list[0]!).getByTestId('history-explain')).toHaveTextContent('Explain');
     expect(list[0]).toHaveTextContent('SELECT * FROM orders');
     expect(list[0]).not.toHaveTextContent('FORMAT=JSON');
     expect(within(list[1]!).queryByTestId('history-explain')).toBeNull();
+  });
+
+  it('explain_variants_of_postgres_and_mariadb', async () => {
+    rows = [
+      entry(1, { sql_text: 'EXPLAIN (ANALYZE, FORMAT JSON) SELECT 1 FROM a' }),
+      entry(2, { sql_text: 'ANALYZE FORMAT=JSON SELECT 2 FROM b' }),
+      entry(3, { sql_text: 'EXPLAIN ANALYZE SELECT 3 FROM c' }),
+    ];
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    expect(within(list[0]!).getByTestId('history-explain')).toHaveTextContent('Analyze');
+    expect(list[0]).toHaveTextContent('SELECT 1 FROM a');
+    expect(within(list[1]!).getByTestId('history-explain')).toHaveTextContent('Analyze');
+    expect(list[1]).toHaveTextContent('SELECT 2 FROM b');
+    expect(list[1]).not.toHaveTextContent('FORMAT');
+    expect(within(list[2]!).getByTestId('history-explain')).toHaveTextContent('Analyze');
+    expect(list[2]).toHaveTextContent('SELECT 3 FROM c');
   });
 });

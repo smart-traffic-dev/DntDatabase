@@ -53,7 +53,7 @@ export function defineDntTheme(monaco: MonacoApi, dark: boolean): void {
 }
 
 /**
- * The app theme for a Monaco editor: pass 	heme and eforeMount to <Editor>. The theme is
+ * The app theme for a Monaco editor: pass the returned theme and beforeMount to <Editor>. The theme is
  * redefined from the tokens when the appearance changes (ThemeProvider's layout effect, which
  * sets the class, runs before this effect).
  */

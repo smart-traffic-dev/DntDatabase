@@ -1,6 +1,8 @@
-import { render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
-import { ThemeProvider } from '../../theme/ThemeProvider';
+import { act, render, renderHook, screen } from '@testing-library/react';
+import type { ReactNode } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { useDntMonacoTheme } from '../../monaco/dntTheme';
+import { ThemeProvider, useTheme } from '../../theme/ThemeProvider';
 import { SqlEditor } from './SqlEditor';
 
 afterEach(() => {
@@ -28,5 +30,19 @@ describe('SqlEditor theme', () => {
     view.unmount();
     render(<ThemeProvider><SqlEditor doc={doc} engine="mysql" /></ThemeProvider>);
     expect(screen.queryByTestId('editor-placeholder')).toBeNull();
+  });
+
+  it('dark_toggle_redefines_and_sets_the_dnt_dark_theme', () => {
+    localStorage.setItem('theme', 'light');
+    const defineTheme = vi.fn();
+    const setTheme = vi.fn();
+    const monaco = { editor: { defineTheme, setTheme } } as unknown as Parameters<ReturnType<typeof useDntMonacoTheme>['beforeMount']>[0];
+    const wrapper = ({ children }: { children: ReactNode }) => <ThemeProvider>{children}</ThemeProvider>;
+    const { result } = renderHook(() => ({ theme: useDntMonacoTheme(), app: useTheme() }), { wrapper });
+    act(() => result.current.theme.beforeMount(monaco));
+    expect(defineTheme).toHaveBeenLastCalledWith('dnt-light', expect.objectContaining({ base: 'vs' }));
+    act(() => result.current.app.setTheme('dark'));
+    expect(defineTheme).toHaveBeenLastCalledWith('dnt-dark', expect.objectContaining({ base: 'vs-dark' }));
+    expect(setTheme).toHaveBeenLastCalledWith('dnt-dark');
   });
 });
