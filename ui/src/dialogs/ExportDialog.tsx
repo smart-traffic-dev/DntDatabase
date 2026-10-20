@@ -4,6 +4,7 @@ import { api, toAppError } from '../api';
 import type { ConnectionSummary, Group, NodeId } from '../bindings';
 import { useConnections } from '../store/connections';
 import { Modal } from './Modal';
+import { PasswordInput } from './PasswordInput';
 
 export const MIN_PASSPHRASE = 8;
 
@@ -155,15 +156,25 @@ export function ExportDialog({ preselected = [], onClose }: Props) {
   };
 
   return (
-    <Modal title="Export connections" onClose={close}>
+    <Modal title="Export connections" onClose={close} initialFocus=".export-tree input">
       <form onSubmit={(e) => void submit(e)}>
         <div className="modal-body stack">
           {model.roots.length === 0 ? (
             <p className="hint">There are no connections to export.</p>
           ) : (
-            <ul className="export-tree root" aria-label="Connections to export">
-              {model.roots.map(renderNode)}
-            </ul>
+            <>
+              <div className="export-bulk">
+                <button type="button" className="btn small" onClick={() => setChecked(new Set(model.names.keys()))}>
+                  Select all
+                </button>
+                <button type="button" className="btn small" onClick={() => setChecked(new Set())}>
+                  Select none
+                </button>
+              </div>
+              <ul className="export-tree root" aria-label="Connections to export">
+                {model.roots.map(renderNode)}
+              </ul>
+            </>
           )}
           <div className="field">
             <label className="check">
@@ -179,9 +190,9 @@ export function ExportDialog({ preselected = [], onClose }: Props) {
             <>
               <div className="field">
                 <label htmlFor="ex-pass">Passphrase</label>
-                <input
+                <PasswordInput
                   id="ex-pass"
-                  type="password"
+                  label="Passphrase"
                   autoComplete="new-password"
                   value={passphrase}
                   aria-invalid={tooShort}
@@ -195,9 +206,9 @@ export function ExportDialog({ preselected = [], onClose }: Props) {
               </div>
               <div className="field">
                 <label htmlFor="ex-confirm">Confirm passphrase</label>
-                <input
+                <PasswordInput
                   id="ex-confirm"
-                  type="password"
+                  label="Confirm passphrase"
                   autoComplete="new-password"
                   value={confirm}
                   aria-invalid={mismatch}
@@ -219,7 +230,11 @@ export function ExportDialog({ preselected = [], onClose }: Props) {
           )}
         </div>
         <footer className="modal-foot">
-          <span className="hint spacer">{connectionCount} connection(s) selected</span>
+          <span className="hint spacer">
+            {connectionCount === 0
+              ? 'No connections selected'
+              : `${connectionCount} ${connectionCount === 1 ? 'connection' : 'connections'} selected`}
+          </span>
           <button type="button" className="btn" onClick={close}>
             Cancel
           </button>

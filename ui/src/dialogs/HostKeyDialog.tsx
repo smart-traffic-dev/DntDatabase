@@ -11,10 +11,12 @@ interface Props {
   mismatchMessage?: string;
   /** `true` once the key was stored in known_hosts; `false` when the user cancelled. */
   onDone(trusted: boolean): void;
+  /** `test` when opened from the connection dialog's Test (it only tests, it does not connect). */
+  context?: 'test' | 'connect';
 }
 
 /** Asks the user to trust an unknown SSH host key (trust on first use). */
-export function HostKeyDialog({ host, port, fingerprint, keyOpenssh, mismatchMessage, onDone }: Props) {
+export function HostKeyDialog({ host, port, fingerprint, keyOpenssh, mismatchMessage, onDone, context = 'connect' }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,7 +55,13 @@ export function HostKeyDialog({ host, port, fingerprint, keyOpenssh, mismatchMes
   }
 
   return (
-    <Modal title="Unknown SSH host key" onClose={() => !busy && onDone(false)} className="narrow" initialFocus="[data-trust]">
+    // Cancel is focused: Enter must never accept an unverified key.
+    <Modal
+      title="Unknown SSH host key"
+      onClose={() => !busy && onDone(false)}
+      className="narrow"
+      initialFocus="[data-cancel]"
+    >
       <div className="modal-body">
         <p>
           The authenticity of <strong>{host}:{port}</strong> cannot be established. Compare this fingerprint with the
@@ -76,11 +84,11 @@ export function HostKeyDialog({ host, port, fingerprint, keyOpenssh, mismatchMes
         )}
       </div>
       <footer className="modal-foot">
-        <button type="button" className="btn" onClick={() => onDone(false)} disabled={busy}>
+        <button type="button" className="btn" data-cancel onClick={() => onDone(false)} disabled={busy}>
           Cancel
         </button>
-        <button type="button" className="btn primary" data-trust onClick={() => void trust()} disabled={busy}>
-          Trust and connect
+        <button type="button" className="btn" data-trust onClick={() => void trust()} disabled={busy}>
+          {context === 'test' ? 'Trust and test' : 'Trust and connect'}
         </button>
       </footer>
     </Modal>

@@ -34,7 +34,10 @@ describe('RunConfirmDialog', () => {
   it('lists_confirm_statements_with_labels', () => {
     render(<RunConfirmDialog plan={plan} onDone={vi.fn()} />);
     const dialog = screen.getByTestId('run-confirm');
-    expect(dialog).toHaveTextContent('Run 4 statements on shop-prod (Production)?');
+    expect(screen.getByTestId('run-confirm-summary')).toHaveTextContent(
+      '4 statements will run on shop-prod (PRODUCTION). 3 need confirmation:',
+    );
+    expect(screen.getByTestId('env-chip')).toHaveTextContent('Production');
     expect(dialog.querySelector('strong')).toHaveTextContent('shop-prod');
     const rows = dialog.querySelectorAll('[data-testid="run-confirm-row"]');
     expect(rows).toHaveLength(3);
@@ -75,14 +78,16 @@ describe('RunConfirmDialog', () => {
     const onDone = vi.fn();
     render(<RunConfirmDialog plan={plan} onDone={onDone} />);
     const run = screen.getByTestId('run-confirm-run');
-    expect(run).toHaveTextContent('Run 4 statements');
+    expect(run).toHaveTextContent(/^Run all 4$/);
     await userEvent.setup().click(run);
     expect(onDone).toHaveBeenCalledWith(true);
   });
 
   it('a single statement is singular in the title and the button', () => {
     render(<RunConfirmDialog plan={prodPlan([stmt(0, 'write', 'confirm', 'DELETE FROM t')])} onDone={vi.fn()} />);
-    expect(screen.getByTestId('run-confirm')).toHaveTextContent('Run 1 statement on shop-prod (Production)?');
+    expect(screen.getByTestId('run-confirm-summary')).toHaveTextContent(
+      '1 statement will run on shop-prod (PRODUCTION). 1 needs confirmation:',
+    );
     expect(screen.getByTestId('run-confirm-run')).toHaveTextContent(/^Run 1 statement$/);
   });
 });

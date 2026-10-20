@@ -6,6 +6,9 @@ import { Modal } from './Modal';
 interface Props {
   /** Title of the tab being closed. */
   title: string;
+  /** Connection the transaction runs on (named in the message when known). */
+  connectionName?: string;
+  production?: boolean;
   /** Commits or rolls back; a rejection keeps the dialog open with the error. */
   onSettle(action: TxAction): Promise<void>;
   /** `true` after a successful Commit / Rollback, `false` on Cancel. */
@@ -13,7 +16,7 @@ interface Props {
 }
 
 /** Closing a tab whose session has an open transaction (spec §7.2): Commit / Rollback / Cancel. */
-export function TxCloseDialog({ title, onSettle, onDone }: Props) {
+export function TxCloseDialog({ title, connectionName, production = false, onSettle, onDone }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,9 +34,31 @@ export function TxCloseDialog({ title, onSettle, onDone }: Props) {
   };
 
   return (
-    <Modal title={`Close ${title}`} onClose={() => onDone(false)} className="narrow" role="alertdialog" initialFocus="[data-cancel]">
+    <Modal
+      title={`Close ${title}`}
+      badge={
+        production ? (
+          <span className="chip env-production" data-testid="env-chip">
+            Production
+          </span>
+        ) : undefined
+      }
+      onClose={() => onDone(false)}
+      className="narrow"
+      role="alertdialog"
+      initialFocus="[data-cancel]"
+    >
       <div className="modal-body stack">
-        <p>This tab has an open transaction.</p>
+        <p>
+          {connectionName ? (
+            <>
+              This tab has an open transaction on <strong>{connectionName}</strong>
+              {production ? ' (PRODUCTION)' : ''}.
+            </>
+          ) : (
+            'This tab has an open transaction.'
+          )}
+        </p>
         {error && (
           <p role="alert" className="field-error">
             {error}
@@ -44,7 +69,7 @@ export function TxCloseDialog({ title, onSettle, onDone }: Props) {
         <button type="button" className="btn" data-cancel onClick={() => onDone(false)}>
           Cancel
         </button>
-        <button type="button" className="btn danger" disabled={busy} onClick={() => void settle('Rollback')}>
+        <button type="button" className="btn" disabled={busy} onClick={() => void settle('Rollback')}>
           Rollback
         </button>
         <button type="button" className="btn primary" disabled={busy} onClick={() => void settle('Commit')}>

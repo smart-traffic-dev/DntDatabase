@@ -17,7 +17,8 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
-    css: false,
+    // Process CSS so ?raw imports (cssVars.test.ts) return the real source instead of ''.
+    css: { include: [/\.css(\?.*)?$/] },
     restoreMocks: true,
   },
 });

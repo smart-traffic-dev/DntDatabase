@@ -11,6 +11,8 @@ import {
   resetStores,
   serverInfo,
 } from '../test/backend';
+const sheet = import.meta.glob('./dialogs.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+const css = Object.values(sheet)[0] ?? '';
 import { ConnectionDialog, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds } from './ConnectionDialog';
 
 beforeEach(resetStores);
@@ -34,7 +36,8 @@ describe('ConnectionDialog', () => {
     expect(port).toHaveValue(5432);
     await user.click(screen.getByLabelText('MariaDB'));
     expect(port).toHaveValue(3306);
-    expect(screen.getByText('MariaDB', { selector: '.chip' })).toBeInTheDocument();
+    // The selected radio is the only indicator: no duplicate chip.
+    expect(screen.queryByText('MariaDB', { selector: '.chip' })).not.toBeInTheDocument();
     // An edited port is kept.
     await user.clear(port);
     await user.type(port, '3307');
@@ -91,7 +94,7 @@ describe('ConnectionDialog', () => {
     await user.type(screen.getByTestId('conn-password'), 'pw');
     await user.click(screen.getByTestId('conn-test'));
     const bar = await screen.findByTestId('test-result');
-    expect(bar).toHaveTextContent('Connected · 8.0.36 · Connect 12 ms · Detect server 3 ms');
+    expect(bar).toHaveTextContent('Connected to MySQL 8.0.36 · Connect 12 ms · Detect server 3 ms');
     expect(callsOf('test_connection')[0]).toMatchObject({ secrets: { db_password: 'pw' } });
   });
 
@@ -109,7 +112,7 @@ describe('ConnectionDialog', () => {
     expect(bar).toHaveTextContent('Could not connect to the database server.');
     expect(bar).toHaveTextContent('Connection refused: check host, port, firewall');
     // Stages that completed before the failure keep their timings.
-    expect(bar).toHaveTextContent('Secrets 1 ms');
+    expect(bar).toHaveTextContent('Steps completed: Secrets 1 ms');
     expect(screen.queryByText(/os error 10061/)).not.toBeInTheDocument();
     await user.click(within(bar).getByRole('button', { name: 'Details' }));
     expect(screen.getByText(/os error 10061/)).toBeInTheDocument();
@@ -153,7 +156,9 @@ describe('ConnectionDialog', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Unknown SSH host key' });
     expect(dialog).toHaveTextContent('bastion:22');
     expect(dialog).toHaveTextContent('SHA256:abc123');
-    await user.click(within(dialog).getByRole('button', { name: 'Trust and connect' }));
+    // Unverified key: Cancel has the focus, and the test context says "test", not "connect".
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await user.click(within(dialog).getByRole('button', { name: 'Trust and test' }));
     expect(await screen.findByTestId('test-result')).toHaveTextContent('Connected');
     expect(callsOf('trust_host_key')[0]).toMatchObject({
       host: 'bastion',
@@ -163,6 +168,77 @@ describe('ConnectionDialog', () => {
     });
     expect(callsOf('test_connection')).toHaveLength(2);
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('untouched_form_closes_without_asking', async () => {
+    mockBackend({});
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('dirty_form_asks_before_discarding_on_cancel_close_and_escape', async () => {
+    mockBackend({});
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await user.type(screen.getByTestId('conn-name'), 'x');
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    const ask = await screen.findByRole('alertdialog', { name: 'Discard changes?' });
+    expect(onClose).not.toHaveBeenCalled();
+    // The safe action has the focus: Enter keeps editing.
+    expect(within(ask).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByTestId('conn-name')).toHaveValue('x');
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Discard' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('discard_prompt_traps_focus_and_escape_closes_only_the_top_modal', async () => {
+    mockBackend({});
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await user.type(screen.getByTestId('conn-name'), 'x');
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    const ask = await screen.findByRole('alertdialog', { name: 'Discard changes?' });
+    const cancel = within(ask).getByRole('button', { name: 'Cancel' });
+    const discard = within(ask).getByRole('button', { name: 'Discard' });
+    expect(cancel).toHaveFocus();
+    await user.tab();
+    expect(discard).toHaveFocus();
+    await user.tab();
+    expect(cancel).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(discard).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'New connection' })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('reserves_the_result_area_so_the_button_row_stays_put', async () => {
+    mockBackend({ test_connection: () => okResult });
+    const user = userEvent.setup();
+    const { container } = render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    const slot = container.ownerDocument.querySelector('.result-slot');
+    expect(slot).not.toBeNull();
+    expect(slot?.nextElementSibling).toBe(container.ownerDocument.querySelector('.modal-foot'));
+    expect(css).toMatch(/\.result-slot\s*\{[^}]*height:\s*\d+px/);
+    expect(css).toMatch(/\.conn-body\s*\{[^}]*height:/);
+    await user.click(screen.getByTestId('conn-test'));
+    await screen.findByTestId('test-result');
+    expect(slot?.contains(screen.getByTestId('test-result'))).toBe(true);
+    expect(slot?.nextElementSibling).toBe(container.ownerDocument.querySelector('.modal-foot'));
+  });
+
+  it('dark_dialogs_get_a_visible_line_colour', () => {
+    expect(css).toMatch(/\.dark \.modal\s*\{[^}]*--dlg-line:/);
+    expect(css).toMatch(/\.modal\s*\{[^}]*--dlg-line:/);
   });
 
   it('host_key_mismatch_warns_without_trust_button', async () => {

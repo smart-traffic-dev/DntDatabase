@@ -4,6 +4,8 @@ const sheets = import.meta.glob('../**/*.css', { query: '?raw', import: 'default
 
 describe('CSS custom properties', () => {
   it('every var(--x) used in app CSS is defined in tokens.css or theme.css', () => {
+    // Guard against a vacuous pass: ?raw CSS must not be stripped by the test config.
+    expect(Object.values(sheets).join('').length).toBeGreaterThan(1000);
     const defined = new Set<string>();
     for (const css of Object.values(sheets)) {
       for (const m of css.matchAll(/(--[\w-]+)\s*:/g)) defined.add(m[1] ?? '');

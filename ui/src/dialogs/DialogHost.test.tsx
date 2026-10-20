@@ -26,6 +26,51 @@ const seed = async () => {
 };
 
 describe('DialogHost', () => {
+  it('the transaction close question names the connection and PRODUCTION', () => {
+    useDialogs.getState().ask({
+      kind: 'txClose',
+      title: 'Query 1',
+      connectionName: 'shop-prod',
+      envTag: 'production',
+      settle: async () => {},
+      done: () => {},
+    });
+    render(<DialogHost />);
+    const dlg = screen.getByRole('alertdialog');
+    expect(dlg).toHaveTextContent('open transaction on shop-prod (PRODUCTION)');
+    expect(within(dlg).getByTestId('env-chip')).toBeInTheDocument();
+  });
+
+  it('a saved connection expands every ancestor group', async () => {
+    const tree = sampleTree();
+    tree.groups = [...tree.groups, { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', parent_id: ids.groupB, name: 'Nested', sort_order: 0 }];
+    const created = { ...tree.connections[2]!.config, group_id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc' };
+    tree.connections = [{ ...tree.connections[2]!, config: created }];
+    mockBackend({ list_tree: () => tree, create_connection: () => created });
+    await seed();
+    useDialogs.getState().requestDialog({ kind: 'newConnection' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    await user.type(screen.getByTestId('conn-name'), 'legacy-crm');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(useTree.getState().selectedId).toBe(`conn:${ids.legacy}`));
+    expect(useTree.getState().expanded.has('group:cccccccc-cccc-4ccc-8ccc-cccccccccccc')).toBe(true);
+    expect(useTree.getState().expanded.has(`group:${ids.groupB}`)).toBe(true);
+  });
+
+  it('a new connection saved into a group expands the group and selects the row', async () => {
+    const created = sampleTree().connections[2]!.config;
+    mockBackend({ list_tree: () => sampleTree(), create_connection: () => created });
+    await seed();
+    useDialogs.getState().requestDialog({ kind: 'newConnection' });
+    const user = userEvent.setup();
+    render(<DialogHost />);
+    await user.type(screen.getByTestId('conn-name'), 'legacy-crm');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(useTree.getState().selectedId).toBe(`conn:${ids.legacy}`));
+    expect(useTree.getState().expanded.has(`group:${ids.groupB}`)).toBe(true);
+  });
+
   it('password prompt opens the connection and expands it', async () => {
     const info = serverInfo('MySql8');
     mockBackend({

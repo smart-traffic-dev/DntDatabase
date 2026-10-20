@@ -40,6 +40,23 @@ describe('ExportDialog', () => {
     expect(exportBtn).toBeEnabled();
   });
 
+  it('select_all_and_none_with_plural_safe_count', async () => {
+    const user = userEvent.setup();
+    render(<ExportDialog onClose={() => {}} />);
+    expect(screen.getByText('No connections selected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Select all' }));
+    expect(screen.getByText(/^\d+ connections selected$/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Export' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Select none' }));
+    expect(screen.getByText('No connections selected')).toBeInTheDocument();
+  });
+
+  it('one_selected_connection_is_singular', () => {
+    render(<ExportDialog preselected={[{ type: 'connection', id: ids.legacy }]} onClose={() => {}} />);
+    expect(screen.getByText('1 connection selected')).toBeInTheDocument();
+  });
+
   it('export_calls_api_with_selected_nodes', async () => {
     const user = userEvent.setup();
     vi.mocked(save).mockResolvedValue('C:\\out\\x.dntconn');

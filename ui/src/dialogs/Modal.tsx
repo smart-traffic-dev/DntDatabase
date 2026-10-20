@@ -15,10 +15,12 @@ interface Props {
   initialFocus?: string;
   role?: 'dialog' | 'alertdialog';
   testId?: string;
+  /** Shows a × button in the header that calls `onClose`. */
+  closable?: boolean;
 }
 
 /** Accessible modal: `role=dialog`, focus trap, Esc closes, focus returns to the opener. */
-export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog', testId }: Props) {
+export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog', testId, closable = false }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
@@ -77,6 +79,11 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
         <header className="modal-head">
           <h2 id={titleId}>{title}</h2>
           {badge}
+          {closable && (
+            <button type="button" className="modal-close" aria-label="Close" onClick={onClose}>
+              ×
+            </button>
+          )}
         </header>
         {children}
       </div>

@@ -6,7 +6,7 @@ import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs'
 import { useRunPrompt } from '../store/runPrompt';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
-import { connNodeId } from '../store/treeModel';
+import { connNodeId, groupNodeId } from '../store/treeModel';
 import { ConnectionDialog } from './ConnectionDialog';
 import { ExportDialog } from './ExportDialog';
 import { HostKeyDialog } from './HostKeyDialog';
@@ -44,7 +44,7 @@ async function finishOpen(id: string, info: Awaited<ReturnType<typeof api.openCo
 function PromptHost({ prompt }: { prompt: PendingPrompt }) {
   const { showPrompt, closePrompt } = useDialogs.getState();
   const stored = useConnections((s) => s.summaries.get(prompt.connectionId));
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ message: string; hint: string | null } | null>(null);
   const id = prompt.connectionId;
 
   /** Opens the connection; routes a failure to the right prompt again. */
@@ -63,7 +63,7 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
       } else if (isPasswordRequired(err) && prompt.kind === 'hostKey') {
         showPrompt({ kind: 'password', connectionId: id, error: err });
       } else if (prompt.kind === 'password') {
-        setError(err.message);
+        setError({ message: err.message, hint: err.hint ?? null });
       } else {
         closePrompt();
         useTree.setState({ error: err });
@@ -93,7 +93,8 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
     <PasswordPrompt
       connectionName={stored?.config.name ?? 'connection'}
       needs={neededSecrets(stored?.config, !!stored?.has_db_password, !!stored?.has_ssh_secret, prompt.error)}
-      error={error}
+      error={error?.message ?? null}
+      errorHint={error?.hint ?? null}
       onSubmit={(secrets) => {
         setError(null);
         void attempt(secrets);
@@ -156,7 +157,15 @@ function InternalErrorToast() {
 /** A question a store awaits (closing a query tab, quitting the app). */
 function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'txClose') {
-    return <TxCloseDialog title={question.title} onSettle={question.settle} onDone={question.done} />;
+    return (
+      <TxCloseDialog
+        title={question.title}
+        connectionName={question.connectionName}
+        production={question.envTag === 'production'}
+        onSettle={question.settle}
+        onDone={question.done}
+      />
+    );
   }
   if (question.kind === 'discard') {
     return (
@@ -224,7 +233,20 @@ export function DialogHost() {
         mode="create"
         onClose={(saved) => {
           closeRequest();
-          if (saved) void reload();
+          if (!saved) return;
+          // Reveal the new row: open its group and select it.
+          void (async () => {
+            await reload();
+            const tree = useTree.getState();
+            // Open every ancestor group so the row is visible.
+            const parents = new Map(useConnections.getState().groups.map((g) => [g.id, g.parent_id]));
+            const seen = new Set<string>();
+            for (let g = saved.group_id; g && !seen.has(g); g = parents.get(g) ?? null) {
+              seen.add(g);
+              tree.expand(groupNodeId(g));
+            }
+            tree.select(connNodeId(saved.id));
+          })();
         }}
       />
     );
