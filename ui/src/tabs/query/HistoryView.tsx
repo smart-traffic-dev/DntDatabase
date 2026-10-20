@@ -55,6 +55,15 @@ export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'erro
   };
 }
 
+/** Why a data-edit row is not inserted into the editor. */
+export const NOT_RE_RUNNABLE = "This statement was shortened or redacted for history and can't be re-run.";
+
+/**
+ * Whether a row's text may go back into the editor. A data edit marked redacted holds a
+ * shortened literal (`'abc…' /* N chars *\/`) or a placeholder: valid SQL, but not what ran.
+ */
+export const canReRun = (row: Pick<HistoryEntry, 'origin' | 'redacted'>) => !(row.origin === 'data_edit' && row.redacted);
+
 type Modifiers = Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>;
 
 const firstLine =(sql: string) => sql.split(/\r?\n/, 1)[0] ?? '';
@@ -85,6 +94,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
   const [search, setSearch] = useState('');
   const [rows, setRows] = useState<HistoryEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirmClear, setConfirmClear] = useState(false);
   /** The row that takes Tab focus (roving tabIndex). */
@@ -157,6 +167,16 @@ export function HistoryView({ tabId }: { tabId: string }) {
     listRef.current?.querySelectorAll<HTMLElement>('[role="option"]')[to]?.focus();
   };
 
+  /** Inserts a row's statement at the cursor; a data edit whose text is not what ran is refused. */
+  const insert = (row: HistoryEntry) => {
+    if (!canReRun(row)) {
+      setNotice(NOT_RE_RUNNABLE);
+      return;
+    }
+    setNotice(null);
+    insertAtCursor(tabId, row.sql_text);
+  };
+
   const onRowKey = (e: KeyboardEvent, row: HistoryEntry, index: number) => {
     switch (e.key) {
       case 'ArrowDown':
@@ -169,7 +189,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
         return moveTo(e, rows.length - 1);
       case 'Enter':
         e.preventDefault();
-        insertAtCursor(tabId, row.sql_text);
+        insert(row);
         return;
       case ' ':
         e.preventDefault();
@@ -263,6 +283,11 @@ export function HistoryView({ tabId }: { tabId: string }) {
           {error}
         </div>
       )}
+      {notice && (
+        <div className="qr-msg" role="status">
+          {notice}
+        </div>
+      )}
       <div
         ref={listRef}
         className="hs-list"
@@ -288,7 +313,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
               data-testid="history-row"
               title={row.sql_text}
               onClick={(e) => pick(e, row, i)}
-              onDoubleClick={() => insertAtCursor(tabId, row.sql_text)}
+              onDoubleClick={() => insert(row)}
               onKeyDown={(e) => onRowKey(e, row, i)}
             >
               <span className="hs-time">{timeText(row.started_at)}</span>

@@ -198,6 +198,25 @@ describe('HistoryView', () => {
     unregisterEditor(tab, editor);
   });
 
+  it('a shortened data-edit statement is never inserted: Enter and double click are refused with a notice', async () => {
+    const shortened = "UPDATE `t` SET `note` = 'aaaa…' /* 1048576 chars */ WHERE `id` = 1";
+    rows = [entry(1, { origin: 'data_edit', kind: 'write', redacted: true, sql_text: shortened }), entry(2, { origin: 'data_edit', kind: 'write', sql_text: 'UPDATE t SET a = 1' })];
+    const user = userEvent.setup();
+    useQueryDocs.getState().update(tab, { sql: '', cursor: 0 });
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    await user.dblClick(list[0]!);
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('');
+    expect(screen.getByRole('status')).toHaveTextContent("This statement was shortened or redacted for history and can't be re-run.");
+    list[0]!.focus();
+    await user.keyboard('{Enter}');
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('');
+    // A whole data-edit statement is inserted as before, and the notice goes.
+    await user.dblClick(list[1]!);
+    expect(useQueryDocs.getState().docs.get(tab)!.sql).toBe('UPDATE t SET a = 1');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('double_click_without_an_editor_inserts_at_the_stored_cursor', async () => {
     const user = userEvent.setup();
     useQueryDocs.getState().update(tab, { sql: 'ab', cursor: 1 });

@@ -997,7 +997,8 @@ impl SessionManager {
 /// a statement that matched no row is `conflict`. `outcome_unknown`: the statement
 /// without an answer, or every statement when the `COMMIT` has none. The statements of
 /// a plan are sent in a row, so every row has the apply's start and duration.
-/// Long literals are shortened as in the preview ([`display_sql`]).
+/// Long literals are shortened as in the preview ([`display_sql`]); such a row is
+/// marked `redacted` (its text is not the statement that ran).
 fn edit_history_entries(
     conn: Uuid,
     database: &str,
@@ -1020,7 +1021,11 @@ fn edit_history_entries(
         let Some(st) = plan.stmts.get(pos) else {
             break;
         };
-        let sql = redact(&display_sql(&st.sql, plan.dialect), plan.dialect);
+        let shown = display_sql(&st.sql, plan.dialect);
+        // A shortened literal leaves valid SQL that is not the statement that ran: it is
+        // marked like a redacted one, and the history refuses to re-run it.
+        let abbreviated = shown != st.sql;
+        let sql = redact(&shown, plan.dialect);
         let (status, error_kind, error_code) = match &sent.error {
             Some(e) => (
                 if e.kind == "cancelled" {
@@ -1044,7 +1049,7 @@ fn edit_history_entries(
             connection_id: conn,
             database: Some(database.to_owned()),
             sql_text: sql.text,
-            redacted: sql.changed,
+            redacted: sql.changed || abbreviated,
             kind: "write".into(),
             started_at: started_at.to_owned(),
             elapsed_ms: Some(elapsed_ms),

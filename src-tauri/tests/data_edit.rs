@@ -1561,6 +1561,52 @@ async fn apply_writes_history_with_origin_and_redaction() {
     assert!(h.error_kind.is_none());
 }
 
+/// A statement whose long literal history shortens (`'abc…' /* N chars */`) is marked
+/// redacted: the stored text is valid SQL but not the statement that ran, and the UI
+/// refuses to re-run it.
+#[tokio::test]
+async fn abbreviated_history_sql_is_marked_redacted() {
+    let f = fixture().await;
+    {
+        let mut d = f.server.detail.lock().unwrap();
+        d.columns[1] = ColumnDetail {
+            db_type: "text".into(),
+            ..column("note", true)
+        };
+        f.server.metas.lock().unwrap()[1] = ColumnMeta {
+            db_type: "TEXT".into(),
+            logical: LogicalType::Text,
+            ..meta("note")
+        };
+    }
+    let long = "a".repeat(5000);
+    let set = EditSet {
+        object: object(),
+        edits: vec![RowEdit::Update {
+            row: RowRef {
+                key: key(1),
+                original: vec![
+                    ("id".into(), Value::Int(1)),
+                    ("note".into(), Value::Text("old".into())),
+                ],
+                xmin: None,
+                loaded: vec![],
+            },
+            set: vec![("note".into(), CellInput::Text { text: long.clone() })],
+        }],
+        overwrite: false,
+    };
+    let p = f.sm.edit_preview(f.id, set).await.unwrap();
+    let r = f.sm.edit_apply(p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed);
+    let rows = edit_history(&f);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let h = &rows[0];
+    assert!(h.sql_text.contains("/* 5000 chars */"), "{}", h.sql_text);
+    assert!(!h.sql_text.contains(&long), "{}", h.sql_text);
+    assert!(h.redacted);
+}
+
 /// A batch rolled back by a conflict: the statements that were sent are recorded as not
 /// applied, the one never sent is not recorded.
 #[tokio::test]
