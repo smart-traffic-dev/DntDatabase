@@ -282,7 +282,7 @@ describe('closing a tab', () => {
     // Cancel leaves the tab.
     let closing = useQueryDocs.getState().closeTab(id);
     const dialog = await screen.findByRole('alertdialog');
-    expect(dialog).toHaveTextContent('This tab has an open transaction.');
+    expect(dialog).toHaveTextContent(/This tab has an open transaction/);
     for (const name of ['Commit', 'Rollback', 'Cancel']) expect(screen.getByRole('button', { name })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(await closing).toBe(false);

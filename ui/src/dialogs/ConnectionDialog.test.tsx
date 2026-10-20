@@ -11,6 +11,8 @@ import {
   resetStores,
   serverInfo,
 } from '../test/backend';
+const sheet = import.meta.glob('./dialogs.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+const css = Object.values(sheet)[0] ?? '';
 import { ConnectionDialog, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds } from './ConnectionDialog';
 
 beforeEach(resetStores);
@@ -194,6 +196,49 @@ describe('ConnectionDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Close' }));
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Discard' }));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('discard_prompt_traps_focus_and_escape_closes_only_the_top_modal', async () => {
+    mockBackend({});
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await user.type(screen.getByTestId('conn-name'), 'x');
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    const ask = await screen.findByRole('alertdialog', { name: 'Discard changes?' });
+    const cancel = within(ask).getByRole('button', { name: 'Cancel' });
+    const discard = within(ask).getByRole('button', { name: 'Discard' });
+    expect(cancel).toHaveFocus();
+    await user.tab();
+    expect(discard).toHaveFocus();
+    await user.tab();
+    expect(cancel).toHaveFocus();
+    await user.tab({ shift: true });
+    expect(discard).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'New connection' })).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('reserves_the_result_area_so_the_button_row_stays_put', async () => {
+    mockBackend({ test_connection: () => okResult });
+    const user = userEvent.setup();
+    const { container } = render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    const slot = container.ownerDocument.querySelector('.result-slot');
+    expect(slot).not.toBeNull();
+    expect(slot?.nextElementSibling).toBe(container.ownerDocument.querySelector('.modal-foot'));
+    expect(css).toMatch(/\.result-slot\s*\{[^}]*height:\s*\d+px/);
+    expect(css).toMatch(/\.conn-body\s*\{[^}]*height:/);
+    await user.click(screen.getByTestId('conn-test'));
+    await screen.findByTestId('test-result');
+    expect(slot?.contains(screen.getByTestId('test-result'))).toBe(true);
+    expect(slot?.nextElementSibling).toBe(container.ownerDocument.querySelector('.modal-foot'));
+  });
+
+  it('dark_dialogs_get_a_visible_line_colour', () => {
+    expect(css).toMatch(/\.dark \.modal\s*\{[^}]*--dlg-line:/);
+    expect(css).toMatch(/\.modal\s*\{[^}]*--dlg-line:/);
   });
 
   it('host_key_mismatch_warns_without_trust_button', async () => {

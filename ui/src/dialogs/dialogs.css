@@ -13,15 +13,21 @@
 }
 
 .modal {
+  /* Separator / field border; dark mode overrides it (the hairline equals the popover there). */
+  --dlg-line: var(--border);
   display: flex;
   flex-direction: column;
   width: 420px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
   background: var(--studio-popover);
-  border: 1px solid var(--studio-hairline);
+  border: 1px solid var(--dlg-line);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-popover);
+}
+
+.dark .modal {
+  --dlg-line: color-mix(in srgb, var(--studio-fg) 24%, var(--studio-popover));
 }
 
 .modal.wide {
@@ -41,7 +47,7 @@
   align-items: center;
   gap: 10px;
   padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dlg-line);
 }
 
 .modal-head h2 {
@@ -72,7 +78,7 @@
   gap: 8px;
   justify-content: flex-end;
   padding: 10px 16px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--dlg-line);
 }
 
 .modal-foot .spacer {
@@ -98,18 +104,12 @@
   color: var(--danger);
   border: 1px solid var(--danger-border);
   border-radius: var(--radius-sm);
-  padding: 1px 8px;
+  padding: 1px 6px;
+  font-family: var(--font-sans);
   font-size: var(--text-caption);
   font-weight: 600;
+  letter-spacing: 0.02em;
   text-transform: uppercase;
-}
-
-.chip.chip-ma {
-  border-radius: var(--radius-sm);
-  padding: 1px 6px;
-  font-size: var(--text-caption);
-  margin-left: 8px;
-  align-self: flex-start;
 }
 
 /* Connection dialog */
@@ -121,8 +121,9 @@
 
 .conn-body {
   display: flex;
-  min-height: 340px;
-  overflow: auto;
+  /* Fixed height: the dialog does not jump between tabs. One scroll area (.conn-main). */
+  height: clamp(260px, calc(100vh - 300px), 400px);
+  overflow: hidden;
 }
 
 .engines {
@@ -133,11 +134,12 @@
   margin: 0;
   padding: 12px 8px;
   border: 0;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--dlg-line);
   background: var(--sidebar);
+  flex: none;
 }
 
-.engines legend {
+.engines-title {
   padding: 0 8px;
   margin-bottom: 6px;
   font-size: var(--text-caption);
@@ -163,13 +165,14 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
+  overflow: auto;
 }
 
 .tabs {
   display: flex;
   gap: 2px;
   padding: 8px 12px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dlg-line);
 }
 
 .dlg-tab {
@@ -229,7 +232,7 @@
 .field select {
   height: 30px;
   padding: 0 8px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dlg-line);
   border-radius: var(--radius-sm);
   background: var(--studio-control);
   font: inherit;
@@ -301,6 +304,23 @@
   font-weight: 500;
 }
 
+/* Reserved area for the test result: the form and the button row do not move when a result appears. */
+.result-slot {
+  flex: none;
+  height: 84px;
+  overflow: auto;
+  padding-top: 8px;
+}
+
+.result-slot .result {
+  margin-top: 0;
+}
+
+.result-check {
+  margin-right: 6px;
+  font-weight: 700;
+}
+
 .result {
   margin: 0 16px 10px;
   padding: 8px 10px;
@@ -339,7 +359,7 @@
 .result .detail {
   margin: 6px 0 0;
   padding: 6px 8px;
-  max-height: 140px;
+  max-height: 80px;
   overflow: auto;
   white-space: pre-wrap;
   font-family: var(--font-mono);
@@ -380,7 +400,7 @@
   padding: 6px 8px;
   max-height: 260px;
   overflow: auto;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dlg-line);
   border-radius: var(--radius-sm);
 }
 
@@ -430,7 +450,7 @@
   gap: 2px;
   margin: 0;
   padding: 8px 10px;
-  border: 1px solid var(--border);
+  border: 1px solid var(--dlg-line);
   border-radius: var(--radius-sm);
 }
 

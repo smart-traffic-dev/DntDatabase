@@ -241,10 +241,14 @@ async function forget(id: string) {
 
 /** Shows `TxCloseDialog`; true once the transaction was committed or rolled back. */
 function settleTransaction(id: string, title: string): Promise<boolean> {
+  const connectionId = useQueryDocs.getState().docs.get(id)?.connectionId;
+  const summary = connectionId ? useConnections.getState().summaries.get(connectionId) : undefined;
   return new Promise((resolve) => {
     useDialogs.getState().ask({
       kind: 'txClose',
       title,
+      connectionName: summary?.config.name,
+      envTag: summary?.config.env_tag ?? null,
       settle: async (action: TxAction) => {
         await queryTxRecorded(id, action);
       },

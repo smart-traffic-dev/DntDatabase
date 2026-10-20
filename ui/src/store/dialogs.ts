@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppError, NodeId, TxAction } from '../bindings';
+import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
 
 /** A prompt the connection tree needs answered before it can open a connection. */
 export interface PendingPrompt {
@@ -25,6 +25,9 @@ export type Question =
       kind: 'txClose';
       /** Title of the tab being closed. */
       title: string;
+      /** Connection the transaction runs on, and its environment (named in the dialog). */
+      connectionName?: string;
+      envTag?: EnvTag | null;
       /** Commits or rolls back; rejects with the backend error (the dialog stays open). */
       settle(action: TxAction): Promise<void>;
       done(closed: boolean): void;

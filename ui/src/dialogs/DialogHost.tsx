@@ -157,13 +157,11 @@ function InternalErrorToast() {
 /** A question a store awaits (closing a query tab, quitting the app). */
 function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'txClose') {
-    // The store may also say which connection the transaction runs on (optional fields).
-    const extra = question as typeof question & { connectionName?: string; envTag?: string | null };
     return (
       <TxCloseDialog
         title={question.title}
-        connectionName={extra.connectionName}
-        production={extra.envTag === 'production'}
+        connectionName={question.connectionName}
+        production={question.envTag === 'production'}
         onSettle={question.settle}
         onDone={question.done}
       />
@@ -240,7 +238,13 @@ export function DialogHost() {
           void (async () => {
             await reload();
             const tree = useTree.getState();
-            if (saved.group_id) tree.expand(groupNodeId(saved.group_id));
+            // Open every ancestor group so the row is visible.
+            const parents = new Map(useConnections.getState().groups.map((g) => [g.id, g.parent_id]));
+            const seen = new Set<string>();
+            for (let g = saved.group_id; g && !seen.has(g); g = parents.get(g) ?? null) {
+              seen.add(g);
+              tree.expand(groupNodeId(g));
+            }
             tree.select(connNodeId(saved.id));
           })();
         }}
