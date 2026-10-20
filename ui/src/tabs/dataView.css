@@ -74,10 +74,21 @@
   padding: 16px;
 }
 
-.dv-count-error {
+.dv-note {
   margin: 0;
   padding: 4px 12px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: var(--text-footnote);
+}
+
+.dv-note-error {
   color: var(--color-danger);
+}
+
+/* Implicit primary-key order: a quiet hint, not a sort state. */
+.dv-key-order {
+  color: var(--text-faint);
   font-size: var(--text-footnote);
 }
 

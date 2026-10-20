@@ -28,23 +28,30 @@ pub fn qualified_name(kind: DbKind, database: &str, schema: Option<&str>, name: 
     }
 }
 
-/// `SELECT * FROM <relation> [ORDER BY <col> ASC|DESC] LIMIT <limit> OFFSET <offset>`.
-/// `relation` must come from [`qualified_name`]; `order` is `(column, ascending)` and the
-/// column is quoted here.
+/// `SELECT * FROM <relation> [ORDER BY <col> ASC|DESC, ...] LIMIT <limit> OFFSET <offset>`.
+/// `relation` must come from [`qualified_name`]; `order` lists `(column, ascending)` and
+/// the columns are quoted here.
 pub fn select_page_sql(
     kind: DbKind,
     relation: &str,
-    order: Option<(&str, bool)>,
+    order: &[(&str, bool)],
     limit: u64,
     offset: u64,
 ) -> String {
-    let order = match order {
-        Some((column, asc)) => format!(
-            " ORDER BY {} {}",
-            quote_ident(kind, column),
-            if asc { "ASC" } else { "DESC" }
-        ),
-        None => String::new(),
+    let order = if order.is_empty() {
+        String::new()
+    } else {
+        let keys: Vec<String> = order
+            .iter()
+            .map(|(column, asc)| {
+                format!(
+                    "{} {}",
+                    quote_ident(kind, column),
+                    if *asc { "ASC" } else { "DESC" }
+                )
+            })
+            .collect();
+        format!(" ORDER BY {}", keys.join(", "))
     };
     format!("SELECT * FROM {relation}{order} LIMIT {limit} OFFSET {offset}")
 }
@@ -93,17 +100,21 @@ mod tests {
     fn select_page_quotes_the_order_column() {
         let rel = qualified_name(DbKind::MySql, "shop", None, "weird_names");
         assert_eq!(
-            select_page_sql(DbKind::MySql, &rel, None, 101, 0),
+            select_page_sql(DbKind::MySql, &rel, &[], 101, 0),
             "SELECT * FROM `shop`.`weird_names` LIMIT 101 OFFSET 0"
         );
         assert_eq!(
-            select_page_sql(DbKind::MySql, &rel, Some(("we`ird\"col", false)), 11, 200),
+            select_page_sql(DbKind::MySql, &rel, &[("we`ird\"col", false)], 11, 200),
             "SELECT * FROM `shop`.`weird_names` ORDER BY `we``ird\"col` DESC LIMIT 11 OFFSET 200"
         );
         let rel = qualified_name(DbKind::Postgres, "shop", Some("public"), "đơn_hàng");
         assert_eq!(
-            select_page_sql(DbKind::Postgres, &rel, Some(("x\"; DROP", true)), 5, 5),
+            select_page_sql(DbKind::Postgres, &rel, &[("x\"; DROP", true)], 5, 5),
             "SELECT * FROM \"public\".\"đơn_hàng\" ORDER BY \"x\"\"; DROP\" ASC LIMIT 5 OFFSET 5"
+        );
+        assert_eq!(
+            select_page_sql(DbKind::Postgres, &rel, &[("a", true), ("b", true)], 5, 0),
+            "SELECT * FROM \"public\".\"đơn_hàng\" ORDER BY \"a\" ASC, \"b\" ASC LIMIT 5 OFFSET 0"
         );
         assert_eq!(
             count_sql(&rel),

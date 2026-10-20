@@ -146,6 +146,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::set_table_page_size,
             data::table_data,
             data::table_row_count,
+            data::table_data_cancel,
             workspace::tabs_load,
             workspace::tabs_save,
             workspace::tabs_delete,

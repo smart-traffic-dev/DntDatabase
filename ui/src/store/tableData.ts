@@ -8,11 +8,12 @@ import { useTabs } from './tabs';
 
 /** The data view of one object tab: its paging, sort and the page on screen. */
 export interface TableDataState {
+  connectionId: string;
   pageSize: number;
   offset: number;
   sort: SortSpec | null;
   page?: Loadable<TableDataPage>;
-  /** Exact row count (`table_row_count`), fetched on demand. */
+  /** Exact row count (`table_row_count`), fetched on demand; cleared by any page load. */
   count?: Loadable<number>;
 }
 
@@ -21,7 +22,7 @@ interface TableDataStore {
   byTab: Record<string, TableDataState>;
   /** Creates the tab's state with `pageSize` and loads the first page, unless it exists. */
   init(tab: Tab, pageSize: number): void;
-  /** (Re)loads the current page. */
+  /** (Re)loads the current page (and forgets the exact count, which may be stale). */
   load(tab: Tab): Promise<void>;
   setPageSize(tab: Tab, pageSize: number): void;
   next(tab: Tab): void;
@@ -30,10 +31,17 @@ interface TableDataStore {
   toggleSort(tab: Tab, column: string): void;
   clearSort(tab: Tab): void;
   count(tab: Tab): Promise<void>;
+  /** Stops the page load / the count running for the tab (the backend cancels the statement). */
+  cancelPage(tab: Tab): void;
+  cancelCount(tab: Tab): void;
   /** Opens the tab's connection again, then reloads the page. */
   reconnect(tab: Tab): Promise<void>;
   reset(): void;
 }
+
+/** The backend request keys of a tab: one page and one count at a time, each. */
+export const pageKey = (tabId: string) => `${tabId}:page`;
+export const countKey = (tabId: string) => `${tabId}:count`;
 
 /** The next sort after a click on `column`. */
 export function nextSort(current: SortSpec | null, column: string): SortSpec | null {
@@ -42,8 +50,14 @@ export function nextSort(current: SortSpec | null, column: string): SortSpec | n
 }
 
 let counter = 0;
+/** Latest request token per tab and kind (`page` / `count`). */
 const tokens = new Map<string, number>();
 const isOpen = (tabId: string) => useTabs.getState().tabs.some((t) => t.id === tabId);
+
+function cancelRequest(connectionId: string, key: string) {
+  // Best effort: the request may already have ended.
+  api.tableDataCancel(connectionId, key).catch(() => undefined);
+}
 
 export const useTableData = create<TableDataStore>()((set, get) => {
   const patch = (tabId: string, change: Partial<TableDataState>) =>
@@ -63,23 +77,27 @@ export const useTableData = create<TableDataStore>()((set, get) => {
     byTab: {},
     init(tab, pageSize) {
       if (get().byTab[tab.id]) return;
-      set((s) => ({ byTab: { ...s.byTab, [tab.id]: { pageSize, offset: 0, sort: null } } }));
+      set((s) => ({ byTab: { ...s.byTab, [tab.id]: { connectionId: tab.connectionId, pageSize, offset: 0, sort: null } } }));
       void get().load(tab);
     },
     async load(tab) {
       const state = get().byTab[tab.id];
       if (!state) return;
       const token = ++counter;
-      tokens.set(tab.id, token);
-      patch(tab.id, { page: { status: 'loading' } });
-      const latest = () => tokens.get(tab.id) === token && isOpen(tab.id);
+      const key = pageKey(tab.id);
+      tokens.set(key, token);
+      // A count running for the old page is answered for nothing: drop it.
+      if (state.count?.status === 'loading') cancelRequest(tab.connectionId, countKey(tab.id));
+      tokens.delete(countKey(tab.id));
+      patch(tab.id, { page: { status: 'loading' }, count: undefined });
+      const latest = () => tokens.get(key) === token && isOpen(tab.id);
       try {
-        const data = await api.tableData(tab.connectionId, tab.objectRef, state.pageSize, state.offset, state.sort);
+        // The backend cancels the previous request of this key itself.
+        const data = await api.tableData(tab.connectionId, tab.objectRef, state.pageSize, state.offset, state.sort, key);
         if (latest()) patch(tab.id, { page: { status: 'ok', data } });
       } catch (e) {
-        if (!latest()) return;
-        const error = toAppError(e);
-        patch(tab.id, { page: isCancelled(error) ? undefined : { status: 'error', error } });
+        // A superseded request fails with `cancelled`: only the latest one is shown.
+        if (latest()) patch(tab.id, { page: { status: 'error', error: toAppError(e) } });
       }
     },
     setPageSize(tab, pageSize) {
@@ -87,7 +105,8 @@ export const useTableData = create<TableDataStore>()((set, get) => {
     },
     next(tab) {
       const s = get().byTab[tab.id];
-      if (s?.page?.status === 'ok' && s.page.data.has_more) go(tab, { offset: s.offset + s.pageSize });
+      // A page cut short by its byte budget holds fewer rows: continue right after them.
+      if (s?.page?.status === 'ok' && s.page.data.has_more) go(tab, { offset: s.offset + Math.max(1, s.page.data.rows.length) });
     },
     prev(tab) {
       const s = get().byTab[tab.id];
@@ -102,15 +121,28 @@ export const useTableData = create<TableDataStore>()((set, get) => {
     },
     async count(tab) {
       if (!get().byTab[tab.id]) return;
+      const token = ++counter;
+      const key = countKey(tab.id);
+      tokens.set(key, token);
       patch(tab.id, { count: { status: 'loading' } });
+      const latest = () => tokens.get(key) === token && isOpen(tab.id);
       try {
-        const { rows } = await api.tableRowCount(tab.connectionId, tab.objectRef);
-        if (isOpen(tab.id)) patch(tab.id, { count: { status: 'ok', data: rows } });
+        const { rows } = await api.tableRowCount(tab.connectionId, tab.objectRef, key);
+        if (latest()) patch(tab.id, { count: { status: 'ok', data: rows } });
       } catch (e) {
-        if (!isOpen(tab.id)) return;
+        if (!latest()) return;
         const error: AppError = toAppError(e);
         patch(tab.id, { count: isCancelled(error) ? undefined : { status: 'error', error } });
       }
+    },
+    cancelPage(tab) {
+      if (get().byTab[tab.id]?.page?.status === 'loading') cancelRequest(tab.connectionId, pageKey(tab.id));
+    },
+    cancelCount(tab) {
+      if (get().byTab[tab.id]?.count?.status !== 'loading') return;
+      tokens.delete(countKey(tab.id));
+      patch(tab.id, { count: undefined });
+      cancelRequest(tab.connectionId, countKey(tab.id));
     },
     async reconnect(tab) {
       patch(tab.id, { page: { status: 'loading' } });
@@ -130,12 +162,18 @@ export const useTableData = create<TableDataStore>()((set, get) => {
   };
 });
 
-// Forget the data (and ignore in-flight answers) of tabs that were closed.
+// Forget the data of closed tabs, ignore their in-flight answers and stop their statements.
 useTabs.subscribe((state) => {
   const open = new Set(state.tabs.map((t) => t.id));
   const { byTab } = useTableData.getState();
   const gone = Object.keys(byTab).filter((id) => !open.has(id));
   if (gone.length === 0) return;
-  for (const id of gone) tokens.delete(id);
+  for (const id of gone) {
+    tokens.delete(pageKey(id));
+    tokens.delete(countKey(id));
+    const s = byTab[id]!;
+    if (s.page?.status === 'loading') cancelRequest(s.connectionId, pageKey(id));
+    if (s.count?.status === 'loading') cancelRequest(s.connectionId, countKey(id));
+  }
   useTableData.setState({ byTab: Object.fromEntries(Object.entries(byTab).filter(([id]) => open.has(id))) });
 });

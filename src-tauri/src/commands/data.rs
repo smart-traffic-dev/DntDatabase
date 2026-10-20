@@ -3,21 +3,24 @@
 //!
 //! # Where the statements run
 //!
-//! On the connection's metadata session for the object's database
-//! ([`crate::session_manager::SessionManager::metadata_read`]), the session the tree's
-//! introspection uses: never on a query tab's session, so the view neither waits for a
-//! tab's run nor reads inside a tab's open transaction. The statements are plain `SELECT`s
-//! built here (identifiers quoted per engine, numbers formatted from integers), so they
-//! need no Production confirmation and run on read-only connections. Trade-off: while a
-//! page loads, tree browsing on that connection waits for it (both share the metadata
-//! link); the statement timeout (see `metadata_read`) bounds that wait.
+//! On the connection's data sessions (see [`crate::data_sessions`]): never on a query
+//! tab's session (so the view neither waits for a tab's run nor reads inside a tab's
+//! open transaction) and never under the metadata `link` (so a slow page or count does
+//! not hold up the tree, completion or Info). Every request runs under a caller-chosen
+//! `request_key` (the UI uses one per tab and purpose): a new request under the same key
+//! cancels the previous one, and `table_data_cancel` cancels it on demand.
+//!
+//! The statements are plain `SELECT`s built here (identifiers quoted per engine, numbers
+//! formatted from integers), so they need no Production confirmation and run on read-only
+//! connections. Pages are bounded: long text cells are cut and a page stops taking rows
+//! at a byte budget (see [`crate::data_sessions::BoundedPage`]).
 
 use super::browse::table_detail_impl;
 use super::guard;
 use crate::session_manager::config_error;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
-use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef};
+use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
 use dnt_core::sql::ident::{count_sql, qualified_name, select_page_sql};
 use dnt_core::value::{ColumnMeta, Value};
@@ -47,10 +50,17 @@ pub struct SortSpec {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct TableDataPage {
     pub columns: Vec<ColumnMeta>,
-    /// At most `limit` rows, starting at `offset`.
+    /// At most `limit` rows, starting at `offset` (fewer when `size_capped`).
     pub rows: Vec<Vec<Value>>,
-    /// Whether a row follows this page.
+    /// Whether a row follows this page (the next page starts at `offset + rows.len()`).
     pub has_more: bool,
+    /// Text / JSON cells cut to 64 KB.
+    pub truncated_cells: u32,
+    /// The page reached its byte budget: rows were left for the next page.
+    pub size_capped: bool,
+    /// Without an explicit sort: the primary key columns the page is ordered by (stable
+    /// paging); empty when there is no primary key or a sort was given.
+    pub key_order: Vec<String>,
     #[specta(type = f64)]
     pub elapsed_ms: u64,
 }
@@ -106,21 +116,76 @@ pub fn check_limit(limit: u32) -> Result<(), DbError> {
     }
 }
 
-/// `order` checked against the object's columns (exact name): `(column, ascending)`.
+/// Whether a column of type `db_type` cannot be sorted on: PostgreSQL types without a
+/// default ordering (`json`, `xml`, the geometric types, and arrays of them). MySQL sorts
+/// every type.
+pub fn unsortable(kind: DbKind, db_type: &str) -> bool {
+    if kind != DbKind::Postgres {
+        return false;
+    }
+    let t = db_type.trim().to_ascii_lowercase();
+    let base = t.trim_end_matches("[]").trim();
+    // `pg_catalog.json`, `json(…)` and similar spellings.
+    let base = base.rsplit('.').next().unwrap_or(base);
+    let base = base.split('(').next().unwrap_or(base).trim();
+    matches!(
+        base,
+        "json" | "xml" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle"
+    )
+}
+
+/// `order` checked against the object's columns (exact name, sortable type):
+/// `(column, ascending)`.
 pub fn resolve_order(
+    kind: DbKind,
     columns: &[ColumnDetail],
     order: Option<SortSpec>,
 ) -> Result<Option<(String, bool)>, DbError> {
     let Some(order) = order else {
         return Ok(None);
     };
-    if !columns.iter().any(|c| c.name == order.column) {
+    let Some(column) = columns.iter().find(|c| c.name == order.column) else {
         return Err(config_error(
             "order",
             &format!("\"{}\" is not a column of this object", order.column),
         ));
+    };
+    if unsortable(kind, &column.db_type) {
+        return Err(config_error(
+            "order",
+            &format!(
+                "Can't sort by \"{}\": values of type {} have no order",
+                column.name, column.db_type
+            ),
+        ));
     }
     Ok(Some((order.column, order.dir == SortDir::Asc)))
+}
+
+/// The primary key columns to order by when no sort is given (none when the object has
+/// no plain-column primary key).
+pub fn key_order(detail: &TableDetail) -> Vec<String> {
+    match &detail.primary_key {
+        Some(pk)
+            if !pk.columns.is_empty()
+                && pk
+                    .columns
+                    .iter()
+                    .all(|c| detail.columns.iter().any(|d| &d.name == c)) =>
+        {
+            pk.columns.clone()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// An offset as JS sends it: a negative, fractional or non-finite one is clamped.
+pub fn clamp_offset(offset: f64) -> u64 {
+    if offset.is_finite() && offset > 0.0 {
+        offset.trunc() as u64
+    } else {
+        0
+    }
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -131,6 +196,7 @@ fn relation(kind: DbKind, obj: &ObjectRef) -> String {
     qualified_name(kind, &obj.database, obj.schema.as_deref(), &obj.name)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn table_data_impl(
     state: &AppState,
     id: Uuid,
@@ -138,38 +204,45 @@ pub async fn table_data_impl(
     limit: u32,
     offset: u64,
     order: Option<SortSpec>,
+    request_key: String,
 ) -> Result<TableDataPage, DbError> {
     let kind = state.repo.get(id)?.kind;
     check_object(kind, &obj)?;
     check_limit(limit)?;
-    let order = match order {
+    // The detail is cached by the tree's Info view (a metadata call, short).
+    let (order, keys) = match order {
         Some(order) => {
-            // Cached by the tree's Info view; also tells us the object exists.
             let detail = table_detail_impl(state, id, obj.clone()).await?;
-            resolve_order(&detail.columns, Some(order))?
+            let order = resolve_order(kind, &detail.columns, Some(order))?;
+            (order.into_iter().collect::<Vec<_>>(), Vec::new())
         }
-        None => None,
+        None => match table_detail_impl(state, id, obj.clone()).await {
+            Ok(detail) => {
+                let keys = key_order(&detail);
+                (keys.iter().map(|k| (k.clone(), true)).collect(), keys)
+            }
+            // No stable order then; the SELECT reports a real problem itself.
+            Err(_) => (Vec::new(), Vec::new()),
+        },
     };
+    let order: Vec<(&str, bool)> = order.iter().map(|(c, asc)| (c.as_str(), *asc)).collect();
     let fetch = u64::from(limit) + 1;
-    let sql = select_page_sql(
-        kind,
-        &relation(kind, &obj),
-        order.as_ref().map(|(c, asc)| (c.as_str(), *asc)),
-        fetch,
-        offset,
-    );
+    let sql = select_page_sql(kind, &relation(kind, &obj), &order, fetch, offset);
     let started = Instant::now();
-    let read = state
+    let page = state
         .sessions
-        .metadata_read(id, Some(&obj.database), sql, fetch as usize)
+        .data_read(id, Some(&obj.database), &request_key, &sql, fetch as usize)
         .await?;
-    let mut rows = read.rows;
-    let has_more = rows.len() > limit as usize;
+    let mut rows = page.rows;
+    let has_more = rows.len() > limit as usize || page.capped;
     rows.truncate(limit as usize);
     Ok(TableDataPage {
-        columns: read.columns,
+        columns: page.columns,
         rows,
         has_more,
+        truncated_cells: page.truncated_cells,
+        size_capped: page.capped,
+        key_order: keys,
         elapsed_ms: elapsed_ms(started),
     })
 }
@@ -191,13 +264,20 @@ pub async fn table_row_count_impl(
     state: &AppState,
     id: Uuid,
     obj: ObjectRef,
+    request_key: String,
 ) -> Result<TableRowCount, DbError> {
     let kind = state.repo.get(id)?.kind;
     check_object(kind, &obj)?;
     let started = Instant::now();
     let read = state
         .sessions
-        .metadata_read(id, Some(&obj.database), count_sql(&relation(kind, &obj)), 1)
+        .data_read(
+            id,
+            Some(&obj.database),
+            &request_key,
+            &count_sql(&relation(kind, &obj)),
+            1,
+        )
         .await?;
     let rows = count_value(read.rows.first().and_then(|r| r.first()))?;
     Ok(TableRowCount {
@@ -206,8 +286,17 @@ pub async fn table_row_count_impl(
     })
 }
 
+pub async fn table_data_cancel_impl(
+    state: &AppState,
+    id: Uuid,
+    request_key: String,
+) -> Result<bool, DbError> {
+    Ok(state.sessions.data_cancel(id, &request_key))
+}
+
 #[tauri::command]
 #[specta::specta]
+#[allow(clippy::too_many_arguments)]
 pub async fn table_data(
     state: State<'_, AppState>,
     id: Uuid,
@@ -215,14 +304,19 @@ pub async fn table_data(
     limit: u32,
     offset: f64,
     order: Option<SortSpec>,
+    request_key: String,
 ) -> Result<TableDataPage, AppError> {
-    // JS numbers: a negative or fractional offset is clamped to a whole one.
-    let offset = if offset.is_finite() && offset > 0.0 {
-        offset.trunc() as u64
-    } else {
-        0
-    };
-    guard(table_data_impl(&state, id, obj, limit, offset, order)).await
+    let offset = clamp_offset(offset);
+    guard(table_data_impl(
+        &state,
+        id,
+        obj,
+        limit,
+        offset,
+        order,
+        request_key,
+    ))
+    .await
 }
 
 #[tauri::command]
@@ -231,13 +325,27 @@ pub async fn table_row_count(
     state: State<'_, AppState>,
     id: Uuid,
     obj: ObjectRef,
+    request_key: String,
 ) -> Result<TableRowCount, AppError> {
-    guard(table_row_count_impl(&state, id, obj)).await
+    guard(table_row_count_impl(&state, id, obj, request_key)).await
+}
+
+/// Cancels the `table_data` / `table_row_count` request running under `request_key`;
+/// whether one was running (its call then fails with `cancelled`).
+#[tauri::command]
+#[specta::specta]
+pub async fn table_data_cancel(
+    state: State<'_, AppState>,
+    id: Uuid,
+    request_key: String,
+) -> Result<bool, AppError> {
+    guard(table_data_cancel_impl(&state, id, request_key)).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dnt_core::meta::{IndexDetail, TableOptions};
 
     fn obj(schema: Option<&str>, kind: ObjectKind) -> ObjectRef {
         ObjectRef {
@@ -248,11 +356,11 @@ mod tests {
         }
     }
 
-    fn col(name: &str) -> ColumnDetail {
+    fn typed(name: &str, db_type: &str) -> ColumnDetail {
         ColumnDetail {
             name: name.into(),
             ordinal: 1,
-            db_type: "int".into(),
+            db_type: db_type.into(),
             nullable: true,
             default: None,
             auto_increment: false,
@@ -261,6 +369,10 @@ mod tests {
             invisible: false,
             comment: None,
         }
+    }
+
+    fn col(name: &str) -> ColumnDetail {
+        typed(name, "int")
     }
 
     fn field(e: DbError) -> Option<String> {
@@ -301,19 +413,119 @@ mod tests {
     #[test]
     fn order_must_name_a_column_exactly() {
         let cols = [col("id"), col("we`ird\"col")];
-        assert_eq!(resolve_order(&cols, None).unwrap(), None);
+        assert_eq!(resolve_order(DbKind::MySql, &cols, None).unwrap(), None);
         let spec = |c: &str, dir| SortSpec {
             column: c.into(),
             dir,
         };
         assert_eq!(
-            resolve_order(&cols, Some(spec("we`ird\"col", SortDir::Desc))).unwrap(),
+            resolve_order(
+                DbKind::MySql,
+                &cols,
+                Some(spec("we`ird\"col", SortDir::Desc))
+            )
+            .unwrap(),
             Some(("we`ird\"col".to_string(), false))
         );
         for bad in ["ID", "id; DROP TABLE orders", "1", ""] {
-            let e = resolve_order(&cols, Some(spec(bad, SortDir::Asc))).unwrap_err();
+            let e = resolve_order(DbKind::MySql, &cols, Some(spec(bad, SortDir::Asc))).unwrap_err();
             assert_eq!(field(e).as_deref(), Some("order"), "{bad}");
         }
+    }
+
+    #[test]
+    fn postgres_types_without_order_are_refused_kindly() {
+        for t in [
+            "json",
+            "JSON",
+            "xml",
+            "point",
+            "polygon",
+            "json[]",
+            "pg_catalog.json",
+        ] {
+            assert!(unsortable(DbKind::Postgres, t), "{t}");
+            assert!(!unsortable(DbKind::MySql, t), "{t}");
+        }
+        for t in [
+            "jsonb",
+            "text",
+            "integer",
+            "timestamp with time zone",
+            "int[]",
+        ] {
+            assert!(!unsortable(DbKind::Postgres, t), "{t}");
+        }
+        let cols = [typed("doc", "json")];
+        let e = resolve_order(
+            DbKind::Postgres,
+            &cols,
+            Some(SortSpec {
+                column: "doc".into(),
+                dir: SortDir::Asc,
+            }),
+        )
+        .unwrap_err();
+        match e {
+            DbError::Config { field, message } => {
+                assert_eq!(field.as_deref(), Some("order"));
+                assert_eq!(
+                    message,
+                    "Can't sort by \"doc\": values of type json have no order"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn detail(pk: Option<Vec<&str>>) -> TableDetail {
+        TableDetail {
+            object: obj(None, ObjectKind::Table),
+            columns: vec![col("a"), col("b")],
+            primary_key: pk.map(|c| IndexDetail {
+                name: "PRIMARY".into(),
+                unique: true,
+                primary: true,
+                columns: c.into_iter().map(Into::into).collect(),
+                expression: None,
+                method: None,
+                definition: None,
+            }),
+            indexes: vec![],
+            foreign_keys: vec![],
+            checks: vec![],
+            triggers: vec![],
+            options: TableOptions {
+                engine: None,
+                collation: None,
+                tablespace: None,
+                partitioned_by: None,
+                system_versioned: false,
+            },
+            row_estimate: None,
+            size_bytes: None,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn primary_key_gives_the_default_order() {
+        assert_eq!(key_order(&detail(Some(vec!["b", "a"]))), ["b", "a"]);
+        assert!(key_order(&detail(None)).is_empty());
+        assert!(key_order(&detail(Some(vec![]))).is_empty());
+        assert!(key_order(&detail(Some(vec!["gone"]))).is_empty());
+    }
+
+    #[test]
+    fn js_offsets_are_clamped() {
+        assert_eq!(clamp_offset(0.0), 0);
+        assert_eq!(clamp_offset(250.0), 250);
+        assert_eq!(clamp_offset(10.9), 10);
+        assert_eq!(clamp_offset(-5.0), 0);
+        assert_eq!(clamp_offset(f64::NAN), 0);
+        assert_eq!(clamp_offset(f64::INFINITY), 0);
+        assert_eq!(clamp_offset(f64::NEG_INFINITY), 0);
+        assert_eq!(clamp_offset(9_007_199_254_740_992.0), 9_007_199_254_740_992);
     }
 
     #[test]

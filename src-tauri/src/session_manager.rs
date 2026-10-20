@@ -11,6 +11,7 @@
 
 use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
 use crate::commands::browse::folder_key;
+use crate::data_sessions::DataSessions;
 use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
@@ -23,7 +24,6 @@ use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
-use dnt_core::sql::StatementKind;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::{KnownHosts, SshSecrets, Tunnel};
@@ -324,6 +324,10 @@ pub struct SessionManager {
     pub(crate) runs: Runs,
     /// `ExecOptions::cancel_grace` of query runs.
     pub(crate) cancel_grace: Duration,
+    /// Table data requests (see `data_sessions`).
+    pub(crate) data_timeout: Duration,
+    pub(crate) data_cell_cap: usize,
+    pub(crate) data_page_cap: usize,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -364,6 +368,9 @@ impl SessionManager {
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
             cancel_grace: DEFAULT_CANCEL_GRACE,
+            data_timeout: crate::data_sessions::DATA_READ_TIMEOUT,
+            data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,
+            data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
         }
     }
 
@@ -867,72 +874,6 @@ impl SessionManager {
         }
         Ok(objects)
     }
-
-    /// Runs ONE read-only statement (`SELECT` built by the backend, never user text) on
-    /// the metadata session for `db` and returns its first result, at most `max_rows`
-    /// rows. Used by the table data view: it never touches a query tab's session (nor its
-    /// open transaction), and it is not cached.
-    ///
-    /// The statement runs under a server-side cancel after the connection's query timeout,
-    /// capped at 2/3 of the metadata call bound (with a cancel grace of 1/6 of it), so a
-    /// slow table is stopped before the metadata session would be given up.
-    pub async fn metadata_read(
-        &self,
-        id: Uuid,
-        db: Option<&str>,
-        sql: String,
-        max_rows: usize,
-    ) -> Result<ReadResult, DbError> {
-        let rt = self.runtime(id)?;
-        let cap = rt.metadata_timeout * 2 / 3;
-        let timeout = match rt.cfg.options.query_timeout_s {
-            0 => cap,
-            s => Duration::from_secs(s.into()).min(cap),
-        };
-        let cancel_grace = rt.metadata_timeout / 6;
-        rt.with_session(db, |s| {
-            let sql = sql.clone();
-            Box::pin(async move {
-                // A fresh options value (and stop signal) per attempt: a retry after a
-                // reopen must not inherit a raised signal.
-                let opts = ExecOptions {
-                    max_rows,
-                    timeout: Some(timeout),
-                    cancel_grace,
-                    ..ExecOptions::default()
-                };
-                let mut sink = ReadResult::default();
-                s.execute_one(&sql, StatementKind::Read, &opts, &mut sink)
-                    .await?;
-                Ok(sink)
-            })
-        })
-        .await
-    }
-}
-
-/// The first result of a [`SessionManager::metadata_read`].
-#[derive(Debug, Default)]
-pub struct ReadResult {
-    pub columns: Vec<ColumnMeta>,
-    pub rows: Vec<Vec<Value>>,
-    /// Further results (never expected from a `SELECT`) are ignored.
-    results: usize,
-}
-
-impl RowSink for ReadResult {
-    fn result_start(&mut self, cols: &[ColumnMeta]) {
-        self.results += 1;
-        if self.results == 1 {
-            self.columns = cols.to_vec();
-        }
-    }
-    fn rows(&mut self, batch: Vec<Vec<Value>>) {
-        if self.results == 1 {
-            self.rows.extend(batch);
-        }
-    }
-    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 pub(crate) fn config_error(field: &str, message: &str) -> DbError {
@@ -1013,6 +954,8 @@ pub struct ConnectionRuntime {
     schema_tasks: Mutex<Vec<JoinHandle<()>>>,
     /// The query tabs on this connection, each with its own session.
     pub(crate) queries: QuerySessions,
+    /// Sessions of the table data view.
+    pub(crate) data: DataSessions,
 }
 
 impl ConnectionRuntime {
@@ -1055,6 +998,7 @@ impl ConnectionRuntime {
             state: Mutex::new(ConnState::Connected),
             schema_tasks: Mutex::new(Vec::new()),
             queries: QuerySessions::default(),
+            data: DataSessions::default(),
             cfg,
         }
     }
@@ -1226,6 +1170,7 @@ impl ConnectionRuntime {
                 .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
         )
         .await;
+        self.data.shutdown().await;
         match tokio::time::timeout(SHUTDOWN_LOCK_TIMEOUT, self.link.lock()).await {
             Ok(mut link) => {
                 link.closed = true;

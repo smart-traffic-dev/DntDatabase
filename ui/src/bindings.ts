@@ -377,17 +377,29 @@ async setTablePageSize(size: number) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async tableData(id: string, obj: ObjectRef, limit: number, offset: number, order: SortSpec | null) : Promise<Result<TableDataPage, AppError>> {
+async tableData(id: string, obj: ObjectRef, limit: number, offset: number, order: SortSpec | null, requestKey: string) : Promise<Result<TableDataPage, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("table_data", { id, obj, limit, offset, order }) };
+    return { status: "ok", data: await TAURI_INVOKE("table_data", { id, obj, limit, offset, order, requestKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async tableRowCount(id: string, obj: ObjectRef) : Promise<Result<TableRowCount, AppError>> {
+async tableRowCount(id: string, obj: ObjectRef, requestKey: string) : Promise<Result<TableRowCount, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("table_row_count", { id, obj }) };
+    return { status: "ok", data: await TAURI_INVOKE("table_row_count", { id, obj, requestKey }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancels the `table_data` / `table_row_count` request running under `request_key`;
+ * whether one was running (its call then fails with `cancelled`).
+ */
+async tableDataCancel(id: string, requestKey: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_data_cancel", { id, requestKey }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -807,13 +819,26 @@ export type StopReason =
 { kind: "dialect_changed"; index: number }
 export type TableDataPage = { columns: ColumnMeta[]; 
 /**
- * At most `limit` rows, starting at `offset`.
+ * At most `limit` rows, starting at `offset` (fewer when `size_capped`).
  */
 rows: Value[][]; 
 /**
- * Whether a row follows this page.
+ * Whether a row follows this page (the next page starts at `offset + rows.len()`).
  */
-has_more: boolean; elapsed_ms: number }
+has_more: boolean; 
+/**
+ * Text / JSON cells cut to 64 KB.
+ */
+truncated_cells: number; 
+/**
+ * The page reached its byte budget: rows were left for the next page.
+ */
+size_capped: boolean; 
+/**
+ * Without an explicit sort: the primary key columns the page is ordered by (stable
+ * paging); empty when there is no primary key or a sort was given.
+ */
+key_order: string[]; elapsed_ms: number }
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.

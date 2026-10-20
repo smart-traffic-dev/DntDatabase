@@ -61,7 +61,7 @@ function setup(tab: Tab, handlers: Record<string, (a: Record<string, unknown>) =
     object_ddl: () => DDL,
     refresh_node: () => null,
     get_table_page_size: () => 100,
-    table_data: () => ({ columns: [], rows: [], has_more: false, elapsed_ms: 1 }),
+    table_data: () => ({ columns: [], rows: [], has_more: false, truncated_cells: 0, size_capped: false, key_order: [], elapsed_ms: 1 }),
     ...handlers,
   });
   useTabs.getState().open(tab);
@@ -122,6 +122,9 @@ describe('ObjectTab', () => {
         columns: [{ name: 'id', db_type: 'int', logical: 'Integer', nullable: false, origin_table: null, origin_column: null }],
         rows: [[{ t: 'Int', v: 1 }]],
         has_more: false,
+        truncated_cells: 0,
+        size_capped: false,
+        key_order: [],
         elapsed_ms: 3,
       }),
     });
@@ -134,7 +137,7 @@ describe('ObjectTab', () => {
     expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findByText('Rows 1–1')).toBeInTheDocument();
     // The Settings default is the page size.
-    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 250, offset: 0, order: null }]);
+    expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 250, offset: 0, order: null, requestKey: `${tab.id}:page` }]);
     // The detail's row estimate is shown next to the page.
     expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
   });

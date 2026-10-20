@@ -509,7 +509,7 @@ impl ConnectionRuntime {
     /// Opens a query session on `database` through the connection's tunnel, reopening
     /// the tunnel first when it died (as metadata calls do). Returns the session and the
     /// tunnel generation it was opened through.
-    async fn open_query_session(
+    pub(crate) async fn open_query_session(
         &self,
         database: Option<String>,
     ) -> Result<(Box<dyn Session>, u64), DbError> {
