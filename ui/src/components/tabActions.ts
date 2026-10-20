@@ -1,4 +1,5 @@
 import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataEdits';
+import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs, type Tab } from '../store/tabs';
 
@@ -21,6 +22,30 @@ export function confirmDiscardConnection(connectionId: string): Promise<boolean>
     .tabs.filter((t) => t.kind === 'object' && t.connectionId === connectionId)
     .map((t) => t.id);
   return confirmDiscardMany(ids);
+}
+
+/**
+ * An import that overwrites `connectionIds` while their tabs hold staged data edits: the only
+ * choices are "Discard and import" (true; the edits are discarded) and "Cancel import" (false).
+ */
+export function confirmDiscardForImport(connectionIds: string[]): Promise<boolean> {
+  const ids = useTabs
+    .getState()
+    .tabs.filter((t) => t.kind === 'object' && connectionIds.includes(t.connectionId))
+    .map((t) => t.id);
+  const count = ids.reduce((n, id) => n + useDataEdits.getState().changeCount(id), 0);
+  if (count === 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    useDialogs.getState().ask({
+      kind: 'discardForImport',
+      count,
+      done: (discard) => {
+        useDialogs.getState().answer();
+        if (discard) for (const id of ids) useDataEdits.getState().discard(id);
+        resolve(discard);
+      },
+    });
+  });
 }
 
 /** Closes `tabs` one after another (each query tab may ask a question first); stops when the user cancels one. */

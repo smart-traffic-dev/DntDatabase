@@ -195,6 +195,18 @@ function QuestionHost({ question }: { question: Question }) {
       />
     );
   }
+  if (question.kind === 'discardForImport') {
+    return (
+      <ConfirmDialog
+        title="Unsaved changes"
+        message={`The import replaces connections that have ${question.count} unsaved changes in open tabs. Discard them and import?`}
+        confirmLabel="Discard and import"
+        cancelLabel="Cancel import"
+        onClose={() => question.done(false)}
+        onConfirm={async () => question.done(true)}
+      />
+    );
+  }
   if (question.kind === 'stopRun') {
     return (
       <ConfirmDialog
