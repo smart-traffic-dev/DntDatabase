@@ -257,6 +257,8 @@ struct Rec {
     cancel_at_end: Option<(u32, RunCancel)>,
     /// Notified at `statement_start` of statement 0.
     started: Option<Arc<Notify>>,
+    /// Cancelled (to completion) at the first `tx_state` event.
+    cancel_at_tx: Option<RunCancel>,
 }
 
 impl RowSink for Rec {
@@ -300,6 +302,9 @@ impl RunSink for Rec {
     }
     fn tx_state(&mut self, state: TxState) {
         self.tx.push(state);
+        if let Some(cancel) = self.cancel_at_tx.take() {
+            block_on(cancel.cancel()).unwrap();
+        }
     }
 }
 
@@ -1182,4 +1187,26 @@ async fn manual_tx_failed_begin_stops_without_sending_the_statement() {
     assert_eq!(err_of(&r, 0).kind, "connection_lost");
     assert_eq!(rec.events, ["start 0", "end 0 err"]);
     assert_eq!(rec.notices, [(0, BEGIN_FAILED_NOTICE.to_string())]);
+}
+
+/// A Stop that lands while the manual BEGIN runs: the statement is never sent.
+#[tokio::test]
+async fn manual_tx_stop_after_begin_sends_nothing_more() {
+    let s = FakeSession::new(PG, vec![ok().tx(TxState::Active)]);
+    let cancel = s.cancel();
+    let mut rec = Rec {
+        cancel_at_tx: Some(cancel.clone()),
+        ..Rec::default()
+    };
+    let cfg = RunConfig {
+        continue_on_error: false,
+        manual_tx: true,
+    };
+    let p = all("UPDATE a SET x = 1; SELECT 2", PG);
+    let r = run_with(&s, &p, &ExecOptions::default(), cfg, &cancel, &mut rec).await;
+    assert_eq!(s.sent(), ["BEGIN"]);
+    assert_eq!(r.stop, Some(StopReason::Cancelled));
+    assert!(r.stmts.is_empty());
+    assert!(r.began_unused);
+    assert!(rec.events.is_empty(), "{:?}", rec.events);
 }

@@ -176,6 +176,9 @@ pub struct RunReport {
     pub stmts: Vec<StmtReport>,
     /// Connections the session replaced during the run.
     pub reconnects: u32,
+    /// A manual-commit run began a transaction and was stopped before it sent the
+    /// statement it was for: the transaction is open and nothing used it yet.
+    pub began_unused: bool,
 }
 
 /// Messages line after a `COMMIT` that ended an aborted transaction.
@@ -238,6 +241,7 @@ pub async fn run_with(
         stop: None,
         stmts: Vec::new(),
         reconnects: 0,
+        began_unused: false,
     };
     let mut dialect = plan.dialect;
     let mut shown_tx = session.tx_state();
@@ -286,7 +290,16 @@ pub async fn run_with(
                 sink.tx_state(now);
             }
             match begun {
-                Ok(_) => began_tx = true,
+                Ok(_) => {
+                    began_tx = true;
+                    // A Stop while the BEGIN ran: the statement is not sent. The
+                    // transaction just begun stays open (and unused) for the user.
+                    if cancel.is_cancelled() {
+                        report.began_unused = true;
+                        report.stop = Some(StopReason::Cancelled);
+                        break;
+                    }
+                }
                 Err(err) => {
                     let stop = stop_after_error(&err, now, false, stmt.index);
                     let mut app = AppError::from(err);

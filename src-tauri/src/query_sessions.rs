@@ -256,8 +256,13 @@ pub struct TabSession {
     pub(crate) reopen: bool,
     /// `session` was dropped with a transaction open (the server rolled it back): the
     /// next `query_tx` reports `ConnectionLost` instead of `Idle`. Cleared once
-    /// reported, or when a session opens again.
+    /// reported, or when a session opens again (except in a Manual tab, see
+    /// `SessionManager::ensure_session`).
     pub(crate) lost_tx: bool,
+    /// With `lost_tx`: the connection went while a statement that commits ran (the
+    /// user's `COMMIT`, a MySQL implicit commit), so the transaction may have committed:
+    /// it is reported as an unknown outcome, never as rolled back.
+    pub(crate) lost_tx_unknown: bool,
     /// `ConnectionRuntime::tunnel_gen` when `session` was opened.
     pub(crate) tunnel_gen: u64,
     /// Set once the slot was closed (tab or connection closed): a caller that was
@@ -305,6 +310,32 @@ impl TabSession {
         self.session
             .as_ref()
             .is_some_and(|s| s.tx_state() != TxState::Idle)
+    }
+
+    fn set_lost_tx(&mut self, lost: bool, unknown: bool) {
+        self.lost_tx = lost;
+        self.lost_tx_unknown = lost && unknown;
+    }
+
+    /// What the tab reports about its lost transaction ([`Self::lost_tx`]).
+    fn lost_tx_error(&self) -> DbError {
+        if self.lost_tx_unknown {
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: true,
+                message: "the connection was lost while the tab's transaction was being \
+                          committed; it may have committed"
+                    .into(),
+            }
+        } else {
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                message: "the tab's session was closed during the transaction; \
+                          the server rolled it back"
+                    .into(),
+            }
+        }
     }
 
     fn tx_info(&self) -> TabTxInfo {
@@ -884,7 +915,7 @@ impl ConnectionRuntime {
             if in_tx {
                 // As after a run that lost its session in a transaction: a Commit now
                 // must not look like it worked.
-                ts.lost_tx = true;
+                ts.set_lost_tx(true, false);
                 return Err(DbError::ConnectionLost {
                     was_in_tx: true,
                     outcome_unknown: false,
@@ -900,7 +931,7 @@ impl ConnectionRuntime {
             ts.tunnel_gen = generation;
             ts.database = target;
             ts.reopen = false;
-            ts.lost_tx = false;
+            ts.set_lost_tx(false, false);
             return Ok(());
         };
         if ts.database == target {
@@ -1137,7 +1168,7 @@ impl SessionManager {
                     if let Some(dead) = ts.session.take() {
                         close_quietly(dead).await;
                     }
-                    ts.lost_tx = in_tx;
+                    ts.set_lost_tx(in_tx, false);
                     ts.reopen = !in_tx;
                     rt.queries.sync_bound(tab, ts);
                     if in_tx {
@@ -1275,9 +1306,12 @@ impl SessionManager {
         ts: &mut TabSession,
         database: Option<String>,
     ) -> Result<(), DbError> {
-        let keep = ts.lost_tx && self.tx_mode(tab) == TxMode::Manual;
+        let keep =
+            (ts.lost_tx && self.tx_mode(tab) == TxMode::Manual).then_some(ts.lost_tx_unknown);
         let ensured = rt.ensure_tab_session(ts, database).await;
-        ts.lost_tx |= keep;
+        if let Some(unknown) = keep {
+            ts.set_lost_tx(true, unknown);
+        }
         ensured
     }
 
@@ -1300,7 +1334,8 @@ impl SessionManager {
     /// the tab is closed (`query_close_tab`); a tab without a session takes it too.
     /// Errors: `config` (bad tab id), `busy` while the tab runs, `transaction_open` when
     /// a Manual tab with a transaction open is switched to Auto (commit or roll back
-    /// first).
+    /// first), `connection_lost` (`was_in_tx`) when its transaction was lost with the
+    /// connection and `query_tx` has not acknowledged it yet.
     pub async fn query_tx_mode(&self, tab: &str, mode: TxMode) -> Result<TxState, DbError> {
         validate_tab(tab)?;
         // Held while the mode changes, so a run of the tab cannot start meanwhile.
@@ -1314,8 +1349,14 @@ impl SessionManager {
             .map_or(TxState::Idle, |s| s.tx_state());
         let mut modes = lock(&self.tx_modes);
         let current = modes.get(tab).copied().unwrap_or_default();
-        if current == TxMode::Manual && mode == TxMode::Auto && state != TxState::Idle {
-            return Err(DbError::TransactionOpen);
+        if current == TxMode::Manual && mode == TxMode::Auto {
+            if state != TxState::Idle {
+                return Err(DbError::TransactionOpen);
+            }
+            // A lost transaction not acknowledged yet (`query_tx`) keeps the tab Manual.
+            if let Some(ts) = held.as_ref().filter(|ts| ts.lost_tx) {
+                return Err(ts.lost_tx_error());
+            }
         }
         match mode {
             TxMode::Auto => modes.remove(tab),
@@ -1378,19 +1419,19 @@ impl SessionManager {
         let mut ts = Arc::clone(&slot)
             .try_lock_owned()
             .map_err(|_| (DbError::Busy, None))?;
-        // The session died with a transaction open: the server rolled it back, so a
-        // Commit must not look like it worked. Nothing is sent: this call is the
-        // acknowledgement (a Manual tab's runs are refused until it, see
-        // `query_run_named`), even when the tab's session was reopened since.
-        if std::mem::take(&mut ts.lost_tx) {
-            let lost = DbError::ConnectionLost {
-                was_in_tx: true,
-                outcome_unknown: false,
-                message: "the tab's session was closed during the transaction; \
-                          the server rolled it back"
-                    .into(),
-            };
-            return Err((lost, Some(TxState::Idle)));
+        // The session died with a transaction open (rolled back, or maybe committed:
+        // `lost_tx_unknown`), so a Commit must not look like it worked. Nothing is
+        // sent: this call is the acknowledgement (a Manual tab's runs are refused until
+        // it, see `query_run_named`), also when the tab's session was reopened since —
+        // unless a transaction is open on it now: that one is new, and its Commit /
+        // Rollback is sent (the stale loss is forgotten).
+        if ts.lost_tx {
+            if !ts.tx_open() {
+                let lost = ts.lost_tx_error();
+                ts.set_lost_tx(false, false);
+                return Err((lost, Some(TxState::Idle)));
+            }
+            ts.set_lost_tx(false, false);
         }
         let Some(session) = ts.session.as_deref() else {
             return Ok(TxState::Idle);
@@ -1806,7 +1847,7 @@ impl ExportRun {
                     let in_tx = ts.tx_open();
                     if let Some(dead) = ts.session.take() {
                         close_quietly(dead).await;
-                        ts.lost_tx = in_tx;
+                        ts.set_lost_tx(in_tx, false);
                         ts.reopen = !in_tx && AppError::from(e).retryable;
                     }
                 }
@@ -1818,7 +1859,7 @@ impl ExportRun {
                 let in_tx = ts.tx_open();
                 if let Some(dead) = ts.session.take() {
                     close_quietly(dead).await;
-                    ts.lost_tx = in_tx;
+                    ts.set_lost_tx(in_tx, false);
                     ts.reopen = false;
                 }
                 let error = DbError::Internal {
@@ -2258,10 +2299,10 @@ impl RunTask {
         if lost {
             // The driver resets its state on a lost connection: the sink saw whether a
             // transaction was open when it happened.
-            let in_tx = ts.tx_open() || sink.lost_in_tx;
+            let in_tx = ts.tx_open() || sink.lost_in_tx || sink.lost_committing;
             if let Some(dead) = ts.session.take() {
                 close_quietly(dead).await;
-                ts.lost_tx = in_tx;
+                ts.set_lost_tx(in_tx, sink.lost_committing);
                 // Retry / Fetch all may run the tab's statements again on a fresh
                 // session, unless a transaction was lost or an outcome is unknown.
                 ts.reopen = report.is_some() && !in_tx && lost_errors.iter().all(|e| e.retryable);
@@ -2271,7 +2312,9 @@ impl RunTask {
         }
         match report {
             Some(report) => {
-                ts.tx_fresh = tx_fresh_after(ts.tx_fresh, &self.plan, report);
+                ts.tx_fresh = tx_fresh_after(ts.tx_fresh, &self.plan, report)
+                    // Begun, then stopped before its statement: nothing used it.
+                    || report.began_unused;
                 ts.track_tx(self.tx_open_before, started_ms, &self.plan, report);
             }
             None => ts.forget_tx_if_idle(),
@@ -2350,13 +2393,7 @@ impl SessionManager {
         if manual && ts.lost_tx {
             // The Manual transaction was lost with the session: nothing runs (and no
             // new transaction begins) until the user acknowledges it with `query_tx`.
-            return Err(DbError::ConnectionLost {
-                was_in_tx: true,
-                outcome_unknown: false,
-                message: "the tab's transaction was lost with its connection and rolled \
-                          back; roll back to acknowledge it before running again"
-                    .into(),
-            });
+            return Err(ts.lost_tx_error());
         }
         let cfg = self.current_config(&rt);
         let run_plan = rejudge(

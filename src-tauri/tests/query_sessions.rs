@@ -3253,3 +3253,129 @@ async fn manual_lost_tx_blocks_runs_until_acknowledged() {
         Some("UPDATE t SET a = 3 WHERE id = 1")
     );
 }
+
+#[tokio::test]
+async fn manual_lost_tx_must_be_acknowledged_before_leaving_manual() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+    run_text(&f, id, "UPDATE t SET a = 2 WHERE lose_tx = 1", opts()).await;
+    // The next plan reopens the session (idle); leaving Manual is refused.
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    let err = f.sm.query_tx_mode("t1", TxMode::Auto).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: false,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    // Still Manual: a run is still refused.
+    let view = plan(&f, "t1", id, None, "UPDATE t SET a = 3 WHERE id = 1")
+        .await
+        .unwrap();
+    let (emit, _events) = collector();
+    assert!(f
+        .sm
+        .query_run(view.plan_id, true, opts(), emit)
+        .await
+        .is_err());
+
+    // Acknowledged: Auto is allowed, and a transaction opened afterwards commits for real.
+    let ack = f.sm.query_tx("t1", TxAction::Rollback).await.unwrap_err();
+    assert!(matches!(ack, DbError::ConnectionLost { .. }), "{ack:?}");
+    assert_eq!(
+        f.sm.query_tx_mode("t1", TxMode::Auto).await.unwrap(),
+        TxState::Idle
+    );
+    run_text(&f, id, "BEGIN; UPDATE t SET a = 5 WHERE id = 1", opts()).await;
+    let before = sent(&f).len();
+    assert_eq!(
+        f.sm.query_tx("t1", TxAction::Commit).await.unwrap(),
+        TxState::Idle
+    );
+    assert_eq!(sent(&f)[before..], ["COMMIT"]);
+}
+
+/// A connection lost on the user's own COMMIT may have committed: the loss is never
+/// acknowledged as a rollback. Lost on the UPDATE before it, it was rolled back.
+#[tokio::test]
+async fn connection_lost_on_commit_is_an_unknown_outcome() {
+    for manual_mode in [false, true] {
+        let f = fixture(DbKind::MySql);
+        let id = open(&f, config(DbKind::MySql)).await;
+        if manual_mode {
+            manual(&f, "t1").await;
+        }
+        f.log.lose_on_tx.store(true, Ordering::SeqCst);
+        let events = run_text(
+            &f,
+            id,
+            "BEGIN; UPDATE t SET a = 1 WHERE id = 1; COMMIT",
+            opts(),
+        )
+        .await;
+        assert_eq!(
+            events.of("statement_error")[0]["error"]["kind"],
+            "connection_lost"
+        );
+        if manual_mode {
+            // A new plan reopens; the refused run reports the unknown outcome too.
+            f.log.lose_on_tx.store(false, Ordering::SeqCst);
+            let view = plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+            let (emit, _events) = collector();
+            let err =
+                f.sm.query_run(view.plan_id, true, opts(), emit)
+                    .await
+                    .unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    DbError::ConnectionLost {
+                        outcome_unknown: true,
+                        ..
+                    }
+                ),
+                "{err:?}"
+            );
+        }
+        let ack =
+            f.sm.query_tx_reported("t1", TxAction::Rollback)
+                .await
+                .unwrap_err();
+        assert_eq!(ack.kind, "connection_lost", "manual {manual_mode}");
+        assert!(ack.outcome_unknown, "manual {manual_mode}: {ack:?}");
+        assert!(!ack.message.contains("rolled back"), "{}", ack.message);
+        assert!(
+            !ack.detail.as_deref().unwrap_or("").contains("rolled"),
+            "{:?}",
+            ack.detail
+        );
+        assert_eq!(ack.tx_state.as_deref(), Some("idle"));
+
+        // Lost on the UPDATE: rolled back, the outcome is known.
+        let f = fixture(DbKind::MySql);
+        let id = open(&f, config(DbKind::MySql)).await;
+        if manual_mode {
+            manual(&f, "t1").await;
+        }
+        run_text(
+            &f,
+            id,
+            "BEGIN; UPDATE t SET a = 1 WHERE lose_tx = 1",
+            opts(),
+        )
+        .await;
+        let ack =
+            f.sm.query_tx_reported("t1", TxAction::Rollback)
+                .await
+                .unwrap_err();
+        assert_eq!(ack.kind, "connection_lost", "manual {manual_mode}");
+        assert!(!ack.outcome_unknown, "manual {manual_mode}: {ack:?}");
+    }
+}
