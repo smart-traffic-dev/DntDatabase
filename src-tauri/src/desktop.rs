@@ -35,7 +35,9 @@ pub fn harden_main_webview<R: Runtime, M: Manager<R>>(manager: &M) {
 
 #[cfg(windows)]
 mod webview2 {
-    use webview2_com::Microsoft::Web::WebView2::Win32::{ICoreWebView2Controller, ICoreWebView2Settings4};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2Controller, ICoreWebView2Settings4,
+    };
     use windows_core::Interface;
 
     pub(super) unsafe fn apply(controller: &ICoreWebView2Controller) -> windows_core::Result<()> {
