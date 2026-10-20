@@ -468,6 +468,86 @@ async historyClear() : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async favoritesList() : Promise<Result<Favorite[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("favorites_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async favoritesCreate(input: FavoriteInput) : Promise<Result<Favorite, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("favorites_create", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async favoritesUpdate(id: string, input: FavoriteInput) : Promise<Result<Favorite, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("favorites_update", { id, input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async favoritesRename(id: string, name: string) : Promise<Result<Favorite, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("favorites_rename", { id, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async favoritesMove(id: string, folder: string | null) : Promise<Result<Favorite, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("favorites_move", { id, folder }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async favoritesDelete(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("favorites_delete", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async snippetsList() : Promise<Result<Snippet[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snippets_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async snippetsCreate(input: SnippetInput) : Promise<Result<Snippet, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snippets_create", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async snippetsUpdate(id: string, input: SnippetInput) : Promise<Result<Snippet, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snippets_update", { id, input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async snippetsDelete(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("snippets_delete", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -553,6 +633,23 @@ export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 export type EnvTag = "production" | "staging" | "local"
+export type Favorite = { id: string; name: string; 
+/**
+ * `/`-separated folder path; `None` is the root.
+ */
+folder: string | null; sql: string; connection_id: string | null; database: string | null; 
+/**
+ * RFC 3339 UTC.
+ */
+created_at: string; updated_at: string; 
+/**
+ * Position inside its folder (new and moved favorites go last).
+ */
+sort: number }
+/**
+ * What `favorite_create` / `favorite_update` take.
+ */
+export type FavoriteInput = { name: string; folder: string | null; sql: string; connection_id: string | null; database: string | null }
 export type ForeignKeyDetail = { name: string; columns: string[]; ref_schema: string | null; ref_table: string; ref_columns: string[]; on_update: string; on_delete: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -762,6 +859,16 @@ export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres"
  * An entry of the import file that cannot be imported at all.
  */
 export type SkippedItem = { name: string; reason: string }
+export type Snippet = { id: string; 
+/**
+ * What the user types to trigger it; unique, case-insensitively.
+ */
+prefix: string; label: string; 
+/**
+ * Monaco snippet syntax (`${1:placeholder}`, `$0`).
+ */
+body: string; description: string; created_at: string; updated_at: string }
+export type SnippetInput = { prefix: string; label: string; body: string; description: string }
 export type SortDir = "asc" | "desc"
 /**
  * Server-side `ORDER BY` of one column (which must be a column of the object).
