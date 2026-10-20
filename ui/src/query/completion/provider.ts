@@ -51,10 +51,17 @@ function currentStatement(text: string, offset: number, ranges: [number, number]
   if (hit) [lo, hi] = hit;
   else {
     // Between statements: from the end of the previous one to the start of the next one.
+    let prevStart = -1;
     for (const [s, e] of ranges) {
-      if (e <= offset) lo = Math.max(lo, e);
+      if (e <= offset && e >= lo) {
+        lo = e;
+        prevStart = s;
+      }
       if (s > offset) hi = Math.min(hi, s);
     }
+    // Ranges end at the last token: `SELECT * FROM |` (a blank gap, no `;`) is still that
+    // statement, so the cursor keeps its FROM/JOIN/... context.
+    if (prevStart >= 0 && /^\s*$/.test(text.slice(lo, offset))) lo = prevStart;
   }
   return { stmt: text.slice(lo, hi), offset: offset - lo };
 }
