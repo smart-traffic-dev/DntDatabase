@@ -1248,11 +1248,7 @@ DELIMITER ;";
                     for &s in UNBOUNDED {
                         // Production and Staging always confirm (§4.3, R43); the setting
                         // decides on Local and untagged connections only.
-                        let want = if prod || staging || setting {
-                            C
-                        } else {
-                            A
-                        };
+                        let want = if prod || staging || setting { C } else { A };
                         assert_eq!(
                             judged(s, *d, ctx(env, false, setting)),
                             [want],
