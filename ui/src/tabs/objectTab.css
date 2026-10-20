@@ -124,19 +124,22 @@
   justify-content: flex-end;
 }
 
+.ot-ddl-bar {
+  gap: 8px;
+}
+
+.ot-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Read-only Monaco: it fills the panel, so a short DDL is not a lost island in an empty box. */
 .ot-ddl-text {
   flex: 1;
-  min-height: 0;
-  margin: 0;
-  padding: 12px;
-  overflow: auto;
-  white-space: pre;
+  min-height: 160px;
+  overflow: hidden;
   border: 1px solid var(--studio-hairline);
   border-radius: var(--radius-md);
-  background: var(--studio-subtle);
-  font-family: var(--font-mono);
-  font-size: var(--text-callout);
-  line-height: 1.5;
 }
 
 .ot-structure h3 {

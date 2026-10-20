@@ -6,13 +6,14 @@ import { analyzeAvailable } from './explainTree';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc, type RowLimit } from '../../store/queryTabs';
 import { useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
+import './toolbar.css';
 
 /**
  * Explain and its menu (Explain, Explain Analyze). The menu takes focus when it opens; arrows,
  * Home and End move between its enabled items; Escape closes it and gives focus back to the caret;
  * an outside click or focus leaving it closes it.
  */
-function ExplainSplit({ tabId, runnable, analyzeOk }: { tabId: string; runnable: boolean; analyzeOk: boolean }) {
+function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runnable: boolean; analyzeOk: boolean; why?: string }) {
   const [open, setOpen] = useState(false);
   const split = useRef<HTMLSpanElement>(null);
   const caret = useRef<HTMLButtonElement>(null);
@@ -80,7 +81,7 @@ function ExplainSplit({ tabId, runnable, analyzeOk }: { tabId: string; runnable:
         className="qt-btn qt-split-main"
         data-testid="query-explain"
         disabled={!runnable}
-        title={runnable ? 'Explain (Ctrl+Shift+E)' : undefined}
+        title={runnable ? 'Explain (Ctrl+Shift+E)' : why}
         onClick={() => void explainQuery(tabId, false)}
       >
         Explain
@@ -166,6 +167,13 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
   const hasSelection = useSelection((s) => s.ids.has(doc.id));
   const starting = useStarting((s) => s.ids.has(doc.id));
   const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting;
+  const why = runnable
+    ? undefined
+    : !doc.connectionId
+      ? 'Choose a connection to run queries'
+      : !summaries.has(doc.connectionId)
+        ? 'The connection of this tab no longer exists'
+        : 'A statement is running — stop it first';
   const analyzeOk = analyzeAvailable(useConnections((s) => (doc.connectionId ? s.info.get(doc.connectionId) : undefined)));
 
   return (
@@ -175,17 +183,29 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
         className="qt-btn qt-run"
         data-testid="query-run"
         disabled={!runnable}
-        title={runnable ? 'Run (Ctrl+Enter)' : undefined}
+        title={runnable ? 'Run the statement at the cursor (Ctrl+Enter)' : why}
         onClick={() => void runFromEditor(doc.id, 'cursor')}
       >
         Run
+        <kbd className="qt-kbd">Ctrl+Enter</kbd>
+      </button>
+      <button
+        type="button"
+        className="qt-btn"
+        data-testid="query-run-all"
+        disabled={!runnable}
+        title={runnable ? 'Run every statement in the editor (Ctrl+Shift+Enter)' : why}
+        onClick={() => void runFromEditor(doc.id, 'all')}
+      >
+        Run all
+        <kbd className="qt-kbd">Ctrl+Shift+Enter</kbd>
       </button>
       <button
         type="button"
         className="qt-btn"
         data-testid="query-run-selection"
         disabled={!runnable || !hasSelection}
-        title={runnable ? 'Run only the selected text' : undefined}
+        title={!runnable ? why : hasSelection ? 'Run only the selected text' : 'Select text in the editor to run only that'}
         onClick={() => void runFromEditor(doc.id, 'selection')}
       >
         Run selection
@@ -200,7 +220,7 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
       >
         Stop
       </button>
-      <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} />
+      <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} why={why} />
       <span className="qt-sep" aria-hidden="true" />
       <select
         className="qt-select"

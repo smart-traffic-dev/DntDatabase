@@ -208,4 +208,27 @@ describe('HistoryView', () => {
     await waitFor(() => expect(screen.queryAllByTestId('history-row')).toHaveLength(0));
     expect(screen.getByTestId('history-view')).toHaveTextContent(/no history/i);
   });
+
+  it('all_scope_shows_connection_and_database', async () => {
+    const user = userEvent.setup();
+    rows = [entry(1), entry(2, { connection_id: 'gone-conn', database: null })];
+    render(<HistoryView tabId={tab} />);
+    await screen.findAllByTestId('history-row');
+    expect(screen.queryByTestId('history-origin')).toBeNull();
+    await user.selectOptions(screen.getByTestId('history-connection'), '');
+    const origins = await screen.findAllByTestId('history-origin');
+    expect(origins[0]).toHaveTextContent('shop-prod');
+    expect(origins[0]).toHaveTextContent('shop');
+    expect(origins[1]).toHaveTextContent('gone-conn');
+  });
+
+  it('explain_rows_are_marked_and_show_the_inner_statement', async () => {
+    rows = [entry(1, { sql_text: 'EXPLAIN FORMAT=JSON SELECT * FROM orders', kind: 'explain' }), entry(2)];
+    render(<HistoryView tabId={tab} />);
+    const list = await screen.findAllByTestId('history-row');
+    expect(within(list[0]!).getByTestId('history-explain')).toHaveTextContent('Explain');
+    expect(list[0]).toHaveTextContent('SELECT * FROM orders');
+    expect(list[0]).not.toHaveTextContent('FORMAT=JSON');
+    expect(within(list[1]!).queryByTestId('history-explain')).toBeNull();
+  });
 });

@@ -4,6 +4,7 @@ import type { HistoryEntry, HistoryStatus } from '../../bindings';
 import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import { insertAtCursor } from '../../store/runQuery';
+import './toolbar.css';
 
 /** Search box debounce. */
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -49,6 +50,13 @@ export function statusOf(row: Pick<HistoryEntry, 'status' | 'error_kind' | 'erro
 type Modifiers = Pick<KeyboardEvent, 'shiftKey' | 'ctrlKey' | 'metaKey'>;
 
 const firstLine =(sql: string) => sql.split(/\r?\n/, 1)[0] ?? '';
+
+/** An Explain run is stored as its wrapper (`EXPLAIN [ANALYZE] [FORMAT=JSON | (…)] <statement>`): the statement inside. */
+function explainOf(row: Pick<HistoryEntry, 'sql_text' | 'kind'>): { inner: string; analyze: boolean } | null {
+  const m = /^\s*EXPLAIN\s+(ANALYZE\s+)?(?:FORMAT\s*=\s*\w+\s+|\([^)]*\)\s+)?/i.exec(row.sql_text);
+  if (!m && row.kind !== 'explain') return null;
+  return { inner: m ? row.sql_text.slice(m[0].length) : row.sql_text, analyze: !!m?.[1] || /\(\s*ANALYZE/i.test(row.sql_text.slice(0, 40)) };
+}
 
 /** `2026-10-20T08:15:30Z` as the local date and time. */
 function timeText(iso: string): string {
@@ -256,6 +264,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
         {rows.length === 0 && !error && <div className="qr-empty">No history.</div>}
         {rows.map((row, i) => {
           const status = statusOf(row);
+          const explain = explainOf(row);
           return (
             <div
               key={row.id}
@@ -274,7 +283,14 @@ export function HistoryView({ tabId }: { tabId: string }) {
                 {status.text}
               </span>
               <span className="hs-elapsed">{row.elapsed_ms === null ? '' : `${row.elapsed_ms} ms`}</span>
-              <span className="hs-sql">{firstLine(row.sql_text)}</span>
+              {scope === 'all' && (
+                <span className="hs-origin" data-testid="history-origin">
+                  {summaries.get(row.connection_id)?.config.name ?? row.connection_id}
+                  {row.database ? ` · ${row.database}` : ''}
+                </span>
+              )}
+              {explain && <span className="chip hs-explain" data-testid="history-explain">Explain{explain.analyze ? ' Analyze' : ''}</span>}
+              <span className="hs-sql">{firstLine(explain ? explain.inner : row.sql_text)}</span>
               {row.redacted && <span className="chip hs-redacted">redacted</span>}
             </div>
           );

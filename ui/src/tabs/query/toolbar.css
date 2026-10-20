@@ -1,0 +1,50 @@
+/* Shortcut hint inside a toolbar button. */
+.qt-kbd {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  font-weight: 400;
+  opacity: 0.75;
+}
+
+@media (max-width: 1100px) {
+  .qt-kbd {
+    display: none;
+  }
+}
+
+/* Editor placeholder: the keys, shown while the editor is empty. */
+.sql-editor {
+  position: relative;
+}
+
+.sql-editor-placeholder {
+  position: absolute;
+  top: 0;
+  left: 64px;
+  right: 16px;
+  padding-top: 1px;
+  line-height: 19px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--studio-fg-tertiary, var(--muted));
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  z-index: 1;
+}
+
+/* History: connection / database column of the all-connections scope, Explain marker. */
+.hs-origin {
+  flex: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+
+.hs-explain {
+  flex: none;
+}
