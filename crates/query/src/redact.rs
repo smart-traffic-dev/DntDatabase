@@ -945,6 +945,18 @@ mod tests {
                 "SELECT 1 -- ALTER USER u IDENTIFIED BY 'pw'\r\n; SELECT 2",
                 "SELECT 1 -- ALTER USER u IDENTIFIED BY '[REDACTED]'\r\n; SELECT 2",
             ),
+            // A PostgreSQL `--` comment also ends at a bare `\r` (R44): the body before
+            // it is redacted, and the statement after it is read as code.
+            (
+                PG,
+                "SELECT 1 -- CREATE ROLE r PASSWORD 'pw'\r; SELECT 2",
+                "SELECT 1 -- CREATE ROLE r PASSWORD '[REDACTED]'\r; SELECT 2",
+            ),
+            (
+                PG,
+                "SELECT 1 -- note\rALTER ROLE r PASSWORD 'pw'; SELECT 2",
+                "SELECT 1 -- note\rALTER ROLE r PASSWORD '[REDACTED]'; SELECT 2",
+            ),
             (
                 MY,
                 "# CREATE USER u IDENTIFIED BY 'pw'\nSELECT 1; SELECT 2",

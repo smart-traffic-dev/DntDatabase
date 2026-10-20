@@ -509,6 +509,14 @@ describe('monaco provider: fix round 1', () => {
     expect(splitRanges(nbsp, 'mysql')).toHaveLength(2);
   });
 
+  it('a PostgreSQL -- comment ends at a bare \\r like the backend lexer; MySQL runs to \\n', () => {
+    const text = 'SELECT 1 -- note\r; SELECT 2';
+    expect(splitRanges(text, 'postgres').map(([s, e]) => text.slice(s, e))).toEqual(['SELECT 1 -- note', 'SELECT 2']);
+    expect(splitRanges(text, 'mysql').map(([s, e]) => text.slice(s, e))).toEqual([text]);
+    const crlf = 'SELECT 1 -- note\r\n; SELECT 2';
+    expect(splitRanges(crlf, 'postgres')).toHaveLength(2);
+  });
+
   it('incremental_split_without_a_known_edit_offset_is_a_full_split', () => {
     const before = 'SELECT 1; SELECT 2; SELECT 3';
     const prev = splitIncremental(null, before, 'mysql', 0);
