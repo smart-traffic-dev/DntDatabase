@@ -213,7 +213,9 @@ async function execute(
   const confirmed = plan.stmts.some((s) => s.verdict === 'confirm');
   // The names typed in the dialog (the plan's own `confirm_name`s, once each, in statement order).
   let names: string[] = [];
-  if (confirmed) {
+  // R37: an implicit commit (Allow verdict) also asks; `confirmed` is sent only for real Confirm
+  // verdicts (the backend refuses Confirm without it and ignores it for an all-Allow plan).
+  if (confirmed || plan.stmts.some((s) => s.implicit_commit === true)) {
     const answer = await askRunConfirmation(plan);
     if (!answer) return;
     names = answer;

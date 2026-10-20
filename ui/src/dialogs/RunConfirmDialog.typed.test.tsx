@@ -95,6 +95,12 @@ describe('RunConfirmDialog typed names, estimates and implicit commits', () => {
     expect(screen.getByText('This statement commits the open transaction.')).toBeInTheDocument();
   });
 
+  it('an_allowed_implicit_commit_statement_shows_the_warning', () => {
+    const plan = planOf([stmt(0, 'ALTER TABLE t ADD c INT', { kind: 'ddl', verdict: 'allow', implicit_commit: true })], 'local');
+    render(<RunConfirmDialog plan={plan} onDone={vi.fn()} />);
+    expect(screen.getByText('This statement commits the open transaction.')).toBeInTheDocument();
+  });
+
   it('explains_a_drop', () => {
     const plan = planOf(
       [stmt(0, 'DROP DATABASE shop', { kind: 'ddl', drops: [{ kind: 'database', name: 'shop' }] })],

@@ -72,6 +72,24 @@ describe('runQuery typed confirmation and lost transactions', () => {
     expect(callsOf('query_run')[0]).toMatchObject({ confirmNames: [] });
   });
 
+  it('an_allowed_implicit_commit_asks_first_and_cancel_runs_nothing', async () => {
+    setup(planOf([stmt(0, { verdict: 'allow', kind: 'ddl', implicit_commit: true })]));
+    const done = runQuery(tab, 'All');
+    await vi.waitFor(() => expect(useRunPrompt.getState().pending?.kind).toBe('confirm'));
+    useRunPrompt.getState().settle(false);
+    await done;
+    expect(callsOf('query_run')).toEqual([]);
+  });
+
+  it('an_allowed_implicit_commit_runs_with_confirmed_false_and_no_names', async () => {
+    setup(planOf([stmt(0, { verdict: 'allow', kind: 'ddl', implicit_commit: true })]));
+    const done = runQuery(tab, 'All');
+    await vi.waitFor(() => expect(useRunPrompt.getState().pending?.kind).toBe('confirm'));
+    useRunPrompt.getState().settle(true);
+    await done;
+    expect(callsOf('query_run')[0]).toMatchObject({ confirmed: false, confirmNames: [] });
+  });
+
   it('a_run_refused_for_a_lost_manual_transaction_asks_for_a_rollback', async () => {
     setup(planOf([stmt(0, { verdict: 'allow', kind: 'read' })]), () => {
       throw backendError('connection_lost_outcome_unknown');
