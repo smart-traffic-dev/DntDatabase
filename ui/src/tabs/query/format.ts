@@ -75,21 +75,89 @@ export function cellView(v: Value): CellView {
 export const MIN_COL_WIDTH = 60;
 export const MAX_COL_WIDTH = 400;
 /** Rows sampled when fitting a column to its content. */
-export const FIT_SAMPLE_ROWS = 100;
-const CELL_PAD = 20;
-/** Approximate advance of the monospace body (13px) and header (12px bold) fonts. */
+export const FIT_SAMPLE_ROWS = 200;
+/** Glide's cell padding (8 px each side) plus a little slack. */
+export const CELL_PAD = 20;
+/** Fallback advance of the monospace body (13px) and header (12px bold) fonts, without a canvas. */
 export const BODY_CHAR_PX = 7.9;
 export const HEADER_CHAR_PX = 7.5;
+const TYPE_CHAR_PX = 6.8;
 
-/** Initial width of a column: wide enough for its header (name, type) and sampled values, capped. */
-export function fitColumnWidth(name: string, dbType: string, sampleTexts: string[]): number {
-  let px = Math.max(name.length * HEADER_CHAR_PX, dbType.length * 6.8);
-  for (const t of sampleTexts) px = Math.max(px, Math.min(t.length, 200) * BODY_CHAR_PX);
-  return Math.round(Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, px + CELL_PAD)));
+/** The fonts the grid draws with (CSS `font` shorthand, family included). */
+export interface GridFont {
+  body: string;
+  header: string;
+  marker: string;
 }
 
-/** How many body characters fit in a column of `width` px. */
-export const charsForWidth = (width: number) => Math.max(1, Math.floor((width - CELL_PAD) / BODY_CHAR_PX));
+/** Text width in px for a CSS font. */
+export interface Measurer {
+  width(text: string, font: string): number;
+}
+
+let canvasCtx: CanvasRenderingContext2D | null | undefined;
+
+/** Measures with a canvas (the real font); estimates from the character count where there is none. */
+export const canvasMeasurer: Measurer = {
+  width(text, font) {
+    if (canvasCtx === undefined) {
+      try {
+        canvasCtx = typeof document === 'undefined' ? null : document.createElement('canvas').getContext('2d');
+      } catch {
+        canvasCtx = null;
+      }
+    }
+    if (canvasCtx) {
+      canvasCtx.font = font;
+      const w = canvasCtx.measureText(text).width;
+      if (Number.isFinite(w) && (w > 0 || text.length === 0)) return w;
+    }
+    const size = /(\d+(?:\.\d+)?)px/.exec(font);
+    return text.length * (size ? Number(size[1]) * 0.6 : BODY_CHAR_PX);
+  },
+};
+
+/** The advance of one body character of `font` (the grid font is monospace). */
+export function bodyCharPx(font: string, m: Measurer = canvasMeasurer): number {
+  const w = m.width('0', font);
+  return Number.isFinite(w) && w > 0 ? w : BODY_CHAR_PX;
+}
+
+const DEFAULT_FONT: GridFont = {
+  body: '13px monospace',
+  header: '600 12px monospace',
+  marker: '11px monospace',
+};
+
+/** Longest value text measured per column (more than `MAX_COL_WIDTH` can show anyway). */
+const MEASURE_CHARS = 120;
+
+/**
+ * Initial width of a column: wide enough for its header (name, type) and sampled values (measured
+ * with the grid's own fonts), plus the cell padding, capped at `MAX_COL_WIDTH`.
+ */
+export function fitColumnWidth(
+  name: string,
+  dbType: string,
+  sampleTexts: string[],
+  font: GridFont = DEFAULT_FONT,
+  m: Measurer = canvasMeasurer,
+): number {
+  let px = Math.max(m.width(name, font.header), m.width(dbType, font.marker));
+  if (!Number.isFinite(px)) px = Math.max(name.length * HEADER_CHAR_PX, dbType.length * TYPE_CHAR_PX);
+  // Only the longest texts can set the width (equal-advance font); others are skipped for speed.
+  let longest = 0;
+  for (const t of sampleTexts) longest = Math.max(longest, t.length);
+  for (const t of sampleTexts) {
+    if (t.length * 2 < longest) continue;
+    px = Math.max(px, m.width(t.length > MEASURE_CHARS ? t.slice(0, MEASURE_CHARS) : t, font.body));
+  }
+  return Math.round(Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, Math.ceil(px) + CELL_PAD)));
+}
+
+/** How many body characters fit in a column of `width` px (`charPx`: the advance of one). */
+export const charsForWidth = (width: number, charPx: number = BODY_CHAR_PX) =>
+  Math.max(1, Math.floor((width - CELL_PAD) / charPx + 1e-6));
 
 /**
  * `view.text` cut to `max` characters with an ellipsis. Bytes keep their `(N bytes)` suffix

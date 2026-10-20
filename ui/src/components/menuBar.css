@@ -1,0 +1,32 @@
+/* The menu bar in the title bar: one 32 px row, buttons are not part of the drag region. */
+.menubar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+}
+
+.menubar-btn {
+  padding: 0 9px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-callout);
+  cursor: default;
+}
+
+.menubar-btn:hover,
+.menubar-btn.open {
+  background: var(--hover);
+}
+
+.menubar-btn u {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Inactive window: dimmed like the title. */
+.titlebar.inactive .menubar-btn:not(:hover):not(.open) {
+  color: var(--muted);
+}

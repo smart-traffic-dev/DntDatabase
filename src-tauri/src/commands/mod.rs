@@ -9,9 +9,11 @@
 pub mod browse;
 pub mod connections;
 pub mod data;
+pub mod favorites;
 pub mod query;
 pub mod settings;
 pub mod transfer;
+pub mod window;
 pub mod workspace;
 
 use dnt_core::error::{AppError, DbError};
@@ -149,6 +151,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data::table_data,
             data::table_row_count,
             data::table_data_cancel,
+            window::open_devtools,
             workspace::tabs_load,
             workspace::tabs_save,
             workspace::tabs_delete,
@@ -157,6 +160,16 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             workspace::history_list,
             workspace::history_delete,
             workspace::history_clear,
+            favorites::favorites_list,
+            favorites::favorites_create,
+            favorites::favorites_update,
+            favorites::favorites_rename,
+            favorites::favorites_move,
+            favorites::favorites_delete,
+            favorites::snippets_list,
+            favorites::snippets_create,
+            favorites::snippets_update,
+            favorites::snippets_delete,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.

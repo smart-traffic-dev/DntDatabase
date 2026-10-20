@@ -17,7 +17,21 @@ export type UiRequest =
   | { kind: 'deleteNode'; node: NodeId; label: string }
   | { kind: 'export'; preselected?: NodeId[] }
   | { kind: 'import' }
-  | { kind: 'settings' };
+  | { kind: 'settings' }
+  /** Save `sql` (a query tab's selection or whole text) as a favorite. */
+  | {
+      kind: 'addFavorite';
+      sql: string;
+      /** Suggested name (the tab title). */
+      name: string;
+      connectionId: string | null;
+      database: string | null;
+      fromSelection: boolean;
+    }
+  /** The user snippets manager. */
+  | { kind: 'snippets' }
+  | { kind: 'shortcuts' }
+  | { kind: 'about' };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =

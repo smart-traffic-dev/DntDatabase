@@ -1475,6 +1475,7 @@ dependencies = [
  "cbc 0.1.2",
  "chacha20poly1305",
  "dnt-core",
+ "dnt-query",
  "hex",
  "keyring",
  "quick-xml 0.37.5",

@@ -41,8 +41,27 @@ CREATE TABLE query_history (
 CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
 ";
 
+/// Favorites (saved queries, `folder` is a `/`-separated path or NULL for the root) and
+/// user-defined editor snippets. A favorite outlives its connection (SET NULL).
+const MIGRATION_3: &str = "
+CREATE TABLE favorites (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, folder TEXT NULL, sql TEXT NOT NULL,
+  connection_id TEXT NULL REFERENCES connections(id) ON DELETE SET NULL,
+  database TEXT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  sort INTEGER NOT NULL);
+CREATE INDEX favorites_folder_sort ON favorites(folder, sort);
+CREATE TABLE snippets (
+  id TEXT PRIMARY KEY, prefix TEXT NOT NULL UNIQUE COLLATE NOCASE, label TEXT NOT NULL,
+  body TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+";
+
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)])
+    Migrations::new(vec![
+        M::up(MIGRATION_1),
+        M::up(MIGRATION_2),
+        M::up(MIGRATION_3),
+    ])
 }
 
 /// Opens (creating if needed) the database file, enables foreign keys and migrates to latest.
@@ -91,6 +110,44 @@ mod tests {
     #[test]
     fn migrations_are_valid() {
         migrations().validate().unwrap();
+    }
+
+    /// A database at schema version 2 (before favorites) migrates to 3 and keeps its rows.
+    #[test]
+    fn migrates_version_2_database_to_favorites() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            Migrations::new(vec![M::up(MIGRATION_1), M::up(MIGRATION_2)])
+                .to_latest(&mut conn)
+                .unwrap();
+            conn.execute(
+                "INSERT INTO query_tabs (id, title, sort_order, sql_text, updated_at) \
+                 VALUES ('t1', 'Query', 0, 'SELECT 1', 'now')",
+                [],
+            )
+            .unwrap();
+            let v: i64 = conn
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(v, 2);
+        }
+        let conn = open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 3);
+        let tabs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(tabs, 1);
+        for table in ["favorites", "snippets"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table}");
+        }
     }
 
     #[test]

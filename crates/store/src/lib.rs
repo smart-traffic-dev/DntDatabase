@@ -2,6 +2,7 @@
 
 pub mod db;
 pub mod dntconn;
+pub mod favorites;
 pub mod history;
 pub mod keyring_store;
 pub mod ncx;
