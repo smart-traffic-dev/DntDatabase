@@ -29,7 +29,7 @@ use specta::Type;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -664,7 +664,7 @@ impl SessionManager {
         })
     }
 
-    fn runtime_opt(&self, id: Uuid) -> Option<Arc<ConnectionRuntime>> {
+    pub(crate) fn runtime_opt(&self, id: Uuid) -> Option<Arc<ConnectionRuntime>> {
         self.runtimes
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -853,7 +853,7 @@ impl SessionManager {
     }
 }
 
-fn config_error(field: &str, message: &str) -> DbError {
+pub(crate) fn config_error(field: &str, message: &str) -> DbError {
     DbError::Config {
         field: Some(field.into()),
         message: message.into(),
@@ -917,6 +917,9 @@ pub struct ConnectionRuntime {
     pub(crate) link: tokio::sync::Mutex<Link>,
     /// Set first thing by `shutdown`, even when it cannot get the link.
     pub(crate) closed: AtomicBool,
+    /// Bumped every time the SSH tunnel is replaced: a tab session opened through an
+    /// older tunnel is stale.
+    pub(crate) tunnel_gen: AtomicU64,
     metadata_timeout: Duration,
     schema_error_ttl: Duration,
     cache: NodeCache,
@@ -962,6 +965,7 @@ impl ConnectionRuntime {
                 closed: false,
             }),
             closed: AtomicBool::new(false),
+            tunnel_gen: AtomicU64::new(0),
             metadata_timeout,
             schema_error_ttl,
             cache: NodeCache::default(),
@@ -1102,6 +1106,7 @@ impl ConnectionRuntime {
             Ok(None) => {}
         }
         link.resolved.port = port;
+        self.tunnel_gen.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 

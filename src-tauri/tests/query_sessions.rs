@@ -24,9 +24,10 @@ use dntdatabase::query_sessions::{TxAction, PREVIEW_CHARS};
 use dntdatabase::session_manager::SessionManager;
 use secrecy::SecretString;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 /// What the fake driver saw, and the state the test scripts for it.
@@ -40,8 +41,10 @@ struct Log {
     executed: Mutex<Vec<String>>,
     /// The transaction state every session reports; `COMMIT`/`ROLLBACK` reset it.
     tx: Mutex<Option<TxState>>,
-    /// Every connect takes this long (ms).
-    connect_delay_ms: AtomicU64,
+    /// While set, every connect signals `entered` and waits for this gate.
+    gate: Mutex<Option<Arc<Notify>>>,
+    /// Signalled (one permit) when a connect reaches the gate.
+    entered: Notify,
 }
 
 impl Log {
@@ -56,6 +59,17 @@ impl Log {
     }
     fn executed(&self) -> Vec<String> {
         self.executed.lock().unwrap().clone()
+    }
+    /// From now on every connect waits at the gate until `open_gate`.
+    fn close_gate(&self) -> Arc<Notify> {
+        let gate = Arc::new(Notify::new());
+        *self.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        gate
+    }
+    /// Releases the connect waiting at `gate`; later connects pass freely.
+    fn open_gate(&self, gate: &Notify) {
+        self.gate.lock().unwrap().take();
+        gate.notify_one();
     }
 }
 
@@ -77,9 +91,10 @@ impl Driver for FakeDriver {
             .lock()
             .unwrap()
             .push(cfg.database.clone());
-        let ms = self.log.connect_delay_ms.load(Ordering::SeqCst);
-        if ms > 0 {
-            tokio::time::sleep(Duration::from_millis(ms)).await;
+        let gate = self.log.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            self.log.entered.notify_one();
+            gate.notified().await;
         }
         let info = match self.kind {
             DbKind::MySql => detect_mysql("8.0.36").unwrap(),
@@ -524,20 +539,21 @@ async fn query_tx_rollback_returns_idle() {
 async fn busy_tab_refuses_plan_and_tx() {
     let f = fixture(DbKind::MySql);
     let id = open(&f, config(DbKind::MySql)).await;
-    f.log.connect_delay_ms.store(300, Ordering::SeqCst);
+    let gate = f.log.close_gate();
     let sm = Arc::clone(&f.sm);
     let first = tokio::spawn(async move {
         sm.query_plan("t1", id, None, "SELECT 1", Target::All)
             .await
             .map(|_| ())
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The first plan holds the tab while it connects.
+    f.log.entered.notified().await;
     let err = plan(&f, "t1", id, None, "SELECT 1").await.unwrap_err();
     assert_eq!(AppError::from(err).kind, "busy");
     let err = f.sm.query_tx("t1", TxAction::Rollback).await.unwrap_err();
     assert_eq!(AppError::from(err).kind, "busy");
     // Another tab is not affected.
-    f.log.connect_delay_ms.store(0, Ordering::SeqCst);
+    f.log.open_gate(&gate);
     plan(&f, "t2", id, None, "SELECT 1").await.unwrap();
     first.await.unwrap().unwrap();
 }
@@ -597,4 +613,181 @@ async fn taken_plan_is_guarded_and_runs_once() {
     plan(&f, "t1", id, None, "SELECT 6").await.unwrap();
     assert!(f.sm.take_plan(pending.plan_id).is_err());
     assert!(f.sm.plan_statement(view.plan_id, 0).is_ok());
+}
+
+fn kind(e: DbError) -> String {
+    AppError::from(e).kind
+}
+
+#[tokio::test]
+async fn replaced_tunnel_reopens_idle_tab_session() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    plan(&f, "t1", id, Some("shop"), "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 2);
+    f.sm.simulate_tunnel_replaced(id);
+    let view = plan(&f, "t1", id, Some("shop"), "SELECT 1").await.unwrap();
+    assert_eq!(view.tx_state, TxState::Idle);
+    assert_eq!(
+        f.log.connects(),
+        3,
+        "a fresh session through the new tunnel"
+    );
+    assert_eq!(f.log.closes(), 1, "the stale session is closed");
+    assert_eq!(
+        f.log.databases.lock().unwrap().last().cloned().flatten(),
+        Some("shop".into())
+    );
+    // Not stale any more.
+    plan(&f, "t1", id, Some("shop"), "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3);
+}
+
+#[tokio::test]
+async fn replaced_tunnel_with_open_tx_reports_lost_once() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(&f, config(DbKind::Postgres)).await;
+    plan(&f, "t1", id, None, "BEGIN").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    f.sm.simulate_tunnel_replaced(id);
+    let err = plan(&f, "t1", id, None, "SELECT 1").await.unwrap_err();
+    assert!(
+        matches!(&err, DbError::ConnectionLost { was_in_tx: true, outcome_unknown: false, message }
+            if message.contains("SSH tunnel")),
+        "{err:?}"
+    );
+    assert_eq!(f.log.closes(), 1);
+    // The server rolled the transaction back; the next plan reopens.
+    f.log.set_tx(TxState::Idle);
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    assert_eq!(f.log.connects(), 3);
+}
+
+#[tokio::test]
+async fn stored_statement_on_another_database_is_expired() {
+    for k in [DbKind::MySql, DbKind::Postgres] {
+        let f = fixture(k);
+        let id = open(&f, config(k)).await;
+        let view = plan(&f, "t1", id, Some("a"), "SELECT 1; SELECT 2")
+            .await
+            .unwrap();
+        f.sm.take_plan(view.plan_id).unwrap();
+        assert!(f.sm.plan_statement(view.plan_id, 1).is_ok());
+        let pending = plan(&f, "t1", id, Some("b"), "SELECT 3").await.unwrap();
+        let err = f.sm.plan_statement(view.plan_id, 1).unwrap_err();
+        assert_eq!(kind(err), "plan_expired", "{k:?}");
+        // Back on `a`: a plan made on `b` does not run there.
+        plan(&f, "t1", id, Some("a"), "SELECT 4").await.unwrap();
+        assert_eq!(
+            kind(f.sm.take_plan(pending.plan_id).unwrap_err()),
+            "plan_expired"
+        );
+    }
+}
+
+#[tokio::test]
+async fn plan_of_tab_moved_to_another_connection_is_expired() {
+    let f = fixture(DbKind::MySql);
+    let a = open(&f, config(DbKind::MySql)).await;
+    let b = open(&f, config(DbKind::MySql)).await;
+    let view = plan(&f, "t1", a, None, "SELECT 1").await.unwrap();
+    f.sm.take_plan(view.plan_id).unwrap();
+    plan(&f, "t1", b, None, "SELECT 1").await.unwrap();
+    assert_eq!(
+        kind(f.sm.plan_statement(view.plan_id, 0).unwrap_err()),
+        "plan_expired"
+    );
+}
+
+#[tokio::test]
+async fn only_latest_taken_plan_is_kept_without_ttl() {
+    let f = fixture_with(DbKind::MySql, |sm| {
+        sm.with_plan_ttl(Duration::from_millis(50))
+    });
+    let id = open(&f, config(DbKind::MySql)).await;
+    let first = plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.sm.take_plan(first.plan_id).unwrap();
+    let second = plan(&f, "t1", id, None, "SELECT 2").await.unwrap();
+    // A plan of another tab does not affect t1's.
+    let other = plan(&f, "t2", id, None, "SELECT 9").await.unwrap();
+    f.sm.take_plan(other.plan_id).unwrap();
+    assert!(f.sm.plan_statement(first.plan_id, 0).is_ok());
+    f.sm.take_plan(second.plan_id).unwrap();
+    assert_eq!(
+        kind(f.sm.plan_statement(first.plan_id, 0).unwrap_err()),
+        "plan_expired",
+        "an older taken plan of the tab is dropped"
+    );
+
+    let pending = plan(&f, "t1", id, None, "SELECT 3").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The latest taken plans outlive the TTL; a pending plan does not.
+    let (_, _, one) = f.sm.plan_statement(second.plan_id, 0).unwrap();
+    assert_eq!(one.stmts[0].text, "SELECT 2");
+    assert!(f.sm.plan_statement(other.plan_id, 0).is_ok());
+    assert_eq!(
+        kind(f.sm.take_plan(pending.plan_id).unwrap_err()),
+        "plan_expired"
+    );
+
+    f.sm.query_close_tab("t1", false).await.unwrap();
+    assert!(f.sm.plan_statement(second.plan_id, 0).is_err());
+    assert!(f.sm.plan_statement(other.plan_id, 0).is_ok());
+}
+
+#[tokio::test]
+async fn plan_statement_carries_only_the_statement() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let text = format!("SELECT 1;\n{}\nSELECT 2", "-- filler\n".repeat(1000));
+    let view = plan(&f, "t1", id, None, &text).await.unwrap();
+    let (_, _, one) = f.sm.plan_statement(view.plan_id, 1).unwrap();
+    assert_eq!(one.source, "SELECT 2");
+    assert_eq!(one.stmts[0].source_range, (0, 8));
+    assert_eq!(one.stmts[0].range, view.stmts[1].range);
+    assert_eq!(one.base, view.stmts[1].range.0);
+}
+
+#[tokio::test]
+async fn plan_finishing_after_close_is_not_stored() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let gate = f.log.close_gate();
+    let sm = Arc::clone(&f.sm);
+    let planning =
+        tokio::spawn(async move { sm.query_plan("t1", id, None, "SELECT 1", Target::All).await });
+    f.log.entered.notified().await;
+    let sm = Arc::clone(&f.sm);
+    let closing = tokio::spawn(async move { sm.close(id).await });
+    while !f.sm.open_connections().is_empty() {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    f.log.open_gate(&gate);
+    let err = planning.await.unwrap().unwrap_err();
+    assert_eq!(kind(err), "connection_lost");
+    closing.await.unwrap();
+    assert_eq!(
+        f.log.closes(),
+        2,
+        "metadata + the tab session opened meanwhile"
+    );
+}
+
+#[tokio::test]
+async fn tab_id_is_validated() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    for tab in [String::new(), "x".repeat(65)] {
+        let err = plan(&f, &tab, id, None, "SELECT 1").await.unwrap_err();
+        assert_eq!(kind(err), "config");
+        let err = f.sm.query_tx(&tab, TxAction::Commit).await.unwrap_err();
+        assert_eq!(kind(err), "config");
+        let err = f.sm.query_close_tab(&tab, true).await.unwrap_err();
+        assert_eq!(kind(err), "config");
+    }
+    plan(&f, &"é".repeat(64), id, None, "SELECT 1")
+        .await
+        .unwrap();
+    assert_eq!(f.log.connects(), 2);
 }
