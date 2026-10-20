@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { addQueryToFavorites } from '../../components/favoritesActions';
 import { useConnections } from '../../store/connections';
+import { useExporting } from '../../store/queryExport';
 import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
 import { analyzeAvailable } from './explainTree';
@@ -179,14 +180,19 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   // A tab without a (still stored) connection stays disabled; a run locks the toolbar until it ends.
   const hasSelection = useSelection((s) => s.ids.has(doc.id));
   const starting = useStarting((s) => s.ids.has(doc.id));
-  const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting;
+  // "All rows" of a result being exported runs on this tab's session: the tab is busy.
+  const exporting = useExporting((s) => s.runs.has(doc.id));
+  const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting && !exporting;
+  const stoppable = canStop(run) || exporting;
   const why = runnable
     ? undefined
     : !doc.connectionId
       ? 'Choose a connection to run queries'
       : !summaries.has(doc.connectionId)
         ? 'The connection of this tab no longer exists'
-        : 'A statement is running — stop it first';
+        : exporting
+          ? 'An export is reading this tab’s result — stop it first'
+          : 'A statement is running — stop it first';
   const analyzeOk = analyzeAvailable(useConnections((s) => (doc.connectionId ? s.info.get(doc.connectionId) : undefined)));
 
   return (
@@ -227,8 +233,8 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
         type="button"
         className="qt-btn"
         data-testid="query-stop"
-        disabled={!canStop(run)}
-        title={canStop(run) ? 'Stop (Esc)' : 'Nothing is running'}
+        disabled={!stoppable}
+        title={exporting ? 'Stop the export (Esc)' : stoppable ? 'Stop (Esc)' : 'Nothing is running'}
         onClick={() => void stopQuery(doc.id)}
       >
         Stop

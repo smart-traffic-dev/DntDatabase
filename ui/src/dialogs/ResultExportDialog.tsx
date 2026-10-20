@@ -1,10 +1,12 @@
 import { Channel } from '@tauri-apps/api/core';
-import { save } from '@tauri-apps/plugin-dialog';
 import { useRef, useState, type FormEvent } from 'react';
 import { api, isCancelled, toAppError } from '../api';
 import type { ExportFormat, ExportOptions, ExportProgress, ExportSummary } from '../bindings';
+import { setExporting } from '../store/queryExport';
+import { useQueryRun } from '../store/queryRun';
+import { asTxState } from '../store/queryTabs';
 import { Modal } from './Modal';
-import { FORMATS, defaultOptions, formatInfo, type ExportRequest } from './resultExport';
+import { FORMATS, defaultOptions, type ExportRequest } from './resultExport';
 
 /** CSV delimiters offered (value sent as is). */
 export const DELIMITERS: { value: string; label: string }[] = [
@@ -16,14 +18,18 @@ export const DELIMITERS: { value: string; label: string }[] = [
 
 type Scope = 'loaded' | 'all';
 
+/** How a running export is stopped: a table export by its request key, a query export by its run id. */
+type Stop = { kind: 'table'; connectionId: string; key: string } | { kind: 'query'; runId: string } | null;
+
 type Phase =
   | { kind: 'form' }
-  | { kind: 'running'; rows: number; key: string | null }
+  | { kind: 'running'; rows: number; stop: Stop }
   | { kind: 'done'; summary: ExportSummary }
   | { kind: 'cancelled' };
 
 let exports = 0;
 const fmt = (n: number) => n.toLocaleString('en-US');
+const plural = (n: number, one: string, many: string) => `${fmt(n)} ${n === 1 ? one : many}`;
 
 interface Props {
   request: ExportRequest;
@@ -33,7 +39,9 @@ interface Props {
 /**
  * Export a result to a file: CSV / JSON / Excel / SQL INSERT / Markdown, the loaded rows or all
  * rows. "All rows" is read again by the backend and streamed straight to the file, with progress
- * and Cancel; the file is written only by the backend.
+ * and Cancel: a table under the data view's filter on a data session, a query result on its tab's
+ * own session (the tab shows as busy meanwhile; Stop cancels it). The save dialog is opened by the
+ * backend, which only writes the file picked there.
  */
 export function ResultExportDialog({ request, onClose }: Props) {
   const [opts, setOpts] = useState<ExportOptions>(() => defaultOptions(request.tableName));
@@ -43,25 +51,33 @@ export function ResultExportDialog({ request, onClose }: Props) {
   const run = useRef(0);
 
   const set = (change: Partial<ExportOptions>) => setOpts((o) => ({ ...o, ...change }));
-  const info = formatInfo(opts.format);
   const busy = phase.kind === 'running';
   const tableMissing = opts.format === 'sql' && opts.table_name.trim() === '';
   const canExport = !busy && !tableMissing && (scope === 'loaded' || request.all !== null);
+  const partial = request.partialBinaries;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (!canExport) return;
     const my = ++run.current;
     setError(null);
-    const path = await save({
-      defaultPath: `${request.baseName}.${info.ext}`,
-      filters: [{ name: info.filter, extensions: [info.ext] }],
-    });
-    if (my !== run.current) return;
-    if (!path) return;
+    let path: string | null;
+    try {
+      path = await api.exportPickPath(request.baseName, opts.format);
+    } catch (err) {
+      if (my === run.current) setError(toAppError(err).message);
+      return;
+    }
+    if (my !== run.current || !path) return;
     const all = scope === 'all' ? request.all : null;
-    const key = all ? `export:${Date.now()}:${++exports}` : null;
-    setPhase({ kind: 'running', rows: 0, key });
+    const stop: Stop =
+      all?.kind === 'table'
+        ? { kind: 'table', connectionId: all.connectionId, key: `export:${Date.now()}:${++exports}` }
+        : all?.kind === 'query'
+          ? { kind: 'query', runId: crypto.randomUUID() }
+          : null;
+    setPhase({ kind: 'running', rows: 0, stop });
+    const tabId = all?.kind === 'query' ? all.tabId : null;
     try {
       let summary: ExportSummary;
       if (!all) {
@@ -71,28 +87,40 @@ export function ResultExportDialog({ request, onClose }: Props) {
         channel.onmessage = (p) => {
           if (my === run.current) setPhase((ph) => (ph.kind === 'running' ? { ...ph, rows: p.rows } : ph));
         };
-        summary =
-          all.kind === 'table'
-            ? await api.exportTable(all.connectionId, all.obj, all.sort, all.filter, opts, path, key!, channel)
-            : await api.exportQuery(all.planId, all.index, opts, path, key!, channel);
+        if (all.kind === 'table' && stop?.kind === 'table') {
+          summary = await api.exportTable(all.connectionId, all.obj, all.sort, all.filter, opts, path, stop.key, channel);
+        } else if (all.kind === 'query' && stop?.kind === 'query') {
+          // The statement runs on the tab's session: the tab is busy until it ends.
+          setExporting(all.tabId, stop.runId);
+          summary = await api.exportQuery(all.planId, all.index, opts, path, stop.runId, channel);
+        } else {
+          return;
+        }
       }
       if (my === run.current) setPhase({ kind: 'done', summary });
     } catch (err) {
-      if (my !== run.current) return;
       const appError = toAppError(err);
+      // A failed read may change the tab's transaction (PostgreSQL: aborted).
+      const tx = asTxState(appError.tx_state);
+      if (tabId && tx) useQueryRun.getState().setTxState(tabId, tx);
+      if (my !== run.current) return;
       if (isCancelled(appError)) {
         setPhase({ kind: 'cancelled' });
       } else {
         setError(appError.message);
         setPhase({ kind: 'form' });
       }
+    } finally {
+      if (tabId) setExporting(tabId, null);
     }
   };
 
   const cancel = () => {
-    if (phase.kind !== 'running' || !phase.key || !request.all) return;
+    if (phase.kind !== 'running' || !phase.stop) return;
     // The backend stops the statement and removes the half-written file.
-    api.tableDataCancel(request.all.connectionId, phase.key).catch(() => undefined);
+    const stop = phase.stop;
+    if (stop.kind === 'table') api.tableDataCancel(stop.connectionId, stop.key).catch(() => undefined);
+    else api.queryCancel(stop.runId).catch(() => undefined);
   };
 
   const close = () => {
@@ -121,6 +149,13 @@ export function ResultExportDialog({ request, onClose }: Props) {
               </p>
               {s.cut_cells > 0 ? (
                 <p className="hint">{fmt(s.cut_cells)} long values were cut to Excel's 32,767 characters.</p>
+              ) : null}
+              {s.partial_binaries > 0 ? (
+                <p className="hint">
+                  {plural(s.partial_binaries, 'binary value was', 'binary values were')} only partially loaded and
+                  written as {opts.format === 'sql' || opts.format === 'json' ? 'NULL' : 'empty cells'}. Export all rows to
+                  get them whole.
+                </p>
               ) : null}
             </>
           ) : (
@@ -185,6 +220,18 @@ export function ResultExportDialog({ request, onClose }: Props) {
                 <input type="checkbox" checked={opts.bom} onChange={(e) => set({ bom: e.target.checked })} />
                 UTF-8 BOM (for Excel)
               </label>
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={opts.formula_guard ?? false}
+                  onChange={(e) => set({ formula_guard: e.target.checked })}
+                />
+                Protect against formula injection
+              </label>
+              <p className="hint">
+                NULL is an empty field; an empty string is written as "". With protection on, text starting with =, +, -,
+                @, a tab or a carriage return gets a leading ' so spreadsheets show it as text.
+              </p>
             </>
           ) : null}
           {opts.format === 'sql' ? (
@@ -217,6 +264,17 @@ export function ResultExportDialog({ request, onClose }: Props) {
             </label>
             {request.all === null && request.allUnavailable ? <p className="hint">{request.allUnavailable}</p> : null}
             {scope === 'loaded' && request.loadedNote ? <p className="hint">{request.loadedNote}</p> : null}
+            {scope === 'loaded' && partial > 0 ? (
+              <p className="hint" data-testid="rx-partial-note">
+                {plural(partial, 'binary value is', 'binary values are')} only partially loaded —{' '}
+                {request.all !== null
+                  ? 'choose All rows to export them fully.'
+                  : `they are exported as ${opts.format === 'sql' || opts.format === 'json' ? 'NULL' : 'empty cells'}.`}
+              </p>
+            ) : null}
+            {scope === 'all' && request.all?.kind === 'query' ? (
+              <p className="hint">Runs the statement again on this tab's session; the tab is busy until the export ends.</p>
+            ) : null}
           </div>
           {error && (
             <p role="alert" className="field-error">
@@ -229,7 +287,7 @@ export function ResultExportDialog({ request, onClose }: Props) {
             {busy ? `Exporting… ${fmt(phase.rows)} rows written` : null}
           </span>
           {busy ? (
-            <button type="button" className="btn" onClick={cancel} disabled={!phase.key}>
+            <button type="button" className="btn" onClick={cancel} disabled={!phase.stop}>
               Cancel export
             </button>
           ) : (

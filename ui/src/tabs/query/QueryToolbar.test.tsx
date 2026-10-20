@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useConnections } from '../../store/connections';
+import { setExporting } from '../../store/queryExport';
 import { useQueryDocs } from '../../store/queryTabs';
 import { setHasSelection } from '../../store/runQuery';
 import { config, ids, resetStores, serverInfo } from '../../test/backend';
@@ -38,6 +39,20 @@ describe('QueryToolbar', () => {
     expect(screen.getByTestId('query-run')).toHaveTextContent('Ctrl+Enter');
     expect(screen.getByTestId('query-run-selection')).toHaveAttribute('title', 'Select text in the editor to run only that');
   });
+  it('an_export_of_the_tabs_result_makes_it_busy_and_stoppable', () => {
+    const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    expect(screen.getByTestId('query-stop')).toBeDisabled();
+    act(() => setExporting(id, 'run-1'));
+    expect(screen.getByTestId('query-run')).toBeDisabled();
+    expect(screen.getByTestId('query-run')).toHaveAttribute('title', 'An export is reading this tab’s result — stop it first');
+    expect(screen.getByTestId('query-stop')).toBeEnabled();
+    expect(screen.getByTestId('query-stop')).toHaveAttribute('title', 'Stop the export (Esc)');
+    act(() => setExporting(id, null));
+    expect(screen.getByTestId('query-run')).toBeEnabled();
+    expect(screen.getByTestId('query-stop')).toBeDisabled();
+  });
+
   it('explain_is_enabled_with_a_connection', () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);

@@ -4,6 +4,7 @@ import { api, toAppError } from '../api';
 import { runChannel } from '../api/query';
 import type { PlanView, Target, TxAction } from '../bindings';
 import { useConnections } from './connections';
+import { exportRunOf, useExporting } from './queryExport';
 import { canRun, canStop, settleTx, useQueryRun, type MessageLine } from './queryRun';
 import { setRunningSource, useQueryDocs } from './queryTabs';
 import { promptHandles, reopenConnection } from './reopen';
@@ -31,6 +32,10 @@ function tabIdSet() {
 const [startingStore, setStarting] = tabIdSet();
 export const useStarting = startingStore;
 const isStarting = (tabId: string) => useStarting.getState().ids.has(tabId);
+
+/** Whether a run may start on the tab: nothing starting, running or exporting there. */
+const mayStart = (tabId: string) =>
+  !isStarting(tabId) && canRun(useQueryRun.getState().get(tabId)) && exportRunOf(tabId) === null;
 
 /** Tabs whose editor has selected text (Run selection needs one). */
 export const [useSelection, setHasSelection] = tabIdSet();
@@ -228,7 +233,7 @@ async function openedConnection(tabId: string, connectionId: string | null): Pro
 
 /** Runs the tab's `target`: opens the connection, plans, asks the guards, runs. */
 export async function runQuery(tabId: string, target: Target, extra?: { maxRows?: number }): Promise<void> {
-  if (isStarting(tabId) || !canRun(useQueryRun.getState().get(tabId))) return;
+  if (!mayStart(tabId)) return;
   const doc = useQueryDocs.getState().docs.get(tabId);
   if (!doc) return;
   setStarting(tabId, true);
@@ -263,7 +268,7 @@ function setExplainError(tabId: string, text: string | null) {
  * the plan, which then goes through the normal run flow, so Analyze on Production asks first.
  */
 export async function explainQuery(tabId: string, analyze: boolean): Promise<void> {
-  if (isStarting(tabId) || !canRun(useQueryRun.getState().get(tabId))) return;
+  if (!mayStart(tabId)) return;
   const doc = useQueryDocs.getState().docs.get(tabId);
   if (!doc) return;
   setStarting(tabId, true);
@@ -319,7 +324,7 @@ export function insertAtCursor(tabId: string, text: string): void {
 
 /** Runs a plan that already exists (Retry, Fetch all) through the same guards and run flow. */
 export async function runPlanned(tabId: string, plan: PlanView, extra?: { maxRows?: number }): Promise<void> {
-  if (isStarting(tabId) || !canRun(useQueryRun.getState().get(tabId))) return;
+  if (!mayStart(tabId)) return;
   setStarting(tabId, true);
   try {
     await execute(tabId, plan, extra);
@@ -337,8 +342,13 @@ async function cancelRun(tabId: string, runId: string) {
   }
 }
 
-/** Stop: asks the backend to cancel the tab's run (the `stopping` event follows). */
+/** Stop: asks the backend to cancel the tab's run (the `stopping` event follows), or its export. */
 export async function stopQuery(tabId: string): Promise<void> {
+  const exporting = exportRunOf(tabId);
+  if (exporting !== null) {
+    await cancelRun(tabId, exporting);
+    return;
+  }
   const run = useQueryRun.getState().get(tabId);
   if (!canStop(run)) return;
   if (!run.runId) {
@@ -349,25 +359,31 @@ export async function stopQuery(tabId: string): Promise<void> {
   await cancelRun(tabId, run.runId);
 }
 
-/** Stops the tab's run and waits for it to end; false when it is still running after `STOP_WAIT_MS`. */
+/** Whether the tab neither runs nor exports. */
+const tabIdle = (tabId: string) => canRun(useQueryRun.getState().get(tabId)) && exportRunOf(tabId) === null;
+
+/** Stops the tab's run (or export) and waits for it to end; false when it is still running after `STOP_WAIT_MS`. */
 function stopAndWait(tabId: string): Promise<boolean> {
-  if (canRun(useQueryRun.getState().get(tabId))) return Promise.resolve(true);
+  if (tabIdle(tabId)) return Promise.resolve(true);
   return new Promise((resolve) => {
     const finish = (ok: boolean) => {
       clearTimeout(timer);
-      unsubscribe();
+      unsubscribeRun();
+      unsubscribeExport();
       resolve(ok);
     };
-    const unsubscribe = useQueryRun.subscribe((s) => {
-      if (canRun(s.runs.get(tabId) ?? useQueryRun.getState().get(tabId))) finish(true);
-    });
+    const check = () => {
+      if (tabIdle(tabId)) finish(true);
+    };
+    const unsubscribeRun = useQueryRun.subscribe(check);
+    const unsubscribeExport = useExporting.subscribe(check);
     const timer = setTimeout(() => finish(false), STOP_WAIT_MS);
     void stopQuery(tabId);
   });
 }
 
-// Closing a tab (or quitting) asks first while its run is active, then stops it and waits.
-setRunningSource((tabId) => !canRun(useQueryRun.getState().get(tabId)), stopAndWait);
+// Closing a tab (or quitting) asks first while its run (or export) is active, then stops it and waits.
+setRunningSource((tabId) => !tabIdle(tabId), stopAndWait);
 
 // Retry statement and Fetch all (rerun.ts) run their derived plans through this flow, so a
 // Confirm verdict asks and a Block verdict is refused exactly as for a normal run.

@@ -7,6 +7,7 @@ import './toolbar.css';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
 import type { Engine } from '../../query/engine';
 import { clearCursor, reportCursor } from '../../store/cursor';
+import { exportRunOf, useExporting } from '../../store/queryExport';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
@@ -50,9 +51,13 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   );
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE, () => void explainQuery(tabId, false));
   // Esc keeps its editor meaning (close widgets, collapse cursors) unless a run can be stopped.
-  const running = editor.createContextKey<boolean>('dntRunning', canStop(useQueryRun.getState().get(tabId)));
-  const unsubscribe = useQueryRun.subscribe((s) => running.set(canStop(s.runs.get(tabId) ?? emptyRun)));
+  // An export of the tab's result (it runs on the tab's session) is stoppable too.
+  const stoppable = () => canStop(useQueryRun.getState().runs.get(tabId) ?? emptyRun) || exportRunOf(tabId) !== null;
+  const running = editor.createContextKey<boolean>('dntRunning', stoppable());
+  const unsubscribe = useQueryRun.subscribe(() => running.set(stoppable()));
+  const unsubscribeExport = useExporting.subscribe(() => running.set(stoppable()));
   editor.onDidDispose(unsubscribe);
+  editor.onDidDispose(unsubscribeExport);
   editor.addCommand(monaco.KeyCode.Escape, () => void stopQuery(tabId), 'dntRunning');
   // F9 / Ctrl+R / Ctrl+Shift+R, Format SQL, case, duplicate, F12: Monaco actions (context menu).
   registerEditorCommands(tabId, editor, monaco);

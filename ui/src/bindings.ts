@@ -438,25 +438,41 @@ async exportTable(id: string, obj: ObjectRef, sort: SortSpec[], filter: DataFilt
 }
 },
 /**
- * Every row of statement `index` of plan `plan_id`, read again (a read statement
- * only: `config` error with field `scope` otherwise), streamed to `path`; progress
- * through `channel`; `table_data_cancel(<the tab's connection>, request_key)` stops it.
+ * Every row of statement `index` of plan `plan_id`, run again on the tab's session as
+ * run `run_id` (a fresh id; `query_cancel(run_id)` stops it) and streamed to `path`;
+ * progress through `channel`. Refused (`config` error) while the tab runs (field `tab`)
+ * and for anything but an allowed read (field `scope`). A failure carries the tab's
+ * transaction state after it (`tx_state`).
  */
-async exportQuery(planId: string, index: number, opts: ExportOptions, path: string, requestKey: string, channel: TAURI_CHANNEL<ExportProgress>) : Promise<Result<ExportSummary, AppError>> {
+async exportQuery(planId: string, index: number, opts: ExportOptions, path: string, runId: string, channel: TAURI_CHANNEL<ExportProgress>) : Promise<Result<ExportSummary, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("export_query", { planId, index, opts, path, requestKey, channel }) };
+    return { status: "ok", data: await TAURI_INVOKE("export_query", { planId, index, opts, path, runId, channel }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
 /**
- * Shows an exported file in the system file manager ("Open folder"). Only an existing
- * file is shown; nothing is opened or run.
+ * Shows an exported file in the system file manager ("Open folder"). Only a file an
+ * export wrote, and that still exists, is shown; nothing is opened or run.
  */
 async revealExport(path: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reveal_export", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the save dialog (from the backend, so the UI never names a path itself) for a
+ * `format` file called `base_name` by default, and approves what the user picked for
+ * the export commands (for a while; see the `export_paths` module). `None`: the dialog
+ * was cancelled.
+ */
+async exportPickPath(baseName: string, format: ExportFormat) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_pick_path", { baseName, format }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -726,7 +742,11 @@ bom: boolean;
 /**
  * SQL: the table the `INSERT`s go into (one identifier, quoted per engine).
  */
-table_name: string }
+table_name: string; 
+/**
+ * CSV: prefix `'` to text cells a spreadsheet would read as a formula.
+ */
+formula_guard?: boolean }
 /**
  * Progress of an export streaming to its file.
  */
@@ -738,7 +758,11 @@ export type ExportSummary = { rows: number; path: string;
 /**
  * Excel: text cells cut to Excel's 32,767 characters.
  */
-cut_cells: number; elapsed_ms: number }
+cut_cells: number; 
+/**
+ * Binary values only partly loaded, written as NULL / empty (see the module docs).
+ */
+partial_binaries: number; elapsed_ms: number }
 export type Favorite = { id: string; name: string; 
 /**
  * `/`-separated folder path; `None` is the root.

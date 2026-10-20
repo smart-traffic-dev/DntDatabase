@@ -10,7 +10,7 @@ import { useTabs, type ObjectTabRef } from '../store/tabs';
 /** How "all rows" are read again on the backend (none: only the loaded rows can be exported). */
 export type ExportAll =
   | { kind: 'table'; connectionId: string; obj: ObjectRef; sort: SortSpec[]; filter: DataFilter | null }
-  | { kind: 'query'; connectionId: string; planId: string; index: number };
+  | { kind: 'query'; tabId: string; connectionId: string; planId: string; index: number };
 
 export interface ExportRequest {
   /** Dialog title, e.g. "Export orders". */
@@ -26,6 +26,8 @@ export interface ExportRequest {
   loadedCount: number;
   /** A caveat of the loaded rows (cut values). */
   loadedNote: string | null;
+  /** Binary values of the loaded rows held only as a preview (exported as NULL / empty). */
+  partialBinaries: number;
   all: ExportAll | null;
   /** Why "all rows" is not offered. */
   allUnavailable: string | null;
@@ -39,8 +41,6 @@ export const FORMATS: { format: ExportFormat; label: string; ext: string; filter
   { format: 'markdown', label: 'Markdown table', ext: 'md', filter: 'Markdown' },
 ];
 
-export const formatInfo = (format: ExportFormat) => FORMATS.find((f) => f.format === format) ?? FORMATS[0]!;
-
 export const defaultOptions = (tableName: string): ExportOptions => ({
   format: 'csv',
   delimiter: ',',
@@ -48,7 +48,19 @@ export const defaultOptions = (tableName: string): ExportOptions => ({
   quote_all: false,
   bom: false,
   table_name: tableName,
+  formula_guard: false,
 });
+
+/** Whether `v` is a binary value the UI holds only a preview of (its first 64 bytes). */
+const isPartial = (v: Value): boolean => v.t === 'Bytes' && v.v.len > v.v.preview.length;
+
+/** The partly loaded binary values of `rows` (array items included). */
+export function countPartialBinaries(rows: Value[][]): number {
+  const count = (v: Value): number => (v.t === 'Array' ? v.v.reduce((n, item) => n + count(item), 0) : isPartial(v) ? 1 : 0);
+  let n = 0;
+  for (const row of rows) for (const v of row) n += count(v);
+  return n;
+}
 
 /** A file name from `name`: characters Windows refuses become `_`. */
 export function safeFileName(name: string): string {
@@ -77,6 +89,7 @@ export function dataExportRequest(tab: ObjectTabRef, state: TableDataState): Exp
     rows: () => data.rows,
     loadedCount: data.rows.length,
     loadedNote: data.truncated_cells > 0 ? `${plural(data.truncated_cells, 'value')} of this page are cut; "All rows" reads them whole.` : null,
+    partialBinaries: countPartialBinaries(data.rows),
     all: { kind: 'table', connectionId: tab.connectionId, obj: tab.objectRef, sort: state.sort, filter: state.filter },
     allUnavailable: null,
   };
@@ -112,7 +125,8 @@ export function queryExportRequest(tabId: string, at: number): ExportRequest | n
     rows: () => resultRows(result),
     loadedCount: result.rowCount,
     loadedNote: result.truncated ? `Only the first ${plural(result.rowCount, 'row')} were fetched.` : null,
-    all: unavailable || !planId ? null : { kind: 'query', connectionId, planId, index: result.index },
+    partialBinaries: countPartialBinaries(resultRows(result)),
+    all: unavailable || !planId ? null : { kind: 'query', tabId, connectionId, planId, index: result.index },
     allUnavailable: unavailable,
   };
 }
