@@ -6,7 +6,7 @@
 //! so zero dates (`0000-00-00`) and zero components survive unchanged.
 
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use mysql_async::consts::{ColumnFlags, ColumnType};
 use mysql_async::Column;
 use mysql_async::Value as My;
@@ -141,6 +141,15 @@ pub(crate) fn to_value_full(v: My, col: &Column, full_bytes: bool) -> Value {
         },
         v => to_value(v, col),
     }
+}
+
+/// [`to_value`] as a complete value ([`CellMode::Full`](dnt_core::driver::CellMode)): a
+/// binary value keeps every byte (the export path of [`to_value_full`]).
+pub(crate) fn to_full_value(v: My, col: &Column) -> FullValue {
+    // `to_value` builds `Bytes` only for binary columns, which `full_bytes` keeps whole,
+    // so the result is always complete.
+    FullValue::try_from_value(to_value_full(v, col, true))
+        .expect("binary values are read whole with full_bytes")
 }
 
 pub(crate) fn to_value(v: My, col: &Column) -> Value {
@@ -437,6 +446,30 @@ mod tests {
                 type_name: "geometry".into(),
                 text: "001f".into()
             }
+        );
+    }
+
+    #[test]
+    fn to_full_value_keeps_all_bytes() {
+        let bin = col(ColumnType::MYSQL_TYPE_BLOB).with_character_set(BINARY_CHARSET);
+        let f = to_full_value(My::Bytes(vec![7; 100]), &bin);
+        assert_eq!(f.as_bytes().unwrap().len(), 100);
+        // Everything else decodes exactly like `to_value`.
+        let text = col(ColumnType::MYSQL_TYPE_VAR_STRING).with_character_set(45);
+        assert_eq!(
+            to_full_value(bytes("Nguyễn"), &text).as_value(),
+            Some(&Value::Text("Nguyễn".into()))
+        );
+        assert!(to_full_value(My::NULL, &bin).is_null());
+        let bit = col(ColumnType::MYSQL_TYPE_BIT).with_character_set(BINARY_CHARSET);
+        assert_eq!(
+            to_full_value(My::Bytes(vec![0xAA]), &bit).as_bytes(),
+            Some(&[0xAA][..])
+        );
+        let geo = col(ColumnType::MYSQL_TYPE_GEOMETRY).with_character_set(BINARY_CHARSET);
+        assert_eq!(
+            to_full_value(My::Bytes(vec![0, 0x1F]), &geo).to_display(),
+            to_value(My::Bytes(vec![0, 0x1F]), &geo)
         );
     }
 

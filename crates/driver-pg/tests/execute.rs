@@ -1,11 +1,11 @@
 use dnt_core::driver::{
-    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices, Session,
-    StmtOutcome, MAX_SERVER_NOTICES,
+    CellMode, ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices,
+    Session, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::sql::classify;
 use dnt_core::tx::TxState;
-use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::time::{Duration, Instant};
@@ -1480,5 +1480,97 @@ async fn user_cancel_of_stuck_statement_abandons() {
         );
         assert_ne!(backend_pid(&s).await, pid, "{t:?}: same backend");
         kill(t, pid).await;
+    }
+}
+
+/// Collects complete values ([`CellMode::Full`]); display rows must not arrive.
+#[derive(Debug, Default)]
+struct FullCollect {
+    rows: Vec<Vec<FullValue>>,
+}
+
+impl RowSink for FullCollect {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {
+        panic!("rows() called in CellMode::Full");
+    }
+    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+        self.rows.extend(batch);
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+fn full_opts(max_cell_bytes: usize) -> ExecOptions {
+    ExecOptions {
+        cells: CellMode::Full { max_cell_bytes },
+        ..ExecOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn full_mode_reads_blob_intact() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let mut sink = FullCollect::default();
+        s.execute(
+            "SELECT decode(repeat('ab', 1048576), 'hex') AS b, \
+             ARRAY[decode(repeat('cd', 100), 'hex'), NULL] AS arr, 'Nguyễn'::text AS t",
+            full_opts(2 << 20),
+            &mut sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(sink.rows.len(), 1, "{t:?}");
+        let b = sink.rows[0][0].as_bytes().expect("bytea cell");
+        assert_eq!(b.len(), 1_048_576, "{t:?}");
+        assert!(b.iter().all(|&x| x == 0xab), "{t:?}");
+        assert_eq!(
+            sink.rows[0][1].as_value(),
+            Some(&Value::Array(vec![
+                Value::Bytes {
+                    len: 100,
+                    preview: vec![0xcd; 100]
+                },
+                Value::Null
+            ])),
+            "{t:?}"
+        );
+        assert_eq!(
+            sink.rows[0][2].as_value(),
+            Some(&Value::Text("Nguyễn".into())),
+            "{t:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_mode_rejects_oversized_cell() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        for sql in [
+            "SELECT decode(repeat('78', n), 'hex') AS b FROM (VALUES (1, 10), (2, 2000)) d(k, n) ORDER BY k",
+            "SELECT repeat('x', n) AS t FROM (VALUES (1, 10), (2, 2000)) d(k, n) ORDER BY k",
+            "SELECT ARRAY[decode(repeat('78', 600), 'hex'), decode(repeat('78', 600), 'hex')]",
+        ] {
+            let mut sink = FullCollect::default();
+            let res = s.execute(sql, full_opts(1024), &mut sink).await;
+            match res {
+                Err(DbError::Unsupported { feature, .. }) => {
+                    assert_eq!(feature, "cell larger than 1024 bytes", "{t:?}: {sql}")
+                }
+                other => panic!("{t:?}: {sql}: {other:?}"),
+            }
+            // Nothing cut reached the sink: only the small row, if any.
+            assert!(sink.rows.len() <= 1, "{t:?}: {} rows", sink.rows.len());
+            assert!(
+                sink.rows.iter().flatten().all(|v| v.byte_len() == 10),
+                "{t:?}"
+            );
+        }
+        // The session is still usable.
+        let (_, c) = run(&s, "SELECT 1").await.unwrap();
+        assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
     }
 }

@@ -1,16 +1,16 @@
 use crate::cancel::{send_cancel, CancelState, CancelTarget, PgCanceller, RunGuard};
-use crate::values::{column_meta, to_value, Raw};
+use crate::values::{column_meta, to_full_value, to_value, Raw};
 use crate::{close_conn, io_error, map_pg_error, open, take_notices, ConnectParams, PgConn};
 use async_trait::async_trait;
 use dnt_core::driver::{
-    CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
-    SharedSink, StmtOutcome, StopSignal,
+    check_cell_size, CancelHandle, CellMode, ExecOptions, ExecProgress, Introspector,
+    ResultSummary, RowSink, Session, SharedSink, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::sql::{leading_keywords, session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::{next_tx_state, StmtResult, TxState};
-use dnt_core::value::{ColumnMeta, Value};
+use dnt_core::value::{ColumnMeta, FullValue, Value};
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -262,6 +262,7 @@ impl PgSession {
         sink: &mut dyn RowSink,
         results: &mut Vec<ResultSummary>,
         emitted: &mut bool,
+        cell_error: &mut Option<DbError>,
     ) -> Result<(bool, bool), StmtError> {
         let shared = SharedSink::new(sink);
         let mut handle = &shared;
@@ -271,7 +272,8 @@ impl PgSession {
             opts,
             &mut handle,
             results,
-            emitted
+            emitted,
+            cell_error
         ));
         let expiry = async {
             match opts.timeout {
@@ -372,7 +374,9 @@ impl ToSql for TextParam<'_> {
 }
 
 /// Prepares one statement (for its column types), then streams its rows into `sink`, or
-/// runs it for its affected-row count when it returns no columns.
+/// runs it for its affected-row count when it returns no columns. `cell_error`: set when
+/// a cell was larger than [`CellMode::Full`] allows; the rows are still read to the end,
+/// and the error is reported once the statement is tracked.
 async fn run_statement(
     client: &Client,
     sql: &str,
@@ -380,6 +384,7 @@ async fn run_statement(
     sink: &mut dyn RowSink,
     results: &mut Vec<ResultSummary>,
     emitted: &mut bool,
+    cell_error: &mut Option<DbError>,
 ) -> Result<bool, tokio_postgres::Error> {
     let started = Instant::now();
     let stmt = client.prepare(sql).await?;
@@ -403,39 +408,74 @@ async fn run_statement(
     *emitted = true;
     let batch_size = opts.batch_size.max(1);
     let mut rows = std::pin::pin!(rows);
-    let mut batch: Vec<Vec<Value>> = Vec::with_capacity(batch_size.min(opts.max_rows.max(1)));
+    let cap = batch_size.min(opts.max_rows.max(1));
+    let mut batch: Vec<Vec<Value>> = Vec::new();
+    let mut full_batch: Vec<Vec<FullValue>> = Vec::new();
+    match opts.cells {
+        CellMode::Preview => batch.reserve(cap),
+        CellMode::Full { .. } => full_batch.reserve(cap),
+    }
     let mut row_count = 0u64;
     let mut truncated = false;
     while let Some(row) = rows.next().await {
         let row = row?;
-        // Past `max_rows` the rest of the set is still read, just discarded.
+        // Past `max_rows`, or once a cell was too large, the rest of the set is still
+        // read, just discarded.
+        if cell_error.is_some() {
+            continue;
+        }
         if row_count as usize >= opts.max_rows {
             truncated = true;
             continue;
         }
-        let values = types
-            .iter()
-            .enumerate()
-            .map(|(i, ty)| {
-                let raw = row.try_get::<_, Raw>(i).ok().and_then(|r| r.0);
-                match (to_value(ty, raw), raw) {
-                    // Export keeps every byte (bytea, or a domain over it).
-                    (Value::Bytes { len, .. }, Some(raw)) if opts.full_bytes => Value::Bytes {
-                        len,
-                        preview: raw.to_vec(),
-                    },
-                    (v, _) => v,
+        let raws = (0..types.len()).map(|i| row.try_get::<_, Raw>(i).ok().and_then(|r| r.0));
+        match opts.cells {
+            CellMode::Preview => {
+                let values = types
+                    .iter()
+                    .zip(raws)
+                    .map(|(ty, raw)| match (to_value(ty, raw), raw) {
+                        // Export keeps every byte (bytea, or a domain over it).
+                        (Value::Bytes { len, .. }, Some(raw)) if opts.full_bytes => Value::Bytes {
+                            len,
+                            preview: raw.to_vec(),
+                        },
+                        (v, _) => v,
+                    })
+                    .collect();
+                batch.push(values);
+                if batch.len() >= batch_size {
+                    sink.rows(std::mem::take(&mut batch));
                 }
-            })
-            .collect();
-        batch.push(values);
-        row_count += 1;
-        if batch.len() >= batch_size {
-            sink.rows(std::mem::take(&mut batch));
+            }
+            CellMode::Full { max_cell_bytes } => {
+                let values: Vec<FullValue> = types
+                    .iter()
+                    .zip(raws)
+                    .map(|(ty, raw)| to_full_value(ty, raw))
+                    .collect();
+                if let Some(e) = values
+                    .iter()
+                    .find_map(|v| check_cell_size(v, max_cell_bytes).err())
+                {
+                    // Never a cut value: no further row reaches the sink.
+                    *cell_error = Some(e);
+                    full_batch.clear();
+                    continue;
+                }
+                full_batch.push(values);
+                if full_batch.len() >= batch_size {
+                    sink.full_rows(std::mem::take(&mut full_batch));
+                }
+            }
         }
+        row_count += 1;
     }
     if !batch.is_empty() {
         sink.rows(batch);
+    }
+    if !full_batch.is_empty() {
+        sink.full_rows(full_batch);
     }
     finish(sink, results, started, None, row_count, truncated);
     Ok(true)
@@ -768,6 +808,8 @@ impl PgSession {
                 return Err(not_sent);
             }
         }
+        // Only set once rows were emitted, and such a statement is never re-run.
+        let mut cell_error = None;
         loop {
             let mut emitted = false;
             let res = self
@@ -779,6 +821,7 @@ impl PgSession {
                     sink,
                     &mut outcome.results,
                     &mut emitted,
+                    &mut cell_error,
                 )
                 .await;
             let err = match res {
@@ -889,6 +932,10 @@ impl PgSession {
             }
         }
         self.track_after(kind, stmt);
+        // The statement ran (and is tracked); only its rows were refused.
+        if let Some(e) = cell_error {
+            return Err(e);
+        }
         Ok(outcome)
     }
 }

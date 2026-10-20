@@ -81,6 +81,18 @@ pub enum CellMode {
     Full { max_cell_bytes: usize },
 }
 
+/// [`CellMode::Full`]: a cell whose [`FullValue::byte_len`] exceeds `max_cell_bytes` is
+/// an error that stops the statement; it is never cut.
+pub fn check_cell_size(v: &FullValue, max_cell_bytes: usize) -> Result<(), DbError> {
+    if v.byte_len() > max_cell_bytes {
+        return Err(DbError::Unsupported {
+            feature: format!("cell larger than {max_cell_bytes} bytes"),
+            version: String::new(),
+        });
+    }
+    Ok(())
+}
+
 impl Default for ExecOptions {
     fn default() -> Self {
         ExecOptions {
@@ -373,6 +385,22 @@ mod tests {
         );
         assert_eq!(o.cancel_grace, DEFAULT_CANCEL_GRACE);
         assert!(!o.stop.is_stopped());
+    }
+
+    #[test]
+    fn oversized_cell_is_an_error() {
+        assert!(check_cell_size(&FullValue::bytes(vec![0u8; 1024]), 1024).is_ok());
+        let err = check_cell_size(&FullValue::bytes(vec![0u8; 1025]), 1024);
+        assert!(
+            matches!(
+                &err,
+                Err(DbError::Unsupported { feature, version })
+                    if feature == "cell larger than 1024 bytes" && version.is_empty()
+            ),
+            "{err:?}"
+        );
+        let text = FullValue::try_from_value(Value::Text("a".repeat(11))).unwrap();
+        assert!(check_cell_size(&text, 10).is_err());
     }
 
     #[test]

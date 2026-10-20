@@ -155,6 +155,32 @@ impl FullValue {
     pub fn is_null(&self) -> bool {
         matches!(self.0, Repr::Plain(Value::Null))
     }
+
+    /// Size of the cell's payload in bytes: the binary data, or the UTF-8 length of its
+    /// text (summed over an `Array`). Numbers and booleans count as 0.
+    pub fn byte_len(&self) -> usize {
+        match &self.0 {
+            Repr::Bytes(b) => b.len(),
+            Repr::Plain(v) => value_byte_len(v),
+        }
+    }
+}
+
+fn value_byte_len(v: &Value) -> usize {
+    match v {
+        Value::Null | Value::Bool(_) | Value::Int(_) | Value::UInt(_) | Value::Float(_) => 0,
+        Value::Bytes { preview, .. } => preview.len(),
+        Value::Decimal(s)
+        | Value::Text(s)
+        | Value::Json(s)
+        | Value::Uuid(s)
+        | Value::Date(s)
+        | Value::Time(s)
+        | Value::DateTime(s)
+        | Value::TimestampTz(s)
+        | Value::Other { text: s, .. } => s.len(),
+        Value::Array(items) => items.iter().map(value_byte_len).sum(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
@@ -308,6 +334,20 @@ mod tests {
             FullValue::try_from_value(arr.clone()).unwrap().as_value(),
             Some(&arr)
         );
+    }
+    #[test]
+    fn byte_len_counts_payload_bytes() {
+        assert_eq!(FullValue::bytes(vec![0u8; 1000]).byte_len(), 1000);
+        let full = |v| FullValue::try_from_value(v).unwrap();
+        assert_eq!(full(Value::Text("Nguyễn".into())).byte_len(), 8);
+        assert_eq!(full(Value::Json("{}".into())).byte_len(), 2);
+        assert_eq!(full(Value::Int(i64::MAX)).byte_len(), 0);
+        assert_eq!(full(Value::Null).byte_len(), 0);
+        let arr = Value::Array(vec![
+            Value::bytes(&[1; 40]),
+            Value::Array(vec![Value::Text("abc".into())]),
+        ]);
+        assert_eq!(full(arr).byte_len(), 43);
     }
     #[test]
     fn is_complete_looks_into_arrays() {

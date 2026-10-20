@@ -1,11 +1,11 @@
 use dnt_core::driver::{
-    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices, Session,
-    StmtOutcome, MAX_SERVER_NOTICES,
+    CellMode, ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices,
+    Session, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::sql::{classify, Dialect, MySqlMode, StatementKind};
 use dnt_core::tx::TxState;
-use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1787,5 +1787,87 @@ async fn timeout_in_tx_carries_was_in_tx() {
             other => panic!("{t:?}: {other:?}"),
         }
         run(&s, "ROLLBACK").await.unwrap();
+    }
+}
+
+/// Collects complete values ([`CellMode::Full`]); display rows must not arrive.
+#[derive(Debug, Default)]
+struct FullCollect {
+    rows: Vec<Vec<FullValue>>,
+}
+
+impl RowSink for FullCollect {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {
+        panic!("rows() called in CellMode::Full");
+    }
+    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+        self.rows.extend(batch);
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+fn full_opts(max_cell_bytes: usize) -> ExecOptions {
+    ExecOptions {
+        cells: CellMode::Full { max_cell_bytes },
+        ..ExecOptions::default()
+    }
+}
+
+#[tokio::test]
+async fn full_mode_reads_blob_intact() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let mut sink = FullCollect::default();
+        s.execute(
+            "SELECT CAST(REPEAT('ab', 524288) AS BINARY) AS b, 'Nguyễn' AS t, 42 AS n",
+            full_opts(2 << 20),
+            &mut sink,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(sink.rows.len(), 1, "{t:?}");
+        let b = sink.rows[0][0].as_bytes().expect("binary cell");
+        assert_eq!(b.len(), 1_048_576, "{t:?}");
+        assert!(b.chunks(2).all(|p| p == b"ab"), "{t:?}");
+        assert_eq!(
+            sink.rows[0][1].as_value(),
+            Some(&Value::Text("Nguyễn".into())),
+            "{t:?}"
+        );
+        assert_eq!(sink.rows[0][2].to_display(), Value::Int(42), "{t:?}");
+    }
+}
+
+#[tokio::test]
+async fn full_mode_rejects_oversized_cell() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        for sql in [
+            "SELECT CAST(REPEAT('x', n) AS BINARY) AS b \
+             FROM (SELECT 1 AS k, 10 AS n UNION ALL SELECT 2, 2000) d ORDER BY k",
+            "SELECT REPEAT('x', n) AS t \
+             FROM (SELECT 1 AS k, 10 AS n UNION ALL SELECT 2, 2000) d ORDER BY k",
+        ] {
+            let mut sink = FullCollect::default();
+            let res = s.execute(sql, full_opts(1024), &mut sink).await;
+            match res {
+                Err(DbError::Unsupported { feature, .. }) => {
+                    assert_eq!(feature, "cell larger than 1024 bytes", "{t:?}")
+                }
+                other => panic!("{t:?}: {other:?}"),
+            }
+            // Nothing cut reached the sink: only the small row, if any.
+            assert!(sink.rows.len() <= 1, "{t:?}: {} rows", sink.rows.len());
+            assert!(
+                sink.rows.iter().flatten().all(|v| v.byte_len() == 10),
+                "{t:?}"
+            );
+        }
+        // The session is still usable.
+        let (_, c) = run(&s, "SELECT 1").await.unwrap();
+        assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
     }
 }
