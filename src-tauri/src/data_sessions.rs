@@ -11,7 +11,10 @@
 //!   request under the same key cancels the one still running, and
 //!   [`SessionManager::data_cancel`] cancels it on demand, through the driver's cancel
 //!   (`KILL QUERY` / PostgreSQL cancel request);
-//! - closing the connection cancels the running requests and closes the idle sessions.
+//! - closing the connection cancels the running requests and closes the idle sessions;
+//!   an edit apply (which runs on a taken session, see `edit_plans`) is registered with
+//!   [`DataSessions::register_apply`] so closing can wait for it (at most
+//!   `SessionManager::apply_close_wait`) and then cancel it.
 //!
 //! # Cancels never reach a reused session
 //!
@@ -32,9 +35,10 @@ use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, Value};
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::{watch, Notify};
 use uuid::Uuid;
 
 /// Statement timeout of a data request when the connection sets no query timeout.
@@ -80,6 +84,48 @@ struct Request {
     phase: Phase,
 }
 
+/// How long closing waits, after cancelling a running edit apply, for it to end.
+const APPLY_ABORT_WAIT: Duration = Duration::from_secs(1);
+
+/// What closing needs of a running edit apply.
+struct ApplyCtl {
+    stop: StopSignal,
+    cancel: CancelHandle,
+    abort: Arc<Notify>,
+    /// Its sender is dropped when the apply ends.
+    done: watch::Receiver<()>,
+}
+
+impl ApplyCtl {
+    async fn ended(&mut self) {
+        // Nothing is ever sent: `changed` returns once the sender is dropped.
+        let _ = self.done.changed().await;
+    }
+}
+
+#[derive(Default)]
+struct Applies {
+    serial: u64,
+    running: HashMap<u64, ApplyCtl>,
+    /// Set by `end_applies`: no apply may start any more.
+    closing: bool,
+}
+
+/// A registered edit apply; dropping it unregisters it.
+pub(crate) struct ApplyGuard<'a> {
+    data: &'a DataSessions,
+    id: u64,
+    /// Notified when closing gives up waiting: the apply must stop now.
+    pub(crate) abort: Arc<Notify>,
+    _done: watch::Sender<()>,
+}
+
+impl Drop for ApplyGuard<'_> {
+    fn drop(&mut self) {
+        lock(&self.data.applies).running.remove(&self.id);
+    }
+}
+
 /// The data sessions of one connection runtime.
 #[derive(Default)]
 pub(crate) struct DataSessions {
@@ -88,6 +134,8 @@ pub(crate) struct DataSessions {
     /// serial) was cancelled or superseded.
     requests: Mutex<HashMap<String, Request>>,
     serial: AtomicU64,
+    /// Edit applies running on this connection.
+    applies: Mutex<Applies>,
 }
 
 /// Stops a request taken out of the map.
@@ -109,6 +157,70 @@ impl DataSessions {
         }
         let idle: Vec<Idle> = lock(&self.idle).drain().flat_map(|(_, v)| v).collect();
         futures_util::future::join_all(idle.into_iter().map(|i| close_quietly(i.session))).await;
+    }
+
+    /// Registers an edit apply about to run on `session` with `stop` in its options.
+    /// `None` once the connection is closing (`closed` is the runtime's flag, set before
+    /// `end_applies` runs): nothing may be sent then.
+    pub(crate) fn register_apply(
+        &self,
+        closed: &AtomicBool,
+        session: &dyn Session,
+        stop: &StopSignal,
+    ) -> Option<ApplyGuard<'_>> {
+        let mut applies = lock(&self.applies);
+        if applies.closing || closed.load(Ordering::SeqCst) {
+            return None;
+        }
+        applies.serial += 1;
+        let id = applies.serial;
+        let abort = Arc::new(Notify::new());
+        let (tx, rx) = watch::channel(());
+        applies.running.insert(
+            id,
+            ApplyCtl {
+                stop: stop.clone(),
+                cancel: session.cancel_handle(),
+                abort: Arc::clone(&abort),
+                done: rx,
+            },
+        );
+        Some(ApplyGuard {
+            data: self,
+            id,
+            abort,
+            _done: tx,
+        })
+    }
+
+    /// Closing: refuses new applies, waits up to `wait` for each running one, then
+    /// cancels it (stop signal, the driver's cancel, and `abort`, which makes the apply
+    /// report what is known and close its session) and waits briefly for it to end.
+    pub(crate) async fn end_applies(&self, wait: Duration) {
+        let running: Vec<ApplyCtl> = {
+            let mut applies = lock(&self.applies);
+            applies.closing = true;
+            applies.running.drain().map(|(_, c)| c).collect()
+        };
+        futures_util::future::join_all(running.into_iter().map(|mut c| async move {
+            if tokio::time::timeout(wait, c.ended()).await.is_ok() {
+                return;
+            }
+            tracing::warn!("an edit apply is still running; cancelling it to close");
+            c.stop.stop();
+            c.abort.notify_one();
+            let cancel = Arc::clone(&c.cancel);
+            tokio::spawn(async move {
+                let _ = cancel.cancel().await;
+            });
+            if tokio::time::timeout(APPLY_ABORT_WAIT, c.ended())
+                .await
+                .is_err()
+            {
+                tracing::warn!("a cancelled edit apply did not end; closing without it");
+            }
+        }))
+        .await;
     }
 
     /// Cancels the request of `key` (running or still opening); whether there was one.
@@ -562,6 +674,13 @@ impl SessionManager {
         } else {
             tokio::spawn(close_quietly(taken.session));
         }
+    }
+
+    /// Overrides how long closing a connection waits for a running edit apply before it
+    /// cancels it (default `SLOT_CLOSE_WAIT`; tests).
+    pub fn with_apply_close_wait(mut self, wait: Duration) -> Self {
+        self.apply_close_wait = wait;
+        self
     }
 
     /// Overrides [`DATA_READ_TIMEOUT`] and the page bounds (tests).

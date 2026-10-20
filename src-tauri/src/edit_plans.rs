@@ -38,6 +38,17 @@
 //! A session goes back to the pool only after a commit or a conflict's clean rollback:
 //! after a failed statement a cancel request may still be on its way to it.
 //!
+//! # Closing the connection mid-apply
+//!
+//! A running apply is registered with the connection's data sessions. Closing the
+//! connection waits for it (at most `SessionManager::apply_close_wait`, by default
+//! `SLOT_CLOSE_WAIT`), then cancels it: the statement in flight is abandoned and the
+//! apply reports where it was (spec §4.2d) instead of an error. In a transaction before
+//! `COMMIT` was sent: [`ApplyOutcome::RolledBack`] (the session is closed, so the server
+//! rolls back); in `COMMIT`, or in a statement without a transaction:
+//! [`ApplyOutcome::Unknown`]; during the checks of a plan without a transaction (nothing
+//! sent): `PartiallyApplied { applied: 0 }`. The session is closed, never pooled.
+//!
 //! MySQL counts changed rows, not matched ones: an UPDATE that reports 0 rows is checked
 //! with its `recheck` (a locking `SELECT … FOR UPDATE`, which sees the latest committed
 //! row as the UPDATE did) before it is called a conflict. An INSERT's row is read back
@@ -48,7 +59,7 @@ use crate::commands::settings::saved_confirm_unbounded;
 use crate::data_sessions::{BoundedPage, FirstCell, DATA_CANCEL_GRACE};
 use crate::session_manager::{config_error, is_lost, lock, ConnectionRuntime, SessionManager};
 use dnt_core::config::{ConnectionConfig, EnvTag};
-use dnt_core::driver::{ExecOptions, Session};
+use dnt_core::driver::{ExecOptions, Session, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectRef, TableDetail};
 use dnt_core::sql::ident::{qualified_name, quote_ident};
@@ -59,8 +70,10 @@ use dnt_query::edit::{
     PlannedEdit, Protection,
 };
 use dnt_query::{redact, GuardCtx, Verdict};
+use futures_util::future::{select, Either};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::pin::pin;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
@@ -397,6 +410,15 @@ impl SessionManager {
             self.return_data_session(&rt, taken, true);
             return Err(stale("the session's SQL mode changed"));
         }
+        // Registered before anything is sent, so closing the connection finds it.
+        let stop = StopSignal::new();
+        let Some(running) = rt
+            .data
+            .register_apply(&rt.closed, taken.session.as_ref(), &stop)
+        else {
+            self.return_data_session(&rt, taken, false);
+            return Err(stale("the connection was closed or reopened"));
+        };
         let apply = Apply {
             s: taken.session.as_ref(),
             plan,
@@ -405,20 +427,32 @@ impl SessionManager {
                 max_rows: 2,
                 timeout: Some(self.edit_timeout(&rt)),
                 cancel_grace: DATA_CANCEL_GRACE,
+                stop,
                 ..ExecOptions::default()
             },
             cell_cap: self.data_cell_cap,
             page_cap: self.data_page_cap,
+            progress: Mutex::default(),
         };
-        let (result, clean) = if plan.atomic == Atomicity::Yes {
-            apply.atomic().await
-        } else {
-            apply.single().await
+        let run = async {
+            if plan.atomic == Atomicity::Yes {
+                apply.atomic().await
+            } else {
+                apply.single().await
+            }
+        };
+        let abort = running.abort.notified();
+        let (result, clean) = match select(pin!(abort), pin!(run)).await {
+            // Closing gave up waiting: the statement in flight is abandoned with `run`.
+            Either::Left(((), _run)) => (Ok(apply.closed_report()), false),
+            Either::Right((out, _)) => out,
         };
         if let Ok(r) = &result {
             tracing::info!(connection = %stored.conn, outcome = ?r.outcome, "edit plan applied");
         }
+        // The session is closed (or pooled) before closing is told the apply ended.
         self.return_data_session(&rt, taken, clean);
+        drop(running);
         result
     }
 }
@@ -431,6 +465,28 @@ struct Done {
     inserted: Option<Vec<Value>>,
 }
 
+/// Where a run of a plan is: what closing the connection mid-apply reports.
+#[derive(Debug, Clone, Copy, Default)]
+enum Stage {
+    /// `BEGIN` and the session checks: nothing of the plan was sent.
+    #[default]
+    Checks,
+    /// Statement `i` of the plan (with its recheck / read-back).
+    Statement(usize),
+    /// Rolling back after a conflict or a failed statement.
+    Rollback,
+    /// `COMMIT` is sent (or about to be).
+    Commit,
+}
+
+/// What a run did so far.
+#[derive(Default)]
+struct Progress {
+    stage: Stage,
+    statements: Vec<StmtApply>,
+    inserted: Vec<Vec<Value>>,
+}
+
 /// One run of a plan on its session.
 struct Apply<'a> {
     s: &'a dyn Session,
@@ -439,23 +495,99 @@ struct Apply<'a> {
     opts: ExecOptions,
     cell_cap: usize,
     page_cap: usize,
+    /// Kept outside the run's future, so it is still there when the run is abandoned.
+    progress: Mutex<Progress>,
 }
 
-fn report(
-    outcome: ApplyOutcome,
-    statements: Vec<StmtApply>,
-    inserted: Vec<Vec<Value>>,
-    error: Option<DbError>,
-) -> ApplyReport {
-    ApplyReport {
-        outcome,
-        statements,
-        inserted,
-        error: error.map(AppError::from),
+/// The error of what closing the connection cut off.
+fn closed_mid_apply(was_in_tx: bool, outcome_unknown: bool) -> DbError {
+    DbError::ConnectionLost {
+        was_in_tx,
+        outcome_unknown,
+        message: "the connection was closed while the changes were being applied".into(),
     }
 }
 
 impl Apply<'_> {
+    fn stage(&self, stage: Stage) {
+        lock(&self.progress).stage = stage;
+    }
+
+    /// Records a statement that ended, with an INSERT's row when it counts.
+    fn record(&self, stmt: StmtApply, inserted: Option<Vec<Value>>) {
+        let mut p = lock(&self.progress);
+        p.statements.push(stmt);
+        p.inserted.extend(inserted);
+    }
+
+    /// The report of the statements recorded so far; inserted rows only when something
+    /// may have been applied.
+    fn report(&self, outcome: ApplyOutcome, error: Option<DbError>) -> ApplyReport {
+        let mut p = lock(&self.progress);
+        let statements = std::mem::take(&mut p.statements);
+        let inserted = match outcome {
+            ApplyOutcome::Committed | ApplyOutcome::Unknown { .. } => {
+                std::mem::take(&mut p.inserted)
+            }
+            _ => Vec::new(),
+        };
+        ApplyReport {
+            outcome,
+            statements,
+            inserted,
+            error: error.map(AppError::from),
+        }
+    }
+
+    /// The report of a run abandoned because the connection is closing (see the module
+    /// docs).
+    fn closed_report(&self) -> ApplyReport {
+        let stage = lock(&self.progress).stage;
+        let atomic = self.plan.atomic == Atomicity::Yes;
+        match stage {
+            Stage::Checks if atomic => self.report(
+                ApplyOutcome::RolledBack,
+                Some(closed_mid_apply(true, false)),
+            ),
+            Stage::Checks => self.report(
+                ApplyOutcome::PartiallyApplied { applied: 0 },
+                Some(closed_mid_apply(false, false)),
+            ),
+            Stage::Statement(i) => {
+                let (outcome, error) = if atomic {
+                    (ApplyOutcome::RolledBack, closed_mid_apply(true, false))
+                } else {
+                    (
+                        ApplyOutcome::Unknown { at: count(i) },
+                        closed_mid_apply(false, true),
+                    )
+                };
+                if let Some(st) = self.plan.stmts.get(i) {
+                    self.record(
+                        StmtApply {
+                            index: st.index,
+                            affected: None,
+                            error: Some(AppError::from(error)),
+                            conflict: false,
+                        },
+                        None,
+                    );
+                }
+                self.report(outcome, None)
+            }
+            Stage::Rollback => self.report(
+                ApplyOutcome::RolledBack,
+                Some(closed_mid_apply(true, false)),
+            ),
+            Stage::Commit => self.report(
+                ApplyOutcome::Unknown {
+                    at: count(self.plan.stmts.len()),
+                },
+                Some(closed_mid_apply(true, true)),
+            ),
+        }
+    }
+
     /// Runs `sql` (one statement of kind `kind`): the rows it affected (as the driver
     /// reports them) and its first result's rows.
     async fn exec(
@@ -588,70 +720,60 @@ impl Apply<'_> {
             }
             return (Err(e), false);
         }
-        let mut statements = Vec::with_capacity(self.plan.stmts.len());
-        let mut inserted = Vec::new();
-        for st in &self.plan.stmts {
+        for (i, st) in self.plan.stmts.iter().enumerate() {
+            self.stage(Stage::Statement(i));
             match self.statement(st, true).await {
                 Ok(done) => {
                     let conflict = done.affected != Some(st.expect_affected);
-                    statements.push(StmtApply {
+                    let stmt = StmtApply {
                         index: st.index,
                         affected: done.affected.map(|n| n as f64),
                         error: None,
                         conflict,
-                    });
+                    };
                     if conflict {
+                        self.record(stmt, None);
+                        self.stage(Stage::Rollback);
                         let clean = self.rollback().await;
-                        return (
-                            Ok(report(ApplyOutcome::RolledBack, statements, vec![], None)),
-                            clean,
-                        );
+                        return (Ok(self.report(ApplyOutcome::RolledBack, None)), clean);
                     }
-                    inserted.extend(done.inserted);
+                    self.record(stmt, done.inserted);
                 }
                 Err(e) => {
                     // Not committed: rolled back here, or by the server once the
                     // connection is gone. Either way the session is closed (see above).
-                    if !is_lost(&e) {
+                    let lost = is_lost(&e);
+                    self.record(
+                        StmtApply {
+                            index: st.index,
+                            affected: None,
+                            error: Some(AppError::from(e)),
+                            conflict: false,
+                        },
+                        None,
+                    );
+                    self.stage(Stage::Rollback);
+                    if !lost {
                         self.rollback().await;
                     }
-                    statements.push(StmtApply {
-                        index: st.index,
-                        affected: None,
-                        error: Some(AppError::from(e)),
-                        conflict: false,
-                    });
-                    return (
-                        Ok(report(ApplyOutcome::RolledBack, statements, vec![], None)),
-                        false,
-                    );
+                    return (Ok(self.report(ApplyOutcome::RolledBack, None)), false);
                 }
             }
         }
+        self.stage(Stage::Commit);
         match self.tx("COMMIT", TxControl::Commit).await {
             Ok(()) => (
-                Ok(report(ApplyOutcome::Committed, statements, inserted, None)),
+                Ok(self.report(ApplyOutcome::Committed, None)),
                 !self.s.in_transaction(),
             ),
             // A PostgreSQL COMMIT the server refused (a deferred constraint) rolled back.
-            Err(e @ DbError::Server { .. }) if self.plan.dialect == Dialect::Postgres => (
-                Ok(report(
-                    ApplyOutcome::RolledBack,
-                    statements,
-                    vec![],
-                    Some(e),
-                )),
-                false,
-            ),
+            Err(e @ DbError::Server { .. }) if self.plan.dialect == Dialect::Postgres => {
+                (Ok(self.report(ApplyOutcome::RolledBack, Some(e))), false)
+            }
             Err(e) => {
                 let at = count(self.plan.stmts.len());
                 (
-                    Ok(report(
-                        ApplyOutcome::Unknown { at },
-                        statements,
-                        inserted,
-                        Some(e),
-                    )),
+                    Ok(self.report(ApplyOutcome::Unknown { at }, Some(e))),
                     false,
                 )
             }
@@ -686,6 +808,7 @@ impl Apply<'_> {
                 false,
             );
         }
+        self.stage(Stage::Statement(0));
         match self.statement(st, false).await {
             Ok(done) => {
                 let replaced = self.s.reconnects() != reconnects;
@@ -704,10 +827,11 @@ impl Apply<'_> {
                     conflict,
                 };
                 let inserted = match outcome {
-                    ApplyOutcome::Committed => done.inserted.into_iter().collect(),
-                    _ => vec![],
+                    ApplyOutcome::Committed => done.inserted,
+                    _ => None,
                 };
-                (Ok(report(outcome, vec![stmt], inserted, None)), clean)
+                self.record(stmt, inserted);
+                (Ok(self.report(outcome, None)), clean)
             }
             Err(e) => {
                 let outcome = if outcome_unknown(&e) {
@@ -715,13 +839,16 @@ impl Apply<'_> {
                 } else {
                     ApplyOutcome::PartiallyApplied { applied: 0 }
                 };
-                let stmt = StmtApply {
-                    index: st.index,
-                    affected: None,
-                    error: Some(AppError::from(e)),
-                    conflict: false,
-                };
-                (Ok(report(outcome, vec![stmt], vec![], None)), false)
+                self.record(
+                    StmtApply {
+                        index: st.index,
+                        affected: None,
+                        error: Some(AppError::from(e)),
+                        conflict: false,
+                    },
+                    None,
+                );
+                (Ok(self.report(outcome, None)), false)
             }
         }
     }

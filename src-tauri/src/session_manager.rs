@@ -331,6 +331,8 @@ pub struct SessionManager {
     pub(crate) data_timeout: Duration,
     pub(crate) data_cell_cap: usize,
     pub(crate) data_page_cap: usize,
+    /// How long `close` waits for a running edit apply before it cancels it.
+    pub(crate) apply_close_wait: Duration,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -375,6 +377,7 @@ impl SessionManager {
             data_timeout: crate::data_sessions::DATA_READ_TIMEOUT,
             data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,
             data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
+            apply_close_wait: SLOT_CLOSE_WAIT,
         }
     }
 
@@ -543,12 +546,12 @@ impl SessionManager {
         };
         guard.done = true;
         let Some(replaced) = installed else {
-            rt.shutdown().await;
+            rt.shutdown(SLOT_CLOSE_WAIT).await;
             return Err(DbError::cancelled());
         };
         if let Some(old) = replaced {
             // Cannot normally happen (every open/close bumps the generation); never leak it.
-            old.shutdown().await;
+            old.shutdown(SLOT_CLOSE_WAIT).await;
         }
         if let Err(e) = self.repo.touch_connected(id) {
             tracing::warn!(connection = %id, error = %e, "could not record the connection time");
@@ -714,7 +717,7 @@ impl SessionManager {
             .remove(&id);
         lock(&self.pending).remove(&id);
         if let Some(rt) = rt {
-            rt.shutdown().await;
+            rt.shutdown(self.apply_close_wait).await;
         }
         self.plans.drop_conn(id);
         self.edit_plans.drop_conn(id);
@@ -1178,8 +1181,10 @@ impl ConnectionRuntime {
     /// Makes the runtime terminal: stops the SchemaCache task and closes every session and
     /// the tunnel. A metadata call holding the link longer than `SHUTDOWN_LOCK_TIMEOUT`
     /// keeps its sessions until it returns (they are dropped with the runtime); the
-    /// tunnel is closed regardless, and the call finds the runtime closed.
-    async fn shutdown(&self) {
+    /// tunnel is closed regardless, and the call finds the runtime closed. A running edit
+    /// apply gets up to `apply_wait` to end before it is cancelled (it then reports what
+    /// is known, see `edit_plans`).
+    async fn shutdown(&self, apply_wait: Duration) {
         {
             let mut tasks = lock(&self.schema_tasks);
             self.closed.store(true, Ordering::SeqCst);
@@ -1192,9 +1197,12 @@ impl ConnectionRuntime {
         }
         // `closed` is set: no tab slot can be created any more.
         let tabs = self.queries.drain();
-        futures_util::future::join_all(
-            tabs.into_iter()
-                .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
+        futures_util::future::join(
+            futures_util::future::join_all(
+                tabs.into_iter()
+                    .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
+            ),
+            self.data.end_applies(apply_wait),
         )
         .await;
         self.data.shutdown().await;

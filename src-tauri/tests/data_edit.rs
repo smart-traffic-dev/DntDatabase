@@ -37,7 +37,7 @@ use uuid::Uuid;
 /// What the fake server holds and answers, and what it saw.
 struct Server {
     detail: Mutex<TableDetail>,
-    metas: Vec<ColumnMeta>,
+    metas: Mutex<Vec<ColumnMeta>>,
     dialect: Mutex<Dialect>,
     charset: Mutex<String>,
     /// Sessions opened so far (the metadata session is number 0).
@@ -61,6 +61,12 @@ struct Server {
     /// While set, reading the table detail waits for it (`detail_entered` says so).
     detail_gate: Mutex<Option<Arc<Notify>>>,
     detail_entered: Notify,
+    /// A statement starting with this hangs (ignoring cancels) until the `Notify`, if
+    /// any, is notified; `hang_entered` says it started.
+    hang: Mutex<Option<(String, Option<Arc<Notify>>)>>,
+    hang_entered: Notify,
+    /// Session numbers in the order they were closed.
+    closed: Mutex<Vec<usize>>,
 }
 
 /// A write that reports no affected count.
@@ -75,7 +81,10 @@ impl Server {
             detail_gate: Mutex::default(),
             detail_entered: Notify::new(),
             detail: Mutex::new(items(engine)),
-            metas: vec![meta("id"), meta("qty")],
+            metas: Mutex::new(vec![meta("id"), meta("qty")]),
+            hang: Mutex::default(),
+            hang_entered: Notify::new(),
+            closed: Mutex::default(),
             dialect: Mutex::new(Dialect::MYSQL),
             charset: Mutex::new("utf8mb4".into()),
             sessions: AtomicUsize::new(0),
@@ -271,6 +280,20 @@ impl Session for FakeSession {
                 s.reconnects.fetch_add(1, Ordering::SeqCst);
             }
         }
+        let hang = {
+            let mut h = s.hang.lock().unwrap();
+            match h.as_ref() {
+                Some((prefix, _)) if stmt.starts_with(prefix.as_str()) => h.take(),
+                _ => None,
+            }
+        };
+        if let Some((_, release)) = hang {
+            s.hang_entered.notify_one();
+            match release {
+                Some(release) => release.notified().await,
+                None => std::future::pending::<()>().await,
+            }
+        }
         let word = stmt.split_whitespace().next().unwrap_or("").to_uppercase();
         match word.as_str() {
             "START" | "BEGIN" => {
@@ -319,10 +342,12 @@ impl Session for FakeSession {
                 };
                 Ok(result(sink, &[meta("1")], rows))
             }
-            "SELECT" if stmt.contains("LIMIT 0") => Ok(result(sink, &s.metas, vec![])),
+            "SELECT" if stmt.contains("LIMIT 0") => {
+                Ok(result(sink, &s.metas.lock().unwrap(), vec![]))
+            }
             "SELECT" => Ok(result(
                 sink,
-                &s.metas,
+                &s.metas.lock().unwrap(),
                 vec![vec![Value::Int(41), Value::Int(5)]],
             )),
             _ => Ok(done(None)),
@@ -352,6 +377,7 @@ impl Session for FakeSession {
         Ok(())
     }
     async fn close(self: Box<Self>) {
+        self.server.closed.lock().unwrap().push(self.number);
         self.server.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -1001,4 +1027,192 @@ async fn tunnel_replaced_during_apply_checks_is_stale() {
         "{:?}",
         f.server.since(before)
     );
+}
+
+// ---- closing the connection mid-apply, stale dialect (Task 9) ------------------------
+
+/// `f` with closing waiting at most `wait` for a running apply.
+fn closing_after(f: Fixture, wait: Duration) -> Fixture {
+    Fixture {
+        sm: f.sm.with_apply_close_wait(wait),
+        ..f
+    }
+}
+
+/// Runs `edit_apply(plan)` and, once a statement starting with `hang_at` hangs, closes
+/// the connection; the apply's report, and the number of the session it ran on.
+async fn close_during_apply(f: &Fixture, plan: Uuid, hang_at: &str) -> (ApplyReport, usize) {
+    *f.server.hang.lock().unwrap() = Some((hang_at.to_string(), None));
+    let (r, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(f.sm.edit_apply(plan, false), async {
+            f.server.hang_entered.notified().await;
+            f.sm.close(f.id).await;
+        })
+    })
+    .await
+    .expect("closing ends the apply");
+    let session = f
+        .server
+        .executed
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|(_, s)| s.starts_with(hang_at))
+        .map(|(n, _)| *n)
+        .unwrap();
+    (r.expect("a report, not an error"), session)
+}
+
+/// Whether session `n` was closed (not pooled).
+async fn was_closed(f: &Fixture, n: usize) -> bool {
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    f.server.closed.lock().unwrap().contains(&n)
+}
+
+/// Closing the connection while an apply runs ends it with what is known (spec §4.2d):
+/// stuck before `COMMIT` was sent, nothing is committed (the server rolls back when the
+/// session goes); stuck in `COMMIT`, it may have committed. The session is closed.
+#[tokio::test]
+async fn close_connection_during_apply_reports_outcome() {
+    // Stuck in statement 2 of 3.
+    let f = closing_after(fixture().await, Duration::from_millis(100));
+    let p = f.sm.edit_preview(f.id, updates(3)).await.unwrap();
+    let before = f.server.executed().len();
+    let (r, session) = close_during_apply(&f, p.plan_id, &p.statements[1]).await;
+    assert_eq!(r.outcome, ApplyOutcome::RolledBack, "{r:?}");
+    assert_eq!(r.statements.len(), 2, "{r:?}");
+    assert!(r.statements[0].error.is_none());
+    assert_eq!(r.statements[1].index, 1);
+    let err = r.statements[1]
+        .error
+        .as_ref()
+        .expect("statement 2 did not finish");
+    assert_eq!(err.kind, "connection_lost");
+    assert!(!err.outcome_unknown);
+    assert!(r.inserted.is_empty());
+    let sent = f.server.since(before);
+    assert!(!sent.contains(&p.statements[2]), "{sent:?}");
+    assert!(!sent.iter().any(|s| s == "COMMIT"), "{sent:?}");
+    assert!(was_closed(&f, session).await, "the apply session is closed");
+
+    // Stuck in COMMIT.
+    let f = closing_after(fixture().await, Duration::from_millis(100));
+    let p = f.sm.edit_preview(f.id, updates(2)).await.unwrap();
+    let (r, session) = close_during_apply(&f, p.plan_id, "COMMIT").await;
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 2 }, "{r:?}");
+    assert_eq!(r.statements.len(), 2);
+    assert!(r.statements.iter().all(|s| s.error.is_none()));
+    let err = r.error.as_ref().expect("the COMMIT's error");
+    assert_eq!(err.kind, "connection_lost");
+    assert!(err.outcome_unknown);
+    assert!(was_closed(&f, session).await, "the apply session is closed");
+}
+
+/// Without a transaction, a statement cut off by closing may or may not have run.
+#[tokio::test]
+async fn close_connection_during_non_atomic_apply_is_unknown() {
+    let f = closing_after(
+        fixture_with("MyISAM", None).await,
+        Duration::from_millis(100),
+    );
+    let p = f.sm.edit_preview(f.id, updates(1)).await.unwrap();
+    let (r, session) = close_during_apply(&f, p.plan_id, "UPDATE").await;
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 0 }, "{r:?}");
+    assert_eq!(r.statements.len(), 1);
+    let err = r.statements[0]
+        .error
+        .as_ref()
+        .expect("the statement's error");
+    assert_eq!(err.kind, "connection_lost");
+    assert!(err.outcome_unknown);
+    assert!(was_closed(&f, session).await, "the apply session is closed");
+}
+
+/// Closing waits (boundedly) for a running apply: one that ends within the wait is
+/// reported as it ended, and closing returns only afterwards.
+#[tokio::test]
+async fn close_connection_waits_for_a_running_apply() {
+    let f = closing_after(fixture().await, Duration::from_secs(5));
+    let p = f.sm.edit_preview(f.id, updates(2)).await.unwrap();
+    let release = Arc::new(Notify::new());
+    *f.server.hang.lock().unwrap() = Some((p.statements[1].clone(), Some(Arc::clone(&release))));
+    let applied = AtomicBool::new(false);
+    let (r, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            async {
+                let r = f.sm.edit_apply(p.plan_id, false).await;
+                applied.store(true, Ordering::SeqCst);
+                r
+            },
+            async {
+                f.server.hang_entered.notified().await;
+                let release = Arc::clone(&release);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    release.notify_one();
+                });
+                f.sm.close(f.id).await;
+                assert!(applied.load(Ordering::SeqCst), "close waited for the apply");
+            }
+        )
+    })
+    .await
+    .expect("no hang");
+    assert_eq!(r.unwrap().outcome, ApplyOutcome::Committed);
+}
+
+/// An atomic plan whose session's `sql_mode` turns on `NO_BACKSLASH_ESCAPES` after the
+/// session was taken (seen by the check inside the transaction): a literal with `\`
+/// would be read differently, so the plan is stale, nothing is written and the
+/// transaction is rolled back. (The change seen before the session is used is
+/// `dialect_change_makes_plan_stale`; without a transaction,
+/// `non_atomic_dialect_flip_between_check_and_write_is_stale`.)
+#[tokio::test]
+async fn sql_mode_change_makes_plan_stale() {
+    let f = fixture().await;
+    {
+        let mut d = f.server.detail.lock().unwrap();
+        let mut note = column("note", true);
+        note.db_type = "varchar(20)".into();
+        d.columns.push(note);
+    }
+    f.server.metas.lock().unwrap().push(ColumnMeta {
+        name: "note".into(),
+        db_type: "VARCHAR".into(),
+        logical: LogicalType::Text,
+        nullable: None,
+        origin_table: None,
+        origin_column: None,
+    });
+    let set = edits(vec![RowEdit::Update {
+        row: RowRef {
+            key: vec![("id".into(), Value::Int(1))],
+            original: vec![
+                ("id".into(), Value::Int(1)),
+                ("qty".into(), Value::Int(0)),
+                ("note".into(), Value::Text("x".into())),
+            ],
+            xmin: None,
+        },
+        set: vec![(
+            "note".into(),
+            CellInput::Text {
+                text: r"a\b".into(),
+            },
+        )],
+    }]);
+    let p = f.sm.edit_preview(f.id, set).await.unwrap();
+    assert_eq!(p.atomic, Atomicity::Yes);
+    assert!(p.statements[0].contains(r"'a\\b'"), "{:?}", p.statements);
+    f.server
+        .flip_dialect_after_check
+        .store(true, Ordering::SeqCst);
+    let before = f.server.executed().len();
+    let e = f.sm.edit_apply(p.plan_id, false).await.unwrap_err();
+    assert!(matches!(e, DbError::PlanStale { .. }), "{e:?}");
+    let sent = f.server.since(before);
+    assert!(!sent.iter().any(|s| s.starts_with("UPDATE")), "{sent:?}");
+    assert!(!sent.iter().any(|s| s == "COMMIT"), "{sent:?}");
+    assert!(sent.iter().any(|s| s == "ROLLBACK"), "{sent:?}");
 }
