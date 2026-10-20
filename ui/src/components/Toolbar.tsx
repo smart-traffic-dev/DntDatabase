@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useDialogs } from '../store/dialogs';
 import { ActionMenu, transferItems } from './ActionMenu';
 import { openNewQuery } from './newQuery';
-import { ChevronDownIcon, LogoIcon, TOOL_PATHS, ToolIcon } from './icons';
+import { ChevronDownIcon, TOOL_PATHS, ToolIcon } from './icons';
 
 const LATER = 'Coming in a later phase';
 
@@ -21,10 +21,6 @@ export function Toolbar() {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   return (
     <header className="toolbar">
-      <div className="brand">
-        <LogoIcon />
-        <span>DntDatabase</span>
-      </div>
       <div className="tool-split">
         <button
           type="button"

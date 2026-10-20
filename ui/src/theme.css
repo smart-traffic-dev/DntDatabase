@@ -30,9 +30,15 @@
   --warning-bg: #fff4d6;
   --warning-fg: #7a4b00;
   --current-stmt-bg: color-mix(in srgb, var(--studio-fg) 6%, transparent);
+  /* Title bar close button (Windows' red), hover / pressed; the glyph turns white. */
+  --titlebar-close-bg: #c42b1c;
+  --titlebar-close-bg-pressed: #c8433a;
+  --titlebar-close-fg: #fff;
 }
 
 .dark {
+  --titlebar-close-bg: #c42b1c;
+  --titlebar-close-bg-pressed: #b2382f;
   --danger-fg: #ff7b7f;
   --warning-bg: #3a3020;
   --warning-fg: #f0c674;

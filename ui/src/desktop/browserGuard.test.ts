@@ -5,9 +5,10 @@ let uninstall: () => void;
 let host: HTMLDivElement;
 
 beforeEach(() => {
-  uninstall = installBrowserGuard(window);
+  uninstall = installBrowserGuard(window, { allowReload: false });
   host = document.createElement('div');
   host.innerHTML = `
+    <p id="text">CREATE TABLE orders</p>
     <div class="chrome"><button type="button" id="btn">B</button><a id="link" href="https://example.com">x</a><img id="img" alt="" /></div>
     <input id="field" />
     <textarea id="area"></textarea>
@@ -133,7 +134,17 @@ describe('browser keys', () => {
   it('uninstall removes every listener', () => {
     uninstall();
     expect(key(el('btn'), 'F5').defaultPrevented).toBe(false);
-    uninstall = installBrowserGuard(window);
+    uninstall = installBrowserGuard(window, { allowReload: false });
+  });
+
+  it('dev builds keep F5 / Ctrl+R reload, and block the rest', () => {
+    uninstall();
+    uninstall = installBrowserGuard(window, { allowReload: true });
+    expect(key(el('btn'), 'F5').defaultPrevented).toBe(false);
+    expect(key(el('btn'), 'r', { ctrlKey: true }).defaultPrevented).toBe(false);
+    expect(key(el('btn'), 'R', { ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(false);
+    expect(key(el('btn'), 'p', { ctrlKey: true }).defaultPrevented).toBe(true);
+    expect(key(el('btn'), 'F12').defaultPrevented).toBe(true);
   });
 });
 
@@ -147,6 +158,20 @@ describe('context menu', () => {
   it('suppresses the browser menu on the chrome', () => {
     expect(menu(el('btn')).defaultPrevented).toBe(true);
     expect(menu(document.body).defaultPrevented).toBe(true);
+  });
+
+  it('keeps the native menu (Copy) over selected read-only text', () => {
+    const range = document.createRange();
+    range.selectNodeContents(el('text'));
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    try {
+      expect(menu(el('text')).defaultPrevented).toBe(false);
+    } finally {
+      selection?.removeAllRanges();
+    }
+    expect(menu(el('text')).defaultPrevented).toBe(true);
   });
 
   it('keeps the native menu (copy/paste) in fields', () => {

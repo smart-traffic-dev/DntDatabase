@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { useTabs } from '../store/tabs';
 import { LogoIcon } from './icons';
 import './titleBar.css';
@@ -47,25 +47,32 @@ export function TitleBar() {
   const [focused, setFocused] = useState(() => document.hasFocus());
   const title = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.title);
 
+  /** Re-reads the maximized state; replaced by the effect while mounted. */
+  const sync = useRef<() => void>(() => {});
+
   useEffect(() => {
     if (!win) return;
     let live = true;
-    const sync = () => {
-      win.isMaximized().then((m) => live && setMaximized(m), ignore);
+    // Only the latest request's reply is applied: replies can arrive out of order (rapid toggles).
+    let seq = 0;
+    sync.current = () => {
+      const mine = ++seq;
+      win.isMaximized().then((m) => live && mine === seq && setMaximized(m), ignore);
     };
-    sync();
+    sync.current();
     // Maximize / restore also happen outside the bar (Win+Up / Down, snap, restore from the taskbar).
-    const unResized = win.onResized(sync);
+    const unResized = win.onResized(() => sync.current());
     const unFocus = win.onFocusChanged(({ payload }) => live && setFocused(payload));
     return () => {
       live = false;
+      sync.current = () => {};
       for (const un of [unResized, unFocus]) void un.then((f) => f(), ignore);
     };
   }, [win]);
 
   const toggleMaximize = () => {
     if (!win) return;
-    win.toggleMaximize().then(() => win.isMaximized()).then(setMaximized, ignore);
+    win.toggleMaximize().then(() => sync.current(), ignore);
   };
 
   const onDragMouseDown = (e: MouseEvent) => {

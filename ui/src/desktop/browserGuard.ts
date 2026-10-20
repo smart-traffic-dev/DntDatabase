@@ -63,13 +63,19 @@ export function isBlockedKey(e: KeyboardEvent): boolean {
   return false;
 }
 
-function onKeyDown(e: KeyboardEvent) {
-  if (isBlockedKey(e)) e.preventDefault();
+/** F5 / Ctrl+F5 / Ctrl+R / Ctrl+Shift+R / the Refresh key. */
+export function isReloadKey(e: KeyboardEvent): boolean {
+  if (e.key === 'F5' || e.key === 'BrowserRefresh') return true;
+  return (e.ctrlKey || e.metaKey) && !e.altKey && keyOf(e) === 'r';
 }
 
 /** Bubble phase: the app's menus (tree, tabs, Monaco) run first and may check `defaultPrevented`. */
 function onContextMenu(e: MouseEvent) {
-  if (!closest(e.target, FIELD)) e.preventDefault();
+  if (closest(e.target, FIELD)) return;
+  // Selected read-only text (messages, DDL, dialog text) keeps the native menu for Copy.
+  const selected = (e.target instanceof Node ? e.target.ownerDocument : document)?.getSelection()?.toString() ?? '';
+  if (selected.trim()) return;
+  e.preventDefault();
 }
 
 /** Mouse buttons 3 / 4 navigate back / forward; button 1 starts autoscroll. */
@@ -106,8 +112,17 @@ function onDrop(e: DragEvent) {
   if (!closest(e.target, FIELD)) e.preventDefault();
 }
 
+export interface BrowserGuardOptions {
+  /** Let F5 / Ctrl+R reload the page (the Vite dev server: `import.meta.env.DEV`). */
+  allowReload?: boolean;
+}
+
 /** Installs the guard on `win`; returns the uninstaller. */
-export function installBrowserGuard(win: Window = window): () => void {
+export function installBrowserGuard(win: Window = window, { allowReload = import.meta.env.DEV }: BrowserGuardOptions = {}): () => void {
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (allowReload && isReloadKey(e)) return;
+    if (isBlockedKey(e)) e.preventDefault();
+  };
   const listeners: [string, (e: never) => void, AddEventListenerOptions][] = [
     ['keydown', onKeyDown, { capture: true }],
     ['contextmenu', onContextMenu, { capture: false }],

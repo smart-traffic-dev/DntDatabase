@@ -65,13 +65,13 @@
 
 /* Windows' close button: red on hover, white glyph. */
 .titlebar-btn.close:hover {
-  background: #c42b1c;
-  color: #fff;
+  background: var(--titlebar-close-bg);
+  color: var(--titlebar-close-fg);
 }
 
 .titlebar-btn.close:active {
-  background: #c8433a;
-  color: #fff;
+  background: var(--titlebar-close-bg-pressed);
+  color: var(--titlebar-close-fg);
 }
 
 /* Inactive window: dimmed title and glyphs, as the native frame does. */

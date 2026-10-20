@@ -47,6 +47,7 @@ beforeEach(() => {
   win.state.focus = [];
   useTabs.getState().reset();
   vi.clearAllMocks();
+  win.isMaximized.mockImplementation(async () => win.state.maximized);
 });
 
 describe('TitleBar', () => {
@@ -96,6 +97,41 @@ describe('TitleBar', () => {
     fireEvent.click(restore);
     await flush();
     expect(screen.getByRole('button', { name: 'Maximize' })).toBeInTheDocument();
+  });
+
+  it('rapid toggles: a stale isMaximized reply never overwrites a newer one', async () => {
+    render(<TitleBar />);
+    await flush();
+    const replies: ((m: boolean) => void)[] = [];
+    win.isMaximized.mockImplementation(() => new Promise<boolean>((r) => replies.push(r)));
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }));
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }));
+    await flush();
+    expect(win.toggleMaximize).toHaveBeenCalledTimes(2);
+    expect(replies).toHaveLength(2);
+    // The newer reply (restored) lands first, then the stale one (maximized).
+    await act(async () => replies[1]?.(false));
+    await act(async () => replies[0]?.(true));
+    await flush();
+    expect(screen.getByRole('button', { name: 'Maximize' })).toBeInTheDocument();
+  });
+
+  it('a resize reply after a toggle wins over the older toggle reply', async () => {
+    render(<TitleBar />);
+    await flush();
+    const replies: ((m: boolean) => void)[] = [];
+    win.isMaximized.mockImplementation(() => new Promise<boolean>((r) => replies.push(r)));
+    fireEvent.click(screen.getByRole('button', { name: 'Maximize' }));
+    await flush();
+    await act(async () => {
+      for (const h of win.state.resized) h({ payload: { width: 1, height: 1 } });
+    });
+    expect(replies).toHaveLength(2);
+    await act(async () => replies[1]?.(true));
+    await act(async () => replies[0]?.(false));
+    await flush();
+    expect(screen.getByRole('button', { name: 'Restore down' })).toBeInTheDocument();
   });
 
   it('starts with the real maximized state', async () => {
