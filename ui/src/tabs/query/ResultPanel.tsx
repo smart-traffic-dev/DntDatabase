@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import { plural } from '../../lib/plural';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
@@ -32,8 +32,10 @@ function cancelledText(run: TabRun): string | null {
   return ms === null ? 'Cancelled by user' : `Cancelled by user after ${(ms / 1000).toFixed(1)} s`;
 }
 
-/** The bottom half of a query tab: result tabs and Messages. */
-export function ResultPanel({ tabId }: { tabId: string }) {
+/** The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent. */
+export const ResultPanel = memo(ResultPanelView);
+
+function ResultPanelView({ tabId }: { tabId: string }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
   const setPanel = useQueryRun((s) => s.setPanel);
   const planAlive = usePlanAlive(tabId);

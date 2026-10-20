@@ -18,8 +18,8 @@ export const PLAN_GONE = 'This result is no longer linked to a plan; run the sta
  */
 export function usePlanAlive(tabId: string): boolean {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
-  const doc = useQueryDocs((s) => s.docs.get(tabId));
-  return planAlive(run, doc);
+  // A boolean selector, not the document: its text changes on every keystroke.
+  return useQueryDocs((s) => planAlive(run, s.docs.get(tabId)));
 }
 
 export interface RerunOptions {

@@ -1,8 +1,10 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
-import { useState } from 'react';
+import type * as Monaco from 'monaco-editor';
+import { memo, useEffect, useState } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
+import { editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
-import { ensureCompletion } from '../../query/completion/monacoProvider';
+import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
 import type { Engine } from '../../query/engine';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
@@ -38,11 +40,74 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   editor.addCommand(monaco.KeyCode.Escape, () => void stopQuery(tabId), 'dntRunning');
 }
 
+/**
+ * Editor options: one object for the app's lifetime (a new object per render makes
+ * @monaco-editor/react call `updateOptions` on every keystroke). Fonts come from the tokens.
+ */
+let editorOptions: Monaco.editor.IStandaloneEditorConstructionOptions | null = null;
+function options(): Monaco.editor.IStandaloneEditorConstructionOptions {
+  editorOptions ??= {
+    automaticLayout: true,
+    minimap: { enabled: false },
+    ...editorFontOptions(),
+    scrollBeyondLastLine: false,
+    renderWhitespace: 'none',
+    // No lightbulb / quick-fix actions: the error hover stays a plain message.
+    lightbulb: { enabled: 'off' as never },
+    // Our provider has the keywords and the schema: Monaco's own scan of every word of the
+    // model (on the editor worker, per keystroke) only competes with it and slows big scripts.
+    wordBasedSuggestions: 'off',
+    snippetSuggestions: 'none',
+    suggest: { showWords: false, showSnippets: false, filterGraceful: true, localityBonus: false },
+  };
+  return editorOptions;
+}
+
+/** The mounted editor of each tab: what it holds right now. */
+const editors = new Map<string, { getValue(): string }>();
+/**
+ * Per tab, the text the editor last held as far as React knows: what it typed (`onChange`)
+ * or the `value` it was last rendered with (applied without an `onChange`). Used when no
+ * editor instance is mounted yet.
+ */
+const shownText = new Map<string, string>();
+
+/**
+ * Re-render only when something the editor shows changed. Every keystroke updates the
+ * document in the store; re-rendering the editor for its own text is wasted work. The text
+ * is skipped only when it equals what the editor holds now: a text loaded from history or
+ * a file always reaches it, even one equal to an earlier typed text.
+ */
+function sameEditor(prev: SqlEditorProps, next: SqlEditorProps): boolean {
+  if (prev.engine !== next.engine || prev.doc.id !== next.doc.id) return false;
+  if (prev.doc.connectionId !== next.doc.connectionId || prev.doc.database !== next.doc.database) return false;
+  if ((prev.doc.sql === '') !== (next.doc.sql === '')) return false;
+  const id = next.doc.id;
+  const holds = editors.get(id)?.getValue() ?? shownText.get(id);
+  return next.doc.sql === holds;
+}
+
 /** The Monaco editor of a query document. Monaco itself is bundled by `monaco/setup.ts`. */
-export function SqlEditor({ doc, engine, onMount }: SqlEditorProps) {
+export const SqlEditor = memo(SqlEditorView, sameEditor);
+
+function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
   const monacoTheme = useDntMonacoTheme();
   // The placeholder lines up with the text: left edge of the content area, known once the editor is laid out.
   const [contentLeft, setContentLeft] = useState<number | null>(null);
+  const { connectionId, database } = doc;
+  // Load the schema for autocomplete as soon as the editor opens, not on the first suggestion.
+  useEffect(() => {
+    prefetchCompletion({ tabId: doc.id, connId: connectionId, db: database, engine });
+  }, [doc.id, connectionId, database, engine]);
+  // This render hands `doc.sql` to the editor as its value (applied without an onChange).
+  shownText.set(doc.id, doc.sql);
+  useEffect(
+    () => () => {
+      shownText.delete(doc.id);
+      editors.delete(doc.id);
+    },
+    [doc.id],
+  );
   return (
     <div className="sql-editor" data-testid="query-editor">
       {doc.sql === '' && (
@@ -61,24 +126,22 @@ export function SqlEditor({ doc, engine, onMount }: SqlEditorProps) {
         value={doc.sql}
         theme={monacoTheme.theme}
         beforeMount={monacoTheme.beforeMount}
-        onChange={(sql) => useQueryDocs.getState().update(doc.id, { sql: sql ?? '', dirty: true })}
+        onChange={(sql) => {
+          shownText.set(doc.id, sql ?? '');
+          useQueryDocs.getState().update(doc.id, { sql: sql ?? '', dirty: true });
+        }}
         onMount={(editor, monaco) => {
           ensureCompletion(monaco);
+          editors.set(doc.id, editor);
+          editor.onDidDispose(() => {
+            if (editors.get(doc.id) === editor) editors.delete(doc.id);
+          });
           setContentLeft(editor.getLayoutInfo().contentLeft);
           editor.onDidLayoutChange((l) => setContentLeft(l.contentLeft));
           bindRunKeys(doc.id, editor, monaco);
           onMount?.(editor, monaco);
         }}
-        options={{
-          automaticLayout: true,
-          minimap: { enabled: false },
-          fontFamily: "ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace",
-          fontSize: 13,
-          scrollBeyondLastLine: false,
-          renderWhitespace: 'none',
-          // No lightbulb / quick-fix actions: the error hover stays a plain message.
-          lightbulb: { enabled: 'off' as never },
-        }}
+        options={options()}
       />
     </div>
   );

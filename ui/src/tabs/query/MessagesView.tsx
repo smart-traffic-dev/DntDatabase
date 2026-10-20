@@ -20,9 +20,9 @@ const FOLLOW_SLACK = 80;
  * script does not re-render 10k rows on every run event.
  */
 export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
-  const doc = useQueryDocs((s) => s.docs.get(tabId));
-  const connectionId = doc?.connectionId ?? null;
-  const alive = planAlive(run, doc);
+  // Field selectors, not the document: its text changes on every keystroke.
+  const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
+  const alive = useQueryDocs((s) => planAlive(run, s.docs.get(tabId)));
   const ranges = useMemo(() => (run.plan ? stmtsByIndex(run.plan) : null), [run.plan]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const following = useRef(true);

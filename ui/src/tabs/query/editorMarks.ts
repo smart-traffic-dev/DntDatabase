@@ -3,11 +3,10 @@
 // editor text, which is what Monaco's model uses.
 import type * as Monaco from 'monaco-editor';
 import { useEffect, useMemo, useRef } from 'react';
-import { api } from '../../api';
 import type { PlanView } from '../../bindings';
+import { splitIncremental, type SplitState } from '../../query/completion/split';
 import { stmtsByIndex } from '../../query/plan';
 import type { Engine } from '../../query/engine';
-import { engineDialect } from '../../store/queryTabs';
 import type { TabRun } from '../../store/queryRun';
 import { currentStatement } from './format';
 
@@ -136,7 +135,8 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
   const planId = useRef<string | null>(null);
   planId.current = run.plan?.plan_id ?? null;
 
-  // Current statement: statement_ranges (debounced) + the cursor.
+  // Current statement: the local splitter (debounced, no IPC while typing) + the cursor.
+  // Display only: what runs is still cut by the backend when the run starts.
   useEffect(() => {
     if (!mounted) return;
     const { editor } = mounted;
@@ -144,8 +144,9 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
     highlight.current ??= editor.createDecorationsCollection();
     glyphs.current ??= editor.createDecorationsCollection();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    let alive = true;
-    let requests = 0;
+    // Local split (UI only, see split.ts), redone from the statement before the first edit.
+    let split: SplitState | null = null;
+    let changedFrom = 0;
     const paint = () => {
       const model = editor.getModel();
       const pos = editor.getPosition();
@@ -159,20 +160,19 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
       clearTimeout(timer);
       timer = setTimeout(() => {
         const sql = editor.getModel()?.getValue() ?? '';
-        const request = ++requests;
-        api
-          .statementRanges(sql, engineDialect(engine))
-          .then((r) => {
-            if (!alive || request !== requests) return;
-            ranges.current = r;
-            paint();
-          })
-          .catch(() => {});
+        split = splitIncremental(split, sql, engine, changedFrom);
+        changedFrom = Infinity;
+        ranges.current = split.ranges;
+        paint();
       }, HIGHLIGHT_DEBOUNCE_MS);
     };
     refresh();
     const subs = [
-      editor.onDidChangeModelContent(() => {
+      editor.onDidChangeModelContent((e) => {
+        // No offsets (no event data, an empty change list): split everything again.
+        const changes = e?.changes ?? [];
+        if (changes.length === 0) changedFrom = 0;
+        for (const c of changes) if (c.rangeOffset < changedFrom) changedFrom = c.rangeOffset;
         // Markers and "done" dots of the last run describe text that has changed (F08).
         const model = editor.getModel();
         if (model) mounted.monaco.editor.setModelMarkers(model, MARKER_OWNER, []);
@@ -183,7 +183,6 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
       editor.onDidChangeCursorPosition(paint),
     ];
     return () => {
-      alive = false;
       highlight.current?.clear();
       glyphs.current?.clear();
       highlight.current = null;

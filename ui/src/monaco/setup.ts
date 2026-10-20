@@ -9,6 +9,11 @@ import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution';
 import 'monaco-editor/esm/vs/basic-languages/mysql/mysql.contribution';
 import 'monaco-editor/esm/vs/basic-languages/pgsql/pgsql.contribution';
 import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import './monaco.css';
 
 self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
 loader.config({ monaco });
+
+// Monaco measures glyph widths once; a code font that finishes loading later would leave the
+// cursor and selections misaligned until it measures again.
+void document.fonts?.ready.then(() => monaco.editor.remeasureFonts());

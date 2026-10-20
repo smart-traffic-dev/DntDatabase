@@ -1,13 +1,12 @@
 // Monaco `CompletionItemProvider` for the query editor (spec §7.3), registered once for
 // both SQL languages; per model it asks `ctxOf` which tab, connection and database it serves.
 import type * as Monaco from 'monaco-editor';
-import { commands } from '../../bindings';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
-import { engineDialect, useQueryDocs } from '../../store/queryTabs';
+import { useQueryDocs } from '../../store/queryTabs';
 import type { Engine } from '../engine';
-import { localStatementRange } from './context';
 import { suggest, type Suggestion } from './provider';
+import { splitIncremental, type SplitState } from './split';
 
 export interface CompletionTarget {
   tabId: string;
@@ -36,76 +35,135 @@ function itemKind(monaco: typeof Monaco, kind: Suggestion['kind']): Monaco.langu
   }
 }
 
-async function ranges(text: string, engine: Engine): Promise<[number, number][]> {
-  try {
-    return await commands.statementRanges(text, engineDialect(engine));
-  } catch {
-    // No ranges: `analyze` still cuts the statement at `;`.
-    return [];
-  }
+/** `sortText` of the i-th item (keeps the provider's order), built once per index. */
+const sortTexts: string[] = [];
+const sortText = (i: number) => (sortTexts[i] ??= String(i).padStart(5, '0'));
+
+/** Starts loading the autocomplete data of a target (e.g. when its editor opens). Never waits. */
+export function prefetchCompletion(target: CompletionTarget): void {
+  const { connId, db, engine } = target;
+  if (!connId) return;
+  if (db) useCompletion.peekScope(connId, db);
+  if (db || engine === 'mysql') useCompletion.peekContainers(connId, db ?? '', engine);
 }
 
-/** Above this many UTF-16 code units (~1 MB) the text is not sent to `statement_ranges`. */
-const LARGE_TEXT = 1024 * 1024;
-
+/**
+ * Registers the provider. The hot path is synchronous: statement ranges come from the local
+ * splitter (cached per model version, no `statement_ranges` IPC per keystroke) and the scope
+ * from the completion cache. While the scope is still loading, keywords are returned at once
+ * with `incomplete` so Monaco asks again once the tables are there.
+ */
 export function registerCompletion(
   monaco: typeof Monaco,
   ctxOf: (model: unknown) => CompletionTarget | null,
 ): { dispose(): void } {
-  /** Statement ranges per model, reused while its version (and the engine) is unchanged. */
-  const rangeCache = new WeakMap<object, { version: number; engine: Engine; ranges: Promise<[number, number][]> }>();
-  const rangesOf = (model: Monaco.editor.ITextModel, text: string, engine: Engine) => {
+  /**
+   * Text and statement split per model, reused while its version is unchanged. `changedFrom`
+   * is the smallest offset edited since the last split (tracked from content events), so the
+   * next split only rescans from the statement boundary before it.
+   */
+  interface Snapshot {
+    version: number;
+    text: string;
+    split: SplitState;
+    changedFrom: number;
+    listener?: { dispose(): void };
+  }
+  const snapshots = new WeakMap<object, Snapshot>();
+  const snapshot = (model: Monaco.editor.ITextModel, engine: Engine): { text: string; ranges: [number, number][] } => {
     const version = model.getVersionId();
-    const hit = rangeCache.get(model);
-    if (hit && hit.version === version && hit.engine === engine) return hit.ranges;
-    const entry = { version, engine, ranges: ranges(text, engine) };
-    rangeCache.set(model, entry);
-    return entry.ranges;
+    let snap = snapshots.get(model);
+    if (snap && snap.version === version && snap.split.engine === engine) return { text: snap.text, ranges: snap.split.ranges };
+    const text = model.getValue();
+    if (!snap) {
+      snap = { version, text, split: splitIncremental(null, text, engine, 0), changedFrom: Infinity };
+      const s = snap;
+      // Without content events (tests' fake models) every new version is a full split.
+      if (typeof model.onDidChangeContent === 'function') {
+        s.listener = model.onDidChangeContent((e) => {
+          for (const c of e.changes) s.changedFrom = Math.min(s.changedFrom, c.rangeOffset);
+        });
+        model.onWillDispose?.(() => s.listener?.dispose());
+      } else s.changedFrom = 0;
+      snapshots.set(model, s);
+    } else {
+      snap.split = splitIncremental(snap.split, text, engine, Number.isFinite(snap.changedFrom) ? snap.changedFrom : 0);
+      snap.version = version;
+      snap.text = text;
+      snap.changedFrom = snap.listener ? Infinity : 0;
+    }
+    return { text: snap.text, ranges: snap.split.ranges };
+  };
+
+  /** The load each model's open suggest list waits for (one refresh per load, not per keystroke). */
+  const waiting = new WeakMap<object, Promise<unknown>>();
+  /**
+   * Once `load` settles, asks again in the editors of `model` whose suggest list is still
+   * open, so the tables appear without another keystroke. A closed list stays closed.
+   */
+  const refreshWhenLoaded = (model: Monaco.editor.ITextModel, load: Promise<unknown>) => {
+    if (waiting.get(model) === load) return;
+    waiting.set(model, load);
+    void load.then(() => {
+      if (waiting.get(model) !== load) return;
+      waiting.delete(model);
+      for (const editor of monaco.editor?.getEditors?.() ?? []) {
+        if (editor.getModel() !== model) continue;
+        if (!editor.getDomNode()?.querySelector('.suggest-widget.visible')) continue;
+        editor.trigger('dnt', 'editor.action.triggerSuggest', {});
+      }
+    });
   };
 
   const provider: Monaco.languages.CompletionItemProvider = {
     triggerCharacters: ['.'],
-    async provideCompletionItems(model, position, _context, token) {
+    provideCompletionItems(model, position, _context, token) {
       const target = ctxOf(model);
-      if (!target) return { suggestions: [] };
+      if (!target || token?.isCancellationRequested) return { suggestions: [] };
       const { connId, db, engine } = target;
-      const text = model.getValue();
+      const { text, ranges } = snapshot(model, engine);
       const offset = model.getOffsetAt(position);
-      const [stmtRanges, scope, containers] = await Promise.all([
-        text.length > LARGE_TEXT
-          ? // No IPC round trip with the whole script: cut the statement locally.
-            Promise.resolve([localStatementRange(text, offset, engine)])
-          : rangesOf(model, text, engine),
-        connId && db ? useCompletion.scope(connId, db) : Promise.resolve(null),
-        connId && (db || engine === 'mysql') ? useCompletion.containers(connId, db ?? '', engine) : Promise.resolve([]),
-      ]);
-      if (token?.isCancellationRequested) return { suggestions: [] };
-      const items = await suggest({
+      // `undefined`: still loading (the load is started, never awaited here).
+      const scope = connId && db ? useCompletion.peekScope(connId, db) : null;
+      const containers =
+        connId && (db || engine === 'mysql') ? useCompletion.peekContainers(connId, db ?? '', engine) : [];
+      const items = suggest({
         text,
         offset,
-        ranges: stmtRanges,
+        ranges,
         engine,
-        scope,
-        containers,
-        loadObjects: (q) => (connId ? useCompletion.objects(connId, db, engine, q) : Promise.resolve(null)),
+        scope: scope ?? null,
+        containers: containers ?? [],
+        loadObjects: (q) => (connId ? useCompletion.objectsNow(connId, db, engine, q) : null),
       });
-      if (token?.isCancellationRequested) return { suggestions: [] };
       const word = model.getWordUntilPosition(position);
       const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
-      return {
-        // No scope (failed or not loaded): Monaco asks again on the next keystroke instead
-        // of only filtering a list without the tables.
-        incomplete: Boolean(connId && db) && scope === null,
-        suggestions: items.map((s, i) => ({
+      // No scope (loading or failed): Monaco asks again on the next keystroke instead of
+      // only filtering a list without the tables.
+      const incomplete = (Boolean(connId && db) && !scope) || containers === undefined;
+      if (connId && (scope === undefined || containers === undefined)) {
+        refreshWhenLoaded(
+          model,
+          Promise.all([
+            db ? useCompletion.scope(connId, db) : null,
+            db || engine === 'mysql' ? useCompletion.containers(connId, db ?? '', engine) : null,
+          ]),
+        );
+      }
+      const toList = (list: Suggestion[]): Monaco.languages.CompletionList => ({
+        incomplete,
+        suggestions: list.map((s, i) => ({
           label: s.label,
           kind: itemKind(monaco, s.kind),
           detail: s.detail,
           insertText: s.insertText,
-          // Keep the provider's order: columns, then keywords, and so on.
-          sortText: String(i).padStart(5, '0'),
+          sortText: sortText(i),
           range,
         })),
-      };
+      });
+      if (Array.isArray(items)) return toList(items);
+      // Only the objects of a `db.` qualifier not loaded yet: the one case that waits.
+      return items.then((list) => (token?.isCancellationRequested ? { suggestions: [] } : toList(list)));
     },
   };
   const subs = LANGUAGES.map((lang) => monaco.languages.registerCompletionItemProvider(lang, provider));

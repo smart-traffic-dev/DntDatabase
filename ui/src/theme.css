@@ -28,6 +28,13 @@
   --warning-bg: #fff4d6;
   --warning-fg: #7a4b00;
   --current-stmt-bg: color-mix(in srgb, var(--studio-fg) 6%, transparent);
+  /*
+   * Code font for every mono surface (editor, suggest list, grid, DDL, messages, history).
+   * The token's stack starts with `ui-monospace` (Safari only) then 'Cascadia Code', whose
+   * ligatures cannot be switched off on the grid canvas: the ligature-free 'Cascadia Mono'
+   * comes first so CSS, Monaco and the canvas render the same face.
+   */
+  --font-mono: 'Cascadia Mono', Consolas, ui-monospace, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace;
 }
 
 .dark {

@@ -2,8 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CompletionObject, SchemaCache } from '../../bindings';
 import { callsOf, mockBackend } from '../../test/backend';
 import { forgetCompletionConnection, invalidateCompletion, useCompletion } from '../../store/completion';
-import { analyze, localStatementRange } from './context';
+import { analyze } from './context';
 import { disposeCompletion, ensureCompletion, registerCompletion } from './monacoProvider';
+import { splitIncremental, splitRanges } from './split';
 import { currentSchemaOf, suggest, type Suggestion } from './provider';
 import type { CompletionScope } from './provider';
 import type { Engine } from '../engine';
@@ -284,6 +285,7 @@ describe('monaco provider', () => {
     };
     const reg = registerCompletion(fake as never, () => ({ tabId: 't', connId: conn, db: 'shop', engine: 'mysql' }));
     expect([...providers.keys()]).toEqual(['mysql', 'pgsql']);
+    await useCompletion.scope(conn, 'shop');
     const result = await providers.get('mysql')?.provideCompletionItems(model, { lineNumber: 1, column: offset + 1 });
     expect(result?.suggestions.map((s) => [s.label, s.kind, s.sortText])).toEqual([
       ['id', 5, '00000'],
@@ -340,6 +342,12 @@ describe('monaco provider: fix round 1', () => {
   const target = () => ({ tabId: 't', connId: conn, db: 'shop', engine: 'mysql' as const });
   const live = { isCancellationRequested: false };
 
+  /** The scope and qualifier lists, loaded (the provider itself never waits for them). */
+  const loaded = async () => {
+    await useCompletion.scope(conn, 'shop');
+    await useCompletion.containers(conn, 'shop', 'mysql');
+  };
+
   beforeEach(() => {
     useCompletion.reset();
     mockBackend({
@@ -349,26 +357,188 @@ describe('monaco provider: fix round 1', () => {
     });
   });
 
-  it('ranges_are_cached_per_model_version', async () => {
+  it('no_statement_ranges_ipc_per_keystroke', async () => {
+    await loaded();
     const { monaco, providers } = fakeMonaco();
     registerCompletion(monaco as never, target);
     const p = providers.get('mysql') as FakeProvider;
     const model = fakeModel('SELECT o.| FROM orders o');
-    await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
-    await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
-    expect(callsOf('statement_ranges')).toHaveLength(1);
+    const first = p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    // Answered synchronously: no promise, no IPC round trip.
+    expect(Array.isArray((first as unknown as { suggestions: unknown[] }).suggestions)).toBe(true);
     model.version = 2;
     await p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
-    expect(callsOf('statement_ranges')).toHaveLength(2);
+    expect(callsOf('statement_ranges')).toEqual([]);
+  });
+
+  it('scope_loading_returns_keywords_at_once_then_tables', async () => {
+    let resolveScope: (v: unknown) => void = () => {};
+    mockBackend({
+      completion_scope: () => new Promise((r) => (resolveScope = r)),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    const before = p.provideCompletionItems(fakeModel('sel|'), { lineNumber: 1 }, {}, live) as unknown as {
+      suggestions: { label: string }[];
+      incomplete?: boolean;
+    };
+    // Not a promise: keywords at once, marked incomplete while the tables load.
+    expect(before.suggestions.map((s) => s.label)).toContain('SELECT');
+    expect(before.incomplete).toBe(true);
+    resolveScope({ database: 'shop', tables: mysqlScope.tables });
+    await loaded();
+    const after = (await p.provideCompletionItems(fakeModel('sel|'), { lineNumber: 1 }, {}, live)) as {
+      suggestions: { label: string }[];
+      incomplete?: boolean;
+    };
+    expect(after.suggestions.map((s) => s.label)).toEqual(expect.arrayContaining(['SELECT', 'orders']));
+    expect(after.incomplete).toBeFalsy();
+    expect(callsOf('completion_scope')).toHaveLength(1);
+  });
+
+  it('open_suggest_widget_is_refreshed_once_the_scope_loads', async () => {
+    let resolveScope: (v: unknown) => void = () => {};
+    mockBackend({
+      completion_scope: () => new Promise((r) => (resolveScope = r)),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    const model = fakeModel('SELECT * FROM |');
+    const widget = document.createElement('div');
+    const dom = document.createElement('div');
+    dom.appendChild(widget);
+    const trigger = vi.fn();
+    const editors = [{ getModel: () => model, getDomNode: () => dom, trigger }];
+    const withEditors = { ...monaco, editor: { getEditors: () => editors } };
+    registerCompletion(withEditors as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    p.provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    p.provideCompletionItems(model, { lineNumber: 1 }, {}, live); // still loading: one refresh, not two
+    widget.className = 'suggest-widget visible';
+    resolveScope({ database: 'shop', tables: mysqlScope.tables });
+    await loaded();
+    await Promise.resolve();
+    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(trigger).toHaveBeenCalledWith('dnt', 'editor.action.triggerSuggest', {});
+  });
+
+  it('closed_suggest_widget_is_not_reopened_when_the_scope_loads', async () => {
+    let resolveScope: (v: unknown) => void = () => {};
+    mockBackend({
+      completion_scope: () => new Promise((r) => (resolveScope = r)),
+      list_databases: () => [{ name: 'shop' }],
+    });
+    const { monaco, providers } = fakeMonaco();
+    const model = fakeModel('SELECT * FROM |');
+    const trigger = vi.fn();
+    const editors = [{ getModel: () => model, getDomNode: () => document.createElement('div'), trigger }];
+    registerCompletion({ ...monaco, editor: { getEditors: () => editors } } as never, target);
+    (providers.get('mysql') as FakeProvider).provideCompletionItems(model, { lineNumber: 1 }, {}, live);
+    resolveScope({ database: 'shop', tables: mysqlScope.tables });
+    await loaded();
+    await Promise.resolve();
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('large_script_completion_is_fast', async () => {
+    await loaded();
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    // 10k lines with strings and comments holding `;`, the cursor in the last statement.
+    const lines = Array.from({ length: 10_000 }, (_, i) =>
+      i % 3 === 0 ? `SELECT 'a;b', id FROM customers c WHERE c.id = ${i}; -- x;y` : `/* ; */ UPDATE orders SET total = ${i};`,
+    );
+    const head = `${lines.join('\n')}\nSELECT o.`;
+    const tail = ' FROM orders o';
+    // A model that types at the cursor and reports its edits like Monaco does.
+    let typed = '';
+    let version = 1;
+    const listeners: ((e: { changes: { rangeOffset: number }[] }) => void)[] = [];
+    const model = {
+      getValue: () => head + typed + tail,
+      getVersionId: () => version,
+      getOffsetAt: () => head.length + typed.length,
+      getWordUntilPosition: () => ({ startColumn: 1, endColumn: 1 }),
+      onDidChangeContent: (l: (typeof listeners)[number]) => {
+        listeners.push(l);
+        return { dispose: () => {} };
+      },
+    };
+    const type = (s: string) => {
+      const at = head.length + typed.length;
+      typed += s;
+      version += 1;
+      listeners.forEach((l) => l({ changes: [{ rangeOffset: at }] }));
+    };
+    p.provideCompletionItems(model, { lineNumber: 1 }, {}, live); // first split: the whole script
+    const runs = 20;
+    const t0 = performance.now();
+    let result: { suggestions: { label: string }[] } | undefined;
+    for (const ch of 'customer_id_and_more'.slice(0, runs)) {
+      type(ch); // a keystroke: a new model version every time
+      result = p.provideCompletionItems(model, { lineNumber: 1 }, {}, live) as unknown as typeof result;
+    }
+    const perKeystroke = (performance.now() - t0) / runs;
+    expect(result?.suggestions.map((s) => s.label)).toEqual(['id', 'customer_id', 'total']);
+    expect(callsOf('statement_ranges')).toEqual([]);
+    expect(perKeystroke).toBeLessThan(50);
+    // Without content events every keystroke splits the whole script: still within budget.
+    const plain = fakeModel(`${head}|${tail}`);
+    const t1 = performance.now();
+    for (let k = 0; k < 5; k++) {
+      plain.version += 1;
+      p.provideCompletionItems(plain, { lineNumber: 1 }, {}, live);
+    }
+    expect((performance.now() - t1) / 5).toBeLessThan(50);
+  });
+
+  it('split_whitespace_matches_rust', () => {
+    // Statement trimming is Rust's `str::trim` (Unicode White_Space): NEL and NBSP are
+    // trimmed, a BOM is not (JS `\s` would get both wrong).
+    const nel = 'select 1\u0085;  select 2 ';
+    expect(splitRanges(nel, 'mysql').map(([s, e]) => nel.slice(s, e))).toEqual(['select 1', 'select 2']);
+    const bom = '﻿select 1';
+    expect(splitRanges(bom, 'mysql').map(([s, e]) => bom.slice(s, e))).toEqual(['﻿select 1']);
+    // Blank-fragment detection is ASCII only: an NBSP between comments is significant.
+    const nbsp = 'select 1; /* a */ /* b */';
+    expect(splitRanges(nbsp, 'mysql')).toHaveLength(2);
+  });
+
+  it('incremental_split_without_a_known_edit_offset_is_a_full_split', () => {
+    const before = 'SELECT 1; SELECT 2; SELECT 3';
+    const prev = splitIncremental(null, before, 'mysql', 0);
+    // The edit offset is unknown (Infinity): reusing the old boundaries would be wrong here.
+    const after = "SELECT ';"; // the first statement now opens a string that swallows the rest
+    expect(splitIncremental(prev, after, 'mysql', Infinity).ranges).toEqual(splitRanges(after, 'mysql'));
+    expect(splitIncremental(prev, after, 'mysql', Number.NaN).ranges).toEqual(splitRanges(after, 'mysql'));
+  });
+
+  it('incremental_split_matches_a_full_split', () => {
+    const base = "SELECT 'a;b' FROM t; -- c;\nDELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;\nSELECT 2; /* x; */ SELECT 3";
+    let state = splitIncremental(null, base, 'mysql', 0);
+    let text = base;
+    // Edits anywhere: inserts and deletes, including ones that open a string or remove a `;`.
+    const edits: [number, number, string][] = [
+      [text.length, 0, ' WHERE x = 1'],
+      [9, 0, "'"],
+      [9, 1, ''],
+      [19, 1, ''],
+      [40, 0, ';'],
+      [0, 0, 'USE db;\n'],
+      [70, 5, ''],
+    ];
+    for (const [at, del, ins] of edits) {
+      text = text.slice(0, at) + ins + text.slice(at + del);
+      state = splitIncremental(state, text, 'mysql', at);
+      expect(state.ranges).toEqual(splitRanges(text, 'mysql'));
+    }
   });
 
   it('ctrl_space_after_from_lists_tables_first', async () => {
-    // The backend trims the trailing blank: the range ends before the cursor.
-    mockBackend({
-      statement_ranges: () => [[0, 13]],
-      completion_scope: () => ({ database: 'shop', tables: mysqlScope.tables }),
-      list_databases: () => [{ name: 'shop' }],
-    });
+    await loaded();
     const { monaco, providers } = fakeMonaco();
     registerCompletion(monaco as never, target);
     const result = (await providers
@@ -409,6 +579,7 @@ describe('monaco provider: fix round 1', () => {
   });
 
   it('large_text_skips_statement_ranges', async () => {
+    await loaded();
     const { monaco, providers } = fakeMonaco();
     registerCompletion(monaco as never, target);
     // > 1 MB of earlier statements, one with a `;` inside a string, then the current one.
@@ -420,10 +591,58 @@ describe('monaco provider: fix round 1', () => {
     expect(result?.suggestions.map((s) => s.label)).toEqual(['id', 'customer_id', 'total']);
   });
 
-  it('local_statement_range_cuts_at_semicolons_outside_strings', () => {
-    const { text, offset } = at("SELECT ';' x; SELECT 'a;b', | FROM t; SELECT 3");
-    const [lo, hi] = localStatementRange(text, offset, 'mysql');
-    expect(text.slice(lo, hi).trim()).toBe("SELECT 'a;b',  FROM t");
+  it('split_ranges_match_the_backend_splitter', () => {
+    // The cases of `crates/core/src/sql/split.rs` (statement texts, trimmed, no delimiter).
+    const cases: [string, Engine, string[]][] = [
+      ['select 1; select 2', 'mysql', ['select 1', 'select 2']],
+      ['select \';\' ; select "a;b"; select `c;d`', 'mysql', ["select ';'", 'select "a;b"', 'select `c;d`']],
+      ['select 1 -- x;y\n; select 2 # z;\n;', 'mysql', ['select 1 -- x;y', 'select 2 # z;']],
+      ['/* a;b */ select 1;', 'mysql', ['/* a;b */ select 1']],
+      [
+        'DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nCALL p();',
+        'mysql',
+        ['CREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END', 'CALL p()'],
+      ],
+      ["select 'it''s;'; select 2", 'mysql', ["select 'it''s;'", 'select 2']],
+      [
+        'create function f() returns int as $$ begin return 1; end $$ language plpgsql; select 1',
+        'postgres',
+        ['create function f() returns int as $$ begin return 1; end $$ language plpgsql', 'select 1'],
+      ],
+      ['select $tag$ ; $$ ; $tag$; select 2', 'postgres', ['select $tag$ ; $$ ; $tag$', 'select 2']],
+      ["select E'a\\';b'; select 2", 'postgres', ["select E'a\\';b'", 'select 2']],
+      ['select 1 # not a comment in pg; select 2', 'postgres', ['select 1 # not a comment in pg', 'select 2']],
+      ['  ;; \n', 'mysql', []],
+      ["select 'chưa đóng", 'mysql', ["select 'chưa đóng"]],
+      ["select 'a\\';b'; select 2", 'mysql', ["select 'a\\';b'", 'select 2']],
+      ["select 'C:\\'; select 2", 'postgres', ["select 'C:\\'", 'select 2']],
+      ['/* a /* b; */ c; */ select 1; select 2', 'postgres', ['/* a /* b; */ c; */ select 1', 'select 2']],
+      ['select $1; select a$b$; select 3', 'postgres', ['select $1', 'select a$b$', 'select 3']],
+      ['select 1--1; select 2', 'mysql', ['select 1--1', 'select 2']],
+      ['select 1; -- done\n', 'mysql', ['select 1']],
+      ['select 1; /* end */', 'postgres', ['select 1']],
+      [
+        'delimiter //\r\nselect 1; select 2//\r\n  Delimiter ;\r\nselect 3;',
+        'mysql',
+        ['select 1; select 2', 'select 3'],
+      ],
+      ['DELIMITER $$\nselect 1', 'postgres', ['DELIMITER $$\nselect 1']],
+      ['select $x$ ; ', 'postgres', ['select $x$ ;']],
+      ['select 1 /* ; ', 'mysql', ['select 1 /* ;']],
+      [
+        '/*!40014 SET FOREIGN_KEY_CHECKS=0 */;\nselect 1;',
+        'mysql',
+        ['/*!40014 SET FOREIGN_KEY_CHECKS=0 */', 'select 1'],
+      ],
+      ['/*M!100100 SET a=1; */;\n/*!40101 SET NAMES utf8mb4 */', 'mysql', ['/*M!100100 SET a=1; */', '/*!40101 SET NAMES utf8mb4 */']],
+      ['select 1; /*! x */', 'postgres', ['select 1']],
+      ["select 'ư;đ'; select 2", 'mysql', ["select 'ư;đ'", 'select 2']],
+      ['select $thẻ$ ; $thẻ$; select 2', 'postgres', ['select $thẻ$ ; $thẻ$', 'select 2']],
+    ];
+    for (const [input, engine, expected] of cases) {
+      const texts = splitRanges(input, engine).map(([s, e]) => input.slice(s, e));
+      expect(texts, `${input} (${engine})`).toEqual(expected);
+    }
   });
 
   it('registers_once_per_monaco_instance', () => {

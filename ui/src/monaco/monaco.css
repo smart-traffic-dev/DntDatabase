@@ -1,0 +1,9 @@
+/*
+ * Monaco's chrome (find widget, hovers, suggest status bar, menus) uses its own system-font
+ * stack, and its hover code blocks `--monaco-monospace-font`. Both follow the app tokens.
+ * Doubled class: wins over Monaco's `.monaco-editor` rule whatever the stylesheet order.
+ */
+.monaco-editor.monaco-editor {
+  font-family: var(--font-sans);
+  --monaco-monospace-font: var(--font-mono);
+}
