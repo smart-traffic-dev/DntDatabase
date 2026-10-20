@@ -291,7 +291,10 @@ pub(crate) struct ChannelSink {
 fn commits_open_tx(stmt: &PlannedStmt, dialect: Dialect) -> bool {
     match stmt.kind {
         StatementKind::Transaction(TxControl::Commit) => true,
-        StatementKind::Transaction(TxControl::AutocommitOn) => dialect.is_mysql(),
+        // MySQL `BEGIN` / `START TRANSACTION` commit the open transaction first.
+        StatementKind::Transaction(TxControl::Begin | TxControl::AutocommitOn) => {
+            dialect.is_mysql()
+        }
         StatementKind::Ddl => dialect.is_mysql(),
         _ => stmt.implicit_commit,
     }
@@ -795,6 +798,22 @@ mod tests {
             .map(|i| format!("SELECT {i}"))
             .collect();
         assert_eq!(texts, want);
+    }
+
+    /// A MySQL `BEGIN` / `START TRANSACTION` commits the open transaction: a connection
+    /// lost during it leaves the outcome unknown, never "rolled back".
+    #[test]
+    fn mysql_begin_commits_the_open_transaction() {
+        let p = dnt_query::plan(
+            "BEGIN; START TRANSACTION; SELECT 1",
+            dnt_query::Target::All,
+            Dialect::MYSQL,
+        );
+        assert!(commits_open_tx(&p.stmts[0], Dialect::MYSQL));
+        assert!(commits_open_tx(&p.stmts[1], Dialect::MYSQL));
+        assert!(!commits_open_tx(&p.stmts[2], Dialect::MYSQL));
+        let p = dnt_query::plan("BEGIN", dnt_query::Target::All, Dialect::Postgres);
+        assert!(!commits_open_tx(&p.stmts[0], Dialect::Postgres));
     }
 
     #[test]

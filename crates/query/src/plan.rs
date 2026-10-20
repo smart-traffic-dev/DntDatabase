@@ -205,8 +205,9 @@ pub fn statement_kind(text: &str, dialect: Dialect) -> StatementKind {
 /// and every statement succeeds: on MySQL, a statement that is not transaction
 /// control and that `next_tx_state` says ends an open transaction (DDL, `LOCK
 /// TABLES`, `FLUSH`, …), when a transaction is open before it. Always `false` on
-/// PostgreSQL, whose DDL is transactional. The user's own `BEGIN` / `COMMIT` are not
-/// flagged: they are the transaction control the user wrote.
+/// PostgreSQL, whose DDL is transactional. A MySQL `BEGIN` / `START TRANSACTION` run
+/// while a transaction is open is flagged too (it commits that transaction first); the
+/// user's other transaction control (`COMMIT`, `ROLLBACK`, …) is not: it does what it says.
 ///
 /// `manual_tx`: the plan runs with [`crate::run::RunConfig::manual_tx`], which begins a
 /// transaction before every statement that needs one ([`manual_needs_tx`]) while none
@@ -228,9 +229,11 @@ pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: b
             next_tx_state(DbKind::MySql, prev, false, s.kind, &s.text, StmtResult::Ok)
                 == TxState::Idle
         };
+        // A `BEGIN` in an open transaction commits it before starting the next one.
+        let begin = s.kind == StatementKind::Transaction(TxControl::Begin);
         s.implicit_commit = state != TxState::Idle
-            && !matches!(s.kind, StatementKind::Transaction(_))
-            && commits(TxState::Active);
+            && (begin
+                || (!matches!(s.kind, StatementKind::Transaction(_)) && commits(TxState::Active)));
         state = next_tx_state(
             DbKind::MySql,
             state,
@@ -552,6 +555,23 @@ mod tests {
 
         let mut p = plan(text, Target::All, Dialect::Postgres);
         mark_implicit_commits(&mut p, Active, true);
+        assert!(flags(&p).iter().all(|f| !f));
+    }
+
+    /// On MySQL a `BEGIN` / `START TRANSACTION` run while a transaction is open commits
+    /// it first: flagged like DDL. PostgreSQL only warns and keeps the transaction.
+    #[test]
+    fn mysql_begin_in_an_open_transaction_is_an_implicit_commit() {
+        use dnt_core::tx::TxState::{Active, Idle};
+        let text = "UPDATE t SET x = 1 WHERE id = 1; BEGIN; UPDATE t SET x = 2 WHERE id = 1; \
+                    START TRANSACTION; COMMIT; BEGIN";
+        let mut p = plan(text, Target::All, MY);
+        mark_implicit_commits(&mut p, Active, false);
+        assert_eq!(flags(&p), [false, true, false, true, false, false]);
+        mark_implicit_commits(&mut p, Idle, false);
+        assert_eq!(flags(&p), [false, false, false, true, false, false]);
+        let mut p = plan(text, Target::All, Dialect::Postgres);
+        mark_implicit_commits(&mut p, Active, false);
         assert!(flags(&p).iter().all(|f| !f));
     }
 
