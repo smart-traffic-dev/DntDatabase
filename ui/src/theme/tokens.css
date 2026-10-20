@@ -1,0 +1,189 @@
+/*
+ * Design tokens copied from dnt-note (dungnt1312/dnt-note, commit 170211f,
+ * src/theme/tokens.css — "Studio theme", ChatGPT style).
+ *
+ * Token names and values are unchanged. The only adaptation is syntax: this
+ * project has no Tailwind, so the `@theme inline` and `@theme` blocks are
+ * declared on `:root`. The legacy aliases, base focus/selection/scrollbar
+ * rules and the reduced-motion guard are copied as-is.
+ */
+
+:root {
+  color-scheme: light;
+
+  --studio-bg: #ffffff;
+  --studio-sidebar: #f9f9f9;
+  --studio-hover: #efefef;
+  --studio-selected: #e8e8e8;
+  --studio-hairline: #e8e8e8;
+  --studio-control: #ffffff;
+  --studio-subtle: #f7f7f7;
+  --studio-bubble: #f4f4f4;
+
+  /* secondary ≥ 4.5:1, tertiary ≥ 3:1 on --studio-bg */
+  --studio-fg: #0d0d0d;
+  --studio-fg-secondary: #5d5d5d;
+  --studio-fg-tertiary: #8a8a8a;
+
+  --studio-accent: #0d0d0d;
+  --studio-accent-fg: #ffffff;
+  --studio-accent-hover: #333333;
+  --studio-danger: #d7373f;
+  --studio-danger-fill: #fdeeee;
+  --studio-danger-border: #f3caca;
+
+  --studio-composer: #ffffff;
+  --studio-composer-border: #e3e3e3;
+  --studio-composer-hover: #f0f0f0;
+  --studio-send-disabled: #d7d7d7;
+  --studio-send-disabled-fg: #ffffff;
+  --studio-popover: #ffffff;
+  --studio-mention: rgba(0, 0, 0, 0.07);
+  --studio-scrollbar: #d4d4d4;
+  --studio-shadow: 0 12px 30px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.dark {
+  color-scheme: dark;
+
+  --studio-bg: #212121;
+  --studio-sidebar: #181818;
+  --studio-hover: #2a2a2a;
+  --studio-selected: #303030;
+  --studio-hairline: #363636;
+  --studio-control: #2a2a2a;
+  --studio-subtle: #262626;
+  --studio-bubble: #303030;
+
+  --studio-fg: #ececec;
+  --studio-fg-secondary: #b4b4b4;
+  --studio-fg-tertiary: #8c8c8c;
+
+  --studio-accent: #f3f3f3;
+  --studio-accent-fg: #0d0d0d;
+  --studio-accent-hover: #d6d6d6;
+  --studio-danger: #e5484d;
+  --studio-danger-fill: #3a2224;
+  --studio-danger-border: #5a2f31;
+
+  --studio-composer: #303030;
+  --studio-composer-border: #3d3d3d;
+  --studio-composer-hover: #424242;
+  --studio-send-disabled: #7a7a7a;
+  --studio-send-disabled-fg: #2f2f2f;
+  --studio-popover: #353535;
+  --studio-mention: rgba(255, 255, 255, 0.14);
+  --studio-scrollbar: #4a4a4a;
+  --studio-shadow: 0 12px 30px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+}
+
+/* Legacy aliases — keep standalone windows on-theme. */
+:root,
+.dark {
+  --bg: var(--studio-bg);
+  --bg-panel: var(--studio-sidebar);
+  --bg-elevated: var(--studio-control);
+  --bg-hover: var(--studio-hover);
+  --text: var(--studio-fg);
+  --text-secondary: var(--studio-fg-secondary);
+  --text-faint: var(--studio-fg-tertiary);
+  --border: var(--studio-hairline);
+  --accent: var(--studio-accent);
+  --accent-soft: var(--studio-hover);
+  --danger: var(--studio-danger);
+  --code-bg: var(--studio-subtle);
+
+  /* `@theme inline` colour aliases. */
+  --color-app: var(--studio-bg);
+  --color-sidebar: var(--studio-sidebar);
+  --color-hover: var(--studio-hover);
+  --color-selected: var(--studio-selected);
+  --color-hairline: var(--studio-hairline);
+  --color-control: var(--studio-control);
+  --color-subtle: var(--studio-subtle);
+  --color-bubble: var(--studio-bubble);
+  --color-fg: var(--studio-fg);
+  --color-fg-secondary: var(--studio-fg-secondary);
+  --color-fg-tertiary: var(--studio-fg-tertiary);
+  --color-accent: var(--studio-accent);
+  --color-accent-fg: var(--studio-accent-fg);
+  --color-accent-hover: var(--studio-accent-hover);
+  --color-danger: var(--studio-danger);
+  --color-danger-fill: var(--studio-danger-fill);
+  --color-danger-border: var(--studio-danger-border);
+  --color-composer: var(--studio-composer);
+  --color-composer-border: var(--studio-composer-border);
+  --color-composer-hover: var(--studio-composer-hover);
+  --color-send-disabled: var(--studio-send-disabled);
+  --color-send-disabled-fg: var(--studio-send-disabled-fg);
+  --color-popover: var(--studio-popover);
+  --color-mention: var(--studio-mention);
+  --shadow-popover: var(--studio-shadow);
+
+  /* `@theme` typography and radii. */
+  --font-sans:
+    ui-sans-serif, -apple-system, system-ui, 'Segoe UI Variable Text', 'Segoe UI', Helvetica,
+    Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+
+  --text-caption: 11px;
+  --text-caption--line-height: 16px;
+  --text-footnote: 12px;
+  --text-footnote--line-height: 16px;
+  --text-callout: 13px;
+  --text-callout--line-height: 18px;
+  --text-body: 15px;
+  --text-body--line-height: 24px;
+  --text-headline: 17px;
+  --text-headline--line-height: 24px;
+  --text-title: 22px;
+  --text-title--line-height: 28px;
+  --text-large-title: 28px;
+  --text-large-title--line-height: 34px;
+
+  /* control · card/popover · bubble — plus the composer card */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 22px;
+  --radius-xl: 26px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--studio-fg) 18%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--studio-fg-secondary);
+  outline-offset: 2px;
+}
+
+/* Text fields and menu rows show focus through their own border/fill instead of a ring. */
+input:focus-visible,
+textarea:focus-visible,
+.cm-editor :focus-visible,
+[contenteditable='true']:focus-visible,
+[role='menuitem']:focus-visible,
+[role='menuitemradio']:focus-visible,
+[role='option']:focus-visible {
+  outline: none;
+}
+
+::placeholder {
+  color: var(--studio-fg-tertiary);
+  opacity: 1;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--studio-scrollbar) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

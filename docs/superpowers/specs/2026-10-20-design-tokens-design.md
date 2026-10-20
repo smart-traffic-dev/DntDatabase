@@ -42,7 +42,6 @@ ignore unknown at-rules. No Tailwind dependency is added.
 | `--icon` | `--studio-fg-secondary` |
 | `--production` | `--studio-danger` |
 | `--production-bg` | `--studio-danger-fill` |
-| `--staging`, `--local` | `--studio-fg-secondary` |
 
 All remaining raw colours in `theme.css`, `dialogs.css`, `query.css` and `objectTab.css`
 are replaced by `--studio-*` tokens. The existing `--bg`, `--text`, `--border`,
@@ -110,4 +109,5 @@ selector. Monaco switches between `vs` and `vs-dark`.
 - Visual check of the shell, connection dialog, query tab and settings in light and dark at
   1440px, using the Vite dev server (no Tauri backend).
 - No remaining raw hex/rgba values in `ui/src/**/*.css` except the modal backdrop, which
-  has no token in the source and is defined per theme.
+  has no token in the source and is defined per theme, and the white label of the danger
+  button (the source uses `text-white` there too).

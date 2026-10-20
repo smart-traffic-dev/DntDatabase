@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { computeRows } from '../store/treeModel';
+import { EnvTag } from './EnvTag';
 import {
   ChevronIcon,
   DatabaseIcon,
@@ -132,7 +133,7 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       {node.kind === 'connection' ? (
         <>
           {node.engine && <span className={`chip chip-${node.engine}`}>{node.engine}</span>}
-          {node.envTag && <span className={`env-dot env-${node.envTag}`} title={`Environment: ${node.envTag}`} />}
+          {node.envTag && <EnvTag env={node.envTag} />}
         </>
       ) : (
         <NodeIcon node={node} />

@@ -1,10 +1,18 @@
 import { useEffect, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { LogLevel } from '../bindings';
+import { useTheme, type Theme } from '../theme/ThemeProvider';
 import { Modal } from './Modal';
 
-/** App settings. P1 has one: debug logging (stored in app.db, applied at start-up too). */
+const THEMES: { id: Theme; label: string }[] = [
+  { id: 'light', label: 'Light' },
+  { id: 'dark', label: 'Dark' },
+  { id: 'system', label: 'System' },
+];
+
+/** App settings: appearance (local), and debug logging (stored in app.db, applied at start-up too). */
 export function SettingsDialog({ onClose }: { onClose(): void }) {
+  const { theme, setTheme } = useTheme();
   const [level, setLevel] = useState<LogLevel | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -41,6 +49,23 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
   return (
     <Modal title="Settings" onClose={onClose} className="narrow">
       <div className="modal-body stack">
+        <div className="field">
+          <span className="field-label">Appearance</span>
+          <div className="theme-options" role="radiogroup" aria-label="Appearance">
+            {THEMES.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="radio"
+                aria-checked={theme === t.id}
+                className="theme-option"
+                onClick={() => setTheme(t.id)}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <label className="check">
           <input
             type="checkbox"
