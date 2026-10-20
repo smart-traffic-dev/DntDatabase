@@ -17,12 +17,15 @@ use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
-use dnt_query::{StmtKindLabel, Target, Verdict};
+use dnt_query::{StmtKindLabel, Target, UnboundedReason, UnboundedWrite, Verdict, WriteOp};
 use dnt_store::db::open_in_memory;
 use dnt_store::history::{HistoryFilter, HistoryStatus};
 use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
 use dnt_tunnel::KnownHosts;
-use dntdatabase::query_sessions::{tx_state_after, with_tx_state, TxAction, PREVIEW_CHARS};
+use dntdatabase::commands::settings::CONFIRM_UNBOUNDED_KEY;
+use dntdatabase::query_sessions::{
+    tx_state_after, with_tx_state, PlanView, TxAction, PREVIEW_CHARS,
+};
 use dntdatabase::run_events::{EventSink, RunOptions};
 use dntdatabase::session_manager::SessionManager;
 use secrecy::SecretString;
@@ -534,9 +537,237 @@ async fn plan_returns_verdicts_from_connection_config() {
         ssh_key_passphrase: SecretChange::Keep,
     };
     f.repo.update(cfg, keep).unwrap();
-    let view = plan(&f, "t1", prod, None, "DELETE FROM t").await.unwrap();
+    let view = plan(&f, "t1", prod, None, "DELETE FROM t WHERE id = 1")
+        .await
+        .unwrap();
     assert_eq!(view.stmts[0].verdict, Verdict::Allow);
     assert_eq!(view.env_tag, Some(EnvTag::Local));
+}
+
+/// Sets the "Confirm UPDATE/DELETE without WHERE" setting as the Settings dialog does.
+fn set_confirm_unbounded(f: &Fixture, on: bool) {
+    f.repo
+        .set_app_setting(CONFIRM_UNBOUNDED_KEY, if on { "1" } else { "0" })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn unbounded_writes_confirm_on_every_connection() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let prod = open_tagged(&f, Some(EnvTag::Production), false).await;
+    let text = "SELECT 1; DELETE FROM orders; UPDATE t SET a = 1 WHERE id = 1";
+    let verdicts = |v: &PlanView| v.stmts.iter().map(|s| s.verdict).collect::<Vec<_>>();
+
+    // Setting on (the default): confirmed on Local too, flag and table in the view.
+    let view = plan(&f, "t1", local, None, text).await.unwrap();
+    assert_eq!(
+        verdicts(&view),
+        [Verdict::Allow, Verdict::Confirm, Verdict::Allow]
+    );
+    assert_eq!(
+        view.stmts[1].unbounded,
+        [UnboundedWrite {
+            op: WriteOp::Delete,
+            reason: UnboundedReason::NoWhere,
+            table: "orders".into(),
+        }]
+    );
+    assert!(view.stmts[0].unbounded.is_empty() && view.stmts[2].unbounded.is_empty());
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+    assert!(f.log.executed().is_empty());
+
+    // Setting off: allowed on Local, still flagged for the UI.
+    set_confirm_unbounded(&f, false);
+    let view = plan(&f, "t1", local, None, text).await.unwrap();
+    assert_eq!(verdicts(&view), [Verdict::Allow; 3]);
+    assert_eq!(view.stmts[1].unbounded.len(), 1);
+
+    // Production always confirms, whatever the setting: a DELETE without WHERE (not
+    // DDL, so only the Production rule asks) ...
+    let view = plan(&f, "t2", prod, None, "DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(view.stmts[0].unbounded[0].op, WriteOp::Delete);
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+    assert!(f.log.executed().is_empty());
+    // ... and a TRUNCATE.
+    let view = plan(&f, "t2", prod, None, "TRUNCATE orders").await.unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(view.stmts[0].unbounded[0].op, WriteOp::Truncate);
+}
+
+/// An export is judged with the same guard context as a run (the unbounded-write
+/// setting included): with the setting off a DELETE without WHERE is allowed for a
+/// run, yet an export still only reads again.
+#[tokio::test]
+async fn exports_judge_with_the_run_guard_context() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    for on in [true, false] {
+        set_confirm_unbounded(&f, on);
+        let view = plan(&f, "t1", local, None, "DELETE FROM orders")
+            .await
+            .unwrap();
+        let mut sink = ExportRows::default();
+        let (err, state) = export(&f, view.plan_id, Uuid::new_v4(), &mut sink)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, DbError::Config { field: Some(s), .. } if s == "scope"),
+            "{on}: {err:?}"
+        );
+        assert_eq!(state, None);
+        let view = plan(&f, "t1", local, None, "SELECT rows_2").await.unwrap();
+        export(&f, view.plan_id, Uuid::new_v4(), &mut sink)
+            .await
+            .unwrap();
+    }
+    assert!(!f.log.executed().iter().any(|s| s.starts_with("DELETE")));
+}
+
+#[tokio::test]
+async fn unbounded_setting_turned_off_between_plan_and_run() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let prod = open_tagged(&f, Some(EnvTag::Production), false).await;
+
+    // Local: planned as Confirm, the user confirmed, then the setting went off; the
+    // confirmed run goes through once.
+    let view = plan(&f, "t1", local, None, "DELETE FROM t").await.unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    set_confirm_unbounded(&f, false);
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(f.log.executed(), ["DELETE FROM t"]);
+
+    // Production: the setting going off never lifts the confirmation.
+    set_confirm_unbounded(&f, true);
+    let view = plan(&f, "t2", prod, None, "DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    set_confirm_unbounded(&f, false);
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+    assert_eq!(f.log.executed(), ["DELETE FROM t"]);
+}
+
+#[tokio::test]
+async fn fetch_all_and_retry_of_a_run_keep_the_unbounded_flag() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let view = plan(&f, "t1", local, None, "SELECT 1;\nDELETE FROM t")
+        .await
+        .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+
+    // Retry / Fetch all of the taken plan: flagged, confirmed again.
+    let again = f.sm.query_plan_statement(view.plan_id, 1).await.unwrap();
+    assert_eq!(again.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(again.stmts[0].unbounded, view.stmts[1].unbounded);
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(again.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+
+    // Setting off: allowed on Local, the flag is still in the view.
+    set_confirm_unbounded(&f, false);
+    let again = f.sm.query_plan_statement(view.plan_id, 1).await.unwrap();
+    assert_eq!(again.stmts[0].verdict, Verdict::Allow);
+    assert_eq!(again.stmts[0].unbounded, view.stmts[1].unbounded);
+    let all = RunOptions {
+        max_rows: 1_000_000,
+        continue_on_error: false,
+    };
+    let (emit, events) = collector();
+    f.sm.query_run(again.plan_id, false, all, emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(
+        f.log.executed(),
+        ["SELECT 1", "DELETE FROM t", "DELETE FROM t"]
+    );
+}
+
+#[tokio::test]
+async fn unbounded_setting_is_read_again_at_run() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    set_confirm_unbounded(&f, false);
+    let view = plan(&f, "t1", local, None, "DELETE FROM t").await.unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Allow);
+    // Turned on between plan and run: the run asks again.
+    set_confirm_unbounded(&f, true);
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, true, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(f.log.executed(), ["DELETE FROM t"]);
+}
+
+#[tokio::test]
+async fn retry_keeps_the_unbounded_flag() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let view = plan(&f, "t1", local, None, "SELECT 1;\nUPDATE t SET a = 1")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[1].verdict, Verdict::Confirm);
+    let retry = f.sm.query_plan_statement(view.plan_id, 1).await.unwrap();
+    assert_eq!(retry.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(retry.stmts[0].unbounded, view.stmts[1].unbounded);
+    assert_eq!(retry.stmts[0].unbounded[0].table, "t");
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(retry.plan_id, false, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+}
+
+#[tokio::test]
+async fn unbounded_write_in_a_delimiter_script_is_confirmed() {
+    let f = fixture(DbKind::MySql);
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let text = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN DELETE FROM t; END$$\nSELECT 1; DELETE FROM u$$\nDELIMITER ;";
+    let view = plan(&f, "t1", local, None, text).await.unwrap();
+    let verdicts: Vec<Verdict> = view.stmts.iter().map(|s| s.verdict).collect();
+    // The routine body is exempt; the forgotten-delimiter piece is not.
+    assert_eq!(verdicts, [Verdict::Allow, Verdict::Confirm]);
+    assert_eq!(view.stmts[1].unbounded[0].table, "u");
 }
 
 #[tokio::test]
@@ -1185,7 +1416,9 @@ async fn blocked_plan_is_refused_even_if_confirmed() {
 async fn guard_is_rechecked_at_run() {
     let f = fixture(DbKind::MySql);
     let id = open_tagged(&f, Some(EnvTag::Local), false).await;
-    let view = plan(&f, "t1", id, None, "DELETE FROM t").await.unwrap();
+    let view = plan(&f, "t1", id, None, "DELETE FROM t WHERE id = 1")
+        .await
+        .unwrap();
     assert_eq!(view.stmts[0].verdict, Verdict::Allow);
     let mut cfg = f.repo.get(id).unwrap();
     cfg.env_tag = Some(EnvTag::Production);
@@ -1341,7 +1574,7 @@ async fn grace_expired_emits_abandoning() {
         sm.with_cancel_grace(Duration::from_millis(50))
     });
     let id = open(&f, config(DbKind::MySql)).await;
-    let view = plan(&f, "t1", id, None, "UPDATE stuck SET a = 1")
+    let view = plan(&f, "t1", id, None, "UPDATE stuck SET a = 1 WHERE id = 1")
         .await
         .unwrap();
     let (emit, events) = collector();
@@ -1553,7 +1786,7 @@ async fn retry_runs_the_stored_statement_verbatim() {
 async fn retry_is_judged_with_the_current_config() {
     let f = fixture(DbKind::MySql);
     let id = open_tagged(&f, None, false).await;
-    let view = plan(&f, "t1", id, None, "SELECT 1; DELETE FROM t")
+    let view = plan(&f, "t1", id, None, "SELECT 1; DELETE FROM t WHERE id = 1")
         .await
         .unwrap();
     let (emit, events) = collector();

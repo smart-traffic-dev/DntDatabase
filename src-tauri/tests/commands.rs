@@ -9,8 +9,10 @@ use dntdatabase::commands::connections::{
     SecretsUpdateInput,
 };
 use dntdatabase::commands::settings::{
-    get_log_level_impl, get_table_page_size_impl, saved_log_level, saved_table_page_size,
-    set_log_level_impl, set_table_page_size_impl,
+    get_confirm_unbounded_writes_impl, get_log_level_impl, get_table_page_size_impl,
+    saved_confirm_unbounded, saved_log_level, saved_table_page_size,
+    set_confirm_unbounded_writes_impl, set_log_level_impl, set_table_page_size_impl,
+    CONFIRM_UNBOUNDED_KEY,
 };
 use dntdatabase::commands::transfer::{
     apply_import_impl, export_connections_impl, import_needs_passphrase_impl, preview_import_impl,
@@ -222,6 +224,31 @@ async fn log_level_is_persisted_and_restored() {
         .await
         .unwrap();
     assert_eq!(saved_log_level(&state.repo), LogLevel::Info);
+}
+
+#[tokio::test]
+async fn confirm_unbounded_writes_defaults_on_and_persists() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert!(get_confirm_unbounded_writes_impl(&state).await.unwrap());
+    set_confirm_unbounded_writes_impl(&state, false)
+        .await
+        .unwrap();
+    assert!(!get_confirm_unbounded_writes_impl(&state).await.unwrap());
+    // Survives a restart.
+    drop(state);
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    assert!(!saved_confirm_unbounded(&state.repo));
+    set_confirm_unbounded_writes_impl(&state, true)
+        .await
+        .unwrap();
+    assert!(saved_confirm_unbounded(&state.repo));
+    // Anything but `0` stored keeps the confirmation on.
+    state
+        .repo
+        .set_app_setting(CONFIRM_UNBOUNDED_KEY, "garbage")
+        .unwrap();
+    assert!(saved_confirm_unbounded(&state.repo));
 }
 
 #[tokio::test]

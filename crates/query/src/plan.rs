@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::guard::GuardCtx;
 use crate::offsets::Utf16Map;
+use crate::unbounded::{unbounded_writes, UnboundedWrite};
 
 /// What the user asked to run. Offsets are UTF-16 code units into the editor text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
@@ -54,6 +55,10 @@ pub struct PlannedStmt {
     pub kind: StatementKind,
     pub verdict: Verdict,
     pub source_range: (usize, usize),
+    /// What of this statement changes every row of a table
+    /// ([`crate::unbounded::unbounded_writes`]); empty for most statements. Shown by
+    /// the confirm dialog; the guard judges the text itself.
+    pub unbounded: Vec<UnboundedWrite>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +117,7 @@ pub fn plan(text: &str, target: Target, dialect: Dialect) -> ScriptPlan {
             kind: statement_kind(&s.text, dialect),
             verdict: Verdict::Allow,
             source_range: (s.start, s.end),
+            unbounded: unbounded_writes(&s.text, dialect),
             text: s.text,
         })
         .collect();

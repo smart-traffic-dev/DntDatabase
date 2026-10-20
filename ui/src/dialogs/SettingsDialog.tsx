@@ -91,7 +91,70 @@ function PageSizeField() {
   );
 }
 
-/** App settings: appearance (local), debug logging and the table page size (stored in app.db). */
+/**
+ * "Confirm UPDATE/DELETE without WHERE" (stored in app.db, on by default): asks before a
+ * statement that changes every row of a table runs on a connection that is not Production.
+ * Production connections always ask.
+ */
+function UnboundedWritesField() {
+  const [on, setOn] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    api
+      .getConfirmUnboundedWrites()
+      .then((v) => live && setOn(v))
+      .catch((e: unknown) => {
+        if (!live) return;
+        setOn(true);
+        setError(toAppError(e).message);
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const toggle = async (next: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.setConfirmUnboundedWrites(next);
+      setOn(next);
+    } catch (e) {
+      setError(toAppError(e).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="field">
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={on ?? true}
+          disabled={on === null || busy}
+          aria-describedby="settings-unbounded-hint"
+          onChange={(e) => void toggle(e.target.checked)}
+        />
+        <span>Confirm UPDATE/DELETE without WHERE</span>
+      </label>
+      <p id="settings-unbounded-hint" className="hint">
+        Asks before a statement that changes every row of a table (UPDATE or DELETE without WHERE, TRUNCATE) runs on a
+        non-Production connection. Production connections always ask.
+      </p>
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** App settings: appearance (local), debug logging, the table page size and the unbounded-write confirmation (stored in app.db). */
 export function SettingsDialog({ onClose }: { onClose(): void }) {
   const { theme, setTheme } = useTheme();
   const [level, setLevel] = useState<LogLevel | null>(null);
@@ -158,6 +221,7 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
         </label>
         <p className="hint">Writes more detail to the log files. Passwords are never logged.</p>
         <PageSizeField />
+        <UnboundedWritesField />
         {error && (
           <p role="alert" className="field-error">
             {error}

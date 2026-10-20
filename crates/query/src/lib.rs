@@ -12,14 +12,16 @@ pub mod offsets;
 pub mod plan;
 pub mod redact;
 pub mod run;
+pub mod unbounded;
 
 pub use explain::{
     explain_sql, parse_plan, self_cost, ExplainFormat, ExplainSql, PlanNode, PlanTree,
 };
-pub use guard::{guard, lifts_read_only, other_whitelisted, verdict, GuardCtx};
+pub use guard::{guard, guard_with, lifts_read_only, other_whitelisted, verdict, GuardCtx};
 pub use offsets::Utf16Map;
 pub use plan::{plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target, Verdict};
 pub use redact::{redact, Redacted, REDACTED};
 pub use run::{
     error_offset, run, RunCancel, RunReport, RunSink, StmtReport, StopReason, ROLLED_BACK_NOTICE,
 };
+pub use unbounded::{unbounded_writes, UnboundedReason, UnboundedWrite, WriteOp};

@@ -19,6 +19,7 @@
 //! - An export of all rows of a result (`query_export`) runs its statement again on the
 //!   tab's session as a run of the tab (no events: its rows go to a file).
 
+use crate::commands::settings::saved_confirm_unbounded;
 use crate::run_events::{
     tick_rows, ChannelSink, EventSink, HistoryCtx, RunEvent, RunFlags, RunOptions,
 };
@@ -34,8 +35,8 @@ use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    explain_sql, guard, plan, run, ExplainFormat, PlannedStmt, RunCancel, RunReport, ScriptPlan,
-    StmtKindLabel, StopReason, Target, Verdict,
+    explain_sql, guard_with, plan, run, ExplainFormat, GuardCtx, PlannedStmt, RunCancel, RunReport,
+    ScriptPlan, StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict,
 };
 use dnt_store::repo::ConnectionRepo;
 use futures_util::FutureExt;
@@ -73,6 +74,12 @@ pub struct PlanStmtView {
     pub verdict: Verdict,
     /// The first [`PREVIEW_CHARS`] characters, line breaks turned into spaces.
     pub preview: String,
+    /// What of the statement changes every row of a table (`UPDATE`/`DELETE` without
+    /// WHERE, `TRUNCATE`, …), whatever the verdict; empty for most statements. The
+    /// guard makes such a statement Confirm (see `dnt_query::guard`). Always sent;
+    /// optional in the bindings so older fixtures stay valid.
+    #[serde(default)]
+    pub unbounded: Vec<UnboundedWrite>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
@@ -636,6 +643,23 @@ impl SessionManager {
         }
     }
 
+    /// What the guard judges a plan with on a connection whose config is `cfg` (as
+    /// stored now): its env tag and read-only flag, and the app's "Confirm UPDATE/DELETE
+    /// without WHERE" setting (Production confirms unbounded writes regardless).
+    fn guard_ctx(&self, cfg: &ConnectionConfig, analyze: bool) -> GuardCtx {
+        GuardCtx {
+            env: cfg.env_tag,
+            read_only: cfg.read_only,
+            analyze,
+            confirm_unbounded: self.confirm_unbounded(),
+        }
+    }
+
+    /// The stored "Confirm UPDATE/DELETE without WHERE" setting (on by default).
+    fn confirm_unbounded(&self) -> bool {
+        saved_confirm_unbounded(&self.repo)
+    }
+
     /// Whether a stored plan's tab is still where the plan was made: the same runtime of
     /// the connection (not closed, not reopened since) and a session on the same database.
     fn plan_target_current(&self, t: &PlanTarget) -> bool {
@@ -673,7 +697,7 @@ impl SessionManager {
 
         let cfg = self.current_config(&rt);
         let mut planned = plan(text, target, dialect);
-        guard(&mut planned, cfg.env_tag, cfg.read_only, false);
+        guard_with(&mut planned, self.guard_ctx(&cfg, false));
         let copy = PlanCopy {
             target: plan_target,
             plan: planned,
@@ -735,6 +759,7 @@ impl SessionManager {
                 kind: s.kind.into(),
                 verdict: s.verdict,
                 preview: preview(&s.text),
+                unbounded: s.unbounded.clone(),
             })
             .collect();
         // The connection closed while we planned: `shutdown` closes the tab's session;
@@ -997,7 +1022,7 @@ impl SessionManager {
             None => &mut copy.plan,
         };
         let analyze = judged.guard.is_some_and(|g| g.analyze);
-        guard(judged, cfg.env_tag, cfg.read_only, analyze);
+        guard_with(judged, self.guard_ctx(&cfg, analyze));
         self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 
@@ -1082,8 +1107,10 @@ impl SessionManager {
         {
             return Err(early(DbError::PlanExpired));
         }
-        let cfg = self.current_config(&rt);
-        let stmt = export_read(&copy, &cfg).map_err(early)?;
+        // Judged with the same guard context as a run (config and the unbounded-write
+        // setting as they are now).
+        let ctx = self.guard_ctx(&self.current_config(&rt), false);
+        let stmt = export_read(&copy, ctx).map_err(early)?;
         // A stale session is replaced; one dropped after a lost connection reopens.
         if rt.is_stale(&ts) || ts.session.is_none() {
             let ensured = rt
@@ -1096,7 +1123,7 @@ impl SessionManager {
             })?;
         }
         let session = ts.session.as_deref().ok_or((DbError::PlanExpired, None))?;
-        still_one_read(&stmt, session.dialect(), &cfg).map_err(early)?;
+        still_one_read(&stmt, session.dialect(), ctx).map_err(early)?;
 
         let cancel = RunCancel::new(session.cancel_handle());
         let finished = Arc::new(AtomicBool::new(false));
@@ -1268,14 +1295,14 @@ fn not_read() -> DbError {
 }
 
 /// The statement of a one-statement plan copy an export may run again: a read (one
-/// statement for the server, not an Explain) the guard allows with `cfg` without
-/// confirmation.
-fn export_read(copy: &PlanCopy, cfg: &ConnectionConfig) -> Result<PlannedStmt, DbError> {
+/// statement for the server, not an Explain) the guard allows under `ctx` (the guard
+/// context a run is judged with, `SessionManager::guard_ctx`) without confirmation.
+fn export_read(copy: &PlanCopy, ctx: GuardCtx) -> Result<PlannedStmt, DbError> {
     if copy.explain.is_some() || copy.plan.explain {
         return Err(not_read());
     }
     let mut judged = copy.plan.clone();
-    guard(&mut judged, cfg.env_tag, cfg.read_only, false);
+    guard_with(&mut judged, ctx);
     let dialect = judged.dialect;
     let stmt = judged.stmts.first().ok_or(DbError::PlanExpired)?;
     if stmt.kind != StatementKind::Read
@@ -1289,10 +1316,10 @@ fn export_read(copy: &PlanCopy, cfg: &ConnectionConfig) -> Result<PlannedStmt, D
 
 /// Defense in depth before an export sends `stmt`: split, classified and judged with
 /// the session's dialect `now` (its `sql_mode` may have changed since the plan), it
-/// must still be exactly one read the guard allows.
-fn still_one_read(stmt: &PlannedStmt, now: Dialect, cfg: &ConnectionConfig) -> Result<(), DbError> {
+/// must still be exactly one read the guard allows under `ctx`.
+fn still_one_read(stmt: &PlannedStmt, now: Dialect, ctx: GuardCtx) -> Result<(), DbError> {
     let mut again = plan(&stmt.text, Target::All, now);
-    guard(&mut again, cfg.env_tag, cfg.read_only, false);
+    guard_with(&mut again, ctx);
     let one_read = match again.stmts.as_slice() {
         [only] => {
             only.kind == StatementKind::Read
@@ -1429,12 +1456,10 @@ fn count_verdict(plan: &ScriptPlan, v: Verdict) -> u32 {
 /// Judges a stored plan again with the connection's current config and returns the plan
 /// to run. `Blocked` when any statement is Block; `ConfirmationRequired` when any is
 /// Confirm and the user did not confirm. An Explain plan is judged on the explained
-/// statement; the explain statement it runs carries those verdicts.
-fn rejudge(
-    copy: &PlanCopy,
-    cfg: &ConnectionConfig,
-    confirmed: bool,
-) -> Result<ScriptPlan, DbError> {
+/// statement; the explain statement it runs carries those verdicts. `now`: the guard
+/// context as it is now (`SessionManager::guard_ctx`: current config and "Confirm
+/// UPDATE/DELETE without WHERE" setting); the plan keeps its own `analyze`.
+fn rejudge(copy: &PlanCopy, now: GuardCtx, confirmed: bool) -> Result<ScriptPlan, DbError> {
     let mut judged = copy
         .explain
         .as_ref()
@@ -1445,7 +1470,13 @@ fn rejudge(
             message: "the run plan was never guarded".into(),
         });
     };
-    guard(&mut judged, cfg.env_tag, cfg.read_only, ctx.analyze);
+    guard_with(
+        &mut judged,
+        GuardCtx {
+            analyze: ctx.analyze,
+            ..now
+        },
+    );
     let blocked = count_verdict(&judged, Verdict::Block);
     if blocked > 0 {
         return Err(DbError::Blocked { count: blocked });
@@ -1702,7 +1733,7 @@ impl SessionManager {
             return Err(DbError::PlanExpired);
         }
         let cfg = self.current_config(&rt);
-        let run_plan = rejudge(&copy, &cfg, confirmed)?;
+        let run_plan = rejudge(&copy, self.guard_ctx(&cfg, false), confirmed)?;
         // A stale session is replaced; one dropped after a lost connection reopens.
         if rt.is_stale(&ts) || ts.session.is_none() {
             let ensured = rt
@@ -1830,7 +1861,7 @@ impl SessionManager {
         let sql = explain_sql(&stmt.text, &info, dialect, analyze)?;
         let cfg = self.current_config(&rt);
         original.explain = true;
-        guard(&mut original, cfg.env_tag, cfg.read_only, analyze);
+        guard_with(&mut original, self.guard_ctx(&cfg, analyze));
 
         // The explain statement replaces the statement (one, the Cursor's): it is the
         // whole source of the plan that runs.

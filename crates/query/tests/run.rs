@@ -906,6 +906,7 @@ fn stmt(range: (u32, u32), text: &str) -> PlannedStmt {
         kind: StatementKind::Read,
         verdict: Verdict::Allow,
         source_range: (0, text.len()),
+        unbounded: Vec::new(),
     }
 }
 

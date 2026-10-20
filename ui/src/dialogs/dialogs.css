@@ -523,6 +523,34 @@ fieldset.export-form {
   white-space: nowrap;
 }
 
+/* Unbounded writes (UPDATE/DELETE without WHERE, TRUNCATE): a tinted block, no stripe. */
+.run-confirm-warning {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--warning-bg);
+  color: var(--warning-fg);
+}
+
+.run-confirm-warning-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+
+.run-confirm-unbounded-row {
+  display: flex;
+  flex-direction: column;
+  padding: 3px 0;
+}
+
+.run-confirm-unbounded-row .run-confirm-row {
+  padding: 0;
+  min-width: 0;
+}
+
+.run-confirm-warning .run-confirm-no {
+  color: inherit;
+}
+
 /* Secondary buttons and fields stay visible in dark dialogs (F34). */
 .modal .btn:not(.primary):not(.danger) {
   border-color: var(--dlg-line);

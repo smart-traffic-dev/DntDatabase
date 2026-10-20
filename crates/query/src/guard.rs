@@ -13,6 +13,13 @@
 //! On a read-only connection, a statement that lifts the session's read-only
 //! mode ([`lifts_read_only`]) is Block whatever its kind.
 //!
+//! On top of that table, a statement that runs and changes every row of a table
+//! ([`crate::unbounded`]: `UPDATE`/`DELETE` without WHERE or with an always-true one,
+//! `TRUNCATE`) is at least Confirm on EVERY connection: always on Production, and
+//! elsewhere while [`GuardCtx::confirm_unbounded`] (the "Confirm UPDATE/DELETE without
+//! WHERE" setting, on by default) is set. A plain Explain runs nothing and is not
+//! affected; read-only Block stays Block.
+//!
 //! A planned statement that holds several statements for the server (a MySQL
 //! `DELIMITER` left on, see [`resplits`]) gets the strictest verdict over all of
 //! them, and plain Explain does not cover it.
@@ -38,12 +45,23 @@ use crate::plan::{ScriptPlan, Verdict};
 ///
 /// The inputs are kept in `plan.guard`, so `run` can judge the statements again
 /// when the session's `sql_mode` changes how they are lexed.
+///
+/// Unbounded writes are confirmed on every connection (the setting's default); use
+/// [`guard_with`] to pass the setting.
 pub fn guard(plan: &mut ScriptPlan, env: Option<EnvTag>, read_only: bool, analyze: bool) {
-    let ctx = GuardCtx {
-        env,
-        read_only,
-        analyze,
-    };
+    guard_with(
+        plan,
+        GuardCtx {
+            env,
+            read_only,
+            analyze,
+            confirm_unbounded: true,
+        },
+    );
+}
+
+/// [`guard`] with every input given.
+pub fn guard_with(plan: &mut ScriptPlan, ctx: GuardCtx) {
     let (dialect, explain) = (plan.dialect, plan.explain);
     for s in &mut plan.stmts {
         s.verdict = stmt_verdict(&s.text, s.kind, dialect, explain, ctx);
@@ -57,6 +75,9 @@ pub struct GuardCtx {
     pub env: Option<EnvTag>,
     pub read_only: bool,
     pub analyze: bool,
+    /// Confirm unbounded writes on a connection that is not Production (the "Confirm
+    /// UPDATE/DELETE without WHERE" setting). Production always confirms them.
+    pub confirm_unbounded: bool,
 }
 
 /// The verdict [`guard`] gives one statement of a plan (`explain`: the plan's flag).
@@ -71,8 +92,9 @@ pub(crate) fn stmt_verdict(
         env,
         read_only,
         analyze,
+        confirm_unbounded,
     } = ctx;
-    if analyze {
+    let v = if analyze {
         let analyze_verdict = if !read_only && env == Some(EnvTag::Production) {
             Verdict::Confirm
         } else {
@@ -84,11 +106,18 @@ pub(crate) fn stmt_verdict(
         )
     } else if explain && kind != StatementKind::Ddl && !resplits(text, dialect) {
         // `explain_sql` refuses a text that re-splits; judged like a run should
-        // one reach here.
-        Verdict::Allow
+        // one reach here. A plain Explain runs nothing.
+        return Verdict::Allow;
     } else {
         verdict(text, kind, dialect, env, read_only)
+    };
+    if v == Verdict::Allow
+        && (confirm_unbounded || env == Some(EnvTag::Production))
+        && crate::unbounded::is_unbounded(text, dialect)
+    {
+        return Verdict::Confirm;
     }
+    v
 }
 
 /// The §5.1 verdict of one statement: the strictest over its [`readings`], each
@@ -372,7 +401,7 @@ fn name_at(src: &str, toks: &[Token], i: usize) -> Option<String> {
 /// `EXPLAIN|DESC|DESCRIBE ANALYZE …` (MySQL), `EXPLAIN ANALYZE|ANALYSE …` and
 /// `EXPLAIN (… ANALYZE [value] …) …` (PG) with a value other than
 /// `false`/`off`/`0`: the same option rules as `classify`.
-fn explain_analyze(toks: &[Token], dialect: Dialect) -> bool {
+pub(crate) fn explain_analyze(toks: &[Token], dialect: Dialect) -> bool {
     let explain = is_word(toks, 0, "EXPLAIN")
         || (dialect.is_mysql() && (is_word(toks, 0, "DESC") || is_word(toks, 0, "DESCRIBE")));
     if !explain {
@@ -929,7 +958,12 @@ mod tests {
             assert_eq!(plan_columns("SELECT 1", *d, true, true), [C, A, A]);
             assert_eq!(plan_columns("SELECT 1", *d, false, true), [C, A, A]);
             // Should a non-Read reach the guard, the stricter rule still applies.
-            assert_eq!(plan_columns("DELETE FROM t", *d, true, true), [C, B, A]);
+            assert_eq!(
+                plan_columns("DELETE FROM t WHERE id = 1", *d, true, true),
+                [C, B, A]
+            );
+            // Explain Analyze runs it: an unbounded write is confirmed everywhere.
+            assert_eq!(plan_columns("DELETE FROM t", *d, true, true), [C, B, C]);
         }
     }
 
@@ -1109,8 +1143,11 @@ DELIMITER ;";
     fn plain_explain_of_several_pieces_is_judged_as_a_run() {
         // Plain Explain allows everything but Ddl, unless the text is several
         // statements: then it is judged like any run.
-        let text = "DELIMITER $$\nSELECT 1; DELETE FROM t";
+        let text = "DELIMITER $$\nSELECT 1; DELETE FROM t WHERE id = 1";
         assert_eq!(plan_columns(text, MY, true, false), [C, B, A]);
+        // ... including the unbounded-write rule.
+        let text = "DELIMITER $$\nSELECT 1; DELETE FROM t";
+        assert_eq!(plan_columns(text, MY, true, false), [C, B, C]);
     }
 
     #[test]
@@ -1128,6 +1165,150 @@ DELIMITER ;";
                 assert_eq!(split(&s.text, PG).len(), 1, "{text:?}: {}", s.text);
                 assert!(!resplits(&s.text, PG), "{}", s.text);
             }
+        }
+    }
+
+    fn judged(text: &str, d: Dialect, ctx: GuardCtx) -> Vec<Verdict> {
+        let mut p = plan(text, Target::All, d);
+        guard_with(&mut p, ctx);
+        assert_eq!(p.guard, Some(ctx));
+        p.stmts.iter().map(|s| s.verdict).collect()
+    }
+
+    fn ctx(env: Option<EnvTag>, read_only: bool, confirm_unbounded: bool) -> GuardCtx {
+        GuardCtx {
+            env,
+            read_only,
+            analyze: false,
+            confirm_unbounded,
+        }
+    }
+
+    /// Environment x read-only x setting, for unbounded and bounded writes.
+    #[test]
+    fn unbounded_write_matrix() {
+        const UNBOUNDED: &[&str] = &[
+            "UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "TRUNCATE t",
+            "DELETE FROM t WHERE 1=1",
+        ];
+        const BOUNDED: &[&str] = &[
+            "UPDATE t SET a = 1 WHERE id = 1",
+            "DELETE FROM t WHERE id = 2",
+        ];
+        let envs = [
+            Some(EnvTag::Production),
+            Some(EnvTag::Staging),
+            Some(EnvTag::Local),
+            None,
+        ];
+        for d in BOTH {
+            for env in envs {
+                let prod = env == Some(EnvTag::Production);
+                for setting in [true, false] {
+                    for &s in UNBOUNDED {
+                        // Production always confirms; elsewhere the setting decides.
+                        let want = if prod || setting { C } else { A };
+                        assert_eq!(
+                            judged(s, *d, ctx(env, false, setting)),
+                            [want],
+                            "{s} {env:?} {setting}"
+                        );
+                        // Read-only blocks whatever the setting.
+                        assert_eq!(
+                            judged(s, *d, ctx(env, true, setting)),
+                            [B],
+                            "{s} {env:?} ro"
+                        );
+                    }
+                    for &s in BOUNDED {
+                        let want = if prod { C } else { A };
+                        assert_eq!(
+                            judged(s, *d, ctx(env, false, setting)),
+                            [want],
+                            "{s} {env:?} {setting}"
+                        );
+                    }
+                }
+            }
+        }
+        // `guard` confirms unbounded writes (the setting's default).
+        let mut p = plan("DELETE FROM t", Target::All, MY);
+        guard(&mut p, Some(EnvTag::Local), false, false);
+        assert_eq!(p.stmts[0].verdict, C);
+        assert!(p.guard.unwrap().confirm_unbounded);
+    }
+
+    #[test]
+    fn unbounded_writes_only_flag_their_own_statement() {
+        let local = ctx(Some(EnvTag::Local), false, true);
+        assert_eq!(
+            judged(
+                "SELECT 1; DELETE FROM t; DELETE FROM t WHERE id = 1; UPDATE t SET a = 1",
+                MY,
+                local
+            ),
+            [A, C, A, C]
+        );
+        // A WHERE inside a subquery does not bound the statement.
+        assert_eq!(
+            judged(
+                "UPDATE t SET a = (SELECT b FROM u WHERE u.id = t.id)",
+                PG,
+                local
+            ),
+            [C]
+        );
+        // MariaDB `SET STATEMENT … FOR` runs the DELETE: confirmed even off Production.
+        assert_eq!(
+            judged(
+                "SET STATEMENT max_statement_time = 1 FOR DELETE FROM t",
+                MY,
+                local
+            ),
+            [C]
+        );
+        // Routine bodies are not flagged.
+        assert!(judged(DUMP_PROCEDURE, MY, local).iter().all(|v| *v == A));
+        assert_eq!(
+            judged(
+                "DELIMITER $$\nCREATE PROCEDURE p() BEGIN DELETE FROM t; END$$",
+                MY,
+                local
+            ),
+            [A]
+        );
+    }
+
+    #[test]
+    fn unbounded_write_in_a_delimiter_script() {
+        // A forgotten `DELIMITER ;`: the DELETE piece is judged on its own.
+        let local = ctx(Some(EnvTag::Local), false, true);
+        assert_eq!(judged(FORGOTTEN_DELIMITER, MY, local), [A]);
+        assert_eq!(
+            judged("DELIMITER $$\nSELECT * FROM t; DELETE FROM t;", MY, local),
+            [C]
+        );
+        assert_eq!(
+            judged(
+                "DELIMITER $$\nSELECT * FROM t; DELETE FROM t;",
+                MY,
+                ctx(None, false, false)
+            ),
+            [A]
+        );
+    }
+
+    #[test]
+    fn plain_explain_of_an_unbounded_write_is_allowed() {
+        for setting in [true, false] {
+            let mut p = plan("DELETE FROM t", Target::All, PG);
+            p.explain = true;
+            guard_with(&mut p, ctx(Some(EnvTag::Local), false, setting));
+            assert_eq!(p.stmts[0].verdict, A);
+            // The flag is still there for the UI.
+            assert_eq!(p.stmts[0].unbounded.len(), 1);
         }
     }
 

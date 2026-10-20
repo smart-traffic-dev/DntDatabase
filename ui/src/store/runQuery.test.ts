@@ -236,6 +236,90 @@ describe('runQuery', () => {
     expect(callsOf('query_run')[0]).toMatchObject({ planId: 'plan-1', confirmed: true });
   });
 
+  describe('confirmation_required at run (setting changed after planning)', () => {
+    const refusedOnce = () => {
+      let runs = 0;
+      return () => {
+        runs += 1;
+        return runs === 1
+          ? Promise.reject({ kind: 'confirmation_required', message: '1 statement needs confirmation', count: 1 })
+          : 'run-2';
+      };
+    };
+
+    it('plans again and asks, like a fresh run', async () => {
+      let plans = 0;
+      mockBackend({
+        query_plan: () => {
+          plans += 1;
+          return plans === 1
+            ? planOf([stmt(0, 'write', 'allow')])
+            : { ...planOf([stmt(0, 'write', 'confirm')]), plan_id: 'plan-2' };
+        },
+        query_run: refusedOnce(),
+      });
+      const done = runQuery(tab, { Cursor: 3 });
+      await vi.waitFor(() => expect(useRunPrompt.getState().pending?.kind).toBe('confirm'));
+      useRunPrompt.getState().settle(true);
+      await done;
+      expect(callsOf('query_plan')).toHaveLength(2);
+      expect(callsOf('query_plan')[1]).toMatchObject({ target: { Cursor: 3 }, text: 'SELECT 1; UPDATE t SET a = 1' });
+      expect(callsOf('query_run')).toMatchObject([
+        { planId: 'plan-1', confirmed: false },
+        { planId: 'plan-2', confirmed: true },
+      ]);
+      expect(messages()).toEqual([]);
+      expect(useQueryRun.getState().get(tab).runId).toBe('run-2');
+    });
+
+    it('cancelling the dialog runs nothing and shows no error', async () => {
+      let plans = 0;
+      mockBackend({
+        query_plan: () => {
+          plans += 1;
+          return planOf([stmt(0, 'write', plans === 1 ? 'allow' : 'confirm')]);
+        },
+        query_run: refusedOnce(),
+      });
+      const done = runQuery(tab, 'All');
+      await vi.waitFor(() => expect(useRunPrompt.getState().pending?.kind).toBe('confirm'));
+      useRunPrompt.getState().settle(false);
+      await done;
+      expect(callsOf('query_run')).toHaveLength(1);
+      expect(messages()).toEqual([]);
+      expect(useQueryRun.getState().get(tab).phase.kind).toBe('idle');
+    });
+
+    it('a second refusal is shown, not retried forever', async () => {
+      mockBackend({
+        query_plan: () => planOf([stmt(0, 'write', 'allow')]),
+        query_run: () => Promise.reject({ kind: 'confirmation_required', message: 'needs confirmation', count: 1 }),
+      });
+      await runQuery(tab, 'All');
+      expect(callsOf('query_plan')).toHaveLength(2);
+      expect(callsOf('query_run')).toHaveLength(2);
+      expect(messages()).toEqual(['needs confirmation']);
+      expect(useQueryRun.getState().get(tab).phase.kind).toBe('idle');
+    });
+
+    it('Retry / Fetch all derive the statement again and ask', async () => {
+      mockBackend({
+        query_plan_statement: () => ({ ...planOf([stmt(1, 'write', 'confirm')]), plan_id: 'plan-3' }),
+        query_run: refusedOnce(),
+      });
+      const done = runPlanned(tab, planOf([stmt(1, 'write', 'allow')]), { maxRows: 1_000_000 });
+      await vi.waitFor(() => expect(useRunPrompt.getState().pending?.kind).toBe('confirm'));
+      useRunPrompt.getState().settle(true);
+      await done;
+      expect(callsOf('query_plan_statement')).toMatchObject([{ planId: 'plan-1', index: 1 }]);
+      expect(callsOf('query_run')).toMatchObject([
+        { planId: 'plan-1', confirmed: false },
+        { planId: 'plan-3', confirmed: true, opts: { max_rows: 1_000_000 } },
+      ]);
+      expect(messages()).toEqual([]);
+    });
+  });
+
   it('a Stop before attach is sent at attach', async () => {
     let release!: (id: string) => void;
     mockBackend({

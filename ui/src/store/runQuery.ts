@@ -170,22 +170,36 @@ function note(tabId: string, text: string, error: ReturnType<typeof toAppError> 
   }));
 }
 
-/** A run that never started (`query_run` failed): the tab is usable again. */
-function abort(tabId: string, text: string, error: ReturnType<typeof toAppError>) {
+/** A run that never started: back to idle so the tab is usable again. */
+function toIdle(tabId: string) {
   const run = useQueryRun.getState().get(tabId);
   if (run.phase.kind !== 'idle') {
     useQueryRun.setState((s) => ({
       runs: new Map(s.runs).set(tabId, { ...run, phase: { kind: 'idle' }, current: null, openResult: null }),
     }));
   }
+}
+
+/** A run that never started (`query_run` failed): the tab is usable again. */
+function abort(tabId: string, text: string, error: ReturnType<typeof toAppError>) {
+  toIdle(tabId);
   note(tabId, text, error);
 }
 
-/** Guard dialogs, then `begin` + `query_run` + `attach` for a plan (the caller holds the starting flag). */
+/** Makes the plan again (fresh verdicts), for a run refused with `confirmation_required`. */
+type Replan = () => Promise<PlanView>;
+
+/**
+ * Guard dialogs, then `begin` + `query_run` + `attach` for a plan (the caller holds the starting
+ * flag). When an unconfirmed `query_run` answers `confirmation_required` (e.g. the "Confirm
+ * UPDATE/DELETE without WHERE" setting was turned on after planning), `replan` plans again and the
+ * new plan goes through the dialogs like a fresh run (once: a second refusal is shown).
+ */
 async function execute(
   tabId: string,
   plan: PlanView,
   extra?: { maxRows?: number; mode?: 'run' | 'explain' },
+  replan?: Replan,
 ): Promise<void> {
   const doc = useQueryDocs.getState().docs.get(tabId);
   if (!doc || plan.stmts.length === 0) return;
@@ -213,6 +227,19 @@ async function execute(
   } catch (e) {
     pendingStop.delete(tabId);
     const error = toAppError(e);
+    if (error.kind === 'confirmation_required' && !confirmed && replan) {
+      toIdle(tabId);
+      let again: PlanView;
+      try {
+        again = await replan();
+      } catch (e2) {
+        const err = toAppError(e2);
+        note(tabId, err.message, err);
+        return;
+      }
+      await execute(tabId, again, extra);
+      return;
+    }
     abort(tabId, error.message, error);
   }
 }
@@ -243,15 +270,16 @@ export async function runQuery(tabId: string, target: Target, extra?: { maxRows?
   try {
     const connectionId = await openedConnection(tabId, doc.connectionId);
     if (!connectionId) return;
+    const makePlan = () => api.queryPlan(tabId, connectionId, doc.database, doc.sql, target);
     let plan: PlanView;
     try {
-      plan = await api.queryPlan(tabId, connectionId, doc.database, doc.sql, target);
+      plan = await makePlan();
     } catch (e) {
       const error = toAppError(e);
       note(tabId, error.message, error);
       return;
     }
-    await execute(tabId, plan, extra);
+    await execute(tabId, plan, extra, makePlan);
   } finally {
     setStarting(tabId, false);
   }
@@ -280,15 +308,16 @@ export async function explainQuery(tabId: string, analyze: boolean): Promise<voi
     if (!connectionId) return;
     const target = targetOf(tabId, 'cursor');
     const cursor = target === null || target === 'All' ? 0 : 'Cursor' in target ? target.Cursor : target.Selection[0];
+    const makePlan = () => api.queryExplain(tabId, connectionId, doc.database, doc.sql, cursor, analyze);
     let plan: PlanView;
     try {
-      plan = await api.queryExplain(tabId, connectionId, doc.database, doc.sql, cursor, analyze);
+      plan = await makePlan();
     } catch (e) {
       setExplainError(tabId, toAppError(e).message);
       return;
     }
     setExplainError(tabId, null);
-    await execute(tabId, plan, { mode: 'explain' });
+    await execute(tabId, plan, { mode: 'explain' }, makePlan);
   } finally {
     setStarting(tabId, false);
   }
@@ -330,7 +359,10 @@ export async function runPlanned(tabId: string, plan: PlanView, extra?: { maxRow
   if (!mayStart(tabId)) return;
   setStarting(tabId, true);
   try {
-    await execute(tabId, plan, extra);
+    // A derived plan holds one statement: derive it again from itself.
+    const only = plan.stmts.length === 1 ? plan.stmts[0] : undefined;
+    const replan = only ? () => api.queryPlanStatement(plan.plan_id, only.index) : undefined;
+    await execute(tabId, plan, extra, replan);
   } finally {
     setStarting(tabId, false);
   }
