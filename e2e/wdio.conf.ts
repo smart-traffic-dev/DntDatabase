@@ -86,7 +86,7 @@ function cleanup() {
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
-  specs: ['./smoke.e2e.ts', './postgres.e2e.ts'],
+  specs: ['./smoke.e2e.ts', './postgres.e2e.ts', './query.e2e.ts'],
   maxInstances: 1,
   maxInstancesPerCapability: 1, // both specs share one DNT_DATA_DIR and one tauri-driver port
   hostname: '127.0.0.1',
@@ -137,8 +137,10 @@ export const config: WebdriverIO.Config = {
 
   async afterTest(test, _context, { passed }) {
     if (!passed) {
-      const { evidence } = await import('./evidence');
-      await evidence(`FAILED-${test.title.replace(/\W+/g, '_').slice(0, 60)}`);
+      // The worker's global `browser`; importing ./evidence from the launcher cannot resolve @wdio/globals.
+      const dir = process.env.E2E_EVIDENCE_DIR ?? here;
+      fs.mkdirSync(dir, { recursive: true });
+      await browser.saveScreenshot(path.join(dir, `FAILED-${test.title.replace(/\W+/g, '_').slice(0, 60)}.png`));
     }
   },
 
