@@ -261,6 +261,49 @@ impl RowSink for BoundedPage {
     fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
+/// One statement for [`SessionManager::data_exec`].
+#[derive(Debug, Clone, Default)]
+pub struct DataRequest {
+    /// ONE read statement: built by the backend, or a user statement the plan / guard
+    /// classified as a read (export).
+    pub sql: String,
+    /// Bound values (see `ExecOptions::params`).
+    pub params: Vec<String>,
+    pub max_rows: usize,
+    /// Every byte of binary values (export).
+    pub full_bytes: bool,
+    /// No statement timeout (an export streams for as long as it takes; it is
+    /// cancelled through its key).
+    pub no_timeout: bool,
+}
+
+/// Forwards to a sink and remembers whether anything reached it (a request may only be
+/// sent again on a fresh session when nothing did).
+struct Tracked<'a> {
+    inner: &'a mut dyn RowSink,
+    touched: bool,
+}
+
+impl RowSink for Tracked<'_> {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.touched = true;
+        self.inner.result_start(cols);
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        self.touched = true;
+        self.inner.rows(batch);
+    }
+    fn result_end(&mut self, summary: &ResultSummary) {
+        self.inner.result_end(summary);
+    }
+    fn progress(&mut self, p: dnt_core::driver::ExecProgress) {
+        self.inner.progress(p);
+    }
+    fn server_notices(&mut self, notices: dnt_core::driver::ServerNotices) {
+        self.inner.server_notices(notices);
+    }
+}
+
 impl SessionManager {
     /// Runs ONE `SELECT` built by the backend on a data session for `db` of connection
     /// `id`, under request `key` (see the module docs), and returns its first result,
@@ -274,15 +317,57 @@ impl SessionManager {
         sql: &str,
         max_rows: usize,
     ) -> Result<BoundedPage, DbError> {
+        self.data_read_params(id, db, key, sql, Vec::new(), max_rows)
+            .await
+    }
+
+    /// [`Self::data_read`] with bound values (the data view's filter).
+    pub async fn data_read_params(
+        &self,
+        id: Uuid,
+        db: Option<&str>,
+        key: &str,
+        sql: &str,
+        params: Vec<String>,
+        max_rows: usize,
+    ) -> Result<BoundedPage, DbError> {
+        let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
+        let request = DataRequest {
+            sql: sql.to_string(),
+            params,
+            max_rows,
+            ..DataRequest::default()
+        };
+        self.data_exec(id, db, key, &request, &mut page).await?;
+        Ok(page)
+    }
+
+    /// Runs `request` on a data session for `db` of connection `id`, under request
+    /// `key` (see the module docs: supersede, cancel, pooling), streaming every result
+    /// into `sink` unbounded (export). The statement timeout is none with
+    /// `no_timeout`, else the connection's query timeout, else [`DATA_READ_TIMEOUT`].
+    pub async fn data_exec(
+        &self,
+        id: Uuid,
+        db: Option<&str>,
+        key: &str,
+        request: &DataRequest,
+        sink: &mut dyn RowSink,
+    ) -> Result<(), DbError> {
         let rt = self.runtime(id)?;
         let data = &rt.data;
         let serial = data.serial.fetch_add(1, Ordering::SeqCst) + 1;
         // Ours from now on: the previous request of this key is cancelled at once.
         data.begin(key, serial);
         let database = db.map(str::to_string);
-        let timeout = match rt.cfg.options.query_timeout_s {
-            0 => self.data_timeout,
-            s => Duration::from_secs(s.into()),
+        let timeout = match (request.no_timeout, rt.cfg.options.query_timeout_s) {
+            (true, _) => None,
+            (false, 0) => Some(self.data_timeout),
+            (false, s) => Some(Duration::from_secs(s.into())),
+        };
+        let mut sink = Tracked {
+            inner: sink,
+            touched: false,
         };
         let mut pooled = take_idle(&rt, &database);
         loop {
@@ -322,19 +407,21 @@ impl SessionManager {
                 return Err(DbError::cancelled());
             }
             let opts = ExecOptions {
-                max_rows,
-                timeout: Some(timeout),
+                max_rows: request.max_rows,
+                timeout,
                 cancel_grace: DATA_CANCEL_GRACE,
                 stop,
+                params: request.params.clone(),
+                full_bytes: request.full_bytes,
                 ..ExecOptions::default()
             };
-            let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
             let outcome = session
-                .execute_one(sql, StatementKind::Read, &opts, &mut page)
+                .execute_one(&request.sql, StatementKind::Read, &opts, &mut sink)
                 .await;
             // A pooled session that went stale while idle (server restart, idle timeout):
-            // one more attempt on a fresh session, unless the request was cancelled.
-            if from_pool && outcome.as_ref().is_err_and(is_lost) {
+            // one more attempt on a fresh session, unless the request was cancelled or
+            // something already reached the sink.
+            if from_pool && !sink.touched && outcome.as_ref().is_err_and(is_lost) {
                 tokio::spawn(close_quietly(session));
                 continue;
             }
@@ -353,7 +440,7 @@ impl SessionManager {
             } else {
                 tokio::spawn(close_quietly(session));
             }
-            return outcome.map(|_| page);
+            return outcome.map(|_| ());
         }
     }
 

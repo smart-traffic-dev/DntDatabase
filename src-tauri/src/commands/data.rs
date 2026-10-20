@@ -14,6 +14,10 @@
 //! formatted from integers), so they need no Production confirmation and run on read-only
 //! connections. Pages are bounded: long text cells are cut and a page stops taking rows
 //! at a byte budget (see [`crate::data_sessions::BoundedPage`]).
+//!
+//! The filter and sort arrive as a structured AST ([`DataFilter`], [`SortSpec`]), never
+//! as SQL: columns are checked against the object's real columns and quoted, values are
+//! bound parameters (see [`dnt_core::sql::filter`]).
 
 use super::browse::table_detail_impl;
 use super::guard;
@@ -22,7 +26,9 @@ use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::DbKind;
-use dnt_core::sql::ident::{count_sql, qualified_name, select_page_sql};
+use dnt_core::sql::filter::{build_where, pg_unordered, WhereClause, MAX_SORT_KEYS};
+pub use dnt_core::sql::filter::{DataFilter, FilterCond, FilterMode, FilterOp, SortDir, SortSpec};
+use dnt_core::sql::ident::{count_where_sql, qualified_name, select_sql};
 use dnt_core::value::{ColumnMeta, Value};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -32,20 +38,6 @@ use uuid::Uuid;
 
 /// Largest page the data view may ask for.
 pub const MAX_PAGE_SIZE: u32 = 10_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum SortDir {
-    Asc,
-    Desc,
-}
-
-/// Server-side `ORDER BY` of one column (which must be a column of the object).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-pub struct SortSpec {
-    pub column: String,
-    pub dir: SortDir,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct TableDataPage {
@@ -120,18 +112,7 @@ pub fn check_limit(limit: u32) -> Result<(), DbError> {
 /// default ordering (`json`, `xml`, the geometric types, and arrays of them). MySQL sorts
 /// every type.
 pub fn unsortable(kind: DbKind, db_type: &str) -> bool {
-    if kind != DbKind::Postgres {
-        return false;
-    }
-    let t = db_type.trim().to_ascii_lowercase();
-    let base = t.trim_end_matches("[]").trim();
-    // `pg_catalog.json`, `json(…)` and similar spellings.
-    let base = base.rsplit('.').next().unwrap_or(base);
-    let base = base.split('(').next().unwrap_or(base).trim();
-    matches!(
-        base,
-        "json" | "xml" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle"
-    )
+    kind == DbKind::Postgres && pg_unordered(db_type)
 }
 
 /// `order` checked against the object's columns (exact name, sortable type):
@@ -183,22 +164,101 @@ pub fn key_order(detail: &TableDetail) -> Vec<String> {
 pub type OrderBy = Vec<(String, bool)>;
 
 /// The `ORDER BY` of a page and its implicit key order (`TableDataPage::key_order`): the
-/// requested sort followed by the primary key columns as a tie-breaker (stable paging
-/// over equal values), or, without a sort, the primary key alone.
+/// requested sort keys in order (a column named twice counts once, first wins) followed
+/// by the primary key columns as a tie-breaker (stable paging over equal values), or,
+/// without a sort, the primary key alone.
 pub fn page_order(
     kind: DbKind,
     detail: &TableDetail,
-    order: Option<SortSpec>,
+    sort: &[SortSpec],
 ) -> Result<(OrderBy, Vec<String>), DbError> {
-    let keys = key_order(detail);
-    match resolve_order(kind, &detail.columns, order)? {
-        Some((column, asc)) => {
-            let mut by = vec![(column.clone(), asc)];
-            by.extend(keys.into_iter().filter(|k| *k != column).map(|k| (k, true)));
-            Ok((by, Vec::new()))
-        }
-        None => Ok((keys.iter().map(|k| (k.clone(), true)).collect(), keys)),
+    if sort.len() > MAX_SORT_KEYS {
+        return Err(config_error(
+            "order",
+            &format!("sort by at most {MAX_SORT_KEYS} columns"),
+        ));
     }
+    let keys = key_order(detail);
+    if sort.is_empty() {
+        return Ok((keys.iter().map(|k| (k.clone(), true)).collect(), keys));
+    }
+    let mut by: OrderBy = Vec::with_capacity(sort.len() + keys.len());
+    for spec in sort {
+        if let Some((column, asc)) = resolve_order(kind, &detail.columns, Some(spec.clone()))? {
+            if !by.iter().any(|(c, _)| *c == column) {
+                by.push((column, asc));
+            }
+        }
+    }
+    for k in keys {
+        if !by.iter().any(|(c, _)| *c == k) {
+            by.push((k, true));
+        }
+    }
+    Ok((by, Vec::new()))
+}
+
+/// Whether `filter` has any condition.
+fn filtered(filter: Option<&DataFilter>) -> bool {
+    filter.is_some_and(|f| !f.conditions.is_empty())
+}
+
+/// What a data read of an object runs: the relation, `ORDER BY`, implicit key order and
+/// `WHERE` (with its parameters), all checked against the object's columns.
+pub(crate) struct DataQuery {
+    pub kind: DbKind,
+    pub relation: String,
+    pub order: OrderBy,
+    pub keys: Vec<String>,
+    pub filter: WhereClause,
+}
+
+impl DataQuery {
+    /// The `SELECT`, paged with `(limit, offset)` or whole.
+    pub fn select(&self, page: Option<(u64, u64)>) -> String {
+        let order: Vec<(&str, bool)> = self
+            .order
+            .iter()
+            .map(|(c, asc)| (c.as_str(), *asc))
+            .collect();
+        select_sql(self.kind, &self.relation, &self.filter.sql, &order, page)
+    }
+}
+
+/// Builds the [`DataQuery`] of `obj`. The object's columns (the tree's cached table
+/// detail) are required for a sort or a filter; without either, a failed detail read
+/// only loses the stable key order.
+pub(crate) async fn data_query(
+    state: &AppState,
+    id: Uuid,
+    obj: &ObjectRef,
+    sort: &[SortSpec],
+    filter: Option<&DataFilter>,
+) -> Result<DataQuery, DbError> {
+    let kind = state.repo.get(id)?.kind;
+    check_object(kind, obj)?;
+    // The detail is cached by the tree's Info view (a metadata call, short).
+    let (order, keys, filter) = if !sort.is_empty() || filtered(filter) {
+        let detail = table_detail_impl(state, id, obj.clone()).await?;
+        let (order, keys) = page_order(kind, &detail, sort)?;
+        (order, keys, build_where(kind, &detail.columns, filter)?)
+    } else {
+        match table_detail_impl(state, id, obj.clone()).await {
+            Ok(detail) => {
+                let (order, keys) = page_order(kind, &detail, &[])?;
+                (order, keys, WhereClause::default())
+            }
+            // No stable order then; the SELECT reports a real problem itself.
+            Err(_) => (Vec::new(), Vec::new(), WhereClause::default()),
+        }
+    };
+    Ok(DataQuery {
+        kind,
+        relation: relation(kind, obj),
+        order,
+        keys,
+        filter,
+    })
 }
 
 /// An offset as JS sends it: a negative, fractional or non-finite one is clamped.
@@ -218,6 +278,8 @@ fn relation(kind: DbKind, obj: &ObjectRef) -> String {
     qualified_name(kind, &obj.database, obj.schema.as_deref(), &obj.name)
 }
 
+/// A page of `obj`: `sort` keys in order (empty: the primary key), rows matching
+/// `filter` (none: all rows).
 #[allow(clippy::too_many_arguments)]
 pub async fn table_data_impl(
     state: &AppState,
@@ -225,32 +287,27 @@ pub async fn table_data_impl(
     obj: ObjectRef,
     limit: u32,
     offset: u64,
-    order: Option<SortSpec>,
+    sort: Vec<SortSpec>,
+    filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableDataPage, DbError> {
-    let kind = state.repo.get(id)?.kind;
-    check_object(kind, &obj)?;
     check_limit(limit)?;
-    // The detail is cached by the tree's Info view (a metadata call, short).
-    let (order, keys) = match order {
-        Some(order) => {
-            let detail = table_detail_impl(state, id, obj.clone()).await?;
-            page_order(kind, &detail, Some(order))?
-        }
-        None => match table_detail_impl(state, id, obj.clone()).await {
-            Ok(detail) => page_order(kind, &detail, None)?,
-            // No stable order then; the SELECT reports a real problem itself.
-            Err(_) => (Vec::new(), Vec::new()),
-        },
-    };
-    let order: Vec<(&str, bool)> = order.iter().map(|(c, asc)| (c.as_str(), *asc)).collect();
+    let query = data_query(state, id, &obj, &sort, filter.as_ref()).await?;
     let fetch = u64::from(limit) + 1;
-    let sql = select_page_sql(kind, &relation(kind, &obj), &order, fetch, offset);
+    let sql = query.select(Some((fetch, offset)));
     let started = Instant::now();
     let page = state
         .sessions
-        .data_read(id, Some(&obj.database), &request_key, &sql, fetch as usize)
+        .data_read_params(
+            id,
+            Some(&obj.database),
+            &request_key,
+            &sql,
+            query.filter.params,
+            fetch as usize,
+        )
         .await?;
+    let keys = query.keys;
     let mut rows = page.rows;
     let has_more = rows.len() > limit as usize || page.capped;
     rows.truncate(limit as usize);
@@ -278,22 +335,31 @@ fn count_value(v: Option<&Value>) -> Result<u64, DbError> {
     })
 }
 
+/// The exact count of the rows of `obj` matching `filter` (none: all rows).
 pub async fn table_row_count_impl(
     state: &AppState,
     id: Uuid,
     obj: ObjectRef,
+    filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableRowCount, DbError> {
     let kind = state.repo.get(id)?.kind;
     check_object(kind, &obj)?;
+    let clause = if filtered(filter.as_ref()) {
+        let detail = table_detail_impl(state, id, obj.clone()).await?;
+        build_where(kind, &detail.columns, filter.as_ref())?
+    } else {
+        WhereClause::default()
+    };
     let started = Instant::now();
     let read = state
         .sessions
-        .data_read(
+        .data_read_params(
             id,
             Some(&obj.database),
             &request_key,
-            &count_sql(&relation(kind, &obj)),
+            &count_where_sql(&relation(kind, &obj), &clause.sql),
+            clause.params,
             1,
         )
         .await?;
@@ -312,6 +378,9 @@ pub async fn table_data_cancel_impl(
     Ok(state.sessions.data_cancel(id, &request_key))
 }
 
+/// A page of a table / view. `sort`: keys in order (empty: the primary key);
+/// `filter`: a structured filter (columns checked, values bound; `config` error with
+/// field `filter` / `order` for a bad one).
 #[tauri::command]
 #[specta::specta]
 #[allow(clippy::too_many_arguments)]
@@ -321,7 +390,8 @@ pub async fn table_data(
     obj: ObjectRef,
     limit: u32,
     offset: f64,
-    order: Option<SortSpec>,
+    sort: Vec<SortSpec>,
+    filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableDataPage, AppError> {
     let offset = clamp_offset(offset);
@@ -331,21 +401,24 @@ pub async fn table_data(
         obj,
         limit,
         offset,
-        order,
+        sort,
+        filter,
         request_key,
     ))
     .await
 }
 
+/// Exact `COUNT(*)` of the rows matching `filter` (null: all rows).
 #[tauri::command]
 #[specta::specta]
 pub async fn table_row_count(
     state: State<'_, AppState>,
     id: Uuid,
     obj: ObjectRef,
+    filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableRowCount, AppError> {
-    guard(table_row_count_impl(&state, id, obj, request_key)).await
+    guard(table_row_count_impl(&state, id, obj, filter, request_key)).await
 }
 
 /// Cancels the `table_data` / `table_row_count` request running under `request_key`;
@@ -537,21 +610,21 @@ mod tests {
     #[test]
     fn an_explicit_sort_gets_the_primary_key_as_tie_breaker() {
         let spec = |c: &str, dir| {
-            Some(SortSpec {
+            vec![SortSpec {
                 column: c.into(),
                 dir,
-            })
+            }]
         };
         let d = detail(Some(vec!["a", "b"]));
         let owned = |v: &[(&str, bool)]| -> Vec<(String, bool)> {
             v.iter().map(|(c, asc)| (c.to_string(), *asc)).collect()
         };
         assert_eq!(
-            page_order(DbKind::MySql, &d, spec("b", SortDir::Desc)).unwrap(),
+            page_order(DbKind::MySql, &d, &spec("b", SortDir::Desc)).unwrap(),
             (owned(&[("b", false), ("a", true)]), vec![])
         );
         assert_eq!(
-            page_order(DbKind::MySql, &d, None).unwrap(),
+            page_order(DbKind::MySql, &d, &[]).unwrap(),
             (
                 owned(&[("a", true), ("b", true)]),
                 vec!["a".to_string(), "b".to_string()]
@@ -559,13 +632,37 @@ mod tests {
         );
         let no_pk = detail(None);
         assert_eq!(
-            page_order(DbKind::MySql, &no_pk, spec("a", SortDir::Asc)).unwrap(),
+            page_order(DbKind::MySql, &no_pk, &spec("a", SortDir::Asc)).unwrap(),
             (owned(&[("a", true)]), vec![])
         );
         assert_eq!(
-            page_order(DbKind::MySql, &no_pk, None).unwrap(),
+            page_order(DbKind::MySql, &no_pk, &[]).unwrap(),
             (vec![], vec![])
         );
+    }
+
+    #[test]
+    fn several_sort_keys_keep_their_order_and_dedupe() {
+        let d = detail(Some(vec!["a"]));
+        let key = |c: &str, dir| SortSpec {
+            column: c.into(),
+            dir,
+        };
+        let sort = [
+            key("b", SortDir::Desc),
+            key("a", SortDir::Desc),
+            key("b", SortDir::Asc),
+        ];
+        assert_eq!(
+            page_order(DbKind::MySql, &d, &sort).unwrap().0,
+            vec![("b".to_string(), false), ("a".to_string(), false)]
+        );
+        // An unknown key anywhere is refused.
+        let bad = [key("a", SortDir::Asc), key("nope", SortDir::Asc)];
+        let e = page_order(DbKind::MySql, &d, &bad).unwrap_err();
+        assert_eq!(field(e).as_deref(), Some("order"));
+        let many = vec![key("a", SortDir::Asc); MAX_SORT_KEYS + 1];
+        assert!(page_order(DbKind::MySql, &d, &many).is_err());
     }
 
     #[test]

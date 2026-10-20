@@ -93,11 +93,21 @@ async fn page(
     offset: u64,
     order: Option<SortSpec>,
 ) -> Result<TableDataPage, DbError> {
-    table_data_impl(state, id, obj, limit, offset, order, "tab:page".into()).await
+    table_data_impl(
+        state,
+        id,
+        obj,
+        limit,
+        offset,
+        order.into_iter().collect(),
+        None,
+        "tab:page".into(),
+    )
+    .await
 }
 
 async fn count(state: &AppState, id: Uuid, obj: ObjectRef) -> Result<TableRowCount, DbError> {
-    table_row_count_impl(state, id, obj, "tab:count".into()).await
+    table_row_count_impl(state, id, obj, None, "tab:count".into()).await
 }
 
 fn int(v: &Value) -> i64 {
@@ -332,6 +342,7 @@ async fn slow_page_does_not_block_browsing_and_cancel_stops_it() {
                 view(t, &slow.name),
                 10,
                 0,
+                vec![],
                 None,
                 "tab-slow:page".into()
             ),
