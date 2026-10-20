@@ -906,6 +906,25 @@ enum Failure {
     Server,
 }
 
+/// Whether `stmt`, ONE statement for the server under `sent_as` (the dialect the caller
+/// split it with), would reach it as several under `now` (the `sql_mode` read again
+/// inside `execute_one`, after a stale read or a silent reconnect): for example a
+/// `'a\'; DROP …'` string once `NO_BACKSLASH_ESCAPES` is on. Such a statement must not
+/// be sent: what the guard judged is not what would run.
+fn splits_differently(stmt: &str, sent_as: Dialect, now: Dialect) -> bool {
+    sent_as != now && resplits(stmt, now) && !resplits(stmt, sent_as)
+}
+
+/// [`splits_differently`]: refused before anything was sent.
+fn mode_changed() -> DbError {
+    DbError::Config {
+        field: Some("sql_mode".into()),
+        message: "The session's SQL mode changed (it was read again after a reconnect) and \
+                  this statement would now be sent as several. Nothing was sent; run it again."
+            .into(),
+    }
+}
+
 /// `cancelled`: our cancel targeted this call; `interrupted`: the error is 1317;
 /// `killed_unknown`: [`killed_outcome_unknown`] for the statement.
 fn failure_kind(
@@ -957,6 +976,9 @@ impl Session for MySqlSession {
         }
         let mut outcome = StmtOutcome::default();
         let mut reconnected = false;
+        // The dialect the caller split `stmt` with (`dialect()` when it planned): a
+        // `sql_mode` read again below, or a reconnect, may lex it differently.
+        let sent_as = self.dialect();
         // An earlier call's `KILL QUERY` may still land on this connection (see
         // `run_timed`): replace it before anything is sent, silently only when nothing of
         // the old session is lost. Same for a connection that stopped answering a check
@@ -1022,11 +1044,14 @@ impl Session for MySqlSession {
         }
         // The `sql_mode` `stmt` runs under, read from the connection it is sent on
         // (after any reconnect above).
-        let dialect = self.dialect();
+        let mut dialect = self.dialect();
+        if splits_differently(stmt, sent_as, dialect) {
+            return Err(mode_changed());
+        }
         let was_in_tx = self.in_transaction();
         // Several pieces for the server: its transaction state is read back afterwards
         // (`sync_tx`), on every path that keeps this connection.
-        let multi = resplits(stmt, dialect);
+        let mut multi = resplits(stmt, dialect);
         loop {
             let mut emitted = false;
             let res = match slot.as_mut() {
@@ -1154,6 +1179,14 @@ impl Session for MySqlSession {
             if stopped() {
                 return Err(not_sent(false));
             }
+            // The fresh connection read the `sql_mode` again (the global one may have
+            // changed): sent as the caller's one statement, or not at all.
+            let now = self.dialect();
+            if splits_differently(stmt, sent_as, now) {
+                return Err(mode_changed());
+            }
+            dialect = now;
+            multi = resplits(stmt, dialect);
         }
         // Before any other statement is sent: each one resets the warnings.
         self.report_warnings(&mut slot, stmt, dialect, opts, sink)
@@ -1224,6 +1257,39 @@ impl Session for MySqlSession {
 mod tests {
     use super::*;
     use mysql_async::ServerError;
+
+    #[test]
+    fn a_statement_that_splits_under_the_new_mode_is_refused() {
+        let no_bs = Dialect::MySql(MySqlMode {
+            ansi_quotes: false,
+            no_backslash_escapes: true,
+        });
+        let ansi = Dialect::MySql(MySqlMode {
+            ansi_quotes: true,
+            no_backslash_escapes: false,
+        });
+        // One string with the default mode; two statements once backslashes do not
+        // escape.
+        let sneaky = r"SELECT 'a\'; DELETE FROM t; -- '";
+        assert!(!resplits(sneaky, Dialect::MYSQL));
+        assert!(splits_differently(sneaky, Dialect::MYSQL, no_bs));
+        // `"…"` stops being a string under ANSI_QUOTES only for identifiers; a quoted
+        // identifier holding `;` still is one token.
+        let quoted = r#"SELECT "a;b""#;
+        assert!(!splits_differently(quoted, Dialect::MYSQL, ansi));
+        // Same mode, or a statement that is one either way: sent.
+        assert!(!splits_differently(sneaky, no_bs, no_bs));
+        assert!(!splits_differently("SELECT 1", Dialect::MYSQL, no_bs));
+        assert!(!splits_differently(r"SELECT 'a\'b'", Dialect::MYSQL, no_bs));
+        // Already several for the caller (a DELIMITER left on): its own decision.
+        let multi = "SELECT 1; SELECT 2";
+        assert!(resplits(multi, Dialect::MYSQL));
+        assert!(!splits_differently(multi, Dialect::MYSQL, no_bs));
+        assert!(matches!(
+            mode_changed(),
+            DbError::Config { field: Some(f), .. } if f == "sql_mode"
+        ));
+    }
 
     #[test]
     fn parse_sql_mode_flags() {
