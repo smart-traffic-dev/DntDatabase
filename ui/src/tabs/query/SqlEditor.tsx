@@ -1,4 +1,5 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
+import { ensureCompletion } from '../../query/completion/monacoProvider';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 
 export interface SqlEditorProps {
@@ -16,7 +17,10 @@ export function SqlEditor({ doc, engine, onMount }: SqlEditorProps) {
         language={engine === 'postgres' ? 'pgsql' : 'mysql'}
         value={doc.sql}
         onChange={(sql) => useQueryDocs.getState().update(doc.id, { sql: sql ?? '', dirty: true })}
-        onMount={(editor, monaco) => onMount?.(editor, monaco)}
+        onMount={(editor, monaco) => {
+          ensureCompletion(monaco);
+          onMount?.(editor, monaco);
+        }}
         options={{
           automaticLayout: true,
           minimap: { enabled: false },
