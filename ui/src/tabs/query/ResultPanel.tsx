@@ -1,11 +1,12 @@
-import { useState } from 'react';
-import { canRun, emptyRun, useQueryRun, type ResultSet } from '../../store/queryRun';
+import { useEffect, useRef, useState } from 'react';
+import { plural } from '../../lib/plural';
+import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { ExplainView } from './ExplainView';
 import { HistoryView } from './HistoryView';
 import { MessagesView } from './MessagesView';
 import { ResultGrid } from './ResultGrid';
-import { rerunStatement } from './rerun';
+import { PLAN_GONE, rerunStatement, usePlanAlive } from './rerun';
 
 /** Row limit "Fetch all" runs with. */
 const FETCH_ALL_ROWS = 1_000_000;
@@ -20,10 +21,23 @@ function Summary({ result }: { result: ResultSet }) {
   );
 }
 
+/** Statements that failed (a plain user cancel is not one). */
+const errorCount = (run: TabRun): number =>
+  run.messages.reduce((n, m) => (m.index !== null && m.error !== null && m.tone !== 'info' ? n + 1 : n), 0);
+
+/** "Cancelled by user after 3.1 s" when the user stopped the run; null otherwise. */
+function cancelledText(run: TabRun): string | null {
+  if (run.stop?.kind !== 'cancelled') return null;
+  const ms = run.messages.findLast((m) => m.index === null)?.elapsedMs ?? null;
+  return ms === null ? 'Cancelled by user' : `Cancelled by user after ${(ms / 1000).toFixed(1)} s`;
+}
+
 /** The bottom half of a query tab: result tabs and Messages. */
 export function ResultPanel({ tabId }: { tabId: string }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
   const setPanel = useQueryRun((s) => s.setPanel);
+  const planAlive = usePlanAlive(tabId);
+  const stripRef = useRef<HTMLDivElement>(null);
   // Which result tab is open; reset by `key` when a new run starts.
   const [picked, setPicked] = useState<{ runId: string | null; at: number }>({ runId: run.runId, at: 0 });
   const at = Math.min(picked.runId === run.runId ? picked.at : 0, Math.max(0, run.results.length - 1));
@@ -33,35 +47,59 @@ export function ResultPanel({ tabId }: { tabId: string }) {
   const showHistory = run.panel === 'history';
   const hasExplain = run.explain !== null || run.explainError !== null;
   const readStatement = result ? run.plan?.stmts.find((s) => s.index === result.index)?.kind === 'read' : false;
+  const errors = errorCount(run);
+  const cancelled = cancelledText(run);
+
+  // A run that ends on an error after a result moves to Messages: the squiggle alone is too quiet (F16).
+  const wasActive = useRef(run.phase.kind !== 'idle');
+  useEffect(() => {
+    const active = run.phase.kind !== 'idle';
+    const ended = wasActive.current && !active;
+    wasActive.current = active;
+    if (ended && run.stop?.kind === 'error' && run.panel === 'result') setPanel(tabId, 'messages');
+  }, [run.phase.kind, run.stop, run.panel, setPanel, tabId]);
+
+  // With dozens of result tabs the strip scrolls inside itself; keep the open one in view.
+  useEffect(() => {
+    stripRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  }, [at, showResult]);
 
   return (
     <div className="qr-panel" data-testid="result-panel">
       <div className="qr-tabs" role="tablist">
-        {run.results.map((r, i) => (
-          <button
-            key={r.id}
-            type="button"
-            role="tab"
-            aria-selected={showResult && i === at}
-            className={`qr-tab${showResult && i === at ? ' active' : ''}`}
-            data-testid={`result-tab-${i + 1}`}
-            onClick={() => {
-              setPicked({ runId: run.runId, at: i });
-              setPanel(tabId, 'result');
-            }}
-          >
-            Result {i + 1}
-          </button>
-        ))}
+        <div className="qr-tabs-scroll" role="presentation" data-testid="result-tabs" ref={stripRef}>
+          {run.results.map((r, i) => (
+            <button
+              key={r.id}
+              type="button"
+              role="tab"
+              aria-selected={showResult && i === at}
+              className={`qr-tab${showResult && i === at ? ' active' : ''}`}
+              data-testid={`result-tab-${i + 1}`}
+              onClick={() => {
+                setPicked({ runId: run.runId, at: i });
+                setPanel(tabId, 'result');
+              }}
+            >
+              Result {i + 1}
+            </button>
+          ))}
+        </div>
         <button
           type="button"
           role="tab"
           aria-selected={!showResult && !showExplain && !showHistory}
+          aria-label={errors > 0 ? `Messages (${plural(errors, 'error')})` : undefined}
           className={`qr-tab${!showResult && !showExplain && !showHistory ? ' active' : ''}`}
           data-testid="panel-messages"
           onClick={() => setPanel(tabId, 'messages')}
         >
           Messages
+          {errors > 0 && (
+            <span className="qr-badge" data-testid="messages-badge" aria-hidden="true">
+              {errors}
+            </span>
+          )}
         </button>
         {(hasExplain || showExplain) && (
           <button
@@ -89,6 +127,11 @@ export function ResultPanel({ tabId }: { tabId: string }) {
       </div>
       {showResult ? (
         <>
+          {cancelled && (
+            <div className="qr-banner" role="status" data-testid="result-cancelled">
+              <span>{cancelled}; the results shown may be incomplete.</span>
+            </div>
+          )}
           {result.truncated && (
             <div className="qr-banner" role="status">
               <span>Showing first {result.rowCount} rows</span>
@@ -96,7 +139,8 @@ export function ResultPanel({ tabId }: { tabId: string }) {
                 <button
                   type="button"
                   className="btn small"
-                  disabled={!canRun(run)}
+                  disabled={!canRun(run) || !planAlive}
+                  title={planAlive ? undefined : PLAN_GONE}
                   onClick={() => void rerunStatement(tabId, result.index, { maxRows: FETCH_ALL_ROWS })}
                 >
                   Fetch all
