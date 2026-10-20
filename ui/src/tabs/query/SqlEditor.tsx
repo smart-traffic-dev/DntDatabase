@@ -9,6 +9,7 @@ import type { Engine } from '../../query/engine';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
 import { explainQuery, registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
+import { editorOf, setActiveEditor } from './activeEditor';
 
 export interface SqlEditorProps {
   doc: QueryDoc;
@@ -22,8 +23,10 @@ type Monaco = Parameters<OnMount>[1];
 /** Ctrl+Enter / Ctrl+Shift+Enter run, Ctrl+Shift+E explains, Esc stops while running (spec §5.2). Not S/O/T: those are window shortcuts. */
 function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   registerEditor(tabId, editor);
+  setActiveEditor(tabId, editor);
   editor.onDidDispose(() => {
     unregisterEditor(tabId, editor);
+    if (editorOf(tabId) === editor) setActiveEditor(tabId, null);
     setHasSelection(tabId, false);
   });
   editor.onDidChangeCursorSelection((e) => setHasSelection(tabId, !e.selection.isEmpty()));

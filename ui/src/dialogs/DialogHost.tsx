@@ -7,6 +7,8 @@ import { useRunPrompt } from '../store/runPrompt';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
+import { AboutDialog } from './AboutDialog';
+import { ShortcutsDialog } from './ShortcutsDialog';
 import { ConnectionDialog } from './ConnectionDialog';
 import { ExportDialog } from './ExportDialog';
 import { HostKeyDialog } from './HostKeyDialog';
@@ -314,6 +316,10 @@ export function DialogHost() {
     dialog = <ImportDialog onClose={closeRequest} />;
   } else if (request?.kind === 'settings') {
     dialog = <SettingsDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'shortcuts') {
+    dialog = <ShortcutsDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'about') {
+    dialog = <AboutDialog onClose={closeRequest} />;
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';

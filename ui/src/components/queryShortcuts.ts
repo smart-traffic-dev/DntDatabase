@@ -1,12 +1,14 @@
+import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
+import { openDevtools } from './appMenus';
 import { openNewQuery } from './newQuery';
 import { closeTab, cycleTab } from './tabActions';
 
 /**
  * Window-level query shortcuts (spec §7.1): `Ctrl+S` save (`Ctrl+Shift+S` save as),
  * `Ctrl+O` open a .sql file, `Ctrl+T` new query,
- * `Ctrl+W` close tab, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
+ * `Ctrl+W` close tab, `Ctrl+B` show / hide the sidebar, `Ctrl+Shift+I` developer tools, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
  * Ignored while a modal dialog is open.
  */
 export function onQueryShortcut(e: KeyboardEvent) {
@@ -38,5 +40,11 @@ export function onQueryShortcut(e: KeyboardEvent) {
   } else if (key === 't' && !e.shiftKey) {
     e.preventDefault();
     openNewQuery();
+  } else if (key === 'b' && !e.shiftKey) {
+    e.preventDefault();
+    useLayout.getState().toggleSidebar();
+  } else if (key === 'i' && e.shiftKey) {
+    e.preventDefault();
+    void openDevtools();
   }
 }
