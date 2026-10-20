@@ -119,6 +119,20 @@ async fn refused_port_is_connect_error() {
     assert!(hint(&err).is_some(), "{err:?}");
 }
 
+/// A host name that does not resolve (`.invalid` never does) gets the DNS hint.
+#[tokio::test]
+async fn unresolvable_host_has_dns_hint() {
+    require_db!();
+    let cfg = ResolvedConfig {
+        host: "no-such-host.invalid".into(),
+        ..Target::Pg17.resolved(None)
+    };
+    let err = connect_err(Target::Pg17, &cfg, "unresolvable host").await;
+    assert!(matches!(err, DbError::Connect { .. }), "{err:?}");
+    let hint = hint(&err).unwrap_or_default();
+    assert!(hint.contains("could not be resolved"), "{err:?}: {hint}");
+}
+
 #[tokio::test]
 async fn tls_modes() {
     require_db!();

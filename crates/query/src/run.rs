@@ -5,10 +5,14 @@
 //! plan holds it (`PlannedStmt::text`), so a one-statement plan (Retry, Fetch all)
 //! runs exactly that statement.
 
-use dnt_core::driver::{CancelHandle, ExecOptions, RowSink, Session, StmtOutcome, StopSignal};
+use dnt_core::driver::{
+    CancelHandle, ExecOptions, ExecProgress, ResultSummary, RowSink, ServerNotices, Session,
+    StmtOutcome, StopSignal,
+};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::tx::{is_rollback_to, TxState};
+use dnt_core::value::{ColumnMeta, Value};
 use serde::{Deserialize, Serialize};
 
 use crate::guard::stmt_verdict;
@@ -22,7 +26,9 @@ pub trait RunSink: RowSink {
     /// `result`: an error is already mapped for the editor (`position` is a UTF-16
     /// offset into the editor text, `tx_state` is the session's state after it).
     fn statement_end(&mut self, stmt: &PlannedStmt, result: &Result<StmtOutcome, AppError>);
-    /// A line for Messages about statement `index` (after its `statement_end`).
+    /// A line for Messages about statement `index` (after its `statement_end`): the
+    /// server's own notices and warnings first (`NOTICE: …`, `Warning 1292: …`, at most
+    /// [`dnt_core::driver::MAX_SERVER_NOTICES`] and one "N more" line), then the run's.
     fn notice(&mut self, index: u32, message: &str);
     /// The session's transaction state changed.
     fn tx_state(&mut self, state: TxState);
@@ -177,10 +183,14 @@ pub async fn run(
         }
 
         sink.statement_start(stmt);
-        let rows: &mut dyn RowSink = &mut *sink;
+        let mut rows = Collect {
+            sink: &mut *sink,
+            notices: ServerNotices::default(),
+        };
         let result = session
-            .execute_one(&stmt.text, stmt.kind, &opts, rows)
+            .execute_one(&stmt.text, stmt.kind, &opts, &mut rows)
             .await;
+        let server_notices = rows.notices;
         let after = session.tx_state();
         let total = session.reconnects();
         let fresh = total.saturating_sub(reconnects);
@@ -208,6 +218,9 @@ pub async fn run(
             }
         };
         sink.statement_end(stmt, &result);
+        for line in server_notices.lines() {
+            sink.notice(stmt.index, &line);
+        }
         if fresh > 0 && !lost {
             sink.notice(stmt.index, &reconnect_notice(report.reconnects));
         }
@@ -231,6 +244,31 @@ pub async fn run(
         }
     }
     report
+}
+
+/// The [`RowSink`] a statement runs into: results go straight to the run's sink, the
+/// server's notices are held until after the statement's `statement_end`.
+struct Collect<'a> {
+    sink: &'a mut dyn RunSink,
+    notices: ServerNotices,
+}
+
+impl RowSink for Collect<'_> {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.sink.result_start(cols);
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        self.sink.rows(batch);
+    }
+    fn result_end(&mut self, summary: &ResultSummary) {
+        self.sink.result_end(summary);
+    }
+    fn progress(&mut self, p: ExecProgress) {
+        self.sink.progress(p);
+    }
+    fn server_notices(&mut self, notices: ServerNotices) {
+        self.notices.extend(notices);
+    }
 }
 
 /// The stop after statement `index` failed with `err`, leaving the session in `after`.

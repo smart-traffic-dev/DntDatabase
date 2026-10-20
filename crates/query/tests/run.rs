@@ -10,8 +10,8 @@ use std::task::{Context, Poll, Waker};
 use async_trait::async_trait;
 use dnt_core::config::EnvTag;
 use dnt_core::driver::{
-    CancelHandle, Canceller, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, ExecOptions, Introspector, ResultSummary, RowSink, ServerNotice,
+    ServerNotices, Session, StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
@@ -40,6 +40,8 @@ struct FakeStep {
     dialect_after: Option<Dialect>,
     /// Reconnects the driver made during the call.
     reconnects: u64,
+    /// Server messages the driver reports (before returning, also on failure).
+    notices: Option<ServerNotices>,
 }
 
 fn ok() -> FakeStep {
@@ -48,6 +50,7 @@ fn ok() -> FakeStep {
         tx_after: None,
         dialect_after: None,
         reconnects: 0,
+        notices: None,
     }
 }
 
@@ -69,6 +72,10 @@ impl FakeStep {
     }
     fn reconnects(mut self, n: u64) -> Self {
         self.reconnects = n;
+        self
+    }
+    fn notices(mut self, n: ServerNotices) -> Self {
+        self.notices = Some(n);
         self
     }
     fn late(mut self) -> Self {
@@ -174,6 +181,9 @@ impl Session for FakeSession {
                 sink.result_end(r);
             }
         }
+        if let Some(n) = step.notices {
+            sink.server_notices(n);
+        }
         step.result
     }
 
@@ -239,6 +249,8 @@ impl Introspector for FakeSession {
 struct Rec {
     events: Vec<String>,
     notices: Vec<(u32, String)>,
+    /// The last event before each notice.
+    notice_after: Vec<String>,
     tx: Vec<TxState>,
     /// Cancelled (to completion) inside `statement_end` of this statement.
     cancel_at_end: Option<(u32, RunCancel)>,
@@ -282,6 +294,8 @@ impl RunSink for Rec {
     }
     fn notice(&mut self, index: u32, message: &str) {
         self.notices.push((index, message.to_string()));
+        self.notice_after
+            .push(self.events.last().cloned().unwrap_or_default());
     }
     fn tx_state(&mut self, state: TxState) {
         self.tx.push(state);
@@ -638,6 +652,82 @@ async fn sink_sees_statement_and_result_events_in_order() {
             "start 1",
             "end 1 err"
         ]
+    );
+}
+
+fn server_notices(items: &[(&str, Option<&str>, &str)], omitted: u64) -> ServerNotices {
+    let mut n = ServerNotices::default();
+    for (level, code, message) in items {
+        n.push(ServerNotice {
+            level: (*level).into(),
+            code: code.map(Into::into),
+            message: (*message).into(),
+        });
+    }
+    n.add_omitted(omitted);
+    n
+}
+
+/// The server's notices and warnings become Messages lines of their statement, after
+/// its `statement_end`, also when it failed; the omitted ones are summed up.
+#[tokio::test]
+async fn server_notices_become_notices_after_the_statement() {
+    let s = FakeSession::new(
+        PG,
+        vec![
+            ok().notices(server_notices(
+                &[("NOTICE", None, "hello"), ("WARNING", None, "careful")],
+                0,
+            )),
+            ok(),
+            fail(server_err("boom")).notices(server_notices(
+                &[(
+                    "Warning",
+                    Some("1292"),
+                    "Truncated incorrect INTEGER value: 'abc'",
+                )],
+                2,
+            )),
+        ],
+    );
+    let mut rec = Rec::default();
+    let r = go(&s, &all("DO 1; SELECT 2; SELECT 3", PG), false, &mut rec).await;
+    assert_eq!(r.stop, Some(StopReason::Error { index: 2 }));
+    assert_eq!(
+        rec.notices,
+        [
+            (0, "NOTICE: hello".to_string()),
+            (0, "WARNING: careful".to_string()),
+            (
+                2,
+                "Warning 1292: Truncated incorrect INTEGER value: 'abc'".to_string()
+            ),
+            (2, "2 more server messages not shown".to_string()),
+        ]
+    );
+    assert_eq!(
+        rec.notice_after,
+        ["end 0 ok", "end 0 ok", "end 2 err", "end 2 err"]
+    );
+}
+
+/// Server notices come before the run's own notice about the same statement.
+#[tokio::test]
+async fn server_notices_come_before_the_reconnect_notice() {
+    let s = FakeSession::new(
+        PG,
+        vec![ok()
+            .reconnects(1)
+            .notices(server_notices(&[("NOTICE", None, "n")], 0))],
+    );
+    let mut rec = Rec::default();
+    go(&s, &all("SELECT 1", PG), false, &mut rec).await;
+    assert_eq!(rec.notices.len(), 2, "{:?}", rec.notices);
+    assert_eq!(rec.notices[0].1, "NOTICE: n");
+    assert!(
+        rec.notices[1].1.starts_with("Reconnected"),
+        "{:?}",
+        rec.notices
     );
 }
 

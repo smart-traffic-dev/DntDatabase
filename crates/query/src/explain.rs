@@ -129,19 +129,26 @@ pub fn parse_plan(
     Ok(PlanTree::Tree { root, raw })
 }
 
-/// The node's own cost: its `est_cost` minus the sum of its children's `est_cost`
-/// (a child without a cost counts as 0), clamped to 0. `None` when the node has no cost.
+/// The node's own cost: its `est_cost` minus the costs of its nearest costed
+/// descendants (a child without a cost is looked through), clamped to 0. `None` when
+/// the node has no cost.
+///
+/// Every format's `est_cost` covers the node's whole subtree: PostgreSQL and MySQL
+/// `EXPLAIN ANALYZE` report it that way, and the MySQL / MariaDB JSON parser
+/// normalizes to it (MySQL's cumulative `prefix_cost` is not used).
 ///
 /// The clamp covers nodes that stop early: a PG `Limit` costs less than the scan below it.
-///
-/// MySQL JSON `prefix_cost` is cumulative: each table's cost includes the tables joined
-/// before it, and the query block's `query_cost` includes everything. The subtraction is
-/// therefore only approximate there, and the query-block node usually carries the
-/// highest self cost.
 pub fn self_cost(node: &PlanNode) -> Option<f64> {
     let own = node.est_cost?;
-    let children: f64 = node.children.iter().filter_map(|c| c.est_cost).sum();
-    Some((own - children).max(0.0))
+    Some((own - below(&node.children)).max(0.0))
+}
+
+/// The summed cost of the nearest costed nodes among `children` and their descendants.
+fn below(children: &[PlanNode]) -> f64 {
+    children
+        .iter()
+        .map(|c| c.est_cost.unwrap_or_else(|| below(&c.children)))
+        .sum()
 }
 
 fn internal(message: &str) -> DbError {
@@ -386,7 +393,7 @@ mod pg {
 /// MySQL 8 / MariaDB `FORMAT=JSON` (and MariaDB `ANALYZE FORMAT=JSON`).
 mod mysql_json {
     use super::json::{self, J};
-    use super::{internal, leaf, PlanNode};
+    use super::{below, internal, leaf, PlanNode};
     use dnt_core::error::DbError;
 
     pub fn parse(raw: &str) -> Result<PlanNode, DbError> {
@@ -451,6 +458,10 @@ mod mysql_json {
                 n.detail = op_detail(v);
                 fill_measures(&mut n, v);
                 n.children = walk(v);
+                // A total (`query_cost`) covers everything below; rounding may leave it
+                // under the sum of its parts.
+                let parts = below(&n.children);
+                n.est_cost = n.est_cost.map(|total| total.max(parts));
                 vec![n]
             }
             _ => walk(v),
@@ -474,11 +485,15 @@ mod mysql_json {
     }
 
     /// Cost, rows and (MariaDB) actuals of an operation or table object.
+    ///
+    /// The cost is the object's OWN cost: a MySQL table's `read_cost + eval_cost`
+    /// (never its `prefix_cost`, which adds every table joined before it), a query
+    /// block's `query_cost`, MariaDB's per-object `cost`. The callers then make it
+    /// cover the node's subtree.
     fn fill_measures(n: &mut PlanNode, v: &J) {
         let ci = v.get("cost_info");
         let ci_num = |k: &str| ci.and_then(|c| c.get(k)).and_then(J::num);
-        n.est_cost = ci_num("prefix_cost")
-            .or_else(|| ci_num("query_cost"))
+        n.est_cost = ci_num("query_cost")
             .or_else(|| Some(ci_num("read_cost")? + ci_num("eval_cost")?))
             .or_else(|| v.get("cost").and_then(J::num));
         n.est_rows = v
@@ -515,6 +530,9 @@ mod mysql_json {
         n.detail = (!detail.is_empty()).then(|| detail.join("; "));
         fill_measures(&mut n, t);
         n.children = walk(t);
+        // A table's own cost plus whatever runs below it (a materialized subquery).
+        let parts = below(&n.children);
+        n.est_cost = n.est_cost.map(|own| own + parts);
         n
     }
 }

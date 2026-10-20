@@ -108,6 +108,24 @@ async fn refused_port_is_connect_error() {
     assert!(matches!(err, DbError::Connect { .. }), "{err:?}");
 }
 
+/// A host name that does not resolve (`.invalid` never does) gets the DNS hint.
+#[tokio::test]
+async fn unresolvable_host_has_dns_hint() {
+    require_db!();
+    let cfg = ResolvedConfig {
+        host: "no-such-host.invalid".into(),
+        ..Target::MySql8.resolved(None)
+    };
+    let err = MySqlDriver
+        .connect(&cfg)
+        .await
+        .err()
+        .expect("an .invalid host never resolves");
+    assert!(matches!(err, DbError::Connect { .. }), "{err:?}");
+    let hint = hint(&err).unwrap_or_default();
+    assert!(hint.contains("could not be resolved"), "{err:?}: {hint}");
+}
+
 #[tokio::test]
 async fn tls_require_and_verify_ca() {
     require_db!();

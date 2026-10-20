@@ -13,15 +13,16 @@ pub use session::PgSession;
 
 use async_trait::async_trait;
 use dnt_core::config::{ResolvedConfig, SslMode};
-use dnt_core::driver::{Driver, Session};
+use dnt_core::driver::{Driver, ServerNotice, ServerNotices, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{detect_pg, DbKind, ServerInfo};
 use secrecy::ExposeSecret;
 use std::error::Error as _;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_postgres::config::SslMode as PgSslMode;
 use tokio_postgres::error::ErrorPosition;
-use tokio_postgres::{Client, SimpleQueryMessage};
+use tokio_postgres::{AsyncMessage, Client, SimpleQueryMessage};
 
 /// Run on every new physical connection (also on reconnect) when the connection is read-only.
 const SET_READ_ONLY: &str = "SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY";
@@ -63,6 +64,18 @@ pub(crate) struct ConnectParams {
     pub(crate) config: tokio_postgres::Config,
     pub(crate) tls: tls::Tls,
     pub(crate) read_only: bool,
+    /// Where every connection opened with these params puts the server's notices
+    /// (`NOTICE`, `WARNING`…) as they arrive; `execute_one` empties it before its
+    /// statement and hands what arrived to its sink afterwards. Bounded.
+    pub(crate) notices: NoticeBuf,
+}
+
+/// Shared by the session and the task driving its connection's socket.
+pub(crate) type NoticeBuf = Arc<std::sync::Mutex<ServerNotices>>;
+
+/// Takes everything `buf` holds, leaving it empty.
+pub(crate) fn take_notices(buf: &NoticeBuf) -> ServerNotices {
+    std::mem::take(&mut *buf.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 /// One physical connection: the client and the task driving its socket.
@@ -96,6 +109,7 @@ async fn connect_inner(cfg: &ResolvedConfig) -> Result<PgSession, DbError> {
         config,
         tls,
         read_only: cfg.read_only,
+        notices: NoticeBuf::default(),
     };
     let conn = match open(&params).await {
         Ok(conn) => conn,
@@ -119,14 +133,29 @@ async fn connect_inner(cfg: &ResolvedConfig) -> Result<PgSession, DbError> {
 
 /// Opens a connection and runs the startup statements (application name is in the config).
 pub(crate) async fn open(params: &ConnectParams) -> Result<PgConn, DbError> {
-    let (client, connection) = params
+    let (client, mut connection) = params
         .config
         .connect(params.tls.connector.clone())
         .await
         .map_err(|e| map_pg_error(e, ConnectStage::ConnectDb))?;
+    let notices = params.notices.clone();
     let task = tokio::spawn(async move {
+        // A notice is handed over here before the connection reads the messages that
+        // follow it (the statement's completion), so it is in `notices` by the time
+        // the statement's caller sees the statement end.
         // Errors surface on the client (`is_closed`, failing requests).
-        let _ = connection.await;
+        while let Some(Ok(message)) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+            if let AsyncMessage::Notice(n) = message {
+                notices
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push(ServerNotice {
+                        level: n.severity().to_string(),
+                        code: None,
+                        message: n.message().to_string(),
+                    });
+            }
+        }
     });
     let conn = PgConn { client, task };
     if params.read_only {

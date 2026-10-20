@@ -1,5 +1,6 @@
 use dnt_core::driver::{
-    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
+    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices, Session,
+    StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::sql::{classify, Dialect, MySqlMode, StatementKind};
@@ -26,9 +27,13 @@ struct Res {
 struct Collect {
     results: Vec<Res>,
     progress: Vec<ExecProgress>,
+    notices: Vec<ServerNotices>,
 }
 
 impl RowSink for Collect {
+    fn server_notices(&mut self, notices: ServerNotices) {
+        self.notices.push(notices);
+    }
     fn progress(&mut self, p: ExecProgress) {
         self.progress.push(p);
     }
@@ -110,6 +115,53 @@ async fn kill(t: Target, id: u64) {
     Box::new(admin).close().await;
     // Let the server tear the killed session down.
     tokio::time::sleep(Duration::from_millis(200)).await;
+}
+
+/// The warnings of a statement (`SHOW WARNINGS`, read only when the server reported
+/// some) reach the sink once, with level and code; at most `MAX_SERVER_NOTICES`, the
+/// rest counted. A statement without warnings reports none.
+#[tokio::test]
+async fn warnings_reach_the_sink() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let (res, c) = run_one(&s, "SELECT CAST('abc' AS SIGNED)", ExecOptions::default()).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(c.notices.len(), 1, "{t:?}: {:?}", c.notices);
+        let lines = c.notices[0].lines();
+        assert_eq!(lines.len(), 1, "{t:?}: {lines:?}");
+        assert!(
+            lines[0].starts_with("Warning 1292: Truncated incorrect INTEGER value"),
+            "{t:?}: {lines:?}"
+        );
+        // The query result itself is untouched.
+        assert_eq!(c.results.len(), 1, "{t:?}");
+
+        let (res, c) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        res.unwrap();
+        assert!(c.notices.is_empty(), "{t:?}: {:?}", c.notices);
+
+        // An OK statement's warnings (`DO` evaluates and discards).
+        let (res, c) = run_one(&s, "DO CAST('x' AS SIGNED)", ExecOptions::default()).await;
+        res.unwrap();
+        assert_eq!(c.notices.len(), 1, "{t:?}: {:?}", c.notices);
+        assert_eq!(c.notices[0].kept[0].level, "Warning", "{t:?}");
+        assert_eq!(c.notices[0].kept[0].code.as_deref(), Some("1292"), "{t:?}");
+
+        // 60 warnings: 50 kept, 10 counted.
+        let casts = vec!["CAST('x' AS SIGNED)"; 60].join(", ");
+        let (res, c) = run_one(&s, &format!("SELECT {casts}"), ExecOptions::default()).await;
+        res.unwrap();
+        let n = &c.notices[0];
+        assert_eq!(n.kept.len(), MAX_SERVER_NOTICES, "{t:?}");
+        assert_eq!(n.omitted, 10, "{t:?}");
+
+        // `SHOW WARNINGS` typed by the user is its own result, not repeated as notices.
+        let (res, c) = run_one(&s, "SHOW WARNINGS", ExecOptions::default()).await;
+        res.unwrap();
+        assert!(c.notices.is_empty(), "{t:?}: {:?}", c.notices);
+        Box::new(s).close().await;
+    }
 }
 
 #[tokio::test]

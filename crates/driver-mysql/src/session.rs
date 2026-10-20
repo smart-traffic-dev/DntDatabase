@@ -6,8 +6,8 @@ use crate::values::value_text;
 use crate::values::{column_meta, to_value};
 use async_trait::async_trait;
 use dnt_core::driver::{
-    CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
-    SharedSink, StmtOutcome,
+    CancelHandle, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, ServerNotice,
+    ServerNotices, Session, SharedSink, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo, ServerVariant};
@@ -19,7 +19,7 @@ use dnt_core::tx::{next_autocommit_off, next_tx_state, StmtResult, TxState};
 use dnt_core::value::ColumnMeta;
 use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::Queryable;
-use mysql_async::{Conn, DriverError, Error as MyError, Opts};
+use mysql_async::{Conn, DriverError, Error as MyError, Opts, Row};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -361,6 +361,58 @@ impl MySqlSession {
         }
     }
 
+    /// Hands the warnings of the statement `stmt` that just succeeded to `sink`: read
+    /// with `SHOW WARNINGS LIMIT` [`MAX_SERVER_NOTICES`] only when the server reported
+    /// some, the rest of its count reported as omitted. Not for the user's own
+    /// `SHOW WARNINGS` / `SHOW ERRORS` (their result already lists them), nor on a
+    /// poisoned connection (a `KILL QUERY` may still land; it is replaced first).
+    ///
+    /// Bounded by [`check_limit`] like the other checks after a statement: no answer
+    /// in time gives the connection up ([`MySqlSession::desync`]). A failed read only
+    /// loses the warnings.
+    async fn report_warnings(
+        &self,
+        slot: &mut Option<Conn>,
+        stmt: &str,
+        dialect: Dialect,
+        opts: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) {
+        if self.cancel.poisoned() {
+            return;
+        }
+        let Some(conn) = slot.as_mut() else {
+            return;
+        };
+        let count = conn.get_warnings();
+        if count == 0 || shows_diagnostics(stmt, dialect) {
+            return;
+        }
+        let sql = format!("SHOW WARNINGS LIMIT {MAX_SERVER_NOTICES}");
+        let rows = match tokio::time::timeout(check_limit(opts), conn.query::<Row, _>(sql)).await {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "SHOW WARNINGS failed; its warnings are not shown");
+                return;
+            }
+            Err(_) => {
+                self.desync("SHOW WARNINGS");
+                return;
+            }
+        };
+        let mut notices = ServerNotices::default();
+        for row in &rows {
+            notices.push(ServerNotice {
+                level: cell_text(row, 0),
+                code: Some(cell_text(row, 1)).filter(|c| !c.is_empty()),
+                message: cell_text(row, 2),
+            });
+        }
+        let read = u64::try_from(notices.kept.len()).unwrap_or(u64::MAX);
+        notices.add_omitted(u64::from(count).saturating_sub(read));
+        sink.server_notices(notices);
+    }
+
     /// The `ConnectionLost` message suffix for losing the current connection.
     fn notes(&self, was_in_tx: bool) -> String {
         reset_notes(was_in_tx, self.session_custom.load(Ordering::SeqCst))
@@ -533,6 +585,24 @@ impl MySqlSession {
             Err(e) if late && is_interrupted(&e) => Err(StmtError::Timeout),
             Err(e) => Err(StmtError::My(e)),
         }
+    }
+}
+
+/// `SHOW WARNINGS`, `SHOW ERRORS`, `SHOW COUNT(*) WARNINGS`…: statements that read
+/// the diagnostics of the previous statement.
+fn shows_diagnostics(stmt: &str, dialect: Dialect) -> bool {
+    let words = leading_keywords(stmt, dialect, 3);
+    words.first().is_some_and(|w| w == "SHOW")
+        && words.iter().any(|w| w == "WARNINGS" || w == "ERRORS")
+}
+
+/// Column `i` of a `SHOW WARNINGS` row as text (empty when missing).
+fn cell_text(row: &Row, i: usize) -> String {
+    match row.as_ref(i) {
+        Some(mysql_async::Value::Bytes(b)) => String::from_utf8_lossy(b).into_owned(),
+        Some(mysql_async::Value::Int(n)) => n.to_string(),
+        Some(mysql_async::Value::UInt(n)) => n.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -1051,6 +1121,9 @@ impl Session for MySqlSession {
                 return Err(not_sent(false));
             }
         }
+        // Before any other statement is sent: each one resets the warnings.
+        self.report_warnings(&mut slot, stmt, dialect, opts, sink)
+            .await;
         // A connection poisoned by an unconfirmed `KILL QUERY` is replaced before the
         // next statement, and the replacement's `sql_mode` read then.
         if self.track_after(kind, stmt, dialect) && !self.cancel.poisoned() {
