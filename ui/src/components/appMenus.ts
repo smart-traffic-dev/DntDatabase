@@ -9,6 +9,7 @@ import type { Theme } from '../theme/ThemeProvider';
 import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
 import type { MenuAction, MenuEntry } from './ActionMenu';
 import { transferItems } from './ActionMenu';
+import { addActiveQueryToFavorites, listFavoritesForMenu, openSnippetsManager } from './favoritesActions';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeTab, reopenClosedTab } from './tabActions';
@@ -38,7 +39,7 @@ export interface MenuState {
 }
 
 export interface AppMenu {
-  id: 'file' | 'edit' | 'view' | 'query' | 'tools' | 'help';
+  id: 'file' | 'edit' | 'view' | 'query' | 'favorites' | 'tools' | 'help';
   label: string;
   /** The Alt+<key> mnemonic: a letter of `label`, underlined in the bar. */
   mnemonic: string;
@@ -72,7 +73,13 @@ const activeTab = (): Tab | undefined => {
   return tabs.find((t) => t.id === activeId);
 };
 
-/** The six top-level menus, left to right. Items that cannot run now are present but disabled. */
+/** The saved favorites (first 20) after a separator, as Navicat's Favorites menu lists them. */
+function favoriteItems(): MenuEntry[] {
+  const favorites = listFavoritesForMenu();
+  return favorites.length ? [sep, ...favorites.map((f) => ({ label: f.label, run: f.open }))] : [];
+}
+
+/** The seven top-level menus, left to right. Items that cannot run now are present but disabled. */
 export function buildMenus(s: MenuState): AppMenu[] {
   const dialog = useDialogs.getState().requestDialog;
   const q = s.queryTabId;
@@ -176,6 +183,16 @@ export function buildMenus(s: MenuState): AppMenu[] {
         },
         { label: 'Stop', hint: 'Esc', disabled: !q || !s.stoppable, run: () => q && void stopQuery(q) },
         { label: 'Explain', hint: 'Ctrl+Shift+E', disabled: !q || !s.runnable, run: () => q && void explainQuery(q, false) },
+      ],
+    },
+    {
+      id: 'favorites',
+      label: 'Favorites',
+      mnemonic: 'a',
+      items: [
+        { label: 'Add to favorites…', hint: 'Ctrl+Shift+D', disabled: !q, run: () => void addActiveQueryToFavorites() },
+        { label: 'Manage snippets…', run: openSnippetsManager },
+        ...favoriteItems(),
       ],
     },
     {

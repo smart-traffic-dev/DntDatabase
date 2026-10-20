@@ -1,0 +1,93 @@
+/* Snippets manager: list on the left, the chosen snippet on the right. */
+.snippets-body {
+  display: flex;
+  min-height: 0;
+  height: clamp(320px, calc(100vh - 200px), 480px);
+}
+
+.snippets-side {
+  width: 220px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 8px;
+  border-right: 1px solid var(--dlg-line);
+  background: var(--sidebar);
+}
+
+.snippets-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: auto;
+}
+
+.snippets-item {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.snippets-item:hover {
+  background: var(--hover);
+}
+
+.snippets-item.selected {
+  background: var(--sel);
+}
+
+.snippets-label,
+.snippets-empty {
+  font-size: var(--text-caption);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.snippets-empty {
+  padding: 4px 8px;
+}
+
+.snippets-form {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 16px;
+  overflow: auto;
+}
+
+.snippets-row {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 10px;
+}
+
+.snippets-text {
+  min-height: 140px;
+  padding: 6px 8px;
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--radius-sm);
+  background: var(--studio-control);
+  color: inherit;
+  font-size: var(--text-footnote);
+  resize: vertical;
+}
+
+.snippets-form code {
+  font-family: var(--font-mono);
+}
+
+.snippets-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.snippets-actions .spacer {
+  flex: 1;
+}

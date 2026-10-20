@@ -1,0 +1,219 @@
+/* Result grid tools: find / go-to bar, selection stats footer, record view, JSON tree. Tokens only. */
+
+.qr-grid {
+  display: flex;
+  flex-direction: column;
+}
+
+.gt-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.gt-canvas {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+}
+
+.gt-stats {
+  flex: none;
+  padding: 2px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--sidebar);
+  color: var(--muted);
+  font-size: var(--text-footnote);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gt-bar {
+  position: absolute;
+  top: 48px;
+  right: 16px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: var(--color-popover);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-popover);
+  font-size: var(--text-callout);
+}
+
+.gt-input {
+  width: 200px;
+  padding: 3px 6px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font: inherit;
+  font-family: var(--font-mono);
+}
+
+.gt-input:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
+}
+
+.gt-count {
+  min-width: 56px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.gt-btn {
+  padding: 2px 8px;
+  background: transparent;
+  color: var(--text);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font: inherit;
+  cursor: pointer;
+}
+
+.gt-btn:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.gt-btn:focus-visible {
+  outline: 1px solid var(--accent);
+}
+
+.gt-btn:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.gt-spacer {
+  flex: 1;
+}
+
+.gt-record {
+  flex: none;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: var(--text-callout);
+}
+
+.gt-record-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.gt-record-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.gt-record-empty {
+  padding: 12px;
+  color: var(--muted);
+}
+
+.gt-field {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gt-field-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gt-field-name {
+  font-weight: 600;
+}
+
+.gt-field-type {
+  color: var(--muted);
+  font-size: var(--text-caption);
+}
+
+.gt-field-value {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.rv-text {
+  margin: 0;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.rv-null {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.jt {
+  font-family: var(--font-mono);
+}
+
+.jt-children {
+  padding-left: 14px;
+}
+
+.jt-row {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.jt-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.jt-toggle:hover {
+  background: var(--hover);
+}
+
+.jt-toggle:focus-visible {
+  outline: 1px solid var(--accent);
+}
+
+.jt-arrow,
+.jt-sum,
+.jt-null,
+.jt-more {
+  color: var(--muted);
+}
+
+.jt-key {
+  font-weight: 600;
+}
+
+.jt-num,
+.jt-bool {
+  color: var(--accent);
+}

@@ -67,7 +67,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['Keyboard shortcuts', 'F1'],
       ['Code font bigger / smaller / reset', 'Ctrl+= / Ctrl+- / Ctrl+0'],
       ['Developer tools', 'Ctrl+Shift+I'],
-      ['Open a menu', 'Alt+F, E, V, Q, T, H'],
+      ['Open a menu', 'Alt+F, E, V, Q, A, T, H'],
     ],
   },
 ];

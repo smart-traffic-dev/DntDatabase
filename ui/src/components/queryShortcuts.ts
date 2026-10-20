@@ -2,6 +2,7 @@ import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { openDevtools } from './appMenus';
+import { addActiveQueryToFavorites } from './favoritesActions';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeTab, cycleTab, goToTab, reopenClosedTab } from './tabActions';
@@ -41,7 +42,7 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
 
 /**
  * Window-level query shortcuts (spec §7.1): `Ctrl+S` save (`Ctrl+Shift+S` save as),
- * `Ctrl+O` open a .sql file, `Ctrl+T` new query,
+ * `Ctrl+O` open a .sql file, `Ctrl+T` new query, `Ctrl+Shift+D` add to favorites,
  * `Ctrl+W` close tab, `Ctrl+B` show / hide the sidebar, `Ctrl+Shift+I` developer tools, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
  * Ignored while a modal dialog is open.
  */
@@ -89,6 +90,10 @@ export function onQueryShortcut(e: KeyboardEvent) {
   } else if (key === 't' && e.shiftKey) {
     e.preventDefault();
     reopenClosedTab();
+  } else if (key === 'd' && e.shiftKey) {
+    // Ctrl+Shift+D: add the active query (its selection, else all of it) to favorites.
+    e.preventDefault();
+    addActiveQueryToFavorites();
   } else if (key === 'b' && !e.shiftKey) {
     e.preventDefault();
     useLayout.getState().toggleSidebar();

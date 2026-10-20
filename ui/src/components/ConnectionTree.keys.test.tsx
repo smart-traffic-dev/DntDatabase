@@ -46,7 +46,7 @@ async function setup(ui: React.ReactElement = <ConnectionTree />) {
 }
 
 const select = (id: string) => act(() => useTree.getState().select(id));
-const key = (k: string, init: KeyboardEventInit = {}) => fireEvent.keyDown(screen.getByRole('tree'), { key: k, ...init });
+const key = (k: string, init: KeyboardEventInit = {}) => fireEvent.keyDown(screen.getByRole('tree', { name: 'Connections' }), { key: k, ...init });
 
 beforeEach(() => {
   resetStores();
@@ -137,7 +137,7 @@ describe('ConnectionTree keys', () => {
   it('other Ctrl combinations are left alone', async () => {
     await setup();
     select(ordersNode);
-    const before = fireEvent.keyDown(screen.getByRole('tree'), { key: 'a', ctrlKey: true });
+    const before = fireEvent.keyDown(screen.getByRole('tree', { name: 'Connections' }), { key: 'a', ctrlKey: true });
     expect(before).toBe(true);
     expect(useTree.getState().filter).toBe('');
   });
@@ -148,13 +148,13 @@ describe('typing in the tree', () => {
     await setup(<Sidebar />);
     const filter = screen.getByRole('searchbox', { name: 'Filter objects' });
     select(ordersNode);
-    screen.getByRole('tree').focus();
+    screen.getByRole('tree', { name: 'Connections' }).focus();
     expect(key('c')).toBe(false); // default prevented: the character is not typed twice
     expect(useTree.getState().filter).toBe('c');
     expect(filter).toHaveFocus();
     expect(filter).toHaveValue('c');
     // More keys typed while the tree still has the focus append.
-    screen.getByRole('tree').focus();
+    screen.getByRole('tree', { name: 'Connections' }).focus();
     key('u');
     expect(useTree.getState().filter).toBe('cu');
   });

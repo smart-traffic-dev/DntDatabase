@@ -31,13 +31,13 @@ beforeEach(() => {
 });
 
 describe('MenuBar', () => {
-  it('renders the menubar with the six menus, collapsed', () => {
+  it('renders the menubar with the seven menus, collapsed', () => {
     mount();
     const bar = screen.getByRole('menubar');
     const labels = within(bar)
       .getAllByRole('menuitem')
       .map((b) => b.textContent);
-    expect(labels).toEqual(['File', 'Edit', 'View', 'Query', 'Tools', 'Help']);
+    expect(labels).toEqual(['File', 'Edit', 'View', 'Query', 'Favorites', 'Tools', 'Help']);
     for (const b of within(bar).getAllByRole('menuitem')) {
       expect(b).toHaveAttribute('aria-haspopup', 'menu');
       expect(b).toHaveAttribute('aria-expanded', 'false');

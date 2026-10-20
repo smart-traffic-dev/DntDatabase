@@ -22,10 +22,10 @@ const item = (menu: string, label: string, state: Partial<MenuState> = {}) => it
 const isSep = (e: MenuEntry) => 'separator' in e;
 
 describe('buildMenus', () => {
-  it('has the six menus in order with unique mnemonics that are letters of the label', () => {
+  it('has the seven menus in order with unique mnemonics that are letters of the label', () => {
     const menus = buildMenus(base);
-    expect(menus.map((m) => m.label)).toEqual(['File', 'Edit', 'View', 'Query', 'Tools', 'Help']);
-    expect(menus.map((m) => m.mnemonic)).toEqual(['F', 'E', 'V', 'Q', 'T', 'H']);
+    expect(menus.map((m) => m.label)).toEqual(['File', 'Edit', 'View', 'Query', 'Favorites', 'Tools', 'Help']);
+    expect(menus.map((m) => m.mnemonic)).toEqual(['F', 'E', 'V', 'Q', 'a', 'T', 'H']);
     for (const m of menus) expect(m.label).toContain(m.mnemonic);
   });
 
