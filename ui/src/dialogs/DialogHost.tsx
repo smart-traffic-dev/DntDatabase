@@ -18,6 +18,8 @@ import { RunConfirmDialog } from './RunConfirmDialog';
 import { ConfirmDialog, NameDialog } from './SimpleDialogs';
 import { AppCloseDialog } from './AppCloseDialog';
 import { TxCloseDialog } from './TxCloseDialog';
+import { AddFavoriteDialog } from './AddFavoriteDialog';
+import { SnippetsDialog } from './SnippetsDialog';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
 function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
@@ -314,6 +316,22 @@ export function DialogHost() {
     dialog = <ImportDialog onClose={closeRequest} />;
   } else if (request?.kind === 'settings') {
     dialog = <SettingsDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'addFavorite') {
+    dialog = (
+      <AddFavoriteDialog
+        sql={request.sql}
+        name={request.name}
+        connectionId={request.connectionId}
+        database={request.database}
+        fromSelection={request.fromSelection}
+        onClose={(saved) => {
+          closeRequest();
+          if (saved) useDialogs.getState().setNotice(`Added "${saved.name}" to favorites.`);
+        }}
+      />
+    );
+  } else if (request?.kind === 'snippets') {
+    dialog = <SnippetsDialog onClose={closeRequest} />;
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';
