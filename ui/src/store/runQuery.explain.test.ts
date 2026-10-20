@@ -61,6 +61,12 @@ describe('explainQuery', () => {
     });
     expect(callsOf('query_run')[0]).toMatchObject({ planId: 'plan-x', confirmed: false });
     expect(useQueryRun.getState().get(tab).runId).toBe('run-1');
+    // F46: an Explain run is marked, so its `done` keeps the status bar figures.
+    expect(useQueryRun.getState().get(tab).mode).toBe('explain');
+    const before = { rows: 7, elapsedMs: 21 };
+    useQueryRun.setState({ runs: new Map([[tab, { ...useQueryRun.getState().get(tab), lastRun: before }]]) });
+    useQueryRun.getState().apply(tab, { t: 'done', stop: null, elapsed_ms: 6 }, 'plan-x');
+    expect(useQueryRun.getState().get(tab).lastRun).toBe(before);
   });
 
   it('uses the editor cursor when the editor is mounted', async () => {

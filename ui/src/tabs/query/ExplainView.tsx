@@ -1,13 +1,19 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import type { PlanNode } from '../../bindings';
 import { emptyRun, useQueryRun } from '../../store/queryRun';
-import { hottestNode, selfCost } from './explainTree';
+import { hottestNode, selfCosts } from './explainTree';
 
-const fmt = (n: number) => (Number.isInteger(n) ? String(n) : n.toFixed(2));
+type Costs = Map<PlanNode, number | null>;
 
-function Metrics({ node }: { node: PlanNode }) {
+// Rounded first, so float noise (0.9 - 0.55) does not show as 0.35000000000000003.
+const fmt = (n: number) => {
+  const r = Math.round(n * 100) / 100;
+  return Number.isInteger(r) ? String(r) : r.toFixed(2);
+};
+
+function Metrics({ node, costs }: { node: PlanNode; costs: Costs }) {
   const parts: string[] = [];
-  const own = selfCost(node);
+  const own = costs.get(node) ?? null;
   if (node.est_cost !== null) parts.push(`cost ${fmt(node.est_cost)}`);
   if (own !== null) parts.push(`self ${fmt(own)}`);
   if (node.est_rows !== null) parts.push(`rows ${fmt(node.est_rows)}`);
@@ -17,7 +23,7 @@ function Metrics({ node }: { node: PlanNode }) {
   return parts.length > 0 ? <span className="ex-metrics">{parts.join(' · ')}</span> : null;
 }
 
-function TreeNode({ node, hot }: { node: PlanNode; hot: PlanNode | null }) {
+function TreeNode({ node, hot, costs }: { node: PlanNode; hot: PlanNode | null; costs: Costs }) {
   const [open, setOpen] = useState(true);
   const hasChildren = node.children.length > 0;
   return (
@@ -38,16 +44,29 @@ function TreeNode({ node, hot }: { node: PlanNode; hot: PlanNode | null }) {
         )}
         <span className="ex-label">{node.label}</span>
         {node.detail && <span className="ex-detail">{node.detail}</span>}
-        <Metrics node={node} />
+        <Metrics node={node} costs={costs} />
       </div>
       {hasChildren && open && (
         <ul>
           {node.children.map((c, i) => (
-            <TreeNode key={i} node={c} hot={hot} />
+            <TreeNode key={i} node={c} hot={hot} costs={costs} />
           ))}
         </ul>
       )}
     </li>
+  );
+}
+
+/** The plan tree, its own costs computed once per plan. */
+function PlanTreeView({ root }: { root: PlanNode }) {
+  const { costs, hot } = useMemo(() => {
+    const costs = selfCosts(root);
+    return { costs, hot: hottestNode(root, costs) };
+  }, [root]);
+  return (
+    <ul className="ex-tree">
+      <TreeNode node={root} hot={hot} costs={costs} />
+    </ul>
   );
 }
 
@@ -94,12 +113,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
       </table>
     );
   } else {
-    const hot = hottestNode(plan.root);
-    body = (
-      <ul className="ex-tree">
-        <TreeNode node={plan.root} hot={hot} />
-      </ul>
-    );
+    body = <PlanTreeView root={plan.root} />;
   }
 
   return (

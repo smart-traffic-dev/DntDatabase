@@ -10,7 +10,10 @@ import {
   canRun,
   canStop,
   emptyRun,
+  lastRunText,
   reduceRun,
+  runElapsedMs,
+  runProgress,
   settleTx,
   startRun,
   stopReasonText,
@@ -126,11 +129,11 @@ describe('reduceRun', () => {
     expect(run.messages.map((m) => [m.index, m.text, m.rows, m.affected, m.elapsedMs, m.tone])).toEqual([
       [0, 'SELECT 1', 3, null, 12, 'info'],
       [1, 'UPDATE t SET a = 1', null, 4, 5, 'info'],
-      [null, 'Done: 2 statement(s) in 40 ms.', null, null, 40, 'info'],
+      [null, 'Done: 2 statements in 40 ms.', null, null, 40, 'info'],
     ]);
     expect(run.finished).toEqual([0, 1]);
     expect(run.panel).toBe('result');
-    expect(run.lastRun).toEqual({ rows: 3, elapsedMs: 40 });
+    expect(run.lastRun).toEqual({ rows: 3, affected: 4, resultSets: 1, statements: 2, errors: 0, elapsedMs: 40 });
     expect(canRun(run)).toBe(true);
   });
 
@@ -387,7 +390,8 @@ describe('reduceRun', () => {
   });
 
   it('other stop texts match the spec', () => {
-    expect(stopReasonText(null, 3, 120)).toBe('Done: 3 statement(s) in 120 ms.');
+    expect(stopReasonText(null, 3, 120)).toBe('Done: 3 statements in 120 ms.');
+    expect(stopReasonText(null, 1, 1500)).toBe('Done: 1 statement in 1,500 ms.');
     expect(stopReasonText({ kind: 'error', index: 0 }, 3, 1)).toBe('Stopped at statement 1 after an error.');
     expect(stopReasonText({ kind: 'cancelled' }, 3, 1)).toBe('Cancelled by user.');
     expect(stopReasonText({ kind: 'tx_aborted' }, 3, 1)).toBe(
@@ -480,6 +484,159 @@ describe('reduceRun', () => {
       txState: 'active',
       lastRun: first.lastRun,
     });
+  });
+
+  // F09: an UPDATE reports its affected rows, not "0 rows".
+  it('last run counts affected rows of DML', () => {
+    const run = play([
+      { t: 'statement_start', index: 1, range: [10, 28] },
+      { t: 'result_start', result_id: 0, index: 1, columns: [] },
+      resultEnd(0, 0, { affected: 1, elapsed_ms: 2 }),
+      { t: 'done', stop: null, elapsed_ms: 3 },
+    ]);
+    expect(run.lastRun).toEqual({ rows: 0, affected: 1, resultSets: 0, statements: 2, errors: 0, elapsedMs: 3 });
+    expect(lastRunText(run.lastRun!)).toBe('1 row affected · 3 ms');
+  });
+
+  it('last run text: rows, affected, errors, plurals and separators', () => {
+    expect(lastRunText({ rows: 12, elapsedMs: 34 })).toBe('12 rows · 34 ms');
+    expect(lastRunText({ rows: 1, elapsedMs: 5 })).toBe('1 row · 5 ms');
+    expect(lastRunText({ rows: 10000, resultSets: 1, affected: null, elapsedMs: 1234 })).toBe('10,000 rows · 1,234 ms');
+    expect(lastRunText({ rows: 3, resultSets: 1, affected: 4, elapsedMs: 40 })).toBe('3 rows · 4 rows affected · 40 ms');
+    expect(lastRunText({ rows: 0, resultSets: 0, affected: 2, errors: 1, elapsedMs: 9 })).toBe(
+      '2 rows affected · 1 error · 9 ms',
+    );
+    // Nothing returned and nothing affected (DDL): still "0 rows".
+    expect(lastRunText({ rows: 0, resultSets: 0, affected: null, elapsedMs: 1 })).toBe('0 rows · 1 ms');
+  });
+
+  // F10: continue on error ends with stop = null, but the errors are counted.
+  it('a run with failed statements finishes with errors, not Done', () => {
+    const plan = planOf([
+      stmt(0, 'SELECT 1', [0, 8]),
+      stmt(1, 'SELECT * FORM orders', [9, 29]),
+      stmt(2, 'SELECT 2', [30, 38]),
+      stmt(3, 'UPDATE t SET a = 1', [39, 57], 'write'),
+    ]);
+    const run = play(
+      [
+        { t: 'statement_start', index: 0, range: [0, 8] },
+        { t: 'result_start', result_id: 0, index: 0, columns: [col('a')] },
+        resultEnd(0, 1),
+        { t: 'statement_start', index: 1, range: [9, 29] },
+        { t: 'statement_error', index: 1, error: err('query', 'syntax error') },
+        { t: 'statement_start', index: 2, range: [30, 38] },
+        { t: 'statement_error', index: 2, error: err('cancelled', 'Cancelled') },
+        { t: 'statement_start', index: 3, range: [39, 57] },
+        { t: 'statement_error', index: 3, error: err('connection_lost', 'Lost', { outcome_unknown: true }) },
+        { t: 'done', stop: null, elapsed_ms: 30 },
+      ],
+      plan,
+    );
+    const final = run.messages.at(-1)!;
+    // A plain cancel is not an error; an outcome-unknown failure is.
+    expect(final.text).toBe('Finished with 2 errors — 4 statements in 30 ms.');
+    expect(final.tone).toBe('warning');
+    expect(run.lastRun?.errors).toBe(2);
+    expect(stopReasonText(null, 6, 30, 1)).toBe('Finished with 1 error — 6 statements in 30 ms.');
+    expect(stopReasonText(null, 6, 30, 0)).toBe('Done: 6 statements in 30 ms.');
+  });
+
+  // F11: error lines carry the statement they belong to.
+  it('error lines keep the statement preview', () => {
+    const plan = planOf([stmt(0, 'SELECT * FORM orders\nWHERE 1', [0, 28])]);
+    const run = play(
+      [
+        { t: 'statement_start', index: 0, range: [0, 28] },
+        { t: 'statement_error', index: 0, error: err('query', 'syntax error near FORM') },
+      ],
+      plan,
+    );
+    expect(run.messages[0]).toMatchObject({ index: 0, statement: 'SELECT * FORM orders', text: 'syntax error near FORM' });
+    const unknown = play(
+      [
+        { t: 'statement_start', index: 0, range: [0, 28] },
+        { t: 'statement_error', index: 0, error: err('connection_lost', 'Lost.', { outcome_unknown: true }) },
+      ],
+      plan,
+    );
+    expect(unknown.messages[0]).toMatchObject({ statement: 'SELECT * FORM orders', tone: 'warning' });
+    expect(unknown.messages[0]!.text).toContain('may have been applied');
+  });
+
+  it('result lines and notices carry the statement preview too; the final line has none', () => {
+    const run = play([
+      { t: 'statement_start', index: 0, range: [0, 8] },
+      { t: 'notice', index: 0, message: 'reconnected' },
+      { t: 'result_start', result_id: 0, index: 0, columns: [col('a')] },
+      resultEnd(0, 1),
+      { t: 'done', stop: null, elapsed_ms: 1 },
+    ]);
+    expect(run.messages.map((m) => m.statement)).toEqual(['SELECT 1', 'SELECT 1', null]);
+  });
+
+  // F14: every piece of a statement gets its own Messages line.
+  it('a trailing OK piece after a result set gets its own line', () => {
+    const run = play([
+      { t: 'statement_start', index: 0, range: [0, 8] },
+      { t: 'result_start', result_id: 0, index: 0, columns: [col('a')] },
+      { t: 'rows', result_id: 0, rows: rows(1) },
+      resultEnd(0, 1),
+      { t: 'result_start', result_id: 1, index: 0, columns: [] },
+      resultEnd(1, 0, { affected: 0 }),
+      // A piece whose `result_start` never came still gets a line, for the running statement.
+      resultEnd(2, 0, { affected: 3 }),
+      { t: 'done', stop: null, elapsed_ms: 5 },
+    ]);
+    const lines = run.messages.filter((m) => m.index === 0);
+    expect(lines.map((m) => [m.rows, m.affected])).toEqual([
+      [1, null],
+      [null, 0],
+      [null, 3],
+    ]);
+    expect(run.results).toHaveLength(1);
+    expect(run.lastRun).toMatchObject({ rows: 1, affected: 3, resultSets: 1 });
+  });
+
+  // F46: Explain does not replace the status bar figures.
+  it('an explain run leaves the last run figures alone', () => {
+    const first = play([
+      { t: 'statement_start', index: 0, range: [0, 8] },
+      { t: 'result_start', result_id: 0, index: 0, columns: [col('a')] },
+      resultEnd(0, 7),
+      { t: 'done', stop: null, elapsed_ms: 21 },
+    ]);
+    let run = startRun(first, PLAN, 5000, { mode: 'explain' });
+    expect(run.mode).toBe('explain');
+    run = reduceRun(run, { t: 'statement_start', index: 0, range: [0, 8] }, 5001);
+    run = reduceRun(run, { t: 'explain', index: 0, plan: { kind: 'table', columns: [], rows: [], raw: '' } }, 5002);
+    run = reduceRun(run, { t: 'done', stop: null, elapsed_ms: 6 }, 5003);
+    expect(run.lastRun).toBe(first.lastRun);
+    // A failed Explain does not say "Done" either.
+    let failed = startRun(first, PLAN, 6000, { mode: 'explain' });
+    failed = reduceRun(failed, { t: 'statement_error', index: 0, error: err('query', 'bad') }, 6001);
+    failed = reduceRun(failed, { t: 'done', stop: null, elapsed_ms: 2 }, 6002);
+    expect(failed.messages.at(-1)!.text).toBe('Finished with 1 error — 2 statements in 2 ms.');
+    expect(failed.lastRun).toBe(first.lastRun);
+    // The next normal run records its figures again.
+    expect(startRun(failed, PLAN, 7000).mode).toBe('run');
+  });
+
+  it('run timing is derivable for the status bar', () => {
+    expect(runElapsedMs(emptyRun, 5000)).toBeNull();
+    expect(runProgress(emptyRun)).toBeNull();
+    const plan = planOf([stmt(0, 'SELECT 1', [0, 8]), stmt(1, 'SELECT 2', [9, 17]), stmt(2, 'SELECT 3', [18, 26])]);
+    let run = startRun(emptyRun, plan, 1000);
+    run = reduceRun(run, { t: 'statement_start', index: 1, range: [9, 17] }, 1100);
+    expect(runElapsedMs(run, 13_000)).toBe(12_000);
+    expect(runProgress(run)).toEqual({ current: 2, total: 3 });
+    // Stopping keeps the clock of the run.
+    run = reduceRun(run, { t: 'stopping', reason: 'user' }, 14_000);
+    expect(runElapsedMs(run, 15_000)).toBe(14_000);
+    expect(runProgress(run)).toEqual({ current: 2, total: 3 });
+    run = reduceRun(run, { t: 'done', stop: { kind: 'cancelled' }, elapsed_ms: 14_100 }, 15_100);
+    expect(runElapsedMs(run, 16_000)).toBeNull();
+    expect(runProgress(run)).toBeNull();
   });
 });
 
@@ -643,6 +800,31 @@ describe('useQueryRun', () => {
     expect(useQueryRun.getState().get(TAB).txState).toBe('idle');
     useQueryRun.getState().apply(TAB, { t: 'tx_state', state: 'aborted' }, PLAN.plan_id);
     expect(useQueryRun.getState().get(TAB).txState).toBe('aborted');
+  });
+
+  // F12: the backend drops a tab's taken plan with its connection.
+  it('begin records the run origin; closing its connection expires the plan', () => {
+    useConnections.setState({ info: new Map([['conn-1', { ...info, version: [16, 0, 0] }]]) });
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().apply(TAB, { t: 'done', stop: null, elapsed_ms: 1 });
+    expect(useQueryRun.getState().get(TAB)).toMatchObject({
+      origin: { connectionId: 'conn-1', database: 'shop' },
+      planExpired: false,
+      mode: 'run',
+    });
+    useConnections.getState().clearInfo('conn-1');
+    expect(useQueryRun.getState().get(TAB).planExpired).toBe(true);
+    // A new run starts with a live plan again.
+    useQueryRun.getState().begin(TAB, PLAN, { mode: 'explain' });
+    expect(useQueryRun.getState().get(TAB)).toMatchObject({ planExpired: false, mode: 'explain' });
+  });
+
+  it('expirePlan marks only the given plan', () => {
+    useQueryRun.getState().begin(TAB, PLAN);
+    useQueryRun.getState().expirePlan(TAB, 'other-plan');
+    expect(useQueryRun.getState().get(TAB).planExpired).toBe(false);
+    useQueryRun.getState().expirePlan(TAB, PLAN.plan_id);
+    expect(useQueryRun.getState().get(TAB).planExpired).toBe(true);
   });
 
   it('closing a connection forgets its completion data and idle tx states', () => {

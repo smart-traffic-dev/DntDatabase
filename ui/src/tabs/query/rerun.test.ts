@@ -1,9 +1,10 @@
+import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanView } from '../../bindings';
 import { useQueryDocs } from '../../store/queryTabs';
-import { useQueryRun } from '../../store/queryRun';
+import { planAlive, useQueryRun } from '../../store/queryRun';
 import { callsOf, mockBackend, resetStores } from '../../test/backend';
-import { rerunStatement, setPlanRunner } from './rerun';
+import { PLAN_GONE, rerunStatement, setPlanRunner, usePlanAlive } from './rerun';
 
 const plan = (id: string, verdict: 'allow' | 'confirm' | 'block' = 'allow'): PlanView => ({
   plan_id: id,
@@ -82,6 +83,52 @@ describe('rerunStatement', () => {
     await rerunStatement(tab(), 0);
     expect(callsOf('query_run')).toEqual([]);
     expect(useQueryRun.getState().get(tab()).plan?.plan_id).toBe('other');
+  });
+
+  // F12: once the backend says the plan is gone, Retry / Fetch all go away.
+  it('plan_expired_marks_the_plan_gone', async () => {
+    mockBackend({
+      query_plan_statement: () => Promise.reject({ kind: 'plan_expired', message: 'The run plan expired; run it again.' }),
+    });
+    expect(planAlive(useQueryRun.getState().get(tab()), useQueryDocs.getState().docs.get(tab()))).toBe(true);
+    await rerunStatement(tab(), 0);
+    const run = useQueryRun.getState().get(tab());
+    expect(run.planExpired).toBe(true);
+    expect(run.messages.at(-1)?.text).toBe('The run plan expired; run it again.');
+    expect(planAlive(run, useQueryDocs.getState().docs.get(tab()))).toBe(false);
+    // A later click asks the backend nothing and says why.
+    await rerunStatement(tab(), 0);
+    expect(callsOf('query_plan_statement')).toHaveLength(1);
+    expect(useQueryRun.getState().get(tab()).messages.at(-1)?.text).toBe(PLAN_GONE);
+  });
+
+  it('other_errors_keep_the_plan', async () => {
+    mockBackend({ query_plan_statement: () => Promise.reject({ kind: 'busy', message: 'Busy.' }) });
+    await rerunStatement(tab(), 0);
+    expect(useQueryRun.getState().get(tab()).planExpired).toBe(false);
+  });
+
+  it('plan_is_gone_when_the_tab_moved_to_another_database_or_connection', async () => {
+    const id =useQueryDocs.getState().newQuery('conn-1', 'shop');
+    useQueryRun.getState().begin(id, plan('p'));
+    useQueryRun.getState().apply(id, { t: 'done', stop: null, elapsed_ms: 1 });
+    const alive = () => planAlive(useQueryRun.getState().get(id), useQueryDocs.getState().docs.get(id));
+    expect(alive()).toBe(true);
+    const { result } = renderHook(() => usePlanAlive(id));
+    expect(result.current).toBe(true);
+    act(() => useQueryDocs.getState().update(id, { database: 'other' }));
+    expect(alive()).toBe(false);
+    expect(result.current).toBe(false);
+    act(() => useQueryDocs.getState().update(id, { database: 'shop', connectionId: 'conn-2' }));
+    expect(alive()).toBe(false);
+    act(() => useQueryDocs.getState().update(id, { connectionId: 'conn-1' }));
+    expect(result.current).toBe(true);
+    mockBackend({ query_plan_statement: () => plan('d'), query_run: () => 'r' });
+    act(() => useQueryDocs.getState().update(id, { database: 'other' }));
+    await rerunStatement(id, 0);
+    expect(callsOf('query_plan_statement')).toEqual([]);
+    // No plan at all: nothing to retry.
+    expect(planAlive(useQueryRun.getState().get('none'), undefined)).toBe(false);
   });
 
   it('ignored_while_a_run_is_active', async () => {

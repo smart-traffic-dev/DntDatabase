@@ -42,6 +42,27 @@ describe('ExplainView', () => {
     expect(hot[0]).toHaveTextContent('Seq Scan');
   });
 
+  // F04: LD-62, a MySQL plan with cumulative `prefix_cost`s under an uncosted nested loop.
+  it('marks_the_costliest_table_of_a_mysql_plan_not_the_query_block', () => {
+    const tree: PlanTree = {
+      kind: 'tree',
+      root: node('Query block #1', 0.9, [node('Nested loop', null, [node('index o', 0.55), node('eq_ref c', 0.9)])]),
+      raw: '{}',
+    };
+    show({ explain: tree });
+    const nodes = screen.getAllByTestId('explain-node');
+    const hot = nodes.filter((n) => n.classList.contains('hot'));
+    expect(hot).toHaveLength(1);
+    expect(hot[0]).toHaveTextContent('index o');
+    expect(nodes[0]).toHaveTextContent('cost 0.90 · self 0');
+    expect(nodes[3]).toHaveTextContent('cost 0.90 · self 0.35');
+  });
+
+  it('a_single_node_plan_marks_nothing', () => {
+    show({ explain: { kind: 'tree', root: node('Seq Scan on orders', 35.5), raw: '' } });
+    expect(screen.getAllByTestId('explain-node').filter((n) => n.classList.contains('hot'))).toHaveLength(0);
+  });
+
   it('explain_tree_collapses', async () => {
     const user = userEvent.setup();
     show({ explain: TREE });
