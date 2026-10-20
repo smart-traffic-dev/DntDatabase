@@ -252,12 +252,21 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
     if (!state) return;
     const { keys, only } = pending;
     const outcome = report.outcome;
+    /** The rows whose statements found the row changed on the server. */
+    const conflictRows = () =>
+      report.statements
+        .filter((s) => s.conflict)
+        .map((s) => keys[s.index])
+        .filter((k): k is EditKey & { row: RowId } => !!k && k.kind !== 'insert')
+        .map((k) => k.row);
+    const failed = () => report.statements.find((s) => s.error)?.error ?? report.error;
     if (outcome.outcome === 'committed') {
       if (only) {
         patch(tab.id, {
           staged: without(state.staged, keys),
           history: [],
           conflicts: state.conflicts.filter((r) => r !== only),
+          unknown: false,
           error: null,
           applying: null,
         });
@@ -266,22 +275,27 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
       }
       void useTableData.getState().load(tab);
     } else if (outcome.outcome === 'rolled_back') {
-      const conflicts = report.statements
-        .filter((s) => s.conflict)
-        .map((s) => keys[s.index])
-        .filter((k): k is EditKey & { row: RowId } => !!k && k.kind !== 'insert')
-        .map((k) => k.row);
-      const failed = report.statements.find((s) => s.error)?.error ?? report.error;
+      const conflicts = conflictRows();
       patch(tab.id, {
         conflicts: only ? [...new Set([...state.conflicts, ...conflicts])] : conflicts,
         applying: null,
-        error: conflicts.length > 0 ? null : (failed?.message ?? 'The changes were rolled back; nothing was applied.'),
+        error: conflicts.length > 0 ? null : (failed()?.message ?? 'The changes were rolled back; nothing was applied.'),
       });
-    } else {
+    } else if (outcome.outcome === 'partially_applied') {
       // Without a transaction the first statements are applied for good: they must not run again.
-      const applied = outcome.outcome === 'partially_applied' ? keys.filter((_, i) => i < outcome.applied) : [];
+      // The rest certainly did not apply: a conflict or the server's error says why (rule 7: no "may have").
+      const applied = keys.filter((_, i) => i < outcome.applied);
+      const conflicts = conflictRows();
       patch(tab.id, {
         staged: applied.length ? without(state.staged, applied) : state.staged,
+        history: [],
+        conflicts: only ? [...new Set([...state.conflicts, ...conflicts])] : conflicts,
+        applying: null,
+        error: conflicts.length > 0 ? null : (failed()?.message ?? 'The changes stopped before all of them were applied.'),
+      });
+    } else {
+      // Whether anything applied cannot be told: the stage is kept and the user reloads to check.
+      patch(tab.id, {
         history: [],
         unknown: true,
         applying: null,

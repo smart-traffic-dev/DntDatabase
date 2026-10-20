@@ -172,6 +172,7 @@ function deferred<T>() {
 }
 
 const grid = () => within(screen.getByTestId('grid'));
+const UNKNOWN_TEXT = 'Outcome unknown: the change may have been applied. Reload to check.';
 
 beforeEach(() => {
   resetStores();
@@ -1029,13 +1030,75 @@ describe('DataView editing', () => {
     await user.click(cell(0, 1));
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await user.click(await screen.findByRole('button', { name: 'Confirm' }));
-    expect(await screen.findByText('Outcome unknown: the change may have been applied. Reload to check.')).toBeInTheDocument();
+    // The outcome is certain: the server's error is shown, not "may have been applied".
+    expect(await screen.findByText('boom')).toBeInTheDocument();
+    expect(screen.queryByText(UNKNOWN_TEXT)).not.toBeInTheDocument();
     // The update (edit 0) ran; the INSERT (edit 1) did not: only the INSERT stays staged.
     expect(cell(0, 1)).toHaveAttribute('data-status', '');
     expect(screen.getByTestId('grid-rows')).toHaveTextContent('4');
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await screen.findByRole('dialog', { name: 'Review changes' });
     expect((lastCall('data_preview').set as { edits: { op: string }[] }).edits.map((e) => e.op)).toEqual(['insert']);
+  });
+
+  it('a conflict on a table without transactions marks the row; no unknown banner', async () => {
+    const { user } = await editable(
+      {
+        data_preview: () => previewOf({ atomic: 'no' }),
+        data_apply: () =>
+          reportOf({ outcome: { outcome: 'partially_applied', applied: 0 }, statements: [{ index: 0, affected: 0, error: null, conflict: true }] }),
+      },
+      { info: editableInfo({ atomic: 'no' }) },
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-status', 'conflict'));
+    expect(screen.getByRole('button', { name: 'Reload row' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Overwrite' })).toBeInTheDocument();
+    expect(screen.queryByText(UNKNOWN_TEXT)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply changes' })).toBeInTheDocument();
+  });
+
+  it('a server error on a table without transactions is shown; no unknown banner', async () => {
+    const { user } = await editable(
+      {
+        data_preview: () => previewOf({ atomic: 'no' }),
+        data_apply: () =>
+          reportOf({
+            outcome: { outcome: 'partially_applied', applied: 0 },
+            statements: [{ index: 0, affected: null, error: appError('server', "Duplicate entry '1' for key 'PRIMARY'"), conflict: false }],
+          }),
+      },
+      { info: editableInfo({ atomic: 'no' }) },
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText("Duplicate entry '1' for key 'PRIMARY'")).toBeInTheDocument();
+    expect(screen.queryByText(UNKNOWN_TEXT)).not.toBeInTheDocument();
+    // Nothing ran: the change stays staged.
+    expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
+  });
+
+  it('an Overwrite that commits clears an earlier unknown outcome', async () => {
+    const outcomes: ApplyReport[] = [
+      reportOf({ outcome: { outcome: 'rolled_back' }, statements: [{ index: 0, affected: 0, error: null, conflict: true }] }),
+      reportOf({ outcome: { outcome: 'unknown', at: 0 } }),
+      reportOf(),
+    ];
+    const { user } = await editable({
+      data_preview: (a) => previewOf({ plan_id: (a.set as { overwrite: boolean }).overwrite ? 'over' : 'p1' }),
+      data_apply: () => outcomes.shift()!,
+    });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await screen.findByRole('button', { name: 'Overwrite' });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText(UNKNOWN_TEXT)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Overwrite' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(callsOf('data_apply')).toHaveLength(3));
+    await waitFor(() => expect(screen.queryByText(UNKNOWN_TEXT)).not.toBeInTheDocument());
   });
 
   it("a failed data_editable says so and stays read-only", async () => {
