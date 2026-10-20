@@ -862,6 +862,228 @@ async fn transaction_flags_follow_statements() {
     }
 }
 
+/// Runs `sql` through `execute_one` as ONE statement of `kind`: what a planned
+/// statement holding several `;`-separated pieces (a stray `DELIMITER $$`) sends.
+async fn run_as(s: &MySqlSession, sql: &str, kind: StatementKind) -> Result<StmtOutcome, DbError> {
+    let mut sink = Collect::default();
+    s.execute_one(sql, kind, &ExecOptions::default(), &mut sink)
+        .await
+}
+
+/// A statement holding several pieces whose first one returns no rows (`SET …; SELECT`,
+/// `BEGIN; INSERT …`) reports one result per piece; it used to spin forever on the
+/// first OK result because nothing moved on to the next one.
+#[tokio::test]
+async fn multi_piece_statement_streams_every_piece() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let mut sink = Collect::default();
+        let res = tokio::time::timeout(
+            Duration::from_secs(10),
+            s.execute_one(
+                "SET @f1 = 1; DO 0; SELECT @f1 + 1",
+                StatementKind::Other,
+                &ExecOptions::default(),
+                &mut sink,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{t:?}: hung"))
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(res.results.len(), 3, "{t:?}");
+        assert_eq!(sink.results.len(), 3, "{t:?}");
+        assert_eq!(sink.results[0].affected, Some(0), "{t:?}");
+        assert!(sink.results[1].cols.is_empty(), "{t:?}");
+        assert_eq!(sink.results[2].rows.len(), 1, "{t:?}");
+        // A failing later piece is the statement's error, after the earlier results
+        // (whether they returned rows or not).
+        for (sql, want) in [
+            ("SET @f1 = 2; SELECT * FROM f1_no_such_table", 1),
+            ("SELECT 1; SET @f1 = 3; SELECT * FROM f1_no_such_table", 2),
+        ] {
+            let mut sink = Collect::default();
+            let err = tokio::time::timeout(
+                Duration::from_secs(10),
+                s.execute_one(
+                    sql,
+                    StatementKind::Other,
+                    &ExecOptions::default(),
+                    &mut sink,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{t:?}: hung"))
+            .err();
+            assert!(
+                matches!(err, Some(DbError::Server { .. })),
+                "{t:?}: {sql}: {err:?}"
+            );
+            assert_eq!(sink.results.len(), want, "{t:?}: {sql}");
+        }
+        assert!(
+            run_as(
+                &s,
+                "SELECT 1; SELECT * FROM f1_no_such_table",
+                StatementKind::Read
+            )
+            .await
+            .is_err(),
+            "{t:?}"
+        );
+        // The connection is still in sync.
+        let (_, c) = run(&s, "SELECT @f1").await.unwrap();
+        assert_eq!(as_u64(&scalar(&c)), 3, "{t:?}");
+        Box::new(s).close().await;
+    }
+}
+
+/// F1: a statement that re-splits into several pieces runs every piece on the server,
+/// and its planned kind (the strictest piece) hides the BEGIN / COMMIT pieces from
+/// tracking. The driver asks the server for the transaction state afterwards.
+#[tokio::test]
+async fn multi_piece_statement_reads_tx_state_from_the_server() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        run(
+            &s,
+            "DROP TABLE IF EXISTS f1_tx; CREATE TABLE f1_tx (a int) ENGINE=InnoDB",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+
+        // `BEGIN; INSERT …` is planned as Write: the server holds an open transaction.
+        run_as(
+            &s,
+            "BEGIN; INSERT INTO f1_tx VALUES (1)",
+            StatementKind::Write,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}: BEGIN; INSERT");
+        run(&s, "ROLLBACK").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
+
+        // `SELECT 1; COMMIT` after BEGIN ends the transaction.
+        run(&s, "BEGIN").await.unwrap();
+        run_as(
+            &s,
+            "SELECT 1; COMMIT",
+            StatementKind::Transaction(dnt_core::sql::TxControl::Commit),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}: SELECT 1; COMMIT");
+
+        // `COMMIT; UPDATE …` is planned as Write: the COMMIT piece ended it.
+        run(&s, "BEGIN").await.unwrap();
+        run_as(&s, "COMMIT; UPDATE f1_tx SET a = 2", StatementKind::Write)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}: COMMIT; UPDATE");
+
+        // A later piece fails: the COMMIT piece still ran.
+        run(&s, "BEGIN").await.unwrap();
+        let err = run_as(
+            &s,
+            "COMMIT; INSERT INTO f1_no_such_table VALUES (1)",
+            StatementKind::Write,
+        )
+        .await
+        .err();
+        assert!(
+            matches!(err, Some(DbError::Server { .. })),
+            "{t:?}: {err:?}"
+        );
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}: COMMIT; failing INSERT");
+
+        // ... and a BEGIN piece before a failing one leaves it open.
+        let err = run_as(
+            &s,
+            "BEGIN; INSERT INTO f1_no_such_table VALUES (1)",
+            StatementKind::Write,
+        )
+        .await
+        .err();
+        assert!(
+            matches!(err, Some(DbError::Server { .. })),
+            "{t:?}: {err:?}"
+        );
+        assert_eq!(
+            s.tx_state(),
+            TxState::Active,
+            "{t:?}: BEGIN; failing INSERT"
+        );
+        run(&s, "ROLLBACK").await.unwrap();
+
+        // `SET autocommit = 0` hidden in a Write: Active, and it stays Active after a
+        // COMMIT (the server opens the next transaction).
+        run_as(
+            &s,
+            "SET autocommit = 0; INSERT INTO f1_tx VALUES (3)",
+            StatementKind::Write,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}: autocommit off");
+        run(&s, "COMMIT").await.unwrap();
+        assert_eq!(
+            s.tx_state(),
+            TxState::Active,
+            "{t:?}: autocommit off, COMMIT"
+        );
+        // ... and back on.
+        run_as(
+            &s,
+            "SET autocommit = 1; DELETE FROM f1_tx WHERE a = 0",
+            StatementKind::Write,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}: autocommit on");
+
+        run(&s, "DROP TABLE f1_tx").await.unwrap();
+        Box::new(s).close().await;
+    }
+}
+
+/// The server is only asked after a statement that re-splits: no extra round trip for
+/// ordinary statements.
+#[tokio::test]
+async fn single_piece_statements_issue_no_tx_probe() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        for sql in [
+            "SELECT 1",
+            "BEGIN",
+            "SELECT ';'",
+            "COMMIT",
+            "SELECT 1;",
+            "CREATE PROCEDURE f1_p() BEGIN SELECT 1; SELECT 2; END",
+            "DROP PROCEDURE f1_p",
+        ] {
+            let kind = classify(sql, s.dialect());
+            run_as(&s, sql, kind)
+                .await
+                .unwrap_or_else(|e| panic!("{t:?}: {sql}: {e}"));
+        }
+        // A failing single statement neither.
+        assert!(
+            run_as(&s, "SELECT * FROM f1_no_such_table", StatementKind::Read)
+                .await
+                .is_err()
+        );
+        assert_eq!(s.tx_probes(), 0, "{t:?}");
+        run_as(&s, "SELECT 1; SELECT 2", StatementKind::Read)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_probes(), 1, "{t:?}");
+        Box::new(s).close().await;
+    }
+}
+
 /// The session's `sql_mode` lexing flags as the server reports them.
 async fn server_mode(s: &MySqlSession) -> MySqlMode {
     let (_, c) = run(s, "SELECT @@SESSION.sql_mode").await.unwrap();

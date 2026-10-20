@@ -143,6 +143,11 @@ impl PgSession {
     }
 
     /// Applies [`next_tx_state`] for a statement that ended with `result`.
+    ///
+    /// Unlike the MySQL driver this never asks the server for the state afterwards: a
+    /// PostgreSQL statement never holds several `;`-separated pieces
+    /// (`dnt_core::sql::resplits` is always false for it, as PG has no `DELIMITER`), so
+    /// its kind always describes everything that ran.
     fn track_tx(&self, kind: StatementKind, sql: &str, result: StmtResult<'_>) {
         let mut tx = self.tx.lock().unwrap_or_else(|p| p.into_inner());
         *tx = next_tx_state(DbKind::Postgres, *tx, false, kind, sql, result);

@@ -10,12 +10,14 @@ use dnt_core::driver::{
     SharedSink, StmtOutcome,
 };
 use dnt_core::error::{ConnectStage, DbError};
-use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo};
+use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo, ServerVariant};
 use dnt_core::sql::{
-    leading_keywords, readings, session_effect, Dialect, MySqlMode, StatementKind, TxControl,
+    leading_keywords, readings, resplits, session_effect, Dialect, MySqlMode, StatementKind,
+    TxControl,
 };
 use dnt_core::tx::{next_autocommit_off, next_tx_state, StmtResult, TxState};
 use dnt_core::value::ColumnMeta;
+use mysql_async::consts::StatusFlags;
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, DriverError, Error as MyError, Opts};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -91,6 +93,9 @@ pub struct MySqlSession {
     session_custom: AtomicBool,
     /// Successful [`MySqlSession::reconnect`]s ([`Session::reconnects`]).
     reconnects: AtomicU64,
+    /// Transaction-state probes sent ([`MySqlSession::sync_tx`]), for tests.
+    #[cfg(feature = "test-helpers")]
+    tx_probes: AtomicU64,
 }
 
 /// How one statement attempt failed.
@@ -145,7 +150,16 @@ impl MySqlSession {
             last_db: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
             reconnects: AtomicU64::new(0),
+            #[cfg(feature = "test-helpers")]
+            tx_probes: AtomicU64::new(0),
         }
+    }
+
+    /// Test-only (`test-helpers` feature): how many transaction-state probes
+    /// ([`MySqlSession::sync_tx`]) this session sent.
+    #[cfg(feature = "test-helpers")]
+    pub fn tx_probes(&self) -> u64 {
+        self.tx_probes.load(Ordering::SeqCst)
     }
 
     pub fn capabilities(&self) -> MySqlCapabilities {
@@ -252,6 +266,42 @@ impl MySqlSession {
             self.session_custom.store(true, Ordering::SeqCst);
         }
         effect.sql_mode
+    }
+
+    /// Replaces the tracked transaction state and `autocommit` mode with what the
+    /// server reports ([`probe_tx`]). Called after a statement that holds several
+    /// `;`-separated pieces ([`resplits`]: a MySQL `DELIMITER` left on), whose planned
+    /// kind (the strictest piece) hides `BEGIN` / `COMMIT` / `SET autocommit` pieces
+    /// from [`next_tx_state`]. Ordinary statements never pay for this round trip.
+    ///
+    /// Only on a live connection the statement ended on: never on one poisoned by an
+    /// unconfirmed `KILL QUERY` (it is replaced before anything else is sent), nor on a
+    /// lost or abandoned one (the reconnect already reset the state). A cancel arriving
+    /// meanwhile can only stop the probe. A failed probe never fails the statement: the
+    /// tracked state is kept.
+    async fn sync_tx(&self, slot: &mut Option<Conn>) {
+        if self.cancel.poisoned() {
+            return;
+        }
+        let Some(conn) = slot.as_mut() else {
+            return;
+        };
+        #[cfg(feature = "test-helpers")]
+        self.tx_probes.fetch_add(1, Ordering::SeqCst);
+        match probe_tx(conn, self.info.variant).await {
+            Ok((in_tx, autocommit)) => {
+                self.autocommit_off.store(!autocommit, Ordering::SeqCst);
+                self.set_tx(if in_tx {
+                    TxState::Active
+                } else {
+                    TxState::Idle
+                });
+            }
+            Err(e) => tracing::debug!(
+                error = %e,
+                "transaction-state probe failed; keeping the tracked state"
+            ),
+        }
     }
 
     /// The `ConnectionLost` message suffix for losing the current connection.
@@ -461,6 +511,37 @@ pub(crate) async fn read_sql_mode(conn: &mut Conn) -> Result<MySqlMode, MyError>
     Ok(parse_sql_mode(mode.as_deref().unwrap_or_default()))
 }
 
+/// Asks the server whether `conn` is inside a transaction and whether `autocommit` is
+/// on: `(in_transaction, autocommit)`.
+///
+/// - MariaDB (10.6 and 11.4 checked): `SELECT @@in_transaction, @@autocommit`.
+/// - MySQL 5.7 / 8 have no `@@in_transaction`, and `information_schema.innodb_trx`
+///   misses a `BEGIN` that touched no InnoDB table yet. The `SERVER_STATUS_IN_TRANS`
+///   flag of the probe's own closing OK packet is what the server itself says, right
+///   after `BEGIN` too, so MySQL reads that (also MariaDB's fallback when its query is
+///   rejected).
+///
+/// A probe that reads no table opens no transaction, even with `autocommit` off.
+async fn probe_tx(conn: &mut Conn, variant: ServerVariant) -> Result<(bool, bool), MyError> {
+    if variant == ServerVariant::MariaDb {
+        match conn
+            .query_first::<(i64, i64), _>("SELECT @@in_transaction, @@autocommit")
+            .await
+        {
+            Ok(Some((in_tx, autocommit))) => return Ok((in_tx != 0, autocommit != 0)),
+            // Rejected (an older server): try the status flag.
+            Ok(None) | Err(MyError::Server(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let autocommit: Option<i64> = conn.query_first("SELECT @@autocommit").await?;
+    let in_tx = conn.last_ok_packet().is_some_and(|ok| {
+        ok.status_flags()
+            .contains(StatusFlags::SERVER_STATUS_IN_TRANS)
+    });
+    Ok((in_tx, autocommit.is_none_or(|a| a != 0)))
+}
+
 fn lost(was_in_tx: bool, outcome_unknown: bool, message: String) -> DbError {
     DbError::ConnectionLost {
         was_in_tx,
@@ -601,13 +682,28 @@ async fn run_statement(
         };
         sink.result_end(&result_summary);
         results.push(result_summary);
-        // More sets only follow for multi-result statements such as `CALL`; the
-        // trailing status of a `CALL` is not reported as a separate result.
+        // More sets only follow for multi-result statements such as `CALL`, or a
+        // statement holding several `;`-separated pieces (a `DELIMITER` left on); the
+        // trailing status of a `CALL` (like an OK piece right after a result set) is
+        // not reported as a separate result.
         if result.is_empty() {
-            return Ok(had_columns);
+            break;
+        }
+        if cols.is_empty() {
+            // A set with rows was read to its end above, which moved on to the next
+            // set; an OK result has to be stepped over explicitly.
+            result.for_each(|_| {}).await?;
+        }
+        // No set pending: a later piece failed (its error is pending).
+        if result.columns().is_none() {
+            break;
         }
         started = Instant::now();
     }
+    // Reports the error of a piece that failed after earlier results (the driver only
+    // hands it over on the next read) and skips a trailing status.
+    result.drop_result().await?;
+    Ok(had_columns)
 }
 
 fn is_connection_lost(e: &MyError) -> bool {
@@ -750,6 +846,9 @@ impl Session for MySqlSession {
         // (after any reconnect above).
         let dialect = self.dialect();
         let was_in_tx = self.in_transaction();
+        // Several pieces for the server: its transaction state is read back afterwards
+        // (`sync_tx`), on every path that keeps this connection.
+        let multi = resplits(stmt, dialect);
         loop {
             let mut emitted = false;
             let res = match slot.as_mut() {
@@ -776,6 +875,9 @@ impl Session for MySqlSession {
                 Ok(done) if done.had_columns && kind == StatementKind::Read && run.cancelled() => {
                     // It did run (a read cannot change the `sql_mode`).
                     self.track_after(kind, stmt, dialect);
+                    if multi {
+                        self.sync_tx(&mut slot).await;
+                    }
                     return Err(DbError::Cancelled {
                         outcome_unknown: false,
                         was_in_tx,
@@ -795,6 +897,9 @@ impl Session for MySqlSession {
                             code: Some(ER_QUERY_INTERRUPTED),
                         },
                     );
+                    if multi {
+                        self.sync_tx(&mut slot).await;
+                    }
                     return Err(DbError::Timeout {
                         stage: ConnectStage::Execute,
                         outcome_unknown: killed_outcome_unknown(kind, was_in_tx, stmt),
@@ -817,6 +922,9 @@ impl Session for MySqlSession {
             // tracked by the reconnect.
             if !conn_lost {
                 self.track_failed(kind, stmt, &err);
+                if multi {
+                    self.sync_tx(&mut slot).await;
+                }
             }
             match failure_kind(
                 conn_lost,
@@ -877,6 +985,9 @@ impl Session for MySqlSession {
                 // call (a lost connection is replaced, and its `sql_mode` read, then).
                 self.refresh_mode(conn).await;
             }
+        }
+        if multi {
+            self.sync_tx(&mut slot).await;
         }
         Ok(outcome)
     }

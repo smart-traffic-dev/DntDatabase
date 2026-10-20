@@ -21,7 +21,9 @@
 //! place, so `SET \`a\` GLOBAL …` never passes for a session `SET`.
 
 use dnt_core::config::EnvTag;
-use dnt_core::sql::{classify, readings, split, tokenize, Dialect, StatementKind, TokKind, Token};
+use dnt_core::sql::{
+    classify, readings, resplit_reading, tokenize, Dialect, StatementKind, TokKind, Token,
+};
 
 use crate::plan::{ScriptPlan, Verdict};
 
@@ -142,7 +144,7 @@ pub fn verdict(
         v = strictest(v, judge(&r, &toks));
         // A reading that holds several statements (see `resplits`): the server
         // runs each of them, so each is judged too.
-        for piece in pieces(&r, &toks, dialect).into_iter().flatten() {
+        for piece in resplit_reading(&r, &toks, dialect).into_iter().flatten() {
             let ptoks = tokenize(&piece, dialect);
             if !ptoks.is_empty() {
                 v = strictest(v, judge(&piece, &ptoks));
@@ -206,106 +208,18 @@ pub fn lifts_read_only(stmt: &str, dialect: Dialect) -> bool {
 }
 
 /// Whether `stmt` (one planned statement) holds more than one statement for the
-/// server: some reading of it, split again with the default `;` delimiter, gives
-/// several pieces. Under a MySQL `DELIMITER` a planned statement may hold depth-0
-/// `;` (a forgotten `DELIMITER ;`), and with multi-statements on the server runs
-/// every piece. Compound statements ([`compound_body`]) never re-split: their `;`
-/// belong to the body. A PostgreSQL statement never re-splits (PG has no
-/// `DELIMITER`, so `split` already cut at every depth-0 `;`).
-pub fn resplits(stmt: &str, dialect: Dialect) -> bool {
-    readings(stmt, dialect).iter().any(|r| {
-        let toks = tokenize(r, dialect);
-        pieces(r, &toks, dialect).is_some()
-    })
-}
+/// server (moved to `dnt_core::sql` so the MySQL driver can use it too).
+pub use dnt_core::sql::resplits;
 
 /// The kinds of the pieces of `stmt` ([`resplits`]), reading by reading, each in
 /// order; empty when it does not re-split.
 pub(crate) fn piece_kinds(stmt: &str, dialect: Dialect) -> Vec<StatementKind> {
     readings(stmt, dialect)
         .iter()
-        .filter_map(|r| pieces(r, &tokenize(r, dialect), dialect))
+        .filter_map(|r| resplit_reading(r, &tokenize(r, dialect), dialect))
         .flatten()
         .map(|p| classify(&p, dialect))
         .collect()
-}
-
-/// The statements of reading `r` (tokens `toks`) split again with the default `;`
-/// delimiter, when there are several (see [`resplits`]).
-fn pieces(r: &str, toks: &[Token], dialect: Dialect) -> Option<Vec<String>> {
-    if compound_body(toks) {
-        return None;
-    }
-    let found = split(r, dialect);
-    (found.len() > 1).then(|| found.into_iter().map(|s| s.text).collect())
-}
-
-/// MySQL/MariaDB compound statements, whose body holds `;`:
-/// `CREATE [OR REPLACE] [DEFINER = user] [AGGREGATE] PROCEDURE|FUNCTION|TRIGGER|EVENT`
-/// and `BEGIN NOT ATOMIC`. A user is `CURRENT_USER[()]` or a name (word or quoted)
-/// with an optional `@host`.
-fn compound_body(toks: &[Token]) -> bool {
-    if is_word(toks, 0, "BEGIN") && is_word(toks, 1, "NOT") && is_word(toks, 2, "ATOMIC") {
-        return true;
-    }
-    if !is_word(toks, 0, "CREATE") {
-        return false;
-    }
-    let mut i = 1;
-    if is_word(toks, i, "OR") && is_word(toks, i + 1, "REPLACE") {
-        i += 2;
-    }
-    if is_word(toks, i, "DEFINER") {
-        if !is_punct(toks, i + 1, b'=') {
-            return false;
-        }
-        match skip_user(toks, i + 2) {
-            Some(next) => i = next,
-            None => return false,
-        }
-    }
-    if is_word(toks, i, "AGGREGATE") {
-        i += 1;
-    }
-    ["PROCEDURE", "FUNCTION", "TRIGGER", "EVENT"]
-        .iter()
-        .any(|k| is_word(toks, i, k))
-}
-
-/// The index past the user spec of a `DEFINER =` starting at token `i`.
-fn skip_user(toks: &[Token], mut i: usize) -> Option<usize> {
-    let first = toks.get(i)?;
-    match first.kind {
-        TokKind::Word(w) if w.eq_ignore_ascii_case("CURRENT_USER") => {
-            i += 1;
-            if toks.get(i).is_some_and(|t| t.kind == TokKind::Open)
-                && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Close)
-            {
-                i += 2;
-            }
-            return Some(i);
-        }
-        TokKind::Word(_) | TokKind::Quoted => {}
-        _ => return None,
-    }
-    let ends_at = |t: &Token| matches!(t.kind, TokKind::Word(w) if w.ends_with('@'));
-    let mut prev = *first;
-    i += 1;
-    // The host: `@host` / `@'host'` (`@` is a word byte, so `@` may stand alone or
-    // open the next word).
-    while let Some(t) = toks.get(i) {
-        let host = match t.kind {
-            TokKind::Word(w) if w.starts_with('@') => true,
-            TokKind::Word(_) | TokKind::Quoted => ends_at(&prev),
-            _ => false,
-        };
-        if !host {
-            break;
-        }
-        prev = *t;
-        i += 1;
-    }
-    Some(i)
 }
 
 fn rank(v: Verdict) -> u8 {
