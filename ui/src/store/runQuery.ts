@@ -25,6 +25,18 @@ const setStarting = (tabId: string, on: boolean) =>
   });
 const isStarting = (tabId: string) => useStarting.getState().ids.has(tabId);
 
+/** Tabs whose editor has selected text (Run selection needs one). */
+export const useSelection = create<{ ids: Set<string> }>()(() => ({ ids: new Set() }));
+export function setHasSelection(tabId: string, on: boolean) {
+  useSelection.setState((s) => {
+    if (s.ids.has(tabId) === on) return s;
+    const ids = new Set(s.ids);
+    if (on) ids.add(tabId);
+    else ids.delete(tabId);
+    return { ids };
+  });
+}
+
 /** Tabs whose Stop came before `query_run` returned the run id. */
 const pendingStop = new Set<string>();
 
@@ -209,6 +221,7 @@ export async function stopQuery(tabId: string): Promise<void> {
 
 /** Stops the tab's run and waits for it to end; false when it is still running after `STOP_WAIT_MS`. */
 function stopAndWait(tabId: string): Promise<boolean> {
+  if (canRun(useQueryRun.getState().get(tabId))) return Promise.resolve(true);
   return new Promise((resolve) => {
     const finish = (ok: boolean) => {
       clearTimeout(timer);

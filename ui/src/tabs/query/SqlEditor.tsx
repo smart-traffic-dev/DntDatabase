@@ -1,7 +1,7 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import { ensureCompletion } from '../../query/completion/monacoProvider';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
-import { registerEditor, runFromEditor, stopQuery, unregisterEditor } from '../../store/runQuery';
+import { registerEditor, runFromEditor, setHasSelection, stopQuery, unregisterEditor } from '../../store/runQuery';
 import { useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 
 export interface SqlEditorProps {
@@ -16,7 +16,11 @@ type Monaco = Parameters<OnMount>[1];
 /** Ctrl+Enter / Ctrl+Shift+Enter run, Esc stops while running (spec §5.2). Not S/O/T: those are window shortcuts. */
 function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   registerEditor(tabId, editor);
-  editor.onDidDispose(() => unregisterEditor(tabId, editor));
+  editor.onDidDispose(() => {
+    unregisterEditor(tabId, editor);
+    setHasSelection(tabId, false);
+  });
+  editor.onDidChangeCursorSelection((e) => setHasSelection(tabId, !e.selection.isEmpty()));
   editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'cursor'));
   editor.addCommand(
     monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,

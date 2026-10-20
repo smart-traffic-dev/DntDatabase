@@ -1,6 +1,6 @@
 import { useConnections } from '../../store/connections';
 import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
-import { runFromEditor, stopQuery, useStarting } from '../../store/runQuery';
+import { runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc, type RowLimit } from '../../store/queryTabs';
 import { useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
@@ -34,6 +34,7 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
   };
   const run = useQueryRun((s) => s.runs.get(doc.id) ?? emptyRun);
   // A tab without a (still stored) connection stays disabled; a run locks the toolbar until it ends.
+  const hasSelection = useSelection((s) => s.ids.has(doc.id));
   const starting = useStarting((s) => s.ids.has(doc.id));
   const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting;
 
@@ -53,7 +54,7 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
         type="button"
         className="qt-btn"
         data-testid="query-run-selection"
-        disabled={!runnable}
+        disabled={!runnable || !hasSelection}
         title={runnable ? 'Run only the selected text' : undefined}
         onClick={() => void runFromEditor(doc.id, 'selection')}
       >

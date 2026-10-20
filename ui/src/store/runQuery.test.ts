@@ -238,6 +238,23 @@ describe('runQuery', () => {
       expect(await closing).toBe(false);
     });
 
+    it('a run that ended while the dialog was open closes without waiting', async () => {
+      mockBackend({
+        query_plan: () => plan,
+        query_run: () => 'run-1',
+        query_close_tab: () => null,
+        tabs_delete: () => null,
+        tabs_save: () => null,
+      });
+      await runQuery(tab, 'All');
+      const closing = useQueryDocs.getState().closeTab(tab);
+      await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('stopRun'));
+      useQueryRun.getState().apply(tab, { t: 'done', stop: null, elapsed_ms: 1 });
+      const q = useDialogs.getState().question;
+      if (q?.kind === 'stopRun') q.done(true);
+      expect(await closing).toBe(true);
+    });
+
     it('a run that does not stop keeps the tab open', async () => {
       await runQuery(tab, 'All');
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
