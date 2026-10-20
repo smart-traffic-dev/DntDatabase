@@ -24,10 +24,14 @@
 //! directly or through a plain TCP forwarder (SSH tunnel, Docker port proxy); a pooler
 //! that answers cancel requests on its own may close before the server acted.
 //!
-//! A request that was written but never confirmed (the close did not come within
-//! [`CANCEL_TIMEOUT`], or the socket failed) may still signal the backend at any time:
-//! [`CancelFailed::maybe_sent`]. A user's Cancel click that lands while the call is
-//! finishing keeps a window of one network round trip that the client cannot close.
+//! A request that was written but never confirmed (the close did not come within the
+//! call's `cancel_grace`, or the socket failed) may still signal the backend at any time:
+//! [`CancelFailed::maybe_sent`]. After a timeout the session gives the connection up at
+//! once. After a user's cancel the connection is marked for replacement
+//! ([`CancelState::poisoned`]); the next `execute_one` first waits for every cancel
+//! request still in flight ([`CancelState::settled`]), so a request that is confirmed or
+//! given up only after its call returned is still accounted for, and replaces a poisoned
+//! connection before it sends anything.
 
 use crate::tls::Tls;
 use crate::{map_pg_error, ConnectParams};
@@ -36,7 +40,7 @@ use dnt_core::driver::{Canceller, StopSignal};
 use dnt_core::error::{ConnectStage, DbError};
 use std::io;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
@@ -47,38 +51,108 @@ use tokio_postgres::config::Host;
 use tokio_postgres::tls::MakeTlsConnect;
 use tokio_postgres::CancelToken;
 
-/// Bound on sending a cancel request.
-pub(crate) const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// State shared between a session and its cancellers. Never touches the session's
 /// connection mutex, since `cancel` is called while `execute` holds it.
 pub(crate) struct CancelState {
-    /// Cancel key of the session's current physical connection (replaced on reconnect).
-    token: Mutex<CancelToken>,
+    /// Cancel key of the session's current physical connection (replaced on reconnect),
+    /// with the connection's epoch (incremented on every replacement, starting at 1).
+    token: Mutex<(CancelToken, u64)>,
     gens: Arc<Generations>,
+    /// Epoch of a connection a user's cancel request may still signal (unconfirmed);
+    /// 0: none. Only meaningful while it equals the current epoch.
+    poisoned: AtomicU64,
+    /// User cancel requests not yet confirmed or given up.
+    in_flight: AtomicUsize,
+    /// Woken when `in_flight` drops to 0.
+    settled: Notify,
 }
 
 impl CancelState {
     pub(crate) fn new(token: CancelToken) -> Self {
         CancelState {
-            token: Mutex::new(token),
+            token: Mutex::new((token, 1)),
             gens: Arc::default(),
+            poisoned: AtomicU64::new(0),
+            in_flight: AtomicUsize::new(0),
+            settled: Notify::new(),
         }
     }
 
     pub(crate) fn token(&self) -> CancelToken {
+        self.token_with_epoch().0
+    }
+
+    fn token_with_epoch(&self) -> (CancelToken, u64) {
         self.token.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
+    /// Installs the cancel key of a new physical connection (a new epoch).
     pub(crate) fn set_token(&self, token: CancelToken) {
-        *self.token.lock().unwrap_or_else(|p| p.into_inner()) = token;
+        let mut slot = self.token.lock().unwrap_or_else(|p| p.into_inner());
+        let epoch = slot.1 + 1;
+        *slot = (token, epoch);
     }
 
     /// Marks a new `execute_one` call as running (call with the connection lock held);
-    /// `stop` is its stop signal. The returned guard marks the session idle again when
-    /// dropped.
-    pub(crate) fn begin(&self, stop: &StopSignal) -> RunGuard {
-        self.gens.begin(stop)
+    /// `stop` is its stop signal and `grace` its `cancel_grace`, which also bounds the
+    /// wait for a user's cancel request to be confirmed. The returned guard marks the
+    /// session idle again when dropped.
+    pub(crate) fn begin(&self, stop: &StopSignal, grace: Duration) -> RunGuard {
+        self.gens.begin(stop, grace)
+    }
+
+    /// Whether a user's cancel request aimed at the current connection was never
+    /// confirmed: the signal may still reach whatever runs next, so the connection must
+    /// be replaced before anything is sent on it. Cleared by [`CancelState::set_token`].
+    pub(crate) fn poisoned(&self) -> bool {
+        let epoch = self.token.lock().unwrap_or_else(|p| p.into_inner()).1;
+        self.poisoned.load(Ordering::SeqCst) == epoch
+    }
+
+    fn poison(&self, epoch: u64) {
+        self.poisoned.fetch_max(epoch, Ordering::SeqCst);
+    }
+
+    /// Completes once no user cancel request is in flight (each is bounded by the
+    /// `cancel_grace` of the call it targeted).
+    pub(crate) async fn settled(&self) {
+        loop {
+            let notified = self.settled.notified();
+            let mut notified = std::pin::pin!(notified);
+            notified.as_mut().enable();
+            if self.in_flight.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one user cancel request as in flight until the returned guard is dropped.
+    fn flight(&self) -> Flight<'_> {
+        self.in_flight.fetch_add(1, Ordering::SeqCst);
+        Flight {
+            state: self,
+            unconfirmed: None,
+        }
+    }
+}
+
+/// One user cancel request in flight (see [`CancelState::flight`]). Dropped while
+/// `unconfirmed` holds an epoch (the request may have been written but was never
+/// confirmed, or the caller gave up on it), it poisons that connection.
+struct Flight<'a> {
+    state: &'a CancelState,
+    unconfirmed: Option<u64>,
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        if let Some(epoch) = self.unconfirmed {
+            self.state.poison(epoch);
+        }
+        if self.state.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.state.settled.notify_waiters();
+        }
     }
 }
 
@@ -93,15 +167,15 @@ struct Generations {
     cancelled: AtomicU64,
     /// Woken when a cancel targets the running call (see [`RunGuard::cancel_requested`]).
     notify: Notify,
-    /// The running call's `ExecOptions::stop`, with its generation. A cancel raises it,
-    /// so no later statement of the same run is sent.
-    stop: Mutex<Option<(u64, StopSignal)>>,
+    /// The running call's `ExecOptions::stop` and `cancel_grace`, with its generation. A
+    /// cancel raises the stop signal, so no later statement of the same run is sent.
+    stop: Mutex<Option<(u64, StopSignal, Duration)>>,
 }
 
 impl Generations {
-    fn begin(self: &Arc<Self>, stop: &StopSignal) -> RunGuard {
+    fn begin(self: &Arc<Self>, stop: &StopSignal, grace: Duration) -> RunGuard {
         let gen = self.last.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.stop.lock().unwrap_or_else(|p| p.into_inner()) = Some((gen, stop.clone()));
+        *self.stop.lock().unwrap_or_else(|p| p.into_inner()) = Some((gen, stop.clone(), grace));
         self.running.store(gen, Ordering::SeqCst);
         RunGuard {
             gens: self.clone(),
@@ -109,14 +183,19 @@ impl Generations {
         }
     }
 
-    /// Records a cancel for the running call; returns its generation (`None` when idle).
-    fn request(&self) -> Option<u64> {
+    /// Records a cancel for the running call; returns its generation and
+    /// `cancel_grace` (`None` when idle).
+    fn request(&self) -> Option<(u64, Duration)> {
         let gen = self.running.load(Ordering::SeqCst);
         if gen == 0 {
             return None;
         }
         self.mark_cancelled(gen);
-        Some(gen)
+        let grace = match &*self.stop.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some((g, _, grace)) if *g == gen => *grace,
+            _ => dnt_core::driver::DEFAULT_CANCEL_GRACE,
+        };
+        Some((gen, grace))
     }
 
     /// Records a cancel for generation `gen`, raises that call's stop signal and wakes
@@ -125,7 +204,7 @@ impl Generations {
     /// only raised for `gen` itself.
     fn mark_cancelled(&self, gen: u64) {
         self.cancelled.fetch_max(gen, Ordering::SeqCst);
-        if let Some((g, stop)) = &*self.stop.lock().unwrap_or_else(|p| p.into_inner()) {
+        if let Some((g, stop, _)) = &*self.stop.lock().unwrap_or_else(|p| p.into_inner()) {
             if *g == gen {
                 stop.stop();
             }
@@ -164,12 +243,22 @@ impl RunGuard {
             notified.await;
         }
     }
+
+    /// Ends this call for cancels before the guard is dropped: a cancel arriving from
+    /// now on finds the session idle and sends nothing. Called before an abandoned
+    /// connection is replaced, so no cancel aimed at this call can reach the fresh one.
+    pub(crate) fn retire(&self) {
+        let _ = self
+            .gens
+            .running
+            .compare_exchange(self.gen, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
         let mut stop = self.gens.stop.lock().unwrap_or_else(|p| p.into_inner());
-        if stop.as_ref().is_some_and(|(g, _)| *g == self.gen) {
+        if stop.as_ref().is_some_and(|(g, _, _)| *g == self.gen) {
             *stop = None;
         }
         drop(stop);
@@ -187,15 +276,34 @@ pub(crate) struct PgCanceller {
 
 #[async_trait]
 impl Canceller for PgCanceller {
+    /// Raises the running call's stop signal and sends the cancel request, waiting (up to
+    /// the call's `cancel_grace`) for the server to confirm it. A request that may have
+    /// been written but was not confirmed marks the connection for replacement (see the
+    /// module docs).
     async fn cancel(&self) -> Result<(), DbError> {
-        let Some(gen) = self.state.gens.request() else {
+        // Counted before the call can see the cancel, so its next call waits for it.
+        let mut flight = self.state.flight();
+        let Some((gen, grace)) = self.state.gens.request() else {
             return Ok(());
         };
-        let token = self.state.token();
+        let (token, epoch) = self.state.token_with_epoch();
         if !self.state.gens.is_running(gen) {
             return Ok(());
         }
-        send_cancel(&token, &self.target).await.map_err(|f| f.error)
+        // Until confirmed (also when this future is dropped mid-way).
+        flight.unconfirmed = Some(epoch);
+        match send_cancel(&token, &self.target, grace).await {
+            Ok(()) => {
+                flight.unconfirmed = None;
+                Ok(())
+            }
+            Err(f) => {
+                if !f.maybe_sent {
+                    flight.unconfirmed = None;
+                }
+                Err(f.error)
+            }
+        }
     }
 }
 
@@ -232,12 +340,13 @@ pub(crate) struct CancelFailed {
     pub(crate) maybe_sent: bool,
 }
 
-/// Sends one cancel request for `token`'s backend and waits (within [`CANCEL_TIMEOUT`])
-/// until the server closed the request's connection: `Ok` means any signal it causes is
-/// already pending on the backend (see the module docs).
+/// Sends one cancel request for `token`'s backend and waits (within `limit`) until the
+/// server closed the request's connection: `Ok` means any signal it causes is already
+/// pending on the backend (see the module docs).
 pub(crate) async fn send_cancel(
     token: &CancelToken,
     target: &CancelTarget,
+    limit: Duration,
 ) -> Result<(), CancelFailed> {
     let mut connected = false;
     let attempt = async {
@@ -259,7 +368,7 @@ pub(crate) async fn send_cancel(
             .await
             .map_err(|e| map_pg_error(e, ConnectStage::Execute))
     };
-    let res = match tokio::time::timeout(CANCEL_TIMEOUT, attempt).await {
+    let res = match tokio::time::timeout(limit, attempt).await {
         Ok(res) => res,
         Err(_) => Err(DbError::timeout(ConnectStage::Execute)),
     };
@@ -338,29 +447,31 @@ fn peer_closed(e: &io::Error) -> bool {
 mod tests {
     use super::*;
 
+    const GRACE: Duration = Duration::from_millis(1_500);
+
     /// A cancel raises the stop signal of the call it targets, never another call's.
     #[test]
     fn a_cancel_raises_only_its_calls_stop_signal() {
         let gens = Arc::new(Generations::default());
         let (first, second) = (StopSignal::new(), StopSignal::new());
-        drop(gens.begin(&first));
+        drop(gens.begin(&first, GRACE));
         assert_eq!(gens.request(), None);
         assert!(!first.is_stopped(), "idle: nothing to stop");
-        let b = gens.begin(&second);
+        let b = gens.begin(&second, GRACE);
         gens.mark_cancelled(1);
         assert!(
             !second.is_stopped(),
             "a stale cancel stopped the newer call"
         );
-        assert_eq!(gens.request(), Some(2));
+        assert_eq!(gens.request(), Some((2, GRACE)));
         assert!(second.is_stopped() && b.cancelled());
     }
 
     #[tokio::test]
     async fn cancel_requested_wakes_only_for_its_call() {
         let gens = Arc::new(Generations::default());
-        drop(gens.begin(&StopSignal::new()));
-        let b = gens.begin(&StopSignal::new());
+        drop(gens.begin(&StopSignal::new(), GRACE));
+        let b = gens.begin(&StopSignal::new(), GRACE);
         let wait = Duration::from_millis(50);
         // A stale request for call 1 wakes the waiter, which keeps waiting.
         let (pending, ()) = tokio::join!(tokio::time::timeout(wait, b.cancel_requested()), async {
@@ -381,14 +492,14 @@ mod tests {
     fn generations_scope_cancel_requests() {
         let gens = Arc::new(Generations::default());
         assert_eq!(gens.request(), None, "idle: nothing to cancel");
-        let a = gens.begin(&StopSignal::new());
+        let a = gens.begin(&StopSignal::new(), GRACE);
         assert!(gens.is_running(1));
-        assert_eq!(gens.request(), Some(1));
+        assert_eq!(gens.request(), Some((1, GRACE)));
         assert!(a.cancelled());
         drop(a);
         assert!(gens.is_running(0));
         // A request aimed at the finished call does not leak into the next one.
-        let b = gens.begin(&StopSignal::new());
+        let b = gens.begin(&StopSignal::new(), GRACE);
         assert!(!b.cancelled());
         assert!(gens.is_running(2));
         // A guard of an older call never clears a newer one.
@@ -399,12 +510,27 @@ mod tests {
         assert!(gens.is_running(2));
     }
 
+    /// A retired call (its connection is being replaced) takes no more cancels, and its
+    /// guard's drop does not disturb the next call.
+    #[test]
+    fn a_retired_call_takes_no_cancel() {
+        let gens = Arc::new(Generations::default());
+        let stop = StopSignal::new();
+        let a = gens.begin(&stop, GRACE);
+        a.retire();
+        assert_eq!(gens.request(), None);
+        assert!(!a.cancelled() && !stop.is_stopped());
+        drop(a);
+        let _b = gens.begin(&StopSignal::new(), GRACE);
+        assert!(gens.is_running(2));
+    }
+
     #[test]
     fn a_stale_cancel_never_lowers_the_cancelled_generation() {
         let gens = Arc::new(Generations::default());
-        drop(gens.begin(&StopSignal::new()));
-        let second = gens.begin(&StopSignal::new());
-        assert_eq!(gens.request(), Some(2));
+        drop(gens.begin(&StopSignal::new(), GRACE));
+        let second = gens.begin(&StopSignal::new(), GRACE);
+        assert_eq!(gens.request(), Some((2, GRACE)));
         // A click that read generation 1 before it ended lands late.
         gens.mark_cancelled(1);
         assert!(second.cancelled(), "the newer call lost its cancel");

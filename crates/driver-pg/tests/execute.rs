@@ -3,6 +3,7 @@ use dnt_core::driver::{
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::sql::classify;
+use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
@@ -1107,12 +1108,14 @@ async fn transaction_state_follows_the_server() {
         let s = connect(t).await;
         for sql in ["SET autocommit = 0", "SET autocommit = on"] {
             assert!(run(&s, sql).await.is_err(), "{t:?} {sql}");
-            assert!(!s.in_transaction(), "{t:?} {sql}");
+            assert_eq!(s.tx_state(), TxState::Idle, "{t:?} {sql}");
             run(&s, "BEGIN").await.unwrap();
+            assert_eq!(s.tx_state(), TxState::Active, "{t:?} {sql}");
             assert!(run(&s, sql).await.is_err(), "{t:?} {sql}");
-            assert!(s.in_transaction(), "{t:?} {sql}");
+            // Any error aborts the block, which stays open.
+            assert_eq!(s.tx_state(), TxState::Aborted, "{t:?} {sql}");
             run(&s, "ROLLBACK").await.unwrap();
-            assert!(!s.in_transaction(), "{t:?} {sql}");
+            assert_eq!(s.tx_state(), TxState::Idle, "{t:?} {sql}");
         }
 
         // A rejected BEGIN opens nothing.
@@ -1120,7 +1123,7 @@ async fn transaction_state_follows_the_server() {
             run(&s, "BEGIN ISOLATION LEVEL bogus").await.is_err(),
             "{t:?}"
         );
-        assert!(!s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
 
         // A COMMIT that fails on a deferred constraint still ends the transaction.
         run(
@@ -1133,7 +1136,7 @@ async fn transaction_state_follows_the_server() {
         run(&s, "BEGIN; INSERT INTO t4_c VALUES (1)").await.unwrap();
         let res = run(&s, "COMMIT").await;
         assert_eq!(sqlstate_of(&res), Some("23503"), "{t:?}");
-        assert!(!s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
         run(&s, "SELECT 1")
             .await
             .unwrap_or_else(|e| panic!("{t:?}: still in a block: {e}"));
@@ -1141,9 +1144,9 @@ async fn transaction_state_follows_the_server() {
         // AND CHAIN starts the next transaction at once.
         run(&s, "BEGIN").await.unwrap();
         run(&s, "COMMIT AND CHAIN").await.unwrap();
-        assert!(s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
         run(&s, "ROLLBACK").await.unwrap();
-        assert!(!s.in_transaction(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
     }
 }
 
@@ -1255,6 +1258,7 @@ async fn timeout_reports_cancel_sent() {
             "{t:?}: {res:?}"
         );
         assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
     }
 }
 
@@ -1276,6 +1280,75 @@ async fn timeout_in_tx_carries_was_in_tx() {
             other => panic!("{t:?}: {other:?}"),
         }
         run(&s, "ROLLBACK").await.unwrap();
+    }
+}
+
+/// I4: a timeout inside a transaction aborts the block (PostgreSQL rejects everything
+/// with `25P02` until it ends), carries `was_in_tx` and is not retryable.
+#[tokio::test]
+async fn timeout_in_transaction_aborts_and_is_not_retryable() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        run(&s, "BEGIN").await.unwrap();
+        run(
+            &s,
+            "INSERT INTO orders (customer_id) SELECT min(id) FROM customers",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
+        let (res, _) = run_one(&s, "SELECT pg_sleep(5)", timeout_opts(200)).await;
+        match res {
+            Err(
+                e @ DbError::Timeout {
+                    was_in_tx: true, ..
+                },
+            ) => assert!(!AppError::from(e).retryable, "{t:?}"),
+            other => panic!("{t:?}: {other:?}"),
+        }
+        assert_eq!(s.tx_state(), TxState::Aborted, "{t:?}");
+        let (res, _) = run_one(&s, "SELECT 1", ExecOptions::default()).await;
+        assert_eq!(sqlstate_of(&res), Some("25P02"), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Aborted, "{t:?}");
+        run(&s, "ROLLBACK").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
+    }
+}
+
+/// `ROLLBACK TO` a savepoint revives an aborted block; `COMMIT` then ends it.
+#[tokio::test]
+async fn savepoint_rollback_to_reactivates() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        run(&s, "BEGIN; SAVEPOINT s").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
+        let (res, _) = run_one(&s, "SELECT 1/0", ExecOptions::default()).await;
+        assert_eq!(sqlstate_of(&res), Some("22012"), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Aborted, "{t:?}");
+        run(&s, "ROLLBACK TO s").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
+        run(&s, "SELECT 1")
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        run(&s, "COMMIT").await.unwrap();
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
+    }
+}
+
+/// `COMMIT` of an aborted block succeeds (the server answers `ROLLBACK`) and ends it.
+#[tokio::test]
+async fn commit_when_aborted_goes_idle() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        run(&s, "BEGIN").await.unwrap();
+        assert!(run(&s, "SELECT 1/0").await.is_err(), "{t:?}");
+        assert_eq!(s.tx_state(), TxState::Aborted, "{t:?}");
+        let (res, _) = run_one(&s, "COMMIT", ExecOptions::default()).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert_eq!(s.tx_state(), TxState::Idle, "{t:?}");
     }
 }
 

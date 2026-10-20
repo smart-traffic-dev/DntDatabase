@@ -52,7 +52,10 @@ pub struct ExecOptions {
     pub timeout: Option<Duration>,
     /// See [`DEFAULT_CANCEL_GRACE`]; tests set it shorter.
     pub cancel_grace: Duration,
-    /// Raised by the user's Stop: no statement may be sent once it is set.
+    /// Raised by the user's Stop: no statement may be sent once it is set. Use one
+    /// signal per run (every statement of a script shares it): a cancel aimed at a
+    /// running statement raises it too, and it stays raised, so a later run needs a
+    /// fresh signal.
     pub stop: StopSignal,
 }
 
@@ -81,7 +84,9 @@ pub struct StmtOutcome {
 /// Progress of a statement being stopped, reported through [`RowSink::progress`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecProgress {
-    /// The server was asked to stop the statement.
+    /// Stopping the statement was requested (its timeout expired, or a user's cancel
+    /// targeted it). Emitted at once, before the cancel request is actually sent; the
+    /// cancel grace runs from here.
     CancelSent,
     /// The statement did not stop within the cancel grace.
     GraceExpired,
@@ -136,6 +141,10 @@ pub trait Session: Send + Sync {
     /// Runs a (possibly multi-statement) script: splits it by [`Session::dialect`],
     /// classifies each statement and runs it with [`Session::execute_one`], stopping at
     /// the first error.
+    ///
+    /// A [`Canceller::cancel`] only targets a statement that is running: one that lands
+    /// between two statements is a no-op and the script goes on. To stop a script for
+    /// sure, raise `opts.stop` as well.
     async fn execute(
         &self,
         sql: &str,

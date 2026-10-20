@@ -6,7 +6,10 @@ use dnt_core::sql::{classify, StatementKind};
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::net::{TcpListener, TcpStream};
 
 /// One result as seen by the sink.
 #[derive(Debug, Default)]
@@ -984,6 +987,110 @@ async fn timeout_reports_cancel_sent() {
             "{t:?}: {res:?}"
         );
         assert_eq!(c.progress, [ExecProgress::CancelSent], "{t:?}");
+    }
+}
+
+/// A TCP proxy to `upstream` on 127.0.0.1 that forwards every connection, except the
+/// first one accepted after `hold` is raised: that one is accepted but never answered, so
+/// a client opening it waits for the server greeting. Held sockets stay open while the
+/// proxy runs.
+async fn holding_proxy(upstream: u16) -> (u16, Arc<AtomicBool>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let hold = Arc::new(AtomicBool::new(false));
+    let hold_next = hold.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((mut client, _)) = listener.accept().await {
+            if hold_next.swap(false, Ordering::SeqCst) {
+                held.push(client);
+                continue;
+            }
+            tokio::spawn(async move {
+                let Ok(mut server) = TcpStream::connect(("127.0.0.1", upstream)).await else {
+                    return;
+                };
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            });
+        }
+    });
+    (port, hold)
+}
+
+/// The timeout's `KILL QUERY` and the grace period share one deadline: a kill that
+/// cannot get through (its connection hangs in the proxy) does not delay `CancelSent`
+/// nor extend the wait, so a statement that ignores the timeout is given up after
+/// timeout + grace.
+#[tokio::test]
+async fn unconfirmed_timeout_kill_stays_within_the_grace() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let (port, hold) = holding_proxy(t.host_port()).await;
+        let mut cfg = t.resolved(Some(FIXTURE_DB));
+        cfg.port = port;
+        let s = MySqlDriver
+            .connect_session(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let id = connection_id(&s).await;
+        // The next connection is the kill's.
+        hold.store(true, Ordering::SeqCst);
+        let started = Instant::now();
+        let mut sink = Timed::new();
+        let opts = ExecOptions {
+            timeout: Some(Duration::from_millis(300)),
+            cancel_grace: Duration::from_secs(1),
+            ..ExecOptions::default()
+        };
+        let kind = classify("SELECT SLEEP(30)", s.dialect());
+        let res = s
+            .execute_one("SELECT SLEEP(30)", kind, &opts, &mut sink)
+            .await;
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(res, Err(DbError::ConnectionLost { .. })),
+            "{t:?}: {res:?}"
+        );
+        let kinds: Vec<ExecProgress> = sink.progress.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            kinds,
+            [ExecProgress::CancelSent, ExecProgress::GraceExpired],
+            "{t:?}"
+        );
+        // Reported when the timeout fired, not once the kill gave up.
+        assert!(
+            sink.progress[0].1 < Duration::from_millis(1_000),
+            "{t:?}: CancelSent at {:?}",
+            sink.progress[0].1
+        );
+        // 0.3 s + 1 s, plus the reconnect and a loaded machine; never + 10 s.
+        assert!(elapsed < Duration::from_secs(5), "{t:?}: took {elapsed:?}");
+        assert_ne!(connection_id(&s).await, id, "{t:?}");
+        kill(t, id).await;
+    }
+}
+
+/// Records when each progress event arrived.
+struct Timed {
+    started: Instant,
+    progress: Vec<(ExecProgress, Duration)>,
+}
+
+impl Timed {
+    fn new() -> Self {
+        Timed {
+            started: Instant::now(),
+            progress: Vec::new(),
+        }
+    }
+}
+
+impl RowSink for Timed {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+    fn progress(&mut self, p: ExecProgress) {
+        self.progress.push((p, self.started.elapsed()));
     }
 }
 

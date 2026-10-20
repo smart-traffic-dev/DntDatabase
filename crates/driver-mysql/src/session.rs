@@ -46,6 +46,10 @@ const STUCK: &str = "the statement did not stop after the timeout, so its connec
 /// `ConnectionLost` message for a statement that ignored the user's cancel.
 const STUCK_CANCEL: &str =
     "the statement did not stop after it was cancelled, so its connection was closed";
+/// `ConnectionLost` message for a statement that ended during the grace period while the
+/// `KILL QUERY` sent after its timeout was still unanswered at the deadline.
+const UNCONFIRMED: &str = "the KILL QUERY sent after the timeout could not be confirmed, so \
+                           the connection was closed before it could hit the next statement";
 
 /// One MySQL-family connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct MySqlSession {
@@ -107,7 +111,7 @@ enum Trigger {
 impl MySqlSession {
     pub(crate) fn new(conn: Conn, info: ServerInfo, caps: MySqlCapabilities, opts: Opts) -> Self {
         let cancel = Arc::new(CancelState::default());
-        cancel.connection_id.store(conn.id(), Ordering::SeqCst);
+        cancel.set_connection(conn.id());
         MySqlSession {
             conn: Mutex::new(Some(conn)),
             info,
@@ -205,6 +209,9 @@ impl MySqlSession {
     /// on the abandoned connection again.
     async fn reconnect(&self, slot: &mut Option<Conn>) -> Result<(), DbError> {
         self.in_tx.store(false, Ordering::SeqCst);
+        // From here on no cancel may kill anything: not the abandoned thread, and not the
+        // fresh connection's before this call returned (see `RunGuard::retire`).
+        self.cancel.clear_connection();
         if let Some(old) = slot.take() {
             abandon(old);
         }
@@ -235,9 +242,7 @@ impl MySqlSession {
         let fresh = tokio::time::timeout(RECONNECT_TIMEOUT, open)
             .await
             .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))??;
-        self.cancel
-            .connection_id
-            .store(fresh.id(), Ordering::SeqCst);
+        self.cancel.set_connection(fresh.id());
         self.session_custom.store(false, Ordering::SeqCst);
         *slot = Some(fresh);
         Ok(())
@@ -247,9 +252,13 @@ impl MySqlSession {
     /// watching for a cancel aimed at `run`.
     ///
     /// On expiry the query is killed; on a cancel the canceller kills it. Either way
-    /// `sink` gets [`ExecProgress::CancelSent`] and the statement is awaited for
-    /// `opts.cancel_grace` so the connection stays in sync. A statement still running
-    /// after that is `Stuck` (after [`ExecProgress::GraceExpired`]).
+    /// `sink` gets [`ExecProgress::CancelSent`] at once (before the `KILL QUERY` is
+    /// actually sent) and the statement is awaited until `opts.cancel_grace` after that,
+    /// so the connection stays in sync. On expiry the kill runs while the statement is
+    /// awaited, under that same deadline: a slow kill never extends it. A statement still
+    /// running at the deadline is `Stuck` (after [`ExecProgress::GraceExpired`]); one
+    /// that ended while the timeout's kill was still unanswered is `Stuck` too
+    /// ([`UNCONFIRMED`]), since the kill could still stop the next statement.
     ///
     /// After a timeout, a statement that completes during the grace period reports what
     /// really happened (it may have committed) with `late_completion`, except a result
@@ -294,19 +303,44 @@ impl MySqlSession {
             () = expiry => Trigger::Timeout,
             () = run.cancel_requested() => Trigger::Cancel,
         };
-        let stuck = match trigger {
-            Trigger::Timeout => {
-                let id = self.cancel.connection_id.load(Ordering::SeqCst);
-                let _ = kill_query(&self.opts, || Some(id)).await;
-                STUCK
-            }
-            // The canceller sends the `KILL QUERY` itself.
-            Trigger::Cancel => STUCK_CANCEL,
-        };
+        // One deadline for everything that follows: the `KILL QUERY` and the statement's
+        // end.
+        let deadline = tokio::time::Instant::now() + opts.cancel_grace;
         shared.progress(ExecProgress::CancelSent);
-        let Ok(res) = tokio::time::timeout(opts.cancel_grace, fut.as_mut()).await else {
-            shared.progress(ExecProgress::GraceExpired);
-            return Err(StmtError::Stuck(stuck));
+        let res = match trigger {
+            // The canceller sends the `KILL QUERY` itself.
+            Trigger::Cancel => {
+                let Ok(res) = tokio::time::timeout_at(deadline, fut.as_mut()).await else {
+                    shared.progress(ExecProgress::GraceExpired);
+                    return Err(StmtError::Stuck(STUCK_CANCEL));
+                };
+                res
+            }
+            Trigger::Timeout => {
+                let id = self.cancel.kill_target(run.gen());
+                let mut kill = std::pin::pin!(kill_query(&self.opts, || id));
+                let expired = tokio::time::sleep_until(deadline);
+                let mut expired = std::pin::pin!(expired);
+                let (mut ended, mut killed) = (None, false);
+                // Until both the statement ended and the kill was answered (it then
+                // cannot hit a later statement), or the deadline.
+                while ended.is_none() || !killed {
+                    tokio::select! {
+                        res = fut.as_mut(), if ended.is_none() => ended = Some(res),
+                        _ = kill.as_mut(), if !killed => killed = true,
+                        () = expired.as_mut() => break,
+                    }
+                }
+                match ended {
+                    None => {
+                        shared.progress(ExecProgress::GraceExpired);
+                        return Err(StmtError::Stuck(STUCK));
+                    }
+                    // The `KILL QUERY` may still land, on whatever runs next.
+                    Some(_) if !killed => return Err(StmtError::Stuck(UNCONFIRMED)),
+                    Some(res) => res,
+                }
+            }
         };
         let late = trigger == Trigger::Timeout;
         match res {
@@ -627,6 +661,8 @@ impl Session for MySqlSession {
                 Err(StmtError::Stuck(cause)) => {
                     let notes = self.notes(was_in_tx);
                     let unknown = may_have_committed(kind, was_in_tx, stmt);
+                    // No cancel aimed at this call may reach the fresh connection.
+                    run.retire();
                     let replaced = self.reconnect(&mut slot).await;
                     return Err(stuck_error(cause, unknown, was_in_tx, &notes, replaced));
                 }

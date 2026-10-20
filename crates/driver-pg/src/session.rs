@@ -7,9 +7,9 @@ use dnt_core::driver::{
     SharedSink, StmtOutcome,
 };
 use dnt_core::error::{ConnectStage, DbError};
-use dnt_core::server::ServerInfo;
+use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::sql::{leading_keywords, session_effect, Dialect, StatementKind, TxControl};
-use dnt_core::tx::TxState;
+use dnt_core::tx::{next_tx_state, StmtResult, TxState};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::StreamExt;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,11 @@ const STUCK_CANCEL: &str =
 const UNCONFIRMED: &str = "the cancel request sent after the timeout could not be confirmed, \
                            so the connection was closed before a late cancel could hit the \
                            next statement";
+/// `ConnectionLost` message for a statement that found its connection poisoned by a
+/// user's cancel request that was never confirmed (see `cancel.rs`).
+const UNCONFIRMED_CANCEL: &str = "an earlier cancel request could not be confirmed, so the \
+                                  connection was replaced before a late cancel could hit \
+                                  this statement";
 
 /// One PostgreSQL connection. It is its own [`Introspector`] (see `introspect.rs`).
 pub struct PgSession {
@@ -48,11 +53,11 @@ pub struct PgSession {
     /// Settings of the established connection (TLS fallback applied); used to reconnect
     /// and by cancel requests.
     params: ConnectParams,
-    /// Whether a transaction block is open (possibly aborted by an error: PostgreSQL then
-    /// rejects everything with `25P02` until `ROLLBACK`). Changed only once the server
-    /// answered a transaction-control statement ([`tx_state_after`]); DDL is
-    /// transactional and errors leave the block open, so neither clears it.
-    in_tx: AtomicBool,
+    /// Transaction state, changed only as the server answered each statement
+    /// ([`next_tx_state`]): `Aborted` once a statement failed inside a block (PostgreSQL
+    /// then rejects everything with `25P02` until it ends). Reset to `Idle` by a
+    /// reconnect (the server rolled the block back).
+    tx: std::sync::Mutex<TxState>,
     cancel: Arc<CancelState>,
     /// Last session-level `SET search_path …` that succeeded, re-applied after a reconnect.
     search_path: std::sync::Mutex<Option<String>>,
@@ -97,7 +102,7 @@ impl PgSession {
             conn: Mutex::new(conn),
             info,
             params,
-            in_tx: AtomicBool::new(false),
+            tx: std::sync::Mutex::new(TxState::Idle),
             cancel,
             search_path: std::sync::Mutex::new(None),
             session_custom: AtomicBool::new(false),
@@ -130,12 +135,20 @@ impl PgSession {
         }
     }
 
+    fn set_tx(&self, state: TxState) {
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = state;
+    }
+
+    /// Applies [`next_tx_state`] for a statement that ended with `result`.
+    fn track_tx(&self, kind: StatementKind, sql: &str, result: StmtResult<'_>) {
+        let mut tx = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+        *tx = next_tx_state(DbKind::Postgres, *tx, false, kind, sql, result);
+    }
+
     /// Tracking applied after a statement succeeded: transaction state, the last
     /// `search_path` and whether session state was customised.
-    fn track_after(&self, kind: StatementKind, sql: &str, was_in_tx: bool) {
-        if let Some(in_tx) = tx_state_after(kind, sql, was_in_tx, None) {
-            self.in_tx.store(in_tx, Ordering::SeqCst);
-        }
+    fn track_after(&self, kind: StatementKind, sql: &str) {
+        self.track_tx(kind, sql, StmtResult::Ok);
         if let Some(effect) = session_effect(sql, Dialect::Postgres) {
             if let Some(change) = effect.search_path {
                 *self.search_path.lock().unwrap_or_else(|p| p.into_inner()) = change;
@@ -147,11 +160,17 @@ impl PgSession {
     }
 
     /// Transaction tracking for a statement the server answered with an error
-    /// (`state`: its SQLSTATE). Not for a lost connection: reconnecting resets it.
-    fn track_failed(&self, kind: StatementKind, sql: &str, was_in_tx: bool, state: Option<&str>) {
-        if let Some(in_tx) = tx_state_after(kind, sql, was_in_tx, Some(state)) {
-            self.in_tx.store(in_tx, Ordering::SeqCst);
-        }
+    /// (`sqlstate`: its SQLSTATE; `57014` for one stopped by our cancel). Not for a lost
+    /// connection: reconnecting resets it.
+    fn track_failed(&self, kind: StatementKind, sql: &str, sqlstate: Option<&str>) {
+        self.track_tx(
+            kind,
+            sql,
+            StmtResult::Failed {
+                sqlstate,
+                code: None,
+            },
+        );
     }
 
     /// The `ConnectionLost` message suffix for losing the current connection.
@@ -166,7 +185,7 @@ impl PgSession {
     /// finds it closed and opens a new one before sending anything; nothing ever runs on
     /// the abandoned connection again.
     async fn reconnect(&self, conn: &mut PgConn) -> Result<(), DbError> {
-        self.in_tx.store(false, Ordering::SeqCst);
+        self.set_tx(TxState::Idle);
         self.session_custom.store(false, Ordering::SeqCst);
         let search_path = self
             .search_path
@@ -205,9 +224,12 @@ impl PgSession {
     /// watching for a cancel aimed at `run`.
     ///
     /// On expiry a cancel request is sent; on a cancel the canceller sends it. Either way
-    /// `sink` gets [`ExecProgress::CancelSent`] and the statement is awaited for
-    /// `opts.cancel_grace` so the connection stays in sync. A statement still running
-    /// after that is `Stuck` (after [`ExecProgress::GraceExpired`]).
+    /// `sink` gets [`ExecProgress::CancelSent`] at once (before the request is actually
+    /// sent) and the statement is awaited until `opts.cancel_grace` after that, so the
+    /// connection stays in sync. On expiry the request is sent while the statement is
+    /// awaited, under that same deadline: a slow or unanswered request never extends it.
+    /// A statement still running at the deadline is `Stuck` (after
+    /// [`ExecProgress::GraceExpired`]).
     ///
     /// After a timeout, PostgreSQL reports a statement stopped by the cancel with
     /// `query_canceled` (`Timeout`); a statement that completes during the grace period
@@ -219,8 +241,8 @@ impl PgSession {
     /// A statement that completed during the grace period after a timeout needs no new
     /// connection: `send_cancel` returns only once the server closed the request's
     /// connection, after which the signal can no longer reach a later statement (see
-    /// `cancel.rs`). Only when that was not confirmed is the connection given up
-    /// (`Unconfirmed`), since the signal may still be on its way.
+    /// `cancel.rs`). Only when that was not confirmed by the deadline is the connection
+    /// given up (`Unconfirmed`), since the signal may still be on its way.
     #[allow(clippy::too_many_arguments)]
     async fn run_timed(
         &self,
@@ -254,25 +276,45 @@ impl PgSession {
             () = expiry => Trigger::Timeout,
             () = run.cancel_requested() => Trigger::Cancel,
         };
-        let (unconfirmed, stuck) = match trigger {
-            Trigger::Timeout => {
-                let target = CancelTarget::new(&self.params);
-                match send_cancel(&self.cancel.token(), &target).await {
-                    Err(f) if f.maybe_sent => (Some(f.error), STUCK),
-                    _ => (None, STUCK),
-                }
-            }
-            // The canceller sends the request itself.
-            Trigger::Cancel => (None, STUCK_CANCEL),
-        };
+        // One deadline for everything that follows: sending the cancel request (and its
+        // confirmation) and the statement's end.
+        let deadline = tokio::time::Instant::now() + opts.cancel_grace;
         shared.progress(ExecProgress::CancelSent);
-        let Ok(res) = tokio::time::timeout(opts.cancel_grace, fut.as_mut()).await else {
-            shared.progress(ExecProgress::GraceExpired);
-            return Err(StmtError::Stuck(stuck));
-        };
         if trigger == Trigger::Cancel {
+            // The canceller sends the request itself.
+            let Ok(res) = tokio::time::timeout_at(deadline, fut.as_mut()).await else {
+                shared.progress(ExecProgress::GraceExpired);
+                return Err(StmtError::Stuck(STUCK_CANCEL));
+            };
             return res.map(|had| (had, false)).map_err(StmtError::Pg);
         }
+        let token = self.cancel.token();
+        let target = CancelTarget::new(&self.params);
+        let mut send = std::pin::pin!(send_cancel(&token, &target, opts.cancel_grace));
+        let expired = tokio::time::sleep_until(deadline);
+        let mut expired = std::pin::pin!(expired);
+        let mut ended = None;
+        let mut sent = None;
+        // Until both the statement ended and the request was answered, or the deadline.
+        while ended.is_none() || sent.is_none() {
+            tokio::select! {
+                res = fut.as_mut(), if ended.is_none() => ended = Some(res),
+                res = send.as_mut(), if sent.is_none() => sent = Some(res),
+                () = expired.as_mut() => break,
+            }
+        }
+        let Some(res) = ended else {
+            shared.progress(ExecProgress::GraceExpired);
+            return Err(StmtError::Stuck(STUCK));
+        };
+        let unconfirmed = match sent {
+            Some(Ok(())) => None,
+            // Never reached the server: no signal can follow.
+            Some(Err(f)) if !f.maybe_sent => None,
+            Some(Err(f)) => Some(f.error),
+            // Still waiting for the server to close the request's connection.
+            None => Some(DbError::timeout(ConnectStage::Execute)),
+        };
         match res {
             // Given up anyway: no statement follows on this connection.
             Err(e) if is_connection_lost(&e, &conn.client) => Err(StmtError::Pg(e)),
@@ -434,47 +476,6 @@ fn is_prepare_transaction(sql: &str) -> bool {
     starts_with_words(sql, &["PREPARE", "TRANSACTION"])
 }
 
-/// `COMMIT` / `END` / `ROLLBACK` / `ABORT … AND CHAIN`: a new transaction starts at once.
-fn is_and_chain(sql: &str) -> bool {
-    let words = leading_keywords(sql, Dialect::Postgres, 5);
-    words.windows(2).any(|w| w[0] == "AND" && w[1] == "CHAIN")
-}
-
-/// The transaction state after a transaction-control statement was answered: `failed`
-/// is `None` when it succeeded, else `Some(sqlstate)` of its error (`57014` for one
-/// stopped by a cancel). `None` when the statement does not change the state.
-///
-/// - `BEGIN` opens a block only when it succeeds.
-/// - `COMMIT` / `END` / `ROLLBACK` / `ABORT` close it (an `AND CHAIN` variant opens the
-///   next one at once). A failed `COMMIT` (deferred constraint, serialization failure,
-///   cancel) still ended the transaction: the server rolled it back. Only one rejected
-///   before it ran (class 42, syntax error or access rule violation) left the block as
-///   it was (aborted, still open).
-/// - `PREPARE TRANSACTION` hands the transaction to 2PC; when it fails it becomes a
-///   `ROLLBACK`.
-/// - PostgreSQL has no `autocommit` setting: `SET autocommit …` (classified as
-///   transaction control for MySQL) is rejected by the server and never tracked.
-fn tx_state_after(
-    kind: StatementKind,
-    sql: &str,
-    was_in_tx: bool,
-    failed: Option<Option<&str>>,
-) -> Option<bool> {
-    match kind {
-        StatementKind::Transaction(TxControl::Begin) => Some(failed.is_none() || was_in_tx),
-        StatementKind::Transaction(TxControl::Commit | TxControl::Rollback) => Some(match failed {
-            None => is_and_chain(sql),
-            Some(state) if state.is_some_and(|s| s.starts_with("42")) => was_in_tx,
-            Some(_) => false,
-        }),
-        StatementKind::Other if is_prepare_transaction(sql) => Some(match failed {
-            Some(Some(s)) if s.starts_with("42") => was_in_tx,
-            _ => false,
-        }),
-        _ => None,
-    }
-}
-
 /// Whether a statement may have made a durable change by the time its connection went
 /// away (or had to be abandoned). Inside a transaction block everything but the
 /// statement ending it (`COMMIT`, `PREPARE TRANSACTION`) is rolled back with the
@@ -579,7 +580,9 @@ impl Session for PgSession {
     /// [`killed_outcome_unknown`]). One that ignores the cancel (after a timeout or a
     /// user's cancel) for `opts.cancel_grace` loses its connection: `ConnectionLost`
     /// (see [`abandoned_error`]), and so does one that ended during the grace period
-    /// while the timeout's cancel request was not confirmed (see `run_timed`).
+    /// while the timeout's cancel request was not confirmed (see `run_timed`). A user's
+    /// cancel request that was never confirmed has the connection replaced before the
+    /// next statement is sent (see `cancel.rs`).
     async fn execute_one(
         &self,
         stmt: &str,
@@ -589,7 +592,7 @@ impl Session for PgSession {
     ) -> Result<StmtOutcome, DbError> {
         let mut conn = self.conn.lock().await;
         // Cancels only apply to this call from here on (see `cancel.rs`).
-        let run = self.cancel.begin(&opts.stop);
+        let run = self.cancel.begin(&opts.stop, opts.cancel_grace);
         let was_in_tx = self.in_transaction();
         // Stopped before anything was sent.
         let stopped = || run.cancelled() || opts.stop.is_stopped();
@@ -600,17 +603,32 @@ impl Session for PgSession {
         if stopped() {
             return Err(not_sent);
         }
+        // An earlier call's cancel request may still be on its way: wait until it was
+        // confirmed (harmless from then on) or given up (the connection is poisoned).
+        tokio::select! {
+            biased;
+            () = run.cancel_requested() => return Err(not_sent),
+            () = self.cancel.settled() => {}
+        }
         let mut outcome = StmtOutcome::default();
         let mut reconnected = false;
         // Found dead before anything was sent (the idle backend was terminated, or an
-        // earlier call abandoned it). Reconnecting first is safe for any statement, but
-        // silently only when nothing of the old session is lost.
-        if conn.client.is_closed() {
-            const CLOSED: &str = "the server closed the connection";
+        // earlier call abandoned it), or poisoned by an unconfirmed cancel request.
+        // Reconnecting first is safe for any statement, but silently only when nothing of
+        // the old session is lost.
+        const CLOSED: &str = "the server closed the connection";
+        let replace = if conn.client.is_closed() {
+            Some(CLOSED)
+        } else if self.cancel.poisoned() {
+            Some(UNCONFIRMED_CANCEL)
+        } else {
+            None
+        };
+        if let Some(cause) = replace {
             let custom = self.session_custom.load(Ordering::SeqCst);
             let notes = self.notes(was_in_tx);
             if was_in_tx || custom {
-                let mut message = format!("{CLOSED}{notes}");
+                let mut message = format!("{cause}{notes}");
                 // Best effort so the next statement finds a live connection.
                 if let Err(e) = self.reconnect(&mut conn).await {
                     message.push_str(&format!("; reconnecting failed: {e}"));
@@ -622,7 +640,7 @@ impl Session for PgSession {
                 return Err(lost(
                     false,
                     false,
-                    format!("{CLOSED}; reconnecting failed: {e}"),
+                    format!("{cause}; reconnecting failed: {e}"),
                 ));
             }
             if stopped() {
@@ -653,7 +671,7 @@ impl Session for PgSession {
                     break;
                 }
                 Err(StmtError::Timeout) => {
-                    self.track_failed(kind, stmt, was_in_tx, Some(QUERY_CANCELED));
+                    self.track_failed(kind, stmt, Some(QUERY_CANCELED));
                     return Err(DbError::Timeout {
                         stage: ConnectStage::Execute,
                         outcome_unknown: killed_outcome_unknown(was_in_tx, stmt),
@@ -663,6 +681,8 @@ impl Session for PgSession {
                 Err(StmtError::Stuck(cause)) => {
                     let notes = self.notes(was_in_tx);
                     let unknown = may_have_committed(kind, was_in_tx, stmt);
+                    // No cancel aimed at this call may reach the fresh connection.
+                    run.retire();
                     let replaced = self.reconnect(&mut conn).await;
                     return Err(abandoned_error(cause, unknown, was_in_tx, &notes, replaced));
                 }
@@ -674,7 +694,7 @@ impl Session for PgSession {
                         Some(_) => killed_outcome_unknown(was_in_tx, stmt),
                     };
                     if failed.is_none() {
-                        self.track_after(kind, stmt, was_in_tx);
+                        self.track_after(kind, stmt);
                     }
                     // After it: a successful `BEGIN` opened a block that is now lost.
                     let in_tx = self.in_transaction();
@@ -685,6 +705,7 @@ impl Session for PgSession {
                             format!("{UNCONFIRMED} ({cancel}); the statement failed: {e}")
                         }
                     };
+                    run.retire();
                     let replaced = self.reconnect(&mut conn).await;
                     return Err(abandoned_error(&cause, unknown, in_tx, &notes, replaced));
                 }
@@ -694,8 +715,8 @@ impl Session for PgSession {
             if !conn_lost {
                 // Before the cancel check, so a coinciding cancel cannot skip it.
                 // Any other error inside a block aborts it but leaves it open
-                // (`in_tx` kept): the server answers `25P02` until `ROLLBACK`.
-                self.track_failed(kind, stmt, was_in_tx, sqlstate(&err));
+                // (`Aborted`): the server answers `25P02` until it ends.
+                self.track_failed(kind, stmt, sqlstate(&err));
             }
             match failure_kind(
                 conn_lost,
@@ -746,16 +767,12 @@ impl Session for PgSession {
                 return Err(not_sent);
             }
         }
-        self.track_after(kind, stmt, was_in_tx);
+        self.track_after(kind, stmt);
         Ok(outcome)
     }
 
     fn tx_state(&self) -> TxState {
-        if self.in_tx.load(Ordering::SeqCst) {
-            TxState::Active
-        } else {
-            TxState::Idle
-        }
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     fn dialect(&self) -> Dialect {
@@ -894,82 +911,6 @@ mod tests {
         ] {
             assert!(!may_have_committed(kind, in_tx, sql), "{sql}");
         }
-    }
-
-    #[test]
-    fn transaction_state_changes_only_as_the_server_applied_it() {
-        let ok = None;
-        let failed = |state: &'static str| Some(Some(state));
-        let begin = Transaction(TxControl::Begin);
-        let commit = Transaction(TxControl::Commit);
-        let rollback = Transaction(TxControl::Rollback);
-        assert_eq!(tx_state_after(begin, "BEGIN", false, ok), Some(true));
-        // A rejected BEGIN opens nothing (and inside a block leaves it open).
-        assert_eq!(
-            tx_state_after(begin, "BEGIN ISOLATION LEVEL x", false, failed("42601")),
-            Some(false)
-        );
-        assert_eq!(
-            tx_state_after(begin, "BEGIN", true, failed("25001")),
-            Some(true)
-        );
-        assert_eq!(tx_state_after(commit, "COMMIT", true, ok), Some(false));
-        assert_eq!(
-            tx_state_after(commit, "COMMIT AND CHAIN", true, ok),
-            Some(true)
-        );
-        assert_eq!(
-            tx_state_after(commit, "COMMIT AND NO CHAIN", true, ok),
-            Some(false)
-        );
-        assert_eq!(
-            tx_state_after(rollback, "/* x */ ROLLBACK AND CHAIN", true, ok),
-            Some(true)
-        );
-        // A COMMIT that failed (deferred constraint, serialization failure, cancel)
-        // still ended the transaction ...
-        assert_eq!(
-            tx_state_after(commit, "COMMIT", true, failed("23503")),
-            Some(false)
-        );
-        assert_eq!(
-            tx_state_after(commit, "COMMIT", true, Some(None)),
-            Some(false)
-        );
-        // ... one the server could not even parse did not.
-        assert_eq!(
-            tx_state_after(commit, "COMMIT AND x", true, failed("42601")),
-            Some(true)
-        );
-        // A failed PREPARE TRANSACTION becomes a ROLLBACK.
-        assert_eq!(
-            tx_state_after(Other, "PREPARE TRANSACTION 'x'", true, failed("XX000")),
-            Some(false)
-        );
-        assert_eq!(
-            tx_state_after(Other, "PREPARE TRANSACTION 'x'", true, ok),
-            Some(false)
-        );
-        // PostgreSQL has no autocommit setting (the server rejects the SET); never
-        // tracked, whatever the outcome.
-        for (sql, kind) in [
-            ("SET autocommit = 0", Transaction(TxControl::AutocommitOff)),
-            ("SET autocommit = on", Transaction(TxControl::AutocommitOn)),
-        ] {
-            for in_tx in [false, true] {
-                assert_eq!(tx_state_after(kind, sql, in_tx, ok), None, "{sql}");
-                assert_eq!(
-                    tx_state_after(kind, sql, in_tx, failed("42704")),
-                    None,
-                    "{sql}"
-                );
-            }
-        }
-        assert_eq!(
-            tx_state_after(Write, "INSERT …", true, failed("23505")),
-            None
-        );
-        assert_eq!(tx_state_after(Read, "SELECT 1", false, ok), None);
     }
 
     #[test]

@@ -25,4 +25,4 @@ dnt-testkit = { path = "../testkit" }
 insta = { version = "1", features = ["yaml", "redactions"] }
 serde.workspace = true
 rustls = { workspace = true, features = ["ring", "std"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }

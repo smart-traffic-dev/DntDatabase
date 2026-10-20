@@ -2,8 +2,11 @@
 //! postmaster signals it after reading the request). These tests hold the request back
 //! in a local proxy, so the late signal is deterministic rather than a timing accident.
 
-use dnt_core::driver::{ExecOptions, ExecSummary, ResultSummary, RowSink, Session};
+use dnt_core::driver::{
+    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
+};
 use dnt_core::error::DbError;
+use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
 use dnt_testkit::{require_db, Target, FIXTURE_DB};
@@ -49,6 +52,30 @@ async fn run(s: &PgSession, sql: &str) -> Result<(ExecSummary, Collect), DbError
 async fn scalar(s: &PgSession, sql: &str) -> Value {
     let (_, c) = run(s, sql).await.unwrap_or_else(|e| panic!("{sql}: {e}"));
     c.results.last().unwrap()[0][0].clone()
+}
+
+/// Records when each progress event arrived.
+struct Timed {
+    started: Instant,
+    progress: Vec<(ExecProgress, Duration)>,
+}
+
+impl Timed {
+    fn new() -> Self {
+        Timed {
+            started: Instant::now(),
+            progress: Vec::new(),
+        }
+    }
+}
+
+impl RowSink for Timed {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+    fn progress(&mut self, p: ExecProgress) {
+        self.progress.push((p, self.started.elapsed()));
+    }
 }
 
 /// A cancel request the proxy holds back until `release` fires.
@@ -241,5 +268,175 @@ async fn unconfirmed_cancel_gives_up_the_connection() {
         drop(swallowed);
         assert!(!s.in_transaction(), "{t:?}");
         assert_ne!(scalar(&s, "SELECT pg_backend_pid()").await, pid, "{t:?}");
+    }
+}
+
+/// Runs `sql` as one statement through `execute_one`.
+async fn run_one<S: RowSink>(
+    s: &PgSession,
+    sql: &str,
+    opts: &ExecOptions,
+    sink: &mut S,
+) -> Result<StmtOutcome, DbError> {
+    s.execute_one(sql, classify(sql, s.dialect()), opts, sink)
+        .await
+}
+
+async fn terminate(admin: &PgSession, pid: &Value) {
+    let Value::Int(pid) = pid else {
+        panic!("not a pid: {pid:?}")
+    };
+    run(admin, &format!("SELECT pg_terminate_backend({pid})"))
+        .await
+        .unwrap();
+}
+
+/// The timeout's cancel request and the grace period share one deadline: a request the
+/// server never confirms (the proxy holds it) does not delay `CancelSent` nor extend the
+/// wait, so a statement that ignores the timeout is given up after timeout + grace.
+#[tokio::test]
+async fn unconfirmed_timeout_cancel_stays_within_the_grace() {
+    require_db!();
+    for t in Target::pg() {
+        let (port, mut held) = proxy(t.host_port()).await;
+        let mut cfg = t.resolved(Some(FIXTURE_DB));
+        cfg.port = port;
+        let s = PgDriver
+            .connect_session(&cfg)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let admin = PgDriver
+            .connect_session(&t.resolved(Some(FIXTURE_DB)))
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let pid = scalar(&s, "SELECT pg_backend_pid()").await;
+        let opts = ExecOptions {
+            timeout: Some(Duration::from_millis(300)),
+            cancel_grace: Duration::from_secs(1),
+            ..ExecOptions::default()
+        };
+        let mut sink = Timed::new();
+        let (res, swallowed) = tokio::join!(
+            run_one(&s, "SELECT pg_sleep(30)", &opts, &mut sink),
+            held.recv()
+        );
+        let elapsed = sink.started.elapsed();
+        assert!(
+            matches!(res, Err(DbError::ConnectionLost { .. })),
+            "{t:?}: {res:?}"
+        );
+        let kinds: Vec<ExecProgress> = sink.progress.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            kinds,
+            [ExecProgress::CancelSent, ExecProgress::GraceExpired],
+            "{t:?}"
+        );
+        // Reported when the timeout fired, not once the request gave up.
+        assert!(
+            sink.progress[0].1 < Duration::from_millis(1_000),
+            "{t:?}: CancelSent at {:?}",
+            sink.progress[0].1
+        );
+        // 0.3 s + 1 s, plus the reconnect and a loaded machine; never + 10 s.
+        assert!(elapsed < Duration::from_secs(5), "{t:?}: took {elapsed:?}");
+        drop(swallowed);
+        assert_ne!(scalar(&s, "SELECT pg_backend_pid()").await, pid, "{t:?}");
+        terminate(&admin, &pid).await;
+    }
+}
+
+/// A user's cancel request that the server never confirms (the proxy holds it) may still
+/// signal the backend later. The statement completed on its own, but its connection is
+/// replaced before the next statement: silently on a clean session, with `ConnectionLost`
+/// (naming the rolled-back transaction) when it held one.
+#[tokio::test]
+async fn unconfirmed_user_cancel_replaces_the_connection() {
+    require_db!();
+    for t in Target::pg() {
+        for in_tx in [false, true] {
+            let (port, mut held) = proxy(t.host_port()).await;
+            let mut cfg = t.resolved(Some(FIXTURE_DB));
+            cfg.port = port;
+            let s = PgDriver
+                .connect_session(&cfg)
+                .await
+                .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+            let pid = scalar(&s, "SELECT pg_backend_pid()").await;
+            if in_tx {
+                run(&s, "BEGIN").await.unwrap();
+            }
+            let opts = ExecOptions {
+                cancel_grace: Duration::from_secs(2),
+                ..ExecOptions::default()
+            };
+            let handle = s.cancel_handle();
+            let mut sink = Timed::new();
+            let (res, (cancel, swallowed)) =
+                tokio::join!(run_one(&s, "SELECT pg_sleep(1)", &opts, &mut sink), async {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    tokio::join!(handle.cancel(), held.recv())
+                });
+            // The cancel never landed: the statement ran to its end.
+            res.unwrap_or_else(|e| panic!("{t:?} in_tx={in_tx}: {e:?}"));
+            assert!(cancel.is_err(), "{t:?}: the held cancel was confirmed");
+            assert!(opts.stop.is_stopped(), "{t:?}");
+            let next = run(&s, "SELECT pg_backend_pid()").await;
+            if in_tx {
+                match &next {
+                    Err(DbError::ConnectionLost {
+                        was_in_tx: true,
+                        outcome_unknown: false,
+                        message,
+                    }) => {
+                        assert!(
+                            message.contains("could not be confirmed"),
+                            "{t:?}: {message}"
+                        );
+                        assert!(message.contains("rolled back"), "{t:?}: {message}");
+                    }
+                    other => panic!("{t:?}: {:?}", other.as_ref().map(|(s, _)| s)),
+                }
+                assert!(!s.in_transaction(), "{t:?}");
+            } else {
+                let (_, c) = next.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+                assert_ne!(c.results[0][0][0], pid, "{t:?}: same backend");
+            }
+            assert_ne!(scalar(&s, "SELECT pg_backend_pid()").await, pid, "{t:?}");
+            drop(swallowed);
+        }
+    }
+}
+
+/// M1: statements that end right around their timeout (finished, late, cancelled or
+/// given up) never leave a cancel signal behind for the next statement.
+#[tokio::test]
+async fn near_timeout_loop_has_no_stray_cancel() {
+    require_db!();
+    for t in Target::pg() {
+        let s = PgDriver
+            .connect_session(&t.resolved(Some(FIXTURE_DB)))
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        for i in 0..200u64 {
+            let opts = ExecOptions {
+                timeout: Some(Duration::from_millis(45 + 5 * (i % 3))),
+                ..ExecOptions::default()
+            };
+            let mut sink = Collect::default();
+            match run_one(&s, "SELECT pg_sleep(0.05)", &opts, &mut sink).await {
+                Ok(_) | Err(DbError::Timeout { .. }) | Err(DbError::ConnectionLost { .. }) => {}
+                Err(e) => panic!("{t:?} #{i}: {e:?}"),
+            }
+            let mut sink = Collect::default();
+            let res = run_one(&s, "SELECT 1", &ExecOptions::default(), &mut sink).await;
+            if let Err(DbError::Server { sqlstate, .. }) = &res {
+                assert_ne!(
+                    sqlstate.as_deref(),
+                    Some("57014"),
+                    "{t:?} #{i}: a stray cancel hit the next statement"
+                );
+            }
+            res.unwrap_or_else(|e| panic!("{t:?} #{i}: {e:?}"));
+        }
     }
 }

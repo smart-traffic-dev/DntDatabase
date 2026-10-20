@@ -25,8 +25,9 @@ pub(crate) const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 /// connection mutex, since `cancel` is called while `execute_one` holds it.
 #[derive(Debug, Default)]
 pub(crate) struct CancelState {
-    /// Server thread id of the session's current physical connection (updated on reconnect).
-    pub(crate) connection_id: AtomicU32,
+    /// Server thread id of the session's current physical connection; 0 while there is
+    /// none, including while an abandoned connection is being replaced.
+    connection_id: AtomicU32,
     /// Last generation handed out to an `execute_one` call.
     last_gen: AtomicU64,
     /// Generation of the `execute_one` call holding the connection; 0 when idle.
@@ -42,6 +43,28 @@ pub(crate) struct CancelState {
 }
 
 impl CancelState {
+    /// The thread id of the session's (new) physical connection.
+    pub(crate) fn set_connection(&self, id: u32) {
+        self.connection_id.store(id, Ordering::SeqCst);
+    }
+
+    /// No connection to kill any more: called before an abandoned connection is
+    /// replaced, so a cancel can neither target the old thread id nor pick up the fresh
+    /// connection's.
+    pub(crate) fn clear_connection(&self) {
+        self.connection_id.store(0, Ordering::SeqCst);
+    }
+
+    /// The thread id a `KILL QUERY` for call `gen` may target: only while that call is
+    /// still running (not retired) and has a connection.
+    pub(crate) fn kill_target(&self, gen: u64) -> Option<u32> {
+        if self.running.load(Ordering::SeqCst) != gen {
+            return None;
+        }
+        let id = self.connection_id.load(Ordering::SeqCst);
+        (id != 0).then_some(id)
+    }
+
     /// Marks a new `execute_one` call as running (call with the connection lock held);
     /// `stop` is its stop signal. The returned guard marks the session idle again when
     /// dropped.
@@ -77,6 +100,11 @@ pub(crate) struct RunGuard {
 }
 
 impl RunGuard {
+    /// This call's generation.
+    pub(crate) fn gen(&self) -> u64 {
+        self.gen
+    }
+
     /// True once a cancel targeted this call.
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::SeqCst) == self.gen
@@ -95,6 +123,17 @@ impl RunGuard {
             // Also woken by a stale request for an older call: check again.
             notified.await;
         }
+    }
+
+    /// Ends this call for cancels before the guard is dropped: a cancel arriving from
+    /// now on finds the session idle and kills nothing. Called before an abandoned
+    /// connection is replaced, so no `KILL QUERY` aimed at this call can reach the fresh
+    /// connection (and the next statement on it).
+    pub(crate) fn retire(&self) {
+        let _ =
+            self.state
+                .running
+                .compare_exchange(self.gen, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
 }
 
@@ -126,11 +165,7 @@ impl Canceller for MySqlCanceller {
         }
         self.state.request_cancel(gen);
         let state = &self.state;
-        kill_query(&self.opts, || {
-            (state.running.load(Ordering::SeqCst) == gen)
-                .then(|| state.connection_id.load(Ordering::SeqCst))
-        })
-        .await
+        kill_query(&self.opts, || state.kill_target(gen)).await
     }
 }
 
@@ -213,6 +248,30 @@ mod tests {
         assert!(tokio::time::timeout(wait, b.cancel_requested())
             .await
             .is_ok());
+    }
+
+    /// M2: while a stuck connection is being replaced, a cancel for the call can no
+    /// longer find a thread to kill: not the abandoned one, and not the fresh idle one
+    /// (a `KILL QUERY` landing there could stop the next statement).
+    #[test]
+    fn a_retired_call_or_cleared_connection_has_no_kill_target() {
+        let state = Arc::new(CancelState::default());
+        state.set_connection(7);
+        let run = state.begin(&StopSignal::new());
+        assert_eq!(state.kill_target(1), Some(7));
+        // The connection is being replaced: no id to kill.
+        state.clear_connection();
+        assert_eq!(state.kill_target(1), None);
+        // Replaced while the stuck call is still returning: it is retired first, so
+        // the fresh connection's id is never handed to its cancels.
+        run.retire();
+        state.set_connection(9);
+        assert_eq!(state.kill_target(1), None);
+        drop(run);
+        // The next call targets the fresh connection.
+        let _next = state.begin(&StopSignal::new());
+        assert_eq!(state.kill_target(2), Some(9));
+        assert_eq!(state.kill_target(1), None, "stale generation");
     }
 
     #[test]
