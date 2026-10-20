@@ -179,6 +179,28 @@ pub fn key_order(detail: &TableDetail) -> Vec<String> {
     }
 }
 
+/// `ORDER BY` columns with their direction (`true`: ascending).
+pub type OrderBy = Vec<(String, bool)>;
+
+/// The `ORDER BY` of a page and its implicit key order (`TableDataPage::key_order`): the
+/// requested sort followed by the primary key columns as a tie-breaker (stable paging
+/// over equal values), or, without a sort, the primary key alone.
+pub fn page_order(
+    kind: DbKind,
+    detail: &TableDetail,
+    order: Option<SortSpec>,
+) -> Result<(OrderBy, Vec<String>), DbError> {
+    let keys = key_order(detail);
+    match resolve_order(kind, &detail.columns, order)? {
+        Some((column, asc)) => {
+            let mut by = vec![(column.clone(), asc)];
+            by.extend(keys.into_iter().filter(|k| *k != column).map(|k| (k, true)));
+            Ok((by, Vec::new()))
+        }
+        None => Ok((keys.iter().map(|k| (k.clone(), true)).collect(), keys)),
+    }
+}
+
 /// An offset as JS sends it: a negative, fractional or non-finite one is clamped.
 pub fn clamp_offset(offset: f64) -> u64 {
     if offset.is_finite() && offset > 0.0 {
@@ -213,14 +235,10 @@ pub async fn table_data_impl(
     let (order, keys) = match order {
         Some(order) => {
             let detail = table_detail_impl(state, id, obj.clone()).await?;
-            let order = resolve_order(kind, &detail.columns, Some(order))?;
-            (order.into_iter().collect::<Vec<_>>(), Vec::new())
+            page_order(kind, &detail, Some(order))?
         }
         None => match table_detail_impl(state, id, obj.clone()).await {
-            Ok(detail) => {
-                let keys = key_order(&detail);
-                (keys.iter().map(|k| (k.clone(), true)).collect(), keys)
-            }
+            Ok(detail) => page_order(kind, &detail, None)?,
             // No stable order then; the SELECT reports a real problem itself.
             Err(_) => (Vec::new(), Vec::new()),
         },
@@ -514,6 +532,40 @@ mod tests {
         assert!(key_order(&detail(None)).is_empty());
         assert!(key_order(&detail(Some(vec![]))).is_empty());
         assert!(key_order(&detail(Some(vec!["gone"]))).is_empty());
+    }
+
+    #[test]
+    fn an_explicit_sort_gets_the_primary_key_as_tie_breaker() {
+        let spec = |c: &str, dir| {
+            Some(SortSpec {
+                column: c.into(),
+                dir,
+            })
+        };
+        let d = detail(Some(vec!["a", "b"]));
+        let owned = |v: &[(&str, bool)]| -> Vec<(String, bool)> {
+            v.iter().map(|(c, asc)| (c.to_string(), *asc)).collect()
+        };
+        assert_eq!(
+            page_order(DbKind::MySql, &d, spec("b", SortDir::Desc)).unwrap(),
+            (owned(&[("b", false), ("a", true)]), vec![])
+        );
+        assert_eq!(
+            page_order(DbKind::MySql, &d, None).unwrap(),
+            (
+                owned(&[("a", true), ("b", true)]),
+                vec!["a".to_string(), "b".to_string()]
+            )
+        );
+        let no_pk = detail(None);
+        assert_eq!(
+            page_order(DbKind::MySql, &no_pk, spec("a", SortDir::Asc)).unwrap(),
+            (owned(&[("a", true)]), vec![])
+        );
+        assert_eq!(
+            page_order(DbKind::MySql, &no_pk, None).unwrap(),
+            (vec![], vec![])
+        );
     }
 
     #[test]

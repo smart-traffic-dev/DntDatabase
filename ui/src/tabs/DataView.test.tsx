@@ -271,21 +271,57 @@ describe('DataView', () => {
     expect(callsOf('table_row_count')).toEqual([{ id: ids.prod, obj: objectRef, requestKey: COUNT_KEY }]);
   });
 
-  it('refresh, paging or sorting clears the exact count', async () => {
+  it('refresh or sorting clears the exact count; paging keeps it', async () => {
     const user = userEvent.setup();
-    setup({ table_data: () => page(3, 1, true), table_row_count: () => ({ rows: 999, elapsed_ms: 5 }) }, { estimate: 12_345 });
+    setup(
+      { table_data: (a) => page(3, (a.offset as number) + 1, true), table_row_count: () => ({ rows: 999, elapsed_ms: 5 }) },
+      { estimate: 12_345 },
+    );
     await screen.findByText('Rows 1–3');
+    await user.click(screen.getByRole('button', { name: 'Count' }));
+    expect(await screen.findByText('999 rows')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Rows 4–6');
+    await user.click(screen.getByRole('button', { name: 'Previous page' }));
+    await screen.findByText('Rows 1–3');
+    expect(screen.getByText('999 rows')).toBeInTheDocument();
+    expect(callsOf('table_row_count')).toHaveLength(1);
+
     for (const act of [
       () => user.click(screen.getByRole('button', { name: 'Refresh' })),
-      () => user.click(screen.getByRole('button', { name: 'Next page' })),
       () => user.click(grid().getByRole('button', { name: 'id' })),
     ]) {
-      await user.click(screen.getByRole('button', { name: 'Count' }));
-      expect(await screen.findByText('999 rows')).toBeInTheDocument();
+      if (!screen.queryByText('999 rows')) {
+        await user.click(screen.getByRole('button', { name: 'Count' }));
+        expect(await screen.findByText('999 rows')).toBeInTheDocument();
+      }
       await act();
       expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
       expect(screen.queryByText('999 rows')).not.toBeInTheDocument();
     }
+  });
+
+  it('Prev after a page that stopped early returns to the exact previous offset', async () => {
+    const user = userEvent.setup();
+    // Pages of 10, but the first stops after 4 rows (byte budget).
+    setup({
+      get_table_page_size: () => 10,
+      table_data: (a) => {
+        const offset = a.offset as number;
+        return offset === 0 ? page(4, 1, true, { size_capped: true }) : page(10, offset + 1, true);
+      },
+    });
+    await screen.findByText('Rows 1–4');
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Rows 5–14');
+    await user.click(screen.getByRole('button', { name: 'Next page' }));
+    await screen.findByText('Rows 15–24');
+    await user.click(screen.getByRole('button', { name: 'Previous page' }));
+    await screen.findByText('Rows 5–14');
+    await user.click(screen.getByRole('button', { name: 'Previous page' }));
+    await screen.findByText('Rows 1–4');
+    expect(callsOf('table_data').map((c) => c.offset)).toEqual([0, 4, 14, 4, 0]);
+    expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
   });
 
   it('a count answered after the page changed is dropped', async () => {

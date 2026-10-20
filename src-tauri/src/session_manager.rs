@@ -294,7 +294,7 @@ fn ask_for_missing_key_passphrase(e: DbError) -> DbError {
 }
 
 /// Errors after which the metadata session (and tunnel) is worth reopening once.
-fn is_lost(e: &DbError) -> bool {
+pub(crate) fn is_lost(e: &DbError) -> bool {
     matches!(e, DbError::ConnectionLost { .. } | DbError::Connect { .. })
 }
 

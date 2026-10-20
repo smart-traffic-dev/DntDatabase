@@ -11,6 +11,8 @@ export interface TableDataState {
   connectionId: string;
   pageSize: number;
   offset: number;
+  /** Offsets of the pages Next left, so Prev returns exactly (pages can stop early). */
+  back: number[];
   sort: SortSpec | null;
   page?: Loadable<TableDataPage>;
   /** Exact row count (`table_row_count`), fetched on demand; cleared by any page load. */
@@ -22,8 +24,11 @@ interface TableDataStore {
   byTab: Record<string, TableDataState>;
   /** Creates the tab's state with `pageSize` and loads the first page, unless it exists. */
   init(tab: Tab, pageSize: number): void;
-  /** (Re)loads the current page (and forgets the exact count, which may be stale). */
-  load(tab: Tab): Promise<void>;
+  /**
+   * (Re)loads the current page. Forgets the exact count (it may be stale) unless
+   * `keepCount` (paging does not change it).
+   */
+  load(tab: Tab, opts?: { keepCount?: boolean }): Promise<void>;
   setPageSize(tab: Tab, pageSize: number): void;
   next(tab: Tab): void;
   prev(tab: Tab): void;
@@ -68,28 +73,32 @@ export const useTableData = create<TableDataStore>()((set, get) => {
     });
 
   /** Moves to a new position (offset / size / sort) and loads it. */
-  const go = (tab: Tab, change: Partial<TableDataState>) => {
+  const go = (tab: Tab, change: Partial<TableDataState>, keepCount: boolean) => {
     patch(tab.id, change);
-    void get().load(tab);
+    void get().load(tab, { keepCount });
   };
 
   return {
     byTab: {},
     init(tab, pageSize) {
       if (get().byTab[tab.id]) return;
-      set((s) => ({ byTab: { ...s.byTab, [tab.id]: { connectionId: tab.connectionId, pageSize, offset: 0, sort: null } } }));
+      set((s) => ({ byTab: { ...s.byTab, [tab.id]: { connectionId: tab.connectionId, pageSize, offset: 0, back: [], sort: null } } }));
       void get().load(tab);
     },
-    async load(tab) {
+    async load(tab, opts = {}) {
       const state = get().byTab[tab.id];
       if (!state) return;
       const token = ++counter;
       const key = pageKey(tab.id);
       tokens.set(key, token);
-      // A count running for the old page is answered for nothing: drop it.
-      if (state.count?.status === 'loading') cancelRequest(tab.connectionId, countKey(tab.id));
-      tokens.delete(countKey(tab.id));
-      patch(tab.id, { page: { status: 'loading' }, count: undefined });
+      if (opts.keepCount) {
+        patch(tab.id, { page: { status: 'loading' } });
+      } else {
+        // A count running for the old data is answered for nothing: drop it.
+        if (state.count?.status === 'loading') cancelRequest(tab.connectionId, countKey(tab.id));
+        tokens.delete(countKey(tab.id));
+        patch(tab.id, { page: { status: 'loading' }, count: undefined });
+      }
       const latest = () => tokens.get(key) === token && isOpen(tab.id);
       try {
         // The backend cancels the previous request of this key itself.
@@ -101,23 +110,28 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       }
     },
     setPageSize(tab, pageSize) {
-      go(tab, { pageSize, offset: 0 });
+      go(tab, { pageSize, offset: 0, back: [] }, true);
     },
     next(tab) {
       const s = get().byTab[tab.id];
       // A page cut short by its byte budget holds fewer rows: continue right after them.
-      if (s?.page?.status === 'ok' && s.page.data.has_more) go(tab, { offset: s.offset + Math.max(1, s.page.data.rows.length) });
+      if (s?.page?.status === 'ok' && s.page.data.has_more) {
+        go(tab, { offset: s.offset + Math.max(1, s.page.data.rows.length), back: [...s.back, s.offset] }, true);
+      }
     },
     prev(tab) {
       const s = get().byTab[tab.id];
-      if (s && s.offset > 0) go(tab, { offset: Math.max(0, s.offset - s.pageSize) });
+      if (!s || s.offset === 0) return;
+      const back = s.back.slice(0, -1);
+      const offset = s.back.at(-1) ?? Math.max(0, s.offset - s.pageSize);
+      go(tab, { offset, back }, true);
     },
     toggleSort(tab, column) {
       const s = get().byTab[tab.id];
-      if (s) go(tab, { sort: nextSort(s.sort, column), offset: 0 });
+      if (s) go(tab, { sort: nextSort(s.sort, column), offset: 0, back: [] }, false);
     },
     clearSort(tab) {
-      if (get().byTab[tab.id]?.sort) go(tab, { sort: null, offset: 0 });
+      if (get().byTab[tab.id]?.sort) go(tab, { sort: null, offset: 0, back: [] }, false);
     },
     async count(tab) {
       if (!get().byTab[tab.id]) return;

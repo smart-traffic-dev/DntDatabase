@@ -12,8 +12,18 @@
 //!   [`SessionManager::data_cancel`] cancels it on demand, through the driver's cancel
 //!   (`KILL QUERY` / PostgreSQL cancel request);
 //! - closing the connection cancels the running requests and closes the idle sessions.
+//!
+//! # Cancels never reach a reused session
+//!
+//! The drivers' cancel targets whatever statement runs on the session when the cancel is
+//! actually sent (it reads the running generation then, not when it was requested). A
+//! session whose request was cancelled or superseded is therefore NEVER given back to the
+//! pool: it is closed, even when its statement completed. A late cancel can then only
+//! find that request's statement or an idle (closing) session, never another request's.
+//! A request cancelled while its session is still opening is dropped before it starts
+//! (its fresh session, which ran nothing, does go to the pool).
 
-use crate::session_manager::{close_quietly, lock, ConnectionRuntime, SessionManager};
+use crate::session_manager::{close_quietly, is_lost, lock, ConnectionRuntime, SessionManager};
 use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
 use dnt_core::error::DbError;
 use dnt_core::sql::StatementKind;
@@ -41,46 +51,104 @@ struct Idle {
     tunnel_gen: u64,
 }
 
-struct Running {
+/// Where the current request of a key is.
+enum Phase {
+    /// Its session is being taken / opened: a cancel only removes the entry.
+    Opening,
+    /// Its statement runs: a cancel raises `stop` and sends the driver's cancel.
+    Running {
+        cancel: CancelHandle,
+        stop: StopSignal,
+    },
+}
+
+struct Request {
     serial: u64,
-    cancel: CancelHandle,
-    stop: StopSignal,
+    phase: Phase,
 }
 
 /// The data sessions of one connection runtime.
 #[derive(Default)]
 pub(crate) struct DataSessions {
     idle: Mutex<HashMap<Option<String>, Vec<Idle>>>,
-    running: Mutex<HashMap<String, Running>>,
+    /// The current request of every key. A request whose entry is gone (or holds another
+    /// serial) was cancelled or superseded.
+    requests: Mutex<HashMap<String, Request>>,
     serial: AtomicU64,
 }
 
-fn cancel_running(r: Running) {
-    r.stop.stop();
-    tokio::spawn(async move {
-        let _ = r.cancel.cancel().await;
-    });
+/// Stops a request taken out of the map.
+fn stop_request(r: Request) {
+    if let Phase::Running { cancel, stop } = r.phase {
+        stop.stop();
+        tokio::spawn(async move {
+            let _ = cancel.cancel().await;
+        });
+    }
 }
 
 impl DataSessions {
-    /// Cancels every running request and closes the idle sessions (connection close).
+    /// Cancels every request and closes the idle sessions (connection close).
     pub(crate) async fn shutdown(&self) {
-        let running: Vec<Running> = lock(&self.running).drain().map(|(_, r)| r).collect();
-        for r in running {
-            cancel_running(r);
+        let requests: Vec<Request> = lock(&self.requests).drain().map(|(_, r)| r).collect();
+        for r in requests {
+            stop_request(r);
         }
         let idle: Vec<Idle> = lock(&self.idle).drain().flat_map(|(_, v)| v).collect();
         futures_util::future::join_all(idle.into_iter().map(|i| close_quietly(i.session))).await;
     }
 
-    /// Cancels the request running under `key`; whether there was one.
+    /// Cancels the request of `key` (running or still opening); whether there was one.
     fn cancel(&self, key: &str) -> bool {
-        match lock(&self.running).remove(key) {
+        match lock(&self.requests).remove(key) {
             Some(r) => {
-                cancel_running(r);
+                stop_request(r);
                 true
             }
             None => false,
+        }
+    }
+
+    /// Makes request `serial` the current one of `key`, superseding (cancelling) the one
+    /// there.
+    fn begin(&self, key: &str, serial: u64) {
+        let previous = lock(&self.requests).insert(
+            key.to_string(),
+            Request {
+                serial,
+                phase: Phase::Opening,
+            },
+        );
+        if let Some(previous) = previous {
+            stop_request(previous);
+        }
+    }
+
+    /// Moves request `serial` of `key` to running on `session`; false when it was
+    /// cancelled or superseded meanwhile (it must not start).
+    fn start(&self, key: &str, serial: u64, session: &dyn Session, stop: &StopSignal) -> bool {
+        let mut requests = lock(&self.requests);
+        match requests.get_mut(key) {
+            Some(r) if r.serial == serial => {
+                r.phase = Phase::Running {
+                    cancel: session.cancel_handle(),
+                    stop: stop.clone(),
+                };
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Ends request `serial` of `key`; true when it was still current, i.e. no cancel was
+    /// ever sent for it (only then may its session be reused).
+    fn finish(&self, key: &str, serial: u64) -> bool {
+        let mut requests = lock(&self.requests);
+        if requests.get(key).is_some_and(|r| r.serial == serial) {
+            requests.remove(key);
+            true
+        } else {
+            false
         }
     }
 }
@@ -209,75 +277,84 @@ impl SessionManager {
         let rt = self.runtime(id)?;
         let data = &rt.data;
         let serial = data.serial.fetch_add(1, Ordering::SeqCst) + 1;
-        let stop = StopSignal::new();
-        // Supersede the previous request of this key at once (even before ours starts).
-        data.cancel(key);
+        // Ours from now on: the previous request of this key is cancelled at once.
+        data.begin(key, serial);
         let database = db.map(str::to_string);
-        let (session, tunnel_gen) = match take_idle(&rt, &database) {
-            Some(idle) => (idle.session, idle.tunnel_gen),
-            None => rt.open_query_session(database.clone()).await?,
-        };
-        {
-            let mut running = lock(&data.running);
-            if let Some(previous) = running.insert(
-                key.to_string(),
-                Running {
-                    serial,
-                    cancel: session.cancel_handle(),
-                    stop: stop.clone(),
-                },
-            ) {
-                // A newer request of this key started meanwhile only if it has a higher
-                // serial; ours is newest otherwise.
-                if previous.serial > serial {
-                    let ours = running.insert(key.to_string(), previous);
-                    drop(running);
-                    if let Some(ours) = ours {
-                        ours.stop.stop();
-                    }
-                } else {
-                    cancel_running(previous);
-                }
-            }
-        }
         let timeout = match rt.cfg.options.query_timeout_s {
             0 => self.data_timeout,
             s => Duration::from_secs(s.into()),
         };
-        let opts = ExecOptions {
-            max_rows,
-            timeout: Some(timeout),
-            cancel_grace: DATA_CANCEL_GRACE,
-            stop,
-            ..ExecOptions::default()
-        };
-        let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
-        let outcome = session
-            .execute_one(sql, StatementKind::Read, &opts, &mut page)
-            .await;
-        {
-            let mut running = lock(&data.running);
-            if running.get(key).is_some_and(|r| r.serial == serial) {
-                running.remove(key);
-            }
-        }
-        let reusable = outcome.is_ok()
-            && !rt.closed.load(Ordering::SeqCst)
-            && !rt.tunnel_dead()
-            && tunnel_gen == rt.tunnel_gen.load(Ordering::SeqCst);
-        if reusable {
-            give_back(
-                &rt,
-                database,
-                Idle {
-                    session,
-                    tunnel_gen,
+        let mut pooled = take_idle(&rt, &database);
+        loop {
+            let from_pool = pooled.is_some();
+            let (session, tunnel_gen) = match pooled.take() {
+                Some(idle) => (idle.session, idle.tunnel_gen),
+                None => match rt.open_query_session(database.clone()).await {
+                    Ok(opened) => opened,
+                    Err(e) => {
+                        data.finish(key, serial);
+                        return Err(e);
+                    }
                 },
-            );
-        } else {
-            tokio::spawn(close_quietly(session));
+            };
+            let reusable = |rt: &ConnectionRuntime| {
+                !rt.closed.load(Ordering::SeqCst)
+                    && !rt.tunnel_dead()
+                    && tunnel_gen == rt.tunnel_gen.load(Ordering::SeqCst)
+            };
+            // A fresh stop signal per attempt: a raised one stays raised.
+            let stop = StopSignal::new();
+            if !data.start(key, serial, session.as_ref(), &stop) {
+                // Cancelled (or superseded) while the session was being taken or opened:
+                // nothing ran on it, so it may serve the next request.
+                if reusable(&rt) {
+                    give_back(
+                        &rt,
+                        database,
+                        Idle {
+                            session,
+                            tunnel_gen,
+                        },
+                    );
+                } else {
+                    tokio::spawn(close_quietly(session));
+                }
+                return Err(DbError::cancelled());
+            }
+            let opts = ExecOptions {
+                max_rows,
+                timeout: Some(timeout),
+                cancel_grace: DATA_CANCEL_GRACE,
+                stop,
+                ..ExecOptions::default()
+            };
+            let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
+            let outcome = session
+                .execute_one(sql, StatementKind::Read, &opts, &mut page)
+                .await;
+            // A pooled session that went stale while idle (server restart, idle timeout):
+            // one more attempt on a fresh session, unless the request was cancelled.
+            if from_pool && outcome.as_ref().is_err_and(is_lost) {
+                tokio::spawn(close_quietly(session));
+                continue;
+            }
+            // Only a session whose request was never cancelled goes back to the pool: a
+            // cancel sent for it may still land on whatever runs there next.
+            let current = data.finish(key, serial);
+            if outcome.is_ok() && current && reusable(&rt) {
+                give_back(
+                    &rt,
+                    database,
+                    Idle {
+                        session,
+                        tunnel_gen,
+                    },
+                );
+            } else {
+                tokio::spawn(close_quietly(session));
+            }
+            return outcome.map(|_| page);
         }
-        outcome.map(|_| page)
     }
 
     /// Cancels the data request running under `key` on connection `id`; whether one was
