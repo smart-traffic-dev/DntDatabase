@@ -120,33 +120,40 @@ export function queryDocTarget(model: unknown): CompletionTarget | null {
   return { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine: kind ?? doc.dialect };
 }
 
-/** The registration lives on the monaco instance, so a reloaded module finds (and replaces) it. */
-const HANDLE = Symbol.for('dnt.sqlCompletion');
-type Holder = { [HANDLE]?: { dispose(): void } };
+type Handle = { dispose(): void };
 
-let lastMonaco: typeof Monaco | null = null;
+/**
+ * One registration per monaco instance. A WeakMap, not a property: the real monaco is an
+ * ES module namespace object (`import * as monaco`), which is not extensible.
+ */
+const handles = new WeakMap<object, Handle>();
 
 /** Registers the provider once per monaco instance (every editor shares it). */
 export function ensureCompletion(monaco: typeof Monaco): void {
-  const holder = monaco as unknown as Holder;
-  holder[HANDLE] ??= registerCompletion(monaco, queryDocTarget);
-  lastMonaco = monaco;
+  if (handles.has(monaco)) return;
+  const handle = registerCompletion(monaco, queryDocTarget);
+  handles.set(monaco, handle);
+  if (import.meta.hot) {
+    import.meta.hot.data.completion = { monaco, handle };
+  }
 }
 
 /** Removes the provider registered by `ensureCompletion`. */
 export function disposeCompletion(monaco: typeof Monaco): void {
-  const holder = monaco as unknown as Holder;
-  holder[HANDLE]?.dispose();
-  delete holder[HANDLE];
+  handles.get(monaco)?.dispose();
+  handles.delete(monaco);
 }
 
-// HMR: the old module removes its provider, the new one registers its own on the same instance.
+// HMR: the old module disposes its provider (its handle is kept in `hot.data`), and the
+// new module registers its own on the same monaco instance.
 if (import.meta.hot) {
-  const previous = import.meta.hot.data.monaco as typeof Monaco | undefined;
-  if (previous) ensureCompletion(previous);
-  import.meta.hot.dispose((data: { monaco?: typeof Monaco }) => {
-    if (!lastMonaco) return;
-    disposeCompletion(lastMonaco);
-    data.monaco = lastMonaco;
+  const hot = import.meta.hot;
+  const previous = hot.data.completion as { monaco: typeof Monaco; handle: Handle } | undefined;
+  if (previous) {
+    hot.data.completion = undefined;
+    ensureCompletion(previous.monaco);
+  }
+  hot.dispose((data: { completion?: { monaco: typeof Monaco; handle: Handle } }) => {
+    data.completion?.handle.dispose();
   });
 }

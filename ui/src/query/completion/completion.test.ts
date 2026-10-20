@@ -379,6 +379,17 @@ describe('monaco provider: fix round 1', () => {
     disposeCompletion(monaco as never);
   });
 
+  it('registers_on_a_frozen_namespace_like_monaco', () => {
+    // The real monaco is an ES module namespace object: not extensible.
+    const { monaco, registered, disposed } = fakeMonaco();
+    const frozen = Object.freeze({ ...monaco });
+    expect(() => ensureCompletion(frozen as never)).not.toThrow();
+    ensureCompletion(frozen as never);
+    expect(registered).toEqual(['mysql', 'pgsql']);
+    disposeCompletion(frozen as never);
+    expect(disposed).toEqual(['mysql', 'pgsql']);
+  });
+
   it('dollar_quoted_body_is_a_string', () => {
     const { text, offset } = at('SELECT $fn$ FROM o.| $fn$, 1');
     expect(analyze(text, offset, 'postgres').context).toEqual({ kind: 'none' });
