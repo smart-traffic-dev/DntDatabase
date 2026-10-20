@@ -1,5 +1,6 @@
 // The code font of every monospace surface drawn outside CSS (Monaco, the Glide grid canvas),
 // read from the design tokens so they match the CSS surfaces (`var(--font-mono)`) exactly.
+import { useLayout } from '../store/layout';
 
 /** Used when the token cannot be read (tests, before the CSS loaded). Ligature-free first. */
 export const MONO_FALLBACK = "'Cascadia Mono', Consolas, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace";
@@ -33,17 +34,44 @@ export function monoFontFamily(): string {
   return stack;
 }
 
-/** Code text sizes on the type scale: editor and grid cells (callout), grid header (footnote). */
-export function codeFontSizes() {
+const scaled = (px: number, scale: number) => Math.round(px * scale * 10) / 10;
+
+/**
+ * Code text sizes on the type scale: editor and grid cells (callout), grid header (footnote),
+ * times the user's font scale (Ctrl+= / Ctrl+-, `useLayout().fontScale`).
+ */
+export function codeFontSizes(scale: number = useLayout.getState().fontScale) {
   return {
     /** Editor text, suggest rows and grid cells. */
-    body: cssPx('--text-callout', 13),
-    bodyLineHeight: cssPx('--text-callout--line-height', 18),
+    body: scaled(cssPx('--text-callout', 13), scale),
+    bodyLineHeight: Math.round(cssPx('--text-callout--line-height', 18) * scale),
     /** Grid header. */
-    header: cssPx('--text-footnote', 12),
+    header: scaled(cssPx('--text-footnote', 12), scale),
     /** Grid row markers. */
-    marker: cssPx('--text-caption', 11),
+    marker: scaled(cssPx('--text-caption', 11), scale),
   };
+}
+
+/** The part of a Monaco editor the font scale needs. */
+interface ScalableEditor {
+  updateOptions(options: Record<string, unknown>): void;
+  onDidDispose(listener: () => void): unknown;
+}
+
+/**
+ * Keeps an editor's font at the current font scale (applied now, then on every change of
+ * the layout store's `fontScale`); stops when the editor is disposed.
+ */
+export function bindEditorFontScale(editor: ScalableEditor): void {
+  const apply = () => {
+    const { body, bodyLineHeight } = codeFontSizes();
+    editor.updateOptions({ fontSize: body, lineHeight: bodyLineHeight, suggestFontSize: body, suggestLineHeight: bodyLineHeight });
+  };
+  apply();
+  const off = useLayout.subscribe((s, prev) => {
+    if (s.fontScale !== prev.fontScale) apply();
+  });
+  editor.onDidDispose(off);
 }
 
 /** Font options shared by every Monaco editor (query editor, DDL viewer). */

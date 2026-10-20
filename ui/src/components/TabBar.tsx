@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEvent } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
 import { useTabs, type Tab } from '../store/tabs';
 import { EnvTag } from './EnvTag';
-import { ChevronDownIcon, CloseIcon, LockIcon } from './icons';
-import { closeTab, closeTabs } from './tabActions';
+import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon } from './icons';
+import { closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 import { TabMenu, type TabMenuItem } from './TabMenu';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
@@ -26,8 +27,15 @@ export function TabBar() {
   const activeId = useTabs((s) => s.activeId);
   const activate = useTabs((s) => s.activate);
   const summaries = useConnections((s) => s.summaries);
-  const docs = useQueryDocs((s) => s.docs);
-  const runs = useQueryRun((s) => s.runs);
+  // Derived id lists, not the docs / runs maps: typing replaces the docs map on every keystroke.
+  // `useShallow` keeps the same array while the ids do not change, so nothing re-renders.
+  const unsavedIds = useQueryDocs(
+    useShallow((s) => [...s.docs.values()].filter((d) => !!d.filePath && d.dirty).map((d) => d.id)),
+  );
+  const txIds = useQueryRun(
+    useShallow((s) => [...s.runs].filter(([, r]) => (r.txState ?? 'idle') !== 'idle').map(([id]) => id)),
+  );
+  const canReopen = useTabs((s) => s.closed.length > 0);
   const strip = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: TabMenuItem[] } | null>(null);
 
@@ -59,13 +67,18 @@ export function TabBar() {
   const openContext = (e: ReactMouseEvent, tab: Tab) => {
     e.preventDefault();
     const at = tabs.findIndex((t) => t.id === tab.id);
+    // Pinned tabs are never closed in bulk.
+    const others = tabs.filter((t) => t.id !== tab.id && !t.pinned);
+    const right = tabs.slice(at + 1).filter((t) => !t.pinned);
     setMenu({
       x: e.clientX,
       y: e.clientY,
       items: [
-        { label: 'Close', run: () => void closeTab(tab) },
-        { label: 'Close others', disabled: tabs.length < 2, run: () => void closeTabs(tabs.filter((t) => t.id !== tab.id)) },
-        { label: 'Close tabs to the right', disabled: at >= tabs.length - 1, run: () => void closeTabs(tabs.slice(at + 1)) },
+        { label: 'Close', hint: 'Ctrl+W', run: () => void closeTab(tab) },
+        { label: 'Close others', disabled: others.length === 0, run: () => void closeOtherTabs(tab) },
+        { label: 'Close tabs to the right', disabled: right.length === 0, run: () => void closeTabsToRight(tab) },
+        { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
+        { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
       ],
     });
   };
@@ -80,9 +93,8 @@ export function TabBar() {
           const readOnly = !!conn?.read_only;
           const classes = ['tab', tab.id === activeId ? 'active' : '', env ? `env-${env}` : ''].filter(Boolean).join(' ');
           // `●` only for a tab bound to a file whose text differs from it.
-          const doc = tab.kind === 'query' ? docs.get(tab.id) : undefined;
-          const unsaved = !!doc?.filePath && doc.dirty;
-          const inTx = tab.kind === 'query' && (runs.get(tab.id)?.txState ?? 'idle') !== 'idle';
+          const unsaved = tab.kind === 'query' && unsavedIds.includes(tab.id);
+          const inTx = tab.kind === 'query' && txIds.includes(tab.id);
           const tip = [tab.title, conn ? `Connection: ${conn.name}` : null, readOnly ? 'Read-only' : null, inTx ? 'Open transaction' : null]
             .filter(Boolean)
             .join(' · ');
@@ -96,6 +108,11 @@ export function TabBar() {
                 onClick={() => activate(tab.id)}
                 onAuxClick={(e) => e.button === 1 && void closeTab(tab)}
               >
+                {tab.pinned && (
+                  <span className="tab-pin" title="Pinned" role="img" aria-label="Pinned">
+                    <PinIcon />
+                  </span>
+                )}
                 {env && <EnvTag env={env} />}
                 <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : KIND_LABEL[tab.objectRef.kind]}</span>
                 <span className="tab-title">{tab.title}</span>

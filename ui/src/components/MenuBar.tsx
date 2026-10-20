@@ -1,14 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from 'react';
-import { useConnections } from '../store/connections';
-import { useLayout } from '../store/layout';
-import { canRun, canStop, emptyRun, useQueryRun } from '../store/queryRun';
-import { useQueryDocs } from '../store/queryTabs';
-import { useSelection, useStarting } from '../store/runQuery';
-import { useTabs } from '../store/tabs';
-import { getActiveEditor } from '../tabs/query/activeEditor';
-import { useTheme } from '../theme/ThemeProvider';
 import { ActionMenu } from './ActionMenu';
-import { buildMenus, type MenuState } from './appMenus';
+import { buildMenus } from './appMenus';
+import { useMenuState } from './useMenuState';
 import './menuBar.css';
 
 /** Which menu is open; `keyboard`: it was opened with the keyboard, so its first item takes the focus. */
@@ -28,35 +21,6 @@ function Label({ text, mnemonic }: { text: string; mnemonic: string }) {
       {text.slice(at + 1)}
     </>
   );
-}
-
-/** Subscribes to exactly what the menu model needs (never the document text: no re-render per keystroke). */
-function useMenuState(): MenuState {
-  const { theme, setTheme } = useTheme();
-  const sidebarVisible = useLayout((s) => s.sidebarVisible);
-  const hasTab = useTabs((s) => s.tabs.length > 0);
-  const queryTabId = useTabs((s) => {
-    const tab = s.tabs.find((t) => t.id === s.activeId);
-    return tab?.kind === 'query' ? tab.id : null;
-  });
-  const bound = useQueryDocs((s) => (queryTabId ? (s.docs.get(queryTabId)?.connectionId ?? null) : null));
-  const stored = useConnections((s) => (bound ? s.summaries.has(bound) : false));
-  const idle = useQueryRun((s) => canRun(queryTabId ? (s.runs.get(queryTabId) ?? emptyRun) : emptyRun));
-  const stoppable = useQueryRun((s) => canStop(queryTabId ? (s.runs.get(queryTabId) ?? emptyRun) : emptyRun));
-  const starting = useStarting((s) => (queryTabId ? s.ids.has(queryTabId) : false));
-  const hasSelection = useSelection((s) => (queryTabId ? s.ids.has(queryTabId) : false));
-  return {
-    theme,
-    setTheme,
-    sidebarVisible,
-    hasTab,
-    queryTabId,
-    // Read at render time: opening a menu re-renders, so the answer is current for that menu.
-    hasEditor: queryTabId !== null && getActiveEditor() !== null,
-    runnable: queryTabId !== null && !!bound && stored && idle && !starting,
-    stoppable,
-    hasSelection,
-  };
 }
 
 /**

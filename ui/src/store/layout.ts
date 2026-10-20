@@ -28,13 +28,32 @@ export function editorPixels(ratio: number, total: number): number {
   return Math.round(clamp(ratio * total, EDITOR_MIN_PX, max));
 }
 
+/** Scale of the code font (editor, result grid, messages): Ctrl+= / Ctrl+- / Ctrl+0. */
+export const FONT_SCALE_MIN = 0.8;
+export const FONT_SCALE_MAX = 1.6;
+export const FONT_SCALE_STEP = 0.1;
+export const FONT_SCALE_DEFAULT = 1;
+
+/** Clamped to the range and rounded to one decimal (0.1 steps add up without float noise). */
+export const clampFontScale = (n: number) =>
+  Number.isFinite(n) ? Math.round(clamp(n, FONT_SCALE_MIN, FONT_SCALE_MAX) * 10) / 10 : FONT_SCALE_DEFAULT;
+
 interface Saved {
   sidebarWidth: number;
   sidebarVisible: boolean;
   editorRatio: number;
+  /** The result panel of query tabs is shown (Ctrl+J). */
+  resultsVisible: boolean;
+  fontScale: number;
 }
 
-const defaults = (): Saved => ({ sidebarWidth: SIDEBAR_DEFAULT, sidebarVisible: true, editorRatio: EDITOR_RATIO_DEFAULT });
+const defaults = (): Saved => ({
+  sidebarWidth: SIDEBAR_DEFAULT,
+  sidebarVisible: true,
+  editorRatio: EDITOR_RATIO_DEFAULT,
+  resultsVisible: true,
+  fontScale: FONT_SCALE_DEFAULT,
+});
 
 function load(): Saved {
   try {
@@ -45,6 +64,8 @@ function load(): Saved {
       sidebarWidth: typeof v?.sidebarWidth === 'number' ? clampSidebar(v.sidebarWidth) : SIDEBAR_DEFAULT,
       sidebarVisible: typeof v?.sidebarVisible === 'boolean' ? v.sidebarVisible : true,
       editorRatio: typeof v?.editorRatio === 'number' ? clampRatio(v.editorRatio) : EDITOR_RATIO_DEFAULT,
+      resultsVisible: typeof v?.resultsVisible === 'boolean' ? v.resultsVisible : true,
+      fontScale: typeof v?.fontScale === 'number' ? clampFontScale(v.fontScale) : FONT_SCALE_DEFAULT,
     };
   } catch {
     return defaults();
@@ -53,7 +74,7 @@ function load(): Saved {
 
 function save(s: Saved) {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ sidebarWidth: s.sidebarWidth, sidebarVisible: s.sidebarVisible, editorRatio: s.editorRatio }));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
   } catch {
     // Storage can be unavailable; the in-memory layout still applies.
   }
@@ -63,7 +84,12 @@ interface LayoutState extends Saved {
   setSidebarWidth(width: number): void;
   toggleSidebar(): void;
   setEditorRatio(ratio: number): void;
-  /** Default sidebar width and editor / result split (the sidebar is shown again). */
+  toggleResults(): void;
+  /** Sets the code font scale (clamped to 0.8 to 1.6). */
+  setFontScale(scale: number): void;
+  /** One step bigger / smaller (`step` of `FONT_SCALE_STEP`), clamped. */
+  zoomFont(steps: number): void;
+  /** Default sidebar width and editor / result split (the sidebar and results are shown again; the font scale stays). */
   reset(): void;
 }
 
@@ -71,15 +97,18 @@ export const useLayout = create<LayoutState>()((set, get) => {
   /** Applies a change and persists the result. */
   const apply = (patch: Partial<Saved>) => {
     set(patch);
-    const { sidebarWidth, sidebarVisible, editorRatio } = get();
-    save({ sidebarWidth, sidebarVisible, editorRatio });
+    const { sidebarWidth, sidebarVisible, editorRatio, resultsVisible, fontScale } = get();
+    save({ sidebarWidth, sidebarVisible, editorRatio, resultsVisible, fontScale });
   };
   return {
     ...load(),
     setSidebarWidth: (width) => apply({ sidebarWidth: clampSidebar(width) }),
     toggleSidebar: () => apply({ sidebarVisible: !get().sidebarVisible }),
     setEditorRatio: (ratio) => apply({ editorRatio: clampRatio(ratio) }),
-    reset: () => apply(defaults()),
+    toggleResults: () => apply({ resultsVisible: !get().resultsVisible }),
+    setFontScale: (scale) => apply({ fontScale: clampFontScale(scale) }),
+    zoomFont: (steps) => apply({ fontScale: clampFontScale(get().fontScale + steps * FONT_SCALE_STEP) }),
+    reset: () => apply({ ...defaults(), fontScale: get().fontScale }),
   };
 });
 
@@ -87,3 +116,19 @@ export const useLayout = create<LayoutState>()((set, get) => {
 export function reloadLayout() {
   useLayout.setState(load());
 }
+
+/**
+ * Mirrors the font scale into `--font-scale` on the root element: CSS mono surfaces (messages)
+ * multiply their size by it, and the result grid (which watches the root's `style`) re-themes.
+ */
+function mirrorFontScale(scale: number) {
+  try {
+    document.documentElement.style.setProperty('--font-scale', String(scale));
+  } catch {
+    // No document (not a browser): nothing to mirror.
+  }
+}
+mirrorFontScale(useLayout.getState().fontScale);
+useLayout.subscribe((s, prev) => {
+  if (s.fontScale !== prev.fontScale) mirrorFontScale(s.fontScale);
+});

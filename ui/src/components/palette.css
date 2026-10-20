@@ -1,0 +1,94 @@
+/* Command palette / quick open: a floating panel at the top centre, no backdrop (not modal). */
+.palette {
+  position: fixed;
+  z-index: 60;
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(420px, calc(100vh - 80px));
+  display: flex;
+  flex-direction: column;
+  background: var(--studio-popover);
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  overflow: hidden;
+}
+
+.palette-input {
+  flex: none;
+  margin: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-callout);
+}
+
+.palette-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 4px 4px;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.palette-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-callout);
+  cursor: default;
+}
+
+.palette-row.active {
+  background: var(--sel);
+}
+
+.palette-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--muted);
+}
+
+.palette-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-match {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.palette-path {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--text-footnote);
+}
+
+.palette-hint {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption);
+  color: var(--muted);
+}
+
+.palette-empty {
+  padding: 8px 12px 12px;
+  color: var(--muted);
+  font-size: var(--text-callout);
+}
