@@ -2,12 +2,17 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Value } from '../../bindings';
 import {
   MAX_COL_WIDTH,
+  MAX_COPY_CELLS,
+  MEMORY_WARNING_ROWS,
   MIN_COL_WIDTH,
+  cellView,
   charsForWidth,
+  copyText,
+  currentStatement,
   fitCellText,
   fitColumnWidth,
-  noLigatures,
-  MAX_COPY_CELLS, MEMORY_WARNING_ROWS, cellView, copyText, currentStatement, truncateText } from './format';
+  truncateText,
+} from './format';
 
 describe('column fitting', () => {
   it('fits_header_and_is_clamped', () => {
@@ -38,11 +43,6 @@ describe('column fitting', () => {
     expect(fitCellText(v, 5)).toBe('(3000 bytes)');
   });
 
-  it('splits_ligature_pairs', () => {
-    expect(noLigatures('a >= 0')).toBe('a >‌= 0');
-    expect(noLigatures('plain text')).toBe('plain text');
-    expect(noLigatures('1234')).toBe('1234');
-  });
 });
 
 describe('cellView', () => {

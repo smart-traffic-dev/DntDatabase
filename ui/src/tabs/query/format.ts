@@ -109,11 +109,6 @@ export function fitCellText(view: CellView, max: number): string {
   return truncateText(text, Math.max(0, max - 1));
 }
 
-// Programming ligatures of the mono font (`>=` drawn as `≥`) mislead in SQL; the canvas has no
-// font-feature control, so a zero-width non-joiner splits the pair.
-const LIGATURE = /([<>=!\-+*/|&:.#~])(?=[<>=!\-+*/|&:.#~>])/g;
-export const noLigatures = (text: string) => text.replace(LIGATURE, '$1‌');
-
 /** The text of a cell as copied (computed only when copying): tabs and line breaks become spaces. */
 export function copyText(v: Value): string {
   const text = v.t === 'Json' ? collapse(v.v) : cellView(v).text;

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ResultSet } from '../../store/queryRun';
-import { initialWidths, selectionCells, tooLargeMessage } from './ResultGrid';
+import { initialWidths, overridesFor, withResize, selectionCells, tooLargeMessage } from './ResultGrid';
 
 const result: ResultSet = {
   id: 1,
@@ -24,6 +24,17 @@ describe('initialWidths', () => {
     const [a, b] = initialWidths(wide);
     expect(a).toBeGreaterThanOrEqual(19 * 7.9);
     expect(b).toBe(60);
+  });
+});
+
+describe('resize overrides', () => {
+  it('kept_for_the_result_and_reset_for_a_new_one', () => {
+    const r = withResize({ cols: result.columns, w: {} }, result.columns, 1, 250);
+    expect(overridesFor(r, result.columns)).toEqual({ 1: 250 });
+    expect(withResize(r, result.columns, 0, 10).w).toEqual({ 0: 60, 1: 250 });
+    const other = [...result.columns];
+    expect(overridesFor(r, other)).toEqual({});
+    expect(withResize(r, other, 0, 100).w).toEqual({ 0: 100 });
   });
 });
 

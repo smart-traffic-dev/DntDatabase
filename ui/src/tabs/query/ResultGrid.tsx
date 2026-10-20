@@ -20,14 +20,28 @@ import {
   copyText,
   fitCellText,
   fitColumnWidth,
-  noLigatures,
 } from './format';
 
 const ROW_HEIGHT = 28;
 const HEADER_HEIGHT = 44;
+/** Cascadia Mono, not Code: the grid draws on a canvas and Code's ligatures would render >= as a single glyph. */
+const GRID_FONT = "'Cascadia Mono', Consolas, 'SF Mono', Menlo, 'DejaVu Sans Mono', monospace";
+
+type Resized = { cols: ResultSet['columns']; w: Record<number, number> };
 const NO_OVERRIDES: Record<number, number> = {};
 
 /** Initial column widths: header plus the first rows of the first chunk (no per-paint work). */
+/** The widths the user set for this result (a new result has none). */
+export function overridesFor(r: Resized, cols: ResultSet['columns']): Record<number, number> {
+  return r.cols === cols ? r.w : NO_OVERRIDES;
+}
+
+/** `prev` with column `index` of the result `cols` set to `size` (clamped). */
+export function withResize(prev: Resized, cols: ResultSet['columns'], index: number, size: number): Resized {
+  const w = Math.max(MIN_COL_WIDTH, Math.min(size, 2000));
+  return { cols, w: { ...overridesFor(prev, cols), [index]: w } };
+}
+
 export function initialWidths(result: ResultSet): number[] {
   const rows = result.chunks[0] ?? [];
   const n = Math.min(rows.length, FIT_SAMPLE_ROWS);
@@ -83,7 +97,7 @@ function buildTheme(): { theme: Partial<Theme>; nullStyle: Partial<Theme> } {
       textMedium: muted,
       textHeader: cssVar('--text', '#1b1f24'),
       borderColor: cssVar('--border', '#dcdfe4'),
-      fontFamily: cssVar('--font-mono', 'ui-monospace, monospace'),
+      fontFamily: GRID_FONT,
       textLight: muted,
       markerFontStyle: '11px',
       baseFontStyle: '13px',
@@ -126,10 +140,12 @@ export function ResultGrid({ result }: { result: ResultSet }) {
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
   const { theme, nullStyle } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
   const [notice, setNotice] = useState<string | null>(null);
-  const fitted = useMemo(() => initialWidths(result), [result.columns]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Re-fitted once when the first rows arrive (columns can come before rows), never per rows event.
+  const hasRows = (result.chunks[0]?.length ?? 0) > 0;
+  const fitted = useMemo(() => initialWidths(result), [result.columns, hasRows]); // eslint-disable-line react-hooks/exhaustive-deps
   // User-resized widths belong to one result: a new result starts from the fitted widths.
-  const [resized, setResized] = useState<{ cols: ResultSet['columns']; w: Record<number, number> }>({ cols: result.columns, w: {} });
-  const overrides = resized.cols === result.columns ? resized.w : NO_OVERRIDES;
+  const [resized, setResized] = useState<Resized>({ cols: result.columns, w: {} });
+  const overrides = overridesFor(resized, result.columns);
   const widths = useMemo(() => fitted.map((w, i) => overrides[i] ?? w), [fitted, overrides]);
   const columns = useMemo<GridColumn[]>(
     () => result.columns.map((c, i) => ({ id: String(i), title: c.name, width: widths[i] ?? MIN_COL_WIDTH })),
@@ -137,8 +153,7 @@ export function ResultGrid({ result }: { result: ResultSet }) {
   );
   const onColumnResize = useCallback(
     (_col: GridColumn, newSize: number, index: number) => {
-      const w = Math.max(MIN_COL_WIDTH, Math.min(newSize, 2000));
-      setResized((prev) => ({ cols: result.columns, w: { ...(prev.cols === result.columns ? prev.w : {}), [index]: w } }));
+      setResized((prev) => withResize(prev, result.columns, index, newSize));
     },
     [result.columns],
   );
@@ -171,7 +186,7 @@ export function ResultGrid({ result }: { result: ResultSet }) {
       return {
         kind: GridCellKind.Text,
         data: view.text,
-        displayData: noLigatures(fitCellText(view, max).replace(/\s+/g, ' ')),
+        displayData: fitCellText(view, max).replace(/\s+/g, ' '),
         allowOverlay: true, // read-only overlay shows the full value
         readonly: true,
         // A clipped number keeps its leading digits (left side) and gets an ellipsis.
