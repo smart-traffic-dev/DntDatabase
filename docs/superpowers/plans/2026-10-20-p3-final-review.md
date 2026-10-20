@@ -24,6 +24,9 @@ The two Rust totals are equal because the DB tests count as passed in both runs.
 
 ### Smoke E2E notes
 
+- Cleanup is guaranteed: an `after` hook drops this run's own `p3_smoke_<uuid8>` with `DROP TABLE IF EXISTS` through
+  `docker exec` of the container's `mysql`/`psql` client, independent of the UI. Checked by forcing a failure right after
+  the table was created: no table was left on MySQL 8 or PG 17.
 - New scenario `e2e/data-edit.e2e.ts`, registered in `e2e/wdio.conf.ts`. Per engine it creates a Local-environment
   connection, creates `p3_smoke_<uuid8>` (`id INT PRIMARY KEY, label VARCHAR(40)`, one row `before`) from a query tab,
   opens the table's Data tab, edits `label` to `after`, reviews the real `UPDATE` in the dialog, Confirms, reads the row

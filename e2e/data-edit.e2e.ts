@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { $, $$, browser, expect } from '@wdio/globals';
 import { evidence } from './evidence';
@@ -23,6 +24,24 @@ const engines: Engine[] = [
     schemaPath: ['dnt_fixture', 'public'],
   },
 ];
+
+/**
+ * Drops one scratch table straight in the database server (docker exec of the test container's own client,
+ * same root/postgres credentials as the connections above; no Node DB client is among the e2e dependencies),
+ * so it works when the UI is in a bad state. The name is this run's own `p3_smoke_<8 hex>`; nothing else is touched.
+ */
+function dropScratch(engine: ConnOpts['engine'], table: string) {
+  if (!/^p3_smoke_[0-9a-f]{8}$/.test(table)) throw new Error(`refusing to drop ${table}`);
+  const args =
+    engine === 'postgres'
+      ? ['exec', 'dnt-test-pg17-1', 'psql', '-U', 'postgres', '-d', 'dnt_fixture', '-c', `DROP TABLE IF EXISTS public.${table}`]
+      : ['exec', 'dnt-test-mysql8-1', 'mysql', '-uroot', '-pdnt_test', '-e', `DROP TABLE IF EXISTS dnt_fixture.${table}`];
+  try {
+    execFileSync('docker', args, { stdio: 'ignore' });
+  } catch (err) {
+    console.warn(`e2e cleanup: could not drop ${table}: ${(err as Error).message}`);
+  }
+}
 
 const OTHER_CONNECTIONS = ['e2e-mysql8', 'e2e-pg17', 'e2e-q-mysql8', 'e2e-q-pg17', 'e2e-d-mysql8', 'e2e-d-pg17'];
 
@@ -63,6 +82,9 @@ async function expectRows(sql: string, count: number) {
 for (const e of engines) {
   describe(`DntDatabase data editing (${e.conn.name})`, () => {
     const table = `p3_smoke_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+
+    // Whatever step fails, this run's scratch table (and only it) is dropped, without the UI.
+    after(() => dropScratch(e.conn.engine, table));
 
     it('edits a cell in the Data tab, applies it, reads it back and drops the scratch table', async () => {
       // Earlier specs left their connections in the tree: collapse them so `dnt_fixture` is unambiguous.
