@@ -303,11 +303,14 @@ fn cut(s: &mut String, max: usize) -> bool {
     true
 }
 
-/// `v` with long text cut to `max` bytes; whether anything was cut.
+/// `v` with long text cut to `max` bytes; whether the cell is now incomplete: text was
+/// cut here, or a binary value came from the driver as a shorter preview (rule 8: a
+/// cell that is not whole is never written from).
 fn truncate_cell(v: &mut Value, max: usize) -> bool {
     match v {
         Value::Text(s) | Value::Json(s) => cut(s, max),
         Value::Other { text, .. } => cut(text, max),
+        Value::Bytes { preview, len } => (preview.len() as u64) < *len,
         // Every item is cut (no short circuit).
         Value::Array(items) => {
             items
@@ -893,6 +896,34 @@ mod tests {
         assert!(page.capped);
         assert_eq!(page.truncated, [(0, 0)]);
         assert_eq!(page.truncated_cells, 1);
+    }
+
+    #[test]
+    fn bounded_page_records_binary_previews_as_truncated() {
+        let mut page = BoundedPage::new(100, 1_000_000);
+        page.result_start(&[]);
+        page.rows(vec![vec![
+            Value::Int(1),
+            // A 1000-byte value delivered as its 64-byte preview.
+            Value::Bytes {
+                len: 1000,
+                preview: vec![7; 64],
+            },
+            // A whole small value is not cut.
+            Value::Bytes {
+                len: 3,
+                preview: vec![1, 2, 3],
+            },
+            Value::Array(vec![
+                Value::Int(1),
+                Value::Bytes {
+                    len: 500,
+                    preview: vec![0; 64],
+                },
+            ]),
+        ]]);
+        assert_eq!(page.truncated, [(0, 1), (0, 3)]);
+        assert_eq!(page.truncated_cells, 2);
     }
 
     #[test]
