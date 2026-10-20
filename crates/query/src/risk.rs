@@ -19,6 +19,12 @@
 //!
 //! ("setting": Confirm while "Confirm UPDATE/DELETE without WHERE" is on.) A read-only
 //! connection blocks all of them whatever the tag.
+//!
+//! Known limits (as in [`crate::unbounded`]): dynamic and compound SQL is not inspected
+//! for `DROP`s: PostgreSQL `DO $$ … $$` blocks and function bodies, PL/pgSQL
+//! `EXECUTE '…'`, MySQL `PREPARE … FROM '…'` / `EXECUTE`, routine, trigger and event
+//! bodies, MariaDB `BEGIN NOT ATOMIC … END`, and whatever a `CALL` runs. Such
+//! statements keep only their ordinary guard verdict.
 
 use dnt_core::sql::{readings, resplit_reading, resplits, tokenize, Dialect, TokKind, Token};
 use dnt_core::value::Value;

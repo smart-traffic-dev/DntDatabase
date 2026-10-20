@@ -460,6 +460,19 @@ async fn estimate_on_staging_delete() {
         ] {
             if in_tx {
                 run_all(&state, "t1", id, "BEGIN").await;
+                // Nothing has read in the transaction yet: no estimate (it would take
+                // the transaction's first snapshot).
+                let view = state
+                    .sessions
+                    .query_plan("t1", id, None, &text, Pick::All)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    view.stmts[0].estimate,
+                    Some(dnt_query::RowEstimate::Unavailable),
+                    "{t:?}"
+                );
+                run_all(&state, "t1", id, "SELECT 1").await;
             }
             let view = state
                 .sessions

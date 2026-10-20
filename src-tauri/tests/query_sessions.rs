@@ -65,6 +65,8 @@ struct Log {
     cancel_calls: AtomicUsize,
     /// Set once a `FLAKY` statement lost its connection (the next one succeeds).
     flaked: AtomicBool,
+    /// While set, `ROLLBACK TO SAVEPOINT …` fails with a server error.
+    fail_rollback_to: AtomicBool,
 }
 
 impl Log {
@@ -245,6 +247,16 @@ impl Session for FakeSession {
             };
             sink.result_end(&summary);
             return ok(summary);
+        }
+        if upper.starts_with("ROLLBACK TO SAVEPOINT")
+            && self.log.fail_rollback_to.load(Ordering::SeqCst)
+        {
+            return Err(DbError::Server {
+                code: None,
+                sqlstate: Some("3B001".into()),
+                message: "savepoint does not exist".into(),
+                position: None,
+            });
         }
         // Row estimates (`EXPLAIN DELETE …` / `EXPLAIN (FORMAT JSON) UPDATE …`).
         let estimate = [
@@ -722,7 +734,11 @@ async fn unbounded_setting_turned_off_between_plan_and_run() {
             .await
             .unwrap_err();
     assert_eq!(kind(err), "confirmation_required");
-    assert_eq!(not_explain(&f), ["DELETE FROM t"]);
+    // Only the Production plan's row estimate was sent after the Local run.
+    assert_eq!(
+        f.log.executed(),
+        ["DELETE FROM t", "EXPLAIN DELETE FROM orders"]
+    );
 }
 
 #[tokio::test]
@@ -837,14 +853,6 @@ async fn run_named(f: &Fixture, id: Uuid, names: &[&str]) -> Result<(), String> 
     }
 }
 
-fn not_explain(f: &Fixture) -> Vec<String> {
-    f.log
-        .executed()
-        .into_iter()
-        .filter(|s| !s.starts_with("EXPLAIN"))
-        .collect()
-}
-
 #[tokio::test]
 async fn wrong_typed_name_is_rejected() {
     let f = fixture(DbKind::MySql);
@@ -888,15 +896,17 @@ async fn wrong_typed_name_is_rejected() {
             .await
             .unwrap_err();
     assert_eq!(kind(err), "confirmation_required");
-    assert!(not_explain(&f).is_empty());
+    // Only the row estimate of planning was sent.
+    assert_eq!(f.log.executed(), ["EXPLAIN DELETE FROM orders"]);
 
     // Every name, in any order: it runs.
     run_named(&f, view.plan_id, &["Audit", "orders"])
         .await
         .unwrap();
     assert_eq!(
-        not_explain(&f),
+        f.log.executed(),
         [
+            "EXPLAIN DELETE FROM orders",
             "SELECT 1",
             "DELETE FROM orders",
             "DROP TABLE IF EXISTS `Audit`"
@@ -950,7 +960,8 @@ async fn typed_names_follow_the_current_config() {
         "confirmation_required"
     );
     run_named(&f, view.plan_id, &["orders"]).await.unwrap();
-    assert_eq!(not_explain(&f), ["DELETE FROM orders"]);
+    // Planned on Local: no row estimate was sent.
+    assert_eq!(f.log.executed(), ["DELETE FROM orders"]);
 }
 
 #[tokio::test]
@@ -1072,6 +1083,130 @@ async fn pg_estimates_keep_the_transaction() {
     assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Unavailable));
     assert_eq!(view.tx_state, TxState::Aborted);
     assert!(f.log.executed().is_empty());
+}
+
+/// An estimate runs in the session as it is before the script: after anything but a
+/// plain read earlier in the plan (`USE`, `SET`, a write, …) it is not sent.
+#[tokio::test]
+async fn estimates_skip_after_an_earlier_session_change() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Staging), false).await;
+    for text in [
+        "USE x; DELETE FROM t",
+        "SET @a = 1; DELETE FROM t",
+        "INSERT INTO u VALUES (1); DELETE FROM t",
+        "BEGIN; DELETE FROM t",
+        "DELETE FROM u; DELETE FROM t",
+    ] {
+        f.log.executed.lock().unwrap().clear();
+        let view = plan(&f, "t1", id, None, text).await.unwrap();
+        assert_eq!(
+            view.stmts[1].estimate,
+            Some(RowEstimate::Unavailable),
+            "{text}"
+        );
+        let sent: Vec<String> = f.log.executed();
+        assert!(
+            !sent.iter().any(|s| s == "EXPLAIN DELETE FROM t"),
+            "{text}: {sent:?}"
+        );
+    }
+    // Plain reads before it do not stop it.
+    f.log.executed.lock().unwrap().clear();
+    let view = plan(&f, "t1", id, None, "SELECT 1; DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[1].estimate, Some(RowEstimate::Rows { n: 42.0 }));
+    assert_eq!(f.log.executed(), ["EXPLAIN DELETE FROM orders"]);
+}
+
+/// PostgreSQL: a transaction just opened has no snapshot yet; an estimate must not take
+/// it (a later `SET TRANSACTION` would fail). Once something read in it, estimates run
+/// under a savepoint.
+#[tokio::test]
+async fn pg_fresh_transaction_is_not_explained() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(
+        &f,
+        ConnectionConfig {
+            env_tag: Some(EnvTag::Production),
+            ..config(DbKind::Postgres)
+        },
+    )
+    .await;
+    let view = plan(&f, "t1", id, None, "BEGIN").await.unwrap();
+    run_named(&f, view.plan_id, &[]).await.unwrap();
+    f.log.set_tx(TxState::Active);
+    f.log.executed.lock().unwrap().clear();
+
+    for text in [
+        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE; DELETE FROM t",
+        "DELETE FROM t",
+    ] {
+        let view = plan(&f, "t1", id, None, text).await.unwrap();
+        let last = view.stmts.last().unwrap();
+        assert_eq!(last.estimate, Some(RowEstimate::Unavailable), "{text}");
+        assert_eq!(view.tx_state, TxState::Active);
+        assert!(
+            f.log.executed().is_empty(),
+            "{text}: {:?}",
+            f.log.executed()
+        );
+    }
+
+    // A read in the transaction takes its snapshot: estimates run again.
+    let view = plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    run_named(&f, view.plan_id, &[]).await.unwrap();
+    f.log.executed.lock().unwrap().clear();
+    let view = plan(&f, "t1", id, None, "DELETE FROM t").await.unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Rows { n: 321.0 }));
+    assert_eq!(
+        f.log.executed(),
+        [
+            "SAVEPOINT dnt_row_estimate",
+            "EXPLAIN (FORMAT JSON) DELETE FROM t",
+            "RELEASE SAVEPOINT dnt_row_estimate",
+        ]
+    );
+}
+
+/// A savepoint that cannot be rolled back to leaves the transaction aborted: planning
+/// fails with the server's error instead of going on.
+#[tokio::test]
+async fn failed_savepoint_rollback_fails_the_plan() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(
+        &f,
+        ConnectionConfig {
+            env_tag: Some(EnvTag::Staging),
+            ..config(DbKind::Postgres)
+        },
+    )
+    .await;
+    // A session exists and its transaction has been used (not fresh).
+    plan(&f, "t1", id, None, "SELECT 1").await.unwrap();
+    f.log.set_tx(TxState::Active);
+    f.log.fail_rollback_to.store(true, Ordering::SeqCst);
+    let err = plan(&f, "t1", id, None, "DELETE FROM fail_t")
+        .await
+        .unwrap_err();
+    let app = AppError::from(err);
+    assert_eq!(app.kind, "server", "{app:?}");
+    assert!(app.message.contains("may now be aborted"), "{app:?}");
+    assert_eq!(
+        f.log.executed(),
+        [
+            "SAVEPOINT dnt_row_estimate",
+            "EXPLAIN (FORMAT JSON) DELETE FROM fail_t",
+            "ROLLBACK TO SAVEPOINT dnt_row_estimate",
+        ]
+    );
+    // Without the failure the plan goes on, the estimate unavailable.
+    f.log.fail_rollback_to.store(false, Ordering::SeqCst);
+    let view = plan(&f, "t1", id, None, "DELETE FROM fail_t")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Unavailable));
 }
 
 #[tokio::test]
@@ -1691,7 +1826,8 @@ async fn run_without_confirmation_is_refused_on_production() {
         "{err:?}"
     );
     // Only the row estimates of planning were sent.
-    assert!(not_explain(&f).is_empty(), "execute_one is never called");
+    // Only the DELETE's row estimate was sent (the UPDATE comes after a write).
+    assert_eq!(f.log.executed(), ["EXPLAIN DELETE FROM t"]);
     assert!(events.list().is_empty());
     // Confirmed without the typed table name: still refused.
     let err =
@@ -1707,7 +1843,7 @@ async fn run_without_confirmation_is_refused_on_production() {
         .await
         .unwrap();
     events.done(LONG).await;
-    assert_eq!(not_explain(&f).len(), 3);
+    assert_eq!(f.log.executed().len(), 4);
 }
 
 #[tokio::test]

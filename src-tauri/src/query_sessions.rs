@@ -185,6 +185,33 @@ pub struct TabSession {
     /// Set once the slot was closed (tab or connection closed): a caller that was
     /// waiting for it must get a fresh slot instead.
     pub(crate) closed: bool,
+    /// Meaningful while the session's transaction is open: nothing has read or written
+    /// in it since it began, so its first snapshot may not be taken yet (row estimates
+    /// must not take it). Set by a run whose last transaction-control statement came
+    /// after its last read / write / DDL; cleared by a read, write or DDL that succeeded
+    /// (a run, an export). See [`tx_fresh_after`].
+    pub(crate) tx_fresh: bool,
+}
+
+/// [`TabSession::tx_fresh`] after a run of `plan` that sent `report.stmts`, from
+/// `fresh` before it: transaction control (`BEGIN`, `COMMIT AND CHAIN`, …) starts a
+/// fresh transaction, a read / write / DDL that succeeded uses it, anything else
+/// (`SET`, `SAVEPOINT`, a failure) keeps it as it was. Errs towards fresh: a fresh
+/// transaction only costs a row estimate.
+fn tx_fresh_after(mut fresh: bool, plan: &ScriptPlan, report: &RunReport) -> bool {
+    for r in &report.stmts {
+        let Some(s) = plan.stmts.iter().find(|s| s.index == r.index) else {
+            continue;
+        };
+        match s.kind {
+            StatementKind::Transaction(_) => fresh = true,
+            StatementKind::Read | StatementKind::Write | StatementKind::Ddl if r.result.is_ok() => {
+                fresh = false
+            }
+            _ => {}
+        }
+    }
+    fresh
 }
 
 impl TabSession {
@@ -338,17 +365,26 @@ async fn explain_estimate(
     table: Option<&str>,
     savepoint: bool,
     grace: Duration,
-) -> Result<RowEstimate, DbError> {
+) -> Result<RowEstimate, EstimateError> {
     let bound = ESTIMATE_TIMEOUT + grace + Duration::from_secs(1);
     let attempt = explain_estimate_once(session, sql, dialect, table, savepoint, grace);
     match tokio::time::timeout(bound, attempt).await {
         Ok(r) => r,
-        Err(_) => Err(DbError::ConnectionLost {
+        Err(_) => Err(EstimateError::Lost(DbError::ConnectionLost {
             was_in_tx: false,
             outcome_unknown: false,
             message: "a row estimate did not stop; the session was dropped".into(),
-        }),
+        })),
     }
+}
+
+/// Why a row estimate left the session in a state the caller must act on.
+enum EstimateError {
+    /// The connection was lost (or the explain never stopped): drop the session.
+    Lost(DbError),
+    /// A savepoint statement failed (the connection is fine): the user's PostgreSQL
+    /// transaction may now be aborted, so planning must fail with this error.
+    Savepoint(DbError),
 }
 
 async fn explain_estimate_once(
@@ -358,18 +394,15 @@ async fn explain_estimate_once(
     table: Option<&str>,
     savepoint: bool,
     grace: Duration,
-) -> Result<RowEstimate, DbError> {
-    // Only a lost connection is the caller's business.
-    let quiet = |r: Result<(), DbError>| match r {
-        Err(e) if is_lost(&e) => Err(e),
-        Err(e) => {
-            tracing::debug!(error = %e, "a row estimate statement failed");
-            Ok(false)
-        }
-        Ok(()) => Ok(true),
+) -> Result<RowEstimate, EstimateError> {
+    // The savepoint statements must work: any failure leaves the transaction aborted.
+    let guarded = |r: Result<(), DbError>| match r {
+        Err(e) if is_lost(&e) => Err(EstimateError::Lost(e)),
+        Err(e) => Err(EstimateError::Savepoint(e)),
+        Ok(()) => Ok(()),
     };
-    if savepoint && !quiet(execute_quietly(session, ESTIMATE_SAVEPOINT).await)? {
-        return Ok(RowEstimate::Unavailable);
+    if savepoint {
+        guarded(execute_quietly(session, ESTIMATE_SAVEPOINT).await)?;
     }
     let opts = ExecOptions {
         max_rows: 1_000,
@@ -382,12 +415,20 @@ async fn explain_estimate_once(
         .execute_one(sql, classify(sql, dialect), &opts, &mut sink)
         .await
         .map(|_| ());
-    let ok = quiet(ran)?;
+    // A failed explain is only `Unavailable`, unless the connection went with it.
+    let ok = match ran {
+        Err(e) if is_lost(&e) => return Err(EstimateError::Lost(e)),
+        Err(e) => {
+            tracing::debug!(error = %e, "a row estimate failed");
+            false
+        }
+        Ok(()) => true,
+    };
     if savepoint {
         if !ok {
-            quiet(execute_quietly(session, ESTIMATE_ROLLBACK).await)?;
+            guarded(execute_quietly(session, ESTIMATE_ROLLBACK).await)?;
         }
-        quiet(execute_quietly(session, ESTIMATE_RELEASE).await)?;
+        guarded(execute_quietly(session, ESTIMATE_RELEASE).await)?;
     }
     Ok(if ok {
         parse_estimate(dialect, &sink.columns, &sink.rows, table)
@@ -840,16 +881,28 @@ impl SessionManager {
     /// `planned` that is not blocked and holds an unbounded `UPDATE` / `DELETE`, runs
     /// `EXPLAIN` (never `ANALYZE`: nothing executes) with [`ESTIMATE_TIMEOUT`] and stores
     /// what it says in `estimate`. Best-effort: a statement that cannot be explained
-    /// safely ([`estimate_sql`]), a failed or timed-out explain, an aborted transaction
-    /// (nothing is sent then) and every statement past [`MAX_ESTIMATES`] are
-    /// `Unavailable`.
+    /// safely ([`estimate_sql`]), a failed or timed-out explain and every statement past
+    /// [`MAX_ESTIMATES`] are `Unavailable`. Nothing is sent (`Unavailable`) when:
+    ///
+    /// - an earlier statement of the plan is not a plain read: the explain runs in the
+    ///   session as it is BEFORE the script, so a `USE other_db`, `SET search_path`,
+    ///   DDL, write or transaction control earlier in the script could make it estimate
+    ///   another table (or see other rows), a confident wrong number;
+    /// - the tab's transaction is aborted;
+    /// - the tab's transaction is open but nothing has read or written in it yet
+    ///   ([`TabSession::tx_fresh`]): the explain would take the transaction's first
+    ///   snapshot, changing what a REPEATABLE READ / SERIALIZABLE transaction sees and
+    ///   making a later `SET TRANSACTION` fail. (A `SET TRANSACTION` in the same plan is
+    ///   covered by the first rule.)
     ///
     /// The tab's transaction state is kept: an explain does not change it on MySQL, and
     /// inside an open PostgreSQL transaction it runs under a savepoint, rolled back to
-    /// when it fails (a failure would abort the transaction otherwise).
+    /// when it fails (a failure would abort the transaction otherwise). Should a
+    /// savepoint statement itself fail, the transaction may be aborted: planning fails
+    /// with that server error.
     ///
-    /// Only a lost connection (or an explain that does not stop after its timeout and
-    /// grace) is an error: the session is dropped as after a run. Outside a transaction
+    /// A lost connection (or an explain that does not stop after its timeout and
+    /// grace) drops the session as after a run. Outside a transaction
     /// the tab keeps its binding and reopens on its next use, and planning goes on;
     /// inside one, `ConnectionLost { was_in_tx: true }` is returned (the server rolled
     /// the transaction back).
@@ -862,7 +915,12 @@ impl SessionManager {
     ) -> Result<(), DbError> {
         let dialect = planned.dialect;
         let mut done = 0usize;
+        // Whether every statement before this one is a plain read: only then is the
+        // session, as it is now, the one the statement will run in.
+        let mut reads_before = true;
         for s in &mut planned.stmts {
+            let clean = reads_before;
+            reads_before &= s.kind == StatementKind::Read;
             let flagged = s.verdict != Verdict::Block
                 && s.unbounded
                     .iter()
@@ -875,7 +933,12 @@ impl SessionManager {
                 continue;
             };
             let state = session.tx_state();
-            if state == TxState::Aborted || done >= MAX_ESTIMATES {
+            // An earlier statement of the script (`USE`, `SET search_path`, DDL, a
+            // write, transaction control) may change what this one touches; and an
+            // EXPLAIN would take the first snapshot of a transaction nothing has read
+            // in yet.
+            let fresh_tx = state == TxState::Active && ts.tx_fresh;
+            if !clean || fresh_tx || state == TxState::Aborted || done >= MAX_ESTIMATES {
                 continue;
             }
             let Some(sql) = estimate_sql(&s.text, dialect) else {
@@ -895,7 +958,29 @@ impl SessionManager {
             .await
             {
                 Ok(estimate) => s.estimate = Some(estimate),
-                Err(e) => {
+                Err(EstimateError::Savepoint(e)) => {
+                    // The user's transaction may now be aborted: say so, never plan
+                    // on as if nothing happened.
+                    tracing::warn!(connection = %rt.cfg.id, error = %e, "a row estimate could not restore the transaction");
+                    return Err(match e {
+                        DbError::Server {
+                            code,
+                            sqlstate,
+                            message,
+                            ..
+                        } => DbError::Server {
+                            code,
+                            sqlstate,
+                            message: format!(
+                                "Estimating rows could not restore the open transaction, \
+                                 which may now be aborted: {message}"
+                            ),
+                            position: None,
+                        },
+                        other => other,
+                    });
+                }
+                Err(EstimateError::Lost(e)) => {
                     tracing::warn!(connection = %rt.cfg.id, error = %e, "a row estimate lost the tab's session");
                     let in_tx = state != TxState::Idle;
                     if let Some(dead) = ts.session.take() {
@@ -1459,6 +1544,10 @@ impl ExportRun {
         drop(registration);
         let (outcome, state) = match ran {
             Ok(Some((outcome, state))) => {
+                if outcome.is_ok() {
+                    // The export read in the tab's transaction.
+                    ts.tx_fresh = false;
+                }
                 let lost = outcome.as_ref().err().filter(|e| is_lost(e)).cloned();
                 if let Some(e) = lost {
                     // As after a run: the next use opens a fresh session.
@@ -1912,6 +2001,9 @@ impl RunTask {
             }
         } else if let Some(db) = &sink.use_db {
             ts.database = Some(db.clone());
+        }
+        if let Some(report) = report {
+            ts.tx_fresh = tx_fresh_after(ts.tx_fresh, &self.plan, report);
         }
         let current = self.rt.queries.is_slot(&self.tab, &self.slot);
         if self.rt.closed.load(Ordering::SeqCst) || !current || ts.closed {
