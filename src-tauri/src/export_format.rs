@@ -7,7 +7,7 @@
 //!
 //! - NULL: an empty unquoted CSV field (an empty string is always `""`), JSON `null`, an
 //!   empty Excel cell, SQL `NULL`, Markdown `NULL`.
-//! - Binary: hex, `0x…` in text formats; `X'…'` (MySQL) / `'\x…'::bytea` (PostgreSQL) in
+//! - Binary: hex, `0x…` in text formats; `X'…'` (MySQL) / `E'\\x…'::bytea` (PostgreSQL) in
 //!   SQL. A binary value the UI only holds a preview of (the loaded rows: its first 64
 //!   bytes) is never written as if it were whole: it becomes `NULL` (SQL, JSON) or an
 //!   empty cell (CSV, Excel, Markdown) and is counted ([`Written::partial_binaries`]).
@@ -558,8 +558,10 @@ fn pg_bytea_array(items: &[Value]) -> String {
 
 /// A MySQL geometry value (its internal form in hex) as a binary literal.
 fn mysql_geometry(text: &str) -> Option<String> {
-    (!text.is_empty() && text.len() % 2 == 0 && text.bytes().all(|c| c.is_ascii_hexdigit()))
-        .then(|| format!("X'{text}'"))
+    (!text.is_empty()
+        && text.len().is_multiple_of(2)
+        && text.bytes().all(|c| c.is_ascii_hexdigit()))
+    .then(|| format!("X'{text}'"))
 }
 
 /// The SQL literal of a value for `kind`.
@@ -576,7 +578,8 @@ pub fn sql_literal(kind: DbKind, v: &Value) -> String {
         Value::Decimal(s) if is_sql_number(s) => s.clone(),
         Value::Bytes { preview, .. } => match kind {
             DbKind::MySql => format!("X'{}'", hex(preview)),
-            DbKind::Postgres => format!("'\\x{}'::bytea", hex(preview)),
+            // An escape string, so `standard_conforming_strings = off` reads it the same.
+            DbKind::Postgres => format!("E'\\\\x{}'::bytea", hex(preview)),
         },
         Value::Array(items) if kind == DbKind::Postgres && has_bytes(items) => {
             format!("{}::bytea[]", pg_bytea_array(items))
@@ -1373,7 +1376,7 @@ mod tests {
             text.starts_with("INSERT INTO \"we`ird\"\"t\" (\"id\", \"name\", \"blob\", \"at\")"),
             "{text}"
         );
-        assert!(text.contains("'\\xdead'::bytea"), "{text}");
+        assert!(text.contains("E'\\\\xdead'::bytea"), "{text}");
         let empty = ExportOptions {
             table_name: "  ".into(),
             ..opts(ExportFormat::Sql)
@@ -1397,14 +1400,14 @@ mod tests {
         assert_eq!(my(Value::Text("a\0b".into())), "_utf8mb4 X'610062'");
         assert_eq!(my(Value::Text("é".into())), "'é'");
         // bytea and bytea[].
-        assert_eq!(pg(Value::bytes(&[0xde, 0xad])), "'\\xdead'::bytea");
+        assert_eq!(pg(Value::bytes(&[0xde, 0xad])), "E'\\\\xdead'::bytea");
         assert_eq!(
             pg(Value::Array(vec![
                 Value::bytes(&[1]),
                 Value::Null,
                 Value::Array(vec![Value::bytes(&[2])])
             ])),
-            "ARRAY['\\x01'::bytea, NULL, ARRAY['\\x02'::bytea]]::bytea[]"
+            "ARRAY[E'\\\\x01'::bytea, NULL, ARRAY[E'\\\\x02'::bytea]]::bytea[]"
         );
         // MySQL geometry (its internal form, hex) as a binary literal.
         let geo = |text: &str| Value::Other {

@@ -16,6 +16,8 @@
 //! - A run (`query_run`) is a task that holds the tab's slot until it ends and streams
 //!   [`RunEvent`]s; `query_cancel`, closing the tab and closing the connection stop it
 //!   (the run still ends with `done`).
+//! - An export of all rows of a result (`query_export`) runs its statement again on the
+//!   tab's session as a run of the tab (no events: its rows go to a file).
 
 use crate::run_events::{
     tick_rows, ChannelSink, EventSink, HistoryCtx, RunEvent, RunFlags, RunOptions,
@@ -32,8 +34,8 @@ use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    explain_sql, guard, plan, run, ExplainFormat, RunCancel, RunReport, ScriptPlan, StmtKindLabel,
-    StopReason, Target, Verdict,
+    explain_sql, guard, plan, run, ExplainFormat, PlannedStmt, RunCancel, RunReport, ScriptPlan,
+    StmtKindLabel, StopReason, Target, Verdict,
 };
 use dnt_store::repo::ConnectionRepo;
 use futures_util::FutureExt;
@@ -996,43 +998,204 @@ impl SessionManager {
         self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 
-    /// Export of all rows: statement `index` of plan `plan_id` (taken or not), to be
-    /// read again on a data session: `(connection, database, text)`. Only a statement
-    /// the planner classified as a read (one statement for the server, not an Explain)
-    /// and the guard allows with the connection's current config (no confirmation
-    /// needed) qualifies; anything else is a `config` error (field `scope`): export the
-    /// loaded rows instead. `PlanExpired` as for [`Self::query_plan_statement`].
-    pub fn export_statement(
+    /// The engine of plan `plan_id`'s connection (an export's SQL format needs it before
+    /// anything runs). `PlanExpired` as for [`Self::query_plan_statement`].
+    pub fn plan_kind(&self, plan_id: Uuid) -> Result<DbKind, DbError> {
+        let current = |t: &PlanTarget| self.plan_target_current(t);
+        let (_, conn) = self.plans.locate(self.plan_ttl, plan_id, &current)?;
+        Ok(self.runtime(conn)?.cfg.kind)
+    }
+
+    /// Export of all rows: runs statement `index` of plan `plan_id` (taken or not) again
+    /// ON THE TAB'S OWN SESSION, as Fetch all does, streaming every row (binary values
+    /// whole, no row limit, no statement timeout) into `sink` instead of the grid. The
+    /// session keeps what the user's result was read under: `sql_mode` (so the dialect
+    /// the plan was split with is the server's), user variables, `search_path`, role,
+    /// temporary tables and the open transaction.
+    ///
+    /// - Only while the tab is idle: a tab that is running (or planning) is refused at
+    ///   once with a `config` error (field `tab`), never queued.
+    /// - Only a statement the planner classified as a read (one statement for the
+    ///   server, not an Explain) that the guard allows with the connection's current
+    ///   config without confirmation; anything else is a `config` error (field `scope`):
+    ///   export the loaded rows instead.
+    /// - Right before it is sent, the statement is split, classified and judged again
+    ///   with the session's CURRENT dialect (a `SET sql_mode` since the plan): if it no
+    ///   longer is one allowed read, it is refused (field `scope`).
+    /// - While it runs it is a run of the tab under `run_id` (a fresh id from the UI):
+    ///   `query_cancel(run_id)`, closing the tab and closing the connection stop it,
+    ///   with a run's cancel grace. A write error of the sink is reported through
+    ///   `failed` (`Notify::notify_one`), which cancels the statement too.
+    ///
+    /// A failure comes with the session's transaction state after it (`None` when the
+    /// statement never ran), as `query_tx_reported` reports it.
+    pub async fn query_export(
         &self,
         plan_id: Uuid,
         index: u32,
-    ) -> Result<(Uuid, Option<String>, String), DbError> {
+        run_id: Uuid,
+        sink: &mut dyn RowSink,
+        failed: &tokio::sync::Notify,
+    ) -> Result<(), (DbError, Option<TxState>)> {
         let current = |t: &PlanTarget| self.plan_target_current(t);
-        let mut copy = self
+        let early = |e: DbError| (e, None);
+        let (tab, conn) = self
             .plans
-            .statement(self.plan_ttl, plan_id, index, &current)?;
-        let rt = self.runtime(copy.target.conn)?;
-        let cfg = self.current_config(&rt);
-        let not_read = || {
-            config_error(
-                "scope",
-                "Only the result of a read statement can be read again for export; \
-                 export the loaded rows instead.",
-            )
-        };
-        if copy.explain.is_some() || copy.plan.explain {
-            return Err(not_read());
-        }
-        guard(&mut copy.plan, cfg.env_tag, cfg.read_only, false);
-        let dialect = copy.plan.dialect;
-        let stmt = copy.plan.stmts.first().ok_or(DbError::PlanExpired)?;
-        if stmt.kind != StatementKind::Read
-            || stmt.verdict != Verdict::Allow
-            || dnt_core::sql::resplits(&stmt.text, dialect)
+            .locate(self.plan_ttl, plan_id, &current)
+            .map_err(early)?;
+        let rt = self.runtime(conn).map_err(early)?;
+        let slot = rt.queries.get(&tab).ok_or((DbError::PlanExpired, None))?;
+        let mut ts = Arc::clone(&slot).try_lock_owned().map_err(|_| {
+            early(config_error(
+                "tab",
+                "The tab is running a statement. Wait for it to finish (or stop it), \
+                 then export all rows.",
+            ))
+        })?;
+        let copy = self
+            .plans
+            .statement(self.plan_ttl, plan_id, index, &current)
+            .map_err(early)?;
+        if ts.closed || (ts.session.is_none() && !ts.reopen) || ts.database != copy.target.database
         {
-            return Err(not_read());
+            return Err(early(DbError::PlanExpired));
         }
-        Ok((copy.target.conn, copy.target.database, stmt.text.clone()))
+        let cfg = self.current_config(&rt);
+        let stmt = export_read(&copy, &cfg).map_err(early)?;
+        // A stale session is replaced; one dropped after a lost connection reopens.
+        if rt.is_stale(&ts) || ts.session.is_none() {
+            let ensured = rt
+                .ensure_tab_session(&mut ts, copy.target.database.clone())
+                .await;
+            rt.queries.sync_bound(&tab, &ts);
+            ensured.map_err(early)?;
+        }
+        let session = ts.session.as_deref().ok_or((DbError::PlanExpired, None))?;
+        still_one_read(&stmt, session.dialect(), &cfg).map_err(early)?;
+        if self.runs.get(run_id).is_some() {
+            return Err(early(config_error("run_id", "this run id is in use")));
+        }
+
+        let cancel = RunCancel::new(session.cancel_handle());
+        let finished = Arc::new(AtomicBool::new(false));
+        // An export has no event stream: its rows go to the file.
+        let emit: EventSink = Arc::new(|_| true);
+        self.runs.insert(
+            run_id,
+            RunEntry {
+                tab: tab.clone(),
+                conn,
+                cancel: cancel.clone(),
+                flags: Arc::new(RunFlags::default()),
+                emit,
+                finished: Arc::clone(&finished),
+            },
+        );
+        let exec = ExecOptions {
+            max_rows: usize::MAX,
+            batch_size: RUN_BATCH_SIZE,
+            timeout: None,
+            cancel_grace: self.cancel_grace,
+            stop: cancel.signal(),
+            full_bytes: true,
+            ..ExecOptions::default()
+        };
+        tracing::info!(connection = %conn, "export reads a query result again on its tab");
+        let outcome = {
+            let exec = std::pin::pin!(session.execute_one(&stmt.text, stmt.kind, &exec, sink));
+            let watch = std::pin::pin!(async {
+                failed.notified().await;
+                if let Err(e) = cancel.cancel().await {
+                    tracing::warn!(error = %e, "could not cancel an export");
+                }
+                std::future::pending::<()>().await
+            });
+            match futures_util::future::select(exec, watch).await {
+                futures_util::future::Either::Left((outcome, _)) => outcome,
+                futures_util::future::Either::Right(((), _)) => {
+                    unreachable!("the watcher never completes")
+                }
+            }
+        };
+        // No statement runs any more: from here on nothing may cancel the session.
+        finished.store(true, Ordering::SeqCst);
+        self.runs.remove(run_id);
+        let state = session.tx_state();
+        let lost = outcome.as_ref().err().filter(|e| is_lost(e)).cloned();
+        if let Some(e) = lost {
+            // As after a run: the next use opens a fresh session.
+            let in_tx = ts.tx_open();
+            if let Some(dead) = ts.session.take() {
+                close_quietly(dead).await;
+                ts.lost_tx = in_tx;
+                ts.reopen = !in_tx && AppError::from(e).retryable;
+            }
+        }
+        if rt.closed.load(Ordering::SeqCst) || !rt.queries.is_slot(&tab, &slot) || ts.closed {
+            // The tab or connection was closed while the export held the session.
+            ts.close().await;
+        } else {
+            rt.queries.sync_bound(&tab, &ts);
+        }
+        let state = if ts.session.is_some() {
+            state
+        } else {
+            TxState::Idle
+        };
+        outcome.map(|_| ()).map_err(|e| (e, Some(state)))
+    }
+}
+
+fn not_read() -> DbError {
+    config_error(
+        "scope",
+        "Only the result of a read statement can be read again for export; \
+         export the loaded rows instead.",
+    )
+}
+
+/// The statement of a one-statement plan copy an export may run again: a read (one
+/// statement for the server, not an Explain) the guard allows with `cfg` without
+/// confirmation.
+fn export_read(copy: &PlanCopy, cfg: &ConnectionConfig) -> Result<PlannedStmt, DbError> {
+    if copy.explain.is_some() || copy.plan.explain {
+        return Err(not_read());
+    }
+    let mut judged = copy.plan.clone();
+    guard(&mut judged, cfg.env_tag, cfg.read_only, false);
+    let dialect = judged.dialect;
+    let stmt = judged.stmts.first().ok_or(DbError::PlanExpired)?;
+    if stmt.kind != StatementKind::Read
+        || stmt.verdict != Verdict::Allow
+        || dnt_core::sql::resplits(&stmt.text, dialect)
+    {
+        return Err(not_read());
+    }
+    Ok(stmt.clone())
+}
+
+/// Defense in depth before an export sends `stmt`: split, classified and judged with
+/// the session's dialect `now` (its `sql_mode` may have changed since the plan), it
+/// must still be exactly one read the guard allows.
+fn still_one_read(stmt: &PlannedStmt, now: Dialect, cfg: &ConnectionConfig) -> Result<(), DbError> {
+    let mut again = plan(&stmt.text, Target::All, now);
+    guard(&mut again, cfg.env_tag, cfg.read_only, false);
+    let one_read = match again.stmts.as_slice() {
+        [only] => {
+            only.kind == StatementKind::Read
+                && only.verdict == Verdict::Allow
+                && !dnt_core::sql::resplits(&stmt.text, now)
+        }
+        _ => false,
+    };
+    if one_read {
+        Ok(())
+    } else {
+        Err(config_error(
+            "scope",
+            "The session's SQL mode changed since this result was read, and the statement \
+             now reads differently. Run it again, then export.",
+        ))
     }
 }
 

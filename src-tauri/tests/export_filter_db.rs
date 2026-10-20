@@ -20,6 +20,7 @@ use dntdatabase::commands::data::{
 };
 use dntdatabase::commands::export::{export_query_impl, export_table_impl, Progress};
 use dntdatabase::export_format::{ExportFormat, ExportOptions};
+use dntdatabase::run_events::{EventSink, RunEvent, RunOptions};
 use dntdatabase::state::{AppPaths, AppState};
 use serde_json::json;
 use std::path::Path;
@@ -558,7 +559,13 @@ async fn export_all_streams_filtered_rows_to_files() {
                 ExportFormat::Xlsx => assert_eq!(&bytes[..2], b"PK"),
                 ExportFormat::Sql => {
                     let text = String::from_utf8(bytes).unwrap();
-                    assert_eq!(text.lines().count(), 3, "{t:?}");
+                    let inserts = text.lines().filter(|l| l.starts_with("INSERT INTO "));
+                    assert_eq!(inserts.count(), 3, "{t:?}");
+                    assert_eq!(
+                        text.starts_with("SET NAMES utf8mb4;\n"),
+                        t.kind() == DbKind::MySql,
+                        "{t:?}"
+                    );
                     assert!(text.contains("'paid'"), "{t:?}: {text}");
                 }
                 _ => {
@@ -603,7 +610,7 @@ async fn export_query_reads_only_read_statements_again() {
             0,
             opts(ExportFormat::Json),
             path.to_string_lossy().into(),
-            "export:q".into(),
+            Uuid::new_v4(),
             collect().1,
         )
         .await
@@ -625,7 +632,7 @@ async fn export_query_reads_only_read_statements_again() {
                 0,
                 opts(ExportFormat::Csv),
                 dir.path().join("no.csv").to_string_lossy().into(),
-                "export:no".into(),
+                Uuid::new_v4(),
                 collect().1,
             )
             .await
@@ -689,5 +696,355 @@ async fn a_cancelled_export_leaves_no_file() {
         assert!(!dir.path().join("slow.csv.dntpart").exists(), "{t:?}");
         close_connection_impl(&state, id).await.unwrap();
         admin(t, &format!("DROP VIEW {qualified}")).await;
+    }
+}
+
+/// SQL files import back to the same values whatever the importing session's string
+/// rules: MySQL under `NO_BACKSLASH_ESCAPES`, PostgreSQL with
+/// `standard_conforming_strings` off (backslashes, quotes, NUL, binary, `bytea[]`).
+#[tokio::test]
+async fn sql_exports_import_back_under_any_string_mode() {
+    require_db!();
+    for t in [Target::MySql8, Target::Pg17] {
+        let src = unique("dnt_rs");
+        let dst = unique("dnt_rd");
+        let (create, rows, mode, same) = match t.kind() {
+            DbKind::MySql => (
+                "(id INT PRIMARY KEY, s TEXT, b BLOB)",
+                "(1, 'a\\\\b', X'00ff5c27'), (2, 'it''s', NULL), (3, CONCAT('nul', CHAR(0 USING utf8mb4), '\\\\'), X'')",
+                "SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'",
+                "a.s <=> b.s AND a.b <=> b.b",
+            ),
+            DbKind::Postgres => (
+                "(id INT PRIMARY KEY, s TEXT, b BYTEA, ba BYTEA[])",
+                "(1, E'a\\\\b', '\\x00ff5c27', ARRAY['\\x01'::bytea, NULL]), (2, 'it''s', NULL, NULL), (3, E'\\\\x', '\\x', '{}')",
+                "SET standard_conforming_strings = off",
+                "a.s IS NOT DISTINCT FROM b.s AND a.b IS NOT DISTINCT FROM b.b \
+                 AND a.ba IS NOT DISTINCT FROM b.ba",
+            ),
+        };
+        let q = |name: &str| match t.kind() {
+            DbKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
+            DbKind::Postgres => format!("public.{name}"),
+        };
+        admin(t, &format!("CREATE TABLE {} {create}", q(&src))).await;
+        admin(t, &format!("CREATE TABLE {} {create}", q(&dst))).await;
+        admin(t, &format!("INSERT INTO {} VALUES {rows}", q(&src))).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open_env(&state, t, None).await;
+        let path = dir.path().join("rt.sql");
+        let s = export_table_impl(
+            &state,
+            id,
+            obj(t, &src),
+            vec![],
+            None,
+            ExportOptions {
+                table_name: dst.clone(),
+                ..opts(ExportFormat::Sql)
+            },
+            path.to_string_lossy().into(),
+            "export:rt".into(),
+            collect().1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(s.rows, 3, "{t:?}");
+        close_connection_impl(&state, id).await.unwrap();
+
+        let file = std::fs::read_to_string(&path).unwrap();
+        admin(t, &format!("{mode};\n{file}")).await;
+        let matching = scalar(
+            t,
+            &format!(
+                "SELECT COUNT(*) FROM {} a JOIN {} b ON a.id = b.id WHERE {same}",
+                q(&src),
+                q(&dst)
+            ),
+        )
+        .await;
+        assert_eq!(int(&matching), 3, "{t:?}: {file}");
+        admin(t, &format!("DROP TABLE {}", q(&src))).await;
+        admin(t, &format!("DROP TABLE {}", q(&dst))).await;
+    }
+}
+
+// ---- "All rows" of a query result runs on the tab's own session ----
+
+/// A name no other test run uses (short: MySQL identifiers hold 64 characters).
+fn unique(prefix: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    format!("{prefix}_{}_{}", std::process::id(), nanos % 1_000_000)
+}
+
+/// The first cell of the first row of `sql`, as the admin sees it.
+async fn scalar(t: Target, sql: &str) -> Value {
+    #[derive(Default)]
+    struct First(Option<Value>);
+    impl RowSink for First {
+        fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+        fn rows(&mut self, batch: Vec<Vec<Value>>) {
+            if self.0.is_none() {
+                self.0 = batch.into_iter().next().and_then(|r| r.into_iter().next());
+            }
+        }
+        fn result_end(&mut self, _summary: &ResultSummary) {}
+    }
+    let driver: Box<dyn Driver> = match t.kind() {
+        DbKind::MySql => Box::new(MySqlDriver),
+        DbKind::Postgres => Box::new(PgDriver),
+    };
+    let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
+    let mut first = First::default();
+    session
+        .execute(sql, ExecOptions::default(), &mut first)
+        .await
+        .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
+    session.close().await;
+    first.0.unwrap_or(Value::Null)
+}
+
+/// Plans `text` (all of it) on tab `tab` and runs it to its end, as the user does; its
+/// plan id. Every statement must succeed.
+async fn run_on_tab(state: &AppState, tab: &str, id: Uuid, text: &str) -> Uuid {
+    let view = state
+        .sessions
+        .query_plan(tab, id, None, text, Pick::All)
+        .await
+        .unwrap();
+    let events: Arc<Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let out = Arc::clone(&events);
+    let emit: EventSink = Arc::new(move |e: RunEvent| {
+        out.lock().unwrap().push(serde_json::to_value(e).unwrap());
+        true
+    });
+    let opts = RunOptions {
+        max_rows: 10_000,
+        continue_on_error: false,
+    };
+    state
+        .sessions
+        .query_run(view.plan_id, true, opts, emit)
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !events.lock().unwrap().iter().any(|e| e["t"] == "done") {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{text}: no done"));
+    let events = events.lock().unwrap();
+    assert!(
+        !events.iter().any(|e| e["t"] == "statement_error"),
+        "{text}: {events:?}"
+    );
+    view.plan_id
+}
+
+async fn export_csv(
+    state: &AppState,
+    plan_id: Uuid,
+    index: u32,
+    path: &Path,
+) -> Result<(u64, String), DbError> {
+    let s = export_query_impl(
+        state,
+        plan_id,
+        index,
+        ExportOptions {
+            delimiter: "|".into(),
+            ..opts(ExportFormat::Csv)
+        },
+        path.to_string_lossy().into(),
+        Uuid::new_v4(),
+        collect().1,
+    )
+    .await?;
+    Ok((s.rows, std::fs::read_to_string(path).unwrap()))
+}
+
+fn is_scope_error(e: &DbError) -> bool {
+    matches!(e, DbError::Config { field: Some(f), .. } if f == "scope")
+}
+
+/// The security review's repro: a statement that is ONE read under the tab's `sql_mode`
+/// but several statements under the default one. Exporting all rows must run it under
+/// the tab's mode (never `DELETE`), also on Production.
+#[tokio::test]
+async fn mysql_export_runs_under_the_tabs_sql_mode() {
+    require_db!();
+    let t = Target::MySql8;
+    let table = unique("dnt_v");
+    let qualified = format!("`{FIXTURE_DB}`.`{table}`");
+    admin(t, &format!("CREATE TABLE {qualified} (id INT PRIMARY KEY)")).await;
+    admin(t, &format!("INSERT INTO {qualified} VALUES (1), (2), (3)")).await;
+    let count_sql = format!("SELECT COUNT(*) FROM {qualified}");
+    let count = || scalar(t, &count_sql);
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path());
+    let id = open_env(&state, t, Some(EnvTag::Production)).await;
+
+    // NO_BACKSLASH_ESCAPES: `'\'` is a whole string.
+    run_on_tab(
+        &state,
+        "nbe",
+        id,
+        "SET SESSION sql_mode = CONCAT(@@sql_mode, ',NO_BACKSLASH_ESCAPES')",
+    )
+    .await;
+    let text = format!("SELECT '\\' AS a, '; DELETE FROM {table}; SELECT 1 -- ' AS b");
+    let shown = run_on_tab(&state, "nbe", id, &text).await;
+    let path = dir.path().join("nbe.csv");
+    let (rows, csv) = export_csv(&state, shown, 0, &path).await.unwrap();
+    assert_eq!(rows, 1);
+    assert_eq!(
+        csv,
+        format!("a|b\r\n\\|; DELETE FROM {table}; SELECT 1 -- \r\n")
+    );
+    assert_eq!(int(&count().await), 3, "nothing was deleted");
+
+    // ANSI_QUOTES: `"a\"` is an identifier (a string with an escaped quote otherwise).
+    run_on_tab(
+        &state,
+        "ansi",
+        id,
+        "SET SESSION sql_mode = CONCAT(@@sql_mode, ',ANSI_QUOTES')",
+    )
+    .await;
+    let text = format!("SELECT 1 AS \"a\\\", 2 AS \"; DELETE FROM {table}; SELECT 1 -- \"");
+    let shown = run_on_tab(&state, "ansi", id, &text).await;
+    let path = dir.path().join("ansi.csv");
+    let (rows, csv) = export_csv(&state, shown, 0, &path).await.unwrap();
+    assert_eq!(rows, 1);
+    assert_eq!(
+        csv,
+        format!("a\\|; DELETE FROM {table}; SELECT 1 -- \r\n1|2\r\n")
+    );
+    assert_eq!(int(&count().await), 3, "nothing was deleted");
+
+    // Defense in depth: the tab's mode changed after the result was read (the script's
+    // last statement): the statement now splits differently, so it is not sent.
+    let script = format!(
+        "SELECT '\\' AS a, '; DELETE FROM {table}; SELECT 1 -- ' AS b; \
+         SET SESSION sql_mode = DEFAULT"
+    );
+    let shown = run_on_tab(&state, "nbe", id, &script).await;
+    let path = dir.path().join("changed.csv");
+    let err = export_csv(&state, shown, 0, &path).await.unwrap_err();
+    assert!(is_scope_error(&err), "{err:?}");
+    assert!(!path.exists());
+    assert_eq!(int(&count().await), 3, "nothing was deleted");
+
+    close_connection_impl(&state, id).await.unwrap();
+    admin(t, &format!("DROP TABLE {qualified}")).await;
+}
+
+/// User variables (MySQL) and `search_path` (PostgreSQL) of the tab's session apply:
+/// the file holds the rows the user saw.
+#[tokio::test]
+async fn export_keeps_the_tabs_session_state() {
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+
+    let t = Target::MySql8;
+    let state = app_state(dir.path());
+    let id = open_env(&state, t, None).await;
+    run_on_tab(&state, "vars", id, "SET @c = 1").await;
+    let shown = run_on_tab(
+        &state,
+        "vars",
+        id,
+        "SELECT id FROM customers WHERE id > @c ORDER BY id",
+    )
+    .await;
+    let (rows, csv) = export_csv(&state, shown, 0, &dir.path().join("vars.csv"))
+        .await
+        .unwrap();
+    assert_eq!((rows, csv.as_str()), (2, "id\r\n2\r\n3\r\n"));
+    close_connection_impl(&state, id).await.unwrap();
+
+    let t = Target::Pg17;
+    let schema = unique("dnt_s");
+    admin(t, &format!("CREATE SCHEMA {schema}")).await;
+    admin(
+        t,
+        &format!("CREATE TABLE {schema}.only_here (v TEXT); INSERT INTO {schema}.only_here VALUES ('x'), ('y')"),
+    )
+    .await;
+    let state = app_state(&dir.path().join("pg"));
+    let id = open_env(&state, t, None).await;
+    run_on_tab(&state, "path", id, &format!("SET search_path TO {schema}")).await;
+    let shown = run_on_tab(&state, "path", id, "SELECT v FROM only_here ORDER BY v").await;
+    let (rows, csv) = export_csv(&state, shown, 0, &dir.path().join("path.csv"))
+        .await
+        .unwrap();
+    assert_eq!((rows, csv.as_str()), (2, "v\r\nx\r\ny\r\n"));
+    close_connection_impl(&state, id).await.unwrap();
+    admin(t, &format!("DROP SCHEMA {schema} CASCADE")).await;
+}
+
+/// The export is a run of its tab: the tab is busy meanwhile (another export or a plan
+/// is refused), `query_cancel(run_id)` stops it with no file left behind, and the tab is
+/// usable afterwards.
+#[tokio::test]
+async fn query_export_is_a_cancellable_run_of_its_tab() {
+    require_db!();
+    for t in [Target::MySql8, Target::Pg17] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open_env(&state, t, None).await;
+        let slow = match t.kind() {
+            DbKind::MySql => "SELECT SLEEP(8) AS s",
+            DbKind::Postgres => "SELECT 1 AS s FROM pg_sleep(8)",
+        };
+        let p = plan(&state, "slow", id, slow).await;
+        let path = dir.path().join("slow.csv");
+        let busy_path = dir.path().join("busy.csv");
+        let run_id = Uuid::new_v4();
+        let started = std::time::Instant::now();
+        let (result, ()) = tokio::join!(
+            export_query_impl(
+                &state,
+                p,
+                0,
+                opts(ExportFormat::Csv),
+                path.to_string_lossy().into(),
+                run_id,
+                collect().1,
+            ),
+            async {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                let err = export_csv(&state, p, 0, &busy_path).await.unwrap_err();
+                assert!(
+                    matches!(&err, DbError::Config { field: Some(f), .. } if f == "tab"),
+                    "{t:?}: {err:?}"
+                );
+                let err = state
+                    .sessions
+                    .query_plan("slow", id, None, "SELECT 1", Pick::All)
+                    .await
+                    .unwrap_err();
+                assert!(matches!(err, DbError::Busy), "{t:?}: {err:?}");
+                state.sessions.query_cancel(run_id).await.unwrap();
+            }
+        );
+        assert!(
+            matches!(result, Err(DbError::Cancelled { .. })),
+            "{t:?}: {result:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(7), "{t:?}");
+        for p in [&path, &busy_path] {
+            assert!(!p.exists(), "{t:?} {p:?}");
+        }
+        assert!(!dir.path().join("slow.csv.dntpart").exists(), "{t:?}");
+        // The tab runs again.
+        run_on_tab(&state, "slow", id, "SELECT 1").await;
+        close_connection_impl(&state, id).await.unwrap();
     }
 }
