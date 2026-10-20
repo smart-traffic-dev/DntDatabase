@@ -491,11 +491,15 @@ impl Introspector for PgSession {
         let schema = schema_of(&scope.schema);
         let conn = self.conn_for(&scope.database).await?;
         let rows = fetch(&conn.client, &queries::list_columns(), &[&schema]).await?;
-        let mut pairs = Vec::with_capacity(rows.len());
+        let mut triples = Vec::with_capacity(rows.len());
         for r in &rows {
-            pairs.push((get::<String>(r, 0)?, get::<String>(r, 1)?));
+            triples.push((
+                get::<String>(r, 0)?,
+                get::<String>(r, 1)?,
+                get::<String>(r, 2)?,
+            ));
         }
-        Ok(group_table_columns(pairs))
+        Ok(group_table_columns(triples))
     }
 
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {

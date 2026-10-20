@@ -109,7 +109,7 @@ impl MySqlSession {
         db: &str,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.live_conn().await?;
         let shown = show(
             &mut conn,
             &format!("SHOW FULL TABLES FROM {}", quote_ident(db)),
@@ -156,7 +156,7 @@ impl MySqlSession {
         params: Params,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.live_conn().await?;
         Ok(summaries(fetch(&mut conn, sql, params).await?, kind))
     }
 
@@ -270,7 +270,7 @@ fn apply_json_alias(columns: &mut [ColumnDetail], checks: &[CheckDetail]) {
 #[async_trait]
 impl Introspector for MySqlSession {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.live_conn().await?;
         let mut names: Vec<String> = show(&mut conn, queries::LIST_DATABASES)
             .await?
             .iter()
@@ -316,11 +316,11 @@ impl Introspector for MySqlSession {
     }
 
     async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.live_conn().await?;
         let rows = fetch(&mut conn, queries::SCHEMA_COLUMNS, params1(&scope.database)).await?;
-        Ok(group_table_columns(
-            rows.iter().filter_map(|r| Some((col(r, 0)?, col(r, 1)?))),
-        ))
+        Ok(group_table_columns(rows.iter().filter_map(|r| {
+            Some((col(r, 0)?, col(r, 1)?, col(r, 2)?))
+        })))
     }
 
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {
@@ -332,7 +332,7 @@ impl Introspector for MySqlSession {
         let checks_sql = self.checks_query();
         let indexes_sql = self.indexes_query();
 
-        let mut conn = self.conn.lock().await;
+        let mut conn = self.live_conn().await?;
         let table = fetch(&mut conn, queries::TABLE, params2(db, name))
             .await?
             .into_iter()
@@ -447,9 +447,8 @@ impl Introspector for MySqlSession {
             quote_ident(&obj.name)
         );
         let row: Option<Row> = self
-            .conn
-            .lock()
-            .await
+            .live_conn()
+            .await?
             .query_first(sql)
             .await
             .map_err(map_err)?;

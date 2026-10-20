@@ -33,9 +33,7 @@ impl MySqlDriver {
     pub async fn connect_session(&self, cfg: &ResolvedConfig) -> Result<MySqlSession, DbError> {
         tokio::time::timeout(cfg.connect_timeout, connect_inner(cfg))
             .await
-            .map_err(|_| DbError::Timeout {
-                stage: ConnectStage::ConnectDb,
-            })?
+            .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))?
     }
 }
 
@@ -66,8 +64,15 @@ async fn connect_inner(cfg: &ResolvedConfig) -> Result<MySqlSession, DbError> {
             return Err(e);
         }
     };
+    let mode = match session::read_sql_mode(&mut conn).await {
+        Ok(mode) => mode,
+        Err(e) => {
+            let _ = conn.disconnect().await;
+            return Err(map_mysql_error(e, ConnectStage::DetectServer));
+        }
+    };
     let caps = MySqlCapabilities::for_server(&info);
-    Ok(MySqlSession::new(conn, info, caps, opts))
+    Ok(MySqlSession::new(conn, info, caps, opts, mode))
 }
 
 /// Opens the physical connection, returning the options that worked (for reconnects).
@@ -147,7 +152,7 @@ pub(crate) fn map_mysql_error(e: MyError, stage: ConnectStage) -> DbError {
             message: t.to_string(),
         },
         MyError::Io(IoError::Io(io)) if io.kind() == std::io::ErrorKind::TimedOut => {
-            DbError::Timeout { stage }
+            DbError::timeout(stage)
         }
         MyError::Io(IoError::Io(io)) => DbError::Connect {
             message: io.to_string(),
@@ -216,7 +221,9 @@ mod tests {
         assert!(matches!(
             map_mysql_error(timed_out.into(), ConnectStage::ConnectDb),
             DbError::Timeout {
-                stage: ConnectStage::ConnectDb
+                stage: ConnectStage::ConnectDb,
+                outcome_unknown: false,
+                was_in_tx: false,
             }
         ));
         let handshake = std::io::Error::new(

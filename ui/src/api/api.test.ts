@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AppErrorEx, api, isPasswordRequired } from '.';
+import { isCancelled } from './errors';
 import { backendError, fail, mockBackend } from '../test/backend';
 
 describe('api', () => {
@@ -21,6 +22,22 @@ describe('api', () => {
     expect((err as AppErrorEx).stage).toBe('connect_db');
     expect((err as AppErrorEx).timings).toEqual([{ stage: 'resolve_secrets', ms: 1 }]);
     expect((err as AppErrorEx).toAppError()).toEqual(backendError('server_db_missing'));
+  });
+
+  it('never hides a cancel whose statement may have been applied', async () => {
+    mockBackend({
+      list_tree: () => {
+        throw fail('cancelled_outcome_unknown');
+      },
+    });
+    const err = (await api.listTree().catch((e: unknown) => e)) as AppErrorEx;
+    expect(err.outcome_unknown).toBe(true);
+    expect(err.toAppError()).toEqual(backendError('cancelled_outcome_unknown'));
+    expect(isCancelled(err)).toBe(false);
+    expect(isCancelled(backendError('cancelled'))).toBe(true);
+    expect(backendError('timeout_execute_outcome_unknown').outcome_unknown).toBe(true);
+    expect(backendError('connection_lost_outcome_unknown').outcome_unknown).toBe(true);
+    expect(backendError('connection_lost').outcome_unknown).toBe(false);
   });
 
   it('recognizes the real password_required error', async () => {

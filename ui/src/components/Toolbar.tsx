@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { useDialogs } from '../store/dialogs';
 import { ActionMenu, transferItems } from './ActionMenu';
+import { openNewQuery } from './newQuery';
 import { ChevronIcon, LogoIcon, TOOL_PATHS, ToolIcon } from './icons';
 
 const LATER = 'Coming in a later phase';
 
 const DISABLED_TOOLS = [
-  { label: 'New query', path: TOOL_PATHS.query },
   { label: 'Tables', path: TOOL_PATHS.table },
   { label: 'Views', path: TOOL_PATHS.view },
   { label: 'Functions', path: TOOL_PATHS.fn },
@@ -62,6 +62,10 @@ export function Toolbar() {
           onClose={() => setMenu(null)}
         />
       )}
+      <button type="button" className="tool" data-testid="new-query" onClick={() => openNewQuery()}>
+        <ToolIcon path={TOOL_PATHS.query} />
+        <span>New query</span>
+      </button>
       {DISABLED_TOOLS.map((t) => (
         <button key={t.label} type="button" className="tool" disabled title={LATER}>
           <ToolIcon path={t.path} />

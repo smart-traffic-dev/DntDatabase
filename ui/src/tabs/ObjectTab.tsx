@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } f
 import { needsReconnect } from '../api';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
-import type { Tab } from '../store/tabs';
+import type { ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
 
 const DASH = '—';

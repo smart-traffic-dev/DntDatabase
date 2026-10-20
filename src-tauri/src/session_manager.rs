@@ -1,5 +1,6 @@
 //! `SessionManager`: the staged connect pipeline and one `ConnectionRuntime` per open
-//! connection (tunnel, dedicated metadata sessions, `NodeCache`, `SchemaCache`).
+//! connection (tunnel, dedicated metadata sessions, `NodeCache`, `SchemaCache`, and the
+//! query tabs' sessions of [`crate::query_sessions`]).
 //!
 //! Introspection only ever runs on metadata sessions, never on a user's query session:
 //! MySQL keeps one (key `None`); PostgreSQL one per database (key `Some(db)`), because its
@@ -8,12 +9,18 @@
 //! introspection, so a call that fails with a lost connection (or finds the SSH tunnel
 //! dead) reopens the tunnel and that session once and is retried once.
 
-use crate::cache::{NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
+use crate::cache::{CompletionObject, NodeCache, NodeKey, SchemaCache, SchemaCacheTable};
+use crate::commands::browse::folder_key;
+use crate::query_sessions::{
+    close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
+};
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
-use dnt_core::driver::{Driver, ExecOptions, Introspector, RowSink, Session};
+use dnt_core::driver::{
+    Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session, DEFAULT_CANCEL_GRACE,
+};
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
-use dnt_core::meta::{ObjectKind, Scope};
+use dnt_core::meta::{ColumnBrief, ObjectKind, Scope};
 use dnt_core::secret::{SecretKind, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
@@ -26,7 +33,7 @@ use specta::Type;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
@@ -44,15 +51,21 @@ const CLOSE_DEAD_TIMEOUT: Duration = Duration::from_secs(2);
 /// session is dropped and `Timeout{Execute}` returned, without a retry.
 pub const METADATA_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a failed SchemaCache load is remembered: callers within this window get the
+/// same error without a new load; the first caller after it retries.
+pub const SCHEMA_ERROR_TTL: Duration = Duration::from_secs(10);
+
 /// How long `close` waits for an in-flight metadata call to release the runtime before it
 /// marks the runtime closed and tears down what it can reach without it.
 const SHUTDOWN_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Returned by metadata calls on a runtime that was closed (also to calls that were
 /// waiting while `close` ran): the connection is gone and is not reopened.
-fn closed_error() -> DbError {
+pub(crate) fn closed_error() -> DbError {
     DbError::ConnectionLost {
-        in_transaction: false,
+        was_in_tx: false,
+        outcome_unknown: false,
+        message: "the connection was closed".into(),
     }
 }
 
@@ -90,7 +103,9 @@ fn password_required() -> DbError {
     }
 }
 
-fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+/// Locks `m`, recovering the data of a poisoned mutex (a panic elsewhere must not
+/// take the connection or query state down with it). Shared by the backend modules.
+pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -204,7 +219,7 @@ fn resolved_config(
 }
 
 /// `base` pointed at another database.
-fn with_database(base: &ResolvedConfig, database: Option<String>) -> ResolvedConfig {
+pub(crate) fn with_database(base: &ResolvedConfig, database: Option<String>) -> ResolvedConfig {
     ResolvedConfig {
         kind: base.kind,
         host: base.host.clone(),
@@ -221,25 +236,45 @@ fn with_database(base: &ResolvedConfig, database: Option<String>) -> ResolvedCon
 }
 
 /// Driver connect bounded by the configured timeout, reported as the `ConnectDb` stage.
-async fn connect_db(
+pub(crate) async fn connect_db(
     driver: &dyn Driver,
     resolved: &ResolvedConfig,
 ) -> Result<Box<dyn Session>, DbError> {
     tokio::time::timeout(resolved.connect_timeout, driver.connect(resolved))
         .await
-        .map_err(|_| DbError::Timeout {
-            stage: ConnectStage::ConnectDb,
-        })?
+        .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))?
 }
 
-/// Whether `cfg` (as typed) still points at the server, user and SSH bastion of `stored`.
+/// Host names compare case-insensitively, ignoring surrounding blanks.
+fn same_host(a: &str, b: &str) -> bool {
+    a.trim().eq_ignore_ascii_case(b.trim())
+}
+
+fn same_ssh(a: &SshConfig, b: &SshConfig) -> bool {
+    same_host(&a.host, &b.host) && a.port == b.port && a.user == b.user
+}
+
+/// Whether `cfg` (as typed) still takes the whole network path of `stored` to the same
+/// server as the same user: engine, database host, port and user, whether SSH is used,
+/// and, with SSH, the bastion's host, port and user. Gates the stored database password.
+/// Turning SSH on or off is a different target: `host:port` then names another machine.
 fn same_target(stored: &ConnectionConfig, cfg: &ConnectionConfig) -> bool {
     let ssh = match (&stored.ssh, &cfg.ssh) {
-        (_, None) => true,
-        (Some(a), Some(b)) => a.host == b.host && a.port == b.port && a.user == b.user,
-        (None, Some(_)) => false,
+        (None, None) => true,
+        (Some(a), Some(b)) => same_ssh(a, b),
+        _ => false,
     };
-    stored.host == cfg.host && stored.port == cfg.port && stored.username == cfg.username && ssh
+    stored.kind == cfg.kind
+        && same_host(&stored.host, &cfg.host)
+        && stored.port == cfg.port
+        && stored.username == cfg.username
+        && ssh
+}
+
+/// Whether both configs use SSH through the same bastion host, port and user. Gates the
+/// stored SSH password and key passphrase, which only ever reach the bastion.
+fn same_ssh_endpoint(stored: &ConnectionConfig, cfg: &ConnectionConfig) -> bool {
+    matches!((&stored.ssh, &cfg.ssh), (Some(a), Some(b)) if same_ssh(a, b))
 }
 
 /// Opening a saved connection whose SSH key is encrypted and whose passphrase is not
@@ -262,13 +297,13 @@ fn is_lost(e: &DbError) -> bool {
     matches!(e, DbError::ConnectionLost { .. } | DbError::Connect { .. })
 }
 
-async fn close_quietly(session: Box<dyn Session>) {
+pub(crate) async fn close_quietly(session: Box<dyn Session>) {
     let _ = tokio::time::timeout(CLOSE_DEAD_TIMEOUT, session.close()).await;
 }
 
 pub struct SessionManager {
     drivers: HashMap<DbKind, Arc<dyn Driver>>,
-    repo: Arc<ConnectionRepo>,
+    pub(crate) repo: Arc<ConnectionRepo>,
     secrets: Arc<dyn SecretStore>,
     known_hosts: KnownHosts,
     runtimes: RwLock<HashMap<Uuid, Arc<ConnectionRuntime>>>,
@@ -280,6 +315,14 @@ pub struct SessionManager {
     /// longer current was superseded and must not install its runtime or touch `pending`.
     generations: Mutex<HashMap<Uuid, u64>>,
     metadata_timeout: Duration,
+    schema_error_ttl: Duration,
+    /// Run plans of query tabs (see `query_sessions`).
+    pub(crate) plans: PlanStore,
+    pub(crate) plan_ttl: Duration,
+    /// Runs in progress (see `query_sessions`).
+    pub(crate) runs: Runs,
+    /// `ExecOptions::cancel_grace` of query runs.
+    pub(crate) cancel_grace: Duration,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -315,12 +358,23 @@ impl SessionManager {
             timings: Mutex::new(HashMap::new()),
             generations: Mutex::new(HashMap::new()),
             metadata_timeout: METADATA_CALL_TIMEOUT,
+            schema_error_ttl: SCHEMA_ERROR_TTL,
+            plans: PlanStore::default(),
+            plan_ttl: PLAN_TTL,
+            runs: Runs::default(),
+            cancel_grace: DEFAULT_CANCEL_GRACE,
         }
     }
 
     /// Overrides [`METADATA_CALL_TIMEOUT`] for runtimes opened afterwards (tests).
     pub fn with_metadata_timeout(mut self, timeout: Duration) -> Self {
         self.metadata_timeout = timeout;
+        self
+    }
+
+    /// Overrides [`SCHEMA_ERROR_TTL`] for runtimes opened afterwards (tests).
+    pub fn with_schema_error_ttl(mut self, ttl: Duration) -> Self {
+        self.schema_error_ttl = ttl;
         self
     }
 
@@ -355,9 +409,11 @@ impl SessionManager {
     /// everything again. Nothing is stored and no runtime is kept.
     ///
     /// For a saved connection (non-nil id, `Saved` mode) secrets the user did not type fall
-    /// back to the stored ones, but only while host, port and user (and, with SSH, the SSH
-    /// host, port and user) are those of the stored config: an edited target never gets
-    /// the stored secrets. Typed secrets always win. They never leave the backend.
+    /// back to the stored ones, each only while its target is unchanged: the database
+    /// password while the whole path is ([`same_target`]: engine, host, port, user, SSH on
+    /// or off and the bastion), SSH secrets while the bastion's host, port and user are
+    /// ([`same_ssh_endpoint`]). An edited target never gets the stored secret. Typed
+    /// secrets always win. They never leave the backend.
     pub async fn test(
         &self,
         cfg: &ConnectionConfig,
@@ -385,23 +441,26 @@ impl SessionManager {
         secrets: NewSecrets,
     ) -> Result<ConnSecrets, DbError> {
         let mut secrets = ConnSecrets::from(secrets);
-        let same_target = || match self.repo.get(cfg.id) {
-            Ok(stored) => same_target(&stored, cfg),
-            Err(_) => false,
-        };
-        if cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil() && same_target() {
+        let stored = (cfg.secret_mode == SecretMode::Saved && !cfg.id.is_nil())
+            .then(|| self.repo.get(cfg.id).ok())
+            .flatten();
+        if let Some(stored) = stored {
             let fill = |slot: &mut Option<SecretString>, kind| -> Result<(), DbError> {
                 if slot.is_none() {
                     *slot = self.secrets.get(cfg.id, kind)?;
                 }
                 Ok(())
             };
-            fill(&mut secrets.db_password, SecretKind::DbPassword)?;
-            fill(&mut secrets.ssh_password, SecretKind::SshPassword)?;
-            fill(
-                &mut secrets.ssh_key_passphrase,
-                SecretKind::SshKeyPassphrase,
-            )?;
+            if same_target(&stored, cfg) {
+                fill(&mut secrets.db_password, SecretKind::DbPassword)?;
+            }
+            if same_ssh_endpoint(&stored, cfg) {
+                fill(&mut secrets.ssh_password, SecretKind::SshPassword)?;
+                fill(
+                    &mut secrets.ssh_key_passphrase,
+                    SecretKind::SshKeyPassphrase,
+                )?;
+            }
         }
         secrets.check_ssh(cfg)?;
         Ok(secrets)
@@ -456,6 +515,7 @@ impl SessionManager {
             opened,
             self.known_hosts.clone(),
             self.metadata_timeout,
+            self.schema_error_ttl,
         ));
         // Checked and installed under the generations lock, so a `close` either supersedes
         // this open or finds (and closes) its runtime.
@@ -472,7 +532,7 @@ impl SessionManager {
         guard.done = true;
         let Some(replaced) = installed else {
             rt.shutdown().await;
-            return Err(DbError::Cancelled);
+            return Err(DbError::cancelled());
         };
         if let Some(old) = replaced {
             // Cannot normally happen (every open/close bumps the generation); never leak it.
@@ -481,7 +541,10 @@ impl SessionManager {
         if let Err(e) = self.repo.touch_connected(id) {
             tracing::warn!(connection = %id, error = %e, "could not record the connection time");
         }
-        rt.spawn_schema_cache();
+        // Warm the cache of the database a new query tab starts on.
+        if let Some(home) = rt.home_database() {
+            rt.spawn_schema_load(home);
+        }
         Ok(OpenResult { info, timings })
     }
 
@@ -613,7 +676,7 @@ impl SessionManager {
         })
     }
 
-    fn runtime_opt(&self, id: Uuid) -> Option<Arc<ConnectionRuntime>> {
+    pub(crate) fn runtime_opt(&self, id: Uuid) -> Option<Arc<ConnectionRuntime>> {
         self.runtimes
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -621,13 +684,16 @@ impl SessionManager {
             .cloned()
     }
 
-    fn runtime(&self, id: Uuid) -> Result<Arc<ConnectionRuntime>, DbError> {
+    pub(crate) fn runtime(&self, id: Uuid) -> Result<Arc<ConnectionRuntime>, DbError> {
         self.runtime_opt(id).ok_or(DbError::NotOpen)
     }
 
     /// Closes the tunnel and every metadata session and forgets the connection. An `open`
     /// in flight is superseded (it closes what it opened and returns `Cancelled`).
     pub async fn close(&self, id: Uuid) {
+        // A running query is stopped first, so closing does not wait for it; the run
+        // still ends with its `done` event.
+        self.stop_runs(|r| r.conn == id).await;
         self.bump_generation(id);
         let rt = self
             .runtimes
@@ -638,6 +704,17 @@ impl SessionManager {
         if let Some(rt) = rt {
             rt.shutdown().await;
         }
+        self.plans.drop_conn(id);
+    }
+
+    /// Every runtime, without holding the map's lock.
+    pub(crate) fn runtimes_snapshot(&self) -> Vec<(Uuid, Arc<ConnectionRuntime>)> {
+        self.runtimes
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|(id, rt)| (*id, Arc::clone(rt)))
+            .collect()
     }
 
     pub fn state(&self, id: Uuid) -> ConnState {
@@ -695,48 +772,180 @@ impl SessionManager {
         Ok(value)
     }
 
-    /// Drops every cached browse result of `id` under `prefix`.
+    /// Drops every cached browse result of `id` under `prefix`, and reloads (in the
+    /// background) the SchemaCache of every loaded database the prefix covers: all of them
+    /// for `[]`, database `x` for any prefix starting with `db:x`.
     pub fn refresh(&self, id: Uuid, prefix: &NodeKey) {
         if let Some(rt) = self.runtime_opt(id) {
             rt.cache.invalidate_prefix(prefix);
+            let covered: Vec<String> = rt
+                .schema_databases()
+                .into_iter()
+                .filter(|db| match prefix.0.first() {
+                    None => true,
+                    Some(first) => first.strip_prefix("db:") == Some(db.as_str()),
+                })
+                .collect();
+            for db in covered {
+                rt.refresh_schema_cache(&db);
+            }
         }
     }
 
-    pub fn schema_cache(&self, id: Uuid) -> Option<SchemaCache> {
-        self.runtime_opt(id)?
-            .schema_cache
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    /// The SchemaCache of `database`, loading it on first use. Concurrent first calls for
+    /// one database share a single load; a failed load is not kept (the next call retries).
+    pub async fn schema_cache_for(&self, id: Uuid, database: &str) -> Result<SchemaCache, DbError> {
+        self.runtime(id)?.schema_cache_for(database).await
+    }
+
+    /// Drops the SchemaCache of `database` and reloads it in the background (e.g. after a
+    /// DDL statement). Callers arriving meanwhile wait for the reload.
+    pub fn refresh_schema_cache(&self, id: Uuid, database: &str) {
+        if let Some(rt) = self.runtime_opt(id) {
+            rt.refresh_schema_cache(database);
+        }
+    }
+
+    /// The database whose SchemaCache `get_schema_cache` returns: the connect database
+    /// (PostgreSQL: the one named after the user when none is set; MySQL: none when no
+    /// default database is set).
+    pub fn home_database(&self, id: Uuid) -> Result<Option<String>, DbError> {
+        Ok(self.runtime(id)?.home_database())
+    }
+
+    /// Tables and views (and materialized views on PostgreSQL) for autocomplete after
+    /// `db.` (MySQL: `schema` must be `None`) / `schema.` (PostgreSQL: `schema` is
+    /// required, as every PostgreSQL folder key of the tree carries a `schema:` segment).
+    /// Listed through [`SessionManager::browse`] under the tree's folder keys, so the tree
+    /// and autocomplete share one cache.
+    pub async fn completion_objects(
+        &self,
+        id: Uuid,
+        database: &str,
+        schema: Option<&str>,
+    ) -> Result<Vec<CompletionObject>, DbError> {
+        require_database(database)?;
+        let kind = self.runtime(id)?.cfg.kind;
+        match (kind, schema) {
+            (DbKind::MySql, Some(_)) => {
+                return Err(config_error(
+                    "schema",
+                    "MySQL has no schemas inside a database",
+                ))
+            }
+            (DbKind::Postgres, None) => {
+                return Err(config_error("schema", "a schema is required on PostgreSQL"))
+            }
+            _ => {}
+        }
+        let kinds: &[ObjectKind] = match kind {
+            DbKind::MySql => &[ObjectKind::Table, ObjectKind::View],
+            DbKind::Postgres => &[
+                ObjectKind::Table,
+                ObjectKind::View,
+                ObjectKind::MaterializedView,
+            ],
+        };
+        let scope = Scope {
+            database: database.to_string(),
+            schema: schema.map(str::to_string),
+        };
+        let mut objects = Vec::new();
+        for &kind in kinds {
+            let listed = self
+                .browse(id, Some(database), folder_key(&scope, kind), |i| {
+                    let scope = scope.clone();
+                    Box::pin(async move { i.list_objects(&scope, kind).await })
+                })
+                .await?;
+            objects.extend(listed.into_iter().map(|o| CompletionObject {
+                schema: scope.schema.clone(),
+                name: o.name,
+                kind,
+            }));
+        }
+        Ok(objects)
+    }
+}
+
+pub(crate) fn config_error(field: &str, message: &str) -> DbError {
+    DbError::Config {
+        field: Some(field.into()),
+        message: message.into(),
+    }
+}
+
+fn require_database(database: &str) -> Result<(), DbError> {
+    if database.is_empty() {
+        Err(config_error("database", "a database is required"))
+    } else {
+        Ok(())
+    }
+}
+
+/// What a SchemaSlot holds.
+#[derive(Default)]
+enum SlotState {
+    #[default]
+    Empty,
+    Ready(SchemaCache),
+    /// The last load failed at the given time; returned as is until the TTL runs out.
+    Failed(DbError, Instant),
+}
+
+/// One database's SchemaCache. Its async mutex makes loads single-flight: the caller
+/// holding it runs the load (in a task, so `refresh` can abort it), and the callers
+/// waiting for it then find the result (success or error) in the state.
+#[derive(Default)]
+struct SchemaSlot {
+    state: tokio::sync::Mutex<SlotState>,
+    /// Abort handle of the load running for this slot.
+    load: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl SchemaSlot {
+    fn abort_load(&self) {
+        if let Some(load) = lock(&self.load).take() {
+            load.abort();
+        }
     }
 }
 
 /// Resolved address and metadata sessions, held by one metadata call at a time.
-struct Link {
-    resolved: ResolvedConfig,
+pub(crate) struct Link {
+    pub(crate) resolved: ResolvedConfig,
     metadata: HashMap<Option<String>, Box<dyn Session>>,
     /// Set by `shutdown` once it holds the link: nothing may be (re)opened any more.
     closed: bool,
 }
 
 pub struct ConnectionRuntime {
-    cfg: ConnectionConfig,
+    pub(crate) cfg: ConnectionConfig,
     info: ServerInfo,
     secrets: ConnSecrets,
-    driver: Arc<dyn Driver>,
+    pub(crate) driver: Arc<dyn Driver>,
     known_hosts: KnownHosts,
     /// Metadata key of the connect database's session.
     home: Option<String>,
     /// Outside `link` so `shutdown` can close it while a metadata call holds the link.
     tunnel: Mutex<Option<Tunnel>>,
-    link: tokio::sync::Mutex<Link>,
+    pub(crate) link: tokio::sync::Mutex<Link>,
     /// Set first thing by `shutdown`, even when it cannot get the link.
-    closed: AtomicBool,
+    pub(crate) closed: AtomicBool,
+    /// Bumped every time the SSH tunnel is replaced: a tab session opened through an
+    /// older tunnel is stale.
+    pub(crate) tunnel_gen: AtomicU64,
     metadata_timeout: Duration,
+    schema_error_ttl: Duration,
     cache: NodeCache,
-    schema_cache: RwLock<Option<SchemaCache>>,
+    /// `database → SchemaCache`, each loaded on first use.
+    schema_caches: Mutex<HashMap<String, Arc<SchemaSlot>>>,
     state: Mutex<ConnState>,
-    schema_task: Mutex<Option<JoinHandle<()>>>,
+    /// Background SchemaCache loads (home database on open, refreshes); aborted by
+    /// `shutdown`.
+    schema_tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// The query tabs on this connection, each with its own session.
+    pub(crate) queries: QuerySessions,
 }
 
 impl ConnectionRuntime {
@@ -746,6 +955,7 @@ impl ConnectionRuntime {
         opened: Opened,
         known_hosts: KnownHosts,
         metadata_timeout: Duration,
+        schema_error_ttl: Duration,
     ) -> Self {
         let home = match cfg.kind {
             DbKind::MySql => None,
@@ -770,11 +980,14 @@ impl ConnectionRuntime {
                 closed: false,
             }),
             closed: AtomicBool::new(false),
+            tunnel_gen: AtomicU64::new(0),
             metadata_timeout,
+            schema_error_ttl,
             cache: NodeCache::default(),
-            schema_cache: RwLock::new(None),
+            schema_caches: Mutex::new(HashMap::new()),
             state: Mutex::new(ConnState::Connected),
-            schema_task: Mutex::new(None),
+            schema_tasks: Mutex::new(Vec::new()),
+            queries: QuerySessions::default(),
             cfg,
         }
     }
@@ -783,7 +996,7 @@ impl ConnectionRuntime {
         lock(&self.state).clone()
     }
 
-    fn set_state(&self, state: ConnState) {
+    pub(crate) fn set_state(&self, state: ConnState) {
         *lock(&self.state) = state;
     }
 
@@ -816,18 +1029,23 @@ impl ConnectionRuntime {
                 let session = connect_db(self.driver.as_ref(), &resolved).await?;
                 link.metadata.insert(key.clone(), session);
             }
-            let session = link.metadata.get(&key).ok_or_else(|| DbError::Internal {
-                message: "metadata session vanished".into(),
-            })?;
+            // Taken out of the map for the call: if this future is dropped mid-call (an
+            // aborted SchemaCache load), the session, possibly mid-protocol, is dropped with
+            // it instead of being reused.
+            let session = link
+                .metadata
+                .remove(&key)
+                .ok_or_else(|| DbError::Internal {
+                    message: "metadata session vanished".into(),
+                })?;
             let outcome = tokio::time::timeout(self.metadata_timeout, f(session.as_ref())).await;
             let Ok(outcome) = outcome else {
                 // The session may be stuck mid-protocol: drop it (no graceful close) and do
                 // not retry; the next call opens a fresh one.
-                link.metadata.remove(&key);
-                return Err(DbError::Timeout {
-                    stage: ConnectStage::Execute,
-                });
+                drop(session);
+                return Err(DbError::timeout(ConnectStage::Execute));
             };
+            link.metadata.insert(key.clone(), session);
             match outcome {
                 Err(e) if !reopened && is_lost(&e) => {
                     self.ensure_open(&link)?;
@@ -861,47 +1079,57 @@ impl ConnectionRuntime {
         if let Some(old) = link.metadata.remove(key) {
             close_quietly(old).await;
         }
-        if let Some(ssh) = &self.cfg.ssh {
-            if self.tunnel_dead() {
-                // Every session went through the dead tunnel.
-                for (_, s) in link.metadata.drain() {
-                    close_quietly(s).await;
-                }
-                // The dead tunnel stays until a new one is up, so a failed attempt is
-                // retried by the next call.
-                let tunnel = open_tunnel(ssh, &self.cfg, &self.secrets, &self.known_hosts).await?;
-                let port = tunnel.local_addr().port();
-                let old = {
-                    let mut slot = lock(&self.tunnel);
-                    if self.closed.load(Ordering::SeqCst) {
-                        // `shutdown` ran meanwhile: do not resurrect the connection.
-                        Err(tunnel)
-                    } else {
-                        Ok(slot.replace(tunnel))
-                    }
-                };
-                match old {
-                    Err(fresh) => {
-                        fresh.close().await;
-                        return Err(closed_error());
-                    }
-                    Ok(Some(old)) => old.close().await,
-                    Ok(None) => {}
-                }
-                link.resolved.port = port;
-            }
-        }
+        self.replace_dead_tunnel(link).await?;
         let resolved = with_database(&link.resolved, key.clone());
         let session = connect_db(self.driver.as_ref(), &resolved).await?;
         link.metadata.insert(key.clone(), session);
         Ok(())
     }
 
-    fn tunnel_dead(&self) -> bool {
+    /// With SSH and a dead tunnel: closes every metadata session (they all went through
+    /// it), opens a new tunnel and points `link` at it. Otherwise does nothing. (Query
+    /// tab sessions through the dead tunnel fail on their next use.)
+    pub(crate) async fn replace_dead_tunnel(&self, link: &mut Link) -> Result<(), DbError> {
+        let Some(ssh) = &self.cfg.ssh else {
+            return Ok(());
+        };
+        if !self.tunnel_dead() {
+            return Ok(());
+        }
+        for (_, s) in link.metadata.drain() {
+            close_quietly(s).await;
+        }
+        // The dead tunnel stays until a new one is up, so a failed attempt is retried by
+        // the next call.
+        let tunnel = open_tunnel(ssh, &self.cfg, &self.secrets, &self.known_hosts).await?;
+        let port = tunnel.local_addr().port();
+        let old = {
+            let mut slot = lock(&self.tunnel);
+            if self.closed.load(Ordering::SeqCst) {
+                // `shutdown` ran meanwhile: do not resurrect the connection.
+                Err(tunnel)
+            } else {
+                Ok(slot.replace(tunnel))
+            }
+        };
+        match old {
+            Err(fresh) => {
+                fresh.close().await;
+                return Err(closed_error());
+            }
+            Ok(Some(old)) => old.close().await,
+            Ok(None) => {}
+        }
+        link.resolved.port = port;
+        self.tunnel_gen.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) fn tunnel_dead(&self) -> bool {
         lock(&self.tunnel).as_ref().is_some_and(|t| !t.is_alive())
     }
 
-    fn ensure_open(&self, link: &Link) -> Result<(), DbError> {
+    pub(crate) fn ensure_open(&self, link: &Link) -> Result<(), DbError> {
         if link.closed || self.closed.load(Ordering::SeqCst) {
             Err(closed_error())
         } else {
@@ -915,12 +1143,22 @@ impl ConnectionRuntime {
     /// tunnel is closed regardless, and the call finds the runtime closed.
     async fn shutdown(&self) {
         {
-            let mut task = lock(&self.schema_task);
+            let mut tasks = lock(&self.schema_tasks);
             self.closed.store(true, Ordering::SeqCst);
-            if let Some(task) = task.take() {
+            for task in tasks.drain(..) {
                 task.abort();
             }
         }
+        for (_, slot) in lock(&self.schema_caches).drain() {
+            slot.abort_load();
+        }
+        // `closed` is set: no tab slot can be created any more.
+        let tabs = self.queries.drain();
+        futures_util::future::join_all(
+            tabs.into_iter()
+                .map(|(tab, slot)| close_slot(tab, slot, SLOT_CLOSE_WAIT)),
+        )
+        .await;
         match tokio::time::timeout(SHUTDOWN_LOCK_TIMEOUT, self.link.lock()).await {
             Ok(mut link) => {
                 link.closed = true;
@@ -940,62 +1178,144 @@ impl ConnectionRuntime {
         self.set_state(ConnState::Disconnected);
     }
 
-    /// Starts loading the SchemaCache; does nothing on a closed runtime.
-    fn spawn_schema_cache(self: &Arc<Self>) {
+    /// The connect database: PostgreSQL's `home`, MySQL's default database (if any).
+    pub(crate) fn home_database(&self) -> Option<String> {
+        match self.cfg.kind {
+            DbKind::MySql => self.cfg.default_db.clone(),
+            DbKind::Postgres => self.home.clone(),
+        }
+    }
+
+    /// The slot of `database`, created empty on first use.
+    fn schema_slot(&self, database: &str) -> Arc<SchemaSlot> {
+        Arc::clone(
+            lock(&self.schema_caches)
+                .entry(database.to_string())
+                .or_default(),
+        )
+    }
+
+    /// Whether `slot` is still the slot of `database` (not replaced by a refresh).
+    fn is_current_slot(&self, database: &str, slot: &Arc<SchemaSlot>) -> bool {
+        lock(&self.schema_caches)
+            .get(database)
+            .is_some_and(|current| Arc::ptr_eq(current, slot))
+    }
+
+    /// Databases that have a SchemaCache slot (loaded or loading).
+    fn schema_databases(&self) -> Vec<String> {
+        lock(&self.schema_caches).keys().cloned().collect()
+    }
+
+    /// Single-flight per database: one load at a time, and its result (a cache, or an
+    /// error kept for `schema_error_ttl`) is what every waiter gets. A caller whose load
+    /// (or slot) is replaced by a refresh follows the new slot.
+    async fn schema_cache_for(self: &Arc<Self>, database: &str) -> Result<SchemaCache, DbError> {
+        require_database(database)?;
+        loop {
+            let slot = self.schema_slot(database);
+            let mut state = slot.state.lock().await;
+            match &*state {
+                SlotState::Ready(cache) => return Ok(cache.clone()),
+                SlotState::Failed(e, at) if at.elapsed() < self.schema_error_ttl => {
+                    return Err(e.clone())
+                }
+                _ => {}
+            }
+            if !self.is_current_slot(database, &slot) {
+                continue;
+            }
+            self.ensure_not_closed()?;
+            let rt = Arc::clone(self);
+            let db = database.to_string();
+            let load = tokio::spawn(async move { rt.load_schema_cache(&db).await });
+            *lock(&slot.load) = Some(load.abort_handle());
+            let outcome = load.await;
+            lock(&slot.load).take();
+            match outcome {
+                Ok(Ok(cache)) => {
+                    *state = SlotState::Ready(cache.clone());
+                    return Ok(cache);
+                }
+                Ok(Err(e)) => {
+                    *state = SlotState::Failed(e.clone(), Instant::now());
+                    return Err(e);
+                }
+                // Aborted by a refresh (follow the new slot) or by `shutdown`.
+                Err(join) if join.is_cancelled() => {
+                    self.ensure_not_closed()?;
+                }
+                Err(_) => {
+                    return Err(DbError::Internal {
+                        message: "the schema cache load failed unexpectedly".into(),
+                    })
+                }
+            }
+        }
+    }
+
+    fn ensure_not_closed(&self) -> Result<(), DbError> {
+        if self.closed.load(Ordering::SeqCst) {
+            Err(closed_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Replaces the slot of `database` with an empty one, aborts the load running on the
+    /// old one (so the two loads do not compete for the metadata link), and loads the new
+    /// one in the background. Callers waiting on the old slot follow the new one.
+    pub(crate) fn refresh_schema_cache(self: &Arc<Self>, database: &str) {
+        let old = lock(&self.schema_caches).insert(database.to_string(), Arc::default());
+        if let Some(old) = old {
+            old.abort_load();
+        }
+        self.spawn_schema_load(database.to_string());
+    }
+
+    /// Loads the SchemaCache of `database` in the background; does nothing on a closed
+    /// runtime.
+    fn spawn_schema_load(self: &Arc<Self>, database: String) {
         // `closed` is set under the same lock by `shutdown`, so either the task is not
         // started or `shutdown` finds (and aborts) it.
-        let mut slot = lock(&self.schema_task);
+        let mut tasks = lock(&self.schema_tasks);
         if self.closed.load(Ordering::SeqCst) {
             return;
         }
+        tasks.retain(|t| !t.is_finished());
         let rt = Arc::clone(self);
-        let task = tokio::spawn(async move {
-            match rt.load_schema_cache().await {
-                Ok(Some(cache)) => {
-                    *rt.schema_cache
-                        .write()
-                        .unwrap_or_else(PoisonError::into_inner) = Some(cache);
-                }
-                Ok(None) => {}
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = rt.schema_cache_for(&database).await {
                 // DbError messages never carry secrets.
-                Err(e) => tracing::warn!(
+                tracing::warn!(
                     connection = %rt.cfg.id,
                     error = %e,
                     "could not load the schema cache"
-                ),
+                );
             }
-        });
-        *slot = Some(task);
+        }));
     }
 
-    /// Tables and views (with column names) of the default database; on PostgreSQL of
-    /// the schemas in `current_schemas(false)`. `None` for MySQL without a default database.
-    async fn load_schema_cache(&self) -> Result<Option<SchemaCache>, DbError> {
-        let (database, schemas, kinds): (String, Vec<Option<String>>, &[ObjectKind]) =
-            match (self.cfg.kind, &self.home) {
-                (DbKind::Postgres, Some(home)) => {
-                    let schemas = self
-                        .with_session(None, |s| Box::pin(current_schemas(s)))
-                        .await?;
-                    (
-                        home.clone(),
-                        schemas.into_iter().map(Some).collect(),
-                        &[
-                            ObjectKind::Table,
-                            ObjectKind::View,
-                            ObjectKind::MaterializedView,
-                        ],
-                    )
-                }
-                _ => match &self.cfg.default_db {
-                    Some(db) => (
-                        db.clone(),
-                        vec![None],
-                        &[ObjectKind::Table, ObjectKind::View],
-                    ),
-                    None => return Ok(None),
-                },
-            };
+    /// Tables and views (with column names and types) of `database`; on PostgreSQL of the
+    /// schemas in `current_schemas(false)` of that database's metadata session.
+    async fn load_schema_cache(&self, database: &str) -> Result<SchemaCache, DbError> {
+        let database = database.to_string();
+        let (schemas, kinds): (Vec<Option<String>>, &[ObjectKind]) = match self.cfg.kind {
+            DbKind::Postgres => {
+                let schemas = self
+                    .with_session(Some(&database), |s| Box::pin(current_schemas(s)))
+                    .await?;
+                (
+                    schemas.into_iter().map(Some).collect(),
+                    &[
+                        ObjectKind::Table,
+                        ObjectKind::View,
+                        ObjectKind::MaterializedView,
+                    ],
+                )
+            }
+            DbKind::MySql => (vec![None], &[ObjectKind::Table, ObjectKind::View]),
+        };
 
         // Per scope: one listing per object kind plus ONE bulk column query; never a
         // per-table `table_detail` (that reads statistics, ~6-8 queries per table).
@@ -1005,7 +1325,7 @@ impl ConnectionRuntime {
                 database: database.clone(),
                 schema: schema.clone(),
             };
-            let mut columns: HashMap<String, Vec<String>> = self
+            let mut columns: HashMap<String, Vec<ColumnBrief>> = self
                 .with_session(Some(&database), |s| {
                     let scope = scope.clone();
                     Box::pin(async move { s.introspector().list_columns(&scope).await })
@@ -1031,7 +1351,7 @@ impl ConnectionRuntime {
                 }
             }
         }
-        Ok(Some(SchemaCache { database, tables }))
+        Ok(SchemaCache { database, tables })
     }
 }
 
@@ -1051,7 +1371,7 @@ impl RowSink for TextColumn {
                 }),
         );
     }
-    fn result_end(&mut self, _affected: Option<u64>, _elapsed: Duration) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 /// The schemas of the session's effective `search_path` (PostgreSQL).
@@ -1077,6 +1397,116 @@ mod tests {
     fn manager_is_send_and_sync() {
         assert_send_sync::<SessionManager>();
         assert_send_sync::<ConnectionRuntime>();
+    }
+
+    mod target {
+        use super::super::{same_ssh_endpoint, same_target};
+        use dnt_core::config::ConnectionConfig;
+        use dnt_core::server::DbKind;
+        use dnt_core::test_util::{sample_config, sample_ssh};
+
+        fn with_ssh() -> ConnectionConfig {
+            ConnectionConfig {
+                ssh: Some(sample_ssh()),
+                ..sample_config()
+            }
+        }
+
+        #[test]
+        fn ssh_on_to_off_is_different_target() {
+            let stored = with_ssh();
+            let cfg = ConnectionConfig {
+                ssh: None,
+                ..stored.clone()
+            };
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_off_to_on_is_different_target() {
+            let stored = sample_config();
+            let cfg = with_ssh();
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_host_changed_is_different_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.ssh.as_mut().unwrap().host = "other-bastion.example.com".into();
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_port_changed_is_different_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.ssh.as_mut().unwrap().port = 2222;
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn ssh_user_changed_is_different_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.ssh.as_mut().unwrap().user = "someone".into();
+            assert!(!same_target(&stored, &cfg));
+            assert!(!same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn unchanged_ssh_is_same_target() {
+            let stored = with_ssh();
+            let mut cfg = stored.clone();
+            cfg.name = "renamed".into();
+            cfg.default_db = Some("other".into());
+            assert!(same_target(&stored, &cfg));
+            assert!(same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn unchanged_direct_connection_is_same_target() {
+            let stored = sample_config();
+            assert!(same_target(&stored, &stored.clone()));
+            // No SSH on either side: there is no SSH secret to fall back to.
+            assert!(!same_ssh_endpoint(&stored, &stored.clone()));
+        }
+
+        #[test]
+        fn db_host_case_only_change_is_same_target() {
+            let stored = ConnectionConfig {
+                host: "db.example.com".into(),
+                ..with_ssh()
+            };
+            let mut cfg = stored.clone();
+            cfg.host = "  DB.Example.COM ".into();
+            cfg.ssh.as_mut().unwrap().host = " Bastion.EXAMPLE.com".into();
+            assert!(same_target(&stored, &cfg));
+            assert!(same_ssh_endpoint(&stored, &cfg));
+        }
+
+        #[test]
+        fn db_endpoint_or_engine_changed_is_different_target() {
+            let stored = with_ssh();
+            type Edit = (&'static str, fn(&mut ConnectionConfig));
+            let edits: [Edit; 4] = [
+                ("engine", |c| c.kind = DbKind::Postgres),
+                ("host", |c| c.host = "10.0.0.9".into()),
+                ("port", |c| c.port = 3307),
+                ("user", |c| c.username = "someone".into()),
+            ];
+            for (what, edit) in edits {
+                let mut cfg = stored.clone();
+                edit(&mut cfg);
+                assert!(!same_target(&stored, &cfg), "changed {what}");
+                // The bastion is unchanged: its secrets may still be reused.
+                assert!(same_ssh_endpoint(&stored, &cfg), "changed {what}");
+            }
+        }
     }
 
     #[test]

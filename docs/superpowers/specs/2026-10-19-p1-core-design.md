@@ -178,7 +178,7 @@ Timeout mặc định: SSH 10 giây, DB 10 giây, chỉnh được trong tab Adv
 ### 4.4 Tự kết nối lại
 
 - Lỗi mất kết nối khi **không** có transaction mở: tự kết nối lại một lần, rồi chạy lại câu lệnh nếu `classify_statement` cho kết quả `Read`.
-- Lỗi mất kết nối khi **có** transaction mở (theo dõi bằng cờ trong session, cập nhật theo `BEGIN/START TRANSACTION/COMMIT/ROLLBACK` và trạng thái autocommit): trả `ConnectionLost { in_transaction: true }`, không retry.
+- Lỗi mất kết nối khi **có** transaction mở (theo dõi bằng cờ trong session, cập nhật theo `BEGIN/START TRANSACTION/COMMIT/ROLLBACK` và trạng thái autocommit): trả `ConnectionLost { was_in_tx: true, outcome_unknown, message }`, không retry. `outcome_unknown = true` khi câu lệnh đang chạy có thể đã commit (DDL, `COMMIT`, `CALL`, hoặc câu ghi ngoài transaction); `message` ghi nguyên nhân và những gì đã bị reset (transaction, biến/thiết lập session, bảng tạm).
 
 ### 4.5 Tag môi trường và read-only
 
@@ -323,23 +323,24 @@ pub enum DbError {
     SshHostKeyUnknown { host: String, fingerprint: String },
     Tls { message: String },
     Connect { message: String },
-    Timeout { stage: ConnectStage },
+    Timeout { stage: ConnectStage, outcome_unknown: bool },
     Auth { message: String },
     Server { code: Option<String>, sqlstate: Option<String>, message: String, position: Option<u32> },
-    ConnectionLost { in_transaction: bool },
-    Cancelled,
+    ConnectionLost { was_in_tx: bool, outcome_unknown: bool, message: String },
+    Cancelled { outcome_unknown: bool },
     Unsupported { feature: String, version: String },
     Internal { message: String },
 }
 ```
 
-- Lỗi gửi lên frontend dưới dạng `AppError { kind, message, detail, stage?, server_code?, sqlstate?, position?, retryable }`. `detail` giữ nguyên thông báo gốc.
+- Lỗi gửi lên frontend dưới dạng `AppError { kind, message, detail, stage?, server_code?, sqlstate?, position?, retryable, outcome_unknown }`. `detail` giữ nguyên thông báo gốc.
+- `outcome_unknown` (của `Timeout`, `ConnectionLost`, `Cancelled`): câu lệnh có thể đã được áp dụng. Khi đó `message` nói rõ "may have been applied" và `retryable = false`.
 - **Cách UI hiển thị:**
   - Lỗi kết nối: hiện trong dialog, đánh dấu bước lỗi.
   - `SshHostKeyUnknown`: hộp xác nhận fingerprint.
   - `ConnectionLost`: thanh báo kèm nút Reconnect.
   - `Internal`: toast kèm "Open log folder".
-  - `Cancelled`: không coi là lỗi.
+  - `Cancelled`: không coi là lỗi, **trừ khi** `outcome_unknown = true`: khi đó phải hiện cho người dùng (câu lệnh có thể đã được áp dụng).
 - **Gợi ý theo mã lỗi** (bảng tra trong `core`), tối thiểu gồm: `ECONNREFUSED`, MySQL `1045`, `1049`, `2003`, PG `28P01`, `28000`, `3D000`, SSH `Auth` khi key có passphrase.
 - Mọi Tauri command chạy trong lớp bọc bắt panic, trả `Internal`. Task nền gặp lỗi chỉ ghi log và cập nhật trạng thái. Frontend có error boundary cho từng panel.
 - **Log:**

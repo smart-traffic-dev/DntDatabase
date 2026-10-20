@@ -13,6 +13,9 @@ use std::time::Duration;
 pub enum Target {
     MySql57,
     MySql8,
+    /// MySQL 8.4 LTS: explain fixtures only, so not in [`Target::all`] or
+    /// [`Target::mysql_family`].
+    MySql84,
     MariaDb106,
     MariaDb114,
     Pg12,
@@ -60,6 +63,7 @@ impl Target {
         match self {
             Target::MySql57 => 33057,
             Target::MySql8 => 33080,
+            Target::MySql84 => 33084,
             Target::MariaDb106 => 33106,
             Target::MariaDb114 => 33114,
             Target::Pg12 => 54312,
@@ -103,6 +107,7 @@ impl Target {
         match self {
             Target::MySql57 => ("mysql57", 3306),
             Target::MySql8 => ("mysql8", 3306),
+            Target::MySql84 => ("mysql84", 3306),
             Target::MariaDb106 => ("mariadb106", 3306),
             Target::MariaDb114 => ("mariadb114", 3306),
             Target::Pg12 => ("pg12", 5432),

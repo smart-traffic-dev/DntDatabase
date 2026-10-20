@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api, isCancelled, notOpenError, toAppError } from '../api';
 import { promptHandles, reopenConnection } from './reopen';
 import type { AppError, ObjectRef, TableDetail } from '../bindings';
-import type { Tab } from './tabs';
+import type { ObjectTabRef as Tab } from './tabs';
 import { useTabs } from './tabs';
 import { objectNodeKey } from './treeModel';
 

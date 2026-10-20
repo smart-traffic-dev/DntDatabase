@@ -209,11 +209,16 @@ pub async fn refresh_node_impl(
     Ok(())
 }
 
+/// The SchemaCache of the connect database (loaded on first use; see
+/// `SessionManager::schema_cache_for`). `None` for MySQL without a default database.
 pub async fn get_schema_cache_impl(
     state: &AppState,
     id: Uuid,
 ) -> Result<Option<SchemaCache>, DbError> {
-    Ok(state.sessions.schema_cache(id))
+    match state.sessions.home_database(id)? {
+        Some(db) => Ok(Some(state.sessions.schema_cache_for(id, &db).await?)),
+        None => Ok(None),
+    }
 }
 
 #[tauri::command]

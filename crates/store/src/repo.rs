@@ -71,7 +71,7 @@ pub struct SecretUpdate {
 }
 
 pub struct ConnectionRepo {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
     secrets: Arc<dyn SecretStore>,
 }
 
@@ -87,7 +87,7 @@ impl ConnectionRepo {
         }
     }
 
-    fn lock(&self) -> Result<MutexGuard<'_, Connection>, DbError> {
+    pub(crate) fn lock(&self) -> Result<MutexGuard<'_, Connection>, DbError> {
         self.conn.lock().map_err(|_| DbError::Internal {
             message: "connection repository lock is poisoned".into(),
         })
@@ -713,7 +713,7 @@ pub(crate) fn now_rfc3339() -> Result<String, DbError> {
         .map_err(|e| internal("format timestamp", e))
 }
 
-fn parse_uuid(s: &str) -> Result<Uuid, DbError> {
+pub(crate) fn parse_uuid(s: &str) -> Result<Uuid, DbError> {
     Uuid::parse_str(s).map_err(|e| internal(format!("invalid id {s:?} in database"), e))
 }
 

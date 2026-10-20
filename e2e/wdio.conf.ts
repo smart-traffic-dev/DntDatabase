@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const application = path.join(root, 'target', 'debug', 'dntdatabase.exe');
+const application = path.join(root, 'target', 'e2e', 'debug', 'dntdatabase.exe');
 const README_HINT = 'See README.md, section "End-to-end smoke test".';
 
 /** First existing candidate, or the first candidate when none exists (used in the error message). */
@@ -86,14 +86,16 @@ function cleanup() {
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
-  specs: ['./smoke.e2e.ts'],
+  specs: ['./smoke.e2e.ts', './postgres.e2e.ts', './query.e2e.ts'],
   maxInstances: 1,
+  maxInstancesPerCapability: 1, // both specs share one DNT_DATA_DIR and one tauri-driver port
   hostname: '127.0.0.1',
   port: 4444,
   path: '/',
   capabilities: [
     {
       browserName: 'wry',
+      maxInstances: 1, // specs share one DNT_DATA_DIR and one tauri-driver; run them serially
       'tauri:options': { application },
     } as WebdriverIO.Capabilities,
   ],
@@ -104,7 +106,7 @@ export const config: WebdriverIO.Config = {
 
   async onPrepare() {
     const missing: [string, string][] = [
-      ['the app binary', application],
+      ['the app binary (run `pnpm --dir e2e build:app`)', application],
       ['msedgedriver (set MSEDGEDRIVER or extract it to tools/msedgedriver/)', nativeDriver],
       ['tauri-driver (set TAURI_DRIVER or run `cargo install tauri-driver --locked`)', tauriDriver],
     ];
@@ -114,6 +116,13 @@ export const config: WebdriverIO.Config = {
     // A fresh data dir per run; the app (spawned by the driver) inherits this environment.
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dnt-e2e-'));
     process.env.DNT_DATA_DIR = dataDir;
+    // One evidence folder per run, shared with the worker process.
+    process.env.E2E_EVIDENCE_DIR ??= path.join(
+      here,
+      'evidence',
+      new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19),
+    );
+    console.log(`e2e evidence: ${process.env.E2E_EVIDENCE_DIR}`);
     credentialsBefore = appCredentials();
     driver = spawn(tauriDriver, ['--native-driver', nativeDriver], {
       stdio: ['ignore', process.stdout, process.stderr],
@@ -126,7 +135,17 @@ export const config: WebdriverIO.Config = {
     }
   },
 
+  async afterTest(test, _context, { passed }) {
+    if (!passed) {
+      // The worker's global `browser`; importing ./evidence from the launcher cannot resolve @wdio/globals.
+      const dir = process.env.E2E_EVIDENCE_DIR ?? here;
+      fs.mkdirSync(dir, { recursive: true });
+      await browser.saveScreenshot(path.join(dir, `FAILED-${test.title.replace(/\W+/g, '_').slice(0, 60)}.png`));
+    }
+  },
+
   onComplete() {
     cleanup();
   },
 };
+

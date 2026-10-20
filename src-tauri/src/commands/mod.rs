@@ -8,8 +8,10 @@
 
 pub mod browse;
 pub mod connections;
+pub mod query;
 pub mod settings;
 pub mod transfer;
+pub mod workspace;
 
 use dnt_core::error::{AppError, DbError};
 use dnt_core::value::{ColumnMeta, Value};
@@ -122,6 +124,16 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browse::object_ddl,
             browse::refresh_node,
             browse::get_schema_cache,
+            query::completion_scope,
+            query::completion_objects,
+            query::query_plan,
+            query::statement_ranges,
+            query::query_tx,
+            query::query_close_tab,
+            query::query_run,
+            query::query_cancel,
+            query::query_explain,
+            query::query_plan_statement,
             transfer::export_connections,
             transfer::preview_import,
             transfer::apply_import,
@@ -129,7 +141,18 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::get_log_level,
             settings::set_log_level,
             settings::open_log_folder,
+            workspace::tabs_load,
+            workspace::tabs_save,
+            workspace::tabs_delete,
+            workspace::file_read,
+            workspace::file_write,
+            workspace::history_list,
+            workspace::history_delete,
+            workspace::history_clear,
         ])
+        // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
+        // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.
+        .events(tauri_specta::collect_events![])
         .typ::<Value>()
         .typ::<ColumnMeta>()
 }
@@ -227,7 +250,7 @@ mod tests {
     #[tokio::test]
     async fn guard_maps_errors_and_passes_values() {
         assert_eq!(guard(async { Ok::<_, DbError>(7) }).await.unwrap(), 7);
-        let err = guard(async { Err::<(), _>(DbError::Cancelled) })
+        let err = guard(async { Err::<(), _>(DbError::cancelled()) })
             .await
             .unwrap_err();
         assert_eq!(err.kind, "cancelled");

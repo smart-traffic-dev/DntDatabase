@@ -1,0 +1,13 @@
+{
+  "columns": [
+    "EXPLAIN"
+  ],
+  "rows": [
+    [
+      {
+        "t": "Text",
+        "v": "{\n  \"query_block\": {\n    \"select_id\": 1,\n    \"filesort\": {\n      \"sort_key\": \"count(0) desc\",\n      \"temporary_table\": {\n        \"table\": {\n          \"table_name\": \"o\",\n          \"access_type\": \"index\",\n          \"possible_keys\": [\"idx_orders_customer_status\"],\n          \"key\": \"idx_orders_customer_status\",\n          \"key_length\": \"5\",\n          \"used_key_parts\": [\"customer_id\", \"status\"],\n          \"rows\": 3,\n          \"filtered\": 100,\n          \"attached_condition\": \"o.`status` = 'paid'\",\n          \"using_index\": true\n        },\n        \"table\": {\n          \"table_name\": \"c\",\n          \"access_type\": \"eq_ref\",\n          \"possible_keys\": [\"PRIMARY\"],\n          \"key\": \"PRIMARY\",\n          \"key_length\": \"4\",\n          \"used_key_parts\": [\"id\"],\n          \"ref\": [\"dnt_fixture.o.customer_id\"],\n          \"rows\": 1,\n          \"filtered\": 100,\n          \"using_index\": true\n        }\n      }\n    }\n  }\n}"
+      }
+    ]
+  ]
+}

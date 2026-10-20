@@ -291,6 +291,7 @@ describe('ConnectionTree', () => {
     const menu = screen.getByRole('menu');
     expect(within(menu).getAllByRole('menuitem').map((i) => i.textContent)).toEqual([
       'Open',
+      'New query',
       'Edit',
       'Duplicate',
       'Delete',

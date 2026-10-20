@@ -290,7 +290,7 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
     );
     out.insert(
         "timeout_connect",
-        staged(ConnectDb, false, DbError::Timeout { stage: ConnectDb }),
+        staged(ConnectDb, false, DbError::timeout(ConnectDb)),
     );
     out.insert(
         "ssh_connect",
@@ -352,19 +352,76 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
     // Browsing an open connection.
     out.insert(
         "timeout_execute",
+        DbError::timeout(ConnectStage::Execute).into(),
+    );
+    // Running a statement: it timed out, and whether it was applied is unknown.
+    out.insert(
+        "timeout_execute_outcome_unknown",
         DbError::Timeout {
             stage: ConnectStage::Execute,
+            outcome_unknown: true,
+            was_in_tx: false,
+        }
+        .into(),
+    );
+    // Inside a transaction: nothing applied, but not a plain retry either.
+    out.insert(
+        "timeout_in_tx",
+        DbError::Timeout {
+            stage: ConnectStage::Execute,
+            outcome_unknown: false,
+            was_in_tx: true,
         }
         .into(),
     );
     out.insert(
         "connection_lost",
         DbError::ConnectionLost {
-            in_transaction: false,
+            was_in_tx: false,
+            outcome_unknown: false,
+            message: "Lost connection to MySQL server during query".into(),
         }
         .into(),
     );
-    out.insert("cancelled", DbError::Cancelled.into());
+    out.insert(
+        "connection_lost_in_transaction",
+        DbError::ConnectionLost {
+            was_in_tx: true,
+            outcome_unknown: false,
+            message: "Lost connection to MySQL server during query; the transaction was \
+                      rolled back"
+                .into(),
+        }
+        .into(),
+    );
+    out.insert(
+        "connection_lost_outcome_unknown",
+        DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: "Lost connection to MySQL server during query".into(),
+        }
+        .into(),
+    );
+    out.insert("cancelled", DbError::cancelled().into());
+    out.insert(
+        "cancelled_outcome_unknown",
+        DbError::Cancelled {
+            outcome_unknown: true,
+            was_in_tx: false,
+        }
+        .into(),
+    );
+
+    // Query runs: the tab is busy, or the guard / plan stops the run.
+    out.insert("busy", DbError::Busy.into());
+    out.insert("transaction_open", DbError::TransactionOpen.into());
+    out.insert("plan_expired", DbError::PlanExpired.into());
+    out.insert("blocked", DbError::Blocked { count: 2 }.into());
+    out.insert(
+        "confirmation_required",
+        DbError::ConfirmationRequired { count: 3 }.into(),
+    );
     out
 }
 

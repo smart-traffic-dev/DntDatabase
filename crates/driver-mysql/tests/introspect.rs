@@ -396,9 +396,35 @@ async fn list_columns_matches_table_detail_in_one_query() {
                 .unwrap_or_else(|| panic!("{t:?}: {table} missing from {names:?}"))
                 .columns;
             let detail = s.table_detail(&obj(table, kind)).await.unwrap();
-            let expected: Vec<String> = detail.columns.into_iter().map(|c| c.name).collect();
-            assert_eq!(listed, &expected, "{t:?} {table}");
+            let expected: Vec<(String, String)> = detail
+                .columns
+                .into_iter()
+                .map(|c| (c.name, c.db_type))
+                .collect();
+            let listed: Vec<(String, String)> = listed
+                .iter()
+                .map(|c| (c.name.clone(), c.data_type.clone()))
+                .collect();
+            assert_eq!(listed, expected, "{t:?} {table}");
         }
+    }
+}
+
+#[tokio::test]
+async fn list_columns_has_types() {
+    require_db!();
+    for t in Target::mysql_family() {
+        let s = connect(t).await;
+        let all = s.list_columns(&fixture()).await.unwrap();
+        let orders = all.iter().find(|c| c.table == "orders").unwrap();
+        let status = orders.columns.iter().find(|c| c.name == "status").unwrap();
+        assert!(
+            status.data_type.starts_with("enum("),
+            "{t:?}: {}",
+            status.data_type
+        );
+        let total = orders.columns.iter().find(|c| c.name == "total").unwrap();
+        assert_eq!(total.data_type, "decimal(12,2)", "{t:?}");
     }
 }
 

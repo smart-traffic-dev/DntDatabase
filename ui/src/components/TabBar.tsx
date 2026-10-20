@@ -1,6 +1,8 @@
 import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
-import { useTabs } from '../store/tabs';
+import { useQueryDocs } from '../store/queryTabs';
+import { useTabs, type Tab } from '../store/tabs';
+import { EnvTag } from './EnvTag';
 import { CloseIcon } from './icons';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
@@ -21,12 +23,21 @@ export function TabBar() {
   const activate = useTabs((s) => s.activate);
   const close = useTabs((s) => s.close);
   const summaries = useConnections((s) => s.summaries);
+  const docs = useQueryDocs((s) => s.docs);
+  // A query tab closes through its guards (open transaction, unsaved file), then drops its row.
+  const closeTab = (tab: Tab) => {
+    if (tab.kind === 'query') void useQueryDocs.getState().closeTab(tab.id);
+    else close(tab.id);
+  };
   return (
     <div role="tablist" aria-label="Open tabs" className="tabbar">
       {tabs.map((tab) => {
         // Environment colour of the tab's connection, as in the tree and status bar.
-        const env = summaries.get(tab.connectionId)?.config.env_tag ?? null;
+        const env = (tab.connectionId ? summaries.get(tab.connectionId)?.config.env_tag : null) ?? null;
         const classes = ['tab', tab.id === activeId ? 'active' : '', env ? `env-${env}` : ''].filter(Boolean).join(' ');
+        // `●` only for a tab bound to a file whose text differs from it.
+        const doc = tab.kind === 'query' ? docs.get(tab.id) : undefined;
+        const unsaved = !!doc?.filePath && doc.dirty;
         return (
           <div key={tab.id} className={classes}>
             <button
@@ -35,13 +46,18 @@ export function TabBar() {
               aria-selected={tab.id === activeId}
               className="tab-label"
               onClick={() => activate(tab.id)}
-              onAuxClick={(e) => e.button === 1 && close(tab.id)}
+              onAuxClick={(e) => e.button === 1 && closeTab(tab)}
             >
-              {env && <span className={`env-dot env-${env}`} title={`Environment: ${env}`} />}
-              <span className="tab-kind">{KIND_LABEL[tab.objectRef.kind]}</span>
+              {env && <EnvTag env={env} />}
+              <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : KIND_LABEL[tab.objectRef.kind]}</span>
               <span>{tab.title}</span>
+              {unsaved && (
+                <span className="tab-dirty" title="Unsaved changes" aria-label="Unsaved changes">
+                  ●
+                </span>
+              )}
             </button>
-            <button type="button" className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => close(tab.id)}>
+            <button type="button" className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => closeTab(tab)}>
               <CloseIcon />
             </button>
           </div>

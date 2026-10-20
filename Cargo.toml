@@ -17,6 +17,7 @@ dirs = "6"
 dnt-core = { path = "crates/core" }
 dnt-driver-mysql = { path = "crates/driver-mysql" }
 dnt-driver-pg = { path = "crates/driver-pg" }
+dnt-query = { path = "crates/query" }
 dnt-store = { path = "crates/store" }
 dnt-testkit = { path = "crates/testkit" }
 dnt-tunnel = { path = "crates/tunnel" }

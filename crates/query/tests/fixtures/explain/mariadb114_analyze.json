@@ -1,0 +1,13 @@
+{
+  "columns": [
+    "ANALYZE"
+  ],
+  "rows": [
+    [
+      {
+        "t": "Text",
+        "v": "{\n  \"query_optimization\": {\n    \"r_total_time_ms\": 0.112380345\n  },\n  \"query_block\": {\n    \"select_id\": 1,\n    \"cost\": 0.010588495,\n    \"r_loops\": 1,\n    \"r_total_time_ms\": 0.599707137,\n    \"filesort\": {\n      \"sort_key\": \"count(0) desc\",\n      \"r_loops\": 1,\n      \"r_total_time_ms\": 0.008482671,\n      \"r_used_priority_queue\": false,\n      \"r_output_rows\": 1,\n      \"r_buffer_size\": \"360\",\n      \"r_sort_mode\": \"sort_key,rowid\",\n      \"temporary_table\": {\n        \"nested_loop\": [\n          {\n            \"table\": {\n              \"table_name\": \"o\",\n              \"access_type\": \"index\",\n              \"possible_keys\": [\"idx_orders_customer_status\"],\n              \"key\": \"idx_orders_customer_status\",\n              \"key_length\": \"5\",\n              \"used_key_parts\": [\"customer_id\", \"status\"],\n              \"loops\": 1,\n              \"r_loops\": 1,\n              \"rows\": 3,\n              \"r_rows\": 3,\n              \"cost\": 0.007085975,\n              \"r_table_time_ms\": 0.191380855,\n              \"r_other_time_ms\": 0.051978918,\n              \"r_engine_stats\": {\n                \"pages_accessed\": 1\n              },\n              \"filtered\": 100,\n              \"r_filtered\": 33.33333333,\n              \"attached_condition\": \"o.`status` = 'paid'\",\n              \"using_index\": true\n            }\n          },\n          {\n            \"table\": {\n              \"table_name\": \"c\",\n              \"access_type\": \"eq_ref\",\n              \"possible_keys\": [\"PRIMARY\"],\n              \"key\": \"PRIMARY\",\n              \"key_length\": \"4\",\n              \"used_key_parts\": [\"id\"],\n              \"ref\": [\"dnt_fixture.o.customer_id\"],\n              \"loops\": 3,\n              \"r_loops\": 1,\n              \"rows\": 1,\n              \"r_rows\": 1,\n              \"cost\": 0.00350252,\n              \"r_table_time_ms\": 0.322907369,\n              \"r_other_time_ms\": 0.009039158,\n              \"r_engine_stats\": {\n                \"pages_accessed\": 1\n              },\n              \"filtered\": 100,\n              \"r_filtered\": 100\n            }\n          }\n        ]\n      }\n    }\n  }\n}"
+      }
+    ]
+  ]
+}

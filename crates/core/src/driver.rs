@@ -5,16 +5,58 @@ use crate::meta::{
     TableDetail,
 };
 use crate::server::{DbKind, ServerInfo};
+use crate::sql::{classify, split, Dialect, StatementKind};
+use crate::tx::TxState;
 use crate::value::{ColumnMeta, Value};
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// How long a driver waits, after it asked the server to stop a statement (timeout or
+/// Stop), for the statement to end before it gives the connection up.
+pub const DEFAULT_CANCEL_GRACE: Duration = Duration::from_secs(10);
+
+/// A flag the query layer raises to stop a run; every clone shares it. Two signals are
+/// equal only when they are the same flag.
+#[derive(Clone, Debug, Default)]
+pub struct StopSignal(Arc<AtomicBool>);
+
+impl StopSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn stop(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl PartialEq for StopSignal {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for StopSignal {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecOptions {
     pub max_rows: usize,
     pub batch_size: usize,
+    /// Per-statement time limit.
     pub timeout: Option<Duration>,
+    /// See [`DEFAULT_CANCEL_GRACE`]; tests set it shorter.
+    pub cancel_grace: Duration,
+    /// Raised by the user's Stop: no statement may be sent once it is set. Use one
+    /// signal per run (every statement of a script shares it): a cancel aimed at a
+    /// running statement raises it too, and it stays raised, so a later run needs a
+    /// fresh signal.
+    pub stop: StopSignal,
 }
 
 impl Default for ExecOptions {
@@ -23,8 +65,31 @@ impl Default for ExecOptions {
             max_rows: 10_000,
             batch_size: 500,
             timeout: None,
+            cancel_grace: DEFAULT_CANCEL_GRACE,
+            stop: StopSignal::new(),
         }
     }
+}
+
+/// What one executed statement produced.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StmtOutcome {
+    /// One entry per result (a MySQL `CALL` may return several result sets).
+    pub results: Vec<ResultSummary>,
+    /// The statement completed within the cancel grace after its timeout: its results
+    /// are kept, and the script must not continue.
+    pub late_completion: bool,
+}
+
+/// Progress of a statement being stopped, reported through [`RowSink::progress`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecProgress {
+    /// Stopping the statement was requested (its timeout expired, or a user's cancel
+    /// targeted it). Emitted at once, before the cancel request is actually sent; the
+    /// cancel grace runs from here.
+    CancelSent,
+    /// The statement did not stop within the cancel grace.
+    GraceExpired,
 }
 
 /// Outcome of one statement of an executed script.
@@ -57,18 +122,60 @@ pub trait Driver: Send + Sync {
 #[async_trait]
 pub trait Session: Send + Sync {
     fn server_info(&self) -> &ServerInfo;
-    /// Runs a (possibly multi-statement) script. The driver splits it by its dialect
-    /// and calls `result_start` / `rows` / `result_end` on `sink` for every statement.
+    /// Runs ONE statement (`kind`: its [`classify`] result) and calls `result_start` /
+    /// `rows` / `result_end` on `sink` for every result it produces (a MySQL `CALL` may
+    /// produce several), and `progress` while it is being stopped.
+    ///
+    /// Nothing is sent when `opts.stop` is raised (or a cancel targeted this call)
+    /// before the statement starts: `Cancelled { outcome_unknown: false, .. }`.
+    /// `opts.timeout` applies to this statement; once it expires, or a cancel targets
+    /// it, the driver waits `opts.cancel_grace` for the statement to end before giving
+    /// its connection up. Every `Timeout` / `Cancelled` carries `was_in_tx`.
+    async fn execute_one(
+        &self,
+        stmt: &str,
+        kind: StatementKind,
+        opts: &ExecOptions,
+        sink: &mut dyn RowSink,
+    ) -> Result<StmtOutcome, DbError>;
+    /// Runs a (possibly multi-statement) script: splits it by [`Session::dialect`],
+    /// classifies each statement and runs it with [`Session::execute_one`], stopping at
+    /// the first error.
+    ///
+    /// A [`Canceller::cancel`] only targets a statement that is running: one that lands
+    /// between two statements is a no-op and the script goes on. To stop a script for
+    /// sure, raise `opts.stop` as well.
     async fn execute(
         &self,
         sql: &str,
         opts: ExecOptions,
         sink: &mut dyn RowSink,
-    ) -> Result<ExecSummary, DbError>;
+    ) -> Result<ExecSummary, DbError> {
+        let dialect = self.dialect();
+        let mut summary = ExecSummary::default();
+        for stmt in split(sql, dialect) {
+            let kind = classify(&stmt.text, dialect);
+            let outcome = self.execute_one(&stmt.text, kind, &opts, sink).await?;
+            summary.results.extend(outcome.results);
+        }
+        Ok(summary)
+    }
+    fn tx_state(&self) -> TxState;
+    /// The dialect statements of this session are split and classified with.
+    fn dialect(&self) -> Dialect;
+    fn in_transaction(&self) -> bool {
+        self.tx_state() != TxState::Idle
+    }
+    /// How many times this session replaced its connection with a fresh one, in all.
+    /// The query layer compares it around each statement to tell the user about
+    /// reconnects that were otherwise silent (a statement that succeeded on a new
+    /// connection). Default: 0 (a session that never reconnects).
+    fn reconnects(&self) -> u64 {
+        0
+    }
     fn cancel_handle(&self) -> CancelHandle;
     /// Session types implement `Introspector` themselves and return `self`.
     fn introspector(&self) -> &dyn Introspector;
-    fn in_transaction(&self) -> bool;
     async fn ping(&self) -> Result<(), DbError>;
     async fn close(self: Box<Self>);
 }
@@ -76,7 +183,50 @@ pub trait Session: Send + Sync {
 pub trait RowSink: Send {
     fn result_start(&mut self, cols: &[ColumnMeta]);
     fn rows(&mut self, batch: Vec<Vec<Value>>);
-    fn result_end(&mut self, affected: Option<u64>, elapsed: Duration);
+    /// The result that `result_start` opened is complete (`summary` is also returned
+    /// in the call's summary).
+    fn result_end(&mut self, summary: &ResultSummary);
+    /// Progress while a statement is being stopped. Default: ignored.
+    fn progress(&mut self, _p: ExecProgress) {}
+}
+
+/// A [`RowSink`] shared between a running statement (which streams into `&SharedSink`)
+/// and the driver code waiting on it, which reports [`ExecProgress`] meanwhile. Every
+/// call locks only for its own duration, never across an `.await`.
+pub struct SharedSink<'a> {
+    inner: std::sync::Mutex<&'a mut dyn RowSink>,
+}
+
+impl<'a> SharedSink<'a> {
+    pub fn new(sink: &'a mut dyn RowSink) -> Self {
+        SharedSink {
+            inner: std::sync::Mutex::new(sink),
+        }
+    }
+
+    fn with<R>(&self, f: impl FnOnce(&mut dyn RowSink) -> R) -> R {
+        let mut sink = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        f(&mut **sink)
+    }
+
+    pub fn progress(&self, p: ExecProgress) {
+        self.with(|s| s.progress(p));
+    }
+}
+
+impl RowSink for &SharedSink<'_> {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.with(|s| s.result_start(cols));
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        self.with(|s| s.rows(batch));
+    }
+    fn result_end(&mut self, summary: &ResultSummary) {
+        self.with(|s| s.result_end(summary));
+    }
+    fn progress(&mut self, p: ExecProgress) {
+        SharedSink::progress(self, p);
+    }
 }
 
 #[async_trait]
@@ -88,8 +238,8 @@ pub trait Introspector: Send + Sync {
         scope: &Scope,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError>;
-    /// Column names of every table and view of `scope` the user can see, in ONE query
-    /// (the SchemaCache needs names only; no statistics are read).
+    /// Column names and types of every table and view of `scope` the user can see, in ONE
+    /// query (the SchemaCache needs nothing more; no statistics are read).
     async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError>;
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError>;
     async fn object_ddl(&self, obj: &ObjectRef) -> Result<String, DbError>;
@@ -103,12 +253,145 @@ mod tests {
     #[test]
     fn exec_options_defaults() {
         let o = ExecOptions::default();
-        assert_eq!((o.max_rows, o.batch_size, o.timeout), (10_000, 500, None));
+        assert_eq!(
+            (o.max_rows, o.batch_size, o.timeout, o.cancel_grace),
+            (10_000, 500, None, Duration::from_secs(10))
+        );
+        assert_eq!(o.cancel_grace, DEFAULT_CANCEL_GRACE);
+        assert!(!o.stop.is_stopped());
     }
 
-    /// A session that is its own introspector, as the drivers are built.
+    #[test]
+    fn stop_signal_is_shared_across_clones() {
+        let a = StopSignal::new();
+        let b = a.clone();
+        assert!(!a.is_stopped());
+        b.stop();
+        assert!(a.is_stopped());
+        assert_eq!(a, b);
+        assert_ne!(a, StopSignal::new());
+    }
+
+    #[test]
+    fn stmt_outcome_default_is_empty() {
+        let o = StmtOutcome::default();
+        assert!(o.results.is_empty());
+        assert!(!o.late_completion);
+    }
+
+    /// A sink that only implements the required methods gets a no-op `progress`.
+    #[test]
+    fn row_sink_progress_defaults_to_noop() {
+        let mut s = Ends(vec![]);
+        s.progress(ExecProgress::CancelSent);
+        s.progress(ExecProgress::GraceExpired);
+        let summary = ResultSummary {
+            affected: Some(2),
+            row_count: 0,
+            truncated: false,
+            elapsed_ms: 5,
+        };
+        s.result_end(&summary);
+        assert_eq!(s.0, [summary]);
+    }
+
+    /// A session that is its own introspector, as the drivers are built. Records the
+    /// statements it is given; one containing `fail` fails.
     struct FakeSession {
         info: ServerInfo,
+        seen: std::sync::Mutex<Vec<(String, StatementKind)>>,
+    }
+
+    fn fake() -> FakeSession {
+        FakeSession {
+            info: detect_pg(170002, "PostgreSQL 17.2"),
+            seen: std::sync::Mutex::new(vec![]),
+        }
+    }
+
+    struct Ends(Vec<ResultSummary>);
+    impl RowSink for Ends {
+        fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+        fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+        fn result_end(&mut self, summary: &ResultSummary) {
+            self.0.push(summary.clone());
+        }
+    }
+
+    #[derive(Default)]
+    struct Log(Vec<String>);
+    impl RowSink for Log {
+        fn result_start(&mut self, cols: &[ColumnMeta]) {
+            self.0.push(format!("start {}", cols.len()));
+        }
+        fn rows(&mut self, batch: Vec<Vec<Value>>) {
+            self.0.push(format!("rows {}", batch.len()));
+        }
+        fn result_end(&mut self, summary: &ResultSummary) {
+            self.0.push(format!("end {}", summary.row_count));
+        }
+        fn progress(&mut self, p: ExecProgress) {
+            self.0.push(format!("{p:?}"));
+        }
+    }
+
+    /// Calls through a `&SharedSink` and the sink's own `progress` reach the same sink,
+    /// in order.
+    #[test]
+    fn shared_sink_forwards_every_call() {
+        let mut log = Log::default();
+        {
+            let shared = SharedSink::new(&mut log);
+            let mut handle = &shared;
+            handle.result_start(&[]);
+            handle.rows(vec![vec![Value::Null], vec![Value::Null]]);
+            shared.progress(ExecProgress::CancelSent);
+            handle.result_end(&ResultSummary {
+                affected: None,
+                row_count: 2,
+                truncated: false,
+                elapsed_ms: 0,
+            });
+            handle.progress(ExecProgress::GraceExpired);
+        }
+        assert_eq!(
+            log.0,
+            ["start 0", "rows 2", "CancelSent", "end 2", "GraceExpired"]
+        );
+    }
+
+    /// The default `execute` splits by the session's dialect, classifies each
+    /// statement, runs it with `execute_one` and stops at the first error.
+    #[tokio::test]
+    async fn default_execute_runs_statements_until_the_first_error() {
+        let s = fake();
+        let mut sink = Ends(vec![]);
+        let summary = s
+            .execute("SELECT 1; BEGIN", ExecOptions::default(), &mut sink)
+            .await
+            .unwrap();
+        assert_eq!(summary.results.len(), 2);
+        assert_eq!(sink.0.len(), 2);
+        assert_eq!(
+            *s.seen.lock().unwrap(),
+            [
+                ("SELECT 1".to_string(), StatementKind::Read),
+                (
+                    "BEGIN".to_string(),
+                    StatementKind::Transaction(crate::sql::TxControl::Begin)
+                ),
+            ]
+        );
+        s.seen.lock().unwrap().clear();
+        let err = s
+            .execute(
+                "SELECT 1; SELECT fail; SELECT 3",
+                ExecOptions::default(),
+                &mut sink,
+            )
+            .await;
+        assert!(matches!(err, Err(DbError::Internal { .. })), "{err:?}");
+        assert_eq!(s.seen.lock().unwrap().len(), 2);
     }
 
     struct NoopCancel;
@@ -125,24 +408,43 @@ mod tests {
         fn server_info(&self) -> &ServerInfo {
             &self.info
         }
-        async fn execute(
+        async fn execute_one(
             &self,
-            _sql: &str,
-            _opts: ExecOptions,
+            stmt: &str,
+            kind: StatementKind,
+            _opts: &ExecOptions,
             sink: &mut dyn RowSink,
-        ) -> Result<ExecSummary, DbError> {
+        ) -> Result<StmtOutcome, DbError> {
+            self.seen.lock().unwrap().push((stmt.to_string(), kind));
+            if stmt.contains("fail") {
+                return Err(DbError::Internal {
+                    message: "fail".into(),
+                });
+            }
+            let summary = ResultSummary {
+                affected: Some(0),
+                row_count: 0,
+                truncated: false,
+                elapsed_ms: 0,
+            };
             sink.result_start(&[]);
-            sink.result_end(Some(0), Duration::ZERO);
-            Ok(ExecSummary::default())
+            sink.result_end(&summary);
+            Ok(StmtOutcome {
+                results: vec![summary],
+                late_completion: false,
+            })
+        }
+        fn tx_state(&self) -> TxState {
+            TxState::Idle
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::Postgres
         }
         fn cancel_handle(&self) -> CancelHandle {
             Arc::new(NoopCancel)
         }
         fn introspector(&self) -> &dyn Introspector {
             self
-        }
-        fn in_transaction(&self) -> bool {
-            false
         }
         async fn ping(&self) -> Result<(), DbError> {
             Ok(())
@@ -180,9 +482,7 @@ mod tests {
 
     #[test]
     fn session_can_be_its_own_introspector() {
-        let s: Box<dyn Session> = Box::new(FakeSession {
-            info: detect_pg(170002, "PostgreSQL 17.2"),
-        });
+        let s: Box<dyn Session> = Box::new(fake());
         let i: &dyn Introspector = s.introspector();
         assert!(std::ptr::addr_eq(
             i as *const dyn Introspector,

@@ -11,7 +11,7 @@ import {
   resetStores,
   serverInfo,
 } from '../test/backend';
-import { ConnectionDialog } from './ConnectionDialog';
+import { ConnectionDialog, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds } from './ConnectionDialog';
 
 beforeEach(resetStores);
 
@@ -288,5 +288,73 @@ describe('ConnectionDialog', () => {
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledWith();
     expect(callsOf('create_connection')).toHaveLength(0);
+  });
+
+  it('query_timeout_field_saves_options', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.type(screen.getByTestId('conn-name'), 'q');
+    await user.type(screen.getByTestId('conn-host'), 'h');
+    await user.click(screen.getByRole('tab', { name: 'Advanced' }));
+    const field = screen.getByTestId('conn-query-timeout');
+    expect(field).toHaveValue(0);
+    expect(screen.getByLabelText('Query timeout (s)')).toBe(field);
+    await user.clear(field);
+    await user.type(field, '30');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { options: { query_timeout_s: 30 } } });
+  });
+
+  it('query_timeout_shows_the_stored_value_and_empty_means_off', async () => {
+    mockBackend({ update_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const stored = config(ids.prod, 'x').config;
+    render(
+      <ConnectionDialog
+        mode="edit"
+        initial={{ ...stored, options: { ...stored.options, query_timeout_s: 45 } }}
+        onClose={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole('tab', { name: 'Advanced' }));
+    const field = screen.getByTestId('conn-query-timeout');
+    expect(field).toHaveValue(45);
+    // Emptied: no timeout. (The browser itself refuses negative and fractional input.)
+    await user.clear(field);
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('update_connection')).toHaveLength(1));
+    expect(callsOf('update_connection')[0]).toMatchObject({ cfg: { options: { query_timeout_s: 0 } } });
+  });
+
+  it('query_timeout_is_clamped_to_whole_seconds_within_a_day', () => {
+    expect(MAX_QUERY_TIMEOUT_S).toBe(86_400);
+    expect(queryTimeoutSeconds('')).toBe(0);
+    expect(queryTimeoutSeconds('   ')).toBe(0);
+    expect(queryTimeoutSeconds('abc')).toBe(0);
+    expect(queryTimeoutSeconds('-5')).toBe(0);
+    expect(queryTimeoutSeconds('-0.5')).toBe(0);
+    expect(queryTimeoutSeconds('2.9')).toBe(2);
+    expect(queryTimeoutSeconds('30')).toBe(30);
+    expect(queryTimeoutSeconds('86400')).toBe(86_400);
+    expect(queryTimeoutSeconds('86401')).toBe(86_400);
+    expect(queryTimeoutSeconds('1e12')).toBe(86_400);
+    expect(queryTimeoutSeconds('Infinity')).toBe(0);
+  });
+
+  it('a huge query timeout is saved clamped', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.type(screen.getByTestId('conn-name'), 'q');
+    await user.type(screen.getByTestId('conn-host'), 'h');
+    await user.click(screen.getByRole('tab', { name: 'Advanced' }));
+    const field = screen.getByTestId('conn-query-timeout');
+    await user.clear(field);
+    await user.type(field, '99999999999');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { options: { query_timeout_s: 86_400 } } });
   });
 });

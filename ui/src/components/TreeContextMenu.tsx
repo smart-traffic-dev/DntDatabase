@@ -3,6 +3,7 @@ import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { useTree, type TreeNode } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
+import { openNewQuery } from './newQuery';
 import { openObjectTab } from './openObject';
 
 interface Item {
@@ -29,6 +30,7 @@ function itemsFor(node: TreeNode): Item[] {
     label: 'Copy name',
     run: () => void navigator.clipboard?.writeText(node.label).catch(() => undefined),
   };
+  const newQuery: Item = { label: 'New query', run: () => void openNewQuery(node) };
   const refresh: Item = { label: 'Refresh', hint: 'F5', run: () => void tree.refresh(node.id) };
 
   if (node.kind === 'connection' && connectionId) {
@@ -37,6 +39,7 @@ function itemsFor(node: TreeNode): Item[] {
       isOpen
         ? { label: 'Close', run: () => void tree.closeConnection(connectionId) }
         : { label: 'Open', run: () => tree.expand(node.id) },
+      newQuery,
       { label: 'Edit', run: () => dialogs.requestDialog({ kind: 'editConnection', id: connectionId }) },
       { label: 'Duplicate', run: () => void tree.duplicateConnection(connectionId) },
       {
@@ -73,9 +76,9 @@ function itemsFor(node: TreeNode): Item[] {
     ];
   }
   if (node.kind === 'object') {
-    return [{ label: 'Open', run: () => openObjectTab(node) }, refresh, copy];
+    return [{ label: 'Open', run: () => openObjectTab(node) }, newQuery, refresh, copy];
   }
-  return [refresh, copy];
+  return [newQuery, refresh, copy];
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {

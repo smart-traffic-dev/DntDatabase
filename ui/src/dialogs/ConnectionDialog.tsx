@@ -102,6 +102,7 @@ interface Form {
   connectTimeout: string;
   sshTimeout: string;
   appName: string;
+  queryTimeout: string;
 }
 
 function initialForm(initial: ConnectionConfig | undefined): Form {
@@ -137,6 +138,7 @@ function initialForm(initial: ConnectionConfig | undefined): Form {
     connectTimeout: String(initial?.options.connect_timeout_s ?? 10),
     sshTimeout: String(initial?.options.ssh_timeout_s ?? 10),
     appName: initial?.options.application_name ?? '',
+    queryTimeout: String(initial?.options.query_timeout_s ?? 0),
   };
 }
 
@@ -145,6 +147,14 @@ const num = (s: string, fallback: number) => {
   return s.trim() !== '' && Number.isFinite(n) ? n : fallback;
 };
 const orNull = (s: string) => (s.trim() === '' ? null : s.trim());
+
+/** Upper bound of the query timeout: one day (the backend field is a `u32` of seconds). */
+export const MAX_QUERY_TIMEOUT_S = 86_400;
+
+/** The query timeout field as whole seconds in 0..=MAX_QUERY_TIMEOUT_S; empty or invalid is 0 (off). */
+export function queryTimeoutSeconds(s: string): number {
+  return Math.min(MAX_QUERY_TIMEOUT_S, Math.max(0, Math.floor(num(s, 0))));
+}
 
 type TestState =
   | { state: 'idle' }
@@ -242,6 +252,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       ssh_timeout_s: num(form.sshTimeout, 10),
       charset: initial?.options.charset ?? null,
       application_name: orNull(form.appName),
+      // 0 = no timeout; never negative, fractional or beyond MAX_QUERY_TIMEOUT_S.
+      query_timeout_s: queryTimeoutSeconds(form.queryTimeout),
     },
   });
 
@@ -572,6 +584,19 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           <input id="cd-ssh-timeout" type="number" min={1} value={form.sshTimeout} onChange={(e) => set('sshTimeout', e.target.value)} />
         </div>
         <div className="field span2">
+          <label htmlFor="cd-query-timeout">Query timeout (s)</label>
+          <input
+            id="cd-query-timeout"
+            data-testid="conn-query-timeout"
+            type="number"
+            min={0}
+            step={1}
+            value={form.queryTimeout}
+            onChange={(e) => set('queryTimeout', e.target.value)}
+          />
+          <p className="hint">0 means no timeout. A query that runs longer is stopped. At most {MAX_QUERY_TIMEOUT_S} (one day).</p>
+        </div>
+        <div className="field span2">
           <label htmlFor="cd-app">Application name</label>
           <input id="cd-app" value={form.appName} onChange={(e) => set('appName', e.target.value)} />
         </div>
@@ -635,7 +660,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                     aria-selected={tab === t.id}
                     aria-controls={`cd-panel-${t.id}`}
                     tabIndex={tab === t.id ? 0 : -1}
-                    className={`tab${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
+                    className={`dlg-tab${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
                     onClick={() => setTab(t.id)}
                     onKeyDown={onTabKey}
                   >

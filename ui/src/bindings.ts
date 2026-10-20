@@ -173,6 +173,135 @@ async getSchemaCache(id: string) : Promise<Result<SchemaCache | null, AppError>>
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The SchemaCache of `database` for autocomplete. The whole scope comes back in one
+ * payload: the UI must cache it per (tab connection, database) and fetch it again only
+ * after a refresh or when the tab changes database, never per keystroke. Errors: an
+ * empty `database` is a `config` error; a failed load is returned again (without a new
+ * load) for 10 s.
+ */
+async completionScope(connId: string, database: string) : Promise<Result<SchemaCache, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("completion_scope", { connId, database }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Tables and views after `db.` (MySQL: `schema` must be null) or `schema.` (PostgreSQL:
+ * `schema` is required). Shares the object tree's cache.
+ */
+async completionObjects(connId: string, database: string, schema: string | null) : Promise<Result<CompletionObject[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("completion_objects", { connId, database, schema }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Plans what `target` selects in `text` for tab `tab_id` on `conn_id` / `database`
+ * (null: the connect database) and returns every statement's guard verdict. Opens the
+ * tab's session on first use and moves it when the connection or database changed.
+ * Errors: `not_open`, `busy` (the tab is running), `transaction_open` (changing the
+ * connection or database of a tab with an open transaction), connect errors. The plan
+ * is kept 2 minutes for `query_run`.
+ */
+async queryPlan(tabId: string, connId: string, database: string | null, text: string, target: Target) : Promise<Result<PlanView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_plan", { tabId, connId, database, text, target }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Statement ranges for highlighting the statement under the cursor (debounced 150 ms).
+ */
+async statementRanges(text: string, dialect: Dialect) : Promise<([number, number])[]> {
+    return await TAURI_INVOKE("statement_ranges", { text, dialect });
+},
+/**
+ * Commits or rolls back the tab's transaction; returns the new state. `busy` while the
+ * tab runs. A failed statement reports the session's state after it in
+ * `AppError.tx_state`.
+ */
+async queryTx(tabId: string, action: TxAction) : Promise<Result<TxState, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_tx", { tabId, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Closes the tab's session. With a transaction open and `force` false it returns
+ * `transaction_open` and keeps the session (ask Commit / Rollback / Cancel, then call
+ * again, or `query_tx` first); `force` closes anyway (the server rolls back).
+ */
+async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_close_tab", { tabId, force }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Runs plan `plan_id` (from `query_plan`, `query_explain` or `query_plan_statement`)
+ * and returns the run id at once; every result streams through `channel` (see
+ * `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
+ * statement is blocked, `confirmation_required` when any needs confirmation and
+ * `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
+ * `busy` while the tab runs; `plan_expired` for a plan already run, expired or
+ * replaced.
+ */
+async queryRun(planId: string, confirmed: boolean, opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, opts, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops run `run_id` (emits `stopping{user}` first). Unknown or finished runs: no-op.
+ */
+async queryCancel(runId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_cancel", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Plans an Explain (or Explain Analyze, `analyze`) of the statement at `cursor`;
+ * run it with `query_run`, which streams one `explain` event. `config` (field
+ * `explain`) for a DDL statement, or Analyze of a statement that is not a read;
+ * `unsupported` where the server has no such explain (Analyze on MySQL 5.7).
+ */
+async queryExplain(tabId: string, connId: string, database: string | null, text: string, cursor: number, analyze: boolean) : Promise<Result<PlanView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_explain", { tabId, connId, database, text, cursor, analyze }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retry statement / Fetch all: plans statement `index` of plan `plan_id` again, its
+ * stored text verbatim, judged with the current guard. Run it with `query_run`.
+ */
+async queryPlanStatement(planId: string, index: number) : Promise<Result<PlanView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_plan_statement", { planId, index }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async exportConnections(ids: NodeId[], passphrase: string | null, path: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("export_connections", { ids, passphrase, path }) };
@@ -231,6 +360,70 @@ async openLogFolder() : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async tabsLoad() : Promise<Result<QueryTabRecord[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tabs_load") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tabsSave(tab: QueryTabRecord) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tabs_save", { tab }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tabsDelete(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tabs_delete", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async fileRead(path: string) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_read", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async fileWrite(path: string, text: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_write", { path, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async historyList(filter: HistoryFilter) : Promise<Result<HistoryEntry[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("history_list", { filter }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async historyDelete(ids: HistoryIds) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("history_delete", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async historyClear() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("history_clear") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -248,15 +441,37 @@ export type AppError = { kind: string; message: string; detail: string | null; s
 /**
  * Connect errors: the stages that completed before the failing one.
  */
-timings: StageTiming[] | null; server_code: string | null; sqlstate: string | null; position: number | null; retryable: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null }
+timings: StageTiming[] | null; server_code: string | null; sqlstate: string | null; position: number | null; retryable: boolean; 
+/**
+ * `timeout` / `connection_lost` / `cancelled`: the statement may have been applied
+ * (the server's outcome is unknown). The UI must show such an error to the user,
+ * never treat it as a silent cancel.
+ */
+outcome_unknown: boolean; hint: string | null; fingerprint: string | null; key_openssh: string | null; host: string | null; port: number | null; field: string | null; 
+/**
+ * Query errors: the tab's transaction state after the failure (`idle` / `active` /
+ * `aborted`, see `TxState::as_str`), so the status bar updates at once. Filled by
+ * the query layer; `None` from `From<DbError>`.
+ */
+tx_state: string | null }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
  * (e.g. `CHECK ((total >= 0)) NOT VALID`).
  */
 definition: string | null }
+/**
+ * A column's name and its type as the server spells it: MySQL `COLUMNS.COLUMN_TYPE`
+ * (e.g. `enum('a','b')`, `decimal(12,2)`), PostgreSQL `format_type(atttypid, atttypmod)`
+ * (e.g. `numeric(12,2)`).
+ */
+export type ColumnBrief = { name: string; data_type: string }
 export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; comment: string | null }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
+/**
+ * A table or view offered by autocomplete after `db.` / `schema.`.
+ */
+export type CompletionObject = { schema: string | null; name: string; kind: ObjectKind }
 export type ConflictKind = 
 /**
  * A stored connection has the same id; resolved by the [`ConflictPolicy`].
@@ -274,7 +489,11 @@ export type ConflictPolicy = "skip" | "overwrite" | "copy"
 /**
  * Advanced options. Missing fields fall back to defaults so `options_json = '{}'` parses.
  */
-export type ConnOptions = { version: number; connect_timeout_s: number; ssh_timeout_s: number; charset: string | null; application_name: string | null }
+export type ConnOptions = { version: number; connect_timeout_s: number; ssh_timeout_s: number; charset: string | null; application_name: string | null; 
+/**
+ * Per-statement time limit of query tabs, in seconds; 0 = no limit.
+ */
+query_timeout_s: number }
 export type ConnState = { state: "disconnected" } | { state: "connecting"; stage: ConnectStage } | { state: "connected" } | { state: "reconnecting" } | { state: "failed" }
 export type ConnectStage = "resolve_secrets" | "open_tunnel" | "connect_db" | "detect_server" | "execute"
 export type ConnectionConfig = { id: string; group_id: string | null; name: string; 
@@ -288,6 +507,7 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
+export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 export type EnvTag = "production" | "staging" | "local"
 export type ForeignKeyDetail = { name: string; columns: string[]; ref_schema: string | null; ref_table: string; ref_columns: string[]; on_update: string; on_delete: string; 
 /**
@@ -300,6 +520,24 @@ export type Group = { id: string; parent_id: string | null; name: string;
  * Exported as a JS number (positions are small).
  */
 sort_order: number }
+export type HistoryEntry = { id: number; connection_id: string; database: string | null; sql_text: string; redacted: boolean; kind: string; started_at: string; elapsed_ms: number | null; status: HistoryStatus; row_count: number | null; affected: number | null; error_kind: string | null; error_code: string | null }
+export type HistoryFilter = { connection_id: string | null; 
+/**
+ * Substring of the SQL text; `%`, `_` and `\` match literally.
+ */
+search: string | null; 
+/**
+ * At most [`HISTORY_LIST_MAX`]; larger values are clamped.
+ */
+limit: number }
+export type HistoryIds = number[]
+export type HistoryStatus = "ok" | "error" | 
+/**
+ * The statement was stopped. Not "not applied": the stop may have come after it
+ * took effect (the error's `outcome_unknown` is not stored), so the UI must not
+ * show such a row as not applied.
+ */
+"cancelled"
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
@@ -330,6 +568,18 @@ definition: string | null }
 export type JsInteger = number | string
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
+/**
+ * The MySQL `sql_mode` flags that change how a script is lexed.
+ */
+export type MySqlMode = { 
+/**
+ * `ANSI_QUOTES`: `"…"` is a quoted identifier, with no backslash escape.
+ */
+ansi_quotes?: boolean; 
+/**
+ * `NO_BACKSLASH_ESCAPES`: `'…'` and `"…"` strings have no backslash escape.
+ */
+no_backslash_escapes?: boolean }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
@@ -340,11 +590,109 @@ export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | 
 row_estimate: number | null }
 export type OpenResult = { info: ServerInfo; timings: StageTiming[] }
 /**
- * Table / view names and their column names of the connection's default database
- * (PostgreSQL: of the schemas in `current_schemas(false)`), loaded in the background.
+ * One node of a normalized plan.
+ */
+export type PlanNode = { label: string; detail: string | null; est_cost: number | null; est_rows: number | null; actual_rows: number | null; actual_ms: number | null; loops: number | null; children: PlanNode[] }
+export type PlanStmtView = { index: number; 
+/**
+ * UTF-16 range in the editor text (end-exclusive).
+ */
+range: [number, number]; kind: StmtKindLabel; verdict: Verdict; 
+/**
+ * The first [`PREVIEW_CHARS`] characters, line breaks turned into spaces.
+ */
+preview: string }
+/**
+ * A normalized explain result. `raw` is the engine's original output.
+ */
+export type PlanTree = { kind: "tree"; root: PlanNode; raw: string } | { kind: "table"; columns: string[]; rows: string[][]; raw: string }
+export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialect; connection_name: string; env_tag: EnvTag | null; read_only: boolean; 
+/**
+ * The tab session's transaction state when the plan was made.
+ */
+tx_state: TxState }
+export type QueryTabRecord = { id: string; title: string; 
+/**
+ * Exported as a JS number (positions are small).
+ */
+sort_order: number; connection_id: string | null; database: string | null; sql_text: string; 
+/**
+ * UTF-16 offset of the cursor in `sql_text`.
+ */
+cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boolean; row_limit: number; 
+/**
+ * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
+ */
+updated_at: string }
+/**
+ * One event of a run, in the order described in the module docs.
+ */
+export type RunEvent = 
+/**
+ * Statement `index` of the plan is sent; `range` is its UTF-16 range in the editor.
+ */
+{ t: "statement_start"; index: number; range: [number, number] } | 
+/**
+ * A result set of statement `index` begins. `result_id` counts up from 0 per run.
+ */
+{ t: "result_start"; result_id: number; index: number; columns: ColumnMeta[] } | 
+/**
+ * At most 500 (`batch_size`) rows of result `result_id`, in order.
+ */
+{ t: "rows"; result_id: number; rows: Value[][] } | { t: "result_end"; result_id: number; affected: number | null; row_count: number; truncated: boolean; elapsed_ms: number } | 
+/**
+ * Statement `index` failed. `error.position` is a UTF-16 offset into the editor
+ * text, `error.tx_state` the session's state after the failure, and
+ * `error.outcome_unknown` set when the statement may have been applied (show it as
+ * such, never as "not applied").
+ */
+{ t: "statement_error"; index: number; error: AppError } | 
+/**
+ * A Messages line about statement `index` (a silent reconnect, a rolled-back
+ * transaction…).
+ */
+{ t: "notice"; index: number; message: string } | 
+/**
+ * Explain mode: the normalized plan of statement `index`.
+ */
+{ t: "explain"; index: number; plan: PlanTree } | 
+/**
+ * Stopping the running statement was requested. Sent once per stop: a Stop
+ * pressed while a timeout is already stopping the statement sends nothing more
+ * (the user's stop is still recorded, and ends the run), and a second Stop of the
+ * same run sends nothing.
+ */
+{ t: "stopping"; reason: StopCause } | 
+/**
+ * The statement did not stop within the cancel grace; its connection is being
+ * replaced.
+ */
+{ t: "abandoning" } | 
+/**
+ * The session's transaction state changed.
+ */
+{ t: "tx_state"; state: TxState } | 
+/**
+ * The run ended. `stop: null` means every planned statement ran. A Stop that lands
+ * while the LAST statement runs, when that statement still completes, also ends
+ * with `stop: null` (after a `stopping` event): everything ran.
+ */
+{ t: "done"; stop: StopReason | null; elapsed_ms: number }
+/**
+ * Per-run options from the toolbar.
+ */
+export type RunOptions = { 
+/**
+ * Row limit per result; clamped to 1..=1 000 000.
+ */
+max_rows: number; continue_on_error: boolean }
+/**
+ * Table / view names and their columns (with types) of one database (PostgreSQL: of the
+ * schemas in `current_schemas(false)` of that database's metadata session). One per
+ * database, loaded lazily (see `SessionManager::schema_cache_for`).
  */
 export type SchemaCache = { database: string; tables: SchemaCacheTable[] }
-export type SchemaCacheTable = { schema: string | null; name: string; kind: ObjectKind; columns: string[] }
+export type SchemaCacheTable = { schema: string | null; name: string; kind: ObjectKind; columns: ColumnBrief[] }
 export type SchemaInfo = { name: string }
 /**
  * Where objects are listed: a database, plus a schema on PostgreSQL.
@@ -382,19 +730,80 @@ export type StageTiming = { stage: ConnectStage;
  * Exported as a JS number (milliseconds).
  */
 ms: number }
+export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other"
+/**
+ * Why a run is being stopped.
+ */
+export type StopCause = 
+/**
+ * The user pressed Stop (or closed the tab / connection).
+ */
+"user" | 
+/**
+ * The statement's time limit expired.
+ */
+"timeout"
+/**
+ * Why a run ended before its last statement.
+ */
+export type StopReason = 
+/**
+ * Statement `index` failed.
+ */
+{ kind: "error"; index: number } | 
+/**
+ * The user stopped the run.
+ */
+{ kind: "cancelled" } | 
+/**
+ * The PostgreSQL transaction is aborted: only `ROLLBACK [TO]` / `COMMIT` may run.
+ */
+{ kind: "tx_aborted" } | 
+/**
+ * A statement finished after its timeout; the rest was not run.
+ */
+{ kind: "late_completion" } | 
+/**
+ * The session's `sql_mode` now splits the rest differently, starting at statement
+ * `index`: "sql_mode changed; run the remaining statements again".
+ */
+{ kind: "dialect_changed"; index: number }
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.
  */
 row_estimate: number | null; size_bytes: number | null; comment: string | null }
 export type TableOptions = { engine: string | null; collation: string | null; tablespace: string | null; partitioned_by: string | null; system_versioned: boolean }
+/**
+ * What the user asked to run. Offsets are UTF-16 code units into the editor text.
+ */
+export type Target = { Cursor: number } | { Selection: [number, number] } | "All"
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
+export type TxAction = "Commit" | "Rollback"
+/**
+ * Transaction state of a session as the query layer sees it.
+ */
+export type TxState = 
+/**
+ * No transaction is open (autocommit).
+ */
+"idle" | 
+/**
+ * A transaction is open (or MySQL `autocommit = 0` is in effect).
+ */
+"active" | 
+/**
+ * PostgreSQL only: a statement failed inside a transaction block; the server
+ * rejects everything but `ROLLBACK [TO SAVEPOINT]` / `COMMIT` until it ends.
+ */
+"aborted"
 export type Value = { t: "Null" } | { t: "Bool"; v: boolean } | { t: "Int"; v: JsInteger } | { t: "UInt"; v: JsInteger } | { t: "Float"; v: number } | { t: "Decimal"; v: string } | { t: "Text"; v: string } | { t: "Json"; v: string } | { t: "Uuid"; v: string } | { t: "Bytes"; v: { 
 /**
  * A byte length; far below 2^53 in practice, so a plain number.
  */
 len: number; preview: number[] } } | { t: "Date"; v: string } | { t: "Time"; v: string } | { t: "DateTime"; v: string } | { t: "TimestampTz"; v: string } | { t: "Array"; v: Value[] } | { t: "Other"; v: { type_name: string; text: string } }
+export type Verdict = "allow" | "confirm" | "block"
 
 /** tauri-specta globals **/
 

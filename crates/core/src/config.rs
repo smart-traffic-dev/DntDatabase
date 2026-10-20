@@ -95,6 +95,8 @@ pub struct ConnOptions {
     pub ssh_timeout_s: u32,
     pub charset: Option<String>,
     pub application_name: Option<String>,
+    /// Per-statement time limit of query tabs, in seconds; 0 = no limit.
+    pub query_timeout_s: u32,
 }
 
 impl Default for ConnOptions {
@@ -105,6 +107,7 @@ impl Default for ConnOptions {
             ssh_timeout_s: 10,
             charset: None,
             application_name: None,
+            query_timeout_s: 0,
         }
     }
 }
@@ -184,6 +187,13 @@ fn require(ok: bool, field: &str, message: &str) -> Result<(), DbError> {
 mod tests {
     use super::*;
     use crate::test_util::{sample_config, sample_resolved, sample_ssh};
+
+    #[test]
+    fn conn_options_query_timeout_defaults_to_zero() {
+        let o: ConnOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(o.query_timeout_s, 0);
+        assert_eq!(ConnOptions::default().query_timeout_s, 0);
+    }
 
     #[test]
     fn validate_rejects_bad_port_and_missing_key() {

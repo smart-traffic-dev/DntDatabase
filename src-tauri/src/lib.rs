@@ -4,5 +4,7 @@
 pub mod cache;
 pub mod commands;
 pub mod logging;
+pub mod query_sessions;
+pub mod run_events;
 pub mod session_manager;
 pub mod state;

@@ -44,7 +44,7 @@ pub fn detect_format(text: &str) -> Result<ImportFormat, DbError> {
 }
 
 /// A file the user chose could not be read or written: shown at the file field.
-fn path_error(action: &str, path: &str, e: &std::io::Error) -> DbError {
+pub(crate) fn path_error(action: &str, path: &str, e: &std::io::Error) -> DbError {
     let path = Path::new(path);
     let name = path
         .file_name()

@@ -1,0 +1,266 @@
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useConnections } from '../../store/connections';
+import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
+import { explainQuery, runFromEditor, stopQuery, useSelection, useStarting } from '../../store/runQuery';
+import { analyzeAvailable } from './explainTree';
+import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc, type RowLimit } from '../../store/queryTabs';
+import { useTabs } from '../../store/tabs';
+import { useTree } from '../../store/tree';
+
+/**
+ * Explain and its menu (Explain, Explain Analyze). The menu takes focus when it opens; arrows,
+ * Home and End move between its enabled items; Escape closes it and gives focus back to the caret;
+ * an outside click or focus leaving it closes it.
+ */
+function ExplainSplit({ tabId, runnable, analyzeOk }: { tabId: string; runnable: boolean; analyzeOk: boolean }) {
+  const [open, setOpen] = useState(false);
+  const split = useRef<HTMLSpanElement>(null);
+  const caret = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+
+  const enabledItems = () => [...(menu.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])];
+
+  useEffect(() => {
+    if (!open) return;
+    enabledItems()[0]?.focus();
+    const away = (e: globalThis.MouseEvent) => {
+      if (!split.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', away);
+    return () => document.removeEventListener('mousedown', away);
+  }, [open]);
+
+  // A run that starts (or a lost connection) disables Explain: the menu goes with it.
+  if (open && !runnable) setOpen(false);
+
+  const close = (refocus: boolean) => {
+    setOpen(false);
+    if (refocus) caret.current?.focus();
+  };
+
+  const onMenuKey = (e: KeyboardEvent) => {
+    const items = enabledItems();
+    const at = items.indexOf(document.activeElement as HTMLButtonElement);
+    const go = (i: number) => {
+      e.preventDefault();
+      items[(i + items.length) % items.length]?.focus();
+    };
+    switch (e.key) {
+      case 'ArrowDown':
+        return go(at + 1);
+      case 'ArrowUp':
+        return go(at < 0 ? -1 : at - 1);
+      case 'Home':
+        return go(0);
+      case 'End':
+        return go(-1);
+      case 'Escape':
+        e.preventDefault();
+        return close(true);
+      case 'Tab':
+        return close(false);
+    }
+  };
+
+  const choose = (analyze: boolean) => {
+    close(true);
+    void explainQuery(tabId, analyze);
+  };
+
+  return (
+    <span
+      className="qt-split"
+      ref={split}
+      onBlur={(e) => {
+        if (open && !split.current?.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
+      <button
+        type="button"
+        className="qt-btn qt-split-main"
+        data-testid="query-explain"
+        disabled={!runnable}
+        title={runnable ? 'Explain (Ctrl+Shift+E)' : undefined}
+        onClick={() => void explainQuery(tabId, false)}
+      >
+        Explain
+      </button>
+      <button
+        ref={caret}
+        type="button"
+        className="qt-btn qt-split-caret"
+        data-testid="query-explain-menu"
+        aria-label="Explain options"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? `qt-explain-menu-${tabId}` : undefined}
+        disabled={!runnable}
+        onClick={() => setOpen((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setOpen(false);
+          else if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !open) {
+            e.preventDefault();
+            setOpen(true);
+          }
+        }}
+      >
+        ▾
+      </button>
+      {open && (
+        <div
+          ref={menu}
+          id={`qt-explain-menu-${tabId}`}
+          className="qt-menu"
+          role="menu"
+          aria-label="Explain options"
+          onKeyDown={onMenuKey}
+        >
+          <button type="button" role="menuitem" className="qt-menu-item" data-testid="query-explain-plain" tabIndex={-1} onClick={() => choose(false)}>
+            Explain
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className="qt-menu-item"
+            data-testid="query-explain-analyze"
+            tabIndex={-1}
+            disabled={!analyzeOk}
+            title={analyzeOk ? 'Runs the statement and reports real timings' : 'Explain Analyze needs MySQL 8.0.18 or later'}
+            onClick={() => choose(true)}
+          >
+            Explain Analyze
+          </button>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** Run / Stop / Explain, connection, database, row limit and continue-on-error of a query tab. */
+export function QueryToolbar({ doc }: { doc: QueryDoc }) {
+  const summaries = useConnections((s) => s.summaries);
+  const nodes = useTree((s) => s.nodes);
+  const update = useQueryDocs((s) => s.update);
+
+  const prefix = doc.connectionId ? `conn:${doc.connectionId}/db:` : null;
+  const databases = new Set<string>();
+  if (prefix) {
+    for (const id of nodes.keys()) {
+      const raw = id.slice(prefix.length);
+      if (!id.startsWith(prefix) || raw.includes('/')) continue;
+      try {
+        databases.add(decodeURIComponent(raw));
+      } catch {
+        databases.add(raw);
+      }
+    }
+  }
+  if (doc.database) databases.add(doc.database);
+
+  const bind = (connectionId: string | null) => {
+    update(doc.id, { connectionId, database: null, dialect: dialectOfConnection(connectionId) });
+    useTabs.getState().bind(doc.id, connectionId);
+  };
+  const run = useQueryRun((s) => s.runs.get(doc.id) ?? emptyRun);
+  // A tab without a (still stored) connection stays disabled; a run locks the toolbar until it ends.
+  const hasSelection = useSelection((s) => s.ids.has(doc.id));
+  const starting = useStarting((s) => s.ids.has(doc.id));
+  const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting;
+  const analyzeOk = analyzeAvailable(useConnections((s) => (doc.connectionId ? s.info.get(doc.connectionId) : undefined)));
+
+  return (
+    <div className="query-toolbar" role="toolbar" aria-label="Query">
+      <button
+        type="button"
+        className="qt-btn qt-run"
+        data-testid="query-run"
+        disabled={!runnable}
+        title={runnable ? 'Run (Ctrl+Enter)' : undefined}
+        onClick={() => void runFromEditor(doc.id, 'cursor')}
+      >
+        Run
+      </button>
+      <button
+        type="button"
+        className="qt-btn"
+        data-testid="query-run-selection"
+        disabled={!runnable || !hasSelection}
+        title={runnable ? 'Run only the selected text' : undefined}
+        onClick={() => void runFromEditor(doc.id, 'selection')}
+      >
+        Run selection
+      </button>
+      <button
+        type="button"
+        className="qt-btn"
+        data-testid="query-stop"
+        disabled={!canStop(run)}
+        title={canStop(run) ? 'Stop (Esc)' : 'Nothing is running'}
+        onClick={() => void stopQuery(doc.id)}
+      >
+        Stop
+      </button>
+      <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} />
+      <span className="qt-sep" aria-hidden="true" />
+      <select
+        className="qt-select"
+        data-testid="query-connection"
+        aria-label="Connection"
+        value={doc.connectionId ?? ''}
+        onChange={(e) => bind(e.target.value || null)}
+      >
+        <option value="">Choose a connection</option>
+        {doc.connectionId && !summaries.has(doc.connectionId) && (
+          <option value={doc.connectionId} disabled>
+            (deleted connection)
+          </option>
+        )}
+        {[...summaries.values()].map((c) => (
+          <option key={c.config.id} value={c.config.id}>
+            {c.config.name}
+          </option>
+        ))}
+      </select>
+      <select
+        className="qt-select"
+        data-testid="query-database"
+        aria-label="Database"
+        value={doc.database ?? ''}
+        disabled={!doc.connectionId}
+        onChange={(e) => update(doc.id, { database: e.target.value || null })}
+      >
+        <option value="">Default database</option>
+        {[...databases].map((d) => (
+          <option key={d} value={d}>
+            {d}
+          </option>
+        ))}
+      </select>
+      <label className="qt-field">
+        <span>Limit</span>
+        <select
+          className="qt-select"
+          data-testid="query-row-limit"
+          aria-label="Row limit"
+          value={doc.rowLimit}
+          onChange={(e) => update(doc.id, { rowLimit: Number(e.target.value) as RowLimit })}
+        >
+          {ROW_LIMITS.map((n) => (
+            <option key={n} value={n}>
+              {n.toLocaleString('en-US')}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="qt-field">
+        <input
+          type="checkbox"
+          data-testid="query-continue-on-error"
+          checked={doc.continueOnError}
+          onChange={(e) => update(doc.id, { continueOnError: e.target.checked })}
+        />
+        <span>Continue on error</span>
+      </label>
+    </div>
+  );
+}

@@ -1,7 +1,7 @@
 //! Cancelling a running statement: `KILL QUERY <id>` sent over a temporary connection
 //! (same `Opts`, so through the same SSH tunnel port when tunneled).
 //!
-//! Cancels are scoped to one `execute` call by a generation number: `cancel()` targets
+//! Cancels are scoped to one `execute_one` call by a generation number: `cancel()` targets
 //! the call running when it is invoked, does nothing when the session is idle, and does
 //! not send the `KILL` if that call has finished by the time the temporary connection is
 //! open. A remaining window of one network round trip (the generation check vs. the
@@ -9,60 +9,156 @@
 
 use crate::map_mysql_error;
 use async_trait::async_trait;
-use dnt_core::driver::Canceller;
+use dnt_core::driver::{Canceller, StopSignal};
 use dnt_core::error::{ConnectStage, DbError};
 use mysql_async::prelude::Queryable;
 use mysql_async::{Conn, Opts};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 /// Bound on opening the temporary connection and running `KILL QUERY`.
 pub(crate) const CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// State shared between a session and its cancellers. Never touches the session's
-/// connection mutex, since `cancel` is called while `execute` holds it.
+/// connection mutex, since `cancel` is called while `execute_one` holds it.
 #[derive(Debug, Default)]
 pub(crate) struct CancelState {
-    /// Server thread id of the session's current physical connection (updated on reconnect).
-    pub(crate) connection_id: AtomicU32,
-    /// Last generation handed out to an `execute` call.
+    /// Server thread id of the session's current physical connection; 0 while there is
+    /// none, including while an abandoned connection is being replaced.
+    connection_id: AtomicU32,
+    /// See [`CancelState::poison`]; cleared by [`CancelState::set_connection`].
+    poisoned: AtomicBool,
+    /// Last generation handed out to an `execute_one` call.
     last_gen: AtomicU64,
-    /// Generation of the `execute` call holding the connection; 0 when idle.
+    /// Generation of the `execute_one` call holding the connection; 0 when idle.
     running: AtomicU64,
     /// Generation a cancel was requested for. Needed besides the `KILL` because a killed
     /// `SELECT SLEEP(n)` returns a normal row on MySQL instead of error 1317.
     cancelled: AtomicU64,
+    /// Woken when a cancel targets the running call (see [`RunGuard::cancel_requested`]).
+    notify: Notify,
+    /// The running call's `ExecOptions::stop`, with its generation. A cancel raises it,
+    /// so no later statement of the same run is sent.
+    stop: Mutex<Option<(u64, StopSignal)>>,
 }
 
 impl CancelState {
-    /// Marks a new `execute` call as running (call with the connection lock held).
-    /// The returned guard marks the session idle again when dropped.
-    pub(crate) fn begin(self: &Arc<Self>) -> RunGuard {
+    /// The thread id of the session's (new) physical connection. A new connection is
+    /// never poisoned.
+    pub(crate) fn set_connection(&self, id: u32) {
+        self.poisoned.store(false, Ordering::SeqCst);
+        self.connection_id.store(id, Ordering::SeqCst);
+    }
+
+    /// A `KILL QUERY` aimed at the current connection may still land (it was not
+    /// answered by the deadline): the connection must be replaced before anything else
+    /// is sent on it.
+    pub(crate) fn poison(&self) {
+        self.poisoned.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn poisoned(&self) -> bool {
+        self.poisoned.load(Ordering::SeqCst)
+    }
+
+    /// No connection to kill any more: called before an abandoned connection is
+    /// replaced, so a cancel can neither target the old thread id nor pick up the fresh
+    /// connection's.
+    pub(crate) fn clear_connection(&self) {
+        self.connection_id.store(0, Ordering::SeqCst);
+    }
+
+    /// The thread id a `KILL QUERY` for call `gen` may target: only while that call is
+    /// still running (not retired) and has a connection.
+    pub(crate) fn kill_target(&self, gen: u64) -> Option<u32> {
+        if self.running.load(Ordering::SeqCst) != gen {
+            return None;
+        }
+        let id = self.connection_id.load(Ordering::SeqCst);
+        (id != 0).then_some(id)
+    }
+
+    /// Marks a new `execute_one` call as running (call with the connection lock held);
+    /// `stop` is its stop signal. The returned guard marks the session idle again when
+    /// dropped.
+    pub(crate) fn begin(self: &Arc<Self>, stop: &StopSignal) -> RunGuard {
         let gen = self.last_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        *self.stop.lock().unwrap_or_else(|p| p.into_inner()) = Some((gen, stop.clone()));
         self.running.store(gen, Ordering::SeqCst);
         RunGuard {
             state: self.clone(),
             gen,
         }
     }
+
+    /// Records a cancel for generation `gen`, raises that call's stop signal and wakes
+    /// it. Generations only grow, so `fetch_max` keeps a stale request (one that read an
+    /// older `running` before a newer click stored its own) from lowering the value and
+    /// un-cancelling the newer call; the stop signal is only raised for `gen` itself.
+    pub(crate) fn request_cancel(&self, gen: u64) {
+        self.cancelled.fetch_max(gen, Ordering::SeqCst);
+        if let Some((g, stop)) = &*self.stop.lock().unwrap_or_else(|p| p.into_inner()) {
+            if *g == gen {
+                stop.stop();
+            }
+        }
+        self.notify.notify_waiters();
+    }
 }
 
-/// One running `execute` call.
+/// One running `execute_one` call.
 pub(crate) struct RunGuard {
     state: Arc<CancelState>,
     gen: u64,
 }
 
 impl RunGuard {
+    /// This call's generation.
+    pub(crate) fn gen(&self) -> u64 {
+        self.gen
+    }
+
     /// True once a cancel targeted this call.
     pub(crate) fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::SeqCst) == self.gen
+    }
+
+    /// Completes once a cancel targeted this call (at once if one already did).
+    pub(crate) async fn cancel_requested(&self) {
+        loop {
+            let notified = self.state.notify.notified();
+            let mut notified = std::pin::pin!(notified);
+            // Registered before the check, so a request in between still wakes us.
+            notified.as_mut().enable();
+            if self.cancelled() {
+                return;
+            }
+            // Also woken by a stale request for an older call: check again.
+            notified.await;
+        }
+    }
+
+    /// Ends this call for cancels before the guard is dropped: a cancel arriving from
+    /// now on finds the session idle and kills nothing. Called before an abandoned
+    /// connection is replaced, so no `KILL QUERY` aimed at this call can reach the fresh
+    /// connection (and the next statement on it).
+    pub(crate) fn retire(&self) {
+        let _ =
+            self.state
+                .running
+                .compare_exchange(self.gen, 0, Ordering::SeqCst, Ordering::SeqCst);
     }
 }
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
+        let mut stop = self.state.stop.lock().unwrap_or_else(|p| p.into_inner());
+        if stop.as_ref().is_some_and(|(g, _)| *g == self.gen) {
+            *stop = None;
+        }
+        drop(stop);
         let _ =
             self.state
                 .running
@@ -82,41 +178,63 @@ impl Canceller for MySqlCanceller {
         if gen == 0 {
             return Ok(());
         }
-        self.state.cancelled.store(gen, Ordering::SeqCst);
+        self.state.request_cancel(gen);
         let state = &self.state;
-        kill_query(&self.opts, || {
-            (state.running.load(Ordering::SeqCst) == gen)
-                .then(|| state.connection_id.load(Ordering::SeqCst))
-        })
-        .await
+        kill_query(&self.opts, || state.kill_target(gen), CANCEL_TIMEOUT)
+            .await
+            .map_err(|f| f.error)
     }
+}
+
+/// A `KILL QUERY` that did not complete (see [`kill_query`]).
+#[derive(Debug)]
+pub(crate) struct KillFailed {
+    pub(crate) error: DbError,
+    /// The `KILL QUERY` may have been written without the server answering it, so it
+    /// may still stop whatever the target thread runs later. False when it was never
+    /// sent, or when the server answered it (even with an error).
+    pub(crate) maybe_sent: bool,
 }
 
 /// Opens a temporary connection, asks `target` for the thread id to kill (`None`: the
 /// target is gone, send nothing), runs `KILL QUERY <id>`, then closes the connection.
+/// The whole exchange is bounded by `limit`. `Ok` once the server answered the kill
+/// (it then stopped the statement or found nothing to stop).
 pub(crate) async fn kill_query(
     opts: &Opts,
     target: impl Fn() -> Option<u32> + Send + Sync,
-) -> Result<(), DbError> {
+    limit: Duration,
+) -> Result<(), KillFailed> {
+    let sending = AtomicBool::new(false);
+    let answered = AtomicBool::new(false);
     let work = async {
         let mut conn = Conn::new(opts.clone())
             .await
             .map_err(|e| map_mysql_error(e, ConnectStage::ConnectDb))?;
         let res = match target() {
-            Some(id) => conn
-                .query_drop(format!("KILL QUERY {id}"))
-                .await
-                .map_err(|e| map_mysql_error(e, ConnectStage::Execute)),
+            Some(id) => {
+                sending.store(true, Ordering::SeqCst);
+                let res = conn.query_drop(format!("KILL QUERY {id}")).await;
+                if matches!(res, Ok(()) | Err(mysql_async::Error::Server(_))) {
+                    answered.store(true, Ordering::SeqCst);
+                }
+                res.map_err(|e| map_mysql_error(e, ConnectStage::Execute))
+            }
             None => Ok(()),
         };
         let _ = conn.disconnect().await;
         res
     };
-    tokio::time::timeout(CANCEL_TIMEOUT, work)
-        .await
-        .map_err(|_| DbError::Timeout {
-            stage: ConnectStage::Execute,
-        })?
+    let res = match tokio::time::timeout(limit, work).await {
+        Ok(res) => res,
+        // Answered before the goodbye ran out of time: done.
+        Err(_) if answered.load(Ordering::SeqCst) => Ok(()),
+        Err(_) => Err(DbError::timeout(ConnectStage::Execute)),
+    };
+    res.map_err(|error| KillFailed {
+        error,
+        maybe_sent: sending.load(Ordering::SeqCst) && !answered.load(Ordering::SeqCst),
+    })
 }
 
 #[cfg(test)]
@@ -126,15 +244,127 @@ mod tests {
     #[test]
     fn generations_scope_cancel_requests() {
         let state = Arc::new(CancelState::default());
-        let a = state.begin();
+        let a = state.begin(&StopSignal::new());
         assert_eq!(state.running.load(Ordering::SeqCst), 1);
         state.cancelled.store(1, Ordering::SeqCst);
         assert!(a.cancelled());
         drop(a);
         assert_eq!(state.running.load(Ordering::SeqCst), 0);
         // A request aimed at the finished call does not leak into the next one.
-        let b = state.begin();
+        let b = state.begin(&StopSignal::new());
         assert!(!b.cancelled());
         assert_eq!(state.running.load(Ordering::SeqCst), 2);
+    }
+
+    /// A cancel raises the stop signal of the call it targets, never another call's.
+    #[test]
+    fn a_cancel_raises_only_its_calls_stop_signal() {
+        let state = Arc::new(CancelState::default());
+        let (first, second) = (StopSignal::new(), StopSignal::new());
+        drop(state.begin(&first));
+        // Stale: aimed at call 1, which is over.
+        state.request_cancel(1);
+        assert!(!first.is_stopped());
+        let b = state.begin(&second);
+        state.request_cancel(1);
+        assert!(!second.is_stopped());
+        state.request_cancel(2);
+        assert!(second.is_stopped() && b.cancelled());
+    }
+
+    #[tokio::test]
+    async fn cancel_requested_wakes_only_for_its_call() {
+        let state = Arc::new(CancelState::default());
+        drop(state.begin(&StopSignal::new()));
+        let b = state.begin(&StopSignal::new());
+        let wait = Duration::from_millis(50);
+        // A stale request for call 1 wakes the waiter, which keeps waiting.
+        let (pending, ()) = tokio::join!(tokio::time::timeout(wait, b.cancel_requested()), async {
+            state.request_cancel(1)
+        });
+        assert!(pending.is_err());
+        let (woken, ()) = tokio::join!(tokio::time::timeout(wait, b.cancel_requested()), async {
+            state.request_cancel(2)
+        });
+        assert!(woken.is_ok());
+        // Already cancelled: completes at once.
+        assert!(tokio::time::timeout(wait, b.cancel_requested())
+            .await
+            .is_ok());
+    }
+
+    /// M2: while a stuck connection is being replaced, a cancel for the call can no
+    /// longer find a thread to kill: not the abandoned one, and not the fresh idle one
+    /// (a `KILL QUERY` landing there could stop the next statement).
+    #[test]
+    fn a_retired_call_or_cleared_connection_has_no_kill_target() {
+        let state = Arc::new(CancelState::default());
+        state.set_connection(7);
+        let run = state.begin(&StopSignal::new());
+        assert_eq!(state.kill_target(1), Some(7));
+        // The connection is being replaced: no id to kill.
+        state.clear_connection();
+        assert_eq!(state.kill_target(1), None);
+        // Replaced while the stuck call is still returning: it is retired first, so
+        // the fresh connection's id is never handed to its cancels.
+        run.retire();
+        state.set_connection(9);
+        assert_eq!(state.kill_target(1), None);
+        drop(run);
+        // The next call targets the fresh connection.
+        let _next = state.begin(&StopSignal::new());
+        assert_eq!(state.kill_target(2), Some(9));
+        assert_eq!(state.kill_target(1), None, "stale generation");
+    }
+
+    fn opts_for(port: u16) -> Opts {
+        Opts::from_url(&format!("mysql://u:p@127.0.0.1:{port}/")).unwrap()
+    }
+
+    /// No server at the address: the `KILL` was never sent, so nothing can follow.
+    #[tokio::test]
+    async fn refused_kill_was_not_sent() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let err = kill_query(&opts_for(port), || Some(7), Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(!err.maybe_sent, "{err:?}");
+    }
+
+    /// A server that never greets: bounded by `limit`, and never sent.
+    #[tokio::test]
+    async fn silent_server_is_bounded_by_the_limit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let _keep = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let started = std::time::Instant::now();
+        let err = kill_query(&opts_for(port), || Some(7), Duration::from_millis(300))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3), "{err:?}");
+        assert!(!err.maybe_sent, "{err:?}");
+        assert!(matches!(err.error, DbError::Timeout { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_stale_cancel_never_lowers_the_cancelled_generation() {
+        let state = Arc::new(CancelState::default());
+        drop(state.begin(&StopSignal::new()));
+        let b = state.begin(&StopSignal::new());
+        // A click for call 2, then a late write from a click that read call 1 earlier.
+        state.request_cancel(2);
+        state.request_cancel(1);
+        assert!(b.cancelled());
+        assert_eq!(state.cancelled.load(Ordering::SeqCst), 2);
+        // A second click on the same call changes nothing.
+        state.request_cancel(2);
+        assert!(b.cancelled());
     }
 }

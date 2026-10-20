@@ -1,0 +1,22 @@
+[package]
+name = "dnt-query"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_query"
+
+[dependencies]
+dnt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+
+[dev-dependencies]
+# The scripted FakeSession of tests/run.rs.
+async-trait.workspace = true
+# Explain fixture capture only (tests/explain_capture.rs).
+dnt-driver-mysql.workspace = true
+dnt-driver-pg.workspace = true
+dnt-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

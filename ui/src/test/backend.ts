@@ -12,6 +12,7 @@ import type {
 import backendErrors from './fixtures/app-errors.json';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
+import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 
@@ -48,12 +49,14 @@ export const appError = (kind: string, message: string, extra: Partial<AppError>
   sqlstate: null,
   position: null,
   retryable: false,
+  outcome_unknown: false,
   hint: null,
   fingerprint: null,
   key_openssh: null,
   host: null,
   port: null,
   field: null,
+  tx_state: null,
   ...extra,
 });
 
@@ -84,7 +87,8 @@ export function resetStores() {
   useTree.getState().reset();
   useConnections.getState().reset();
   useTabs.getState().reset();
-  useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null });
+  useQueryDocs.getState().reset();
+  useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null, question: null });
 }
 
 export const ids = {
@@ -112,7 +116,7 @@ export function config(id: string, name: string, over: Partial<ConnectionConfig>
       secret_mode: 'saved',
       ssh: null,
       ssl: null,
-      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null },
+      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0 },
       ...over,
     },
     has_db_password: true,

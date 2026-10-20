@@ -156,12 +156,9 @@ impl Tunnel {
         let alive = Arc::new(AtomicBool::new(true));
         let dead = Arc::new(Notify::new());
         let session = Self::connect(cfg, secrets, known, &opts, &alive, &dead);
-        let handle =
-            tokio::time::timeout(timeout, session)
-                .await
-                .map_err(|_| DbError::Timeout {
-                    stage: ConnectStage::OpenTunnel,
-                })??;
+        let handle = tokio::time::timeout(timeout, session)
+            .await
+            .map_err(|_| DbError::timeout(ConnectStage::OpenTunnel))??;
         let handle = Arc::new(handle);
 
         let listener = match TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await {

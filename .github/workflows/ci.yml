@@ -1,8 +1,10 @@
 name: CI
 
+# Paused during MVP development (local-first): verification runs locally
+# (cargo test with DNT_TEST_DB=1, pnpm --dir ui test, e2e). Run by hand from the
+# Actions tab when needed; restore `push`/`pull_request` to re-enable.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -48,7 +50,16 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Debug info made the test binaries large enough to fill the runner disk, which
+      # crashed `ld` with a bus error. Line tables keep panics readable.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
     steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

@@ -3,20 +3,23 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, ExecSummary, Introspector, RowSink, Session,
+    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
+    StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
-    TableDetail,
+    ColumnBrief, DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope,
+    TableColumns, TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
 use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
+use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
+use dnt_core::tx::TxState;
 use dnt_store::db::open_in_memory;
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::KnownHosts;
-use dntdatabase::cache::NodeKey;
+use dntdatabase::cache::{NodeKey, SchemaCache};
 use dntdatabase::session_manager::{ConnState, MetaFuture, SessionManager};
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
@@ -45,6 +48,14 @@ struct Log {
     connect_delay_ms: AtomicU64,
     /// Every `list_objects` call takes this long (ms).
     list_delay_ms: AtomicU64,
+    /// Every `list_columns` call takes this long (ms).
+    columns_delay_ms: AtomicU64,
+    /// `Scope::database` of every `list_columns` call, in order.
+    column_scopes: Mutex<Vec<String>>,
+    /// `list_columns` calls that ran to the end (were not dropped mid-call).
+    columns_done: AtomicUsize,
+    /// While set, `list_columns` fails.
+    fail_columns: AtomicBool,
 }
 
 async fn delay(ms: &AtomicU64) {
@@ -111,24 +122,37 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
-    async fn execute(
+    async fn execute_one(
         &self,
-        _sql: &str,
-        _opts: ExecOptions,
+        _stmt: &str,
+        _kind: StatementKind,
+        _opts: &ExecOptions,
         sink: &mut dyn RowSink,
-    ) -> Result<ExecSummary, DbError> {
+    ) -> Result<StmtOutcome, DbError> {
+        let summary = ResultSummary {
+            affected: None,
+            row_count: 0,
+            truncated: false,
+            elapsed_ms: 0,
+        };
         sink.result_start(&[]);
-        sink.result_end(None, Duration::ZERO);
-        Ok(ExecSummary::default())
+        sink.result_end(&summary);
+        Ok(StmtOutcome {
+            results: vec![summary],
+            late_completion: false,
+        })
+    }
+    fn tx_state(&self) -> TxState {
+        TxState::Idle
+    }
+    fn dialect(&self) -> Dialect {
+        Dialect::for_kind(self.info.kind)
     }
     fn cancel_handle(&self) -> CancelHandle {
         Arc::new(NoopCancel)
     }
     fn introspector(&self) -> &dyn Introspector {
         self
-    }
-    fn in_transaction(&self) -> bool {
-        false
     }
     async fn ping(&self) -> Result<(), DbError> {
         Ok(())
@@ -161,7 +185,9 @@ impl Introspector for FakeSession {
             .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
         if lose.is_ok() {
             return Err(DbError::ConnectionLost {
-                in_transaction: false,
+                was_in_tx: false,
+                outcome_unknown: false,
+                message: "Lost connection to MySQL server during query".into(),
             });
         }
         Ok(vec![ObjectSummary {
@@ -171,11 +197,35 @@ impl Introspector for FakeSession {
             row_estimate: None,
         }])
     }
-    async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
+    async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
         self.log.columns_calls.fetch_add(1, Ordering::SeqCst);
+        self.log
+            .column_scopes
+            .lock()
+            .unwrap()
+            .push(scope.database.clone());
+        delay(&self.log.columns_delay_ms).await;
+        self.log.columns_done.fetch_add(1, Ordering::SeqCst);
+        if self.log.fail_columns.load(Ordering::SeqCst) {
+            return Err(DbError::Server {
+                code: Some("1142".into()),
+                sqlstate: None,
+                message: "columns denied".into(),
+                position: None,
+            });
+        }
         Ok(vec![TableColumns {
             table: "orders".into(),
-            columns: vec!["id".into(), "total".into()],
+            columns: vec![
+                ColumnBrief {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                },
+                ColumnBrief {
+                    name: "total".into(),
+                    data_type: "decimal(12,2)".into(),
+                },
+            ],
         }])
     }
     async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
@@ -191,6 +241,9 @@ impl Introspector for FakeSession {
 
 /// Metadata call bound used by these tests instead of 30 s.
 const TEST_METADATA_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// How long a failed SchemaCache load is remembered in these tests instead of 10 s.
+const TEST_SCHEMA_ERROR_TTL: Duration = Duration::from_millis(200);
 
 struct Fixture {
     sm: Arc<SessionManager>,
@@ -218,7 +271,8 @@ fn fixture(kind: DbKind, fail_connect: bool) -> Fixture {
         KnownHosts::new(dir.path().join("known_hosts")),
         HashMap::from([(kind, driver)]),
     )
-    .with_metadata_timeout(TEST_METADATA_TIMEOUT);
+    .with_metadata_timeout(TEST_METADATA_TIMEOUT)
+    .with_schema_error_ttl(TEST_SCHEMA_ERROR_TTL);
     Fixture {
         sm: Arc::new(sm),
         repo,
@@ -322,20 +376,221 @@ async fn schema_cache_loads_with_bulk_column_listing_only() {
     cfg.default_db = Some("shop".into());
     let id = save(&f, cfg, Some("pw"));
     f.sm.open(id, None).await.unwrap();
-    wait_until(|| f.sm.schema_cache(id).is_some()).await;
-    let cache = f.sm.schema_cache(id).unwrap();
+    // `open` starts loading the home database in the background; this call waits for
+    // that load instead of starting a second one.
+    let cache = f.sm.schema_cache_for(id, "shop").await.unwrap();
     assert_eq!(cache.database, "shop");
     let orders = cache
         .tables
         .iter()
         .find(|t| t.name == "orders" && t.kind == ObjectKind::Table)
         .unwrap();
-    assert_eq!(orders.columns, ["id", "total"]);
+    let columns: Vec<(&str, &str)> = orders
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.data_type.as_str()))
+        .collect();
+    assert_eq!(columns, [("id", "int"), ("total", "decimal(12,2)")]);
     // One column query per scope, never a per-table detail.
     assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 1);
     assert_eq!(f.log.detail_calls.load(Ordering::SeqCst), 0);
     // Tables and views listed: one list_objects call each.
     assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn schema_cache_is_per_database_and_lazy() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    // No default database: nothing is loaded until asked for.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 0);
+
+    let a = f.sm.schema_cache_for(id, "a").await.unwrap();
+    assert_eq!(a.database, "a");
+    let b = f.sm.schema_cache_for(id, "b").await.unwrap();
+    assert_eq!(b.database, "b");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+    // A repeat is served from the cache.
+    assert_eq!(f.sm.schema_cache_for(id, "a").await.unwrap(), a);
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(*f.log.column_scopes.lock().unwrap(), ["a", "b"]);
+
+    // Concurrent first requests for one database share a single load.
+    f.log.columns_delay_ms.store(50, Ordering::SeqCst);
+    let (x, y) = tokio::join!(
+        f.sm.schema_cache_for(id, "c"),
+        f.sm.schema_cache_for(id, "c")
+    );
+    assert_eq!(x.unwrap(), y.unwrap());
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn refresh_schema_cache_reloads_in_background() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.sm.schema_cache_for(id, "a").await.unwrap();
+    f.sm.schema_cache_for(id, "b").await.unwrap();
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+
+    f.sm.refresh_schema_cache(id, "a");
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 3).await;
+    // The reload is what the next call gets: no further load.
+    f.sm.schema_cache_for(id, "a").await.unwrap();
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 3);
+
+    // A tree refresh of a database reloads that database's cache too (and only it).
+    f.sm.refresh(id, &key(&["db:b", "folder:Table"]));
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 4).await;
+    assert_eq!(
+        f.log
+            .column_scopes
+            .lock()
+            .unwrap()
+            .last()
+            .map(String::as_str),
+        Some("b")
+    );
+    // A whole-connection refresh reloads every loaded database.
+    f.sm.refresh(id, &key(&[]));
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 6).await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 6);
+}
+
+fn is_columns_denied(r: &Result<SchemaCache, DbError>) -> bool {
+    matches!(r, Err(DbError::Server { message, .. }) if message == "columns denied")
+}
+
+#[tokio::test]
+async fn failed_schema_load_is_shared_and_remembered_for_the_ttl() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.log.fail_columns.store(true, Ordering::SeqCst);
+    f.log.columns_delay_ms.store(50, Ordering::SeqCst);
+
+    // Five concurrent callers share one failing load.
+    let results =
+        futures_util::future::join_all((0..5).map(|_| f.sm.schema_cache_for(id, "a"))).await;
+    assert!(results.iter().all(is_columns_denied), "{results:?}");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 1);
+
+    // Within the TTL the error is returned without a new load.
+    let again = f.sm.schema_cache_for(id, "a").await;
+    assert!(is_columns_denied(&again), "{again:?}");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 1);
+
+    // After the TTL the next caller retries; a success replaces the error.
+    tokio::time::sleep(TEST_SCHEMA_ERROR_TTL + Duration::from_millis(50)).await;
+    f.log.fail_columns.store(false, Ordering::SeqCst);
+    let cache = f.sm.schema_cache_for(id, "a").await.unwrap();
+    assert_eq!(cache.database, "a");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+    f.sm.schema_cache_for(id, "a").await.unwrap();
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn refresh_aborts_the_inflight_load() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    f.log.columns_delay_ms.store(150, Ordering::SeqCst);
+
+    let sm = Arc::clone(&f.sm);
+    let first = tokio::spawn(async move { sm.schema_cache_for(id, "a").await });
+    wait_until(|| f.log.columns_calls.load(Ordering::SeqCst) == 1).await;
+    f.sm.refresh_schema_cache(id, "a");
+    // The waiting caller follows the reload instead of failing.
+    assert_eq!(first.await.unwrap().unwrap().database, "a");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 2);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // The first load never finished: it was aborted, not left to compete for the link.
+    assert_eq!(f.log.columns_done.load(Ordering::SeqCst), 1);
+    // Its session was dropped mid-call (it may be mid-protocol), not reused.
+    assert_eq!(f.log.connects.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn completion_inputs_are_validated() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let is_config = |e: &DbError, field: &str| matches!(e, DbError::Config { field: Some(f), .. } if f == field);
+    let err = f.sm.schema_cache_for(id, "").await.unwrap_err();
+    assert!(is_config(&err, "database"), "{err:?}");
+    let err = f.sm.completion_objects(id, "", None).await.unwrap_err();
+    assert!(is_config(&err, "database"), "{err:?}");
+    // MySQL has no schemas below a database.
+    let err =
+        f.sm.completion_objects(id, "shop", Some("public"))
+            .await
+            .unwrap_err();
+    assert!(is_config(&err, "schema"), "{err:?}");
+    assert_eq!(f.log.columns_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 0);
+
+    // PostgreSQL: objects are listed per schema, like the tree.
+    let f = fixture(DbKind::Postgres, false);
+    let id = save(&f, config(DbKind::Postgres, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let err = f.sm.completion_objects(id, "shop", None).await.unwrap_err();
+    assert!(is_config(&err, "schema"), "{err:?}");
+    let err =
+        f.sm.completion_objects(id, "", Some("public"))
+            .await
+            .unwrap_err();
+    assert!(is_config(&err, "database"), "{err:?}");
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn completion_objects_uses_browse_cache() {
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let first = f.sm.completion_objects(id, "shop", None).await.unwrap();
+    let second = f.sm.completion_objects(id, "shop", None).await.unwrap();
+    assert_eq!(first, second);
+    let kinds: Vec<ObjectKind> = first.iter().map(|o| o.kind).collect();
+    assert_eq!(kinds, [ObjectKind::Table, ObjectKind::View]);
+    assert!(first
+        .iter()
+        .all(|o| o.name == "orders" && o.schema.is_none()));
+    // One listing per kind, shared with the tree (same folder keys).
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+    list_tables(&f, id, Some("shop"), &["db:shop", "folder:Table"]).await;
+    assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn pg_completion_objects_list_materialized_views_of_the_schema() {
+    let f = fixture(DbKind::Postgres, false);
+    let id = save(&f, config(DbKind::Postgres, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let objects =
+        f.sm.completion_objects(id, "shop", Some("sales"))
+            .await
+            .unwrap();
+    let kinds: Vec<ObjectKind> = objects.iter().map(|o| o.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::MaterializedView
+        ]
+    );
+    assert!(objects.iter().all(|o| o.schema.as_deref() == Some("sales")));
+    // Listed on the metadata session of database `shop`.
+    assert_eq!(
+        f.log.databases.lock().unwrap().last().cloned().flatten(),
+        Some("shop".to_string())
+    );
 }
 
 #[tokio::test]
@@ -498,7 +753,8 @@ async fn close_drops_runtime() {
     f.sm.close(id).await;
     assert_eq!(f.sm.state(id), ConnState::Disconnected);
     assert!(f.sm.open_connections().is_empty());
-    assert!(f.sm.schema_cache(id).is_none());
+    let err = f.sm.schema_cache_for(id, "a").await.unwrap_err();
+    assert!(matches!(err, DbError::NotOpen), "{err:?}");
     // Both metadata sessions (connect database and `a`) were closed.
     assert_eq!(f.log.closes.load(Ordering::SeqCst), 2);
     let k = key(&["db:a", "folder:Table"]);
@@ -653,6 +909,60 @@ async fn test_falls_back_to_stored_ssh_secret_only_for_the_same_ssh_server_and_u
             "changed {what}: {err:?}"
         );
     }
+
+    // Only the database endpoint changed: the bastion still gets its stored password
+    // (the test fails at OpenTunnel, not at ResolveSecrets).
+    let mut cfg = stored.clone();
+    cfg.host = "10.0.0.9".into();
+    let err = f.sm.test(&cfg, secrets(None)).await.unwrap_err();
+    assert_eq!(err.stage(), Some(ConnectStage::OpenTunnel), "{err:?}");
+}
+
+#[tokio::test]
+async fn test_does_not_send_stored_password_when_ssh_is_turned_off() {
+    let f = fixture(DbKind::MySql, false);
+    let mut cfg = config(DbKind::MySql, SecretMode::Saved);
+    cfg.ssh = Some(dnt_core::test_util::sample_ssh());
+    let id = f
+        .repo
+        .create(
+            cfg,
+            NewSecrets {
+                db_password: Some(SecretString::from("stored-pw")),
+                ssh_password: Some(SecretString::from("ssh-pw")),
+                ssh_key_passphrase: None,
+            },
+        )
+        .unwrap()
+        .id;
+    // Without the tunnel the same host:port is another server (seen from this machine).
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.ssh = None;
+    f.sm.test(&cfg, secrets(None)).await.unwrap();
+    assert_eq!(f.log.last_password.lock().unwrap().as_deref(), None);
+}
+
+#[tokio::test]
+async fn test_does_not_send_stored_ssh_secret_when_ssh_is_turned_on() {
+    let f = fixture(DbKind::MySql, false);
+    let id = f
+        .repo
+        .create(
+            config(DbKind::MySql, SecretMode::Saved),
+            NewSecrets {
+                db_password: Some(SecretString::from("stored-pw")),
+                ssh_password: Some(SecretString::from("ssh-pw")),
+                ssh_key_passphrase: None,
+            },
+        )
+        .unwrap()
+        .id;
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.ssh = Some(dnt_core::test_util::sample_ssh());
+    let err = f.sm.test(&cfg, secrets(None)).await.unwrap_err();
+    assert_eq!(err.stage(), Some(ConnectStage::ResolveSecrets), "{err:?}");
+    assert_eq!(AppError::from(err).kind, "password_required");
+    assert_eq!(f.log.connects.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -727,7 +1037,7 @@ async fn close_during_slow_connect_ends_disconnected() {
     f.sm.close(id).await;
     assert_eq!(f.sm.state(id), ConnState::Disconnected);
     let err = open.await.unwrap().unwrap_err();
-    assert!(matches!(err, DbError::Cancelled), "{err:?}");
+    assert!(matches!(err, DbError::Cancelled { .. }), "{err:?}");
     // The superseded open closed the session it got and installed nothing.
     assert_eq!(f.sm.state(id), ConnState::Disconnected);
     assert!(f.sm.open_connections().is_empty());
@@ -789,7 +1099,9 @@ async fn hanging_metadata_call_times_out_and_close_is_prompt() {
         matches!(
             err,
             DbError::Timeout {
-                stage: ConnectStage::Execute
+                stage: ConnectStage::Execute,
+                outcome_unknown: false,
+                was_in_tx: false,
             }
         ),
         "{err:?}"

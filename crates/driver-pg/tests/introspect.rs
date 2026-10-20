@@ -1,4 +1,4 @@
-use dnt_core::driver::{ExecOptions, Introspector, RowSink, Session};
+use dnt_core::driver::{ExecOptions, Introspector, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::value::{ColumnMeta, Value};
@@ -32,7 +32,7 @@ struct Discard;
 impl RowSink for Discard {
     fn result_start(&mut self, _cols: &[ColumnMeta]) {}
     fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
-    fn result_end(&mut self, _affected: Option<u64>, _elapsed: Duration) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
 }
 
 async fn exec(s: &PgSession, sql: &str) -> Result<(), DbError> {
@@ -581,9 +581,31 @@ async fn list_columns_matches_table_detail_in_one_query() {
                 .unwrap_or_else(|| panic!("{t:?}: {table} missing from {tables:?}"))
                 .columns;
             let detail = s.table_detail(&obj(schema, table, kind)).await.unwrap();
-            let expected: Vec<String> = detail.columns.into_iter().map(|c| c.name).collect();
-            assert_eq!(listed, &expected, "{t:?} {schema}.{table}");
+            let expected: Vec<(String, String)> = detail
+                .columns
+                .into_iter()
+                .map(|c| (c.name, c.db_type))
+                .collect();
+            let listed: Vec<(String, String)> = listed
+                .iter()
+                .map(|c| (c.name.clone(), c.data_type.clone()))
+                .collect();
+            assert_eq!(listed, expected, "{t:?} {schema}.{table}");
         }
+    }
+}
+
+#[tokio::test]
+async fn list_columns_has_types() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let all = s.list_columns(&scope("public")).await.unwrap();
+        let orders = all.iter().find(|c| c.table == "orders").unwrap();
+        let total = orders.columns.iter().find(|c| c.name == "total").unwrap();
+        assert_eq!(total.data_type, "numeric(12,2)", "{t:?}");
+        let status = orders.columns.iter().find(|c| c.name == "status").unwrap();
+        assert_eq!(status.data_type, "order_status", "{t:?}");
     }
 }
 

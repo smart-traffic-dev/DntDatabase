@@ -18,13 +18,13 @@
   align-items: baseline;
   gap: 10px;
   min-width: 0;
-  font-size: 14px;
+  font-size: var(--text-body);
 }
 
 .ot-title .mono,
 .mono {
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-footnote);
 }
 
 .ot-tabs {
@@ -63,9 +63,9 @@
 .ot-error {
   max-width: 640px;
   padding: 10px 12px;
-  border: 1px solid var(--danger);
-  border-radius: 6px;
-  background: var(--production-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-fill);
   color: var(--danger);
 }
 
@@ -77,7 +77,7 @@
   margin: 6px 0 0;
   white-space: pre-wrap;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-footnote);
 }
 
 .ot-error .btn {
@@ -87,7 +87,7 @@
 /* Closed or lost connection: a notice with Reconnect rather than a failure. */
 .ot-error.ot-reconnect {
   border-color: var(--border);
-  background: var(--panel);
+  background: var(--studio-bg);
   color: inherit;
 }
 
@@ -131,17 +131,17 @@
   padding: 12px;
   overflow: auto;
   white-space: pre;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--sidebar);
+  border: 1px solid var(--studio-hairline);
+  border-radius: var(--radius-md);
+  background: var(--studio-subtle);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: var(--text-callout);
   line-height: 1.5;
 }
 
 .ot-structure h3 {
   margin: 20px 0 6px;
-  font-size: 12px;
+  font-size: var(--text-caption);
   font-weight: 600;
   color: var(--muted);
   text-transform: uppercase;
@@ -170,7 +170,7 @@
 }
 
 .ot-table th {
-  background: var(--sidebar);
+  background: var(--studio-sidebar);
   font-weight: 500;
   color: var(--muted);
 }

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppError, NodeId } from '../bindings';
+import type { AppError, NodeId, TxAction } from '../bindings';
 
 /** A prompt the connection tree needs answered before it can open a connection. */
 export interface PendingPrompt {
@@ -19,7 +19,35 @@ export type UiRequest =
   | { kind: 'import' }
   | { kind: 'settings' };
 
+/** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
+export type Question =
+  | {
+      kind: 'txClose';
+      /** Title of the tab being closed. */
+      title: string;
+      /** Commits or rolls back; rejects with the backend error (the dialog stays open). */
+      settle(action: TxAction): Promise<void>;
+      done(closed: boolean): void;
+    }
+  | { kind: 'discard'; file: string; done(discard: boolean): void }
+  /** Closing a tab whose query is still running: closing stops it first. */
+  | { kind: 'stopRun'; title: string; done(close: boolean): void }
+  /** Quitting while `count` tabs could not be saved. */
+  | { kind: 'saveFailed'; count: number; done(quit: boolean): void }
+  | {
+      kind: 'appClose';
+      /** Titles of the tabs with an open transaction. */
+      tabs: string[];
+      /** Rolls every transaction back, then quits. */
+      quit(): Promise<void>;
+      done(): void;
+    };
+
 interface DialogsState {
+  /** The question shown on top of everything else (`ask` sets it). */
+  question: Question | null;
+  ask(question: Question): void;
+  answer(): void;
   /** Set when opening a connection needs a password (`PasswordPrompt`) or host-key trust (`HostKeyDialog`). */
   prompt: PendingPrompt | null;
   request: UiRequest | null;
@@ -37,6 +65,9 @@ interface DialogsState {
 }
 
 export const useDialogs = create<DialogsState>()((set) => ({
+  question: null,
+  ask: (question) => set({ question }),
+  answer: () => set({ question: null }),
   prompt: null,
   request: null,
   notice: null,

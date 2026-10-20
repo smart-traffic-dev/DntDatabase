@@ -1411,6 +1411,7 @@ dependencies = [
  "serde_json",
  "specta",
  "thiserror 2.0.21",
+ "tokio",
  "uuid",
 ]
 
@@ -1446,6 +1447,21 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+]
+
+[[package]]
+name = "dnt-query"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "dnt-core",
+ "dnt-driver-mysql",
+ "dnt-driver-pg",
+ "dnt-testkit",
+ "serde",
+ "serde_json",
+ "specta",
+ "tokio",
 ]
 
 [[package]]
@@ -1509,9 +1525,11 @@ dependencies = [
  "dnt-core",
  "dnt-driver-mysql",
  "dnt-driver-pg",
+ "dnt-query",
  "dnt-store",
  "dnt-testkit",
  "dnt-tunnel",
+ "dntdatabase",
  "futures-util",
  "secrecy",
  "serde",
@@ -1524,6 +1542,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-specta",
  "tempfile",
+ "time",
  "tokio",
  "tracing",
  "tracing-appender",

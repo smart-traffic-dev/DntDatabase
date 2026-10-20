@@ -28,12 +28,13 @@ pub(crate) fn list_relations() -> String {
     )
 }
 
-/// Column names of every visible table, partitioned table, view, materialized view and
-/// foreign table of one schema (`$1` = schema), ordered by relation then `attnum`. Same
-/// privilege filter as [`list_relations`]; partitions are left out like there.
+/// Column names and types (`format_type`, as in table details) of every visible table,
+/// partitioned table, view, materialized view and foreign table of one schema (`$1` =
+/// schema), ordered by relation then `attnum`. Same privilege filter as
+/// [`list_relations`]; partitions are left out like there.
 pub(crate) fn list_columns() -> String {
     format!(
-        "SELECT c.relname::text, a.attname::text \
+        "SELECT c.relname::text, a.attname::text, format_type(a.atttypid, a.atttypmod) \
          FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \

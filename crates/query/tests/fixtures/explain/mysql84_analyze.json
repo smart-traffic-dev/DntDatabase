@@ -1,0 +1,13 @@
+{
+  "columns": [
+    "EXPLAIN"
+  ],
+  "rows": [
+    [
+      {
+        "t": "Text",
+        "v": "-> Sort: `COUNT(*)` DESC  (actual time=0.0898..0.0899 rows=1 loops=1)\n    -> Table scan on <temporary>  (actual time=0.0761..0.0764 rows=1 loops=1)\n        -> Aggregate using temporary table  (actual time=0.0748..0.0748 rows=1 loops=1)\n            -> Nested loop inner join  (cost=1.55 rows=1) (actual time=0.0367..0.04 rows=1 loops=1)\n                -> Filter: (o.`status` = 'paid')  (cost=1.2 rows=1) (actual time=0.0224..0.0254 rows=1 loops=1)\n                    -> Covering index scan on o using idx_orders_customer_status  (cost=1.2 rows=2) (actual time=0.0129..0.0159 rows=3 loops=1)\n                -> Single-row covering index lookup on c using PRIMARY (id=o.customer_id)  (cost=0.35 rows=1) (actual time=0.009..0.009 rows=1 loops=1)\n"
+      }
+    ]
+  ]
+}

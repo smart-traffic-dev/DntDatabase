@@ -42,9 +42,7 @@ impl PgDriver {
     pub async fn connect_session(&self, cfg: &ResolvedConfig) -> Result<PgSession, DbError> {
         tokio::time::timeout(cfg.connect_timeout, connect_inner(cfg))
             .await
-            .map_err(|_| DbError::Timeout {
-                stage: ConnectStage::ConnectDb,
-            })?
+            .map_err(|_| DbError::timeout(ConnectStage::ConnectDb))?
     }
 }
 
@@ -226,12 +224,12 @@ pub(crate) fn map_pg_error(e: tokio_postgres::Error, stage: ConnectStage) -> DbE
                 message: with_detail(),
             }
         }
-        "timeout waiting for server" => return DbError::Timeout { stage },
+        "timeout waiting for server" => return DbError::timeout(stage),
         _ => {}
     }
     if let Some(io) = io_error(&e) {
         return if io.kind() == std::io::ErrorKind::TimedOut {
-            DbError::Timeout { stage }
+            DbError::timeout(stage)
         } else {
             DbError::Connect {
                 message: io.to_string(),
