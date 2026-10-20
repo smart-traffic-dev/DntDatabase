@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::guard::GuardCtx;
 use crate::offsets::Utf16Map;
+use crate::risk::{drop_targets, DropTarget, RowEstimate};
 use crate::unbounded::{unbounded_writes, UnboundedWrite};
 
 /// What the user asked to run. Offsets are UTF-16 code units into the editor text.
@@ -59,6 +60,15 @@ pub struct PlannedStmt {
     /// ([`crate::unbounded::unbounded_writes`]); empty for most statements. Shown by
     /// the confirm dialog; the guard judges the text itself.
     pub unbounded: Vec<UnboundedWrite>,
+    /// What of this statement a `DROP` removes ([`crate::risk::drop_targets`]).
+    pub drops: Vec<DropTarget>,
+    /// Set by the guard on Production for a Confirm statement that changes every row
+    /// of a table or drops something ([`crate::risk::confirm_name`]): the run must be
+    /// confirmed with this name typed exactly.
+    pub confirm_name: Option<String>,
+    /// The server's estimate of the rows a flagged `UPDATE` / `DELETE` changes; set
+    /// (best-effort) by the backend when it plans on Staging / Production.
+    pub estimate: Option<RowEstimate>,
 }
 
 #[derive(Debug, Clone)]
@@ -118,6 +128,9 @@ pub fn plan(text: &str, target: Target, dialect: Dialect) -> ScriptPlan {
             verdict: Verdict::Allow,
             source_range: (s.start, s.end),
             unbounded: unbounded_writes(&s.text, dialect),
+            drops: drop_targets(&s.text, dialect),
+            confirm_name: None,
+            estimate: None,
             text: s.text,
         })
         .collect();

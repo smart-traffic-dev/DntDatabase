@@ -256,12 +256,14 @@ async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppErr
  * `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
  * statement is blocked, `confirmation_required` when any needs confirmation and
  * `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
- * `busy` while the tab runs; `plan_expired` for a plan already run, expired or
- * replaced.
+ * On Production, `confirm_names` must hold exactly the `confirm_name`s of the plan's
+ * statements (case-sensitive), else `confirmation_required` too; pass `[]` when the
+ * plan asks for none. `busy` while the tab runs; `plan_expired` for a plan already
+ * run, expired or replaced.
  */
-async queryRun(planId: string, confirmed: boolean, opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
+async queryRun(planId: string, confirmed: boolean, confirmNames: string[], opts: RunOptions, channel: TAURI_CHANNEL<RunEvent>) : Promise<Result<string, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, opts, channel }) };
+    return { status: "ok", data: await TAURI_INVOKE("query_run", { planId, confirmed, confirmNames, opts, channel }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -806,6 +808,31 @@ export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 /**
+ * What a `DROP` removes.
+ */
+export type DropKind = 
+/**
+ * `DROP DATABASE`.
+ */
+"database" | 
+/**
+ * `DROP SCHEMA` (on MySQL a synonym of `DROP DATABASE`).
+ */
+"schema" | 
+/**
+ * Any other `DROP` (table, view, index, routine, user, …).
+ */
+"object"
+/**
+ * One name a `DROP` removes.
+ */
+export type DropTarget = { kind: DropKind; 
+/**
+ * The name as written, quotes removed (`` `shop`.`t` `` → `shop.t`); empty when
+ * the statement names nothing readable (`DROP OPERATOR + (int, int)`).
+ */
+name: string }
+/**
  * Whether the data view may edit an object, and how (`data_editable`).
  */
 export type EditableInfo = { editable: boolean; 
@@ -1024,7 +1051,25 @@ preview: string;
  * guard makes such a statement Confirm (see `dnt_query::guard`). Always sent;
  * optional in the bindings so older fixtures stay valid.
  */
-unbounded?: UnboundedWrite[] }
+unbounded?: UnboundedWrite[]; 
+/**
+ * What a `DROP` of the statement removes (`DROP DATABASE` is confirmed on every
+ * connection, any other `DROP` on Staging and Production); empty for most
+ * statements. Always sent; optional in the bindings.
+ */
+drops?: DropTarget[]; 
+/**
+ * On Production, the name (a table, object, database or schema, unquoted) the user
+ * must type to run this Confirm statement: pass it in `query_run`'s
+ * `confirm_names`, exactly (case-sensitive). `None` when no name is asked.
+ */
+confirm_name?: string | null; 
+/**
+ * On Staging and Production, for an `UPDATE` / `DELETE` that changes every row:
+ * the server's estimate of the rows it changes (`EXPLAIN`, at most
+ * [`ESTIMATE_TIMEOUT`]), or `unavailable`. `None`: not estimated.
+ */
+estimate?: RowEstimate | null }
 /**
  * A normalized explain result. `raw` is the engine's original output.
  */
@@ -1052,6 +1097,15 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+/**
+ * The estimated number of rows a flagged `UPDATE` / `DELETE` changes, from the
+ * server's `EXPLAIN` (no `ANALYZE`: nothing runs).
+ */
+export type RowEstimate = { kind: "rows"; n: number } | 
+/**
+ * The explain failed, timed out or said nothing usable.
+ */
+{ kind: "unavailable" }
 /**
  * One event of a run, in the order described in the module docs.
  */

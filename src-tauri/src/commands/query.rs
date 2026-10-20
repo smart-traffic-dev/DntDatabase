@@ -93,12 +93,13 @@ pub async fn query_run_impl(
     state: &AppState,
     plan_id: Uuid,
     confirmed: bool,
+    confirm_names: Vec<String>,
     opts: RunOptions,
     emit: EventSink,
 ) -> Result<Uuid, DbError> {
     state
         .sessions
-        .query_run(plan_id, confirmed, opts, emit)
+        .query_run_named(plan_id, confirmed, confirm_names, opts, emit)
         .await
 }
 
@@ -205,14 +206,17 @@ pub async fn query_tx(
 /// `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
 /// statement is blocked, `confirmation_required` when any needs confirmation and
 /// `confirmed` is false (the plan stays valid: ask, then call again with `confirmed`).
-/// `busy` while the tab runs; `plan_expired` for a plan already run, expired or
-/// replaced.
+/// On Production, `confirm_names` must hold exactly the `confirm_name`s of the plan's
+/// statements (case-sensitive), else `confirmation_required` too; pass `[]` when the
+/// plan asks for none. `busy` while the tab runs; `plan_expired` for a plan already
+/// run, expired or replaced.
 #[tauri::command]
 #[specta::specta]
 pub async fn query_run(
     state: State<'_, AppState>,
     plan_id: Uuid,
     confirmed: bool,
+    confirm_names: Vec<String>,
     opts: RunOptions,
     channel: Channel<RunEvent>,
 ) -> Result<Uuid, AppError> {
@@ -224,7 +228,15 @@ pub async fn query_run(
             false
         }
     });
-    guard_tab(query_run_impl(&state, plan_id, confirmed, opts, emit)).await
+    guard_tab(query_run_impl(
+        &state,
+        plan_id,
+        confirmed,
+        confirm_names,
+        opts,
+        emit,
+    ))
+    .await
 }
 
 /// Stops run `run_id` (emits `stopping{user}` first). Unknown or finished runs: no-op.

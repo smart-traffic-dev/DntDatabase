@@ -412,6 +412,92 @@ async fn explain_tree_per_engine() {
     }
 }
 
+/// Row estimates (spec §4.3): on a Staging connection a DELETE without WHERE gets the
+/// server's `EXPLAIN` estimate, which deletes nothing and keeps the tab's transaction.
+#[tokio::test]
+async fn estimate_on_staging_delete() {
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_in(dir.path());
+    for t in Target::all() {
+        let mut cfg = config(t, false);
+        cfg.env_tag = Some(dnt_core::config::EnvTag::Staging);
+        let id = state
+            .repo
+            .create(
+                cfg,
+                NewSecrets {
+                    db_password: Some(SecretString::from(TEST_PASSWORD)),
+                    ssh_password: None,
+                    ssh_key_passphrase: None,
+                },
+            )
+            .unwrap()
+            .id;
+        state.sessions.open(id, None).await.unwrap();
+        let table = format!("p3_estimate_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let values: Vec<String> = (1..=300).map(|i| format!("({i})")).collect();
+        let analyze = match t.kind() {
+            DbKind::MySql => format!("ANALYZE TABLE {table}"),
+            DbKind::Postgres => format!("ANALYZE {table}"),
+        };
+        let setup = format!(
+            "CREATE TABLE {table} (id INT PRIMARY KEY);\n\
+             INSERT INTO {table} VALUES {};\n{analyze}",
+            values.join(", ")
+        );
+        let events = run_all(&state, "t1", id, &setup).await;
+        assert_eq!(
+            events.of("done")[0]["stop"],
+            Json::Null,
+            "{t:?}: {:?}",
+            events.list()
+        );
+
+        for (text, in_tx) in [
+            (format!("DELETE FROM {table}"), false),
+            (format!("UPDATE {table} SET id = id WHERE 1 = 1"), true),
+        ] {
+            if in_tx {
+                run_all(&state, "t1", id, "BEGIN").await;
+            }
+            let view = state
+                .sessions
+                .query_plan("t1", id, None, &text, Pick::All)
+                .await
+                .unwrap();
+            let s = &view.stmts[0];
+            assert_eq!(s.verdict, Verdict::Confirm, "{t:?}");
+            assert_eq!(s.confirm_name, None, "{t:?}: no typed name off Production");
+            match s.estimate {
+                Some(dnt_query::RowEstimate::Rows { n }) => assert!(n > 0.0, "{t:?}: {n}"),
+                other => panic!("{t:?} {text}: {other:?}"),
+            }
+            let want = if in_tx {
+                dnt_core::tx::TxState::Active
+            } else {
+                dnt_core::tx::TxState::Idle
+            };
+            assert_eq!(view.tx_state, want, "{t:?}");
+            if in_tx {
+                let after = state
+                    .sessions
+                    .query_tx("t1", dntdatabase::query_sessions::TxAction::Rollback)
+                    .await
+                    .unwrap();
+                assert_eq!(after, dnt_core::tx::TxState::Idle, "{t:?}");
+            }
+        }
+        // Nothing was deleted.
+        let events = run_all(&state, "t1", id, &format!("SELECT COUNT(*) FROM {table}")).await;
+        let rows = events.of("rows");
+        let count = &rows[0]["rows"][0][0]["v"];
+        assert!(count == 300 || count == "300", "{t:?}: {count}");
+        run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;
+        state.sessions.close(id).await;
+    }
+}
+
 #[tokio::test]
 async fn ddl_refreshes_completion_cache() {
     require_db!();

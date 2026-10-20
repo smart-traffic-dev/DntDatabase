@@ -13,6 +13,7 @@ pub mod guard;
 pub mod offsets;
 pub mod plan;
 pub mod redact;
+pub mod risk;
 pub mod run;
 pub mod unbounded;
 
@@ -27,6 +28,10 @@ pub use guard::{guard, guard_with, lifts_read_only, other_whitelisted, verdict, 
 pub use offsets::Utf16Map;
 pub use plan::{plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target, Verdict};
 pub use redact::{redact, Redacted, REDACTED};
+pub use risk::{
+    confirm_name, confirm_names_match, drop_targets, estimate_sql, estimate_table, parse_estimate,
+    DropKind, DropTarget, RowEstimate,
+};
 pub use run::{
     error_offset, run, RunCancel, RunReport, RunSink, StmtReport, StopReason, ROLLED_BACK_NOTICE,
 };

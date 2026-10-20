@@ -218,6 +218,8 @@ async function execute(
     const runId = await api.queryRun(
       plan.plan_id,
       confirmed,
+      // Typed Production names come with Task 16's confirm dialog.
+      [],
       { max_rows: extra?.maxRows ?? doc.rowLimit, continue_on_error: doc.continueOnError },
       // Bound to this run: late events of an earlier channel are dropped.
       runChannel((ev) => useQueryRun.getState().apply(tabId, ev, plan.plan_id)),

@@ -35,8 +35,9 @@ use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    explain_sql, guard_with, plan, run, ExplainFormat, GuardCtx, PlannedStmt, RunCancel, RunReport,
-    ScriptPlan, StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict,
+    confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_with, parse_estimate,
+    plan, run, DropTarget, ExplainFormat, GuardCtx, PlannedStmt, RowEstimate, RunCancel, RunReport,
+    ScriptPlan, StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict, WriteOp,
 };
 use dnt_store::repo::ConnectionRepo;
 use futures_util::FutureExt;
@@ -65,7 +66,18 @@ pub const RUN_BATCH_SIZE: usize = 500;
 /// Upper bound of `RunOptions::max_rows`.
 pub const MAX_ROWS_LIMIT: u32 = 1_000_000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+/// How long the `EXPLAIN` of one row estimate may run (spec §4.3).
+pub const ESTIMATE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Statements of one plan that get a row estimate; the others are `unavailable`.
+pub const MAX_ESTIMATES: usize = 10;
+
+/// The savepoint a PostgreSQL row estimate runs under inside an open transaction.
+const ESTIMATE_SAVEPOINT: &str = "SAVEPOINT dnt_row_estimate";
+const ESTIMATE_ROLLBACK: &str = "ROLLBACK TO SAVEPOINT dnt_row_estimate";
+const ESTIMATE_RELEASE: &str = "RELEASE SAVEPOINT dnt_row_estimate";
+
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 pub struct PlanStmtView {
     pub index: u32,
     /// UTF-16 range in the editor text (end-exclusive).
@@ -80,9 +92,24 @@ pub struct PlanStmtView {
     /// optional in the bindings so older fixtures stay valid.
     #[serde(default)]
     pub unbounded: Vec<UnboundedWrite>,
+    /// What a `DROP` of the statement removes (`DROP DATABASE` is confirmed on every
+    /// connection, any other `DROP` on Staging and Production); empty for most
+    /// statements. Always sent; optional in the bindings.
+    #[serde(default)]
+    pub drops: Vec<DropTarget>,
+    /// On Production, the name (a table, object, database or schema, unquoted) the user
+    /// must type to run this Confirm statement: pass it in `query_run`'s
+    /// `confirm_names`, exactly (case-sensitive). `None` when no name is asked.
+    #[serde(default)]
+    pub confirm_name: Option<String>,
+    /// On Staging and Production, for an `UPDATE` / `DELETE` that changes every row:
+    /// the server's estimate of the rows it changes (`EXPLAIN`, at most
+    /// [`ESTIMATE_TIMEOUT`]), or `unavailable`. `None`: not estimated.
+    #[serde(default)]
+    pub estimate: Option<RowEstimate>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 pub struct PlanView {
     pub plan_id: Uuid,
     pub stmts: Vec<PlanStmtView>,
@@ -273,6 +300,100 @@ async fn execute_quietly(session: &dyn Session, sql: &str) -> Result<(), DbError
         .execute_one(sql, kind, &ExecOptions::default(), &mut NullSink)
         .await
         .map(|_| ())
+}
+
+/// A [`RowSink`] that keeps the columns and rows of the first result (an `EXPLAIN`).
+#[derive(Default)]
+struct CollectSink {
+    started: bool,
+    columns: Vec<String>,
+    rows: Vec<Vec<Value>>,
+}
+
+impl RowSink for CollectSink {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        if !self.started {
+            self.columns = cols.iter().map(|c| c.name.clone()).collect();
+        }
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        if !self.started {
+            self.rows.extend(batch);
+        }
+    }
+    fn result_end(&mut self, _summary: &ResultSummary) {
+        self.started = true;
+    }
+}
+
+/// One row estimate on `session` (see `SessionManager::estimate_rows`): `Ok` with what
+/// the explain said (`Unavailable` when it failed), `Err` when the session is no longer
+/// usable: its connection was lost, or the explain did not end within
+/// [`ESTIMATE_TIMEOUT`] plus `grace` plus one second (the driver should have stopped it
+/// by then; its state is unknown).
+async fn explain_estimate(
+    session: &dyn Session,
+    sql: &str,
+    dialect: Dialect,
+    table: Option<&str>,
+    savepoint: bool,
+    grace: Duration,
+) -> Result<RowEstimate, DbError> {
+    let bound = ESTIMATE_TIMEOUT + grace + Duration::from_secs(1);
+    let attempt = explain_estimate_once(session, sql, dialect, table, savepoint, grace);
+    match tokio::time::timeout(bound, attempt).await {
+        Ok(r) => r,
+        Err(_) => Err(DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: false,
+            message: "a row estimate did not stop; the session was dropped".into(),
+        }),
+    }
+}
+
+async fn explain_estimate_once(
+    session: &dyn Session,
+    sql: &str,
+    dialect: Dialect,
+    table: Option<&str>,
+    savepoint: bool,
+    grace: Duration,
+) -> Result<RowEstimate, DbError> {
+    // Only a lost connection is the caller's business.
+    let quiet = |r: Result<(), DbError>| match r {
+        Err(e) if is_lost(&e) => Err(e),
+        Err(e) => {
+            tracing::debug!(error = %e, "a row estimate statement failed");
+            Ok(false)
+        }
+        Ok(()) => Ok(true),
+    };
+    if savepoint && !quiet(execute_quietly(session, ESTIMATE_SAVEPOINT).await)? {
+        return Ok(RowEstimate::Unavailable);
+    }
+    let opts = ExecOptions {
+        max_rows: 1_000,
+        timeout: Some(ESTIMATE_TIMEOUT),
+        cancel_grace: grace,
+        ..ExecOptions::default()
+    };
+    let mut sink = CollectSink::default();
+    let ran = session
+        .execute_one(sql, classify(sql, dialect), &opts, &mut sink)
+        .await
+        .map(|_| ());
+    let ok = quiet(ran)?;
+    if savepoint {
+        if !ok {
+            quiet(execute_quietly(session, ESTIMATE_ROLLBACK).await)?;
+        }
+        quiet(execute_quietly(session, ESTIMATE_RELEASE).await)?;
+    }
+    Ok(if ok {
+        parse_estimate(dialect, &sink.columns, &sink.rows, table)
+    } else {
+        RowEstimate::Unavailable
+    })
 }
 
 /// A MySQL identifier in backticks (embedded backticks doubled).
@@ -685,19 +806,27 @@ impl SessionManager {
         text: &str,
         target: Target,
     ) -> Result<PlanView, DbError> {
-        let (rt, ts) = self.tab_session(tab, conn, database).await?;
-        let (dialect, tx_state, _) = session_facts(&ts)?;
+        let (rt, mut ts) = self.tab_session(tab, conn, database).await?;
+        let (dialect, _, _) = session_facts(&ts)?;
         let plan_target = PlanTarget {
             tab: tab.to_string(),
             conn,
             runtime: Arc::downgrade(&rt),
             database: ts.database.clone(),
         };
-        drop(ts);
 
         let cfg = self.current_config(&rt);
         let mut planned = plan(text, target, dialect);
         guard_with(&mut planned, self.guard_ctx(&cfg, false));
+        if matches!(cfg.env_tag, Some(EnvTag::Staging | EnvTag::Production)) {
+            self.estimate_rows(&rt, tab, &mut ts, &mut planned).await?;
+        }
+        // After the estimates (which never change it, short of a lost connection).
+        let tx_state = ts
+            .session
+            .as_deref()
+            .map_or(TxState::Idle, |s| s.tx_state());
+        drop(ts);
         let copy = PlanCopy {
             target: plan_target,
             plan: planned,
@@ -705,6 +834,89 @@ impl SessionManager {
             source: None,
         };
         self.store_plan(&rt, &cfg, copy, dialect, tx_state)
+    }
+
+    /// Row estimates (spec §4.3), on the tab's own held session: for every statement of
+    /// `planned` that is not blocked and holds an unbounded `UPDATE` / `DELETE`, runs
+    /// `EXPLAIN` (never `ANALYZE`: nothing executes) with [`ESTIMATE_TIMEOUT`] and stores
+    /// what it says in `estimate`. Best-effort: a statement that cannot be explained
+    /// safely ([`estimate_sql`]), a failed or timed-out explain, an aborted transaction
+    /// (nothing is sent then) and every statement past [`MAX_ESTIMATES`] are
+    /// `Unavailable`.
+    ///
+    /// The tab's transaction state is kept: an explain does not change it on MySQL, and
+    /// inside an open PostgreSQL transaction it runs under a savepoint, rolled back to
+    /// when it fails (a failure would abort the transaction otherwise).
+    ///
+    /// Only a lost connection (or an explain that does not stop after its timeout and
+    /// grace) is an error: the session is dropped as after a run. Outside a transaction
+    /// the tab keeps its binding and reopens on its next use, and planning goes on;
+    /// inside one, `ConnectionLost { was_in_tx: true }` is returned (the server rolled
+    /// the transaction back).
+    async fn estimate_rows(
+        &self,
+        rt: &ConnectionRuntime,
+        tab: &str,
+        ts: &mut TabSession,
+        planned: &mut ScriptPlan,
+    ) -> Result<(), DbError> {
+        let dialect = planned.dialect;
+        let mut done = 0usize;
+        for s in &mut planned.stmts {
+            let flagged = s.verdict != Verdict::Block
+                && s.unbounded
+                    .iter()
+                    .any(|w| matches!(w.op, WriteOp::Update | WriteOp::Delete));
+            if !flagged {
+                continue;
+            }
+            s.estimate = Some(RowEstimate::Unavailable);
+            let Some(session) = ts.session.as_deref() else {
+                continue;
+            };
+            let state = session.tx_state();
+            if state == TxState::Aborted || done >= MAX_ESTIMATES {
+                continue;
+            }
+            let Some(sql) = estimate_sql(&s.text, dialect) else {
+                continue;
+            };
+            done += 1;
+            let table = estimate_table(&s.unbounded);
+            let savepoint = rt.cfg.kind == DbKind::Postgres && state == TxState::Active;
+            match explain_estimate(
+                session,
+                &sql,
+                dialect,
+                table.as_deref(),
+                savepoint,
+                self.cancel_grace,
+            )
+            .await
+            {
+                Ok(estimate) => s.estimate = Some(estimate),
+                Err(e) => {
+                    tracing::warn!(connection = %rt.cfg.id, error = %e, "a row estimate lost the tab's session");
+                    let in_tx = state != TxState::Idle;
+                    if let Some(dead) = ts.session.take() {
+                        close_quietly(dead).await;
+                    }
+                    ts.lost_tx = in_tx;
+                    ts.reopen = !in_tx;
+                    rt.queries.sync_bound(tab, ts);
+                    if in_tx {
+                        return Err(DbError::ConnectionLost {
+                            was_in_tx: true,
+                            outcome_unknown: false,
+                            message: "the connection was lost while estimating rows; \
+                                      the open transaction was rolled back"
+                                .into(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Opens (or moves) the session of `tab` on `conn` / `database` and returns it held:
@@ -760,6 +972,9 @@ impl SessionManager {
                 verdict: s.verdict,
                 preview: preview(&s.text),
                 unbounded: s.unbounded.clone(),
+                drops: s.drops.clone(),
+                confirm_name: s.confirm_name.clone(),
+                estimate: s.estimate,
             })
             .collect();
         // The connection closed while we planned: `shutdown` closes the tab's session;
@@ -1459,7 +1674,16 @@ fn count_verdict(plan: &ScriptPlan, v: Verdict) -> u32 {
 /// statement; the explain statement it runs carries those verdicts. `now`: the guard
 /// context as it is now (`SessionManager::guard_ctx`: current config and "Confirm
 /// UPDATE/DELETE without WHERE" setting); the plan keeps its own `analyze`.
-fn rejudge(copy: &PlanCopy, now: GuardCtx, confirmed: bool) -> Result<ScriptPlan, DbError> {
+///
+/// On Production a confirmation also needs the typed names (spec §4.3): `confirm_names`
+/// must be exactly the `confirm_name`s the guard gives the Confirm statements now
+/// ([`confirm_names_match`], case-sensitive), else `ConfirmationRequired`.
+fn rejudge(
+    copy: &PlanCopy,
+    now: GuardCtx,
+    confirmed: bool,
+    confirm_names: &[String],
+) -> Result<ScriptPlan, DbError> {
     let mut judged = copy
         .explain
         .as_ref()
@@ -1482,8 +1706,16 @@ fn rejudge(copy: &PlanCopy, now: GuardCtx, confirmed: bool) -> Result<ScriptPlan
         return Err(DbError::Blocked { count: blocked });
     }
     let confirm = count_verdict(&judged, Verdict::Confirm);
-    if confirm > 0 && !confirmed {
-        return Err(DbError::ConfirmationRequired { count: confirm });
+    let required: Vec<String> = judged
+        .stmts
+        .iter()
+        .filter(|s| s.verdict == Verdict::Confirm)
+        .filter_map(|s| s.confirm_name.clone())
+        .collect();
+    if (confirm > 0 && !confirmed) || !confirm_names_match(&required, confirm_names) {
+        return Err(DbError::ConfirmationRequired {
+            count: confirm.max(1),
+        });
     }
     if copy.explain.is_none() {
         return Ok(judged);
@@ -1713,10 +1945,29 @@ impl SessionManager {
     /// that is already running (or planning) → `Busy`. A plan already run, expired,
     /// replaced, or whose tab moved → `PlanExpired`. The run holds the tab's session
     /// until it ends.
+    ///
+    /// No name is typed: a plan whose Production confirmation asks for one is refused
+    /// (`ConfirmationRequired`); see [`Self::query_run_named`].
     pub async fn query_run(
         &self,
         plan_id: Uuid,
         confirmed: bool,
+        opts: RunOptions,
+        emit: EventSink,
+    ) -> Result<Uuid, DbError> {
+        self.query_run_named(plan_id, confirmed, Vec::new(), opts, emit)
+            .await
+    }
+
+    /// [`Self::query_run`] with the names the user typed to confirm it on Production
+    /// (`PlanStmtView::confirm_name`): they must be exactly the names the plan asks for
+    /// when judged again now (case-sensitive; order and repeats do not matter), else
+    /// `ConfirmationRequired` and the plan stays available.
+    pub async fn query_run_named(
+        &self,
+        plan_id: Uuid,
+        confirmed: bool,
+        confirm_names: Vec<String>,
         opts: RunOptions,
         emit: EventSink,
     ) -> Result<Uuid, DbError> {
@@ -1733,7 +1984,12 @@ impl SessionManager {
             return Err(DbError::PlanExpired);
         }
         let cfg = self.current_config(&rt);
-        let run_plan = rejudge(&copy, self.guard_ctx(&cfg, false), confirmed)?;
+        let run_plan = rejudge(
+            &copy,
+            self.guard_ctx(&cfg, false),
+            confirmed,
+            &confirm_names,
+        )?;
         // A stale session is replaced; one dropped after a lost connection reopens.
         if rt.is_stale(&ts) || ts.session.is_none() {
             let ensured = rt

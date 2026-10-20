@@ -6,7 +6,7 @@ use dnt_core::driver::{
     CancelHandle, Canceller, Driver, ExecOptions, ExecProgress, Introspector, ResultSummary,
     RowSink, Session, StmtOutcome,
 };
-use dnt_core::error::{AppError, DbError};
+use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
     TableDetail,
@@ -17,7 +17,10 @@ use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
-use dnt_query::{StmtKindLabel, Target, UnboundedReason, UnboundedWrite, Verdict, WriteOp};
+use dnt_query::{
+    DropKind, DropTarget, RowEstimate, StmtKindLabel, Target, UnboundedReason, UnboundedWrite,
+    Verdict, WriteOp,
+};
 use dnt_store::db::open_in_memory;
 use dnt_store::history::{HistoryFilter, HistoryStatus};
 use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
@@ -237,6 +240,56 @@ impl Session for FakeSession {
             let summary = ResultSummary {
                 affected: None,
                 row_count: 100,
+                truncated: false,
+                elapsed_ms: 1,
+            };
+            sink.result_end(&summary);
+            return ok(summary);
+        }
+        // Row estimates (`EXPLAIN DELETE …` / `EXPLAIN (FORMAT JSON) UPDATE …`).
+        let estimate = [
+            "EXPLAIN DELETE",
+            "EXPLAIN UPDATE",
+            "EXPLAIN (FORMAT JSON) DELETE",
+            "EXPLAIN (FORMAT JSON) UPDATE",
+        ]
+        .iter()
+        .any(|p| upper.starts_with(p));
+        if estimate {
+            if upper.contains("SLOW") {
+                // Honours `opts.timeout` as the real drivers do.
+                let started = Instant::now();
+                let limit = opts.timeout.unwrap_or(Duration::from_secs(10));
+                while started.elapsed() < limit {
+                    if self.stop_requested(opts) {
+                        return Err(DbError::cancelled());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                return Err(DbError::timeout(ConnectStage::Execute));
+            }
+            if upper.contains("FAIL") {
+                return Err(DbError::Server {
+                    code: None,
+                    sqlstate: Some("42P01".into()),
+                    message: "relation does not exist".into(),
+                    position: None,
+                });
+            }
+            if self.info.kind == DbKind::Postgres {
+                let plan = r#"[{"Plan": {"Node Type": "ModifyTable", "Plan Rows": 0, "Plans": [{"Node Type": "Seq Scan", "Plan Rows": 321}]}}]"#;
+                sink.result_start(&[column("QUERY PLAN")]);
+                sink.rows(vec![vec![Value::Text(plan.into())]]);
+            } else {
+                sink.result_start(&[column("table"), column("rows")]);
+                sink.rows(vec![
+                    vec![Value::Text("other".into()), Value::Int(1)],
+                    vec![Value::Text("orders".into()), Value::Int(42)],
+                ]);
+            }
+            let summary = ResultSummary {
+                affected: None,
+                row_count: 1,
                 truncated: false,
                 elapsed_ms: 1,
             };
@@ -601,7 +654,8 @@ async fn unbounded_writes_confirm_on_every_connection() {
             .await
             .unwrap_err();
     assert_eq!(kind(err), "confirmation_required");
-    assert!(f.log.executed().is_empty());
+    // Only its row estimate was sent (Production).
+    assert_eq!(f.log.executed(), ["EXPLAIN DELETE FROM orders"]);
     // ... and a TRUNCATE.
     let view = plan(&f, "t2", prod, None, "TRUNCATE orders").await.unwrap();
     assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
@@ -668,7 +722,7 @@ async fn unbounded_setting_turned_off_between_plan_and_run() {
             .await
             .unwrap_err();
     assert_eq!(kind(err), "confirmation_required");
-    assert_eq!(f.log.executed(), ["DELETE FROM t"]);
+    assert_eq!(not_explain(&f), ["DELETE FROM t"]);
 }
 
 #[tokio::test]
@@ -768,6 +822,256 @@ async fn unbounded_write_in_a_delimiter_script_is_confirmed() {
     // The routine body is exempt; the forgotten-delimiter piece is not.
     assert_eq!(verdicts, [Verdict::Allow, Verdict::Confirm]);
     assert_eq!(view.stmts[1].unbounded[0].table, "u");
+}
+
+/// Runs plan `id` confirmed, with `names` typed; the error kind when refused.
+async fn run_named(f: &Fixture, id: Uuid, names: &[&str]) -> Result<(), String> {
+    let (emit, events) = collector();
+    let names = names.iter().map(|s| s.to_string()).collect();
+    match f.sm.query_run_named(id, true, names, opts(), emit).await {
+        Ok(_) => {
+            events.done(LONG).await;
+            Ok(())
+        }
+        Err(e) => Err(kind(e)),
+    }
+}
+
+fn not_explain(f: &Fixture) -> Vec<String> {
+    f.log
+        .executed()
+        .into_iter()
+        .filter(|s| !s.starts_with("EXPLAIN"))
+        .collect()
+}
+
+#[tokio::test]
+async fn wrong_typed_name_is_rejected() {
+    let f = fixture(DbKind::MySql);
+    let prod = open_tagged(&f, Some(EnvTag::Production), false).await;
+    let text = "SELECT 1; DELETE FROM orders; DROP TABLE IF EXISTS `Audit`";
+    let view = plan(&f, "t1", prod, None, text).await.unwrap();
+    let names: Vec<Option<&str>> = view
+        .stmts
+        .iter()
+        .map(|s| s.confirm_name.as_deref())
+        .collect();
+    assert_eq!(names, [None, Some("orders"), Some("Audit")]);
+    assert_eq!(
+        view.stmts[2].drops,
+        [DropTarget {
+            kind: DropKind::Object,
+            name: "Audit".into()
+        }]
+    );
+    assert!(view.stmts[0].drops.is_empty() && view.stmts[1].drops.is_empty());
+
+    // Missing, wrong case, partial or extra names: refused, nothing runs, and the plan
+    // stays available.
+    for typed in [
+        &[][..],
+        &["orders"][..],
+        &["orders", "audit"][..],
+        &["ORDERS", "Audit"][..],
+        &["orders", "Audit", "extra"][..],
+    ] {
+        assert_eq!(
+            run_named(&f, view.plan_id, typed).await.unwrap_err(),
+            "confirmation_required",
+            "{typed:?}"
+        );
+    }
+    // `confirmed` without names is refused too.
+    let (emit, _) = collector();
+    let err =
+        f.sm.query_run(view.plan_id, true, opts(), emit)
+            .await
+            .unwrap_err();
+    assert_eq!(kind(err), "confirmation_required");
+    assert!(not_explain(&f).is_empty());
+
+    // Every name, in any order: it runs.
+    run_named(&f, view.plan_id, &["Audit", "orders"])
+        .await
+        .unwrap();
+    assert_eq!(
+        not_explain(&f),
+        [
+            "SELECT 1",
+            "DELETE FROM orders",
+            "DROP TABLE IF EXISTS `Audit`"
+        ]
+    );
+
+    // A Production confirmation without a risky statement needs no name, and refuses one.
+    let view = plan(&f, "t1", prod, None, "INSERT INTO t VALUES (1)")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(view.stmts[0].confirm_name, None);
+    assert_eq!(
+        run_named(&f, view.plan_id, &["t"]).await.unwrap_err(),
+        "confirmation_required"
+    );
+    run_named(&f, view.plan_id, &[]).await.unwrap();
+
+    // Off Production no name is asked: DROP DATABASE is confirmed on Local.
+    let local = open_tagged(&f, Some(EnvTag::Local), false).await;
+    let view = plan(&f, "t2", local, None, "DROP DATABASE scratch")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+    assert_eq!(view.stmts[0].confirm_name, None);
+    assert_eq!(view.stmts[0].drops[0].kind, DropKind::Database);
+    run_named(&f, view.plan_id, &[]).await.unwrap();
+}
+
+/// The names are checked against the config as it is at run time: a connection tagged
+/// Production after the plan asks for them.
+#[tokio::test]
+async fn typed_names_follow_the_current_config() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Local), false).await;
+    set_confirm_unbounded(&f, false);
+    let view = plan(&f, "t1", id, None, "DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Allow);
+    let mut cfg = f.repo.get(id).unwrap();
+    cfg.env_tag = Some(EnvTag::Production);
+    let keep = SecretUpdate {
+        db_password: SecretChange::Keep,
+        ssh_password: SecretChange::Keep,
+        ssh_key_passphrase: SecretChange::Keep,
+    };
+    f.repo.update(cfg, keep).unwrap();
+    assert_eq!(
+        run_named(&f, view.plan_id, &[]).await.unwrap_err(),
+        "confirmation_required"
+    );
+    run_named(&f, view.plan_id, &["orders"]).await.unwrap();
+    assert_eq!(not_explain(&f), ["DELETE FROM orders"]);
+}
+
+#[tokio::test]
+async fn estimates_on_staging_and_production_only() {
+    let f = fixture(DbKind::MySql);
+    let text = "DELETE FROM orders; UPDATE t SET a = 1 WHERE id = 1; TRUNCATE x; SELECT 1";
+    for env in [Some(EnvTag::Local), None] {
+        let id = open_tagged(&f, env, false).await;
+        let view = plan(&f, "t1", id, None, text).await.unwrap();
+        assert!(view.stmts.iter().all(|s| s.estimate.is_none()), "{env:?}");
+        assert!(f.log.executed().is_empty(), "{env:?}");
+    }
+    for env in [EnvTag::Staging, EnvTag::Production] {
+        let id = open_tagged(&f, Some(env), false).await;
+        let view = plan(&f, "t1", id, None, text).await.unwrap();
+        let estimates: Vec<Option<RowEstimate>> = view.stmts.iter().map(|s| s.estimate).collect();
+        // The `rows` of the target table; bounded writes and TRUNCATE are not estimated.
+        assert_eq!(
+            estimates,
+            [Some(RowEstimate::Rows { n: 42.0 }), None, None, None],
+            "{env:?}"
+        );
+        assert_eq!(f.log.executed(), ["EXPLAIN DELETE FROM orders"]);
+        assert_eq!(view.tx_state, TxState::Idle);
+        f.log.executed.lock().unwrap().clear();
+    }
+    // Read-only blocks: nothing is explained.
+    let ro = open_tagged(&f, Some(EnvTag::Staging), true).await;
+    let view = plan(&f, "t9", ro, None, "DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].verdict, Verdict::Block);
+    assert_eq!(view.stmts[0].estimate, None);
+    assert!(f.log.executed().is_empty());
+}
+
+#[tokio::test]
+async fn estimate_timeout_is_unavailable() {
+    let f = fixture(DbKind::MySql);
+    let id = open_tagged(&f, Some(EnvTag::Staging), false).await;
+    let started = Instant::now();
+    let view = plan(&f, "t1", id, None, "DELETE FROM slow_t")
+        .await
+        .unwrap();
+    let took = started.elapsed();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Unavailable));
+    assert!(
+        took >= Duration::from_millis(1900) && took < Duration::from_secs(4),
+        "{took:?}"
+    );
+    // A failed explain is unavailable too, and the plan still runs.
+    let view = plan(&f, "t1", id, None, "DELETE FROM fail_t")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Unavailable));
+    assert_eq!(view.stmts[0].verdict, Verdict::Confirm);
+}
+
+/// PostgreSQL: an estimate inside an open transaction runs under a savepoint, so a
+/// failed explain cannot abort the transaction; none runs in an aborted one.
+#[tokio::test]
+async fn pg_estimates_keep_the_transaction() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(
+        &f,
+        ConnectionConfig {
+            env_tag: Some(EnvTag::Production),
+            ..config(DbKind::Postgres)
+        },
+    )
+    .await;
+    // Idle: a plain explain.
+    let view = plan(&f, "t1", id, None, "DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Rows { n: 321.0 }));
+    assert_eq!(view.stmts[0].confirm_name.as_deref(), Some("orders"));
+    assert_eq!(
+        f.log.executed(),
+        ["EXPLAIN (FORMAT JSON) DELETE FROM orders"]
+    );
+    f.log.executed.lock().unwrap().clear();
+
+    f.log.set_tx(TxState::Active);
+    let view = plan(&f, "t1", id, None, "UPDATE orders SET a = 1")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Rows { n: 321.0 }));
+    assert_eq!(view.tx_state, TxState::Active);
+    assert_eq!(
+        f.log.executed(),
+        [
+            "SAVEPOINT dnt_row_estimate",
+            "EXPLAIN (FORMAT JSON) UPDATE orders SET a = 1",
+            "RELEASE SAVEPOINT dnt_row_estimate",
+        ]
+    );
+    f.log.executed.lock().unwrap().clear();
+
+    let view = plan(&f, "t1", id, None, "DELETE FROM fail_t")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Unavailable));
+    assert_eq!(
+        f.log.executed(),
+        [
+            "SAVEPOINT dnt_row_estimate",
+            "EXPLAIN (FORMAT JSON) DELETE FROM fail_t",
+            "ROLLBACK TO SAVEPOINT dnt_row_estimate",
+            "RELEASE SAVEPOINT dnt_row_estimate",
+        ]
+    );
+    f.log.executed.lock().unwrap().clear();
+
+    f.log.set_tx(TxState::Aborted);
+    let view = plan(&f, "t1", id, None, "DELETE FROM orders")
+        .await
+        .unwrap();
+    assert_eq!(view.stmts[0].estimate, Some(RowEstimate::Unavailable));
+    assert_eq!(view.tx_state, TxState::Aborted);
+    assert!(f.log.executed().is_empty());
 }
 
 #[tokio::test]
@@ -1386,14 +1690,24 @@ async fn run_without_confirmation_is_refused_on_production() {
         matches!(err, DbError::ConfirmationRequired { count: 2 }),
         "{err:?}"
     );
-    assert!(f.log.executed().is_empty(), "execute_one is never called");
+    // Only the row estimates of planning were sent.
+    assert!(not_explain(&f).is_empty(), "execute_one is never called");
     assert!(events.list().is_empty());
-    // The plan is still there: confirmed, it runs.
-    f.sm.query_run(view.plan_id, true, opts(), emit)
+    // Confirmed without the typed table name: still refused.
+    let err =
+        f.sm.query_run(view.plan_id, true, opts(), emit.clone())
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(err, DbError::ConfirmationRequired { count: 2 }),
+        "{err:?}"
+    );
+    // The plan is still there: confirmed with the name, it runs.
+    f.sm.query_run_named(view.plan_id, true, vec!["t".into()], opts(), emit)
         .await
         .unwrap();
     events.done(LONG).await;
-    assert_eq!(f.log.executed().len(), 3);
+    assert_eq!(not_explain(&f).len(), 3);
 }
 
 #[tokio::test]
