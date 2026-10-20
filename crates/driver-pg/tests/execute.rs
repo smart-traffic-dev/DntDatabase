@@ -3,7 +3,10 @@ use dnt_core::driver::{
     Session, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
+use dnt_core::server::DbKind;
+use dnt_core::sql::build::{literal, BuildError, ColumnTarget};
 use dnt_core::sql::classify;
+use dnt_core::sql::ident::quote_ident;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_driver_pg::{PgDriver, PgSession};
@@ -1486,11 +1489,14 @@ async fn user_cancel_of_stuck_statement_abandons() {
 /// Collects complete values ([`CellMode::Full`]); display rows must not arrive.
 #[derive(Debug, Default)]
 struct FullCollect {
+    cols: Vec<ColumnMeta>,
     rows: Vec<Vec<FullValue>>,
 }
 
 impl RowSink for FullCollect {
-    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.cols = cols.to_vec();
+    }
     fn rows(&mut self, _batch: Vec<Vec<Value>>) {
         panic!("rows() called in CellMode::Full");
     }
@@ -1573,4 +1579,161 @@ async fn full_mode_rejects_oversized_cell() {
         let (_, c) = run(&s, "SELECT 1").await.unwrap();
         assert_eq!(scalar(&c), Value::Int(1), "{t:?}");
     }
+}
+
+/// Runs `sql` in [`CellMode::Full`] and returns its columns and rows.
+async fn full_select(s: &PgSession, sql: &str) -> Result<FullCollect, String> {
+    let mut sink = FullCollect::default();
+    s.execute(sql, full_opts(1 << 20), &mut sink)
+        .await
+        .map_err(|e| format!("{sql}: {e}"))?;
+    Ok(sink)
+}
+
+fn full(v: Value) -> FullValue {
+    FullValue::try_from_value(v).unwrap()
+}
+
+/// Row 1 of `all_types` with awkward text, JSON, bytes and special numbers / dates in
+/// place of the originals. Returns the row to write and the row expected back (a
+/// non-finite float reads back as its PG text).
+fn awkward_row(row1: &[FullValue], cols: &[ColumnMeta]) -> (Vec<FullValue>, Vec<FullValue>) {
+    let (mut row, mut want) = (row1.to_vec(), row1.to_vec());
+    for ((v, w), c) in row.iter_mut().zip(want.iter_mut()).zip(cols) {
+        let (write, read) = match c.name.as_str() {
+            // bpchar(10): exactly 10 characters, so no padding is added.
+            "c_char" => (full(Value::Text("a'\\\";$$--x".into())), None),
+            "c_varchar" => (
+                full(Value::Text(
+                    "it's C:\\x \"q\" $$ $a$ -- ;/* ễ 😀 */ E'\\'".into(),
+                )),
+                None,
+            ),
+            "c_text" => (full(Value::Text("\\'' \\\\ \n\r\t — end\\".into())), None),
+            "c_bytea" => (FullValue::bytes((0..=255u8).collect::<Vec<_>>()), None),
+            "c_json" | "c_jsonb" => (
+                full(Value::Json(
+                    r#"{"a": "it's \\ \"x\" ễ", "b": [1, 2]}"#.into(),
+                )),
+                None,
+            ),
+            "c_numeric" => (full(Value::Decimal("NaN".into())), None),
+            "c_double" => (
+                full(Value::Float(f64::NAN)),
+                Some(Value::Other {
+                    type_name: "float8".into(),
+                    text: "NaN".into(),
+                }),
+            ),
+            "c_real" => (
+                full(Value::Float(f64::NEG_INFINITY)),
+                Some(Value::Other {
+                    type_name: "float4".into(),
+                    text: "-Infinity".into(),
+                }),
+            ),
+            "c_date" => (full(Value::Date("0001-01-01 BC".into())), None),
+            "c_timestamp" => (full(Value::DateTime("infinity".into())), None),
+            _ => continue,
+        };
+        *w = read.map_or_else(|| write.clone(), full);
+        *v = write;
+    }
+    (row, want)
+}
+
+/// Every `all_types` value that has a literal (and awkward text / bytes / specials)
+/// written back with `build::literal` and read in [`CellMode::Full`] comes back equal.
+/// Arrays and `Other` values (interval) are `Unsupported` in v1.
+#[tokio::test]
+async fn literal_round_trip_all_types() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let table = quote_ident(
+            DbKind::Postgres,
+            &format!("p3_lit_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
+        );
+        run(
+            &s,
+            &format!("CREATE TABLE public.{table} (LIKE public.all_types)"),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let res = pg_literal_round_trip(&s, &format!("public.{table}")).await;
+        run(&s, &format!("DROP TABLE public.{table}"))
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: drop: {e}"));
+        Box::new(s).close().await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+    }
+}
+
+async fn pg_literal_round_trip(s: &PgSession, table: &str) -> Result<(), String> {
+    let d = s.dialect();
+    let src = full_select(s, "SELECT * FROM public.all_types ORDER BY id").await?;
+    let targets: Vec<ColumnTarget> = src
+        .cols
+        .iter()
+        .map(|c| ColumnTarget {
+            name: c.name.clone(),
+            db_type: c.db_type.clone(),
+            logical: c.logical,
+            collation: None,
+        })
+        .collect();
+    let mut cases: Vec<(Vec<FullValue>, Vec<FullValue>)> =
+        src.rows.iter().map(|r| (r.clone(), r.clone())).collect();
+    cases.push(awkward_row(&src.rows[0], &src.cols));
+    let mut unsupported = Vec::new();
+    for (i, (mut row, mut want)) in cases.into_iter().enumerate() {
+        let id = full(Value::Int(i as i64 + 1));
+        row[0] = id.clone();
+        want[0] = id;
+        // Columns with a literal; the rest are left NULL and must be arrays / `Other`.
+        let mut names = Vec::new();
+        let mut lits = Vec::new();
+        let mut written = Vec::new();
+        for (j, (v, c)) in row.iter().zip(&targets).enumerate() {
+            match literal(v, c, d) {
+                Ok(l) => {
+                    names.push(quote_ident(DbKind::Postgres, &c.name));
+                    lits.push(l);
+                    written.push(j);
+                }
+                Err(BuildError::Unsupported { .. })
+                    if matches!(c.logical, LogicalType::Array | LogicalType::Other) =>
+                {
+                    unsupported.push(c.name.clone());
+                }
+                Err(e) => return Err(format!("row {i} {}: {e}", c.name)),
+            }
+        }
+        let sql = format!(
+            "INSERT INTO {table} ({}) VALUES ({})",
+            names.join(", "),
+            lits.join(", ")
+        );
+        let (res, _) = run_one(s, &sql, ExecOptions::default()).await;
+        res.map_err(|e| format!("{sql}: {e}"))?;
+        let key = literal(&row[0], &targets[0], d).unwrap();
+        let back = full_select(s, &format!("SELECT * FROM {table} WHERE id = {key}")).await?;
+        if back.rows.len() != 1 {
+            return Err(format!("row {i}: {} rows read back", back.rows.len()));
+        }
+        for j in written {
+            if want[j] != back.rows[0][j] {
+                return Err(format!(
+                    "row {i} {}: wrote {:?}, read {:?}\n{sql}",
+                    src.cols[j].name, want[j], back.rows[0][j]
+                ));
+            }
+        }
+    }
+    unsupported.sort();
+    unsupported.dedup();
+    if unsupported != ["c_int_array", "c_interval", "c_text_array"] {
+        return Err(format!("unexpected unsupported columns: {unsupported:?}"));
+    }
+    Ok(())
 }
