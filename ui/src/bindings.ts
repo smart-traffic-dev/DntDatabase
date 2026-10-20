@@ -412,7 +412,7 @@ async setTablePageSize(size: number) : Promise<Result<null, AppError>> {
 }
 },
 /**
- * "Confirm UPDATE/DELETE without WHERE" for non-Production connections.
+ * "Confirm UPDATE/DELETE without WHERE" for Local and untagged connections.
  */
 async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
     try {
@@ -423,8 +423,8 @@ async getConfirmUnboundedWrites() : Promise<Result<boolean, AppError>> {
 }
 },
 /**
- * Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production
- * connections confirm unbounded writes whatever it is.
+ * Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production and
+ * Staging connections confirm unbounded writes whatever it is.
  */
 async setConfirmUnboundedWrites(enabled: boolean) : Promise<Result<null, AppError>> {
     try {

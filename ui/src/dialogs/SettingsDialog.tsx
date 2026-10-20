@@ -170,8 +170,8 @@ function IdleTxField() {
 
 /**
  * "Confirm UPDATE/DELETE without WHERE" (stored in app.db, on by default): asks before a
- * statement that changes every row of a table runs on a connection that is not Production.
- * Production connections always ask.
+ * statement that changes every row of a table runs on a Local or untagged connection.
+ * Production and Staging connections always ask.
  */
 function UnboundedWritesField() {
   const [on, setOn] = useState<boolean | null>(null);
@@ -219,8 +219,8 @@ function UnboundedWritesField() {
         <span>Confirm UPDATE/DELETE without WHERE</span>
       </label>
       <p id="settings-unbounded-hint" className="hint">
-        Asks before a statement that changes every row of a table (UPDATE or DELETE without WHERE, TRUNCATE) runs on a
-        non-Production connection. Production connections always ask.
+        Asks before a statement that changes every row of a table (UPDATE or DELETE without WHERE, TRUNCATE) runs on
+        Local and untagged connections. Production and Staging connections always ask.
       </p>
       {error && (
         <p role="alert" className="field-error">

@@ -12,7 +12,7 @@
 //!
 //! | Risk                                  | Local / untagged | Staging | Production          |
 //! |---------------------------------------|------------------|---------|---------------------|
-//! | unbounded `UPDATE` / `DELETE`         | setting          | setting | Confirm + table     |
+//! | unbounded `UPDATE` / `DELETE`         | setting          | Confirm | Confirm + table     |
 //! | `TRUNCATE`                            | setting          | Confirm | Confirm + table     |
 //! | `DROP` of an object                   | Allow            | Confirm | Confirm + object    |
 //! | `DROP DATABASE` / `DROP SCHEMA`       | Confirm          | Confirm | Confirm + its name  |

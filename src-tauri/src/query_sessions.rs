@@ -988,7 +988,7 @@ impl SessionManager {
 
     /// What the guard judges a plan with on a connection whose config is `cfg` (as
     /// stored now): its env tag and read-only flag, and the app's "Confirm UPDATE/DELETE
-    /// without WHERE" setting (Production confirms unbounded writes regardless).
+    /// without WHERE" setting (Production and Staging confirm unbounded writes regardless).
     fn guard_ctx(&self, cfg: &ConnectionConfig, analyze: bool) -> GuardCtx {
         GuardCtx {
             env: cfg.env_tag,

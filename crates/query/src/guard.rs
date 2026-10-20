@@ -15,13 +15,13 @@
 //!
 //! On top of that table, a statement that runs and changes every row of a table
 //! ([`crate::unbounded`]: `UPDATE`/`DELETE` without WHERE or with an always-true one,
-//! `TRUNCATE`) is at least Confirm on EVERY connection: always on Production, and
-//! elsewhere while [`GuardCtx::confirm_unbounded`] (the "Confirm UPDATE/DELETE without
-//! WHERE" setting, on by default) is set. A plain Explain runs nothing and is not
+//! `TRUNCATE`) is at least Confirm: always on Production and Staging, and on Local and
+//! untagged connections while [`GuardCtx::confirm_unbounded`] (the "Confirm UPDATE/DELETE
+//! without WHERE" setting, on by default) is set. A plain Explain runs nothing and is not
 //! affected; read-only Block stays Block.
 //!
-//! Spec §4.3 adds ([`crate::risk`]): a `TRUNCATE` or `DROP` of an object is Confirm on
-//! Staging; `DROP DATABASE` / `DROP SCHEMA` is Confirm on every connection; and on
+//! Spec §4.3 adds ([`crate::risk`]): a `DROP` of an object is Confirm on Staging;
+//! `DROP DATABASE` / `DROP SCHEMA` is Confirm on every connection; and on
 //! Production a Confirm statement that changes every row of a table or drops something
 //! carries [`crate::plan::PlannedStmt::confirm_name`], the name the user must type.
 //!
@@ -87,8 +87,8 @@ pub struct GuardCtx {
     pub env: Option<EnvTag>,
     pub read_only: bool,
     pub analyze: bool,
-    /// Confirm unbounded writes on a connection that is not Production (the "Confirm
-    /// UPDATE/DELETE without WHERE" setting). Production always confirms them.
+    /// Confirm unbounded writes on Local and untagged connections (the "Confirm
+    /// UPDATE/DELETE without WHERE" setting). Production and Staging always confirm them.
     pub confirm_unbounded: bool,
 }
 
@@ -126,18 +126,16 @@ pub(crate) fn stmt_verdict(
     if v != Verdict::Allow {
         return v;
     }
+    // §4.3: a write that changes every row of a table (UPDATE / DELETE without WHERE,
+    // TRUNCATE) is confirmed on Production and Staging whatever the setting; the setting
+    // decides on Local and untagged connections (R43).
     let writes = crate::unbounded::unbounded_writes(text, dialect);
-    if !writes.is_empty() && (confirm_unbounded || env == Some(EnvTag::Production)) {
+    let tagged = matches!(env, Some(EnvTag::Production | EnvTag::Staging));
+    if !writes.is_empty() && (confirm_unbounded || tagged) {
         return Verdict::Confirm;
     }
-    // §4.3: a TRUNCATE or a DROP of an object is confirmed on Staging (Production
-    // confirms it as DDL / a write already); DROP DATABASE / SCHEMA everywhere.
-    let truncate = writes
-        .iter()
-        .any(|w| w.op == crate::unbounded::WriteOp::Truncate);
-    if truncate && env == Some(EnvTag::Staging) {
-        return Verdict::Confirm;
-    }
+    // §4.3: a DROP of an object is confirmed on Staging (Production confirms it as DDL
+    // already); DROP DATABASE / SCHEMA everywhere.
     if mentions_drop(text) {
         let drops = crate::risk::drop_targets(text, dialect);
         let staging_object =
@@ -1245,13 +1243,12 @@ DELIMITER ;";
         for d in BOTH {
             for env in envs {
                 let prod = env == Some(EnvTag::Production);
+                let staging = env == Some(EnvTag::Staging);
                 for setting in [true, false] {
                     for &s in UNBOUNDED {
-                        // Production always confirms; elsewhere the setting decides,
-                        // except that Staging always confirms a TRUNCATE (§4.3).
-                        let staging_truncate =
-                            env == Some(EnvTag::Staging) && s.starts_with("TRUNCATE");
-                        let want = if prod || setting || staging_truncate {
+                        // Production and Staging always confirm (§4.3, R43); the setting
+                        // decides on Local and untagged connections only.
+                        let want = if prod || staging || setting {
                             C
                         } else {
                             A

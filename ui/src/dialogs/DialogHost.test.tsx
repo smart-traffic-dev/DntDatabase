@@ -268,7 +268,7 @@ describe('DialogHost', () => {
     const box = await screen.findByRole('checkbox', { name: 'Confirm UPDATE/DELETE without WHERE' });
     await waitFor(() => expect(box).toBeEnabled());
     expect(box).toBeChecked();
-    expect(box).toHaveAccessibleDescription(/non-Production connection\. Production connections always ask\./);
+    expect(box).toHaveAccessibleDescription(/Local and untagged connections\. Production and Staging connections always ask\./);
     await user.click(box);
     await waitFor(() => expect(callsOf('set_confirm_unbounded_writes')).toEqual([{ enabled: false }]));
     expect(box).not.toBeChecked();

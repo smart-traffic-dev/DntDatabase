@@ -121,8 +121,8 @@ pub async fn set_table_page_size(state: State<'_, AppState>, size: u32) -> Resul
 /// `app_settings` key of "Confirm UPDATE/DELETE without WHERE" (`1` | `0`).
 pub const CONFIRM_UNBOUNDED_KEY: &str = "confirm_unbounded_writes";
 
-/// Whether unbounded writes (`dnt_query::unbounded`) are confirmed on connections that
-/// are not Production (Production always confirms them). On unless `0` is stored; on
+/// Whether unbounded writes (`dnt_query::unbounded`) are confirmed on Local and untagged
+/// connections (Production and Staging always confirm them). On unless `0` is stored; on
 /// when it cannot be read.
 pub fn saved_confirm_unbounded(repo: &ConnectionRepo) -> bool {
     match repo.app_setting(CONFIRM_UNBOUNDED_KEY) {
@@ -149,15 +149,15 @@ pub async fn set_confirm_unbounded_writes_impl(
     blocking(move || repo.set_app_setting(CONFIRM_UNBOUNDED_KEY, value)).await
 }
 
-/// "Confirm UPDATE/DELETE without WHERE" for non-Production connections.
+/// "Confirm UPDATE/DELETE without WHERE" for Local and untagged connections.
 #[tauri::command]
 #[specta::specta]
 pub async fn get_confirm_unbounded_writes(state: State<'_, AppState>) -> Result<bool, AppError> {
     guard(get_confirm_unbounded_writes_impl(&state)).await
 }
 
-/// Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production
-/// connections confirm unbounded writes whatever it is.
+/// Stores "Confirm UPDATE/DELETE without WHERE"; the next plan uses it. Production and
+/// Staging connections confirm unbounded writes whatever it is.
 #[tauri::command]
 #[specta::specta]
 pub async fn set_confirm_unbounded_writes(
