@@ -1,10 +1,13 @@
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { openNewQuery } from './newQuery';
+import { closeTab, cycleTab } from './tabActions';
 
 /**
  * Window-level query shortcuts (spec §7.1): `Ctrl+S` save (`Ctrl+Shift+S` save as),
- * `Ctrl+O` open a .sql file, `Ctrl+T` new query. Ignored while a modal dialog is open.
+ * `Ctrl+O` open a .sql file, `Ctrl+T` new query,
+ * `Ctrl+W` close tab, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
+ * Ignored while a modal dialog is open.
  */
 export function onQueryShortcut(e: KeyboardEvent) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey || e.repeat) return;
@@ -14,7 +17,17 @@ export function onQueryShortcut(e: KeyboardEvent) {
   if (target?.closest('input, textarea, select, [contenteditable="true"]') && !target.closest('.sql-editor')) return;
   const key = e.key.toLowerCase();
   const docs = useQueryDocs.getState();
-  if (key === 's') {
+  // Intentional: Ctrl+PageUp/PageDown switch tabs (as in VS Code) and override Monaco's own
+  // Ctrl+PageUp/PageDown editor scroll, because this listener runs in the capture phase.
+  if (key === 'tab' || key === 'pagedown' || key === 'pageup') {
+    e.preventDefault();
+    cycleTab(key === 'pageup' || (key === 'tab' && e.shiftKey) ? -1 : 1);
+  } else if (key === 'w' && !e.shiftKey) {
+    e.preventDefault();
+    const { tabs, activeId } = useTabs.getState();
+    const tab = tabs.find((t) => t.id === activeId);
+    if (tab) void closeTab(tab);
+  } else if (key === 's') {
     e.preventDefault();
     const { tabs, activeId } = useTabs.getState();
     const tab = tabs.find((t) => t.id === activeId);

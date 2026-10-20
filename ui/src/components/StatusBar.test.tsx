@@ -38,9 +38,22 @@ describe('StatusBar', () => {
         ssh: { host: 'bastion-01', port: 22, user: 'ops', auth: 'key', key_path: null },
       }),
     );
-    expect(screen.getByText('shop-prod · 8.0.36 · via SSH bastion-01')).toBeInTheDocument();
+    expect(screen.getByText('shop-prod · MySQL 8.0.36 · via SSH bastion-01')).toBeInTheDocument();
   });
 
+  it('shows a short PostgreSQL version with the full string in the tooltip, and a read-only mark', () => {
+    const full = 'PostgreSQL 17.11 (Debian 17.11-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc, 64-bit';
+    render(<StatusBar />);
+    const summary = config(ids.prod, 'pg-main', { read_only: true });
+    act(() => {
+      useConnections.getState().setStored([], [summary]);
+      useConnections.getState().setInfo(ids.prod, { ...serverInfo('Postgres', [17, 11, 0]), version_string: full });
+      useTree.getState().select(connNodeId(ids.prod));
+    });
+    const label = screen.getByText('pg-main · PostgreSQL 17.11');
+    expect(label).toHaveAttribute('title', expect.stringContaining(full));
+    expect(screen.getByText('read-only')).toBeInTheDocument();
+  });
   it('follows the active tab, else the tree selection', () => {
     const { container } = render(<StatusBar />);
     const prod = config(ids.prod, 'shop-prod', { env_tag: 'production' });
@@ -96,6 +109,41 @@ describe('StatusBar of a query tab', () => {
     expect(screen.getByText('12 rows · 34 ms')).toBeInTheDocument();
   });
 
+  it('shows running state with elapsed time and hides the previous run', () => {
+    vi.useFakeTimers({ now: 100_000 });
+    setRun({
+      phase: { kind: 'running', index: 1, total: 6, startedAt: 88_000 },
+      lastRun: { rows: 1, elapsedMs: 10 },
+    });
+    render(<StatusBar />);
+    expect(screen.getByTestId('status-running')).toHaveTextContent('Running… 2/6 · 12 s');
+    expect(screen.queryByTestId('status-last')).toBeNull();
+    expect(screen.getByTestId('status-tx')).toHaveTextContent('Auto-commit');
+    const live = screen.getByRole('status');
+    expect(live.textContent).toBe('Running… 2/6');
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.getByTestId('status-running')).toHaveTextContent('Running… 2/6 · 14 s');
+    expect(screen.getByRole('status').textContent).toBe('Running… 2/6');
+    expect(screen.getByTestId('status-running').querySelector('[aria-hidden="true"]:not(.spinner)')).toHaveTextContent('14 s');
+  });
+
+  it('says so when the user cancelled the run', () => {
+    setRun({ stop: { kind: 'cancelled' }, lastRun: { rows: 1, elapsedMs: 3093 } });
+    render(<StatusBar />);
+    expect(screen.getByTestId('status-last')).toHaveTextContent('Cancelled by user after 3.1 s');
+  });
+
+  it('uses singular and grouped numbers', () => {
+    setRun({ lastRun: { rows: 1, elapsedMs: 1200 } });
+    const { unmount } = render(<StatusBar />);
+    expect(screen.getByTestId('status-last')).toHaveTextContent('1 row · 1,200 ms');
+    unmount();
+    setRun({ lastRun: { rows: 10000, elapsedMs: 5 } });
+    render(<StatusBar />);
+    expect(screen.getByTestId('status-last')).toHaveTextContent('10,000 rows · 5 ms');
+  });
   it('shows_transaction_states_with_buttons', async () => {
     render(<StatusBar />);
     expect(screen.getByTestId('status-tx')).toHaveTextContent('Auto-commit');

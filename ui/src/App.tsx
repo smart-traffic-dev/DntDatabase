@@ -1,5 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect } from 'react';
+import { openNewQuery } from './components/newQuery';
 import { onQueryShortcut } from './components/queryShortcuts';
 import { installCloseGuard, useQueryDocs } from './store/queryTabs';
 // Registers the run store as the close guard's transaction source (before the guard runs).
@@ -12,8 +13,39 @@ import { TabBar } from './components/TabBar';
 import { Toolbar } from './components/Toolbar';
 import { ObjectTab } from './tabs/ObjectTab';
 import { QueryTab } from './tabs/query/QueryTab';
+import { useConnections } from './store/connections';
+import { useDialogs } from './store/dialogs';
 import { useTabs } from './store/tabs';
 import { useTree } from './store/tree';
+
+/** Nothing open: a first-start call to action, else the keys that get a user going. */
+export function EmptyWorkspace() {
+  const hasConnections = useConnections((s) => s.summaries.size > 0);
+  const requestDialog = useDialogs((s) => s.requestDialog);
+  if (!hasConnections) {
+    return (
+      <div className="empty" data-testid="workspace-empty">
+        <strong>No connections yet</strong>
+        <span>Add a connection to start browsing and querying.</span>
+        <button type="button" className="btn primary" onClick={() => requestDialog({ kind: 'newConnection' })}>
+          New connection
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="empty" data-testid="workspace-empty">
+      <strong>No tab open</strong>
+      <span>Double-click a table or view in the connection tree to open it.</span>
+      <span>
+        <kbd>Ctrl+T</kbd> opens a new query; <kbd>Ctrl+Enter</kbd> runs the statement at the cursor.
+      </span>
+      <button type="button" className="btn" onClick={() => openNewQuery()}>
+        New query
+      </button>
+    </div>
+  );
+}
 
 function Workspace() {
   const tab = useTabs((s) => s.tabs.find((t) => t.id === s.activeId));
@@ -26,10 +58,7 @@ function Workspace() {
         ) : tab?.kind === 'query' ? (
           <QueryTab key={tab.id} tab={tab} />
         ) : (
-          <div className="empty">
-            <strong>No object open</strong>
-            <span>Double-click a table or view in the connection tree.</span>
-          </div>
+          <EmptyWorkspace />
         )}
       </section>
     </main>
