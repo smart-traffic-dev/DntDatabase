@@ -601,3 +601,30 @@ button:disabled {
 .tool-more:hover {
   background: var(--sel);
 }
+
+.status-tx {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-tx.tx-active {
+  color: #b54708;
+}
+
+.status-tx.tx-aborted {
+  color: var(--danger);
+}
+
+.status-btn {
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+}
+
+.status-run {
+  color: var(--danger);
+}

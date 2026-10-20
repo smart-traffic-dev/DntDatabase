@@ -1,4 +1,6 @@
 import { useConnections } from '../../store/connections';
+import { canRun, canStop, emptyRun, useQueryRun } from '../../store/queryRun';
+import { runFromEditor, stopQuery } from '../../store/runQuery';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc, type RowLimit } from '../../store/queryTabs';
 import { useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
@@ -30,21 +32,43 @@ export function QueryToolbar({ doc }: { doc: QueryDoc }) {
     update(doc.id, { connectionId, database: null, dialect: dialectOfConnection(connectionId) });
     useTabs.getState().bind(doc.id, connectionId);
   };
-  // Running arrives with a later task; a tab without a connection must stay disabled then too.
-  const canRun = false;
+  const run = useQueryRun((s) => s.runs.get(doc.id) ?? emptyRun);
+  // A tab without a (still stored) connection stays disabled; a run locks the toolbar until it ends.
+  const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run);
 
   return (
     <div className="query-toolbar" role="toolbar" aria-label="Query">
-      <button type="button" className="qt-btn qt-run" data-testid="query-run" disabled={!canRun} title={SOON}>
+      <button
+        type="button"
+        className="qt-btn qt-run"
+        data-testid="query-run"
+        disabled={!runnable}
+        title={runnable ? 'Run (Ctrl+Enter)' : undefined}
+        onClick={() => void runFromEditor(doc.id, 'cursor')}
+      >
         Run
       </button>
-      <button type="button" className="qt-btn" data-testid="query-run-selection" disabled={!canRun} title={SOON}>
+      <button
+        type="button"
+        className="qt-btn"
+        data-testid="query-run-selection"
+        disabled={!runnable}
+        title={runnable ? 'Run the selection, or the statement at the cursor' : undefined}
+        onClick={() => void runFromEditor(doc.id, 'selection')}
+      >
         Run selection
       </button>
-      <button type="button" className="qt-btn" data-testid="query-stop" disabled title="Nothing is running">
+      <button
+        type="button"
+        className="qt-btn"
+        data-testid="query-stop"
+        disabled={!canStop(run)}
+        title={canStop(run) ? 'Stop (Esc)' : 'Nothing is running'}
+        onClick={() => void stopQuery(doc.id)}
+      >
         Stop
       </button>
-      <button type="button" className="qt-btn" data-testid="query-explain" disabled={!canRun} title={SOON}>
+      <button type="button" className="qt-btn" data-testid="query-explain" disabled title={SOON}>
         Explain
       </button>
       <span className="qt-sep" aria-hidden="true" />

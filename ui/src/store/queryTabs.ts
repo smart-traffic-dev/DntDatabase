@@ -138,6 +138,25 @@ export function setTxStateSource(
   recordTxState = (source && record) || (() => {});
 }
 
+/** Whether a tab has a run in progress (the run flow registers itself here). */
+let runningOf: (tabId: string) => boolean = () => false;
+export function setRunningSource(source: ((tabId: string) => boolean) | null) {
+  runningOf = source ?? (() => false);
+}
+
+function confirmStopRun(title: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    useDialogs.getState().ask({
+      kind: 'stopRun',
+      title,
+      done: (close) => {
+        useDialogs.getState().answer();
+        resolve(close);
+      },
+    });
+  });
+}
+
 const TX_STATES: readonly string[] = ['idle', 'active', 'aborted'] satisfies TxState[];
 
 /** `AppError.tx_state` (a plain string) as a `TxState`; null when absent or unknown. */
@@ -346,6 +365,8 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       closing.add(id);
       try {
         const title = get().docs.get(id)?.title ?? tab?.title ?? 'Query';
+        // Closing stops the run (the backend does it); ask first.
+        if (runningOf(id) && !(await confirmStopRun(title))) return false;
         // Discard first: cancelling it must not leave a transaction committed or rolled back.
         const doc = get().docs.get(id);
         if (doc?.filePath && doc.dirty && !(await confirmDiscard(fileName(doc.filePath)))) return false;

@@ -14,10 +14,11 @@ interface Props {
   /** Element to focus first (default: the first focusable control). */
   initialFocus?: string;
   role?: 'dialog' | 'alertdialog';
+  testId?: string;
 }
 
 /** Accessible modal: `role=dialog`, focus trap, Esc closes, focus returns to the opener. */
-export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog' }: Props) {
+export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog', testId }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
@@ -66,6 +67,7 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
       <div
         ref={ref}
         role={role}
+        data-testid={testId}
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}

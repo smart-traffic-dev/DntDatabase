@@ -1,10 +1,13 @@
 import { act, render, screen } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConnections } from '../store/connections';
+import { emptyRun, useQueryRun, type TabRun } from '../store/queryRun';
+import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
-import { config, ids, resetStores, serverInfo } from '../test/backend';
+import { callsOf, config, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
 import { StatusBar } from './StatusBar';
 
 function select(summary: ReturnType<typeof config>, open = true) {
@@ -66,5 +69,69 @@ describe('StatusBar', () => {
     select(config(ids.prod, 'local-db', { env_tag: 'local' }), false);
     expect(container.querySelector('footer')).not.toHaveClass('env-production');
     expect(screen.getByText('local-db · not connected')).toBeInTheDocument();
+  });
+});
+
+describe('StatusBar of a query tab', () => {
+  let tab: string;
+  const setRun = (patch: Partial<TabRun>) =>
+    act(() => useQueryRun.setState({ runs: new Map([[tab, { ...emptyRun, ...patch }]]) }));
+
+  beforeEach(() => {
+    resetStores();
+    useQueryRun.setState({ runs: new Map() });
+    useConnections.getState().setStored([], [config(ids.prod, 'shop-prod')]);
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
+    tab = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    mockBackend({ query_tx: () => 'idle', tabs_save: () => null });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows the figures of the last run', () => {
+    setRun({ lastRun: { rows: 12, elapsedMs: 34 } });
+    render(<StatusBar />);
+    expect(screen.getByText('12 rows · 34 ms')).toBeInTheDocument();
+  });
+
+  it('shows_transaction_states_with_buttons', async () => {
+    render(<StatusBar />);
+    expect(screen.getByTestId('status-tx')).toHaveTextContent('Auto-commit');
+    expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
+
+    setRun({ txState: 'active' });
+    expect(screen.getByTestId('status-tx')).toHaveTextContent('In transaction');
+    expect(screen.getByTestId('status-tx')).toHaveClass('tx-active');
+    expect(screen.getByRole('button', { name: 'Rollback' })).toBeInTheDocument();
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Commit' }));
+    expect(callsOf('query_tx')).toEqual([{ tabId: tab, action: 'Commit' }]);
+
+    setRun({ txState: 'aborted' });
+    expect(screen.getByTestId('status-tx')).toHaveTextContent('Transaction aborted');
+    expect(screen.getByTestId('status-tx')).toHaveClass('tx-aborted');
+    expect(screen.queryByRole('button', { name: 'Commit' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Rollback' })).toBeInTheDocument();
+  });
+
+  it('stopping_counter_and_abandoning_text', () => {
+    vi.useFakeTimers({ now: 100_000 });
+    render(<StatusBar />);
+    expect(screen.queryByTestId('status-run')).toBeNull();
+
+    setRun({ phase: { kind: 'stopping', since: 100_000, reason: 'user' } });
+    expect(screen.getByTestId('status-run')).toHaveTextContent('Stopping… 0 s');
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
+    expect(screen.getByTestId('status-run')).toHaveTextContent('Stopping… 3 s');
+
+    setRun({ phase: { kind: 'abandoning', since: 103_000 } });
+    expect(screen.getByTestId('status-run')).toHaveTextContent('Server not responding — replacing connection… 0 s');
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    expect(screen.getByTestId('status-run')).toHaveTextContent('Server not responding — replacing connection… 2 s');
   });
 });
