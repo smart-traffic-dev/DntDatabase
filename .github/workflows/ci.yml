@@ -1,8 +1,10 @@
 name: CI
 
+# Paused during MVP development (local-first): verification runs locally
+# (cargo test with DNT_TEST_DB=1, pnpm --dir ui test, e2e). Run by hand from the
+# Actions tab when needed; restore `push`/`pull_request` to re-enable.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
