@@ -223,13 +223,14 @@ async fn export_query_reported(
     let early = |e: DbError| (e, None);
     check_options(&opts).map_err(early)?;
     let kind = state.sessions.plan_kind(plan_id).map_err(early)?;
+    // The tab is held (not busy) and the statement judged before the file is created.
+    let run = state
+        .sessions
+        .query_export_begin(plan_id, index, run_id)
+        .await?;
     let mut s = Stream::open(&opts, kind, &path, progress).map_err(early)?;
     let failed = Arc::clone(&s.failed);
-    let (outcome, tx) = match state
-        .sessions
-        .query_export(plan_id, index, run_id, &mut s.sink, &failed)
-        .await
-    {
+    let (outcome, tx) = match run.execute(&mut s.sink, &failed).await {
         Ok(()) => (Ok(()), None),
         Err((e, tx)) => (Err(e), tx),
     };

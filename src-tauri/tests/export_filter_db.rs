@@ -1020,11 +1020,19 @@ async fn query_export_is_a_cancellable_run_of_its_tab() {
             ),
             async {
                 tokio::time::sleep(Duration::from_millis(700)).await;
-                let err = export_csv(&state, p, 0, &busy_path).await.unwrap_err();
-                assert!(
-                    matches!(&err, DbError::Config { field: Some(f), .. } if f == "tab"),
-                    "{t:?}: {err:?}"
-                );
+                let part = dir.path().join("slow.csv.dntpart");
+                assert!(part.exists(), "{t:?}: the running export's temp file");
+                // Refused for the busy tab before any file is opened: neither a temp
+                // file of its own nor the running export's (same target) is touched.
+                for target in [&busy_path, &path] {
+                    let err = export_csv(&state, p, 0, target).await.unwrap_err();
+                    assert!(
+                        matches!(&err, DbError::Config { field: Some(f), .. } if f == "tab"),
+                        "{t:?}: {err:?}"
+                    );
+                }
+                assert!(!dir.path().join("busy.csv.dntpart").exists(), "{t:?}");
+                assert!(part.exists(), "{t:?}: still the running export's");
                 let err = state
                     .sessions
                     .query_plan("slow", id, None, "SELECT 1", Pick::All)

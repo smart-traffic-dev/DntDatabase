@@ -274,9 +274,34 @@ struct Out {
     path: String,
 }
 
+/// Creates the temp file `path` (`<file>.dntpart`) for writing. Only a NEW file: an
+/// existing one (a stale temp file, another export writing the same file) or anything
+/// planted there, a symbolic link included (`create_new` never follows one), is refused
+/// and left as it is.
+fn create_part(path: &Path, shown: &str) -> Result<File, DbError> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                let name = path
+                    .file_name()
+                    .unwrap_or(path.as_os_str())
+                    .to_string_lossy();
+                export_error(format!(
+                    "The temporary file {name} already exists next to the file (another \
+                     export may be writing it). Remove it, or choose another file."
+                ))
+            } else {
+                path_error("write", shown, &e)
+            }
+        })
+}
+
 impl Out {
     fn create(path: &Path, shown: &str) -> Result<Out, DbError> {
-        let f = File::create(path).map_err(|e| path_error("write", shown, &e))?;
+        let f = create_part(path, shown)?;
         Ok(Out {
             w: BufWriter::with_capacity(256 * 1024, f),
             path: shown.to_string(),
@@ -298,6 +323,8 @@ impl Out {
 
 struct Csv {
     out: Out,
+    /// A UTF-8 byte order mark first (written by `begin`).
+    bom: bool,
     delim: char,
     header: bool,
     quote_all: bool,
@@ -344,6 +371,9 @@ impl Csv {
 
 impl FormatWriter for Csv {
     fn begin(&mut self, cols: &[ColumnMeta]) -> Result<(), DbError> {
+        if self.bom {
+            self.out.put("\u{feff}")?;
+        }
         if self.header {
             let names = unique_names(cols)
                 .iter()
@@ -655,7 +685,9 @@ impl FormatWriter for Sql {
 
 struct Xlsx {
     book: rust_xlsxwriter::Workbook,
-    path: PathBuf,
+    /// The temp file, created up front (see [`create_part`]); the workbook is saved
+    /// into it by `finish`.
+    file: Option<File>,
     shown: String,
     row: u32,
     cut: u32,
@@ -676,9 +708,11 @@ impl Xlsx {
         // Constant memory: rows go to a temp file as they are written.
         book.add_worksheet_with_constant_memory()
             .map_err(xlsx_error)?;
+        // Last: nothing fails after the temp file exists.
+        let file = create_part(path, shown)?;
         Ok(Xlsx {
             book,
-            path: path.to_path_buf(),
+            file: Some(file),
             shown: shown.to_string(),
             row: 0,
             cut: 0,
@@ -806,11 +840,17 @@ impl FormatWriter for Xlsx {
     }
 
     fn finish(&mut self) -> Result<(), DbError> {
-        let path = self.path.clone();
-        self.book.save(&path).map_err(|e| match e {
-            rust_xlsxwriter::XlsxError::IoError(io) => path_error("write", &self.shown, &io),
+        let file = self.file.take().ok_or_else(|| DbError::Internal {
+            message: "the Excel file was already saved".into(),
+        })?;
+        let io = |e: std::io::Error| path_error("write", &self.shown, &e);
+        let mut out = BufWriter::new(file);
+        self.book.save_to_writer(&mut out).map_err(|e| match e {
+            rust_xlsxwriter::XlsxError::IoError(e) => io(e),
             other => xlsx_error(other),
-        })
+        })?;
+        out.into_inner().map_err(|e| io(e.into_error()))?;
+        Ok(())
     }
 
     fn cut_cells(&self) -> u32 {
@@ -827,15 +867,15 @@ pub fn open_writer(
     shown: &str,
 ) -> Result<Box<dyn FormatWriter>, DbError> {
     check_options(opts)?;
+    // Nothing may fail once the temp file exists: a caller removes only a temp file it
+    // created (an existing one is refused and left alone).
     Ok(match opts.format {
         ExportFormat::Csv => {
-            let mut out = Out::create(path, shown)?;
-            if opts.bom {
-                out.put("\u{feff}")?;
-            }
+            let delim = delimiter(opts)?;
             Box::new(Csv {
-                out,
-                delim: delimiter(opts)?,
+                out: Out::create(path, shown)?,
+                bom: opts.bom,
+                delim,
                 header: opts.header,
                 quote_all: opts.quote_all,
                 formula_guard: opts.formula_guard,
@@ -1000,8 +1040,9 @@ pub fn write_rows(
     rows: &[Vec<Value>],
 ) -> Result<Written, DbError> {
     let shown = target.final_path.to_string_lossy().to_string();
+    // Not ours to remove when it cannot be created (it may exist already).
+    let mut w = open_writer(opts, kind, &target.part, &shown)?;
     let result = (|| {
-        let mut w = open_writer(opts, kind, &target.part, &shown)?;
         w.begin(columns)?;
         let mut partial = 0u32;
         for row in rows {
@@ -1015,6 +1056,8 @@ pub fn write_rows(
             partial_binaries: partial,
         })
     })();
+    // Closed before it is moved or removed.
+    drop(w);
     match result {
         Ok(done) => {
             target.commit()?;
@@ -1497,6 +1540,83 @@ mod tests {
         assert!(write_rows(&bad, DbKind::MySql, &target, &[col("a")], &[]).is_err());
         assert!(!path.exists() && !target.part.exists());
         assert!(Target::new(" ").is_err());
+    }
+
+    #[test]
+    fn an_existing_temp_file_is_refused_and_left_alone() {
+        for format in [
+            ExportFormat::Csv,
+            ExportFormat::Json,
+            ExportFormat::Markdown,
+            ExportFormat::Sql,
+            ExportFormat::Xlsx,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("out.file");
+            let target = Target::new(path.to_str().unwrap()).unwrap();
+            std::fs::write(&target.part, b"someone else's").unwrap();
+            let rows = vec![vec![Value::Int(1)]];
+            let err = write_rows(&opts(format), DbKind::MySql, &target, &[col("a")], &rows)
+                .unwrap_err();
+            assert!(
+                matches!(&err, DbError::Config { message, .. } if message.contains(".dntpart")),
+                "{format:?}: {err:?}"
+            );
+            // Neither removed nor overwritten, and the target was not written.
+            assert_eq!(std::fs::read(&target.part).unwrap(), b"someone else's");
+            assert!(!path.exists(), "{format:?}");
+            // Same through the streaming writer.
+            assert!(open_writer(&opts(format), DbKind::MySql, &target.part, "out").is_err());
+            assert_eq!(std::fs::read(&target.part).unwrap(), b"someone else's");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_link_is_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"keep").unwrap();
+        let path = dir.path().join("out.csv");
+        let target = Target::new(path.to_str().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&victim, &target.part).unwrap();
+        let rows = vec![vec![Value::Int(1)]];
+        assert!(write_rows(
+            &opts(ExportFormat::Csv),
+            DbKind::MySql,
+            &target,
+            &[col("a")],
+            &rows
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert!(target.part.symlink_metadata().is_ok(), "the link is left alone");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_planted_link_is_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"keep").unwrap();
+        let path = dir.path().join("out.csv");
+        let target = Target::new(path.to_str().unwrap()).unwrap();
+        // Creating a symbolic link needs a privilege (or developer mode) on Windows.
+        if std::os::windows::fs::symlink_file(&victim, &target.part).is_err() {
+            eprintln!("skipped: symbolic links cannot be created here");
+            return;
+        }
+        let rows = vec![vec![Value::Int(1)]];
+        assert!(write_rows(
+            &opts(ExportFormat::Csv),
+            DbKind::MySql,
+            &target,
+            &[col("a")],
+            &rows
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert!(target.part.symlink_metadata().is_ok(), "the link is left alone");
     }
 
     #[test]
