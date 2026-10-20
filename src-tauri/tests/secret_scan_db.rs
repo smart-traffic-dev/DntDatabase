@@ -174,6 +174,13 @@ async fn no_secret_in_app_db_logs_or_export() {
 
     // Export without passwords.
     let export = dir.path().join("data").join("export.dntconn");
+    state
+        .file_picks
+        .admit(
+            dntdatabase::file_picks::FileAccess::ConnectionsExport,
+            export.clone(),
+        )
+        .unwrap();
     export_connections_impl(
         &state,
         [ok.id, bad_db.id, bad_ssh.id, bad_key.id]

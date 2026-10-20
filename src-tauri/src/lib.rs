@@ -7,6 +7,7 @@ pub mod data_sessions;
 pub mod desktop;
 pub mod export_format;
 pub mod export_paths;
+pub mod file_picks;
 pub mod logging;
 pub mod query_sessions;
 pub mod run_events;

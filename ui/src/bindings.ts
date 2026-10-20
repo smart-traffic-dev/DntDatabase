@@ -206,7 +206,9 @@ async completionObjects(connId: string, database: string, schema: string | null)
  * tab's session on first use and moves it when the connection or database changed.
  * Errors: `not_open`, `busy` (the tab is running), `transaction_open` (changing the
  * connection or database of a tab with an open transaction), connect errors. The plan
- * is kept 2 minutes for `query_run`.
+ * is kept 2 minutes for `query_run`. A `connection_lost` that dropped the tab's
+ * transaction (its SSH tunnel was replaced) carries `tx_state: "idle"`, here and in
+ * `query_run`, `query_explain` and `query_plan_statement`.
  */
 async queryPlan(tabId: string, connId: string, database: string | null, text: string, target: Target) : Promise<Result<PlanView, AppError>> {
     try {
@@ -510,6 +512,10 @@ async tabsDelete(id: string) : Promise<Result<null, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The text of a `.sql` file: only one picked through `file_pick_open` /
+ * `file_pick_save` or stored with a query tab (`config` error, field `path`, else).
+ */
 async fileRead(path: string) : Promise<Result<string, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("file_read", { path }) };
@@ -518,9 +524,39 @@ async fileRead(path: string) : Promise<Result<string, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Writes a `.sql` file: only one picked through `file_pick_open` / `file_pick_save`
+ * or stored with a query tab (`config` error, field `path`, else).
+ */
 async fileWrite(path: string, text: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("file_write", { path, text }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the Open dialog for a `kind` file (from the backend: the UI never names a
+ * path itself) and returns the picked path, admitted for `file_read` / `file_write`
+ * (`sql`) or the connection import commands (`connections`). `None`: cancelled.
+ */
+async filePickOpen(kind: FileKind) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_pick_open", { kind }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the Save dialog for a `kind` file, named `default_name` by default, and
+ * returns the picked path, admitted for `file_write` (`sql`) or `export_connections`
+ * (`connections`). `None`: cancelled.
+ */
+async filePickSave(kind: FileKind, defaultName: string | null) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("file_pick_save", { kind, defaultName }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -780,6 +816,18 @@ sort: number }
  * What `favorite_create` / `favorite_update` take.
  */
 export type FavoriteInput = { name: string; folder: string | null; sql: string; connection_id: string | null; database: string | null }
+/**
+ * What the UI asks a dialog for (`file_pick_open` / `file_pick_save`).
+ */
+export type FileKind = 
+/**
+ * A `.sql` file of the query editor.
+ */
+"sql" | 
+/**
+ * A connections file: `.dntconn` / Navicat `.ncx` to import, `.dntconn` to export.
+ */
+"connections"
 /**
  * One condition: `column op values`.
  */

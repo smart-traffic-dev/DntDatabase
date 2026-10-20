@@ -1,6 +1,7 @@
 //! App-wide state: data paths, connection repository, secret store and sessions.
 
 use crate::export_paths::ExportPaths;
+use crate::file_picks::FilePicks;
 use crate::session_manager::SessionManager;
 use dnt_core::driver::Driver;
 use dnt_core::error::DbError;
@@ -66,6 +67,9 @@ pub struct AppState {
     pub paths: AppPaths,
     /// The files exports may write (picked in the backend's save dialog).
     pub export_paths: ExportPaths,
+    /// The `.sql` and connections files the UI may have read or written (picked in a
+    /// dialog the backend opened, or a query tab's stored file).
+    pub file_picks: FilePicks,
 }
 
 impl AppState {
@@ -90,6 +94,7 @@ impl AppState {
             sessions,
             paths,
             export_paths: ExportPaths::default(),
+            file_picks: FilePicks::default(),
         })
     }
 }

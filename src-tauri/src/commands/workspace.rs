@@ -1,10 +1,14 @@
 //! Query workspace: autosaved query tabs, `.sql` files and query history.
 //!
-//! File paths come from the native Open/Save dialogs in the UI. Files are UTF-8: a leading
-//! byte order mark is stripped on read and never written.
+//! File paths come from the Open / Save dialogs the BACKEND opens (`file_pick_open`,
+//! `file_pick_save`): `file_read` / `file_write` only take a path picked there, or the
+//! file of a query tab as stored in the app database (see [`crate::file_picks`]). Files
+//! are UTF-8: a leading byte order mark is stripped on read and never written.
 
+use super::export::file_stem;
 use super::transfer::path_error;
 use super::{blocking, guard};
+use crate::file_picks::{FileAccess, FileKind};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_store::history::{HistoryEntry, HistoryFilter, HistoryIds};
@@ -13,19 +17,50 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
+use tauri_plugin_dialog::DialogExt;
 
 /// Largest `.sql` file the editor opens (the whole text goes over IPC into Monaco).
 pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
 const BOM: char = '\u{feff}';
 
+/// The stored query tabs. The `.sql` file of each, read from the app database (never
+/// from the UI), is admitted for `file_read` / `file_write` again: Ctrl+S on a restored
+/// tab saves to its file without a new dialog.
 pub async fn tabs_load_impl(state: &AppState) -> Result<Vec<QueryTabRecord>, DbError> {
     let repo = Arc::clone(&state.repo);
-    blocking(move || repo.tabs_load()).await
+    let tabs = blocking(move || repo.tabs_load()).await?;
+    for path in tabs.iter().filter_map(|t| t.file_path.as_deref()) {
+        // A relative path stored by hand is simply not admitted.
+        let _ = state.file_picks.admit(FileAccess::Sql, path.into());
+    }
+    Ok(tabs)
 }
 
+/// Saves a query tab. Its `file_path` must be admitted (picked in the backend's
+/// dialog, or restored by `tabs_load`), or be the one already stored for this tab:
+/// the UI cannot plant a path for a later `tabs_load` to admit.
 pub async fn tabs_save_impl(state: &AppState, tab: QueryTabRecord) -> Result<(), DbError> {
     let repo = Arc::clone(&state.repo);
+    if let Some(path) = tab.file_path.clone() {
+        if state.file_picks.check(FileAccess::Sql, &path).is_err() {
+            let id = tab.id.clone();
+            let stored = Arc::clone(&repo);
+            let same = blocking(move || {
+                Ok(stored
+                    .tabs_load()?
+                    .into_iter()
+                    .any(|t| t.id == id && t.file_path.as_deref() == Some(path.as_str())))
+            })
+            .await?;
+            if !same {
+                return Err(DbError::Config {
+                    field: Some("file_path".into()),
+                    message: "Choose the tab's file in the file dialog.".into(),
+                });
+            }
+        }
+    }
     blocking(move || repo.tabs_save(&tab)).await
 }
 
@@ -42,9 +77,6 @@ fn no_path() -> DbError {
 }
 
 fn read_text(path: &str) -> Result<String, DbError> {
-    if path.trim().is_empty() {
-        return Err(no_path());
-    }
     let file = std::fs::File::open(Path::new(path)).map_err(|e| path_error("read", path, &e))?;
     let mut bytes = Vec::new();
     // One byte past the limit tells "too large" apart from "exactly at the limit".
@@ -71,9 +103,6 @@ fn read_text(path: &str) -> Result<String, DbError> {
 }
 
 fn write_text(path: &str, text: &str) -> Result<(), DbError> {
-    if path.trim().is_empty() {
-        return Err(no_path());
-    }
     let text = text.strip_prefix(BOM).unwrap_or(text);
     write_atomic(Path::new(path), text.as_bytes()).map_err(|e| path_error("write", path, &e))
 }
@@ -105,14 +134,72 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     written
 }
 
-/// The UTF-8 text of `path`, without a leading BOM.
-pub async fn file_read_impl(path: String) -> Result<String, DbError> {
+/// Refuses an empty `path` ("No file was chosen.") and one not admitted for `.sql`
+/// files (see [`crate::file_picks`]).
+fn admitted_sql(state: &AppState, path: &str) -> Result<(), DbError> {
+    if path.trim().is_empty() {
+        return Err(no_path());
+    }
+    state.file_picks.check(FileAccess::Sql, path)
+}
+
+/// The UTF-8 text of `path`, without a leading BOM. Only an admitted path.
+pub async fn file_read_impl(state: &AppState, path: String) -> Result<String, DbError> {
+    admitted_sql(state, &path)?;
     blocking(move || read_text(&path)).await
 }
 
-/// Writes `text` to `path` as UTF-8 without BOM (a leading U+FEFF is dropped).
-pub async fn file_write_impl(path: String, text: String) -> Result<(), DbError> {
+/// Writes `text` to `path` as UTF-8 without BOM (a leading U+FEFF is dropped). Only an
+/// admitted path.
+pub async fn file_write_impl(state: &AppState, path: String, text: String) -> Result<(), DbError> {
+    admitted_sql(state, &path)?;
     blocking(move || write_text(&path, &text)).await
+}
+
+/// The file dialog of `kind` (`save`: a save dialog, named `default_name` when given),
+/// opened by the backend; the picked path is admitted for what `kind` / `save` grant
+/// (see [`FileAccess::of`]) and returned. `None`: the dialog was cancelled.
+async fn pick_file(
+    window: &tauri::WebviewWindow,
+    state: &AppState,
+    kind: FileKind,
+    save: bool,
+    default_name: Option<String>,
+) -> Result<Option<String>, DbError> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = window.dialog().file().set_parent(window);
+    dialog = match (kind, save) {
+        (FileKind::Sql, _) => dialog.add_filter("SQL", &["sql"]),
+        (FileKind::Connections, false) => dialog
+            .add_filter("DntDatabase connections", &["dntconn"])
+            .add_filter("Navicat connections", &["ncx"])
+            .add_filter("All files", &["*"]),
+        (FileKind::Connections, true) => dialog.add_filter("DntDatabase connections", &["dntconn"]),
+    };
+    if let Some(name) = default_name.filter(|n| !n.trim().is_empty()) {
+        dialog = dialog.set_file_name(file_stem(&name));
+    }
+    let answer = move |picked| {
+        let _ = tx.send(picked);
+    };
+    if save {
+        dialog.save_file(answer);
+    } else {
+        dialog.pick_file(answer);
+    }
+    let picked = rx.await.map_err(|_| DbError::Internal {
+        message: "the file dialog closed without an answer".into(),
+    })?;
+    let Some(picked) = picked else {
+        return Ok(None);
+    };
+    let path = picked.into_path().map_err(|e| DbError::Internal {
+        message: format!("the file dialog returned no file path: {e}"),
+    })?;
+    state
+        .file_picks
+        .admit(FileAccess::of(kind, save), path)
+        .map(Some)
 }
 
 pub async fn history_list_impl(
@@ -151,16 +238,51 @@ pub async fn tabs_delete(state: State<'_, AppState>, id: String) -> Result<(), A
     guard(tabs_delete_impl(&state, id)).await
 }
 
+/// Opens the Open dialog for a `kind` file (from the backend: the UI never names a
+/// path itself) and returns the picked path, admitted for `file_read` / `file_write`
+/// (`sql`) or the connection import commands (`connections`). `None`: cancelled.
 #[tauri::command]
 #[specta::specta]
-pub async fn file_read(path: String) -> Result<String, AppError> {
-    guard(file_read_impl(path)).await
+pub async fn file_pick_open(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    kind: FileKind,
+) -> Result<Option<String>, AppError> {
+    guard(pick_file(&window, &state, kind, false, None)).await
 }
 
+/// Opens the Save dialog for a `kind` file, named `default_name` by default, and
+/// returns the picked path, admitted for `file_write` (`sql`) or `export_connections`
+/// (`connections`). `None`: cancelled.
 #[tauri::command]
 #[specta::specta]
-pub async fn file_write(path: String, text: String) -> Result<(), AppError> {
-    guard(file_write_impl(path, text)).await
+pub async fn file_pick_save(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    kind: FileKind,
+    default_name: Option<String>,
+) -> Result<Option<String>, AppError> {
+    guard(pick_file(&window, &state, kind, true, default_name)).await
+}
+
+/// The text of a `.sql` file: only one picked through `file_pick_open` /
+/// `file_pick_save` or stored with a query tab (`config` error, field `path`, else).
+#[tauri::command]
+#[specta::specta]
+pub async fn file_read(state: State<'_, AppState>, path: String) -> Result<String, AppError> {
+    guard(file_read_impl(&state, path)).await
+}
+
+/// Writes a `.sql` file: only one picked through `file_pick_open` / `file_pick_save`
+/// or stored with a query tab (`config` error, field `path`, else).
+#[tauri::command]
+#[specta::specta]
+pub async fn file_write(
+    state: State<'_, AppState>,
+    path: String,
+    text: String,
+) -> Result<(), AppError> {
+    guard(file_write_impl(&state, path, text)).await
 }
 
 #[tauri::command]

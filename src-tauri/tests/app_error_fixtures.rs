@@ -18,6 +18,7 @@ use dntdatabase::commands::connections::{
 };
 use dntdatabase::commands::guard;
 use dntdatabase::commands::transfer::{export_connections_impl, preview_import_impl};
+use dntdatabase::file_picks::FileAccess;
 use dntdatabase::state::{AppPaths, AppState};
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -132,6 +133,12 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
     .unwrap();
     let file = dir.path().join("conns.dntconn");
     let path = file.to_string_lossy().into_owned();
+    // The files as picked in the backend's dialogs.
+    let picked = |access, p: &std::path::Path| {
+        state.file_picks.admit(access, p.to_path_buf()).unwrap();
+    };
+    picked(FileAccess::ConnectionsExport, &file);
+    picked(FileAccess::ConnectionsImport, &file);
     let err = export_connections_impl(
         &state,
         vec![NodeId::Connection(saved.id)],
@@ -154,12 +161,14 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         .unwrap_err();
     out.insert("passphrase_incorrect", err.into());
     let missing = dir.path().join("missing.dntconn");
+    picked(FileAccess::ConnectionsImport, &missing);
     let err = preview_import_impl(&state, missing.to_string_lossy().into_owned(), None)
         .await
         .unwrap_err();
     out.insert("import_unreadable", err.into());
     let junk = dir.path().join("notes.txt");
     std::fs::write(&junk, "hello").unwrap();
+    picked(FileAccess::ConnectionsImport, &junk);
     let err = preview_import_impl(&state, junk.to_string_lossy().into_owned(), None)
         .await
         .unwrap_err();

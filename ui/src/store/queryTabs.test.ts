@@ -1,6 +1,5 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { open, save } from '@tauri-apps/plugin-dialog';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueryTabRecord } from '../bindings';
@@ -13,7 +12,9 @@ import { useDialogs } from './dialogs';
 import { AUTOSAVE_MS, fromRecord, setTxStateSource, toRecord, useQueryDocs, type QueryDoc } from './queryTabs';
 import { useTabs, type QueryTabRef } from './tabs';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn(), open: vi.fn() }));
+/** What the user picks in the backend's Save / Open dialogs (`file_pick_save` / `file_pick_open`). */
+const save = vi.fn<(args: Record<string, unknown>) => Promise<string | null>>();
+const open = vi.fn<(args: Record<string, unknown>) => Promise<string | null>>();
 
 const record = (over: Partial<QueryTabRecord> = {}): QueryTabRecord => ({
   id: 'tab-1',
@@ -39,6 +40,8 @@ function backend(rows: QueryTabRecord[] = [], extra: Record<string, (a: Record<s
     tabs_delete: () => null,
     file_read: () => 'SELECT 42;',
     file_write: () => null,
+    file_pick_save: (a) => save(a),
+    file_pick_open: (a) => open(a),
     query_close_tab: () => null,
     query_tx: () => 'idle',
     ...extra,
@@ -168,7 +171,8 @@ describe('files', () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     useQueryDocs.getState().update(id, { sql: 'SELECT 7;' });
     await useQueryDocs.getState().saveFile(id);
-    expect(save).toHaveBeenCalledWith({ filters: [{ name: 'SQL', extensions: ['sql'] }] });
+    // The backend opens the dialog: the UI only names the kind of file.
+    expect(callsOf('file_pick_save')).toEqual([{ kind: 'sql', defaultName: null }]);
     expect(callsOf('file_write')).toEqual([{ path: 'C:\\work\\report.sql', text: 'SELECT 7;' }]);
     expect(doc(id)).toMatchObject({ filePath: 'C:\\work\\report.sql', dirty: false, title: 'report.sql' });
     expect(useTabs.getState().tabs[0]!.title).toBe('report.sql');
@@ -201,6 +205,7 @@ describe('files', () => {
     backend();
     vi.mocked(open).mockResolvedValue('D:\\scripts\\daily report.sql');
     await useQueryDocs.getState().openFile();
+    expect(callsOf('file_pick_open')).toEqual([{ kind: 'sql' }]);
     expect(callsOf('file_read')).toEqual([{ path: 'D:\\scripts\\daily report.sql' }]);
     const tab = useTabs.getState().tabs[0]!;
     expect(tab.title).toBe('daily report.sql');
@@ -212,6 +217,26 @@ describe('files', () => {
     await useQueryDocs.getState().openFile();
     expect(useTabs.getState().tabs).toHaveLength(2);
     expect(useTabs.getState().activeId).toBe(tab.id);
+  });
+
+  it('a path the backend refuses opens or saves nothing', async () => {
+    backend([], {
+      file_read: () => {
+        throw fail('import_unreadable', { message: 'Choose the file in the file dialog.' });
+      },
+      file_write: () => {
+        throw fail('import_unreadable', { message: 'Choose the file in the file dialog.' });
+      },
+    });
+    open.mockResolvedValue('D:\\x.sql');
+    await useQueryDocs.getState().openFile();
+    expect(useTabs.getState().tabs).toHaveLength(0);
+    expect(useDialogs.getState().notice).toMatch(/Could not open x\.sql: Choose the file/);
+    const id = useQueryDocs.getState().newQuery(null, null);
+    save.mockResolvedValue('D:\\y.sql');
+    await useQueryDocs.getState().saveFile(id);
+    expect(doc(id).filePath).toBeNull();
+    expect(useDialogs.getState().notice).toMatch(/Could not save y\.sql: Choose the file/);
   });
 });
 

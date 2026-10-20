@@ -1,4 +1,3 @@
-import { save } from '@tauri-apps/plugin-dialog';
 import { useMemo, useRef, useState, type FormEvent, type ReactElement } from 'react';
 import { api, toAppError } from '../api';
 import type { ConnectionSummary, Group, NodeId } from '../bindings';
@@ -112,10 +111,8 @@ export function ExportDialog({ preselected = [], onClose }: Props) {
     setBusy(true);
     try {
       const day = new Date().toISOString().slice(0, 10);
-      const path = await save({
-        defaultPath: `connections-${day}.dntconn`,
-        filters: [{ name: 'DntDatabase connections', extensions: ['dntconn'] }],
-      });
+      // The backend opens the save dialog (.dntconn) and admits only the picked file.
+      const path = await api.filePickSave('connections', `connections-${day}.dntconn`);
       if (my !== run.current) return;
       if (!path) {
         setBusy(false);

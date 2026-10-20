@@ -1,4 +1,3 @@
-import { open, save } from '@tauri-apps/plugin-dialog';
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
 import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
@@ -13,8 +12,6 @@ export const DEFAULT_ROW_LIMIT: RowLimit = 10000;
 
 /** Debounce of the tab autosave (spec §7.2). */
 export const AUTOSAVE_MS = 1000;
-
-const SQL_FILTERS = [{ name: 'SQL', extensions: ['sql'] }];
 
 // The SQL engine of a document follows its connection. The backend `Dialect` (with the MySQL
 // `sql_mode` flags) is `engineDialect(engine)` before a plan, `PlanView.dialect` after one.
@@ -445,8 +442,15 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
     },
 
     openFile: async () => {
-      const picked = await open({ multiple: false, directory: false, filters: SQL_FILTERS });
-      if (typeof picked !== 'string') return;
+      // The backend opens the dialog and only then lets `file_read` / `file_write` use the path.
+      let picked: string | null;
+      try {
+        picked = await api.filePickOpen('sql');
+      } catch (e) {
+        notice(`Could not open a file: ${toAppError(e).message}`);
+        return;
+      }
+      if (!picked) return;
       const already = [...get().docs.values()].find((d) => d.filePath === picked);
       if (already) {
         useTabs.getState().activate(already.id);
@@ -477,7 +481,12 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       if (!doc) return;
       let path = saveAs ? null : doc.filePath;
       if (!path) {
-        path = await save({ filters: SQL_FILTERS });
+        try {
+          path = await api.filePickSave('sql', null);
+        } catch (e) {
+          notice(`Could not save ${doc.title}: ${toAppError(e).message}`);
+          return;
+        }
         if (!path) return;
       }
       const text = doc.sql;

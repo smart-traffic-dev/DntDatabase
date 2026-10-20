@@ -20,6 +20,7 @@ use dntdatabase::commands::workspace::{
     tabs_delete_impl, tabs_load_impl, tabs_save_impl,
 };
 use dntdatabase::commands::{export_bindings, BINDINGS_PATH};
+use dntdatabase::file_picks::FileAccess;
 use dntdatabase::logging::LogLevel;
 use dntdatabase::state::{AppPaths, AppState};
 use secrecy::ExposeSecret;
@@ -116,6 +117,11 @@ async fn export_then_import_into_another_app() {
     let file = dir.path().join("export.dntconn");
     let path = file.to_string_lossy().into_owned();
     let passphrase = Some("long enough passphrase".to_string());
+    // Picked in the save dialog of the source app.
+    source
+        .file_picks
+        .admit(FileAccess::ConnectionsExport, file.clone())
+        .unwrap();
     export_connections_impl(
         &source,
         vec![NodeId::Connection(cfg.id)],
@@ -128,10 +134,17 @@ async fn export_then_import_into_another_app() {
     assert!(!std::fs::read_to_string(&file)
         .unwrap()
         .contains(DB_PASSWORD));
-    assert!(import_needs_passphrase_impl(path.clone()).await.unwrap());
 
     let store = Arc::new(MemorySecretStore::default());
     let target = app_state(&dir.path().join("b"), Arc::clone(&store));
+    // Picked in the open dialog of the target app.
+    target
+        .file_picks
+        .admit(FileAccess::ConnectionsImport, file.clone())
+        .unwrap();
+    assert!(import_needs_passphrase_impl(&target, path.clone())
+        .await
+        .unwrap());
     let preview = preview_import_impl(&target, path.clone(), passphrase.clone())
         .await
         .unwrap();
@@ -147,6 +160,10 @@ async fn export_then_import_into_another_app() {
     // Something that is neither format is a config error.
     let junk = dir.path().join("junk.txt");
     std::fs::write(&junk, "hello").unwrap();
+    target
+        .file_picks
+        .admit(FileAccess::ConnectionsImport, junk.clone())
+        .unwrap();
     let err = preview_import_impl(&target, junk.to_string_lossy().into_owned(), None)
         .await
         .unwrap_err();
@@ -160,16 +177,18 @@ async fn export_then_import_into_another_app() {
 async fn unreadable_import_file_is_a_path_error() {
     let dir = tempfile::tempdir().unwrap();
     let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
-    let missing = dir
-        .path()
-        .join("missing.dntconn")
-        .to_string_lossy()
-        .into_owned();
+    let missing = state
+        .file_picks
+        .admit(
+            FileAccess::ConnectionsImport,
+            dir.path().join("missing.dntconn"),
+        )
+        .unwrap();
     for err in [
         preview_import_impl(&state, missing.clone(), None)
             .await
             .unwrap_err(),
-        import_needs_passphrase_impl(missing.clone())
+        import_needs_passphrase_impl(&state, missing.clone())
             .await
             .unwrap_err(),
     ] {
@@ -271,22 +290,31 @@ fn bindings_are_current() {
     );
 }
 
+/// A `.sql` path as picked in the backend's dialog.
+fn picked_sql(state: &AppState, file: &std::path::Path) -> String {
+    state
+        .file_picks
+        .admit(FileAccess::Sql, file.to_path_buf())
+        .unwrap()
+}
+
 #[tokio::test]
 async fn file_roundtrip_utf8_without_bom() {
     let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
     let file = dir.path().join("query.sql");
-    let path = file.to_string_lossy().into_owned();
+    let path = picked_sql(&state, &file);
     let text = "SELECT 'Tiếng Việt 😀';\r\n";
-    file_write_impl(path.clone(), text.to_string())
+    file_write_impl(&state, path.clone(), text.to_string())
         .await
         .unwrap();
     let bytes = std::fs::read(&file).unwrap();
     assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
     assert_eq!(bytes, text.as_bytes());
-    assert_eq!(file_read_impl(path.clone()).await.unwrap(), text);
+    assert_eq!(file_read_impl(&state, path.clone()).await.unwrap(), text);
 
     // A leading BOM is never written, and is stripped on read.
-    file_write_impl(path.clone(), format!("\u{feff}{text}"))
+    file_write_impl(&state, path.clone(), format!("\u{feff}{text}"))
         .await
         .unwrap();
     assert!(!std::fs::read(&file)
@@ -295,27 +323,26 @@ async fn file_roundtrip_utf8_without_bom() {
     let mut with_bom = vec![0xEF, 0xBB, 0xBF];
     with_bom.extend_from_slice(text.as_bytes());
     std::fs::write(&file, with_bom).unwrap();
-    assert_eq!(file_read_impl(path).await.unwrap(), text);
+    assert_eq!(file_read_impl(&state, path).await.unwrap(), text);
 }
 
 #[tokio::test]
 async fn file_write_replaces_atomically() {
     let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("existing.sql");
+    let work = dir.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let file = work.join("existing.sql");
     std::fs::write(&file, "OLD CONTENT THAT IS LONGER THAN THE NEW ONE").unwrap();
-    let path = file.to_string_lossy().into_owned();
-    file_write_impl(path.clone(), "SELECT 2;".into())
+    let path = picked_sql(&state, &file);
+    file_write_impl(&state, path.clone(), "SELECT 2;".into())
         .await
         .unwrap();
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2;");
     // Writing into a missing directory fails and leaves nothing behind either.
-    let bad = dir.path().join("missing").join("x.sql");
-    assert!(
-        file_write_impl(bad.to_string_lossy().into_owned(), "x".into())
-            .await
-            .is_err()
-    );
-    let names: Vec<String> = std::fs::read_dir(dir.path())
+    let bad = picked_sql(&state, &work.join("missing").join("x.sql"));
+    assert!(file_write_impl(&state, bad, "x".into()).await.is_err());
+    let names: Vec<String> = std::fs::read_dir(&work)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
@@ -325,9 +352,10 @@ async fn file_write_replaces_atomically() {
 #[tokio::test]
 async fn file_read_rejects_non_utf8() {
     let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
     let file = dir.path().join("latin1.sql");
     std::fs::write(&file, b"SELECT '\xE9t\xE9';").unwrap();
-    let err = file_read_impl(file.to_string_lossy().into_owned())
+    let err = file_read_impl(&state, picked_sql(&state, &file))
         .await
         .unwrap_err();
     let app = dnt_core::error::AppError::from(err);
@@ -335,12 +363,8 @@ async fn file_read_rejects_non_utf8() {
     assert_eq!(app.field.as_deref(), Some("path"));
     assert_eq!(app.message, "The file is not UTF-8 text.");
 
-    let missing = dir
-        .path()
-        .join("missing.sql")
-        .to_string_lossy()
-        .into_owned();
-    let app = dnt_core::error::AppError::from(file_read_impl(missing).await.unwrap_err());
+    let missing = picked_sql(&state, &dir.path().join("missing.sql"));
+    let app = dnt_core::error::AppError::from(file_read_impl(&state, missing).await.unwrap_err());
     assert_eq!(app.kind, "config");
     assert!(
         app.message.starts_with("Could not read missing.sql: "),
@@ -372,6 +396,138 @@ async fn tabs_commands_roundtrip() {
     assert_eq!(tabs_load_impl(&state).await.unwrap().len(), 1);
     tabs_delete_impl(&state, "tab-1".into()).await.unwrap();
     assert!(tabs_load_impl(&state).await.unwrap().is_empty());
+}
+
+fn is_path_refusal(err: &dnt_core::error::DbError) -> bool {
+    matches!(err, dnt_core::error::DbError::Config { field: Some(f), message }
+        if f == "path" && message.starts_with("Choose the file"))
+}
+
+/// `file_read` / `file_write` and the connection import / export never touch a path
+/// the UI names unless it was picked in the backend's dialog for that use.
+#[tokio::test]
+async fn unpicked_paths_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "do not read").unwrap();
+    let victim = dir.path().join("victim.sql");
+    std::fs::write(&victim, "keep").unwrap();
+    let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+
+    let err = file_read_impl(&state, s(&secret)).await.unwrap_err();
+    assert!(is_path_refusal(&err), "{err:?}");
+    let err = file_write_impl(&state, s(&victim), "x".into())
+        .await
+        .unwrap_err();
+    assert!(is_path_refusal(&err), "{err:?}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    // An empty path is still "no file chosen".
+    let err = file_read_impl(&state, String::new()).await.unwrap_err();
+    assert!(
+        matches!(&err, dnt_core::error::DbError::Config { message, .. } if message == "No file was chosen."),
+        "{err:?}"
+    );
+
+    // A connections file picked to import is not writable, and the reverse.
+    let import = state
+        .file_picks
+        .admit(FileAccess::ConnectionsImport, victim.clone())
+        .unwrap();
+    let err = export_connections_impl(&state, vec![], None, import.clone())
+        .await
+        .unwrap_err();
+    assert!(is_path_refusal(&err), "{err:?}");
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep");
+    let err = file_write_impl(&state, import, "x".into())
+        .await
+        .unwrap_err();
+    assert!(is_path_refusal(&err), "{err:?}");
+    let export = state
+        .file_picks
+        .admit(FileAccess::ConnectionsExport, secret.clone())
+        .unwrap();
+    for err in [
+        preview_import_impl(&state, export.clone(), None)
+            .await
+            .unwrap_err(),
+        apply_import_impl(&state, export.clone(), None, ConflictPolicy::Skip)
+            .await
+            .unwrap_err(),
+        import_needs_passphrase_impl(&state, export.clone())
+            .await
+            .unwrap_err(),
+        file_read_impl(&state, export).await.unwrap_err(),
+    ] {
+        assert!(is_path_refusal(&err), "{err:?}");
+    }
+}
+
+/// A query tab's file keeps working after a restart (`tabs_load` re-admits the paths
+/// stored in the app database), but the UI cannot plant a path through `tabs_save`.
+#[tokio::test]
+async fn tab_files_are_admitted_from_the_stored_tabs_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let file = dir.path().join("saved.sql");
+    let tab = |id: &str, path: &std::path::Path| dnt_store::tabs::QueryTabRecord {
+        id: id.into(),
+        title: "saved.sql".into(),
+        sort_order: 0,
+        connection_id: None,
+        database: None,
+        sql_text: "SELECT 1".into(),
+        cursor: 0,
+        file_path: Some(path.to_string_lossy().into_owned()),
+        dirty: false,
+        continue_on_error: false,
+        row_limit: 1000,
+        updated_at: String::new(),
+    };
+
+    // Not picked: refused, and nothing is stored.
+    let planted = dir.path().join("planted.sql");
+    let err = tabs_save_impl(&state, tab("tab-1", &planted))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, dnt_core::error::DbError::Config { field: Some(f), .. } if f == "file_path"),
+        "{err:?}"
+    );
+    assert!(tabs_load_impl(&state).await.unwrap().is_empty());
+
+    // Picked (Save as): stored, written.
+    let path = picked_sql(&state, &file);
+    file_write_impl(&state, path.clone(), "SELECT 1".into())
+        .await
+        .unwrap();
+    tabs_save_impl(&state, tab("tab-1", &file)).await.unwrap();
+
+    // After a restart the stored file is admitted again by `tabs_load` (Ctrl+S).
+    drop(state);
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let err = file_write_impl(&state, path.clone(), "SELECT 2".into())
+        .await
+        .unwrap_err();
+    assert!(
+        is_path_refusal(&err),
+        "not before the tabs are loaded: {err:?}"
+    );
+    assert_eq!(tabs_load_impl(&state).await.unwrap().len(), 1);
+    file_write_impl(&state, path.clone(), "SELECT 2".into())
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "SELECT 2");
+    assert_eq!(file_read_impl(&state, path).await.unwrap(), "SELECT 2");
+    // Saving the tab again keeps its stored file; another tab cannot take a planted one.
+    tabs_save_impl(&state, tab("tab-1", &file)).await.unwrap();
+    assert!(tabs_save_impl(&state, tab("tab-2", &planted))
+        .await
+        .is_err());
+    let err = file_read_impl(&state, planted.to_string_lossy().into_owned())
+        .await
+        .unwrap_err();
+    assert!(is_path_refusal(&err), "{err:?}");
 }
 
 #[tokio::test]

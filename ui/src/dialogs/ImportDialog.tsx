@@ -1,4 +1,3 @@
-import { open } from '@tauri-apps/plugin-dialog';
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, toAppError } from '../api';
 import type { ConflictPolicy, DbKind, ImportPreview } from '../bindings';
@@ -68,22 +67,15 @@ export function ImportDialog({ onClose }: Props) {
     const my = ++token.current;
     setError(null);
     setPassError(null);
-    let file: string | string[] | null;
+    let file: string | null;
     try {
-      file = await open({
-        multiple: false,
-        directory: false,
-        filters: [
-          { name: 'DntDatabase connections', extensions: ['dntconn'] },
-          { name: 'Navicat connections', extensions: ['ncx'] },
-          { name: 'All files', extensions: ['*'] },
-        ],
-      });
+      // The backend opens the dialog (.dntconn / .ncx) and admits only the picked file.
+      file = await api.filePickOpen('connections');
     } catch (e) {
       if (my === token.current) fail(e);
       return;
     }
-    if (!file || Array.isArray(file) || my !== token.current) return;
+    if (!file || my !== token.current) return;
     setPath(file);
     setNeedsPassphrase(false);
     setPassError(null);

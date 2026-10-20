@@ -1,7 +1,12 @@
 //! Export to `.dntconn` and import from `.dntconn` or Navicat `.ncx` (format detected by
 //! content). Importing only writes the repository; the UI reloads the tree afterwards.
+//!
+//! The file is one the user picked in a dialog the backend opened (`file_pick_open` /
+//! `file_pick_save` with kind `connections`): any other path is refused (see
+//! [`crate::file_picks`]).
 
 use super::{blocking, guard};
+use crate::file_picks::FileAccess;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_store::dntconn::{dntconn_has_secrets, export_dntconn, parse_dntconn};
@@ -83,6 +88,9 @@ pub async fn export_connections_impl(
     passphrase: Option<String>,
     path: String,
 ) -> Result<(), DbError> {
+    state
+        .file_picks
+        .check(FileAccess::ConnectionsExport, &path)?;
     let passphrase = passphrase.map(SecretString::from);
     let repo = Arc::clone(&state.repo);
     // Argon2id key derivation, keychain reads and file I/O: on the blocking pool.
@@ -104,6 +112,9 @@ pub async fn preview_import_impl(
     path: String,
     passphrase: Option<String>,
 ) -> Result<ImportPreview, DbError> {
+    state
+        .file_picks
+        .check(FileAccess::ConnectionsImport, &path)?;
     let repo = Arc::clone(&state.repo);
     blocking(move || {
         let bundle = read_bundle(&path, passphrase)?;
@@ -118,6 +129,9 @@ pub async fn apply_import_impl(
     passphrase: Option<String>,
     policy: ConflictPolicy,
 ) -> Result<ImportResult, DbError> {
+    state
+        .file_picks
+        .check(FileAccess::ConnectionsImport, &path)?;
     let repo = Arc::clone(&state.repo);
     let result = blocking(move || {
         let bundle = read_bundle(&path, passphrase)?;
@@ -138,7 +152,10 @@ pub async fn apply_import_impl(
 }
 
 /// Whether the file carries encrypted secrets (`.ncx` never needs a passphrase).
-pub async fn import_needs_passphrase_impl(path: String) -> Result<bool, DbError> {
+pub async fn import_needs_passphrase_impl(state: &AppState, path: String) -> Result<bool, DbError> {
+    state
+        .file_picks
+        .check(FileAccess::ConnectionsImport, &path)?;
     blocking(move || {
         let text = read_file(&path)?;
         match detect_format(&text)? {
@@ -183,8 +200,11 @@ pub async fn apply_import(
 
 #[tauri::command]
 #[specta::specta]
-pub async fn import_needs_passphrase(path: String) -> Result<bool, AppError> {
-    guard(import_needs_passphrase_impl(path)).await
+pub async fn import_needs_passphrase(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<bool, AppError> {
+    guard(import_needs_passphrase_impl(&state, path)).await
 }
 
 #[cfg(test)]

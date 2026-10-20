@@ -1,6 +1,5 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { open } from '@tauri-apps/plugin-dialog';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImportPreview } from '../bindings';
 import { useDialogs } from '../store/dialogs';
@@ -10,7 +9,12 @@ import { useTree } from '../store/tree';
 import { callsOf, calls, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ImportDialog } from './ImportDialog';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn(), open: vi.fn() }));
+/** What the user picks in the backend's open dialog (`file_pick_open`). */
+const open = vi.fn<(args: Record<string, unknown>) => Promise<string | null>>();
+
+/** `mockBackend` with the backend's open dialog answering `open`. */
+const backend = (handlers: Parameters<typeof mockBackend>[0]) =>
+  mockBackend({ file_pick_open: (a) => open(a), ...handlers });
 
 const FILE = 'C:\\in\\conns.dntconn';
 
@@ -25,14 +29,14 @@ const preview: ImportPreview = {
 
 beforeEach(() => {
   resetStores();
-  vi.mocked(open).mockReset();
-  vi.mocked(open).mockResolvedValue(FILE);
+  open.mockReset();
+  open.mockResolvedValue(FILE);
 });
 
 describe('ImportDialog', () => {
   it('import_wrong_passphrase_inline_error', async () => {
     const user = userEvent.setup();
-    mockBackend({
+    backend({
       import_needs_passphrase: () => true,
       preview_import: (a) => {
         if (a.passphrase === 'wrong-pass') {
@@ -61,16 +65,13 @@ describe('ImportDialog', () => {
 
   it('import_preview_shows_conflicts_warnings_skipped', async () => {
     const user = userEvent.setup();
-    mockBackend({ import_needs_passphrase: () => false, preview_import: () => preview });
+    backend({ import_needs_passphrase: () => false, preview_import: () => preview });
     render(<ImportDialog onClose={() => {}} />);
     await user.click(screen.getByRole('button', { name: 'Choose file…' }));
     await screen.findByText('shop');
 
-    expect(vi.mocked(open).mock.calls[0]![0]!.filters).toEqual([
-      { name: 'DntDatabase connections', extensions: ['dntconn'] },
-      { name: 'Navicat connections', extensions: ['ncx'] },
-      { name: 'All files', extensions: ['*'] },
-    ]);
+    // The backend opens the dialog (.dntconn / .ncx filters); the UI names the kind of file.
+    expect(callsOf('file_pick_open')).toEqual([{ kind: 'connections' }]);
     const headers = screen.getAllByRole('columnheader').map((h) => h.textContent);
     expect(headers).toEqual(['Name', 'Engine', 'Host', 'Group', 'Conflict', 'Warnings']);
 
@@ -89,7 +90,7 @@ describe('ImportDialog', () => {
 
   it('import_apply_uses_selected_policy_and_reloads_tree', async () => {
     const user = userEvent.setup();
-    mockBackend({
+    backend({
       import_needs_passphrase: () => false,
       preview_import: () => preview,
       apply_import: () => ({ imported: 2, overwritten: 1, skipped: 3, overwritten_ids: [] }),
@@ -110,7 +111,7 @@ describe('ImportDialog', () => {
 
   it('overwrite closes the replaced connections and their tabs before reloading', async () => {
     const user = userEvent.setup();
-    mockBackend({
+    backend({
       import_needs_passphrase: () => false,
       preview_import: () => preview,
       apply_import: () => ({ imported: 0, overwritten: 1, skipped: 0, overwritten_ids: [ids.prod] }),
@@ -147,7 +148,7 @@ describe('ImportDialog', () => {
     const user = userEvent.setup();
     let finish!: () => void;
     const gate = new Promise<void>((r) => (finish = r));
-    mockBackend({
+    backend({
       import_needs_passphrase: () => false,
       preview_import: () => preview,
       apply_import: async () => {
@@ -175,12 +176,12 @@ describe('ImportDialog', () => {
 
   it('does nothing when the file dialog is cancelled', async () => {
     const user = userEvent.setup();
-    vi.mocked(open).mockResolvedValue(null);
-    mockBackend({});
+    open.mockResolvedValue(null);
+    backend({});
     render(<ImportDialog onClose={() => {}} />);
     await user.click(screen.getByRole('button', { name: 'Choose file…' }));
     await waitFor(() => expect(open).toHaveBeenCalled());
-    expect(calls()).toEqual([]);
+    expect(calls()).toEqual(['file_pick_open']);
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });

@@ -1,17 +1,17 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { save } from '@tauri-apps/plugin-dialog';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useTree } from '../store/tree';
 import { callsOf, ids, mockBackend, resetStores, sampleTree } from '../test/backend';
 import { ExportDialog } from './ExportDialog';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn(), open: vi.fn() }));
+/** What the user picks in the backend's save dialog (`file_pick_save`). */
+const save = vi.fn<(args: Record<string, unknown>) => Promise<string | null>>();
 
 beforeEach(async () => {
   resetStores();
-  vi.mocked(save).mockReset();
-  mockBackend({ list_tree: () => sampleTree(), export_connections: () => null });
+  save.mockReset();
+  mockBackend({ list_tree: () => sampleTree(), export_connections: () => null, file_pick_save: (a) => save(a) });
   await useTree.getState().reloadStored();
 });
 
@@ -59,7 +59,7 @@ describe('ExportDialog', () => {
 
   it('export_calls_api_with_selected_nodes', async () => {
     const user = userEvent.setup();
-    vi.mocked(save).mockResolvedValue('C:\\out\\x.dntconn');
+    save.mockResolvedValue('C:\\out\\x.dntconn');
     const onClose = vi.fn();
     // Group A (shop-prod, analytics) is preselected as a whole.
     render(<ExportDialog preselected={[{ type: 'group', id: ids.groupA }]} onClose={onClose} />);
@@ -73,9 +73,10 @@ describe('ExportDialog', () => {
     await user.click(screen.getByRole('button', { name: 'Export' }));
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    const opts = vi.mocked(save).mock.calls[0]![0]!;
-    expect(opts.defaultPath).toMatch(/^connections-\d{4}-\d{2}-\d{2}\.dntconn$/);
-    expect(opts.filters).toEqual([{ name: 'DntDatabase connections', extensions: ['dntconn'] }]);
+    // The backend opens the save dialog (with the .dntconn filter); the UI names the kind and file.
+    const [picked] = callsOf('file_pick_save');
+    expect(picked!.kind).toBe('connections');
+    expect(picked!.defaultName).toMatch(/^connections-\d{4}-\d{2}-\d{2}\.dntconn$/);
     expect(callsOf('export_connections')).toEqual([
       {
         ids: [
@@ -91,7 +92,7 @@ describe('ExportDialog', () => {
 
   it('does nothing when the file dialog is cancelled', async () => {
     const user = userEvent.setup();
-    vi.mocked(save).mockResolvedValue(null);
+    save.mockResolvedValue(null);
     const onClose = vi.fn();
     render(<ExportDialog preselected={[{ type: 'connection', id: ids.prod }]} onClose={onClose} />);
     await user.click(screen.getByRole('button', { name: 'Export' }));

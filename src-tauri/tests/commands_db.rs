@@ -21,6 +21,7 @@ use dntdatabase::commands::connections::{
 };
 use dntdatabase::commands::query::{completion_objects_impl, completion_scope_impl};
 use dntdatabase::commands::transfer::{apply_import_impl, export_connections_impl};
+use dntdatabase::file_picks::FileAccess;
 use dntdatabase::state::{AppPaths, AppState};
 use serde_json::json;
 use std::sync::Arc;
@@ -115,6 +116,9 @@ async fn overwrite_import_closes_the_open_connection() {
 
     let file = dir.path().join("self.dntconn");
     let path = file.to_string_lossy().into_owned();
+    for access in [FileAccess::ConnectionsExport, FileAccess::ConnectionsImport] {
+        state.file_picks.admit(access, file.clone()).unwrap();
+    }
     export_connections_impl(&state, vec![NodeId::Connection(id)], None, path.clone())
         .await
         .unwrap();

@@ -161,6 +161,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             workspace::tabs_delete,
             workspace::file_read,
             workspace::file_write,
+            workspace::file_pick_open,
+            workspace::file_pick_save,
             workspace::history_list,
             workspace::history_delete,
             workspace::history_clear,
