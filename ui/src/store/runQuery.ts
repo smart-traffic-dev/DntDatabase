@@ -9,6 +9,7 @@ import { canRun, canStop, settleTx, useQueryRun, type MessageLine } from './quer
 import { asTxState, setRunningSource, useQueryDocs } from './queryTabs';
 import { promptHandles, reopenConnection } from './reopen';
 import { askRunConfirmation, showBlocked } from './runPrompt';
+import { noteRunFailure, refreshTxInfo, useTxMode } from './txMode';
 import { setPlanRunner } from '../tabs/query/rerun';
 
 /** How long "Stop and close" waits for the run to end. */
@@ -149,7 +150,7 @@ export async function runFromEditor(tabId: string, mode: 'cursor' | 'selection' 
 }
 
 /** Appends a line to the tab's Messages and shows that panel. */
-function note(tabId: string, text: string, error: ReturnType<typeof toAppError> | null = null) {
+export function note(tabId: string, text: string, error: ReturnType<typeof toAppError> | null = null) {
   const line: MessageLine = {
     index: null,
     statement: null,
@@ -183,6 +184,8 @@ function toIdle(tabId: string) {
 /** A run that never started (`query_run` failed): the tab is usable again. */
 function abort(tabId: string, text: string, error: ReturnType<typeof toAppError>) {
   toIdle(tabId);
+  // A Manual transaction lost with its connection blocks every run until a Rollback acknowledges it.
+  noteRunFailure(tabId, error);
   note(tabId, text, error);
 }
 
@@ -208,7 +211,13 @@ async function execute(
     return;
   }
   const confirmed = plan.stmts.some((s) => s.verdict === 'confirm');
-  if (confirmed && !(await askRunConfirmation(plan))) return;
+  // The names typed in the dialog (the plan's own `confirm_name`s, once each, in statement order).
+  let names: string[] = [];
+  if (confirmed) {
+    const answer = await askRunConfirmation(plan);
+    if (!answer) return;
+    names = answer;
+  }
 
   // The tab may have been closed while the dialog was open.
   if (!canRun(useQueryRun.getState().get(tabId)) || !useQueryDocs.getState().docs.has(tabId)) return;
@@ -218,11 +227,13 @@ async function execute(
     const runId = await api.queryRun(
       plan.plan_id,
       confirmed,
-      // Typed Production names come with Task 16's confirm dialog.
-      [],
+      names,
       { max_rows: extra?.maxRows ?? doc.rowLimit, continue_on_error: doc.continueOnError },
       // Bound to this run: late events of an earlier channel are dropped.
-      runChannel((ev) => useQueryRun.getState().apply(tabId, ev, plan.plan_id)),
+      runChannel((ev) => {
+        useQueryRun.getState().apply(tabId, ev, plan.plan_id);
+        if (ev.t === 'statement_error') noteRunFailure(tabId, ev.error);
+      }),
     );
     useQueryRun.getState().attach(tabId, runId);
     if (pendingStop.delete(tabId)) await cancelRun(tabId, runId);
@@ -430,6 +441,9 @@ setPlanRunner((tabId, plan, opts) => runPlanned(tabId, plan, { maxRows: opts.max
 export async function txAction(tabId: string, action: TxAction): Promise<void> {
   try {
     await settleTx(tabId, action);
+    // A Rollback acknowledges a transaction lost with its connection.
+    if (action === 'Rollback') useTxMode.getState().patch(tabId, { lost: null });
+    void refreshTxInfo(tabId);
   } catch (e) {
     const error = toAppError(e);
     note(tabId, error.message, error);

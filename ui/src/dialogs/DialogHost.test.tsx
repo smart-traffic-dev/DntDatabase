@@ -205,6 +205,7 @@ describe('DialogHost', () => {
       },
       get_table_page_size: () => 100,
       get_confirm_unbounded_writes: () => true,
+      get_idle_tx_warn_minutes: () => 5,
     });
     useDialogs.getState().requestDialog({ kind: 'settings' });
     const user = userEvent.setup();
@@ -229,6 +230,7 @@ describe('DialogHost', () => {
         return null;
       },
       get_confirm_unbounded_writes: () => true,
+      get_idle_tx_warn_minutes: () => 5,
     });
     useDialogs.getState().requestDialog({ kind: 'settings' });
     const user = userEvent.setup();
@@ -254,6 +256,7 @@ describe('DialogHost', () => {
       get_log_level: () => 'Info',
       get_table_page_size: () => 100,
       get_confirm_unbounded_writes: () => on,
+      get_idle_tx_warn_minutes: () => 5,
       set_confirm_unbounded_writes: (a) => {
         on = a.enabled as boolean;
         return null;
@@ -280,6 +283,7 @@ describe('DialogHost', () => {
       get_log_level: () => 'Info',
       get_table_page_size: () => 100,
       get_confirm_unbounded_writes: () => true,
+      get_idle_tx_warn_minutes: () => 5,
       set_confirm_unbounded_writes: () => {
         throw fail('busy');
       },

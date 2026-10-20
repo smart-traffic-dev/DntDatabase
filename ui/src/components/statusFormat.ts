@@ -17,7 +17,16 @@ export function shortVersion(info: ServerInfo): string {
   return `${engine} ${info.version.join('.')}`;
 }
 
-/** "450 ms", "3.1 s", "12 s", "1 m 05 s". */
+/** "02:14", "1:05:09": minutes and seconds (hours from one hour on). */
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, '0');
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${String(m).padStart(2, '0')}:${s}`;
+}
+
+/** "450 ms","3.1 s", "12 s", "1 m 05 s". */
 export function formatElapsed(ms: number): string {
   if (ms < 1000) return `${Math.max(0, Math.round(ms))} ms`;
   if (ms < 10_000) return `${(ms / 1000).toFixed(1)} s`;
