@@ -1,0 +1,168 @@
+---
+source: crates/driver-pg/tests/execute.rs
+expression: snapshot
+---
+columns:
+  - name: id
+    logical: Integer
+    db_type: int4
+  - name: c_smallint
+    logical: Integer
+    db_type: int2
+  - name: c_int
+    logical: Integer
+    db_type: int4
+  - name: c_bigint
+    logical: Integer
+    db_type: int8
+  - name: c_numeric
+    logical: Decimal
+    db_type: numeric
+  - name: c_real
+    logical: Float
+    db_type: float4
+  - name: c_double
+    logical: Float
+    db_type: float8
+  - name: c_boolean
+    logical: Bool
+    db_type: bool
+  - name: c_date
+    logical: Date
+    db_type: date
+  - name: c_time
+    logical: Time
+    db_type: time
+  - name: c_timestamp
+    logical: DateTime
+    db_type: timestamp
+  - name: c_timestamptz
+    logical: DateTime
+    db_type: timestamptz
+  - name: c_interval
+    logical: Other
+    db_type: interval
+  - name: c_char
+    logical: Text
+    db_type: bpchar
+  - name: c_varchar
+    logical: Text
+    db_type: varchar
+  - name: c_text
+    logical: Text
+    db_type: text
+  - name: c_bytea
+    logical: Binary
+    db_type: bytea
+  - name: c_uuid
+    logical: Uuid
+    db_type: uuid
+  - name: c_json
+    logical: Json
+    db_type: json
+  - name: c_jsonb
+    logical: Json
+    db_type: jsonb
+  - name: c_int_array
+    logical: Array
+    db_type: "int4[]"
+  - name: c_text_array
+    logical: Array
+    db_type: "text[]"
+  - name: c_enum
+    logical: Enum
+    db_type: order_status
+rows:
+  - - t: Int
+      v: 1
+    - t: Int
+      v: -32768
+    - t: Int
+      v: 2147483647
+    - t: Int
+      v: "9223372036854775807"
+    - t: Decimal
+      v: "123456789012345678901234567890.1234567890"
+    - t: Float
+      v: 340282350000000000000000000000000000000
+    - t: Float
+      v: 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+    - t: Bool
+      v: true
+    - t: Date
+      v: 9999-12-31
+    - t: Time
+      v: "23:59:59.999999"
+    - t: DateTime
+      v: "9999-12-31 23:59:59.999999"
+    - t: TimestampTz
+      v: "2038-01-19T03:14:07+00:00"
+    - t: Other
+      v:
+        type_name: interval
+        text: P1Y2M3DT4H5M6.789S
+    - t: Text
+      v: "Nguyễn    "
+    - t: Text
+      v: Nguyễn Văn A
+    - t: Text
+      v: Nguyễn Văn A — văn bản dài
+    - t: Bytes
+      v:
+        len: 7
+        preview:
+          - 0
+          - 255
+          - 16
+          - 222
+          - 173
+          - 190
+          - 239
+    - t: Uuid
+      v: 123e4567-e89b-12d3-a456-426614174000
+    - t: Json
+      v: "{\"name\": \"Nguyễn Văn A\", \"tags\": [1, 2, 3]}"
+    - t: Json
+      v: "{\"name\": \"Nguyễn Văn A\", \"tags\": [1, 2, 3]}"
+    - t: Array
+      v:
+        - t: Int
+          v: 1
+        - t: Int
+          v: 2
+        - t: Int
+          v: 3
+    - t: Array
+      v:
+        - t: Text
+          v: x
+        - t: Text
+          v: Nguyễn
+        - t: Text
+          v: z
+    - t: Text
+      v: shipped
+  - - t: Int
+      v: 2
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"

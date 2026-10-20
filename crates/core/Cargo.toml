@@ -1,0 +1,19 @@
+[package]
+name = "dnt-core"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_core"
+
+[features]
+test-util = []
+
+[dependencies]
+async-trait.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

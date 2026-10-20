@@ -1,0 +1,107 @@
+---
+source: crates/driver-pg/tests/introspect.rs
+expression: d
+---
+object:
+  database: dnt_fixture
+  schema: public
+  name: orders
+  kind: Table
+columns:
+  - name: id
+    ordinal: 1
+    db_type: integer
+    nullable: false
+    default: ~
+    auto_increment: true
+    identity: BY DEFAULT
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: customer_id
+    ordinal: 2
+    db_type: integer
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: status
+    ordinal: 3
+    db_type: order_status
+    nullable: false
+    default: "'new'::order_status"
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: total
+    ordinal: 4
+    db_type: "numeric(12,2)"
+    nullable: false
+    default: "0"
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: created_at
+    ordinal: 5
+    db_type: timestamp without time zone
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+primary_key:
+  name: orders_pkey
+  unique: true
+  primary: true
+  columns:
+    - id
+  expression: ~
+  method: btree
+  definition: PRIMARY KEY (id)
+indexes:
+  - name: idx_orders_customer_status
+    unique: false
+    primary: false
+    columns:
+      - customer_id
+      - status
+    expression: ~
+    method: btree
+    definition: "CREATE INDEX idx_orders_customer_status ON public.orders USING btree (customer_id, status)"
+foreign_keys:
+  - name: orders_customer_id_fkey
+    columns:
+      - customer_id
+    ref_schema: ~
+    ref_table: customers
+    ref_columns:
+      - id
+    on_update: NO ACTION
+    on_delete: NO ACTION
+    definition: FOREIGN KEY (customer_id) REFERENCES public.customers(id)
+checks:
+  - name: orders_total_check
+    expression: "(total >= (0)::numeric)"
+    definition: "CHECK ((total >= (0)::numeric))"
+triggers:
+  - name: trg_orders_bi
+    timing: BEFORE
+    event: INSERT
+options:
+  engine: ~
+  collation: ~
+  tablespace: ~
+  partitioned_by: ~
+  system_versioned: false
+row_estimate: "[redacted]"
+size_bytes: "[redacted]"
+comment: ~

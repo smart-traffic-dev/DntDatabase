@@ -1,0 +1,52 @@
+---
+source: crates/driver-mysql/tests/introspect.rs
+expression: d
+---
+object:
+  database: dnt_fixture
+  schema: ~
+  name: weird_names
+  kind: Table
+columns:
+  - name: id
+    ordinal: 1
+    db_type: int(11)
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: "we`ird\"col"
+    ordinal: 2
+    db_type: varchar(50)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+primary_key:
+  name: PRIMARY
+  unique: true
+  primary: true
+  columns:
+    - id
+  expression: ~
+  method: BTREE
+  definition: ~
+indexes: []
+foreign_keys: []
+checks: []
+triggers: []
+options:
+  engine: InnoDB
+  collation: utf8mb4_unicode_ci
+  tablespace: ~
+  partitioned_by: ~
+  system_versioned: false
+row_estimate: "[redacted]"
+size_bytes: "[redacted]"
+comment: ~

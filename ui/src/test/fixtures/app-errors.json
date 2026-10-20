@@ -1,0 +1,542 @@
+{
+  "auth_mysql": {
+    "kind": "auth",
+    "message": "Authentication failed.",
+    "detail": "Access denied for user 'root'@'172.18.0.1' (using password: YES) [1045]",
+    "stage": "connect_db",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": "Wrong user/password, or this user may not log in from your host.",
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "auth_pg": {
+    "kind": "auth",
+    "message": "Authentication failed.",
+    "detail": "password authentication failed for user \"postgres\" [28P01]",
+    "stage": "connect_db",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": "Wrong user/password.",
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "cancelled": {
+    "kind": "cancelled",
+    "message": "The operation was cancelled.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "connect_refused": {
+    "kind": "connect",
+    "message": "Could not connect to the database server.",
+    "detail": "No connection could be made because the target machine actively refused it. (os error 10061)",
+    "stage": "connect_db",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": true,
+    "hint": "Connection refused: check host, port, firewall, or whether an SSH tunnel is needed.",
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "connection_lost": {
+    "kind": "connection_lost",
+    "message": "The connection to the server was lost.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": true,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "field_host": {
+    "kind": "config",
+    "message": "Host must not be empty.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "host"
+  },
+  "field_name": {
+    "kind": "config",
+    "message": "Name must not be empty.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "name"
+  },
+  "field_port": {
+    "kind": "config",
+    "message": "Port must be between 1 and 65535.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "port"
+  },
+  "field_ssh_key_path": {
+    "kind": "config",
+    "message": "SSH key authentication requires a private key file.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "ssh.key_path"
+  },
+  "field_ssl_ca_path": {
+    "kind": "config",
+    "message": "SSL verification requires a CA certificate file.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "ssl.ca_path"
+  },
+  "host_key_trust_invalid": {
+    "kind": "config",
+    "message": "Not an OpenSSH public key.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "known_hosts"
+  },
+  "import_unknown_format": {
+    "kind": "config",
+    "message": "The file is neither a DntDatabase export (.dntconn) nor a Navicat export (.ncx).",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "path"
+  },
+  "import_unreadable": {
+    "kind": "config",
+    "message": "Could not read missing.dntconn: entity not found.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "path"
+  },
+  "internal": {
+    "kind": "internal",
+    "message": "An internal error occurred.",
+    "detail": "the command failed unexpectedly; see the log for details",
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "key_passphrase_required": {
+    "kind": "password_required",
+    "message": "A password is required.",
+    "detail": null,
+    "stage": "open_tunnel",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "not_open": {
+    "kind": "not_open",
+    "message": "This connection is not open.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": true,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "passphrase_incorrect": {
+    "kind": "config",
+    "message": "Passphrase is incorrect.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "passphrase"
+  },
+  "passphrase_too_short": {
+    "kind": "config",
+    "message": "Passphrase must be at least 8 characters.",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": "passphrase"
+  },
+  "password_required": {
+    "kind": "password_required",
+    "message": "A password is required.",
+    "detail": null,
+    "stage": "resolve_secrets",
+    "timings": [],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "server_db_missing": {
+    "kind": "server",
+    "message": "Unknown database 'shop'",
+    "detail": "Unknown database 'shop'",
+    "stage": "connect_db",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": "1049",
+    "sqlstate": "42000",
+    "position": null,
+    "retryable": false,
+    "hint": "Database does not exist.",
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "ssh_auth": {
+    "kind": "ssh",
+    "message": "SSH connection failed.",
+    "detail": "the server rejected the SSH credentials of user ops",
+    "stage": "auth",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": "SSH authentication failed. If the key has a passphrase, enter it.",
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "ssh_channel": {
+    "kind": "ssh",
+    "message": "SSH connection failed.",
+    "detail": "the SSH server could not open a channel to db.internal:3306: Channel open failure: ConnectFailed",
+    "stage": "channel",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      },
+      {
+        "stage": "open_tunnel",
+        "ms": 120
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": "The SSH server could not reach db.internal:3306.",
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "ssh_connect": {
+    "kind": "ssh",
+    "message": "SSH connection failed.",
+    "detail": "Connection refused (os error 10061)",
+    "stage": "connect",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "ssh_host_key_mismatch": {
+    "kind": "ssh",
+    "message": "SSH connection failed.",
+    "detail": "the host key of [bastion]:22 changed: trusted SHA256:old, server sent SHA256:new",
+    "stage": "host_key_mismatch",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "ssh_host_key_unknown": {
+    "kind": "ssh_host_key_unknown",
+    "message": "The SSH host key is not trusted yet.",
+    "detail": null,
+    "stage": "open_tunnel",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": "SHA256:abc123",
+    "key_openssh": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample",
+    "host": "bastion",
+    "port": 22,
+    "field": null
+  },
+  "timeout_connect": {
+    "kind": "timeout",
+    "message": "The operation timed out.",
+    "detail": null,
+    "stage": "connect_db",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": true,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "timeout_execute": {
+    "kind": "timeout",
+    "message": "The operation timed out.",
+    "detail": null,
+    "stage": "execute",
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": true,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  },
+  "tls": {
+    "kind": "tls",
+    "message": "TLS handshake failed.",
+    "detail": "invalid peer certificate: UnknownIssuer",
+    "stage": "connect_db",
+    "timings": [
+      {
+        "stage": "resolve_secrets",
+        "ms": 1
+      }
+    ],
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null
+  }
+}

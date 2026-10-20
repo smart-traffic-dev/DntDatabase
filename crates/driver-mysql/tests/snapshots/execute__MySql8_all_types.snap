@@ -1,0 +1,205 @@
+---
+source: crates/driver-mysql/tests/execute.rs
+expression: snapshot
+---
+columns:
+  - name: id
+    logical: Integer
+    db_type: int
+  - name: c_tinyint
+    logical: Integer
+    db_type: tinyint
+  - name: c_tinyint_u
+    logical: Integer
+    db_type: tinyint unsigned
+  - name: c_smallint
+    logical: Integer
+    db_type: smallint
+  - name: c_smallint_u
+    logical: Integer
+    db_type: smallint unsigned
+  - name: c_mediumint
+    logical: Integer
+    db_type: mediumint
+  - name: c_mediumint_u
+    logical: Integer
+    db_type: mediumint unsigned
+  - name: c_int
+    logical: Integer
+    db_type: int
+  - name: c_int_u
+    logical: Integer
+    db_type: int unsigned
+  - name: c_bigint
+    logical: Integer
+    db_type: bigint
+  - name: c_bigint_u
+    logical: Integer
+    db_type: bigint unsigned
+  - name: c_decimal
+    logical: Decimal
+    db_type: decimal
+  - name: c_float
+    logical: Float
+    db_type: float
+  - name: c_double
+    logical: Float
+    db_type: double
+  - name: c_bit
+    logical: Binary
+    db_type: bit
+  - name: c_date
+    logical: Date
+    db_type: date
+  - name: c_datetime
+    logical: DateTime
+    db_type: datetime
+  - name: c_timestamp
+    logical: DateTime
+    db_type: timestamp
+  - name: c_time
+    logical: Time
+    db_type: time
+  - name: c_year
+    logical: Integer
+    db_type: year
+  - name: c_char
+    logical: Text
+    db_type: char
+  - name: c_varchar
+    logical: Text
+    db_type: varchar
+  - name: c_text
+    logical: Text
+    db_type: text
+  - name: c_binary
+    logical: Binary
+    db_type: binary
+  - name: c_varbinary
+    logical: Binary
+    db_type: varbinary
+  - name: c_blob
+    logical: Binary
+    db_type: blob
+  - name: c_enum
+    logical: Enum
+    db_type: enum
+  - name: c_set
+    logical: Enum
+    db_type: set
+  - name: c_json
+    logical: Json
+    db_type: json
+rows:
+  - - t: Int
+      v: 1
+    - t: Int
+      v: -128
+    - t: UInt
+      v: 255
+    - t: Int
+      v: -32768
+    - t: UInt
+      v: 65535
+    - t: Int
+      v: -8388608
+    - t: UInt
+      v: 16777215
+    - t: Int
+      v: -2147483648
+    - t: UInt
+      v: 4294967295
+    - t: Int
+      v: "9223372036854775807"
+    - t: UInt
+      v: "18446744073709551615"
+    - t: Decimal
+      v: "123456789012345678901234567890.1234567890"
+    - t: Float
+      v: 340282000000000000000000000000000000000
+    - t: Float
+      v: 179769313486231570000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+    - t: Bytes
+      v:
+        len: 1
+        preview:
+          - 170
+    - t: Date
+      v: 9999-12-31
+    - t: DateTime
+      v: "9999-12-31 23:59:59.999999"
+    - t: DateTime
+      v: "2038-01-19 03:14:07"
+    - t: Time
+      v: "838:59:59"
+    - t: Int
+      v: 2155
+    - t: Text
+      v: Nguyễn
+    - t: Text
+      v: Nguyễn Văn A
+    - t: Text
+      v: Nguyễn Văn A — văn bản dài
+    - t: Bytes
+      v:
+        len: 8
+        preview:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+    - t: Bytes
+      v:
+        len: 3
+        preview:
+          - 0
+          - 255
+          - 16
+    - t: Bytes
+      v:
+        len: 4
+        preview:
+          - 222
+          - 173
+          - 190
+          - 239
+    - t: Text
+      v: large
+    - t: Text
+      v: "a,c"
+    - t: Json
+      v: "{\"name\": \"Nguyễn Văn A\", \"tags\": [1, 2, 3]}"
+  - - t: Int
+      v: 2
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"
+    - t: "Null"

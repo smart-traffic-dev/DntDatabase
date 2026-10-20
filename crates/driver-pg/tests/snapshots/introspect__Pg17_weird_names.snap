@@ -1,0 +1,52 @@
+---
+source: crates/driver-pg/tests/introspect.rs
+expression: d
+---
+object:
+  database: dnt_fixture
+  schema: public
+  name: weird_names
+  kind: Table
+columns:
+  - name: id
+    ordinal: 1
+    db_type: integer
+    nullable: false
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+  - name: "we`ird\"col"
+    ordinal: 2
+    db_type: character varying(50)
+    nullable: true
+    default: ~
+    auto_increment: false
+    identity: ~
+    generated: ~
+    invisible: false
+    comment: ~
+primary_key:
+  name: weird_names_pkey
+  unique: true
+  primary: true
+  columns:
+    - id
+  expression: ~
+  method: btree
+  definition: PRIMARY KEY (id)
+indexes: []
+foreign_keys: []
+checks: []
+triggers: []
+options:
+  engine: ~
+  collation: ~
+  tablespace: ~
+  partitioned_by: ~
+  system_versioned: false
+row_estimate: "[redacted]"
+size_bytes: "[redacted]"
+comment: ~

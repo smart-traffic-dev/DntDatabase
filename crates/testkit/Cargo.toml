@@ -1,0 +1,24 @@
+[package]
+name = "dnt-testkit"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[lib]
+name = "dnt_testkit"
+
+[features]
+# Fixture generator only; keeps rcgen/ssh-key out of consumers' dev builds.
+gen-fixtures = ["dep:rcgen", "dep:ssh-key"]
+
+[[bin]]
+name = "gen_fixtures"
+path = "src/bin/gen_fixtures.rs"
+required-features = ["gen-fixtures"]
+
+[dependencies]
+dnt-core.workspace = true
+dnt-store.workspace = true
+secrecy.workspace = true
+rcgen = { version = "0.13", optional = true }
+ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "encryption", "getrandom"], optional = true }

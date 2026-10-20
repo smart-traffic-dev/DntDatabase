@@ -1,0 +1,32 @@
+[package]
+name = "dnt-store"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_store"
+
+[dependencies]
+aes.workspace = true
+argon2.workspace = true
+base64.workspace = true
+cbc.workspace = true
+chacha20poly1305.workspace = true
+dnt-core.workspace = true
+hex.workspace = true
+keyring.workspace = true
+quick-xml.workspace = true
+rusqlite.workspace = true
+rusqlite_migration.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+time.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+dnt-core = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Connections Ver="1.5">
+  <Connection ConnectionName="Local MySQL via SSH" ConnType="MYSQL" Host="10.0.0.5" Port="3306" UserName="root" Password="FB7D4A56E9AADE86D052B0F125570306" Database="shop" SSH="true" SSH_Host="bastion.example.com" SSH_Port="2222" SSH_UserName="deploy" SSH_AuthenMethod="PUBLICKEY" SSH_PrivateKey="C:\Users\dev\.ssh\id_rsa" SSH_Password="7EDB09B48AB15DE2B18F597014C01F8B" SSH_Passphrase="" SSL="false" />
+  <Connection ConnectionName="Maria" ConnType="MARIADB" Host="maria.example.com" UserName="app" Password="FB7D4A56E9AADE86D052B0F125570306" SSH="false" SSL="false" />
+  <Connection ConnectionName="Warehouse PG" ConnType="POSTGRESQL" Host="pg.example.com" Port="5433" UserName="postgres" Password="" Database="dw" SSH="false" SSL="true" SSL_PGSSLMode="verify-full" SSL_CACert="C:\certs\ca.pem" SSL_ClientCert="C:\certs\client.crt" SSL_ClientKey="C:\certs\client.key" />
+  <Connection ConnectionName="Legacy MSSQL" ConnType="SQLSERVER" Host="mssql.example.com" Port="1433" UserName="sa" Password="FB7D4A56E9AADE86D052B0F125570306" />
+  <Connection ConnectionName="Broken password" ConnType="MYSQL" Host="broken.example.com" Port="3306" UserName="root" Password="ZZZ" />
+</Connections>

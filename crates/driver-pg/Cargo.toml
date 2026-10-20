@@ -1,0 +1,29 @@
+[package]
+name = "dnt-driver-pg"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_driver_pg"
+
+[features]
+# Exposes `PgSession::query_row_text` / `backend_pid` for integration tests only (they
+# bypass transaction tracking, so they are not part of the normal API).
+test-helpers = []
+
+[dependencies]
+async-trait.workspace = true
+dnt-core.workspace = true
+futures-util.workspace = true
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+secrecy.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+
+[dev-dependencies]
+dnt-driver-pg = { path = ".", features = ["test-helpers"] }
+dnt-testkit = { path = "../testkit" }
+insta = { version = "1", features = ["yaml", "redactions"] }
+serde.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

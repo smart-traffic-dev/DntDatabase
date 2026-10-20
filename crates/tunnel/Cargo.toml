@@ -1,0 +1,21 @@
+[package]
+name = "dnt-tunnel"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_tunnel"
+
+[dependencies]
+dnt-core.workspace = true
+russh.workspace = true
+secrecy.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["net", "io-util", "macros", "rt"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+dnt-driver-mysql = { path = "../driver-mysql" }
+dnt-driver-pg = { path = "../driver-pg" }
+dnt-testkit = { path = "../testkit" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
