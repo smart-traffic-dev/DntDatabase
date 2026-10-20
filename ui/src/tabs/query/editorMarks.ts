@@ -1,8 +1,8 @@
 // Editor decorations of a query tab (spec §6.2, §9): the current statement, error markers and
-// the gutter glyph of finished statements. Every offset is a UTF-16 offset into the editor
-// text, which is what Monaco's model uses.
+// the gutter glyphs of finished / failed statements. Every offset is a UTF-16 offset into the
+// editor text, which is what Monaco's model uses.
 import type * as Monaco from 'monaco-editor';
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { api } from '../../api';
 import type { PlanView } from '../../bindings';
 import { stmtsByIndex } from '../../query/plan';
@@ -26,8 +26,49 @@ export function highlightRange(model: Model, [from, to]: [number, number]): Rng 
   return { startLineNumber: a.lineNumber, startColumn: a.column, endLineNumber: b.lineNumber, endColumn: b.column };
 }
 
-/** Error markers at the offsets the backend mapped (`AppError.position`); replaces the previous ones. */
-export function applyErrorMarkers(monaco: MonacoLike, model: Model, markers: TabRun['markers']) {
+/** A failed statement the backend gave no position for: the whole statement gets the marker (F45). */
+export interface StatementMarker {
+  range: [number, number];
+  message: string;
+  /** Outcome unknown (may have been applied): a warning rather than an error. */
+  warning: boolean;
+}
+
+/** Statements that failed (a plain user cancel is not one), with the tone of their Messages line. */
+function failures(run: Pick<TabRun, 'messages'>) {
+  return run.messages.flatMap((m) =>
+    m.index !== null && m.error !== null && m.tone !== 'info'
+      ? [{ index: m.index, error: m.error, warning: m.tone === 'warning' }]
+      : [],
+  );
+}
+
+/** Whole-statement markers of failed statements whose error has no editor position. */
+export function statementMarkers(run: Pick<TabRun, 'plan' | 'messages'>): StatementMarker[] {
+  if (!run.plan) return [];
+  const byIndex = stmtsByIndex(run.plan);
+  return failures(run).flatMap((f) => {
+    const stmt = byIndex.get(f.index);
+    if (!stmt || f.error.position !== null) return [];
+    return [{ range: [stmt.range[0], stmt.range[1]] as [number, number], message: f.error.message, warning: f.warning }];
+  });
+}
+
+/** Indexes of the statements that failed in the run. */
+export const failedIndexes = (run: Pick<TabRun, 'messages'>): number[] => [
+  ...new Set(failures(run).map((f) => f.index)),
+];
+
+/**
+ * Error markers at the offsets the backend mapped (`AppError.position`) and over whole
+ * statements for errors without one; replaces the previous ones.
+ */
+export function applyErrorMarkers(
+  monaco: MonacoLike,
+  model: Model,
+  markers: TabRun['markers'],
+  statements: StatementMarker[] = [],
+) {
   const data = markers.map((m) => {
     const at = Math.min(m.offset, model.getValueLength());
     const start = model.getPositionAt(at);
@@ -42,24 +83,43 @@ export function applyErrorMarkers(monaco: MonacoLike, model: Model, markers: Tab
       endColumn,
     };
   });
+  for (const s of statements) {
+    const a = model.getPositionAt(Math.min(s.range[0], model.getValueLength()));
+    const b = model.getPositionAt(Math.min(s.range[1], model.getValueLength()));
+    data.push({
+      severity: s.warning ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Error,
+      message: s.message,
+      startLineNumber: a.lineNumber,
+      startColumn: a.column,
+      endLineNumber: b.lineNumber,
+      endColumn: b.column,
+    });
+  }
   monaco.editor.setModelMarkers(model, MARKER_OWNER, data);
 }
 
-/** One gutter glyph on the first line of each finished statement. */
-export function finishedGlyphs(model: Model, plan: PlanView, finished: number[]) {
+function glyphsOf(model: Model, plan: PlanView, indexes: number[], className: string, hover: string) {
   const byIndex = stmtsByIndex(plan);
-  return finished.flatMap((i) => {
+  return indexes.flatMap((i) => {
     const stmt = byIndex.get(i);
     if (!stmt) return [];
     const start = model.getPositionAt(Math.min(stmt.range[0], model.getValueLength()));
     return [
       {
         range: { startLineNumber: start.lineNumber, startColumn: 1, endLineNumber: start.lineNumber, endColumn: 1 },
-        options: { glyphMarginClassName: 'stmt-done', glyphMarginHoverMessage: { value: 'Finished' } },
+        options: { glyphMarginClassName: className, glyphMarginHoverMessage: { value: hover } },
       },
     ];
   });
 }
+
+/** One gutter glyph on the first line of each finished statement. */
+export const finishedGlyphs = (model: Model, plan: PlanView, finished: number[]) =>
+  glyphsOf(model, plan, finished, 'stmt-done', 'Finished');
+
+/** One red gutter glyph on the first line of each failed statement (F45). */
+export const failedGlyphs = (model: Model, plan: PlanView, failed: number[]) =>
+  glyphsOf(model, plan, failed, 'stmt-failed', 'Failed');
 
 interface Mounted {
   editor: EditorLike;
@@ -71,6 +131,10 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
   const ranges = useRef<[number, number][]>([]);
   const highlight = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
   const glyphs = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
+  // The plan the editor text changed under: its offsets, markers and dots no longer describe the text.
+  const staleFor = useRef<string | null>(null);
+  const planId = useRef<string | null>(null);
+  planId.current = run.plan?.plan_id ?? null;
 
   // Current statement: statement_ranges (debounced) + the cursor.
   useEffect(() => {
@@ -109,9 +173,11 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
     refresh();
     const subs = [
       editor.onDidChangeModelContent(() => {
-        // Markers of the last run describe text that has changed.
+        // Markers and "done" dots of the last run describe text that has changed (F08).
         const model = editor.getModel();
         if (model) mounted.monaco.editor.setModelMarkers(model, MARKER_OWNER, []);
+        staleFor.current = planId.current;
+        glyphs.current?.set([]);
         refresh();
       }),
       editor.onDidChangeCursorPosition(paint),
@@ -127,11 +193,16 @@ export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: Tab
     };
   }, [mounted, engine]);
 
-  // Error markers and finished-statement glyphs follow the run.
+  // Error markers and finished / failed statement glyphs follow the run.
+  const statements = useMemo(() => statementMarkers({ plan: run.plan, messages: run.messages }), [run.plan, run.messages]);
+  const failed = useMemo(() => failedIndexes({ messages: run.messages }), [run.messages]);
   useEffect(() => {
     const model = mounted?.editor.getModel();
     if (!mounted || !model) return;
-    applyErrorMarkers(mounted.monaco, model, run.markers);
-    glyphs.current?.set(run.plan ? finishedGlyphs(model, run.plan, run.finished) : []);
-  }, [mounted, run.markers, run.plan, run.finished]);
+    if (run.plan && staleFor.current === run.plan.plan_id) return;
+    applyErrorMarkers(mounted.monaco, model, run.markers, statements);
+    glyphs.current?.set(
+      run.plan ? [...finishedGlyphs(model, run.plan, run.finished), ...failedGlyphs(model, run.plan, failed)] : [],
+    );
+  }, [mounted, run.markers, run.plan, run.finished, statements, failed]);
 }

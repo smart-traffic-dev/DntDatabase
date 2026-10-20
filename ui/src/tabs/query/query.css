@@ -3,6 +3,9 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
+  /* Never scroll sideways: wide content scrolls inside its own panel. */
+  overflow-x: clip;
 }
 
 .query-toolbar {
@@ -76,6 +79,7 @@
 .qr-panel {
   flex: 0 0 40%;
   min-height: 160px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
@@ -84,19 +88,47 @@
 
 .qr-tabs {
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 2px;
+  min-width: 0;
   padding: 0 8px;
   background: var(--tabstrip);
   border-bottom: 1px solid var(--border);
 }
 
+/* The result tabs scroll inside this strip; Messages / Explain / History / summary stay pinned. */
+.qr-tabs-scroll {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
 .qr-tab {
+  flex: none;
   height: 28px;
   padding: 0 12px;
   border: 0;
   background: transparent;
   color: var(--muted);
+  white-space: nowrap;
+}
+
+.qr-badge {
+  display: inline-block;
+  min-width: 16px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--danger-fg, var(--danger));
+  color: var(--panel);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .qr-tab.active {
@@ -106,6 +138,8 @@
 }
 
 .qr-summary {
+  flex: none;
+  white-space: nowrap;
   margin-left: auto;
   color: var(--muted);
   font-size: 12px;
@@ -153,7 +187,7 @@
 }
 
 .qr-msg.error {
-  color: var(--danger);
+  color: var(--danger-fg, var(--danger));
   background: var(--production-bg);
 }
 
@@ -166,11 +200,37 @@
   color: var(--muted);
 }
 
+.qr-msg.jump {
+  cursor: pointer;
+}
+
+.qr-msg.jump:hover {
+  filter: brightness(0.96);
+}
+
+.qr-msg.jump:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
+}
+
 .qr-msg-text {
   flex: 1;
   min-width: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* An error row: the statement's first line, then the server message under it. */
+.qr-msg-stmt,
+.qr-msg-detail {
+  display: block;
+}
+
+.qr-msg-stmt {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .qr-msg-meta {
@@ -182,12 +242,17 @@
   background: var(--current-stmt-bg);
 }
 
-.stmt-done {
+.stmt-done,
+.stmt-failed {
   background: var(--studio-fg-secondary);
   border-radius: 50%;
   width: 8px !important;
   height: 8px !important;
   margin: 6px 0 0 4px;
+}
+
+.stmt-failed {
+  background: var(--danger-fg, var(--danger));
 }
 
 .qr-notice {
@@ -406,7 +471,7 @@
 }
 
 .hs-status.error {
-  color: var(--danger);
+  color: var(--danger-fg, var(--danger));
 }
 
 .hs-status.cancelled,

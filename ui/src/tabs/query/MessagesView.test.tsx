@@ -8,9 +8,17 @@ import { reopenConnection } from '../../store/reopen';
 import { useQueryDocs } from '../../store/queryTabs';
 import { appError, ids, resetStores } from '../../test/backend';
 import { MessagesView } from './MessagesView';
-import { rerunStatement } from './rerun';
+import { PLAN_GONE, rerunStatement } from './rerun';
+import { revealInEditor } from '../../store/runQuery';
 
-vi.mock('./rerun', () => ({ rerunStatement: vi.fn(async () => {}) }));
+vi.mock('./rerun', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./rerun')>()),
+  rerunStatement: vi.fn(async () => {}),
+}));
+vi.mock('../../store/runQuery', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../store/runQuery')>()),
+  revealInEditor: vi.fn(() => true),
+}));
 vi.mock('../../store/reopen', () => ({ reopenConnection: vi.fn(async () => null) }));
 
 const PLAN = {
@@ -81,6 +89,62 @@ describe('MessagesView', () => {
     expect(row).toHaveTextContent('12 ms');
   });
 
+  it('error_row_shows_statement_then_server_message', () => {
+    render(<MessagesView tabId="t" run={withError(appError('query', 'Table x missing'))} />);
+    expect(screen.getByTestId('message-statement')).toHaveTextContent('SELECT 1');
+    expect(screen.getByTestId('message-detail')).toHaveTextContent('Table x missing');
+  });
+
+  it('retry_disabled_with_a_tooltip_when_the_plan_is_gone', () => {
+    const run = { ...withError(appError('query', 'boom', { retryable: true })), planExpired: true };
+    render(<MessagesView tabId="t" run={run} />);
+    const retry = screen.getByRole('button', { name: 'Retry statement' });
+    expect(retry).toBeDisabled();
+    expect(retry).toHaveAttribute('title', PLAN_GONE);
+  });
+
+  describe('click to jump (F25)', () => {
+    beforeEach(() => vi.mocked(revealInEditor).mockClear());
+
+    it('error_with_position_reveals_that_offset', async () => {
+      render(<MessagesView tabId="t" run={withError(appError('query', 'syntax', { position: 3 }))} />);
+      await userEvent.setup().click(screen.getByTestId('message-line'));
+      expect(revealInEditor).toHaveBeenCalledWith('t', { from: 3, to: 4 }, { focus: true });
+    });
+
+    it('error_without_position_selects_the_statement', async () => {
+      render(<MessagesView tabId="t" run={withError(appError('query', 'no table', { position: null }))} />);
+      await userEvent.setup().click(screen.getByTestId('message-line'));
+      expect(revealInEditor).toHaveBeenCalledWith('t', { from: 0, to: 8 }, { focus: true });
+    });
+
+    it('enter_key_jumps_too_and_buttons_do_not', async () => {
+      render(<MessagesView tabId="t" run={withError(appError('query', 'x', { retryable: true }))} />);
+      const u = userEvent.setup();
+      await u.click(screen.getByRole('button', { name: 'Retry statement' }));
+      expect(revealInEditor).not.toHaveBeenCalled();
+      screen.getByTestId('message-line').focus();
+      await u.keyboard('{Enter}');
+      expect(revealInEditor).toHaveBeenCalledTimes(1);
+    });
+
+    it('final_line_is_not_a_jump_target', async () => {
+      const run = reduceRun(startRun(emptyRun, PLAN, 0), { t: 'done', stop: null, elapsed_ms: 1 }, 1);
+      render(<MessagesView tabId="t" run={run} />);
+      await userEvent.setup().click(screen.getByTestId('message-line'));
+      expect(revealInEditor).not.toHaveBeenCalled();
+    });
+  });
+
+  it('running_run_without_lines_shows_a_running_placeholder', () => {
+    const running = startRun(emptyRun, PLAN, 0);
+    const { rerender } = render(<MessagesView tabId="t" run={running} />);
+    expect(screen.getByText(/Running/)).toBeInTheDocument();
+    expect(screen.queryByText('No messages yet.')).toBeNull();
+    rerender(<MessagesView tabId="t" run={emptyRun} />);
+    expect(screen.getByText('No messages yet.')).toBeInTheDocument();
+  });
+
   describe('virtualized', () => {
     const lines = (n: number, over: Partial<MessageLine> = {}): MessageLine[] =>
       Array.from({ length: n }, (_, i) => ({
@@ -127,7 +191,7 @@ describe('MessagesView', () => {
       const id = useQueryDocs.getState().newQuery(ids.prod, null);
       const msgs = lines(5000);
       msgs[3] = { ...msgs[3]!, tone: 'error', error: err, retryRange: [0, 5] };
-      render(<MessagesView tabId={id} run={runWith(msgs)} />);
+      render(<MessagesView tabId={id} run={{ ...runWith(msgs), plan: PLAN }} />);
       const u = userEvent.setup();
       await u.click(screen.getByRole('button', { name: 'Retry statement' }));
       expect(rerunStatement).toHaveBeenCalledWith(id, 3);

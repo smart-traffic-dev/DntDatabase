@@ -3,9 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanStmtView, RunEvent, Value } from '../../bindings';
 import { emptyRun, reduceRun, startRun, useQueryRun, type TabRun } from '../../store/queryRun';
-import { mockBackend, resetStores } from '../../test/backend';
+import { appError, mockBackend, resetStores } from '../../test/backend';
 import { ResultPanel } from './ResultPanel';
-import { rerunStatement } from './rerun';
+import { PLAN_GONE, rerunStatement } from './rerun';
 
 vi.mock('./rerun', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./rerun')>()),
@@ -147,4 +147,58 @@ describe('ResultPanel', () => {
     expect(screen.getByTestId('explain-view')).toBeInTheDocument();
     expect(screen.getByTestId('panel-explain')).toHaveAttribute('aria-selected', 'true');
   });
-});
+
+  it('many_result_tabs_scroll_inside_a_strip_and_the_fixed_tabs_stay_outside', () => {
+    const events = Array.from({ length: 41 }, (_, i) => result(i + 1, 0, 1)).flat();
+    show(play(events));
+    const strip = screen.getByTestId('result-tabs');
+    expect(strip).toContainElement(screen.getByTestId('result-tab-41'));
+    expect(strip).not.toContainElement(screen.getByTestId('panel-messages'));
+    expect(strip).not.toContainElement(screen.getByTestId('panel-history'));
+    expect(screen.getByRole('tablist')).toContainElement(screen.getByTestId('panel-history'));
+  });
+
+  it('messages_tab_is_badged_with_the_error_count', () => {
+    const err = { t: 'statement_error', index: 1, error: appError('query', 'boom') } as RunEvent;
+    const { unmount } = show(play([...result(1, 0, 1), err]));
+    expect(screen.getByTestId('messages-badge')).toHaveTextContent('1');
+    expect(screen.getByTestId('panel-messages')).toHaveAccessibleName('Messages (1 error)');
+    unmount();
+    show(play(result(1, 0, 1)));
+    expect(screen.queryByTestId('messages-badge')).toBeNull();
+  });
+
+  it('a_run_that_stops_on_an_error_after_a_result_switches_to_messages', () => {
+    const err = { t: 'statement_error', index: 1, error: appError('query', 'boom') } as RunEvent;
+    const running = play([...result(1, 0, 1), err], false);
+    show(running);
+    expect(useQueryRun.getState().get('t').panel).toBe('result');
+    act(() =>
+      useQueryRun.setState({
+        runs: new Map([['t', reduceRun(running, { t: 'done', stop: { kind: 'error', index: 1 }, elapsed_ms: 5 }, 50)]]),
+      }),
+    );
+    expect(useQueryRun.getState().get('t').panel).toBe('messages');
+    expect(screen.getByTestId('messages')).toBeInTheDocument();
+  });
+
+  it('a_finished_error_run_is_not_forced_back_to_messages_on_mount', () => {
+    const err = { t: 'statement_error', index: 1, error: appError('query', 'boom') } as RunEvent;
+    let run = play([...result(1, 0, 1), err], false);
+    run = reduceRun(run, { t: 'done', stop: { kind: 'error', index: 1 }, elapsed_ms: 5 }, 50);
+    show(run);
+    expect(useQueryRun.getState().get('t').panel).toBe('result');
+  });
+
+  it('a_stop_by_the_user_is_stated_on_the_result', () => {
+    const running = play(result(1, 0, 1), false);
+    show(reduceRun(running, { t: 'done', stop: { kind: 'cancelled' }, elapsed_ms: 3093 }, 50));
+    expect(screen.getByTestId('result-cancelled')).toHaveTextContent('Cancelled by user after 3.1 s');
+  });
+
+  it('fetch_all_is_disabled_with_a_tooltip_when_the_plan_is_gone', () => {
+    show({ ...play(result(1, 0, 20, true)), planExpired: true });
+    const btn = screen.getByRole('button', { name: 'Fetch all' });
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', PLAN_GONE);
+  });});
