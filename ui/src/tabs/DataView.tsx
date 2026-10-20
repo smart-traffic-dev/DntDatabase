@@ -13,10 +13,11 @@ import { draftToFilter, newFilterRow, useTableData, type FilterRow } from '../st
 import { cellStatus, effectivePage } from './data/editModel';
 import { EditPreviewDialog } from './data/EditPreviewDialog';
 import { copyAs, copySql, type CopyFormat } from './data/copyAs';
+import { isCutCell } from './data/cutCells';
 import { closeValueEditor, openValueEditor, useValueEditors } from './data/openValueEditor';
 import { ValueEditor } from './data/ValueEditor';
 import { FilterBar, type FilterBarHandle } from './FilterBar';
-import { cellView } from './query/format';
+import { editText } from './query/format';
 import { ResultGrid, writeClipboard, type GridEditing } from './query/ResultGrid';
 import './query/query.css';
 import './data/dataEdit.css';
@@ -311,8 +312,12 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
         setEditNotice('This row has no complete key, so it cannot be edited.');
         return false;
       }
-      if (fetched === undefined && truncatedCells.has(`${row},${col}`)) {
+      if (fetched === undefined && isCutCell(data, row, col)) {
         setEditNotice('This value is cut short; open it in the value editor to change it.');
+        return false;
+      }
+      if (fetched === undefined && input.kind === 'text' && !inline(row, col)) {
+        setEditNotice('Change this value in the value editor.');
         return false;
       }
       // The token of a cut original fetched in full lets the backend check that column too.
@@ -332,41 +337,56 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     return r.ok;
   };
 
-  const truncatedCells = useMemo(() => new Set((data?.truncated ?? []).map(([r, c]) => `${r},${c}`)), [data]);
+  /** Whether a cell of the loaded page is not its whole value (the one rule: `isCutCell`). */
+  const cutAt = (row: number, col: number) => !!data && row < data.rows.length && isCutCell(data, row, col);
+
+  /**
+   * Whether a cell is edited in place: its text in the grid is its value. Binary columns, cut
+   * cells, arrays and long text / JSON are changed in the value editor (which fetches cut values first).
+   */
+  function inline(row: number, col: number): boolean {
+    if (!data || data.columns[col]?.logical === 'Binary' || cutAt(row, col)) return false;
+    const now = shown?.rows[row]?.[col];
+    return now === undefined || editText(now) !== null;
+  }
+
+  /** Whether a cell may be changed at all (an editable column of a row not marked for deletion). */
+  const writable = (row: number, col: number) => {
+    const name = data?.columns[col]?.name;
+    if (!data || !info || !name || !info.editable_columns.includes(name)) return false;
+    const id = rowIds[row];
+    return row >= data.rows.length || (!!id && !staged.deletes.has(id));
+  };
 
   const editing = useMemo<GridEditing | undefined>(() => {
     if (!editable || !data || !shown || !info) return undefined;
     const names = data.columns.map((c) => c.name);
+    const open = (row: number, col: number, column: string) =>
+      openValueEditor({ tabId: tab.id, row, col, column, rowId: row < data.rows.length ? (rowIds[row] ?? null) : null });
     return {
-      isEditable: (row, col) => {
-        const name = names[col];
-        if (!name || !info.editable_columns.includes(name) || truncatedCells.has(`${row},${col}`)) return false;
-        const id = rowIds[row];
-        return row >= data.rows.length || (!!id && !staged.deletes.has(id));
-      },
+      isEditable: (row, col) => writable(row, col) && inline(row, col),
       status: (row, col) => cellStatus(data, staged, conflicts, rowIds, row, names[col] ?? ''),
       onEdit: (row, col, text) => {
         const name = names[col];
         if (!name) return;
-        if (row < data.rows.length && truncatedCells.has(`${row},${col}`)) {
-          openValueEditor({ tabId: tab.id, row, col, column: name, rowId: rowIds[row] ?? null });
+        // Never stage the grid's text of a value it does not show whole.
+        if (!inline(row, col)) {
+          open(row, col, name);
           return;
         }
         const now = shown.rows[row]?.[col];
-        if (now && cellView(now).text === text) return;
+        if (now && editText(now) === text) return;
         setCell(row, col, { kind: 'text', text });
       },
       onActivate: (row, col) => {
         const name = names[col];
-        if (name && row < data.rows.length && truncatedCells.has(`${row},${col}`)) {
-          openValueEditor({ tabId: tab.id, row, col, column: name, rowId: rowIds[row] ?? null });
-        }
+        if (name && !inline(row, col)) open(row, col, name);
       },
       onKey: handleEditKey,
     };
-    // `setCell` and `handleEditKey` read the latest values through the stores and these deps.
+    // `setCell`, `inline`, `writable` and `handleEditKey` read the latest values through the stores and these deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editable, data, shown, info, staged, conflicts, rowIds, truncatedCells]);
+  }, [editable, data, shown, info, staged, conflicts, rowIds]);
 
   /** Opens the value editor on any cell (Shift+Enter, the cell menu). */
   const openCell = (row: number, col: number) => {
@@ -394,7 +414,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
     // What the cell holds now: a change staged for it (when it is text, NULL or a value), else the page's value.
     const change = isNew ? staged.inserts[row - data.rows.length]?.values.get(column.name) : id ? staged.updates.get(id)?.cells.get(column.name) : undefined;
     const showsChange = change !== undefined && (change.kind === 'text' || change.kind === 'null' || change.kind === 'value');
-    const cut = !isNew && !showsChange && truncatedCells.has(`${row},${col}`);
+    const cut = !isNew && !showsChange && isCutCell(data, row, col);
     const value = showsChange ? (shown.rows[row]?.[col] ?? { t: 'Null' as const }) : (data.rows[row]?.[col] ?? shown.rows[row]?.[col] ?? { t: 'Null' as const });
     const canEdit = editable && !!info?.editable_columns.includes(column.name) && (isNew || (!!id && !staged.deletes.has(id)));
     return (
@@ -765,7 +785,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
                 ];
                 if (!editing) return [...copies, ...(filters.length > 0 ? [{ separator: true } as MenuEntry, ...filters] : [])];
                 const editEntries: MenuEntry[] = [];
-                if (editing.isEditable(ctx.row, ctx.col)) {
+                if (writable(ctx.row, ctx.col) && !cutAt(ctx.row, ctx.col)) {
                   editEntries.push({ label: 'Set to NULL', hint: 'Ctrl+0', run: () => setCell(ctx.row, ctx.col, { kind: 'null' }) });
                 }
                 editEntries.push({

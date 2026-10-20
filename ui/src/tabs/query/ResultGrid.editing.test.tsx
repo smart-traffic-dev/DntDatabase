@@ -88,6 +88,16 @@ describe('ResultGrid editing', () => {
     expect(e.onActivate).toHaveBeenCalledWith(1, 2);
   });
 
+  it('an editable cell is edited as its stored value: JSON as written, a 20-digit number exact', () => {
+    const raw = '{"big": 12345678901234567890, "x": 1.10}';
+    const json: ResultSet = { ...result, chunks: [[[{ t: 'Int', v: 10 }, { t: 'Json', v: raw }, { t: 'Text', v: 'cut' }]]], rowCount: 1 };
+    render(<ResultGrid result={json} editing={editing({ isEditable: (_r, c) => c === 1 })} />);
+    const cell = glide.props!.getCellContent([1, 0]);
+    expect(cell).toMatchObject({ readonly: false, data: raw });
+    // The grid itself still shows the compact one-line form.
+    expect(cell.displayData).not.toContain('\n');
+  });
+
   it('Delete and Backspace never stage an empty text: no onDelete is wired, NULL is Ctrl+0 / the menu', () => {
     const e = editing();
     render(<ResultGrid result={result} editing={e} />);

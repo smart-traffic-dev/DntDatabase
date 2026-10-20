@@ -28,6 +28,7 @@ import {
   cellView,
   charsForWidth,
   copyText,
+  editText,
   fitCellText,
   fitColumnWidth,
   type GridFont,
@@ -390,12 +391,14 @@ export function ResultGrid({
       const max = charsForWidth(widths[col] ?? MIN_COL_WIDTH, charPx);
       const clipped = view.text.length > max;
       const status = editing?.status(row, col) ?? null;
+      const editable = editing?.isEditable(row, col) ?? false;
       return {
         kind: GridCellKind.Text,
-        data: view.text,
+        // The overlay edits the value as stored, never the display text (compacted JSON, cut text).
+        data: editable ? (editText(value) ?? view.text) : view.text,
         displayData: fitCellText(view, max).replace(/\s+/g, ' '),
         allowOverlay: true, // a read-only overlay shows the full value
-        readonly: !(editing?.isEditable(row, col) ?? false),
+        readonly: !editable,
         // A clipped number keeps its leading digits (left side) and gets an ellipsis.
         contentAlign: view.kind === 'number' && !clipped ? 'right' : 'left',
         themeOverride: status ? { ...(view.kind === 'null' ? nullStyle : {}), ...statusStyle[status] } : view.kind === 'null' ? nullStyle : undefined,

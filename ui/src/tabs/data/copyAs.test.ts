@@ -115,6 +115,13 @@ describe('copySql', () => {
     await expect(copySql('update', rowsOf(0), cut, meta)).resolves.toBeTypeOf('string');
   });
 
+  it('a binary preview is cut, also inside an array and when the page does not list it', async () => {
+    const preview: Value = { t: 'Bytes', v: { len: 1000, preview: [1, 2] } };
+    const p = page([[int(1), { t: 'Array', v: [text('a'), preview] }], [int(2), preview]]);
+    expect(() => copyAs('json', rowsOf(0), p)).toThrow(TRUNCATED_COPY);
+    await expect(copySql('insert', rowsOf(1), p, meta)).rejects.toThrow(TRUNCATED_COPY);
+  });
+
   it('needs the key to find the rows', async () => {
     const p = page([[int(1), text('a')]]);
     await expect(copySql('insert', rowsOf(0), p, { ...meta, info: { ...info, key: [] } })).rejects.toThrow(/key/);

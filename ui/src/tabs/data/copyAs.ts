@@ -5,6 +5,7 @@ import type { EditableInfo, ObjectRef, TableDataPage, Value } from '../../bindin
 import { rowRef } from '../../store/dataEdits';
 import { MAX_COPY_CELLS, cellView } from '../query/format';
 import { plainText } from '../query/gridCopy';
+import { isCutCell } from './cutCells';
 import { blockValues, selectionBlock, type Block, type SelectionLike } from '../query/gridSelection';
 
 export type CopyFormat = 'json' | 'markdown';
@@ -67,14 +68,7 @@ export function copyAs(format: CopyFormat, sel: SelectionLike | undefined, page:
   const block = blockOf(sel, page, meta);
   const rows = blockValues({ chunks: [page.rows] }, block);
   // Never copy a value the page cut short as if it were complete.
-  const cut = new Set(page.truncated.map(([r, c]) => `${r},${c}`));
-  const incomplete = block.rows.some((r, i) =>
-    block.cols.some((c, j) => {
-      const v = rows[i]![j]!;
-      return cut.has(`${r},${c}`) || (v.t === 'Bytes' && v.v.preview.length < v.v.len);
-    }),
-  );
-  if (incomplete) throw new Error(TRUNCATED_COPY);
+  if (block.rows.some((r) => block.cols.some((c) => isCutCell(page, r, c)))) throw new Error(TRUNCATED_COPY);
   const header = block.cols.map((c) => page.columns[c]?.name ?? '');
   switch (format) {
     case 'json':
@@ -100,7 +94,7 @@ export interface CopySqlMeta extends CopyCell {
 export async function copySql(format: 'insert' | 'update', sel: SelectionLike | undefined, page: TableDataPage, meta: CopySqlMeta): Promise<string> {
   const rows = [...new Set(blockOf(sel, page, meta).rows)].filter((r) => r < page.rows.length).sort((a, b) => a - b);
   if (rows.length === 0) throw new Error('Select the rows to copy.');
-  if (page.truncated.some(([r]) => rows.includes(r))) throw new Error(TRUNCATED_COPY);
+  if (rows.some((r) => page.columns.some((_, c) => isCutCell(page, r, c)))) throw new Error(TRUNCATED_COPY);
   const refs = rows.map((r) => rowRef(page, meta.info, r));
   if (refs.some((r) => r === null)) throw new Error("Copying as SQL needs the table's key columns.");
   return api.dataCopySql(meta.connectionId, meta.object, refs as NonNullable<(typeof refs)[number]>[], format);

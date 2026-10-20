@@ -61,7 +61,8 @@ vi.mock('./query/ResultGrid', () => ({
                 aria-label={`cell ${r},${ci}`}
                 data-status={editing.status(r, ci) ?? ''}
                 data-editable={String(editing.isEditable(r, ci))}
-                onClick={() => editing.onEdit(r, ci, 'edited')}
+                // The text the overlay commits: `data-next` when a test sets it, else "edited".
+                onClick={(e) => editing.onEdit(r, ci, e.currentTarget.getAttribute('data-next') ?? 'edited')}
                 onDoubleClick={() => editing.onActivate?.(r, ci)}
               />
             )),
@@ -770,6 +771,91 @@ describe('DataView editing', () => {
     // Typing into it stages nothing.
     await user.click(cell(0, 2));
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+  });
+
+  const binCol: ColumnMeta = { name: 'doc', db_type: 'blob', logical: 'Binary', nullable: true, origin_table: null, origin_column: null };
+  const bytes = (len: number, shown = len): Value => ({ t: 'Bytes', v: { len, preview: Array.from({ length: shown }, (_, i) => i % 256) } });
+  /** Row 0's `doc` is `doc0`; the others hold 3 whole bytes. */
+  const binaryPage = (doc0: Value, over: Partial<TableDataPage> = {}) =>
+    rows3({
+      columns: [col('id'), col('we`ird"col'), binCol],
+      rows: [0, 1, 2].map((i) => [int(i + 1), int(0), i === 0 ? doc0 : bytes(3)]),
+      ...over,
+    });
+
+  it('a 1000-byte binary cell shown by its preview is fetched in full before it can be edited', async () => {
+    const full = deferred<unknown>();
+    const { user } = await editable(
+      { table_data: () => binaryPage(bytes(1000, 64)), data_cell_fetch: () => full.promise },
+      { stage: false },
+    );
+    // Not editable in place, whether or not the page listed it as truncated.
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
+    await user.click(cell(0, 2));
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    fireEvent.doubleClick(cell(0, 2));
+    expect(await screen.findByText('Loading the full value…')).toBeInTheDocument();
+    expect(lastCall('data_cell_fetch')).toEqual({ id: ids.prod, obj: objectRef, key: [['id', int(1)]], column: 'doc' });
+    // Until the full value is here nothing can be saved or set.
+    expect(screen.getByRole('textbox', { name: 'Hex' })).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Set NULL' })).toBeDisabled();
+    await act(async () => full.resolve({ token: 'tok-b', payload: { kind: 'base64', data: btoa('\x01'.repeat(1000)) } }));
+    await waitFor(() => expect(screen.getByText(/^1,000 bytes/)).toBeInTheDocument());
+    expect(screen.getByRole('textbox', { name: 'Hex' })).not.toHaveAttribute('readonly');
+  });
+
+  it('a binary cell is never edited in place, even a whole one; the value editor opens instead', async () => {
+    vi.mocked(openValueEditor).mockClear();
+    const { user } = await editable({ table_data: () => binaryPage(bytes(3)) }, { stage: false });
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
+    cell(0, 2).setAttribute('data-next', 'deadbeef');
+    await user.click(cell(0, 2));
+    expect(openValueEditor).toHaveBeenCalledWith(expect.objectContaining({ row: 0, col: 2, column: 'doc' }));
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    expect(useDataEdits.getState().hasStaged(makeTab().id)).toBe(false);
+  });
+
+  it('a binary cell the backend lists as truncated is not editable in place', async () => {
+    await editable({ table_data: () => binaryPage(bytes(1000, 64), { truncated: [[0, 2]], truncated_cells: 1 }) }, { stage: false });
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
+    expect(cell(1, 2)).toHaveAttribute('data-editable', 'false');
+  });
+
+  it('an inline JSON edit stages the stored text exactly (20-digit numbers, 1.10 kept)', async () => {
+    const raw = '{"big": 12345678901234567890, "x": 1.10}';
+    const jsonCol: ColumnMeta = { name: 'doc', db_type: 'json', logical: 'Json', nullable: true, origin_table: null, origin_column: null };
+    const { user } = await editable(
+      {
+        table_data: () => rows3({ columns: [col('id'), col('we`ird"col'), jsonCol], rows: [1, 2, 3].map((i) => [int(i), int(0), { t: 'Json', v: raw }]) }),
+        data_preview: () => previewOf(),
+      },
+      { stage: false },
+    );
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'true');
+    // Committing the overlay unchanged stages nothing.
+    cell(0, 2).setAttribute('data-next', raw);
+    await user.click(cell(0, 2));
+    expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
+    const next = raw.replace('"x": 1.10', '"x": 2.50');
+    cell(0, 2).setAttribute('data-next', next);
+    await user.click(cell(0, 2));
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({ set: { edits: [{ set: [['doc', { kind: 'text', text: next }]] }] } });
+    expect(next).toContain('12345678901234567890');
+  });
+
+  it('long text and JSON open the value editor instead of the in-place editor', async () => {
+    vi.mocked(openValueEditor).mockClear();
+    const long = 'a'.repeat(10_001);
+    await editable(
+      { table_data: () => rows3({ columns: [col('id'), col('we`ird"col'), col('doc', 'text')], rows: [1, 2, 3].map((i) => [int(i), int(0), { t: 'Text', v: long }]) }) },
+      { stage: false },
+    );
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
+    fireEvent.doubleClick(cell(0, 2));
+    expect(openValueEditor).toHaveBeenCalledWith(expect.objectContaining({ row: 0, col: 2, column: 'doc' }));
   });
 
   it('value_editor_stages_a_cut_cell_with_the_token_of_its_full_value', async () => {
