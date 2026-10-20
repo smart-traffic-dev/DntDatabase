@@ -10,6 +10,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
 import { TabBar } from './components/TabBar';
+import { TitleBar } from './components/TitleBar';
 import { Toolbar } from './components/Toolbar';
 import { ObjectTab } from './tabs/ObjectTab';
 import { QueryTab } from './tabs/query/QueryTab';
@@ -95,6 +96,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <TitleBar />
       <Toolbar />
       <div className="body">
         <ErrorBoundary label="Sidebar">

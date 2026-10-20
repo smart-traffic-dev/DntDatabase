@@ -1,0 +1,86 @@
+/* Custom window title bar (decorations: false). Height and control widths follow Windows 11. */
+.titlebar {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  height: 32px;
+  background: var(--sidebar);
+  color: var(--text);
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+.titlebar-drag {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 10px;
+}
+
+.titlebar-icon {
+  display: flex;
+  color: var(--accent);
+}
+
+.titlebar-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.titlebar-title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: var(--text-callout);
+}
+
+.titlebar-controls {
+  flex: none;
+  display: flex;
+}
+
+.titlebar-btn {
+  width: 46px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  cursor: default;
+}
+
+.titlebar-btn:hover {
+  background: var(--hover);
+}
+
+.titlebar-btn:active {
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+/* Windows' close button: red on hover, white glyph. */
+.titlebar-btn.close:hover {
+  background: #c42b1c;
+  color: #fff;
+}
+
+.titlebar-btn.close:active {
+  background: #c8433a;
+  color: #fff;
+}
+
+/* Inactive window: dimmed title and glyphs, as the native frame does. */
+.titlebar.inactive .titlebar-title,
+.titlebar.inactive .titlebar-icon,
+.titlebar.inactive .titlebar-btn:not(:hover) {
+  color: var(--muted);
+}
+
+.titlebar.inactive .titlebar-icon {
+  opacity: 0.6;
+}

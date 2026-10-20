@@ -1,7 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions of the main window. The opener plugin is used from Rust only (open_log_folder), so the UI gets no opener permission.",
+  "description": "Permissions of the main window. The opener plugin is used from Rust only (open_log_folder), so the UI gets no opener permission. The window-control permissions serve the custom title bar (decorations are off); close goes through the close guard (onCloseRequested), destroy is its final step.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-destroy", "dialog:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-destroy",
+    "core:window:allow-close",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-start-dragging",
+    "dialog:default"
+  ]
 }

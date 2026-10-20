@@ -55,6 +55,9 @@ tauri-plugin-opener = "2"
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
+# WebView2 settings Tauri does not expose (browser accelerator keys); versions match wry's.
+webview2-com = "0.39"
+windows-core = "0.62"
 zeroize = "1"
 
 # Argon2id (m = 64 MiB) is very slow unoptimised; keep debug builds and tests usable.

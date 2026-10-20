@@ -3,6 +3,7 @@
 
 use dnt_store::keyring_store::KeyringSecretStore;
 use dntdatabase::commands;
+use dntdatabase::desktop;
 use dntdatabase::logging;
 use dntdatabase::state::{AppPaths, AppState};
 use std::error::Error;
@@ -45,6 +46,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            desktop::harden_main_webview(app);
             Ok(())
         })
         .run(tauri::generate_context!())?;
