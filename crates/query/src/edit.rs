@@ -12,7 +12,7 @@ use dnt_core::sql::build::{
     ColumnTarget, RowGuard, RowKey, TableRef,
 };
 use dnt_core::sql::ident::quote_ident;
-use dnt_core::sql::{Dialect, StatementKind};
+use dnt_core::sql::{tokenize, Dialect, StatementKind, TokKind};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -430,6 +430,19 @@ pub fn build_edit_plan(
     ctx: GuardCtx,
     loaded: &LoadedLookup<'_>,
 ) -> Result<EditPlan, EditError> {
+    build_capped(set, detail, metas, dialect, ctx, loaded, MAX_PLAN_SQL_BYTES)
+}
+
+/// [`build_edit_plan`] with at most `max_sql` bytes of SQL.
+fn build_capped(
+    set: &EditSet,
+    detail: &TableDetail,
+    metas: &[ColumnMeta],
+    dialect: Dialect,
+    ctx: GuardCtx,
+    loaded: &LoadedLookup<'_>,
+    max_sql: usize,
+) -> Result<EditPlan, EditError> {
     let kind = match dialect {
         Dialect::MySql(_) => DbKind::MySql,
         Dialect::Postgres => DbKind::Postgres,
@@ -460,9 +473,18 @@ pub fn build_edit_plan(
         },
     };
     let mut stmts = Vec::with_capacity(set.edits.len());
+    let mut sql_bytes = 0usize;
     for (i, edit) in set.edits.iter().enumerate() {
         let index = u32::try_from(i).map_err(|_| invalid("", "too many changes"))?;
-        stmts.push(b.edit(index, edit)?);
+        let st = b.edit(index, edit)?;
+        sql_bytes = sql_bytes
+            .saturating_add(st.sql.len())
+            .saturating_add(st.recheck.as_ref().map_or(0, String::len))
+            .saturating_add(st.read_back.as_ref().map_or(0, String::len));
+        if sql_bytes > max_sql {
+            return Err(invalid("", PLAN_TOO_LARGE));
+        }
+        stmts.push(st);
     }
 
     let (verdict, reason) = edit_verdict(&stmts, ed.atomic, dialect, ctx);
@@ -474,6 +496,76 @@ pub fn build_edit_plan(
         fingerprint: fingerprint(detail),
         dialect,
     })
+}
+
+/// Most SQL one plan may hold, in bytes (statements with their rechecks and read-backs).
+/// A loaded value expands to a literal in every statement that uses it, so a few tokens
+/// reused across many cells could otherwise build gigabytes of SQL.
+pub const MAX_PLAN_SQL_BYTES: usize = 256 * 1024 * 1024;
+
+/// Why a plan over [`MAX_PLAN_SQL_BYTES`] is refused (UI copy).
+pub const PLAN_TOO_LARGE: &str = "changes too large; apply fewer values at once";
+
+/// String literals longer than this (bytes, quotes included) are shortened by
+/// [`display_sql`].
+pub const DISPLAY_LITERAL_MAX: usize = 4096;
+/// Characters of a shortened literal that [`display_sql`] keeps.
+const DISPLAY_KEEP: usize = 64;
+
+/// `sql` for display (a preview): every string literal longer than
+/// [`DISPLAY_LITERAL_MAX`] becomes its first characters, `…`, the closing quote and a
+/// comment with its size: `X'0a1b…' /* 1048576 bytes */` for binary data (MySQL
+/// `X'…'`, PostgreSQL `'\x…'`), `'abc…' /* N chars */` otherwise. Never run: the plan
+/// keeps and runs the full statement.
+pub fn display_sql(sql: &str, dialect: Dialect) -> String {
+    if sql.len() <= DISPLAY_LITERAL_MAX {
+        return sql.to_string();
+    }
+    let toks = tokenize(sql, dialect);
+    let mut out = String::new();
+    let mut at = 0;
+    for (i, t) in toks.iter().enumerate() {
+        if t.kind != TokKind::Quoted || t.end - t.start <= DISPLAY_LITERAL_MAX {
+            continue;
+        }
+        let text = &sql[t.start..t.end];
+        // A string (`'…'`, PostgreSQL `E'…'`); identifiers and dollar quotes stay.
+        let Some(open) = text.find('\'') else {
+            continue;
+        };
+        if !(open == 0 || text[..open].eq_ignore_ascii_case("e")) {
+            continue;
+        }
+        let body = text[open + 1..]
+            .strip_suffix('\'')
+            .unwrap_or(&text[open + 1..]);
+        let x_prefix = i > 0
+            && toks[i - 1].end == t.start
+            && matches!(toks[i - 1].kind, TokKind::Word(w) if w.eq_ignore_ascii_case("x"));
+        let is_hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
+        let size = if x_prefix && is_hex(body) {
+            format!("{} bytes", body.len() / 2)
+        } else if let Some(hex) = body.strip_prefix("\\x").filter(|h| is_hex(h)) {
+            format!("{} bytes", hex.len() / 2)
+        } else {
+            format!("{} chars", body.chars().count())
+        };
+        let keep_end = body
+            .char_indices()
+            .nth(DISPLAY_KEEP)
+            .map_or(body.len(), |(p, _)| p);
+        // Never end on a backslash (it would escape the closing quote).
+        let kept = body[..keep_end].trim_end_matches('\\');
+        out.push_str(&sql[at..t.start]);
+        out.push_str(&text[..=open]);
+        out.push_str(kept);
+        out.push_str("…' /* ");
+        out.push_str(&size);
+        out.push_str(" */");
+        at = t.end;
+    }
+    out.push_str(&sql[at..]);
+    out
 }
 
 /// The verdict of a plan's statements under `ctx` (also used to judge a stored plan
@@ -2259,6 +2351,75 @@ mod tests {
             cell_select(&nokey, &m, Dialect::MYSQL, &key, "payload"),
             Err(EditError::NotEditable(NotEditable::NoKey))
         ));
+    }
+
+    /// One 16-byte token stands for a large value; reused across many cells it would
+    /// expand into a literal per use. The plan's SQL is capped.
+    #[test]
+    fn token_reused_beyond_the_plan_cap_is_refused() {
+        let token = Uuid::from_u128(11);
+        let big = "z".repeat(10_000);
+        let loaded = store(
+            token,
+            "payload",
+            FullValue::try_from_value(text(&big)).unwrap(),
+        );
+        let (d, m) = my_items(INNODB);
+        let edits: Vec<RowEdit> = (1..=20u64)
+            .map(|id| {
+                let mut r = my_row();
+                r.key[0].1 = Value::UInt(id);
+                update(r, &[("payload", CellInput::Loaded { token })])
+            })
+            .collect();
+        let s = set(edits);
+        // 20 statements of ~10 KB each: under 1 MB, over 100 KB.
+        assert!(build_capped(&s, &d, &m, Dialect::MYSQL, ctx(None), &loaded, 1 << 20).is_ok());
+        match build_capped(&s, &d, &m, Dialect::MYSQL, ctx(None), &loaded, 100_000) {
+            Err(EditError::Invalid { column, reason }) => {
+                assert_eq!(column, "");
+                assert_eq!(reason, PLAN_TOO_LARGE);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(MAX_PLAN_SQL_BYTES, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn display_sql_shortens_long_literals_only() {
+        let short = "UPDATE `t` SET `a` = 'x' WHERE `id` = 1";
+        assert_eq!(display_sql(short, Dialect::MYSQL), short);
+        let hex = "0a1b".repeat(2048);
+        let my = format!(
+            "UPDATE `t` SET `b` = X'{hex}', `c` = _utf8mb4'{}' WHERE `id` = 1",
+            "é".repeat(5000)
+        );
+        let shown = display_sql(&my, Dialect::MYSQL);
+        assert!(
+            shown.starts_with(&format!(
+                "UPDATE `t` SET `b` = X'{}…' /* 4096 bytes */, ",
+                &hex[..64]
+            )),
+            "{shown}"
+        );
+        assert!(
+            shown.contains(&format!("_utf8mb4'{}…' /* 5000 chars */", "é".repeat(64))),
+            "{shown}"
+        );
+        assert!(shown.ends_with(" WHERE `id` = 1"), "{shown}");
+        assert!(shown.len() < 600, "{}", shown.len());
+        let pg = format!("UPDATE \"t\" SET \"b\" = '\\x{hex}'::bytea WHERE \"id\" = 1");
+        let shown = display_sql(&pg, Dialect::Postgres);
+        assert!(
+            shown.starts_with(&format!(
+                "UPDATE \"t\" SET \"b\" = '\\x{}…' /* 4096 bytes */::bytea WHERE",
+                &hex[..62]
+            )),
+            "{shown}"
+        );
+        // A literal at the limit stays whole.
+        let edge = format!("SELECT 1, '{}'", "a".repeat(DISPLAY_LITERAL_MAX - 2));
+        assert_eq!(display_sql(&edge, Dialect::MYSQL), edge);
     }
 
     #[test]

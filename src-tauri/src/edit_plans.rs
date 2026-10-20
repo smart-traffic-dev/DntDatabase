@@ -63,8 +63,9 @@
 //! (PostgreSQL `standard_conforming_strings` on, MySQL `character_set_client` utf8mb4:
 //! the key's literals are app-built), and a silent reconnect between the check and the
 //! read discards the value. `data_cell_load_file` makes the same kind of value from a
-//! file. Either stores the value under a token for [`crate::query_sessions::PLAN_TTL`]
-//! ([`LoadedStore`], at most [`MAX_LOADED_BYTES`] in all, oldest dropped first), bound
+//! file. Either stores the value under a token that lives [`LOADED_TTL`] after its last
+//! successful use ([`LoadedStore`], at most [`MAX_LOADED_BYTES`] in all, the least
+//! recently used dropped first), bound
 //! to the connection, table and column it was read for: `data_preview` takes it as a
 //! [`CellInput::Loaded`](dnt_query::edit::CellInput) value or, through
 //! [`RowRef::loaded`](dnt_query::edit::RowRef), as the complete original of a cut cell
@@ -83,8 +84,8 @@ use dnt_core::sql::ident::{qualified_name, quote_ident};
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_query::edit::{
-    base64_encode, build_edit_plan, cell_select, edit_verdict, fingerprint, Atomicity, EditError,
-    EditPlan, EditSet, PlannedEdit, Protection,
+    base64_encode, build_edit_plan, cell_select, display_sql, edit_verdict, fingerprint, Atomicity,
+    EditError, EditPlan, EditSet, PlannedEdit, Protection,
 };
 use dnt_query::{redact, GuardCtx, Verdict};
 use futures_util::future::{select, Either};
@@ -99,11 +100,15 @@ use uuid::Uuid;
 /// Most edits one preview takes.
 pub const MAX_EDITS: usize = 10_000;
 
-/// What `data_preview` returns: the stored plan's id and exactly the statements
-/// `data_apply` will send.
+/// What `data_preview` returns: the stored plan's id and the statements `data_apply`
+/// will send.
 #[derive(Debug, Clone, PartialEq, Serialize, specta::Type)]
 pub struct EditPreview {
     pub plan_id: Uuid,
+    /// The statements, for display: exactly what is sent, except that string literals
+    /// over 4 KiB are shortened to their start (`X'0a1b…'`, `'abc…'`) followed by an SQL
+    /// comment with their size in bytes or chars; the stored plan keeps and runs them in
+    /// full.
     pub statements: Vec<String>,
     pub verdict: Verdict,
     pub atomic: Atomicity,
@@ -215,7 +220,10 @@ impl EditPlanStore {
 
 /// Largest complete value `data_cell_fetch` / `data_cell_load_file` take.
 pub const MAX_FETCH_BYTES: usize = 64 * 1024 * 1024;
-/// Loaded values kept at once, in bytes; the oldest are dropped past it.
+/// How long a loaded value lives after it was last used (sliding: every successful use
+/// restarts it).
+pub const LOADED_TTL: Duration = Duration::from_secs(30 * 60);
+/// Loaded values kept at once, in bytes; the least recently used are dropped past it.
 pub const MAX_LOADED_BYTES: usize = 256 * 1024 * 1024;
 
 /// A complete cell value as the value editor gets it.
@@ -256,7 +264,7 @@ struct Loaded {
 
 const LOADED_GONE: &str = "the loaded value is no longer available (it expired); load it again";
 
-/// Complete cell values by token, oldest first (see the module docs).
+/// Complete cell values by token, least recently used first (see the module docs).
 #[derive(Default)]
 pub(crate) struct LoadedStore {
     values: Mutex<VecDeque<(Uuid, Loaded)>>,
@@ -267,8 +275,17 @@ impl LoadedStore {
         values.retain(|(_, v)| v.at.elapsed() < ttl);
     }
 
-    /// Stores `v`; drops the oldest values while the store holds more than
-    /// [`MAX_LOADED_BYTES`] (never `v` itself).
+    /// Entry `i` was used now: its time is reset and it moves to the back (most
+    /// recently used).
+    fn touch(values: &mut VecDeque<(Uuid, Loaded)>, i: usize) -> Option<&Loaded> {
+        let (token, mut v) = values.remove(i)?;
+        v.at = Instant::now();
+        values.push_back((token, v));
+        values.back().map(|(_, v)| v)
+    }
+
+    /// Stores `v`; drops the least recently used values while the store holds more
+    /// than [`MAX_LOADED_BYTES`] (never `v` itself).
     fn insert(&self, ttl: Duration, v: Loaded) -> Uuid {
         let token = Uuid::new_v4();
         let mut values = lock(&self.values);
@@ -295,9 +312,10 @@ impl LoadedStore {
     ) -> Result<FullValue, String> {
         let mut values = lock(&self.values);
         Self::prune(&mut values, ttl);
-        let Some((_, v)) = values.iter().find(|(t, _)| *t == token) else {
+        let Some(i) = values.iter().position(|(t, _)| *t == token) else {
             return Err(LOADED_GONE.into());
         };
+        let v = &values[i].1;
         if v.conn != conn || (&v.database, &v.schema, &v.table) != (&o.database, &o.schema, &o.name)
         {
             return Err("the loaded value belongs to another table or connection".into());
@@ -308,17 +326,18 @@ impl LoadedStore {
                 v.column
             ));
         }
-        Ok(v.value.clone())
+        // A successful use keeps the value alive (sliding TTL, LRU order).
+        Self::touch(&mut values, i)
+            .map(|v| v.value.clone())
+            .ok_or_else(|| LOADED_GONE.to_string())
     }
 
-    /// The value of `token`, whatever it was read for.
+    /// The value of `token`, whatever it was read for (a read keeps it alive).
     fn value(&self, ttl: Duration, token: Uuid) -> Option<FullValue> {
         let mut values = lock(&self.values);
         Self::prune(&mut values, ttl);
-        values
-            .iter()
-            .find(|(t, _)| *t == token)
-            .map(|(_, v)| v.value.clone())
+        let i = values.iter().position(|(t, _)| *t == token)?;
+        Self::touch(&mut values, i).map(|v| v.value.clone())
     }
 
     /// Forgets the values of connection `conn` (closed).
@@ -432,6 +451,12 @@ impl SessionManager {
         self
     }
 
+    /// Overrides [`LOADED_TTL`] (tests).
+    pub fn with_loaded_ttl(mut self, ttl: Duration) -> Self {
+        self.loaded_ttl = ttl;
+        self
+    }
+
     /// Stores `value`, read for `column` of `o` on connection `id`; its token and payload.
     fn store_loaded(
         &self,
@@ -442,7 +467,7 @@ impl SessionManager {
     ) -> Result<LoadedCell, DbError> {
         let payload = payload(&value, &column)?;
         let token = self.loaded.insert(
-            self.plan_ttl,
+            self.loaded_ttl,
             Loaded {
                 conn: id,
                 database: o.database.clone(),
@@ -562,7 +587,7 @@ impl SessionManager {
     pub fn loaded_bytes(&self, token: Uuid) -> Result<Vec<u8>, DbError> {
         let v = self
             .loaded
-            .value(self.plan_ttl, token)
+            .value(self.loaded_ttl, token)
             .ok_or_else(|| config_error("token", LOADED_GONE))?;
         if let Some(b) = v.as_bytes() {
             return Ok(b.to_vec());
@@ -776,7 +801,7 @@ impl SessionManager {
         let (metas, dialect, tunnel_gen) = self.edit_metas(&rt, &detail).await?;
         let lookup = |token: Uuid, column: &str| {
             self.loaded
-                .lookup(self.plan_ttl, token, id, &set.object, column)
+                .lookup(self.loaded_ttl, token, id, &set.object, column)
         };
         let plan = build_edit_plan(
             &set,
@@ -789,7 +814,12 @@ impl SessionManager {
         .map_err(edit_error)?;
         let mut preview = EditPreview {
             plan_id: Uuid::nil(),
-            statements: plan.stmts.iter().map(|s| s.sql.clone()).collect(),
+            // Long literals shortened for display; the stored plan runs the full SQL.
+            statements: plan
+                .stmts
+                .iter()
+                .map(|s| display_sql(&s.sql, plan.dialect))
+                .collect(),
             verdict: plan.verdict,
             atomic: plan.atomic,
             protections: plan.stmts.iter().map(|s| s.protection.clone()).collect(),
@@ -1404,6 +1434,52 @@ mod tests {
         assert!(store.value(ttl, c).is_some());
         store.drop_conn(conn);
         assert!(store.value(ttl, c).is_none());
+    }
+
+    #[test]
+    fn loaded_values_live_while_used_and_go_least_recently_used_first() {
+        let store = LoadedStore::default();
+        let conn = Uuid::new_v4();
+        let items = ObjectRef {
+            database: "shop".into(),
+            schema: None,
+            name: "items".into(),
+            kind: dnt_core::meta::ObjectKind::Table,
+        };
+        let loaded = |value: FullValue| Loaded {
+            conn,
+            database: "shop".into(),
+            schema: None,
+            table: "items".into(),
+            column: "data".into(),
+            value,
+            at: Instant::now(),
+        };
+        // Sliding: each read restarts the TTL, so the value outlives its first deadline.
+        let ttl = Duration::from_millis(300);
+        let t = store.insert(ttl, loaded(FullValue::bytes(vec![1u8])));
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(150));
+            assert!(store.lookup(ttl, t, conn, &items, "data").is_ok());
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            store.value(ttl, t).is_some(),
+            "450 ms after insert, read 150 ms ago"
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(store.value(ttl, t).is_none());
+
+        // LRU: `a` was read after `b` was stored, so `b` goes first.
+        let ttl = Duration::from_secs(60);
+        let half = FullValue::bytes(vec![0u8; MAX_LOADED_BYTES / 2 - 1]);
+        let a = store.insert(ttl, loaded(half.clone()));
+        let b = store.insert(ttl, loaded(half.clone()));
+        assert!(store.value(ttl, a).is_some());
+        let c = store.insert(ttl, loaded(FullValue::bytes(vec![0u8; 3])));
+        assert!(store.value(ttl, b).is_none(), "least recently used dropped");
+        assert!(store.value(ttl, a).is_some());
+        assert!(store.value(ttl, c).is_some());
     }
 
     #[test]

@@ -922,14 +922,25 @@ mod dml_tests {
             collation: None,
         };
         assert_eq!(
-            select_by_key_sql(&pg_table(), &[age], &k, Dialect::Postgres).unwrap(),
+            select_by_key_sql(
+                &pg_table(),
+                std::slice::from_ref(&age),
+                &k,
+                Dialect::Postgres
+            )
+            .unwrap(),
             "SELECT \"age\" FROM \"public\".\"users\" WHERE \"id\" = 5 AND \"name\" = 'a'"
         );
         assert!(matches!(
             select_by_key_sql(&pg_table(), &[], &k, Dialect::Postgres),
             Err(BuildError::Invalid { .. })
         ));
-        assert!(select_by_key_sql(&pg_table(), &[], &k, Dialect::MYSQL).is_err());
+        // A dialect that does not match the table's server (with columns, so the
+        // mismatch is what fails).
+        assert!(matches!(
+            select_by_key_sql(&pg_table(), std::slice::from_ref(&age), &k, Dialect::MYSQL),
+            Err(BuildError::Invalid { reason, .. }) if reason.contains("dialect")
+        ));
     }
 
     #[test]

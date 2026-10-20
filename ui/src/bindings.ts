@@ -944,10 +944,17 @@ export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
 /**
- * What `data_preview` returns: the stored plan's id and exactly the statements
- * `data_apply` will send.
+ * What `data_preview` returns: the stored plan's id and the statements `data_apply`
+ * will send.
  */
-export type EditPreview = { plan_id: string; statements: string[]; verdict: Verdict; atomic: Atomicity; 
+export type EditPreview = { plan_id: string; 
+/**
+ * The statements, for display: exactly what is sent, except that string literals
+ * over 4 KiB are shortened to their start (`X'0a1b…'`, `'abc…'`) followed by an SQL
+ * comment with their size in bytes or chars; the stored plan keeps and runs them in
+ * full.
+ */
+statements: string[]; verdict: Verdict; atomic: Atomicity; 
 /**
  * The conflict check of each statement, in order.
  */
@@ -971,9 +978,16 @@ export type EditableInfo = { editable: boolean;
  */
 reason: string | null; 
 /**
- * The columns that identify a row (empty when not editable).
+ * The columns that identify a row: set whenever the table has a usable key, even
+ * when it is not editable (e.g. a read-only connection), so complete cells can be
+ * fetched by key (`data_cell_fetch`); empty otherwise.
  */
 key: string[]; 
+/**
+ * Key columns a `SELECT *` does not return (MySQL `INVISIBLE`); a page returns them
+ * apart (`TableDataPage::hidden_key`).
+ */
+hidden_key: string[]; 
 /**
  * Columns an UPDATE may set (empty when not editable).
  */

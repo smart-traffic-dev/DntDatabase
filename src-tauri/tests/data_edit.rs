@@ -1393,11 +1393,12 @@ async fn cell_fetch_refuses_a_session_without_utf8mb4() {
     );
 }
 
-/// A token lives as long as a plan: an expired one is refused with a clear reason.
+/// A token lives `LOADED_TTL` after its last use: an expired one is refused with a clear
+/// reason.
 #[tokio::test]
 async fn expired_token_is_refused() {
     let f = fixture().await;
-    let sm = f.sm.with_plan_ttl(Duration::from_millis(1));
+    let sm = f.sm.with_loaded_ttl(Duration::from_millis(1));
     let cell = sm
         .cell_fetch(f.id, object(), key(1), "qty".into())
         .await

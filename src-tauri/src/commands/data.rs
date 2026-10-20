@@ -107,8 +107,13 @@ pub struct EditableInfo {
     /// Why not, when not editable: `read_only_connection`, `not_a_table`, `no_key` or
     /// `unsupported:<detail>` (machine-readable; the UI words it).
     pub reason: Option<String>,
-    /// The columns that identify a row (empty when not editable).
+    /// The columns that identify a row: set whenever the table has a usable key, even
+    /// when it is not editable (e.g. a read-only connection), so complete cells can be
+    /// fetched by key (`data_cell_fetch`); empty otherwise.
     pub key: Vec<String>,
+    /// Key columns a `SELECT *` does not return (MySQL `INVISIBLE`); a page returns them
+    /// apart (`TableDataPage::hidden_key`).
+    pub hidden_key: Vec<String>,
     /// Columns an UPDATE may set (empty when not editable).
     pub editable_columns: Vec<String>,
     pub atomic: Atomicity,
@@ -356,11 +361,13 @@ pub struct PageExtras {
 }
 
 impl PageExtras {
-    /// For a page of `detail`: only when the data view may edit it.
+    /// For a page of `detail`: the row version only when the data view may edit it; the
+    /// hidden key columns whenever the table has a key (a read-only connection still
+    /// fetches complete cells by key, `data_cell_fetch`).
     pub fn of(detail: &TableDetail, kind: DbKind, read_only: bool) -> PageExtras {
-        match editable(detail, kind, read_only) {
+        match editable(detail, kind, false) {
             Ok(e) => PageExtras {
-                row_version: kind == DbKind::Postgres,
+                row_version: kind == DbKind::Postgres && !read_only,
                 hidden_key: e.hidden_key,
             },
             Err(_) => PageExtras::default(),
@@ -680,21 +687,31 @@ pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> Edi
             editable: true,
             reason: None,
             key: e.key,
+            hidden_key: e.hidden_key,
             editable_columns: e.editable_columns,
             atomic: e.atomic,
             protection: e.protection_kind,
         },
-        Err(n) => EditableInfo {
-            editable: false,
-            reason: Some(reason_code(&n)),
-            key: Vec::new(),
-            editable_columns: Vec::new(),
-            atomic: atomicity(detail, kind),
-            protection: match kind {
-                DbKind::Postgres => ProtectionKind::RowVersion,
-                DbKind::MySql => ProtectionKind::Snapshot,
-            },
-        },
+        Err(n) => {
+            // The key still identifies rows for reads (`data_cell_fetch`), e.g. on a
+            // read-only connection.
+            let (key, hidden_key) = match editable(detail, kind, false) {
+                Ok(e) => (e.key, e.hidden_key),
+                Err(_) => (Vec::new(), Vec::new()),
+            };
+            EditableInfo {
+                editable: false,
+                reason: Some(reason_code(&n)),
+                key,
+                hidden_key,
+                editable_columns: Vec::new(),
+                atomic: atomicity(detail, kind),
+                protection: match kind {
+                    DbKind::Postgres => ProtectionKind::RowVersion,
+                    DbKind::MySql => ProtectionKind::Snapshot,
+                },
+            }
+        }
     }
 }
 
@@ -1329,7 +1346,26 @@ mod tests {
         let ro = editable_info(&d, DbKind::MySql, true);
         assert!(!ro.editable);
         assert_eq!(ro.reason.as_deref(), Some("read_only_connection"));
-        assert!(ro.key.is_empty() && ro.editable_columns.is_empty());
+        // The key is still reported (complete cells are fetched by it); nothing to set.
+        assert_eq!(ro.key, ["a"]);
+        assert!(ro.hidden_key.is_empty() && ro.editable_columns.is_empty());
+        let mut hidden = d.clone();
+        hidden.columns[0].invisible = true;
+        let ro = editable_info(&hidden, DbKind::MySql, true);
+        assert_eq!(ro.hidden_key, ["a"]);
+        // A read-only page still reads the hidden key, without row versions.
+        assert_eq!(
+            PageExtras::of(&hidden, DbKind::MySql, true),
+            PageExtras {
+                row_version: false,
+                hidden_key: vec!["a".into()]
+            }
+        );
+        assert_eq!(
+            PageExtras::of(&d, DbKind::Postgres, true),
+            PageExtras::default()
+        );
+        assert!(PageExtras::of(&d, DbKind::Postgres, false).row_version);
         assert_eq!(ro.protection, ProtectionKind::Snapshot);
 
         let mut v = d.clone();

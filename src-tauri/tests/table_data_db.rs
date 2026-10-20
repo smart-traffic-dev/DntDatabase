@@ -950,6 +950,14 @@ async fn data_editable_reports_reasons() {
             .unwrap();
         assert!(!r.editable, "{t:?}");
         assert_eq!(r.reason.as_deref(), Some("read_only_connection"), "{t:?}");
+        // The key is still there: complete cells are fetched by it on a read-only
+        // connection too.
+        assert_eq!(r.key, ["id"], "{t:?}");
+        assert!(r.editable_columns.is_empty(), "{t:?}");
+        let n = data_editable_impl(&state, ro, obj(t, &nokey))
+            .await
+            .unwrap();
+        assert!(n.key.is_empty(), "{t:?}");
         close_connection_impl(&state, ro).await.unwrap();
         admin(t, &format!("DROP TABLE {}", scratch(t, &nokey))).await;
     }

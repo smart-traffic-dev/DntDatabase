@@ -45,6 +45,10 @@ fn app_state(dir: &std::path::Path) -> AppState {
 }
 
 async fn open(state: &AppState, t: Target) -> Uuid {
+    open_with(state, t, false).await
+}
+
+async fn open_with(state: &AppState, t: Target, read_only: bool) -> Uuid {
     let cfg = ConnectionConfig {
         id: Uuid::nil(),
         group_id: None,
@@ -56,7 +60,7 @@ async fn open(state: &AppState, t: Target) -> Uuid {
         username: t.admin_user().into(),
         default_db: Some(FIXTURE_DB.into()),
         env_tag: None,
-        read_only: false,
+        read_only,
         secret_mode: SecretMode::Saved,
         ssh: None,
         ssl: None,
@@ -1020,7 +1024,7 @@ async fn loaded_value_used_in_update() {
         let o = obj(t, &name);
         let p = page(&state, id, o.clone()).await;
         let cell = fetch(&state, id, &o, &row_ref(&p, 0, &["id"]), "data").await;
-        let r = apply(
+        let preview = data_preview_impl(
             &state,
             id,
             set(
@@ -1033,6 +1037,14 @@ async fn loaded_value_used_in_update() {
         )
         .await
         .unwrap();
+        // The preview shows the 1 MiB literal shortened ...
+        let shown = &preview.statements[0];
+        assert!(shown.contains("…' /* 1048576 bytes */"), "{t:?}: {shown}");
+        assert!(shown.len() < 4096, "{t:?}: {}", shown.len());
+        // ... while the stored plan runs it whole (read back below).
+        let r = data_apply_impl(&state, preview.plan_id, false)
+            .await
+            .unwrap();
         assert_eq!(r.outcome, ApplyOutcome::Committed, "{t:?}: {r:?}");
         let p = page(&state, id, o.clone()).await;
         let copy = fetch(&state, id, &o, &row_ref(&p, 1, &["id"]), "data").await;
@@ -1235,6 +1247,28 @@ async fn cell_file_round_trip() {
             }
             other => panic!("{t:?}: {other:?}"),
         }
+        drop_table(t, &name).await;
+    }
+}
+
+/// A read-only connection reports the table's key and fetches complete cells by it.
+#[tokio::test]
+async fn fetch_on_a_read_only_connection() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open_with(&state, t, true).await;
+        let name = blobs(t, "ro").await;
+        let o = obj(t, &name);
+        let info = data_editable_impl(&state, id, o.clone()).await.unwrap();
+        assert!(!info.editable, "{t:?}");
+        assert_eq!(info.key, ["id"], "{t:?}");
+        let p = page(&state, id, o.clone()).await;
+        let r = row_ref(&p, 0, &["id"]);
+        let cell = fetch(&state, id, &o, &r, "data").await;
+        assert!(bytes_of(&cell) == mib(), "{t:?}");
         drop_table(t, &name).await;
     }
 }
