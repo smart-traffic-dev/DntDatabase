@@ -331,6 +331,7 @@ primary_key:
   name: PRIMARY
   unique: true
   primary: true
+  partial: false
   columns:
     - id
   expression: ~

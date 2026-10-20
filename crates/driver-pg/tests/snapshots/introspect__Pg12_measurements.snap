@@ -45,6 +45,7 @@ primary_key:
   name: measurements_pkey
   unique: true
   primary: true
+  partial: false
   columns:
     - id
     - taken_at

@@ -67,6 +67,7 @@ primary_key:
   name: PRIMARY
   unique: true
   primary: true
+  partial: false
   columns:
     - id
   expression: ~
@@ -76,6 +77,7 @@ indexes:
   - name: idx_orders_customer_status
     unique: false
     primary: false
+    partial: false
     columns:
       - customer_id
       - status

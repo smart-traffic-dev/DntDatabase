@@ -662,6 +662,7 @@ mod tests {
                 name: "PRIMARY".into(),
                 unique: true,
                 primary: true,
+                partial: false,
                 columns: c.into_iter().map(Into::into).collect(),
                 expression: None,
                 method: None,

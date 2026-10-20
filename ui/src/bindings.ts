@@ -918,7 +918,18 @@ skipped: number;
  * uses the old settings).
  */
 overwritten_ids: string[] }
-export type IndexDetail = { name: string; unique: boolean; primary: boolean; columns: string[]; expression: string | null; method: string | null; 
+export type IndexDetail = { name: string; 
+/**
+ * Unique and usable as such. PostgreSQL reports an invalid index (`indisvalid =
+ * false`, e.g. after a failed `CREATE UNIQUE INDEX CONCURRENTLY`) as not unique: the
+ * rows already in the table may hold duplicates.
+ */
+unique: boolean; primary: boolean; 
+/**
+ * A partial index (PostgreSQL `… WHERE <predicate>`): it covers only some rows, so
+ * it never identifies a row. Always false on MySQL/MariaDB.
+ */
+partial: boolean; columns: string[]; expression: string | null; method: string | null; 
 /**
  * Either a full `CREATE INDEX …` statement or, for an index backing a table
  * constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).

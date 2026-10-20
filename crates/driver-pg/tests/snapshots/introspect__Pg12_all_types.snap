@@ -265,6 +265,7 @@ primary_key:
   name: all_types_pkey
   unique: true
   primary: true
+  partial: false
   columns:
     - id
   expression: ~

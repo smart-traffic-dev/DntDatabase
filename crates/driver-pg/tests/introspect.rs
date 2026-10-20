@@ -715,3 +715,61 @@ async fn explicit_column_collation_is_reported() {
         assert_eq!(got, [Some("C"), None, None], "{t:?}");
     }
 }
+
+/// A partial unique index (soft-delete pattern) is reported as `partial`; a unique
+/// index left invalid by a failed `CREATE UNIQUE INDEX CONCURRENTLY` is not unique.
+#[tokio::test]
+async fn partial_and_invalid_unique_indexes_are_reported() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let table = format!(
+            "p3_partial_{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        exec(
+            &s,
+            &format!(
+                "CREATE TABLE public.{table} (code text NOT NULL, sku text NOT NULL, \
+                 deleted_at timestamptz); \
+                 CREATE UNIQUE INDEX {table}_live ON public.{table} (code) \
+                 WHERE deleted_at IS NULL; \
+                 CREATE UNIQUE INDEX {table}_full ON public.{table} (code, sku); \
+                 INSERT INTO public.{table} VALUES ('a', 'x', now()), ('b', 'x', now())"
+            ),
+        )
+        .await
+        .unwrap();
+        // Fails on the duplicates and leaves an invalid index behind.
+        let r = exec(
+            &s,
+            &format!("CREATE UNIQUE INDEX CONCURRENTLY {table}_bad ON public.{table} (sku)"),
+        )
+        .await;
+        let d = detail(&s, t, "public", &table).await;
+        exec(&s, &format!("DROP TABLE public.{table}"))
+            .await
+            .unwrap();
+        assert!(r.is_err(), "{t:?}: {r:?}");
+        let got: Vec<(String, bool, bool)> = d
+            .indexes
+            .iter()
+            .map(|i| {
+                (
+                    i.name.trim_start_matches(&table).to_string(),
+                    i.unique,
+                    i.partial,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("_bad".to_string(), false, false),
+                ("_full".to_string(), true, false),
+                ("_live".to_string(), true, true),
+            ],
+            "{t:?}"
+        );
+    }
+}

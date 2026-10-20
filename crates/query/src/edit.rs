@@ -223,8 +223,11 @@ pub fn editable(
         return Err(NotEditable::NotATable);
     }
     let column = |name: &str| detail.columns.iter().find(|c| c.name == name);
+    // A partial index covers only some rows; an invalid PG index is reported as not
+    // unique by introspection (`IndexDetail::unique`), so `unique` is checked below.
     let usable = |ix: &IndexDetail| {
-        ix.expression.is_none()
+        !ix.partial
+            && ix.expression.is_none()
             && !ix.columns.is_empty()
             && ix
                 .columns
@@ -323,6 +326,7 @@ pub fn fingerprint(detail: &TableDetail) -> u64 {
         h.str(&ix.name);
         h.flag(ix.unique);
         h.flag(ix.primary);
+        h.flag(ix.partial);
         h.len(ix.columns.len());
         for c in &ix.columns {
             h.str(c);
@@ -1055,6 +1059,7 @@ mod tests {
             name: name.into(),
             unique,
             primary,
+            partial: false,
             columns: cols.iter().map(|c| c.to_string()).collect(),
             expression: None,
             method: None,
@@ -1987,6 +1992,70 @@ mod tests {
                 .sql
                 .starts_with("INSERT INTO \"public\".\"items\" DEFAULT VALUES RETURNING")
         );
+    }
+
+    /// A PG partial unique index (`… WHERE deleted_at IS NULL`, the soft-delete pattern)
+    /// lets rows outside the predicate share a value: never a row key.
+    #[test]
+    fn partial_unique_index_is_not_a_key() {
+        let mut d = table(
+            Some("public"),
+            vec![
+                coldet("code", "text", false, None),
+                coldet("sku", "text", false, None),
+                coldet("deleted_at", "timestamptz", true, None),
+            ],
+            None,
+            None,
+        );
+        let mut partial = index("live_code", &["code"], true, false);
+        partial.partial = true;
+        d.indexes = vec![partial.clone()];
+        assert_eq!(
+            editable(&d, DbKind::Postgres, false),
+            Err(NotEditable::NoKey)
+        );
+        // A full unique index after it is used instead.
+        d.indexes.push(index("by_sku", &["sku"], true, false));
+        assert_eq!(editable(&d, DbKind::Postgres, false).unwrap().key, ["sku"]);
+        // A partial primary key cannot exist, but would be refused the same way.
+        let mut pk = partial.clone();
+        pk.primary = true;
+        d.primary_key = Some(pk);
+        assert_eq!(editable(&d, DbKind::Postgres, false).unwrap().key, ["sku"]);
+        // The flag is part of the fingerprint.
+        let mut full = d.clone();
+        full.indexes[0].partial = false;
+        assert_ne!(fingerprint(&full), fingerprint(&d));
+    }
+
+    /// MySQL reads `1.2e0` as a DOUBLE: `literal` writes the exact digits instead.
+    #[test]
+    fn decimal_text_with_exponent_is_expanded_on_mysql() {
+        let d = table(
+            None,
+            vec![
+                coldet("id", "int", false, None),
+                coldet("amount", "decimal(30,25)", true, None),
+            ],
+            Some(&["id"]),
+            INNODB,
+        );
+        let m = vec![
+            meta("id", "int", LogicalType::Integer),
+            meta("amount", "decimal", LogicalType::Decimal),
+        ];
+        let mut s = set(vec![update(
+            row(&[("id", Value::Int(1))], &[]),
+            &[("amount", typed("1.23456789012345678901e0"))],
+        )]);
+        s.overwrite = true;
+        let p = build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &none).unwrap();
+        assert_eq!(
+            p.stmts[0].sql,
+            "UPDATE `shop`.`items` SET `amount` = 1.23456789012345678901 WHERE `id` = 1"
+        );
+        assert!(!p.stmts[0].sql.contains("e0"));
     }
 
     #[test]

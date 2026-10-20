@@ -108,8 +108,14 @@ pub struct ColumnDetail {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct IndexDetail {
     pub name: String,
+    /// Unique and usable as such. PostgreSQL reports an invalid index (`indisvalid =
+    /// false`, e.g. after a failed `CREATE UNIQUE INDEX CONCURRENTLY`) as not unique: the
+    /// rows already in the table may hold duplicates.
     pub unique: bool,
     pub primary: bool,
+    /// A partial index (PostgreSQL `… WHERE <predicate>`): it covers only some rows, so
+    /// it never identifies a row. Always false on MySQL/MariaDB.
+    pub partial: bool,
     pub columns: Vec<String>,
     pub expression: Option<String>,
     pub method: Option<String>,
