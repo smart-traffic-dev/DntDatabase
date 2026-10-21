@@ -54,8 +54,10 @@ where
         let outcome = tokio::spawn(body(Ctx { t, s, sch })).await;
         let cleanup = connect(t).await;
         exec(&cleanup, &format!("DROP SCHEMA IF EXISTS {sch} CASCADE")).await;
-        if let Err(e) = outcome {
-            std::panic::resume_unwind(e.into_panic());
+        match outcome {
+            Ok(()) => {}
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => panic!("{t:?}: test task did not finish: {e}"),
         }
     }
 }
@@ -87,17 +89,35 @@ impl Ctx {
         self.exec("COMMIT").await;
     }
 
-    /// Renders `old` → `new`, runs it, returns the statements.
-    async fn apply(&self, old: &TableDef, new: &TableDef) -> Vec<String> {
+    /// Like [`Ctx::run`], but a failing statement rolls the transaction back and is
+    /// returned as the error.
+    async fn try_run(&self, statements: &[String]) -> Result<(), String> {
+        self.exec("BEGIN").await;
+        for sql in statements {
+            if let Err(e) = self.s.query_row_text(sql).await {
+                self.exec("ROLLBACK").await;
+                return Err(format!("{sql}: {e}"));
+            }
+        }
+        self.exec("COMMIT").await;
+        Ok(())
+    }
+
+    fn render(&self, old: &TableDef, new: &TableDef) -> Rendered {
         let changes = diff(old, new).expect("diff");
-        let r = render(
+        render(
             &self.table(&old.name),
             old,
             &changes,
             self.s.server_info(),
             self.s.dialect(),
         )
-        .expect("render");
+        .expect("render")
+    }
+
+    /// Renders `old` → `new`, runs it, returns the statements.
+    async fn apply(&self, old: &TableDef, new: &TableDef) -> Vec<String> {
+        let r = self.render(old, new);
         self.run(&r.statements).await;
         r.statements
     }
@@ -268,7 +288,7 @@ async fn statement_order_is_fixed() {
         new.foreign_keys.clear();
         new.columns[3].name = "memo".into();
         new.columns[3].comment = Some("Ghi chú của khách".into());
-        new.columns[1].data_type = known("bigint");
+        new.columns[5].data_type = known("text");
         new.columns.push(ColumnDef {
             original: None,
             ..col("channel", ty("varchar", Some(20), None, None), true)
@@ -279,13 +299,11 @@ async fn statement_order_is_fixed() {
         });
         let sql = c.apply(&old, &new).await;
         assert_eq!(sql.len(), 6, "{t:?}: {sql:?}");
-        assert_eq!(c.column_type("orders", "qty").await, "bigint", "{t:?}");
+        assert_eq!(c.column_type("orders", "code").await, "text", "{t:?}");
         assert_eq!(
-            c.text(&format!(
-                "SELECT qty::text || ' ' || memo FROM {sch}.orders"
-            ))
-            .await,
-            "5 42",
+            c.text(&format!("SELECT code || ' ' || memo FROM {sch}.orders"))
+                .await,
+            "abc 42",
             "{t:?}"
         );
         assert_eq!(
@@ -329,6 +347,66 @@ async fn type_change_auto_using() {
             ))
             .await,
             "13 42 abc",
+            "{t:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn type_change_keeps_the_default() {
+    require_db!();
+    each_target("dnt_render_pg_default", |c| async move {
+        let (t, sch) = (c.t, c.sch);
+        let mut old = c.create().await;
+        c.exec(&format!(
+            "ALTER TABLE {sch}.orders ALTER COLUMN note SET DEFAULT '42'"
+        ))
+        .await;
+        old.columns[3].default = Some(DefaultSpec::Value { text: "42".into() });
+        let mut new = old.clone();
+        new.columns[3].data_type = known("integer");
+        let sql = c.apply(&old, &new).await;
+        assert_eq!(c.column_type("orders", "note").await, "integer", "{t:?}");
+        assert_eq!(
+            c.text(&format!(
+                "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef \
+                 WHERE adrelid = '{sch}.orders'::regclass AND adnum = 4"
+            ))
+            .await,
+            "42",
+            "{t:?}: {sql:?}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn too_long_value_fails_instead_of_truncating() {
+    require_db!();
+    each_target("dnt_render_pg_bounded", |c| async move {
+        let (t, sch) = (c.t, c.sch);
+        let old = c.create().await;
+        let mut new = old.clone();
+        new.columns[5].data_type = ty("varchar", Some(2), None, None); // holds 'abc'
+        let r = c.render(&old, &new);
+        assert!(
+            r.impacts
+                .iter()
+                .any(|i| i.kind == ImpactKind::DataLoss && i.count_sql.is_some()),
+            "{t:?}: {:?}",
+            r.impacts
+        );
+        let err = c.try_run(&r.statements).await.expect_err("apply must fail");
+        assert!(err.contains("too long"), "{t:?}: {err}");
+        assert_eq!(
+            c.column_type("orders", "code").await,
+            "character varying(40)",
+            "{t:?}"
+        );
+        assert_eq!(
+            c.text(&format!("SELECT code FROM {sch}.orders")).await,
+            "abc",
             "{t:?}"
         );
     })

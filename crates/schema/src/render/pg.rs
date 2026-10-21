@@ -18,6 +18,12 @@
 //! plain index is created with `CREATE [UNIQUE] INDEX n ON <table> <fragment>`, where
 //! its fragment is the `pg_get_indexdef` tail `USING method (…) [INCLUDE (…)]`, and
 //! dropped with a schema-qualified `DROP INDEX`.
+//!
+//! **Precondition (ruling T8-1), for every statement and fragment here:** the session
+//! runs with `standard_conforming_strings = on`. String literals are standard `'…'`
+//! (only `'` doubled, never `E'…'`), so a backslash is an ordinary character only under
+//! that setting; the backend sets it with `SET LOCAL standard_conforming_strings = on`
+//! inside the apply transaction (Task 10).
 
 use super::{fk_action, invalid, is_number, unsupported, Impacts, RenderError, Rendered};
 use crate::diff::Change;
@@ -45,7 +51,7 @@ fn check_dialect(d: Dialect) -> Result<(), RenderError> {
 }
 
 /// A standard string literal `'…'` (core literal builder: `'` doubled, NUL refused,
-/// never `E'…'`).
+/// never `E'…'`). Read correctly only with `standard_conforming_strings = on` (T8-1).
 fn string(s: &str) -> Result<String, RenderError> {
     let text = ColumnTarget {
         name: String::new(),
@@ -100,6 +106,8 @@ fn rank(c: &Change) -> u8 {
     }
 }
 
+/// Precondition: run with `standard_conforming_strings = on`, which the backend sets
+/// with `SET LOCAL` inside the apply transaction (T8-1, module docs).
 pub(super) fn render(
     table: &TableRef,
     old: &TableDef,
@@ -295,8 +303,10 @@ impl Alter<'_> {
         if oc.identity.is_some() && nc.identity.is_none() {
             self.statements.push(format!("{at} DROP IDENTITY"));
         }
-        // A changing default goes before a type change, which would convert it.
-        if default_changed && oc.default.is_some() && (nc.default.is_none() || type_changed) {
+        // A type change would have to convert the stored default (and PG refuses when
+        // there is no automatic cast): it is dropped first and set again afterwards.
+        let reset_default = type_changed && oc.default.is_some();
+        if reset_default || (default_changed && oc.default.is_some() && nc.default.is_none()) {
             self.statements.push(format!("{at} DROP DEFAULT"));
         }
         if type_changed || collation_changed {
@@ -305,10 +315,19 @@ impl Alter<'_> {
             if let Some(c) = &nc.collation {
                 s.push_str(&format!(" COLLATE {}", q(c)));
             }
+            let mut auto = false;
             if type_changed {
                 match nc.using.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
                     Some(u) => s.push_str(&format!(" USING {u}")),
+                    // An explicit cast to a bounded string type truncates silently; the
+                    // assignment cast PG uses without USING fails on a value too long.
+                    None if safe_cast(&oc.data_type, &nc.data_type)
+                        && length_bounded(&nc.data_type) =>
+                    {
+                        auto = true
+                    }
                     None if safe_cast(&oc.data_type, &nc.data_type) => {
+                        auto = true;
                         s.push_str(&format!(" USING {col}::{new_type}"))
                     }
                     None => {
@@ -324,7 +343,17 @@ impl Alter<'_> {
                 match lossy(&oc.data_type, &nc.data_type) {
                     Some(Some(n)) => self.impacts.data_loss(
                         name,
-                        format!("Values of \"{name}\" longer than {n} characters are cut."),
+                        if auto {
+                            format!(
+                                "Values of \"{name}\" longer than {n} characters make the \
+                                 change fail."
+                            )
+                        } else {
+                            format!(
+                                "Values of \"{name}\" longer than {n} characters may be cut \
+                                 or make the change fail."
+                            )
+                        },
                         Some(count_where_sql(
                             &self.old_relation,
                             &format!(" WHERE char_length({original}) > {n}"),
@@ -338,7 +367,14 @@ impl Alter<'_> {
                         ),
                         None,
                     ),
-                    None => {}
+                    None => {
+                        if let Some(note) = auto
+                            .then(|| cast_note(&oc.data_type, &nc.data_type, name))
+                            .flatten()
+                        {
+                            self.impacts.data_loss(name, note, None);
+                        }
+                    }
                 }
                 self.impacts.rebuild(
                     name,
@@ -369,7 +405,7 @@ impl Alter<'_> {
                 );
             }
         }
-        if default_changed {
+        if default_changed || reset_default {
             if let Some(def) = &nc.default {
                 self.statements
                     .push(format!("{at} SET DEFAULT {}", default_sql(nc, def)?));
@@ -393,6 +429,42 @@ impl Alter<'_> {
             )?);
         }
         Ok(())
+    }
+}
+
+/// A character or bit type with a length limit (`char` alone is `char(1)`).
+fn length_bounded(t: &TypeSpec) -> bool {
+    match t {
+        TypeSpec::Known { base, length, .. } => {
+            base == "char" || (base == "varchar" && length.is_some())
+        }
+        TypeSpec::Custom { text } => {
+            // Arrays (`varchar(5)[]`) are left out: they are not cast element-wise here.
+            let lower = text.trim().to_ascii_lowercase();
+            let name = lower.split('(').next().unwrap_or("").trim();
+            // Without a length `char`, `character` and `bit` mean a length of 1.
+            let one = matches!(name, "char" | "character" | "bit");
+            let sized = matches!(
+                name,
+                "bit varying" | "varbit" | "character varying" | "varchar" | "bpchar"
+            );
+            !lower.ends_with(']') && (one || (sized && lower.contains('(')))
+        }
+    }
+}
+
+/// What an automatic cast that loses nothing still changes about the values.
+fn cast_note(old: &TypeSpec, new: &TypeSpec, name: &str) -> Option<String> {
+    match (base(old)?, base(new)?) {
+        ("timestamp", "timestamptz") | ("timestamptz", "timestamp") => Some(format!(
+            "Converting \"{name}\" between timestamp and timestamptz reads the values in the \
+             session TimeZone, which shifts them unless it matches how they were stored."
+        )),
+        ("bytea", "text" | "varchar") => Some(format!(
+            "Converting \"{name}\" from bytea to text stores the hex form (\\x…) of each \
+             value, not its decoded text."
+        )),
+        _ => None,
     }
 }
 
@@ -568,6 +640,8 @@ fn create_index_sql(
     ))
 }
 
+/// Precondition: run with `standard_conforming_strings = on`, which the backend sets
+/// with `SET LOCAL` inside the apply transaction (T8-1, module docs).
 pub(super) fn render_create(
     table: &TableRef,
     def: &TableDef,
@@ -660,6 +734,8 @@ fn type_sql(t: &TypeSpec, server: &ServerInfo) -> Result<String, RenderError> {
     }
 }
 
+/// Value defaults are standard `'…'` literals: precondition
+/// `standard_conforming_strings = on` (T8-1). The other fragments hold no literal.
 pub(super) fn column_sql(
     c: &ColumnDef,
     server: &ServerInfo,
@@ -684,8 +760,15 @@ pub(super) fn column_sql(
             c.name
         )));
     }
-    // `auto_increment` is not read: introspection sets it for identity and serial
-    // columns, which `identity` and the `nextval(…)` default already describe.
+    // Introspection sets `auto_increment` for identity and serial columns, which
+    // `identity` and the `nextval(…)` default already describe; only a new column
+    // asking for it without an identity is refused.
+    if c.auto_increment && c.identity.is_none() && c.original.is_none() {
+        return Err(invalid(format!(
+            "Column \"{}\": AUTO_INCREMENT is MySQL only; use identity on PostgreSQL.",
+            c.name
+        )));
+    }
     let mut out = format!("{} {}", q(&c.name), type_sql(&c.data_type, server)?);
     if let Some(co) = &c.collation {
         out.push_str(&format!(" COLLATE {}", q(co)));
@@ -1075,7 +1158,7 @@ mod tests {
         new.foreign_keys.clear();
         new.columns[3].name = "memo".into();
         new.columns[3].comment = Some("Ghi chú của khách".into());
-        new.columns[1].data_type = known("bigint");
+        new.columns[5].data_type = known("text");
         new.columns
             .push(new_col("channel", ty("varchar", Some(20), None, None)));
         new.indexes
@@ -1083,7 +1166,7 @@ mod tests {
         let expected = vec![
             r#"ALTER TABLE "public"."orders" DROP CONSTRAINT "fk_customer""#,
             r#"ALTER TABLE "public"."orders" RENAME COLUMN "note" TO "memo""#,
-            r#"ALTER TABLE "public"."orders" ALTER COLUMN "qty" TYPE bigint USING "qty"::bigint"#,
+            r#"ALTER TABLE "public"."orders" ALTER COLUMN "code" TYPE text USING "code"::text"#,
             r#"ALTER TABLE "public"."orders" ADD COLUMN "channel" varchar(20)"#,
             r#"CREATE INDEX "ix_channel" ON "public"."orders" USING btree ("channel")"#,
             r#"COMMENT ON COLUMN "public"."orders"."memo" IS 'Ghi chú của khách'"#,
@@ -1092,7 +1175,7 @@ mod tests {
         assert_eq!(r.statements, expected);
         assert_eq!(
             kinds(&r.impacts),
-            vec![(ImpactKind::Rebuild, ElementRef::Column("qty".into()))]
+            vec![(ImpactKind::Rebuild, ElementRef::Column("code".into()))]
         );
         // The order is the spec's, not the order of the changes given (ruling T6-3).
         let mut changes = diff(&old, &new).unwrap();
@@ -1112,9 +1195,13 @@ mod tests {
         assert_eq!(
             r.statements,
             vec![
+                // The default is dropped and set again around the type change.
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "qty" DROP DEFAULT"#,
                 r#"ALTER TABLE "public"."orders" ALTER COLUMN "qty" TYPE bigint USING "qty"::bigint"#,
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "qty" SET DEFAULT 0"#,
                 r#"ALTER TABLE "public"."orders" ALTER COLUMN "total" TYPE integer USING "total"::integer"#,
-                r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" TYPE varchar(10) USING "note"::varchar(10)"#,
+                // No explicit cast to a bounded type: it would truncate instead of failing.
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" TYPE varchar(10)"#,
             ]
         );
         assert_eq!(
@@ -1132,6 +1219,84 @@ mod tests {
             r.impacts[1].count_sql.as_deref(),
             Some(r#"SELECT COUNT(*) FROM "public"."orders" WHERE char_length("note") > 10"#)
         );
+        assert!(r.impacts[1].message.contains("make the change fail"));
+        // A text default kept across a type change to integer.
+        let mut old = orders();
+        old.columns[3].default = value("42");
+        let mut new = old.clone();
+        new.columns[3].data_type = known("integer");
+        assert_eq!(
+            render_ok(&old, &new).statements,
+            vec![
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" DROP DEFAULT"#,
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" TYPE integer USING "note"::integer"#,
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" SET DEFAULT 42"#,
+            ]
+        );
+        // Bounded targets of any kind get no USING; a user USING is kept.
+        for (from, to, t) in [
+            (ty("char", Some(9), None, None), known("char"), "char"),
+            (
+                ty("char", Some(9), None, None),
+                ty("char", Some(3), None, None),
+                "char(3)",
+            ),
+            (
+                known("integer"),
+                ty("varchar", Some(3), None, None),
+                "varchar(3)",
+            ),
+        ] {
+            let mut old = orders();
+            old.columns[3].data_type = from;
+            let mut new = old.clone();
+            new.columns[3].data_type = to;
+            assert_eq!(
+                render_ok(&old, &new).statements,
+                vec![format!(
+                    r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" TYPE {t}"#
+                )]
+            );
+        }
+        for t in [
+            custom("bit(3)"),
+            custom("bit"),
+            custom("character varying(5)"),
+            custom("CHARACTER(2)"),
+        ] {
+            assert!(length_bounded(&t), "{t:?}");
+        }
+        for t in [
+            custom("varchar(5)[]"),
+            custom("bpchar"),
+            custom("bit varying"),
+            known("varchar"),
+            known("text"),
+        ] {
+            assert!(!length_bounded(&t), "{t:?}");
+        }
+        let mut new = orders();
+        new.columns[3].data_type = ty("varchar", Some(3), None, None);
+        new.columns[3].using = Some("left(note, 3)".into());
+        assert_eq!(
+            render_ok(&orders(), &new).statements,
+            vec![
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "note" TYPE varchar(3) USING left(note, 3)"#
+            ]
+        );
+        // Casts that keep every value but change its meaning carry a note.
+        for (from, to, word) in [
+            (known("timestamp"), known("timestamptz"), "TimeZone"),
+            (known("bytea"), known("text"), "hex"),
+        ] {
+            let mut old = orders();
+            old.columns[3].data_type = from;
+            let mut new = old.clone();
+            new.columns[3].data_type = to;
+            let r = render_ok(&old, &new);
+            assert_eq!(r.impacts[0].kind, ImpactKind::DataLoss);
+            assert!(r.impacts[0].message.contains(word), "{:?}", r.impacts);
+        }
         // Any type to text, text to the listed types, timestamp <-> timestamptz.
         for (from, to) in [
             (custom("integer[]"), known("text")),
@@ -1526,6 +1691,16 @@ mod tests {
             column_sql(&identity, &s, PG).unwrap(),
             r#""id" bigint GENERATED BY DEFAULT AS IDENTITY NOT NULL"#
         );
+        // An existing serial column reads as auto_increment: it renders as it is.
+        let serial = ColumnDef {
+            auto_increment: true,
+            nullable: false,
+            ..c(known("integer"), expr("nextval('t_id_seq'::regclass)"))
+        };
+        assert_eq!(
+            column_sql(&serial, &s, PG).unwrap(),
+            r#""c" integer NOT NULL DEFAULT nextval('t_id_seq'::regclass)"#
+        );
         // MySQL-only attributes and impossible combinations.
         for bad in [
             ColumnDef {
@@ -1556,6 +1731,10 @@ mod tests {
                 ..col("c", known("integer"))
             },
             c(known("text"), value("a\0b")),
+            ColumnDef {
+                auto_increment: true,
+                ..new_col("c", known("bigint"))
+            },
         ] {
             assert!(
                 matches!(column_sql(&bad, &s, PG), Err(RenderError::Invalid { .. })),
@@ -1587,7 +1766,7 @@ mod tests {
                 r#"ALTER TABLE "public"."orders" ALTER COLUMN "qty" DROP DEFAULT"#,
                 r#"ALTER TABLE "public"."orders" ALTER COLUMN "total" SET NOT NULL"#,
                 r#"ALTER TABLE "public"."orders" ALTER COLUMN "total" SET DEFAULT 0"#,
-                r#"ALTER TABLE "public"."orders" ALTER COLUMN "sku" TYPE varchar(8) USING "sku"::varchar(8)"#,
+                r#"ALTER TABLE "public"."orders" ALTER COLUMN "sku" TYPE varchar(8)"#,
             ]
         );
         assert_eq!(

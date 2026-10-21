@@ -169,7 +169,10 @@ impl Impacts {
 /// statement. A [`Change::CreateTable`] diff goes through [`render_create`] instead.
 ///
 /// **Precondition:** the draft passed [`crate::validate`]; expression fields (defaults,
-/// checks, index expressions, custom types) are spliced verbatim.
+/// checks, index expressions, custom types, PostgreSQL `ColumnDef.using`) are spliced
+/// verbatim. PostgreSQL output (here and in [`render_create`] and the `*_sql`
+/// fragments) uses standard `'…'` literals and needs `standard_conforming_strings = on`,
+/// which the backend sets with `SET LOCAL` inside the apply transaction (ruling T8-1).
 pub fn render(
     table: &TableRef,
     old: &TableDef,
@@ -187,7 +190,7 @@ pub fn render(
 /// named `def.name`.
 ///
 /// **Precondition:** `def` passed [`crate::validate`] (expression fields are spliced
-/// verbatim).
+/// verbatim); on PostgreSQL `standard_conforming_strings = on` (see [`render`]).
 pub fn render_create(
     table: &TableRef,
     def: &TableDef,
