@@ -6,8 +6,9 @@
   color: var(--warning-fg);
 }
 
+/* Green, not the selection blue: with a blue accent a new row would look selected. */
 .dnt-row-new {
-  background: var(--sel);
+  background: var(--dnt-status-success-bg);
   color: var(--text);
 }
 

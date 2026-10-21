@@ -131,14 +131,17 @@ function useThemeVersion(): number {
   return version;
 }
 
-function buildTheme(): {
+/** The grid's canvas theme from the --dnt- semantic tokens (fallbacks: the light palette). */
+export function buildTheme(): {
   theme: Partial<Theme>;
   nullStyle: Partial<Theme>;
   statusStyle: Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>;
   font: GridFont;
   charPx: number;
 } {
-  const muted = cssVar('--muted', '#5a6370');
+  const muted = cssVar('--dnt-fg-muted', '#5a5a60');
+  const selected = cssVar('--dnt-bg-selected', '#dce7fd');
+  const fg = cssVar('--dnt-fg', '#131315');
   const size = codeFontSizes();
   const family = monoFontFamily();
   // The canvas fonts, as Glide draws them (`<baseFontStyle> <fontFamily>`).
@@ -149,16 +152,16 @@ function buildTheme(): {
   };
   return {
     theme: {
-      accentColor: cssVar('--accent', '#1f5fd1'),
-      accentLight: cssVar('--sel', '#e3ebfa'),
-      bgCell: cssVar('--panel', '#ffffff'),
-      bgHeader: cssVar('--sidebar', '#fafafb'),
-      bgHeaderHasFocus: cssVar('--sel', '#e3ebfa'),
-      bgHeaderHovered: cssVar('--sel', '#e3ebfa'),
-      textDark: cssVar('--text', '#1b1f24'),
+      accentColor: cssVar('--dnt-accent', '#2563d9'),
+      accentLight: selected,
+      bgCell: cssVar('--dnt-bg-app', '#ffffff'),
+      bgHeader: cssVar('--dnt-bg-sunken', '#f4f4f5'),
+      bgHeaderHasFocus: selected,
+      bgHeaderHovered: cssVar('--dnt-bg-selected-muted', '#ebebed'),
+      textDark: fg,
       textMedium: muted,
-      textHeader: cssVar('--text', '#1b1f24'),
-      borderColor: cssVar('--border', '#dcdfe4'),
+      textHeader: fg,
+      borderColor: cssVar('--dnt-border-subtle', '#ebebed'),
       // The same code font as the editor and every CSS mono surface (`--font-mono`).
       fontFamily: family,
       textLight: muted,
@@ -169,10 +172,10 @@ function buildTheme(): {
     nullStyle: { textDark: muted, baseFontStyle: `italic ${size.body}px` },
     // Staged changes: the same tokens as the `dnt-*` classes of dataEdit.css.
     statusStyle: {
-      edited: { bgCell: cssVar('--warning-bg', '#fff4d6'), textDark: cssVar('--warning-fg', '#7a4b00') },
-      new: { bgCell: cssVar('--sel', '#e3ebfa') },
-      deleted: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
-      conflict: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
+      edited: { bgCell: cssVar('--dnt-status-warning-bg', '#fff6e0'), textDark: cssVar('--dnt-status-warning-fg', '#7a4b00') },
+      new: { bgCell: cssVar('--dnt-status-success-bg', '#eaf7ef') },
+      deleted: { bgCell: cssVar('--dnt-status-danger-bg', '#fdeeee'), textDark: cssVar('--dnt-status-danger-fg', '#b42318') },
+      conflict: { bgCell: cssVar('--dnt-status-danger-bg', '#fdeeee'), textDark: cssVar('--dnt-status-danger-fg', '#b42318') },
     } satisfies Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>,
     font,
     charPx: bodyCharPx(font.body),
