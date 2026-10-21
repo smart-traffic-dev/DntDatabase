@@ -4,12 +4,17 @@
 mod diff;
 mod from_detail;
 mod model;
+mod render;
 mod types;
 mod validate;
 
 pub use diff::{diff, Change, DiffError, Position};
 pub use from_detail::{from_detail, new_table};
 pub use model::*;
+pub use render::{
+    check_sql, column_sql, fk_sql, index_sql, primary_key_sql, render, render_create, Impact,
+    ImpactKind, RenderError, Rendered,
+};
 pub use types::{parse_type, type_catalog, type_text};
 pub use validate::validate;
 

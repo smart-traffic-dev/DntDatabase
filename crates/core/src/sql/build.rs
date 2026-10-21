@@ -241,9 +241,21 @@ fn string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError>
 }
 
 fn mysql_string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError> {
+    let quoted = mysql_quote(s, d).map_err(|e| match e {
+        BuildError::Invalid { reason, .. } => invalid(col, &reason),
+        other => other,
+    })?;
+    Ok(format!("_utf8mb4{quoted}"))
+}
+
+/// `s` as a plain MySQL string literal `'…'` (no character set introducer), escaped as
+/// [`literal`] escapes strings for `d`: backslash-escaped (`\\`, `\'`, `\0`) unless
+/// `NO_BACKSLASH_ESCAPES`, where only `'` is doubled and NUL is refused. For DDL
+/// positions that take no introducer (`COMMENT '…'`, `ENUM('…')`, a column `DEFAULT`).
+pub fn mysql_quote(s: &str, d: Dialect) -> Result<String, BuildError> {
     let backslash = matches!(d, Dialect::MySql(m) if !m.no_backslash_escapes);
-    let mut out = String::with_capacity(s.len() + 11);
-    out.push_str("_utf8mb4'");
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
     for c in s.chars() {
         match c {
             '\\' if backslash => out.push_str("\\\\"),
@@ -251,10 +263,10 @@ fn mysql_string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, Build
             '\0' if backslash => out.push_str("\\0"),
             '\'' => out.push_str("''"),
             '\0' => {
-                return Err(invalid(
-                    col,
-                    "a NUL character cannot be written under NO_BACKSLASH_ESCAPES",
-                ))
+                return Err(BuildError::Invalid {
+                    column: String::new(),
+                    reason: "a NUL character cannot be written under NO_BACKSLASH_ESCAPES".into(),
+                })
             }
             c => out.push(c),
         }
@@ -1435,6 +1447,17 @@ mod tests {
             lit(t("\"x\""), Ctx("varchar", LogicalType::Text, ansi)),
             "_utf8mb4'\"x\"'"
         );
+    }
+
+    #[test]
+    fn mysql_quote_has_no_introducer() {
+        assert_eq!(mysql_quote("it's C:\\x", MY.2).unwrap(), r"'it\'s C:\\x'");
+        assert_eq!(
+            mysql_quote("it's C:\\x", MY_NBE.2).unwrap(),
+            r"'it''s C:\x'"
+        );
+        assert_eq!(mysql_quote("a\0b", MY.2).unwrap(), r"'a\0b'");
+        assert!(mysql_quote("a\0b", MY_NBE.2).is_err());
     }
 
     #[test]
