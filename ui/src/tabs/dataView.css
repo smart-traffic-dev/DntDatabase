@@ -15,50 +15,121 @@
   flex-direction: column;
 }
 
+/* 40px: Filter and the sort chip on the left; pager, Refresh, Open in query, Export and ⋯ on the right. */
 .dv-toolbar {
+  flex: none;
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--color-sidebar);
-  font-size: var(--text-callout);
-}
-
-.dv-size {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-secondary);
-}
-
-.dv-status,
-.dv-total,
-.dv-sort {
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.dv-sort {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.dv-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--text);
-  font-size: var(--text-footnote);
-  text-decoration: underline;
-  cursor: pointer;
+  gap: var(--dnt-space-1);
+  min-height: 40px;
+  padding: 0 var(--dnt-space-3);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
+  font-size: var(--dnt-text-base);
 }
 
 .dv-toolbar .spacer {
   flex: 1;
+}
+
+.dv-toolbar .icon-btn {
+  width: var(--dnt-ctl-h-md);
+  height: var(--dnt-ctl-h-md);
+}
+
+.dv-toolbar .icon-btn:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+/* Quiet text buttons; Export is the one secondary (bordered) button. */
+.dv-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg);
+  font: inherit;
+  white-space: nowrap;
+}
+
+.dv-btn:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+}
+
+.dv-btn:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+/* The filter bar is open: a background tint, no stripe. */
+.dv-btn[aria-pressed='true'] {
+  background: var(--dnt-bg-active);
+}
+
+.dv-btn.secondary {
+  border-color: var(--dnt-border);
+  background: var(--dnt-bg-app);
+}
+
+.dv-btn.secondary:disabled {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-bg-sunken);
+}
+
+.dv-divider {
+  flex: none;
+  width: 1px;
+  height: 20px;
+  margin: 0 var(--dnt-space-1);
+  background: var(--dnt-border);
+}
+
+/* `1–100 / ~3,412` */
+.dv-pager {
+  flex: none;
+  margin-right: var(--dnt-space-1);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The sort keys, with one × that clears them. */
+.dv-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  height: 22px;
+  padding: 0 var(--dnt-space-0_5) 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-sm);
+  white-space: nowrap;
+}
+
+.dv-chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dnt-radius-full);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+}
+
+.dv-chip-x:hover {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
 }
 
 .dv-main {
@@ -84,23 +155,25 @@
 .dv-note {
   margin: 0;
   padding: 4px 12px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text-secondary);
-  font-size: var(--text-footnote);
+  border-bottom: 1px solid var(--dnt-border);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
 }
 
 .dv-note-error {
-  color: var(--color-danger);
-}
-
-/* A toggled toolbar button (the filter bar is open): a background tint, no stripe. */
-.qt-btn.dv-on {
-  background: var(--sel);
+  color: var(--dnt-status-danger-fg);
 }
 
 .dv-filtered {
-  color: var(--text-secondary);
-  font-size: var(--text-footnote);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  white-space: nowrap;
+}
+
+/* Implicit primary-key order: a quiet hint, not a sort state. */
+.dv-key-order {
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-sm);
   white-space: nowrap;
 }
 
@@ -110,9 +183,9 @@
   flex-direction: column;
   gap: 6px;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--color-sidebar);
-  font-size: var(--text-callout);
+  border-bottom: 1px solid var(--dnt-border);
+  background: var(--dnt-bg-chrome);
+  font-size: var(--dnt-text-base);
 }
 
 .fb-head,
@@ -131,7 +204,7 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--text-secondary);
+  color: var(--dnt-fg-muted);
 }
 
 .fb-op {
@@ -142,50 +215,44 @@
   height: 28px;
   min-width: 160px;
   padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
-  color: var(--text);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
   font: inherit;
 }
 
 .fb-and {
-  color: var(--text-secondary);
+  color: var(--dnt-fg-muted);
 }
 
 .fb-remove {
   width: 24px;
   height: 24px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: none;
-  color: var(--text-secondary);
+  color: var(--dnt-fg-muted);
   cursor: pointer;
 }
 
 .fb-remove:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .fb-error {
   margin: 0;
-  color: var(--color-danger);
-  font-size: var(--text-footnote);
-}
-
-/* Implicit primary-key order: a quiet hint, not a sort state. */
-.dv-key-order {
-  color: var(--text-faint);
-  font-size: var(--text-footnote);
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
 }
 
 .dv-error {
   max-width: 640px;
   margin: 16px;
   padding: 10px 12px;
-  border: 1px solid var(--color-danger-border);
-  border-radius: var(--radius-md);
-  background: var(--color-danger-fill);
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-status-danger-bg);
 }
 
 .dv-error p {
@@ -196,7 +263,7 @@
   margin: 6px 0 0;
   white-space: pre-wrap;
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
 }
 
 .dv-error .qt-btn {
