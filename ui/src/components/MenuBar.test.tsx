@@ -50,6 +50,21 @@ describe('MenuBar', () => {
     expect(top('File').querySelector('u')?.textContent).toBe('F');
   });
 
+  it('the dropdown opens under its label, never in the window corner', () => {
+    mount();
+    const rect = (left: number) => ({ left, right: left + 40, top: 0, bottom: 32, width: 40, height: 32, x: left, y: 0, toJSON: () => ({}) });
+    vi.spyOn(top('Query'), 'getBoundingClientRect').mockReturnValue(rect(160) as DOMRect);
+    vi.spyOn(top('View'), 'getBoundingClientRect').mockReturnValue(rect(110) as DOMRect);
+    fireEvent.click(top('Query'));
+    const menu = screen.getByRole('menu', { name: 'Query' });
+    expect(menu.style.left).toBe('160px');
+    expect(menu.style.top).toBe('32px');
+    expect(menu.style.visibility).toBe('');
+    // Hovering another label moves the dropdown under it.
+    fireEvent.mouseEnter(top('View'));
+    expect(screen.getByRole('menu', { name: 'View' }).style.left).toBe('110px');
+  });
+
   it('click opens the dropdown, a second click closes it', () => {
     mount();
     fireEvent.click(top('File'));

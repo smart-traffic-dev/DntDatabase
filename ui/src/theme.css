@@ -96,7 +96,8 @@ textarea:focus-visible,
   line-height: var(--dnt-text-base-lh);
 }
 
-.body {
+/* `app-body`, not `body`: Monaco's suggest details pane has a `.body` of its own. */
+.app-body {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -224,8 +225,11 @@ textarea:focus-visible,
   flex: 1;
 }
 
-/* Tree */
-.tree {
+/*
+ * Tree. `[role='tree']`: Monaco's suggest list is a `div.tree` too, and this padding / overflow
+ * clipped its last row.
+ */
+.tree[role='tree'] {
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -234,11 +238,11 @@ textarea:focus-visible,
 }
 
 /* Keyboard focus is shown on the active row, not around the whole tree. */
-.tree:focus-visible {
+.tree[role='tree']:focus-visible {
   outline: none;
 }
 
-.tree:focus-visible .tree-row.selected {
+.tree[role='tree']:focus-visible .tree-row.selected {
   outline: 1px solid var(--dnt-focus);
   outline-offset: -1px;
 }
@@ -263,7 +267,7 @@ textarea:focus-visible,
   background: var(--dnt-bg-selected-muted);
 }
 
-.tree:focus-within .tree-row.selected {
+.tree[role='tree']:focus-within .tree-row.selected {
   background: var(--dnt-bg-selected);
 }
 

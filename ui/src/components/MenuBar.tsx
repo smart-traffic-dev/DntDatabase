@@ -4,10 +4,16 @@ import { buildMenus } from './appMenus';
 import { useMenuState } from './useMenuState';
 import './menuBar.css';
 
-/** Which menu is open; `keyboard`: it was opened with the keyboard, so its first item takes the focus. */
+/**
+ * Which menu is open; `keyboard`: it was opened with the keyboard, so its first item takes the focus.
+ * `x` / `y`: the bottom-left corner of its label, measured when it opened (never read during render,
+ * where a missing label made the menu flash in the window's top-left corner).
+ */
 interface Open {
   index: number;
   keyboard: boolean;
+  x: number;
+  y: number;
 }
 
 /** The label with its mnemonic letter underlined. */
@@ -39,6 +45,12 @@ export function MenuBar() {
   const count = menus.length;
   const mnemonics = menus.map((m) => m.mnemonic.toLowerCase()).join('');
 
+  /** The menu at `index`, anchored under its label; `null` when the label is not laid out. */
+  const openAt = useCallback((index: number, keyboard: boolean): Open | null => {
+    const r = buttons.current[index]?.getBoundingClientRect();
+    return r ? { index, keyboard, x: r.left, y: r.bottom } : null;
+  }, []);
+
   // Alt+<letter> opens a menu (Alt alone does nothing).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -48,11 +60,11 @@ export function MenuBar() {
       if (e.key.length !== 1 || index < 0) return;
       e.preventDefault();
       e.stopPropagation();
-      setOpen({ index, keyboard: true });
+      setOpen(openAt(index, true));
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [mnemonics]);
+  }, [mnemonics, openAt]);
 
   // While a menu is open: Left / Right switch menus; Up / Down / Home / End / Enter reach the menu
   // even when the focus is still in the editor (a pointer-opened menu does not take the focus).
@@ -66,7 +78,7 @@ export function MenuBar() {
         e.preventDefault();
         e.stopPropagation();
         const step = e.key === 'ArrowRight' ? 1 : -1;
-        setOpen((o) => (o ? { index: (o.index + step + count) % count, keyboard: true } : o));
+        setOpen((o) => (o ? (openAt((o.index + step + count) % count, true) ?? o) : o));
       } else if (!inMenu && ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter'].includes(e.key)) {
         e.preventDefault();
         e.stopPropagation();
@@ -76,7 +88,7 @@ export function MenuBar() {
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [open, count]);
+  }, [open, count, openAt]);
 
   /** Menu buttons never take focus on mousedown (the editor keeps its caret). The mousedown also
    * stays away from the open menu's outside-click handler, so a second click on a label closes it. */
@@ -86,7 +98,6 @@ export function MenuBar() {
   };
 
   const active = open ? menus[open.index] : undefined;
-  const rect = open ? buttons.current[open.index]?.getBoundingClientRect() : undefined;
 
   return (
     <div className="menubar" role="menubar" aria-label="Application menu">
@@ -106,20 +117,20 @@ export function MenuBar() {
             tabIndex={-1}
             data-testid={`menu-${menu.id}`}
             onMouseDown={onMouseDown}
-            onClick={() => setOpen(isOpen ? null : { index: i, keyboard: false })}
-            onMouseEnter={() => open && !isOpen && setOpen({ index: i, keyboard: false })}
+            onClick={() => setOpen(isOpen ? null : openAt(i, false))}
+            onMouseEnter={() => open && !isOpen && setOpen(openAt(i, false) ?? open)}
           >
             <Label text={menu.label} mnemonic={menu.mnemonic} />
           </button>
         );
       })}
-      {active && (
+      {open && active && (
         <div ref={dropdown}>
           <ActionMenu
             key={active.id}
             label={active.label}
-            x={rect?.left ?? 0}
-            y={rect?.bottom ?? 0}
+            x={open.x}
+            y={open.y}
             items={active.items}
             onClose={close}
             autoFocus={open?.keyboard ?? false}

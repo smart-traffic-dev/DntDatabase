@@ -60,6 +60,12 @@ export function defineDntTheme(monaco: MonacoApi, dark: boolean): void {
     'editorSuggestWidget.background': token('--dnt-bg-raised', '#ffffff'),
     'editorSuggestWidget.border': token('--dnt-border', '#dedee1'),
     'editorSuggestWidget.selectedBackground': token('--dnt-bg-selected', '#dce7fd'),
+    // Monaco's focused-row colours are made for its dark-blue selection: on the token's light
+    // selection its pale-blue match highlight was unreadable. Same text and match colours as other rows.
+    'editorSuggestWidget.selectedForeground': token('--dnt-fg', '#131315'),
+    'editorSuggestWidget.selectedIconForeground': token('--dnt-fg', '#131315'),
+    'editorSuggestWidget.highlightForeground': token('--dnt-accent', '#2563eb'),
+    'editorSuggestWidget.focusHighlightForeground': token('--dnt-accent', '#2563eb'),
     'scrollbarSlider.background': token('--dnt-border-strong', '#c6c6ca'),
   });
   monaco.editor.defineTheme(monacoThemeName(dark), { base: dark ? 'vs-dark' : 'vs', inherit: true, rules: [], colors: colors() });
