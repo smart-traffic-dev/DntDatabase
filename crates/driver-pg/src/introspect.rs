@@ -181,6 +181,7 @@ fn column_detail(r: &Row) -> Result<ColumnDetail, DbError> {
         invisible: false,
         collation: non_empty(r, 8)?,
         comment: non_empty(r, 7)?,
+        ..Default::default()
     })
 }
 
@@ -215,6 +216,7 @@ fn index_details(
             columns: get(r, 4)?,
             expression: non_empty(r, 5)?,
             definition,
+            ..Default::default()
         };
         if idx.primary {
             primary = Some(idx);
@@ -242,6 +244,7 @@ fn foreign_keys(rows: &[Row], schema: &str) -> Result<Vec<ForeignKeyDetail>, DbE
             on_delete: fk_action(&get::<String>(r, 6)?).into(),
             definition: get::<Option<String>>(r, 7)?
                 .map(|def| qualify_reference(def, &unqualified, &qualified)),
+            ..Default::default()
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -564,6 +567,7 @@ impl Introspector for PgSession {
                 tablespace: non_empty(rel, 5)?,
                 partitioned_by: non_empty(rel, 4)?,
                 system_versioned: false,
+                ..Default::default()
             },
             row_estimate: estimate(rel, 2)?,
             size_bytes: estimate(rel, 6)?,

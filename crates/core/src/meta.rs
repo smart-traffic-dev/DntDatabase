@@ -88,7 +88,7 @@ pub fn group_table_columns(
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, Type)]
 pub struct ColumnDetail {
     pub name: String,
     pub ordinal: u32,
@@ -103,6 +103,36 @@ pub struct ColumnDetail {
     /// explicit non-default collation; `None` otherwise.
     pub collation: Option<String>,
     pub comment: Option<String>,
+    #[serde(default)]
+    pub charset: Option<String>,
+    /// MySQL ON UPDATE CURRENT_TIMESTAMP[(n)] clause.
+    #[serde(default)]
+    pub on_update: Option<String>,
+    #[serde(default)]
+    pub identity_kind: Option<IdentityKind>,
+    #[serde(default)]
+    pub unsigned: bool,
+    #[serde(default)]
+    pub enum_values: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityKind {
+    Always,
+    ByDefault,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, Type)]
+pub struct IndexPart {
+    pub column: Option<String>,
+    pub expression: Option<String>,
+    pub prefix: Option<u32>,
+    pub descending: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -113,18 +143,48 @@ pub struct IndexDetail {
     /// rows already in the table may hold duplicates.
     pub unique: bool,
     pub primary: bool,
-    /// A partial index (PostgreSQL `… WHERE <predicate>`): it covers only some rows, so
+    /// A partial index (PostgreSQL `â€¦ WHERE <predicate>`): it covers only some rows, so
     /// it never identifies a row. Always false on MySQL/MariaDB.
     pub partial: bool,
     pub columns: Vec<String>,
     pub expression: Option<String>,
     pub method: Option<String>,
-    /// Either a full `CREATE INDEX …` statement or, for an index backing a table
+    /// Either a full `CREATE INDEX â€¦` statement or, for an index backing a table
     /// constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).
     pub definition: Option<String>,
+    #[serde(default)]
+    pub parts: Vec<IndexPart>,
+    #[serde(default = "yes")]
+    pub visible: bool,
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub nulls_not_distinct: bool,
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+impl Default for IndexDetail {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            unique: false,
+            primary: false,
+            partial: false,
+            columns: Vec::new(),
+            expression: None,
+            method: None,
+            definition: None,
+            parts: Vec::new(),
+            visible: true,
+            include: Vec::new(),
+            nulls_not_distinct: false,
+            comment: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, Type)]
 pub struct ForeignKeyDetail {
     pub name: String,
     pub columns: Vec<String>,
@@ -136,6 +196,12 @@ pub struct ForeignKeyDetail {
     /// Verbatim server constraint definition when the backend provides one
     /// (e.g. `FOREIGN KEY (a) REFERENCES t(id) DEFERRABLE INITIALLY DEFERRED`).
     pub definition: Option<String>,
+    #[serde(default)]
+    pub match_type: Option<String>,
+    #[serde(default)]
+    pub deferrable: bool,
+    #[serde(default)]
+    pub initially_deferred: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -154,13 +220,27 @@ pub struct TriggerDetail {
     pub event: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, Type)]
 pub struct TableOptions {
     pub engine: Option<String>,
     pub collation: Option<String>,
     pub tablespace: Option<String>,
     pub partitioned_by: Option<String>,
     pub system_versioned: bool,
+    #[serde(default)]
+    pub charset: Option<String>,
+    #[serde(default)]
+    pub row_format: Option<String>,
+    /// Exported as a JS number: counters stay far below 2^53.
+    #[serde(default)]
+    #[specta(type = Option<f64>)]
+    pub auto_increment: Option<u64>,
+    #[serde(default)]
+    pub extra: Vec<(String, String)>,
+    #[serde(default)]
+    pub is_partition: bool,
+    #[serde(default)]
+    pub inherits: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
@@ -190,6 +270,14 @@ mod tests {
             name: name.into(),
             data_type: data_type.into(),
         }
+    }
+
+    #[test]
+    fn index_detail_defaults_visible() {
+        let json = r#"{"name":"i","unique":false,"primary":false,"partial":false,"columns":["a"],"expression":null,"method":null,"definition":null}"#;
+        let idx: IndexDetail = serde_json::from_str(json).unwrap();
+        assert!(idx.visible);
+        assert!(idx.parts.is_empty());
     }
 
     #[test]

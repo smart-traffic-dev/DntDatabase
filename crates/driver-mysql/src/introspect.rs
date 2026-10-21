@@ -196,6 +196,7 @@ fn column_detail(r: &TextRow, maria: bool) -> Option<ColumnDetail> {
         invisible: extra.to_ascii_uppercase().contains("INVISIBLE"),
         collation: non_empty(r, 8),
         comment: non_empty(r, 7),
+        ..Default::default()
     })
 }
 
@@ -213,6 +214,7 @@ fn group_indexes(rows: &[TextRow]) -> BTreeMap<String, IndexDetail> {
             expression: None,
             method: non_empty(r, 4),
             definition: None,
+            ..Default::default()
         });
         if let Some(c) = col(r, 3) {
             idx.columns.push(c);
@@ -245,6 +247,7 @@ fn group_foreign_keys(rows: &[TextRow], db: &str) -> Vec<ForeignKeyDetail> {
             on_delete: col(r, 6).unwrap_or_default(),
             // MySQL table DDL comes verbatim from `SHOW CREATE TABLE`.
             definition: None,
+            ..Default::default()
         });
         fk.columns.extend(col(r, 1));
         fk.ref_columns.extend(col(r, 4));
@@ -425,6 +428,7 @@ impl Introspector for MySqlSession {
                 tablespace: None,
                 partitioned_by,
                 system_versioned: table_type == "SYSTEM VERSIONED",
+                ..Default::default()
             },
             row_estimate: if is_view { None } else { num(&table, 4) },
             size_bytes,

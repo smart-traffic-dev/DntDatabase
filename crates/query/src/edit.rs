@@ -1328,6 +1328,7 @@ mod tests {
             invisible: false,
             collation: collation.map(Into::into),
             comment: None,
+            ..Default::default()
         }
     }
 
@@ -1341,6 +1342,7 @@ mod tests {
             expression: None,
             method: None,
             definition: None,
+            ..Default::default()
         }
     }
 
@@ -1373,6 +1375,7 @@ mod tests {
                 tablespace: None,
                 partitioned_by: None,
                 system_versioned: false,
+                ..Default::default()
             },
             row_estimate: None,
             size_bytes: None,

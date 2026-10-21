@@ -60,12 +60,17 @@ function column(name: string, ordinal: number, dbType: string, over: Partial<Col
     invisible: false,
     collation: null,
     comment: null,
+    charset: null,
+    on_update: null,
+    identity_kind: null,
+    unsigned: false,
+    enum_values: [],
     ...over,
   };
 }
 
 function index(name: string, columns: string[], over: Partial<IndexDetail> = {}): IndexDetail {
-  return { name, unique: false, primary: false, partial: false, columns, expression: null, method: null, definition: null, ...over };
+  return { name, unique: false, primary: false, partial: false, columns, expression: null, method: null, definition: null, parts: [], visible: true, include: [], nulls_not_distinct: false, comment: null, ...over };
 }
 
 function detailOf(variant: ServerInfo['variant'], object: ObjectRef): TableDetail {
@@ -99,6 +104,12 @@ function detailOf(variant: ServerInfo['variant'], object: ObjectRef): TableDetai
       tablespace: null,
       partitioned_by: null,
       system_versioned: false,
+      charset: null,
+      row_format: null,
+      auto_increment: null,
+      extra: [],
+      is_partition: false,
+      inherits: [],
     },
     row_estimate: 3,
     size_bytes: mysql ? 16_384 : 32_768,

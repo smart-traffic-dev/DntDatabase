@@ -985,7 +985,11 @@ export type ColumnDetail = { name: string; ordinal: number; db_type: string; nul
  * Collation of a text column (MySQL/MariaDB), or of a PostgreSQL column with an
  * explicit non-default collation; `None` otherwise.
  */
-collation: string | null; comment: string | null }
+collation: string | null; comment: string | null; charset?: string | null; 
+/**
+ * MySQL ON UPDATE CURRENT_TIMESTAMP[(n)] clause.
+ */
+on_update?: string | null; identity_kind?: IdentityKind | null; unsigned?: boolean; enum_values?: string[] }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
 /**
  * A table or view offered by autocomplete after `db.` / `schema.`.
@@ -1218,7 +1222,7 @@ export type ForeignKeyDetail = { name: string; columns: string[]; ref_schema: st
  * Verbatim server constraint definition when the backend provides one
  * (e.g. `FOREIGN KEY (a) REFERENCES t(id) DEFERRABLE INITIALLY DEFERRED`).
  */
-definition: string | null }
+definition: string | null; match_type?: string | null; deferrable?: boolean; initially_deferred?: boolean }
 export type Group = { id: string; parent_id: string | null; name: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -1262,6 +1266,7 @@ export type HistoryStatus = "ok" | "error" |
  * show such a row as not applied.
  */
 "cancelled"
+export type IdentityKind = "always" | "by_default"
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
@@ -1286,15 +1291,16 @@ export type IndexDetail = { name: string;
  */
 unique: boolean; primary: boolean; 
 /**
- * A partial index (PostgreSQL `… WHERE <predicate>`): it covers only some rows, so
+ * A partial index (PostgreSQL `â€¦ WHERE <predicate>`): it covers only some rows, so
  * it never identifies a row. Always false on MySQL/MariaDB.
  */
 partial: boolean; columns: string[]; expression: string | null; method: string | null; 
 /**
- * Either a full `CREATE INDEX …` statement or, for an index backing a table
+ * Either a full `CREATE INDEX â€¦` statement or, for an index backing a table
  * constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).
  */
-definition: string | null }
+definition: string | null; parts?: IndexPart[]; visible?: boolean; include?: string[]; nulls_not_distinct?: boolean; comment?: string | null }
+export type IndexPart = { column: string | null; expression: string | null; prefix: number | null; descending: boolean }
 /**
  * TypeScript type of `Value::Int` / `Value::UInt`: a number when |x| ≤ 2^53, else a string.
  * Only used for the bindings (`#[specta(type = …)]`, exported as
@@ -1677,7 +1683,11 @@ export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_
  * Exported as JS numbers: estimates and sizes stay far below 2^53.
  */
 row_estimate: number | null; size_bytes: number | null; comment: string | null }
-export type TableOptions = { engine: string | null; collation: string | null; tablespace: string | null; partitioned_by: string | null; system_versioned: boolean }
+export type TableOptions = { engine: string | null; collation: string | null; tablespace: string | null; partitioned_by: string | null; system_versioned: boolean; charset?: string | null; row_format?: string | null; 
+/**
+ * Exported as a JS number: counters stay far below 2^53.
+ */
+auto_increment?: number | null; extra?: ([string, string])[]; is_partition?: boolean; inherits?: string[] }
 export type TableRowCount = { 
 /**
  * Exact `COUNT(*)`.

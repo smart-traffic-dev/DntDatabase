@@ -144,6 +144,7 @@ fn column(name: &str, nullable: bool) -> ColumnDetail {
         invisible: false,
         collation: None,
         comment: None,
+        ..Default::default()
     }
 }
 
@@ -170,6 +171,7 @@ fn items(engine: &str) -> TableDetail {
             expression: None,
             method: None,
             definition: None,
+            ..Default::default()
         }),
         indexes: vec![],
         foreign_keys: vec![],
@@ -181,6 +183,7 @@ fn items(engine: &str) -> TableDetail {
             tablespace: None,
             partitioned_by: None,
             system_versioned: false,
+            ..Default::default()
         },
         row_estimate: None,
         size_bytes: None,
