@@ -40,10 +40,10 @@ use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_with,
+    classic_table, confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_with,
     mark_implicit_commits, parse_estimate, plan, run_with, DropTarget, ExplainFormat, GuardCtx,
-    PlannedStmt, RowEstimate, RunCancel, RunConfig, RunReport, ScriptPlan, StmtKindLabel,
-    StopReason, Target, UnboundedWrite, Verdict, WriteOp,
+    PlanTable, PlannedStmt, RowEstimate, RunCancel, RunConfig, RunReport, ScriptPlan,
+    StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict, WriteOp,
 };
 use dnt_store::repo::ConnectionRepo;
 use futures_util::FutureExt;
@@ -571,6 +571,32 @@ async fn explain_estimate(
     }
 }
 
+/// The time limit of the classic `EXPLAIN` an Explain runs first.
+const CLASSIC_EXPLAIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The classic tabular `EXPLAIN` of an Explain (MySQL 8 / MariaDB; it never executes
+/// the statement), run on the tab's session before the plan. Best-effort: any failure
+/// (logged at `debug`) leaves the plan without it; a lost connection is left for the
+/// plan's own statement to report.
+async fn classic_explain(
+    session: &dyn Session,
+    sql: &str,
+    dialect: Dialect,
+    opts: &ExecOptions,
+) -> Option<PlanTable> {
+    let mut sink = CollectSink::default();
+    match session
+        .execute_one(sql, classify(sql, dialect), opts, &mut sink)
+        .await
+    {
+        Ok(_) => Some(classic_table(&sink.columns, &sink.rows)),
+        Err(e) => {
+            tracing::debug!(error = %e, "the classic explain failed");
+            None
+        }
+    }
+}
+
 /// Why a row estimate left the session in a state the caller must act on.
 enum EstimateError {
     /// The connection was lost (or the explain never stopped): drop the session.
@@ -652,6 +678,8 @@ pub(crate) struct PlanTarget {
 pub(crate) struct ExplainPlan {
     format: ExplainFormat,
     original: ScriptPlan,
+    /// The plain `EXPLAIN` run first for the classic table (`ExplainSql::classic`).
+    classic: Option<String>,
 }
 
 struct StoredPlan {
@@ -837,6 +865,7 @@ impl PlanStore {
             Some(e) => Some(ExplainPlan {
                 format: e.format,
                 original: one_statement(&e.original, index).ok_or(DbError::PlanExpired)?,
+                classic: e.classic.clone(),
             }),
             None => None,
         };
@@ -2178,6 +2207,8 @@ struct RunTask {
     ts: OwnedMutexGuard<TabSession>,
     plan: ScriptPlan,
     explain: Option<ExplainFormat>,
+    /// Explain mode: the plain `EXPLAIN` run before the plan for the classic table.
+    classic: Option<String>,
     exec: ExecOptions,
     continue_on_error: bool,
     cancel: RunCancel,
@@ -2219,6 +2250,16 @@ impl RunTask {
         let ticker = tokio::spawn(tick_rows(Arc::clone(&rows)));
         let ran = AssertUnwindSafe(async {
             let session = self.ts.session.as_deref()?;
+            if let Some(sql) = &self.classic {
+                let opts = ExecOptions {
+                    max_rows: 1_000,
+                    timeout: Some(CLASSIC_EXPLAIN_TIMEOUT),
+                    cancel_grace: self.exec.cancel_grace,
+                    stop: self.cancel.signal(),
+                    ..ExecOptions::default()
+                };
+                sink.set_classic(classic_explain(session, sql, self.plan.dialect, &opts).await);
+            }
             Some(
                 run_with(
                     session,
@@ -2460,6 +2501,7 @@ impl SessionManager {
             slot,
             ts,
             plan: run_plan,
+            classic: copy.explain.as_ref().and_then(|e| e.classic.clone()),
             explain: copy.explain.map(|e| e.format),
             exec,
             continue_on_error: opts.continue_on_error,
@@ -2560,6 +2602,7 @@ impl SessionManager {
         let explain = ExplainPlan {
             format: sql.format,
             original,
+            classic: sql.classic,
         };
         let copy = PlanCopy {
             target,

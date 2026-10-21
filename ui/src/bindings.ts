@@ -1374,9 +1374,14 @@ estimate?: RowEstimate | null;
  */
 implicit_commit?: boolean }
 /**
+ * A classic tabular `EXPLAIN`: the server's columns, one row per table; a SQL NULL is
+ * `None`.
+ */
+export type PlanTable = { columns: string[]; rows: ((string | null)[])[] }
+/**
  * A normalized explain result. `raw` is the engine's original output.
  */
-export type PlanTree = { kind: "tree"; root: PlanNode; raw: string } | { kind: "table"; columns: string[]; rows: string[][]; raw: string }
+export type PlanTree = { kind: "tree"; root: PlanNode; raw: string; classic?: PlanTable | null } | { kind: "table"; columns: string[]; rows: string[][]; raw: string }
 export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialect; connection_name: string; env_tag: EnvTag | null; read_only: boolean; 
 /**
  * The tab session's transaction state when the plan was made.

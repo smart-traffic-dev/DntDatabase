@@ -5,7 +5,9 @@ use dnt_core::error::DbError;
 use dnt_core::server::{detect_mysql, detect_pg, ServerInfo};
 use dnt_core::sql::{Dialect, MySqlMode};
 use dnt_core::value::Value;
-use dnt_query::explain::{explain_sql, parse_plan, self_cost, ExplainFormat, PlanNode, PlanTree};
+use dnt_query::explain::{
+    classic_table, explain_sql, parse_plan, self_cost, ExplainFormat, PlanNode, PlanTree,
+};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -30,7 +32,7 @@ fn parse(name: &str, format: ExplainFormat) -> PlanTree {
 
 fn root(tree: &PlanTree) -> &PlanNode {
     match tree {
-        PlanTree::Tree { root, raw } => {
+        PlanTree::Tree { root, raw, .. } => {
             assert!(!raw.is_empty());
             root
         }
@@ -138,6 +140,60 @@ fn explain_sql_per_engine() {
             ),
             "{v}"
         );
+    }
+}
+
+/// MySQL 8 and MariaDB also get the classic tabular EXPLAIN (it never executes the
+/// statement); 5.7's plan already is that table, PostgreSQL has none.
+#[test]
+fn classic_explain_beside_the_plan() {
+    let cases = [
+        (mysql("8.0.36"), false, Some("EXPLAIN SELECT 1")),
+        (mysql("8.0.36"), true, Some("EXPLAIN SELECT 1")),
+        (mysql("10.6.16-MariaDB"), false, Some("EXPLAIN SELECT 1")),
+        (mysql("10.6.16-MariaDB"), true, Some("EXPLAIN SELECT 1")),
+        (mysql("5.7.44-log"), false, None),
+        (detect_pg(170002, "PostgreSQL 17.2"), false, None),
+        (detect_pg(170002, "PostgreSQL 17.2"), true, None),
+    ];
+    for (info, analyze, classic) in cases {
+        let got = explain_sql(" SELECT 1 ", &info, dialect(&info), analyze).unwrap();
+        assert_eq!(got.classic.as_deref(), classic, "{info:?} {analyze}");
+    }
+}
+
+#[test]
+fn classic_table_keeps_columns_and_nulls() {
+    let columns = vec![
+        "id".to_string(),
+        "table".into(),
+        "key".into(),
+        "rows".into(),
+    ];
+    let rows = vec![vec![
+        Value::Int(1),
+        Value::Text("e".into()),
+        Value::Null,
+        Value::UInt(10302),
+    ]];
+    let t = classic_table(&columns, &rows);
+    assert_eq!(t.columns, columns);
+    assert_eq!(
+        t.rows,
+        vec![vec![
+            Some("1".to_string()),
+            Some("e".into()),
+            None,
+            Some("10302".into())
+        ]]
+    );
+}
+
+#[test]
+fn a_tree_plan_has_no_classic_table_until_one_is_attached() {
+    match parse("mysql84_plain", ExplainFormat::MySqlJson) {
+        PlanTree::Tree { classic, .. } => assert!(classic.is_none()),
+        t => panic!("expected a tree, got {t:?}"),
     }
 }
 

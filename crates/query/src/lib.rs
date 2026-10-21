@@ -22,7 +22,8 @@ pub use edit::{
     EditSet, Editability, NotEditable, PlannedEdit, Protection, ProtectionKind, RowEdit, RowRef,
 };
 pub use explain::{
-    explain_sql, parse_plan, self_cost, ExplainFormat, ExplainSql, PlanNode, PlanTree,
+    classic_table, explain_sql, parse_plan, self_cost, ExplainFormat, ExplainSql, PlanNode,
+    PlanTable, PlanTree,
 };
 pub use guard::{guard, guard_with, lifts_read_only, other_whitelisted, verdict, GuardCtx};
 pub use offsets::Utf16Map;

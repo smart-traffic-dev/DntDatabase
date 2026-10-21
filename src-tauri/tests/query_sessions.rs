@@ -326,6 +326,47 @@ impl Session for FakeSession {
             sink.result_end(&summary);
             return ok(summary);
         }
+        // The classic tabular `EXPLAIN` (no FORMAT / ANALYZE): `NOCLASSIC` fails it.
+        let classic = upper.starts_with("EXPLAIN ")
+            && !upper.starts_with("EXPLAIN FORMAT")
+            && !upper.starts_with("EXPLAIN ANALYZE")
+            && !upper.starts_with("EXPLAIN (");
+        if classic && self.info.kind == DbKind::MySql {
+            if upper.contains("NOCLASSIC") {
+                return Err(DbError::Server {
+                    code: Some("1064".into()),
+                    sqlstate: Some("42000".into()),
+                    message: "classic explain refused".into(),
+                    position: None,
+                });
+            }
+            sink.result_start(&[
+                column("id"),
+                column("select_type"),
+                column("table"),
+                column("type"),
+                column("key"),
+                column("rows"),
+                column("Extra"),
+            ]);
+            sink.rows(vec![vec![
+                Value::Int(1),
+                Value::Text("SIMPLE".into()),
+                Value::Text("t".into()),
+                Value::Text("ALL".into()),
+                Value::Null,
+                Value::Int(10302),
+                Value::Text("Using where".into()),
+            ]]);
+            let summary = ResultSummary {
+                affected: None,
+                row_count: 1,
+                truncated: false,
+                elapsed_ms: 1,
+            };
+            sink.result_end(&summary);
+            return ok(summary);
+        }
         if upper.starts_with("EXPLAIN") {
             let plan = if upper.starts_with("EXPLAIN ANALYZE") {
                 "-> Rows fetched before execution  (cost=0.00..0.00 rows=1) (actual time=0.001..0.001 rows=1 loops=1)"
@@ -2403,7 +2444,10 @@ async fn explain_analyze_needs_confirmation_on_production() {
     assert_eq!(done["stop"], Json::Null);
     assert_eq!(
         f.log.executed(),
-        ["EXPLAIN ANALYZE SELECT * FROM t WHERE a = 1"]
+        [
+            "EXPLAIN SELECT * FROM t WHERE a = 1",
+            "EXPLAIN ANALYZE SELECT * FROM t WHERE a = 1"
+        ]
     );
     assert_eq!(
         events.tags(),
@@ -2449,6 +2493,76 @@ async fn explain_json_v2_gives_a_clear_error() {
         .unwrap();
     events.done(LONG).await;
     assert_eq!(events.of("explain")[0]["plan"]["kind"], "tree");
+}
+
+#[tokio::test]
+async fn explain_attaches_the_classic_table() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view =
+        f.sm.query_explain("t1", id, None, "SELECT * FROM t", 0, false)
+            .await
+            .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    assert_eq!(
+        f.log.executed(),
+        [
+            "EXPLAIN SELECT * FROM t",
+            "EXPLAIN FORMAT=JSON SELECT * FROM t"
+        ]
+    );
+    // The classic explain streams nothing of its own.
+    assert_eq!(events.tags(), ["statement_start", "explain", "done"]);
+    let classic = &events.of("explain")[0]["plan"]["classic"];
+    assert_eq!(classic["columns"][3], "type");
+    assert_eq!(classic["rows"][0][3], "ALL");
+    assert_eq!(classic["rows"][0][4], Json::Null);
+    assert_eq!(classic["rows"][0][5], "10302");
+}
+
+#[tokio::test]
+async fn a_failed_classic_explain_leaves_the_plan_without_it() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    let view =
+        f.sm.query_explain("t1", id, None, "SELECT noclassic", 0, false)
+            .await
+            .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    let done = events.done(LONG).await;
+    assert_eq!(done["stop"], Json::Null);
+    assert!(events.of("statement_error").is_empty());
+    let plan = &events.of("explain")[0]["plan"];
+    assert_eq!(plan["kind"], "tree");
+    assert_eq!(plan["classic"], Json::Null);
+}
+
+#[tokio::test]
+async fn postgres_explain_runs_no_classic_explain() {
+    let f = fixture(DbKind::Postgres);
+    let id = open(&f, config(DbKind::Postgres)).await;
+    let view =
+        f.sm.query_explain("t1", id, None, "SELECT * FROM t", 0, false)
+            .await
+            .unwrap();
+    let (emit, events) = collector();
+    f.sm.query_run(view.plan_id, false, opts(), emit)
+        .await
+        .unwrap();
+    events.done(LONG).await;
+    let executed = f.log.executed();
+    assert_eq!(executed[0], "EXPLAIN (FORMAT JSON) SELECT * FROM t");
+    assert!(
+        !executed.iter().any(|s| s == "EXPLAIN SELECT * FROM t"),
+        "{executed:?}"
+    );
 }
 
 // ---- Fix round 1 ----

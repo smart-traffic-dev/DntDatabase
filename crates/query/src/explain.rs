@@ -29,6 +29,10 @@ pub enum ExplainFormat {
 pub struct ExplainSql {
     pub sql: String,
     pub format: ExplainFormat,
+    /// MySQL 8 / MariaDB: the plain `EXPLAIN` of the statement, run beside `sql` for
+    /// the classic table ([`classic_table`]). It never executes the statement. `None`
+    /// on MySQL 5.7 (`sql` already is that table) and PostgreSQL (no such table).
+    pub classic: Option<String>,
 }
 
 fn unsupported(feature: &str, info: &ServerInfo) -> DbError {
@@ -74,9 +78,15 @@ pub fn explain_sql(
         (_, _, true) if info.version >= (8, 0, 18) => ("EXPLAIN ANALYZE", ExplainFormat::MySqlTree),
         (_, _, true) => return Err(unsupported("EXPLAIN ANALYZE", info)),
     };
+    let classic = matches!(
+        format,
+        ExplainFormat::MySqlJson | ExplainFormat::MariaDbJson | ExplainFormat::MySqlTree
+    )
+    .then(|| format!("EXPLAIN {}", stmt.trim()));
     Ok(ExplainSql {
         sql: format!("{prefix} {}", stmt.trim()),
         format,
+        classic,
     })
 }
 
@@ -101,12 +111,40 @@ pub enum PlanTree {
     Tree {
         root: PlanNode,
         raw: String,
+        /// MySQL 8 / MariaDB: the classic tabular `EXPLAIN` of the same statement
+        /// (estimates, also after Analyze). `None` when it was not run or failed.
+        /// Always sent; optional in the bindings.
+        #[serde(default)]
+        classic: Option<PlanTable>,
     },
     Table {
         columns: Vec<String>,
         rows: Vec<Vec<String>>,
         raw: String,
     },
+}
+
+/// A classic tabular `EXPLAIN`: the server's columns, one row per table; a SQL NULL is
+/// `None`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
+pub struct PlanTable {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Option<String>>>,
+}
+
+/// The classic table from the rows a plain `EXPLAIN` returned.
+pub fn classic_table(columns: &[String], rows: &[Vec<Value>]) -> PlanTable {
+    PlanTable {
+        columns: columns.to_vec(),
+        rows: rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|v| (!matches!(v, Value::Null)).then(|| cell_text(v)))
+                    .collect()
+            })
+            .collect(),
+    }
 }
 
 /// Normalizes the rows an explain statement of `format` returned.
@@ -126,7 +164,11 @@ pub fn parse_plan(
         ExplainFormat::MySqlTree => mysql_tree::parse(&raw)?,
         ExplainFormat::Table => unreachable!("handled above"),
     };
-    Ok(PlanTree::Tree { root, raw })
+    Ok(PlanTree::Tree {
+        root,
+        raw,
+        classic: None,
+    })
 }
 
 /// The node's own cost: its `est_cost` minus the costs of its nearest costed
