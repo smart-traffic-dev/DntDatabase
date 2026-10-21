@@ -116,7 +116,7 @@ fieldset.export-form {
   color: var(--dnt-fg-disabled);
 }
 
-/* Connection dialog */
+/* Connection dialog (spec §6, board 06): section nav on the left, the form on the right, Test in the footer. */
 .conn-form {
   display: flex;
   flex-direction: column;
@@ -125,87 +125,161 @@ fieldset.export-form {
 
 .conn-body {
   display: flex;
-  /* Fixed height: the dialog does not jump between tabs. One scroll area (.conn-main). */
-  height: clamp(260px, calc(100vh - 300px), 400px);
-  overflow: hidden;
+  min-height: 0;
+  /* Sizes to the section's content; a long one scrolls inside .conn-main. */
+  max-height: calc(100vh - 32px - 48px - 52px);
 }
 
-.engines {
+.conn-nav {
+  flex: none;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  width: 170px;
-  margin: 0;
-  padding: 12px 8px;
-  border: 0;
-  border-right: 1px solid var(--dlg-line);
-  background: var(--sidebar);
-  flex: none;
+  gap: var(--dnt-space-0_5);
+  width: 176px;
+  padding: var(--dnt-space-3) var(--dnt-space-2);
+  border-right: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
 }
 
-.engines-title {
-  padding: 0 8px;
-  margin-bottom: 6px;
-  font-size: var(--text-caption);
-  color: var(--muted);
-  text-transform: uppercase;
-}
-
-.engine {
+.conn-nav-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
+  gap: var(--dnt-space-2);
+  width: 100%;
+  height: var(--dnt-ctl-h-lg);
+  padding: 0 var(--dnt-space-2);
+  border: 0;
+  border-radius: var(--dnt-radius-sm);
+  background: none;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-base);
+  text-align: left;
 }
 
-.engine.on {
-  background: var(--sel);
+.conn-nav-item:hover {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.conn-nav-item.on {
+  background: var(--dnt-bg-selected);
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
+/* The state hint: Off / Prefer / Defaults; Error in the danger colour. */
+.conn-nav-hint {
+  margin-left: auto;
+  font-size: var(--dnt-text-xs);
+  font-weight: 400;
+  color: var(--dnt-fg-subtle);
+}
+
+.conn-nav-item.on .conn-nav-hint {
+  color: var(--dnt-fg-muted);
+}
+
+.conn-nav-item.has-error .conn-nav-hint {
+  color: var(--dnt-status-danger-fg);
+  font-weight: 600;
 }
 
 .conn-main {
   flex: 1;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
   overflow: auto;
 }
 
-.tabs {
+/* A row of radio chips (engine, environment): the native radio stays, the chip is its label. */
+.chip-group {
   display: flex;
-  gap: 2px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--dlg-line);
+  flex-wrap: wrap;
+  gap: var(--dnt-space-2);
 }
 
-.dlg-tab {
-  padding: 6px 12px;
-  border: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  background: none;
-  font-size: var(--text-callout);
-  color: var(--studio-fg-secondary);
+.choice-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-3) 0 var(--dnt-space-2);
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-raised);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-base);
+  font-weight: 500;
+  cursor: pointer;
 }
 
-.dlg-tab:hover {
-  background: var(--hover);
+.choice-chip:hover {
+  background: var(--dnt-bg-hover);
 }
 
-.dlg-tab.on {
-  background: var(--sel);
+.choice-chip input {
+  margin: 0;
+  accent-color: var(--dnt-accent);
+}
+
+.choice-chip.on {
+  border-color: var(--dnt-accent);
+  background: var(--dnt-accent-subtle);
+  color: var(--dnt-fg);
+}
+
+.choice-chip.env-production.on {
+  border-color: var(--dnt-status-danger-solid);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+}
+
+.choice-chip.env-production.on input {
+  accent-color: var(--dnt-status-danger-solid);
+}
+
+.env-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-env-local);
+}
+
+.env-staging .env-dot {
+  background: var(--dnt-env-staging);
+}
+
+.env-production .env-dot {
+  background: var(--dnt-env-prod);
+}
+
+/* Two-letter engine mark. */
+.engine-badge {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-accent-subtle);
   color: var(--dnt-accent-hover);
-  font-weight: 600;
+  font-size: var(--dnt-text-xs);
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
 }
 
-.dlg-tab.has-error::after {
-  content: ' !';
-  color: var(--danger-fg);
-  font-weight: 700;
+/* A field that starts a new group of the form (Environment): a hairline above it. */
+.grid .section-break {
+  padding-top: var(--dnt-space-3);
+  border-top: 1px solid var(--dnt-border-subtle);
+}
+
+/* The Read-only checkbox lines up with the input next to it. */
+.grid .check-cell {
+  justify-content: flex-end;
 }
 
 .panel {
-  padding: 14px 16px;
+  padding: var(--dnt-space-4) var(--dnt-space-6);
 }
 
 .grid {
@@ -312,21 +386,108 @@ fieldset.export-form {
   font-weight: 500;
 }
 
-/* Reserved area for the test result: the form and the button row do not move when a result appears. */
-.result-slot {
+/* Connection test on the footer's left: the Test button, then its state; Cancel and Save stay right. */
+.test-slot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-3);
+}
+
+.test-result {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  color: var(--dnt-fg-muted);
+}
+
+.test-result > svg {
   flex: none;
-  height: 84px;
+  align-self: flex-start;
+  margin-top: 1px;
+}
+
+.test-result.running {
+  color: var(--dnt-status-info-fg);
+}
+
+.test-result.ok {
+  color: var(--dnt-status-success-fg);
+}
+
+.test-result.bad {
+  color: var(--dnt-status-danger-fg);
+}
+
+.test-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.test-line,
+.test-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.test-sub {
+  color: var(--dnt-fg-muted);
+}
+
+/* Text-styled buttons beside a status (Details, Cancel test). */
+.test-slot .link {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dnt-accent);
+  font-size: var(--dnt-text-sm);
+  text-decoration: underline;
+}
+
+.test-slot .link:hover {
+  color: var(--dnt-accent-hover);
+}
+
+/* Details of a failed test: a popover above the footer, Esc closes it first. */
+.test-details {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--dnt-space-3));
+  z-index: var(--dnt-z-dropdown);
+  width: min(520px, 100%);
+  padding: var(--dnt-space-3);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-raised);
+  box-shadow: var(--dnt-shadow-2);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+}
+
+.test-details p {
+  margin: 0 0 var(--dnt-space-2);
+}
+
+.test-details .detail {
+  margin: 0;
+  padding: var(--dnt-space-1_5) var(--dnt-space-2);
+  max-height: 160px;
   overflow: auto;
-  padding-top: 8px;
-}
-
-.result-slot .result {
-  margin-top: 0;
-}
-
-.result-check {
-  margin-right: 6px;
-  font-weight: 700;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-xs);
+  background: var(--dnt-bg-sunken);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
 }
 
 .result {
@@ -339,11 +500,6 @@ fieldset.export-form {
   color: var(--studio-fg);
 }
 
-.result.ok {
-  background: var(--studio-subtle);
-  color: var(--studio-fg);
-}
-
 .result.bad {
   background: var(--studio-danger-fill);
   border-color: var(--studio-danger-border);
@@ -352,29 +508,6 @@ fieldset.export-form {
 
 .result p {
   margin: 4px 0 0;
-}
-
-.result .link {
-  margin-top: 4px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  text-decoration: underline;
-  font-size: var(--text-footnote);
-}
-
-.result .detail {
-  margin: 6px 0 0;
-  padding: 6px 8px;
-  max-height: 80px;
-  overflow: auto;
-  white-space: pre-wrap;
-  font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  background: var(--studio-subtle);
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
 }
 
 .kv {

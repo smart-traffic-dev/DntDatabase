@@ -171,6 +171,37 @@ export const EventIcon = () => (
   </Icon>
 );
 
+/** Check mark: success (test connected, success toast). */
+export const CheckIcon = () => (
+  <Icon size={14} strokeWidth={2.2}>
+    <path d="M5 12.5l4.5 4.5L19 7.5" />
+  </Icon>
+);
+
+/** Circled exclamation: failures (test failed, error toast). */
+export const ErrorIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7.5v5.5M12 16.5h.01" />
+  </Icon>
+);
+
+/** Circled i: information toast. */
+export const InfoIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 11v5.5M12 7.5h.01" />
+  </Icon>
+);
+
+/** Triangle with exclamation: warning toast. */
+export const WarningIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <path d="M12 3.5l9.5 16.5h-19z" />
+    <path d="M12 10v4.5M12 17.5h.01" />
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon size={12} strokeWidth={2}>
     <path d="M6 6l12 12M18 6L6 18" />

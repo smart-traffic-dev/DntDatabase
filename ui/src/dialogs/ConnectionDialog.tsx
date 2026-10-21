@@ -15,6 +15,7 @@ import type {
   StageTiming,
 } from '../bindings';
 import { EnvTag as EnvTagBadge } from '../components/EnvTag';
+import { CheckIcon, ErrorIcon } from '../components/icons';
 import { useConnections } from '../store/connections';
 import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
@@ -25,11 +26,33 @@ type TabId = 'general' | 'ssh' | 'ssl' | 'advanced';
 type Engine = 'mysql' | 'mariadb' | 'postgres';
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
+/** The section nav (spec §6): a vertical tab list, each section with a one-word state hint. */
 const TABS: { id: TabId; label: string }[] = [
   { id: 'general', label: 'General' },
-  { id: 'ssh', label: 'SSH' },
-  { id: 'ssl', label: 'SSL' },
+  { id: 'ssh', label: 'SSH tunnel' },
+  { id: 'ssl', label: 'SSL / TLS' },
   { id: 'advanced', label: 'Advanced' },
+];
+
+const ENGINES: { id: Engine; label: string; badge: string }[] = [
+  { id: 'mysql', label: 'MySQL', badge: 'My' },
+  { id: 'mariadb', label: 'MariaDB', badge: 'Ma' },
+  { id: 'postgres', label: 'PostgreSQL', badge: 'Pg' },
+];
+
+const SSL_MODES: { id: SslMode; label: string }[] = [
+  { id: 'disable', label: 'Disable' },
+  { id: 'prefer', label: 'Prefer' },
+  { id: 'require', label: 'Require' },
+  { id: 'verify_ca', label: 'Verify CA' },
+  { id: 'verify_full', label: 'Verify full' },
+];
+
+const ENVIRONMENTS: { id: '' | EnvTag; label: string; testid: string }[] = [
+  { id: '', label: 'None', testid: 'conn-env-none' },
+  { id: 'local', label: 'Local', testid: 'conn-env-local' },
+  { id: 'staging', label: 'Staging', testid: 'conn-env-staging' },
+  { id: 'production', label: 'Production', testid: 'conn-env-production' },
 ];
 
 /** Backend `config` error paths -> the input (and the tab holding it). */
@@ -172,6 +195,10 @@ export function queryTimeoutSeconds(s: string): number {
   return Math.min(MAX_QUERY_TIMEOUT_S, Math.max(0, Math.floor(num(s, 0))));
 }
 
+/** The Advanced fields are what a new connection starts with (its section hint says Defaults). */
+const advancedIsDefault = (f: Form) =>
+  num(f.connectTimeout, 10) === 10 && num(f.sshTimeout, 10) === 10 && f.appName.trim() === '' && queryTimeoutSeconds(f.queryTimeout) === 0;
+
 type TestState =
   | { state: 'idle' }
   | { state: 'running' }
@@ -208,6 +235,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const [hostKey, setHostKey] = useState<HostKeyRequest | null>(null);
   const [showDetail, setShowDetail] = useState(false);
   const testSeq = useRef(0);
+  const testButton = useRef<HTMLButtonElement>(null);
+  const detailsButton = useRef<HTMLButtonElement>(null);
 
   // A field error goes away as soon as its input is edited.
   const fieldError =
@@ -362,6 +391,16 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     }
   };
 
+  /**
+   * Cancel of a running test: the dialog stops waiting and drops its late answer. (There is no
+   * backend cancel for a test; the attempt ends at its own connect timeout.)
+   */
+  const cancelTest = () => {
+    testSeq.current++;
+    setTest({ state: 'idle' });
+    testButton.current?.focus();
+  };
+
   /** Esc, the × and Cancel: ask before throwing away a filled form. */
   const requestClose = () => {
     if (saving) return;
@@ -393,9 +432,19 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   };
   /** Tabs holding an error get a marker. */
   const errorTab = fieldError ? FIELDS[fieldError.field]?.tab : undefined;
+  const engineLabel = ENGINES.find((e) => e.id === form.engine)?.label ?? 'MySQL';
+
+  /** The state hint of a section in the nav; a section holding an error says so instead. */
+  const hint = (id: TabId): string => {
+    if (errorTab === id) return 'Error';
+    if (id === 'general') return engineLabel;
+    if (id === 'ssh') return form.sshOn ? 'On' : 'Off';
+    if (id === 'ssl') return SSL_MODES.find((m) => m.id === form.sslMode)?.label ?? '';
+    return advancedIsDefault(form) ? 'Defaults' : 'Custom';
+  };
 
   const onTabKey = (e: KeyboardEvent<HTMLButtonElement>) => {
-    const dir = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+    const dir = e.key === 'ArrowDown' || e.key === 'ArrowRight' ? 1 : e.key === 'ArrowUp' || e.key === 'ArrowLeft' ? -1 : 0;
     if (!dir) return;
     e.preventDefault();
     const index = TABS.findIndex((t) => t.id === tab);
@@ -423,6 +472,30 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     general: (
       <div className="grid">
         <div className="field span2">
+          <span id="cd-engine-title" className="field-label">
+            Engine
+          </span>
+          <div role="radiogroup" aria-labelledby="cd-engine-title" className="chip-group">
+            {ENGINES.map((en) => (
+              <label key={en.id} className={`choice-chip${form.engine === en.id ? ' on' : ''}`}>
+                <input
+                  type="radio"
+                  name="engine"
+                  // The badge is decoration: the name is the engine alone.
+                  aria-label={en.label}
+                  data-testid={`conn-engine-${en.id}`}
+                  checked={form.engine === en.id}
+                  onChange={() => chooseEngine(en.id)}
+                />
+                <span className={`engine-badge engine-${en.id}`} aria-hidden="true">
+                  {en.badge}
+                </span>
+                <span>{en.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <div className="field">
           <label htmlFor="cd-name">Name</label>
           <input
             id="cd-name"
@@ -433,7 +506,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           />
           {errorFor('name')}
         </div>
-        <div className="field span2">
+        <div className="field">
           <label htmlFor="cd-group">Group</label>
           <select id="cd-group" value={form.groupId} onChange={(e) => set('groupId', e.target.value)} {...aria('group_id')}>
             <option value="">No group</option>
@@ -467,7 +540,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             onChange={(e) => setForm((f) => ({ ...f, port: e.target.value, portTouched: true }))}
             {...aria('port')}
           />
-          {errorFor('port')}
+          {errorFor('port') ?? (
+            <p className="hint">
+              {num(form.port, -1) === defaultPort(form.engine)
+                ? `Default for ${engineLabel}`
+                : `${engineLabel} default: ${defaultPort(form.engine)}`}
+            </p>
+          )}
         </div>
         <div className="field">
           <label htmlFor="cd-user">User</label>
@@ -496,20 +575,38 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           </label>
           {!form.savePassword && <p className="hint">You will be asked for the password each time. Test uses what you typed above.</p>}
         </div>
+        <div className="field span2 section-break">
+          <span id="cd-env-title" className="field-label">
+            Environment
+          </span>
+          <div role="radiogroup" aria-labelledby="cd-env-title" aria-describedby="cd-env-help" className="chip-group">
+            {ENVIRONMENTS.map((env) => (
+              <label
+                key={env.id || 'none'}
+                className={`choice-chip${form.envTag === env.id ? ' on' : ''}${env.id ? ` env-${env.id}` : ''}`}
+              >
+                <input
+                  type="radio"
+                  name="env"
+                  data-testid={env.testid}
+                  checked={form.envTag === env.id}
+                  onChange={() => set('envTag', env.id)}
+                />
+                {env.id && <span className="env-dot" aria-hidden="true" />}
+                <span>{env.label}</span>
+              </label>
+            ))}
+          </div>
+          <p id="cd-env-help" className="hint">
+            Production asks before running statements that change data or structure, and is marked PROD in tabs and
+            the status bar.
+          </p>
+        </div>
         <div className="field">
           <label htmlFor="cd-db">Default database</label>
           <input id="cd-db" value={form.defaultDb} onChange={(e) => set('defaultDb', e.target.value)} />
         </div>
-        <div className="field">
-          <label htmlFor="cd-env">Environment tag</label>
-          <select id="cd-env" value={form.envTag} onChange={(e) => set('envTag', e.target.value as '' | EnvTag)}>
-            <option value="">None</option>
-            <option value="production">Production</option>
-            <option value="staging">Staging</option>
-            <option value="local">Local</option>
-          </select>
-        </div>
-        <div className="field span2">
+        <div className="field check-cell">
           <label className="check">
             <input type="checkbox" checked={form.readOnly} onChange={(e) => set('readOnly', e.target.checked)} />
             <span>Read-only connection</span>
@@ -586,11 +683,11 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         <div className="field span2">
           <label htmlFor="cd-ssl-mode">SSL mode</label>
           <select id="cd-ssl-mode" value={form.sslMode} onChange={(e) => set('sslMode', e.target.value as SslMode)}>
-            <option value="disable">Disable</option>
-            <option value="prefer">Prefer</option>
-            <option value="require">Require</option>
-            <option value="verify_ca">Verify CA</option>
-            <option value="verify_full">Verify full</option>
+            {SSL_MODES.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
           </select>
         </div>
         <div className="span2">{pathInput('cd-ssl-ca', 'CA certificate', 'sslCa', 'ssl.ca_path')}</div>
@@ -629,19 +726,107 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     ),
   };
 
-  const engines: { id: Engine; label: string; testid?: string }[] = [
-    { id: 'mysql', label: 'MySQL', testid: 'conn-engine-mysql' },
-    { id: 'mariadb', label: 'MariaDB', testid: 'conn-engine-mariadb' },
-    { id: 'postgres', label: 'PostgreSQL', testid: 'conn-engine-postgres' },
-  ];
+  const steps = test.state === 'failed' && test.error.timings ? timingsText(test.error.timings).replace(/^ · /, '') : '';
+  const hasDetails = test.state === 'failed' && (test.mismatch || !!test.error.detail || steps !== '');
+
+  /** Esc while the details are open closes them (the top-most layer), not the dialog. */
+  const onResultKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key !== 'Escape' || !showDetail) return;
+    e.stopPropagation();
+    setShowDetail(false);
+    detailsButton.current?.focus();
+  };
+
+  // The footer's left side (spec §6): idle (nothing), testing + Cancel, connected, failed + Details; a save error.
+  let status: ReactNode = null;
+  if (saveError) {
+    status = (
+      <div className="test-result bad" role="alert">
+        <ErrorIcon />
+        <div className="test-text">
+          <span className="test-line">{saveError.message}</span>
+          {saveError.hint && <span className="test-sub">{saveError.hint}</span>}
+        </div>
+      </div>
+    );
+  } else if (test.state === 'running') {
+    status = (
+      <>
+        <span className="test-result running" role="status">
+          <span className="spinner inline" aria-hidden="true" />
+          Testing connection…
+        </span>
+        <button type="button" className="link" aria-label="Cancel test" onClick={cancelTest}>
+          Cancel
+        </button>
+      </>
+    );
+  } else if (test.state === 'ok') {
+    const text = `Connected to ${ENGINE_NAME[test.result.info.variant]} ${test.result.info.version_string}${timingsText(test.result.timings)}`;
+    status = (
+      <div className="test-result ok" role="status" data-testid="test-result" title={text}>
+        <CheckIcon />
+        <span className="test-line">{text}</span>
+      </div>
+    );
+  } else if (test.state === 'failed') {
+    status = (
+      <div className="test-result bad" role="alert" data-testid="test-result" onKeyDown={onResultKey}>
+        <ErrorIcon />
+        <div className="test-text">
+          {test.mismatch ? (
+            <>
+              <strong className="test-line">Warning: the SSH host key has CHANGED.</strong>
+              <span className="test-sub">Remove the old key from known_hosts manually to continue.</span>
+            </>
+          ) : (
+            <>
+              <span className="test-line" title={test.error.message}>
+                {test.error.stage && <strong data-testid="test-stage">{stageLabel(test.error.stage)}: </strong>}
+                <span>{test.error.message}</span>
+              </span>
+              {test.error.hint && (
+                <span className="test-sub" title={test.error.hint}>
+                  {test.error.hint}
+                </span>
+              )}
+            </>
+          )}
+        </div>
+        {hasDetails && (
+          <button
+            ref={detailsButton}
+            type="button"
+            className="link"
+            aria-expanded={showDetail}
+            aria-controls="cd-test-details"
+            onClick={() => setShowDetail((v) => !v)}
+          >
+            Details
+          </button>
+        )}
+        {showDetail && (
+          <div id="cd-test-details" className="test-details" role="region" aria-label="Test details">
+            {test.mismatch && (
+              <p>
+                This could mean someone is intercepting the connection. {test.error.message} Remove the old key from
+                known_hosts manually to continue.
+              </p>
+            )}
+            {steps !== '' && <p>Steps completed: {steps}</p>}
+            {test.error.detail && <pre className="detail">{test.error.detail}</pre>}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <>
       <Modal
         title={mode === 'edit' ? 'Edit connection' : 'New connection'}
         onClose={requestClose}
-        closable
-        className="wide"
+        className="wide conn-dialog"
         initialFocus="#cd-name"
         badge={form.envTag === 'production' ? <EnvTagBadge env="production" variant="chip" testId="env-chip" /> : undefined}
       >
@@ -653,119 +838,48 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           }}
         >
           <div className="conn-body">
-            <fieldset className="engines" role="radiogroup" aria-labelledby="cd-engine-title">
-              <span id="cd-engine-title" className="engines-title">
-                Engine
-              </span>
-              {engines.map((en) => (
-                <label key={en.id} className={`engine${form.engine === en.id ? ' on' : ''}`}>
-                  <input
-                    type="radio"
-                    name="engine"
-                    data-testid={en.testid}
-                    checked={form.engine === en.id}
-                    onChange={() => chooseEngine(en.id)}
-                  />
-                  <span>{en.label}</span>
-                </label>
+            <div role="tablist" aria-label="Connection settings" aria-orientation="vertical" className="conn-nav">
+              {TABS.map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  id={`cd-tab-${t.id}`}
+                  aria-selected={tab === t.id}
+                  aria-controls={`cd-panel-${t.id}`}
+                  aria-labelledby={`cd-tab-${t.id}-label`}
+                  aria-describedby={`cd-tab-${t.id}-hint`}
+                  tabIndex={tab === t.id ? 0 : -1}
+                  className={`conn-nav-item${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
+                  onClick={() => setTab(t.id)}
+                  onKeyDown={onTabKey}
+                >
+                  <span id={`cd-tab-${t.id}-label`}>{t.label}</span>
+                  <span id={`cd-tab-${t.id}-hint`} className="conn-nav-hint">
+                    {hint(t.id)}
+                  </span>
+                </button>
               ))}
-            </fieldset>
-            <div className="conn-main">
-              <div role="tablist" aria-label="Connection settings" className="tabs">
-                {TABS.map((t) => (
-                  <button
-                    key={t.id}
-                    type="button"
-                    role="tab"
-                    id={`cd-tab-${t.id}`}
-                    aria-selected={tab === t.id}
-                    aria-controls={`cd-panel-${t.id}`}
-                    tabIndex={tab === t.id ? 0 : -1}
-                    className={`dlg-tab${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
-                    onClick={() => setTab(t.id)}
-                    onKeyDown={onTabKey}
-                  >
-                    {t.label}
-                  </button>
-                ))}
-              </div>
-              <div role="tabpanel" id={`cd-panel-${tab}`} aria-labelledby={`cd-tab-${tab}`} className="panel">
-                {panel[tab]}
-              </div>
             </div>
-          </div>
-
-          <div className="result-slot">
-          {test.state === 'running' && (
-            <div className="result" role="status">
-              Testing connection…
+            <div role="tabpanel" id={`cd-panel-${tab}`} aria-labelledby={`cd-tab-${tab}`} className="conn-main panel">
+              {panel[tab]}
             </div>
-          )}
-          {test.state === 'ok' && (
-            <div className="result ok" role="status" data-testid="test-result">
-              <span className="result-check" aria-hidden="true">
-                ✓
-              </span>
-              Connected to {ENGINE_NAME[test.result.info.variant]} {test.result.info.version_string}
-              {timingsText(test.result.timings)}
-            </div>
-          )}
-          {test.state === 'failed' && (
-            <div className="result bad" role="alert" data-testid="test-result">
-              {test.mismatch ? (
-                <>
-                  <strong>Warning: the SSH host key has CHANGED.</strong>
-                  <p>
-                    This could mean someone is intercepting the connection. {test.error.message} Remove the old key
-                    from known_hosts manually to continue.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <div>
-                    {test.error.stage && <strong data-testid="test-stage">{stageLabel(test.error.stage)}: </strong>}
-                    <span>{test.error.message}</span>
-                  </div>
-                  {test.error.hint && <p className="hint-line">{test.error.hint}</p>}
-                  {test.error.timings && timingsText(test.error.timings) !== '' && (
-                    <p className="hint-line">Steps completed:{timingsText(test.error.timings).replace(/^ ·/, '')}</p>
-                  )}
-                </>
-              )}
-              {test.error.detail && (
-                <>
-                  <button
-                    type="button"
-                    className="link"
-                    aria-expanded={showDetail}
-                    onClick={() => setShowDetail((v) => !v)}
-                  >
-                    Details
-                  </button>
-                  {showDetail && <pre className="detail">{test.error.detail}</pre>}
-                </>
-              )}
-            </div>
-          )}
-          {saveError && (
-            <div className="result bad" role="alert">
-              {saveError.message}
-              {saveError.hint && <p className="hint-line">{saveError.hint}</p>}
-            </div>
-          )}
           </div>
 
           <footer className="modal-foot">
-            <button
-              type="button"
-              className="btn"
-              data-testid="conn-test"
-              onClick={() => void runTest()}
-              disabled={saving || test.state === 'running'}
-            >
-              Test
-            </button>
-            <span className="spacer" />
+            <div className="test-slot">
+              <button
+                ref={testButton}
+                type="button"
+                className="btn"
+                data-testid="conn-test"
+                onClick={() => void runTest()}
+                disabled={saving || test.state === 'running'}
+              >
+                Test
+              </button>
+              {status}
+            </div>
             <button type="button" className="btn" onClick={requestClose} disabled={saving}>
               Cancel
             </button>
