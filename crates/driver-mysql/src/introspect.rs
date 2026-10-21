@@ -201,11 +201,18 @@ fn column_detail(r: &TextRow, maria: bool) -> Option<ColumnDetail> {
         comment: non_empty(r, 7),
         charset: non_empty(r, 9),
         on_update: on_update_clause(&extra),
-        unsigned: db_type.to_ascii_lowercase().contains(" unsigned"),
+        unsigned: is_unsigned(&db_type),
         enum_values: enum_values(&db_type),
         db_type,
         ..Default::default()
     })
+}
+
+/// Whether a numeric `COLUMN_TYPE` carries `unsigned` (`enum` / `set` members are quoted
+/// text that may contain the word).
+fn is_unsigned(db_type: &str) -> bool {
+    let lower = db_type.to_ascii_lowercase();
+    !(lower.starts_with("enum(") || lower.starts_with("set(")) && lower.contains(" unsigned")
 }
 
 /// The text after `on update ` in `EXTRA` (e.g. `CURRENT_TIMESTAMP(6)`).
@@ -396,8 +403,37 @@ impl Introspector for MySqlSession {
         let indexes_sql = self.indexes_query();
 
         let mut conn = self.live_conn().await?;
-        let table = fetch(&mut conn, queries::TABLE, params2(db, name))
-            .await?
+        // MySQL 8 caches `information_schema.TABLES` statistics (AUTO_INCREMENT among
+        // them) for `information_schema_stats_expiry` (24 h by default). Read this one
+        // table with the cache off, then put the session's own value back.
+        let live_stats = self.server_info().variant == ServerVariant::MySql8;
+        let prior_expiry = if live_stats {
+            let prior = fetch(
+                &mut conn,
+                "SELECT @@session.information_schema_stats_expiry",
+                Params::Empty,
+            )
+            .await?;
+            let prior = prior.first().and_then(|r| col(r, 0));
+            conn.query_drop("SET SESSION information_schema_stats_expiry = 0")
+                .await
+                .map_err(map_err)?;
+            prior
+        } else {
+            None
+        };
+        let table_rows = fetch(&mut conn, queries::TABLE, params2(db, name)).await;
+        if live_stats {
+            let restore = format!(
+                "SET SESSION information_schema_stats_expiry = {}",
+                prior_expiry
+                    .filter(|p| p.parse::<u64>().is_ok())
+                    .as_deref()
+                    .unwrap_or("DEFAULT")
+            );
+            conn.query_drop(restore).await.map_err(map_err)?;
+        }
+        let table = table_rows?
             .into_iter()
             .next()
             .ok_or_else(|| no_such_table(obj))?;
@@ -554,6 +590,15 @@ mod tests {
 
     fn row(cells: &[Option<&str>]) -> TextRow {
         cells.iter().map(|c| c.map(str::to_string)).collect()
+    }
+
+    #[test]
+    fn unsigned_ignores_enum_members() {
+        assert!(is_unsigned("int(10) unsigned"));
+        assert!(is_unsigned("bigint unsigned zerofill"));
+        assert!(!is_unsigned("int"));
+        assert!(!is_unsigned("enum('a unsigned','b')"));
+        assert!(!is_unsigned("set('x unsigned')"));
     }
 
     #[test]

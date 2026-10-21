@@ -103,7 +103,8 @@ pub struct ColumnDetail {
     /// explicit non-default collation; `None` otherwise.
     pub collation: Option<String>,
     pub comment: Option<String>,
-    /// Character set of a text column when it differs from the table default.
+    /// Character set of a character column. MySQL/MariaDB fill it for every character
+    /// column; consumers normalise against the table charset.
     #[serde(default)]
     pub charset: Option<String>,
     /// MySQL ON UPDATE CURRENT_TIMESTAMP[(n)] clause.

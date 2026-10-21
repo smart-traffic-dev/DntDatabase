@@ -612,11 +612,69 @@ async fn mysql_detail_has_ddl_fields() {
             "{t:?}: {:?}",
             d.options.row_format
         );
+        assert!(
+            d.options
+                .extra
+                .iter()
+                .any(|(k, v)| k == "row_format" && v.eq_ignore_ascii_case("dynamic")),
+            "{t:?}: {:?}",
+            d.options.extra
+        );
         assert!(d.options.auto_increment.is_some(), "{t:?}");
         assert!(d.options.charset.is_some(), "{t:?}");
         if modern {
             assert!(idx("k_desc").parts[0].descending, "{t:?}");
             assert!(!idx("k_inv").visible, "{t:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn auto_increment_is_live() {
+    require_db!();
+    for t in Target::mysql_family().into_iter().chain([Target::MySql84]) {
+        let s = connect(t).await;
+        let table = scratch("autoinc");
+        s.query_row_text(&format!(
+            "CREATE TABLE {FIXTURE_DB}.{table} (id int NOT NULL AUTO_INCREMENT PRIMARY KEY, v int)"
+        ))
+        .await
+        .unwrap();
+        let inserted = s
+            .query_row_text(&format!(
+                "INSERT INTO {FIXTURE_DB}.{table} (v) VALUES (1), (2)"
+            ))
+            .await;
+        let first = s
+            .table_detail(&obj(&table, ObjectKind::Table))
+            .await
+            .map(|d| d.options.auto_increment);
+        let more = s
+            .query_row_text(&format!(
+                "INSERT INTO {FIXTURE_DB}.{table} (v) VALUES (3), (4), (5)"
+            ))
+            .await;
+        let second = s
+            .table_detail(&obj(&table, ObjectKind::Table))
+            .await
+            .map(|d| d.options.auto_increment);
+        let expiry = s
+            .query_row_text("SELECT @@session.information_schema_stats_expiry")
+            .await;
+        s.query_row_text(&format!("DROP TABLE {FIXTURE_DB}.{table}"))
+            .await
+            .unwrap();
+        inserted.unwrap();
+        more.unwrap();
+        assert_eq!(first.unwrap(), Some(3), "{t:?}");
+        assert_eq!(second.unwrap(), Some(6), "{t:?}");
+        if matches!(t, Target::MySql8 | Target::MySql84) {
+            // The session's own cache setting is put back.
+            assert_eq!(
+                expiry.unwrap(),
+                Some(vec![Some("86400".to_string())]),
+                "{t:?}"
+            );
         }
     }
 }
