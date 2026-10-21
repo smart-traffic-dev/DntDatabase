@@ -174,6 +174,13 @@ pub(crate) async fn execute(
     Ok(())
 }
 
+/// MySQL / MariaDB error 1205 (`ER_LOCK_WAIT_TIMEOUT`): the statement waited
+/// `lock_wait_timeout` for its lock and was refused before changing anything. Other
+/// server errors of a MySQL DDL stay unknown (DDL is not transactional there).
+fn mysql_lock_wait_refused(pg: bool, error: &DbError) -> bool {
+    !pg && matches!(error, DbError::Server { code: Some(c), .. } if c == "1205")
+}
+
 /// What a failed apply did: `sent` = a change statement was sent, `commit_sent` = a
 /// PostgreSQL `COMMIT` was. An open PostgreSQL transaction is rolled back here; it only
 /// counts as rolled back when the server confirms the `ROLLBACK`.
@@ -198,7 +205,7 @@ pub(crate) async fn failure_outcome(
         }
     } else if sent {
         // A definite server rejection is known; transport loss/cancel is not.
-        if pg && matches!(error, DbError::Server { .. }) {
+        if (pg && matches!(error, DbError::Server { .. })) || mysql_lock_wait_refused(pg, error) {
             ActionOutcome::NotApplied
         } else {
             ActionOutcome::Unknown

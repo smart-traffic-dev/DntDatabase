@@ -377,6 +377,21 @@ impl SessionManager {
             }
             let before = session.reconnects();
             session.ping().await?;
+            // The lock wait bound covers the re-check too: reading the table waits for a
+            // lock another session holds on it (PostgreSQL's size functions). A reconnect
+            // after this loses it and is caught as stale below.
+            execute(
+                session.as_ref(),
+                if pg {
+                    "SET lock_timeout = '5s'"
+                } else {
+                    "SET SESSION lock_wait_timeout = 5"
+                },
+                stop.clone(),
+                self.cancel_grace,
+                timeout_s,
+            )
+            .await?;
             if current_fingerprint(session.as_ref(), stored.before.as_ref()).await?
                 != stored.fingerprint
             {
@@ -417,12 +432,6 @@ impl SessionManager {
                     )
                 };
             }
-            send!(if pg {
-                "SET lock_timeout = '5s'"
-            } else {
-                "SET SESSION lock_wait_timeout = 5"
-            })
-            .await?;
             if pg {
                 send!("BEGIN").await?;
                 send!("SET LOCAL standard_conforming_strings = on").await?;

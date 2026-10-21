@@ -475,12 +475,7 @@ async fn apply_detects_changed_table_and_sends_nothing() {
         "{e:?}"
     );
     let sent = f.fake.sent();
-    assert!(
-        !sent
-            .iter()
-            .any(|s| s.starts_with("ALTER") || s.contains("lock_wait_timeout")),
-        "{sent:?}"
-    );
+    assert!(!sent.iter().any(|s| s.starts_with("ALTER")), "{sent:?}");
     let history =
         f.sm.repo
             .history_list(&HistoryFilter {
@@ -730,6 +725,73 @@ async fn pg_failure_mid_way_rolls_back() {
     let stages = stages.into_inner().unwrap();
     assert!(stages.contains(&"executing 1/2".to_string()), "{stages:?}");
     assert!(stages.contains(&"executing 2/2".to_string()), "{stages:?}");
+}
+
+/// The 5 s lock wait bounds the whole apply: it is set before the table is read again
+/// (on PostgreSQL that read waits for a lock another session holds on the table), so a
+/// stale table is found with the bound already in place and nothing else sent.
+#[tokio::test]
+async fn lock_wait_bound_covers_the_recheck() {
+    for (f, set) in [
+        (
+            mysql(None, false).await,
+            "SET SESSION lock_wait_timeout = 5",
+        ),
+        (pg().await, "SET lock_timeout = '5s'"),
+    ] {
+        let o = open(&f).await;
+        let p =
+            f.sm.table_design_preview(o.design_id, add_note(&o.def))
+                .await
+                .unwrap();
+        f.fake.detail.lock().unwrap().comment = Some("changed elsewhere".into());
+        let before = f.fake.sent().len();
+        let e =
+            f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+                .await
+                .unwrap_err();
+        assert!(matches!(&e, DbError::PlanStale { .. }), "{e:?}");
+        let sent = f.fake.sent()[before..].to_vec();
+        assert_eq!(sent, [set], "{sent:?}");
+    }
+}
+
+/// MySQL / MariaDB refuse a statement that could not get its lock within
+/// `lock_wait_timeout` with error 1205 before changing anything: not applied. Any other
+/// server error of a sent MySQL DDL stays unknown (DDL is not transactional there).
+#[tokio::test]
+async fn mysql_lock_wait_timeout_is_not_applied() {
+    for (code, expected) in [
+        ("1205", ActionOutcome::NotApplied),
+        ("1062", ActionOutcome::Unknown),
+    ] {
+        let f = mysql(None, false).await;
+        let o = open(&f).await;
+        let p =
+            f.sm.table_design_preview(o.design_id, add_note(&o.def))
+                .await
+                .unwrap();
+        *f.fake.fail.lock().unwrap() = Some((
+            "ALTER TABLE".into(),
+            DbError::Server {
+                code: Some(code.into()),
+                sqlstate: Some("HY000".into()),
+                message: "refused".into(),
+                position: None,
+            },
+        ));
+        let report =
+            f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+                .await
+                .unwrap();
+        assert_eq!(report.outcome, expected, "{code}: {report:?}");
+        assert_eq!(
+            report.error.as_ref().unwrap().outcome_unknown,
+            expected == ActionOutcome::Unknown,
+            "{code}: {report:?}"
+        );
+        assert_eq!(report.statements_sent, 1);
+    }
 }
 
 #[tokio::test]
