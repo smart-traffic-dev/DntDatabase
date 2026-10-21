@@ -426,3 +426,31 @@ async fn a_stale_pooled_session_is_retried_on_a_fresh_one() {
             .unwrap_err();
     assert!(matches!(err, DbError::ConnectionLost { .. }), "{err:?}");
 }
+
+#[tokio::test]
+#[ignore = "manual backend performance observation; see backend-core-performance-review"]
+async fn review_probe_concurrent_reads() {
+    let f = fixture().await;
+    let reads = async {
+        let jobs = (0..24).map(|i| {
+            let sm = &f.sm;
+            let id = f.id;
+            async move {
+                sm.data_read(id, DB, &format!("review-{i}"), "SLOWISH", 10)
+                    .await
+            }
+        });
+        for result in futures_util::future::join_all(jobs).await {
+            result.unwrap();
+        }
+    };
+    let observe = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let opened = f.log.sessions.load(Ordering::SeqCst);
+        println!(
+            "REVIEW: 24 concurrent reads, physical sessions opened including metadata = {opened}"
+        );
+        assert!(opened > 0);
+    };
+    tokio::join!(reads, observe);
+}

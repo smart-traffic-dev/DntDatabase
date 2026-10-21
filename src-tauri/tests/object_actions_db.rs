@@ -431,3 +431,69 @@ async fn stop_cancels_a_real_metadata_lock_wait_without_replaying_ddl() {
         );
     }
 }
+
+#[tokio::test]
+#[ignore = "manual local PostgreSQL performance observation; requires DNT_TEST_DB=1"]
+async fn review_probe_result_budget() {
+    require_db!();
+    let session = PgDriver
+        .connect(&Target::Pg17.resolved(Some(FIXTURE_DB)))
+        .await
+        .unwrap();
+    for text in [
+        "SELECT i, pg_sleep(0.003) FROM generate_series(1, 200) i",
+        "SELECT i, pg_sleep(0.003) FROM generate_series(1, 200) i LIMIT 1",
+    ] {
+        let started = std::time::Instant::now();
+        let mut sink = Collect::default();
+        session
+            .execute_one(
+                text,
+                classify(text, session.dialect()),
+                &ExecOptions {
+                    max_rows: 1,
+                    ..ExecOptions::default()
+                },
+                &mut sink,
+            )
+            .await
+            .unwrap();
+        println!(
+            "REVIEW row limit: {} ms, {} delivered row(s): {text}",
+            started.elapsed().as_millis(),
+            sink.0.len()
+        );
+        assert_eq!(sink.0.len(), 1);
+    }
+    let mut sink = Collect::default();
+    let text = "SELECT repeat('x', 131072) FROM generate_series(1, 500)";
+    session
+        .execute_one(
+            text,
+            classify(text, session.dialect()),
+            &ExecOptions {
+                max_rows: 500,
+                batch_size: 500,
+                ..ExecOptions::default()
+            },
+            &mut sink,
+        )
+        .await
+        .unwrap();
+    let bytes: usize = sink
+        .0
+        .iter()
+        .flat_map(|r| r.iter())
+        .map(|v| match v {
+            Value::Text(t) => t.len(),
+            _ => 0,
+        })
+        .sum();
+    println!(
+        "REVIEW query preview: {} rows, {} text bytes retained",
+        sink.0.len(),
+        bytes
+    );
+    assert_eq!(bytes, 65_536_000);
+    session.close().await;
+}
