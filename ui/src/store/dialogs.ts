@@ -77,6 +77,8 @@ interface DialogsState {
   request: UiRequest | null;
   /** A short status message shown as a toast (e.g. the import summary). */
   notice: string | null;
+  /** Bumped by every `setNotice`, so the same text shown again restarts the toast's timer. */
+  noticeSeq: number;
   /** The last `internal` error of any command: shown as a toast with "Open log folder". */
   internalError: AppError | null;
   setNotice(notice: string | null): void;
@@ -95,8 +97,9 @@ export const useDialogs = create<DialogsState>()((set) => ({
   prompt: null,
   request: null,
   notice: null,
+  noticeSeq: 0,
   internalError: null,
-  setNotice: (notice) => set({ notice }),
+  setNotice: (notice) => set((s) => ({ notice, noticeSeq: s.noticeSeq + 1 })),
   showPrompt: (prompt) => set({ prompt }),
   closePrompt: () => set({ prompt: null }),
   requestDialog: (request) => set({ request }),

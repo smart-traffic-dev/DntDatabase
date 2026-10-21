@@ -178,6 +178,8 @@ describe('MessagesView', () => {
     expect(screen.queryByText('No messages yet.')).toBeNull();
     rerender(<MessagesView tabId="t" run={emptyRun} />);
     expect(screen.getByText('No messages yet.')).toBeInTheDocument();
+    // An idle, empty panel says how to run something.
+    expect(screen.getByText(/Ctrl\+Enter runs the statement at the cursor/)).toBeInTheDocument();
   });
 
   describe('virtualized', () => {

@@ -113,15 +113,20 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
 /** Shows the status message set by a dialog (import summary) for a few seconds. */
 function Toast() {
   const notice = useDialogs((s) => s.notice);
+  // A repeated notice (same text) restarts the timer rather than vanishing early.
+  const seq = useDialogs((s) => s.noticeSeq);
   useEffect(() => {
     if (!notice) return;
     const t = setTimeout(() => useDialogs.getState().setNotice(null), 6000);
     return () => clearTimeout(t);
-  }, [notice]);
+  }, [notice, seq]);
   if (!notice) return null;
   return (
     <div className="toast" role="status">
-      {notice}
+      <span>{notice}</span>
+      <button type="button" className="toast-dismiss" aria-label="Dismiss notice" title="Dismiss" onClick={() => useDialogs.getState().setNotice(null)}>
+        ×
+      </button>
     </div>
   );
 }

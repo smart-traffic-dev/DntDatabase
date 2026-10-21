@@ -471,6 +471,32 @@ fieldset.export-form {
   font-size: var(--text-callout);
 }
 
+.toast:not(.error) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 520px;
+  padding-right: 8px;
+}
+
+.toast-dismiss {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--studio-fg-secondary);
+  font-size: var(--text-headline);
+  line-height: 1;
+}
+
+.toast-dismiss:hover {
+  background: var(--hover);
+  color: var(--studio-fg);
+}
+
 /* Internal error toast: above the notice toast so both can show. */
 .toast.error {
   bottom: 60px;

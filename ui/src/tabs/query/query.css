@@ -186,6 +186,10 @@
   color: var(--muted);
 }
 
+.qr-empty p {
+  margin: 0 0 4px;
+}
+
 .qr-messages {
   flex: 1;
   min-height: 0;

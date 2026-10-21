@@ -68,8 +68,15 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
   const jump = (target: { from: number; to: number }) => revealInEditor(tabId, target, { focus: true });
 
   if (count === 0) {
-    const text = run.phase.kind === 'idle' ? 'No messages yet.' : run.mode === 'explain' ? 'Explaining…' : 'Running…';
-    return <div className="qr-empty">{text}</div>;
+    if (run.phase.kind === 'idle') {
+      return (
+        <div className="qr-empty">
+          <p>No messages yet.</p>
+          <p className="muted">Ctrl+Enter runs the statement at the cursor; Ctrl+Shift+Enter runs them all.</p>
+        </div>
+      );
+    }
+    return <div className="qr-empty">{run.mode === 'explain' ? 'Explaining…' : 'Running…'}</div>;
   }
   return (
     <div

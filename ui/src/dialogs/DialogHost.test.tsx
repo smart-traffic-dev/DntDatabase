@@ -1,6 +1,6 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { objectTabId, useTabs } from '../store/tabs';
@@ -182,6 +182,29 @@ describe('DialogHost', () => {
     expect(callsOf('open_log_folder')).toHaveLength(1);
     await user.click(within(toast).getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByRole('alert', { name: 'Internal error' })).not.toBeInTheDocument();
+  });
+
+  it('a notice toast can be dismissed, and showing it again restarts its timer', () => {
+    vi.useFakeTimers();
+    try {
+      render(<DialogHost />);
+      act(() => useDialogs.getState().setNotice('Imported 3 connections'));
+      expect(screen.getByRole('status')).toHaveTextContent('Imported 3 connections');
+      act(() => vi.advanceTimersByTime(5000));
+      // The same text again: a fresh 6 s, not the 1 s left of the first one.
+      act(() => useDialogs.getState().setNotice('Imported 3 connections'));
+      act(() => vi.advanceTimersByTime(5000));
+      expect(screen.getByRole('status')).toHaveTextContent('Imported 3 connections');
+      act(() => vi.advanceTimersByTime(1500));
+      expect(screen.queryByRole('status')).toBeNull();
+
+      act(() => useDialogs.getState().setNotice('Saved'));
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
+      expect(screen.queryByRole('status')).toBeNull();
+      expect(useDialogs.getState().notice).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('other errors do not raise the internal toast', async () => {
