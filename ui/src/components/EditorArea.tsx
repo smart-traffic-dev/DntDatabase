@@ -1,9 +1,10 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties, type DragEvent } from 'react';
-import { useTabs } from '../store/tabs';
+import { groupTabs, useTabs } from '../store/tabs';
 import { ObjectTab } from '../tabs/ObjectTab';
 import { QueryTab } from '../tabs/query/QueryTab';
 import { EmptyWorkspace } from './EmptyWorkspace';
 import { Splitter } from './Splitter';
+import { draggedTab } from './tabDrag';
 import { TAB_DRAG_TYPE, TabBar, tabContentId } from './TabBar';
 
 /** A group never shrinks below this (spec §4). */
@@ -34,15 +35,26 @@ function GroupPane({ groupId, index, welcome }: { groupId: string; index: number
   const [zone, setZone] = useState<DropZone | null>(null);
 
   const isTabDrag = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes(TAB_DRAG_TYPE);
+  /**
+   * The zone a drop of `tabId` would really use: an edge only splits when a group can still be
+   * added and the tab is not the only one of this group (it would just come back to the same place).
+   */
+  const zoneFor = (e: DragEvent<HTMLElement>, tabId: string | null): DropZone => {
+    const zone = dropZone(e.currentTarget.getBoundingClientRect(), e.clientX, e.clientY);
+    if (zone === 'center') return zone;
+    const s = useTabs.getState();
+    const alone = !!tabId && s.groupOf[tabId] === groupId && groupTabs(s, groupId).length === 1;
+    return s.canSplit() && !alone ? zone : 'center';
+  };
   const onDragOver = (e: DragEvent<HTMLElement>) => {
     if (!isTabDrag(e)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    setZone(dropZone(e.currentTarget.getBoundingClientRect(), e.clientX, e.clientY));
+    setZone(zoneFor(e, draggedTab()));
   };
   const onDrop = (e: DragEvent<HTMLElement>) => {
     const id = e.dataTransfer.getData(TAB_DRAG_TYPE);
-    const at = dropZone(e.currentTarget.getBoundingClientRect(), e.clientX, e.clientY);
+    const at = zoneFor(e, id || null);
     setZone(null);
     if (!id) return;
     e.preventDefault();

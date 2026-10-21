@@ -149,6 +149,22 @@ describe('editor groups', () => {
     expect(ids(s().focusedGroupId)).toEqual(['c', 'a', 'b']);
   });
 
+  it('moving tabs keeps pinned tabs first in the target group', () => {
+    open('a', 'b', 'p');
+    s().setPinned('p', true);
+    s().splitTab('b', 'right');
+    const [g1, g2] = groupIds();
+    open('c'); // into g2: [b, c]
+    // A pinned tab dropped after the unpinned ones joins the pinned block.
+    s().moveTab('p', g2!);
+    expect(ids(g2!)).toEqual(['p', 'b', 'c']);
+    // An unpinned tab dropped onto the pinned block lands right after it.
+    s().moveTab('a', g2!, 0);
+    expect(ids(g2!)).toEqual(['p', 'a', 'b', 'c']);
+    expect(s().groups.map((g) => g.id)).toEqual([g2]);
+    void g1;
+  });
+
   it('closeConnection keeps every group consistent', () => {
     const obj = (id: string, connectionId: string) =>
       s().open({ id, kind: 'object', connectionId, title: id, objectRef: { database: 'd', schema: null, name: id, kind: 'Table' } });

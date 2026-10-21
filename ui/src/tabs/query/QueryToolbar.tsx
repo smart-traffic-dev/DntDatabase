@@ -553,6 +553,9 @@ function ContextFields({ doc }: { doc: ToolbarDoc }) {
  * connection and database selects. Esc closes it and gives the focus back to the pill; an
  * outside click or the focus leaving it closes it too. The environment badge never shrinks.
  */
+/** Space kept between a shifted picker and the tab's right edge. */
+const POPOVER_GAP = 8;
+
 function ContextPill({ doc, env }: { doc: ToolbarDoc; env: EnvTag | null }) {
   const name = useConnections((s) => (doc.connectionId ? (s.summaries.get(doc.connectionId)?.config.name ?? '(deleted connection)') : null));
   const [open, setOpen] = useState(false);
@@ -568,6 +571,18 @@ function ContextPill({ doc, env }: { doc: ToolbarDoc; env: EnvTag | null }) {
     };
     document.addEventListener('mousedown', away);
     return () => document.removeEventListener('mousedown', away);
+  }, [open]);
+
+  // In a narrow editor group the picker (left-aligned at the pill) would run past the tab and be
+  // clipped: shift it left to fit, keeping a small gap, never past the tab's left edge.
+  useLayoutEffect(() => {
+    const el = picker.current;
+    const bound = el?.closest('.query-tab');
+    if (!open || !el || !bound) return;
+    const box = el.getBoundingClientRect();
+    const area = bound.getBoundingClientRect();
+    const over = box.right - area.right;
+    if (over > 0) el.style.transform = `translateX(-${Math.min(over + POPOVER_GAP, box.left - area.left)}px)`;
   }, [open]);
 
   const database = doc.database ?? 'Default database';

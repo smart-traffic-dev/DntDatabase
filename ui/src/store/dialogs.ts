@@ -125,6 +125,13 @@ export const useDialogs = create<DialogsState>()((set, get) => ({
   closePrompt: () => set({ prompt: null }),
   requestDialog: (request) => set({ request }),
   closeRequest: () => set({ request: null }),
-  reportInternal: (internalError) => set({ internalError }),
-  dismissInternal: () => set({ internalError: null }),
+  // The internal-error toast shares the stack's room with the store's toasts.
+  reportInternal: (internalError) => {
+    set({ internalError });
+    useToasts.getState().reserve(internalError ? 1 : 0);
+  },
+  dismissInternal: () => {
+    set({ internalError: null });
+    useToasts.getState().reserve(0);
+  },
 }));

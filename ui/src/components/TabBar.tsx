@@ -19,6 +19,7 @@ import { EnvTag } from './EnvTag';
 import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon } from './icons';
 import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
+import { setDraggedTab } from './tabDrag';
 import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
 /** DOM id of a tab's button. */
@@ -200,9 +201,11 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
               title={tip}
               draggable
               onDragStart={(e) => {
+                setDraggedTab(tab.id);
                 e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
                 e.dataTransfer.effectAllowed = 'move';
               }}
+              onDragEnd={() => setDraggedTab(null)}
               onContextMenu={(e) => openContext(e, tab)}
             >
               <button

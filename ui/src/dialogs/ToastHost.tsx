@@ -166,8 +166,8 @@ function InternalErrorToast({ error }: { error: AppError }) {
 export function ToastHost() {
   const toasts = useToasts((s) => s.toasts);
   const internal = useDialogs((s) => s.internalError);
-  const room = MAX_TOASTS - (internal ? 1 : 0);
-  const shown = toasts.slice(Math.max(0, toasts.length - room));
+  // The store already keeps the stack within the room the internal error leaves (`reserve`).
+  const shown = toasts.slice(Math.max(0, toasts.length - (MAX_TOASTS - (internal ? 1 : 0))));
   if (!internal && shown.length === 0) return null;
   return (
     <div className="toast-stack">

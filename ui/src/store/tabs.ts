@@ -255,7 +255,11 @@ export const useTabs = create<TabsState>()((set, get) => {
         // Strip order: place the tab before the target group's tab at `index` (else after its last tab).
         const rest = s.tabs.filter((t) => t.id !== tabId);
         const targets = rest.filter((t) => s.groupOf[t.id] === groupId);
-        const anchor = index !== undefined ? targets[index] : undefined;
+        // Pinned tabs stay first: a pinned tab lands inside the pinned block, an unpinned one after it.
+        const pinnedCount = targets.filter((t) => t.pinned).length;
+        const wanted = index ?? targets.length;
+        const slot = tab.pinned ? Math.min(wanted, pinnedCount) : Math.max(wanted, pinnedCount);
+        const anchor = targets[slot];
         const at = anchor ? rest.indexOf(anchor) : targets.length ? rest.indexOf(targets.at(-1)!) + 1 : rest.length;
         const tabs = [...rest.slice(0, at), tab, ...rest.slice(at)];
         // The source group's active tab moves on to a neighbour.

@@ -47,14 +47,29 @@ interface ToastsState {
   dismiss(id: number): void;
   /** Dismisses the toast with this key, if one is shown. */
   dismissKey(key: string): void;
+  /** Slots taken by toasts shown outside this store (the internal-error toast); trims the stack to fit. */
+  reserve(slots: number): void;
   reset(): void;
 }
 
 let nextId = 1;
+/** Slots held by the internal-error toast (see `reserve`). */
+let reserved = 0;
 
 export const useToasts = create<ToastsState>()((set, get) => {
   const drop = (gone: Toast[]) => {
     for (const t of gone) t.onDismiss?.();
+  };
+  /** Pushes toasts out until `next` fits the room left; `keep` (the newest) goes last. */
+  const fit = (next: Toast[], keep?: Toast) => {
+    const gone: Toast[] = [];
+    while (next.length > Math.max(1, MAX_TOASTS - reserved)) {
+      // Push out the oldest one that would hide anyway; an error or a running progress only if all are.
+      const victim = next.find((t) => t !== keep && autoHides(t.kind)) ?? next.find((t) => t !== keep) ?? next[0]!;
+      gone.push(victim);
+      next = next.filter((t) => t !== victim);
+    }
+    return { next, gone };
   };
   return {
     toasts: [],
@@ -66,14 +81,7 @@ export const useToasts = create<ToastsState>()((set, get) => {
         return same.id;
       }
       const toast: Toast = { ...input, id: nextId++, seq: 0 };
-      let next = [...toasts, toast];
-      const gone: Toast[] = [];
-      while (next.length > MAX_TOASTS) {
-        // Push out the oldest one that would hide anyway; an error or a running progress only if all are.
-        const victim = next.find((t) => t !== toast && autoHides(t.kind)) ?? next[0]!;
-        gone.push(victim);
-        next = next.filter((t) => t !== victim);
-      }
+      const { next, gone } = fit([...toasts, toast], toast);
       set({ toasts: next });
       drop(gone);
       return toast.id;
@@ -89,6 +97,13 @@ export const useToasts = create<ToastsState>()((set, get) => {
     dismissKey: (key) => {
       const hit = get().toasts.find((t) => t.key === key);
       if (hit) get().dismiss(hit.id);
+    },
+    reserve: (slots) => {
+      reserved = slots;
+      const { next, gone } = fit(get().toasts, get().toasts.at(-1));
+      if (!gone.length) return;
+      set({ toasts: next });
+      drop(gone);
     },
     reset: () => set({ toasts: [] }),
   };
