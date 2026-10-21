@@ -19,6 +19,8 @@ export interface DesignerHeaderProps {
   /** `connection › database · engine` */
   context: string;
   counts: Partial<Record<DesignSubTab, number>>;
+  /** Sections the server cannot do: disabled, the text is their tooltip. */
+  unavailable?: Partial<Record<DesignSubTab, string>>;
   subTab: DesignSubTab;
   onSubTab(sub: DesignSubTab): void;
   changes: number;
@@ -37,7 +39,7 @@ export function DesignerHeader(p: DesignerHeaderProps) {
     refs.current[sub]?.focus();
   };
   const onKeyDown = (e: KeyboardEvent) => {
-    const ids = SUB_TABS.map((s) => s.id);
+    const ids = SUB_TABS.map((s) => s.id).filter((id) => !p.unavailable?.[id] || id === p.subTab);
     const at = ids.indexOf(p.subTab);
     const target =
       e.key === 'ArrowRight' ? ids[(at + 1) % ids.length]
@@ -58,6 +60,7 @@ export function DesignerHeader(p: DesignerHeaderProps) {
         {SUB_TABS.map((s) => {
           const on = s.id === p.subTab;
           const count = p.counts[s.id];
+          const unavailable = p.unavailable?.[s.id];
           return (
             <button
               key={s.id}
@@ -66,6 +69,8 @@ export function DesignerHeader(p: DesignerHeaderProps) {
               id={subTabId(p.uid, s.id)}
               aria-selected={on}
               aria-controls={subPanelId(p.uid)}
+              disabled={!!unavailable}
+              title={unavailable}
               tabIndex={on ? 0 : -1}
               className={`segment${on ? ' on' : ''}`}
               ref={(el) => {

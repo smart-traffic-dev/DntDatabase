@@ -6,7 +6,13 @@ import { confirmDiscardDesign, useTableDesigns } from '../../store/tableDesigns'
 import type { DesignTabRef } from '../../store/tabs';
 import { addColumn } from './columnModel';
 import { ColumnInspector } from './ColumnInspector';
+import { ChecksGrid } from './ChecksGrid';
 import { ColumnsGrid } from './ColumnsGrid';
+import { CommentPanel } from './CommentPanel';
+import { checksUnsupported, CHECKS_UNSUPPORTED } from './elementModel';
+import { ForeignKeysGrid } from './ForeignKeysGrid';
+import { IndexesGrid } from './IndexesGrid';
+import { OptionsPanel } from './OptionsPanel';
 import { DesignerHeader, subPanelId, subTabId } from './DesignerHeader';
 import { SqlPreview } from './SqlPreview';
 import './designer.css';
@@ -83,7 +89,8 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
 
   const where = [connectionName, tab.scope.schema ? `${tab.scope.database} › ${tab.scope.schema}` : tab.scope.database].filter(Boolean).join(' › ');
   const engine = draft.options.engine;
-  const tableProblems = errors.filter((e) => e.element.kind === 'table' || e.element.kind === 'primary_key');
+  const grid = { open, draft, errors, editable, selection, onSelect: select, edit };
+  const tableProblems =errors.filter((e) => e.element.kind === 'table' || e.element.kind === 'primary_key');
 
   return (
     <div className="designer" data-testid="designer-tab" onKeyDown={onKeyDown}>
@@ -116,6 +123,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
         name={draft.name}
         context={engine ? `${where} · ${engine}` : where}
         counts={{ columns: draft.columns.length, indexes: draft.indexes.length, foreign_keys: draft.foreign_keys.length, checks: draft.checks.length }}
+        unavailable={checksUnsupported(open.server) ? { checks: CHECKS_UNSUPPORTED } : undefined}
         subTab={subTab}
         onSubTab={(sub) => designs.setSubTab(tab.id, sub)}
         changes={changes}
@@ -142,6 +150,11 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
                 onAdd={add}
               />
             ) : null}
+            {subTab === 'indexes' ? <IndexesGrid {...grid} /> : null}
+            {subTab === 'foreign_keys' ? <ForeignKeysGrid {...grid} connectionId={tab.connectionId} scope={tab.scope} /> : null}
+            {subTab === 'checks' ? <ChecksGrid {...grid} /> : null}
+            {subTab === 'options' ? <OptionsPanel open={open} draft={draft} errors={errors} editable={editable} edit={edit} /> : null}
+            {subTab === 'comment' ? <CommentPanel draft={draft} errors={errors} editable={editable} edit={edit} /> : null}
           </div>
           {tableProblems.length > 0 ? (
             <ul className="dz-problems">

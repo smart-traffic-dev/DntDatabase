@@ -92,6 +92,14 @@
   font-weight: 500;
 }
 
+.dz-sections .segment:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+.dz-sections .segment:disabled:hover {
+  background: transparent;
+}
+
 .dz-count {
   font-style: normal;
   font-size: var(--dnt-text-xs);

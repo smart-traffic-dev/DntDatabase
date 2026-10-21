@@ -1,0 +1,120 @@
+/* Indexes, foreign keys and checks grids, and the options / comment panels. Tokens only. */
+.dz-egrid {
+  min-width: 840px;
+}
+
+.dz-egrid .dz-row > div {
+  height: auto;
+  min-height: 30px;
+  white-space: normal;
+}
+
+.dz-egrid .dz-head > div {
+  min-height: 32px;
+}
+
+.dz-egrid select.dz-input {
+  padding: 0 var(--dnt-space-1);
+}
+
+.dz-egrid .dz-row .dz-input:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+.dz-actions {
+  justify-content: flex-end;
+}
+
+.dz-cell-name {
+  gap: var(--dnt-space-1);
+}
+
+.dz-tag {
+  flex: none;
+  padding: 0 var(--dnt-space-1_5);
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.dz-parts {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: var(--dnt-space-1);
+  padding-top: var(--dnt-space-1);
+  padding-bottom: var(--dnt-space-1);
+}
+
+.dz-part {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+}
+
+.dz-part .dz-input {
+  flex: 1;
+}
+
+.dz-part .dz-prefix {
+  flex: none;
+  width: 64px;
+}
+
+.dz-part .dz-desc {
+  flex: none;
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
+}
+
+.dz-part-expr {
+  flex: 1;
+  color: var(--dnt-fg-muted);
+  font-style: italic;
+}
+
+.dz-add-part {
+  align-self: flex-start;
+}
+
+.dz-ref {
+  gap: var(--dnt-space-1);
+}
+
+.dz-ref .dz-ref-schema {
+  flex: none;
+  width: 40%;
+}
+
+.dz-row-hint {
+  margin: var(--dnt-space-2) var(--dnt-space-2) 0;
+}
+
+.dz-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-3);
+  max-width: 480px;
+  padding: var(--dnt-space-4);
+}
+
+.dz-options .dz-input {
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+  border-color: var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+}
+
+.dz-options textarea.dz-textarea {
+  height: auto;
+  padding: var(--dnt-space-1) var(--dnt-space-2);
+  resize: vertical;
+}
+
+.dz-options-problems {
+  padding-left: var(--dnt-space-6);
+}
