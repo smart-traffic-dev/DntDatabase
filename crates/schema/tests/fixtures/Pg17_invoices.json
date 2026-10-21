@@ -1,0 +1,228 @@
+{
+  "detail": {
+    "checks": [],
+    "columns": [
+      {
+        "auto_increment": true,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "bigint",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": "ALWAYS",
+        "identity_kind": "always",
+        "invisible": false,
+        "name": "id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 1,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "integer",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "order_id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 2,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "numeric(12,2)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "amount",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 3,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "numeric(12,2)",
+        "default": null,
+        "enum_values": [],
+        "generated": "round((amount * 1.1), 2)",
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "amount_with_tax",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 4,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "text[]",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "tags",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 5,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "jsonb",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "meta",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 6,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "timestamp with time zone",
+        "default": "now()",
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "issued_at",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 7,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "interval",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "ttl",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 8,
+        "unsigned": false
+      }
+    ],
+    "comment": null,
+    "foreign_keys": [
+      {
+        "columns": [
+          "order_id"
+        ],
+        "deferrable": false,
+        "definition": "FOREIGN KEY (order_id) REFERENCES public.orders(id)",
+        "initially_deferred": false,
+        "match_type": null,
+        "name": "invoices_order_id_fkey",
+        "on_delete": "NO ACTION",
+        "on_update": "NO ACTION",
+        "ref_columns": [
+          "id"
+        ],
+        "ref_schema": "public",
+        "ref_table": "orders"
+      }
+    ],
+    "indexes": [],
+    "object": {
+      "database": "dnt_fixture",
+      "kind": "Table",
+      "name": "invoices",
+      "schema": "sales"
+    },
+    "options": {
+      "auto_increment": null,
+      "charset": null,
+      "collation": null,
+      "engine": null,
+      "extra": [],
+      "inherits": [],
+      "is_partition": false,
+      "partitioned_by": null,
+      "row_format": null,
+      "system_versioned": false,
+      "tablespace": null
+    },
+    "primary_key": {
+      "columns": [
+        "id"
+      ],
+      "comment": null,
+      "definition": "PRIMARY KEY (id)",
+      "expression": null,
+      "include": [],
+      "method": "btree",
+      "name": "invoices_pkey",
+      "nulls_not_distinct": false,
+      "partial": false,
+      "parts": [
+        {
+          "column": "id",
+          "descending": false,
+          "expression": null,
+          "prefix": null
+        }
+      ],
+      "primary": true,
+      "unique": true,
+      "visible": true
+    },
+    "row_estimate": null,
+    "size_bytes": null,
+    "triggers": []
+  },
+  "server": {
+    "kind": "postgres",
+    "variant": "Postgres",
+    "version": [
+      17,
+      0,
+      11
+    ],
+    "version_string": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+  }
+}

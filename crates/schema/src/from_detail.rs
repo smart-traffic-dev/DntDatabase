@@ -185,7 +185,7 @@ fn is_mysql_default_expression(d: &str) -> bool {
 }
 
 /// A leading `'…'` literal (`''` unescaped) and the text after it.
-fn unquote(s: &str) -> Option<(String, &str)> {
+pub(crate) fn unquote(s: &str) -> Option<(String, &str)> {
     let rest = s.strip_prefix('\'')?;
     let mut out = String::new();
     let mut chars = rest.char_indices().peekable();
@@ -203,7 +203,7 @@ fn unquote(s: &str) -> Option<(String, &str)> {
 }
 
 /// `::type` (possibly with spaces, parameters, `[]` or a qualified name), nothing else.
-fn is_cast_suffix(s: &str) -> bool {
+pub(crate) fn is_cast_suffix(s: &str) -> bool {
     s.strip_prefix("::").is_some_and(|t| {
         !t.is_empty()
             && !t.contains("::")

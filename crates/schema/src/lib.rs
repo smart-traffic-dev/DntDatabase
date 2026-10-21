@@ -2,6 +2,7 @@
 //! from introspection and validating it (spec §4.2). Pure Rust: no database access.
 
 mod diff;
+mod fidelity;
 mod from_detail;
 mod model;
 mod render;
@@ -9,6 +10,7 @@ mod types;
 mod validate;
 
 pub use diff::{diff, Change, DiffError, Position};
+pub use fidelity::{apply_locks, fidelity, Locked};
 pub use from_detail::{from_detail, new_table};
 pub use model::*;
 pub use render::{
