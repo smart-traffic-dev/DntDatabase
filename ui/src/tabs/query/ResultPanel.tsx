@@ -34,12 +34,37 @@ function cancelledText(run: TabRun): string | null {
   return ms === null ? 'Cancelled by user' : `Cancelled by user after ${(ms / 1000).toFixed(1)} s`;
 }
 
-/** The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent. */
+/** The run keys, shown by the collapsed panel of a tab that never ran. */
+function RunKeys() {
+  const keys = (...names: string[]) =>
+    names.map((k, i) => (
+      <kbd key={i} className="keycap">
+        {k}
+      </kbd>
+    ));
+  return (
+    <span className="qr-keys" data-testid="result-empty-keys">
+      <span className="qr-key">{keys('Ctrl', 'Enter')} Run statement</span>
+      <span className="qr-key">{keys('Ctrl', 'Shift', 'Enter')} Run all</span>
+      <span className="qr-key">{keys('Ctrl', 'Shift', 'E')} Explain</span>
+    </span>
+  );
+}
+
+/**
+ * The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent.
+ * `collapsed`: only the tab bar (before the tab's first run), with the run keys; choosing one of
+ * its tabs calls `onOpen`.
+ */
 export const ResultPanel = memo(ResultPanelView);
 
-function ResultPanelView({ tabId }: { tabId: string }) {
+function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; collapsed?: boolean; onOpen?: () => void }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
-  const setPanel = useQueryRun((s) => s.setPanel);
+  const setRunPanel = useQueryRun((s) => s.setPanel);
+  const setPanel = (id: string, panel: TabRun['panel']) => {
+    setRunPanel(id, panel);
+    if (collapsed) onOpen?.();
+  };
   const planAlive = usePlanAlive(tabId);
   // The engine only quotes copied INSERT statements; a primitive, so typing does not re-render this.
   const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
@@ -63,8 +88,8 @@ function ResultPanelView({ tabId }: { tabId: string }) {
     const active = run.phase.kind !== 'idle';
     const ended = wasActive.current && !active;
     wasActive.current = active;
-    if (ended && run.stop?.kind === 'error' && run.panel === 'result') setPanel(tabId, 'messages');
-  }, [run.phase.kind, run.stop, run.panel, setPanel, tabId]);
+    if (ended && run.stop?.kind === 'error' && run.panel === 'result') setRunPanel(tabId, 'messages');
+  }, [run.phase.kind, run.stop, run.panel, setRunPanel, tabId]);
 
   // `openExportDialog` (menu hook) exports the result shown here.
   useEffect(() => {
@@ -77,7 +102,7 @@ function ResultPanelView({ tabId }: { tabId: string }) {
   }, [at, showResult]);
 
   return (
-    <div className="qr-panel" data-testid="result-panel">
+    <div className={`qr-panel${collapsed ? ' collapsed' : ''}`} data-testid="result-panel">
       <div className="qr-tabs" role="tablist">
         <div className="qr-tabs-scroll" role="presentation" data-testid="result-tabs" ref={stripRef}>
           {run.results.map((r, i) => (
@@ -148,8 +173,9 @@ function ResultPanelView({ tabId }: { tabId: string }) {
             Export…
           </button>
         )}
+        {collapsed && <RunKeys />}
       </div>
-      {showResult ? (
+      {collapsed ? null : showResult ? (
         <>
           {cancelled && (
             <div className="qr-banner" role="status" data-testid="result-cancelled">

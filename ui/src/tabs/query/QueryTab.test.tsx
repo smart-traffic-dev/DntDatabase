@@ -59,17 +59,16 @@ describe('query tab shell', () => {
     expect(useQueryDocs.getState().docs.get(activeTab()!.id)).toMatchObject({ connectionId: ids.prod, database: 'shop' });
   });
 
-  it('toolbar_hides_p5_p6_buttons', () => {
+  it('toolbar_shows_run_explain_format_context_and_limit', () => {
     const docId = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     const tab: QueryTabRef = { id: docId, kind: 'query', connectionId: ids.prod, title: 'Query 1' };
     render(<QueryTab tab={tab} />);
-    for (const name of ['Format', 'Export…', 'Copy as…']) {
+    for (const name of ['Export…', 'Copy as…']) {
       expect(screen.queryByRole('button', { name })).toBeNull();
     }
-    for (const testId of ['query-run', 'query-run-selection', 'query-stop', 'query-explain']) {
+    for (const testId of ['query-run', 'query-run-menu', 'query-explain', 'query-format', 'query-context']) {
       expect(screen.getByTestId(testId)).toBeInTheDocument();
     }
-    expect(screen.getByTestId('query-continue-on-error')).toBeInTheDocument();
     const options = [...screen.getByTestId('query-row-limit').querySelectorAll('option')].map((o) => o.textContent);
     expect(options).toEqual(['1,000', '10,000', '100,000', '1,000,000']);
   });
@@ -85,7 +84,7 @@ describe('query tab shell', () => {
     expect(useTabs.getState().activeId).toBe(useTabs.getState().tabs[0]!.id);
   });
 
-  it('a query tab survives deletion of its connection and shows a placeholder', () => {
+  it('a query tab survives deletion of its connection and shows a placeholder', async () => {
     const docId = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     act(() => {
       useConnections.getState().setStored([], [config(ids.analytics, 'analytics', { kind: 'postgres' })]);
@@ -93,6 +92,7 @@ describe('query tab shell', () => {
     });
     expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([docId]);
     render(<QueryTab tab={{ id: docId, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
+    await userEvent.setup().click(screen.getByTestId('query-context'));
     const select = screen.getByTestId('query-connection') as HTMLSelectElement;
     expect(select.value).toBe(ids.prod);
     expect(select.selectedOptions[0]).toHaveTextContent('(deleted connection)');

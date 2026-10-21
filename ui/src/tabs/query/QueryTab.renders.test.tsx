@@ -73,9 +73,10 @@ describe('typing re-renders', () => {
     expect(counts.toolbar - toolbarBefore).toBe(1);
     // So does the run state: a started run disables Run and enables Stop.
     expect(screen.getByTestId('query-run')).toBeEnabled();
-    expect(screen.getByTestId('query-stop')).toBeDisabled();
+    expect(screen.queryByTestId('query-stop')).toBeNull();
     act(() => useQueryRun.setState({ runs: new Map([[id, startRun(emptyRun, PLAN as never, 0)]]) }));
-    expect(screen.getByTestId('query-run')).toBeDisabled();
+    // The Run slot shows Stop while the statement runs.
+    expect(screen.queryByTestId('query-run')).toBeNull();
     expect(screen.getByTestId('query-stop')).toBeEnabled();
   });
 

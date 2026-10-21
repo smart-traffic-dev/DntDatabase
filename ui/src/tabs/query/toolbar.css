@@ -1,10 +1,164 @@
-/* Shortcut hint inside a toolbar button. */
+/* Shortcut hint inside the Run button (hidden on a narrow toolbar). */
 .qt-kbd {
-  margin-left: 8px;
+  margin-left: var(--dnt-space-1);
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
   font-weight: 400;
-  opacity: 0.75;
+  color: inherit;
+}
+
+.query-toolbar:not(.w-wide) .qt-kbd {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  .qt-kbd {
+    display: none;
+  }
+}
+
+/* Context pill `[ENV] connection › database`: the name shrinks, the badge never does. */
+.qt-context {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.qt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  min-width: 0;
+  max-width: 360px;
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-bg-app);
+  font-size: var(--dnt-text-base);
+}
+
+.qt-pill:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.qt-pill[aria-expanded='true'] {
+  border-color: var(--dnt-focus);
+}
+
+.qt-pill-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qt-pill-sep {
+  margin: 0 var(--dnt-space-1);
+  color: var(--dnt-fg-subtle);
+}
+
+.qt-pill-default {
+  color: var(--dnt-fg-muted);
+}
+
+.qt-pill > svg {
+  flex: none;
+  color: var(--dnt-fg-muted);
+}
+
+.qt-env {
+  flex: none;
+  padding: 0 var(--dnt-space-1);
+  border-radius: var(--dnt-radius-xs);
+  font-size: var(--dnt-text-xs);
+  line-height: var(--dnt-text-xs-lh);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--dnt-on-accent);
+}
+
+.qt-env.env-production {
+  background: var(--dnt-env-prod);
+}
+
+.qt-env.env-staging {
+  background: var(--dnt-env-staging);
+}
+
+.qt-env.env-local {
+  background: var(--dnt-env-local);
+}
+
+/* The picker: connection and database selects under the pill. */
+.qt-popover {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: var(--dnt-z-dropdown);
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+  min-width: 240px;
+  margin-top: 2px;
+  padding: var(--dnt-space-3);
+  background: var(--dnt-bg-raised);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  box-shadow: var(--dnt-shadow-2);
+}
+
+.qt-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+}
+
+.qt-pick .qt-select {
+  max-width: none;
+  color: var(--dnt-fg);
+}
+
+.qt-limit {
+  height: var(--dnt-ctl-h-sm);
+  font-size: var(--dnt-text-sm);
+}
+
+/* Right end: Auto | Manual, then the open transaction (chip, Rollback, Commit). */
+.qt-tx {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  margin-left: auto;
+}
+
+.qt-tx-chip {
+  flex: none;
+  height: var(--dnt-ctl-h-sm);
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid;
+  border-radius: var(--dnt-radius-full);
+  font-size: var(--dnt-text-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qt-tx-chip.warning {
+  background: var(--dnt-status-warning-bg);
+  border-color: var(--dnt-status-warning-border);
+  color: var(--dnt-status-warning-fg);
+}
+
+.qt-tx-chip.danger {
+  background: var(--dnt-status-danger-bg);
+  border-color: var(--dnt-status-danger-border);
+  color: var(--dnt-status-danger-fg);
 }
 
 /* Auto | Manual commit mode: two joined buttons. */
@@ -24,36 +178,37 @@
 }
 
 .qt-seg.on {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-fg);
+  background: var(--dnt-accent);
+  border-color: var(--dnt-accent);
+  color: var(--dnt-on-accent);
 }
 
-@media (max-width: 1100px) {
-  .qt-kbd {
-    display: none;
-  }
-}
-
-/* Editor placeholder: the keys, shown while the editor is empty. */
-.sql-editor {
-  position: relative;
-}
-
-.sql-editor-placeholder {
-  position: absolute;
-  top: 0;
-  right: 16px;
-  padding-top: 1px;
-  line-height: 19px;
-  font-family: var(--font-mono);
-  font-size: var(--text-callout);
-  color: var(--studio-fg-tertiary, var(--muted));
-  pointer-events: none;
-  white-space: nowrap;
+/* Collapsed results: the run keys on the right of the tab bar. A hint that does not fit wraps out of sight whole. */
+.qr-keys {
+  display: flex;
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  column-gap: var(--dnt-space-4);
+  height: var(--dnt-ctl-h-xs);
+  margin-left: auto;
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  z-index: 1;
+  white-space: nowrap;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+}
+
+.qr-key {
+  display: inline-flex;
+  align-items: center;
+  height: var(--dnt-ctl-h-xs);
+  gap: var(--dnt-space-0_5);
+}
+
+.qr-key .keycap:last-of-type {
+  margin-right: var(--dnt-space-1);
 }
 
 /* History: connection / database column of the all-connections scope, Explain marker. */
@@ -63,7 +218,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .hs-explain {

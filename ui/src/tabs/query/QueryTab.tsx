@@ -3,7 +3,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { Splitter } from '../../components/Splitter';
 import { useConnections } from '../../store/connections';
 import { EDITOR_MIN_PX, EDITOR_RATIO_DEFAULT, RESULT_MIN_PX, editorPixels, useLayout } from '../../store/layout';
-import { emptyRun, useQueryRun } from '../../store/queryRun';
+import { emptyRun, useQueryRun, type TabRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
 import type { QueryTabRef } from '../../store/tabs';
 import type { Engine } from '../../query/engine';
@@ -30,7 +30,15 @@ const EditorHost = memo(function EditorHost({
   return doc ? <SqlEditor doc={doc} engine={engine} onMount={onMount} /> : null;
 });
 
-/** A query tab: toolbar over the editor, results and messages below. */
+/** The tab has run (or explained) something: its results open from then on. */
+const ranOnce = (run: TabRun) =>
+  run.runId !== null || run.phase.kind !== 'idle' || run.explain !== null || run.explainError !== null || run.messages.length > 0;
+
+/**
+ * A query tab: toolbar over the editor, results and messages below. Until the tab first runs,
+ * the results are collapsed to their tab bar (which shows the run keys); clicking one of its
+ * tabs opens them too.
+ */
 export function QueryTab({ tab }: { tab: QueryTabRef }) {
   // Field selectors only (not the document): the text changes on every keystroke.
   const toolbarDoc = useQueryDocs(
@@ -59,6 +67,9 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   const ratio = useLayout((s) => s.editorRatio);
   const setEditorRatio = useLayout((s) => s.setEditorRatio);
   const resultsVisible = useLayout((s) => s.resultsVisible);
+  const [opened, setOpened] = useState(false);
+  const onOpenResults = useCallback(() => setOpened(true), []);
+  const collapsed = !ranOnce(run) && !opened;
   const splitRef = useRef<HTMLDivElement>(null);
   const [total, setTotal] = useState(0);
   const missing = !toolbarDoc;
@@ -85,11 +96,12 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
       <div className="query-split" ref={splitRef}>
         <div
           className="query-editor-pane"
-          style={{ flex: !resultsVisible ? '1 1 0' : editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px` }}
+          style={{ flex: !resultsVisible || collapsed ? '1 1 0' : editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px` }}
         >
           <EditorHost tabId={tab.id} engine={engine} onMount={onMount} />
         </div>
-        {resultsVisible && (
+        {resultsVisible && collapsed && <ResultPanel tabId={tab.id} collapsed onOpen={onOpenResults} />}
+        {resultsVisible && !collapsed && (
           <>
             <Splitter
               orientation="horizontal"

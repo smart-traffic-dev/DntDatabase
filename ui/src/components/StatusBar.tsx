@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import type { EnvTag } from '../bindings';
 import { plural } from '../lib/plural';
+import { useNow } from '../lib/useNow';
 import { useQueryDocs } from '../store/queryTabs';
 import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
@@ -14,18 +15,6 @@ import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { LockIcon } from './icons';
 import { formatClock, formatElapsed, shortVersion } from './statusFormat';
-
-/** `Date.now()`, ticking once a second while `active` (restarted when `key` changes). */
-function useNow(active: boolean, key: number | null): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [active, key]);
-  return now;
-}
 
 const wholeSeconds = (ms: number) => Math.floor(ms / 1000);
 

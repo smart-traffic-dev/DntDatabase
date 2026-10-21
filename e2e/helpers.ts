@@ -76,3 +76,25 @@ export async function runCurrent() {
   await focusEditor();
   await browser.keys(['Control', 'Enter']);
 }
+
+/** The query toolbar's Run slot shows Stop while a statement (or an export) can be stopped. */
+export const isRunning = () => byId('query-stop').isExisting();
+
+/**
+ * Opens the context pill's picker, runs `fn` (it holds the `query-connection` and
+ * `query-database` selects), then closes it with Escape.
+ */
+export async function inContextPicker(fn: () => Promise<void>) {
+  await byId('query-context').click();
+  await byId('query-connection').waitForDisplayed({ timeout: 5_000 });
+  await fn();
+  await browser.keys(['Escape']);
+  await byId('query-connection').waitForDisplayed({ reverse: true, timeout: 5_000 });
+}
+
+/** Toggles "Continue on error" in the Run split menu (choosing it closes the menu). */
+export async function toggleContinueOnError() {
+  await byId('query-run-menu').click();
+  await byId('query-continue-on-error').waitForClickable({ timeout: 5_000 });
+  await byId('query-continue-on-error').click();
+}
