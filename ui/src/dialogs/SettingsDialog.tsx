@@ -12,13 +12,18 @@ import {
   isValidPageSize,
   useAppSettings,
 } from '../store/appSettings';
-import { useTheme, type Theme } from '../theme/ThemeProvider';
+import { useTheme, type Density, type Theme } from '../theme/ThemeProvider';
 import { Modal } from './Modal';
 
 const THEMES: { id: Theme; label: string }[] = [
   { id: 'light', label: 'Light' },
   { id: 'dark', label: 'Dark' },
   { id: 'system', label: 'System' },
+];
+
+const DENSITIES: { id: Density; label: string }[] = [
+  { id: 'compact', label: 'Compact' },
+  { id: 'comfortable', label: 'Comfortable' },
 ];
 
 /** "Table data page size": the default rows per page of a table's Data view (stored in app.db). */
@@ -233,7 +238,7 @@ function UnboundedWritesField() {
 
 /** App settings: appearance (local), debug logging, the table page size and the unbounded-write confirmation (stored in app.db). */
 export function SettingsDialog({ onClose }: { onClose(): void }) {
-  const { theme, setTheme } = useTheme();
+  const { theme, setTheme, density, setDensity } = useTheme();
   const [level, setLevel] = useState<LogLevel | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -283,6 +288,23 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
                 onClick={() => setTheme(t.id)}
               >
                 {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="field">
+          <span className="field-label">Density</span>
+          <div className="theme-options" role="radiogroup" aria-label="Density">
+            {DENSITIES.map((d) => (
+              <button
+                key={d.id}
+                type="button"
+                role="radio"
+                aria-checked={density === d.id}
+                className="theme-option"
+                onClick={() => setDensity(d.id)}
+              >
+                {d.label}
               </button>
             ))}
           </div>
