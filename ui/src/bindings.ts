@@ -1140,7 +1140,12 @@ export type DefaultSpec =
  */
 { kind: "expression"; text: string }
 export type DesignOpen = { design_id: string; def: TableDef; locked: Locked[]; catalog: TypeInfo[]; server: ServerInfo; env: EnvTag | null; read_only: boolean }
-export type DesignPreview = { plan_id: string; statements: string[]; impacts: CountedImpact[]; confirm_name: string | null; expires_in_seconds: number }
+export type DesignPreview = { plan_id: string; statements: string[]; impacts: CountedImpact[]; confirm_name: string | null; expires_in_seconds: number; 
+/**
+ * The table's row estimate read with the preview (shown next to rebuild warnings);
+ * `None` for a new table or when the server has none. Exported as a JS number.
+ */
+row_estimate: number | null }
 /**
  * The live SQL of a draft. `errors` are shown at their elements; `error` is a
  * problem of the change as a whole (a locked element, an unsupported feature, a

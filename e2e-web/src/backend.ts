@@ -439,7 +439,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
       const total = (draft as TableDef).columns.find((c) => c.original === 'total');
       plans.set(planId, total?.data_type.kind === 'known' ? (total.data_type.precision ?? totalPrecision) : totalPrecision);
       const env = connections.find((c) => c.id === conn)?.env_tag ?? null;
-      return { plan_id: planId, statements, impacts: [], confirm_name: env === 'production' ? 'orders' : null, expires_in_seconds: 600 };
+      return { plan_id: planId, statements, impacts: [], confirm_name: env === 'production' ? 'orders' : null, expires_in_seconds: 600, row_estimate: 3 };
     },
     table_design_apply: ({ planId, confirmed, name }): DesignReport => {
       const precision = plans.get(planId as string);

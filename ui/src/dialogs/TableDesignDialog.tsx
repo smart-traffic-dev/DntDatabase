@@ -3,6 +3,7 @@ import { Channel } from '@tauri-apps/api/core';
 import { api, toAppError } from '../api';
 import type { AppError, CountedImpact, DesignPreview, DesignReport, Impact } from '../bindings';
 import { EnvTag } from '../components/EnvTag';
+import { formatCompact } from '../lib/plural';
 import { invalidateCompletion } from '../store/completion';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
@@ -25,8 +26,14 @@ const NOT_APPLIED: DesignReport = { outcome: 'not_applied', error: null, warning
 
 const isStale = (e: AppError) => e.kind === 'plan_stale';
 
-/** An impact line with its counted rows ("412 rows have a value") or "Not counted". */
-function describe({ impact, rows, counted }: CountedImpact): Impact {
+/**
+ * An impact line with its counted rows ("412 rows have a value") or "Not counted"; a rebuild
+ * warning with the table's row estimate ("≈ 1.2M rows").
+ */
+function describe({ impact, rows, counted }: CountedImpact, estimate: number | null): Impact {
+  if (impact.kind === 'rebuild' && estimate !== null) {
+    return { ...impact, message: `${impact.message} (≈ ${formatCompact(estimate)} ${estimate === 1 ? 'row' : 'rows'})` };
+  }
   if (impact.count_sql === null) return impact;
   const count = counted && rows !== null ? `${rows} ${rows === 1 ? 'row has' : 'rows have'} a value` : 'Not counted';
   return { ...impact, message: `${impact.message} (${count})` };
@@ -263,7 +270,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
         </p>
         {preview ? (
           <>
-            <SqlPreview statements={preview.statements} impacts={preview.impacts.map(describe)} engine={engine} />
+            <SqlPreview statements={preview.statements} impacts={preview.impacts.map((i) => describe(i, preview.row_estimate))} engine={engine} />
             {preview.confirm_name !== null ? (
               <label>
                 Type {preview.confirm_name} to apply

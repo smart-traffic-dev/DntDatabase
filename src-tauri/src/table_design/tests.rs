@@ -620,6 +620,32 @@ async fn ddl_is_read_without_ansi_quotes_and_the_mode_restored() {
     assert!(fake.sent().is_empty());
 }
 
+/// The preview carries the row estimate of the table read with it (statistics move
+/// without making the table "changed"); a new table has none.
+#[tokio::test]
+async fn preview_carries_the_row_estimate() {
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    f.fake.detail.lock().unwrap().row_estimate = Some(1_234_567);
+    let p =
+        f.sm.table_design_preview(o.design_id, add_note(&o.def))
+            .await
+            .unwrap();
+    assert_eq!(p.row_estimate, Some(1_234_567));
+    let n =
+        f.sm.table_design_open(f.conn, scope(&f), None)
+            .await
+            .unwrap();
+    let mut d = n.def.clone();
+    d.name = "fresh".into();
+    d.columns = o.def.columns.clone();
+    for c in &mut d.columns {
+        c.original = None;
+    }
+    let p = f.sm.table_design_preview(n.design_id, d).await.unwrap();
+    assert_eq!(p.row_estimate, None);
+}
+
 fn server_error(code: Option<&str>, sqlstate: Option<&str>) -> DbError {
     DbError::Server {
         code: code.map(str::to_string),

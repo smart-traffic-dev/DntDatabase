@@ -18,6 +18,7 @@ const preview: DesignPreview = {
   impacts: [{ impact: { kind: 'data_loss', element: { kind: 'column', name: 'total' }, message: 'Drops values.', count_sql: 'SELECT 1' }, rows: 412, counted: true }],
   confirm_name: null,
   expires_in_seconds: 300,
+  row_estimate: null,
 };
 const applied: DesignReport = { outcome: 'applied', error: null, warnings: [], statements_sent: 1 };
 
@@ -56,6 +57,19 @@ it('production_requires_exact_name', async () => {
   await user.click(apply);
   await vi.waitFor(() => expect(callsOf('table_design_apply')).toHaveLength(1));
   expect(callsOf('table_design_apply')[0]).toMatchObject({ planId: 'plan', confirmed: true, name: 'orders' });
+});
+
+it('rebuild warnings show the row estimate', async () => {
+  const rebuild = { impact: { kind: 'rebuild' as const, element: { kind: 'table' as const }, message: 'May rebuild the table.', count_sql: null }, rows: null, counted: false };
+  await setup(null, {}, { ...preview, impacts: [...preview.impacts, rebuild], row_estimate: 1_234_567 });
+  expect(await screen.findByText('May rebuild the table. (≈ 1.2M rows)')).toBeInTheDocument();
+  expect(screen.getByText('Drops values. (412 rows have a value)')).toBeInTheDocument();
+});
+
+it('rebuild warnings without an estimate stay as they are', async () => {
+  const rebuild = { impact: { kind: 'rebuild' as const, element: { kind: 'table' as const }, message: 'May rebuild the table.', count_sql: null }, rows: null, counted: false };
+  await setup(null, {}, { ...preview, impacts: [rebuild], row_estimate: null });
+  expect(await screen.findByText('May rebuild the table.')).toBeInTheDocument();
 });
 
 it('local_applies_on_click', async () => {

@@ -1,6 +1,8 @@
 //! Preview (re-check, render, count, guard, store a single-use plan) and apply (re-check
 //! on the DDL session, send exactly the stored statements) of a design.
-use super::{compute, current_fingerprint, session_db, table_changed, timed_out, Design};
+use super::{
+    compute, current_fingerprint, current_state, session_db, table_changed, timed_out, Design,
+};
 use crate::ddl_exec::{
     execute, failure_error, failure_outcome, stopped, write_history, ActionOutcome, DdlHistory,
     HISTORY_FAILED,
@@ -39,6 +41,10 @@ pub struct DesignPreview {
     pub impacts: Vec<CountedImpact>,
     pub confirm_name: Option<String>,
     pub expires_in_seconds: u32,
+    /// The table's row estimate read with the preview (shown next to rebuild warnings);
+    /// `None` for a new table or when the server has none. Exported as a JS number.
+    #[specta(type = Option<f64>)]
+    pub row_estimate: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -278,9 +284,9 @@ impl SessionManager {
         let dialect = session.dialect();
         let draft_name = draft.name.clone();
         let result = async {
-            let fp = tokio::time::timeout(
+            let (fp, row_estimate) = tokio::time::timeout(
                 METADATA_CALL_TIMEOUT,
-                current_fingerprint(session.as_ref(), design.object.as_ref()),
+                current_state(session.as_ref(), design.object.as_ref()),
             )
             .await
             .map_err(|_| timed_out())??;
@@ -303,11 +309,11 @@ impl SessionManager {
                 self.table_designs.count_grace,
             )
             .await;
-            Ok((r.statements, impacts))
+            Ok((r.statements, impacts, row_estimate))
         }
         .await;
         close_quietly(session).await;
-        let (statements, impacts) = result?;
+        let (statements, impacts, row_estimate) = result?;
         let table_name = design
             .base
             .original_name
@@ -319,6 +325,7 @@ impl SessionManager {
             impacts,
             confirm_name: (cfg.env_tag == Some(EnvTag::Production)).then_some(table_name),
             expires_in_seconds: self.plan_ttl.as_secs().min(u32::MAX as u64) as u32,
+            row_estimate,
         };
         let after = ObjectRef {
             database: design.scope.database.clone(),

@@ -367,11 +367,20 @@ async fn current_fingerprint(
     session: &dyn Session,
     object: Option<&ObjectRef>,
 ) -> Result<String, DbError> {
+    Ok(current_state(session, object).await?.0)
+}
+
+/// The fingerprint of `object` read on `session` now, with the table's row estimate
+/// from the same read (`None` for a new table or when the server has none).
+async fn current_state(
+    session: &dyn Session,
+    object: Option<&ObjectRef>,
+) -> Result<(String, Option<u64>), DbError> {
     match object {
-        None => Ok(NEW_TABLE.into()),
+        None => Ok((NEW_TABLE.into(), None)),
         Some(obj) => {
             let (detail, ddl) = read_table(session, obj).await?;
-            Ok(fingerprint(&detail, ddl.as_deref()))
+            Ok((fingerprint(&detail, ddl.as_deref()), detail.row_estimate))
         }
     }
 }
