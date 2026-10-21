@@ -143,6 +143,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const monacoTheme = useDntMonacoTheme();
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
+  const [wrap, setWrap] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
@@ -163,6 +164,9 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   return (
     <div className="ot-ddl">
       <div className="ot-ddl-bar">
+        <button type="button" className="btn small" aria-pressed={wrap} title="Wrap long lines" onClick={() => setWrap((w) => !w)}>
+          Wrap
+        </button>
         <button type="button" className="btn small" onClick={() => openQuery(tab, ddl)}>
           Open in editor
         </button>
@@ -190,6 +194,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
             scrollBeyondLastLine: false,
             folding: false,
             renderLineHighlight: 'none',
+            wordWrap: wrap ? 'on' : 'off',
             lightbulb: { enabled: 'off' as never },
             ariaLabel: 'DDL',
           }}
@@ -381,6 +386,8 @@ export function ObjectTab({ tab }: { tab: Tab }) {
   const { objectRef } = tab;
   const path = [objectRef.database, objectRef.schema, objectRef.name].filter(Boolean).join('.');
   const state = stored?.[resource];
+  // The Data sub-tab has its own loading state; Refresh reflects the section's metadata / DDL.
+  const refreshing = state?.status === 'loading';
 
   return (
     <div className="object-tab">
@@ -398,12 +405,15 @@ export function ObjectTab({ tab }: { tab: Tab }) {
           <button
             type="button"
             className="btn"
+            disabled={refreshing}
+            aria-busy={refreshing}
+            title={refreshing ? 'Loading the visible section…' : 'Reload the visible section'}
             onClick={() => {
               void useObjectData.getState().refresh(tab, resource);
               if (sub === 'data') void useTableData.getState().load(tab);
             }}
           >
-            Refresh
+            {refreshing ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
       </header>

@@ -14,11 +14,18 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@monaco-editor/react', async () => {
   const React = await import('react');
   return {
-    default: (props: { value?: string; language?: string; theme?: string; onChange?: (value: string | undefined) => void }) =>
+    default: (props: {
+      value?: string;
+      language?: string;
+      theme?: string;
+      options?: { wordWrap?: string };
+      onChange?: (value: string | undefined) => void;
+    }) =>
       React.createElement('textarea', {
         'data-testid': 'monaco-mock',
         'data-language': props.language,
         'data-theme': props.theme,
+        'data-word-wrap': props.options?.wordWrap,
         value: props.value ?? '',
         onChange: (e: { target: { value: string } }) => props.onChange?.(e.target.value),
       }),

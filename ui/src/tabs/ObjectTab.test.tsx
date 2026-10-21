@@ -377,6 +377,36 @@ describe('ObjectTab', () => {
     expect(useObjectData.getState().byTab[tab.id]).toBeUndefined();
   });
 
+  it('refresh_shows_refreshing_and_is_disabled_until_the_section_loads', async () => {
+    const user = userEvent.setup();
+    let release: (d: TableDetail) => void = () => undefined;
+    let calls = 0;
+    setup(makeTab('Table'), {
+      table_detail: () => (++calls === 1 ? detail() : new Promise<TableDetail>((resolve) => (release = resolve))),
+    });
+    await screen.findByText('Customer orders');
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    const busy = await screen.findByRole('button', { name: 'Refreshing…' });
+    expect(busy).toBeDisabled();
+    expect(busy).toHaveAttribute('aria-busy', 'true');
+    await act(async () => release(detail()));
+    expect(await screen.findByRole('button', { name: 'Refresh' })).toBeEnabled();
+  });
+
+  it('ddl_wrap_toggles_line_wrapping', async () => {
+    const user = userEvent.setup();
+    const tab = makeTab('Table');
+    setup(tab);
+    await user.click(screen.getByRole('tab', { name: 'DDL' }));
+    const editor = await screen.findByTestId('monaco-mock');
+    expect(editor).toHaveAttribute('data-word-wrap', 'off');
+    const wrap = screen.getByRole('button', { name: 'Wrap' });
+    expect(wrap).toHaveAttribute('aria-pressed', 'false');
+    await user.click(wrap);
+    expect(wrap).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('monaco-mock')).toHaveAttribute('data-word-wrap', 'on');
+  });
+
   it('cached_across_remount_for_tab_lifetime', async () => {
     const tab = makeTab('Table');
     const { unmount } = setup(tab);
