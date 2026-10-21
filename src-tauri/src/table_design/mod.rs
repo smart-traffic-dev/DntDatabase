@@ -264,8 +264,31 @@ async fn read_ddl(session: &dyn Session, obj: &ObjectRef) -> Result<Option<Strin
     ddl.map(Some)
 }
 
+/// The server refuses to show the DDL to this user, or cannot show it at all: a
+/// permission error (MySQL 1044 / 1142 / 1143 / 1227, PostgreSQL 42501), a "not
+/// supported" error (MySQL 1031 / 1178 / 1235, PostgreSQL 0A000), or the MySQL
+/// driver's own "not available to this user" (no code, no SQLSTATE). Anything else (a
+/// lock wait such as MySQL 1205, a deadlock, a timeout) is transient and is an error.
+fn ddl_not_shown(e: &DbError) -> bool {
+    match e {
+        DbError::Server {
+            code: None,
+            sqlstate: None,
+            ..
+        } => true,
+        DbError::Server { code, sqlstate, .. } => {
+            matches!(
+                code.as_deref(),
+                Some("1031" | "1044" | "1142" | "1143" | "1178" | "1227" | "1235")
+            ) || matches!(sqlstate.as_deref(), Some("42501" | "0A000"))
+        }
+        _ => false,
+    }
+}
+
 /// The detail and the DDL text of `obj`. A DDL the server refuses to show is `None`
-/// (MySQL then opens the table read-only).
+/// (MySQL then opens the table read-only); a transient failure (a lock wait) is an
+/// error, never "no DDL".
 async fn read_table(
     session: &dyn Session,
     obj: &ObjectRef,
@@ -273,7 +296,7 @@ async fn read_table(
     let detail = session.introspector().table_detail(obj).await?;
     let ddl = match read_ddl(session, obj).await {
         Ok(ddl) => ddl,
-        Err(DbError::Server { .. }) => None,
+        Err(e) if ddl_not_shown(&e) => None,
         Err(e) => return Err(e),
     };
     Ok((detail, ddl))

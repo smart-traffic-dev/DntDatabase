@@ -57,6 +57,8 @@ struct Fake {
     ddl_ansi: Mutex<Vec<bool>>,
     /// `SELECT @@SESSION.sql_mode` answers with a binary value.
     mode_as_bytes: AtomicBool,
+    /// `object_ddl` fails with this error.
+    ddl_error: Mutex<Option<DbError>>,
 }
 
 impl Fake {
@@ -74,6 +76,7 @@ impl Fake {
             sql_mode: Mutex::new("STRICT_TRANS_TABLES".into()),
             ddl_ansi: Mutex::new(Vec::new()),
             mode_as_bytes: AtomicBool::new(false),
+            ddl_error: Mutex::new(None),
         })
     }
 
@@ -239,6 +242,9 @@ impl Introspector for FakeSession {
     }
     async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
         self.fake.ddl_ansi.lock().unwrap().push(self.fake.ansi());
+        if let Some(e) = self.fake.ddl_error.lock().unwrap().clone() {
+            return Err(e);
+        }
         Ok(self.fake.ddl.lock().unwrap().clone())
     }
 }
@@ -612,6 +618,78 @@ async fn ddl_is_read_without_ansi_quotes_and_the_mode_restored() {
     let obj = fake.detail.lock().unwrap().object.clone();
     read_ddl(&s, &obj).await.unwrap();
     assert!(fake.sent().is_empty());
+}
+
+fn server_error(code: Option<&str>, sqlstate: Option<&str>) -> DbError {
+    DbError::Server {
+        code: code.map(str::to_string),
+        sqlstate: sqlstate.map(str::to_string),
+        message: "refused".into(),
+        position: None,
+    }
+}
+
+/// Only a DDL the server will not show (permission, not supported) is "no DDL"; a lock
+/// wait or another transient error is passed on, so a busy table neither looks changed
+/// at apply nor opens read-only.
+#[tokio::test]
+async fn only_refused_ddl_reads_as_no_ddl() {
+    let refused = [
+        server_error(None, None),
+        server_error(Some("1142"), Some("42000")),
+        server_error(Some("1044"), Some("42000")),
+        server_error(Some("1227"), Some("42000")),
+        server_error(Some("1235"), Some("42000")),
+        server_error(None, Some("42501")),
+        server_error(None, Some("0A000")),
+    ];
+    let transient = [
+        server_error(Some("1205"), Some("HY000")),
+        server_error(Some("1213"), Some("40001")),
+        server_error(None, Some("55P03")),
+        DbError::timeout(dnt_core::error::ConnectStage::Execute),
+    ];
+    for (e, shown_as_none) in refused
+        .into_iter()
+        .map(|e| (e, true))
+        .chain(transient.into_iter().map(|e| (e, false)))
+    {
+        let fake = Fake::new(MYSQL_ORDERS, MYSQL_ORDERS_DDL);
+        *fake.ddl_error.lock().unwrap() = Some(e.clone());
+        let s = FakeSession {
+            fake: Arc::clone(&fake),
+            tx: Mutex::new(TxState::Idle),
+        };
+        let obj = fake.detail.lock().unwrap().object.clone();
+        let r = read_table(&s, &obj).await;
+        if shown_as_none {
+            assert!(matches!(&r, Ok((_, None))), "{e:?}: {r:?}");
+        } else {
+            assert!(r.is_err(), "{e:?}: {r:?}");
+        }
+    }
+}
+
+/// A lock wait while the apply re-reads the table is an error (nothing sent), not
+/// "Table changed".
+#[tokio::test]
+async fn lock_wait_at_the_recheck_is_not_table_changed() {
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    let p =
+        f.sm.table_design_preview(o.design_id, add_note(&o.def))
+            .await
+            .unwrap();
+    *f.fake.ddl_error.lock().unwrap() = Some(server_error(Some("1205"), Some("HY000")));
+    let e =
+        f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(&e, DbError::Server { code: Some(c), .. } if c == "1205"),
+        "{e:?}"
+    );
+    assert!(!f.fake.sent().iter().any(|s| s.starts_with("ALTER")));
 }
 
 #[tokio::test]
