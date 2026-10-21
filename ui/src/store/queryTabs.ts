@@ -150,6 +150,12 @@ export function setStagedEditsSource(confirm: (() => Promise<boolean>) | null) {
   stagedEdits.confirm = confirm ?? (() => Promise.resolve(true));
 }
 
+/** Unapplied table designs (registered by `tableDesigns`, which this store cannot import): same contract. */
+const designDrafts: { confirm(): Promise<boolean> } = { confirm: () => Promise.resolve(true) };
+export function setDesignDraftsSource(confirm: (() => Promise<boolean>) | null) {
+  designDrafts.confirm = confirm ?? (() => Promise.resolve(true));
+}
+
 let runningOf: (tabId: string) => boolean = () => false;
 let stopRunOf: (tabId: string) => Promise<boolean> = async () => true;
 export function setRunningSource(source: ((tabId: string) => boolean) | null, stop?: (tabId: string) => Promise<boolean>) {
@@ -594,6 +600,7 @@ export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
     try {
       // Staged data edits are not saved anywhere: quitting throws them away, so ask first.
       if (!(await stagedEdits.confirm())) return;
+      if (!(await designDrafts.confirm())) return;
       const failed = await useQueryDocs.getState().flush();
       if (failed.length && !(await confirmQuitUnsaved(failed.length))) return;
       const open = await openTransactions();

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ObjectRef } from '../bindings';
+import type { ObjectRef, Scope } from '../bindings';
 import {
   clampRatio,
   isLayoutNode,
@@ -40,7 +40,19 @@ export interface QueryTabRef {
   preview?: boolean;
 }
 
-export type Tab = ObjectTabRef | QueryTabRef;
+/** A table designer tab; `table` is null while designing a new table. The draft lives in `useTableDesigns`. */
+export interface DesignTabRef {
+  id: string;
+  kind: 'design';
+  connectionId: string;
+  scope: Scope;
+  table: string | null;
+  title: string;
+  pinned?: boolean;
+  preview?: boolean;
+}
+
+export type Tab = ObjectTabRef | QueryTabRef | DesignTabRef;
 
 /** What "Reopen closed tab" brings back: an object tab by reference, a query tab with its document. */
 export type ClosedTab = { kind: 'object'; tab: ObjectTabRef } | { kind: 'query'; doc: QueryDoc };
@@ -154,6 +166,11 @@ interface TabsState {
 /** One tab per object of a connection. */
 export function objectTabId(connectionId: string, o: ObjectRef): string {
   return [connectionId, o.database, o.schema ?? '', o.kind, o.name].map(encodeURIComponent).join('/');
+}
+
+/** One designer tab per table of a connection (one "new table" tab per scope: `table` null). */
+export function designTabId(connectionId: string, scope: Scope, table: string | null): string {
+  return ['design', connectionId, scope.database, scope.schema ?? '', table ?? '\u0000new'].map(encodeURIComponent).join('/');
 }
 
 /** The tabs of one group, in strip order. */

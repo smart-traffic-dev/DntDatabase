@@ -2,11 +2,18 @@ import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataE
 import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
+import { confirmDiscardDesign, useTableDesigns } from '../store/tableDesigns';
 import { groupTabs, useTabs, type Tab } from '../store/tabs';
 
 /** A query tab closes through its guards (open transaction, unsaved file), then drops its row. */
 export async function closeTab(tab: Tab): Promise<boolean> {
   if (tab.kind === 'query') return useQueryDocs.getState().closeTab(tab.id);
+  // An unapplied table design is thrown away with the tab: ask first.
+  if (tab.kind === 'design') {
+    if (!(await confirmDiscardDesign(tab.id))) return false;
+    useTabs.getState().close(tab.id);
+    return true;
+  }
   // Staged data edits are thrown away with the tab: ask first.
   if (useDataEdits.getState().hasStaged(tab.id) && !(await confirmDiscard(tab.id))) return false;
   useTabs.getState().close(tab.id);
@@ -85,6 +92,7 @@ export async function closeGroup(groupId = useTabs.getState().focusedGroupId): P
 /** Whether a tab holds something a close would ask about: unsaved file text, staged edits, an open transaction. */
 function unsaved(tab: Tab): boolean {
   if (tab.kind === 'object') return useDataEdits.getState().hasStaged(tab.id);
+  if (tab.kind === 'design') return useTableDesigns.getState().isDirty(tab.id);
   const doc = useQueryDocs.getState().docs.get(tab.id);
   const tx = useQueryRun.getState().runs.get(tab.id)?.txState ?? 'idle';
   return (!!doc?.filePath && doc.dirty) || tx !== 'idle';
