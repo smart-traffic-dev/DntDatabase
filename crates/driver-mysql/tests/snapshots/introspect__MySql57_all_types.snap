@@ -19,6 +19,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_tinyint
     ordinal: 2
     db_type: tinyint(4)
@@ -30,6 +35,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_tinyint_u
     ordinal: 3
     db_type: tinyint(3) unsigned
@@ -41,6 +51,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: true
+    enum_values: []
   - name: c_smallint
     ordinal: 4
     db_type: smallint(6)
@@ -52,6 +67,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_smallint_u
     ordinal: 5
     db_type: smallint(5) unsigned
@@ -63,6 +83,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: true
+    enum_values: []
   - name: c_mediumint
     ordinal: 6
     db_type: mediumint(9)
@@ -74,6 +99,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_mediumint_u
     ordinal: 7
     db_type: mediumint(8) unsigned
@@ -85,6 +115,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: true
+    enum_values: []
   - name: c_int
     ordinal: 8
     db_type: int(11)
@@ -96,6 +131,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_int_u
     ordinal: 9
     db_type: int(10) unsigned
@@ -107,6 +147,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: true
+    enum_values: []
   - name: c_bigint
     ordinal: 10
     db_type: bigint(20)
@@ -118,6 +163,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_bigint_u
     ordinal: 11
     db_type: bigint(20) unsigned
@@ -129,6 +179,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: true
+    enum_values: []
   - name: c_decimal
     ordinal: 12
     db_type: "decimal(40,10)"
@@ -140,6 +195,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_float
     ordinal: 13
     db_type: float
@@ -151,6 +211,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_double
     ordinal: 14
     db_type: double
@@ -162,6 +227,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_bit
     ordinal: 15
     db_type: bit(8)
@@ -173,6 +243,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_date
     ordinal: 16
     db_type: date
@@ -184,6 +259,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_datetime
     ordinal: 17
     db_type: datetime(6)
@@ -195,6 +275,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_timestamp
     ordinal: 18
     db_type: timestamp
@@ -206,6 +291,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_time
     ordinal: 19
     db_type: time(6)
@@ -217,6 +307,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_year
     ordinal: 20
     db_type: year(4)
@@ -228,6 +323,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_char
     ordinal: 21
     db_type: char(10)
@@ -239,6 +339,11 @@ columns:
     invisible: false
     collation: utf8mb4_unicode_ci
     comment: ~
+    charset: utf8mb4
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_varchar
     ordinal: 22
     db_type: varchar(255)
@@ -250,6 +355,11 @@ columns:
     invisible: false
     collation: utf8mb4_unicode_ci
     comment: ~
+    charset: utf8mb4
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_text
     ordinal: 23
     db_type: text
@@ -261,6 +371,11 @@ columns:
     invisible: false
     collation: utf8mb4_unicode_ci
     comment: ~
+    charset: utf8mb4
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_binary
     ordinal: 24
     db_type: binary(8)
@@ -272,6 +387,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_varbinary
     ordinal: 25
     db_type: varbinary(16)
@@ -283,6 +403,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_blob
     ordinal: 26
     db_type: blob
@@ -294,6 +419,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_enum
     ordinal: 27
     db_type: "enum('small','medium','large')"
@@ -305,6 +435,14 @@ columns:
     invisible: false
     collation: utf8mb4_unicode_ci
     comment: ~
+    charset: utf8mb4
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values:
+      - small
+      - medium
+      - large
   - name: c_set
     ordinal: 28
     db_type: "set('a','b','c')"
@@ -316,6 +454,14 @@ columns:
     invisible: false
     collation: utf8mb4_unicode_ci
     comment: ~
+    charset: utf8mb4
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values:
+      - a
+      - b
+      - c
   - name: c_json
     ordinal: 29
     db_type: json
@@ -327,6 +473,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
 primary_key:
   name: PRIMARY
   unique: true
@@ -337,6 +488,15 @@ primary_key:
   expression: ~
   method: BTREE
   definition: ~
+  parts:
+    - column: id
+      expression: ~
+      prefix: ~
+      descending: false
+  visible: true
+  include: []
+  nulls_not_distinct: false
+  comment: ~
 indexes: []
 foreign_keys: []
 checks: []
@@ -347,6 +507,12 @@ options:
   tablespace: ~
   partitioned_by: ~
   system_versioned: false
+  charset: utf8mb4
+  row_format: Dynamic
+  auto_increment: ~
+  extra: []
+  is_partition: false
+  inherits: []
 row_estimate: "[redacted]"
 size_bytes: "[redacted]"
 comment: ~

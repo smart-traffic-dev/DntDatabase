@@ -547,6 +547,81 @@ async fn myisam_engine_is_reported() {
 }
 
 #[tokio::test]
+async fn mysql_detail_has_ddl_fields() {
+    require_db!();
+    for t in Target::mysql_family().into_iter().chain([Target::MySql84]) {
+        let s = connect(t).await;
+        let modern = matches!(t, Target::MySql8 | Target::MySql84);
+        let extra_keys = if modern {
+            ", KEY k_desc (name DESC), KEY k_inv (s) INVISIBLE"
+        } else {
+            ""
+        };
+        let table = scratch("ddlfields");
+        s.query_row_text(&format!(
+            "CREATE TABLE {FIXTURE_DB}.{table} (id int unsigned NOT NULL AUTO_INCREMENT, \
+             ts timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, \
+             s enum('a','b''c') NOT NULL, name varchar(100) CHARACTER SET latin1, \
+             PRIMARY KEY (id), KEY k_name (name(10)) COMMENT 'pfx'{extra_keys}) \
+             ROW_FORMAT=DYNAMIC"
+        ))
+        .await
+        .unwrap();
+        // MySQL 8 reports no AUTO_INCREMENT for a table that never held a row.
+        let inserted = s
+            .query_row_text(&format!(
+                "INSERT INTO {FIXTURE_DB}.{table} (s) VALUES ('a')"
+            ))
+            .await;
+        let d = s
+            .table_detail(&obj(&table, ObjectKind::Table))
+            .await
+            .map_err(|e| e.to_string());
+        s.query_row_text(&format!("DROP TABLE {FIXTURE_DB}.{table}"))
+            .await
+            .unwrap();
+        inserted.unwrap();
+        let d = d.unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        let c = |n: &str| d.columns.iter().find(|c| c.name == n).unwrap();
+        assert!(c("id").unsigned && !c("ts").unsigned, "{t:?}");
+        assert!(
+            c("ts")
+                .on_update
+                .as_deref()
+                .is_some_and(|u| u.to_ascii_uppercase().starts_with("CURRENT_TIMESTAMP")),
+            "{t:?}: {:?}",
+            c("ts").on_update
+        );
+        assert_eq!(c("s").enum_values, ["a", "b'c"], "{t:?}");
+        assert_eq!(c("name").charset.as_deref(), Some("latin1"), "{t:?}");
+        let idx = |n: &str| d.indexes.iter().find(|i| i.name == n).unwrap();
+        let k = idx("k_name");
+        assert_eq!(k.parts.len(), 1, "{t:?}");
+        assert_eq!(k.parts[0].prefix, Some(10), "{t:?}");
+        assert_eq!(k.parts[0].column.as_deref(), Some("name"), "{t:?}");
+        assert_eq!(k.comment.as_deref(), Some("pfx"), "{t:?}");
+        assert!(k.visible, "{t:?}");
+        let pk = d.primary_key.as_ref().unwrap();
+        assert_eq!(pk.parts.len(), 1, "{t:?}");
+        assert_eq!(pk.comment, None, "{t:?}");
+        assert!(
+            d.options
+                .row_format
+                .as_deref()
+                .is_some_and(|r| r.eq_ignore_ascii_case("dynamic")),
+            "{t:?}: {:?}",
+            d.options.row_format
+        );
+        assert!(d.options.auto_increment.is_some(), "{t:?}");
+        assert!(d.options.charset.is_some(), "{t:?}");
+        if modern {
+            assert!(idx("k_desc").parts[0].descending, "{t:?}");
+            assert!(!idx("k_inv").visible, "{t:?}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn invisible_column_flag() {
     require_db!();
     for t in Target::mysql_family() {

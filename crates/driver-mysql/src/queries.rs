@@ -38,26 +38,37 @@ pub(crate) const EVENTS: &str = "SELECT EVENT_NAME, EVENT_COMMENT \
 
 /// One table's row (`?` = db, table).
 pub(crate) const TABLE: &str = "SELECT TABLE_TYPE, ENGINE, TABLE_COLLATION, CREATE_OPTIONS, \
-     TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, TABLE_COMMENT \
+     TABLE_ROWS, DATA_LENGTH, INDEX_LENGTH, TABLE_COMMENT, ROW_FORMAT, AUTO_INCREMENT, \
+     (SELECT c.CHARACTER_SET_NAME FROM information_schema.COLLATIONS c \
+       WHERE c.COLLATION_NAME = TABLES.TABLE_COLLATION) \
      FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?";
 
 /// Columns by ordinal (`?` = db, table).
 pub(crate) const COLUMNS: &str = "SELECT COLUMN_NAME, ORDINAL_POSITION, COLUMN_TYPE, \
      IS_NULLABLE, COLUMN_DEFAULT, EXTRA, GENERATION_EXPRESSION, COLUMN_COMMENT, \
-     COLLATION_NAME \
+     COLLATION_NAME, CHARACTER_SET_NAME \
      FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
      ORDER BY ORDINAL_POSITION";
 
 /// Index parts (`?` = db, table). Servers without functional indexes have no
-/// `EXPRESSION` column, so a NULL stands in for it.
+/// `EXPRESSION` column, and servers without invisible indexes no visibility column, so
+/// NULLs stand in for them. Columns: name, non_unique, seq, column, type, expression,
+/// sub_part, collation (`D` = descending), comment, visible (`YES`/`NO`).
 pub(crate) const INDEXES: &str = "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, \
-     INDEX_TYPE, NULL \
+     INDEX_TYPE, NULL, SUB_PART, COLLATION, INDEX_COMMENT, NULL \
      FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
      ORDER BY INDEX_NAME, SEQ_IN_INDEX";
 
-/// [`INDEXES`] with functional-index expressions (`caps.functional_index`).
+/// [`INDEXES`] with functional-index expressions and visibility (MySQL 8.0.13+).
 pub(crate) const INDEXES_WITH_EXPRESSION: &str = "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, \
-     COLUMN_NAME, INDEX_TYPE, EXPRESSION \
+     COLUMN_NAME, INDEX_TYPE, EXPRESSION, SUB_PART, COLLATION, INDEX_COMMENT, IS_VISIBLE \
+     FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+     ORDER BY INDEX_NAME, SEQ_IN_INDEX";
+
+/// [`INDEXES`] with MariaDB 10.6+ visibility (`IGNORED`, inverted to `YES`/`NO`).
+pub(crate) const INDEXES_MARIADB: &str = "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, \
+     COLUMN_NAME, INDEX_TYPE, NULL, SUB_PART, COLLATION, INDEX_COMMENT, \
+     IF(IGNORED = 'YES', 'NO', 'YES') \
      FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
      ORDER BY INDEX_NAME, SEQ_IN_INDEX";
 
