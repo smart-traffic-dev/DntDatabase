@@ -9,6 +9,9 @@ import { useTabs } from './tabs';
 /** How long edits settle before the live SQL is asked for. */
 export const RENDER_DEBOUNCE_MS = 300;
 
+/** The designer's sections (the segmented control of its header). */
+export type DesignSubTab = 'columns' | 'indexes' | 'foreign_keys' | 'checks' | 'options' | 'comment';
+
 export interface DesignState {
   open: DesignOpen | null;
   draft: TableDef | null;
@@ -23,6 +26,10 @@ export interface DesignState {
    * the draft as it was at that moment, kept until the user reopens and restores or discards it.
    */
   lostDraft: TableDef | null;
+  /** The design that was open when the session was lost: a different `open.design_id` means it was reopened. */
+  lostDesignId: string | null;
+  /** The section shown in the designer. */
+  subTab: DesignSubTab;
 }
 
 /** Most undo steps kept per design. */
@@ -43,8 +50,12 @@ interface DesignsStore {
   byTab: Record<string, DesignState>;
   /** Opens the design session on the backend and starts the draft from its definition. */
   load(tabId: string, connectionId: string, scope: Scope, table: string | null): Promise<void>;
-  /** Applies `recipe` to the draft (undoable) and schedules the live SQL. */
-  edit(tabId: string, recipe: (d: TableDef) => TableDef): void;
+  /**
+   * Applies `recipe` to the draft (undoable) and schedules the live SQL. Consecutive edits with the
+   * same `coalesce` key (typing in one field) make one undo step.
+   */
+  edit(tabId: string, recipe: (d: TableDef) => TableDef, coalesce?: string): void;
+  setSubTab(tabId: string, subTab: DesignSubTab): void;
   undo(tabId: string): void;
   redo(tabId: string): void;
   select(tabId: string, el: ElementRef | null): void;
@@ -65,9 +76,23 @@ interface DesignsStore {
   reset(): void;
 }
 
-const blank = (): DesignState => ({ open: null, draft: null, past: [], future: [], selection: null, render: null, loading: false, error: null, lostDraft: null });
+const blank = (): DesignState => ({
+  open: null,
+  draft: null,
+  past: [],
+  future: [],
+  selection: null,
+  render: null,
+  loading: false,
+  error: null,
+  lostDraft: null,
+  lostDesignId: null,
+  subTab: 'columns',
+});
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+/** The `coalesce` key of a tab's last edit, while the next edit may still merge into it. */
+const lastCoalesce = new Map<string, string>();
 /** Bumped per request of a tab: only the newest answer is kept. */
 const sequence = new Map<string, number>();
 /** Bumped per open / reopen / reload of a tab (never by renders or edits): only the newest open lands. */
@@ -86,7 +111,7 @@ function clearTimer(tabId: string) {
   timers.delete(tabId);
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
+export function deepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
@@ -168,6 +193,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
 
   /** Moves the draft to `draft` (undo / redo / edit share this) and refreshes the live SQL. */
   const setDraft = (tabId: string, draft: TableDef, past: TableDef[], future: TableDef[]) => {
+    lastCoalesce.delete(tabId);
     patch(tabId, { draft, past, future });
     scheduleRender(tabId);
   };
@@ -182,6 +208,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
   async function openInto(tabId: string, target: Target) {
     targets.set(tabId, target);
     clearTimer(tabId);
+    lastCoalesce.delete(tabId);
     const seq = (openSeq.get(tabId) ?? 0) + 1;
     openSeq.set(tabId, seq);
     const had = entry(tabId)?.open ?? null;
@@ -218,14 +245,17 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
   return {
     byTab: {},
     load: (tabId, connectionId, scope, table) => openInto(tabId, { connectionId, scope, table }),
-    edit(tabId, recipe) {
+    edit(tabId, recipe, coalesce) {
       const state = entry(tabId);
       // A lost design takes no edits (reopen it first), nor does one that is being (re)opened.
       if (!state?.draft || state.lostDraft || state.loading) return;
       const next = recipe(state.draft);
       if (next === state.draft) return;
-      setDraft(tabId, next, [...state.past, state.draft].slice(-UNDO_LIMIT), []);
+      const merge = coalesce !== undefined && lastCoalesce.get(tabId) === coalesce && state.future.length === 0 && state.past.length > 0;
+      setDraft(tabId, next, merge ? state.past : [...state.past, state.draft].slice(-UNDO_LIMIT), []);
+      if (coalesce !== undefined) lastCoalesce.set(tabId, coalesce);
     },
+    setSubTab: (tabId, subTab) => patch(tabId, { subTab }),
     undo(tabId) {
       const state = entry(tabId);
       const previous = state?.past.at(-1);
@@ -243,8 +273,9 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       const state = entry(tabId);
       if (!state?.open) return;
       clearTimer(tabId);
+      lastCoalesce.delete(tabId);
       bump(tabId);
-      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null });
+      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null, lostDesignId: null });
     },
     async reload(tabId) {
       const target = targets.get(tabId);
@@ -254,8 +285,9 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       const state = entry(tabId);
       if (!state?.draft || state.lostDraft) return;
       clearTimer(tabId);
+      lastCoalesce.delete(tabId);
       bump(tabId);
-      patch(tabId, { lostDraft: state.draft, loading: false, error: null });
+      patch(tabId, { lostDraft: state.draft, lostDesignId: state.open?.design_id ?? null, loading: false, error: null });
     },
     async reopen(tabId) {
       const target = targets.get(tabId);
@@ -265,11 +297,12 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       const state = entry(tabId);
       const lost = state?.lostDraft;
       if (!state?.draft || !lost || state.loading) return;
-      patch(tabId, { lostDraft: null });
+      patch(tabId, { lostDraft: null, lostDesignId: null });
       setDraft(tabId, lost, [...state.past, state.draft].slice(-UNDO_LIMIT), []);
     },
     dispose(tabId) {
       clearTimer(tabId);
+      lastCoalesce.delete(tabId);
       sequence.delete(tabId);
       openSeq.delete(tabId);
       targets.delete(tabId);
@@ -291,6 +324,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
     reset() {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
+      lastCoalesce.clear();
       sequence.clear();
       openSeq.clear();
       targets.clear();
