@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
-import { MaximizeResultsIcon } from '../../components/icons';
+import { ChevronDownIcon, MaximizeResultsIcon } from '../../components/icons';
 import { plural } from '../../lib/plural';
 import { dialectOfConnection, useQueryDocs } from '../../store/queryTabs';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
@@ -34,27 +34,9 @@ function cancelledText(run: TabRun): string | null {
   return ms === null ? 'Cancelled by user' : `Cancelled by user after ${(ms / 1000).toFixed(1)} s`;
 }
 
-/** The run keys, shown by the collapsed panel of a tab that never ran. */
-function RunKeys() {
-  const keys = (...names: string[]) =>
-    names.map((k, i) => (
-      <kbd key={i} className="keycap">
-        {k}
-      </kbd>
-    ));
-  return (
-    <span className="qr-keys" data-testid="result-empty-keys">
-      <span className="qr-key">{keys('Ctrl', 'Enter')} Run statement</span>
-      <span className="qr-key">{keys('Ctrl', 'Shift', 'Enter')} Run all</span>
-      <span className="qr-key">{keys('Ctrl', 'Shift', 'E')} Explain</span>
-    </span>
-  );
-}
-
 /**
  * The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent.
- * `collapsed`: only the tab bar (before the tab's first run), with the run keys; choosing one of
- * its tabs calls `onOpen`.
+ * `collapsed`: folded to its tab bar by the user; choosing one of its tabs calls `onOpen`.
  */
 export const ResultPanel = memo(ResultPanelView);
 
@@ -64,10 +46,13 @@ function ResultPanelView({
   onOpen,
   maximized = false,
   onToggleMaximize,
+  onToggleCollapse,
 }: {
   tabId: string;
   collapsed?: boolean;
   onOpen?: () => void;
+  /** Folds the panel to its tab bar, or opens it again. */
+  onToggleCollapse?: () => void;
   /** The results fill the group (the editor is folded). */
   maximized?: boolean;
   onToggleMaximize?: () => void;
@@ -175,11 +160,23 @@ function ResultPanelView({
             Export…
           </button>
         )}
-        {collapsed && <RunKeys />}
+        {onToggleCollapse && (
+          <button
+            type="button"
+            className={`icon-btn qr-collapse${collapsed || !showResult ? ' push' : ''}`}
+            data-testid="result-collapse"
+            aria-label={collapsed ? 'Expand results' : 'Collapse results'}
+            aria-expanded={!collapsed}
+            title={collapsed ? 'Expand results' : 'Collapse results'}
+            onClick={onToggleCollapse}
+          >
+            <ChevronDownIcon />
+          </button>
+        )}
         {onToggleMaximize && (
           <button
             type="button"
-            className={`icon-btn qr-maximize${collapsed || !showResult ? ' push' : ''}`}
+            className={`icon-btn qr-maximize${!onToggleCollapse && (collapsed || !showResult) ? ' push' : ''}`}
             data-testid="result-maximize"
             aria-label={maximized ? 'Restore results' : 'Maximize results'}
             aria-pressed={maximized}

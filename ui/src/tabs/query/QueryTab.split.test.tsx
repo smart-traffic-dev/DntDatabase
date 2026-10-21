@@ -21,39 +21,45 @@ const ran = (id: string) => act(() => useQueryRun.setState({ runs: new Map([[id,
 const separator = () => screen.queryByRole('separator', { name: 'Resize editor and results' });
 
 describe('editor / results split', () => {
-  it('collapses the results to their tab bar until the first run, showing the run keys', () => {
+  it('shows no results panel until the tab first runs; the first run opens it', () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, null);
     render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
+    expect(screen.queryByTestId('result-panel')).toBeNull();
     expect(separator()).toBeNull();
-    const panel = screen.getByTestId('result-panel');
-    expect(panel).toHaveClass('collapsed');
     expect(document.querySelector<HTMLElement>('.query-editor-pane')!.style.flex).toMatch(/^1 1 0/);
-    const keys = within(panel).getByTestId('result-empty-keys');
-    expect([...keys.querySelectorAll('.keycap')].map((k) => k.textContent)).toEqual([
-      'Ctrl',
-      'Enter',
-      'Ctrl',
-      'Shift',
-      'Enter',
-      'Ctrl',
-      'Shift',
-      'E',
-    ]);
-    expect(keys).toHaveTextContent(/Run statement.*Run all.*Explain/);
-    // The first run opens the panel.
     ran(id);
     expect(screen.getByTestId('result-panel')).not.toHaveClass('collapsed');
     expect(separator()).toBeInTheDocument();
-    expect(screen.queryByTestId('result-empty-keys')).toBeNull();
   });
 
-  it('opens when one of its tabs is clicked before any run', async () => {
-    mockBackend({ history_list: () => [] });
+  it('the results bar folds the panel to its bar and opens it again; a new run opens it', async () => {
+    const user = userEvent.setup();
     const id = useQueryDocs.getState().newQuery(ids.prod, null);
+    ran(id);
     render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
+    const fold = screen.getByTestId('result-collapse');
+    expect(fold).toHaveAccessibleName('Collapse results');
+    await user.click(fold);
+    expect(screen.getByTestId('result-panel')).toHaveClass('collapsed');
     expect(separator()).toBeNull();
-    await userEvent.setup().click(screen.getByTestId('panel-messages'));
-    expect(separator()).toBeInTheDocument();
+    expect(document.querySelector<HTMLElement>('.query-editor-pane')!.style.flex).toMatch(/^1 1 0/);
+    expect(screen.getByTestId('result-collapse')).toHaveAccessibleName('Expand results');
+    await user.click(screen.getByTestId('result-collapse'));
+    expect(screen.getByTestId('result-panel')).not.toHaveClass('collapsed');
+    // Folded, then a new run: the results open to show it.
+    await user.click(screen.getByTestId('result-collapse'));
+    act(() => useQueryRun.setState({ runs: new Map([[id, { ...emptyRun, runId: 'r2' }]]) }));
+    expect(screen.getByTestId('result-panel')).not.toHaveClass('collapsed');
+  });
+
+  it('a folded panel opens when one of its tabs is clicked', async () => {
+    mockBackend({ history_list: () => [] });
+    const user = userEvent.setup();
+    const id = useQueryDocs.getState().newQuery(ids.prod, null);
+    ran(id);
+    render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
+    await user.click(screen.getByTestId('result-collapse'));
+    await user.click(within(screen.getByTestId('result-panel')).getByTestId('panel-messages'));
     expect(screen.getByTestId('result-panel')).not.toHaveClass('collapsed');
   });
 
@@ -99,11 +105,11 @@ describe('editor / results split', () => {
     expect(separator()).toBeInTheDocument();
   });
 
-  it('maximizing a tab that never ran opens its results', async () => {
+  it('maximizing the results of a tab that never ran (Ctrl+Shift+J) shows its panel', () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, null);
     render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
-    expect(screen.getByTestId('result-panel')).toHaveClass('collapsed');
-    await userEvent.setup().click(screen.getByTestId('result-maximize'));
+    expect(screen.queryByTestId('result-panel')).toBeNull();
+    act(() => useLayout.getState().toggleGroupMaximize(useTabs.getState().focusedGroupId));
     expect(screen.getByTestId('result-panel')).not.toHaveClass('collapsed');
   });
 

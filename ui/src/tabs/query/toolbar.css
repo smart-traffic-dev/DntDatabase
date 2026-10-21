@@ -245,34 +245,6 @@ button.ta-chip:hover {
   color: var(--dnt-status-danger-fg);
 }
 
-/* Collapsed results: the run keys on the right of the tab bar. A hint that does not fit wraps out of sight whole. */
-.qr-keys {
-  display: flex;
-  flex: 1 1 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  align-items: center;
-  column-gap: var(--dnt-space-4);
-  height: var(--dnt-ctl-h-xs);
-  margin-left: auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  color: var(--dnt-fg-muted);
-  font-size: var(--dnt-text-sm);
-}
-
-.qr-key {
-  display: inline-flex;
-  align-items: center;
-  height: var(--dnt-ctl-h-xs);
-  gap: var(--dnt-space-0_5);
-}
-
-.qr-key .keycap:last-of-type {
-  margin-right: var(--dnt-space-1);
-}
-
 /* Marker hover: only the message, without the "View Problem / Quick Fix" status bar. */
 .sql-editor .monaco-hover .hover-row.status-bar {
   display: none;

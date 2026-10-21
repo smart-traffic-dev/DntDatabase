@@ -1,4 +1,4 @@
-import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { Splitter } from '../../components/Splitter';
 import { useConnections } from '../../store/connections';
@@ -34,9 +34,9 @@ const ranOnce = (run: TabRun) =>
   run.runId !== null || run.phase.kind !== 'idle' || run.explain !== null || run.explainError !== null || run.messages.length > 0;
 
 /**
- * A query tab: the editor, results and messages below (its controls are in the tab strip). Until the tab first runs,
- * the results are collapsed to their tab bar (which shows the run keys); clicking one of its
- * tabs opens them too.
+ * A query tab: the editor, results and messages below (its controls are in the tab strip). Until
+ * the tab first runs there is no results panel; after that the user can fold it to its tab bar
+ * (choosing one of its tabs, or a new run, opens it again).
  */
 export function QueryTab({ tab }: { tab: QueryTabRef }) {
   // Field selectors only (not the document): the text changes on every keystroke. The toolbar
@@ -62,11 +62,17 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   const resultsVisible = results.visible;
   const setGroupRatio = useLayout((s) => s.setGroupRatio);
   const toggleGroupMaximize = useLayout((s) => s.toggleGroupMaximize);
-  const [opened, setOpened] = useState(false);
-  const onOpenResults = useCallback(() => setOpened(true), []);
-  // Maximizing a tab that never ran opens its (empty) results: collapsed below gives way to it.
+  // Folded to its tab bar by the user; a new run opens it again to show its outcome.
+  const [folded, setFolded] = useState(false);
+  useEffect(() => {
+    if (run.runId !== null) setFolded(false);
+  }, [run.runId]);
+  const onOpenResults = useCallback(() => setFolded(false), []);
+  const onToggleCollapse = useCallback(() => setFolded((f) => !f), []);
   const onToggleMaximize = useCallback(() => toggleGroupMaximize(groupId), [groupId, toggleGroupMaximize]);
-  const collapsed = !ranOnce(run) && !opened && !maximized;
+  // Until the tab first runs there is nothing to show: no results panel at all (maximizing shows it).
+  const hasResults = ranOnce(run) || maximized;
+  const collapsed = folded && !maximized;
   const splitRef = useRef<HTMLDivElement>(null);
   const [total, setTotal] = useState(0);
   const missing = !toolbarDoc;
@@ -93,14 +99,23 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
         <div
           className="query-editor-pane"
           hidden={maximized && resultsVisible}
-          style={{ flex: !resultsVisible || collapsed ? '1 1 0' : editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px` }}
+          style={{
+            flex: !resultsVisible || !hasResults || collapsed ? '1 1 0' : editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px`,
+          }}
         >
           <EditorHost tabId={tab.id} engine={engine} onMount={onMount} />
         </div>
-        {resultsVisible && collapsed && (
-          <ResultPanel tabId={tab.id} collapsed onOpen={onOpenResults} maximized={false} onToggleMaximize={onToggleMaximize} />
+        {resultsVisible && hasResults && collapsed && (
+          <ResultPanel
+            tabId={tab.id}
+            collapsed
+            onOpen={onOpenResults}
+            onToggleCollapse={onToggleCollapse}
+            maximized={false}
+            onToggleMaximize={onToggleMaximize}
+          />
         )}
-        {resultsVisible && !collapsed && (
+        {resultsVisible && hasResults && !collapsed && (
           <>
             {!maximized && (
             <Splitter
@@ -113,7 +128,12 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
               onChange={(px) => total > 0 && setGroupRatio(groupId, px / total)}
             />
             )}
-            <ResultPanel tabId={tab.id} maximized={maximized} onToggleMaximize={onToggleMaximize} />
+            <ResultPanel
+              tabId={tab.id}
+              maximized={maximized}
+              onToggleMaximize={onToggleMaximize}
+              onToggleCollapse={maximized ? undefined : onToggleCollapse}
+            />
           </>
         )}
       </div>

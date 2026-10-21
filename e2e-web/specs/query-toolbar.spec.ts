@@ -87,12 +87,9 @@ test.describe('query toolbar in the tab strip', () => {
     await page.keyboard.press('Escape');
   });
 
-  test('results are collapsed to their tab bar with the run keys', async ({ page }) => {
+  test('a tab that never ran has no results panel; the editor fills the group', async ({ page }) => {
     await openQuery(page);
-    const panel = byId(page, 'result-panel');
-    await expect(panel).toHaveClass(/collapsed/);
-    expect((await panel.boundingBox())!.height).toBeLessThanOrEqual(33);
-    await expect(byId(page, 'result-empty-keys')).toContainText('Run statement');
+    await expect(byId(page, 'result-panel')).toHaveCount(0);
     await expect(page.getByRole('separator', { name: 'Resize editor and results' })).toHaveCount(0);
   });
 

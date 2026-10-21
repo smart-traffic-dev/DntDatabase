@@ -431,11 +431,18 @@
   text-align: left;
 }
 
-.qr-maximize {
+.qr-maximize,
+.qr-collapse {
   flex: none;
   margin-left: var(--dnt-space-1);
 }
 
-.qr-maximize.push {
+.qr-maximize.push,
+.qr-collapse.push {
   margin-left: auto;
+}
+
+/* Collapse points down (fold the panel away); folded, it points up (open it). */
+.qr-panel.collapsed .qr-collapse svg {
+  transform: rotate(180deg);
 }
