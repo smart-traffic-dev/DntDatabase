@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, type DragEvent, type KeyboardEvent } from 'react';
-import type { ColumnDef, DesignOpen, DraftError, ElementRef, TableDef } from '../../bindings';
+import type { ColumnDef, DesignOpen, DraftError, ElementRef, TableDef, TypeSpec } from '../../bindings';
 import { DraftInput } from './DraftInput';
 import {
   baseText,
@@ -16,8 +16,10 @@ import {
   updateColumn,
   withBase,
   withParamsText,
+  withType,
   type ColumnRow,
 } from './columnModel';
+import './columnsGrid.css';
 
 type Edit = (recipe: (d: TableDef) => TableDef, coalesce?: string) => void;
 
@@ -35,18 +37,35 @@ export interface ColumnsGridProps {
 
 const COLUMN_DRAG_TYPE = 'application/x-dnt-design-column';
 
-/** Which grid cell shows a draft error of `field`; anything else shows on the row's state mark. */
+/**
+ * Which grid cell shows a draft error of `field` (the inspector has the field itself); anything
+ * else (no field, `locked`, …) shows on the row's state mark.
+ */
 const CELL_OF: Record<string, 'name' | 'type' | 'length' | 'default' | 'comment'> = {
   name: 'name',
   data_type: 'type',
   values: 'type',
   unsigned: 'type',
+  collation: 'type',
+  charset: 'type',
+  using: 'type',
   length: 'length',
   precision: 'length',
   scale: 'length',
   default: 'default',
+  auto_increment: 'default',
+  identity: 'default',
+  on_update: 'default',
+  generated: 'default',
   comment: 'comment',
 };
+
+/** What the Default cell shows (muted) for a column whose value the server generates. */
+function generatedText(c: ColumnDef): string | null {
+  if (c.auto_increment) return 'AUTO_INCREMENT';
+  if (c.identity) return c.identity === 'always' ? 'IDENTITY ALWAYS' : 'IDENTITY BY DEFAULT';
+  return null;
+}
 
 function KeyIcon() {
   return (
@@ -112,7 +131,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
 
   return (
     <div className="dz-columns">
-      <div className={`dz-grid${pg ? ' dz-grid-pg' : ''}`} role="grid" aria-label="Columns" aria-rowcount={rows.length + 1}>
+      <div className={`dz-grid${pg ? ' dz-grid-pg' : ''}`} role="table" aria-label="Columns" aria-rowcount={rows.length + 1}>
         <div role="row" className="dz-row dz-head">
           {pg ? null : <div role="columnheader" aria-label="Order" />}
           <div role="columnheader" aria-label="State" />
@@ -137,6 +156,8 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
           const inPk = !dropped && !!pk?.columns.includes(column.name);
           const isSelected = !dropped && selected === column.name;
           const set = (patch: Partial<ColumnDef>, key?: string) => index !== null && edit((d) => updateColumn(d, index, patch), key);
+          const retype = (spec: TypeSpec, key: string) => set(withType(column, spec, open.catalog, open.server.kind, row.base), key);
+          const generated = generatedText(column);
           return (
             <div
               key={row.key}
@@ -146,7 +167,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
               }}
               role="row"
               data-column={column.name}
-              aria-selected={isSelected}
+              aria-current={isSelected ? true : undefined}
               tabIndex={isSelected ? 0 : -1}
               className={`dz-row dz-${state}${column.locked ? ' dz-locked' : ''}${isSelected ? ' dz-selected' : ''}`}
               onFocus={() => !dropped && !isSelected && onSelect({ kind: 'column', name: column.name })}
@@ -157,11 +178,12 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
               onDrop={(e) => onDrop(e, row)}
             >
               {pg ? null : (
-                <div role="gridcell" className="dz-handle">
+                <div role="cell" className="dz-handle">
                   {dropped ? null : (
                     <span
+                      role="img"
                       aria-label="Drag to reorder"
-                      title="Drag to reorder"
+                      title="Drag to reorder (or Ctrl+↑/↓)"
                       draggable={!disabled}
                       onDragStart={(e) => {
                         dragFrom.current = index;
@@ -177,30 +199,35 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   )}
                 </div>
               )}
-              <div role="gridcell" aria-label="State" className="dz-state">
+              <div role="cell" aria-label="State" className="dz-state">
                 {column.locked ? (
-                  <span aria-label="Locked" title={lock ? `${lock.reason}\n${lock.server_text}` : 'Locked'} className="dz-lock">
+                  <span role="img" aria-label="Locked" title={lock ? `${lock.reason}\n${lock.server_text}` : 'Locked'} className="dz-lock">
                     <LockIcon />
                   </span>
                 ) : rowErrors.length > 0 ? (
-                  <span className="dz-mark-error" title={rowErrors.map((e) => e.message).join('\n')} aria-label={rowErrors.map((e) => e.message).join(' ')}>
+                  <span
+                    role="img"
+                    className="dz-mark-error"
+                    title={rowErrors.map((e) => e.message).join('\n')}
+                    aria-label={rowErrors.map((e) => e.message).join(' ')}
+                  >
                     !
                   </span>
                 ) : state === 'modified' ? (
-                  <span className="dz-mark-modified" title="Modified">
+                  <span role="img" aria-label="Modified" className="dz-mark-modified" title="Modified">
                     ●
                   </span>
                 ) : state === 'new' ? (
-                  <span className="dz-mark-new" title="New">
+                  <span role="img" aria-label="New" className="dz-mark-new" title="New">
                     +
                   </span>
                 ) : dropped ? (
-                  <span className="dz-mark-drop" title="To drop">
+                  <span role="img" aria-label="To drop" className="dz-mark-drop" title="To drop">
                     −
                   </span>
                 ) : null}
               </div>
-              <div role="gridcell" className="dz-pk">
+              <div role="cell" className="dz-pk">
                 <button
                   type="button"
                   className={`dz-pk-btn${inPk ? ' on' : ''}`}
@@ -212,7 +239,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   {inPk ? <KeyIcon /> : null}
                 </button>
               </div>
-              <div role="gridcell">
+              <div role="cell">
                 <DraftInput
                   aria-label="Name"
                   className="mono"
@@ -227,7 +254,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   }}
                 />
               </div>
-              <div role="gridcell">
+              <div role="cell">
                 <DraftInput
                   aria-label="Type"
                   className="mono"
@@ -235,10 +262,10 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   value={baseText(column.data_type)}
                   disabled={disabled}
                   error={errorOf('type')}
-                  onCommit={(text, key) => set({ data_type: withBase(column.data_type, text, open.catalog) }, key)}
+                  onCommit={(text, key) => retype(withBase(column.data_type, text, open.catalog), key)}
                 />
               </div>
-              <div role="gridcell">
+              <div role="cell">
                 <DraftInput
                   aria-label="Length"
                   className="mono"
@@ -246,10 +273,10 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   disabled={disabled || !takesParams}
                   error={errorOf('length')}
                   normalize={(text) => paramsText(withParamsText(column.data_type, info, text))}
-                  onCommit={(text, key) => set({ data_type: withParamsText(column.data_type, info, text) }, key)}
+                  onCommit={(text, key) => retype(withParamsText(column.data_type, info, text), key)}
                 />
               </div>
-              <div role="gridcell" className="dz-center">
+              <div role="cell" className="dz-center">
                 <input
                   type="checkbox"
                   aria-label="Null"
@@ -258,7 +285,12 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   onChange={(e) => set({ nullable: e.target.checked })}
                 />
               </div>
-              <div role="gridcell">
+              <div role="cell">
+                {generated && !column.default ? (
+                  <span className="mono dz-generated" title={errorOf('default')}>
+                    {generated}
+                  </span>
+                ) : (
                 <DraftInput
                   aria-label="Default"
                   className={`mono${column.default?.kind === 'expression' ? ' dz-expr' : ''}`}
@@ -268,8 +300,9 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
                   error={errorOf('default')}
                   onCommit={(text, key) => set({ default: text === '' ? null : { kind: column.default?.kind ?? 'value', text } }, key)}
                 />
+                )}
               </div>
-              <div role="gridcell">
+              <div role="cell">
                 {dropped ? (
                   <span className="dz-drop-note">
                     To drop ·{' '}

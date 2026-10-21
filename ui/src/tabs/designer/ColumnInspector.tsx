@@ -1,9 +1,25 @@
 import { useId, useState } from 'react';
-import type { ColumnDef, DefaultSpec, DesignOpen, DraftError, ElementRef, TableDef } from '../../bindings';
+import type { ColumnDef, DefaultSpec, DesignOpen, DraftError, ElementRef, IdentityKind, TableDef, TypeSpec } from '../../bindings';
 import { deepEqual } from '../../store/tableDesigns';
 import { DraftInput } from './DraftInput';
+import {
+  baseText,
+  columnErrors,
+  columnKey,
+  isInteger,
+  lockOf,
+  onUpdateText,
+  parseParam,
+  renameColumn,
+  sameType,
+  takesOnUpdate,
+  typeInfoOf,
+  typeText,
+  updateColumn,
+  withBase,
+  withType,
+} from './columnModel';
 import './columnInspector.css';
-import { baseText, columnErrors, lockOf, parseParam, renameColumn, sameType, typeInfoOf, typeText, updateColumn, withBase } from './columnModel';
 
 type Edit = (recipe: (d: TableDef) => TableDef, coalesce?: string) => void;
 
@@ -25,10 +41,20 @@ export function ColumnInspector({ open, draft, errors, editable, selection, onSe
   const pg = open.server.kind === 'postgres';
   const index = selection?.kind === 'column' ? draft.columns.findIndex((c) => c.name === selection.name) : -1;
   const column = index >= 0 ? draft.columns[index] : undefined;
+  const inBase = !!column && column.original !== null && open.def.columns.some((c) => c.name === column.original);
   return (
     <aside className="dz-inspector" aria-label="Column inspector">
       {column ? (
-        <ColumnFields key={index} open={open} column={column} index={index} errors={errors} editable={editable} onSelect={onSelect} edit={edit} />
+        <ColumnFields
+          key={columnKey(column, inBase)}
+          open={open}
+          column={column}
+          index={index}
+          errors={errors}
+          editable={editable}
+          onSelect={onSelect}
+          edit={edit}
+        />
       ) : (
         <p className="dz-subtle">Select a column to see its details.</p>
       )}
@@ -50,25 +76,47 @@ interface FieldsProps {
   edit: Edit;
 }
 
+const IDENTITY_LABEL: Record<IdentityKind, string> = { always: 'Always', by_default: 'By default' };
+
 function ColumnFields({ open, column, index, errors, editable, onSelect, edit }: FieldsProps) {
   const uid = useId();
-  const [mode, setMode] = useState<DefaultSpec['kind']>(column.default?.kind ?? 'value');
-  const pg = open.server.kind === 'postgres';
+  // Only used while there is no default: an existing default carries its own kind.
+  const [pendingMode, setPendingMode] = useState<DefaultSpec['kind']>('value');
+  const mode = column.default?.kind ?? pendingMode;
+  const engine = open.server.kind;
+  const pg = engine === 'postgres';
   const base = column.original === null ? undefined : open.def.columns.find((c) => c.name === column.original);
   const typeChanged = !!base && !sameType(base.data_type, column.data_type);
   const info = typeInfoOf(open.catalog, column.data_type);
   const spec = column.data_type.kind === 'known' ? column.data_type : null;
   const disabled = !editable || column.locked;
   const lock = lockOf(open.locked, column);
-  const errs = columnErrors(errors, column.name);
-  const errorOf = (...fields: string[]) => errs.find((e) => e.field !== null && fields.includes(e.field))?.message;
   const set = (patch: Partial<ColumnDef>, key?: string) => edit((d) => updateColumn(d, index, patch), key);
-  const setType = (patch: Partial<NonNullable<typeof spec>>, key?: string) => spec && set({ data_type: { ...spec, ...patch } }, key);
+  const retype = (next: TypeSpec, key?: string) => set(withType(column, next, open.catalog, engine, base), key);
+  const setType = (patch: Partial<NonNullable<typeof spec>>, key?: string) => spec && retype({ ...spec, ...patch }, key);
   const setDefault = (kind: DefaultSpec['kind'], text: string, key?: string) => set({ default: text === '' ? null : { kind, text } }, key);
   const state = column.original === null ? 'New' : base && !deepEqual(base, column) ? 'Modified' : null;
 
+  const shows = {
+    length: !!spec && !!info && info.length !== 'None',
+    precision: !!spec && !!info && info.precision !== 'None',
+    scale: !!spec && !!info && info.scale !== 'None',
+    values: !!spec && !!info?.values,
+    unsigned: !!spec && !!info?.unsigned,
+    collation: !!info?.collation,
+    using: pg && typeChanged,
+    auto_increment: !pg && isInteger(column.data_type, engine),
+    identity: pg && isInteger(column.data_type, engine),
+    on_update: takesOnUpdate(column.data_type, engine),
+  };
+  const visible = new Set<string>(['name', 'data_type', 'default', 'comment', ...Object.entries(shows).filter(([, v]) => v).map(([k]) => k)]);
+  const errs = columnErrors(errors, column.name);
+  const errorOf = (field: string) => errs.find((e) => e.field === field)?.message;
+  // Errors of fields this column does not show (or of no field) are listed, never hidden.
+  const others = errs.filter((e) => e.field === null || !visible.has(e.field));
+
   const param = (field: 'length' | 'precision' | 'scale', label: string) =>
-    info && info[field] !== 'None' && spec ? (
+    shows[field] && spec ? (
       <label className="dz-field dz-field-num">
         <span>{label}</span>
         <DraftInput
@@ -97,11 +145,13 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
           <pre>{lock.server_text}</pre>
         </div>
       ) : null}
-      {errs.filter((e) => e.field === null).map((e, i) => (
-        <div key={i} className="dz-alert" role="note">
-          {e.message}
-        </div>
-      ))}
+      {others.length > 0 ? (
+        <ul className="dz-alert dz-other-errors" aria-label="Other problems">
+          {others.map((e, i) => (
+            <li key={i}>{e.message}</li>
+          ))}
+        </ul>
+      ) : null}
       <label className="dz-field">
         <span>Name</span>
         <DraftInput
@@ -126,7 +176,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
             value={baseText(column.data_type)}
             disabled={disabled}
             error={errorOf('data_type')}
-            onCommit={(text, key) => set({ data_type: withBase(column.data_type, text, open.catalog) }, key)}
+            onCommit={(text, key) => retype(withBase(column.data_type, text, open.catalog), key)}
           />
           <datalist id={`${uid}-types`}>
             {open.catalog.map((t) => (
@@ -139,7 +189,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
         {param('scale', 'Scale')}
       </div>
       {typeChanged && base ? <span className="dz-subtle dz-before">Before: {typeText(base.data_type)}</span> : null}
-      {info?.values && spec ? (
+      {shows.values && spec ? (
         <label className="dz-field">
           <span>Values (one per line)</span>
           <textarea
@@ -154,8 +204,8 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
           />
         </label>
       ) : null}
-      {info?.unsigned && spec ? (
-        <label className="dz-check">
+      {shows.unsigned && spec ? (
+        <label className="dz-check" title={errorOf('unsigned')}>
           <input type="checkbox" checked={spec.unsigned} disabled={disabled} onChange={(e) => setType({ unsigned: e.target.checked })} />
           Unsigned
         </label>
@@ -164,6 +214,43 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
         <input type="checkbox" checked={column.nullable} disabled={disabled} onChange={(e) => set({ nullable: e.target.checked })} />
         Nullable
       </label>
+      {shows.auto_increment ? (
+        <label className="dz-check" title={errorOf('auto_increment')}>
+          <input type="checkbox" checked={column.auto_increment} disabled={disabled} onChange={(e) => set({ auto_increment: e.target.checked })} />
+          Auto increment
+        </label>
+      ) : null}
+      {shows.identity ? (
+        <label className="dz-field">
+          <span>Identity</span>
+          <select
+            aria-label="Identity"
+            className={`dz-input${errorOf('identity') ? ' dz-invalid' : ''}`}
+            value={column.identity ?? ''}
+            disabled={disabled}
+            title={errorOf('identity')}
+            onChange={(e) => set({ identity: e.target.value === '' ? null : (e.target.value as IdentityKind) })}
+          >
+            <option value="">None</option>
+            {(['always', 'by_default'] as const).map((k) => (
+              <option key={k} value={k}>
+                {IDENTITY_LABEL[k]}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {shows.on_update ? (
+        <label className="dz-check" title={errorOf('on_update')}>
+          <input
+            type="checkbox"
+            checked={column.on_update !== null}
+            disabled={disabled}
+            onChange={(e) => set({ on_update: e.target.checked ? onUpdateText(column.data_type) : null })}
+          />
+          On update {onUpdateText(column.data_type)}
+        </label>
+      ) : null}
       <div className="dz-field">
         <span id={`${uid}-default`}>Default</span>
         <div className="segmented dz-mode" role="group" aria-labelledby={`${uid}-default`}>
@@ -175,7 +262,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
               aria-pressed={mode === k}
               disabled={disabled}
               onClick={() => {
-                setMode(k);
+                setPendingMode(k);
                 if (column.default && column.default.kind !== k) setDefault(k, column.default.text);
               }}
             >
@@ -193,7 +280,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
           onCommit={(text, key) => setDefault(mode, text, key)}
         />
       </div>
-      {info?.collation ? (
+      {shows.collation ? (
         <label className="dz-field">
           <span>Collation</span>
           <DraftInput
@@ -207,7 +294,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
           />
         </label>
       ) : null}
-      {pg && typeChanged ? (
+      {shows.using ? (
         <label className="dz-field">
           <span>USING</span>
           <DraftInput

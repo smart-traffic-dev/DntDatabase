@@ -80,7 +80,9 @@ export function DesignerHeader(p: DesignerHeaderProps) {
         })}
       </div>
       <span className="dz-spacer" />
-      {p.dirty ? <span className="dz-chip">{p.changes <= 1 ? '1 unsaved change' : `${p.changes} unsaved changes`}</span> : null}
+      {p.dirty ? (
+        <span className="dz-chip">{p.changes === 0 ? 'Unsaved changes' : p.changes === 1 ? '1 unsaved change' : `${p.changes} unsaved changes`}</span>
+      ) : null}
       <button type="button" className="btn dz-btn" disabled={!p.canDiscard} onClick={p.onDiscard}>
         Discard
       </button>

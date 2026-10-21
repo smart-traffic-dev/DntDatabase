@@ -1,100 +1,14 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { ColumnDef, DesignOpen, DesignRender, ServerVariant, TableDef, TypeInfo } from '../../bindings';
+import type { DesignRender } from '../../bindings';
 import { useQueryDocs } from '../../store/queryTabs';
 import { useTableDesigns } from '../../store/tableDesigns';
-import { designTabId, useTabs, type DesignTabRef } from '../../store/tabs';
-import { appError, callsOf, Failure, ids, mockBackend, resetStores, serverInfo } from '../../test/backend';
+import { useTabs } from '../../store/tabs';
+import { appError, callsOf, Failure, mockBackend, resetStores } from '../../test/backend';
+import { render } from '@testing-library/react';
 import { DesignerTab } from './DesignerTab';
-
-const scope = { database: 'shop', schema: null };
-const tab: DesignTabRef = { id: designTabId(ids.prod, scope, 'orders'), kind: 'design', connectionId: ids.prod, scope, table: 'orders', title: 'orders' };
-
-const known = (base: string, extra: Partial<Extract<ColumnDef['data_type'], { kind: 'known' }>> = {}): ColumnDef['data_type'] => ({
-  kind: 'known',
-  base,
-  length: null,
-  precision: null,
-  scale: null,
-  unsigned: false,
-  values: [],
-  ...extra,
-});
-
-const column = (name: string, over: Partial<ColumnDef> = {}): ColumnDef => ({
-  original: name,
-  name,
-  data_type: known('int'),
-  nullable: true,
-  default: null,
-  auto_increment: false,
-  identity: null,
-  on_update: null,
-  charset: null,
-  collation: null,
-  comment: null,
-  using: null,
-  generated: null,
-  locked: false,
-  ...over,
-});
-
-const def = (columns: ColumnDef[] = [column('id', { nullable: false }), column('total')]): TableDef => ({
-  original_name: 'orders',
-  name: 'orders',
-  columns,
-  primary_key: { original: 'PRIMARY', name: 'PRIMARY', columns: ['id'], locked: false },
-  indexes: [],
-  foreign_keys: [],
-  checks: [],
-  options: { engine: 'InnoDB', charset: null, collation: null, row_format: null, locked: false },
-  comment: null,
-  read_only_reason: null,
-});
-
-const info = (base: string, over: Partial<TypeInfo> = {}): TypeInfo => ({
-  base,
-  length: 'None',
-  precision: 'None',
-  scale: 'None',
-  unsigned: false,
-  values: false,
-  collation: false,
-  ...over,
-});
-const catalog: TypeInfo[] = [
-  info('int', { unsigned: true }),
-  info('decimal', { precision: 'Optional', scale: 'Optional', unsigned: true }),
-  info('varchar', { length: 'Required', collation: true }),
-];
-
-const opened = (over: Partial<DesignOpen> = {}, variant: ServerVariant = 'MySql8'): DesignOpen => ({
-  design_id: 'd1',
-  def: def(),
-  locked: [],
-  catalog,
-  server: serverInfo(variant),
-  env: null,
-  read_only: false,
-  ...over,
-});
-
-const clean: DesignRender = { statements: ['ALTER TABLE `shop`.`orders` CHANGE COLUMN `total` `amount` int NULL'], impacts: [], errors: [], error: null };
-
-function setup(open: DesignOpen = opened(), renderResult: () => DesignRender = () => clean) {
-  mockBackend({ table_design_open: () => open, table_design_render: renderResult, table_design_close: () => null });
-  useTabs.getState().open(tab);
-  return render(<DesignerTab tab={tab} />);
-}
-
-const rows = () => screen.getAllByRole('row').filter((r) => r.getAttribute('data-column') !== null);
-const rowOf = (name: string) => {
-  const row = rows().find((r) => r.getAttribute('data-column') === name);
-  if (!row) throw new Error(`no row ${name}`);
-  return row;
-};
-const nameInput = (name: string) => within(rowOf(name)).getByRole('textbox', { name: 'Name' });
+import { clean, column, def, known, nameInput, opened, rowOf, rows, setup, tab } from './designerTestKit';
 
 beforeEach(() => resetStores());
 
@@ -102,7 +16,7 @@ describe('DesignerTab', () => {
   it('renders_columns_and_preview', async () => {
     const user = userEvent.setup();
     setup();
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     expect(rows().map((r) => r.getAttribute('data-column'))).toEqual(['id', 'total']);
     expect(screen.getByRole('tab', { name: /Columns/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', { name: /Columns/ })).toHaveTextContent('2');
@@ -123,8 +37,8 @@ describe('DesignerTab', () => {
   it('type_change_shows_precision_fields', async () => {
     const user = userEvent.setup();
     setup();
-    await screen.findByRole('grid', { name: 'Columns' });
-    await user.click(within(rowOf('total')).getByRole('gridcell', { name: 'State' }));
+    await screen.findByRole('table', { name: 'Columns' });
+    await user.click(within(rowOf('total')).getByRole('cell', { name: 'State' }));
     const inspector = screen.getByRole('complementary', { name: 'Column inspector' });
     expect(within(inspector).queryByRole('spinbutton', { name: 'Precision' })).toBeNull();
     expect(within(inspector).queryByRole('textbox', { name: 'Collation' })).toBeNull();
@@ -157,7 +71,7 @@ describe('DesignerTab', () => {
         locked: [{ element: { kind: 'column', name: 'g' }, reason: 'Generated columns are not supported.', server_text: '`g` int GENERATED ALWAYS AS (`id` * 2)' }],
       }),
     );
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     expect(nameInput('g')).toBeDisabled();
     expect(within(rowOf('g')).getByRole('checkbox', { name: 'Null' })).toBeDisabled();
     const lock = within(rowOf('g')).getByLabelText('Locked');
@@ -168,12 +82,12 @@ describe('DesignerTab', () => {
 
   it('drag_handle_hidden_on_postgres', async () => {
     const view = setup(opened({}, 'Postgres'));
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     expect(screen.queryAllByLabelText('Drag to reorder')).toHaveLength(0);
     view.unmount();
     resetStores();
     setup(opened({}, 'MySql8'));
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     expect(screen.getAllByLabelText('Drag to reorder')).toHaveLength(2);
   });
 
@@ -181,7 +95,7 @@ describe('DesignerTab', () => {
     const user = userEvent.setup();
     let result: DesignRender = { ...clean, errors: [{ element: { kind: 'column', name: 'amount' }, field: 'name', message: 'Bad name.' }] };
     setup(opened(), () => result);
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     const review = screen.getByRole('button', { name: 'Review & apply…' });
     expect(review).toBeDisabled();
     await user.clear(nameInput('total'));
@@ -200,7 +114,7 @@ describe('DesignerTab', () => {
   it('draft_error_shown_on_cell', async () => {
     const user = userEvent.setup();
     setup(opened(), () => ({ ...clean, errors: [{ element: { kind: 'column', name: 'id2' }, field: 'name', message: 'Column "id2" is already taken.' }] }));
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     await user.type(nameInput('total'), '_x');
     await user.clear(nameInput('total_x'));
     await user.type(nameInput(''), 'id2');
@@ -212,7 +126,7 @@ describe('DesignerTab', () => {
   it('undo_shortcut', async () => {
     const user = userEvent.setup();
     setup();
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     await user.type(nameInput('total'), '_new');
     expect(nameInput('total_new')).toBeInTheDocument();
     // Typing in one field is one undo step.
@@ -222,7 +136,7 @@ describe('DesignerTab', () => {
     expect(nameInput('total_new')).toBeInTheDocument();
 
     // Delete on a row marks the column for drop; its Undo link brings it back.
-    await user.click(within(rowOf('id')).getByRole('gridcell', { name: 'State' }));
+    await user.click(within(rowOf('id')).getByRole('cell', { name: 'State' }));
     await user.keyboard('{Delete}');
     expect(useTableDesigns.getState().byTab[tab.id]!.draft!.columns.map((c) => c.name)).toEqual(['total_new']);
     expect(within(rowOf('id')).getByTitle('To drop')).toBeInTheDocument();
@@ -230,7 +144,7 @@ describe('DesignerTab', () => {
     expect(useTableDesigns.getState().byTab[tab.id]!.draft!.columns.map((c) => c.name)).toEqual(['id', 'total_new']);
 
     // Ctrl+Enter adds a column, Ctrl+Down moves the selected one (MySQL).
-    await user.click(within(rowOf('id')).getByRole('gridcell', { name: 'State' }));
+    await user.click(within(rowOf('id')).getByRole('cell', { name: 'State' }));
     await user.keyboard('{Control>}{ArrowDown}{/Control}');
     expect(useTableDesigns.getState().byTab[tab.id]!.draft!.columns.map((c) => c.name)).toEqual(['total_new', 'id']);
     await user.keyboard('{Control>}{Enter}{/Control}');
@@ -248,22 +162,25 @@ describe('DesignerTab', () => {
     });
     useTabs.getState().open(tab);
     render(<DesignerTab tab={tab} />);
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     await user.type(nameInput('total'), '_x');
     act(() => useTableDesigns.getState().markLost(tab.id));
     expect(screen.getByText('The connection to this table was lost.')).toBeInTheDocument();
     expect(nameInput('total_x')).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Restore my changes' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeDisabled();
     await user.click(screen.getByRole('button', { name: 'Reopen' }));
     await waitFor(() => expect(callsOf('table_design_open')).toHaveLength(2));
-    await user.click(await screen.findByRole('button', { name: 'Restore my changes' }));
+    const restore = await screen.findByRole('button', { name: 'Restore my changes' });
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeEnabled();
+    await user.click(restore);
     expect(screen.queryByText('The connection to this table was lost.')).toBeNull();
     expect(nameInput('total_x')).toBeEnabled();
   });
 
   it('a read-only table shows the reason and disables editing', async () => {
     setup(opened({ def: { ...def(), read_only_reason: 'the table is partitioned.' } }));
-    await screen.findByRole('grid', { name: 'Columns' });
+    await screen.findByRole('table', { name: 'Columns' });
     expect(screen.getByText('This table is shown read-only: the table is partitioned.')).toBeInTheDocument();
     expect(nameInput('id')).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Add column' })).toBeDisabled();

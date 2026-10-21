@@ -120,7 +120,8 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
         onSubTab={(sub) => designs.setSubTab(tab.id, sub)}
         changes={changes}
         dirty={dirty}
-        canDiscard={dirty && !loading}
+        // A lost design is discarded only once reopened (there is nothing to go back to before).
+        canDiscard={dirty && !loading && (!lost || reopened)}
         canReview={canReview}
         onDiscard={() => void confirmDiscardDesign(tab.id).then((ok) => ok && useTableDesigns.getState().discard(tab.id))}
         // The review and apply dialog takes this over (its own task); until then nothing opens.
@@ -149,7 +150,11 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
               ))}
             </ul>
           ) : null}
-          <SqlPreview statements={render?.statements ?? []} impacts={render?.impacts ?? []} error={render?.error} live onOpenInQuery={openInQuery} />
+          <SqlPreview statements={render?.statements ?? []} impacts={render?.impacts ?? []} error={render?.error}
+            live
+            engine={open.server.kind}
+            onOpenInQuery={openInQuery}
+          />
         </div>
         {subTab === 'columns' ? (
           <ColumnInspector open={open} draft={draft} errors={errors} editable={editable} selection={selection} onSelect={select} edit={edit} />

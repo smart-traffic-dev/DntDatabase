@@ -69,6 +69,13 @@
   display: flex;
 }
 
+/* Statement boundaries: a hairline and a gap (the SQL itself is shown verbatim, without `;`). */
+.dz-sql-stmt + .dz-sql-stmt {
+  margin-top: var(--dnt-space-1);
+  padding-top: var(--dnt-space-1);
+  border-top: 1px solid var(--dnt-border-subtle);
+}
+
 .dz-ln {
   flex: none;
   width: 36px;

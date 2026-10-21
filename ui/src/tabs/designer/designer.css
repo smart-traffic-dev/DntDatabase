@@ -1,4 +1,4 @@
-/* Table designer (board 10): header row, banners, Columns grid (inspector: columnInspector.css, preview: sqlPreview.css). Tokens only. */
+/* Table designer (board 10): header row, banners, shared field styles (grid: columnsGrid.css, inspector: columnInspector.css, preview: sqlPreview.css). Tokens only. */
 .designer {
   height: 100%;
   min-height: 0;
@@ -143,160 +143,21 @@
   overflow: auto;
 }
 
-/* Columns grid: each row is its own grid on the shared track list. */
-.dz-columns {
-  display: flex;
-  flex-direction: column;
-}
-
-.dz-grid {
-  --dz-cols: 28px 28px 28px minmax(0, 1.3fr) minmax(0, 1.2fr) 80px 48px minmax(0, 1fr) minmax(0, 1.4fr);
-  display: flex;
-  flex-direction: column;
-  min-width: 720px;
-}
-
-.dz-grid.dz-grid-pg {
-  --dz-cols: 28px 28px minmax(0, 1.3fr) minmax(0, 1.2fr) 80px 48px minmax(0, 1fr) minmax(0, 1.4fr);
-}
-
-.dz-row {
-  display: grid;
-  grid-template-columns: var(--dz-cols);
-}
-
-.dz-row > div {
-  height: 30px;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  padding: 0 var(--dnt-space-1);
-  border-bottom: 1px solid var(--dnt-border-subtle);
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.dz-head {
-  position: sticky;
-  top: 0;
-  z-index: var(--dnt-z-sticky);
-}
-
-.dz-head > div {
-  height: 32px;
-  padding: 0 var(--dnt-space-2);
-  border-bottom: 1px solid var(--dnt-border);
-  background: var(--dnt-bg-chrome);
-  color: var(--dnt-fg-subtle);
-  font-size: var(--dnt-text-xs);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.dz-row.dz-modified > div {
-  background: var(--dnt-accent-subtle);
-}
-
-.dz-row.dz-new > div {
-  background: var(--dnt-status-success-bg);
-}
-
-.dz-row.dz-selected > div {
-  background: var(--dnt-bg-selected-muted);
-}
-
-.dz-grid:focus-within .dz-row.dz-selected > div {
-  background: var(--dnt-bg-selected);
-}
-
-.dz-row:focus {
-  outline: none;
-}
-
-.dz-row:focus-visible {
-  outline: 1px solid var(--dnt-focus);
-  outline-offset: -1px;
-}
-
-.dz-row.dz-drop .dz-input {
-  text-decoration: line-through;
-}
-
-.dz-handle {
-  justify-content: center;
-  color: var(--dnt-border-strong);
-  font-size: var(--dnt-text-xs);
-  user-select: none;
-}
-
-.dz-handle [draggable='true'] {
-  cursor: grab;
-}
-
-.dz-handle [draggable='true']:hover {
-  color: var(--dnt-fg-muted);
-}
-
-.dz-state {
-  justify-content: center;
+.dz-problems {
+  flex: none;
+  margin: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-4) var(--dnt-space-2) var(--dnt-space-8);
+  border-top: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-status-danger-fg);
   font-size: var(--dnt-text-sm);
 }
 
-.dz-mark-modified {
-  color: var(--dnt-status-warning-solid);
-}
-
-.dz-mark-new {
-  color: var(--dnt-status-success-fg);
-  font-weight: 700;
-}
-
-.dz-mark-drop {
-  color: var(--dnt-fg-subtle);
-}
-
-.dz-mark-error {
-  color: var(--dnt-status-danger-fg);
-  font-weight: 700;
-}
-
-.dz-lock {
-  display: inline-flex;
-  color: var(--dnt-fg-muted);
-}
-
-.dz-center {
-  justify-content: center;
+.dz-inspector .dz-alert {
+  margin: 0;
 }
 
 .designer input[type='checkbox'] {
   accent-color: var(--dnt-accent);
-}
-
-.dz-pk {
-  justify-content: center;
-}
-
-.dz-pk-btn {
-  width: var(--dnt-ctl-h-xs);
-  height: var(--dnt-ctl-h-xs);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--dnt-radius-xs);
-  background: transparent;
-  color: var(--dnt-status-warning-solid);
-}
-
-.dz-pk-btn:hover:not(:disabled) {
-  background: var(--dnt-bg-hover);
-}
-
-.dz-pk-btn:disabled {
-  color: var(--dnt-fg-disabled);
 }
 
 /* Fields: borderless in the grid until hovered; the focus turns the 1px border (theme.css). */
@@ -317,10 +178,6 @@
   font-size: var(--dnt-text-sm);
 }
 
-.dz-row .dz-input:hover:not(:disabled) {
-  border-color: var(--dnt-border);
-}
-
 .dz-input:focus {
   background: var(--dnt-bg-app);
 }
@@ -337,68 +194,4 @@
 .dz-input.dz-expr {
   color: var(--dnt-fg-muted);
   font-style: italic;
-}
-
-.dz-drop-note {
-  padding: 0 var(--dnt-space-1_5);
-  color: var(--dnt-status-danger-fg);
-  font-size: var(--dnt-text-sm);
-}
-
-.dz-link {
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--dnt-accent);
-  font-size: var(--dnt-text-sm);
-  text-decoration: underline;
-}
-
-.dz-link:hover:not(:disabled) {
-  color: var(--dnt-accent-hover);
-}
-
-.dz-link:disabled {
-  color: var(--dnt-fg-disabled);
-}
-
-.dz-add {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--dnt-space-2);
-  width: max-content;
-  height: var(--dnt-ctl-h-lg);
-  margin: var(--dnt-space-1) var(--dnt-space-2);
-  padding: 0 var(--dnt-space-2);
-  border: 1px solid transparent;
-  border-radius: var(--dnt-radius-sm);
-  background: transparent;
-  color: var(--dnt-fg-muted);
-}
-
-.dz-add:hover:not(:disabled) {
-  background: var(--dnt-bg-hover);
-  color: var(--dnt-fg);
-}
-
-.dz-add:disabled {
-  color: var(--dnt-fg-disabled);
-}
-
-.dz-kbd {
-  color: var(--dnt-fg-subtle);
-  font-size: var(--dnt-text-xs);
-}
-
-.dz-problems {
-  flex: none;
-  margin: 0;
-  padding: var(--dnt-space-2) var(--dnt-space-4) var(--dnt-space-2) var(--dnt-space-8);
-  border-top: 1px solid var(--dnt-border-subtle);
-  color: var(--dnt-status-danger-fg);
-  font-size: var(--dnt-text-sm);
-}
-
-.dz-inspector .dz-alert {
-  margin: 0;
 }

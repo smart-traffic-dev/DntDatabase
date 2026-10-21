@@ -432,3 +432,64 @@ describe('table design draft store', () => {
     expect(callsOf('table_design_close')).toEqual([{ designId: 'd1' }, { designId: 'd2' }]);
   });
 });
+
+describe('table design: undo coalescing, lost design id, sections', () => {
+  const rename = (name: string) => (d: TableDef): TableDef => ({ ...d, name });
+
+  it('edits with the same coalesce key make one undo step', async () => {
+    await loaded();
+    store().edit(TAB, rename('o'), 'k1');
+    store().edit(TAB, rename('or'), 'k1');
+    store().edit(TAB, rename('ord'), 'k1');
+    expect(state().past).toHaveLength(1);
+    store().edit(TAB, rename('ord2'), 'k2');
+    store().edit(TAB, rename('ord3'));
+    expect(state().past).toHaveLength(3);
+    store().undo(TAB);
+    store().undo(TAB);
+    expect(state().draft!.name).toBe('ord');
+    store().undo(TAB);
+    expect(state().draft!.name).toBe('orders');
+  });
+
+  it('an undo ends the coalescing: the next edit with the old key is a new step', async () => {
+    await loaded();
+    store().edit(TAB, rename('a'), 'k');
+    store().edit(TAB, rename('ab'), 'k');
+    store().undo(TAB);
+    store().edit(TAB, rename('x'), 'k');
+    store().edit(TAB, rename('xy'), 'k');
+    expect(state().past).toHaveLength(1);
+    expect(state().future).toEqual([]);
+    store().undo(TAB);
+    expect(state().draft!.name).toBe('orders');
+  });
+
+  it('markLost records the open design; reopening gives a new one; restore and discard clear it', async () => {
+    let n = 0;
+    mockBackend({ table_design_open: () => ({ ...opened(), design_id: `d${++n}` }), table_design_render: () => rendered, table_design_close: () => null });
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    store().markLost(TAB);
+    expect(state().lostDesignId).toBe('d1');
+    await store().reopen(TAB);
+    expect(state().open!.design_id).toBe('d2');
+    expect(state().lostDesignId).toBe('d1');
+    store().restoreLostDraft(TAB);
+    expect(state().lostDesignId).toBeNull();
+    store().markLost(TAB);
+    expect(state().lostDesignId).toBe('d2');
+    store().discard(TAB);
+    expect(state().lostDesignId).toBeNull();
+    expect(state().lostDraft).toBeNull();
+  });
+
+  it('setSubTab keeps the section per tab, through a reload', async () => {
+    await loaded();
+    expect(state().subTab).toBe('columns');
+    store().setSubTab(TAB, 'indexes');
+    expect(state().subTab).toBe('indexes');
+    await store().reload(TAB);
+    expect(state().subTab).toBe('indexes');
+  });
+});

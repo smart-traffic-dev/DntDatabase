@@ -124,6 +124,11 @@
   white-space: pre-wrap;
 }
 
+.dz-inspector .dz-other-errors {
+  margin: 0;
+  padding-left: var(--dnt-space-6);
+}
+
 .dz-hint {
   padding: var(--dnt-space-2);
   border-radius: var(--dnt-radius-md);
