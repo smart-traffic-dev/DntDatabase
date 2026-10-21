@@ -83,7 +83,8 @@ pub(crate) const LIST_TYPES: &str = "SELECT t.typname::text, obj_description(t.o
      AND has_type_privilege(t.oid, 'USAGE')";
 
 /// One visible relation (`$1` = schema, `$2` = name, `$3` = accepted `relkind`s): oid,
-/// relkind, row estimate, comment, partition key, tablespace, total size.
+/// relkind, row estimate, comment, partition key, tablespace, total size, is a partition,
+/// parent tables (other than a partition's own).
 pub(crate) fn relation() -> String {
     format!(
         "SELECT c.oid, c.relkind::text, \
@@ -91,7 +92,13 @@ pub(crate) fn relation() -> String {
          obj_description(c.oid, 'pg_class'), \
          CASE WHEN c.relkind = 'p' THEN pg_get_partkeydef(c.oid) END, \
          ts.spcname::text, \
-         CASE WHEN c.relkind = 'v' THEN NULL ELSE pg_total_relation_size(c.oid) END \
+         CASE WHEN c.relkind = 'v' THEN NULL ELSE pg_total_relation_size(c.oid) END, \
+         c.relispartition, \
+         ARRAY(SELECT CASE WHEN pn.oid = c.relnamespace THEN pc.relname::text \
+                      ELSE pn.nspname::text || '.' || pc.relname::text END \
+               FROM pg_inherits h JOIN pg_class pc ON pc.oid = h.inhparent \
+               JOIN pg_namespace pn ON pn.oid = pc.relnamespace \
+               WHERE h.inhrelid = c.oid AND NOT c.relispartition ORDER BY h.inhseqno) \
          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
          LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace \
          WHERE n.nspname = $1 AND c.relname = $2 AND strpos($3, c.relkind::text) > 0 \
@@ -116,24 +123,52 @@ pub(crate) const COLUMNS: &str = "SELECT a.attname::text, a.attnum::int4, \
 
 /// Indexes (`$1` = relation oid): name, unique (and valid), primary, access method, key
 /// columns, expressions, `CREATE INDEX` statement, definition of the constraint it backs,
-/// partial (has a predicate).
-pub(crate) const INDEXES: &str = "SELECT ic.relname::text, i.indisunique AND i.indisvalid, \
+/// partial (has a predicate), then per key position the column (NULL for an expression),
+/// the expression and descending flag, the INCLUDE columns, the index comment and
+/// NULLS NOT DISTINCT (only selected from PostgreSQL 15, `false` before).
+pub(crate) fn indexes(nulls_not_distinct: bool) -> String {
+    let nnd = if nulls_not_distinct {
+        "i.indnullsnotdistinct"
+    } else {
+        "false"
+    };
+    format!(
+        "SELECT ic.relname::text, i.indisunique AND i.indisvalid, \
      i.indisprimary, \
      am.amname::text, \
      ARRAY(SELECT a.attname::text FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) \
            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
            WHERE k.ord <= i.indnkeyatts ORDER BY k.ord), \
      pg_get_expr(i.indexprs, i.indrelid), pg_get_indexdef(i.indexrelid), \
-     pg_get_constraintdef(con.oid), i.indpred IS NOT NULL \
+     pg_get_constraintdef(con.oid), i.indpred IS NOT NULL, \
+     ARRAY(SELECT a.attname::text \
+           FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) \
+           LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+           WHERE k.ord <= i.indnkeyatts ORDER BY k.ord), \
+     ARRAY(SELECT CASE WHEN k.attnum = 0 \
+                  THEN pg_get_indexdef(i.indexrelid, k.ord::int4, true) END \
+           FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) \
+           WHERE k.ord <= i.indnkeyatts ORDER BY k.ord), \
+     ARRAY(SELECT (k.opt & 1) = 1 \
+           FROM unnest(i.indkey::int2[], i.indoption::int2[]) WITH ORDINALITY \
+                k(attnum, opt, ord) \
+           WHERE k.ord <= i.indnkeyatts ORDER BY k.ord), \
+     ARRAY(SELECT a.attname::text FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) \
+           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
+           WHERE k.ord > i.indnkeyatts ORDER BY k.ord), \
+     obj_description(i.indexrelid, 'pg_class'), {nnd} \
      FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid \
      JOIN pg_am am ON am.oid = ic.relam \
      LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid AND con.conrelid = i.indrelid \
           AND con.contype IN ('p', 'u', 'x') \
-     WHERE i.indrelid = $1";
+     WHERE i.indrelid = $1"
+    )
+}
 
 /// Foreign keys (`$1` = relation oid): name, columns, referenced schema / table /
 /// columns, `confupdtype`, `confdeltype`, `pg_get_constraintdef`, the referenced table as
-/// the server may print it unqualified (`quote_ident(relname)`) and schema-qualified.
+/// the server may print it unqualified (`quote_ident(relname)`) and schema-qualified,
+/// `confmatchtype`, deferrable, initially deferred.
 pub(crate) const FOREIGN_KEYS: &str = "SELECT con.conname::text, \
      ARRAY(SELECT a.attname::text FROM unnest(con.conkey) WITH ORDINALITY k(attnum, ord) \
            JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum \
@@ -143,7 +178,8 @@ pub(crate) const FOREIGN_KEYS: &str = "SELECT con.conname::text, \
            JOIN pg_attribute a ON a.attrelid = con.confrelid AND a.attnum = k.attnum \
            ORDER BY k.ord), \
      con.confupdtype::text, con.confdeltype::text, pg_get_constraintdef(con.oid), \
-     quote_ident(cf.relname), quote_ident(nf.nspname) || '.' || quote_ident(cf.relname) \
+     quote_ident(cf.relname), quote_ident(nf.nspname) || '.' || quote_ident(cf.relname), \
+     con.confmatchtype::text, con.condeferrable, con.condeferred \
      FROM pg_constraint con JOIN pg_class cf ON cf.oid = con.confrelid \
      JOIN pg_namespace nf ON nf.oid = cf.relnamespace \
      WHERE con.conrelid = $1 AND con.contype = 'f'";
