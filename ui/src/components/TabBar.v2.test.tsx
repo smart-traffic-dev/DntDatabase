@@ -25,8 +25,9 @@ afterEach(() => {
 /** Each tab is 100px wide, side by side from x = 0. */
 function layoutTabs() {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-    const tabs = [...(this.parentElement?.querySelectorAll('.tab') ?? [])];
-    const i = tabs.indexOf(this);
+    // The strip: 200px wide from x = 0. Tabs side by side in strip order, 100px each.
+    if (this.classList.contains('tabbar')) return { left: 0, right: 200, width: 200, top: 0, bottom: 34, height: 34, x: 0, y: 0, toJSON() {} } as DOMRect;
+    const i =this.dataset?.tabId ? [...(this.parentElement?.children ?? [])].filter((el) => el.classList.contains('tab')).indexOf(this) : -1;
     const left = i >= 0 ? i * 100 : 0;
     return { left, right: left + 100, width: 100, top: 0, bottom: 34, height: 34, x: left, y: 0, toJSON() {} } as DOMRect;
   });
@@ -80,6 +81,84 @@ describe('TabBar (editor v2)', () => {
     expect(s().maximizedGroupId).toBeUndefined();
     fireEvent.doubleClick(screen.getByRole('tab', { name: /p/ }));
     expect(s().maximizedGroupId).toBe(s().focusedGroupId);
+  });
+
+  it('while dragging, the tab under the pointer is outlined and the strip scrolls at its edges', () => {
+    layoutTabs();
+    act(() => ['a', 'b', 'c'].forEach((id) => s().open(obj(id))));
+    const { container } = render(<TabBar />);
+    const list = container.querySelector<HTMLElement>('.tabbar')!;
+    act(() => setDraggedTab('a'));
+    const strip = container.querySelector('.tabstrip')!;
+    dragAt('dragOver', strip, 150);
+    expect(container.querySelector('[data-tab-id="b"]')).toHaveClass('drop-target');
+    list.scrollLeft = 0;
+    dragAt('dragOver', strip, 195);
+    expect(list.scrollLeft).toBeGreaterThan(0);
+  });
+
+  it('an unpinned tab never shows the insertion bar inside the pinned block', () => {
+    layoutTabs();
+    act(() => {
+      ['a', 'b', 'c'].forEach((id) => s().open(obj(id)));
+      s().setPinned('a', true);
+      s().setPinned('b', true);
+    });
+    const { container } = render(<TabBar />);
+    act(() => setDraggedTab('c'));
+    dragAt('dragOver', container.querySelector('.tabstrip')!, 120); // between a and b
+    const list = [...container.querySelector('.tabbar')!.children].map((el) => (el.classList.contains('tab-insert') ? '|' : (el as HTMLElement).dataset.tabId));
+    expect(list).toEqual(['a', 'b', '|', 'c']);
+  });
+
+  it('a stopped or never-started run leaves no mark; Explain does not show the last run outcome', () => {
+    const stop = installRunMarks();
+    try {
+      act(() => {
+        s().open(q('r'));
+        s().open(q('other'));
+      });
+      const last = { rows: 0, elapsedMs: 5, errors: 1 };
+      act(() => useQueryRun.setState({ runs: new Map([['r', { ...emptyRun, lastRun: last }]]) }));
+      // Explain (or a start that fails): running, then idle with the same last run.
+      act(() => useQueryRun.setState({ runs: new Map([['r', { ...startRun({ ...emptyRun, lastRun: last }, PLAN as never, 0) }]]) }));
+      act(() => useQueryRun.setState({ runs: new Map([['r', { ...emptyRun, lastRun: last }]]) }));
+      expect(useRunMarks.getState().marks.size).toBe(0);
+      // A run the user cancelled.
+      act(() => useQueryRun.setState({ runs: new Map([['r', startRun(emptyRun, PLAN as never, 0)]]) }));
+      act(() => useQueryRun.setState({ runs: new Map([['r', { ...emptyRun, stop: { kind: 'cancelled' }, lastRun: { rows: 0, elapsedMs: 9 } }]]) }));
+      expect(useRunMarks.getState().marks.size).toBe(0);
+    } finally {
+      stop();
+    }
+  });
+
+  it('the dragged tab is its own drag image', () => {
+    act(() => ['a', 'b'].forEach((id) => s().open(obj(id))));
+    const { container } = render(<TabBar />);
+    const setDragImage = vi.fn();
+    const tab = container.querySelector('[data-tab-id="a"]')!;
+    fireEvent.dragStart(tab, { dataTransfer: { setData() {}, setDragImage, effectAllowed: '' } });
+    expect(setDragImage).toHaveBeenCalledWith(tab, expect.any(Number), expect.any(Number));
+  });
+
+  it('double-clicking the empty part of the strip opens a new query; a tab double-click does not', () => {
+    act(() => s().open(obj('a')));
+    const { container } = render(<TabBar />);
+    fireEvent.doubleClick(container.querySelector('.tabstrip-fill')!);
+    expect(s().tabs.filter((t) => t.kind === 'query')).toHaveLength(1);
+    fireEvent.doubleClick(screen.getByRole('tab', { name: /a/ }));
+    expect(s().tabs.filter((t) => t.kind === 'query')).toHaveLength(1);
+  });
+
+  it('the tab menu splits on all four sides', async () => {
+    act(() => ['a', 'b'].forEach((id) => s().open(obj(id))));
+    render(<TabBar />);
+    fireEvent.contextMenu(screen.getByRole('tab', { name: /b/ }));
+    for (const side of ['right', 'down', 'left', 'up']) expect(screen.getByRole('menuitem', { name: new RegExp(`^Split ${side}`) })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Split left/ }));
+    expect(s().groups).toHaveLength(2);
+    expect(groupTabs(s(), s().groups[0]!.id).map((t) => t.id)).toEqual(['b']);
   });
 
   it('a maximized group says so in its strip, with a restore button', () => {

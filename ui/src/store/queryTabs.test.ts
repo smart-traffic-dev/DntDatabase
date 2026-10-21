@@ -128,8 +128,10 @@ describe('restore', () => {
     expect(doc('a')).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT 1;', cursor: 3, dialect: 'mysql' });
     expect(useTabs.getState().activeId).toBe('a');
     // A new query after a restore continues the numbering.
-    useQueryDocs.getState().newQuery(null, null);
-    expect(useTabs.getState().tabs.at(-1)!.title).toBe('Query 3');
+    const fresh = useQueryDocs.getState().newQuery(null, null);
+    expect(useTabs.getState().tabs.find((t) => t.id === fresh)!.title).toBe('Query 3');
+    // It opens right after the active tab (VS Code).
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['a', fresh, 'b']);
   });
 
   it('restores_tab_whose_connection_was_deleted', async () => {

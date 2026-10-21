@@ -4,7 +4,7 @@ import { useQueryDocs } from '../store/queryTabs';
 import { CLOSED_STACK_MAX, objectTabId, useTabs, type ObjectTabRef } from '../store/tabs';
 import { useConnections } from '../store/connections';
 import { callsOf, config, mockBackend, resetStores } from '../test/backend';
-import { closeOtherTabs, closeTab, closeTabsToRight, goToTab, reopenClosedTab, togglePin } from './tabActions';
+import { closeOtherTabs, closeSavedTabs, closeTab, closeTabsToRight, goToTab, reopenClosedTab, togglePin } from './tabActions';
 
 const objectTab = (name: string): ObjectTabRef => {
   const objectRef = { database: 'shop', schema: null, name, kind: 'Table' as const };
@@ -50,8 +50,9 @@ describe('pinning', () => {
     useTabs.getState().open(objectTab('b'));
     togglePin(tab('b'));
     expect(useTabs.getState().activeId).toBe(tab('b').id);
+    // With a pinned tab active, a new tab opens right after the pinned block (VS Code).
     useTabs.getState().open(objectTab('c'));
-    expect(titles()).toEqual(['b', 'a', 'c']);
+    expect(titles()).toEqual(['b', 'c', 'a']);
   });
 
   it('renaming or rebinding keeps the pin', () => {
@@ -164,5 +165,20 @@ describe('reopen closed tab', () => {
     useTabs.getState().open(objectTab('a'));
     useTabs.getState().closeConnection('c1');
     expect(useTabs.getState().closed).toEqual([]);
+  });
+});
+
+describe('closeSavedTabs', () => {
+  beforeEach(resetStores);
+
+  it('closes the tabs of the focused group that have nothing unsaved', async () => {
+    mockBackend({ tabs_save: () => null, tabs_delete: () => null, query_close_tab: () => null });
+    useQueryDocs.getState().newQuery(null, null);
+    const file = useQueryDocs.getState().newQuery(null, null);
+    useQueryDocs.getState().update(file, { filePath: 'C:\\sql\\daily.sql', title: 'daily.sql' });
+    useQueryDocs.getState().update(file, { sql: 'edited' });
+    useTabs.getState().open(objectTab('orders'));
+    await closeSavedTabs();
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([file]);
   });
 });

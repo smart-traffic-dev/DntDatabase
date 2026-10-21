@@ -66,6 +66,7 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
       focusFocusedGroup();
     });
     if (PRESETS[key]) return run(() => tabs.setLayout(PRESETS[key]!));
+    if (key === 'enter' && tabs.activeId) return run(() => tabs.keepTab(tabs.activeId!));
     // With one group, "close the group" would close every tab: as in the View menu, it needs two.
     if (key === 'w' && tabs.groups.length > 1) return run(() => void closeGroup());
     return false;
@@ -90,6 +91,12 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
       return true;
     }
     return false;
+  }
+  // Ctrl+Shift+PgUp / PgDn: move the active tab left / right in its strip.
+  if (e.shiftKey && !e.altKey && (key === 'pageup' || key === 'pagedown')) {
+    consume(e);
+    tabs.shiftTab(key === 'pagedown' ? 1 : -1);
+    return true;
   }
   if (e.altKey || e.shiftKey) return false;
   if (key === 'k') {

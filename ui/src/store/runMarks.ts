@@ -34,7 +34,10 @@ export function installRunMarks(): () => void {
       const before = prev.runs.get(id);
       const ended = before && before.phase.kind !== 'idle' && run.phase.kind === 'idle';
       if (!ended || visible(id)) continue;
-      setMark(id, (run.lastRun?.errors ?? 0) > 0 ? 'error' : 'ok');
+      // Only a run that produced a result of its own: an Explain or a start that failed keeps the
+      // previous last run, and a run the user stopped needs no "done" mark.
+      if (!run.lastRun || run.lastRun === before.lastRun || run.stop?.kind === 'cancelled') continue;
+      setMark(id, (run.lastRun.errors ?? 0) > 0 ? 'error' : 'ok');
     }
   });
   const offTabs = useTabs.subscribe(() => {

@@ -1,6 +1,7 @@
 import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataEdits';
 import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
+import { useQueryRun } from '../store/queryRun';
 import { groupTabs, useTabs, type Tab } from '../store/tabs';
 
 /** A query tab closes through its guards (open transaction, unsaved file), then drops its row. */
@@ -80,6 +81,18 @@ export async function closeGroup(groupId = useTabs.getState().focusedGroupId): P
   // An empty group (from a layout preset) has no tab to take it away.
   useTabs.getState().dropGroup(groupId);
 }
+
+/** Whether a tab holds something a close would ask about: unsaved file text, staged edits, an open transaction. */
+function unsaved(tab: Tab): boolean {
+  if (tab.kind === 'object') return useDataEdits.getState().hasStaged(tab.id);
+  const doc = useQueryDocs.getState().docs.get(tab.id);
+  const tx = useQueryRun.getState().runs.get(tab.id)?.txState ?? 'idle';
+  return (!!doc?.filePath && doc.dirty) || tx !== 'idle';
+}
+
+/** Closes the tabs of a group (default: the focused one) that have nothing unsaved (VS Code's Close Saved). */
+export const closeSavedTabs = (groupId = useTabs.getState().focusedGroupId): Promise<void> =>
+  closeTabs(groupTabs(useTabs.getState(), groupId).filter((t) => !t.pinned && !unsaved(t)));
 
 /** Closes the unpinned tabs to the right of `from` in its group. */
 export function closeTabsToRight(from: Tab): Promise<void> {

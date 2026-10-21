@@ -76,6 +76,11 @@ describe('TabBar', () => {
     expect(dot(/daily\.sql/)).toHaveTextContent('●');
     expect(dot(/daily\.sql/)).toHaveAttribute('title', 'Unsaved changes');
     expect(dot(/Query 1/)).toBeNull();
+    // As in VS Code the close button shows the dot (× on hover) instead of a second mark.
+    const tab = screen.getByRole('tab', { name: /daily\.sql/ }).closest('.tab')!;
+    expect(tab).toHaveClass('dirty');
+    expect(tab.querySelector('.tab-close .tab-close-dot')).not.toBeNull();
+    expect(screen.getByRole('tab', { name: /Query 1/ }).closest('.tab')).not.toHaveClass('dirty');
   });
 
   it('closing a query tab goes through the close guards', async () => {

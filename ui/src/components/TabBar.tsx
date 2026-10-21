@@ -21,11 +21,15 @@ import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon, RestoreIcon } 
 import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
 import { openObjectTab } from './openObject';
-import { draggedItem, setDraggedTab, TAB_DRAG_TYPE, useDrag } from './tabDrag';
+import { draggedItem, openTabOfNode, setDraggedTab, TAB_DRAG_TYPE, useDrag } from './tabDrag';
 import { useRunMarks } from '../store/runMarks';
 import { useTree } from '../store/tree';
 import { TabStripActions } from '../tabs/TabStripActions';
-import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
+import { closeAllTabs, closeOtherTabs, closeSavedTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
+
+/** While dragging, this close to an end of an overflowing strip scrolls it by a step per move. */
+const SCROLL_EDGE = 24;
+const SCROLL_STEP = 16;
 
 /** DOM id of a tab's button. */
 export const tabDomId = (id: string) => `tab-${encodeURIComponent(id)}`;
@@ -58,6 +62,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
   const focused = groupId === focusedGroupId;
   const activate = useTabs((s) => s.activate);
   const [insertAt, setInsertAt] = useState<number | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
   const runningIds = useQueryRun(
     useShallow((s) => [...s.runs].filter(([, r]) => r.phase.kind !== 'idle').map(([id]) => id)),
   );
@@ -112,12 +117,15 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
       { label: 'Close', hint: 'Ctrl+W', run: () => void closeTab(tab) },
       { label: 'Close others', disabled: others.length === 0, run: () => void closeOtherTabs(tab) },
       { label: 'Close tabs to the right', disabled: right.length === 0, run: () => void closeTabsToRight(tab) },
+      { label: 'Close saved', run: () => void closeSavedTabs(groupId) },
       { label: 'Close all', disabled: unpinned.length === 0, run: () => void closeAllTabs(groupId) },
       { separator: true },
       { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
       { separator: true },
       { label: 'Split right', hint: 'Ctrl+\\', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'right'), focusFocusedGroup()) },
       { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'down'), focusFocusedGroup()) },
+      { label: 'Split left', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'left'), focusFocusedGroup()) },
+      { label: 'Split up', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'up'), focusFocusedGroup()) },
       ...groups
         .map((g, i) => ({ g, i }))
         .filter(({ g }) => g.id !== groupId)
@@ -176,18 +184,38 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
     });
     return at < 0 ? els.length : at;
   };
+  /** The tab under the pointer (outlined as the drop target, as VS Code does). */
+  const tabAt = (x: number) =>
+    [...(strip.current?.querySelectorAll<HTMLElement>('.tab') ?? [])].find((el) => {
+      const r = el.getBoundingClientRect();
+      return x >= r.left && x < r.right;
+    })?.dataset.tabId ?? null;
+  /** Near either end of an overflowing strip the drag scrolls it. */
+  const autoScroll = (x: number) => {
+    const el = strip.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    if (x > r.right - SCROLL_EDGE) el.scrollLeft += SCROLL_STEP;
+    else if (x < r.left + SCROLL_EDGE) el.scrollLeft -= SCROLL_STEP;
+  };
+  const endDragOver = () => {
+    setInsertAt(null);
+    setOverId(null);
+  };
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
     const item = draggedItem();
     const at = insertAt ?? insertIndex(e.clientX);
-    setInsertAt(null);
+    endDragOver();
     if (!item) return;
     e.preventDefault();
     useDrag.setState({ item: null });
-    if (item.kind === 'tab') {
+    // A tree object that is already open moves like its tab.
+    const tabId = item.kind === 'tab' ? item.id : openTabOfNode(item.nodeId);
+    if (tabId) {
       // The index counts this group's tabs without the dragged one.
-      const from = tabs.findIndex((t) => t.id === item.id);
-      useTabs.getState().moveTab(item.id, groupId, from >= 0 && from < at ? at - 1 : at);
-    } else {
+      const from = tabs.findIndex((t) => t.id === tabId);
+      useTabs.getState().moveTab(tabId, groupId, from >= 0 && from < at ? at - 1 : at);
+    } else if (item.kind === 'object') {
       const node = useTree.getState().nodes.get(item.nodeId);
       if (!node) return;
       useTabs.getState().focusGroup(groupId);
@@ -200,14 +228,27 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
     <div
       className={`tabstrip${focused ? '' : ' unfocused'}`}
       onMouseDown={() => !focused && useTabs.getState().focusGroup(groupId)}
+      // Double-click on the strip's empty part: a new query, as VS Code opens an untitled file.
+      onDoubleClick={(e) => {
+        const t = e.target as HTMLElement;
+        if (t === e.currentTarget || t.classList.contains('tabstrip-fill') || t.classList.contains('tabbar')) openNewQuery();
+      }}
       onDragOver={(e) => {
         if (!draggedItem()) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        setInsertAt(draggedItem()?.kind === 'tab' ? insertIndex(e.clientX) : null);
+        const item = draggedItem();
+        const isTab = item?.kind === 'tab';
+        // Where the store will really put it: an unpinned tab after the pinned block, a pinned one inside it.
+        const pinnedCount = tabs.filter((t) => t.pinned).length;
+        const pinned = isTab && !!allTabs.find((t) => t.id === item.id)?.pinned;
+        const raw = insertIndex(e.clientX);
+        setInsertAt(isTab ? (pinned ? Math.min(raw, pinnedCount) : Math.max(raw, pinnedCount)) : null);
+        setOverId(isTab ? tabAt(e.clientX) : null);
+        autoScroll(e.clientX);
       }}
       onDragLeave={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setInsertAt(null);
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) endDragOver();
       }}
       onDrop={onDrop}
     >
@@ -217,13 +258,20 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           // Environment colour of the tab's connection, as in the tree and status bar.
           const env = conn?.env_tag ?? null;
           const readOnly = !!conn?.read_only;
-          const classes = ['tab', tab.id === activeId ? 'active' : '', env ? `env-${env}` : '', tab.preview ? 'preview' : '']
+          // `●` only for a tab bound to a file whose text differs from it.
+          const unsaved = tab.kind === 'query' && unsavedIds.includes(tab.id);
+          const classes = [
+            'tab',
+            tab.id === activeId ? 'active' : '',
+            env ? `env-${env}` : '',
+            tab.preview ? 'preview' : '',
+            unsaved ? 'dirty' : '',
+            dragging && overId === tab.id ? 'drop-target' : '',
+          ]
             .filter(Boolean)
             .join(' ');
           const running = runningIds.includes(tab.id);
           const mark = marks.get(tab.id);
-          // `●` only for a tab bound to a file whose text differs from it.
-          const unsaved = tab.kind === 'query' && unsavedIds.includes(tab.id);
           const inTx = tab.kind === 'query' && txIds.includes(tab.id);
           const tip = [tab.title, conn ? `Connection: ${conn.name}` : null, readOnly ? 'Read-only' : null, inTx ? 'Open transaction' : null]
             .filter(Boolean)
@@ -240,10 +288,13 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                 setDraggedTab(tab.id);
                 e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
                 e.dataTransfer.effectAllowed = 'move';
+                // The tab itself follows the pointer, grabbed where it was pressed.
+                const r = e.currentTarget.getBoundingClientRect();
+                e.dataTransfer.setDragImage?.(e.currentTarget, Math.max(0, e.clientX - r.left), Math.max(0, e.clientY - r.top));
               }}
               onDragEnd={() => {
                 setDraggedTab(null);
-                setInsertAt(null);
+                endDragOver();
               }}
               onContextMenu={(e) => openContext(e, tab)}
             >
@@ -291,13 +342,16 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                   <span className="tab-tx" title="Open transaction" aria-label="Open transaction" role="img" />
                 )}
                 {unsaved && (
-                  <span className="tab-dirty" title="Unsaved changes" aria-label="Unsaved changes">
+                  // For screen readers; the close button shows the dot.
+                  <span className="tab-dirty sr-only" title="Unsaved changes" aria-label="Unsaved changes">
                     ●
                   </span>
                 )}
               </button>
               {/* Not a tab stop: the keyboard closes a tab with Ctrl+W or its menu. */}
               <button type="button" className="tab-close" tabIndex={-1} aria-label={`Close ${tab.title}`} onClick={() => void closeTab(tab)}>
+                {/* Unsaved: a dot in the close button's place, the × on hover (VS Code). */}
+                {unsaved && <span className="tab-close-dot" aria-hidden="true" />}
                 <CloseIcon />
               </button>
             </div>

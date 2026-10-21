@@ -1,3 +1,4 @@
+import { resultsOf, useLayout } from '../store/layout';
 import { useTabs } from '../store/tabs';
 import { editorOf } from '../tabs/query/activeEditor';
 import { tabDomId } from './TabBar';
@@ -18,12 +19,14 @@ export function focusFocusedGroup(): void {
   const deadline = Date.now() + WAIT_MS;
   const attempt = () => {
     pending = null;
-    const id = useTabs.getState().activeId;
+    const { activeId: id, focusedGroupId } = useTabs.getState();
     if (!id) return;
-    const editor = editorOf(id);
+    // A group whose results are maximized hides its editor: focusing it would lose the keyboard.
+    const editor = resultsOf(useLayout.getState(), focusedGroupId).maximized ? null : editorOf(id);
     // The editor first: the tab button exists before the editor has mounted.
     if (editor) return editor.focus();
-    const isQuery = useTabs.getState().tabs.find((t) => t.id === id)?.kind === 'query';
+    const isQuery =
+      useTabs.getState().tabs.find((t) => t.id === id)?.kind === 'query' && !resultsOf(useLayout.getState(), focusedGroupId).maximized;
     const button = document.getElementById(tabDomId(id));
     if (button && (!isQuery || Date.now() >= deadline)) return button.focus();
     if (Date.now() < deadline) pending = setTimeout(attempt, STEP_MS);

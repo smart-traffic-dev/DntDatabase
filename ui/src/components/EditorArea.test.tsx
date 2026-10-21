@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../tabs/ObjectTab', () => ({ ObjectTab: ({ tab }: { tab: { id: string } }) => <div data-testid="object-tab">{tab.id}</div> }));
 vi.mock('../tabs/query/QueryTab', () => ({ QueryTab: ({ tab }: { tab: { id: string } }) => <div data-testid="query-tab">{tab.id}</div> }));
 
-import { groupTabs, useTabs, type ObjectTabRef } from '../store/tabs';
+import { groupTabs, objectTabId, useTabs, type ObjectTabRef } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { resetStores } from '../test/backend';
 import { dropZone, EditorArea } from './EditorArea';
@@ -139,6 +139,37 @@ describe('EditorArea', () => {
     dragAt('drop', layer, 290, 150);
     expect(s().groups).toHaveLength(2);
     expect(groupTabs(s(), s().groups[1]!.id).map((t) => t.title)).toEqual(['orders']);
+  });
+
+  it('a tree object that is already open moves there like its tab (no empty group left)', () => {
+    box();
+    const node = { id: 'conn:c1/db:d/folder:Table/obj:orders', kind: 'object' as const, label: 'orders', objectRef: { database: 'd', schema: null, name: 'orders', kind: 'Table' as const } };
+    act(() => {
+      useTree.setState({ nodes: new Map([[node.id, node]]) });
+      s().open(obj('a'));
+      s().open({ id: objectTabId('c1', node.objectRef), kind: 'object', connectionId: 'c1', title: 'orders', objectRef: node.objectRef });
+    });
+    render(<EditorArea />);
+    act(() => setDraggedObject(node.id));
+    dragAt('drop', screen.getByTestId('drop-layer'), 290, 150);
+    expect(s().groups.map((g) => groupTabs(s(), g.id).map((t) => t.title))).toEqual([['a'], ['orders']]);
+  });
+
+  it("dropping a tab in the middle of its own group changes nothing", () => {
+    box();
+    act(() => ['a', 'b', 'c'].forEach((id) => s().open(obj(id))));
+    render(<EditorArea />);
+    act(() => setDraggedTab('a'));
+    dragAt('drop', screen.getByTestId('drop-layer'), 150, 150);
+    expect(s().tabs.map((t) => t.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('a pointer press anywhere clears a drag that never ended (its source left the DOM)', () => {
+    render(<EditorArea />);
+    act(() => setDraggedTab('a'));
+    expect(screen.getByTestId('drop-layer')).toBeInTheDocument();
+    act(() => void window.dispatchEvent(new MouseEvent('mousedown', { bubbles: true })));
+    expect(screen.queryByTestId('drop-layer')).toBeNull();
   });
 
   it('a maximized group is shown alone', () => {

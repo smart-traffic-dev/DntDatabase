@@ -76,6 +76,21 @@ describe('editor group shortcuts', () => {
     expect(s().maximizedGroupId).toBeUndefined();
   });
 
+  it('Ctrl+K Enter keeps a preview tab', () => {
+    s().openPreview({ id: 'p', kind: 'object', connectionId: 'c', title: 'p', objectRef: { database: 'd', schema: null, name: 'p', kind: 'Table' } });
+    key({ key: 'k', ctrlKey: true });
+    expect(key({ key: 'Enter' }).handled).toBe(true);
+    expect(s().tabs.find((t) => t.id === 'p')?.preview).toBe(false);
+  });
+
+  it('Ctrl+Shift+PageUp / PageDown move the active tab in its strip', () => {
+    s().activate('a');
+    expect(key({ key: 'PageDown', ctrlKey: true, shiftKey: true }).handled).toBe(true);
+    expect(groupTabs(s(), s().focusedGroupId).map((t) => t.id)).toEqual(['b', 'a', 'c']);
+    key({ key: 'PageUp', ctrlKey: true, shiftKey: true });
+    expect(groupTabs(s(), s().focusedGroupId).map((t) => t.id)).toEqual(['a', 'b', 'c']);
+  });
+
   it("leaves Monaco's own Ctrl+K Ctrl+<digit> chords (fold level) alone", () => {
     key({ key: 'k', ctrlKey: true });
     expect(key({ key: '2', ctrlKey: true }).handled).toBe(false);

@@ -232,6 +232,53 @@ describe('editor groups', () => {
     void g1;
   });
 
+  it('a new tab opens right after the active tab of its group, as in VS Code', () => {
+    open('a', 'b', 'c');
+    s().activate('a');
+    open('d');
+    expect(ids(s().focusedGroupId)).toEqual(['a', 'd', 'b', 'c']);
+    // A new preview takes the same place.
+    s().activate('b');
+    s().openPreview({ id: 'p', kind: 'object', connectionId: 'c', title: 'p', objectRef: { database: 'd', schema: null, name: 'p', kind: 'Table' } });
+    expect(ids(s().focusedGroupId)).toEqual(['a', 'd', 'b', 'p', 'c']);
+  });
+
+  it('splitTab works on every side; an only tab opens an empty group there', () => {
+    open('a', 'b');
+    s().splitTab('b', 'left');
+    expect(s().tree).toMatchObject({ dir: 'row', a: { kind: 'group' }, b: { kind: 'group' } });
+    expect(ids(s().groups[0]!.id)).toEqual(['b']);
+    s().splitTab('b', 'up');
+    expect(s().groups).toHaveLength(3);
+    expect(s().focusedGroupId).toBe(s().groups[0]!.id);
+    expect(ids(s().groups[0]!.id)).toEqual([]);
+  });
+
+  it('shiftTab moves the active tab one place left / right inside its group', () => {
+    open('a', 'b', 'c');
+    s().activate('b');
+    s().shiftTab(1);
+    expect(ids(s().focusedGroupId)).toEqual(['a', 'c', 'b']);
+    s().shiftTab(1); // already last
+    expect(ids(s().focusedGroupId)).toEqual(['a', 'c', 'b']);
+    s().shiftTab(-1);
+    s().shiftTab(-1);
+    expect(ids(s().focusedGroupId)).toEqual(['b', 'a', 'c']);
+    expect(s().activeId).toBe('b');
+  });
+
+  it('moving a tab out of a maximized group restores the layout (the target must be on screen)', () => {
+    open('a', 'b');
+    s().splitTab('b', 'right');
+    s().open(q('c'));
+    const [g1, g2] = groupIds();
+    s().focusGroup(g2!);
+    s().toggleMaximize();
+    s().moveTab('c', g1!);
+    expect(s().focusedGroupId).toBe(g1);
+    expect(s().maximizedGroupId).toBeUndefined();
+  });
+
   it('closeConnection keeps every group consistent', () => {
     const obj = (id: string, connectionId: string) =>
       s().open({ id, kind: 'object', connectionId, title: id, objectRef: { database: 'd', schema: null, name: id, kind: 'Table' } });

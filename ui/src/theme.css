@@ -643,7 +643,10 @@ textarea:focus-visible,
   font-style: italic;
 }
 
-/* Scrolls sideways inside itself; the scrollbar is hidden so it cannot shift the layout. */
+/*
+ * Scrolls sideways inside itself. A 3px scrollbar is always reserved (so it never shifts the
+ * layout) and only painted while the pointer is over the strip, as in VS Code.
+ */
 .tabbar {
   flex: 0 1 auto;
   min-width: 0;
@@ -651,7 +654,12 @@ textarea:focus-visible,
   align-items: stretch;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.tabbar:hover {
+  scrollbar-color: var(--dnt-border-strong) transparent;
 }
 
 /* New query: right after the last tab. */
@@ -666,7 +674,15 @@ textarea:focus-visible,
 }
 
 .tabbar::-webkit-scrollbar {
-  display: none;
+  height: 3px;
+}
+
+.tabbar::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.tabbar:hover::-webkit-scrollbar-thumb {
+  background: var(--dnt-border-strong);
 }
 
 .tab-overflow {
@@ -691,6 +707,8 @@ textarea:focus-visible,
 /* Flat tabs: hairline separators, the active one takes the editor's surface. No top bar, no rounding. */
 .tab {
   flex: none;
+  /* Never squeezed to a stub: a full strip scrolls instead. */
+  min-width: 80px;
   max-width: 260px;
   display: flex;
   align-items: center;
@@ -712,8 +730,27 @@ textarea:focus-visible,
 }
 
 /* The close button shows on the active tab and on hover (and stays reachable by keyboard). */
-.tab:not(.active):not(:hover):not(:focus-within) .tab-close {
+.tab:not(.active):not(.dirty):not(:hover):not(:focus-within) .tab-close {
   visibility: hidden;
+}
+
+/* While dragging, the tab the drop lands next to is outlined. */
+.tab.drop-target {
+  outline: 1px solid var(--dnt-accent);
+  outline-offset: -1px;
+}
+
+/* Unsaved: the close button shows a dot, and its × only on hover (VS Code). */
+.tab-close-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dnt-fg-muted);
+}
+
+.tab.dirty .tab-close:not(:hover) svg,
+.tab-close:hover .tab-close-dot {
+  display: none;
 }
 
 /* Production is identified by the red title and the P tag, not by a stripe. */
@@ -745,6 +782,16 @@ textarea:focus-visible,
 .tab-dirty {
   font-size: var(--dnt-text-xs);
   color: var(--dnt-fg-muted);
+}
+
+/* Read by screen readers, not shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .tab-ro,

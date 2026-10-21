@@ -96,8 +96,10 @@ interface TabsState {
    * tab moves into the new group; without, the new group starts empty and focused.
    */
   splitGroup(groupId: string, side: Side, tabId?: string): void;
-  /** Moves `tabId` into a new group to the right / below (an empty one when it is its group's only tab). */
-  splitTab(tabId: string, direction: 'right' | 'down'): void;
+  /** Moves `tabId` into a new group on `side` of its own (an empty one when it is its group's only tab). */
+  splitTab(tabId: string, side: Side): void;
+  /** Moves the focused group's active tab one place left (`-1`) / right (`1`) in its strip. */
+  shiftTab(step: 1 | -1): void;
   /** A new group can still be added. */
   canSplit(): boolean;
   /** Moves a tab into `groupId` (at `index` among that group's tabs, else last); it becomes active there. */
@@ -228,8 +230,23 @@ function moveInto(s: Core, tabId: string, groupId: string, index?: number): Core
   const neighbour = (left[i + 1] ?? left[i - 1])?.id;
   let groups = setGroupActive(s.groups, groupId, tabId);
   if (from !== groupId && s.groups.find((g) => g.id === from)?.activeId === tabId) groups = setGroupActive(groups, from, neighbour);
-  const moved: Core = { ...s, tabs, groups, groupOf: { ...s.groupOf, [tabId]: groupId }, focusedGroupId: groupId };
+  // The target takes the focus: a maximized view of another group would hide it, so it ends.
+  const maximizedGroupId = s.maximizedGroupId && s.maximizedGroupId !== groupId ? undefined : s.maximizedGroupId;
+  const moved: Core = { ...s, tabs, groups, groupOf: { ...s.groupOf, [tabId]: groupId }, focusedGroupId: groupId, maximizedGroupId };
   return dropIfEmpty(moved, from);
+}
+
+/**
+ * A new tab's place in the strip: right after its group's active tab (after the pinned block when
+ * that one is pinned), as VS Code opens editors; at the end when the group has no active tab.
+ */
+function insertNew(s: Core, tab: Tab, groupId: string): Tab[] {
+  const members = groupTabs(s, groupId);
+  const active = members.find((t) => t.id === s.groups.find((g) => g.id === groupId)?.activeId);
+  const anchor = active?.pinned && !tab.pinned ? members.filter((t) => t.pinned).at(-1) : active;
+  if (!anchor) return [...s.tabs, tab];
+  const at = s.tabs.indexOf(anchor) + 1;
+  return [...s.tabs.slice(0, at), tab, ...s.tabs.slice(at)];
 }
 
 /** Converts the first saved shape into a tree arrangement (presets and shared ratios). */
@@ -310,7 +327,7 @@ export const useTabs = create<TabsState>()((set, get) => {
         if (home && s.tabs.some((t) => t.id === tab.id)) return { ...focusing(s, home), groups: setGroupActive(s.groups, home, tab.id) };
         return {
           ...s,
-          tabs: [...s.tabs, tab],
+          tabs: insertNew(s, tab, s.focusedGroupId),
           groupOf: { ...s.groupOf, [tab.id]: s.focusedGroupId },
           groups: setGroupActive(s.groups, s.focusedGroupId, tab.id),
         };
@@ -323,7 +340,7 @@ export const useTabs = create<TabsState>()((set, get) => {
         const fresh = { ...tab, preview: true } as Tab;
         const old = groupTabs(s, g).find((t) => t.preview);
         // The new preview takes the old one's place in the strip.
-        const tabs = old ? s.tabs.map((t) => (t.id === old.id ? fresh : t)) : [...s.tabs, fresh];
+        const tabs = old ? s.tabs.map((t) => (t.id === old.id ? fresh : t)) : insertNew(s, fresh, g);
         const groupOf = { ...s.groupOf, [fresh.id]: g };
         if (old) delete groupOf[old.id];
         return { ...s, tabs, groupOf, groups: setGroupActive(s.groups, g, fresh.id) };
@@ -345,15 +362,25 @@ export const useTabs = create<TabsState>()((set, get) => {
       }),
     canSplit: () => get().groups.length < MAX_GROUPS,
     splitGroup: (groupId, side, tabId) => update((s) => split(s, groupId, side, tabId)),
-    splitTab: (tabId, direction) =>
+    splitTab: (tabId, side) =>
       update((s) => {
         const from = s.groupOf[tabId];
         if (!from) return null;
-        const side: Side = direction === 'right' ? 'right' : 'down';
         // Its group's only tab: an empty group opens beside it (one tab is in one group only).
         return groupTabs(s, from).length === 1 ? split(s, from, side) : split(s, from, side, tabId);
       }),
     moveTab: (tabId, groupId, index) => update((s) => moveInto(s, tabId, groupId, index)),
+    shiftTab: (step) =>
+      update((s) => {
+        const id = s.activeId;
+        if (!id) return null;
+        const members = groupTabs(s, s.focusedGroupId);
+        const at = members.findIndex((t) => t.id === id);
+        const to = at + step;
+        if (at < 0 || to < 0 || to >= members.length) return null;
+        // moveInto's index counts the group's other tabs; it keeps the pinned block first.
+        return moveInto(s, id, s.focusedGroupId, to);
+      }),
     moveToNeighbour: (step) => {
       const s = get();
       if (!s.activeId) return;

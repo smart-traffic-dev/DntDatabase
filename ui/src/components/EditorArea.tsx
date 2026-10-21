@@ -7,7 +7,7 @@ import { EmptyWorkspace } from './EmptyWorkspace';
 import { focusFocusedGroup } from './focusGroup';
 import { openObjectTab } from './openObject';
 import { Splitter } from './Splitter';
-import { OBJECT_DRAG_TYPE, TAB_DRAG_TYPE, useDrag, type DragItem } from './tabDrag';
+import { OBJECT_DRAG_TYPE, openTabOfNode, TAB_DRAG_TYPE, useDrag, type DragItem } from './tabDrag';
 import { TabBar, tabContentId } from './TabBar';
 
 /** A group never shrinks below this when the window allows it (spec §1). */
@@ -46,10 +46,13 @@ const OBJECT_LABEL: Record<DropZone, string> = {
 /** Drops a tab or a tree object on `groupId` at `zone`. */
 function drop(item: DragItem, groupId: string, zone: DropZone) {
   const tabs = useTabs.getState();
-  if (item.kind === 'tab') {
-    if (zone === 'center') tabs.moveTab(item.id, groupId);
-    else tabs.splitGroup(groupId, zone, item.id);
-  } else {
+  const tabId = item.kind === 'tab' ? item.id : openTabOfNode(item.nodeId);
+  if (tabId) {
+    // The middle of its own group: nothing to do (it would only move to the strip's end).
+    if (zone === 'center' && tabs.groupOf[tabId] === groupId) tabs.activate(tabId);
+    else if (zone === 'center') tabs.moveTab(tabId, groupId);
+    else tabs.splitGroup(groupId, zone, tabId);
+  } else if (item.kind === 'object') {
     const node = useTree.getState().nodes.get(item.nodeId);
     if (!node) return;
     if (zone === 'center') tabs.focusGroup(groupId);
@@ -70,7 +73,8 @@ function DropLayer({ groupId, item }: { groupId: string; item: DragItem }) {
     const z = dropZone(e.currentTarget.getBoundingClientRect(), e.clientX, e.clientY);
     if (z === 'center') return z;
     const s = useTabs.getState();
-    const alone = item.kind === 'tab' && s.groupOf[item.id] === groupId && groupTabs(s, groupId).length === 1;
+    const tabId = item.kind === 'tab' ? item.id : openTabOfNode(item.nodeId);
+    const alone = !!tabId && s.groupOf[tabId] === groupId && groupTabs(s, groupId).length === 1;
     return s.canSplit() && !alone ? z : 'center';
   };
   return (
@@ -195,12 +199,16 @@ export function EditorArea() {
 
   // A drag that ends anywhere (dropped elsewhere, Esc, outside the window) takes the drop layers away.
   useEffect(() => {
-    const end = () => useDrag.setState({ item: null });
+    const end = () => useDrag.getState().item && useDrag.setState({ item: null });
     window.addEventListener('dragend', end, true);
     window.addEventListener('drop', end);
+    // No pointer press happens during a drag: one means the drag ended without a `dragend`
+    // reaching the window (its source left the DOM, e.g. a recycled virtual tree row).
+    window.addEventListener('mousedown', end, true);
     return () => {
       window.removeEventListener('dragend', end, true);
       window.removeEventListener('drop', end);
+      window.removeEventListener('mousedown', end, true);
     };
   }, []);
 
