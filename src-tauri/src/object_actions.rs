@@ -1,26 +1,28 @@
 //! Single-use DDL plans and dedicated, cancellable object-action sessions.
-use crate::cache::NodeKey;
+pub use crate::ddl_exec::ActionOutcome;
+use crate::ddl_exec::{
+    execute, failure_error, failure_outcome, stopped, write_history, DdlHistory, DdlOperations,
+    HISTORY_FAILED,
+};
 use crate::session_manager::{
     close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
-use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::Session;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, Scope};
 use dnt_core::server::DbKind;
 use dnt_core::sql::ddl::{action_sql, ObjectAction};
-use dnt_core::sql::{classify, Dialect};
-use dnt_core::value::{ColumnMeta, Value};
-use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
+use dnt_core::sql::Dialect;
+use dnt_store::history::HistoryOrigin;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::collections::HashMap;
 use std::sync::{atomic::Ordering, Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use uuid::Uuid;
 
-const MAX_PLANS: usize = 128;
-const MAX_OPERATIONS: usize = 256;
+pub(crate) const MAX_PLANS: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ActionPreview {
@@ -31,14 +33,6 @@ pub struct ActionPreview {
     pub confirm_name: Option<String>,
     pub warnings: Vec<String>,
     pub expires_in_seconds: u32,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionOutcome {
-    Applied,
-    NotApplied,
-    RolledBack,
-    Unknown,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct ActionReport {
@@ -55,90 +49,15 @@ struct StoredPlan {
     fingerprint: String,
     expires: Instant,
 }
-struct Operation {
-    connection: Option<Uuid>,
-    stop: StopSignal,
-    cancel: Option<CancelHandle>,
-    since: Instant,
-}
 #[derive(Default)]
 pub(crate) struct ActionStore {
     plans: Mutex<HashMap<Uuid, StoredPlan>>,
-    operations: Mutex<HashMap<Uuid, Operation>>,
+    pub(crate) operations: DdlOperations,
 }
-struct OperationGuard<'a> {
-    store: &'a ActionStore,
-    id: Uuid,
-}
-impl Drop for OperationGuard<'_> {
-    fn drop(&mut self) {
-        lock(&self.store.operations).remove(&self.id);
-    }
-}
-impl ActionStore {
-    fn register(&self, id: Uuid, conn: Uuid) -> Result<(OperationGuard<'_>, StopSignal), DbError> {
-        let mut ops = lock(&self.operations);
-        ops.retain(|_, op| {
-            op.connection.is_some() || op.since.elapsed() < Duration::from_secs(300)
-        });
-        if let Some(op) = ops.get_mut(&id) {
-            if op.connection.is_some() {
-                return Err(config_error("operation_id", "Operation id is in use."));
-            }
-            op.connection = Some(conn);
-            return Ok((OperationGuard { store: self, id }, op.stop.clone()));
-        }
-        if ops.len() >= MAX_OPERATIONS {
-            return Err(DbError::Busy);
-        }
-        let stop = StopSignal::new();
-        ops.insert(
-            id,
-            Operation {
-                connection: Some(conn),
-                stop: stop.clone(),
-                cancel: None,
-                since: Instant::now(),
-            },
-        );
-        Ok((OperationGuard { store: self, id }, stop))
-    }
-}
-fn stale() -> DbError {
+pub(crate) fn stale() -> DbError {
     DbError::PlanStale {
         reason: "The connection, policy, dialect or object changed; preview again.".into(),
     }
-}
-fn stopped() -> DbError {
-    DbError::Cancelled {
-        outcome_unknown: false,
-        was_in_tx: false,
-    }
-}
-#[derive(Default)]
-struct Sink;
-impl RowSink for Sink {
-    fn result_start(&mut self, _: &[ColumnMeta]) {}
-    fn rows(&mut self, _: Vec<Vec<Value>>) {}
-    fn result_end(&mut self, _: &ResultSummary) {}
-}
-async fn execute(
-    session: &dyn Session,
-    sql: &str,
-    stop: StopSignal,
-    grace: Duration,
-    timeout_s: u32,
-) -> Result<(), DbError> {
-    let options = ExecOptions {
-        stop,
-        timeout: (timeout_s > 0).then(|| Duration::from_secs(u64::from(timeout_s))),
-        cancel_grace: grace,
-        ..ExecOptions::default()
-    };
-    session
-        .execute_one(sql, classify(sql, session.dialect()), &options, &mut Sink)
-        .await?;
-    Ok(())
 }
 
 /// Metadata is read on this operation's session, never from tree caches.
@@ -301,39 +220,12 @@ impl SessionManager {
     }
 
     pub async fn object_action_cancel(&self, id: Uuid) -> Result<(), DbError> {
-        let handle = {
-            let mut ops = lock(&self.object_actions.operations);
-            ops.retain(|_, op| {
-                op.connection.is_some() || op.since.elapsed() < Duration::from_secs(300)
-            });
-            if !ops.contains_key(&id) && ops.len() >= MAX_OPERATIONS {
-                return Err(DbError::Busy);
-            }
-            let op = ops.entry(id).or_insert_with(|| Operation {
-                connection: None,
-                stop: StopSignal::new(),
-                cancel: None,
-                since: Instant::now(),
-            });
-            op.stop.stop();
-            op.cancel.clone()
-        };
-        if let Some(handle) = handle {
-            handle.cancel().await?;
-        }
-        Ok(())
+        self.object_actions.operations.cancel(id).await
     }
 
     pub(crate) async fn object_cancel_connection(&self, conn: Uuid) {
         lock(&self.object_actions.plans).retain(|_, p| p.preview.connection_id != conn);
-        let ids: Vec<_> = lock(&self.object_actions.operations)
-            .iter()
-            .filter(|(_, op)| op.connection == Some(conn))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in ids {
-            let _ = self.object_action_cancel(id).await;
-        }
+        self.object_actions.operations.cancel_connection(conn).await;
     }
 
     pub async fn object_action_apply(
@@ -351,7 +243,7 @@ impl SessionManager {
             return Err(DbError::PlanExpired);
         }
         let conn = stored.preview.connection_id;
-        let (_guard, stop) = self.object_actions.register(operation, conn)?;
+        let (_guard, stop) = self.object_actions.operations.register(operation, conn)?;
         self.check_action_context(&stored)?;
         if !confirmed
             || stored
@@ -372,12 +264,9 @@ impl SessionManager {
             Some(stored.preview.action.database().into())
         };
         let (session, generation) = stored.rt.open_query_session(db).await?;
-        {
-            let mut ops = lock(&self.object_actions.operations);
-            if let Some(op) = ops.get_mut(&operation) {
-                op.cancel = Some(session.cancel_handle());
-            }
-        }
+        self.object_actions
+            .operations
+            .set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {
             if generation != stored.generation || session.dialect() != stored.dialect {
                 return Err(stale());
@@ -480,83 +369,42 @@ impl SessionManager {
             warnings: Vec::new(),
         };
         if let Err(e) = result {
-            report.outcome = if commit_sent {
-                ActionOutcome::Unknown
-            } else if pg && session.in_transaction() {
-                if execute(
-                    session.as_ref(),
-                    "ROLLBACK",
-                    StopSignal::new(),
-                    self.cancel_grace,
-                    30,
-                )
-                .await
-                .is_ok()
-                {
-                    ActionOutcome::RolledBack
-                } else {
-                    ActionOutcome::Unknown
-                }
-            } else if sent {
-                // A definite server rejection is known; transport loss/cancel is not.
-                if pg && matches!(e, DbError::Server { .. }) {
-                    ActionOutcome::NotApplied
-                } else {
-                    ActionOutcome::Unknown
-                }
-            } else {
-                ActionOutcome::NotApplied
-            };
-            let mut error = AppError::from(e);
-            error.outcome_unknown = report.outcome == ActionOutcome::Unknown;
-            report.error = Some(error);
+            report.outcome = failure_outcome(
+                session.as_ref(),
+                &e,
+                pg,
+                sent,
+                commit_sent,
+                self.cancel_grace,
+            )
+            .await;
+            report.error = Some(failure_error(e, report.outcome));
         }
         // No cancellation can reach a later statement or a pooled session: this session is closed.
-        if let Some(op) = lock(&self.object_actions.operations).get_mut(&operation) {
-            op.cancel = None;
-        }
+        self.object_actions.operations.set_cancel(operation, None);
         close_quietly(session).await;
         if sent {
-            let sql = dnt_query::redact::redact(&stored.preview.sql, stored.dialect);
-            let entry = NewHistoryEntry {
-                connection_id: conn,
-                database: Some(stored.preview.action.database().into()),
-                sql_text: sql.text,
-                redacted: sql.changed,
-                kind: "ddl".into(),
-                started_at,
-                elapsed_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
-                status: if report.outcome == ActionOutcome::Applied {
-                    HistoryStatus::Ok
-                } else {
-                    HistoryStatus::Error
+            let saved = write_history(
+                self.repo.clone(),
+                DdlHistory {
+                    connection_id: conn,
+                    database: Some(stored.preview.action.database().into()),
+                    sql: &stored.preview.sql,
+                    dialect: stored.dialect,
+                    started_at,
+                    elapsed: started.elapsed(),
+                    outcome: report.outcome,
+                    error: report.error.as_ref(),
+                    origin: HistoryOrigin::ObjectAction,
                 },
-                row_count: None,
-                affected: None,
-                error_kind: report.error.as_ref().map(|e| e.kind.clone()),
-                error_code: report
-                    .error
-                    .as_ref()
-                    .and_then(|e| e.server_code.clone().or_else(|| e.sqlstate.clone())),
-                origin: HistoryOrigin::ObjectAction,
-                outcome_unknown: report.outcome == ActionOutcome::Unknown,
-            };
-            let repo = self.repo.clone();
-            if !matches!(
-                tokio::task::spawn_blocking(move || repo.history_insert(&entry)).await,
-                Ok(Ok(_))
-            ) {
-                report.warnings.push(
-                    "Operation finished, but saving History failed. Do not retry the operation."
-                        .into(),
-                );
+            )
+            .await;
+            if !saved {
+                report.warnings.push(HISTORY_FAILED.into());
             }
         }
         if sent {
-            self.refresh(conn, &NodeKey(vec![]));
-            self.refresh_schema_cache(conn, stored.preview.action.database());
-            self.edit_plans.drop_conn(conn);
-            self.loaded.drop_conn(conn);
+            self.after_ddl(conn, stored.preview.action.database());
         }
         progress("finished");
         Ok(report)
@@ -605,19 +453,21 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ddl_exec::Operation;
+    use dnt_core::driver::StopSignal;
     #[test]
     fn operation_ids_are_exclusive_and_raii_releases_them() {
         let store = ActionStore::default();
         let id = Uuid::new_v4();
         let conn = Uuid::new_v4();
-        let (guard, stop) = store.register(id, conn).unwrap();
+        let (guard, stop) = store.operations.register(id, conn).unwrap();
         assert!(!stop.is_stopped());
         assert!(matches!(
-            store.register(id, conn),
+            store.operations.register(id, conn),
             Err(DbError::Config { .. })
         ));
         drop(guard);
-        assert!(lock(&store.operations).is_empty());
+        assert!(lock(&store.operations.ops).is_empty());
     }
     #[test]
     fn precancel_is_not_overwritten_by_registration() {
@@ -625,7 +475,7 @@ mod tests {
         let id = Uuid::new_v4();
         let signal = StopSignal::new();
         signal.stop();
-        lock(&store.operations).insert(
+        lock(&store.operations.ops).insert(
             id,
             Operation {
                 connection: None,
@@ -634,7 +484,7 @@ mod tests {
                 since: Instant::now(),
             },
         );
-        let (_guard, signal) = store.register(id, Uuid::new_v4()).unwrap();
+        let (_guard, signal) = store.operations.register(id, Uuid::new_v4()).unwrap();
         assert!(signal.is_stopped());
     }
 }

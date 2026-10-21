@@ -102,7 +102,9 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
         data_type,
         nullable: c.nullable,
         default,
-        auto_increment: c.auto_increment,
+        // MySQL / MariaDB only: PostgreSQL drivers flag identity columns too, which the
+        // draft carries as `identity`.
+        auto_increment: c.auto_increment && server.kind == DbKind::MySql,
         identity: c.identity_kind,
         on_update: c.on_update.clone(),
         charset: unless_table(&c.charset, &opts.charset),
@@ -655,6 +657,8 @@ mod tests {
                 nullable: false,
                 identity_kind: Some(IdentityKind::Always),
                 identity: Some("ALWAYS".into()),
+                // The PostgreSQL driver flags identity columns as auto-increment too.
+                auto_increment: true,
                 ..column("id", 1, "bigint")
             },
             ColumnDetail {
@@ -743,6 +747,7 @@ mod tests {
         let def = from_detail(&d, &pg);
         let col = |n: &str| def.columns.iter().find(|c| c.name == n).unwrap();
         assert_eq!(col("id").identity, Some(IdentityKind::Always));
+        assert!(!col("id").auto_increment);
         assert_eq!(
             col("status").default,
             Some(DefaultSpec::Value { text: "new".into() })
