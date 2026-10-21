@@ -732,22 +732,77 @@ fn text_value(s: &str) -> Result<FullValue, BuildError> {
 /// or DDL statement at depth 0 ([`RAW_WHERE_FORBIDDEN`]); `INTO` anywhere. The data view
 /// also runs the query read-only, so this is a first line, not the only one.
 pub fn check_raw_where(where_sql: &str, d: Dialect) -> Result<(), BuildError> {
+    check_fragment(where_sql, d, &RAW_WHERE_RULES)
+}
+
+/// Checks a user-written SQL expression that the table designer places into DDL: a
+/// column default, a generated column, a `USING` conversion, a `CHECK`, an index
+/// expression or a custom type name.
+///
+/// Same rules as [`check_raw_where`], plus: `SELECT` anywhere (no subqueries) and
+/// comments of any kind (the text is not followed by a newline in DDL, so a `--`
+/// comment would swallow the rest of the line). The server stays the final check.
+pub fn check_expression(text: &str, d: Dialect) -> Result<(), BuildError> {
+    check_fragment(text, d, &EXPRESSION_RULES)
+}
+
+/// What [`check_fragment`] refuses beyond the shared rules.
+struct FragmentRules {
+    /// `BuildError::Invalid::column` of a refusal.
+    label: &'static str,
+    /// The noun in messages ("a filter", "an expression").
+    noun: &'static str,
+    /// The empty-text message.
+    empty: &'static str,
+    /// Words refused at any depth (besides `INTO`).
+    forbidden_anywhere: &'static [&'static str],
+    /// Refuse comments (any text between tokens that is not whitespace).
+    no_comments: bool,
+}
+
+const RAW_WHERE_RULES: FragmentRules = FragmentRules {
+    label: "WHERE",
+    noun: "a filter",
+    empty: "the condition is empty",
+    forbidden_anywhere: &[],
+    no_comments: false,
+};
+
+const EXPRESSION_RULES: FragmentRules = FragmentRules {
+    label: "expression",
+    noun: "an expression",
+    empty: "the expression is empty",
+    forbidden_anywhere: &["SELECT"],
+    no_comments: true,
+};
+
+/// The rules shared by [`check_raw_where`] and [`check_expression`] (see the former).
+fn check_fragment(text: &str, d: Dialect, rules: &FragmentRules) -> Result<(), BuildError> {
     let bad = |reason: &str| {
         Err(BuildError::Invalid {
-            column: "WHERE".into(),
+            column: rules.label.into(),
             reason: reason.into(),
         })
     };
     // Lexed as it will be sent: an open string or comment swallows the `)`.
-    let wrapped = format!("({where_sql}\n)");
+    let wrapped = format!("({text}\n)");
     let toks = crate::sql::tokenize(&wrapped, d);
     let closes_at = wrapped.len() - 1;
     if !matches!(toks.last(), Some(t) if t.kind == TokKind::Close && t.start == closes_at) {
         return bad("a string, quoted name or comment is not closed");
     }
+    if rules.no_comments {
+        // The lexer drops comments: anything but whitespace between tokens is one.
+        let has_comment = toks
+            .windows(2)
+            .any(|w| !wrapped[w[0].end..w[1].start].trim().is_empty());
+        if has_comment {
+            return bad(&format!("comments are not allowed in {}", rules.noun));
+        }
+    }
     let inner = &toks[1..toks.len() - 1];
     if inner.is_empty() {
-        return bad("the condition is empty");
+        return bad(rules.empty);
     }
     let mut depth = 0usize;
     for t in inner {
@@ -759,20 +814,22 @@ pub fn check_raw_where(where_sql: &str, d: Dialect) -> Result<(), BuildError> {
                 }
                 depth -= 1;
             }
-            TokKind::Punct(b';') => return bad("a ';' cannot appear in a filter"),
+            TokKind::Punct(b';') => return bad(&format!("a ';' cannot appear in {}", rules.noun)),
             TokKind::ExecComment => return bad("executable comments are not allowed"),
             TokKind::Word(w) => {
-                if w.eq_ignore_ascii_case("INTO") {
-                    return bad("INTO is not allowed in a filter");
-                }
-                if depth == 0
+                let forbidden_here = (depth == 0
                     && RAW_WHERE_FORBIDDEN
                         .iter()
-                        .any(|k| w.eq_ignore_ascii_case(k))
-                {
+                        .any(|k| w.eq_ignore_ascii_case(k)))
+                    || rules
+                        .forbidden_anywhere
+                        .iter()
+                        .any(|k| w.eq_ignore_ascii_case(k));
+                if w.eq_ignore_ascii_case("INTO") || forbidden_here {
                     return bad(&format!(
-                        "{} is not allowed in a filter",
-                        w.to_ascii_uppercase()
+                        "{} is not allowed in {}",
+                        w.to_ascii_uppercase(),
+                        rules.noun
                     ));
                 }
             }
@@ -1187,6 +1244,42 @@ mod dml_tests {
             check_raw_where("body = $$a;b) into$$", Dialect::Postgres),
             Ok(())
         );
+    }
+
+    #[test]
+    fn check_expression_rejects_statements() {
+        for d in [Dialect::MYSQL, NBE, Dialect::Postgres] {
+            for bad in [
+                "1; DROP TABLE t",
+                "(select 1)",
+                "SELECT 1",
+                "a > (SELECT max(b) FROM t)",
+                "",
+                "(a",
+                "a)",
+                "drop table t",
+                "1 INTO @x",
+                "a -- trailing comment",
+                "a /* c */ + 1",
+            ] {
+                assert!(
+                    matches!(check_expression(bad, d), Err(BuildError::Invalid { .. })),
+                    "{d:?} {bad:?}"
+                );
+            }
+            for good in [
+                "now()",
+                "a > 0",
+                "lower(name) = 'select; drop'",
+                "CURRENT_TIMESTAMP",
+                "(price * qty)",
+                "integer[]",
+            ] {
+                assert_eq!(check_expression(good, d), Ok(()), "{d:?} {good:?}");
+            }
+        }
+        assert!(check_expression("1 /*!50000 + 1 */", Dialect::MYSQL).is_err());
+        assert!(check_expression("a # comment", Dialect::MYSQL).is_err());
     }
 }
 

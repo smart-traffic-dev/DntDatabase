@@ -1,0 +1,13 @@
+[package]
+name = "dnt-schema"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_schema"
+
+[dependencies]
+dnt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
