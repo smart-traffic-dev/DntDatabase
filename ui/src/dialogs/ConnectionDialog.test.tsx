@@ -175,7 +175,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="create" onClose={onClose} />);
-    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Close dialog' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -193,7 +193,7 @@ describe('ConnectionDialog', () => {
     await user.keyboard('{Enter}');
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(screen.getByTestId('conn-name')).toHaveValue('x');
-    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Close dialog' }));
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Discard' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -204,7 +204,7 @@ describe('ConnectionDialog', () => {
     const onClose = vi.fn();
     render(<ConnectionDialog mode="create" onClose={onClose} />);
     await user.type(screen.getByTestId('conn-name'), 'x');
-    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Close dialog' }));
     const ask = await screen.findByRole('alertdialog', { name: 'Discard changes?' });
     const cancel = within(ask).getByRole('button', { name: 'Cancel' });
     const discard = within(ask).getByRole('button', { name: 'Discard' });

@@ -1,33 +1,30 @@
+/* Modal frame (spec §6): scrim, raised surface, large radius, shadow-3; header, body, footer. */
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 50;
+  z-index: var(--dnt-z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.3);
-}
-
-.dark .modal-backdrop {
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--dnt-scrim);
 }
 
 .modal {
-  /* Separator / field border; dark mode overrides it (the hairline equals the popover there). */
-  --dlg-line: var(--border);
+  /* Separator / field border; dark mode overrides it (the hairline is too faint on the raised surface). */
+  --dlg-line: var(--dnt-border);
   display: flex;
   flex-direction: column;
   width: 420px;
   max-width: calc(100vw - 32px);
   max-height: calc(100vh - 32px);
-  background: var(--studio-popover);
-  border: 1px solid var(--dlg-line);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popover);
+  background: var(--dnt-bg-raised);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-lg);
+  box-shadow: var(--dnt-shadow-3);
 }
 
 .dark .modal {
-  --dlg-line: color-mix(in srgb, var(--studio-fg) 24%, var(--studio-popover));
+  --dlg-line: var(--dnt-border-strong);
 }
 
 .modal.wide {
@@ -43,22 +40,26 @@
 }
 
 .modal-head {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--dlg-line);
+  gap: var(--dnt-space-2);
+  min-height: 48px;
+  padding: var(--dnt-space-2) var(--dnt-space-3) var(--dnt-space-2) var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
 }
 
 .modal-head h2 {
+  flex: 1;
+  min-width: 0;
   margin: 0;
-  font-size: var(--text-headline);
-  line-height: var(--text-headline--line-height);
+  font-size: var(--dnt-text-lg);
+  line-height: var(--dnt-text-lg-lh);
   font-weight: 600;
 }
 
 .modal-body {
-  padding: 14px 16px;
+  padding: var(--dnt-space-4);
   overflow: auto;
 }
 
@@ -79,27 +80,33 @@ fieldset.export-form {
   border: 0;
 }
 
+/* Primary action last, on the right; secondary actions before it. */
 .modal-foot {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--dnt-space-2);
   justify-content: flex-end;
-  padding: 10px 16px;
-  border-top: 1px solid var(--dlg-line);
+  min-height: 52px;
+  padding: var(--dnt-space-2) var(--dnt-space-4);
+  border-top: 1px solid var(--dnt-border-subtle);
 }
 
 .modal-foot .spacer {
   flex: 1;
 }
 
+/* Danger solid primary (destructive confirmations). */
 .btn.danger {
-  background: var(--danger);
-  border-color: var(--danger);
+  background: var(--dnt-status-danger-solid);
+  border-color: var(--dnt-status-danger-solid);
   color: #fff;
+  font-weight: 600;
 }
 
 .btn.danger:hover:not(:disabled) {
-  opacity: 0.9;
+  background: color-mix(in srgb, var(--dnt-status-danger-solid) 86%, black);
+  border-color: color-mix(in srgb, var(--dnt-status-danger-solid) 86%, black);
 }
 
 /* Disabled (spec §2.3): its own colours, never opacity; also overrides .primary / .danger fills. */
@@ -511,8 +518,9 @@ fieldset.export-form {
   color: var(--danger-fg);
 }
 
+/* Production guard (board 08): the PRODUCTION badge in the header and a danger hairline, no thick frame. */
 .modal.env-production {
-  border: 2px solid var(--production);
+  border-color: var(--dnt-status-danger-border);
 }
 
 .run-confirm-list {
@@ -523,27 +531,56 @@ fieldset.export-form {
   overflow: auto;
 }
 
+/* The statements that need a confirmation, as one SQL block. */
+.run-confirm-sql {
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  color: var(--dnt-fg);
+}
+
+.run-confirm-sql .run-confirm-preview {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .run-confirm-row {
   display: flex;
-  gap: 8px;
+  gap: var(--dnt-space-2);
   align-items: baseline;
   padding: 3px 0;
 }
 
 .run-confirm-row.danger {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
   font-weight: 600;
 }
 
 .run-confirm-no,
 .run-confirm-kind {
   flex: none;
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
 }
 
 .run-confirm-row.danger .run-confirm-kind {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
+}
+
+/* The name to type, as a code chip in the label; the box types in the code font. */
+.run-confirm-name {
+  padding: 0 var(--dnt-space-1);
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
+  font-family: var(--font-mono);
+  color: var(--dnt-fg);
+}
+
+.field input.run-confirm-input {
+  font-family: var(--font-mono);
 }
 
 .run-confirm-preview {
@@ -614,21 +651,23 @@ fieldset.export-form {
 }
 
 .modal-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   margin-left: auto;
-  width: 26px;
-  height: 26px;
+  width: var(--dnt-ctl-h-md);
+  height: var(--dnt-ctl-h-md);
   padding: 0;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: none;
-  color: var(--studio-fg-secondary);
-  font-size: var(--text-headline);
-  line-height: 1;
+  color: var(--dnt-fg-muted);
 }
 
 .modal-close:hover {
-  background: var(--hover);
-  color: var(--studio-fg);
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
 }
 
 /* Disabled fields (e.g. SSH off) look disabled (F27). */

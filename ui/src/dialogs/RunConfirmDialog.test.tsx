@@ -51,6 +51,22 @@ describe('RunConfirmDialog', () => {
     expect(dialog.className).toContain('env-production');
   });
 
+  it('follows the production guard layout: badge, SQL block, danger solid primary on the right', () => {
+    render(<RunConfirmDialog plan={plan} onDone={vi.fn()} />);
+    const dialog = screen.getByTestId('run-confirm');
+    // PRODUCTION badge leads the header.
+    const head = dialog.querySelector('.modal-head')!;
+    expect(head.firstElementChild).toBe(screen.getByTestId('env-chip'));
+    // The statements read as one SQL block.
+    const sql = dialog.querySelector('.run-confirm-sql');
+    expect(sql).not.toBeNull();
+    expect(sql).toContainElement(screen.getAllByTestId('run-confirm-row')[0]!);
+    // Cancel, then the danger primary last.
+    const foot = [...dialog.querySelectorAll('.modal-foot button')];
+    expect(foot.map((b) => b.getAttribute('data-testid'))).toEqual(['run-confirm-cancel', 'run-confirm-run']);
+    expect(foot[1]).toHaveClass('btn', 'danger');
+  });
+
   it('cancel_is_default_focus_and_runs_nothing', async () => {
     const onDone = vi.fn();
     render(<RunConfirmDialog plan={plan} onDone={onDone} />);
