@@ -1,26 +1,40 @@
 import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from 'react';
+import { CloseIcon } from '../components/icons';
 import './dialogs.css';
 
-const FOCUSABLE =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+/** The Tab stops of a dialog (an element taken out with `tabindex=-1`, like the header ×, is not one). */
+const FOCUSABLE = [
+  'a[href]',
+  'button:not([disabled])',
+  'input:not([disabled])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  '[tabindex]',
+]
+  .map((s) => `${s}:not([tabindex="-1"])`)
+  .join(', ');
 
 interface Props {
   title: ReactNode;
-  /** Extra header content (e.g. the Production chip). */
+  /** Header content before the title (e.g. the Production chip). */
   badge?: ReactNode;
   onClose(): void;
   children: ReactNode;
   className?: string;
-  /** Element to focus first (default: the first focusable control). */
+  /** Element to focus first (default: the first focusable control below the header). */
   initialFocus?: string;
   role?: 'dialog' | 'alertdialog';
   testId?: string;
-  /** Shows a × button in the header that calls `onClose`. */
+  /** Shows the × in the header that calls `onClose` (default on). */
   closable?: boolean;
 }
 
-/** Accessible modal: `role=dialog`, focus trap, Esc closes, focus returns to the opener. */
-export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog', testId, closable = false }: Props) {
+/**
+ * Accessible modal (spec §6): header (badge, title, ×), body, footer; `role=dialog`, focus trap,
+ * Esc closes, focus returns to the opener. In an `alertdialog` (destructive) Enter outside a
+ * button presses the safe default, the `[data-cancel]` button.
+ */
+export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog', testId, closable = true }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
@@ -45,6 +59,23 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
       // Only the innermost dialog reacts.
       e.stopPropagation();
       onClose();
+      return;
+    }
+    if (e.key === 'Enter' && role === 'alertdialog') {
+      const target = e.target as HTMLElement;
+      if (target.closest('button, a[href], textarea, select')) return;
+      // In a text box (a typed confirmation name) Enter does nothing: cancelling there would drop
+      // what the user just typed, with nothing run and nothing said.
+      if (target.closest('input:not([type="checkbox"], [type="radio"])')) {
+        e.preventDefault();
+        return;
+      }
+      const safe = ref.current?.querySelector<HTMLElement>('[data-cancel]');
+      if (safe) {
+        e.preventDefault();
+        e.stopPropagation();
+        safe.click();
+      }
       return;
     }
     if (e.key !== 'Tab') return;
@@ -77,11 +108,12 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
         onKeyDown={onKeyDown}
       >
         <header className="modal-head">
-          <h2 id={titleId}>{title}</h2>
           {badge}
+          <h2 id={titleId}>{title}</h2>
           {closable && (
-            <button type="button" className="modal-close" aria-label="Close" onClick={onClose}>
-              ×
+            // Out of the Tab order: Esc is the keyboard way out, so Tab cycles only the dialog's own controls.
+            <button type="button" className="modal-close" aria-label="Close dialog" title="Close (Esc)" tabIndex={-1} onClick={onClose}>
+              <CloseIcon />
             </button>
           )}
         </header>

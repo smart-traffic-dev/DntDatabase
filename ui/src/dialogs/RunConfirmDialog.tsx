@@ -104,7 +104,8 @@ function ImplicitCommitWarning({ stmts }: { stmts: PlanStmtView[] }) {
  * Confirm statement is listed; any statement that changes every row of a table
  * (UPDATE/DELETE without WHERE, TRUNCATE; any connection) also gets a warning, with the server's
  * row estimate when there is one. A statement that asks for a typed name (`confirm_name`) gets a
- * box, and Run stays off until each matches exactly. One dialog covers it all. Cancel is the default.
+ * box, and Run stays off until each matches exactly. One dialog covers it all. Cancel is the default:
+ * it has the focus; Enter in a name box does nothing (the Modal's alertdialog rule).
  */
 export function RunConfirmDialog({ plan, onDone }: Props) {
   const total = plan.stmts.length;
@@ -143,26 +144,29 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
           )}
         </p>
         {listed.length > 0 && (
-          <ul className="run-confirm-list">
-            {listed.map((s) => (
-              <li key={s.index} className="run-confirm-item">
-                <div
-                  data-testid="run-confirm-row"
-                  className={`run-confirm-row${s.kind === 'ddl' ? ' danger' : ''}`}
-                >
-                  <span className="run-confirm-no">#{s.index + 1}</span>
-                  <span className="run-confirm-kind">{LABEL[s.kind]}</span>
-                  <code className="run-confirm-preview">{s.preview}</code>
-                </div>
-                {(s.drops ?? []).length > 0 && (
-                  <span className="run-confirm-note warn" data-testid="run-confirm-drops">
-                    {dropsText(s.drops ?? [])}
-                  </span>
-                )}
-                <Estimate estimate={s.estimate} />
-              </li>
-            ))}
-          </ul>
+          // Board 08: the statements as one SQL block on the sunken surface.
+          <div className="run-confirm-sql">
+            <ul className="run-confirm-list">
+              {listed.map((s) => (
+                <li key={s.index} className="run-confirm-item">
+                  <div
+                    data-testid="run-confirm-row"
+                    className={`run-confirm-row${s.kind === 'ddl' ? ' danger' : ''}`}
+                  >
+                    <span className="run-confirm-no">#{s.index + 1}</span>
+                    <span className="run-confirm-kind">{LABEL[s.kind]}</span>
+                    <code className="run-confirm-preview">{s.preview}</code>
+                  </div>
+                  {(s.drops ?? []).length > 0 && (
+                    <span className="run-confirm-note warn" data-testid="run-confirm-drops">
+                      {dropsText(s.drops ?? [])}
+                    </span>
+                  )}
+                  <Estimate estimate={s.estimate} />
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         {unbounded.length > 0 && <UnboundedWarning stmts={unbounded} showEstimate={!production} />}
         {implicit.length > 0 && <ImplicitCommitWarning stmts={implicit} />}
@@ -171,10 +175,11 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
             {names.map((n) => (
               <label key={n} className="field">
                 <span className="field-label">
-                  Type <code>{n}</code> to confirm
+                  Type <code className="run-confirm-name">{n}</code> to confirm
                 </span>
                 <input
                   type="text"
+                  className="run-confirm-input"
                   data-testid="run-confirm-name"
                   autoComplete="off"
                   autoCorrect="off"

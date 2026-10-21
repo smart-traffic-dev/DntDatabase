@@ -1,12 +1,12 @@
 import { getActiveEditor, runEditorCommand } from '../tabs/query/activeEditor';
-import { useTabs } from '../store/tabs';
+import { groupTabs, useTabs } from '../store/tabs';
 import { closeOtherTabs, closeTabsToRight, togglePin } from './tabActions';
 
 /** A command the palette lists besides the menu actions. */
 export interface PaletteCommand {
   /** Unique name; registering the same id again replaces the command. */
   id: string;
-  /** Shown as is, by convention "Group: Action". */
+  /** "Group: Action": the palette lists the action under a "Group" section header. */
   label: string;
   hint?: string;
   /** Hidden from the palette while this returns false. */
@@ -28,6 +28,12 @@ export function registerPaletteCommand(command: PaletteCommand): () => void {
 export function paletteCommands(): PaletteCommand[] {
   return [...commands.values()].filter((c) => c.enabled?.() ?? true);
 }
+
+/** The tabs of the focused group: the bulk closes act inside it. */
+const focusedTabs = () => {
+  const s = useTabs.getState();
+  return groupTabs(s, s.focusedGroupId);
+};
 
 const activeTab = () => {
   const { tabs, activeId } = useTabs.getState();
@@ -53,7 +59,10 @@ registerPaletteCommand({
 registerPaletteCommand({
   id: 'tab.closeOthers',
   label: 'Tab: Close other tabs',
-  enabled: () => useTabs.getState().tabs.length > 1,
+  enabled: () => {
+    const { activeId } = useTabs.getState();
+    return focusedTabs().some((t) => t.id !== activeId && !t.pinned);
+  },
   run: () => {
     const tab = activeTab();
     if (tab) void closeOtherTabs(tab);
@@ -63,9 +72,10 @@ registerPaletteCommand({
   id: 'tab.closeRight',
   label: 'Tab: Close tabs to the right',
   enabled: () => {
-    const { tabs, activeId } = useTabs.getState();
+    const { activeId } = useTabs.getState();
+    const tabs = focusedTabs();
     const at = tabs.findIndex((t) => t.id === activeId);
-    return at >= 0 && at < tabs.length - 1;
+    return at >= 0 && tabs.slice(at + 1).some((t) => !t.pinned);
   },
   run: () => {
     const tab = activeTab();

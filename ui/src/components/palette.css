@@ -1,64 +1,122 @@
-/* Command palette / quick open: a floating panel at the top centre, no backdrop (not modal). */
+/* Command palette / quick open (board 06): a floating panel at the top centre, no backdrop (not modal). */
 .palette {
   position: fixed;
-  z-index: 60;
+  z-index: var(--dnt-z-overlay);
   top: 44px;
   left: 50%;
   transform: translateX(-50%);
   width: min(620px, calc(100vw - 32px));
-  max-height: min(420px, calc(100vh - 80px));
+  max-height: min(480px, calc(100vh - 80px));
   display: flex;
   flex-direction: column;
-  background: var(--studio-popover);
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popover);
+  background: var(--dnt-bg-raised);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-lg);
+  box-shadow: var(--dnt-shadow-3);
   overflow: hidden;
 }
 
-.palette-input {
+/* Mode chip, input, Tab tip: one row. */
+.palette-head {
   flex: none;
-  margin: 8px;
-  padding: 6px 8px;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
-  background: var(--panel);
-  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  height: 48px;
+  padding: 0 var(--dnt-space-3);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.palette-mode {
+  flex: none;
+  height: 22px;
+  padding: 0 var(--dnt-space-2);
+  border: 0;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-accent-subtle);
+  color: var(--dnt-accent-hover);
+  font-size: var(--dnt-text-sm);
+  font-weight: 600;
+}
+
+.palette-mode:hover {
+  background: var(--dnt-bg-selected);
+}
+
+/* The head row is the field: its 1px bottom line turns accent while the input has the focus. */
+.palette-head:focus-within {
+  border-bottom-color: var(--dnt-focus);
+}
+
+/* The input itself has no frame. */
+.palette-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dnt-fg);
   font: inherit;
-  font-size: var(--text-callout);
+  font-size: var(--dnt-text-md);
+}
+
+.palette-input:focus,
+.palette-input:focus-visible {
+  outline: none;
+}
+
+.palette-tip {
+  flex: none;
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-subtle);
 }
 
 .palette-list {
   flex: 1;
   min-height: 0;
   margin: 0;
-  padding: 0 4px 4px;
-  list-style: none;
+  padding: var(--dnt-space-1) var(--dnt-space-1_5) var(--dnt-space-2);
   overflow-y: auto;
+}
+
+.palette-section {
+  padding: var(--dnt-space-2) var(--dnt-space-3) var(--dnt-space-1);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--dnt-fg-subtle);
 }
 
 .palette-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-callout);
+  gap: var(--dnt-space-2);
+  height: var(--dnt-ctl-h-lg);
+  padding: 0 var(--dnt-space-3);
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-base);
+  color: var(--dnt-fg);
   cursor: default;
 }
 
 .palette-row.active {
-  background: var(--sel);
+  background: var(--dnt-bg-selected);
+}
+
+/* Planned features: listed, never runnable; colour only (spec §2.3). */
+.palette-row.disabled {
+  color: var(--dnt-fg-disabled);
 }
 
 .palette-icon {
   flex: none;
   display: inline-flex;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .palette-label {
-  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -67,7 +125,16 @@
 
 .palette-match {
   font-weight: 600;
-  color: var(--accent);
+  color: var(--dnt-accent);
+}
+
+.palette-row.disabled .palette-match {
+  color: inherit;
+}
+
+/* On the selection fill the base accent is under 4.5:1. */
+.palette-row.active .palette-match {
+  color: var(--dnt-accent-hover);
 }
 
 .palette-path {
@@ -76,19 +143,60 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
-  font-size: var(--text-footnote);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
 }
 
-.palette-hint {
+/* The menu of a Recent row. */
+.palette-sub {
   flex: none;
-  font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-subtle);
+}
+
+.palette-keys {
+  flex: none;
+  display: inline-flex;
+  gap: var(--dnt-space-1_5);
+  margin-left: auto;
+}
+
+.palette-chord {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.palette-soon {
+  flex: none;
+  margin-left: auto;
+  padding: 0 var(--dnt-space-1_5);
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
+  line-height: var(--dnt-text-xs-lh);
 }
 
 .palette-empty {
-  padding: 8px 12px 12px;
-  color: var(--muted);
-  font-size: var(--text-callout);
+  padding: var(--dnt-space-2) var(--dnt-space-3) var(--dnt-space-3);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-base);
+}
+
+.palette-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-4);
+  height: 32px;
+  padding: 0 var(--dnt-space-3);
+  border-top: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-subtle);
+}
+
+.palette-count {
+  margin-left: auto;
 }

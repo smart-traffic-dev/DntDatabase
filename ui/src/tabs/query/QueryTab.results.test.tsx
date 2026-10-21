@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useConnections } from '../../store/connections';
 import { useLayout } from '../../store/layout';
+import { emptyRun, useQueryRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
 import { config, ids, mockBackend, resetStores } from '../../test/backend';
 import { QueryTab } from './QueryTab';
@@ -17,6 +18,8 @@ beforeEach(() => {
 describe('result panel flag (Ctrl+J)', () => {
   it('hides the result panel and the splitter, and the editor takes the full height', () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    // A tab that ran once: its results are open (before that they are collapsed, QueryTab.split.test).
+    useQueryRun.setState({ runs: new Map([[id, { ...emptyRun, runId: 'r1' }]]) });
     render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
     expect(screen.getByTestId('result-panel')).toBeInTheDocument();
     expect(screen.getByRole('separator', { name: 'Resize editor and results' })).toBeInTheDocument();

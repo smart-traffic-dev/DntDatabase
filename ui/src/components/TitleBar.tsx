@@ -1,7 +1,11 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { useLayout } from '../store/layout';
+import { showQuickOpen } from '../store/palette';
+import type { LayoutPreset } from '../store/layoutTree';
 import { useTabs } from '../store/tabs';
-import { LogoIcon } from './icons';
+import { ActionMenu } from './ActionMenu';
+import { LayoutIcon, LogoIcon, RightSidebarIcon, SearchIcon } from './icons';
 import { MenuBar } from './MenuBar';
 import './titleBar.css';
 
@@ -33,6 +37,73 @@ const Glyph = ({ children }: { children: ReactNode }) => (
   </svg>
 );
 
+const LAYOUT_ITEMS: { layout: LayoutPreset; label: string; hint: string }[] = [
+  { layout: 'single', label: 'Single', hint: 'Ctrl+K 1' },
+  { layout: 'columns', label: 'Two columns', hint: 'Ctrl+K 2' },
+  { layout: 'rows', label: 'Two rows', hint: 'Ctrl+K 3' },
+  { layout: 'grid', label: 'Grid 2 × 2', hint: 'Ctrl+K 4' },
+];
+
+/** Editor layout picker, left of the window buttons. */
+function LayoutButton() {
+  const layout = useTabs((s) => s.layout);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        className="icon-btn titlebar-layout"
+        aria-label="Editor layout"
+        title="Editor layout"
+        aria-haspopup="menu"
+        aria-expanded={menu !== null}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          setMenu({ x: Math.max(8, r.right - 200), y: r.bottom });
+        }}
+      >
+        <LayoutIcon layout={layout} />
+      </button>
+      {menu && (
+        <ActionMenu
+          label="Editor layout"
+          checkRole="radio"
+          x={menu.x}
+          y={menu.y}
+          items={LAYOUT_ITEMS.map((l) => ({
+            label: l.label,
+            hint: l.hint,
+            checked: layout === l.layout,
+            run: () => useTabs.getState().setLayout(l.layout),
+          }))}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
+  );
+}
+
+/** Shows or hides the right sidebar (History); lit while it is open. */
+function RightSidebarButton() {
+  const visible = useLayout((s) => s.rightVisible);
+  const toggle = useLayout((s) => s.toggleRight);
+  return (
+    <button
+      type="button"
+      className={`icon-btn titlebar-layout${visible ? ' on' : ''}`}
+      data-testid="titlebar-right-sidebar"
+      aria-label="Right sidebar"
+      aria-pressed={visible}
+      title="Toggle right sidebar (Ctrl+Alt+B)"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={toggle}
+    >
+      <RightSidebarIcon />
+    </button>
+  );
+}
+
 /**
  * The window's title bar (the native one is off: `decorations: false`). Drag to move (Aero
  * snap included: the OS runs the move loop), double-click to maximize / restore, and the
@@ -47,6 +118,10 @@ export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
   const [focused, setFocused] = useState(() => document.hasFocus());
   const title = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.title);
+
+  useEffect(() => {
+    document.title = title ? `${title} - DntDatabase` : 'DntDatabase';
+  }, [title]);
 
   /** Re-reads the maximized state; replaced by the effect while mounted. */
   const sync = useRef<() => void>(() => {});
@@ -96,11 +171,21 @@ export function TitleBar() {
       </div>
       <MenuBar />
       <div className="titlebar-drag" data-testid="titlebar-drag" onMouseDown={onDragMouseDown}>
-        <span className="titlebar-title" data-testid="titlebar-title">
-          {title ? `${title} - ` : ''}
-          <span>DntDatabase</span>
-        </span>
+        <button
+          type="button"
+          className="titlebar-search"
+          aria-label="Search tables, views, commands"
+          title="Go to object (Ctrl+P)"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={showQuickOpen}
+        >
+          <SearchIcon />
+          <span className="titlebar-search-text">Search tables, views, commands…</span>
+          <kbd className="keycap">Ctrl P</kbd>
+        </button>
       </div>
+      <LayoutButton />
+      <RightSidebarButton />
       <div className="titlebar-controls">
         <button
           type="button"

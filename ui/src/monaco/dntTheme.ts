@@ -6,7 +6,24 @@ type MonacoApi = typeof Monaco;
 
 export const monacoThemeName = (dark: boolean) => (dark ? 'dnt-dark' : 'dnt-light');
 
-/** A CSS token resolved to a color Monaco accepts (hex / rgba); `fallback` when it cannot be resolved. */
+const hex2 = (n: number) => Math.round(Math.min(255, Math.max(0, n))).toString(16).padStart(2, '0');
+
+/**
+ * A computed CSS colour as Monaco's theme format: `#rrggbb`, or `#rrggbbaa` when translucent. Monaco parses
+ * theme colours with `Color.fromHex`, which turns anything else (`rgba(…)`) into red. `null` when unparseable.
+ */
+export function toMonacoColor(css: string): string | null {
+  const v = css.trim().toLowerCase();
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v)) return v;
+  const m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+%?))?\s*\)$/.exec(v);
+  if (!m) return null;
+  const rgb = `#${hex2(Number(m[1]))}${hex2(Number(m[2]))}${hex2(Number(m[3]))}`;
+  if (m[4] === undefined) return rgb;
+  const alpha = m[4].endsWith('%') ? Number(m[4].slice(0, -1)) / 100 : Number(m[4]);
+  return alpha >= 1 ? rgb : `${rgb}${hex2(alpha * 255)}`;
+}
+
+/** A CSS token resolved to a colour Monaco accepts (see toMonacoColor); `fallback` when it cannot be resolved. */
 function token(name: string, fallback: string): string {
   try {
     const probe = document.createElement('span');
@@ -15,11 +32,7 @@ function token(name: string, fallback: string): string {
     document.body.appendChild(probe);
     const resolved = getComputedStyle(probe).color;
     probe.remove();
-    const ctx = document.createElement('canvas').getContext('2d');
-    if (!ctx || !resolved) return fallback;
-    ctx.fillStyle = '#000000';
-    ctx.fillStyle = resolved;
-    return ctx.fillStyle;
+    return toMonacoColor(resolved) ?? fallback;
   } catch {
     return fallback;
   }
@@ -31,23 +44,23 @@ function token(name: string, fallback: string): string {
  */
 export function defineDntTheme(monaco: MonacoApi, dark: boolean): void {
   const colors = () => ({
-    'editor.background': token('--studio-bg', '#ffffff'),
-    'editor.foreground': token('--studio-fg', '#1d1d1f'),
-    'editorGutter.background': token('--studio-bg', '#ffffff'),
-    'editorLineNumber.foreground': token('--studio-fg-tertiary', '#8e8e93'),
-    'editorLineNumber.activeForeground': token('--studio-fg-secondary', '#636366'),
-    'editor.selectionBackground': token('--studio-selected', '#cfe3ff'),
-    'editor.inactiveSelectionBackground': token('--studio-hover', '#e8e8ed'),
-    'editor.lineHighlightBackground': token('--studio-subtle', '#f5f5f7'),
-    'editorCursor.foreground': token('--studio-fg', '#1d1d1f'),
-    'editorWidget.background': token('--studio-popover', '#ffffff'),
-    'editorWidget.border': token('--studio-hairline', '#d2d2d7'),
-    'editorHoverWidget.background': token('--studio-popover', '#ffffff'),
-    'editorHoverWidget.border': token('--studio-hairline', '#d2d2d7'),
-    'editorSuggestWidget.background': token('--studio-popover', '#ffffff'),
-    'editorSuggestWidget.border': token('--studio-hairline', '#d2d2d7'),
-    'editorSuggestWidget.selectedBackground': token('--studio-selected', '#cfe3ff'),
-    'scrollbarSlider.background': token('--studio-hairline', '#d2d2d7'),
+    'editor.background': token('--dnt-bg-app', '#ffffff'),
+    'editor.foreground': token('--dnt-fg', '#131315'),
+    'editorGutter.background': token('--dnt-bg-app', '#ffffff'),
+    'editorLineNumber.foreground': token('--dnt-fg-subtle', '#707076'),
+    'editorLineNumber.activeForeground': token('--dnt-fg-muted', '#5a5a60'),
+    'editor.selectionBackground': token('--dnt-bg-selected', '#dce7fd'),
+    'editor.inactiveSelectionBackground': token('--dnt-bg-selected-muted', '#ebebed'),
+    'editor.lineHighlightBackground': token('--dnt-bg-sunken', '#f4f4f5'),
+    'editorCursor.foreground': token('--dnt-fg', '#131315'),
+    'editorWidget.background': token('--dnt-bg-raised', '#ffffff'),
+    'editorWidget.border': token('--dnt-border', '#dedee1'),
+    'editorHoverWidget.background': token('--dnt-bg-raised', '#ffffff'),
+    'editorHoverWidget.border': token('--dnt-border', '#dedee1'),
+    'editorSuggestWidget.background': token('--dnt-bg-raised', '#ffffff'),
+    'editorSuggestWidget.border': token('--dnt-border', '#dedee1'),
+    'editorSuggestWidget.selectedBackground': token('--dnt-bg-selected', '#dce7fd'),
+    'scrollbarSlider.background': token('--dnt-border-strong', '#c6c6ca'),
   });
   monaco.editor.defineTheme(monacoThemeName(dark), { base: dark ? 'vs-dark' : 'vs', inherit: true, rules: [], colors: colors() });
 }

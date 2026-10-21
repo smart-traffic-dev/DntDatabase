@@ -4,84 +4,48 @@ import { installRunNotifier } from './desktop/runNotifier';
 import { useEffect, type CSSProperties } from 'react';
 import { Splitter } from './components/Splitter';
 import { SIDEBAR_DEFAULT, SIDEBAR_MAX, SIDEBAR_MIN, useLayout } from './store/layout';
-import { openNewQuery } from './components/newQuery';
 import { onQueryShortcut } from './components/queryShortcuts';
 import { installCloseGuard, useQueryDocs } from './store/queryTabs';
 // Registers the run store as the close guard's transaction source (before the guard runs).
 import './store/queryRun';
 import { DialogHost } from './dialogs/DialogHost';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { RightSidebar } from './components/RightSidebar';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
-import { TabBar } from './components/TabBar';
+import { EditorArea } from './components/EditorArea';
 import { TitleBar } from './components/TitleBar';
-import { Toolbar } from './components/Toolbar';
-import { ObjectTab } from './tabs/ObjectTab';
-import { QueryTab } from './tabs/query/QueryTab';
-import { useConnections } from './store/connections';
-import { useDialogs } from './store/dialogs';
+import { persistArrangement, restoreArrangement } from './store/editorArrangement';
+import { installRunMarks } from './store/runMarks';
 import { useTabs } from './store/tabs';
 import { useTree } from './store/tree';
 
-/** Nothing open: a first-start call to action, else the keys that get a user going. */
-export function EmptyWorkspace() {
-  const hasConnections = useConnections((s) => s.summaries.size > 0);
-  const requestDialog = useDialogs((s) => s.requestDialog);
-  if (!hasConnections) {
-    return (
-      <div className="empty" data-testid="workspace-empty">
-        <strong>No connections yet</strong>
-        <span>Add a connection to start browsing and querying.</span>
-        <button type="button" className="btn primary" onClick={() => requestDialog({ kind: 'newConnection' })}>
-          New connection
-        </button>
-      </div>
-    );
-  }
-  return (
-    <div className="empty" data-testid="workspace-empty">
-      <strong>No tab open</strong>
-      <span>Double-click a table or view in the connection tree to open it.</span>
-      <span>
-        <kbd>Ctrl+T</kbd> opens a new query; <kbd>Ctrl+Enter</kbd> runs the statement at the cursor.
-      </span>
-      <button type="button" className="btn" onClick={() => openNewQuery()}>
-        New query
-      </button>
-    </div>
-  );
-}
-
-function Workspace() {
-  const tab = useTabs((s) => s.tabs.find((t) => t.id === s.activeId));
-  return (
-    <main className="workspace">
-      <TabBar />
-      <section className="tab-content" id="tab-content" aria-label="Tab content">
-        {tab?.kind === 'object' ? (
-          <ObjectTab key={tab.id} tab={tab} />
-        ) : tab?.kind === 'query' ? (
-          <QueryTab key={tab.id} tab={tab} />
-        ) : (
-          <EmptyWorkspace />
-        )}
-      </section>
-    </main>
-  );
-}
+export { EmptyWorkspace } from './components/EmptyWorkspace';
 
 export default function App() {
   const sidebarWidth = useLayout((s) => s.sidebarWidth);
   const sidebarVisible = useLayout((s) => s.sidebarVisible);
   const setSidebarWidth = useLayout((s) => s.setSidebarWidth);
   useEffect(() => {
+    let live = true;
+    let stopPersist = () => {};
     void (async () => {
       await useTree.getState().reloadStored();
       // After the connections are known, so a tab bound to a deleted one comes back unbound.
       // A tree that failed to load leaves them unknown: then every binding is kept.
       await useQueryDocs.getState().restore({ connectionsKnown: !useTree.getState().error });
+      // The editor groups go back around the reopened tabs; only then are changes saved again.
+      restoreArrangement();
+      if (live) stopPersist = persistArrangement();
     })();
+    return () => {
+      live = false;
+      stopPersist();
+    };
   }, []);
+
+  // Result marks on query tabs whose run ended out of sight.
+  useEffect(() => installRunMarks(), []);
 
   useEffect(() => {
     // Capture: the shortcuts work inside the editor too.
@@ -126,7 +90,6 @@ export default function App() {
   return (
     <div className="app" style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
       <TitleBar />
-      <Toolbar />
       <div className="body">
         {sidebarVisible && (
           <>
@@ -145,8 +108,9 @@ export default function App() {
           </>
         )}
         <ErrorBoundary label="Workspace">
-          <Workspace />
+          <EditorArea />
         </ErrorBoundary>
+        <RightSidebar />
       </div>
       <StatusBar />
       <CommandPalette />

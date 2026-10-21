@@ -18,6 +18,7 @@
         "minWidth": 1024,
         "minHeight": 640,
         "decorations": false,
+        "dragDropEnabled": false,
         "shadow": true,
         "zoomHotkeysEnabled": false,
         "browserExtensionsEnabled": false,

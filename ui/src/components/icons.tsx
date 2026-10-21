@@ -124,7 +124,153 @@ export const PinIcon = () => (
 /** Function / procedure glyph for the quick-open list. */
 export const FunctionIcon = () => (
   <Icon>
-    <path d={TOOL_PATHS.fn} />
+    <path d="M9 4c-2 0-3 1-3 3v10c0 2-1 3-3 3M3 11h8M14 8l6 8M20 8l-6 8" />
+  </Icon>
+);
+
+export const SearchIcon = () => (
+  <Icon size={13} strokeWidth={2}>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="M16 16l4.5 4.5" />
+  </Icon>
+);
+
+/** Three dots: overflow menus. */
+export const MoreIcon = () => (
+  <Icon size={14} strokeWidth={2.4}>
+    <path d="M5 12h.01M12 12h.01M19 12h.01" />
+  </Icon>
+);
+
+/** Snippet / code glyph: Manage snippets. */
+export const SnippetIcon = () => (
+  <Icon size={14}>
+    <path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" />
+  </Icon>
+);
+
+/** Gear-and-arrow: stored procedures. */
+export const ProcedureIcon = () => (
+  <Icon>
+    <path d="M5 5h9l5 5v9H5zM9 12l2.5 2.5L9 17M13 17h3" />
+  </Icon>
+);
+
+/** Lightning bolt: triggers. */
+export const TriggerIcon = () => (
+  <Icon>
+    <path d="M13 3L5 14h6l-1 7 8-11h-6z" />
+  </Icon>
+);
+
+/** Clock: scheduled events. */
+export const EventIcon = () => (
+  <Icon>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M12 8v4l3 2" />
+  </Icon>
+);
+
+/** The editor layout as a small diagram: one pane, two columns, two rows or a 2 × 2 grid. */
+export const LayoutIcon = ({ layout }: { layout: 'single' | 'columns' | 'rows' | 'grid' | 'custom' }) => (
+  <Icon size={14}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    {(layout === 'columns' || layout === 'grid' || layout === 'custom') && <path d="M12 4v16" />}
+    {(layout === 'rows' || layout === 'grid') && <path d="M3 12h18" />}
+    {layout === 'custom' && <path d="M12 12h9" />}
+  </Icon>
+);
+
+/** Triangle: Run. */
+export const PlayIcon = () => (
+  <Icon size={12} strokeWidth={2}>
+    <path d="M7 5l12 7-12 7z" fill="currentColor" />
+  </Icon>
+);
+
+/** Square: Stop. */
+export const StopIcon = () => (
+  <Icon size={12} strokeWidth={2}>
+    <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" />
+  </Icon>
+);
+
+/** Two linked boxes: Explain (the query plan). */
+export const ExplainIcon = () => (
+  <Icon size={14} strokeWidth={1.8}>
+    <path d="M4 4h6v6H4zM14 14h6v6h-6zM7 10v7h7" />
+  </Icon>
+);
+
+/** Arrow turning back: Rollback. */
+export const RollbackIcon = () => (
+  <Icon size={14} strokeWidth={1.9}>
+    <path d="M8 6l-4 4 4 4M4 10h10a5 5 0 010 10H9" />
+  </Icon>
+);
+
+/** Circular arrow: Refresh. */
+export const RefreshIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7" />
+  </Icon>
+);
+
+/** Pager arrows: previous / next page. */
+export const PrevIcon = () => (
+  <Icon size={14} strokeWidth={2.2}>
+    <path d="M15 6l-6 6 6 6" />
+  </Icon>
+);
+
+export const NextIcon = () => (
+  <Icon size={14} strokeWidth={2.2}>
+    <path d="M9 6l6 6-6 6" />
+  </Icon>
+);
+
+/** Funnel: the data filter bar. */
+export const FilterIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <path d="M4 5h16l-6 7.5V19l-4-2v-4.5z" />
+  </Icon>
+);
+
+/** Check mark: success (test connected, success toast). */
+export const CheckIcon = () => (
+  <Icon size={14} strokeWidth={2.2}>
+    <path d="M5 12.5l4.5 4.5L19 7.5" />
+  </Icon>
+);
+
+/** Circled exclamation: failures (test failed, error toast). */
+export const ErrorIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7.5v5.5M12 16.5h.01" />
+  </Icon>
+);
+
+/** Circled i: information toast. */
+export const InfoIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 11v5.5M12 7.5h.01" />
+  </Icon>
+);
+
+/** Triangle with exclamation: warning toast. */
+export const WarningIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <path d="M12 3.5l9.5 16.5h-19z" />
+    <path d="M12 10v4.5M12 17.5h.01" />
+  </Icon>
+);
+
+/** Arrows pointing inwards: restore a maximized group. */
+export const RestoreIcon = () => (
+  <Icon size={13}>
+    <path d="M9 3v6H3M15 21v-6h6M3 9l6-6M21 15l-6 6" />
   </Icon>
 );
 
@@ -134,21 +280,53 @@ export const CloseIcon = () => (
   </Icon>
 );
 
-/** Toolbar glyphs: stroke paths of the canvas. */
-export const TOOL_PATHS = {
-  connection: 'M10 14a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1M14 10a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1',
-  query: 'M4 4h16v16H4zM8 9l3 3-3 3M13 15h3',
-  table: 'M3 4h18v16H3zM3 10h18M9 10v10',
-  view: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 100 6 3 3 0 000-6z',
-  fn: 'M9 4c-2 0-3 1-3 3v10c0 2-1 3-3 3M3 11h8M14 8l6 8M20 8l-6 8',
-  io: 'M12 3v12M7 10l5 5 5-5M4 19h16',
-  backup: 'M4 7h16v13H4zM4 7l2-3h12l2 3M10 12h4',
-  erd: 'M3 4h7v6H3zM14 14h7v6h-7zM6.5 10v4a2 2 0 002 2H14',
-  compare: 'M8 3v18M16 3v18M4 7h4M16 17h4M4 12h16',
-} as const;
-
-export const ToolIcon = ({ path }: { path: string }) => (
+/** Clock with a return arrow: History. */
+export const HistoryIcon = () => (
   <Icon size={18}>
-    <path d={path} />
+    <path d="M3.5 12a8.5 8.5 0 102.6-6.1M3.5 4.5v4h4M12 8v4.5l3 1.8" />
+  </Icon>
+);
+
+/** Code braces: Snippets. */
+export const SnippetsIcon = () => (
+  <Icon size={18}>
+    <path d="M9 4C6.5 4 6.5 6 6.5 8s0 4-2.5 4c2.5 0 2.5 2 2.5 4s0 4 2.5 4M15 4c2.5 0 2.5 2 2.5 4s0 4 2.5 4c-2.5 0-2.5 2-2.5 4s0 4-2.5 4" />
+  </Icon>
+);
+
+/** Table with a header row: Object info. */
+export const ObjectInfoIcon = () => (
+  <Icon size={18}>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <path d="M4 9.5h16M10 9.5V20" />
+  </Icon>
+);
+
+/** Sparkles: AI assistant. */
+export const AssistantIcon = () => (
+  <Icon size={18}>
+    <path d="M10 4l1.8 4.7L16.5 10.5l-4.7 1.8L10 17l-1.8-4.7L3.5 10.5l4.7-1.8zM18 14l.9 2.1L21 17l-2.1.9L18 20l-.9-2.1L15 17l2.1-.9z" />
+  </Icon>
+);
+
+/** Arrows apart / together: maximize and restore the results. */
+export const MaximizeResultsIcon = ({ restore }: { restore: boolean }) => (
+  <Icon size={14} strokeWidth={2}>
+    {restore ? <path d="M5 10h5V5M19 14h-5v5M10 10L4 4M14 14l6 6" /> : <path d="M4 10V4h6M20 14v6h-6M4 4l6 6M20 20l-6-6" />}
+  </Icon>
+);
+
+/** Trash can: clear history. */
+export const TrashIcon = () => (
+  <Icon size={14} strokeWidth={1.8}>
+    <path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l.9 12.5h9.2L17.5 7" />
+  </Icon>
+);
+
+/** Window with a panel on the right: the right sidebar toggle. */
+export const RightSidebarIcon = () => (
+  <Icon size={14}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M15 4v16" />
   </Icon>
 );

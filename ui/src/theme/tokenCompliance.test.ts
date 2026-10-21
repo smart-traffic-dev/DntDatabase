@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 
 const sheets = import.meta.glob('../**/*.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
@@ -41,6 +41,111 @@ describe('design token compliance', () => {
     expect(offending).toEqual([]);
   });
 
+  /** Every `selector { body }` rule (top level or inside an at-rule) of a stylesheet. */
+  const rules = (css: string) =>
+    [...strip(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: (m[1] ?? '').trim(), body: m[2] ?? '' }));
+
+  it('disabled is never opacity', () => {
+    const offending: string[] = [];
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) {
+        if (r.selector.includes(':disabled') && !r.selector.includes(':not(:disabled)') && /(^|[;\s])opacity\s*:/.test(r.body)) {
+          offending.push(`${file}: ${r.selector}`);
+        }
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
+  // Buttons only: disabled form fields (dialogs.css) are restyled with the dialog frame (phase 6).
+  it('a disabled button is coloured fg-disabled', () => {
+    const offending: string[] = [];
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) {
+        if (!r.selector.includes(':disabled') || r.selector.includes(':not(:disabled)') || !/btn|button/.test(r.selector)) continue;
+        for (const d of declarations(r.body)) {
+          if (/^color\s*:/.test(d) && !/var\(--dnt-fg-disabled\)/.test(d)) offending.push(`${file}: ${r.selector}: ${d}`);
+        }
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
+  it('focus is at most 1px and never a ring', () => {
+    const offending: string[] = [];
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) {
+        for (const d of declarations(r.body)) {
+          const outline = /^outline\s*:\s*(\d+(?:\.\d+)?)px/.exec(d);
+          if (outline && Number(outline[1]) > 1) offending.push(`${file}: ${r.selector}: ${d}`);
+          if (r.selector.includes(':focus') && /^box-shadow\s*:/.test(d) && !/^box-shadow\s*:\s*none$/.test(d)) {
+            offending.push(`${file}: ${r.selector}: ${d}`);
+          }
+        }
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
+  it('focus is visible on rows and menu items', () => {
+    const theme = sheets['../theme.css'] ?? '';
+    expect(theme.length).toBeGreaterThan(1000);
+    const forSelector = (sel: string) => rules(theme).filter((r) => r.selector.split(',').map((s) => s.trim()).includes(sel));
+    for (const sel of ["[role='menuitem']:focus-visible", "[role='option']:focus-visible"]) {
+      const matched = forSelector(sel);
+      expect(matched.some((r) => /outline\s*:\s*1px solid var\(--dnt-focus\)/.test(r.body)), sel).toBe(true);
+      expect(matched.some((r) => /outline\s*:\s*none/.test(r.body)), sel).toBe(false);
+    }
+  });
+
+  // #2563d9 on the selection fill is 4.36:1, under AA for the small labels that sit on it.
+  it('accent text on the selection fill uses the darker accent-hover', () => {
+    const offending: string[] = [];
+    const selFill = /background(-color)?\s*:\s*var\(--dnt-bg-selected\)/;
+    const accentText = /(^|[;\s])color\s*:\s*var\(--dnt-accent\)/;
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) if (selFill.test(r.body) && accentText.test(r.body)) offending.push(`${file}: ${r.selector}`);
+    }
+    const palette = sheets['../components/palette.css'] ?? '';
+    for (const r of rules(palette)) {
+      if (r.selector.includes('.active') && r.selector.includes('.palette-match') && !/var\(--dnt-accent-hover\)/.test(r.body)) {
+        offending.push(`palette.css: ${r.selector}`);
+      }
+    }
+    if (!rules(palette).some((r) => r.selector.includes('.active') && r.selector.includes('.palette-match'))) {
+      offending.push('palette.css: no rule for .palette-row.active .palette-match');
+    }
+    expect(offending).toEqual([]);
+  });
+
+  it('no legacy token names', () => {
+    // Exact legacy names; the app-level values kept on purpose (--font-*, --sidebar-width, --titlebar-close-*) are not listed.
+    const legacy = new Set(
+      ('--bg --bg-panel --bg-elevated --bg-hover --text --text-secondary --text-faint --border --accent --accent-soft --accent-fg ' +
+        '--accent-hover --danger --danger-fg --danger-fill --danger-border --code-bg --panel --sidebar --muted --sel --hover --tabstrip --icon ' +
+        '--production --production-bg --production-fg --warning-bg --warning-fg --current-stmt-bg --shadow-popover ' +
+        '--radius-sm --radius-md --radius-lg --radius-xl --text-caption --text-footnote --text-callout --text-body --text-headline ' +
+        '--text-title --text-large-title').split(' '),
+    );
+    const isLegacy = (n: string) =>
+      legacy.has(n) || /^--(studio|color)-/.test(n) || /^--text-[\w-]+--line-height$/.test(n);
+    const sources = import.meta.glob(['../**/*.ts', '../**/*.tsx', '!../**/*.test.*'], {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(20);
+    const offending: string[] = [];
+    // The token files are scanned too: the alias definitions must be gone, not just their uses.
+    for (const [file, raw] of [...Object.entries(sheets), ...Object.entries(sources)]) {
+      for (const line of strip(raw).split('\n')) {
+        const names = line.match(/--[a-z][\w-]*/g) ?? [];
+        for (const n of names) if (isLegacy(n)) offending.push(`${file}: ${n}`);
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
   it('font-size, font-family, radius and shadow use tokens', () => {
     const offending: string[] = [];
     for (const [file, raw] of appSheets()) {
@@ -55,3 +160,4 @@ describe('design token compliance', () => {
     expect(offending).toEqual([]);
   });
 });
+

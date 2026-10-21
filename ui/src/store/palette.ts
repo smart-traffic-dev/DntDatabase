@@ -1,21 +1,23 @@
 import { create } from 'zustand';
 
-/** The command palette / quick open overlay: one input; a leading `>` means commands. */
+export type PaletteMode = 'commands' | 'objects';
+
+/** The command palette / quick open overlay: one input, the mode shown as a chip. */
 interface PaletteState {
   open: boolean;
-  /** The input's first text: `>` (commands, Ctrl+Shift+P) or empty (objects, Ctrl+P). */
-  initial: string;
+  /** The mode it opens in: commands (Ctrl+Shift+P) or objects (Ctrl+P). */
+  mode: PaletteMode;
   /** Bumped by every `show`, so a second Ctrl+P starts over with a fresh input. */
   nonce: number;
-  show(mode: 'commands' | 'objects'): void;
+  show(mode: PaletteMode): void;
   hide(): void;
 }
 
 export const usePalette = create<PaletteState>()((set) => ({
   open: false,
-  initial: '',
+  mode: 'objects',
   nonce: 0,
-  show: (mode) => set((s) => ({ open: true, initial: mode === 'commands' ? '>' : '', nonce: s.nonce + 1 })),
+  show: (mode) => set((s) => ({ open: true, mode, nonce: s.nonce + 1 })),
   hide: () => set({ open: false }),
 }));
 

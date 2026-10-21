@@ -1,33 +1,5 @@
-/*
- * App aliases over the dnt-note tokens in ui/src/theme/tokens.css.
- * `--bg`, `--text`, `--border`, `--accent`, `--danger` come from the token file's
- * legacy aliases; the rest are DntDatabase-specific names for the same values.
- */
+/* App-level values with no --dnt- token (code font, title bar close button); the rest is in theme/tokens.css. */
 :root {
-  --panel: var(--studio-bg);
-  --sidebar: var(--studio-sidebar);
-  --muted: var(--studio-fg-secondary);
-  --sel: var(--studio-selected);
-  --hover: var(--studio-hover);
-  --tabstrip: var(--studio-sidebar);
-  --icon: var(--studio-fg-secondary);
-  --accent-fg: var(--studio-accent-fg);
-  --accent-hover: var(--studio-accent-hover);
-  --danger-fill: var(--studio-danger-fill);
-  --danger-border: var(--studio-danger-border);
-  --production: var(--studio-danger);
-  --production-bg: var(--studio-danger-fill);
-  /*
-   * Text-safe red: the token danger (#d7373f on #fdeeee = 4.1:1, dark #e5484d on #3a2224 = 3.7:1)
-   * fails WCAG AA at 11-12 px. These give 5.8:1 (light) / 5.9:1 (dark) on the danger fill.
-   * `--production` stays for borders and stripes.
-   */
-  --danger-fg: #b42318;
-  --production-fg: var(--danger-fg);
-  /* P2 query editor (not in the dnt-note tokens): warning and current-statement colours. */
-  --warning-bg: #fff4d6;
-  --warning-fg: #7a4b00;
-  --current-stmt-bg: color-mix(in srgb, var(--studio-fg) 6%, transparent);
   /*
    * Code font for every mono surface (editor, suggest list, grid, DDL, messages, history).
    * The token's stack starts with `ui-monospace` (Safari only) then 'Cascadia Code', whose
@@ -44,9 +16,6 @@
 .dark {
   --titlebar-close-bg: #c42b1c;
   --titlebar-close-bg-pressed: #b2382f;
-  --danger-fg: #ff7b7f;
-  --warning-bg: #3a3020;
-  --warning-fg: #f0c674;
 }
 
 * {
@@ -62,10 +31,10 @@ body,
 
 body {
   font-family: var(--font-sans);
-  font-size: var(--text-body);
-  line-height: var(--text-body--line-height);
-  color: var(--text);
-  background: var(--bg);
+  font-size: var(--dnt-text-md);
+  line-height: var(--dnt-text-md-lh);
+  color: var(--dnt-fg);
+  background: var(--dnt-bg-app);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow: hidden;
@@ -81,11 +50,38 @@ button:disabled {
   cursor: default;
 }
 
-/* The token base rules remove the focus ring on text fields; show focus on the border instead. */
-input:focus,
-select:focus,
-textarea:focus {
-  border-color: var(--studio-fg-tertiary);
+/*
+ * Keyboard focus (spec §2.3): never a ring, glow or thick outline. Everything gets a 1px inset accent
+ * outline; text fields show focus by turning their own 1px border accent instead.
+ */
+:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+[role='menuitem']:focus-visible,
+[role='menuitemradio']:focus-visible,
+[role='option']:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+/*
+ * !important: component rules (`.field input`, `.sidebar-head input`, …) restate the whole `border` and come
+ * later or with higher specificity; focus must win over all of them.
+ */
+:is(input, select, textarea, [contenteditable='true']):focus {
+  border-color: var(--dnt-focus) !important;
+}
+
+/* Checkboxes and radios have no border to colour: they keep the outline. */
+input:not([type='checkbox'], [type='radio']):focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[contenteditable='true']:focus-visible,
+.monaco-editor :focus-visible,
+.cm-editor :focus-visible {
+  outline: none;
 }
 
 .app {
@@ -93,54 +89,17 @@ textarea:focus {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg);
-  color: var(--text);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
   /* The shell is dense: use the reference's control text size, not the body size. */
-  font-size: var(--text-callout);
-  line-height: var(--text-callout--line-height);
+  font-size: var(--dnt-text-base);
+  line-height: var(--dnt-text-base-lh);
 }
 
 .body {
   flex: 1;
   min-height: 0;
   display: flex;
-}
-
-/* Toolbar */
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-
-.tool {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  min-width: 64px;
-  min-height: 44px;
-  padding: 4px 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  font-size: var(--text-footnote);
-}
-
-.tool svg {
-  color: var(--icon);
-}
-
-.tool:hover:not(:disabled) {
-  background: var(--hover);
-}
-
-.tool:disabled {
-  opacity: 0.4;
 }
 
 /* Sidebar */
@@ -151,47 +110,99 @@ textarea:focus {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  background: var(--sidebar);
-  border-right: 1px solid var(--border);
+  background: var(--dnt-bg-chrome);
+  border-right: 1px solid var(--dnt-border);
+}
+
+/* Header row: Objects | Favorites, New connection, options. */
+.sidebar-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-2) var(--dnt-space-2) 0;
+}
+
+.segmented {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  padding: 2px;
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+}
+
+.segment {
+  flex: 1;
+  min-width: 0;
+  height: calc(var(--dnt-ctl-h-sm) - 4px);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-xs);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+  font: inherit;
+  font-size: var(--dnt-text-sm);
+}
+
+.segment:hover:not(.on) {
+  color: var(--dnt-fg);
+}
+
+.segment.on {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-bg-raised);
+  color: var(--dnt-fg);
+  font-weight: 600;
 }
 
 .sidebar-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-2);
 }
 
 .sidebar-head input {
   flex: 1;
   min-width: 0;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
   font: inherit;
 }
 
+/* Icon-only button: borderless until hovered. */
 .icon-btn {
-  width: 30px;
-  height: 30px;
+  width: var(--dnt-ctl-h-sm);
+  height: var(--dnt-ctl-h-sm);
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
-  color: var(--icon);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.sidebar-head .icon-btn {
+  width: var(--dnt-ctl-h-md);
+  height: var(--dnt-ctl-h-md);
 }
 
 .icon-btn.on {
-  background: var(--sel);
-  border-color: var(--accent);
-  color: var(--accent);
+  background: var(--dnt-bg-selected);
+  border-color: var(--dnt-accent);
+  color: var(--dnt-accent-hover);
 }
 
 .banner {
@@ -200,13 +211,13 @@ textarea:focus {
   gap: 8px;
   margin: 0 8px 6px;
   padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-footnote);
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-sm);
 }
 
 .banner.error {
-  background: var(--danger-fill);
-  color: var(--danger-fg);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .banner span {
@@ -228,7 +239,7 @@ textarea:focus {
 }
 
 .tree:focus-visible .tree-row.selected {
-  outline: 1px solid var(--studio-fg-tertiary);
+  outline: 1px solid var(--dnt-focus);
   outline-offset: -1px;
 }
 
@@ -238,40 +249,29 @@ textarea:focus {
   gap: 6px;
   height: 26px;
   padding-right: 8px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   white-space: nowrap;
   user-select: none;
 }
 
 .tree-row:hover {
-  background: var(--studio-hover);
+  background: var(--dnt-bg-hover);
 }
 
+/* Selection is blue while the tree has focus, grey otherwise (spec §2.3). */
 .tree-row.selected {
-  background: var(--sel);
+  background: var(--dnt-bg-selected-muted);
+}
+
+.tree:focus-within .tree-row.selected {
+  background: var(--dnt-bg-selected);
 }
 
 .tree-row.drop-target {
-  outline: 1px dashed var(--studio-fg-tertiary);
+  outline: 1px dashed var(--dnt-fg-subtle);
   outline-offset: -1px;
 }
 
-/* Keyboard focus: one thin token ring everywhere (the token base rule is a 2px ring). */
-:focus-visible {
-  outline: 1px solid var(--studio-fg-tertiary);
-  outline-offset: -1px;
-}
-
-input:focus-visible,
-textarea:focus-visible,
-.cm-editor :focus-visible,
-[contenteditable='true']:focus-visible,
-[role='menuitem']:focus-visible,
-[role='menuitemradio']:focus-visible,
-[role='option']:focus-visible,
-.tree:focus-visible {
-  outline: none;
-}
 
 .tree-row.kind-group .label {
   font-weight: 600;
@@ -279,7 +279,7 @@ textarea:focus-visible,
 
 .tree-row svg {
   flex: none;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .tree-row .label {
@@ -288,7 +288,7 @@ textarea:focus-visible,
 }
 
 .label.env-production {
-  color: var(--production-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .chev {
@@ -296,7 +296,7 @@ textarea:focus-visible,
   flex: none;
   display: inline-flex;
   justify-content: center;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .chev-icon {
@@ -311,21 +311,21 @@ textarea:focus-visible,
 .chip {
   flex: none;
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
   font-weight: 500;
   padding: 1px 4px;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
-  background: var(--studio-subtle);
-  color: var(--studio-fg-secondary);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
 }
 
 /* The reference palette is monochrome: engines differ by label, not by hue. */
 .chip-MY,
 .chip-PG,
 .chip-MA {
-  background: var(--studio-subtle);
-  color: var(--studio-fg-secondary);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
 }
 
 .env-tag {
@@ -336,20 +336,20 @@ textarea:focus-visible,
   min-width: 15px;
   height: 15px;
   padding: 0 3px;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
-  background: var(--studio-subtle);
-  color: var(--studio-fg-secondary);
-  font-size: var(--text-caption);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
   font-weight: 600;
   line-height: 1;
 }
 
 /* Production is the only environment with a colour; S/L stay neutral and carry a letter. */
 .env-tag.env-production {
-  background: var(--studio-danger-fill);
-  border-color: var(--studio-danger-border);
-  color: var(--production-fg);
+  background: var(--dnt-status-danger-bg);
+  border-color: var(--dnt-status-danger-border);
+  color: var(--dnt-status-danger-fg);
 }
 
 /* The spelled-out chip of dialog headers (F50): same colours, room for the name. */
@@ -363,35 +363,35 @@ textarea:focus-visible,
 
 .env-tag.env-staging,
 .env-tag.env-local {
-  color: var(--studio-fg-secondary);
+  color: var(--dnt-fg-muted);
 }
 
 .ssh-tag {
   flex: none;
-  font-size: var(--text-caption);
-  color: var(--muted);
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
   padding: 0 3px;
 }
 
 .meta {
   margin-left: auto;
   flex: none;
-  color: var(--muted);
-  font-size: var(--text-caption);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
 }
 
 .muted {
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .placeholder {
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .placeholder.error {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .error-text {
@@ -404,8 +404,8 @@ textarea:focus-visible,
   width: 10px;
   height: 10px;
   margin-left: auto;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
+  border: 2px solid var(--dnt-border);
+  border-top-color: var(--dnt-accent);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -419,30 +419,30 @@ textarea:focus-visible,
 .btn {
   height: 30px;
   padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
 }
 
 .btn:hover:not(:disabled) {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .btn.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-fg);
+  background: var(--dnt-accent);
+  border-color: var(--dnt-accent);
+  color: var(--dnt-on-accent);
 }
 
 .btn.primary:hover:not(:disabled) {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
+  background: var(--dnt-accent-hover);
+  border-color: var(--dnt-accent-hover);
 }
 
 .btn.small {
   height: 20px;
   padding: 0 8px;
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
   flex: none;
 }
 
@@ -452,11 +452,11 @@ textarea:focus-visible,
   z-index: 50;
   min-width: 180px;
   padding: 4px;
-  background: var(--studio-popover);
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-popover);
-  font-size: var(--text-callout);
+  background: var(--dnt-bg-raised);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  box-shadow: var(--dnt-shadow-2);
+  font-size: var(--dnt-text-base);
 }
 
 .context-menu button {
@@ -466,19 +466,18 @@ textarea:focus-visible,
   gap: 16px;
   padding: 5px 10px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
   text-align: left;
 }
 
 .context-menu button:hover:not(:disabled),
 .context-menu button:focus-visible {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .context-menu button:disabled {
-  color: var(--muted);
-  opacity: 0.5;
+  color: var(--dnt-fg-disabled);
 }
 
 .context-menu .menu-label {
@@ -495,13 +494,13 @@ textarea:focus-visible,
 }
 
 .context-menu button.danger {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .context-menu kbd {
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
 }
 
 /* Tabs and workspace */
@@ -515,66 +514,248 @@ textarea:focus-visible,
 
 .tabstrip {
   display: flex;
-  align-items: flex-end;
-  min-height: 39px;
-  background: var(--tabstrip);
-  border-bottom: 1px solid var(--border);
+  align-items: stretch;
+  height: var(--dnt-tab-h);
+  background: var(--dnt-bg-chrome);
+  border-bottom: 1px solid var(--dnt-border-subtle);
 }
 
-/* Scrolls sideways inside itself; the scrollbar is hidden so it cannot shift the layout. */
-.tabbar {
+/* Editor groups (editor v2 §1): a split tree of flex rows / columns; splitters draw the 1px lines. */
+.editor-split,
+.editor-cell,
+.editor-group {
+  display: flex;
   flex: 1;
   min-width: 0;
+  min-height: 0;
+}
+
+.editor-split.col,
+.editor-group {
+  flex-direction: column;
+}
+
+.editor-group .tab-content {
+  position: relative;
+}
+
+/* Other groups' active tabs stay readable but step back. */
+.tabstrip.unfocused .tab.active {
+  color: var(--dnt-fg-muted);
+  font-weight: 400;
+}
+
+/* While something is dragged: a layer above the editor and the grid takes the drop. */
+.drop-layer {
+  position: absolute;
+  inset: 0;
+  z-index: var(--dnt-z-sticky);
+}
+
+/* Where the drop will land: the whole pane (move) or the half that becomes the new group. */
+.drop-zone {
+  position: absolute;
+  inset: 0;
   display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  padding: 6px 8px 0;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--dnt-accent);
+  background: var(--dnt-accent-subtle);
+  pointer-events: none;
+}
+
+.drop-zone.zone-left {
+  right: 50%;
+}
+
+.drop-zone.zone-right {
+  left: 50%;
+}
+
+.drop-zone.zone-up {
+  bottom: 50%;
+}
+
+.drop-zone.zone-down {
+  top: 50%;
+}
+
+.drop-label {
+  padding: 2px var(--dnt-space-2);
+  border: 1px solid var(--dnt-accent);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-raised);
+  color: var(--dnt-accent-hover);
+  font-size: var(--dnt-text-sm);
+  font-weight: 600;
+}
+
+/* Where a dragged tab lands in a strip: a 2px accent bar between two tabs. */
+.tab-insert {
+  flex: none;
+  width: 0;
+  position: relative;
+}
+
+.tab-insert::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: -1px;
+  width: 2px;
+  background: var(--dnt-accent);
+}
+
+/* Run state on a tab: spinner while running, a dot when a run ended out of sight. */
+.tab-run {
+  display: inline-flex;
+}
+
+.tab-mark {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.tab-mark.ok {
+  background: var(--dnt-status-success-solid);
+}
+
+.tab-mark.error {
+  background: var(--dnt-status-danger-solid);
+}
+
+.tab-maximized {
+  flex: none;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  margin-right: var(--dnt-space-1);
+  color: var(--dnt-accent-hover);
+  font-size: var(--dnt-text-xs);
+}
+
+/* A preview tab: the next preview opened in its group replaces it. */
+.tab.preview .tab-title {
+  font-style: italic;
+}
+
+/*
+ * Scrolls sideways inside itself. A 3px scrollbar is always reserved (so it never shifts the
+ * layout) and only painted while the pointer is over the strip, as in VS Code.
+ */
+.tabbar {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: none;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.tabbar:hover {
+  scrollbar-color: var(--dnt-border-strong) transparent;
+}
+
+/* New query: right after the last tab. */
+.tab-new {
+  flex: none;
+  align-self: center;
+  margin: 0 var(--dnt-space-1);
+}
+
+.tabstrip-fill {
+  flex: 1;
 }
 
 .tabbar::-webkit-scrollbar {
-  display: none;
+  height: 3px;
+}
+
+.tabbar::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.tabbar:hover::-webkit-scrollbar-thumb {
+  background: var(--dnt-border-strong);
 }
 
 .tab-overflow {
   flex: none;
-  width: 28px;
-  height: 32px;
+  align-self: center;
+  width: var(--dnt-ctl-h-sm);
+  height: var(--dnt-ctl-h-sm);
+  margin-right: var(--dnt-space-1);
   display: flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .tab-overflow:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
+
+/* Flat tabs: hairline separators, the active one takes the editor's surface. No top bar, no rounding. */
 .tab {
   flex: none;
+  /* Never squeezed to a stub: a full strip scrolls instead. */
+  min-width: 80px;
   max-width: 260px;
   display: flex;
   align-items: center;
-  height: 32px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-right: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-fg-muted);
   white-space: nowrap;
 }
 
+.tab:hover:not(.active) {
+  background: var(--dnt-bg-hover);
+}
+
 .tab.active {
-  background: var(--panel);
-  border-color: var(--border);
+  /* Covers the strip's bottom hairline so the tab joins its content. */
+  margin-bottom: -1px;
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
   font-weight: 500;
+}
+
+/* The close button shows on the active tab and on hover (and stays reachable by keyboard). */
+.tab:not(.active):not(.dirty):not(:hover):not(:focus-within) .tab-close {
+  visibility: hidden;
+}
+
+/* While dragging, the tab the drop lands next to is outlined. */
+.tab.drop-target {
+  outline: 1px solid var(--dnt-accent);
+  outline-offset: -1px;
+}
+
+/* Unsaved: the close button shows a dot, and its × only on hover (VS Code). */
+.tab-close-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--dnt-fg-muted);
+}
+
+.tab.dirty .tab-close:not(:hover) svg,
+.tab-close:hover .tab-close-dot {
+  display: none;
 }
 
 /* Production is identified by the red title and the P tag, not by a stripe. */
 .tab.env-production .tab-title {
-  color: var(--production-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .tab-label {
@@ -589,8 +770,8 @@ textarea:focus-visible,
 
 .tab-kind {
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
 }
 
 .tab-title {
@@ -599,14 +780,24 @@ textarea:focus-visible,
 }
 
 .tab-dirty {
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
+}
+
+/* Read by screen readers, not shown. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .tab-ro,
 .tab-pin {
   display: inline-flex;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 /* Open transaction: a warning-coloured dot. */
@@ -615,31 +806,32 @@ textarea:focus-visible,
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--warning-fg);
+  background: var(--dnt-status-warning-fg);
 }
 
 .tab-close {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  margin-right: 4px;
+  width: 20px;
+  height: 20px;
+  margin-right: var(--dnt-space-1);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-xs);
   background: transparent;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .tab-close:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-active);
+  color: var(--dnt-fg);
 }
 
 .tab-content {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  background: var(--studio-bg);
+  background: var(--dnt-bg-app);
 }
 
 .empty {
@@ -649,23 +841,23 @@ textarea:focus-visible,
   align-items: center;
   justify-content: center;
   gap: 4px;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .empty strong {
-  color: var(--text);
-  font-size: var(--text-body);
-  line-height: var(--text-body--line-height);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-md);
+  line-height: var(--dnt-text-md-lh);
   font-weight: 600;
 }
 
 .error-fallback {
   margin: 16px;
   padding: 12px 16px;
-  border: 1px solid var(--danger-border);
-  border-radius: var(--radius-md);
-  background: var(--danger-fill);
-  color: var(--danger-fg);
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .error-fallback p {
@@ -676,12 +868,13 @@ textarea:focus-visible,
 .statusbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 4px 12px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: var(--text-footnote);
+  gap: var(--dnt-space-4);
+  height: var(--dnt-statusbar-h);
+  padding: 0 var(--dnt-space-3) 0 0;
+  background: var(--dnt-bg-chrome);
+  border-top: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -690,9 +883,38 @@ textarea:focus-visible,
   flex: none;
 }
 
-.statusbar.env-production {
-  background: var(--production-bg);
-  color: var(--production-fg);
+/* No env segment: the first item keeps the bar's left padding. */
+.statusbar > :first-child:not(.status-env) {
+  margin-left: var(--dnt-space-3);
+}
+
+/* Environment segment: a solid block at the left end instead of a wash over the whole bar. */
+.status-env {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--dnt-space-3);
+  color: var(--dnt-on-accent);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.status-env.env-production {
+  background: var(--dnt-env-prod);
+}
+
+.status-env.env-staging {
+  background: var(--dnt-env-staging);
+}
+
+.status-env.env-local {
+  background: var(--dnt-env-local);
+}
+
+.status-db::before {
+  content: '›';
+  margin-right: var(--dnt-space-1);
+  color: var(--dnt-fg-subtle);
 }
 
 .status-conn {
@@ -713,8 +935,13 @@ textarea:focus-visible,
   margin-left: auto;
 }
 
-.status-cursor {
+.status-cursor,
+.status-selection {
   margin-right: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-rows {
   font-variant-numeric: tabular-nums;
 }
 
@@ -725,17 +952,17 @@ textarea:focus-visible,
   gap: 3px;
   padding: 0 4px;
   border: 1px solid currentColor;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-caption);
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-xs);
   font-weight: 600;
 }
 
 .status-last.cancelled {
-  color: var(--warning-fg);
+  color: var(--dnt-status-warning-fg);
 }
 
 .status-last.errors {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
   font-weight: 600;
 }
 
@@ -743,7 +970,7 @@ textarea:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--text);
+  color: var(--dnt-fg);
 }
 
 .spinner.inline {
@@ -754,39 +981,21 @@ textarea:focus-visible,
   flex: none;
   width: 8px;
   height: 8px;
-  border: 1px solid var(--studio-fg-tertiary);
+  border: 1px solid var(--dnt-fg-subtle);
   border-radius: 50%;
   background: transparent;
 }
 
 .dot.on {
-  border-color: var(--studio-fg);
-  background: var(--studio-fg);
+  border-color: var(--dnt-fg);
+  background: var(--dnt-fg);
 }
 
 .env-badge {
   flex: none;
   font-weight: 600;
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
   letter-spacing: 0.04em;
-}
-
-/* Connection split button */
-.tool-split {
-  display: flex;
-  align-items: stretch;
-}
-
-.tool-more {
-  width: 16px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-}
-
-.tool-more:hover {
-  background: var(--hover);
 }
 
 .status-tx {
@@ -796,12 +1005,12 @@ textarea:focus-visible,
 }
 
 .status-tx.tx-active {
-  color: var(--warning-fg);
+  color: var(--dnt-status-warning-fg);
 }
 
 .status-tx.tx-aborted,
 .status-tx.warn {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .status-tx.warn {
@@ -811,46 +1020,16 @@ textarea:focus-visible,
 .status-btn {
   padding: 0 6px;
   border: 1px solid currentColor;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
   color: inherit;
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
 }
 
 .status-run {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
-/* Disabled "later phase" tools: grouped after a separator, compact, labels dropped on narrow windows. */
-.tool-group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px;
-  margin-left: 8px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
-}
-
-.tool-group .tool {
-  min-width: 52px;
-}
-
-.tool-more {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-@media (max-width: 1180px) {
-  .tool-group .tool span {
-    display: none;
-  }
-
-  .tool-group .tool {
-    min-width: 36px;
-  }
-}
 
 /* Sidebar first-start state */
 .sidebar-empty,
@@ -866,25 +1045,38 @@ textarea:focus-visible,
   justify-content: center;
   gap: 8px;
   padding: 16px;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .sidebar-empty strong {
-  color: var(--text);
-  font-size: var(--text-body);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-md);
   font-weight: 600;
 }
 
 .empty kbd {
   font-family: var(--font-mono);
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
   padding: 0 4px;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
 }
 
 .empty .btn {
   margin-top: 8px;
+}
+
+/* Shortcut keycap (title bar search, palette, empty states). */
+.keycap {
+  flex: none;
+  padding: 0 var(--dnt-space-1);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
+  font-family: var(--font-sans);
+  font-size: var(--dnt-text-xs);
+  line-height: var(--dnt-text-xs-lh);
 }
 
 /*

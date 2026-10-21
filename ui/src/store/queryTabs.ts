@@ -283,7 +283,8 @@ function confirmDiscard(file: string): Promise<boolean> {
   });
 }
 
-const notice = (text: string) => useDialogs.getState().setNotice(text);
+/** The failures of tab I/O: an error toast that stays until dismissed. */
+const notice = (text: string) => useDialogs.getState().setNotice(text, 'error');
 
 export const useQueryDocs = create<QueryDocsState>()((set, get) => {
   /** Adds a document and its tab. */

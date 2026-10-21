@@ -5,31 +5,61 @@ import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { useConnections } from '../store/connections';
 import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
+import type { ObjectKind } from '../bindings';
 import {
   ChevronIcon,
   DatabaseIcon,
+  EventIcon,
   EyeIcon,
   FolderIcon,
+  FunctionIcon,
   ListIcon,
   ObjectIcon,
+  ProcedureIcon,
   SchemaIcon,
   TableIcon,
+  TriggerIcon,
 } from './icons';
 import { useDialogs } from '../store/dialogs';
 import { openNewQuery } from './newQuery';
 import { openObjectTab } from './openObject';
 import { ActionMenu, transferItems } from './ActionMenu';
 import { TreeContextMenu } from './TreeContextMenu';
+import { useTokenPx } from '../theme/useTokenPx';
+import { OBJECT_DRAG_TYPE, setDraggedObject } from './tabDrag';
 import './tree.css';
 
-export const ROW_HEIGHT = 26;
+/** Compact `--dnt-row-h-tree`; the live value follows the density setting. */
+export const ROW_HEIGHT = 24;
 /** An error row carries the message and its hint on two lines. */
 export const ERROR_ROW_HEIGHT = 42;
-const heightOf = (row: TreeRow | undefined) => (row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : ROW_HEIGHT);
+const heightOf = (row: TreeRow | undefined, rowHeight: number) =>
+  row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : rowHeight;
 
 const domId = (key: string) => `tn-${encodeURIComponent(key)}`;
 
-function NodeIcon({ node }: { node: TreeNode }) {
+/** One glyph per object kind, shared by a folder and the objects in it. */
+function KindIcon({ kind }: { kind: ObjectKind | undefined }) {
+  switch (kind) {
+    case 'Table':
+      return <TableIcon />;
+    case 'View':
+    case 'MaterializedView':
+      return <EyeIcon />;
+    case 'Function':
+      return <FunctionIcon />;
+    case 'Procedure':
+      return <ProcedureIcon />;
+    case 'Trigger':
+      return <TriggerIcon />;
+    case 'Event':
+      return <EventIcon />;
+    default:
+      return <ObjectIcon />;
+  }
+}
+
+export function NodeIcon({ node }: { node: TreeNode }) {
   switch (node.kind) {
     case 'group':
       return <FolderIcon />;
@@ -38,11 +68,9 @@ function NodeIcon({ node }: { node: TreeNode }) {
     case 'schema':
       return <SchemaIcon />;
     case 'folder':
-      return <ListIcon />;
+      return node.folderKind ? <KindIcon kind={node.folderKind} /> : <ListIcon />;
     case 'object':
-      if (node.objectRef?.kind === 'Table') return <TableIcon />;
-      if (node.objectRef?.kind === 'View' || node.objectRef?.kind === 'MaterializedView') return <EyeIcon />;
-      return <ObjectIcon />;
+      return <KindIcon kind={node.objectRef?.kind} />;
     default:
       return null;
   }
@@ -112,7 +140,9 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
     );
   }
 
-  const draggable = node.kind === 'group' || node.kind === 'connection';
+  // Groups and connections drag to reorder the tree; objects drag into the editor groups.
+  const draggable = node.kind === 'group' || node.kind === 'connection' || node.kind === 'object';
+  const isObject = node.kind === 'object' && !!node.objectRef;
   // While filtering only loaded children are searched: show "matching / total" for a folder.
   const countMeta =
     row.matchCount && node.meta && /^\d+$/.test(node.meta) ? `${row.matchCount} / ${node.meta}` : node.meta;
@@ -127,11 +157,25 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       className={`tree-row kind-${node.kind}${selected ? ' selected' : ''}${dropTarget ? ' drop-target' : ''}`}
       style={{ ...style, ...indent }}
       draggable={draggable}
-      onClick={() => on.onSelect(node)}
+      onClick={() => {
+        on.onSelect(node);
+        // A single click previews the object; the next preview in that group replaces it.
+        if (isObject) openObjectTab(node, { preview: true });
+      }}
       onDoubleClick={() => (node.kind === 'object' ? on.onOpen(node) : on.onToggle(node))}
       onContextMenu={(e) => on.onMenu(node, e)}
-      onDragStart={draggable ? () => on.onDragStart(node) : undefined}
-      onDragEnd={on.onDragEnd}
+      onDragStart={
+        isObject
+          ? (e) => {
+              e.dataTransfer.setData(OBJECT_DRAG_TYPE, node.id);
+              e.dataTransfer.effectAllowed = 'move';
+              setDraggedObject(node.id);
+            }
+          : draggable
+            ? () => on.onDragStart(node)
+            : undefined
+      }
+      onDragEnd={isObject ? () => setDraggedObject(null) : on.onDragEnd}
       onDragOver={(e) => on.onDragOver(node, e)}
       onDragLeave={on.onDragLeave}
       onDrop={(e) => on.onDrop(node, e)}
@@ -159,7 +203,11 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       ) : (
         <NodeIcon node={node} />
       )}
-      <span className={`label${node.envTag === 'production' ? ' env-production' : ''}`} title={node.label}>
+      {/* A connection's meta is its server version: tooltip only, the row stays short. */}
+      <span
+        className={`label${node.envTag === 'production' ? ' env-production' : ''}`}
+        title={node.kind === 'connection' && node.meta ? `${node.label} · ${node.meta}` : node.label}
+      >
         {node.label}
       </span>
       {readOnly && (
@@ -169,7 +217,7 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       )}
       {node.ssh && <span className="ssh-tag">SSH</span>}
       {node.loading && <span className="spinner" aria-hidden="true" />}
-      {node.meta && <span className="meta">{countMeta}</span>}
+      {node.meta && node.kind !== 'connection' && <span className="meta">{countMeta}</span>}
     </div>
   );
 }
@@ -183,13 +231,16 @@ export function ConnectionTree() {
   const rows = useMemo(() => computeRows({ nodes, childIds, expanded, filter }), [nodes, childIds, expanded, filter]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const rowHeight = useTokenPx('--dnt-row-h-tree', ROW_HEIGHT);
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: (index) => heightOf(rows[index]),
+    estimateSize: (index) => heightOf(rows[index], rowHeight),
     overscan: 10,
     getItemKey: (index) => rows[index]?.key ?? index,
   });
+  // A density change resizes every row: drop the cached sizes.
+  useEffect(() => virtualizer.measure(), [rowHeight, virtualizer]);
 
   const [menu, setMenu] = useState<{ node: TreeNode; x: number; y: number } | null>(null);
   const [emptyMenu, setEmptyMenu] = useState<{ x: number; y: number } | null>(null);

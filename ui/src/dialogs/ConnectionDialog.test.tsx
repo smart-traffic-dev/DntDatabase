@@ -32,17 +32,110 @@ describe('ConnectionDialog', () => {
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     const port = screen.getByTestId('conn-port');
     expect(port).toHaveValue(3306);
+    expect(screen.getByText('Default for MySQL')).toBeInTheDocument();
     await user.click(screen.getByTestId('conn-engine-postgres'));
     expect(port).toHaveValue(5432);
+    expect(screen.getByText('Default for PostgreSQL')).toBeInTheDocument();
     await user.click(screen.getByLabelText('MariaDB'));
     expect(port).toHaveValue(3306);
     // The selected radio is the only indicator: no duplicate chip.
     expect(screen.queryByText('MariaDB', { selector: '.chip' })).not.toBeInTheDocument();
-    // An edited port is kept.
+    // An edited port is kept, and the note names the default it differs from.
     await user.clear(port);
     await user.type(port, '3307');
     await user.click(screen.getByTestId('conn-engine-postgres'));
     expect(port).toHaveValue(3307);
+    expect(screen.getByText('PostgreSQL default: 5432')).toBeInTheDocument();
+  });
+
+  it('engine is the first field of General, each option with its badge', () => {
+    mockBackend({});
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    const panel = screen.getByRole('tabpanel');
+    const engine = screen.getByRole('radiogroup', { name: 'Engine' });
+    expect(panel.querySelector('.field')).toBe(engine.closest('.field'));
+    for (const [id, badge] of [
+      ['conn-engine-mysql', 'My'],
+      ['conn-engine-mariadb', 'Ma'],
+      ['conn-engine-postgres', 'Pg'],
+    ] as const) {
+      const option = screen.getByTestId(id).closest('label')!;
+      expect(option.querySelector('.engine-badge')).toHaveTextContent(badge);
+    }
+    expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
+  });
+
+  it('the section nav is vertical and shows a state hint on each section', async () => {
+    mockBackend({});
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    const nav = screen.getByRole('tablist', { name: 'Connection settings' });
+    expect(nav).toHaveAttribute('aria-orientation', 'vertical');
+    const tab = (name: string) => screen.getByRole('tab', { name });
+    expect(tab('General')).toHaveAccessibleDescription('MySQL');
+    expect(tab('SSH tunnel')).toHaveAccessibleDescription('Off');
+    expect(tab('SSL / TLS')).toHaveAccessibleDescription('Prefer');
+    expect(tab('Advanced')).toHaveAccessibleDescription('Defaults');
+    await user.click(screen.getByTestId('conn-engine-postgres'));
+    expect(tab('General')).toHaveAccessibleDescription('PostgreSQL');
+    await user.click(tab('SSH tunnel'));
+    await user.click(screen.getByLabelText('Connect through an SSH tunnel'));
+    expect(tab('SSH tunnel')).toHaveAccessibleDescription('On');
+    await user.click(tab('SSL / TLS'));
+    await user.selectOptions(screen.getByLabelText('SSL mode'), 'require');
+    expect(tab('SSL / TLS')).toHaveAccessibleDescription('Require');
+    await user.click(tab('Advanced'));
+    await user.clear(screen.getByLabelText('Connect timeout (s)'));
+    await user.type(screen.getByLabelText('Connect timeout (s)'), '30');
+    expect(tab('Advanced')).toHaveAccessibleDescription('Custom');
+    // ArrowDown / ArrowUp move between sections.
+    tab('Advanced').focus();
+    await user.keyboard('{ArrowDown}');
+    expect(tab('General')).toHaveFocus();
+    expect(tab('General')).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{ArrowUp}');
+    expect(tab('Advanced')).toHaveFocus();
+  });
+
+  it('environment is a radio chip group; Production explains what it changes and is saved', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    const group = screen.getByRole('radiogroup', { name: 'Environment' });
+    expect(within(group).getAllByRole('radio').map((r) => r.closest('label')?.textContent)).toEqual([
+      'None',
+      'Local',
+      'Staging',
+      'Production',
+    ]);
+    expect(screen.getByTestId('conn-env-none')).toBeChecked();
+    expect(screen.queryByTestId('env-chip')).toBeNull();
+    expect(group).toHaveAccessibleDescription(/Production asks before running statements that change data/);
+    await user.click(screen.getByTestId('conn-env-production'));
+    expect(screen.getByTestId('env-chip')).toHaveTextContent('Production');
+    await user.type(screen.getByTestId('conn-name'), 'p');
+    await user.type(screen.getByTestId('conn-host'), 'h');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { env_tag: 'production' } });
+  });
+
+  it('a running test shows Testing with Cancel; a cancelled test drops its late result', async () => {
+    let finish: (v: unknown) => void = () => {};
+    mockBackend({ test_connection: () => new Promise((resolve) => (finish = resolve)) });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(screen.getByTestId('conn-test'));
+    const foot = screen.getByRole('dialog').querySelector('.modal-foot') as HTMLElement;
+    expect(within(foot).getByRole('status')).toHaveTextContent('Testing connection…');
+    expect(screen.getByTestId('conn-test')).toBeDisabled();
+    await user.click(within(foot).getByRole('button', { name: 'Cancel test' }));
+    expect(within(foot).queryByRole('status')).toBeNull();
+    expect(screen.getByTestId('conn-test')).toBeEnabled();
+    finish(okResult);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId('test-result')).toBeNull();
   });
 
   it('field_error_focuses_tab', async () => {
@@ -53,12 +146,14 @@ describe('ConnectionDialog', () => {
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    await user.click(screen.getByRole('tab', { name: 'SSH' }));
+    await user.click(screen.getByRole('tab', { name: 'SSH tunnel' }));
     await user.click(screen.getByLabelText('Connect through an SSH tunnel'));
     await user.click(screen.getByRole('tab', { name: 'General' }));
     await user.type(screen.getByTestId('conn-name'), 'x');
     await user.click(screen.getByTestId('conn-save'));
-    expect(await screen.findByRole('tab', { name: 'SSH', selected: true })).toBeInTheDocument();
+    const ssh = await screen.findByRole('tab', { name: 'SSH tunnel', selected: true });
+    // The section holding the error says so in its hint.
+    expect(ssh).toHaveAccessibleDescription('Error');
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('SSH key authentication requires a private key file.');
     expect(screen.getByLabelText('Key file')).toHaveAttribute('aria-invalid', 'true');
@@ -82,7 +177,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     await user.click(screen.getByTestId('conn-test'));
-    expect(await screen.findByRole('tab', { name: 'SSL', selected: true })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'SSL / TLS', selected: true })).toBeInTheDocument();
     expect(await screen.findByRole('alert')).toHaveTextContent('Cannot read the client key file');
     expect(screen.getByLabelText('Client key')).toHaveAttribute('aria-invalid', 'true');
   });
@@ -108,14 +203,23 @@ describe('ConnectionDialog', () => {
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     await user.click(screen.getByTestId('conn-test'));
     const bar = await screen.findByRole('alert');
+    // Failed, on the footer's left: the step, the message and the hint.
+    expect(screen.getByRole('dialog').querySelector('.modal-foot')).toContainElement(bar);
     expect(within(bar).getByTestId('test-stage')).toHaveTextContent('Connect:');
     expect(bar).toHaveTextContent('Could not connect to the database server.');
     expect(bar).toHaveTextContent('Connection refused: check host, port, firewall');
-    // Stages that completed before the failure keep their timings.
-    expect(bar).toHaveTextContent('Steps completed: Secrets 1 ms');
     expect(screen.queryByText(/os error 10061/)).not.toBeInTheDocument();
-    await user.click(within(bar).getByRole('button', { name: 'Details' }));
+    const details = within(bar).getByRole('button', { name: 'Details' });
+    await user.click(details);
+    expect(details).toHaveAttribute('aria-expanded', 'true');
+    // Stages that completed before the failure keep their timings; the raw detail follows.
+    expect(bar).toHaveTextContent('Steps completed: Secrets 1 ms');
     expect(screen.getByText(/os error 10061/)).toBeInTheDocument();
+    // Esc closes the details first, not the dialog.
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText(/os error 10061/)).not.toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'New connection' })).toBeInTheDocument();
+    expect(details).toHaveFocus();
   });
 
   it.each([
@@ -175,7 +279,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="create" onClose={onClose} />);
-    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Close dialog' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -193,7 +297,7 @@ describe('ConnectionDialog', () => {
     await user.keyboard('{Enter}');
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     expect(screen.getByTestId('conn-name')).toHaveValue('x');
-    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Close dialog' }));
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Discard' }));
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -204,7 +308,7 @@ describe('ConnectionDialog', () => {
     const onClose = vi.fn();
     render(<ConnectionDialog mode="create" onClose={onClose} />);
     await user.type(screen.getByTestId('conn-name'), 'x');
-    await user.click(screen.getByRole('button', { name: 'Close' }));
+    await user.click(screen.getByRole('button', { name: 'Close dialog' }));
     const ask = await screen.findByRole('alertdialog', { name: 'Discard changes?' });
     const cancel = within(ask).getByRole('button', { name: 'Cancel' });
     const discard = within(ask).getByRole('button', { name: 'Discard' });
@@ -221,19 +325,23 @@ describe('ConnectionDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('reserves_the_result_area_so_the_button_row_stays_put', async () => {
+  it('the test result sits on the footer left; the body sizes to its content within a max height', async () => {
     mockBackend({ test_connection: () => okResult });
     const user = userEvent.setup();
-    const { container } = render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    const slot = container.ownerDocument.querySelector('.result-slot');
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    const foot = screen.getByRole('dialog').querySelector('.modal-foot') as HTMLElement;
+    const slot = foot.querySelector('.test-slot');
     expect(slot).not.toBeNull();
-    expect(slot?.nextElementSibling).toBe(container.ownerDocument.querySelector('.modal-foot'));
-    expect(css).toMatch(/\.result-slot\s*\{[^}]*height:\s*\d+px/);
-    expect(css).toMatch(/\.conn-body\s*\{[^}]*height:/);
+    // Test and its result first, then Cancel and Save on the right.
+    expect(foot.firstElementChild).toContainElement(screen.getByTestId('conn-test'));
+    expect(foot.lastElementChild).toBe(screen.getByTestId('conn-save'));
+    const body = /\.conn-body\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(body).toMatch(/max-height:/);
+    expect(body).not.toMatch(/(^|[;\s])height:/);
     await user.click(screen.getByTestId('conn-test'));
-    await screen.findByTestId('test-result');
-    expect(slot?.contains(screen.getByTestId('test-result'))).toBe(true);
-    expect(slot?.nextElementSibling).toBe(container.ownerDocument.querySelector('.modal-foot'));
+    const result = await screen.findByTestId('test-result');
+    expect(slot).toContainElement(result);
+    expect(result).toHaveClass('ok');
   });
 
   it('dark_dialogs_get_a_visible_line_colour', () => {
@@ -335,9 +443,11 @@ describe('ConnectionDialog', () => {
   it('labels_are_associated', () => {
     mockBackend({});
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    for (const label of ['Name', 'Group', 'Host', 'Port', 'User', 'Password', 'Default database', 'Environment tag']) {
+    for (const label of ['Name', 'Group', 'Host', 'Port', 'User', 'Password', 'Default database']) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
+    expect(screen.getByRole('radiogroup', { name: 'Engine' })).toBeInTheDocument();
+    expect(screen.getByRole('radiogroup', { name: 'Environment' })).toBeInTheDocument();
     expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
     expect(screen.getByRole('tablist')).toBeInTheDocument();
   });

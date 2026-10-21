@@ -1,5 +1,6 @@
 // What the user has selected in the grid, as plain row / column lists (pure, no Glide runtime).
 import type { Value } from '../../bindings';
+import { plural } from '../../lib/plural';
 import { CHUNK, type ResultSet } from '../../store/queryRun';
 
 /** The parts of Glide's `CompactSelection` used here. */
@@ -35,6 +36,19 @@ export function selectionSize(sel: SelectionLike | undefined, rowCount: number, 
   if (sel.rows.length > 0) return sel.rows.length * colCount;
   if (sel.columns.length > 0) return sel.columns.length * rowCount;
   return sel.current ? sel.current.range.width * sel.current.range.height : 0;
+}
+
+/**
+ * What `sel` covers, for the status bar: "2 rows selected", "1 column selected",
+ * "3 rows × 2 columns selected"; null for nothing or a single cell.
+ */
+export function selectionSummary(sel: SelectionLike | undefined, rowCount: number, colCount: number): string | null {
+  if (!sel || selectionSize(sel, rowCount, colCount) === 0) return null;
+  if (sel.rows.length > 0) return `${plural(sel.rows.length, 'row')} selected`;
+  if (sel.columns.length > 0) return `${plural(sel.columns.length, 'column')} selected`;
+  const r = sel.current!.range;
+  if (r.width * r.height < 2) return null;
+  return `${plural(r.height, 'row')} × ${plural(r.width, 'column')} selected`;
 }
 
 /**

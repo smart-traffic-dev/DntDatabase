@@ -3,9 +3,10 @@
   flex: none;
   display: flex;
   align-items: stretch;
-  height: 32px;
-  background: var(--sidebar);
-  color: var(--text);
+  height: var(--dnt-titlebar-h);
+  background: var(--dnt-bg-chrome);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-fg);
   user-select: none;
   -webkit-user-select: none;
   cursor: default;
@@ -16,8 +17,39 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding-left: 8px;
+  justify-content: center;
+  padding: 0 8px;
+}
+
+/* Centred search: opens the palette in objects mode (Ctrl+P). */
+.titlebar-search {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  width: min(440px, 100%);
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-1) 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg-subtle);
+  font: inherit;
+  font-size: var(--dnt-text-sm);
+  cursor: pointer;
+}
+
+.titlebar-search:hover {
+  border-color: var(--dnt-border-strong);
+  color: var(--dnt-fg-muted);
+}
+
+.titlebar-search-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  text-align: left;
 }
 
 /* The logo: drags like the rest of the bar; the menu bar sits to its right. */
@@ -30,7 +62,7 @@
 
 .titlebar-icon {
   display: flex;
-  color: var(--accent);
+  color: var(--dnt-accent);
 }
 
 .titlebar-icon svg {
@@ -38,11 +70,9 @@
   height: 16px;
 }
 
-.titlebar-title {
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  font-size: var(--text-callout);
+.titlebar-layout {
+  align-self: center;
+  margin-right: var(--dnt-space-2);
 }
 
 .titlebar-controls {
@@ -59,16 +89,16 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--dnt-fg);
   cursor: default;
 }
 
 .titlebar-btn:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .titlebar-btn:active {
-  background: color-mix(in srgb, var(--text) 14%, transparent);
+  background: color-mix(in srgb, var(--dnt-fg) 14%, transparent);
 }
 
 /* Windows' close button: red on hover, white glyph. */
@@ -83,10 +113,9 @@
 }
 
 /* Inactive window: dimmed title and glyphs, as the native frame does. */
-.titlebar.inactive .titlebar-title,
 .titlebar.inactive .titlebar-icon,
 .titlebar.inactive .titlebar-btn:not(:hover) {
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .titlebar.inactive .titlebar-icon {

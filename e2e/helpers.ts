@@ -47,7 +47,7 @@ export async function createConnection(o: ConnOpts) {
   await byId('conn-port').setValue(String(o.port));
   await byId('conn-user').setValue(o.user);
   await byId('conn-password').setValue(o.password);
-  if (o.env) await $('#cd-env').selectByAttribute('value', o.env);
+  if (o.env) await byId(`conn-env-${o.env}`).click();
   await byId('conn-save').click();
 }
 
@@ -75,4 +75,36 @@ export async function runAll() {
 export async function runCurrent() {
   await focusEditor();
   await browser.keys(['Control', 'Enter']);
+}
+
+/** The query toolbar's Run slot shows Stop while a statement (or an export) can be stopped. */
+export const isRunning = () => byId('query-stop').isExisting();
+
+/**
+ * Opens the context pill's picker, runs `fn` (it holds the `query-connection` and
+ * `query-database` selects), then closes it with Escape.
+ */
+export async function inContextPicker(fn: () => Promise<void>) {
+  await byId('query-context').click();
+  await byId('query-connection').waitForDisplayed({ timeout: 5_000 });
+  await fn();
+  await browser.keys(['Escape']);
+  await byId('query-connection').waitForDisplayed({ reverse: true, timeout: 5_000 });
+}
+
+/**
+ * Sets the row limit of the active query tab: a radio item of the `⋯` menu at the right end of
+ * the group's tab strip (choosing it closes the menu).
+ */
+export async function setRowLimit(limit: 1000 | 10000 | 100000 | 1000000) {
+  await byId('query-more').click();
+  await byId(`query-row-limit-${limit}`).waitForClickable({ timeout: 5_000 });
+  await byId(`query-row-limit-${limit}`).click();
+}
+
+/** Toggles "Continue on error" in the Run split menu (choosing it closes the menu). */
+export async function toggleContinueOnError() {
+  await byId('query-run-menu').click();
+  await byId('query-continue-on-error').waitForClickable({ timeout: 5_000 });
+  await byId('query-continue-on-error').click();
 }

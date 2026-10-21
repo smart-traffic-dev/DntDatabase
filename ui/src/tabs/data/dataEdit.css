@@ -2,24 +2,25 @@
 
 /* The statuses the grid paints on canvas (ResultGrid reads the same tokens); the legend uses the classes. */
 .dnt-cell-edited {
-  background: var(--warning-bg);
-  color: var(--warning-fg);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
 }
 
+/* Green, not the selection blue: with a blue accent a new row would look selected. */
 .dnt-row-new {
-  background: var(--sel);
-  color: var(--text);
+  background: var(--dnt-status-success-bg);
+  color: var(--dnt-fg);
 }
 
 .dnt-row-deleted {
-  background: var(--danger-fill);
-  color: var(--danger-fg);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
   text-decoration: line-through;
 }
 
 .dnt-row-conflict {
-  background: var(--danger-fill);
-  color: var(--danger-fg);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .de-bar {
@@ -28,13 +29,13 @@
   flex-wrap: wrap;
   gap: 8px;
   padding: 4px 12px;
-  border-bottom: 1px solid var(--border);
-  font-size: var(--text-footnote);
+  border-bottom: 1px solid var(--dnt-border);
+  font-size: var(--dnt-text-sm);
 }
 
 .de-chip {
   padding: 1px 8px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   white-space: nowrap;
 }
 
@@ -49,15 +50,15 @@
   gap: 8px;
   margin: 0;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--border);
-  background: var(--warning-bg);
-  color: var(--warning-fg);
-  font-size: var(--text-footnote);
+  border-bottom: 1px solid var(--dnt-border);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+  font-size: var(--dnt-text-sm);
 }
 
 .de-banner.de-error {
-  background: var(--danger-fill);
-  color: var(--danger-fg);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .de-conflict-row {
@@ -71,11 +72,11 @@
 }
 
 .ep-block {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .ep-confirm {
-  color: var(--warning-fg);
+  color: var(--dnt-status-warning-fg);
 }
 
 .ep-statements {
@@ -90,7 +91,7 @@
 
 .ep-statements code {
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
   white-space: pre-wrap;
   word-break: break-all;
 }

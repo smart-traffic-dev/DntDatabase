@@ -15,7 +15,7 @@ export function cssVar(name: string, fallback: string): string {
   }
 }
 
-/** A `px` token of the type scale as a number (`--text-callout` → 13). */
+/** A `px` token of the type scale as a number (`--dnt-text-base` → 13). */
 export function cssPx(name: string, fallback: number): number {
   const n = parseFloat(cssVar(name, ''));
   return Number.isFinite(n) && n > 0 ? n : fallback;
@@ -43,12 +43,12 @@ const scaled = (px: number, scale: number) => Math.round(px * scale * 10) / 10;
 export function codeFontSizes(scale: number = useLayout.getState().fontScale) {
   return {
     /** Editor text, suggest rows and grid cells. */
-    body: scaled(cssPx('--text-callout', 13), scale),
-    bodyLineHeight: Math.round(cssPx('--text-callout--line-height', 18) * scale),
+    body: scaled(cssPx('--dnt-text-base', 13), scale),
+    bodyLineHeight: Math.round(cssPx('--dnt-text-base-lh', 18) * scale),
     /** Grid header. */
-    header: scaled(cssPx('--text-footnote', 12), scale),
+    header: scaled(cssPx('--dnt-text-sm', 12), scale),
     /** Grid row markers. */
-    marker: scaled(cssPx('--text-caption', 11), scale),
+    marker: scaled(cssPx('--dnt-text-xs', 11), scale),
   };
 }
 

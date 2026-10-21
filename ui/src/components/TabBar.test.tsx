@@ -8,7 +8,7 @@ import { emptyRun, useQueryRun } from '../store/queryRun';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
 import { callsOf, config, fail, ids, mockBackend, resetStores } from '../test/backend';
-import { TabBar } from './TabBar';
+import { TabBar, tabContentId } from './TabBar';
 
 const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
 
@@ -18,6 +18,19 @@ function openTab(connectionId: string, title: string) {
 
 describe('TabBar', () => {
   beforeEach(resetStores);
+
+  it('the + after the last tab opens a new query (testid new-query)', async () => {
+    const user = userEvent.setup();
+    render(<TabBar />);
+    const plus = screen.getByTestId('new-query');
+    expect(plus).toHaveAccessibleName('New query');
+    expect(plus).toHaveAttribute('title', 'New query (Ctrl+T)');
+    await user.click(plus);
+    expect(useTabs.getState().tabs).toHaveLength(1);
+    expect(useTabs.getState().tabs[0]?.kind).toBe('query');
+    // Sits after the tab list, not inside it.
+    expect(screen.getByRole('tablist').contains(screen.getByTestId('new-query'))).toBe(false);
+  });
 
   it('shows an environment badge for each tab connection', () => {
     const tagged = (id: string, name: string, env_tag: EnvTag | null) => config(id, name, { env_tag });
@@ -63,6 +76,11 @@ describe('TabBar', () => {
     expect(dot(/daily\.sql/)).toHaveTextContent('●');
     expect(dot(/daily\.sql/)).toHaveAttribute('title', 'Unsaved changes');
     expect(dot(/Query 1/)).toBeNull();
+    // As in VS Code the close button shows the dot (× on hover) instead of a second mark.
+    const tab = screen.getByRole('tab', { name: /daily\.sql/ }).closest('.tab')!;
+    expect(tab).toHaveClass('dirty');
+    expect(tab.querySelector('.tab-close .tab-close-dot')).not.toBeNull();
+    expect(screen.getByRole('tab', { name: /Query 1/ }).closest('.tab')).not.toHaveClass('dirty');
   });
 
   it('closing a query tab goes through the close guards', async () => {
@@ -172,7 +190,7 @@ describe('TabBar', () => {
     // Only the active tab is in the Tab order.
     expect(tab('gamma')).toHaveAttribute('tabindex', '0');
     expect(tab('alpha')).toHaveAttribute('tabindex', '-1');
-    expect(tab('alpha')).toHaveAttribute('aria-controls', 'tab-content');
+    expect(tab('alpha')).toHaveAttribute('aria-controls', tabContentId(useTabs.getState().focusedGroupId));
 
     act(() => tab('gamma').focus());
     await user.keyboard('{Home}');

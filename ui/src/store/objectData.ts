@@ -107,3 +107,10 @@ useTabs.subscribe((state) => {
   }
   useObjectData.setState({ byTab: Object.fromEntries(Object.entries(byTab).filter(([id]) => open.has(id))) });
 });
+
+/** DDL invalidation also orphans responses already in flight. */
+export function invalidateObjectData(tabId: string): void {
+  tokens.delete(tokenKey(tabId, 'detail'));
+  tokens.delete(tokenKey(tabId, 'ddl'));
+  useObjectData.setState((s) => ({ byTab: Object.fromEntries(Object.entries(s.byTab).filter(([id]) => id !== tabId)) }));
+}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { confirmDiscardConnection } from '../components/tabActions';
@@ -25,6 +25,7 @@ import { AppCloseDialog } from './AppCloseDialog';
 import { TxCloseDialog } from './TxCloseDialog';
 import { AddFavoriteDialog } from './AddFavoriteDialog';
 import { SnippetsDialog } from './SnippetsDialog';
+import { ToastHost } from './ToastHost';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
 function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
@@ -108,61 +109,6 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
       }}
       onCancel={closePrompt}
     />
-  );
-}
-
-/** Shows the status message set by a dialog (import summary) for a few seconds. */
-function Toast() {
-  const notice = useDialogs((s) => s.notice);
-  // A repeated notice (same text) restarts the timer rather than vanishing early.
-  const seq = useDialogs((s) => s.noticeSeq);
-  useEffect(() => {
-    if (!notice) return;
-    const t = setTimeout(() => useDialogs.getState().setNotice(null), 6000);
-    return () => clearTimeout(t);
-  }, [notice, seq]);
-  if (!notice) return null;
-  return (
-    <div className="toast" role="status">
-      <span>{notice}</span>
-      <button type="button" className="toast-dismiss" aria-label="Dismiss notice" title="Dismiss" onClick={() => useDialogs.getState().setNotice(null)}>
-        ×
-      </button>
-    </div>
-  );
-}
-
-/** Spec §7: an internal error is a toast that points at the log folder. */
-function InternalErrorToast() {
-  const error = useDialogs((s) => s.internalError);
-  const [openFailed, setOpenFailed] = useState(false);
-  if (!error) return null;
-  const openLogs = async () => {
-    try {
-      await api.openLogFolder();
-      setOpenFailed(false);
-    } catch {
-      setOpenFailed(true);
-    }
-  };
-  return (
-    <div className="toast error" role="alert" aria-label="Internal error">
-      <span>{error.message}</span>
-      {openFailed && <span className="hint">The log folder could not be opened.</span>}
-      <button type="button" className="btn small" onClick={() => void openLogs()}>
-        Open log folder
-      </button>
-      <button
-        type="button"
-        className="btn small"
-        onClick={() => {
-          setOpenFailed(false);
-          useDialogs.getState().dismissInternal();
-        }}
-      >
-        Dismiss
-      </button>
-    </div>
   );
 }
 
@@ -363,7 +309,7 @@ export function DialogHost() {
         fromSelection={request.fromSelection}
         onClose={(saved) => {
           closeRequest();
-          if (saved) useDialogs.getState().setNotice(`Added "${saved.name}" to favorites.`);
+          if (saved) useDialogs.getState().setNotice(`Added "${saved.name}" to favorites.`, 'success');
         }}
       />
     );
@@ -407,8 +353,7 @@ export function DialogHost() {
   return (
     <>
       {dialog}
-      <Toast />
-      <InternalErrorToast />
+      <ToastHost />
       {prompt && <PromptHost key={`${prompt.kind}:${prompt.connectionId}:${prompt.error.fingerprint ?? ''}:${prompt.error.stage ?? ''}`} prompt={prompt} />}
       {question && <QuestionHost question={question} />}
       <RunPromptHost />

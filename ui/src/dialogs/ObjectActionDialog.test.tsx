@@ -122,3 +122,49 @@ it('native close cannot exit while an object action is in flight', async () => {
   expect(destroy).not.toHaveBeenCalled();
   expect(useDialogs.getState().notice).toContain('object action is running');
 });
+
+it('rename preserves a background editor group, its active preview and the focused query', async () => {
+  vi.spyOn(useTree.getState(), 'refresh').mockResolvedValue();
+  const store = useTabs.getState();
+  store.open({ kind: 'query', id: 'q', connectionId: ids.prod, title: 'SQL' });
+  const left = useTabs.getState().focusedGroupId;
+  store.setLayout('columns');
+  const right = useTabs.getState().groups[1]!.id;
+  store.focusGroup(right);
+  const old = objectTabId(ids.prod, object);
+  store.openPreview({ kind: 'object', id: old, objectRef: object, connectionId: ids.prod, title: 'orders' });
+  store.focusGroup(left);
+  await refreshAfterAction({ connectionId: ids.prod, action: { kind: 'rename_table', object, name: 'renamed' } }, report);
+  const next = useTabs.getState();
+  const renamed = objectTabId(ids.prod, { ...object, name: 'renamed' });
+  expect(next.groupOf[renamed]).toBe(right);
+  expect(next.groups.find((g) => g.id === right)?.activeId).toBe(renamed);
+  expect(next.tabs.find((t) => t.id === renamed)).toMatchObject({ preview: true });
+  expect(next.activeId).toBe('q');
+  expect(next.focusedGroupId).toBe(left);
+  expect(next.groupOf[old]).toBeUndefined();
+});
+it('drop removes an emptied group without disturbing the surviving query group', async () => {
+  vi.spyOn(useTree.getState(), 'refresh').mockResolvedValue();
+  const store = useTabs.getState();
+  store.open({ kind: 'query', id: 'q', connectionId: ids.prod, title: 'SQL' });
+  const left = useTabs.getState().focusedGroupId;
+  store.setLayout('columns');
+  store.focusGroup(useTabs.getState().groups[1]!.id);
+  const old = objectTabId(ids.prod, object);
+  store.open({ kind: 'object', id: old, objectRef: object, connectionId: ids.prod, title: 'orders' });
+  await refreshAfterAction(request, report);
+  expect(useTabs.getState().groups.map((g) => g.id)).toEqual([left]);
+  expect(useTabs.getState().activeId).toBe('q');
+  expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['q']);
+});
+it('truncate preserves pin and group while changing the resource revision', async () => {
+  vi.spyOn(useTree.getState(), 'refresh').mockResolvedValue();
+  const id = objectTabId(ids.prod, object);
+  useTabs.getState().open({ kind: 'object', id, objectRef: object, connectionId: ids.prod, title: 'orders', pinned: true });
+  const group = useTabs.getState().groupOf[id];
+  await refreshAfterAction({ connectionId: ids.prod, action: { kind: 'truncate_table', object } }, report);
+  expect(useTabs.getState().tabs[0]).toMatchObject({ id, pinned: true, resourceRevision: 1 });
+  expect(useTabs.getState().groupOf[id]).toBe(group);
+  expect(useTabs.getState().groups[0]?.activeId).toBe(id);
+});

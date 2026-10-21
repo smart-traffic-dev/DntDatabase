@@ -10,6 +10,9 @@ export interface MenuAction {
   disabled?: boolean;
   /** A check mark column: `true` ticks the item, `false` leaves it blank (a toggle / current choice). */
   checked?: boolean;
+  /** Tooltip: for a disabled item, the reason it is disabled. */
+  title?: string;
+  testId?: string;
   run(): void;
 }
 
@@ -120,6 +123,8 @@ export function ActionMenu({ label, x, y, items, onClose, autoFocus = true, chec
             role={item.checked === undefined ? 'menuitem' : `menuitem${checkRole}`}
             aria-checked={item.checked}
             disabled={item.disabled}
+            title={item.title}
+            data-testid={item.testId}
             className={item.danger ? 'danger' : undefined}
             onClick={() => {
               if (item.disabled) return;

@@ -13,10 +13,11 @@ import {
   type Rectangle,
   type Theme,
 } from '@glideapps/glide-data-grid';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ObjectRef, Value } from '../../bindings';
 import { ActionMenu, type MenuEntry } from '../../components/ActionMenu';
 import { codeFontSizes, monoFontFamily } from '../../monaco/fonts';
+import { useTokenPx } from '../../theme/useTokenPx';
 import { CHUNK, type ResultSet } from '../../store/queryRun';
 import { FindBar, GoToBar } from './FindBar';
 import {
@@ -45,14 +46,20 @@ import {
   type Engine,
 } from './gridCopy';
 import { findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
-import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, type SelectionLike } from './gridSelection';
+import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, selectionSummary, type SelectionLike } from './gridSelection';
 import { selectionStats } from './selectionStats';
 import { GridStats } from './GridStats';
 import { RecordView } from './RecordView';
 import './gridTools.css';
 
-const ROW_HEIGHT = 28;
-const HEADER_HEIGHT = 44;
+/** Name on line 1, type on line 2 (fixed: the row height follows the density, the header does not). */
+export const GRID_HEADER_HEIGHT = 36;
+/** `--dnt-row-h-grid` when the token cannot be read. */
+const ROW_HEIGHT_FALLBACK = 24;
+/** Room kept for Glide's horizontal scrollbar under the rows of a short, wide result. */
+const SCROLLBAR_ALLOWANCE = 17;
+/** No row lines are painted below the last row (Glide draws a line on each row's top edge). */
+const NO_LINE = { horizontalBorderColor: 'transparent' };
 /** Statistics are not computed for larger selections. */
 const MAX_STATS_CELLS = 50_000;
 /** Two row-number clicks this close (ms) on one row are a double click. */
@@ -103,6 +110,33 @@ export function initialWidths(result: ResultSet, font?: GridFont, m: Measurer = 
   });
 }
 
+/**
+ * The grid always fills its box, so its horizontal scrollbar sits at the bottom of the panel
+ * whatever the row count. Glide paints column lines down the empty space under a short result;
+ * this is the box to cover there: from under the last row (header, rows, closing line) to the
+ * bottom, leaving the horizontal scrollbar when the columns are wider than the box. Null when the
+ * rows fill the box. The row-marker width is Glide's default.
+ */
+export function blankArea(o: {
+  boxHeight: number;
+  boxWidth: number;
+  rows: number;
+  rowHeight: number;
+  columnsWidth: number;
+  /** The horizontal scrollbar's measured height, when known (it depends on the platform). */
+  scrollbar?: number;
+}): { top: number; height: number } | null {
+  const markers = o.rows > 10000 ? 48 : o.rows > 1000 ? 44 : o.rows > 100 ? 36 : 32;
+  const scrollbar = o.scrollbar ?? (o.columnsWidth + markers > o.boxWidth ? SCROLLBAR_ALLOWANCE : 0);
+  const top = GRID_HEADER_HEIGHT + o.rows * o.rowHeight + 1;
+  const height = o.boxHeight - top - scrollbar;
+  return height > 0 ? { top, height } : null;
+}
+
+/** The height of a scroller's horizontal scrollbar (0 when it has none). */
+export const scrollbarHeight = (el: HTMLElement | null | undefined): number | undefined =>
+  el ? Math.max(0, el.offsetHeight - el.clientHeight) : undefined;
+
 export const tooLargeMessage = (cells: number) =>
   `Selection too large to copy (${cells} cells); narrow the selection`;
 
@@ -131,14 +165,20 @@ function useThemeVersion(): number {
   return version;
 }
 
-function buildTheme(): {
+/** The grid's canvas theme from the --dnt- semantic tokens (fallbacks: the light palette). */
+export function buildTheme(): {
   theme: Partial<Theme>;
+  /** The selection fill while the grid has the focus, and otherwise. */
+  selection: { focused: string; muted: string };
   nullStyle: Partial<Theme>;
   statusStyle: Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>;
   font: GridFont;
   charPx: number;
 } {
-  const muted = cssVar('--muted', '#5a6370');
+  const muted = cssVar('--dnt-fg-muted', '#5a5a60');
+  const selected = cssVar('--dnt-bg-selected', '#dce7fd');
+  const selectedMuted = cssVar('--dnt-bg-selected-muted', '#ebebed');
+  const fg = cssVar('--dnt-fg', '#131315');
   const size = codeFontSizes();
   const family = monoFontFamily();
   // The canvas fonts, as Glide draws them (`<baseFontStyle> <fontFamily>`).
@@ -149,16 +189,17 @@ function buildTheme(): {
   };
   return {
     theme: {
-      accentColor: cssVar('--accent', '#1f5fd1'),
-      accentLight: cssVar('--sel', '#e3ebfa'),
-      bgCell: cssVar('--panel', '#ffffff'),
-      bgHeader: cssVar('--sidebar', '#fafafb'),
-      bgHeaderHasFocus: cssVar('--sel', '#e3ebfa'),
-      bgHeaderHovered: cssVar('--sel', '#e3ebfa'),
-      textDark: cssVar('--text', '#1b1f24'),
+      accentColor: cssVar('--dnt-accent', '#2563d9'),
+      // The grid is unfocused until told otherwise (`ResultGrid` swaps in `selection.focused`).
+      accentLight: selectedMuted,
+      bgCell: cssVar('--dnt-bg-app', '#ffffff'),
+      bgHeader: cssVar('--dnt-bg-sunken', '#f4f4f5'),
+      bgHeaderHasFocus: selectedMuted,
+      bgHeaderHovered: selectedMuted,
+      textDark: fg,
       textMedium: muted,
-      textHeader: cssVar('--text', '#1b1f24'),
-      borderColor: cssVar('--border', '#dcdfe4'),
+      textHeader: fg,
+      borderColor: cssVar('--dnt-border-subtle', '#ebebed'),
       // The same code font as the editor and every CSS mono surface (`--font-mono`).
       fontFamily: family,
       textLight: muted,
@@ -166,13 +207,14 @@ function buildTheme(): {
       baseFontStyle: `${size.body}px`,
       headerFontStyle: `600 ${size.header}px`,
     },
-    nullStyle: { textDark: muted, baseFontStyle: `italic ${size.body}px` },
+    selection: { focused: selected, muted: selectedMuted },
+    nullStyle: { textDark: cssVar('--dnt-fg-subtle', '#707076'), baseFontStyle: `italic ${size.body}px` },
     // Staged changes: the same tokens as the `dnt-*` classes of dataEdit.css.
     statusStyle: {
-      edited: { bgCell: cssVar('--warning-bg', '#fff4d6'), textDark: cssVar('--warning-fg', '#7a4b00') },
-      new: { bgCell: cssVar('--sel', '#e3ebfa') },
-      deleted: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
-      conflict: { bgCell: cssVar('--danger-fill', '#fdecea'), textDark: cssVar('--danger-fg', '#b42318') },
+      edited: { bgCell: cssVar('--dnt-status-warning-bg', '#fff6e0'), textDark: cssVar('--dnt-status-warning-fg', '#7a4b00') },
+      new: { bgCell: cssVar('--dnt-status-success-bg', '#eaf7ef') },
+      deleted: { bgCell: cssVar('--dnt-status-danger-bg', '#fdeeee'), textDark: cssVar('--dnt-status-danger-fg', '#b42318') },
+      conflict: { bgCell: cssVar('--dnt-status-danger-bg', '#fdeeee'), textDark: cssVar('--dnt-status-danger-fg', '#b42318') },
     } satisfies Record<'edited' | 'new' | 'deleted' | 'conflict', Partial<Theme>>,
     font,
     charPx: bodyCharPx(font.body),
@@ -316,7 +358,10 @@ export function ResultGrid({
   extraCellMenu,
   editing,
   onOpenValue,
+  onSelectionSummary,
 }: {
+  /** What the selection covers ("3 rows selected"), each time it changes; null for none / one cell. */
+  onSelectionSummary?: (summary: string | null) => void;
   /** Opens the value of a cell in the data view's editor (Shift+Enter, "Open value editor"). */
   onOpenValue?: (row: number, col: number) => void;
   /** The data view's editing hooks. */
@@ -336,7 +381,14 @@ export function ResultGrid({
 }) {
   const themeVersion = useThemeVersion();
   // `themeVersion` is the dependency: the theme is read from CSS variables again when it changes.
-  const { theme, nullStyle, statusStyle, font, charPx } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
+  const { theme: baseTheme, selection, nullStyle, statusStyle, font, charPx } = useMemo(() => (themeVersion >= 0 ? buildTheme() : buildTheme()), [themeVersion]);
+  // Selection (cells, rows, the focused column's header) is the full fill only while the grid has the focus.
+  const [focused, setFocused] = useState(false);
+  const theme = useMemo(() => {
+    const fill = focused ? selection.focused : selection.muted;
+    return { ...baseTheme, accentLight: fill, bgHeaderHasFocus: fill };
+  }, [baseTheme, selection, focused]);
+  const rowHeight = useTokenPx('--dnt-row-h-grid', ROW_HEIGHT_FALLBACK);
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const say = useCallback((text: string, warn: boolean) => {
@@ -439,21 +491,33 @@ export function ResultGrid({
       ctx.textBaseline = 'middle';
       ctx.fillStyle = t.textHeader;
       ctx.font = `${t.headerFontStyle} ${t.fontFamily}`;
-      ctx.fillText(meta.name, rect.x + 8, rect.y + rect.height / 2 - 8);
+      // Line 1 the name, line 2 the type in the caption font; one line each (clipped, never wrapped).
+      ctx.fillText(meta.name, rect.x + 8, rect.y + rect.height / 2 - 7);
       ctx.fillStyle = t.textMedium;
       ctx.font = `${t.markerFontStyle} ${t.fontFamily}`;
-      ctx.fillText(meta.db_type, rect.x + 8, rect.y + rect.height / 2 + 9);
+      ctx.fillText(meta.db_type, rect.x + 8, rect.y + rect.height / 2 + 8);
       const mark = headerMarks?.[columnIndex];
       if (mark) {
         ctx.fillStyle = t.textHeader;
-        ctx.font = `600 12px ${t.fontFamily}`;
+        ctx.font = `${t.headerFontStyle} ${t.fontFamily}`;
         ctx.textAlign = 'right';
-        ctx.fillText(mark, rect.x + rect.width - 8, rect.y + rect.height / 2 - 8);
+        ctx.fillText(mark, rect.x + rect.width - 8, rect.y + rect.height / 2 - 7);
       }
       ctx.restore();
     },
     [result.columns, headerMarks],
   );
+
+  const rows = result.rowCount;
+  const getRowThemeOverride = useCallback((row: number) => (row > rows ? NO_LINE : undefined), [rows]);
+  const height = size ? size.h : '100%';
+  const columnsWidth = widths.reduce((n, w) => n + w, 0);
+  // The real scrollbar height (thin scrollbars, platform): read from Glide's scroller after layout.
+  const [scrollbar, setScrollbar] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    setScrollbar(scrollbarHeight(boxRef.current?.querySelector<HTMLElement>('.dvn-scroller')));
+  }, [size, columnsWidth, rows]);
+  const blank = size ? blankArea({ boxHeight: size.h, boxWidth: size.w, rows, rowHeight, columnsWidth, scrollbar }) : null;
 
   // ---- selection (controlled, so find / go to row can move it) ----
   const [sel, setSel] = useState<GridSelection | undefined>(undefined);
@@ -467,6 +531,9 @@ export function ResultGrid({
     });
     gridRef.current?.scrollTo(col, row);
   }, []);
+
+  const summary = selectionSummary(sel, result.rowCount, result.columns.length);
+  useEffect(() => onSelectionSummary?.(summary), [summary, onSelectionSummary]);
 
   const stats = useMemo(() => {
     const colCount = result.columns.length;
@@ -701,7 +768,13 @@ export function ResultGrid({
       // Window shortcuts that clash with the editing keys (Ctrl+0) look for this.
       data-editing-grid={editing ? 'true' : undefined}
       onKeyDownCapture={onKeyDownCapture}
-      onFocusCapture={() => commands.current && activateGrid(commands.current)}
+      onFocusCapture={() => {
+        setFocused(true);
+        if (commands.current) activateGrid(commands.current);
+      }}
+      onBlurCapture={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocused(false);
+      }}
       onContextMenuCapture={(e) => {
         pointer.current = { x: e.clientX, y: e.clientY };
       }}
@@ -732,8 +805,9 @@ export function ResultGrid({
             getCellContent={getCellContent}
             getCellsForSelection={getCellsForSelection}
             drawHeader={drawHeader}
-            rowHeight={ROW_HEIGHT}
-            headerHeight={HEADER_HEIGHT}
+            rowHeight={rowHeight}
+            headerHeight={GRID_HEADER_HEIGHT}
+            getRowThemeOverride={getRowThemeOverride}
             rowMarkers={firstRowNumber === undefined ? 'number' : { kind: 'number', startIndex: firstRowNumber }}
             rangeSelect="rect"
             theme={theme}
@@ -754,8 +828,10 @@ export function ResultGrid({
             minColumnWidth={MIN_COL_WIDTH}
             maxColumnWidth={2000}
             width={size?.w ?? '100%'}
-            height={size?.h ?? '100%'}
+            height={height}
           />
+          {/* Hides the column lines Glide draws under the last row; clicks and wheel pass through. */}
+          {blank && <div className="gt-blank" data-testid="grid-blank" aria-hidden="true" style={{ top: blank.top, height: blank.height }} />}
         </div>
         {record && (
           <RecordView

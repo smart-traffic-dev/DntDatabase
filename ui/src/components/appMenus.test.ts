@@ -6,6 +6,7 @@ const base: MenuState = {
   theme: 'system',
   setTheme: () => {},
   sidebarVisible: true,
+  rightSidebarVisible: false,
   resultsVisible: true,
   hasTab: false,
   canReopen: false,
@@ -14,6 +15,9 @@ const base: MenuState = {
   runnable: false,
   stoppable: false,
   hasSelection: false,
+  layout: 'single',
+  groupCount: 1,
+  maximized: false,
 };
 
 const items = (menu: string, state: Partial<MenuState> = {}) =>
@@ -77,12 +81,34 @@ describe('buildMenus', () => {
   });
 
   it('View ticks the current theme and the sidebar toggle', () => {
-    const checked = (state: Partial<MenuState>) => items('View', state).filter((i) => i.checked).map((i) => i.label);
+    const checked = (state: Partial<MenuState>) =>
+      items('View', state)
+        .filter((i) => i.checked && !i.label.startsWith('Layout:'))
+        .map((i) => i.label);
     expect(checked({ theme: 'light', sidebarVisible: false, resultsVisible: false })).toEqual(['Light']);
     expect(checked({ theme: 'dark' })).toEqual(['Dark', 'Show sidebar', 'Show results']);
     expect(checked({ theme: 'system', resultsVisible: false })).toEqual(['System', 'Show sidebar']);
+    expect(checked({ theme: 'dark', rightSidebarVisible: true })).toEqual(['Dark', 'Show sidebar', 'Show results', 'Right sidebar']);
     expect(item('View', 'Light')?.checked).toBe(false);
     expect(item('View', 'Reset layout')?.checked).toBeUndefined();
+  });
+
+  it('View offers the editor layouts (current one ticked) and the splits', () => {
+    const layouts = (state: Partial<MenuState>) =>
+      items('View', state).filter((i) => i.label.startsWith('Layout:')).map((i) => [i.label, i.hint, i.checked]);
+    expect(layouts({ layout: 'rows', groupCount: 2 })).toEqual([
+      ['Layout: Single', 'Ctrl+K 1', false],
+      ['Layout: Two columns', 'Ctrl+K 2', false],
+      ['Layout: Two rows', 'Ctrl+K 3', true],
+      ['Layout: Grid 2 × 2', 'Ctrl+K 4', false],
+    ]);
+    expect(item('View', 'Split right', { hasTab: true })?.hint).toBe('Ctrl+\\');
+    expect(item('View', 'Split right', { hasTab: true, groupCount: 4 })?.disabled).toBe(true);
+    expect(item('View', 'Split down')?.disabled).toBe(true);
+    expect(item('View', 'Close group', { groupCount: 2 })?.disabled).toBe(false);
+    expect(item('View', 'Maximize group', { groupCount: 2 })).toMatchObject({ hint: 'Ctrl+K Ctrl+M', disabled: false, checked: false });
+    expect(item('View', 'Maximize group', { groupCount: 2, maximized: true })?.checked).toBe(true);
+    expect(item('View', 'Maximize group')?.disabled).toBe(true);
   });
 
   it('choosing a theme calls setTheme', () => {
@@ -109,14 +135,25 @@ describe('buildMenus', () => {
     expect(item('Query', 'Stop', { queryTabId: 'q1', runnable: false, stoppable: true })?.disabled).toBe(false);
   });
 
+  it('the old toolbar placeholders are disabled "Coming soon" items in the menus that will own them', () => {
+    const soon = (menu: string) => items(menu).filter((i) => i.hint === 'Coming soon');
+    expect(soon('View').map((i) => i.label)).toEqual(['Tables list', 'Views list', 'Functions list']);
+    expect(soon('Tools').map((i) => i.label)).toEqual(['Import / Export data…', 'Backup…', 'ER diagram', 'Compare schemas…']);
+    for (const i of [...soon('View'), ...soon('Tools')]) expect(i.disabled, i.label).toBe(true);
+  });
+
   it('Tools and Help entries', () => {
-    expect(items('Tools').map((i) => i.label)).toEqual(['Settings…', 'Developer tools']);
+    expect(items('Tools').filter((i) => !i.disabled).map((i) => i.label)).toEqual(['Settings…', 'Developer tools']);
     expect(item('Tools', 'Developer tools')?.hint).toBe('Ctrl+Shift+I');
     expect(item('Tools', 'Settings…')?.hint).toBe('Ctrl+,');
     expect(item('Help', 'Keyboard shortcuts')?.hint).toBe('F1');
-    expect(items('View').filter((i) => i.hint).map((i) => [i.label, i.hint])).toEqual([
+    const group = /^(Layout:|Split|Close group|Maximize group)/;
+    expect(items('View').filter((i) => i.hint && i.hint !== 'Coming soon' && !group.test(i.label)).map((i) => [i.label, i.hint])).toEqual([
       ['Show sidebar', 'Ctrl+B'],
       ['Show results', 'Ctrl+J'],
+      ['Maximize results', 'Ctrl+Shift+J'],
+      ['Right sidebar', 'Ctrl+Alt+B'],
+      ['History', 'Ctrl+Shift+H'],
       ['Filter rows (Data tab)', 'F3'],
       ['Focus connection tree', 'Ctrl+E'],
       ['Command palette', 'Ctrl+Shift+P'],

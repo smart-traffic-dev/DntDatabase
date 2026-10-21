@@ -118,9 +118,10 @@ for (const e of engines) {
       // 3. Edit `label` of the first row: click the first cell, move right, Enter, type, Enter.
       const canvas = await grid.$('canvas');
       // wdio click offsets are measured from the element's centre; the `label` cell of row 1 sits 120 px
-      // right of and 58 px below the canvas's top-left corner (row marker, `id` column, then `label`).
+      // right of and 48 px below the canvas's top-left corner (row marker, `id` column, then `label`;
+      // the middle of row 1 under the 36 px header, 24 px rows at the default Compact density).
       const size = await canvas.getSize();
-      await canvas.click({ x: Math.round(120 - size.width / 2), y: Math.round(58 - size.height / 2) });
+      await canvas.click({ x: Math.round(120 - size.width / 2), y: Math.round(48 - size.height / 2) });
       await browser.pause(300);
       // Shift+Enter opens the DOM value editor on the selected cell (the canvas cell overlay is not driveable).
       await browser.keys(['Shift', 'Enter']);

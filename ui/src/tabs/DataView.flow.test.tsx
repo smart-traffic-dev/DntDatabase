@@ -5,7 +5,7 @@ import type { ApplyReport, ColumnMeta, EditPreview, EditableInfo, ObjectRef, Tab
 import { DialogHost } from '../dialogs/DialogHost';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { callsOf, ids, mockBackend, resetStores } from '../test/backend';
-import { DataView } from './DataView';
+import { DataActions, DataPager, DataView } from './DataView';
 
 // P3 acceptance (Task 17, ruling R1): the browser-level scenario "filter -> edit a cell -> preview ->
 // apply -> page reloads" walked end to end through the real DataView, stores and dialogs. The canvas
@@ -86,11 +86,14 @@ describe('P3 flow: filter, edit, preview, apply, reload', () => {
     const user = userEvent.setup();
     render(
       <>
-        <DataView tab={tab} estimate={null} />
+        {/* Filter is in the tab strip, the pager in the sub-tab row (editor v2 §2). */}
+        <DataActions tab={tab} />
+        <DataPager tab={tab} estimate={null} />
+        <DataView tab={tab} />
         <DialogHost />
       </>,
     );
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
 
     // 1. Filter id = 2 (server side).
     await user.click(screen.getByRole('button', { name: 'Filter' }));
@@ -99,7 +102,7 @@ describe('P3 flow: filter, edit, preview, apply, reload', () => {
     await user.click(within(bar).getByRole('button', { name: 'Apply' }));
     const filter = { mode: 'and', conditions: [{ column: 'id', op: 'eq', values: ['2'] }] };
     await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ offset: 0, filter }));
-    await screen.findByText('Rows 1–1');
+    await screen.findByText('1–1');
 
     // 2. Edit a cell, then preview: the dialog shows the real statements, nothing ran yet.
     await user.click(screen.getByRole('button', { name: 'cell 0,1' }));

@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueryTabRecord } from '../bindings';
 import { DialogHost } from '../dialogs/DialogHost';
-import { QueryTab } from '../tabs/query/QueryTab';
+import { TabStripActions } from '../tabs/TabStripActions';
 import { onQueryShortcut } from '../components/queryShortcuts';
 import { callsOf, calls, config, fail, ids, mockBackend, resetStores } from '../test/backend';
 import { useConnections } from './connections';
@@ -128,8 +128,10 @@ describe('restore', () => {
     expect(doc('a')).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT 1;', cursor: 3, dialect: 'mysql' });
     expect(useTabs.getState().activeId).toBe('a');
     // A new query after a restore continues the numbering.
-    useQueryDocs.getState().newQuery(null, null);
-    expect(useTabs.getState().tabs.at(-1)!.title).toBe('Query 3');
+    const fresh = useQueryDocs.getState().newQuery(null, null);
+    expect(useTabs.getState().tabs.find((t) => t.id === fresh)!.title).toBe('Query 3');
+    // It opens right after the active tab (VS Code).
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual(['a', fresh, 'b']);
   });
 
   it('restores_tab_whose_connection_was_deleted', async () => {
@@ -140,7 +142,10 @@ describe('restore', () => {
     expect(doc('orphan')).toMatchObject({ connectionId: null, sql: 'SELECT 1;' });
     const tab = useTabs.getState().tabs[0] as QueryTabRef;
     expect(tab.connectionId).toBeNull();
-    render(createElement(QueryTab, { tab }));
+    // The context chip and Run are in the tab strip's action cluster.
+    render(createElement(TabStripActions, { groupId: 'g1', tab }));
+    expect(screen.getByTestId('query-context')).toHaveTextContent('Choose a connection');
+    await userEvent.setup().click(screen.getByTestId('query-context'));
     const select = screen.getByTestId('query-connection') as HTMLSelectElement;
     expect(select.selectedOptions[0]).toHaveTextContent('Choose a connection');
     expect(screen.getByTestId('query-run')).toBeDisabled();

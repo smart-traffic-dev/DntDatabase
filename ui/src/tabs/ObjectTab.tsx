@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import Editor from '@monaco-editor/react';
 import { needsReconnect } from '../api';
-import { selectTopSql } from '../components/newQuery';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
-import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
-import { useTableData } from '../store/tableData';
-import { DataView } from './DataView';
+import { useObjectData, type Loadable, type SubTab } from '../store/objectData';
+import { DataPager, DataView } from './DataView';
+import { resourceOf, subTabsOf, useSubTab } from './objectSections';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
 import { editorFontOptions } from '../monaco/fonts';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
@@ -30,17 +29,6 @@ export function formatBytes(bytes: number): string {
 }
 
 const formatCount = (n: number) => `≈ ${n.toLocaleString('en-US')}`;
-
-/**
- * Tables and views (incl. materialized) open on their Data (like Navicat), then Info, DDL and
- * Structure; other objects have DDL only.
- */
-function subTabsOf(kind: Tab['objectRef']['kind']): SubTab[] {
-  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['data', 'info', 'ddl', 'structure'] : ['ddl'];
-}
-
-// Data also loads the (cached) detail: its row estimate is shown next to the page.
-const resourceOf = (sub: SubTab): Resource => (sub === 'ddl' ? 'ddl' : 'detail');
 
 interface Recovery {
   onRetry(): void;
@@ -123,17 +111,12 @@ function InfoRows({ rows }: { rows: [string, string][] }) {
   );
 }
 
-/** Tables and views can be queried; routines, sequences and the like cannot. */
-const queryable = (kind: Tab['objectRef']['kind']) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
-
 /** Opens a new query tab on the object's connection and database, holding `sql`. */
 function openQuery(tab: Tab, sql: string) {
   const docs = useQueryDocs.getState();
   const id = docs.newQuery(tab.connectionId, tab.objectRef.database);
   docs.update(id, { sql });
 }
-
-const selectAllOf = (tab: Tab): string => selectTopSql(tab, dialectOfConnection(tab.connectionId));
 
 /** The row estimate of a loaded detail (views have none). */
 const estimateOf = (detail: Loadable<TableDetail> | undefined): number | null =>
@@ -162,8 +145,8 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   };
 
   return (
-    <div className="ot-ddl">
-      <div className="ot-ddl-bar">
+    <>
+      <div className="ot-bar" role="toolbar" aria-label="DDL">
         <button type="button" className="btn small" aria-pressed={wrap} title="Wrap long lines" onClick={() => setWrap((w) => !w)}>
           Wrap
         </button>
@@ -174,33 +157,35 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
           {copied ? 'Copied' : 'Copy'}
         </button>
       </div>
-      {copyError ? (
-        <div role="alert" className="ot-error">
-          Couldn't copy — select the text and press Ctrl+C.
+      <div className="ot-body ot-ddl">
+        {copyError ? (
+          <div role="alert" className="ot-error">
+            Couldn't copy — select the text and press Ctrl+C.
+          </div>
+        ) : null}
+        <div className="ot-ddl-text" data-testid="object-ddl-text">
+          <Editor
+            language={dialectOfConnection(tab.connectionId) === 'postgres' ? 'pgsql' : 'mysql'}
+            value={ddl}
+            theme={monacoTheme.theme}
+            beforeMount={monacoTheme.beforeMount}
+            options={{
+              readOnly: true,
+              domReadOnly: true,
+              automaticLayout: true,
+              minimap: { enabled: false },
+              ...editorFontOptions(),
+              scrollBeyondLastLine: false,
+              folding: false,
+              renderLineHighlight: 'none',
+              wordWrap: wrap ? 'on' : 'off',
+              lightbulb: { enabled: 'off' as never },
+              ariaLabel: 'DDL',
+            }}
+          />
         </div>
-      ) : null}
-      <div className="ot-ddl-text" data-testid="object-ddl-text">
-        <Editor
-          language={dialectOfConnection(tab.connectionId) === 'postgres' ? 'pgsql' : 'mysql'}
-          value={ddl}
-          theme={monacoTheme.theme}
-          beforeMount={monacoTheme.beforeMount}
-          options={{
-            readOnly: true,
-            domReadOnly: true,
-            automaticLayout: true,
-            minimap: { enabled: false },
-            ...editorFontOptions(),
-            scrollBeyondLastLine: false,
-            folding: false,
-            renderLineHighlight: 'none',
-            wordWrap: wrap ? 'on' : 'off',
-            lightbulb: { enabled: 'off' as never },
-            ariaLabel: 'DDL',
-          }}
-        />
       </div>
-    </div>
+    </>
   );
 }
 
@@ -351,7 +336,7 @@ export function ObjectTab({ tab }: { tab: Tab }) {
   const uid = useId();
   const subs = subTabsOf(tab.objectRef.kind);
   const stored = useObjectData((s) => s.byTab[tab.id]);
-  const sub = stored?.sub && subs.includes(stored.sub) ? stored.sub : subs[0]!;
+  const sub = useSubTab(tab);
   const resource = resourceOf(sub);
   const tabRefs = useRef<Partial<Record<SubTab, HTMLButtonElement | null>>>({});
 
@@ -384,64 +369,41 @@ export function ObjectTab({ tab }: { tab: Tab }) {
   const retry = () => void useObjectData.getState().load(tab, resource, true);
   const reconnect = () => void useObjectData.getState().reconnect(tab, resource);
   const { objectRef } = tab;
-  const path = [objectRef.database, objectRef.schema, objectRef.name].filter(Boolean).join('.');
   const state = stored?.[resource];
-  // The Data sub-tab has its own loading state; Refresh reflects the section's metadata / DDL.
-  const refreshing = state?.status === 'loading';
+  const estimate = estimateOf(sub === 'data' ? (state as Loadable<TableDetail> | undefined) : undefined);
 
   if (tab.needsVerification) return <div role="alert" className="ot-error">
     <p>Object action outcome unknown. Cached data is hidden. Reload to verify the object before continuing.</p>
     <button className="btn" onClick={() => useTabs.setState((s) => ({ tabs: s.tabs.map((t) => t.id === tab.id ? { ...t, needsVerification: false } : t) }))}>Reload object</button>
   </div>;
 
+  // No header row (editor v2 §2): the name is the tab's title, the connection and actions are in
+  // the strip's cluster. The sections and the Data pager share one 28 px row.
   return (
     <div className="object-tab">
-      <header className="ot-head">
-        <div className="ot-title">
-          <strong>{objectRef.name}</strong>
-          <span className="muted mono">{path}</span>
-        </div>
-        <div className="ot-actions">
-          {queryable(objectRef.kind) && (
-            <button type="button" className="btn" title="Open a query tab with SELECT * on this object" onClick={() => openQuery(tab, selectAllOf(tab))}>
-              Query
+      <div className="ot-subbar">
+        <div role="tablist" aria-label="Object sections" className="ot-tabs" onKeyDown={onKeyDown}>
+          {subs.map((s) => (
+            <button
+              key={s}
+              type="button"
+              role="tab"
+              id={`${uid}-tab-${s}`}
+              aria-selected={s === sub}
+              aria-controls={`${uid}-panel`}
+              tabIndex={s === sub ? 0 : -1}
+              className={`ot-subtab${s === sub ? ' on' : ''}`}
+              data-testid={s === 'ddl' ? 'object-tab-ddl' : undefined}
+              ref={(el) => {
+                tabRefs.current[s] = el;
+              }}
+              onClick={() => select(s)}
+            >
+              {SUB_LABEL[s]}
             </button>
-          )}
-          <button
-            type="button"
-            className="btn"
-            disabled={refreshing}
-            aria-busy={refreshing}
-            title={refreshing ? 'Loading the visible section…' : 'Reload the visible section'}
-            onClick={() => {
-              void useObjectData.getState().refresh(tab, resource);
-              if (sub === 'data') void useTableData.getState().load(tab);
-            }}
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
+          ))}
         </div>
-      </header>
-      <div role="tablist" aria-label="Object sections" className="ot-tabs" onKeyDown={onKeyDown}>
-        {subs.map((s) => (
-          <button
-            key={s}
-            type="button"
-            role="tab"
-            id={`${uid}-tab-${s}`}
-            aria-selected={s === sub}
-            aria-controls={`${uid}-panel`}
-            tabIndex={s === sub ? 0 : -1}
-            className={`ot-tab${s === sub ? ' active' : ''}`}
-            data-testid={s === 'ddl' ? 'object-tab-ddl' : undefined}
-            ref={(el) => {
-              tabRefs.current[s] = el;
-            }}
-            onClick={() => select(s)}
-          >
-            {SUB_LABEL[s]}
-          </button>
-        ))}
+        {sub === 'data' ? <DataPager tab={tab} estimate={estimate} /> : null}
       </div>
       <div
         role="tabpanel"
@@ -450,15 +412,23 @@ export function ObjectTab({ tab }: { tab: Tab }) {
         className={sub === 'data' ? 'ot-panel ot-panel-data' : 'ot-panel'}
       >
         {sub === 'data' ? (
-          <DataView tab={tab} estimate={estimateOf(state as Loadable<TableDetail> | undefined)} />
-        ) : sub === 'ddl' ? (
-          <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
-            {(ddl) => <DdlPanel ddl={ddl} tab={tab} />}
-          </Loaded>
+          <DataView key={`${tab.id}:${tab.resourceRevision ?? 0}`} tab={tab} />
+        ) : sub === 'ddl' && state?.status === 'ok' ? (
+          <DdlPanel ddl={state.data as string} tab={tab} />
         ) : (
-          <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
-            {(detail) => (sub === 'info' ? <InfoPanel detail={detail} kind={objectRef.kind} /> : <StructurePanel detail={detail} />)}
-          </Loaded>
+          <>
+            <div className="ot-body">
+              {sub === 'ddl' ? (
+                <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
+                  {() => null}
+                </Loaded>
+              ) : (
+                <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
+                  {(detail) => (sub === 'info' ? <InfoPanel detail={detail} kind={objectRef.kind} /> : <StructurePanel detail={detail} />)}
+                </Loaded>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>

@@ -5,6 +5,7 @@ import type {
   ConnectionSummary,
   DatabaseInfo,
   EditableInfo,
+  HistoryEntry,
   IndexDetail,
   ObjectKind,
   ObjectRef,
@@ -147,6 +148,44 @@ const READ_ONLY: EditableInfo = {
   protection: 'row_version',
 };
 
+/** Two statements the app ran earlier, for the right sidebar's History panel. */
+const HISTORY: HistoryEntry[] = [
+  {
+    id: 2,
+    connection_id: 'e2e-history-conn',
+    database: 'dnt_fixture',
+    sql_text: 'UPDATE orders SET total = 0 WHERE id = 99',
+    redacted: false,
+    kind: 'write',
+    started_at: new Date().toISOString(),
+    elapsed_ms: 4,
+    status: 'error',
+    row_count: null,
+    affected: null,
+    error_kind: 'query',
+    error_code: '1054',
+    origin: 'query',
+    outcome_unknown: false,
+  },
+  {
+    id: 1,
+    connection_id: 'e2e-history-conn',
+    database: 'dnt_fixture',
+    sql_text: 'SELECT 42 AS answer',
+    redacted: false,
+    kind: 'read',
+    started_at: new Date().toISOString(),
+    elapsed_ms: 7,
+    status: 'ok',
+    row_count: 1,
+    affected: null,
+    error_kind: null,
+    error_code: null,
+    origin: 'query',
+    outcome_unknown: false,
+  },
+];
+
 export interface FakeBackend {
   /** Commands the app called, in order — for asserting what the UI asked the backend. */
   calls: { cmd: string; args: Record<string, unknown> }[];
@@ -162,6 +201,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   const connections: ConnectionConfig[] = [];
   const open = new Map<string, ServerInfo>();
   const calls: FakeBackend['calls'] = [];
+  let history = [...HISTORY];
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -249,6 +289,22 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     // The cache is a backend optimisation; nothing to invalidate here.
     refresh_node: () => null,
+
+    // The right sidebar's History panel.
+    history_list: ({ filter }) => {
+      const f = filter as { connection_id: string | null; search: string | null };
+      return history.filter(
+        (h) => (f.connection_id === null || h.connection_id === f.connection_id) && (f.search === null || h.sql_text.includes(f.search)),
+      );
+    },
+    history_delete: ({ ids }) => {
+      history = history.filter((h) => !(ids as number[]).includes(h.id));
+      return null;
+    },
+    history_clear: () => {
+      history = [];
+      return null;
+    },
 
     get_log_level: () => 'Info',
     set_log_level: () => null,

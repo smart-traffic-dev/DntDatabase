@@ -1,73 +1,248 @@
-/* Shortcut hint inside a toolbar button. */
-.qt-kbd {
-  margin-left: 8px;
-  font-family: var(--font-mono);
-  font-size: var(--text-caption);
-  font-weight: 400;
-  opacity: 0.75;
+/*
+ * The action cluster at the right end of a group's tab strip (editor v2 §2): 26 px icon
+ * buttons, a context chip, the open transaction. Never shrinks: the strip's tabs shrink and
+ * scroll first.
+ */
+.tab-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 var(--dnt-space-1) 0 var(--dnt-space-2);
+  white-space: nowrap;
 }
 
-/* Auto | Manual commit mode: two joined buttons. */
-.qt-segs {
+.ta-btn {
+  flex: none;
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--dnt-space-1);
+  min-width: var(--dnt-ctl-h-sm);
+  height: var(--dnt-ctl-h-sm);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
 }
 
-.qt-seg:first-child {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
+.ta-btn:hover:not(:disabled),
+.ta-caret:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
 }
 
-.qt-seg:last-child {
-  margin-left: -1px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+.ta-btn:disabled,
+.ta-caret:disabled {
+  background: transparent;
+  color: var(--dnt-fg-disabled);
 }
 
-.qt-seg.on {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-fg);
+.ta-btn[aria-pressed='true'],
+.ta-btn[aria-expanded='true'],
+.ta-caret[aria-expanded='true'] {
+  background: var(--dnt-bg-active);
 }
 
-@media (max-width: 1100px) {
-  .qt-kbd {
-    display: none;
-  }
+/* Run: accent icon; on a Production connection: danger icon. Stop (same element): danger. */
+.ta-btn.qt-primary:not(:disabled) {
+  color: var(--dnt-accent);
 }
 
-/* Editor placeholder: the keys, shown while the editor is empty. */
-.sql-editor {
+.ta-btn.danger-outline:not(:disabled),
+.ta-btn.danger:not(:disabled),
+.ta-btn.ta-rollback:not(:disabled) {
+  color: var(--dnt-status-danger-fg);
+}
+
+.ta-btn.ta-commit:not(:disabled) {
+  color: var(--dnt-status-success-fg);
+}
+
+/* Stop with the elapsed time beside the square. */
+.ta-btn.qt-stop {
+  padding: 0 var(--dnt-space-1_5);
+}
+
+.ta-elapsed {
+  font-size: var(--dnt-text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--dnt-fg-muted);
+}
+
+/* The ▾ of Run and Explain: a narrow button joined to its icon. */
+.ta-caret {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: var(--dnt-ctl-h-sm);
+  margin-left: -2px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+}
+
+.ta-caret svg {
+  width: 10px;
+  height: 10px;
+}
+
+.ta-sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--dnt-space-1);
+  background: var(--dnt-border);
+}
+
+/* Context chip `[ENV] database`: the name shrinks, the badge never does. */
+.qt-context {
   position: relative;
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: var(--dnt-space-1);
 }
 
-.sql-editor-placeholder {
+.ta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  min-width: 0;
+  max-width: 160px;
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-1_5);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-sm);
+}
+
+button.ta-chip:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.ta-chip[aria-expanded='true'] {
+  border-color: var(--dnt-focus);
+}
+
+.ta-chip-static {
+  margin-right: var(--dnt-space-1);
+  cursor: default;
+}
+
+.ta-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ta-chip > svg,
+.ta-chip-ro {
+  flex: none;
+  display: inline-flex;
+  color: var(--dnt-fg-muted);
+}
+
+.ta-chip-default {
+  color: var(--dnt-fg-muted);
+}
+
+.qt-env {
+  flex: none;
+  padding: 0 var(--dnt-space-1);
+  border-radius: var(--dnt-radius-xs);
+  font-size: var(--dnt-text-xs);
+  line-height: var(--dnt-text-xs-lh);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--dnt-on-accent);
+}
+
+.qt-env.env-production {
+  background: var(--dnt-env-prod);
+}
+
+.qt-env.env-staging {
+  background: var(--dnt-env-staging);
+}
+
+.qt-env.env-local {
+  background: var(--dnt-env-local);
+}
+
+/* The picker: connection and database selects under the chip, right-aligned with it. */
+.qt-popover {
   position: absolute;
-  top: 0;
-  right: 16px;
-  padding-top: 1px;
-  line-height: 19px;
-  font-family: var(--font-mono);
-  font-size: var(--text-callout);
-  color: var(--studio-fg-tertiary, var(--muted));
-  pointer-events: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  z-index: 1;
+  top: 100%;
+  right: 0;
+  z-index: var(--dnt-z-dropdown);
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+  min-width: 240px;
+  margin-top: 2px;
+  padding: var(--dnt-space-3);
+  background: var(--dnt-bg-raised);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  box-shadow: var(--dnt-shadow-2);
+  white-space: normal;
 }
 
-/* History: connection / database column of the all-connections scope, Explain marker. */
-.hs-origin {
-  flex: none;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
+.qt-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
 }
 
-.hs-explain {
+.qt-pick .qt-select {
+  max-width: none;
+  color: var(--dnt-fg);
+}
+
+/* The Explain menu opens under its icon, right-aligned (the cluster is at the window's right). */
+.tab-actions .qt-menu {
+  left: auto;
+  right: 0;
+  z-index: var(--dnt-z-dropdown);
+}
+
+/* The open transaction: amber "Tx mm:ss" (red when aborted), only while one is open. */
+.qt-tx-chip {
   flex: none;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  margin-right: 2px;
+  padding: 0 var(--dnt-space-1_5);
+  border: 1px solid;
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.qt-tx-chip.warning {
+  background: var(--dnt-status-warning-bg);
+  border-color: var(--dnt-status-warning-border);
+  color: var(--dnt-status-warning-fg);
+}
+
+.qt-tx-chip.danger {
+  background: var(--dnt-status-danger-bg);
+  border-color: var(--dnt-status-danger-border);
+  color: var(--dnt-status-danger-fg);
 }
 
 /* Marker hover: only the message, without the "View Problem / Quick Fix" status bar. */

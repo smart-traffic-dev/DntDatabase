@@ -70,7 +70,7 @@ describe('FavoritesPanel', () => {
     expect(screen.getByText('shop-prod / shop')).toBeInTheDocument();
   });
 
-  it('collapses the panel and a folder', async () => {
+  it('collapses a folder', async () => {
     backend();
     const user = userEvent.setup();
     render(<FavoritesPanel />);
@@ -78,10 +78,23 @@ describe('FavoritesPanel', () => {
     const folder = screen.getAllByTestId('favorite-folder').find((f) => f.textContent?.startsWith('Reports'));
     await user.dblClick(folder!);
     expect(screen.getAllByTestId('favorite-row')).toHaveLength(2);
+  });
 
-    await user.click(screen.getByRole('button', { name: /Favorites/ }));
-    expect(screen.queryByRole('tree')).toBeNull();
-    expect(screen.getByRole('button', { name: /Favorites/ })).toHaveAttribute('aria-expanded', 'false');
+  it('is a full-height view: no collapse toggle, Manage snippets is an icon button', async () => {
+    backend();
+    render(<FavoritesPanel />);
+    await waitFor(() => expect(screen.getAllByTestId('favorite-row')).toHaveLength(4));
+    expect(screen.queryByRole('button', { name: /^Favorites/ })).toBeNull();
+    const snippets = screen.getByRole('button', { name: 'Manage snippets' });
+    expect(snippets.querySelector('svg')).not.toBeNull();
+    expect(snippets).not.toHaveTextContent('{ }');
+  });
+
+  it('hidden keeps it mounted (favorites still load) but out of view', async () => {
+    backend();
+    render(<FavoritesPanel hidden />);
+    await waitFor(() => expect(callsOf('favorites_list')).toHaveLength(1));
+    expect(screen.getByTestId('favorites-panel')).not.toBeVisible();
   });
 
   it('filters with the filter box', async () => {

@@ -8,8 +8,12 @@ import {
   SIDEBAR_DEFAULT,
   SIDEBAR_MAX,
   SIDEBAR_MIN,
+  RIGHT_DEFAULT,
+  RIGHT_MAX,
+  RIGHT_MIN,
   editorPixels,
   reloadLayout,
+  resultsOf,
   useLayout,
 } from './layout';
 
@@ -73,6 +77,8 @@ describe('layout store', () => {
       editorRatio: 0.25,
       resultsVisible: true,
       fontScale: 1,
+      rightVisible: false,
+      rightWidth: RIGHT_DEFAULT,
     });
     useLayout.setState({ sidebarWidth: 1, sidebarVisible: true, editorRatio: 0.9 });
     reloadLayout();
@@ -150,6 +156,85 @@ describe('font scale', () => {
     localStorage.setItem('dnt.layout', JSON.stringify({ fontScale: 9 }));
     reloadLayout();
     expect(useLayout.getState().fontScale).toBe(1.6);
+  });
+});
+
+describe('right sidebar', () => {
+  it('starts collapsed at the default width, clamps 260 to 560 and persists', () => {
+    const s = useLayout.getState();
+    expect([s.rightVisible, s.rightWidth]).toEqual([false, RIGHT_DEFAULT]);
+    s.setRightWidth(10);
+    expect(useLayout.getState().rightWidth).toBe(RIGHT_MIN);
+    s.setRightWidth(5000);
+    expect(useLayout.getState().rightWidth).toBe(RIGHT_MAX);
+    s.setRightWidth(Number.NaN);
+    expect(useLayout.getState().rightWidth).toBe(RIGHT_DEFAULT);
+    s.setRightWidth(400);
+    s.toggleRight();
+    const stored = JSON.parse(localStorage.getItem('dnt.layout') ?? '{}');
+    expect([stored.rightVisible, stored.rightWidth]).toEqual([true, 400]);
+    useLayout.setState({ rightVisible: false, rightWidth: 300 });
+    reloadLayout();
+    expect([useLayout.getState().rightVisible, useLayout.getState().rightWidth]).toEqual([true, 400]);
+  });
+
+  it('setRightVisible opens or closes without toggling', () => {
+    useLayout.getState().setRightVisible(true);
+    useLayout.getState().setRightVisible(true);
+    expect(useLayout.getState().rightVisible).toBe(true);
+    useLayout.getState().setRightVisible(false);
+    expect(useLayout.getState().rightVisible).toBe(false);
+  });
+});
+
+describe('results per editor group', () => {
+  it('a group without its own setting follows the global value; a change is stored for that group only', () => {
+    const s = useLayout.getState();
+    expect(resultsOf(useLayout.getState(), 'g1')).toEqual({ visible: true, ratio: EDITOR_RATIO_DEFAULT, maximized: false });
+    s.toggleGroupResults('g1');
+    s.setGroupRatio('g1', 0.3);
+    expect(resultsOf(useLayout.getState(), 'g1')).toEqual({ visible: false, ratio: 0.3, maximized: false });
+    expect(resultsOf(useLayout.getState(), 'g2').maximized).toBe(false);
+  });
+
+  it('toggling one group leaves an already-customised group alone', () => {
+    const s = useLayout.getState();
+    s.setGroupRatio('g1', 0.3);
+    s.setGroupRatio('g2', 0.7);
+    s.toggleGroupResults('g1');
+    expect(resultsOf(useLayout.getState(), 'g1').visible).toBe(false);
+    expect(resultsOf(useLayout.getState(), 'g2')).toMatchObject({ visible: true, ratio: 0.7 });
+  });
+
+  it('a new group takes the global value, which follows the latest change', () => {
+    const s = useLayout.getState();
+    s.setGroupRatio('g1', 0.25);
+    s.toggleGroupResults('g1');
+    expect(resultsOf(useLayout.getState(), 'brand-new')).toMatchObject({ visible: false, ratio: 0.25 });
+    expect(useLayout.getState().editorRatio).toBe(0.25);
+  });
+
+  it('maximize shows the results, toggling again restores the stored ratio', () => {
+    const s = useLayout.getState();
+    s.setGroupRatio('g1', 0.4);
+    s.toggleGroupResults('g1');
+    s.toggleGroupMaximize('g1');
+    expect(resultsOf(useLayout.getState(), 'g1')).toEqual({ visible: true, ratio: 0.4, maximized: true });
+    s.toggleGroupMaximize('g1');
+    expect(resultsOf(useLayout.getState(), 'g1')).toEqual({ visible: true, ratio: 0.4, maximized: false });
+  });
+
+  it('hiding the results of a maximized group also restores the editor', () => {
+    const s = useLayout.getState();
+    s.toggleGroupMaximize('g1');
+    s.toggleGroupResults('g1');
+    expect(resultsOf(useLayout.getState(), 'g1')).toMatchObject({ visible: false, maximized: false });
+  });
+
+  it('reset clears per-group settings', () => {
+    useLayout.getState().toggleGroupMaximize('g1');
+    useLayout.getState().reset();
+    expect(resultsOf(useLayout.getState(), 'g1').maximized).toBe(false);
   });
 });
 

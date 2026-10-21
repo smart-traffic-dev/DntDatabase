@@ -1,5 +1,5 @@
 import { useConnections } from '../store/connections';
-import { useLayout } from '../store/layout';
+import { resultsOf, useLayout } from '../store/layout';
 import { canRun, canStop, emptyRun, useQueryRun } from '../store/queryRun';
 import { useQueryDocs } from '../store/queryTabs';
 import { useSelection, useStarting } from '../store/runQuery';
@@ -15,7 +15,9 @@ import type { MenuState } from './appMenus';
 export function useMenuState(): MenuState {
   const { theme, setTheme } = useTheme();
   const sidebarVisible = useLayout((s) => s.sidebarVisible);
-  const resultsVisible = useLayout((s) => s.resultsVisible);
+  const rightSidebarVisible = useLayout((s) => s.rightVisible);
+  const focusedGroup = useTabs((s) => s.focusedGroupId);
+  const resultsVisible = useLayout((s) => resultsOf(s, focusedGroup).visible);
   const hasTab = useTabs((s) => s.tabs.length > 0);
   const canReopen = useTabs((s) => s.closed.length > 0);
   const queryTabId = useTabs((s) => {
@@ -28,10 +30,14 @@ export function useMenuState(): MenuState {
   const stoppable = useQueryRun((s) => canStop(queryTabId ? (s.runs.get(queryTabId) ?? emptyRun) : emptyRun));
   const starting = useStarting((s) => (queryTabId ? s.ids.has(queryTabId) : false));
   const hasSelection = useSelection((s) => (queryTabId ? s.ids.has(queryTabId) : false));
+  const layout = useTabs((s) => s.layout);
+  const groupCount = useTabs((s) => s.groups.length);
+  const maximized = useTabs((s) => !!s.maximizedGroupId);
   return {
     theme,
     setTheme,
     sidebarVisible,
+    rightSidebarVisible,
     resultsVisible,
     hasTab,
     canReopen,
@@ -41,5 +47,8 @@ export function useMenuState(): MenuState {
     runnable: queryTabId !== null && !!bound && stored && idle && !starting,
     stoppable,
     hasSelection,
+    layout,
+    groupCount,
+    maximized,
   };
 }

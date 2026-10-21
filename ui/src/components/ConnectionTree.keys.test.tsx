@@ -8,6 +8,7 @@ import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
 import { callsOf, ids, mockBackend, openResult, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { ConnectionTree } from './ConnectionTree';
+import { useDrag } from './tabDrag';
 import { Sidebar } from './Sidebar';
 
 const prodNode = connNodeId(ids.prod);
@@ -71,6 +72,23 @@ describe('ConnectionTree keys', () => {
     expect(useTree.getState().expanded.has(prodNode)).toBe(false);
     key('Enter');
     expect(useTree.getState().expanded.has(prodNode)).toBe(true);
+  });
+
+  it('a single click opens a preview tab, a double-click keeps it; objects drag into the editor', async () => {
+    await setup();
+    const orders = screen.getAllByTestId('tree-row').find((r) => r.textContent?.includes('orders'))!;
+    fireEvent.click(orders);
+    expect(useTabs.getState().tabs).toEqual([expect.objectContaining({ title: 'orders', preview: true })]);
+    fireEvent.doubleClick(orders);
+    expect(useTabs.getState().tabs).toEqual([expect.objectContaining({ title: 'orders', preview: false })]);
+
+    expect(orders).toHaveAttribute('draggable', 'true');
+    const data = new Map<string, string>();
+    fireEvent.dragStart(orders, { dataTransfer: { setData: (k: string, v: string) => data.set(k, v), effectAllowed: '' } });
+    expect(useDrag.getState().item).toEqual({ kind: 'object', nodeId: ordersNode });
+    expect(data.get('text/x-dnt-object')).toBe(ordersNode);
+    fireEvent.dragEnd(orders);
+    expect(useDrag.getState().item).toBeNull();
   });
 
   it('Ctrl+Enter opens the object on its DDL tab', async () => {

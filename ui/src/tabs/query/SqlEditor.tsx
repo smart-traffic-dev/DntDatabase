@@ -1,6 +1,6 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
 import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
@@ -24,7 +24,7 @@ type Editor = Parameters<OnMount>[0];
 type Monaco = Parameters<OnMount>[1];
 
 /** Ctrl+Enter / Ctrl+Shift+Enter run, Ctrl+Shift+E explains, Esc stops while running (spec §5.2). Not S/O/T: those are window shortcuts. */
-function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
+export function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   registerEditor(tabId, editor);
   setActiveEditor(tabId, editor);
   editor.onDidDispose(() => {
@@ -44,12 +44,16 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   editor.onDidChangeCursorSelection(reportPosition);
   reportPosition();
   editor.onDidDispose(() => clearCursor(tabId));
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'cursor'));
-  editor.addCommand(
-    monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
-    () => void runFromEditor(tabId, 'all'),
-  );
-  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE, () => void explainQuery(tabId, false));
+  // Actions, not `addCommand`: a command lands in Monaco's one shared keybinding service and the
+  // last mounted editor's handler wins in every editor, so with two query tabs side by side
+  // Ctrl+Enter would run the other tab. An action is scoped to its editor and unbound on dispose.
+  const bind = (id: string, label: string, key: number, run: () => void, precondition?: string) => {
+    const handle = editor.addAction({ id: `dnt.run.${id}`, label, keybindings: [key], precondition, run });
+    editor.onDidDispose(() => handle.dispose());
+  };
+  bind('cursor', 'Run statement', monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'cursor'));
+  bind('all', 'Run all', monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => void runFromEditor(tabId, 'all'));
+  bind('explain', 'Explain', monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyE, () => void explainQuery(tabId, false));
   // Esc keeps its editor meaning (close widgets, collapse cursors) unless a run can be stopped.
   // An export of the tab's result (it runs on the tab's session) is stoppable too.
   const stoppable = () => canStop(useQueryRun.getState().runs.get(tabId) ?? emptyRun) || exportRunOf(tabId) !== null;
@@ -58,7 +62,7 @@ function bindRunKeys(tabId: string, editor: Editor, monaco: Monaco) {
   const unsubscribeExport = useExporting.subscribe(() => running.set(stoppable()));
   editor.onDidDispose(unsubscribe);
   editor.onDidDispose(unsubscribeExport);
-  editor.addCommand(monaco.KeyCode.Escape, () => void stopQuery(tabId), 'dntRunning');
+  bind('stop', 'Stop', monaco.KeyCode.Escape, () => void stopQuery(tabId), 'dntRunning');
   // F9 / Ctrl+R / Ctrl+Shift+R, Format SQL, case, duplicate, F12: Monaco actions (context menu).
   registerEditorCommands(tabId, editor, monaco);
 }
@@ -105,7 +109,6 @@ const shownText = new Map<string, string>();
 function sameEditor(prev: SqlEditorProps, next: SqlEditorProps): boolean {
   if (prev.engine !== next.engine || prev.doc.id !== next.doc.id) return false;
   if (prev.doc.connectionId !== next.doc.connectionId || prev.doc.database !== next.doc.database) return false;
-  if ((prev.doc.sql === '') !== (next.doc.sql === '')) return false;
   const id = next.doc.id;
   const holds = editors.get(id)?.getValue() ?? shownText.get(id);
   return next.doc.sql === holds;
@@ -116,8 +119,6 @@ export const SqlEditor = memo(SqlEditorView, sameEditor);
 
 function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
   const monacoTheme = useDntMonacoTheme();
-  // The placeholder lines up with the text: left edge of the content area, known once the editor is laid out.
-  const [contentLeft, setContentLeft] = useState<number | null>(null);
   const { connectionId, database } = doc;
   // Load the schema for autocomplete as soon as the editor opens, not on the first suggestion.
   useEffect(() => {
@@ -134,16 +135,6 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
   );
   return (
     <div className="sql-editor" data-testid="query-editor">
-      {doc.sql === '' && (
-        <div
-          className="sql-editor-placeholder"
-          data-testid="editor-placeholder"
-          aria-hidden="true"
-          style={{ left: contentLeft ?? 0, visibility: contentLeft === null ? 'hidden' : 'visible' }}
-        >
-          Ctrl+Enter runs the statement at the cursor · Ctrl+Shift+Enter runs all · Ctrl+Shift+E explains
-        </div>
-      )}
       <Editor
         path={`query://${doc.id}`}
         language={engine === 'postgres' ? 'pgsql' : 'mysql'}
@@ -160,8 +151,6 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
           editor.onDidDispose(() => {
             if (editors.get(doc.id) === editor) editors.delete(doc.id);
           });
-          setContentLeft(editor.getLayoutInfo().contentLeft);
-          editor.onDidLayoutChange((l) => setContentLeft(l.contentLeft));
           bindRunKeys(doc.id, editor, monaco);
           bindEditorFontScale(editor);
           onMount?.(editor, monaco);

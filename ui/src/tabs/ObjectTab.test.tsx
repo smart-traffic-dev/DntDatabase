@@ -9,6 +9,7 @@ import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { backendError, callsOf, config, fail, ids, mockBackend, resetStores, sampleTree, serverInfo } from '../test/backend';
 import { useObjectData } from '../store/objectData';
 import { openObjectTab } from '../components/openObject';
+import { ObjectActions } from './ObjectActions';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -66,7 +67,23 @@ function setup(tab: Tab, handlers: Record<string, (a: Record<string, unknown>) =
   });
   useTabs.getState().open(tab);
   if (!onData && tab.objectRef.kind !== 'Function') useObjectData.getState().setSub(tab.id, 'info');
-  return render(<ObjectTab tab={tab} />);
+  return render(withActions(tab));
+}
+
+/** The tab with its actions (in the app they sit at the right end of the group's tab strip). */
+function withActions(tab: Tab) {
+  return (
+    <>
+      <ObjectActions tab={tab} />
+      <ObjectTab tab={tab} />
+    </>
+  );
+}
+
+/** "Open in query" of the strip's `⋯` (Data). */
+async function openInQuery(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: 'More data actions' }));
+  await user.click(screen.getByRole('menuitem', { name: 'Open in query' }));
 }
 
 beforeEach(() => {
@@ -135,11 +152,11 @@ describe('ObjectTab', () => {
     render(<ObjectTab tab={tab} />);
     expect(screen.getAllByRole('tab')[0]).toHaveTextContent('Data');
     expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
-    expect(await screen.findByText('Rows 1–1')).toBeInTheDocument();
+    expect(await screen.findByText('1–1')).toBeInTheDocument();
     // The Settings default is the page size.
     expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 250, offset: 0, sort: [], filter: null, requestKey: `${tab.id}:page` }]);
     // The detail's row estimate is shown next to the page.
-    expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
+    expect(await screen.findByTestId('data-total')).toHaveTextContent('~12,345');
   });
 
   it('view_has_info_ddl_and_structure', async () => {
@@ -173,34 +190,85 @@ describe('ObjectTab', () => {
     expect(callsOf('object_ddl')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
   });
 
-  it('query_button_opens_a_select_in_a_new_tab', async () => {
+  it('no header row: the sections lead the sub-tab row; the chip names the connection and path', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'shop-prod')]);
+    const { container } = setup(makeTab('Table'));
+    expect(screen.queryByRole('banner')).toBeNull();
+    const tab = container.querySelector('.object-tab')!;
+    expect(tab.firstElementChild).toHaveClass('ot-subbar');
+    expect(within(tab as HTMLElement).getByRole('tablist', { name: 'Object sections' })).toBeInTheDocument();
+    const chip = screen.getByTestId('object-context');
+    expect(chip).toHaveTextContent('shop');
+    expect(chip).toHaveAttribute('title', expect.stringContaining('shop-prod'));
+    expect(chip).toHaveAttribute('title', expect.stringContaining('shop › orders'));
+    expect(within(chip).queryByRole('img', { name: 'Read-only' })).toBeNull();
+    // No duplicate actions: Query is "Open in query" on Data.
+    expect(screen.queryByRole('button', { name: 'Query' })).toBeNull();
+  });
+
+  it('a schema joins the path; a read-only connection shows a lock with how to change it', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'pg', { read_only: true })]);
+    setup(makeTab('Table', 'orders', 'sales'));
+    const chip = screen.getByTestId('object-context');
+    expect(chip).toHaveAttribute('title', expect.stringContaining('shop › sales › orders'));
+    expect(within(chip).getByRole('img', { name: 'Read-only' })).toBeInTheDocument();
+    expect(chip).toHaveAttribute('title', expect.stringContaining('This connection is read-only. Change it in Edit connection.'));
+  });
+
+  it('open_in_query_on_data_opens_a_select_in_a_new_tab', async () => {
     const user = userEvent.setup();
-    setup(makeTab('Table'));
-    await user.click(await screen.findByRole('button', { name: 'Query' }));
+    setup(makeTab('Table'), {}, true);
+    await openInQuery(user);
     const doc = [...useQueryDocs.getState().docs.values()].at(-1)!;
-    expect(doc).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT * FROM `shop`.`orders` LIMIT 1000;' });
+    expect(doc).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT * FROM `shop`.`orders` LIMIT 100;' });
     expect(useTabs.getState().activeId).toBe(doc.id);
   });
 
   it.each([
-    // The same SQL as the tree's "Select top 1000" (one helper: components/newQuery.ts).
-    ['postgres schema-qualified', 'postgres', 'orders', 'sales', 'SELECT * FROM "sales"."orders" LIMIT 1000;'],
-    ['quote in a postgres name', 'postgres', 'we"ird', 'public', 'SELECT * FROM "public"."we""ird" LIMIT 1000;'],
-    ['backtick in a mysql name', 'mysql', 'we`ird', null, 'SELECT * FROM `shop`.`we``ird` LIMIT 1000;'],
-    ['vietnamese name', 'mysql', 'đơn_hàng', null, 'SELECT * FROM `shop`.`đơn_hàng` LIMIT 1000;'],
-  ])('query_button_quotes_%s', async (_label, kind, name, schema, sql) => {
+    // The same quoting as the tree's "Select top 1000" (one helper: components/newQuery.ts).
+    ['postgres schema-qualified', 'postgres', 'orders', 'sales', 'SELECT * FROM "sales"."orders" LIMIT 100;'],
+    ['quote in a postgres name', 'postgres', 'we"ird', 'public', 'SELECT * FROM "public"."we""ird" LIMIT 100;'],
+    ['backtick in a mysql name', 'mysql', 'we`ird', null, 'SELECT * FROM `shop`.`we``ird` LIMIT 100;'],
+    ['vietnamese name', 'mysql', 'đơn_hàng', null, 'SELECT * FROM `shop`.`đơn_hàng` LIMIT 100;'],
+  ])('open_in_query_quotes_%s', async (_label, kind, name, schema, sql) => {
     const user = userEvent.setup();
     useConnections.getState().setStored([], [config(ids.prod, 'c', { kind: kind as 'mysql' | 'postgres' })]);
-    setup(makeTab('Table', name, schema));
-    await user.click(await screen.findByRole('button', { name: 'Query' }));
+    setup(makeTab('Table', name, schema), {}, true);
+    await openInQuery(user);
     expect([...useQueryDocs.getState().docs.values()].at(-1)!.sql).toBe(sql);
   });
-  it('functions_have_no_query_button', async () => {
+  it('functions_have_no_query_button_and_refresh_in_the_strip_actions', async () => {
     setup(makeTab('Function', 'fn'));
     await screen.findByTestId('monaco-mock');
     expect(screen.queryByRole('button', { name: 'Query' })).toBeNull();
+    // The DDL bar keeps its own actions; Refresh is the strip's one icon button.
+    expect(within(screen.getByRole('toolbar', { name: 'DDL' })).queryByRole('button', { name: 'Refresh' })).toBeNull();
+    const actions = screen.getByRole('toolbar', { name: 'Object' });
+    expect(within(actions).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Refresh']);
+    expect(within(actions).getByRole('button', { name: 'Refresh' })).toHaveAttribute('title', 'Reload this section');
   });
 
+  it.each(['Info', 'Structure'] as const)('%s_has_one_refresh_in_the_strip_actions', async (section) => {
+    const user = userEvent.setup();
+    setup(makeTab('Table'));
+    await user.click(screen.getByRole('tab', { name: section }));
+    const actions = screen.getByRole('toolbar', { name: 'Object' });
+    expect(within(actions).getAllByRole('button').map((b) => b.getAttribute('aria-label'))).toEqual(['Refresh']);
+    expect(screen.getAllByRole('button', { name: 'Refresh' })).toHaveLength(1);
+  });
+
+  it('data_refresh_reloads_the_rows_and_the_metadata', async () => {
+    const user = userEvent.setup();
+    setup(makeTab('Table'), {}, true);
+    await waitFor(() => expect(callsOf('table_data')).toHaveLength(1));
+    await waitFor(() => expect(callsOf('table_detail')).toHaveLength(1));
+    const bar = screen.getByRole('toolbar', { name: 'Object' });
+    await user.click(within(bar).getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
+    await waitFor(() => expect(callsOf('table_detail')).toHaveLength(2));
+    expect(callsOf('refresh_node')).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'Refresh' })).toHaveLength(1);
+  });
   it('open_in_editor_puts_the_ddl_in_a_new_query_tab', async () => {
     const user = userEvent.setup();
     setup(makeTab('Table'));

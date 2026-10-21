@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { $, $$, browser } from '@wdio/globals';
 import { evidence, evidenceDir } from './evidence';
-import { byId, expandRow, treeRow } from './helpers';
+import { byId, expandRow, inContextPicker, isRunning, setRowLimit, toggleContinueOnError, treeRow } from './helpers';
 
 const THEME = process.env.AUDIT_THEME ?? 'light';
 const SIZE = process.env.AUDIT_SIZE ?? 'default';
@@ -78,7 +78,7 @@ async function fillGeneral(c: Conn) {
   await byId('conn-port').setValue(String(c.port));
   await byId('conn-user').setValue(c.user);
   if (c.password !== undefined) await byId('conn-password').setValue(c.password);
-  if (c.env) await $('#cd-env').selectByAttribute('value', c.env);
+  if (c.env) await byId(`conn-env-${c.env}`).click();
   if (c.group) await $('#cd-group').selectByVisibleText(c.group);
   if (c.readOnly) await $("//label[contains(.,'Read-only connection')]/input").click();
   if (c.savePassword === false) await $("//label[contains(.,'Save password')]/input").click();
@@ -138,7 +138,7 @@ async function runCurrent() {
 
 const idle = async () => {
   await browser.pause(800);
-  return browser.waitUntil(async () => !(await byId('query-stop').isEnabled()), { timeout: 60_000, timeoutMsg: 'run did not end' });
+  return browser.waitUntil(async () => !(await isRunning()), { timeout: 60_000, timeoutMsg: 'run did not end' });
 };
 
 async function confirmIfAsked(screenshot?: string) {
@@ -466,9 +466,11 @@ describe(`UX audit tour (${P})`, () => {
     // ---- query tab (MySQL Production) ----
     await step('query-empty', async () => {
       await newQueryOn('shop-prod');
-      await byId('query-connection').selectByVisibleText('shop-prod');
-      await browser.pause(300);
-      await byId('query-database').selectByVisibleText('dnt_fixture');
+      await inContextPicker(async () => {
+        await byId('query-connection').selectByVisibleText('shop-prod');
+        await browser.pause(300);
+        await byId('query-database').selectByVisibleText('dnt_fixture');
+      });
       await browser.pause(800);
       await shot('query-empty');
     });
@@ -514,7 +516,7 @@ describe(`UX audit tour (${P})`, () => {
     await step('running-stop', async () => {
       await setSql('SELECT SLEEP(20)');
       await runCurrent();
-      await browser.waitUntil(async () => await byId('query-stop').isEnabled(), { timeout: 15_000 });
+      await browser.waitUntil(async () => await isRunning(), { timeout: 15_000 });
       await browser.pause(2500);
       await shot('query-running');
       await byId('query-stop').click();
@@ -533,7 +535,7 @@ describe(`UX audit tour (${P})`, () => {
       await idle();
       note(`150k-row SELECT with default limit: ${Date.now() - t0} ms`);
       await shot('result-truncated');
-      await byId('query-row-limit').selectByAttribute('value', '1000000');
+      await setRowLimit(1000000);
       t0 = Date.now();
       await runCurrent();
       await browser.pause(1500);
@@ -558,10 +560,10 @@ describe(`UX audit tour (${P})`, () => {
         await browser.setWindowSize(1024, 700);
         await browser.pause(800);
       }
-      await byId('query-row-limit').selectByAttribute('value', '10000');
+      await setRowLimit(10000);
     });
     await step('messages-errors', async () => {
-      await byId('query-continue-on-error').click();
+      await toggleContinueOnError();
       await setSql(
         "SELECT 1;\nSELECT * FORM orders;\nSELECT CAST('abc' AS SIGNED);\nDO 1;\nSELECT * FROM no_such_table;\nSELECT 2",
       );
@@ -571,7 +573,7 @@ describe(`UX audit tour (${P})`, () => {
       await byId('panel-messages').click();
       await browser.pause(500);
       await shot('messages-errors-warnings');
-      await byId('query-continue-on-error').click();
+      await toggleContinueOnError();
       await setSql('SELECT 1;\nSELECT *\nFROM orders\nWHERE id = = 1;\nSELECT 3');
       await runAll();
       await idle();
@@ -622,12 +624,13 @@ describe(`UX audit tour (${P})`, () => {
       await shot('explain-mysql-raw');
     });
     await step('history', async () => {
-      await byId('panel-history').click();
+      await byId('right-sidebar-history').click();
       await browser.pause(1000);
       await shot('history');
       await $('[data-testid="history-connection"]').selectByVisibleText('All connections');
       await browser.pause(800);
       await shot('history-all');
+      await byId('right-sidebar-history').click();
     });
     await step('tx-active', async () => {
       await setSql('START TRANSACTION');
@@ -661,20 +664,22 @@ describe(`UX audit tour (${P})`, () => {
       await byId('new-query').click();
       await (await editor()).waitForDisplayed({ timeout: 30_000 });
       await setSql("DO $$ BEGIN RAISE NOTICE 'hello from plpgsql'; RAISE WARNING 'careful'; END $$;\nSELECT 1/0;\nSELECT 42 AS answer");
-      await byId('query-continue-on-error').click();
+      await toggleContinueOnError();
       await runAll();
       await idle();
       await byId('panel-messages').click();
       await browser.pause(500);
       await shot('pg-messages-notice-error');
       await setSql('SELECT * FROM generate_series(1, 200000) g');
-      await byId('query-row-limit').selectByAttribute('value', '1000000');
+      await setRowLimit(1000000);
       const t0 = Date.now();
       await runCurrent();
       await idle();
       note(`PG 200k rows: ${Date.now() - t0} ms`);
       await shot('pg-result-200k');
-      await byId('query-database').selectByVisibleText('dnt_fixture');
+      await inContextPicker(async () => {
+        await byId('query-database').selectByVisibleText('dnt_fixture');
+      });
       await setSql('SELECT c.name, count(*) FROM customers c JOIN customers d ON d.id <= c.id GROUP BY c.name ORDER BY 2 DESC');
       await byId('query-explain').click();
       await byId('explain-view').waitForDisplayed({ timeout: 30_000 });

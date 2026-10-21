@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, isCancelled, notOpenError, toAppError } from '../api';
 import type { AppError, DataFilter, FilterMode, FilterOp, SortSpec, TableDataPage } from '../bindings';
+import { formatCount } from '../lib/plural';
 import type { Loadable } from './objectData';
 import { promptHandles, reopenConnection } from './reopen';
 import type { ObjectTabRef as Tab } from './tabs';
@@ -153,6 +154,32 @@ export function draftToFilter(draft: FilterDraft): { filter: DataFilter | null; 
   return { filter: conditions.length ? { mode: draft.mode, conditions } : null, error: null };
 }
 
+/**
+ * The total shown with the page (`1–100 / ~3,412`): the exact count once asked for, else the
+ * table's estimate (not under a filter: it is of the whole table); null when neither is known.
+ */
+export function pageTotal(state: TableDataState, estimate: number | null): { text: string; tip: string } | null {
+  const filtered = state.filter !== null;
+  if (state.count?.status === 'ok') {
+    const n = formatCount(state.count.data);
+    return { text: n, tip: `${n} ${filtered ? 'matching rows' : 'rows'} (counted)` };
+  }
+  if (estimate === null || filtered) return null;
+  const n = formatCount(estimate);
+  return { text: `~${n}`, tip: `About ${n} rows (the table's estimate; Count rows in ⋯ counts exactly)` };
+}
+
+/** The status bar's row text: "Rows 101–200 of ~3,412", "No rows", null while nothing is loaded. */
+export function pageRowsText(state: TableDataState, estimate: number | null): string | null {
+  if (state.page?.status === 'loading') return 'Loading…';
+  if (state.page?.status !== 'ok') return null;
+  const n = state.page.data.rows.length;
+  if (n === 0) return 'No rows';
+  const total = pageTotal(state, estimate);
+  const rows = `Rows ${formatCount(state.offset + 1)}–${formatCount(state.offset + n)}`;
+  return total ? `${rows} of ${total.text}` : rows;
+}
+
 let counter = 0;
 /** Latest request token per tab and kind (`page` / `count`). */
 const tokens = new Map<string, number>();
@@ -241,6 +268,8 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       go(tab, { offset, back }, true);
     },
     toggleSort(tab, column, additive = false) {
+      // Working in a preview tab keeps it (editor v2 §4.1).
+      useTabs.getState().keepTab(tab.id);
       const s = get().byTab[tab.id];
       // Sorting never changes the count.
       if (s) go(tab, { sort: nextSortKeys(s.sort, column, additive), offset: 0, back: [] }, true);
@@ -249,6 +278,7 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       if (get().byTab[tab.id]?.sort.length) go(tab, { sort: [], offset: 0, back: [] }, true);
     },
     applyFilter(tab, filter) {
+      useTabs.getState().keepTab(tab.id);
       if (get().byTab[tab.id]) go(tab, { filter, offset: 0, back: [] }, false);
     },
     clearFilter(tab) {
@@ -323,3 +353,13 @@ useTabs.subscribe((state) => {
   }
   useTableData.setState({ byTab: Object.fromEntries(Object.entries(byTab).filter(([id]) => open.has(id))) });
 });
+
+/** Forget a DDL target's old page and cancel requests before loading its new structure. */
+export function invalidateTableData(tabId: string): void {
+  tokens.delete(pageKey(tabId));
+  tokens.delete(countKey(tabId));
+  const state = useTableData.getState().byTab[tabId];
+  if (state?.page?.status === 'loading') cancelRequest(state.connectionId, pageKey(tabId));
+  if (state?.count?.status === 'loading') cancelRequest(state.connectionId, countKey(tabId));
+  useTableData.setState((s) => ({ byTab: Object.fromEntries(Object.entries(s.byTab).filter(([id]) => id !== tabId)) }));
+}

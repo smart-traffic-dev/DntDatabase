@@ -4,7 +4,8 @@ import { explainQuery, runFromEditor, stopQuery } from '../store/runQuery';
 import { useDialogs } from '../store/dialogs';
 import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
-import { useTabs, type Tab } from '../store/tabs';
+import type { LayoutPreset } from '../store/layoutTree';
+import { MAX_GROUPS, useTabs, type EditorLayout, type Tab } from '../store/tabs';
 import type { Theme } from '../theme/ThemeProvider';
 import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
 import type { MenuAction, MenuEntry } from './ActionMenu';
@@ -13,15 +14,17 @@ import { addActiveQueryToFavorites, listFavoritesForMenu, openSnippetsManager } 
 import { openExportDialog, toggleFilterBar } from '../dialogs/resultExport';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
-import { closeTab, reopenClosedTab } from './tabActions';
-import { focusConnectionTree, toggleResults, zoomIn, zoomOut, zoomReset } from './windowActions';
+import { closeGroup, closeTab, reopenClosedTab } from './tabActions';
+import { focusConnectionTree, showHistory, toggleMaximizeResults, toggleResults, toggleRightSidebar, zoomIn, zoomOut, zoomReset } from './windowActions';
 
 /** What the menu model depends on: plain data, so the builder is a pure function. */
 export interface MenuState {
   theme: Theme;
   setTheme(theme: Theme): void;
   sidebarVisible: boolean;
-  /** The result panel of query tabs is shown. */
+  /** The right sidebar (History) is open. */
+  rightSidebarVisible: boolean;
+  /** The result panel of the focused editor group is shown. */
   resultsVisible: boolean;
   /** A tab is open. */
   hasTab: boolean;
@@ -37,7 +40,19 @@ export interface MenuState {
   stoppable: boolean;
   /** The editor of the active query tab has selected text. */
   hasSelection: boolean;
+  /** The editor group layout and how many groups are open. */
+  layout: EditorLayout;
+  groupCount: number;
+  /** The focused group is maximized. */
+  maximized: boolean;
 }
+
+const LAYOUTS: { layout: LayoutPreset; label: string; key: string }[] = [
+  { layout: 'single', label: 'Single', key: '1' },
+  { layout: 'columns', label: 'Two columns', key: '2' },
+  { layout: 'rows', label: 'Two rows', key: '3' },
+  { layout: 'grid', label: 'Grid 2 × 2', key: '4' },
+];
 
 export interface AppMenu {
   id: 'file' | 'edit' | 'view' | 'query' | 'favorites' | 'tools' | 'help';
@@ -48,6 +63,9 @@ export interface AppMenu {
 }
 
 const sep: MenuEntry = { separator: true };
+
+/** A planned feature: listed, disabled, so the menus already show where it will live. */
+const soon = (label: string): MenuAction => ({ label, hint: 'Coming soon', disabled: true, run: () => {} });
 
 /** Developer tools: the backend opens the webview's DevTools. Quiet when there is no backend (browser preview). */
 export async function openDevtools() {
@@ -68,6 +86,11 @@ function exitApp() {
     // Not inside Tauri (browser preview).
   }
 }
+
+const splitFocused = (direction: 'right' | 'down') => {
+  const { activeId, splitTab } = useTabs.getState();
+  if (activeId) splitTab(activeId, direction);
+};
 
 const activeTab = (): Tab | undefined => {
   const { tabs, activeId } = useTabs.getState();
@@ -158,8 +181,25 @@ export function buildMenus(s: MenuState): AppMenu[] {
         sep,
         { label: 'Show sidebar', hint: 'Ctrl+B', checked: s.sidebarVisible, run: () => useLayout.getState().toggleSidebar() },
         { label: 'Show results', hint: 'Ctrl+J', checked: s.resultsVisible, run: toggleResults },
+        { label: 'Maximize results', hint: 'Ctrl+Shift+J', run: toggleMaximizeResults },
+        { label: 'Right sidebar', hint: 'Ctrl+Alt+B', checked: s.rightSidebarVisible, run: toggleRightSidebar },
+        { label: 'History', hint: 'Ctrl+Shift+H', run: showHistory },
         { label: 'Filter rows (Data tab)', hint: 'F3', disabled: !s.hasTab, run: toggleFilterBar },
         { label: 'Focus connection tree', hint: 'Ctrl+E', run: focusConnectionTree },
+        soon('Tables list'),
+        soon('Views list'),
+        soon('Functions list'),
+        sep,
+        ...LAYOUTS.map((l) => ({
+          label: `Layout: ${l.label}`,
+          hint: `Ctrl+K ${l.key}`,
+          checked: s.layout === l.layout,
+          run: () => useTabs.getState().setLayout(l.layout),
+        })),
+        { label: 'Split right', hint: 'Ctrl+\\', disabled: !s.hasTab || s.groupCount >= MAX_GROUPS, run: () => splitFocused('right') },
+        { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !s.hasTab || s.groupCount >= MAX_GROUPS, run: () => splitFocused('down') },
+        { label: 'Close group', hint: 'Ctrl+K W', disabled: s.groupCount < 2, run: () => void closeGroup() },
+        { label: 'Maximize group', hint: 'Ctrl+K Ctrl+M', checked: s.maximized, disabled: s.groupCount < 2, run: () => useTabs.getState().toggleMaximize() },
         sep,
         { label: 'Command palette', hint: 'Ctrl+Shift+P', run: showCommandPalette },
         { label: 'Go to object', hint: 'Ctrl+P', run: showQuickOpen },
@@ -204,6 +244,11 @@ export function buildMenus(s: MenuState): AppMenu[] {
       mnemonic: 'T',
       items: [
         { hint: 'Ctrl+,', label: 'Settings…', run: () => dialog({ kind: 'settings' }) },
+        sep,
+        soon('Import / Export data…'),
+        soon('Backup…'),
+        soon('ER diagram'),
+        soon('Compare schemas…'),
         sep,
         { label: 'Developer tools', hint: 'Ctrl+Shift+I', run: () => void openDevtools() },
       ],

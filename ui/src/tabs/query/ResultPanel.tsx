@@ -1,11 +1,11 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
+import { ChevronDownIcon, MaximizeResultsIcon } from '../../components/icons';
 import { plural } from '../../lib/plural';
 import { dialectOfConnection, useQueryDocs } from '../../store/queryTabs';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { ExplainView } from './ExplainView';
-import { HistoryView } from './HistoryView';
 import { MessagesView } from './MessagesView';
 import { ResultGrid } from './ResultGrid';
 import { PLAN_GONE, rerunStatement, usePlanAlive } from './rerun';
@@ -34,12 +34,35 @@ function cancelledText(run: TabRun): string | null {
   return ms === null ? 'Cancelled by user' : `Cancelled by user after ${(ms / 1000).toFixed(1)} s`;
 }
 
-/** The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent. */
+/**
+ * The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent.
+ * `collapsed`: folded to its tab bar by the user; choosing one of its tabs calls `onOpen`.
+ */
 export const ResultPanel = memo(ResultPanelView);
 
-function ResultPanelView({ tabId }: { tabId: string }) {
+function ResultPanelView({
+  tabId,
+  collapsed = false,
+  onOpen,
+  maximized = false,
+  onToggleMaximize,
+  onToggleCollapse,
+}: {
+  tabId: string;
+  collapsed?: boolean;
+  onOpen?: () => void;
+  /** Folds the panel to its tab bar, or opens it again. */
+  onToggleCollapse?: () => void;
+  /** The results fill the group (the editor is folded). */
+  maximized?: boolean;
+  onToggleMaximize?: () => void;
+}) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
-  const setPanel = useQueryRun((s) => s.setPanel);
+  const setRunPanel = useQueryRun((s) => s.setPanel);
+  const setPanel = (id: string, panel: TabRun['panel']) => {
+    setRunPanel(id, panel);
+    if (collapsed) onOpen?.();
+  };
   const planAlive = usePlanAlive(tabId);
   // The engine only quotes copied INSERT statements; a primitive, so typing does not re-render this.
   const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
@@ -51,7 +74,6 @@ function ResultPanelView({ tabId }: { tabId: string }) {
   const result = run.results[at];
   const showResult = run.panel === 'result' && result !== undefined;
   const showExplain = run.panel === 'explain';
-  const showHistory = run.panel === 'history';
   const hasExplain = run.explain !== null || run.explainError !== null;
   const readStatement = result ? run.plan?.stmts.find((s) => s.index === result.index)?.kind === 'read' : false;
   const errors = errorCount(run);
@@ -63,8 +85,8 @@ function ResultPanelView({ tabId }: { tabId: string }) {
     const active = run.phase.kind !== 'idle';
     const ended = wasActive.current && !active;
     wasActive.current = active;
-    if (ended && run.stop?.kind === 'error' && run.panel === 'result') setPanel(tabId, 'messages');
-  }, [run.phase.kind, run.stop, run.panel, setPanel, tabId]);
+    if (ended && run.stop?.kind === 'error' && run.panel === 'result') setRunPanel(tabId, 'messages');
+  }, [run.phase.kind, run.stop, run.panel, setRunPanel, tabId]);
 
   // `openExportDialog` (menu hook) exports the result shown here.
   useEffect(() => {
@@ -77,7 +99,7 @@ function ResultPanelView({ tabId }: { tabId: string }) {
   }, [at, showResult]);
 
   return (
-    <div className="qr-panel" data-testid="result-panel">
+    <div className={`qr-panel${collapsed ? ' collapsed' : ''}`} data-testid="result-panel">
       <div className="qr-tabs" role="tablist">
         <div className="qr-tabs-scroll" role="presentation" data-testid="result-tabs" ref={stripRef}>
           {run.results.map((r, i) => (
@@ -100,9 +122,9 @@ function ResultPanelView({ tabId }: { tabId: string }) {
         <button
           type="button"
           role="tab"
-          aria-selected={!showResult && !showExplain && !showHistory}
+          aria-selected={!showResult && !showExplain}
           aria-label={errors > 0 ? `Messages (${plural(errors, 'error')})` : undefined}
-          className={`qr-tab${!showResult && !showExplain && !showHistory ? ' active' : ''}`}
+          className={`qr-tab${!showResult && !showExplain ? ' active' : ''}`}
           data-testid="panel-messages"
           onClick={() => setPanel(tabId, 'messages')}
         >
@@ -125,16 +147,6 @@ function ResultPanelView({ tabId }: { tabId: string }) {
             Explain
           </button>
         )}
-        <button
-          type="button"
-          role="tab"
-          aria-selected={showHistory}
-          className={`qr-tab${showHistory ? ' active' : ''}`}
-          data-testid="panel-history"
-          onClick={() => setPanel(tabId, 'history')}
-        >
-          History
-        </button>
         {showResult && <Summary result={result} />}
         {showResult && result.columns.length > 0 && (
           <button
@@ -148,8 +160,34 @@ function ResultPanelView({ tabId }: { tabId: string }) {
             Export…
           </button>
         )}
+        {onToggleCollapse && (
+          <button
+            type="button"
+            className={`icon-btn qr-collapse${collapsed || !showResult ? ' push' : ''}`}
+            data-testid="result-collapse"
+            aria-label={collapsed ? 'Expand results' : 'Collapse results'}
+            aria-expanded={!collapsed}
+            title={collapsed ? 'Expand results' : 'Collapse results'}
+            onClick={onToggleCollapse}
+          >
+            <ChevronDownIcon />
+          </button>
+        )}
+        {onToggleMaximize && (
+          <button
+            type="button"
+            className={`icon-btn qr-maximize${!onToggleCollapse && (collapsed || !showResult) ? ' push' : ''}`}
+            data-testid="result-maximize"
+            aria-label={maximized ? 'Restore results' : 'Maximize results'}
+            aria-pressed={maximized}
+            title={maximized ? 'Restore results (Ctrl+Shift+J)' : 'Maximize results (Ctrl+Shift+J)'}
+            onClick={onToggleMaximize}
+          >
+            <MaximizeResultsIcon restore={maximized} />
+          </button>
+        )}
       </div>
-      {showResult ? (
+      {collapsed ? null : showResult ? (
         <>
           {cancelled && (
             <div className="qr-banner" role="status" data-testid="result-cancelled">
@@ -181,8 +219,6 @@ function ResultPanelView({ tabId }: { tabId: string }) {
         </>
       ) : showExplain ? (
         <ExplainView tabId={tabId} />
-      ) : showHistory ? (
-        <HistoryView tabId={tabId} />
       ) : (
         <MessagesView tabId={tabId} run={run} />
       )}

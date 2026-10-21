@@ -30,20 +30,20 @@ export function objectActionItems(node: TreeNode): Item[] {
     label, danger, disabled: cfg.read_only,
     run: () => useDialogs.getState().requestDialog({ kind: 'objectAction', connectionId, action }),
   });
-  if (node.kind === 'connection' && !pg) return [item('Create database?', { kind: 'create_namespace', database: '', name: '' })];
+  if (node.kind === 'connection' && !pg) return [item('Create database\u2026', { kind: 'create_namespace', database: '', name: '' })];
   if (node.kind === 'database' && node.scope) {
-    if (pg) return [item('Create schema?', { kind: 'create_namespace', database: node.scope.database, name: '' })];
-    return [item('Drop database?', { kind: 'drop_namespace', database: node.scope.database, name: node.scope.database }, true)];
+    if (pg) return [item('Create schema\u2026', { kind: 'create_namespace', database: node.scope.database, name: '' })];
+    return [item('Drop database\u2026', { kind: 'drop_namespace', database: node.scope.database, name: node.scope.database }, true)];
   }
-  if (node.kind === 'schema' && node.scope?.schema && pg) return [item('Drop schema?', { kind: 'drop_namespace', database: node.scope.database, name: node.scope.schema }, true)];
+  if (node.kind === 'schema' && node.scope?.schema && pg) return [item('Drop schema\u2026', { kind: 'drop_namespace', database: node.scope.database, name: node.scope.schema }, true)];
   const object = node.objectRef;
   if (node.kind !== 'object' || !object) return [];
   if (object.kind === 'Table') return [
-    item('Rename table?', { kind: 'rename_table', object, name: object.name }),
-    item('Truncate table?', { kind: 'truncate_table', object }, true),
-    item('Drop table?', { kind: 'drop_object', object }, true),
+    item('Rename table\u2026', { kind: 'rename_table', object, name: object.name }),
+    item('Truncate table\u2026', { kind: 'truncate_table', object }, true),
+    item('Drop table\u2026', { kind: 'drop_object', object }, true),
   ];
-  if (object.kind === 'View' || (pg && object.kind === 'MaterializedView')) return [item('Drop view?', { kind: 'drop_object', object }, true)];
+  if (object.kind === 'View' || (pg && object.kind === 'MaterializedView')) return [item('Drop view\u2026', { kind: 'drop_object', object }, true)];
   return [];
 }
 

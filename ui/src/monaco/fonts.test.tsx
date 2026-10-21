@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react';
+﻿import { act, render } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ThemeProvider } from '../theme/ThemeProvider';
@@ -21,7 +21,7 @@ vi.mock('@monaco-editor/react', async () => {
 
 afterEach(() => {
   document.documentElement.style.removeProperty('--font-mono');
-  document.documentElement.style.removeProperty('--text-callout');
+  document.documentElement.style.removeProperty('--dnt-text-base');
   renders.length = 0;
 });
 
@@ -39,7 +39,7 @@ describe('code fonts', () => {
 
   it('sizes_follow_the_type_scale', () => {
     expect(codeFontSizes()).toEqual({ body: 13, bodyLineHeight: 18, header: 12, marker: 11 });
-    document.documentElement.style.setProperty('--text-callout', '14px');
+    document.documentElement.style.setProperty('--dnt-text-base', '14px');
     expect(editorFontOptions()).toMatchObject({ fontSize: 14, suggestFontSize: 14, fontLigatures: false });
   });
 });

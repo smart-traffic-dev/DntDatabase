@@ -1,6 +1,6 @@
 import { $, $$, browser, expect } from '@wdio/globals';
 import { evidence } from './evidence';
-import { byId, collapseRow, createConnection, expandRow, runAll, runCurrent, treeRow, typeInEditor, type ConnOpts } from './helpers';
+import { byId, collapseRow, createConnection, expandRow, inContextPicker, isRunning, runAll, runCurrent, treeRow, typeInEditor, type ConnOpts } from './helpers';
 
 interface Engine {
   prefix: string;
@@ -50,8 +50,10 @@ for (const e of engines) {
       // 1. New query tab bound to dnt_fixture.
       await byId('new-query').click();
       await (await $('[data-testid="query-editor"] .monaco-editor')).waitForDisplayed({ timeout: 30_000 });
-      await expect(byId('query-database')).toHaveValue('dnt_fixture');
-      await expect($('[data-testid="query-connection"] option:checked')).toHaveText(expect.stringContaining(e.conn.name));
+      await inContextPicker(async () => {
+        await expect(byId('query-database')).toHaveValue('dnt_fixture');
+        await expect($('[data-testid="query-connection"] option:checked')).toHaveText(expect.stringContaining(e.conn.name));
+      });
       await evidence(`${e.prefix}-01-new-query`);
 
       // No request goes to a CDN: Monaco is bundled.
@@ -148,11 +150,11 @@ for (const e of engines) {
       // 8. Stop a sleeping query.
       await typeInEditor(e.sleep);
       await runCurrent();
-      await browser.waitUntil(async () => await byId('query-stop').isEnabled(), { timeout: 15_000 });
+      await browser.waitUntil(async () => await isRunning(), { timeout: 15_000 });
       await evidence(`${e.prefix}-09-sleeping`);
       const t0 = Date.now();
       await byId('query-stop').click();
-      await browser.waitUntil(async () => !(await byId('query-stop').isEnabled()), {
+      await browser.waitUntil(async () => !(await isRunning()), {
         timeout: 20_000,
         timeoutMsg: 'run did not stop',
       });

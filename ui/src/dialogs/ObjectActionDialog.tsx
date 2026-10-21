@@ -2,6 +2,9 @@ import { useMemo, useRef, useState } from 'react';
 import { Channel } from '@tauri-apps/api/core';
 import { api, toAppError } from '../api';
 import type { ActionPreview, ActionReport, ObjectAction } from '../bindings';
+import { invalidateObjectData } from '../store/objectData';
+import { invalidateTableData } from '../store/tableData';
+import { reportGridSelection } from '../store/gridSelection';
 import { invalidateCompletion } from '../store/completion';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
@@ -43,27 +46,20 @@ export async function refreshAfterAction(request: ObjectActionRequest, report: A
   const postgres = useConnections.getState().summaries.get(connectionId)?.config.kind === 'postgres';
   const state = useTabs.getState();
   const affected = state.tabs.filter((t): t is ObjectTabRef => t.kind === 'object' && t.connectionId === connectionId && affects(action, t, postgres));
-  const wasActive = state.activeId;
-  // Notify resource stores of removal before reusing a canonical tab id.
-  useTabs.setState({ tabs: state.tabs.filter((t) => !affected.some((a) => a.id === t.id)) });
-  const replacements = affected.flatMap((tab): ObjectTabRef[] => {
-    if (report.outcome === 'unknown') return [{ ...tab, needsVerification: true }];
-    if (action.kind === 'rename_table') {
+  const replacements: Record<string, ObjectTabRef | null> = {};
+  for (const tab of affected) {
+    invalidateObjectData(tab.id);
+    invalidateTableData(tab.id);
+    reportGridSelection(tab.id, null);
+    useDataEdits.setState((s) => ({ byTab: Object.fromEntries(Object.entries(s.byTab).filter(([id]) => id !== tab.id)) }));
+    const fresh = { ...tab, resourceRevision: (tab.resourceRevision ?? 0) + 1 };
+    if (report.outcome === 'unknown') replacements[tab.id] = { ...fresh, needsVerification: true };
+    else if (action.kind === 'rename_table') {
       const objectRef = { ...tab.objectRef, name: action.name };
-      return [{ ...tab, id: objectTabId(connectionId, objectRef), objectRef, title: action.name, needsVerification: false }];
-    }
-    return action.kind === 'truncate_table' ? [{ ...tab, needsVerification: false }] : [];
-  });
-  const stableTabs = state.tabs.flatMap((t) => {
-    const at = affected.findIndex((a) => a.id === t.id);
-    if (at < 0) return [t];
-    if (report.outcome === 'unknown') return [{ ...t, needsVerification: true }];
-    if (action.kind === 'rename_table' || action.kind === 'truncate_table') return replacements[at] ? [replacements[at]!] : [];
-    return [];
-  });
-  const replacementActive = affected.findIndex((t) => t.id === wasActive);
-  const activeId = replacementActive >= 0 ? replacements[replacementActive]?.id ?? stableTabs[0]?.id : wasActive;
-  useTabs.setState({ tabs: stableTabs, activeId });
+      replacements[tab.id] = { ...fresh, id: objectTabId(connectionId, objectRef), objectRef, title: action.name, needsVerification: false };
+    } else replacements[tab.id] = action.kind === 'truncate_table' ? { ...fresh, needsVerification: false } : null;
+  }
+  useTabs.getState().replaceObjectTabs(replacements);
   invalidateCompletion(connectionId);
   await useTree.getState().refresh(connNodeId(connectionId));
   return useTree.getState().nodes.get(connNodeId(connectionId))?.error?.message ?? null;
@@ -125,7 +121,8 @@ export function ObjectActionDialog({ request, onClose }: { request: ObjectAction
     catch (e) { setError(`Could not request Stop: ${toAppError(e).message}`); }
   };
   const scope = 'object' in action ? [action.object.database, action.object.schema, action.object.name].filter(Boolean).join(' / ') : [action.database, action.name].filter(Boolean).join(' / ');
-  return <Modal title={actionTitle(action)} onClose={close} className="object-action-dialog" closable={!busy}>
+  return <Modal title={actionTitle(action)} onClose={close} className="wide object-action-dialog" closable={!busy}>
+    <div className="modal-body">
     <p>{cfg?.name ?? request.connectionId} · {cfg?.env_tag ?? 'untagged'} · {scope || 'New namespace'}</p>
     {editableName && <label>Name<input aria-label="Name" value={name} disabled={busy} onChange={(e) => { setName(e.target.value); setPreview(null); setTyped(''); setReport(null); }} /></label>}
     {preview && <>
@@ -139,11 +136,12 @@ export function ObjectActionDialog({ request, onClose }: { request: ObjectAction
       {report.warnings.map((w) => <p key={w}>{w}</p>)}
     </div>}
     {stage && <p role="status">{stage}… Stop does not guarantee undoing DDL already sent.</p>}
-    <div className="dialog-actions">
-      <button className="btn" disabled={busy} onClick={close}>Close</button>
+    </div>
+    <footer className="modal-foot">
+      <button type="button" data-cancel className="btn" disabled={busy} onClick={close}>Close</button>
       {busy && operation.current ? <button className="btn" onClick={() => void stop()}>Stop</button> : null}
       {!report && !preview && <button className="btn primary" disabled={busy || (editableName && !name.trim()) || !!cfg?.read_only} onClick={() => void review()}>Preview SQL</button>}
       {preview && <button className="btn primary" disabled={busy || (preview.confirm_name !== null && typed !== preview.confirm_name)} onClick={() => void apply()}>Apply</button>}
-    </div>
+    </footer>
   </Modal>;
 }
