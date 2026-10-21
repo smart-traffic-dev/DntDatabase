@@ -1,7 +1,8 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { showQuickOpen } from '../store/palette';
 import { useTabs } from '../store/tabs';
-import { LogoIcon } from './icons';
+import { LogoIcon, SearchIcon } from './icons';
 import { MenuBar } from './MenuBar';
 import './titleBar.css';
 
@@ -47,6 +48,10 @@ export function TitleBar() {
   const [maximized, setMaximized] = useState(false);
   const [focused, setFocused] = useState(() => document.hasFocus());
   const title = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.title);
+
+  useEffect(() => {
+    document.title = title ? `${title} - DntDatabase` : 'DntDatabase';
+  }, [title]);
 
   /** Re-reads the maximized state; replaced by the effect while mounted. */
   const sync = useRef<() => void>(() => {});
@@ -96,10 +101,18 @@ export function TitleBar() {
       </div>
       <MenuBar />
       <div className="titlebar-drag" data-testid="titlebar-drag" onMouseDown={onDragMouseDown}>
-        <span className="titlebar-title" data-testid="titlebar-title">
-          {title ? `${title} - ` : ''}
-          <span>DntDatabase</span>
-        </span>
+        <button
+          type="button"
+          className="titlebar-search"
+          aria-label="Search tables, views, commands"
+          title="Go to object (Ctrl+P)"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={showQuickOpen}
+        >
+          <SearchIcon />
+          <span className="titlebar-search-text">Search tables, views, commands…</span>
+          <kbd className="keycap">Ctrl P</kbd>
+        </button>
       </div>
       <div className="titlebar-controls">
         <button

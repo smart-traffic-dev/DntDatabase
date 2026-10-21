@@ -19,6 +19,19 @@ function openTab(connectionId: string, title: string) {
 describe('TabBar', () => {
   beforeEach(resetStores);
 
+  it('the + after the last tab opens a new query (testid new-query)', async () => {
+    const user = userEvent.setup();
+    render(<TabBar />);
+    const plus = screen.getByTestId('new-query');
+    expect(plus).toHaveAccessibleName('New query');
+    expect(plus).toHaveAttribute('title', 'New query (Ctrl+T)');
+    await user.click(plus);
+    expect(useTabs.getState().tabs).toHaveLength(1);
+    expect(useTabs.getState().tabs[0]?.kind).toBe('query');
+    // Sits after the tab list, not inside it.
+    expect(screen.getByRole('tablist').contains(screen.getByTestId('new-query'))).toBe(false);
+  });
+
   it('shows an environment badge for each tab connection', () => {
     const tagged = (id: string, name: string, env_tag: EnvTag | null) => config(id, name, { env_tag });
     act(() => {

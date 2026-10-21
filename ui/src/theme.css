@@ -124,47 +124,6 @@ textarea:focus-visible,
   display: flex;
 }
 
-/* Toolbar */
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-}
-
-.tool {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  min-width: 64px;
-  min-height: 44px;
-  padding: 4px 8px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  font-size: var(--text-footnote);
-}
-
-.tool svg {
-  color: var(--icon);
-}
-
-.tool:hover:not(:disabled) {
-  background: var(--hover);
-}
-
-.tool:disabled {
-  color: var(--dnt-fg-disabled);
-}
-
-.tool:disabled svg {
-  color: var(--dnt-fg-disabled);
-}
-
 /* Sidebar */
 .sidebar {
   /* Driven by the layout store (App sets --sidebar-width); 280px is the default. */
@@ -177,37 +136,89 @@ textarea:focus-visible,
   border-right: 1px solid var(--border);
 }
 
+/* Header row: Objects | Favorites, New connection, options. */
+.sidebar-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-2) var(--dnt-space-2) 0;
+}
+
+.segmented {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  padding: 2px;
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+}
+
+.segment {
+  flex: 1;
+  min-width: 0;
+  height: calc(var(--dnt-ctl-h-sm) - 4px);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-xs);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+  font: inherit;
+  font-size: var(--dnt-text-sm);
+}
+
+.segment:hover:not(.on) {
+  color: var(--dnt-fg);
+}
+
+.segment.on {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-bg-raised);
+  color: var(--dnt-fg);
+  font-weight: 600;
+}
+
 .sidebar-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-2);
 }
 
 .sidebar-head input {
   flex: 1;
   min-width: 0;
-  height: 30px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
   font: inherit;
 }
 
+/* Icon-only button: borderless until hovered. */
 .icon-btn {
-  width: 30px;
-  height: 30px;
+  width: var(--dnt-ctl-h-sm);
+  height: var(--dnt-ctl-h-sm);
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
-  color: var(--icon);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
   font-family: var(--font-mono);
   font-size: var(--text-caption);
+}
+
+.icon-btn:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.sidebar-head .icon-btn {
+  width: var(--dnt-ctl-h-md);
+  height: var(--dnt-ctl-h-md);
 }
 
 .icon-btn.on {
@@ -525,23 +536,32 @@ textarea:focus-visible,
 
 .tabstrip {
   display: flex;
-  align-items: flex-end;
-  min-height: 39px;
-  background: var(--tabstrip);
-  border-bottom: 1px solid var(--border);
+  align-items: stretch;
+  height: var(--dnt-tab-h);
+  background: var(--dnt-bg-chrome);
+  border-bottom: 1px solid var(--dnt-border-subtle);
 }
 
 /* Scrolls sideways inside itself; the scrollbar is hidden so it cannot shift the layout. */
 .tabbar {
-  flex: 1;
+  flex: 0 1 auto;
   min-width: 0;
   display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  padding: 6px 8px 0;
+  align-items: stretch;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
+}
+
+/* New query: right after the last tab. */
+.tab-new {
+  flex: none;
+  align-self: center;
+  margin: 0 var(--dnt-space-1);
+}
+
+.tabstrip-fill {
+  flex: 1;
 }
 
 .tabbar::-webkit-scrollbar {
@@ -550,36 +570,49 @@ textarea:focus-visible,
 
 .tab-overflow {
   flex: none;
-  width: 28px;
-  height: 32px;
+  align-self: center;
+  width: var(--dnt-ctl-h-sm);
+  height: var(--dnt-ctl-h-sm);
+  margin-right: var(--dnt-space-1);
   display: flex;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .tab-overflow:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
+
+/* Flat tabs: hairline separators, the active one takes the editor's surface. No top bar, no rounding. */
 .tab {
   flex: none;
   max-width: 260px;
   display: flex;
   align-items: center;
-  height: 32px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border-right: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-fg-muted);
   white-space: nowrap;
 }
 
+.tab:hover:not(.active) {
+  background: var(--dnt-bg-hover);
+}
+
 .tab.active {
-  background: var(--panel);
-  border-color: var(--border);
+  /* Covers the strip's bottom hairline so the tab joins its content. */
+  margin-bottom: -1px;
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
   font-weight: 500;
+}
+
+/* The close button shows on the active tab and on hover (and stays reachable by keyboard). */
+.tab:not(.active):not(:hover):not(:focus-within) .tab-close {
+  visibility: hidden;
 }
 
 /* Production is identified by the red title and the P tag, not by a stripe. */
@@ -632,17 +665,18 @@ textarea:focus-visible,
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
-  margin-right: 4px;
+  width: 20px;
+  height: 20px;
+  margin-right: var(--dnt-space-1);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-xs);
   background: transparent;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .tab-close:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-active);
+  color: var(--dnt-fg);
 }
 
 .tab-content {
@@ -686,12 +720,13 @@ textarea:focus-visible,
 .statusbar {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 4px 12px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font-size: var(--text-footnote);
+  gap: var(--dnt-space-4);
+  height: var(--dnt-statusbar-h);
+  padding: 0 var(--dnt-space-3) 0 0;
+  background: var(--dnt-bg-chrome);
+  border-top: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
   white-space: nowrap;
   overflow: hidden;
 }
@@ -700,9 +735,38 @@ textarea:focus-visible,
   flex: none;
 }
 
-.statusbar.env-production {
-  background: var(--production-bg);
-  color: var(--production-fg);
+/* No env segment: the first item keeps the bar's left padding. */
+.statusbar > :first-child:not(.status-env) {
+  margin-left: var(--dnt-space-3);
+}
+
+/* Environment segment: a solid block at the left end instead of a wash over the whole bar. */
+.status-env {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--dnt-space-3);
+  color: var(--dnt-on-accent);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.status-env.env-production {
+  background: var(--dnt-env-prod);
+}
+
+.status-env.env-staging {
+  background: var(--dnt-env-staging);
+}
+
+.status-env.env-local {
+  background: var(--dnt-env-local);
+}
+
+.status-db::before {
+  content: '›';
+  margin-right: var(--dnt-space-1);
+  color: var(--dnt-fg-subtle);
 }
 
 .status-conn {
@@ -781,24 +845,6 @@ textarea:focus-visible,
   letter-spacing: 0.04em;
 }
 
-/* Connection split button */
-.tool-split {
-  display: flex;
-  align-items: stretch;
-}
-
-.tool-more {
-  width: 16px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-}
-
-.tool-more:hover {
-  background: var(--hover);
-}
-
 .status-tx {
   display: flex;
   align-items: center;
@@ -831,36 +877,6 @@ textarea:focus-visible,
   color: var(--danger-fg);
 }
 
-/* Disabled "later phase" tools: grouped after a separator, compact, labels dropped on narrow windows. */
-.tool-group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 2px;
-  margin-left: 8px;
-  padding-left: 8px;
-  border-left: 1px solid var(--border);
-}
-
-.tool-group .tool {
-  min-width: 52px;
-}
-
-.tool-more {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-@media (max-width: 1180px) {
-  .tool-group .tool span {
-    display: none;
-  }
-
-  .tool-group .tool {
-    min-width: 36px;
-  }
-}
 
 /* Sidebar first-start state */
 .sidebar-empty,
@@ -895,6 +911,19 @@ textarea:focus-visible,
 
 .empty .btn {
   margin-top: 8px;
+}
+
+/* Shortcut keycap (title bar search, palette, empty states). */
+.keycap {
+  flex: none;
+  padding: 0 var(--dnt-space-1);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
+  font-family: var(--font-sans);
+  font-size: var(--dnt-text-xs);
+  line-height: var(--dnt-text-xs-lh);
 }
 
 /*

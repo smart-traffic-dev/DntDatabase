@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
+import type { EnvTag } from '../bindings';
 import { plural } from '../lib/plural';
+import { useQueryDocs } from '../store/queryTabs';
 import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
@@ -26,6 +28,8 @@ function useNow(active: boolean, key: number | null): number {
 }
 
 const wholeSeconds = (ms: number) => Math.floor(ms / 1000);
+
+const ENV_LABEL: Record<EnvTag, string> = { production: 'PRODUCTION', staging: 'STAGING', local: 'LOCAL' };
 
 /** Last run, transaction state and run/stop progress of a query tab (spec §6.2). */
 function QueryStatus({ tabId }: { tabId: string }) {
@@ -151,23 +155,39 @@ export function StatusBar() {
     return tab?.kind === 'query' ? tab.id : undefined;
   });
   const tabConnection = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.connectionId);
+  // The database the active tab works in: the query tab's context, or the object's database.
+  const objectDb = useTabs((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeId);
+    return tab?.kind === 'object' ? tab.objectRef.database : null;
+  });
+  const queryDb = useQueryDocs((s) => (queryTabId ? s.docs.get(queryTabId)?.database ?? null : null));
+  const database = queryTabId ? queryDb : objectDb;
   // A query tab without a connection falls back to the tree selection.
   const connectionId = tabConnection ?? (selectedId ? connectionIdOf(selectedId) : undefined);
   const summary = useConnections((s) => (connectionId ? s.summaries.get(connectionId) : undefined));
   const info = useConnections((s) => (connectionId ? s.info.get(connectionId) : undefined));
 
   const cfg = summary?.config;
-  const production = cfg?.env_tag === 'production';
+  const env = cfg?.env_tag ?? null;
   const text = cfg
     ? `${cfg.name} · ${info ? shortVersion(info) : 'not connected'}${cfg.ssh ? ` · via SSH ${cfg.ssh.host}` : ''}`
     : '';
   return (
-    <footer className={`statusbar${production ? ' env-production' : ''}`}>
+    <footer className="statusbar">
+      {env && (
+        <span className={`status-env env-${env}`} data-testid="status-env" title={`Environment: ${env}`}>
+          {ENV_LABEL[env]}
+        </span>
+      )}
       {cfg ? (
         <span className="status-conn">
           <span className={`dot${info ? ' on' : ''}`} aria-hidden="true" />
           <span title={info ? `${text}\n${info.version_string}` : text}>{text}</span>
-          {production && <span className="env-badge">PRODUCTION</span>}
+          {database && (
+            <span className="status-db" data-testid="status-db" title={`Database: ${database}`}>
+              {database}
+            </span>
+          )}
           {cfg.read_only && (
             <span className="ro-badge" title="Read-only connection: statements that change data are blocked">
               <LockIcon />
@@ -179,10 +199,12 @@ export function StatusBar() {
         <span className="status-conn">No connection selected</span>
       )}
       {queryTabId && <QueryStatus tabId={queryTabId} />}
-      <span className="status-right">
-        {queryTabId && <CursorStatus tabId={queryTabId} />}
-        UTF-8
-      </span>
+      {queryTabId && (
+        <span className="status-right">
+          <CursorStatus tabId={queryTabId} />
+          UTF-8
+        </span>
+      )}
     </footer>
   );
 }

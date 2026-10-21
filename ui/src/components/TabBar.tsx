@@ -14,7 +14,8 @@ import { useQueryRun } from '../store/queryRun';
 import { useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
-import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon } from './icons';
+import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon } from './icons';
+import { openNewQuery } from './newQuery';
 import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
 /** DOM id of a tab's button (the tab panel's `aria-controls` target is `#tab-content`). */
@@ -188,6 +189,17 @@ export function TabBar() {
           );
         })}
       </div>
+      <button
+        type="button"
+        className="icon-btn tab-new"
+        data-testid="new-query"
+        aria-label="New query"
+        title="New query (Ctrl+T)"
+        onClick={() => openNewQuery()}
+      >
+        <PlusIcon />
+      </button>
+      <span className="tabstrip-fill" />
       {tabs.length > 1 && (
         <button
           type="button"

@@ -49,6 +49,9 @@ export interface AppMenu {
 
 const sep: MenuEntry = { separator: true };
 
+/** A planned feature: listed, disabled, so the menus already show where it will live. */
+const soon = (label: string): MenuAction => ({ label, hint: 'Coming soon', disabled: true, run: () => {} });
+
 /** Developer tools: the backend opens the webview's DevTools. Quiet when there is no backend (browser preview). */
 export async function openDevtools() {
   try {
@@ -160,6 +163,9 @@ export function buildMenus(s: MenuState): AppMenu[] {
         { label: 'Show results', hint: 'Ctrl+J', checked: s.resultsVisible, run: toggleResults },
         { label: 'Filter rows (Data tab)', hint: 'F3', disabled: !s.hasTab, run: toggleFilterBar },
         { label: 'Focus connection tree', hint: 'Ctrl+E', run: focusConnectionTree },
+        soon('Tables list'),
+        soon('Views list'),
+        soon('Functions list'),
         sep,
         { label: 'Command palette', hint: 'Ctrl+Shift+P', run: showCommandPalette },
         { label: 'Go to object', hint: 'Ctrl+P', run: showQuickOpen },
@@ -204,6 +210,11 @@ export function buildMenus(s: MenuState): AppMenu[] {
       mnemonic: 'T',
       items: [
         { hint: 'Ctrl+,', label: 'Settings…', run: () => dialog({ kind: 'settings' }) },
+        sep,
+        soon('Import / Export data…'),
+        soon('Backup…'),
+        soon('ER diagram'),
+        soon('Compare schemas…'),
         sep,
         { label: 'Developer tools', hint: 'Ctrl+Shift+I', run: () => void openDevtools() },
       ],

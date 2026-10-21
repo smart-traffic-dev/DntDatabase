@@ -23,12 +23,35 @@ describe('StatusBar', () => {
     resetStores();
   });
 
-  it('marks a production connection with env-production', () => {
+  it('shows the environment as the first segment instead of washing the bar', () => {
     const { container } = render(<StatusBar />);
     select(config(ids.prod, 'shop-prod', { env_tag: 'production' }));
     const bar = container.querySelector('footer');
-    expect(bar).toHaveClass('env-production');
+    expect(bar).not.toHaveClass('env-production');
+    const env = screen.getByTestId('status-env');
+    expect(env).toHaveTextContent('PRODUCTION');
+    expect(env).toHaveClass('env-production');
+    expect(bar?.firstElementChild).toBe(env);
     expect(screen.getByText(/shop-prod/)).toBeInTheDocument();
+  });
+
+  it('names staging and local too; no segment without a tag', () => {
+    const { unmount } = render(<StatusBar />);
+    select(config(ids.prod, 'stg', { env_tag: 'staging' }));
+    expect(screen.getByTestId('status-env')).toHaveTextContent('STAGING');
+    unmount();
+    render(<StatusBar />);
+    select(config(ids.prod, 'dev', { env_tag: 'local' }));
+    expect(screen.getByTestId('status-env')).toHaveTextContent('LOCAL');
+    act(() => useConnections.getState().setStored([], [config(ids.prod, 'plain')]));
+    expect(screen.queryByTestId('status-env')).toBeNull();
+  });
+
+  it('shows the database of the active query tab', () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'shop-prod')]);
+    act(() => void useQueryDocs.getState().newQuery(ids.prod, 'shop'));
+    render(<StatusBar />);
+    expect(screen.getByTestId('status-db')).toHaveTextContent('shop');
   });
 
   it('shows the connection, server version and SSH host', () => {
@@ -69,10 +92,12 @@ describe('StatusBar', () => {
       useTabs.getState().open({ id: objectTabId(ids.prod, orders), kind: 'object', connectionId: ids.prod, objectRef: orders, title: 'orders' });
     });
     expect(screen.getByText(/shop-prod/)).toBeInTheDocument();
-    expect(container.querySelector('footer')).toHaveClass('env-production');
+    expect(screen.getByTestId('status-env')).toHaveTextContent('PRODUCTION');
+    expect(screen.getByTestId('status-db')).toHaveTextContent('shop');
 
     act(() => useTabs.getState().reset());
     expect(screen.getByText(/analytics/)).toBeInTheDocument();
+    expect(screen.getByTestId('status-env')).toHaveTextContent('LOCAL');
     expect(container.querySelector('footer')).not.toHaveClass('env-production');
   });
 

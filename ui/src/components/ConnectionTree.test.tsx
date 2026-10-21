@@ -82,6 +82,15 @@ describe('ConnectionTree', () => {
     await waitFor(() => expect(within(row('legacy-crm')).getByText('MA')).toBeInTheDocument());
   });
 
+  it('a connection row shows its server version in the tooltip, not as row text', async () => {
+    backend();
+    await renderTree();
+    await expandPath(prodNode);
+    const label = within(row('shop-prod')).getByText('shop-prod');
+    expect(label).toHaveAttribute('title', 'shop-prod · 8.0');
+    expect(row('shop-prod').querySelector('.meta')).toBeNull();
+  });
+
   it('opens the connection then lists databases, showing Loading… meanwhile', async () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));

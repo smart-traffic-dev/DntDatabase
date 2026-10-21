@@ -7,7 +7,7 @@ import { useFavorites } from '../store/favorites';
 import { useSnippets } from '../store/snippets';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { openFavorite, openSnippetsManager } from './favoritesActions';
-import { ChevronIcon, FolderIcon } from './icons';
+import { ChevronIcon, FolderIcon, SnippetIcon } from './icons';
 import './favorites.css';
 
 const StarIcon = () => (
@@ -73,34 +73,15 @@ export function favoriteRows(favorites: Favorite[], collapsed: ReadonlySet<strin
   return rows;
 }
 
-const PANEL_KEY = 'dnt.favorites.open';
-
-function readOpen(): boolean {
-  try {
-    return localStorage.getItem(PANEL_KEY) !== '0';
-  } catch {
-    return true;
-  }
-}
-
-function writeOpen(open: boolean) {
-  try {
-    localStorage.setItem(PANEL_KEY, open ? '1' : '0');
-  } catch {
-    // Storage unavailable: the panel just opens expanded next time.
-  }
-}
-
 type Pending = { kind: 'rename' | 'move' | 'delete'; fav: Favorite };
 
 const copySql = (fav: Favorite) => void navigator.clipboard?.writeText(fav.sql).catch(() => undefined);
 
-/** "Favorites" under the connection tree: saved queries in folders (Navicat's saved queries). */
-export function FavoritesPanel() {
+/** The sidebar's Favorites view: saved queries in folders (Navicat's saved queries). */
+export function FavoritesPanel({ hidden = false }: { hidden?: boolean }) {
   const favorites = useFavorites((s) => s.favorites);
   const error = useFavorites((s) => s.error);
   const summaries = useConnections((s) => s.summaries);
-  const [open, setOpen] = useState(readOpen);
   const [filter, setFilter] = useState('');
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -127,13 +108,6 @@ export function FavoritesPanel() {
       else next.add(path);
       return next;
     });
-
-  const toggleOpen = () => {
-    setOpen((o) => {
-      writeOpen(!o);
-      return !o;
-    });
-  };
 
   const activate = (row: FavoriteRow) => {
     if (row.kind === 'favorite') openFavorite(row.fav);
@@ -242,28 +216,8 @@ export function FavoritesPanel() {
   };
 
   return (
-    <section className={`fav-panel${open ? ' open' : ''}`} aria-label="Favorites" data-testid="favorites-panel">
-      <div className="fav-head">
-        <button type="button" className="fav-toggle" aria-expanded={open} aria-controls={listId} onClick={toggleOpen}>
-          <span className={`chev-icon${open ? ' open' : ''}`}>
-            <ChevronIcon />
-          </span>
-          <span>Favorites</span>
-          {favorites.length > 0 && <span className="meta">{favorites.length}</span>}
-        </button>
-        <button
-          type="button"
-          className="icon-btn fav-snippets"
-          aria-label="Manage snippets"
-          title="Snippets…"
-          onClick={openSnippetsManager}
-        >
-          {'{ }'}
-        </button>
-      </div>
-      {open && (
-        <>
-          <div className="sidebar-head fav-filter">
+    <section className="fav-panel" aria-label="Favorites" data-testid="favorites-panel" hidden={hidden}>
+          <div className="sidebar-head">
             <input
               type="search"
               aria-label="Filter favorites"
@@ -271,6 +225,15 @@ export function FavoritesPanel() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Manage snippets"
+              title="Manage snippets…"
+              onClick={openSnippetsManager}
+            >
+              <SnippetIcon />
+            </button>
           </div>
           {error && (
             <div className="banner error" role="status">
@@ -359,8 +322,6 @@ export function FavoritesPanel() {
               </div>
             )}
           </div>
-        </>
-      )}
       {menu && (
         <ActionMenu
           label={`${menu.row.kind === 'folder' ? menu.row.name : menu.row.fav.name} actions`}

@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { usePalette } from '../store/palette';
 import { useTabs } from '../store/tabs';
 
 type Handler<T> = (event: { payload: T }) => void;
@@ -51,20 +52,39 @@ beforeEach(() => {
 });
 
 describe('TitleBar', () => {
-  it('shows the app name and the window controls with Windows tooltips', async () => {
+  it('shows the window controls with Windows tooltips', async () => {
     render(<TitleBar />);
     await flush();
-    expect(screen.getByText('DntDatabase')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Minimize' })).toHaveAttribute('title', 'Minimize');
     expect(screen.getByRole('button', { name: 'Maximize' })).toHaveAttribute('title', 'Maximize');
     expect(screen.getByRole('button', { name: 'Close' })).toHaveAttribute('title', 'Close');
   });
 
-  it('shows the active tab title', async () => {
+  it('leaves the tab title to the window title, not the bar', async () => {
     useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: null, title: 'Query 1' });
     render(<TitleBar />);
     await flush();
-    expect(screen.getByTestId('titlebar-title')).toHaveTextContent('Query 1 - DntDatabase');
+    expect(screen.queryByTestId('titlebar-title')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Query 1/)).not.toBeInTheDocument();
+    expect(document.title).toBe('Query 1 - DntDatabase');
+  });
+
+  it('the search button opens the palette in objects mode', async () => {
+    usePalette.setState({ open: false, initial: '>' });
+    render(<TitleBar />);
+    await flush();
+    const search = screen.getByRole('button', { name: 'Search tables, views, commands' });
+    expect(search).toHaveTextContent('Search tables, views, commands…');
+    expect(search).toHaveTextContent('Ctrl P');
+    fireEvent.click(search);
+    expect(usePalette.getState()).toMatchObject({ open: true, initial: '' });
+  });
+
+  it('the search button does not start a window drag', async () => {
+    render(<TitleBar />);
+    await flush();
+    fireEvent.mouseDown(screen.getByRole('button', { name: 'Search tables, views, commands' }), { button: 0, detail: 1 });
+    expect(win.startDragging).not.toHaveBeenCalled();
   });
 
   it('window controls do not take focus from the editor', async () => {
@@ -175,9 +195,6 @@ describe('TitleBar', () => {
     fireEvent.mouseDown(drag, { button: 0, detail: 2 });
     expect(win.toggleMaximize).toHaveBeenCalledOnce();
     expect(win.startDragging).toHaveBeenCalledOnce();
-    // The app name inside the drag area drags too.
-    fireEvent.mouseDown(screen.getByText('DntDatabase'), { button: 0, detail: 1 });
-    expect(win.startDragging).toHaveBeenCalledTimes(2);
   });
 
   it('right and middle buttons do not drag', async () => {

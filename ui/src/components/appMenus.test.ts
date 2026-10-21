@@ -109,12 +109,19 @@ describe('buildMenus', () => {
     expect(item('Query', 'Stop', { queryTabId: 'q1', runnable: false, stoppable: true })?.disabled).toBe(false);
   });
 
+  it('the old toolbar placeholders are disabled "Coming soon" items in the menus that will own them', () => {
+    const soon = (menu: string) => items(menu).filter((i) => i.hint === 'Coming soon');
+    expect(soon('View').map((i) => i.label)).toEqual(['Tables list', 'Views list', 'Functions list']);
+    expect(soon('Tools').map((i) => i.label)).toEqual(['Import / Export data…', 'Backup…', 'ER diagram', 'Compare schemas…']);
+    for (const i of [...soon('View'), ...soon('Tools')]) expect(i.disabled, i.label).toBe(true);
+  });
+
   it('Tools and Help entries', () => {
-    expect(items('Tools').map((i) => i.label)).toEqual(['Settings…', 'Developer tools']);
+    expect(items('Tools').filter((i) => !i.disabled).map((i) => i.label)).toEqual(['Settings…', 'Developer tools']);
     expect(item('Tools', 'Developer tools')?.hint).toBe('Ctrl+Shift+I');
     expect(item('Tools', 'Settings…')?.hint).toBe('Ctrl+,');
     expect(item('Help', 'Keyboard shortcuts')?.hint).toBe('F1');
-    expect(items('View').filter((i) => i.hint).map((i) => [i.label, i.hint])).toEqual([
+    expect(items('View').filter((i) => i.hint && i.hint !== 'Coming soon').map((i) => [i.label, i.hint])).toEqual([
       ['Show sidebar', 'Ctrl+B'],
       ['Show results', 'Ctrl+J'],
       ['Filter rows (Data tab)', 'F3'],

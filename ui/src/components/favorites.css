@@ -1,60 +1,18 @@
-/* Favorites panel under the connection tree. */
+/* The sidebar's Favorites view: fills the sidebar under its header. */
 .fav-panel {
-  flex: none;
+  flex: 1;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-top: 1px solid var(--border);
 }
 
-.fav-panel.open {
-  max-height: 45%;
-}
-
-.fav-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-}
-
-.fav-toggle {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 4px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--studio-fg-secondary);
-  font: inherit;
-  font-size: var(--text-footnote);
-  font-weight: 600;
-  text-align: left;
-}
-
-.fav-toggle:hover {
-  background: var(--studio-hover);
-}
-
-.fav-toggle svg {
-  color: var(--muted);
-}
-
-.fav-snippets {
-  width: 26px;
-  height: 26px;
-}
-
-.fav-filter {
-  padding-top: 0;
+.fav-panel[hidden] {
+  display: none;
 }
 
 .fav-tree {
-  min-height: 60px;
+  flex: 1;
+  min-height: 0;
 }
 
 .tree-row.kind-favorite .label {

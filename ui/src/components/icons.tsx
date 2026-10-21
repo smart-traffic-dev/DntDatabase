@@ -124,7 +124,50 @@ export const PinIcon = () => (
 /** Function / procedure glyph for the quick-open list. */
 export const FunctionIcon = () => (
   <Icon>
-    <path d={TOOL_PATHS.fn} />
+    <path d="M9 4c-2 0-3 1-3 3v10c0 2-1 3-3 3M3 11h8M14 8l6 8M20 8l-6 8" />
+  </Icon>
+);
+
+export const SearchIcon = () => (
+  <Icon size={13} strokeWidth={2}>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="M16 16l4.5 4.5" />
+  </Icon>
+);
+
+/** Three dots: overflow menus. */
+export const MoreIcon = () => (
+  <Icon size={14} strokeWidth={2.4}>
+    <path d="M5 12h.01M12 12h.01M19 12h.01" />
+  </Icon>
+);
+
+/** Snippet / code glyph: Manage snippets. */
+export const SnippetIcon = () => (
+  <Icon size={14}>
+    <path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16" />
+  </Icon>
+);
+
+/** Gear-and-arrow: stored procedures. */
+export const ProcedureIcon = () => (
+  <Icon>
+    <path d="M5 5h9l5 5v9H5zM9 12l2.5 2.5L9 17M13 17h3" />
+  </Icon>
+);
+
+/** Lightning bolt: triggers. */
+export const TriggerIcon = () => (
+  <Icon>
+    <path d="M13 3L5 14h6l-1 7 8-11h-6z" />
+  </Icon>
+);
+
+/** Clock: scheduled events. */
+export const EventIcon = () => (
+  <Icon>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M12 8v4l3 2" />
   </Icon>
 );
 
@@ -134,21 +177,3 @@ export const CloseIcon = () => (
   </Icon>
 );
 
-/** Toolbar glyphs: stroke paths of the canvas. */
-export const TOOL_PATHS = {
-  connection: 'M10 14a5 5 0 007 0l3-3a5 5 0 00-7-7l-1 1M14 10a5 5 0 00-7 0l-3 3a5 5 0 007 7l1-1',
-  query: 'M4 4h16v16H4zM8 9l3 3-3 3M13 15h3',
-  table: 'M3 4h18v16H3zM3 10h18M9 10v10',
-  view: 'M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12zM12 9a3 3 0 100 6 3 3 0 000-6z',
-  fn: 'M9 4c-2 0-3 1-3 3v10c0 2-1 3-3 3M3 11h8M14 8l6 8M20 8l-6 8',
-  io: 'M12 3v12M7 10l5 5 5-5M4 19h16',
-  backup: 'M4 7h16v13H4zM4 7l2-3h12l2 3M10 12h4',
-  erd: 'M3 4h7v6H3zM14 14h7v6h-7zM6.5 10v4a2 2 0 002 2H14',
-  compare: 'M8 3v18M16 3v18M4 7h4M16 17h4M4 12h16',
-} as const;
-
-export const ToolIcon = ({ path }: { path: string }) => (
-  <Icon size={18}>
-    <path d={path} />
-  </Icon>
-);

@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Toolbar } from '../../components/Toolbar';
+import { TabBar } from '../../components/TabBar';
 import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import { useTabs, type QueryTabRef } from '../../store/tabs';
@@ -34,7 +34,7 @@ describe('query tab shell', () => {
 
   it('new_query_from_tree_selection_binds_connection_and_database', async () => {
     act(() => selectDatabase(ids.prod, 'shop'));
-    render(<Toolbar />);
+    render(<TabBar />);
     await userEvent.setup().click(screen.getByTestId('new-query'));
     const tab = activeTab();
     expect(tab).toMatchObject({ kind: 'query', title: 'Query 1', connectionId: ids.prod });
@@ -44,7 +44,7 @@ describe('query tab shell', () => {
 
   it('new_query_titles_increment', async () => {
     act(() => selectDatabase(ids.prod, 'shop'));
-    render(<Toolbar />);
+    render(<TabBar />);
     const user = userEvent.setup();
     await user.click(screen.getByTestId('new-query'));
     await user.click(screen.getByTestId('new-query'));
@@ -54,7 +54,7 @@ describe('query tab shell', () => {
   it('a connection node gives its default database', async () => {
     const id = `conn:${ids.prod}`;
     act(() => useTree.setState({ nodes: new Map([[id, { id, kind: 'connection', label: 'shop-prod' }]]), selectedId: id }));
-    render(<Toolbar />);
+    render(<TabBar />);
     await userEvent.setup().click(screen.getByTestId('new-query'));
     expect(useQueryDocs.getState().docs.get(activeTab()!.id)).toMatchObject({ connectionId: ids.prod, database: 'shop' });
   });
