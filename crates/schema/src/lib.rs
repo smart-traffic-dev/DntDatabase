@@ -1,11 +1,13 @@
 //! Table designer model: the editable `TableDef`, the type catalog, building a draft
 //! from introspection and validating it (spec §4.2). Pure Rust: no database access.
 
+mod diff;
 mod from_detail;
 mod model;
 mod types;
 mod validate;
 
+pub use diff::{diff, Change, DiffError, Position};
 pub use from_detail::{from_detail, new_table};
 pub use model::*;
 pub use types::{parse_type, type_catalog, type_text};
