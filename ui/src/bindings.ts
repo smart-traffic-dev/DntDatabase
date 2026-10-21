@@ -335,6 +335,39 @@ async queryCancel(runId: string) : Promise<Result<null, AppError>> {
 }
 },
 /**
+ * A bounded display page from an exact disk-backed query result.
+ */
+async queryResultPage(token: string, offset: number, limit: number) : Promise<Result<ResultPage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_result_page", { token, offset, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Exact selected values for copy/record view; display previews are never used.
+ */
+async queryResultValues(token: string, rows: number[], cols: number[]) : Promise<Result<Value[][], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_result_values", { token, rows, cols }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Finds cells in every committed row, including pages not resident in the frontend.
+ */
+async queryResultFind(token: string, query: string, max: number) : Promise<Result<ResultSearch, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_result_find", { token, query, max }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Plans an Explain (or Explain Analyze, `analyze`) of the statement at `cursor`;
  * run it with `query_run`, which streams one `explain` event. `config` (field
  * `explain`) for a DDL statement, or Analyze of a statement that is not a read;
@@ -648,6 +681,24 @@ async exportQuery(planId: string, index: number, opts: ExportOptions, path: stri
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Exports the exact disk-backed rows of a completed query result.
+ */
+async exportQueryResult(token: string, kind: DbKind, opts: ExportOptions, path: string, operation: string, channel: TAURI_CHANNEL<ExportProgress>) : Promise<Result<ExportSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_query_result", { token, kind, opts, path, operation, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops the stored-result export `operation`; false when none runs. Its half-written
+ * file is removed.
+ */
+async exportQueryResultCancel(operation: string) : Promise<boolean> {
+    return await TAURI_INVOKE("export_query_result_cancel", { operation });
 },
 /**
  * Shows an exported file in the system file manager ("Open folder"). Only a file an
@@ -1421,6 +1472,13 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+export type ResultMatch = { row: number; col: number }
+export type ResultPage = { rows: Value[][]; 
+/**
+ * `(row within page, column)` of display values that are previews.
+ */
+truncated_cells: ([number, number])[]; offset: number; committed_rows: number; done: boolean; bytes: number }
+export type ResultSearch = { matches: ResultMatch[]; capped: boolean }
 export type RowEdit = { op: "update"; row: RowRef; set: ([string, CellInput])[] } | { op: "insert"; values: ([string, CellInput])[] } | { op: "delete"; row: RowRef }
 /**
  * The estimated number of rows a flagged `UPDATE` / `DELETE` changes, from the
@@ -1457,7 +1515,11 @@ export type RunEvent =
 /**
  * At most 500 (`batch_size`) rows of result `result_id`, in order.
  */
-{ t: "rows"; result_id: number; rows: Value[][] } | { t: "result_end"; result_id: number; affected: number | null; row_count: number; truncated: boolean; elapsed_ms: number } | 
+{ t: "rows"; result_id: number; rows: Value[][] } | 
+/**
+ * Exact rows were committed to the disk-backed result store.
+ */
+{ t: "result_stored"; result_id: number; token: string } | { t: "rows_stored"; result_id: number; start: number; row_count: number } | { t: "result_end"; result_id: number; affected: number | null; row_count: number; truncated: boolean; elapsed_ms: number } | 
 /**
  * Statement `index` failed. `error.position` is a UTF-16 offset into the editor
  * text, `error.tx_state` the session's state after the failure, and
@@ -1501,7 +1563,10 @@ export type RunEvent =
  */
 export type RunOptions = { 
 /**
- * Row limit per result; clamped to 1..=1 000 000.
+ * Display row limit per result; clamped to 1..=1 000 000. Rows past it are neither
+ * stored nor shown (the result is `truncated`), but the driver may still drain them
+ * to keep the session usable, so the statement can run longer than the shown rows
+ * took. The SQL is never rewritten and the session never dropped for it.
  */
 max_rows: number; continue_on_error: boolean }
 /**

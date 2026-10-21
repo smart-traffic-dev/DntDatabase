@@ -74,7 +74,7 @@ describe('query tab shell', () => {
     await userEvent.setup().click(screen.getByTestId('query-more'));
     expect(screen.getByTestId('query-format')).toBeInTheDocument();
     const limits = ROW_LIMITS.map((n) => screen.getByTestId(`query-row-limit-${n}`).textContent);
-    expect(limits).toEqual(['Limit 1,000', '✓Limit 10,000', 'Limit 100,000', 'Limit 1,000,000']);
+    expect(limits).toEqual(['Display limit 1,000', '✓Display limit 10,000', 'Display limit 100,000', 'Display limit 1,000,000']);
   });
 
   it('closeConnection closes object tabs but keeps query tabs', () => {

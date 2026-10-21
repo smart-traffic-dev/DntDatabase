@@ -692,9 +692,9 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
     { label: 'Format SQL', hint: 'Ctrl+Shift+F', testId: 'query-format', run: () => formatTab(doc.id) },
     { separator: true },
     ...ROW_LIMITS.map((n) => ({
-      label: `Limit ${limitText(n)}`,
+      label: `Display limit ${limitText(n)}`,
       testId: `query-row-limit-${n}`,
-      title: 'Most rows a result keeps',
+      title: 'Rows kept for display; the database may still finish producing the result',
       checked: doc.rowLimit === n,
       run: () => update(doc.id, { rowLimit: n }),
     })),

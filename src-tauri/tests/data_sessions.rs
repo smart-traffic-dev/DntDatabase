@@ -339,7 +339,7 @@ async fn a_late_cancel_never_hits_the_next_request_on_a_pooled_session() {
 }
 
 /// A cancel while the request's session is still opening drops the request before it
-/// sends anything; the fresh session serves the next request.
+/// sends anything; its connect future is dropped and the next request opens a fresh one.
 #[tokio::test]
 async fn a_cancel_during_open_drops_the_request() {
     let f = fixture().await;
@@ -356,11 +356,11 @@ async fn a_cancel_during_open_drops_the_request() {
         f.log.executed.lock().unwrap().is_empty(),
         "nothing was sent"
     );
-    // The unused session is reused.
+    // The cancelled connect never produces a session to pool; the next read opens again.
     f.sm.data_read(f.id, DB, "tab-1:count", "COUNT", 1)
         .await
         .unwrap();
-    assert_eq!(f.log.sessions.load(Ordering::SeqCst), 2);
+    assert_eq!(f.log.sessions.load(Ordering::SeqCst), 3);
     assert!(!f.sm.data_cancel(f.id, "tab-1:count"), "nothing left");
 }
 

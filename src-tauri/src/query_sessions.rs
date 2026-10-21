@@ -25,8 +25,9 @@
 //!   until `query_tx` acknowledges it.
 
 use crate::commands::settings::saved_confirm_unbounded;
+use crate::result_store::ResultStore;
 use crate::run_events::{
-    tick_rows, ChannelSink, EventSink, HistoryCtx, RunEvent, RunFlags, RunOptions,
+    tick_rows, ChannelSink, EventSink, HistoryCtx, RunEvent, RunFlags, RunOptions, StoredRun,
 };
 use crate::session_manager::{
     close_quietly, closed_error, config_error, connect_db, lock, with_database, ConnState,
@@ -1554,6 +1555,7 @@ impl SessionManager {
         }
         self.plans.drop_tab(tab);
         lock(&self.tx_modes).remove(tab);
+        self.results.remove_tab(tab);
         Ok(())
     }
 
@@ -2216,6 +2218,7 @@ struct RunTask {
     emit: EventSink,
     repo: Arc<ConnectionRepo>,
     runs: Runs,
+    results: ResultStore,
     /// Set when the run's statements are over: no cancel may be sent any more.
     finished: Arc<AtomicBool>,
     /// A transaction was open when the run started.
@@ -2240,6 +2243,32 @@ impl RunTask {
             },
             self.explain,
         );
+        let store_error = Arc::new(Mutex::new(None::<DbError>));
+        if self.explain.is_none() {
+            let error_slot = Arc::clone(&store_error);
+            let cancel = self.cancel.clone();
+            sink.store_results(StoredRun {
+                store: self.results.clone(),
+                connection: self.rt.cfg.id,
+                tab: self.tab.clone(),
+                run: self.run_id,
+                fail: Arc::new(move |error| {
+                    let mut slot = lock(&error_slot);
+                    if slot.is_some() {
+                        return;
+                    }
+                    *slot = Some(error);
+                    drop(slot);
+                    cancel.signal().stop();
+                    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                        let cancel = cancel.clone();
+                        handle.spawn(async move {
+                            let _ = cancel.cancel().await;
+                        });
+                    }
+                }),
+            });
+        }
         sink.tx_now = self
             .ts
             .session
@@ -2285,7 +2314,7 @@ impl RunTask {
         if let Some(writer) = sink.take_writer() {
             writer.finish().await;
         }
-        let stop = match ran {
+        let mut stop = match ran {
             Ok(Some(report)) => {
                 self.after_run(Some(&report), &sink, started_ms).await;
                 report.stop
@@ -2304,6 +2333,14 @@ impl RunTask {
                 Some(StopReason::Error { index: at })
             }
         };
+        if let Some(error) = lock(&store_error).take() {
+            let at = index.load(Ordering::SeqCst);
+            (self.emit)(RunEvent::StatementError {
+                index: at,
+                error: AppError::from(error),
+            });
+            stop = Some(StopReason::Error { index: at });
+        }
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             connection = %self.rt.cfg.id,
@@ -2473,6 +2510,7 @@ impl SessionManager {
             timeout: (cfg.options.query_timeout_s > 0)
                 .then(|| Duration::from_secs(cfg.options.query_timeout_s.into())),
             cancel_grace: self.cancel_grace,
+            full_bytes: copy.explain.is_none(),
             ..ExecOptions::default()
         };
         let cancel = RunCancel::new(session.cancel_handle());
@@ -2480,6 +2518,9 @@ impl SessionManager {
         let emit = stop_when_undelivered(emit, cancel.clone(), Arc::clone(&finished));
         let flags = Arc::new(RunFlags::default());
         let run_id = Uuid::new_v4();
+        if copy.explain.is_none() {
+            self.results.begin_run(&tab);
+        }
         self.runs.try_insert(
             run_id,
             RunEntry {
@@ -2510,6 +2551,7 @@ impl SessionManager {
             emit,
             repo: Arc::clone(&self.repo),
             runs: self.runs.clone(),
+            results: self.results.clone(),
             finished,
         };
         tokio::spawn(task.execute());

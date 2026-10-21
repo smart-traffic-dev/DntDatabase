@@ -80,10 +80,10 @@ describe('tab strip actions: query tab', () => {
     const labels = [...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent);
     expect(labels).toEqual([
       'Format SQL',
-      'Limit 1,000',
-      'Limit 10,000',
-      'Limit 100,000',
-      'Limit 1,000,000',
+      'Display limit 1,000',
+      'Display limit 10,000',
+      'Display limit 100,000',
+      'Display limit 1,000,000',
       'Auto commit',
       'Manual commit',
       'Open in new group',

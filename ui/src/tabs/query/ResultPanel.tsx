@@ -210,7 +210,8 @@ function ResultPanelView({
               )}
             </div>
           )}
-          {result.rowCount > MEMORY_WARNING_ROWS && (
+          {/* A stored result keeps only its visible pages here; others hold every row. */}
+          {!result.token && result.rowCount > MEMORY_WARNING_ROWS && (
             <div className="qr-banner warning" role="status">
               Large result: {result.rowCount} rows are kept in memory.
             </div>

@@ -36,6 +36,8 @@ export type RunPhase =
 export interface ResultSet {
   /** `result_id` of the run. */
   id: number;
+  /** Opaque backend token for the exact disk-backed rows. */
+  token?: string;
   /** Statement index in the plan. */
   index: number;
   columns: ColumnMeta[];
@@ -407,6 +409,23 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
       };
       return { ...run, openResult, results: [...run.results, result] };
     }
+    case 'result_stored': {
+      const at = run.results.findIndex((r) => r.id === ev.result_id);
+      if (at < 0) return run;
+      const results = run.results.slice();
+      results[at] = { ...results[at]!, token: ev.token };
+      return { ...run, results };
+    }
+    case 'rows_stored': {
+      const at = run.results.findIndex((r) => r.id === ev.result_id);
+      if (at < 0) return run;
+      const result = run.results[at]!;
+      const rowCount = Math.max(result.rowCount, ev.start + ev.row_count);
+      if (rowCount === result.rowCount) return run;
+      const results = run.results.slice();
+      results[at] = { ...result, rowCount };
+      return { ...run, results };
+    }
     case 'rows': {
       const at = run.results.findIndex((r) => r.id === ev.result_id);
       if (at < 0 || ev.rows.length === 0) return run;
@@ -424,7 +443,14 @@ export function reduceRun(run: TabRun, ev: RunEvent, now: number): TabRun {
       if (at >= 0) {
         const r = run.results[at]!;
         results = run.results.slice();
-        results[at] = { ...r, truncated: ev.truncated, affected: ev.affected, elapsedMs: ev.elapsed_ms, done: true };
+        results[at] = {
+          ...r,
+          rowCount: ev.row_count,
+          truncated: ev.truncated,
+          affected: ev.affected,
+          elapsedMs: ev.elapsed_ms,
+          done: true,
+        };
       }
       // Every piece gets its own line, also a no-column piece after a result set of the
       // same statement and a piece whose `result_start` never came (F14).

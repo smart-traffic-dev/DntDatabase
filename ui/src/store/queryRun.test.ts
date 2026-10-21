@@ -150,6 +150,22 @@ describe('reduceRun', () => {
     expect(canRun(run)).toBe(true);
   });
 
+  it('a stored result gets its token and grows by committed row ranges, holding no rows', () => {
+    const running = play([
+      { t: 'statement_start', index: 0, range: [0, 8] },
+      { t: 'result_start', result_id: 0, index: 0, columns: [col('a')] },
+      { t: 'result_stored', result_id: 0, token: 'tok' },
+      { t: 'rows_stored', result_id: 0, start: 0, row_count: 500 },
+      { t: 'rows_stored', result_id: 0, start: 500, row_count: 20 },
+      // A late or repeated range never shrinks the count.
+      { t: 'rows_stored', result_id: 0, start: 0, row_count: 500 },
+    ]);
+    expect(running.results[0]).toMatchObject({ token: 'tok', rowCount: 520, done: false });
+    expect(running.results[0]!.chunks).toEqual([]);
+    const done = reduceRun(running, resultEnd(0, 520, { truncated: true }), 2000);
+    expect(done.results[0]).toMatchObject({ rowCount: 520, truncated: true, done: true });
+  });
+
   it('message text is the first line of the preview', () => {
     const plan = planOf([stmt(0, 'SELECT 1\nFROM dual', [0, 18])]);
     const run = play(

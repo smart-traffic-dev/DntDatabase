@@ -75,6 +75,16 @@ for (const e of engines) {
       const rows = Number((await summaryText()).match(/(\d+) rows/)![1]);
       expect(rows).toBeGreaterThan(0);
       await expect(byId('result-grid')).toBeDisplayed();
+      // The rows are read from the backend result store page by page: real cells render.
+      await browser.waitUntil(
+        async () =>
+          browser.execute(() =>
+            [...document.querySelectorAll('[data-testid="result-grid"] [role="gridcell"]')].some((c) =>
+              /^\d+$/.test(c.textContent?.trim() ?? ''),
+            ),
+          ),
+        { timeout: 15_000, timeoutMsg: 'no stored result cells rendered' },
+      );
       await evidence(`${e.prefix}-02-select-grid`);
 
       // 3. Script with an error: Messages show it and the editor carries a marker.

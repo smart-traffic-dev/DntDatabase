@@ -16,6 +16,7 @@ use crate::edit_plans::{EditPlanStore, LoadedStore, LOADED_TTL, MAX_FETCH_BYTES}
 use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
+use crate::result_store::ResultStore;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{
     Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session, DEFAULT_CANCEL_GRACE,
@@ -332,6 +333,8 @@ pub struct SessionManager {
     pub(crate) plan_ttl: Duration,
     /// Runs in progress (see `query_sessions`).
     pub(crate) runs: Runs,
+    /// Exact, ephemeral query results used by display pages, copy and export.
+    pub(crate) results: ResultStore,
     /// The commit mode of every query tab set to Manual (see `query_sessions`); a tab
     /// not in it is Auto.
     pub(crate) tx_modes: Mutex<HashMap<String, crate::query_sessions::TxMode>>,
@@ -387,6 +390,7 @@ impl SessionManager {
             cell_fetch_cap: MAX_FETCH_BYTES,
             plan_ttl: PLAN_TTL,
             runs: Runs::default(),
+            results: ResultStore::temporary().expect("create temporary query result store"),
             tx_modes: Mutex::new(HashMap::new()),
             cancel_grace: DEFAULT_CANCEL_GRACE,
             data_timeout: crate::data_sessions::DATA_READ_TIMEOUT,
@@ -400,6 +404,17 @@ impl SessionManager {
     pub fn with_metadata_timeout(mut self, timeout: Duration) -> Self {
         self.metadata_timeout = timeout;
         self
+    }
+
+    /// The exact rows of the query results still attached to a tab.
+    pub fn results(&self) -> &ResultStore {
+        &self.results
+    }
+
+    /// Uses an application-owned directory for ephemeral query results.
+    pub fn with_result_root(mut self, root: std::path::PathBuf) -> Result<Self, DbError> {
+        self.results = ResultStore::new(root)?;
+        Ok(self)
     }
 
     /// Overrides [`SCHEMA_ERROR_TTL`] for runtimes opened afterwards (tests).
@@ -738,6 +753,7 @@ impl SessionManager {
         self.plans.drop_conn(id);
         self.edit_plans.drop_conn(id);
         self.loaded.drop_conn(id);
+        self.results.remove_connection(id);
     }
 
     /// Every runtime, without holding the map's lock.

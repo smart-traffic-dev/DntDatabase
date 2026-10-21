@@ -1,7 +1,7 @@
 # Backend result spooling and export design
 
 **Date:** 2026-10-21  
-**Status:** Approved in conversation; awaiting review of this written specification  
+**Status:** Implemented on `feat/p4a-object-actions`; see the verification record in `docs/superpowers/reviews/2026-10-21-result-spooling-verification.md`  
 **Scope:** Query-result memory, exact copy/export, obsolete data-session opens, row-limit semantics, and export I/O isolation
 
 ## Goals

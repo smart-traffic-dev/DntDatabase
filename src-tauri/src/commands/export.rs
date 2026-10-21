@@ -122,7 +122,7 @@ impl Stream {
         } = self;
         if let Some(e) = error.or(outcome.err()) {
             // Close the file before removing it.
-            drop(sink);
+            sink.abort();
             target.discard();
             return Err(e);
         }
@@ -172,6 +172,50 @@ async fn stream_to_file(
         }
     };
     s.close(outcome, path).await
+}
+
+/// Writes the exact rows retained for a query result without running its SQL again; a
+/// result still running is followed until it ends. `operation` cancels it
+/// ([`export_query_result_cancel`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn export_query_result_impl(
+    state: &AppState,
+    token: Uuid,
+    kind: DbKind,
+    opts: ExportOptions,
+    path: String,
+    operation: Uuid,
+    progress: Progress,
+) -> Result<ExportSummary, DbError> {
+    check_options(&opts)?;
+    let store = state.sessions.results.clone();
+    let cancel = store.begin_export(operation);
+    let result = async {
+        let stream = Stream::open(&opts, kind, &path, progress)?;
+        // A write error (disk full…) stops reading the stored rows.
+        let failed = Arc::clone(&stream.failed);
+        let stop = Arc::clone(&cancel);
+        let watcher = tokio::spawn(async move {
+            failed.notified().await;
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let reader = store.clone();
+        let flag = Arc::clone(&cancel);
+        let read = blocking(move || {
+            let mut stream = stream;
+            let outcome = reader
+                .stream_cancellable(token, &mut stream.sink, &flag)
+                .map(|_| ());
+            Ok((stream, outcome))
+        })
+        .await;
+        watcher.abort();
+        let (stream, outcome) = read?;
+        stream.close(outcome, path).await
+    }
+    .await;
+    store.finish_export(operation);
+    result
 }
 
 /// Every row of `obj` matching `filter`, in `sort` order (empty: the primary key).
@@ -440,6 +484,41 @@ pub async fn export_query(
     })?;
     state.export_paths.written(&summary.path);
     Ok(summary)
+}
+
+/// Exports the exact disk-backed rows of a completed query result.
+#[tauri::command]
+#[specta::specta]
+pub async fn export_query_result(
+    state: State<'_, AppState>,
+    token: Uuid,
+    kind: DbKind,
+    opts: ExportOptions,
+    path: String,
+    operation: Uuid,
+    channel: Channel<ExportProgress>,
+) -> Result<ExportSummary, AppError> {
+    picked(&state, &path)?;
+    let summary = guard(export_query_result_impl(
+        &state,
+        token,
+        kind,
+        opts,
+        path,
+        operation,
+        channel_progress(channel),
+    ))
+    .await?;
+    state.export_paths.written(&summary.path);
+    Ok(summary)
+}
+
+/// Stops the stored-result export `operation`; false when none runs. Its half-written
+/// file is removed.
+#[tauri::command]
+#[specta::specta]
+pub fn export_query_result_cancel(state: State<'_, AppState>, operation: Uuid) -> bool {
+    state.sessions.results.cancel_export(operation)
 }
 
 #[cfg(test)]
