@@ -829,17 +829,30 @@ fn check_fragment(text: &str, d: Dialect, rules: &FragmentRules) -> Result<(), B
         return bad(rules.empty);
     }
     let mut depth = 0usize;
+    // With the comma rule: open `(` / `[` in order, so they must nest properly and a
+    // comma counts as top level only outside both (PG `ARRAY[1, 2]`, `a[1:2]`).
+    let mut nesting: Vec<u8> = Vec::new();
+    let comma_rule = rules.no_top_level_comma;
     for t in inner {
         match t.kind {
-            TokKind::Open => depth += 1,
+            TokKind::Open => {
+                depth += 1;
+                nesting.push(b'(');
+            }
             TokKind::Close => {
-                if depth == 0 {
+                if depth == 0 || (comma_rule && nesting.pop() != Some(b'(')) {
                     return bad("unbalanced parentheses");
                 }
                 depth -= 1;
             }
             TokKind::Punct(b';') => return bad(&format!("a ';' cannot appear in {}", rules.noun)),
-            TokKind::Punct(b',') if depth == 0 && rules.no_top_level_comma => {
+            TokKind::Punct(b'[') if comma_rule => nesting.push(b'['),
+            TokKind::Punct(b']') if comma_rule => {
+                if nesting.pop() != Some(b'[') {
+                    return bad("unbalanced brackets");
+                }
+            }
+            TokKind::Punct(b',') if comma_rule && nesting.is_empty() => {
                 return bad(&format!(
                     "a ',' outside parentheses cannot appear in {}",
                     rules.noun
@@ -868,6 +881,9 @@ fn check_fragment(text: &str, d: Dialect, rules: &FragmentRules) -> Result<(), B
     }
     if depth != 0 {
         return bad("unbalanced parentheses");
+    }
+    if comma_rule && !nesting.is_empty() {
+        return bad("unbalanced brackets");
     }
     Ok(())
 }
@@ -1295,6 +1311,12 @@ mod dml_tests {
                 "integer, DISABLE TRIGGER ALL",
                 "c::int, OWNER TO x",
                 "int, ADD COLUMN evil int",
+                "a, b",
+                // Brackets must balance and nest with parentheses.
+                "a]",
+                "ARRAY[1, 2",
+                "ARRAY[(1], 2)",
+                "ARRAY[1], 2",
             ] {
                 assert!(
                     matches!(check_expression(bad, d), Err(BuildError::Invalid { .. })),
@@ -1310,6 +1332,9 @@ mod dml_tests {
                 "integer[]",
                 "numeric(10,2)",
                 "coalesce(a, b, 0)",
+                "ARRAY[1, 2]",
+                "'{1,2}'::integer[]",
+                "f(ARRAY[1, 2], 3)",
             ] {
                 assert_eq!(check_expression(good, d), Ok(()), "{d:?} {good:?}");
             }

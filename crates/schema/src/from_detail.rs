@@ -86,16 +86,21 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
         TypeSpec::Custom { .. } => false,
     };
     let generated = c.generated.clone();
+    let default = if generated.is_some() {
+        None
+    } else {
+        c.default.as_deref().and_then(|d| default_spec(d, server))
+    };
+    // MySQL 8 spells quotes inside expression defaults as `\'` (T5-10): the text is
+    // not valid SQL as given, so the column stays as the server has it.
+    let escaped_default = server.kind == DbKind::MySql
+        && matches!(&default, Some(DefaultSpec::Expression { text }) if text.contains("\\'"));
     ColumnDef {
         original: Some(c.name.clone()),
         name: c.name.clone(),
         data_type,
         nullable: c.nullable,
-        default: if generated.is_some() {
-            None
-        } else {
-            c.default.as_deref().and_then(|d| default_spec(d, server))
-        },
+        default,
         auto_increment: c.auto_increment,
         identity: c.identity_kind,
         on_update: c.on_update.clone(),
@@ -103,7 +108,7 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
         collation: unless_table(&c.collation, &opts.collation),
         comment: c.comment.clone(),
         using: None,
-        locked: generated.is_some() || c.invisible || unsafe_values,
+        locked: generated.is_some() || c.invisible || unsafe_values || escaped_default,
         generated,
     }
 }
@@ -890,6 +895,42 @@ mod tests {
         assert!(from_detail(&d, &pg).foreign_keys[0].locked);
         d.foreign_keys[0].definition = Some("FOREIGN KEY (a) REFERENCES u(id)".into());
         assert!(!from_detail(&d, &pg).foreign_keys[0].locked);
+    }
+
+    #[test]
+    fn server_defaults_keep_the_table_savable() {
+        // PG array default (pg_get_expr spelling): an editable expression that passes.
+        let pg = pg();
+        let d = detail(vec![ColumnDetail {
+            default: Some("ARRAY[1, 2]".into()),
+            ..column("tags", 1, "integer[]")
+        }]);
+        let def = from_detail(&d, &pg);
+        assert_eq!(
+            def.columns[0].default,
+            Some(DefaultSpec::Expression {
+                text: "ARRAY[1, 2]".into()
+            })
+        );
+        assert!(!def.columns[0].locked);
+        assert_eq!(crate::validate(&def, &pg), vec![]);
+
+        // MySQL 8 expression default with `\'`-escaped quotes: locked (T5-10).
+        let my = mysql8();
+        let d = detail(vec![
+            ColumnDetail {
+                default: Some(r"concat(_utf8mb4\'a\',_utf8mb4\'b\')".into()),
+                ..column("label", 1, "varchar(10)")
+            },
+            ColumnDetail {
+                default: Some("now()".into()),
+                ..column("at", 2, "datetime")
+            },
+        ]);
+        let def = from_detail(&d, &my);
+        assert!(def.columns[0].locked);
+        assert!(!def.columns[1].locked);
+        assert_eq!(crate::validate(&def, &my), vec![]);
     }
 
     #[test]
