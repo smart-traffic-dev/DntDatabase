@@ -123,6 +123,27 @@ it('stale_offers_reopen', async () => {
   expect(useTableDesigns.getState().byTab[tab.id]!.staleDraft).toEqual(stale);
 });
 
+it('an expired plan offers Preview again, which previews the draft anew', async () => {
+  let previews = 0;
+  const { user } = await setup(null, {
+    table_design_preview: () => ({ ...preview, plan_id: `plan-${++previews}` }),
+    table_design_apply: (a) => {
+      if (a.planId === 'plan-1') throw new Failure(appError('plan_expired', 'The run plan expired; run it again.'));
+      return applied;
+    },
+  });
+  await user.click(await screen.findByRole('button', { name: 'Apply' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The run plan expired');
+  await user.click(screen.getByRole('button', { name: 'Preview again' }));
+  expect(await screen.findByLabelText('SQL preview')).toBeInTheDocument();
+  expect(callsOf('table_design_preview')).toHaveLength(2);
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Preview again' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Apply' }));
+  await vi.waitFor(() => expect(callsOf('table_design_apply')).toHaveLength(2));
+  expect(callsOf('table_design_apply')[1]).toMatchObject({ planId: 'plan-2' });
+});
+
 it('stop_calls_cancel', async () => {
   let resolve!: (r: DesignReport) => void;
   const { user } = await setup(null, { table_design_apply: () => new Promise<DesignReport>((r) => { resolve = r; }), table_design_cancel: () => null });

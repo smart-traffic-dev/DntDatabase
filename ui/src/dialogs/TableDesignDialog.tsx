@@ -81,8 +81,11 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
   const [stage, setStage] = useState('');
   const [typed, setTyped] = useState('');
   const [unknownText, setUnknownText] = useState(UNKNOWN_MESSAGE);
+  const [expired, setExpired] = useState(false);
   const operation = useRef<string | null>(null);
   const inflight = useRef(false);
+  const mounted = useRef(true);
+  const previewSeq = useRef(0);
   const busy = loading || applying;
   const engine = design?.open?.server.kind;
   const env = design?.open?.env ?? cfg?.env_tag ?? null;
@@ -93,9 +96,13 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
     onClose();
   };
 
-  /** A failed command: a lost design closes the dialog, a stale plan offers Reopen, anything else is shown. */
+  /**
+   * A failed command: a lost design closes the dialog, a stale plan offers Reopen, an expired plan
+   * offers Preview again, anything else is shown.
+   */
   const fail = (e: AppError) => {
     if (isDesignLost(e)) return lost();
+    if (e.kind === 'plan_expired') setExpired(true);
     if (isStale(e)) {
       const draft = useTableDesigns.getState().byTab[id]?.draft ?? null;
       useTableDesigns.getState().setStaleDraft(id, draft);
@@ -106,27 +113,39 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
     setError(e.message);
   };
 
-  useEffect(() => {
-    const state = useTableDesigns.getState().byTab[tabId];
-    let live = true;
+  /** Previews the draft as it is now; only the newest preview of a mounted dialog lands. */
+  const runPreview = (designTab: string) => {
+    const seq = ++previewSeq.current;
+    const current = () => mounted.current && previewSeq.current === seq;
+    const state = useTableDesigns.getState().byTab[designTab];
+    setExpired(false);
+    setReport(null);
+    setTyped('');
     if (!state?.open || !state.draft) {
       setLoading(false);
       setError('The design is not open.');
       return;
     }
+    setError(null);
+    setLoading(true);
     api
       .tableDesignPreview(state.open.design_id, state.draft)
       .then((plan) => {
-        if (live) setPreview(plan);
+        if (current()) setPreview(plan);
       })
       .catch((e) => {
-        if (live) fail(toAppError(e));
+        if (current()) fail(toAppError(e));
       })
       .finally(() => {
-        if (live) setLoading(false);
+        if (current()) setLoading(false);
       });
+  };
+
+  useEffect(() => {
+    mounted.current = true;
+    runPreview(tabId);
     return () => {
-      live = false;
+      mounted.current = false;
     };
     // The review is of the draft as it is when the dialog opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -301,6 +320,11 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
         {stale ? (
           <button type="button" className="btn primary" onClick={reopen}>
             Reopen
+          </button>
+        ) : null}
+        {expired && !busy ? (
+          <button type="button" className="btn primary" onClick={() => runPreview(id)}>
+            Preview again
           </button>
         ) : null}
         {preview ? (
