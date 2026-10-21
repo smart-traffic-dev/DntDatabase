@@ -95,6 +95,36 @@ Optional environment: `MSEDGEDRIVER` (path to msedgedriver.exe), `TAURI_DRIVER` 
 default `%CARGO_HOME%\bin`). The run uses a fresh temporary `DNT_DATA_DIR` and removes the test password it stored
 in Windows Credential Manager when it finishes.
 
+### Browser E2E (UI)
+
+Runs the real UI in Chromium against a fake IPC backend (`e2e-web/src/backend.ts`): no Rust build, no WebView2, no
+Docker, so it runs on any OS and in CI. Use it for UI flows (dialogs, tree, object tabs, error rendering); the Rust
+commands and the real servers stay covered by `cargo test` and the smoke test above.
+
+One-time setup:
+
+```powershell
+pnpm --dir e2e-web install
+pnpm --dir e2e-web install-browsers   # downloads the Chromium build Playwright uses
+```
+
+Each run:
+
+```powershell
+pnpm e2e:web
+```
+
+It starts its own Vite instance on port **5174** (5173 belongs to `pnpm tauri dev`, and an unrelated dev server there
+would be reused silently). A failure leaves a trace, screenshots and video in `e2e-web/test-results/`; open the
+report with `pnpm --dir e2e-web report`, or one trace with
+`pnpm --dir e2e-web exec playwright show-trace e2e-web/test-results/<test>/trace.zip`.
+
+The UI reaches the backend only through `window.__TAURI_INTERNALS__.invoke`, so `e2e-web/src/shim.ts` defines it and
+forwards every command to handlers that run in Node. A command without a handler answers with an `internal` error
+and fails the test when it ends (the `test` of `e2e-web/src/test.ts` checks it): add a handler in
+`e2e-web/src/backend.ts`. Error payloads come from `ui/src/test/fixtures/app-errors.json` (the fixtures the Rust
+`app_error_fixtures` test generates), shared with the unit tests through `ui/src/test/fixtures/data.ts`.
+
 ## Fixtures
 
 `cargo run -p dnt-testkit --features gen-fixtures --bin gen_fixtures` generates the TLS certificates
