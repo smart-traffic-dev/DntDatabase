@@ -112,7 +112,15 @@ export function ActionMenu({ label, x, y, items, onClose, autoFocus = true, chec
   };
 
   return (
-    <div ref={ref} role="menu" aria-label={label} className="context-menu" style={pos ?? { left: 0, top: 0 }} onKeyDown={onKeyDown}>
+    <div
+      ref={ref}
+      role="menu"
+      aria-label={label}
+      className="context-menu"
+      // Hidden while it is measured at (0, 0): no frame ever shows it in the window's corner.
+      style={pos ?? { left: 0, top: 0, visibility: 'hidden' }}
+      onKeyDown={onKeyDown}
+    >
       {items.map((item, i) =>
         'separator' in item ? (
           <div key={`sep-${i}`} role="separator" className="menu-sep" />

@@ -292,7 +292,8 @@ fieldset.export-form {
   grid-column: 1 / -1;
 }
 
-.contents {
+/* `fieldset` only: every Monaco suggest row has a `.contents` box that must stay a box. */
+fieldset.contents {
   display: contents;
   border: 0;
 }

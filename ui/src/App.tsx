@@ -90,7 +90,7 @@ export default function App() {
   return (
     <div className="app" style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
       <TitleBar />
-      <div className="body">
+      <div className="app-body">
         {sidebarVisible && (
           <>
             <ErrorBoundary label="Sidebar">
