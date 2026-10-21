@@ -6,7 +6,7 @@ import { closeOtherTabs, closeTabsToRight, togglePin } from './tabActions';
 export interface PaletteCommand {
   /** Unique name; registering the same id again replaces the command. */
   id: string;
-  /** Shown as is, by convention "Group: Action". */
+  /** "Group: Action": the palette lists the action under a "Group" section header. */
   label: string;
   hint?: string;
   /** Hidden from the palette while this returns false. */
