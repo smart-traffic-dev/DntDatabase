@@ -67,7 +67,7 @@ describe('QueryToolbar', () => {
     view.unmount();
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
-    expect(screen.getByTestId('query-run')).toHaveTextContent('Ctrl+Enter');
+    expect(screen.getByTestId('query-run')).toHaveAttribute('title', expect.stringContaining('Ctrl+Enter'));
     await openRunMenu(user);
     expect(screen.getByTestId('query-run-all')).toBeEnabled();
     expect(screen.getByTestId('query-run-all')).toHaveTextContent('Ctrl+Shift+Enter');
@@ -83,6 +83,7 @@ describe('QueryToolbar', () => {
     await openRunMenu(user);
     const menu = screen.getByRole('menu', { name: 'Run options' });
     expect([...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent)).toEqual([
+      'Run statement',
       'Run all',
       'Run selection',
       'Continue on error',
@@ -101,12 +102,12 @@ describe('QueryToolbar', () => {
     expect(screen.getByTestId('query-run-menu')).toHaveFocus();
   });
 
-  it('a production connection runs from a danger outline button labelled Run on PROD', () => {
+  it('a production connection runs from a red Run icon named Run on PROD', () => {
     useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { env_tag: 'production' })]);
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
     const run = screen.getByTestId('query-run');
-    expect(run).toHaveTextContent('Run on PROD');
+    expect(run).toHaveAttribute('aria-label', 'Run on PROD');
     expect(run).toHaveClass('danger-outline');
     expect(run).not.toHaveClass('qt-primary');
   });
@@ -165,27 +166,29 @@ describe('QueryToolbar', () => {
     expect(screen.queryByTestId('query-stop')).toBeNull();
   });
 
-  it('Format formats the editor of the tab', async () => {
+  it('Format (in ⋯) formats the editor of the tab', async () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     const editor = { focus: vi.fn(), trigger: vi.fn() };
     setActiveEditor(id, editor);
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId('query-more'));
     const format = screen.getByTestId('query-format');
-    expect(format).toHaveAttribute('title', 'Format SQL (Ctrl+Shift+F)');
-    await userEvent.setup().click(format);
+    expect(format).toHaveTextContent('Ctrl+Shift+F');
+    await user.click(format);
     expect(editor.trigger).toHaveBeenCalledWith('toolbar', 'dnt.formatSql', null);
     setActiveEditor(id, null);
   });
 
-  describe('context pill', () => {
-    it('shows the environment, connection and database and opens the picker', async () => {
+  describe('context chip', () => {
+    it('shows the environment and database (connection and server in the tooltip) and opens the picker', async () => {
       useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { env_tag: 'production' })]);
       const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
       render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
       const pill = screen.getByTestId('query-context');
       expect(within(pill).getByTestId('query-context-env')).toHaveTextContent('PROD');
-      expect(pill).toHaveTextContent('shop-prod');
-      expect(pill).toHaveTextContent('shop');
+      expect(pill).toHaveTextContent(/^PRODshop$/);
+      expect(pill).toHaveAttribute('title', expect.stringMatching(/^shop-prod \(.+:\d+\) › shop · production\./));
       expect(pill).toHaveAttribute('aria-haspopup', 'dialog');
       expect(screen.queryByTestId('query-connection')).toBeNull();
       const user = userEvent.setup();
@@ -265,7 +268,7 @@ describe('QueryToolbar', () => {
     expect(screen.getByRole('menuitem', { name: 'Explain Analyze' })).toBeEnabled();
   });
 
-  describe('narrow toolbar', () => {
+  describe('narrow group', () => {
     const mount = (env: 'production' | null = null) => {
       useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { env_tag: env })]);
       const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
@@ -273,43 +276,35 @@ describe('QueryToolbar', () => {
       return id;
     };
 
-    it('keeps Explain, Format and Limit in the toolbar when wide', () => {
+    it('a wide group shows the chip text, Run, Explain and ⋯; Format and Limit are always in ⋯', () => {
       stubWidth(900);
       mount();
+      expect(screen.getByTestId('query-context')).toHaveTextContent('shop');
       expect(screen.getByTestId('query-explain')).toBeInTheDocument();
-      expect(screen.getByTestId('query-format')).toBeInTheDocument();
-      expect(screen.getByTestId('query-row-limit')).toBeInTheDocument();
-      expect(screen.queryByTestId('query-more')).toBeNull();
-    });
-
-    it('under 560 px moves Explain, Format and Limit into the more menu', async () => {
-      stubWidth(500);
-      const id = mount();
-      expect(screen.queryByTestId('query-explain')).toBeNull();
+      expect(screen.getByTestId('query-more')).toHaveAttribute('aria-label', 'More query actions');
       expect(screen.queryByTestId('query-format')).toBeNull();
-      expect(screen.queryByTestId('query-row-limit')).toBeNull();
-      expect(screen.getByTestId('query-run')).toHaveTextContent('Run');
-      const more = screen.getByTestId('query-more');
-      expect(more).toHaveAttribute('aria-label', 'More query actions');
-      expect(more).toHaveAttribute('title', 'More query actions');
-      const user = userEvent.setup();
-      await user.click(more);
-      const menu = screen.getByRole('menu', { name: 'More query actions' });
-      const labels = [...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent);
-      expect(labels).toEqual(['Explain', 'Explain Analyze', 'Format SQL', 'Limit 1,000', 'Limit 10,000', 'Limit 100,000', 'Limit 1,000,000']);
-      expect(within(menu).getByRole('menuitemradio', { name: /Limit 10,000$/ })).toHaveAttribute('aria-checked', 'true');
-      await user.click(within(menu).getByRole('menuitemradio', { name: /Limit 1,000$/ }));
-      expect(useQueryDocs.getState().docs.get(id)!.rowLimit).toBe(1000);
+      expect(screen.queryByRole('combobox')).toBeNull();
     });
 
-    it('under 400 px Run is an icon with its name and shortcut, and the environment stays', () => {
-      stubWidth(380);
-      mount('production');
+    it('under 360 px moves Explain into ⋯ and keeps Run, its name and shortcut, and the environment badge', async () => {
+      stubWidth(340);
+      const id = mount('production');
+      expect(screen.queryByTestId('query-explain')).toBeNull();
       const run = screen.getByTestId('query-run');
       expect(run).toHaveAttribute('aria-label', 'Run on PROD');
       expect(run).toHaveAttribute('title', 'Run the statement at the cursor (Ctrl+Enter)');
-      expect(run).not.toHaveTextContent('Run');
-      expect(screen.getByTestId('query-context-env')).toHaveTextContent('PROD');
+      // Badge only: the database is in the chip's name and tooltip.
+      const chip = screen.getByTestId('query-context');
+      expect(chip).toHaveTextContent(/^PROD$/);
+      expect(chip).toHaveAccessibleName('Connection: shop-prod › shop');
+      const user = userEvent.setup();
+      await user.click(screen.getByTestId('query-more'));
+      const menu = screen.getByRole('menu', { name: 'More query actions' });
+      const labels = [...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent);
+      expect(labels.slice(0, 7)).toEqual(['Explain', 'Explain Analyze', 'Format SQL', 'Limit 1,000', 'Limit 10,000', 'Limit 100,000', 'Limit 1,000,000']);
+      expect(within(menu).getByRole('menuitemradio', { name: /Limit 10,000$/ })).toHaveAttribute('aria-checked', 'true');
+      await user.click(within(menu).getByRole('menuitemradio', { name: /Limit 1,000$/ }));
+      expect(useQueryDocs.getState().docs.get(id)!.rowLimit).toBe(1000);
     });
   });
 

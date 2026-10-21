@@ -195,6 +195,20 @@ export const StopIcon = () => (
   </Icon>
 );
 
+/** Two linked boxes: Explain (the query plan). */
+export const ExplainIcon = () => (
+  <Icon size={14} strokeWidth={1.8}>
+    <path d="M4 4h6v6H4zM14 14h6v6h-6zM7 10v7h7" />
+  </Icon>
+);
+
+/** Arrow turning back: Rollback. */
+export const RollbackIcon = () => (
+  <Icon size={14} strokeWidth={1.9}>
+    <path d="M8 6l-4 4 4 4M4 10h10a5 5 0 010 10H9" />
+  </Icon>
+);
+
 /** Circular arrow: Refresh. */
 export const RefreshIcon = () => (
   <Icon size={14} strokeWidth={2}>

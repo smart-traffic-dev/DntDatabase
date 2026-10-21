@@ -8,6 +8,7 @@ import { emptyRun, startRun, useQueryRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
 import { config, ids, resetStores } from '../../test/backend';
 import { useConnections } from '../../store/connections';
+import { TabStripActions } from '../TabStripActions';
 import { QueryTab } from './QueryTab';
 
 const counts = vi.hoisted(() => ({ toolbar: 0, panel: 0 }));
@@ -60,7 +61,14 @@ beforeEach(() => {
 describe('typing re-renders', () => {
   it('fifty_keystrokes_do_not_re_render_the_toolbar_or_the_result_panel', async () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
-    render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
+    // The toolbar is the tab strip's action cluster for the tab.
+    const tab = { id, kind: 'query' as const, connectionId: ids.prod, title: 'Query 1' };
+    render(
+      <>
+        <TabStripActions groupId="g1" tab={tab} />
+        <QueryTab tab={tab} />
+      </>,
+    );
     const toolbarBefore = counts.toolbar;
     const panelBefore = counts.panel;
     expect(toolbarBefore).toBeGreaterThan(0);

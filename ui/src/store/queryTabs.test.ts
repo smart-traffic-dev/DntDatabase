@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueryTabRecord } from '../bindings';
 import { DialogHost } from '../dialogs/DialogHost';
-import { QueryTab } from '../tabs/query/QueryTab';
+import { TabStripActions } from '../tabs/TabStripActions';
 import { onQueryShortcut } from '../components/queryShortcuts';
 import { callsOf, calls, config, fail, ids, mockBackend, resetStores } from '../test/backend';
 import { useConnections } from './connections';
@@ -140,7 +140,8 @@ describe('restore', () => {
     expect(doc('orphan')).toMatchObject({ connectionId: null, sql: 'SELECT 1;' });
     const tab = useTabs.getState().tabs[0] as QueryTabRef;
     expect(tab.connectionId).toBeNull();
-    render(createElement(QueryTab, { tab }));
+    // The context chip and Run are in the tab strip's action cluster.
+    render(createElement(TabStripActions, { groupId: 'g1', tab }));
     expect(screen.getByTestId('query-context')).toHaveTextContent('Choose a connection');
     await userEvent.setup().click(screen.getByTestId('query-context'));
     const select = screen.getByTestId('query-connection') as HTMLSelectElement;

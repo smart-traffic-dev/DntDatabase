@@ -5,62 +5,45 @@
   min-height: 0;
 }
 
-/* One 40px row: name, connection › database path, read-only badge, then the sections on the right. */
-.ot-head {
+/* One 28 px row under the tab strip (editor v2 §2): the sections on the left, the Data pager on the right. */
+.ot-subbar {
   flex: none;
   display: flex;
   align-items: center;
   gap: var(--dnt-space-2);
-  height: 40px;
-  padding: 0 var(--dnt-space-3);
+  height: 28px;
+  min-width: 0;
+  padding: 0 var(--dnt-space-2);
   border-bottom: 1px solid var(--dnt-border-subtle);
-  background: var(--dnt-bg-chrome);
-  min-width: 0;
+  font-size: var(--dnt-text-sm);
 }
 
-.ot-name {
+/* Flat text tabs: the selected one in the full text colour and weight, no bar. */
+.ot-tabs {
   flex: none;
-  max-width: 40%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--dnt-text-md);
-  font-weight: 600;
-  color: var(--dnt-fg);
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 
-.ot-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.ot-subtab {
+  height: var(--dnt-ctl-h-xs);
+  padding: 0 var(--dnt-space-1_5);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
   color: var(--dnt-fg-muted);
   font-size: var(--dnt-text-sm);
 }
 
-.ot-ro {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--dnt-space-1);
-  height: 18px;
-  padding: 0 var(--dnt-space-1_5);
-  border: 1px solid var(--dnt-border);
-  border-radius: var(--dnt-radius-full);
-  color: var(--dnt-fg-muted);
-  font-size: var(--dnt-text-xs);
-  cursor: default;
+.ot-subtab:hover {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
 }
 
-/* The sections: the shared segmented control, sized to its labels and pushed right. */
-.segmented.ot-tabs {
-  flex: none;
-  margin-left: auto;
-}
-
-.ot-tabs .segment {
-  flex: none;
-  padding: 0 var(--dnt-space-3);
+.ot-subtab.on {
+  color: var(--dnt-fg);
+  font-weight: 500;
 }
 
 .mono {
@@ -68,7 +51,7 @@
   font-size: var(--dnt-text-sm);
 }
 
-/* Info / DDL / Structure: a section toolbar, then the scrolling body. */
+/* Info / DDL / Structure: the scrolling body (DDL has its own bar: Wrap, Open in editor, Copy). */
 .ot-panel {
   flex: 1;
   min-height: 0;
@@ -85,15 +68,6 @@
   height: 40px;
   padding: 0 var(--dnt-space-3);
   border-bottom: 1px solid var(--dnt-border-subtle);
-}
-
-.ot-bar .icon-btn {
-  width: var(--dnt-ctl-h-md);
-  height: var(--dnt-ctl-h-md);
-}
-
-.ot-bar .icon-btn:disabled {
-  color: var(--dnt-fg-disabled);
 }
 
 .ot-body {

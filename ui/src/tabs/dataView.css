@@ -15,77 +15,24 @@
   flex-direction: column;
 }
 
-/* 40px: Filter and the sort chip on the left; pager, Refresh, Open in query, Export and ⋯ on the right. */
-.dv-toolbar {
-  flex: none;
+/* The pager in the object tab's sub-tab row: filter / sort state, `1–100 / ~3,412`, Previous, Next. */
+.dv-pagerbar {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--dnt-space-1);
-  min-height: 40px;
-  padding: 0 var(--dnt-space-3);
-  border-bottom: 1px solid var(--dnt-border-subtle);
-  background: var(--dnt-bg-chrome);
-  font-size: var(--dnt-text-base);
+  overflow: hidden;
 }
 
-.dv-toolbar .spacer {
-  flex: 1;
+.dv-pagerbar .icon-btn {
+  width: var(--dnt-ctl-h-xs);
+  height: var(--dnt-ctl-h-xs);
 }
 
-.dv-toolbar .icon-btn {
-  width: var(--dnt-ctl-h-md);
-  height: var(--dnt-ctl-h-md);
-}
-
-.dv-toolbar .icon-btn:disabled {
+.dv-pagerbar .icon-btn:disabled {
   color: var(--dnt-fg-disabled);
-}
-
-/* Quiet text buttons; Export is the one secondary (bordered) button. */
-.dv-btn {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--dnt-space-1_5);
-  height: var(--dnt-ctl-h-md);
-  padding: 0 var(--dnt-space-2);
-  border: 1px solid transparent;
-  border-radius: var(--dnt-radius-sm);
-  background: transparent;
-  color: var(--dnt-fg);
-  font: inherit;
-  white-space: nowrap;
-}
-
-.dv-btn:hover:not(:disabled) {
-  background: var(--dnt-bg-hover);
-}
-
-.dv-btn:disabled {
-  color: var(--dnt-fg-disabled);
-}
-
-/* The filter bar is open: a background tint, no stripe. */
-.dv-btn[aria-pressed='true'] {
-  background: var(--dnt-bg-active);
-}
-
-.dv-btn.secondary {
-  border-color: var(--dnt-border);
-  background: var(--dnt-bg-app);
-}
-
-.dv-btn.secondary:disabled {
-  border-color: var(--dnt-border-subtle);
-  background: var(--dnt-bg-sunken);
-}
-
-.dv-divider {
-  flex: none;
-  width: 1px;
-  height: 20px;
-  margin: 0 var(--dnt-space-1);
-  background: var(--dnt-border);
 }
 
 /* `1–100 / ~3,412` */
