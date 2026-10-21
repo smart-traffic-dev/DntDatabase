@@ -11,19 +11,32 @@ use std::collections::HashSet;
 
 /// Problems in `def` for `server`, in element order.
 ///
-/// The client's `locked` flag is not trusted (ruling T5-4): the injection-safety
-/// checks (identifiers, catalog type names, `check_expression`, raw words, FK actions,
-/// enum members) run on every element. A locked element skips only the shape and
-/// capability rules (it came from the server as is), and a new element (`original:
-/// None`) cannot be locked.
+/// **Precondition (ruling T5-7):** every element that is locked in the stored base
+/// has been replaced by the base copy (matched by `original`) before this call, so a
+/// locked element with `original: Some` is server-derived. Such an element skips the
+/// text-safety checks (`check_expression`, raw words, enum members) as well as the
+/// shape and capability rules; it is never rendered. A locked element with
+/// `original: None` is an error, and every unlocked element gets every check.
+///
+/// Names (ruling T5-8): `validate_identifier` applies only to names the user creates
+/// or changes (`original` None or different from `name`; the table name against
+/// `original_name`). Unchanged names and referenced names (FK target table, schema
+/// and columns, key/index columns) are only checked for being empty or holding a NUL:
+/// they are always quoted on render.
 pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
     let mut v = Validator {
         server,
         kind: server.kind,
         dialect: Dialect::for_kind(server.kind),
+        trusted: false,
         errs: Vec::new(),
     };
-    v.name(ElementRef::Table, "name", &def.name);
+    v.name(
+        ElementRef::Table,
+        "name",
+        &def.name,
+        def.original_name.as_deref(),
+    );
     if def.columns.is_empty() {
         v.err(
             ElementRef::Table,
@@ -34,46 +47,54 @@ pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
     let mut seen = HashSet::new();
     for c in &def.columns {
         let el = ElementRef::Column(c.name.clone());
-        if v.name(el.clone(), "name", &c.name) && !seen.insert(v.key(&c.name)) {
+        if v.name(el.clone(), "name", &c.name, c.original.as_deref())
+            && !seen.insert(v.key(&c.name))
+        {
             v.err(el.clone(), Some("name"), "Another column has this name.");
         }
-        v.locked_new(&el, &c.original, c.locked);
+        v.enter(&el, &c.original, c.locked);
         v.column(c, !c.locked);
     }
     let columns: HashSet<String> = def.columns.iter().map(|c| v.key(&c.name)).collect();
     if let Some(pk) = &def.primary_key {
-        v.locked_new(&ElementRef::PrimaryKey, &pk.original, pk.locked);
+        v.enter(&ElementRef::PrimaryKey, &pk.original, pk.locked);
         v.primary_key(pk, &columns, !pk.locked);
     }
     let mut seen = HashSet::new();
     for i in &def.indexes {
         let el = ElementRef::Index(i.name.clone());
-        if v.name(el.clone(), "name", &i.name) && !seen.insert(v.key(&i.name)) {
+        if v.name(el.clone(), "name", &i.name, i.original.as_deref())
+            && !seen.insert(v.key(&i.name))
+        {
             v.err(el.clone(), Some("name"), "Another index has this name.");
         }
-        v.locked_new(&el, &i.original, i.locked);
+        v.enter(&el, &i.original, i.locked);
         v.index(i, &columns, !i.locked);
     }
     let mut seen = HashSet::new();
     for f in &def.foreign_keys {
         let el = ElementRef::ForeignKey(f.name.clone());
-        if v.name(el.clone(), "name", &f.name) && !seen.insert(v.key(&f.name)) {
+        if v.name(el.clone(), "name", &f.name, f.original.as_deref())
+            && !seen.insert(v.key(&f.name))
+        {
             v.err(
                 el.clone(),
                 Some("name"),
                 "Another foreign key has this name.",
             );
         }
-        v.locked_new(&el, &f.original, f.locked);
+        v.enter(&el, &f.original, f.locked);
         v.foreign_key(f, &columns, !f.locked);
     }
     let mut seen = HashSet::new();
     for c in &def.checks {
         let el = ElementRef::Check(c.name.clone());
-        if v.name(el.clone(), "name", &c.name) && !seen.insert(v.key(&c.name)) {
+        if v.name(el.clone(), "name", &c.name, c.original.as_deref())
+            && !seen.insert(v.key(&c.name))
+        {
             v.err(el.clone(), Some("name"), "Another check has this name.");
         }
-        v.locked_new(&el, &c.original, c.locked);
+        v.enter(&el, &c.original, c.locked);
         v.check(c, !c.locked);
     }
     if def.options.locked && def.original_name.is_none() {
@@ -83,6 +104,7 @@ pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
             "A new table's options cannot be locked.",
         );
     }
+    v.trusted = def.options.locked && def.original_name.is_some();
     v.options(&def.options);
     v.errs
 }
@@ -100,6 +122,8 @@ struct Validator<'a> {
     server: &'a ServerInfo,
     kind: DbKind,
     dialect: Dialect,
+    /// The current element is locked and server-derived: skip text-safety checks.
+    trusted: bool,
     errs: Vec<DraftError>,
 }
 
@@ -116,8 +140,9 @@ impl Validator<'_> {
         self.kind == DbKind::MySql
     }
 
-    /// Only an element that exists on the server can be locked.
-    fn locked_new(&mut self, el: &ElementRef, original: &Option<String>, locked: bool) {
+    /// Starts the checks of one element. Only an element that exists on the server
+    /// can be locked; a locked one is then server-derived (see [`validate`]).
+    fn enter(&mut self, el: &ElementRef, original: &Option<String>, locked: bool) {
         if locked && original.is_none() {
             self.err(
                 el.clone(),
@@ -125,6 +150,7 @@ impl Validator<'_> {
                 "A new element cannot be locked.",
             );
         }
+        self.trusted = locked && original.is_some();
     }
 
     /// Name comparison key: MySQL names compare case-insensitively.
@@ -135,11 +161,14 @@ impl Validator<'_> {
         }
     }
 
-    /// Checks an identifier; `true` when it is valid.
-    fn name(&mut self, el: ElementRef, field: &str, name: &str) -> bool {
-        if name.trim().is_empty() {
-            self.err(el, Some(field), "A name is required.");
+    /// Checks an element's own name; `true` when it is valid. `validate_identifier`
+    /// applies only when the name is new or changed (`original` None or different).
+    fn name(&mut self, el: ElementRef, field: &str, name: &str, original: Option<&str>) -> bool {
+        if !self.reference(el.clone(), field, name) {
             return false;
+        }
+        if original == Some(name) {
+            return true;
         }
         if let Err(e) = validate_identifier(self.kind, name) {
             let message = match e {
@@ -152,8 +181,25 @@ impl Validator<'_> {
         true
     }
 
+    /// Checks an unchanged or referenced name (always quoted on render): not empty,
+    /// no NUL. `true` when it is valid.
+    fn reference(&mut self, el: ElementRef, field: &str, name: &str) -> bool {
+        if name.trim().is_empty() {
+            self.err(el, Some(field), "A name is required.");
+            return false;
+        }
+        if name.contains('\0') {
+            self.err(el, Some(field), "A name cannot contain a NUL character.");
+            return false;
+        }
+        true
+    }
+
     /// Checks a user-written SQL expression.
     fn expression(&mut self, el: &ElementRef, field: &str, text: &str) {
+        if self.trusted {
+            return;
+        }
         if let Err(e) = check_expression(text, self.dialect) {
             let reason = match e {
                 BuildError::Invalid { reason, .. } => reason,
@@ -169,6 +215,9 @@ impl Validator<'_> {
 
     /// A name the server would take unquoted (engine, charset, collation, row format).
     fn word(&mut self, el: &ElementRef, field: &str, value: &Option<String>) {
+        if self.trusted {
+            return;
+        }
         if let Some(v) = value {
             if v.is_empty() || !v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
                 self.err(
@@ -203,7 +252,7 @@ impl Validator<'_> {
     fn values(&mut self, el: &ElementRef, values: &[String], shape: bool) {
         let mut seen = HashSet::new();
         for v in values {
-            if v.contains('\0') || (self.mysql() && v.contains('\\')) {
+            if !self.trusted && (v.contains('\0') || (self.mysql() && v.contains('\\'))) {
                 self.err(
                     el.clone(),
                     Some("values"),
@@ -364,17 +413,17 @@ impl Validator<'_> {
         }
     }
 
-    /// Referenced column names are identifiers too (they are quoted into DDL).
+    /// Referenced column names: not empty, no NUL (they are quoted into DDL).
     fn refs(&mut self, el: &ElementRef, field: &str, names: &[String]) {
         for n in names {
-            self.name(el.clone(), field, n);
+            self.reference(el.clone(), field, n);
         }
     }
 
     fn primary_key(&mut self, pk: &KeyDef, columns: &HashSet<String>, shape: bool) {
         let el = ElementRef::PrimaryKey;
         if let Some(name) = &pk.name {
-            self.name(el.clone(), "name", name);
+            self.name(el.clone(), "name", name, pk.original.as_deref());
         }
         self.refs(&el, "columns", &pk.columns);
         if !shape {
@@ -411,7 +460,8 @@ impl Validator<'_> {
         self.refs(&el, "parts", &part_columns);
         self.refs(&el, "include", &i.include);
         if let Some(m) = &i.method {
-            if m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            let bad = m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            if bad && !self.trusted {
                 self.err(el.clone(), Some("method"), "Invalid index method.");
             }
         }
@@ -473,10 +523,9 @@ impl Validator<'_> {
         let el = ElementRef::ForeignKey(f.name.clone());
         // Safety, locked or not: names, the raw actions and match type.
         self.refs(&el, "columns", &f.columns);
-        if self.name(el.clone(), "ref_table", &f.ref_table) {
-            if let Some(s) = &f.ref_schema {
-                self.name(el.clone(), "ref_schema", s);
-            }
+        self.reference(el.clone(), "ref_table", &f.ref_table);
+        if let Some(s) = &f.ref_schema {
+            self.reference(el.clone(), "ref_schema", s);
         }
         self.refs(&el, "ref_columns", &f.ref_columns);
         for (field, action) in [("on_update", &f.on_update), ("on_delete", &f.on_delete)] {
@@ -860,18 +909,16 @@ mod tests {
         t.options.engine = Some("InnoDB".into());
         assert!(has(&validate(&t, &pg), ElementRef::Options, Some("engine")));
 
-        // The client's `locked` flag is not trusted (T5-4): safety checks still run.
+        // A locked server element (T5-7: the backend restored it from the base) skips
+        // the text-safety checks; it is never rendered.
         let mut t = base();
         t.columns[1].original = Some("a".into());
         t.columns[1].locked = true;
         t.columns[1].data_type = TypeSpec::Custom {
             text: "geometry srid 4326 -- x".into(),
         };
-        assert!(has(
-            &validate(&t, &my),
-            ElementRef::Column("a".into()),
-            Some("data_type")
-        ));
+        assert_eq!(validate(&t, &my), vec![]);
+        // The catalog and referential-action checks still apply.
         let mut t = base();
         t.columns[1].original = Some("a".into());
         t.columns[1].locked = true;
@@ -887,17 +934,6 @@ mod tests {
             &validate(&t, &my),
             ElementRef::Column("a".into()),
             Some("data_type")
-        ));
-        let mut t = base();
-        t.columns[1].original = Some("a".into());
-        t.columns[1].locked = true;
-        t.columns[1].default = Some(DefaultSpec::Expression {
-            text: "0, ADD COLUMN x int".into(),
-        });
-        assert!(has(
-            &validate(&t, &my),
-            ElementRef::Column("a".into()),
-            Some("default")
         ));
         let mut t = base();
         t.foreign_keys.push(FkDef {
@@ -961,6 +997,96 @@ mod tests {
     }
 
     #[test]
+    fn locked_server_elements_skip_text_checks() {
+        let my = mysql8();
+        // MySQL 8 information_schema escapes quotes in generation expressions.
+        let expr = r"concat(`a`,_utf8mb4\' \')";
+        let mut t = base();
+        t.columns.push(ColumnDef {
+            original: Some("g".into()),
+            generated: Some(expr.into()),
+            locked: true,
+            ..col("g", int())
+        });
+        assert_eq!(validate(&t, &my), vec![]);
+        // The same text as an unlocked column's default expression is refused.
+        let mut t = base();
+        t.columns[1].default = Some(DefaultSpec::Expression { text: expr.into() });
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("default")
+        ));
+        // Unlocked existing columns get every check too.
+        t.columns[1].original = Some("a".into());
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("default")
+        ));
+    }
+
+    #[test]
+    fn identifier_rules_only_for_new_or_changed_names() {
+        let my = mysql8();
+        // An unchanged column named `a.b` (it exists on the server) is fine.
+        let mut t = base();
+        t.original_name = Some("t".into());
+        t.columns.push(ColumnDef {
+            original: Some("a.b".into()),
+            ..col("a.b", int())
+        });
+        assert_eq!(validate(&t, &my), vec![]);
+        // Renaming a column to `a.b` is refused.
+        let mut t = base();
+        t.columns[1].original = Some("a".into());
+        t.columns[1].name = "a.b".into();
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a.b".into()),
+            Some("name")
+        ));
+        // An unchanged table name too long for a new one stays valid; renaming is not.
+        let mut t = base();
+        let long = "x".repeat(65);
+        t.name = long.clone();
+        t.original_name = Some(long);
+        assert_eq!(validate(&t, &my), vec![]);
+        t.original_name = Some("t".into());
+        assert!(has(&validate(&t, &my), ElementRef::Table, Some("name")));
+        // FK references are only checked for empty / NUL.
+        let fk = |ref_col: &str| {
+            let mut t = base();
+            t.foreign_keys.push(FkDef {
+                original: None,
+                name: "fk".into(),
+                columns: vec!["a".into()],
+                ref_schema: Some("other.db".into()),
+                ref_table: "u.v".into(),
+                ref_columns: vec![ref_col.into()],
+                on_update: "RESTRICT".into(),
+                on_delete: "CASCADE".into(),
+                match_type: None,
+                deferrable: false,
+                initially_deferred: false,
+                locked: false,
+            });
+            validate(&t, &my)
+        };
+        assert_eq!(fk("x.y"), vec![]);
+        assert!(has(
+            &fk(""),
+            ElementRef::ForeignKey("fk".into()),
+            Some("ref_columns")
+        ));
+        assert!(has(
+            &fk("a\0"),
+            ElementRef::ForeignKey("fk".into()),
+            Some("ref_columns")
+        ));
+    }
+
+    #[test]
     fn validate_enum_values() {
         let my = mysql8();
         let with_values = |values: &[&str]| {
@@ -986,10 +1112,13 @@ mod tests {
                 "{bad:?}"
             );
         }
-        // Unsafe members are refused even on a locked column.
+        // A locked server column keeps them (from_detail locked it for this reason);
+        // a new column marked locked gets the full checks.
         let mut t = with_values(&["a\\"]);
         t.columns[1].original = Some("a".into());
         t.columns[1].locked = true;
+        assert_eq!(validate(&t, &my), vec![]);
+        t.columns[1].original = None;
         assert!(has(
             &validate(&t, &my),
             ElementRef::Column("a".into()),
