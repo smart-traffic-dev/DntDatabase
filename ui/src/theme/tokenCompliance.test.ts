@@ -57,6 +57,20 @@ describe('design token compliance', () => {
     expect(offending).toEqual([]);
   });
 
+  // Buttons only: disabled form fields (dialogs.css) are restyled with the dialog frame (phase 6).
+  it('a disabled button is coloured fg-disabled', () => {
+    const offending: string[] = [];
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) {
+        if (!r.selector.includes(':disabled') || r.selector.includes(':not(:disabled)') || !/btn|button/.test(r.selector)) continue;
+        for (const d of declarations(r.body)) {
+          if (/^color\s*:/.test(d) && !/var\(--dnt-fg-disabled\)/.test(d)) offending.push(`${file}: ${r.selector}: ${d}`);
+        }
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
   it('focus is at most 1px and never a ring', () => {
     const offending: string[] = [];
     for (const [file, raw] of appSheets()) {
