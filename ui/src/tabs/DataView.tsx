@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { api, needsReconnect, toAppError } from '../api';
 import type { AppError, CellInput, ColumnMeta, EditableInfo, FilterOp, SortSpec, TableDataPage, Value } from '../bindings';
 import { ActionMenu, type MenuEntry } from '../components/ActionMenu';
@@ -11,7 +11,8 @@ import { useObjectData } from '../store/objectData';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { CHUNK, type ResultSet } from '../store/queryRun';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
-import { draftToFilter, newFilterRow, useTableData, type FilterRow } from '../store/tableData';
+import { reportGridSelection } from '../store/gridSelection';
+import { draftToFilter, newFilterRow, pageTotal, useTableData, type FilterRow } from '../store/tableData';
 import { cellStatus, effectivePage } from './data/editModel';
 import { EditPreviewDialog } from './data/EditPreviewDialog';
 import { copyAs, copySql, type CopyFormat } from './data/copyAs';
@@ -214,6 +215,10 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   useEffect(() => {
     if (focusTick > 0) barRef.current?.focus();
   }, [focusTick]);
+
+  // The grid's selection summary goes to the status bar while this view is shown.
+  const onSelectionSummary = useCallback((summary: string | null) => reportGridSelection(tab.id, summary), [tab.id]);
+  useEffect(() => () => reportGridSelection(tab.id, null), [tab.id]);
 
   // Whether the table may be edited, and how (the answer lives with the staged changes).
   useEffect(() => {
@@ -463,12 +468,8 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   const range = loading ? 'Loading…' : data ? (data.rows.length === 0 ? 'No rows' : `${fmt(first)}–${fmt(last)}`) : '';
   const filtered = state.filter !== null;
 
-  // `1–100 / ~3,412`: the exact count once asked for, else the table's estimate (not under a filter).
   const count = state.count;
-  const total =
-    count?.status === 'ok' ? { text: fmt(count.data), tip: `${fmt(count.data)} ${filtered ? 'matching rows' : 'rows'} (counted)` }
-    : estimate !== null && !filtered ? { text: `~${fmt(estimate)}`, tip: `About ${fmt(estimate)} rows (the table's estimate; Count rows in ⋯ counts exactly)` }
-    : null;
+  const total = pageTotal(state, estimate);
 
   const refresh = () =>
     guarded(() => {
@@ -814,6 +815,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
               cellsCapped={truncated}
               editing={editing}
               onOpenValue={openCell}
+              onSelectionSummary={onSelectionSummary}
               extraCellMenu={(ctx) => {
                 const column = result.columns[ctx.col];
                 const filters = column

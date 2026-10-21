@@ -107,6 +107,17 @@ describe('grid metrics', () => {
     expect(glide.props!.theme.fontFamily).toBe(buildTheme().theme.fontFamily);
   });
 
+  it('reports a summary of the selection (for the status bar)', () => {
+    const onSelectionSummary = vi.fn();
+    render(<ResultGrid result={result(3)} onSelectionSummary={onSelectionSummary} />);
+    expect(onSelectionSummary).toHaveBeenLastCalledWith(null);
+    const empty = { length: 0, toArray: () => [], first: () => undefined };
+    act(() =>
+      glide.props!.onGridSelectionChange({ current: { cell: [0, 0], range: { x: 0, y: 0, width: 2, height: 3 }, rangeStack: [] }, rows: empty, columns: empty }),
+    );
+    expect(onSelectionSummary).toHaveBeenLastCalledWith('3 rows × 2 columns selected');
+  });
+
   it('the header draws the name on line 1 and the type on line 2 in the caption font', () => {
     render(<ResultGrid result={result(1)} />);
     const texts: { text: string; y: number; font: string }[] = [];

@@ -46,7 +46,7 @@ import {
   type Engine,
 } from './gridCopy';
 import { findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
-import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, type SelectionLike } from './gridSelection';
+import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, selectionSummary, type SelectionLike } from './gridSelection';
 import { selectionStats } from './selectionStats';
 import { GridStats } from './GridStats';
 import { RecordView } from './RecordView';
@@ -342,7 +342,10 @@ export function ResultGrid({
   extraCellMenu,
   editing,
   onOpenValue,
+  onSelectionSummary,
 }: {
+  /** What the selection covers ("3 rows selected"), each time it changes; null for none / one cell. */
+  onSelectionSummary?: (summary: string | null) => void;
   /** Opens the value of a cell in the data view's editor (Shift+Enter, "Open value editor"). */
   onOpenValue?: (row: number, col: number) => void;
   /** The data view's editing hooks. */
@@ -507,6 +510,9 @@ export function ResultGrid({
     });
     gridRef.current?.scrollTo(col, row);
   }, []);
+
+  const summary = selectionSummary(sel, result.rowCount, result.columns.length);
+  useEffect(() => onSelectionSummary?.(summary), [summary, onSelectionSummary]);
 
   const stats = useMemo(() => {
     const colCount = result.columns.length;
