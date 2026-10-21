@@ -70,6 +70,11 @@
   color: var(--accent);
 }
 
+/* On the selection fill the base accent is under 4.5:1. */
+.palette-row.active .palette-match {
+  color: var(--dnt-accent-hover);
+}
+
 .palette-path {
   flex: none;
   max-width: 55%;

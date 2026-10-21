@@ -185,7 +185,7 @@
 .ot-pk {
   margin-left: 6px;
   background: var(--sel);
-  color: var(--accent);
+  color: var(--dnt-accent-hover);
 }
 
 .ot-list {

@@ -88,14 +88,16 @@ button:disabled {
   outline-offset: -1px;
 }
 
-input:focus,
-select:focus,
-textarea:focus,
-[contenteditable='true']:focus {
-  border-color: var(--dnt-focus);
+/*
+ * !important: component rules (`.field input`, `.sidebar-head input`, …) restate the whole `border` and come
+ * later or with higher specificity; focus must win over all of them.
+ */
+:is(input, select, textarea, [contenteditable='true']):focus {
+  border-color: var(--dnt-focus) !important;
 }
 
-input:focus-visible,
+/* Checkboxes and radios have no border to colour: they keep the outline. */
+input:not([type='checkbox'], [type='radio']):focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 [contenteditable='true']:focus-visible,
@@ -211,7 +213,7 @@ textarea:focus-visible,
 .icon-btn.on {
   background: var(--sel);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--dnt-accent-hover);
 }
 
 .banner {

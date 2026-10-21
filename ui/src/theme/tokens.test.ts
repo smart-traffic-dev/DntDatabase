@@ -67,6 +67,24 @@ describe('design tokens', () => {
     }
   });
 
+  it('accent-hover text meets 4.5:1 on the selection fill', () => {
+    // Dark selection is translucent: blend it over bg-app first.
+    const blend = (rgba: string, under: string) => {
+      const m = /rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)/.exec(rgba);
+      if (!m) return rgba;
+      const u = under.replace('#', '');
+      const a = Number(m[4]);
+      return `#${[1, 2, 3]
+        .map((i, k) => Math.round(Number(m[i]) * a + parseInt(u.slice(k * 2, k * 2 + 2), 16) * (1 - a)))
+        .map((n) => n.toString(16).padStart(2, '0'))
+        .join('')}`;
+    };
+    for (const vars of [light, dark]) {
+      const fill = blend(resolve(vars, '--dnt-bg-selected'), resolve(vars, '--dnt-bg-app'));
+      expect(contrast(resolve(vars, '--dnt-accent-hover'), fill)).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it('comfortable density raises control heights', () => {
     expect(resolve(light, '--dnt-ctl-h-md')).toBe('28px');
     expect(resolve(comfortable, '--dnt-ctl-h-md')).toBe('30px');

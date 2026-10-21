@@ -6,7 +6,24 @@ type MonacoApi = typeof Monaco;
 
 export const monacoThemeName = (dark: boolean) => (dark ? 'dnt-dark' : 'dnt-light');
 
-/** A CSS token resolved to a color Monaco accepts (hex / rgba); `fallback` when it cannot be resolved. */
+const hex2 = (n: number) => Math.round(Math.min(255, Math.max(0, n))).toString(16).padStart(2, '0');
+
+/**
+ * A computed CSS colour as Monaco's theme format: `#rrggbb`, or `#rrggbbaa` when translucent. Monaco parses
+ * theme colours with `Color.fromHex`, which turns anything else (`rgba(…)`) into red. `null` when unparseable.
+ */
+export function toMonacoColor(css: string): string | null {
+  const v = css.trim().toLowerCase();
+  if (/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/.test(v)) return v;
+  const m = /^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.]+%?))?\s*\)$/.exec(v);
+  if (!m) return null;
+  const rgb = `#${hex2(Number(m[1]))}${hex2(Number(m[2]))}${hex2(Number(m[3]))}`;
+  if (m[4] === undefined) return rgb;
+  const alpha = m[4].endsWith('%') ? Number(m[4].slice(0, -1)) / 100 : Number(m[4]);
+  return alpha >= 1 ? rgb : `${rgb}${hex2(alpha * 255)}`;
+}
+
+/** A CSS token resolved to a colour Monaco accepts (see toMonacoColor); `fallback` when it cannot be resolved. */
 function token(name: string, fallback: string): string {
   try {
     const probe = document.createElement('span');
@@ -15,11 +32,7 @@ function token(name: string, fallback: string): string {
     document.body.appendChild(probe);
     const resolved = getComputedStyle(probe).color;
     probe.remove();
-    const ctx = document.createElement('canvas').getContext('2d');
-    if (!ctx || !resolved) return fallback;
-    ctx.fillStyle = '#000000';
-    ctx.fillStyle = resolved;
-    return ctx.fillStyle;
+    return toMonacoColor(resolved) ?? fallback;
   } catch {
     return fallback;
   }

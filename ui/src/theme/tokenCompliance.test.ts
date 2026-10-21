@@ -84,6 +84,26 @@ describe('design token compliance', () => {
     }
   });
 
+  // #2563d9 on the selection fill is 4.36:1, under AA for the small labels that sit on it.
+  it('accent text on the selection fill uses the darker accent-hover', () => {
+    const offending: string[] = [];
+    const selFill = /background(-color)?\s*:\s*var\(--(sel|dnt-bg-selected)\)/;
+    const accentText = /(^|[;\s])color\s*:\s*var\(--(accent|dnt-accent)\)/;
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) if (selFill.test(r.body) && accentText.test(r.body)) offending.push(`${file}: ${r.selector}`);
+    }
+    const palette = sheets['../components/palette.css'] ?? '';
+    for (const r of rules(palette)) {
+      if (r.selector.includes('.active') && r.selector.includes('.palette-match') && !/var\(--dnt-accent-hover\)/.test(r.body)) {
+        offending.push(`palette.css: ${r.selector}`);
+      }
+    }
+    if (!rules(palette).some((r) => r.selector.includes('.active') && r.selector.includes('.palette-match'))) {
+      offending.push('palette.css: no rule for .palette-row.active .palette-match');
+    }
+    expect(offending).toEqual([]);
+  });
+
   it('font-size, font-family, radius and shadow use tokens', () => {
     const offending: string[] = [];
     for (const [file, raw] of appSheets()) {

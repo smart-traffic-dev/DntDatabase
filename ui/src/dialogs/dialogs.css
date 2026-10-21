@@ -187,7 +187,7 @@ fieldset.export-form {
 
 .dlg-tab.on {
   background: var(--sel);
-  color: var(--accent);
+  color: var(--dnt-accent-hover);
   font-weight: 600;
 }
 
