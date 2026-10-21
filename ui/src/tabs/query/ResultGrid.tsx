@@ -13,7 +13,7 @@ import {
   type Rectangle,
   type Theme,
 } from '@glideapps/glide-data-grid';
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ObjectRef, Value } from '../../bindings';
 import { ActionMenu, type MenuEntry } from '../../components/ActionMenu';
 import { codeFontSizes, monoFontFamily } from '../../monaco/fonts';
@@ -111,15 +111,31 @@ export function initialWidths(result: ResultSet, font?: GridFont, m: Measurer = 
 }
 
 /**
- * The canvas height: a result shorter than its box ends right after its last row (header, rows,
- * the closing line and, when the columns are wider than the box, the horizontal scrollbar), so no
- * cell lines are painted on the empty space below. The row-marker width is Glide's default.
+ * The grid always fills its box, so its horizontal scrollbar sits at the bottom of the panel
+ * whatever the row count. Glide paints column lines down the empty space under a short result;
+ * this is the box to cover there: from under the last row (header, rows, closing line) to the
+ * bottom, leaving the horizontal scrollbar when the columns are wider than the box. Null when the
+ * rows fill the box. The row-marker width is Glide's default.
  */
-export function fitGridHeight(o: { boxHeight: number; boxWidth: number; rows: number; rowHeight: number; columnsWidth: number }): number {
+export function blankArea(o: {
+  boxHeight: number;
+  boxWidth: number;
+  rows: number;
+  rowHeight: number;
+  columnsWidth: number;
+  /** The horizontal scrollbar's measured height, when known (it depends on the platform). */
+  scrollbar?: number;
+}): { top: number; height: number } | null {
   const markers = o.rows > 10000 ? 48 : o.rows > 1000 ? 44 : o.rows > 100 ? 36 : 32;
-  const scrollbar = o.columnsWidth + markers > o.boxWidth ? SCROLLBAR_ALLOWANCE : 0;
-  return Math.min(o.boxHeight, GRID_HEADER_HEIGHT + o.rows * o.rowHeight + 1 + scrollbar);
+  const scrollbar = o.scrollbar ?? (o.columnsWidth + markers > o.boxWidth ? SCROLLBAR_ALLOWANCE : 0);
+  const top = GRID_HEADER_HEIGHT + o.rows * o.rowHeight + 1;
+  const height = o.boxHeight - top - scrollbar;
+  return height > 0 ? { top, height } : null;
 }
+
+/** The height of a scroller's horizontal scrollbar (0 when it has none). */
+export const scrollbarHeight = (el: HTMLElement | null | undefined): number | undefined =>
+  el ? Math.max(0, el.offsetHeight - el.clientHeight) : undefined;
 
 export const tooLargeMessage = (cells: number) =>
   `Selection too large to copy (${cells} cells); narrow the selection`;
@@ -494,9 +510,14 @@ export function ResultGrid({
 
   const rows = result.rowCount;
   const getRowThemeOverride = useCallback((row: number) => (row > rows ? NO_LINE : undefined), [rows]);
-  const height = size
-    ? fitGridHeight({ boxHeight: size.h, boxWidth: size.w, rows, rowHeight, columnsWidth: widths.reduce((n, w) => n + w, 0) })
-    : '100%';
+  const height = size ? size.h : '100%';
+  const columnsWidth = widths.reduce((n, w) => n + w, 0);
+  // The real scrollbar height (thin scrollbars, platform): read from Glide's scroller after layout.
+  const [scrollbar, setScrollbar] = useState<number | undefined>(undefined);
+  useLayoutEffect(() => {
+    setScrollbar(scrollbarHeight(boxRef.current?.querySelector<HTMLElement>('.dvn-scroller')));
+  }, [size, columnsWidth, rows]);
+  const blank = size ? blankArea({ boxHeight: size.h, boxWidth: size.w, rows, rowHeight, columnsWidth, scrollbar }) : null;
 
   // ---- selection (controlled, so find / go to row can move it) ----
   const [sel, setSel] = useState<GridSelection | undefined>(undefined);
@@ -809,6 +830,8 @@ export function ResultGrid({
             width={size?.w ?? '100%'}
             height={height}
           />
+          {/* Hides the column lines Glide draws under the last row; clicks and wheel pass through. */}
+          {blank && <div className="gt-blank" data-testid="grid-blank" aria-hidden="true" style={{ top: blank.top, height: blank.height }} />}
         </div>
         {record && (
           <RecordView

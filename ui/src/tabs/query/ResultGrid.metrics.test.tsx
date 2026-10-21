@@ -20,7 +20,7 @@ vi.mock('@glideapps/glide-data-grid', async () => {
   };
 });
 
-import { GRID_HEADER_HEIGHT, ResultGrid, buildTheme, fitGridHeight } from './ResultGrid';
+import { GRID_HEADER_HEIGHT, ResultGrid, blankArea, buildTheme, scrollbarHeight } from './ResultGrid';
 
 const col = (name: string, db_type = 'int') => ({ name, db_type, logical: 'Integer' as const, nullable: true, origin_table: null, origin_column: null });
 const result = (rows: number): ResultSet => ({
@@ -65,18 +65,25 @@ describe('grid metrics', () => {
     expect(over(40)).toEqual({ horizontalBorderColor: 'transparent' });
   });
 
-  it('a short result ends the canvas after its last row, so column lines stop there too', () => {
+  it('the grid fills its box whatever the row count, so the horizontal scrollbar sits at the bottom', () => {
     // jsdom (test setup) reports 280 x 600 for every element.
     render(<ResultGrid result={result(3)} />);
-    expect(glide.props!.height).toBe(fitGridHeight({ boxHeight: 600, boxWidth: 280, rows: 3, rowHeight: 24, columnsWidth: glide.props!.columns.reduce((n: number, c: { width: number }) => n + c.width, 0) }));
-    expect(glide.props!.height).toBeLessThan(600);
+    expect(glide.props!.height).toBe(600);
+    // The empty space under the rows is covered (no column lines there), above the scrollbar.
+    const cover = screen.getByTestId('grid-blank');
+    expect(cover).toHaveStyle({ top: `${36 + 3 * 24 + 1}px` });
+    expect(cover).toHaveAttribute('aria-hidden', 'true');
   });
 
-  it('fitGridHeight: header + rows + the closing line, plus room for a horizontal scrollbar, at most the box', () => {
-    expect(fitGridHeight({ boxHeight: 600, boxWidth: 800, rows: 3, rowHeight: 24, columnsWidth: 300 })).toBe(36 + 72 + 1);
-    // Wider than the box: Glide shows a horizontal scrollbar under the rows.
-    expect(fitGridHeight({ boxHeight: 600, boxWidth: 800, rows: 3, rowHeight: 24, columnsWidth: 790 })).toBe(36 + 72 + 1 + 17);
-    expect(fitGridHeight({ boxHeight: 600, boxWidth: 800, rows: 500, rowHeight: 24, columnsWidth: 300 })).toBe(600);
+  it('blankArea: from under the last row to the bottom, leaving the scrollbar; none when rows fill the box', () => {
+    expect(blankArea({ boxHeight: 600, boxWidth: 800, rows: 3, rowHeight: 24, columnsWidth: 300 })).toEqual({ top: 109, height: 600 - 109 });
+    // Wider than the box: the horizontal scrollbar at the bottom stays uncovered.
+    expect(blankArea({ boxHeight: 600, boxWidth: 800, rows: 3, rowHeight: 24, columnsWidth: 790 })).toEqual({ top: 109, height: 600 - 109 - 17 });
+    expect(blankArea({ boxHeight: 600, boxWidth: 800, rows: 500, rowHeight: 24, columnsWidth: 300 })).toBeNull();
+    // A measured scrollbar (thin, platform) wins over the estimate.
+    expect(blankArea({ boxHeight: 600, boxWidth: 800, rows: 3, rowHeight: 24, columnsWidth: 790, scrollbar: 8 })).toEqual({ top: 109, height: 600 - 109 - 8 });
+    expect(scrollbarHeight({ offsetHeight: 100, clientHeight: 92 } as HTMLElement)).toBe(8);
+    expect(scrollbarHeight(null)).toBeUndefined();
   });
 
   it('selection is the muted fill until the grid has the focus', () => {

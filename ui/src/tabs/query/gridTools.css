@@ -16,8 +16,17 @@
   min-width: 0;
   min-height: 0;
   position: relative;
-  /* A short result's canvas ends after its last row; the cell colour continues below it. */
   background: var(--dnt-bg-app);
+}
+
+/* The empty space under a short result's last row (the grid fills the box; see blankArea). */
+.gt-blank {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 1;
+  background: var(--dnt-bg-app);
+  pointer-events: none;
 }
 
 .gt-stats {
