@@ -9,7 +9,7 @@ import { useDialogs } from '../store/dialogs';
 import { invalidateObjectData } from '../store/objectData';
 import { invalidateTableData } from '../store/tableData';
 import { isDesignLost, useTableDesigns } from '../store/tableDesigns';
-import { objectTabId, useTabs, type DesignTabRef, type ObjectTabRef } from '../store/tabs';
+import { designTabId, objectTabId, useTabs, type DesignTabRef, type ObjectTabRef } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
 import { reportGridSelection } from '../store/gridSelection';
@@ -20,6 +20,8 @@ import './tableDesign.css';
 export const LOST_MESSAGE = 'The connection to this table was lost. Your changes are kept; reopen the design to continue.';
 export const STALE_MESSAGE = 'The table changed since you opened it.';
 const UNKNOWN_MESSAGE = 'The result is unknown. The table structure was reloaded; check it before continuing.';
+const UNKNOWN_NEW_MESSAGE = 'The result is unknown. The table may or may not have been created; check the connection tree before continuing.';
+const NOT_APPLIED: DesignReport = { outcome: 'not_applied', error: null, warnings: [], statements_sent: 0 };
 
 const isStale = (e: AppError) => e.kind === 'plan_stale';
 
@@ -31,8 +33,9 @@ function describe({ impact, rows, counted }: CountedImpact): Impact {
 }
 
 /**
- * After a statement was sent: forget what is cached for the table, follow a rename in the open object
- * tabs, refresh the connection's tree node. Returns the tree refresh error, if any.
+ * After DDL was sent: forget what is cached for the table, follow a rename in the open object tabs
+ * (an unknown result only marks them for verification), refresh the connection's tree node.
+ * Returns the tree refresh error, if any.
  */
 async function refreshAfterApply(tab: DesignTabRef, from: string | null, to: string, unknown: boolean): Promise<string | null> {
   const replacements: Record<string, ObjectTabRef | null> = {};
@@ -57,22 +60,28 @@ async function refreshAfterApply(tab: DesignTabRef, from: string | null, to: str
 }
 
 export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose(): void }) {
-  const tab = useTabs((s) => s.tabs.find((t): t is DesignTabRef => t.kind === 'design' && t.id === tabId));
-  const design = useTableDesigns((s) => s.byTab[tabId]);
+  // The design tab is re-keyed when its table is created or renamed: follow it.
+  const [id, setId] = useState(tabId);
+  const tab = useTabs((s) => s.tabs.find((t): t is DesignTabRef => t.kind === 'design' && t.id === id));
+  const design = useTableDesigns((s) => s.byTab[id]);
   const cfg = useConnections((s) => (tab ? s.summaries.get(tab.connectionId)?.config : undefined));
   const [preview, setPreview] = useState<DesignPreview | null>(null);
   const [report, setReport] = useState<DesignReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
-  const [busy, setBusy] = useState(true);
+  const [loading, setLoading] = useState(true);
+  const [applying, setApplying] = useState(false);
   const [stage, setStage] = useState('');
   const [typed, setTyped] = useState('');
+  const [unknownText, setUnknownText] = useState(UNKNOWN_MESSAGE);
   const operation = useRef<string | null>(null);
+  const inflight = useRef(false);
+  const busy = loading || applying;
   const engine = design?.open?.server.kind;
   const env = design?.open?.env ?? cfg?.env_tag ?? null;
 
   const lost = () => {
-    useTableDesigns.getState().markLost(tabId);
+    useTableDesigns.getState().markLost(id);
     useDialogs.getState().setNotice(LOST_MESSAGE, 'error');
     onClose();
   };
@@ -81,8 +90,8 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
   const fail = (e: AppError) => {
     if (isDesignLost(e)) return lost();
     if (isStale(e)) {
-      const draft = useTableDesigns.getState().byTab[tabId]?.draft ?? null;
-      useTableDesigns.getState().setStaleDraft(tabId, draft);
+      const draft = useTableDesigns.getState().byTab[id]?.draft ?? null;
+      useTableDesigns.getState().setStaleDraft(id, draft);
       setStale(true);
       setError(STALE_MESSAGE);
       return;
@@ -94,7 +103,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
     const state = useTableDesigns.getState().byTab[tabId];
     let live = true;
     if (!state?.open || !state.draft) {
-      setBusy(false);
+      setLoading(false);
       setError('The design is not open.');
       return;
     }
@@ -107,7 +116,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
         if (live) fail(toAppError(e));
       })
       .finally(() => {
-        if (live) setBusy(false);
+        if (live) setLoading(false);
       });
     return () => {
       live = false;
@@ -116,65 +125,98 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Closing during the preview is fine (nothing is written); not while an apply runs.
   const close = () => {
-    if (!busy) onClose();
+    if (!applying) onClose();
+  };
+
+  /**
+   * Opens the design again under the first of `names` that opens, and moves the tab to that table's
+   * id when it differs (a created or renamed table). A tab that already designs the target keeps its
+   * draft: it is focused and this one, just applied, is closed.
+   */
+  const follow = async (current: DesignTabRef, names: string[], merge: boolean) => {
+    const designs = useTableDesigns.getState();
+    const target = names[0];
+    const next = target === undefined ? id : designTabId(current.connectionId, current.scope, target);
+    if (merge && next !== id && useTabs.getState().tabs.some((t) => t.id === next)) {
+      useTabs.getState().activate(next);
+      useTabs.getState().close(id);
+      return;
+    }
+    let opened: string | null = null;
+    for (const name of names) {
+      await designs.load(id, current.connectionId, current.scope, name);
+      if (!useTableDesigns.getState().byTab[id]?.error) {
+        opened = name;
+        break;
+      }
+    }
+    if (opened === null || opened === current.table) return;
+    const moved = designTabId(current.connectionId, current.scope, opened);
+    if (useTabs.getState().tabs.some((t) => t.id === moved)) {
+      useTabs.getState().activate(moved);
+      useTabs.getState().close(id);
+      return;
+    }
+    designs.rekey(id, moved);
+    useTabs.getState().moveDesignTab(id, opened);
+    setId(moved);
   };
 
   const apply = async () => {
-    const state = useTableDesigns.getState().byTab[tabId];
-    if (!preview || busy || !tab || !state?.draft || !state.open) return;
+    const state = useTableDesigns.getState().byTab[id];
+    if (inflight.current || !preview || busy || !tab || !state?.draft || !state.open) return;
+    inflight.current = true;
     const to = state.draft.name;
     const from = tab.table;
-    setBusy(true);
+    setApplying(true);
     setError(null);
-    const id = crypto.randomUUID();
-    operation.current = id;
+    const operationId = crypto.randomUUID();
+    operation.current = operationId;
     useDialogs.setState({ tableDesignRunning: true });
     let result: DesignReport | null = null;
     try {
       const channel = new Channel<string>();
       channel.onmessage = setStage;
-      result = await api.tableDesignApply(preview.plan_id, true, typed || null, id, channel);
+      result = await api.tableDesignApply(preview.plan_id, true, typed || null, operationId, channel);
     } catch (e) {
+      // Nothing was sent (a lock wait, a lost session, a stale plan): the draft is untouched.
       setPreview(null);
+      setReport(NOT_APPLIED);
       fail(toAppError(e));
     } finally {
       operation.current = null;
       useDialogs.setState({ tableDesignRunning: false });
     }
-    if (!result) {
-      setBusy(false);
-      setStage('');
-      return;
-    }
-    setPreview(null);
-    setReport(result);
-    const reportError = result.error;
-    if (reportError && (isDesignLost(reportError) || isStale(reportError))) {
-      setBusy(false);
-      setStage('');
-      return fail(reportError);
-    }
-    if (reportError) setError(reportError.message);
-    const sent = result.outcome === 'applied' || result.outcome === 'unknown' || (result.outcome === 'rolled_back' && result.statements_sent > 0);
-    if (sent) {
-      let refreshError: string | null;
-      try {
-        refreshError = await refreshAfterApply(tab, from, to, result.outcome === 'unknown');
-      } catch (e) {
-        refreshError = toAppError(e).message;
+    if (result) {
+      setPreview(null);
+      setReport(result);
+      const reportError = result.error;
+      if (result.outcome === 'unknown') {
+        // Whatever the error says (the connection dropped, the plan went stale after a send), DDL may have run.
+        if (reportError) setError(reportError.message);
+        setUnknownText(from === null ? UNKNOWN_NEW_MESSAGE : UNKNOWN_MESSAGE);
+        const refreshError = await refreshAfterApply(tab, from, to, true).catch((e) => toAppError(e).message);
+        if (refreshError) setError(`Changes may have been sent; metadata refresh failed: ${refreshError}`);
+        // A rename may have gone through: the new name first, then the old one. A table never created has nothing to reload.
+        if (from !== null) await follow(tab, to !== from ? [to, from] : [from], false);
+      } else if (result.outcome === 'applied') {
+        if (reportError) setError(reportError.message);
+        useTableDesigns.getState().setStaleDraft(id, null);
+        const refreshError = await refreshAfterApply(tab, from, to, false).catch((e) => toAppError(e).message);
+        if (refreshError) setError(`Changes were applied; metadata refresh failed: ${refreshError}`);
+        await follow(tab, [to], true);
+      } else if (reportError) {
+        // Not applied / rolled back: the draft stays. Lost or stale routes only when nothing was sent.
+        if (result.statements_sent === 0 && (isDesignLost(reportError) || isStale(reportError))) fail(reportError);
+        else setError(reportError.message);
       }
-      if (refreshError) setError(`Changes were sent; metadata refresh failed: ${refreshError}`);
-      // The designer follows the table: a new or renamed table is opened under its new name.
-      const applied = result.outcome === 'applied';
-      if (applied && to !== tab.table) {
-        useTabs.setState((s) => ({ tabs: s.tabs.map((t) => (t.id === tabId && t.kind === 'design' ? { ...t, table: to, title: to } : t)) }));
-        await useTableDesigns.getState().load(tabId, tab.connectionId, tab.scope, to);
-      } else if (tab.table !== null) await useTableDesigns.getState().reload(tabId);
     }
-    setBusy(false);
+    inflight.current = false;
+    setApplying(false);
     setStage('');
-    if (result.outcome === 'applied' && !reportError && result.warnings.length === 0) {
+    if (result?.outcome === 'applied' && !result.error && result.warnings.length === 0) {
       useDialogs.getState().setNotice('Changes applied.', 'success');
       onClose();
     }
@@ -191,7 +233,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
   };
 
   const reopen = () => {
-    void useTableDesigns.getState().reload(tabId);
+    void useTableDesigns.getState().reload(id);
     onClose();
   };
 
@@ -201,7 +243,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
     ? report.outcome === 'applied'
       ? 'Changes applied.'
       : report.outcome === 'unknown'
-        ? UNKNOWN_MESSAGE
+        ? unknownText
         : report.outcome === 'rolled_back'
           ? 'The changes were rolled back. Your draft is kept.'
           : 'The changes were not applied. Your draft is kept.'
@@ -212,7 +254,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
       title="Review & apply"
       badge={production ? <EnvTag env="production" variant="chip" testId="env-chip" /> : undefined}
       onClose={close}
-      closable={!busy}
+      closable={!applying}
       className={`wide table-design-dialog${production ? ' env-production' : ''}`}
     >
       <div className="modal-body">
@@ -230,7 +272,7 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
             ) : null}
           </>
         ) : null}
-        {busy && !preview && !report && !stage ? <p role="status">Preparing the review…</p> : null}
+        {loading ? <p role="status">Preparing the review…</p> : null}
         {error ? <p role="alert">{error}</p> : null}
         {outcome ? (
           <div role="status">
@@ -241,10 +283,10 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
         {stage ? <p role="status">{stage}… Stop does not guarantee undoing DDL already sent.</p> : null}
       </div>
       <footer className="modal-foot">
-        <button type="button" data-cancel className="btn" disabled={busy} onClick={close}>
+        <button type="button" data-cancel className="btn" disabled={applying} onClick={close}>
           Close
         </button>
-        {busy && operation.current ? (
+        {applying && operation.current ? (
           <button type="button" className="btn" onClick={() => void stop()}>
             Stop
           </button>

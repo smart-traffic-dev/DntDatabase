@@ -69,6 +69,11 @@ interface DesignsStore {
   markLost(tabId: string): void;
   /** Reopens a lost design; the old draft stays in `lostDraft` until restored or discarded. */
   reopen(tabId: string): Promise<void>;
+  /**
+   * Moves a tab's design state to another tab id without closing its backend session (the tab was
+   * re-keyed to a new table name). Call it right before the tabs store changes the id.
+   */
+  rekey(oldId: string, newId: string): void;
   /** Remembers `draft` as the one a stale apply left behind (see `DesignState.staleDraft`). */
   setStaleDraft(tabId: string, draft: TableDef | null): void;
   /** Puts `lostDraft` back as the draft (an undoable edit) once the design is open again. */
@@ -280,7 +285,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       clearTimer(tabId);
       lastCoalesce.delete(tabId);
       bump(tabId);
-      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null, lostDesignId: null });
+      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null, lostDesignId: null, staleDraft: null });
     },
     async reload(tabId) {
       const target = targets.get(tabId);
@@ -297,6 +302,25 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
     async reopen(tabId) {
       const target = targets.get(tabId);
       if (target) await openInto(tabId, target);
+    },
+    rekey(oldId, newId) {
+      const state = entry(oldId);
+      if (!state || oldId === newId) return;
+      clearTimer(oldId);
+      lastCoalesce.delete(oldId);
+      const move = <T,>(map: Map<string, T>) => {
+        const v = map.get(oldId);
+        map.delete(oldId);
+        if (v !== undefined) map.set(newId, v);
+      };
+      move(sequence);
+      move(openSeq);
+      move(targets);
+      set((s) => {
+        const { [oldId]: _moved, ...rest } = s.byTab;
+        void _moved;
+        return { byTab: { ...rest, [newId]: state } };
+      });
     },
     setStaleDraft: (tabId, draft) => patch(tabId, { staleDraft: draft }),
     restoreLostDraft(tabId) {

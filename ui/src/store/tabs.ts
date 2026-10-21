@@ -157,6 +157,12 @@ interface TabsState {
   rename(id: string, title: string): void;
   /** DDL changes object identities without moving tabs between groups. */
   replaceObjectTabs(replacements: Record<string, ObjectTabRef | null>): void;
+  /**
+   * A design tab now designs `table` (it was created or renamed): the tab keeps its place, group and
+   * focus but takes the id of the new table. Returns the new id, or null when the tab is gone or
+   * another tab already has that id (nothing is changed then).
+   */
+  moveDesignTab(id: string, table: string): string | null;
   close(id: string): void;
   /** Closes every object and design tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
@@ -492,6 +498,28 @@ export const useTabs = create<TabsState>()((set, get) => {
       for (const g of s.groups) next = dropIfEmpty(next, g.id);
       return next;
     }),
+    moveDesignTab: (id, table) => {
+      const tab = get().tabs.find((t) => t.id === id);
+      if (tab?.kind !== 'design') return null;
+      const next = designTabId(tab.connectionId, tab.scope, table);
+      if (next === id) {
+        if (tab.table !== table || tab.title !== table) set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? { ...tab, table, title: table } : t)) }));
+        return id;
+      }
+      if (get().tabs.some((t) => t.id === next)) return null;
+      update((s) => {
+        const groupOf = { ...s.groupOf };
+        if (groupOf[id]) groupOf[next] = groupOf[id]!;
+        delete groupOf[id];
+        return {
+          ...s,
+          tabs: s.tabs.map((t) => (t.id === id ? { ...tab, id: next, table, title: table } : t)),
+          groupOf,
+          groups: s.groups.map((g) => (g.activeId === id ? { ...g, activeId: next } : g)),
+        };
+      });
+      return next;
+    },
     bind: (id, connectionId) =>
       set((s) => ({ tabs: s.tabs.map((t) => (t.id === id && t.kind === 'query' ? { ...t, connectionId } : t)) })),
     rename: (id, title) =>
