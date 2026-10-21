@@ -20,6 +20,7 @@ import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon } from './icons
 import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
 import { setDraggedTab } from './tabDrag';
+import { TabStripActions } from '../tabs/TabStripActions';
 import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
 /** DOM id of a tab's button. */
@@ -273,6 +274,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           <ChevronDownIcon />
         </button>
       )}
+      <TabStripActions groupId={groupId} tab={tabs.find((t) => t.id === activeId)} />
       {menu && <ActionMenu label="Tabs" checkRole="radio" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </div>
   );
