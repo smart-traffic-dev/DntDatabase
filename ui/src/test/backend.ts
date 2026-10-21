@@ -6,6 +6,7 @@ import { useConnections } from '../store/connections';
 import { useDataEdits } from '../store/dataEdits';
 import { useTableData } from '../store/tableData';
 import { useDialogs } from '../store/dialogs';
+import { useToasts } from '../store/toasts';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
@@ -59,4 +60,5 @@ export function resetStores() {
   useTableData.getState().reset();
   useDataEdits.getState().reset();
   useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null, question: null });
+  useToasts.getState().reset();
 }

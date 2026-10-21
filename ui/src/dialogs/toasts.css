@@ -1,0 +1,141 @@
+/* Toast stack (spec §6, board 06): bottom right, newest last, at most three. */
+.toast-stack {
+  position: fixed;
+  right: var(--dnt-space-4);
+  bottom: calc(var(--dnt-statusbar-h) + var(--dnt-space-3));
+  z-index: var(--dnt-z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--dnt-space-2);
+  max-width: calc(100vw - 2 * var(--dnt-space-4));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--dnt-space-2);
+  width: 360px;
+  max-width: 100%;
+  padding: var(--dnt-space-3) var(--dnt-space-2) var(--dnt-space-3) var(--dnt-space-3);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-raised);
+  box-shadow: var(--dnt-shadow-2);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-base);
+  line-height: var(--dnt-text-base-lh);
+  pointer-events: auto;
+}
+
+.toast.error {
+  border-color: var(--dnt-status-danger-border);
+}
+
+.toast-icon {
+  flex: none;
+  display: inline-flex;
+  margin-top: 2px;
+  color: var(--dnt-status-info-fg);
+}
+
+.toast.success .toast-icon {
+  color: var(--dnt-status-success-fg);
+}
+
+.toast.warning .toast-icon {
+  color: var(--dnt-status-warning-fg);
+}
+
+.toast.error .toast-icon,
+.toast.error .toast-title {
+  color: var(--dnt-status-danger-fg);
+}
+
+.toast-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
+}
+
+.toast-title {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.toast-message {
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  color: var(--dnt-fg-muted);
+  overflow-wrap: anywhere;
+}
+
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dnt-space-3);
+}
+
+.toast-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dnt-accent);
+  font-size: var(--dnt-text-sm);
+  text-decoration: underline;
+}
+
+.toast-link:hover {
+  color: var(--dnt-accent-hover);
+}
+
+/* Progress: a 4px track with the done part in accent; indeterminate slides. */
+.toast-progress {
+  height: 4px;
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-border-subtle);
+  overflow: hidden;
+}
+
+.toast-progress span {
+  display: block;
+  height: 100%;
+  background: var(--dnt-accent);
+  transition: width var(--dnt-dur-2) var(--dnt-ease-std);
+}
+
+.toast-progress.indeterminate span {
+  width: 30%;
+  animation: toast-progress-slide 1.2s var(--dnt-ease-std) infinite;
+}
+
+@keyframes toast-progress-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+.toast-dismiss {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--dnt-ctl-h-xs);
+  height: var(--dnt-ctl-h-xs);
+  padding: 0;
+  border: 0;
+  border-radius: var(--dnt-radius-sm);
+  background: none;
+  color: var(--dnt-fg-subtle);
+}
+
+.toast-dismiss:hover {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}

@@ -601,56 +601,6 @@ fieldset.export-form {
   color: var(--muted);
 }
 
-.toast {
-  position: fixed;
-  right: 16px;
-  bottom: 16px;
-  z-index: 60;
-  padding: 8px 14px;
-  border-radius: var(--radius-md);
-  background: var(--studio-popover);
-  border: 1px solid var(--studio-hairline);
-  box-shadow: var(--shadow-popover);
-  font-size: var(--text-callout);
-}
-
-.toast:not(.error) {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  max-width: 520px;
-  padding-right: 8px;
-}
-
-.toast-dismiss {
-  flex: none;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--studio-fg-secondary);
-  font-size: var(--text-headline);
-  line-height: 1;
-}
-
-.toast-dismiss:hover {
-  background: var(--hover);
-  color: var(--studio-fg);
-}
-
-/* Internal error toast: above the notice toast so both can show. */
-.toast.error {
-  bottom: 60px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 520px;
-  border-color: var(--danger-border);
-  color: var(--danger-fg);
-}
-
 /* Production guard (board 08): the PRODUCTION badge in the header and a danger hairline, no thick frame. */
 .modal.env-production {
   border-color: var(--dnt-status-danger-border);
