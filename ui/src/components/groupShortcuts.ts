@@ -1,10 +1,11 @@
-import { useTabs, type EditorLayout } from '../store/tabs';
+import type { LayoutPreset } from '../store/layoutTree';
+import { useTabs } from '../store/tabs';
 import { focusFocusedGroup } from './focusGroup';
 import { closeGroup } from './tabActions';
 
 /** How long a `Ctrl+K` waits for its second key. */
 const CHORD_MS = 1500;
-const PRESETS: Record<string, EditorLayout> = { '1': 'single', '2': 'columns', '3': 'rows', '4': 'grid' };
+const PRESETS: Record<string, LayoutPreset> = { '1': 'single', '2': 'columns', '3': 'rows', '4': 'grid' };
 
 let chordAt = 0;
 
@@ -54,6 +55,7 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
     };
     // Exact modifiers: Ctrl+K Ctrl+1..7 are Monaco's fold levels, Ctrl+K Ctrl+W is not ours.
     if (key === '\\' && ctrl) return run(() => splitActive('down'));
+    if (key === 'm' && ctrl) return run(() => tabs.toggleMaximize());
     if (ctrl) return false;
     if (key === 'arrowright') return run(() => {
       tabs.focusNeighbour(1);

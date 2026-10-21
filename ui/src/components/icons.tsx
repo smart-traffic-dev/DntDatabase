@@ -172,11 +172,12 @@ export const EventIcon = () => (
 );
 
 /** The editor layout as a small diagram: one pane, two columns, two rows or a 2 × 2 grid. */
-export const LayoutIcon = ({ layout }: { layout: 'single' | 'columns' | 'rows' | 'grid' }) => (
+export const LayoutIcon = ({ layout }: { layout: 'single' | 'columns' | 'rows' | 'grid' | 'custom' }) => (
   <Icon size={14}>
     <rect x="3" y="4" width="18" height="16" rx="2" />
-    {(layout === 'columns' || layout === 'grid') && <path d="M12 4v16" />}
+    {(layout === 'columns' || layout === 'grid' || layout === 'custom') && <path d="M12 4v16" />}
     {(layout === 'rows' || layout === 'grid') && <path d="M3 12h18" />}
+    {layout === 'custom' && <path d="M12 12h9" />}
   </Icon>
 );
 
@@ -249,6 +250,13 @@ export const WarningIcon = () => (
   <Icon size={14} strokeWidth={2}>
     <path d="M12 3.5l9.5 16.5h-19z" />
     <path d="M12 10v4.5M12 17.5h.01" />
+  </Icon>
+);
+
+/** Arrows pointing inwards: restore a maximized group. */
+export const RestoreIcon = () => (
+  <Icon size={13}>
+    <path d="M9 3v6H3M15 21v-6h6M3 9l6-6M21 15l-6 6" />
   </Icon>
 );
 

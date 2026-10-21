@@ -520,25 +520,19 @@ textarea:focus-visible,
   border-bottom: 1px solid var(--dnt-border-subtle);
 }
 
-/* Editor groups (spec §4): nested flex rows / columns; splitters draw the 1px lines between groups. */
-.editor-col,
-.editor-row,
+/* Editor groups (editor v2 §1): a split tree of flex rows / columns; splitters draw the 1px lines. */
+.editor-split,
 .editor-cell,
 .editor-group {
   display: flex;
+  flex: 1;
   min-width: 0;
   min-height: 0;
 }
 
-.editor-col,
+.editor-split.col,
 .editor-group {
   flex-direction: column;
-}
-
-.editor-col,
-.editor-cell,
-.editor-group {
-  flex: 1;
 }
 
 .editor-group .tab-content {
@@ -551,26 +545,102 @@ textarea:focus-visible,
   font-weight: 400;
 }
 
-.tabstrip.drop-over {
-  background: var(--dnt-accent-subtle);
-}
-
-/* Where a dragged tab will land: the whole pane (move) or its right / bottom half (split). */
-.drop-zone {
+/* While something is dragged: a layer above the editor and the grid takes the drop. */
+.drop-layer {
   position: absolute;
   inset: 0;
   z-index: var(--dnt-z-sticky);
+}
+
+/* Where the drop will land: the whole pane (move) or the half that becomes the new group. */
+.drop-zone {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid var(--dnt-accent);
   background: var(--dnt-accent-subtle);
   pointer-events: none;
+}
+
+.drop-zone.zone-left {
+  right: 50%;
 }
 
 .drop-zone.zone-right {
   left: 50%;
 }
 
+.drop-zone.zone-up {
+  bottom: 50%;
+}
+
 .drop-zone.zone-down {
   top: 50%;
+}
+
+.drop-label {
+  padding: 2px var(--dnt-space-2);
+  border: 1px solid var(--dnt-accent);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-raised);
+  color: var(--dnt-accent-hover);
+  font-size: var(--dnt-text-sm);
+  font-weight: 600;
+}
+
+/* Where a dragged tab lands in a strip: a 2px accent bar between two tabs. */
+.tab-insert {
+  flex: none;
+  width: 0;
+  position: relative;
+}
+
+.tab-insert::before {
+  content: '';
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: -1px;
+  width: 2px;
+  background: var(--dnt-accent);
+}
+
+/* Run state on a tab: spinner while running, a dot when a run ended out of sight. */
+.tab-run {
+  display: inline-flex;
+}
+
+.tab-mark {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.tab-mark.ok {
+  background: var(--dnt-status-success-solid);
+}
+
+.tab-mark.error {
+  background: var(--dnt-status-danger-solid);
+}
+
+.tab-maximized {
+  flex: none;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  margin-right: var(--dnt-space-1);
+  color: var(--dnt-accent-hover);
+  font-size: var(--dnt-text-xs);
+}
+
+/* A preview tab: the next preview opened in its group replaces it. */
+.tab.preview .tab-title {
+  font-style: italic;
 }
 
 /* Scrolls sideways inside itself; the scrollbar is hidden so it cannot shift the layout. */

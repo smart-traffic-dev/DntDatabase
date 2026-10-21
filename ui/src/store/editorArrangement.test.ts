@@ -17,7 +17,7 @@ describe('editor arrangement across restarts', () => {
     for (const id of ['a', 'b']) s().open(q(id));
     stop = persistArrangement();
     s().splitTab('b', 'down');
-    expect(JSON.parse(localStorage.getItem(ARRANGEMENT_KEY)!)).toMatchObject({ layout: 'rows' });
+    expect(JSON.parse(localStorage.getItem(ARRANGEMENT_KEY)!)).toMatchObject({ v: 2, tree: { kind: 'split', dir: 'col' } });
     stop();
 
     s().reset();
@@ -25,6 +25,18 @@ describe('editor arrangement across restarts', () => {
     restoreArrangement();
     expect(s().layout).toBe('rows');
     expect(groupTabs(s(), s().groups[1]!.id).map((t) => t.id)).toEqual(['b']);
+  });
+
+  it('restores the first saved shape (presets + shared ratios) as a tree', () => {
+    for (const id of ['a', 'b']) s().open(q(id));
+    localStorage.setItem(
+      ARRANGEMENT_KEY,
+      JSON.stringify({ layout: 'columns', ratios: { x: 0.3, y: 0.5 }, groups: [{ tabIds: ['a'] }, { tabIds: ['b'] }], focused: 1 }),
+    );
+    restoreArrangement();
+    expect(s().layout).toBe('columns');
+    expect(s().tree).toMatchObject({ kind: 'split', dir: 'row', ratio: 0.3 });
+    expect(groupTabs(s(), s().focusedGroupId).map((t) => t.id)).toEqual(['b']);
   });
 
   it('ignores a missing or broken saved value', () => {

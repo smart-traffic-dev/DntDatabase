@@ -1,7 +1,8 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { showQuickOpen } from '../store/palette';
-import { useTabs, type EditorLayout } from '../store/tabs';
+import type { LayoutPreset } from '../store/layoutTree';
+import { useTabs } from '../store/tabs';
 import { ActionMenu } from './ActionMenu';
 import { LayoutIcon, LogoIcon, SearchIcon } from './icons';
 import { MenuBar } from './MenuBar';
@@ -35,7 +36,7 @@ const Glyph = ({ children }: { children: ReactNode }) => (
   </svg>
 );
 
-const LAYOUT_ITEMS: { layout: EditorLayout; label: string; hint: string }[] = [
+const LAYOUT_ITEMS: { layout: LayoutPreset; label: string; hint: string }[] = [
   { layout: 'single', label: 'Single', hint: 'Ctrl+K 1' },
   { layout: 'columns', label: 'Two columns', hint: 'Ctrl+K 2' },
   { layout: 'rows', label: 'Two rows', hint: 'Ctrl+K 3' },

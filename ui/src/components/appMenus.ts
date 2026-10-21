@@ -4,6 +4,7 @@ import { explainQuery, runFromEditor, stopQuery } from '../store/runQuery';
 import { useDialogs } from '../store/dialogs';
 import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
+import type { LayoutPreset } from '../store/layoutTree';
 import { MAX_GROUPS, useTabs, type EditorLayout, type Tab } from '../store/tabs';
 import type { Theme } from '../theme/ThemeProvider';
 import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
@@ -40,9 +41,11 @@ export interface MenuState {
   /** The editor group layout and how many groups are open. */
   layout: EditorLayout;
   groupCount: number;
+  /** The focused group is maximized. */
+  maximized: boolean;
 }
 
-const LAYOUTS: { layout: EditorLayout; label: string; key: string }[] = [
+const LAYOUTS: { layout: LayoutPreset; label: string; key: string }[] = [
   { layout: 'single', label: 'Single', key: '1' },
   { layout: 'columns', label: 'Two columns', key: '2' },
   { layout: 'rows', label: 'Two rows', key: '3' },
@@ -191,6 +194,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
         { label: 'Split right', hint: 'Ctrl+\\', disabled: !s.hasTab || s.groupCount >= MAX_GROUPS, run: () => splitFocused('right') },
         { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !s.hasTab || s.groupCount >= MAX_GROUPS, run: () => splitFocused('down') },
         { label: 'Close group', hint: 'Ctrl+K W', disabled: s.groupCount < 2, run: () => void closeGroup() },
+        { label: 'Maximize group', hint: 'Ctrl+K Ctrl+M', checked: s.maximized, disabled: s.groupCount < 2, run: () => useTabs.getState().toggleMaximize() },
         sep,
         { label: 'Command palette', hint: 'Ctrl+Shift+P', run: showCommandPalette },
         { label: 'Go to object', hint: 'Ctrl+P', run: showQuickOpen },

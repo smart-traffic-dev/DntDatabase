@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useMemo,
   useRef,
@@ -16,10 +17,13 @@ import { useQueryRun } from '../store/queryRun';
 import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
-import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon } from './icons';
+import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon, RestoreIcon } from './icons';
 import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
-import { setDraggedTab } from './tabDrag';
+import { openObjectTab } from './openObject';
+import { draggedItem, setDraggedTab, TAB_DRAG_TYPE, useDrag } from './tabDrag';
+import { useRunMarks } from '../store/runMarks';
+import { useTree } from '../store/tree';
 import { TabStripActions } from '../tabs/TabStripActions';
 import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
@@ -28,8 +32,7 @@ export const tabDomId = (id: string) => `tab-${encodeURIComponent(id)}`;
 /** DOM id of a group's tab panel (the `aria-controls` target of its tabs). */
 export const tabContentId = (groupId: string) => `tab-content-${groupId}`;
 
-/** Drag payload type of a tab being moved between groups. */
-export const TAB_DRAG_TYPE = 'text/x-dnt-tab';
+export { TAB_DRAG_TYPE } from './tabDrag';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
   Table: 'TBL',
@@ -54,7 +57,12 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
   const groups = useTabs((s) => s.groups);
   const focused = groupId === focusedGroupId;
   const activate = useTabs((s) => s.activate);
-  const [dropOver, setDropOver] = useState(false);
+  const [insertAt, setInsertAt] = useState<number | null>(null);
+  const runningIds = useQueryRun(
+    useShallow((s) => [...s.runs].filter(([, r]) => r.phase.kind !== 'idle').map(([id]) => id)),
+  );
+  const marks = useRunMarks((s) => s.marks);
+  const maximized = useTabs((s) => s.maximizedGroupId === groupId);
   const summaries = useConnections((s) => s.summaries);
   // Derived id lists, not the docs / runs maps: typing replaces the docs map on every keystroke.
   // `useShallow` keeps the same array while the ids do not change, so nothing re-renders.
@@ -156,29 +164,51 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
   // The roving tab stop: the active tab, else the first one.
   const stopId = tabs.some((t) => t.id === activeId) ? activeId : tabs[0]?.id;
 
-  // Drag a tab onto another group's strip to move it there (before the tab under the pointer).
-  const isTabDrag = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes(TAB_DRAG_TYPE);
+  // Dragging over the strip: a tab lands where the insertion bar shows (in this strip or from another
+  // group's), a tree object opens in this group.
+  const dragging = useDrag((s) => s.item);
+  /** The strip position under the pointer: before the first tab whose middle is right of it. */
+  const insertIndex = (x: number) => {
+    const els = [...(strip.current?.querySelectorAll<HTMLElement>('.tab') ?? [])];
+    const at = els.findIndex((el) => {
+      const r = el.getBoundingClientRect();
+      return x < r.left + r.width / 2;
+    });
+    return at < 0 ? els.length : at;
+  };
   const onDrop = (e: DragEvent<HTMLDivElement>) => {
-    setDropOver(false);
-    const id = e.dataTransfer.getData(TAB_DRAG_TYPE);
-    if (!id) return;
+    const item = draggedItem();
+    const at = insertAt ?? insertIndex(e.clientX);
+    setInsertAt(null);
+    if (!item) return;
     e.preventDefault();
-    const over = (e.target as Element).closest<HTMLElement>('.tab')?.dataset.tabId;
-    const at = over ? tabs.findIndex((t) => t.id === over) : -1;
-    useTabs.getState().moveTab(id, groupId, at >= 0 ? at : undefined);
+    useDrag.setState({ item: null });
+    if (item.kind === 'tab') {
+      // The index counts this group's tabs without the dragged one.
+      const from = tabs.findIndex((t) => t.id === item.id);
+      useTabs.getState().moveTab(item.id, groupId, from >= 0 && from < at ? at - 1 : at);
+    } else {
+      const node = useTree.getState().nodes.get(item.nodeId);
+      if (!node) return;
+      useTabs.getState().focusGroup(groupId);
+      openObjectTab(node);
+    }
+    focusFocusedGroup();
   };
 
   return (
     <div
-      className={`tabstrip${focused ? '' : ' unfocused'}${dropOver ? ' drop-over' : ''}`}
+      className={`tabstrip${focused ? '' : ' unfocused'}`}
       onMouseDown={() => !focused && useTabs.getState().focusGroup(groupId)}
       onDragOver={(e) => {
-        if (!isTabDrag(e)) return;
+        if (!draggedItem()) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        setDropOver(true);
+        setInsertAt(draggedItem()?.kind === 'tab' ? insertIndex(e.clientX) : null);
       }}
-      onDragLeave={() => setDropOver(false)}
+      onDragLeave={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setInsertAt(null);
+      }}
       onDrop={onDrop}
     >
       <div role="tablist" aria-label="Open tabs" className="tabbar" ref={strip} onWheel={onWheel}>
@@ -187,7 +217,11 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           // Environment colour of the tab's connection, as in the tree and status bar.
           const env = conn?.env_tag ?? null;
           const readOnly = !!conn?.read_only;
-          const classes = ['tab', tab.id === activeId ? 'active' : '', env ? `env-${env}` : ''].filter(Boolean).join(' ');
+          const classes = ['tab', tab.id === activeId ? 'active' : '', env ? `env-${env}` : '', tab.preview ? 'preview' : '']
+            .filter(Boolean)
+            .join(' ');
+          const running = runningIds.includes(tab.id);
+          const mark = marks.get(tab.id);
           // `●` only for a tab bound to a file whose text differs from it.
           const unsaved = tab.kind === 'query' && unsavedIds.includes(tab.id);
           const inTx = tab.kind === 'query' && txIds.includes(tab.id);
@@ -195,8 +229,9 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
             .filter(Boolean)
             .join(' · ');
           return (
+            <Fragment key={tab.id}>
+            {dragging && insertAt === index && <span className="tab-insert" aria-hidden="true" />}
             <div
-              key={tab.id}
               className={classes}
               data-tab-id={tab.id}
               title={tip}
@@ -206,7 +241,10 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                 e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
                 e.dataTransfer.effectAllowed = 'move';
               }}
-              onDragEnd={() => setDraggedTab(null)}
+              onDragEnd={() => {
+                setDraggedTab(null);
+                setInsertAt(null);
+              }}
               onContextMenu={(e) => openContext(e, tab)}
             >
               <button
@@ -218,6 +256,8 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                 tabIndex={tab.id === stopId ? 0 : -1}
                 className="tab-label"
                 onClick={() => activate(tab.id)}
+                // A preview tab is kept by a double-click; a kept tab's double-click maximizes its group.
+                onDoubleClick={() => (tab.preview ? useTabs.getState().keepTab(tab.id) : useTabs.getState().toggleMaximize(groupId))}
                 onAuxClick={(e) => e.button === 1 && void closeTab(tab)}
                 onKeyDown={(e) => onTabKeyDown(e, tab, index)}
               >
@@ -234,6 +274,19 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                     <LockIcon />
                   </span>
                 )}
+                {running && (
+                  <span className="tab-run" title="Running" aria-label="Running" role="img">
+                    <span className="spinner inline" aria-hidden="true" />
+                  </span>
+                )}
+                {!running && mark && (
+                  <span
+                    className={`tab-mark ${mark}`}
+                    title={mark === 'ok' ? 'Finished' : 'Failed'}
+                    aria-label={mark === 'ok' ? 'Finished' : 'Failed'}
+                    role="img"
+                  />
+                )}
                 {inTx && (
                   <span className="tab-tx" title="Open transaction" aria-label="Open transaction" role="img" />
                 )}
@@ -248,8 +301,10 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                 <CloseIcon />
               </button>
             </div>
+            </Fragment>
           );
         })}
+        {dragging && insertAt === tabs.length && <span className="tab-insert" aria-hidden="true" />}
       </div>
       <button
         type="button"
@@ -273,6 +328,20 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
         >
           <ChevronDownIcon />
         </button>
+      )}
+      {maximized && (
+        <span className="tab-maximized">
+          Maximized
+          <button
+            type="button"
+            className="icon-btn"
+            aria-label="Restore editor layout (Ctrl+K Ctrl+M)"
+            title="Restore editor layout (Ctrl+K Ctrl+M)"
+            onClick={() => useTabs.getState().toggleMaximize(groupId)}
+          >
+            <RestoreIcon />
+          </button>
+        </span>
       )}
       <TabStripActions groupId={groupId} tab={tabs.find((t) => t.id === activeId)} />
       {menu && <ActionMenu label="Tabs" checkRole="radio" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}

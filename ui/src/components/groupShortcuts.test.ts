@@ -66,6 +66,16 @@ describe('editor group shortcuts', () => {
     expect(focus.focusFocusedGroup).toHaveBeenCalledTimes(4);
   });
 
+  it('Ctrl+K Ctrl+M maximizes the focused group and restores it', () => {
+    s().splitTab('c', 'right');
+    key({ key: 'k', ctrlKey: true });
+    expect(key({ key: 'm', ctrlKey: true }).handled).toBe(true);
+    expect(s().maximizedGroupId).toBe(s().focusedGroupId);
+    key({ key: 'k', ctrlKey: true });
+    key({ key: 'm', ctrlKey: true });
+    expect(s().maximizedGroupId).toBeUndefined();
+  });
+
   it("leaves Monaco's own Ctrl+K Ctrl+<digit> chords (fold level) alone", () => {
     key({ key: 'k', ctrlKey: true });
     expect(key({ key: '2', ctrlKey: true }).handled).toBe(false);

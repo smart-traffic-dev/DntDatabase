@@ -29,14 +29,17 @@ describe('editor groups', () => {
     expect(s().activeId).toBe('b');
   });
 
-  it('split down makes rows; a third group makes a grid; at most four groups', () => {
+  it('split down makes rows; a third group splits only its own pane; at most four groups', () => {
     open('a', 'b', 'c', 'd', 'e');
     s().splitTab('e', 'down');
     expect(s().layout).toBe('rows');
     s().activate('d');
     s().splitTab('d', 'right');
     expect(s().groups).toHaveLength(3);
-    expect(s().layout).toBe('grid');
+    expect(s().layout).toBe('custom');
+    // The top pane split into two columns; the bottom pane (e) is untouched.
+    expect(s().tree).toMatchObject({ dir: 'col', a: { dir: 'row' }, b: { kind: 'group' } });
+    expect(ids(s().groups[2]!.id)).toEqual(['e']);
     s().activate('c');
     s().splitTab('c', 'right');
     expect(s().groups).toHaveLength(4);
@@ -136,11 +139,75 @@ describe('editor groups', () => {
     expect(ids(groupIds()[0]!)).toEqual(['a', 'b', 'c']);
   });
 
-  it('ratios clamp to keep groups usable', () => {
-    s().setRatios({ x: 0.02 });
-    expect(s().ratios.x).toBeGreaterThanOrEqual(0.15);
-    s().setRatios({ y: 0.99 });
-    expect(s().ratios.y).toBeLessThanOrEqual(0.85);
+  it('each split has its own ratio, clamped to keep groups usable', () => {
+    open('a', 'b', 'c');
+    s().splitTab('c', 'right');
+    s().splitGroup(s().groups[1]!.id, 'down');
+    const outer = s().tree as unknown as { id: string; b: { id: string } };
+    s().setSplitRatio(outer.id, 0.02);
+    s().setSplitRatio(outer.b.id, 0.99);
+    expect(s().tree).toMatchObject({ ratio: 0.15, b: { ratio: 0.85 } });
+  });
+
+  it('splitGroup splits the target pane on any side, moving the dropped tab there', () => {
+    open('a', 'b');
+    const [g1] = groupIds();
+    s().splitGroup(g1!, 'left', 'b');
+    expect(s().tree).toMatchObject({ dir: 'row', a: { kind: 'group' }, b: { kind: 'group', id: g1 } });
+    expect(ids(groupIds()[0]!)).toEqual(['b']);
+    expect(s().activeId).toBe('b');
+    s().splitGroup(g1!, 'up', 'b');
+    // The left group lost its only tab and closed; b now sits above a.
+    expect(s().tree).toMatchObject({ dir: 'col', a: { kind: 'group' }, b: { kind: 'group', id: g1 } });
+    expect(s().groups).toHaveLength(2);
+    // A group's only tab onto its own edge changes nothing.
+    const before = s().tree;
+    s().splitGroup(s().groupOf.b!, 'right', 'b');
+    expect(s().tree).toBe(before);
+  });
+
+  it('maximize shows one group; focusing another group or splitting restores', () => {
+    open('a', 'b');
+    s().splitTab('b', 'right');
+    const [g1, g2] = groupIds();
+    s().toggleMaximize();
+    expect(s().maximizedGroupId).toBe(g2);
+    s().toggleMaximize();
+    expect(s().maximizedGroupId).toBeUndefined();
+    s().toggleMaximize(g1);
+    expect(s().focusedGroupId).toBe(g1);
+    s().focusGroup(g2!);
+    expect(s().maximizedGroupId).toBeUndefined();
+    // Nothing to maximize with one group.
+    s().setLayout('single');
+    s().toggleMaximize();
+    expect(s().maximizedGroupId).toBeUndefined();
+  });
+
+  it('a preview tab is replaced by the next preview in its group; keepTab makes it stay', () => {
+    const obj = (id: string) => ({ id, kind: 'object' as const, connectionId: 'c', title: id, objectRef: { database: 'd', schema: null, name: id, kind: 'Table' as const } });
+    open('q');
+    s().openPreview(obj('t1'));
+    expect(s().tabs.map((t) => [t.id, !!t.preview])).toEqual([
+      ['q', false],
+      ['t1', true],
+    ]);
+    s().openPreview(obj('t2'));
+    expect(s().tabs.map((t) => t.id)).toEqual(['q', 't2']);
+    expect(s().activeId).toBe('t2');
+    s().keepTab('t2');
+    s().openPreview(obj('t3'));
+    expect(s().tabs.map((t) => [t.id, !!t.preview])).toEqual([
+      ['q', false],
+      ['t2', false],
+      ['t3', true],
+    ]);
+    // Opening an open tab as a preview only activates it.
+    s().openPreview(obj('t2'));
+    expect(s().tabs).toHaveLength(3);
+    // Pinning a preview keeps it too.
+    s().setPinned('t3', true);
+    expect(s().tabs.find((t) => t.id === 't3')?.preview).toBe(false);
   });
 
   it('pinning reorders inside the group', () => {
@@ -179,13 +246,13 @@ describe('editor groups', () => {
   it('arrangement round-trips (restore after start)', () => {
     open('a', 'b', 'c');
     s().splitTab('c', 'down');
-    s().setRatios({ y: 0.3 });
+    s().setSplitRatio((s().tree as { id: string }).id, 0.3);
     const saved = s().arrangement();
     s().reset();
     open('a', 'b', 'c', 'z');
-    s().applyArrangement(saved);
+    s().applyArrangement(JSON.parse(JSON.stringify(saved)));
     expect(s().layout).toBe('rows');
-    expect(s().ratios.y).toBe(0.3);
+    expect(s().tree).toMatchObject({ dir: 'col', ratio: 0.3 });
     expect(ids(groupIds()[0]!)).toEqual(['a', 'b', 'z']);
     expect(ids(groupIds()[1]!)).toEqual(['c']);
   });

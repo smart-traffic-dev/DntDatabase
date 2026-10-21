@@ -319,6 +319,8 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
       });
     },
     stage(tabId, edit) {
+      // An edit in a preview tab keeps it: the next preview must not replace staged changes.
+      useTabs.getState().keepTab(tabId);
       const state = get().byTab[tabId];
       if (!state) return { ok: false, message: 'This table is not ready to edit.' };
       const next = cloneStaged(state.staged);

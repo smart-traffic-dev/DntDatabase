@@ -268,6 +268,8 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       go(tab, { offset, back }, true);
     },
     toggleSort(tab, column, additive = false) {
+      // Working in a preview tab keeps it (editor v2 §4.1).
+      useTabs.getState().keepTab(tab.id);
       const s = get().byTab[tab.id];
       // Sorting never changes the count.
       if (s) go(tab, { sort: nextSortKeys(s.sort, column, additive), offset: 0, back: [] }, true);
@@ -276,6 +278,7 @@ export const useTableData = create<TableDataStore>()((set, get) => {
       if (get().byTab[tab.id]?.sort.length) go(tab, { sort: [], offset: 0, back: [] }, true);
     },
     applyFilter(tab, filter) {
+      useTabs.getState().keepTab(tab.id);
       if (get().byTab[tab.id]) go(tab, { filter, offset: 0, back: [] }, false);
     },
     clearFilter(tab) {

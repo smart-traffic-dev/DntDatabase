@@ -30,6 +30,7 @@ export function useMenuState(): MenuState {
   const hasSelection = useSelection((s) => (queryTabId ? s.ids.has(queryTabId) : false));
   const layout = useTabs((s) => s.layout);
   const groupCount = useTabs((s) => s.groups.length);
+  const maximized = useTabs((s) => !!s.maximizedGroupId);
   return {
     theme,
     setTheme,
@@ -45,5 +46,6 @@ export function useMenuState(): MenuState {
     hasSelection,
     layout,
     groupCount,
+    maximized,
   };
 }

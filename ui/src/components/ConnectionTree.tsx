@@ -26,6 +26,7 @@ import { openObjectTab } from './openObject';
 import { ActionMenu, transferItems } from './ActionMenu';
 import { TreeContextMenu } from './TreeContextMenu';
 import { useTokenPx } from '../theme/useTokenPx';
+import { OBJECT_DRAG_TYPE, setDraggedObject } from './tabDrag';
 import './tree.css';
 
 /** Compact `--dnt-row-h-tree`; the live value follows the density setting. */
@@ -139,7 +140,9 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
     );
   }
 
-  const draggable = node.kind === 'group' || node.kind === 'connection';
+  // Groups and connections drag to reorder the tree; objects drag into the editor groups.
+  const draggable = node.kind === 'group' || node.kind === 'connection' || node.kind === 'object';
+  const isObject = node.kind === 'object' && !!node.objectRef;
   // While filtering only loaded children are searched: show "matching / total" for a folder.
   const countMeta =
     row.matchCount && node.meta && /^\d+$/.test(node.meta) ? `${row.matchCount} / ${node.meta}` : node.meta;
@@ -154,11 +157,25 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       className={`tree-row kind-${node.kind}${selected ? ' selected' : ''}${dropTarget ? ' drop-target' : ''}`}
       style={{ ...style, ...indent }}
       draggable={draggable}
-      onClick={() => on.onSelect(node)}
+      onClick={() => {
+        on.onSelect(node);
+        // A single click previews the object; the next preview in that group replaces it.
+        if (isObject) openObjectTab(node, { preview: true });
+      }}
       onDoubleClick={() => (node.kind === 'object' ? on.onOpen(node) : on.onToggle(node))}
       onContextMenu={(e) => on.onMenu(node, e)}
-      onDragStart={draggable ? () => on.onDragStart(node) : undefined}
-      onDragEnd={on.onDragEnd}
+      onDragStart={
+        isObject
+          ? (e) => {
+              e.dataTransfer.setData(OBJECT_DRAG_TYPE, node.id);
+              e.dataTransfer.effectAllowed = 'move';
+              setDraggedObject(node.id);
+            }
+          : draggable
+            ? () => on.onDragStart(node)
+            : undefined
+      }
+      onDragEnd={isObject ? () => setDraggedObject(null) : on.onDragEnd}
       onDragOver={(e) => on.onDragOver(node, e)}
       onDragLeave={on.onDragLeave}
       onDrop={(e) => on.onDrop(node, e)}

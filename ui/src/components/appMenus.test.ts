@@ -16,6 +16,7 @@ const base: MenuState = {
   hasSelection: false,
   layout: 'single',
   groupCount: 1,
+  maximized: false,
 };
 
 const items = (menu: string, state: Partial<MenuState> = {}) =>
@@ -103,6 +104,9 @@ describe('buildMenus', () => {
     expect(item('View', 'Split right', { hasTab: true, groupCount: 4 })?.disabled).toBe(true);
     expect(item('View', 'Split down')?.disabled).toBe(true);
     expect(item('View', 'Close group', { groupCount: 2 })?.disabled).toBe(false);
+    expect(item('View', 'Maximize group', { groupCount: 2 })).toMatchObject({ hint: 'Ctrl+K Ctrl+M', disabled: false, checked: false });
+    expect(item('View', 'Maximize group', { groupCount: 2, maximized: true })?.checked).toBe(true);
+    expect(item('View', 'Maximize group')?.disabled).toBe(true);
   });
 
   it('choosing a theme calls setTheme', () => {
@@ -141,7 +145,7 @@ describe('buildMenus', () => {
     expect(item('Tools', 'Developer tools')?.hint).toBe('Ctrl+Shift+I');
     expect(item('Tools', 'Settings…')?.hint).toBe('Ctrl+,');
     expect(item('Help', 'Keyboard shortcuts')?.hint).toBe('F1');
-    const group = /^(Layout:|Split|Close group)/;
+    const group = /^(Layout:|Split|Close group|Maximize group)/;
     expect(items('View').filter((i) => i.hint && i.hint !== 'Coming soon' && !group.test(i.label)).map((i) => [i.label, i.hint])).toEqual([
       ['Show sidebar', 'Ctrl+B'],
       ['Show results', 'Ctrl+J'],
