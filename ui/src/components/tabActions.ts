@@ -57,6 +57,9 @@ export async function closeTabs(tabs: Tab[]): Promise<void> {
 export const closeOtherTabs = (keep: Tab): Promise<void> =>
   closeTabs(useTabs.getState().tabs.filter((t) => t.id !== keep.id && !t.pinned));
 
+/** Closes every unpinned tab (pinned tabs are never closed in bulk). */
+export const closeAllTabs = (): Promise<void> => closeTabs(useTabs.getState().tabs.filter((t) => !t.pinned));
+
 /** Closes the unpinned tabs to the right of `from`. */
 export function closeTabsToRight(from: Tab): Promise<void> {
   const { tabs } = useTabs.getState();

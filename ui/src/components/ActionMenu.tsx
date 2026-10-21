@@ -28,6 +28,11 @@ interface Props {
   onClose(): void;
   /** Move the focus into the menu when it opens (default). A pointer-opened menu bar keeps the editor's focus. */
   autoFocus?: boolean;
+  /**
+   * What a `checked` item is: an independent toggle (`checkbox`, default) or the current choice
+   * of a "pick one" list (`radio`, e.g. the tab strip's list of open tabs).
+   */
+  checkRole?: 'checkbox' | 'radio';
 }
 
 /** "Import connections…" / "Export connections…" entries shared by the sidebar and toolbar menus. */
@@ -37,7 +42,7 @@ export const transferItems = () => [
 ];
 
 /** A small popup menu at a fixed position; closes on outside click and Esc. */
-export function ActionMenu({ label, x, y, items, onClose, autoFocus = true }: Props) {
+export function ActionMenu({ label, x, y, items, onClose, autoFocus = true, checkRole = 'checkbox' }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   // Measured at (0, 0) first, so the box is not squeezed against the viewport edge.
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
@@ -110,9 +115,9 @@ export function ActionMenu({ label, x, y, items, onClose, autoFocus = true }: Pr
           <div key={`sep-${i}`} role="separator" className="menu-sep" />
         ) : (
           <button
-            key={item.label}
+            key={`${i}:${item.label}`}
             type="button"
-            role={item.checked === undefined ? 'menuitem' : 'menuitemcheckbox'}
+            role={item.checked === undefined ? 'menuitem' : `menuitem${checkRole}`}
             aria-checked={item.checked}
             disabled={item.disabled}
             className={item.danger ? 'danger' : undefined}

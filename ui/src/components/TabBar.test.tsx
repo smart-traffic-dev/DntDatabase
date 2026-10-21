@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { DialogHost } from '../dialogs/DialogHost';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { EnvTag } from '../bindings';
 import userEvent from '@testing-library/user-event';
 import { useConnections } from '../store/connections';
@@ -161,6 +161,80 @@ describe('TabBar', () => {
     await user.pointer({ keys: '[MouseRight]', target: keep });
     await user.click(screen.getByRole('menuitem', { name: 'Close others' }));
     await waitFor(() => expect(useTabs.getState().tabs.map((x) => x.title)).toEqual(['Query 2']));
+  });
+
+  it('moves between tabs with the arrow keys, Home and End (one tab stop)', async () => {
+    act(() => ['alpha', 'beta', 'gamma'].forEach((title) => openTab(ids.prod, title)));
+    const idOf = (title: string) => objectTabId(ids.prod, { ...orders, name: title });
+    render(<TabBar />);
+    const user = userEvent.setup();
+    const tab = (title: string) => screen.getByRole('tab', { name: new RegExp(title) });
+    // Only the active tab is in the Tab order.
+    expect(tab('gamma')).toHaveAttribute('tabindex', '0');
+    expect(tab('alpha')).toHaveAttribute('tabindex', '-1');
+    expect(tab('alpha')).toHaveAttribute('aria-controls', 'tab-content');
+
+    act(() => tab('gamma').focus());
+    await user.keyboard('{Home}');
+    expect(useTabs.getState().activeId).toBe(idOf('alpha'));
+    expect(tab('alpha')).toHaveFocus();
+    await user.keyboard('{ArrowRight}');
+    expect(useTabs.getState().activeId).toBe(idOf('beta'));
+    expect(tab('beta')).toHaveFocus();
+    await user.keyboard('{End}');
+    expect(useTabs.getState().activeId).toBe(idOf('gamma'));
+    // Wraps around at both ends.
+    await user.keyboard('{ArrowRight}');
+    expect(useTabs.getState().activeId).toBe(idOf('alpha'));
+    await user.keyboard('{ArrowLeft}');
+    expect(useTabs.getState().activeId).toBe(idOf('gamma'));
+  });
+
+  it('opens the tab menu from the keyboard (Shift+F10) and its arrows move between items', async () => {
+    act(() => ['alpha', 'beta'].forEach((title) => openTab(ids.prod, title)));
+    render(<TabBar />);
+    const user = userEvent.setup();
+    act(() => screen.getByRole('tab', { name: /beta/ }).focus());
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    const menu = screen.getByRole('menu', { name: 'Tabs' });
+    expect(within(menu).getAllByRole('menuitem')[0]).toHaveTextContent(/^Close/);
+    expect(within(menu).getAllByRole('menuitem')[0]).toHaveFocus();
+    await user.keyboard('{ArrowDown}');
+    expect(within(menu).getByRole('menuitem', { name: 'Close others' })).toHaveFocus();
+    // An object tab has no Save.
+    expect(within(menu).queryByRole('menuitem', { name: /^Save/ })).toBeNull();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.getByRole('tab', { name: /beta/ })).toHaveFocus();
+  });
+
+  it('closes every unpinned tab with Close all and copies a title', async () => {
+    act(() => ['alpha', 'beta', 'gamma'].forEach((title) => openTab(ids.prod, title)));
+    const idOf = (title: string) => objectTabId(ids.prod, { ...orders, name: title });
+    act(() => useTabs.getState().setPinned(idOf('beta'), true));
+    render(<TabBar />);
+    // After setup: user-event installs its own clipboard stub.
+    const user = userEvent.setup();
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /alpha/ }) });
+    await user.click(screen.getByRole('menuitem', { name: 'Copy title' }));
+    expect(writeText).toHaveBeenCalledWith('alpha');
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /alpha/ }) });
+    await user.click(screen.getByRole('menuitem', { name: 'Close all' }));
+    await waitFor(() => expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([idOf('beta')]));
+  });
+
+  it('saves a query tab from its menu', async () => {
+    mockBackend({ tabs_save: () => null, file_write: () => null, 'plugin:dialog|save': () => null });
+    const id = useQueryDocs.getState().newQuery(null, null);
+    const save = vi.spyOn(useQueryDocs.getState(), 'saveFile').mockResolvedValue(undefined as never);
+    render(<TabBar />);
+    const user = userEvent.setup();
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /Query 1/ }) });
+    await user.click(screen.getByRole('menuitem', { name: /^Save/ }));
+    expect(save).toHaveBeenCalledWith(id, false);
+    save.mockRestore();
   });
 
   it('disables context-menu entries that would do nothing and marks the active tab in the overflow list', async () => {

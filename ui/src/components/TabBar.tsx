@@ -1,14 +1,24 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type WheelEvent } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type WheelEvent,
+} from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
 import { useTabs, type Tab } from '../store/tabs';
+import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
 import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon } from './icons';
-import { closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
-import { TabMenu, type TabMenuItem } from './TabMenu';
+import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
+
+/** DOM id of a tab's button (the tab panel's `aria-controls` target is `#tab-content`). */
+export const tabDomId = (id: string) => `tab-${encodeURIComponent(id)}`;
 
 const KIND_LABEL: Record<ObjectKind, string> = {
   Table: 'TBL',
@@ -37,7 +47,7 @@ export function TabBar() {
   );
   const canReopen = useTabs((s) => s.closed.length > 0);
   const strip = useRef<HTMLDivElement>(null);
-  const [menu, setMenu] = useState<{ x: number; y: number; items: TabMenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null);
 
   // A new or activated tab is always visible, even when the strip overflows.
   useEffect(() => {
@@ -64,29 +74,60 @@ export function TabBar() {
     });
   };
 
-  const openContext = (e: ReactMouseEvent, tab: Tab) => {
-    e.preventDefault();
+  const contextItems = (tab: Tab): MenuEntry[] => {
     const at = tabs.findIndex((t) => t.id === tab.id);
     // Pinned tabs are never closed in bulk.
     const others = tabs.filter((t) => t.id !== tab.id && !t.pinned);
     const right = tabs.slice(at + 1).filter((t) => !t.pinned);
-    setMenu({
-      x: e.clientX,
-      y: e.clientY,
-      items: [
-        { label: 'Close', hint: 'Ctrl+W', run: () => void closeTab(tab) },
-        { label: 'Close others', disabled: others.length === 0, run: () => void closeOtherTabs(tab) },
-        { label: 'Close tabs to the right', disabled: right.length === 0, run: () => void closeTabsToRight(tab) },
-        { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
-        { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
-      ],
-    });
+    const unpinned = tabs.filter((t) => !t.pinned);
+    return [
+      { label: 'Close', hint: 'Ctrl+W', run: () => void closeTab(tab) },
+      { label: 'Close others', disabled: others.length === 0, run: () => void closeOtherTabs(tab) },
+      { label: 'Close tabs to the right', disabled: right.length === 0, run: () => void closeTabsToRight(tab) },
+      { label: 'Close all', disabled: unpinned.length === 0, run: () => void closeAllTabs() },
+      { separator: true },
+      { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
+      { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
+      { separator: true },
+      { label: 'Copy title', run: () => void navigator.clipboard?.writeText(tab.title).catch(() => undefined) },
+      ...(tab.kind === 'query'
+        ? [{ label: 'Save', hint: 'Ctrl+S', run: () => void useQueryDocs.getState().saveFile(tab.id, false) }]
+        : []),
+    ];
   };
+
+  const openContext = (e: ReactMouseEvent, tab: Tab) => {
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, items: contextItems(tab) });
+  };
+
+  // Tab strip keyboard model (WAI-ARIA tabs): one tab stop, arrows / Home / End move and activate,
+  // the context-menu key or Shift+F10 opens the tab's menu under it.
+  const onTabKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>, tab: Tab, index: number) => {
+    const focusAt = (next: number) => {
+      const target = tabs[(next + tabs.length) % tabs.length];
+      if (!target) return;
+      e.preventDefault();
+      activate(target.id);
+      strip.current?.querySelectorAll<HTMLElement>('[role="tab"]')[(next + tabs.length) % tabs.length]?.focus();
+    };
+    if (e.key === 'ArrowRight') return focusAt(index + 1);
+    if (e.key === 'ArrowLeft') return focusAt(index - 1);
+    if (e.key === 'Home') return focusAt(0);
+    if (e.key === 'End') return focusAt(tabs.length - 1);
+    if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
+      e.preventDefault();
+      const r = e.currentTarget.getBoundingClientRect();
+      setMenu({ x: r.left, y: r.bottom, items: contextItems(tab) });
+    }
+  };
+  // The roving tab stop: the active tab, else the first one.
+  const stopId = tabs.some((t) => t.id === activeId) ? activeId : tabs[0]?.id;
 
   return (
     <div className="tabstrip">
       <div role="tablist" aria-label="Open tabs" className="tabbar" ref={strip} onWheel={onWheel}>
-        {tabs.map((tab) => {
+        {tabs.map((tab, index) => {
           const conn = tab.connectionId ? summaries.get(tab.connectionId)?.config : undefined;
           // Environment colour of the tab's connection, as in the tree and status bar.
           const env = conn?.env_tag ?? null;
@@ -103,10 +144,14 @@ export function TabBar() {
               <button
                 type="button"
                 role="tab"
+                id={tabDomId(tab.id)}
                 aria-selected={tab.id === activeId}
+                aria-controls="tab-content"
+                tabIndex={tab.id === stopId ? 0 : -1}
                 className="tab-label"
                 onClick={() => activate(tab.id)}
                 onAuxClick={(e) => e.button === 1 && void closeTab(tab)}
+                onKeyDown={(e) => onTabKeyDown(e, tab, index)}
               >
                 {tab.pinned && (
                   <span className="tab-pin" title="Pinned" role="img" aria-label="Pinned">
@@ -130,7 +175,8 @@ export function TabBar() {
                   </span>
                 )}
               </button>
-              <button type="button" className="tab-close" aria-label={`Close ${tab.title}`} onClick={() => void closeTab(tab)}>
+              {/* Not a tab stop: the keyboard closes a tab with Ctrl+W or its menu. */}
+              <button type="button" className="tab-close" tabIndex={-1} aria-label={`Close ${tab.title}`} onClick={() => void closeTab(tab)}>
                 <CloseIcon />
               </button>
             </div>
@@ -149,7 +195,7 @@ export function TabBar() {
           <ChevronDownIcon />
         </button>
       )}
-      {menu && <TabMenu label="Tabs" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {menu && <ActionMenu label="Tabs" checkRole="radio" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </div>
   );
 }

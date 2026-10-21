@@ -57,7 +57,7 @@ function Workspace() {
   return (
     <main className="workspace">
       <TabBar />
-      <section className="tab-content" aria-label="Tab content">
+      <section className="tab-content" id="tab-content" aria-label="Tab content">
         {tab?.kind === 'object' ? (
           <ObjectTab key={tab.id} tab={tab} />
         ) : tab?.kind === 'query' ? (
