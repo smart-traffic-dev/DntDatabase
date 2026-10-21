@@ -363,42 +363,214 @@
   border-bottom: 1px solid var(--dnt-border);
 }
 
-.ex-views {
+/* Grid · Tree · JSON: flat tabs, like the result tabs. */
+.ex-vtabs {
   flex: none;
   display: inline-flex;
   gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--dnt-border);
-  border-radius: var(--dnt-radius-sm);
-  background: var(--dnt-bg-sunken);
 }
 
-.ex-view-btn {
+.ex-vtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   height: var(--dnt-ctl-h-sm);
   padding: 0 10px;
   border: 0;
-  border-radius: var(--dnt-radius-xs);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
   color: var(--dnt-fg-muted);
   font: inherit;
-  font-size: var(--dnt-text-xs);
+  font-size: var(--dnt-text-sm);
   white-space: nowrap;
 }
 
-.ex-view-btn:hover:not(:disabled) {
+.ex-vtab:hover {
   background: var(--dnt-bg-hover);
   color: var(--dnt-fg);
 }
 
-.ex-view-btn[aria-pressed='true'] {
-  background: var(--dnt-bg-raised);
+.ex-vtab[aria-selected='true'] {
+  background: var(--dnt-bg-selected-muted);
   color: var(--dnt-fg);
-  font-weight: 600;
-  box-shadow: var(--dnt-shadow-1);
+  font-weight: 500;
 }
 
-.ex-view-btn:disabled {
-  color: var(--dnt-fg-disabled);
+.ex-vtab:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+.ex-vtab-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-accent);
+}
+
+/* The classic grid (MySQL / MariaDB): the server's own column names, values like the result grid. */
+.ex-classic .ex-grid th {
+  color: var(--dnt-fg);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.ex-classic .ex-grid td {
+  color: var(--dnt-fg);
+}
+
+.ex-null {
+  color: var(--dnt-fg-subtle);
+  font-style: italic;
+}
+
+.ex-good {
+  padding: 0 3px;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-status-success-bg);
+  color: var(--dnt-status-success-fg);
+  font-weight: 600;
+}
+
+.ex-chips {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--dnt-border);
+  background: var(--dnt-bg-chrome);
+}
+
+.ex-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+  white-space: nowrap;
+}
+
+.ex-chip.warn {
+  border-color: var(--dnt-status-warning-border);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+  font-weight: 500;
+}
+
+.ex-note {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--dnt-border);
+  background: var(--dnt-accent-subtle);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-xs);
+}
+
+.ex-link {
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--dnt-accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.ex-link:hover {
+  text-decoration: underline;
+}
+
+.ex-link:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+}
+
+.ex-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+}
+
+.ex-legend-hint {
+  margin-left: auto;
+}
+
+.ex-ladder {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-xs);
+}
+
+.ex-ladder span {
+  padding: 0 5px;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-subtle);
+}
+
+.ex-ladder span.cur {
+  background: var(--dnt-status-warning-solid);
+  color: var(--dnt-on-accent);
+  font-weight: 600;
+}
+
+.ex-say {
+  margin: 6px 0 0;
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-xs);
+  line-height: 1.5;
+}
+
+.ex-extra {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+  font-size: var(--dnt-text-xs);
+  line-height: 1.5;
+}
+
+.ex-extra code {
+  flex: none;
+  padding: 0 4px;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg);
+  font-family: var(--font-mono);
+}
+
+.ex-extra code.warn {
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+}
+
+.ex-extra span {
+  color: var(--dnt-fg-muted);
+}
+
+/* JSON view colours. */
+.ex-jk {
+  color: var(--dnt-accent);
+}
+
+.ex-js {
+  color: var(--dnt-status-success-fg);
+}
+
+.ex-jn {
+  color: var(--dnt-status-warning-fg);
 }
 
 .ex-search {

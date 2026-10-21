@@ -620,7 +620,9 @@ describe(`UX audit tour (${P})`, () => {
       await browser.pause(300);
       await shot('explain-menu');
       await browser.keys(['Escape']);
-      await $("//div[@data-testid='explain-view']//button[.='Raw']").click();
+      await $("//div[@data-testid='explain-view']//button[@role='tab'][.='Tree']").click();
+      await shot('explain-mysql-tree');
+      await $("//div[@data-testid='explain-view']//button[@role='tab'][.='JSON']").click();
       await shot('explain-mysql-raw');
     });
     await step('history', async () => {

@@ -1,7 +1,7 @@
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Dialect, PlanNode, PlanTree, PlanView, ServerVariant } from '../../bindings';
+import type { Dialect, PlanNode, PlanTable, PlanTree, PlanView, ServerVariant } from '../../bindings';
 import { useConnections } from '../../store/connections';
 import { emptyRun, useQueryRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
@@ -70,6 +70,16 @@ const LOOPED: PlanTree = {
     ],
   },
   raw: '',
+};
+
+/** The classic EXPLAIN of a three-table join (MySQL 8). */
+const CLASSIC: PlanTable = {
+  columns: ['id', 'select_type', 'table', 'partitions', 'type', 'possible_keys', 'key', 'key_len', 'ref', 'rows', 'filtered', 'Extra'],
+  rows: [
+    ['1', 'SIMPLE', 'e', null, 'ALL', 'idx_student', null, null, null, '10302', '33.33', 'Using where; Using temporary; Using filesort'],
+    ['1', 'SIMPLE', 's', null, 'eq_ref', 'PRIMARY', 'PRIMARY', '4', 'lms.e.student_id', '1', '100.00', null],
+    ['1', 'SIMPLE', 'c', null, 'ref', 'PRIMARY,idx_status', 'PRIMARY', '4', 'lms.e.course_id', '1', '50.00', 'Using where'],
+  ],
 };
 
 beforeEach(() => {
@@ -167,7 +177,7 @@ describe('ExplainView', () => {
   it('switches_to_the_grid_and_sorts_by_cost', async () => {
     const user = userEvent.setup();
     show({ explain: TREE });
-    await user.click(screen.getByRole('button', { name: 'Grid' }));
+    await user.click(screen.getByRole('tab', { name: 'Grid' }));
     expect(screen.getByTestId('explain-grid')).toBeInTheDocument();
     expect(screen.queryByTestId('explain-node')).not.toBeInTheDocument();
 
@@ -187,7 +197,7 @@ describe('ExplainView', () => {
   it('grid_filter_shows_matches_only_and_hash_restores_plan_order', async () => {
     const user = userEvent.setup();
     show({ explain: TREE });
-    await user.click(screen.getByRole('button', { name: 'Grid' }));
+    await user.click(screen.getByRole('tab', { name: 'Grid' }));
     const rows = () => screen.getAllByTestId('explain-row').map((r) => r.textContent);
 
     const cost = screen.getByRole('columnheader', { name: /Cost/ });
@@ -216,11 +226,11 @@ describe('ExplainView', () => {
     await user.keyboard('{Enter}');
     expect(screen.getByTestId('explain-details')).toHaveTextContent('Index Scan');
 
-    await user.click(screen.getByRole('button', { name: 'Grid' }));
+    await user.click(screen.getByRole('tab', { name: 'Grid' }));
     expect(screen.getAllByTestId('explain-row').find((r) => r.classList.contains('sel'))).toHaveTextContent(
       'Index Scan',
     );
-    await user.click(screen.getByRole('button', { name: 'Tree' }));
+    await user.click(screen.getByRole('tab', { name: 'Tree' }));
     expect(screen.queryByText('Filter')).not.toBeInTheDocument();
     expect(screen.getByTestId('explain-details')).toHaveTextContent('Index Scan');
   });
@@ -282,15 +292,88 @@ describe('ExplainView', () => {
     expect(screen.getByTestId('explain-details')).toHaveTextContent('Index Scan');
   });
 
-  it('raw_toggle_shows_raw', async () => {
+  it('json_tab_shows_the_plan_indented', async () => {
     const user = userEvent.setup();
     show({ explain: TREE });
     expect(screen.queryByTestId('explain-raw')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Raw' }));
-    expect(screen.getByTestId('explain-raw')).toHaveTextContent('raw-json');
+    await user.click(screen.getByRole('tab', { name: 'JSON' }));
+    expect(screen.getByRole('tab', { name: 'JSON' })).toHaveAttribute('aria-selected', 'true');
+    const raw = screen.getByTestId('explain-raw');
+    expect(raw.textContent).toBe('[\n  {\n    "Plan": "raw-json"\n  }\n]');
+    expect(within(raw).getByText('"Plan"')).toHaveClass('ex-jk');
     expect(screen.queryByTestId('explain-node')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Raw' }));
+    await user.click(screen.getByRole('tab', { name: 'Tree' }));
     expect(screen.getAllByTestId('explain-node').length).toBeGreaterThan(0);
+  });
+
+  it('a_text_plan_has_a_raw_tab_shown_as_it_came', async () => {
+    const user = userEvent.setup();
+    show({ explain: { ...TREE, raw: '-> Sort: a  (cost=1 rows=1)' } });
+    expect(screen.queryByRole('tab', { name: 'JSON' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: 'Raw' }));
+    expect(screen.getByTestId('explain-raw').textContent).toBe('-> Sort: a  (cost=1 rows=1)');
+  });
+
+  it('a_mysql_plan_opens_on_the_classic_grid', () => {
+    show({ explain: { ...TREE, classic: CLASSIC } });
+    expect(screen.getByRole('tab', { name: 'Grid' })).toHaveAttribute('aria-selected', 'true');
+    const table = screen.getByTestId('explain-table');
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
+      '#',
+      ...CLASSIC.columns,
+    ]);
+    const rows = within(table).getAllByTestId('explain-classic-row');
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0]!).getAllByText('(Null)').length).toBe(4);
+    expect(within(rows[0]!).getByText('ALL')).toHaveAttribute('title', 'Full table scan');
+    expect(within(rows[1]!).getByText('eq_ref')).toHaveClass('ex-good');
+    // The node views' overview and footer are not part of the grid.
+    expect(screen.queryByTestId('explain-overview')).not.toBeInTheDocument();
+    expect(screen.getByTestId('explain-summary')).toHaveTextContent('3 tables');
+    expect(screen.getByTestId('explain-summary')).toHaveTextContent('1 full table scan');
+    expect(screen.getByTestId('explain-summary')).toHaveTextContent('Using filesort');
+  });
+
+  it('the_inspector_reads_the_selected_row', async () => {
+    const user = userEvent.setup();
+    show({ explain: { ...TREE, classic: CLASSIC } });
+    const details = () => screen.getByTestId('explain-details');
+    expect(details()).toHaveTextContent('Row 1 · e');
+    expect(details()).toHaveTextContent('Full table scan. MySQL reads every row of the table, about 10,302 rows.');
+    expect(details()).toHaveTextContent('An index exists (idx_student) but the optimizer did not use it.');
+    expect(details()).toHaveTextContent('≈ 3,434');
+    expect(details()).toHaveTextContent('The ORDER BY sorts rows without an index.');
+
+    await user.click(within(screen.getByTestId('explain-table')).getAllByTestId('explain-classic-row')[1]!);
+    expect(details()).toHaveTextContent('Row 2 · s');
+    expect(details()).toHaveTextContent('Uses PRIMARY (4 bytes of the key), matched on lms.e.student_id.');
+  });
+
+  it('the_classic_grid_filters_rows', async () => {
+    const user = userEvent.setup();
+    show({ explain: { ...TREE, classic: CLASSIC } });
+    await user.type(screen.getByRole('textbox', { name: 'Filter plan nodes' }), 'eq_ref');
+    expect(screen.getAllByTestId('explain-classic-row')).toHaveLength(1);
+  });
+
+  it('after_analyze_the_grid_says_it_shows_estimates_and_opens_the_tree', async () => {
+    const user = userEvent.setup();
+    const tab = tabOn('MySql8');
+    show({ explain: { ...LOOPED, classic: CLASSIC } }, tab);
+    expect(screen.getByRole('note')).toHaveTextContent('Analyzed in 419 ms. The grid shows the optimizer’s estimates.');
+    expect(screen.getByRole('img', { name: 'has actual rows and time' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Open Tree for actual rows and time' }));
+    expect(screen.getByRole('tab', { name: /^Tree/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getAllByTestId('explain-node').length).toBeGreaterThan(0);
+  });
+
+  it('postgres_opens_on_the_tree_and_its_grid_lists_nodes', async () => {
+    const user = userEvent.setup();
+    show({ explain: TREE });
+    expect(screen.getByRole('tab', { name: 'Tree' })).toHaveAttribute('aria-selected', 'true');
+    await user.click(screen.getByRole('tab', { name: 'Grid' }));
+    expect(screen.getByTestId('explain-grid')).toBeInTheDocument();
+    expect(screen.queryByTestId('explain-table')).not.toBeInTheDocument();
   });
 
   it('copies_the_raw_plan', async () => {
@@ -314,8 +397,8 @@ describe('ExplainView', () => {
         raw: 'raw-table',
       },
     });
-    expect(screen.getByRole('button', { name: 'Grid' })).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.queryByRole('button', { name: 'Tree' })).not.toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Grid' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByRole('tab', { name: 'Tree' })).not.toBeInTheDocument();
 
     const table = screen.getByTestId('explain-table');
     expect(within(table).getAllByRole('columnheader').map((h) => h.textContent)).toEqual([
@@ -328,9 +411,9 @@ describe('ExplainView', () => {
     expect(within(table).getByText('orders')).toBeInTheDocument();
     expect(screen.queryByTestId('explain-node')).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Raw' }));
+    await user.click(screen.getByRole('tab', { name: 'Raw' }));
     expect(screen.getByTestId('explain-raw')).toHaveTextContent('raw-table');
-    await user.click(screen.getByRole('button', { name: 'Raw' }));
+    await user.click(screen.getByRole('tab', { name: 'Grid' }));
     expect(screen.getByTestId('explain-table')).toBeInTheDocument();
   });
 

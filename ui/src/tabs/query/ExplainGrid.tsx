@@ -1,13 +1,13 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { PlanNode, PlanTree } from '../../bindings';
-import { fmtInt, fmtMs, fmtNum, flattenPlan, iconOf, matchesFilter, rowsRatio, slowHints, type FlatNode, type Insight } from './explainModel';
+import { useEffect, useMemo, useState } from 'react';
+import type { PlanNode } from '../../bindings';
+import { fmtInt, fmtMs, fmtNum, flattenPlan, iconOf, matchesFilter, rowsRatio, type FlatNode, type Insight } from './explainModel';
 import { Highlight } from './ExplainHighlight';
 
 type SortKey = 'plan' | 'cost' | 'self' | 'est' | 'actual' | 'ratio' | 'time' | 'loops';
 type Sort = { key: SortKey; dir: 'asc' | 'desc' };
 
 interface Props {
-  plan: PlanTree;
+  root: PlanNode;
   costs: Map<PlanNode, number | null>;
   warnings: Map<PlanNode, Insight[]>;
   hot: PlanNode | null;
@@ -49,18 +49,6 @@ const valueOf = (f: FlatNode & { order: number }, key: SortKey, costs: Map<PlanN
   }
 };
 
-/** A placeholder root only used so the hooks above run before the table branch returns. */
-const emptyRoot: PlanNode = {
-  label: '',
-  detail: null,
-  est_cost: null,
-  est_rows: null,
-  actual_rows: null,
-  actual_ms: null,
-  loops: null,
-  children: [],
-};
-
 function SortHeader({
   k,
   label,
@@ -91,34 +79,15 @@ function SortHeader({
   );
 }
 
-/** A table-plan cell with its known-slow parts tinted (MySQL 5.7: `ALL`, filesort, temporary). */
-function SlowValue({ column, value }: { column: string; value: string }) {
-  const hints = slowHints(column, value);
-  if (hints.length === 0) return <>{value}</>;
-  const parts: ReactNode[] = [];
-  let from = 0;
-  for (const h of hints) {
-    if (h.start > from) parts.push(value.slice(from, h.start));
-    parts.push(
-      <span key={h.start} className="ex-slow" data-testid="explain-slow" title={h.reason}>
-        {value.slice(h.start, h.end)}
-      </span>,
-    );
-    from = h.end;
-  }
-  if (from < value.length) parts.push(value.slice(from));
-  return <>{parts}</>;
-}
-
 /**
- * The flat grid: one row per node, tree guides in the first column, sortable numeric columns.
- * For MySQL 5.7 table plans it renders the engine's own columns instead.
+ * The node grid (PostgreSQL, or a MySQL / MariaDB plan without its classic table): one row per
+ * node, tree guides in the first column, sortable numeric columns.
  */
-export function ExplainGrid({ plan, costs, warnings, hot, selected, filter, onSelect }: Props) {
+export function ExplainGrid({ root, costs, warnings, hot, selected, filter, onSelect }: Props) {
   const [sort, setSort] = useState<Sort>({ key: 'plan', dir: 'asc' });
   useEffect(() => {
     setSort({ key: 'plan', dir: 'asc' });
-  }, [plan]);
+  }, [root]);
 
   const onSort = (key: SortKey) => {
     setSort((prev) =>
@@ -130,7 +99,7 @@ export function ExplainGrid({ plan, costs, warnings, hot, selected, filter, onSe
     );
   };
 
-  const flat = useMemo(() => flattenPlan(plan.kind === 'tree' ? plan.root : emptyRoot), [plan]);
+  const flat = useMemo(() => flattenPlan(root), [root]);
   const ordered = useMemo(() => flat.map((f, order) => ({ ...f, order })), [flat]);
   const rows = useMemo(() => {
     const q = filter.trim();
@@ -147,45 +116,6 @@ export function ExplainGrid({ plan, costs, warnings, hot, selected, filter, onSe
     });
     return sorted;
   }, [ordered, filter, sort, costs]);
-
-  if (plan.kind === 'table') {
-    const q = filter.trim().toLowerCase();
-    const tableRows = q.length === 0 ? plan.rows : plan.rows.filter((r) => r.some((v) => v.toLowerCase().includes(q)));
-    return (
-      <div className="ex-scroll">
-        {tableRows.length === 0 ? (
-          <div className="ex-empty">No rows match “{filter.trim()}”.</div>
-        ) : (
-          <table className="ex-grid" data-testid="explain-table">
-            <thead>
-              <tr>
-                <th scope="col" className="ex-gutter">
-                  #
-                </th>
-                {plan.columns.map((c, i) => (
-                  <th scope="col" key={i}>
-                    {c}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {tableRows.map((r, i) => (
-                <tr key={i}>
-                  <td className="ex-gutter">{i + 1}</td>
-                  {r.map((v, j) => (
-                    <td key={j} title={v}>
-                      <SlowValue column={plan.columns[j] ?? ''} value={v} />
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    );
-  }
 
   return (
     <div className="ex-scroll">

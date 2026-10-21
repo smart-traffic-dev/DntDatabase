@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { PlanNode } from '../../bindings';
+import type { PlanNode, PlanTree } from '../../bindings';
 import { SearchIcon } from '../../components/icons';
 import { emptyRun, useQueryRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
 import { explainQuery } from '../../store/runQuery';
 import { showToast } from '../../store/toasts';
 import { hottestNode, selfCosts } from './explainTree';
+import { classicOf } from './classicPlan';
 import {
   ancestorsOf,
   fmtMs,
@@ -17,17 +18,23 @@ import {
   selfCostTotal,
   selfShare,
 } from './explainModel';
+import { ExplainClassic } from './ExplainClassic';
 import { ExplainDetails } from './ExplainDetails';
 import { ExplainGrid } from './ExplainGrid';
+import { ExplainJson, isJson } from './ExplainJson';
 import { AnalyzeButton, ExplainOverview } from './ExplainOverview';
 import { PlanTreeView } from './PlanTreeView';
 import { useRunGate } from './runGate';
 
-type View = 'tree' | 'grid' | 'raw';
+type View = 'grid' | 'tree' | 'json';
+
+/** MySQL / MariaDB open on the classic grid, PostgreSQL on the tree. */
+const defaultView = (plan: PlanTree | null): View => (classicOf(plan) !== null ? 'grid' : 'tree');
 
 /**
- * The Explain panel of a query tab: the plan tree, the flat grid, the engine's raw output, and
- * the refusals. Selection, filter, collapse and the view live here; the views stay presentational.
+ * The Explain panel of a query tab: Grid (the classic EXPLAIN table, or the node grid), Tree,
+ * the engine's JSON, and the refusals. Selection, filter, collapse and the view live here; the
+ * views stay presentational.
  */
 export function ExplainView({ tabId }: { tabId: string }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
@@ -37,6 +44,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
   const plan = run.explain;
   const root = plan?.kind === 'tree' ? plan.root : null;
   const isTable = plan?.kind === 'table';
+  const classic = useMemo(() => classicOf(plan), [plan]);
 
   const costs = useMemo(
     () => (root === null ? new Map<PlanNode, number | null>() : selfCosts(root)),
@@ -46,20 +54,24 @@ export function ExplainView({ tabId }: { tabId: string }) {
   const warnings = useMemo(() => (root === null ? new Map() : planWarnings(root)), [root]);
   const shareTotal = useMemo(() => (root === null ? null : selfCostTotal(costs)), [root, costs]);
 
-  const [view, setView] = useState<View>('tree');
+  const [view, setView] = useState<View>(() => defaultView(plan));
   const [selected, setSelected] = useState<PlanNode | null>(null);
+  const [row, setRow] = useState(0);
   const [collapsed, setCollapsed] = useState<Set<PlanNode>>(new Set());
   const [filter, setFilter] = useState('');
 
-  // A new plan starts clean: default view, the hottest node selected, everything expanded.
+  // A new plan starts clean: default view, the hottest node and the first row selected,
+  // everything expanded.
   useEffect(() => {
-    setView(plan?.kind === 'table' ? 'grid' : 'tree');
+    setView(defaultView(plan));
     setSelected(null);
+    setRow(0);
     setCollapsed(new Set());
     setFilter('');
   }, [plan]);
 
   const mode: View = isTable && view === 'tree' ? 'grid' : view;
+  const nodeView = root !== null && (mode === 'tree' || (mode === 'grid' && classic === null));
   const current = selected !== null && costs.has(selected) ? selected : (hot ?? root);
 
   const select = (node: PlanNode) => {
@@ -106,7 +118,16 @@ export function ExplainView({ tabId }: { tabId: string }) {
   const share = current === null ? null : selfShare(current, costs, shareTotal);
   const planMs = root === null ? null : nodeTotals(root, perLoop).ms;
   const currentMs = current === null ? null : nodeTotals(current, perLoop).ms;
+  const analyzedMs = root !== null && root.actual_ms !== null ? planMs : null;
   const explain = (analyze: boolean) => void explainQuery(tabId, analyze);
+
+  const views: { id: View; label: string }[] = !plan
+    ? []
+    : [
+        { id: 'grid', label: 'Grid' },
+        ...(isTable ? [] : [{ id: 'tree' as const, label: 'Tree' }]),
+        { id: 'json', label: isJson(plan.raw) ? 'JSON' : 'Raw' },
+      ];
 
   let body;
   if (run.explainError) {
@@ -134,31 +155,26 @@ export function ExplainView({ tabId }: { tabId: string }) {
         <p className="ex-start-note">Analyze runs the statement; on Production it asks first.</p>
       </div>
     );
-  } else if (mode === 'raw') {
+  } else if (mode === 'json') {
+    body = <ExplainJson raw={plan.raw} />;
+  } else if (mode === 'grid' && classic !== null) {
     body = (
-      <pre className="ex-raw" data-testid="explain-raw">
-        {plan.raw}
-      </pre>
-    );
-  } else if (plan.kind === 'table') {
-    body = (
-      <ExplainGrid
-        plan={plan}
-        costs={costs}
-        warnings={warnings}
-        hot={hot}
-        selected={null}
+      <ExplainClassic
+        table={classic}
         filter={filter}
-        onSelect={() => undefined}
+        selected={row}
+        analyzedMs={analyzedMs}
+        onSelect={setRow}
+        onOpenTree={() => setView('tree')}
       />
     );
-  } else {
+  } else if (root !== null) {
     body = (
       <div className="ex-main">
         <div className="ex-pane">
           {mode === 'tree' ? (
             <PlanTreeView
-              root={plan.root}
+              root={root}
               costs={costs}
               warnings={warnings}
               hot={hot}
@@ -172,7 +188,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
             />
           ) : (
             <ExplainGrid
-              plan={plan}
+              root={root}
               costs={costs}
               warnings={warnings}
               hot={hot}
@@ -200,42 +216,31 @@ export function ExplainView({ tabId }: { tabId: string }) {
     <div className="ex-view" data-testid="explain-view">
       {plan && !run.explainError && (
         <div className="ex-bar" role="toolbar" aria-label="Explain controls">
-          <div className="ex-views" role="group" aria-label="Plan view">
-            {!isTable && (
+          <div className="ex-vtabs" role="tablist" aria-label="Plan view">
+            {views.map((v) => (
               <button
+                key={v.id}
                 type="button"
-                className="ex-view-btn"
-                aria-pressed={mode === 'tree'}
-                onClick={() => setView('tree')}
+                role="tab"
+                className="ex-vtab"
+                aria-selected={mode === v.id}
+                onClick={() => setView(v.id)}
               >
-                Tree
+                {v.label}
+                {v.id === 'tree' && analyzedMs !== null && classic !== null && (
+                  <span className="ex-vtab-dot" role="img" aria-label="has actual rows and time" />
+                )}
               </button>
-            )}
-            <button
-              type="button"
-              className="ex-view-btn"
-              aria-pressed={mode === 'grid'}
-              onClick={() => setView('grid')}
-            >
-              Grid
-            </button>
-            <button
-              type="button"
-              className="ex-view-btn"
-              aria-pressed={mode === 'raw'}
-              onClick={() => setView(mode === 'raw' ? (isTable ? 'grid' : 'tree') : 'raw')}
-            >
-              Raw
-            </button>
+            ))}
           </div>
 
-          {mode !== 'raw' && (
+          {mode !== 'json' && (
             <div className="ex-search">
               <SearchIcon />
               <input
                 type="text"
                 value={filter}
-                placeholder="Filter nodes…"
+                placeholder={mode === 'grid' && classic !== null ? 'Filter rows…' : 'Filter nodes…'}
                 aria-label="Filter plan nodes"
                 onChange={(e) => setFilter(e.target.value)}
               />
@@ -282,7 +287,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
         </div>
       )}
 
-      {root !== null && mode !== 'raw' && (
+      {root !== null && nodeView && (
         <ExplainOverview
           root={root}
           costs={costs}
@@ -297,7 +302,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
 
       <div className="ex-body">{body}</div>
 
-      {root !== null && mode !== 'raw' && current !== null && (
+      {root !== null && nodeView && current !== null && (
         <div className="ex-foot" data-testid="explain-foot">
           <span className="ex-foot-label">{current.label}</span>
           <span>

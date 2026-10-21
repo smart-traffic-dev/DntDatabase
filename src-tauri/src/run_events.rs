@@ -16,7 +16,8 @@ use dnt_core::sql::{session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    parse_plan, redact, ExplainFormat, PlanTree, PlannedStmt, RunSink, StmtKindLabel, StopReason,
+    parse_plan, redact, ExplainFormat, PlanTable, PlanTree, PlannedStmt, RunSink, StmtKindLabel,
+    StopReason,
 };
 use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::ConnectionRepo;
@@ -238,6 +239,8 @@ struct ExplainBuf {
     format: ExplainFormat,
     columns: Vec<String>,
     rows: Vec<Vec<Value>>,
+    /// The classic table run before the plan, attached to a tree plan.
+    classic: Option<PlanTable>,
 }
 
 /// The statement being run.
@@ -334,7 +337,12 @@ fn millis(d: Duration) -> u64 {
 /// what the user can do.
 fn explain_event(index: u32, buf: &ExplainBuf) -> RunEvent {
     match parse_plan(buf.format, &buf.columns, &buf.rows) {
-        Ok(plan) => RunEvent::Explain { index, plan },
+        Ok(mut plan) => {
+            if let PlanTree::Tree { classic, .. } = &mut plan {
+                classic.clone_from(&buf.classic);
+            }
+            RunEvent::Explain { index, plan }
+        }
         Err(e) => {
             let mut error = AppError::from(e);
             error.message = match buf.format {
@@ -373,12 +381,20 @@ impl ChannelSink {
                 format,
                 columns: Vec::new(),
                 rows: Vec::new(),
+                classic: None,
             }),
             ddl_ok: false,
             use_db: None,
             tx_now: TxState::Idle,
             lost_in_tx: false,
             lost_committing: false,
+        }
+    }
+
+    /// Explain mode: the classic table to attach to the plan (see `classic_explain`).
+    pub(crate) fn set_classic(&mut self, table: Option<PlanTable>) {
+        if let Some(ex) = &mut self.explain {
+            ex.classic = table;
         }
     }
 

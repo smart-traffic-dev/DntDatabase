@@ -1,8 +1,47 @@
 # Explain panel redesign — design
 
 Date: 2026-10-21
-Status: approved (user: “Okie chốt, làm đi”)
-Scope: `ui/src/tabs/query` only. No backend or binding changes.
+Status: approved (user: “Okie chốt, làm đi”); v2 approved (“Build Explain v2 as drawn”, canvas
+boards 29–30).
+Scope: `ui/src/tabs/query`; v2 adds the classic EXPLAIN on the backend (`dnt-query` explain,
+`query_sessions` run, `PlanTree.classic` binding).
+
+## v2: Navicat-style views
+
+v1's tree read as hard to follow next to Navicat, whose MySQL Explain opens on the classic
+EXPLAIN table everyone knows. v2 keeps everything below and changes the views:
+
+- **View bar `Grid | Tree | JSON`**: flat tabs (`role="tab"`, `aria-selected`), styled like the
+  result tabs (flat active tab, no underline: the token rules forbid inset stripes). The third
+  tab is `JSON` when `raw` parses as JSON, else `Raw` (MySQL `EXPLAIN ANALYZE` text, 5.7's
+  table). MySQL 5.7 has `Grid | Raw`. MySQL / MariaDB open on Grid, PostgreSQL on Tree.
+- **Classic table (backend)**: on MySQL 8 and MariaDB, `explain_sql` also returns `classic` =
+  `EXPLAIN <stmt>`. The Explain run executes it on the tab's session *before* the plan's own
+  statement (plain EXPLAIN never executes the statement, also beside Analyze), with a 10 s
+  limit and the run's stop signal; its rows become `PlanTree::Tree.classic: PlanTable`
+  (`columns`, `rows` of `string | null`). It streams no events and writes no history. Any
+  failure leaves `classic: null` (logged at debug); a lost connection is reported by the plan's
+  own statement. MySQL 5.7 (already a table) and PostgreSQL (no such table) get none.
+- **Grid with a classic table** (5.7's table plan reads the same way, its `NULL` text as null):
+  - summary chips: tables, rows read on the first table, full scans, slow Extra phrases;
+  - the server's columns as they are (no upper-casing), a `#` gutter, `(Null)` in grey italic,
+    `id` / `key_len` / `rows` / `filtered` right-aligned; `type` tinted good
+    (system, const, eq_ref) or slow (index, ALL); Extra's slow phrases tinted (v1 rules);
+  - a legend with the access-type ladder `system · const · eq_ref · ref · range · index · ALL`;
+  - row click / Enter selects (first row by default); the filter matches any cell;
+  - the inspector reads the selected row in plain words: Access (ladder with the row's type
+    marked + one sentence), Index (possible keys, key used, a sentence on whether an index
+    served it), Rows (examined, and passing = rows × filtered %), Extra (one line per phrase);
+  - narrow (< 720 px): the inspector hides and the footer shows the row and its access sentence;
+  - after Analyze: a note “Analyzed in X ms. The grid shows the optimizer’s estimates.” with a
+    link to Tree, and a dot on the Tree tab.
+- **Grid without one** (PostgreSQL, or the classic explain failed): v1's node grid, with the
+  overview.
+- **Tree**: v1's overview, tree and inspector.
+- **JSON**: indented (2 spaces) and coloured: keys accent, strings success, numbers and
+  literals warning colour; other text as it came. Copy still copies `raw`.
+- Model: `classicPlan.ts` (`classicOf`, `explainRow`, `extraItems`, `accessTone`,
+  `classicSummary`, `passRows`); views: `ExplainClassic.tsx`, `ExplainJson.tsx`.
 
 ## Goal
 
