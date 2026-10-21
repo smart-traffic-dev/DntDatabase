@@ -102,9 +102,9 @@ describe('window shortcuts', () => {
 
   it('Ctrl+Shift+P / Ctrl+P open the palette in commands / objects mode', () => {
     ctrl('P', { shiftKey: true });
-    expect(usePalette.getState()).toMatchObject({ open: true, initial: '>' });
+    expect(usePalette.getState()).toMatchObject({ open: true, mode: 'commands' });
     ctrl('p');
-    expect(usePalette.getState()).toMatchObject({ open: true, initial: '' });
+    expect(usePalette.getState()).toMatchObject({ open: true, mode: 'objects' });
   });
 
   it('zoom keys change the font scale and are still prevented from zooming the browser', () => {

@@ -70,14 +70,14 @@ describe('TitleBar', () => {
   });
 
   it('the search button opens the palette in objects mode', async () => {
-    usePalette.setState({ open: false, initial: '>' });
+    usePalette.setState({ open: false, mode: 'commands' });
     render(<TitleBar />);
     await flush();
     const search = screen.getByRole('button', { name: 'Search tables, views, commands' });
     expect(search).toHaveTextContent('Search tables, views, commands…');
     expect(search).toHaveTextContent('Ctrl P');
     fireEvent.click(search);
-    expect(usePalette.getState()).toMatchObject({ open: true, initial: '' });
+    expect(usePalette.getState()).toMatchObject({ open: true, mode: 'objects' });
   });
 
   it('the layout button picks an editor layout', async () => {

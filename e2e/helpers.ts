@@ -47,7 +47,7 @@ export async function createConnection(o: ConnOpts) {
   await byId('conn-port').setValue(String(o.port));
   await byId('conn-user').setValue(o.user);
   await byId('conn-password').setValue(o.password);
-  if (o.env) await $('#cd-env').selectByAttribute('value', o.env);
+  if (o.env) await byId(`conn-env-${o.env}`).click();
   await byId('conn-save').click();
 }
 

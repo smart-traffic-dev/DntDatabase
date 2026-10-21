@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { PlanView } from '../bindings';
@@ -27,7 +27,8 @@ describe('RunBlockedDialog', () => {
     expect(dialog).toHaveTextContent('reports is read-only. These statements were not run:');
     expect(dialog).toHaveTextContent('DELETE FROM t');
     expect(dialog).not.toHaveTextContent('SELECT 1');
-    expect(screen.getAllByRole('button')).toHaveLength(1);
+    // The footer offers Close only (the header × closes too).
+    expect(within(dialog.querySelector('.modal-foot') as HTMLElement).getAllByRole('button')).toHaveLength(1);
     await userEvent.setup().click(screen.getByRole('button', { name: 'Close' }));
     expect(onClose).toHaveBeenCalled();
     expect(callsOf('query_run')).toEqual([]);

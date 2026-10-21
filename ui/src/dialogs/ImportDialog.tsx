@@ -134,7 +134,7 @@ export function ImportDialog({ onClose }: Props) {
       }
       const r = await api.applyImport(path, used, policy);
       // The import happened on the backend: always surface it, even if the dialog went away.
-      useDialogs.getState().setNotice(`Imported ${r.imported} · Overwritten ${r.overwritten} · Skipped ${r.skipped}`);
+      useDialogs.getState().setNotice(`Imported ${r.imported} · Overwritten ${r.overwritten} · Skipped ${r.skipped}`, 'success');
       // The backend closed the replaced connections: drop what the UI still shows of them.
       for (const id of r.overwritten_ids) {
         useTree.getState().forgetConnection(id);

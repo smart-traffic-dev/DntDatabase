@@ -190,16 +190,16 @@ describe('DialogHost', () => {
       render(<DialogHost />);
       act(() => useDialogs.getState().setNotice('Imported 3 connections'));
       expect(screen.getByRole('status')).toHaveTextContent('Imported 3 connections');
-      act(() => vi.advanceTimersByTime(5000));
-      // The same text again: a fresh 6 s, not the 1 s left of the first one.
+      act(() => vi.advanceTimersByTime(3000));
+      // The same text again: a fresh 4 s, not the 1 s left of the first one.
       act(() => useDialogs.getState().setNotice('Imported 3 connections'));
-      act(() => vi.advanceTimersByTime(5000));
+      act(() => vi.advanceTimersByTime(3000));
       expect(screen.getByRole('status')).toHaveTextContent('Imported 3 connections');
       act(() => vi.advanceTimersByTime(1500));
       expect(screen.queryByRole('status')).toBeNull();
 
       act(() => useDialogs.getState().setNotice('Saved'));
-      fireEvent.click(screen.getByRole('button', { name: 'Dismiss notice' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
       expect(screen.queryByRole('status')).toBeNull();
       expect(useDialogs.getState().notice).toBeNull();
     } finally {

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
 import type { ExportRequest } from '../dialogs/resultExport';
+import { useToasts } from './toasts';
 
 /** A prompt the connection tree needs answered before it can open a connection. */
 export interface PendingPrompt {
@@ -75,13 +76,15 @@ interface DialogsState {
   /** Set when opening a connection needs a password (`PasswordPrompt`) or host-key trust (`HostKeyDialog`). */
   prompt: PendingPrompt | null;
   request: UiRequest | null;
-  /** A short status message shown as a toast (e.g. the import summary). */
+  /** The latest short status message shown as a toast (e.g. the import summary); null once it is gone. */
   notice: string | null;
-  /** Bumped by every `setNotice`, so the same text shown again restarts the toast's timer. */
-  noticeSeq: number;
   /** The last `internal` error of any command: shown as a toast with "Open log folder". */
   internalError: AppError | null;
-  setNotice(notice: string | null): void;
+  /**
+   * Shows `notice` on the toast stack (`info` by default: hides after 4 s; `error` stays until
+   * dismissed). The same text again restarts its timer; `null` hides the current notice.
+   */
+  setNotice(notice: string | null, kind?: 'info' | 'success' | 'error'): void;
   showPrompt(prompt: PendingPrompt): void;
   closePrompt(): void;
   requestDialog(request: UiRequest): void;
@@ -90,16 +93,34 @@ interface DialogsState {
   dismissInternal(): void;
 }
 
-export const useDialogs = create<DialogsState>()((set) => ({
+const noticeKey = (text: string) => `notice:${text}`;
+
+export const useDialogs = create<DialogsState>()((set, get) => ({
   question: null,
   ask: (question) => set({ question }),
   answer: () => set({ question: null }),
   prompt: null,
   request: null,
   notice: null,
-  noticeSeq: 0,
   internalError: null,
-  setNotice: (notice) => set((s) => ({ notice, noticeSeq: s.noticeSeq + 1 })),
+  setNotice: (notice, kind = 'info') => {
+    const current = get().notice;
+    if (notice === null) {
+      set({ notice: null });
+      if (current !== null) useToasts.getState().dismissKey(noticeKey(current));
+      return;
+    }
+    set({ notice });
+    useToasts.getState().show({
+      kind,
+      title: notice,
+      key: noticeKey(notice),
+      // Timed out or dismissed: the notice is gone (unless a newer one took its place).
+      onDismiss: () => {
+        if (get().notice === notice) set({ notice: null });
+      },
+    });
+  },
   showPrompt: (prompt) => set({ prompt }),
   closePrompt: () => set({ prompt: null }),
   requestDialog: (request) => set({ request }),

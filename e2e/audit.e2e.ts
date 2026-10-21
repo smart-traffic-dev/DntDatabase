@@ -78,7 +78,7 @@ async function fillGeneral(c: Conn) {
   await byId('conn-port').setValue(String(c.port));
   await byId('conn-user').setValue(c.user);
   if (c.password !== undefined) await byId('conn-password').setValue(c.password);
-  if (c.env) await $('#cd-env').selectByAttribute('value', c.env);
+  if (c.env) await byId(`conn-env-${c.env}`).click();
   if (c.group) await $('#cd-group').selectByVisibleText(c.group);
   if (c.readOnly) await $("//label[contains(.,'Read-only connection')]/input").click();
   if (c.savePassword === false) await $("//label[contains(.,'Save password')]/input").click();

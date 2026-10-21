@@ -51,6 +51,13 @@ describe('RunConfirmDialog typed names, estimates and implicit commits', () => {
     expect(onDone).toHaveBeenCalledWith(true, ['orders', 'shop']);
   });
 
+  it('Enter in a name box is the safe default: it cancels', async () => {
+    const onDone = vi.fn();
+    render(<RunConfirmDialog plan={planOf([stmt(0, 'TRUNCATE orders', { confirm_name: 'orders' })])} onDone={onDone} />);
+    await userEvent.setup().type(screen.getByLabelText('Type orders to confirm'), 'orders{Enter}');
+    expect(onDone).toHaveBeenCalledWith(false);
+  });
+
   it('a_plan_without_names_has_no_boxes_and_runs_at_once', async () => {
     const onDone = vi.fn();
     render(<RunConfirmDialog plan={planOf([stmt(0, 'UPDATE t SET a = 1')])} onDone={onDone} />);
