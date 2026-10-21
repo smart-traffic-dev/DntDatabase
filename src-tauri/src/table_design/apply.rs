@@ -13,7 +13,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
 use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_schema::{Impact, TableDef};
@@ -105,12 +105,31 @@ async fn count_rows(
     Ok(sink.0)
 }
 
-/// Runs every `count_sql` (each must classify as a read) in one read-only transaction
-/// (PostgreSQL: `standard_conforming_strings` on and `statement_timeout` = `limit`).
-/// Each count is bounded by `limit` on the server too (ruling T10-1): the driver
-/// cancels it when its statement timeout expires, and if it has not returned within
-/// `limit + grace` the session's cancel handle is fired and the session is not used
-/// again (the caller closes it). A count that fails or times out is "not counted".
+/// The statement that bounds every later `SELECT` of the session on the server to
+/// `limit`: MySQL 5.7.8+ `max_execution_time` (milliseconds), MariaDB 10.1+
+/// `max_statement_time` (seconds); `None` on PostgreSQL (it uses `statement_timeout`)
+/// and on older servers.
+pub(super) fn mysql_count_bound(server: &ServerInfo, limit: Duration) -> Option<String> {
+    match server.variant {
+        ServerVariant::MariaDb if server.version >= (10, 1, 0) => Some(format!(
+            "SET SESSION max_statement_time = {:.3}",
+            limit.as_secs_f64()
+        )),
+        ServerVariant::MySql57 | ServerVariant::MySql8 if server.version >= (5, 7, 8) => Some(
+            format!("SET SESSION max_execution_time = {}", limit.as_millis()),
+        ),
+        _ => None,
+    }
+}
+
+/// Runs every `count_sql` (each must classify as a read) in one read-only transaction.
+/// Each count is bounded by `limit` on the server (ruling T10-1): PostgreSQL by
+/// `SET LOCAL statement_timeout` (with `standard_conforming_strings` on), MySQL /
+/// MariaDB by the session's `max_execution_time` / `max_statement_time` (the session is
+/// a dedicated one that the caller closes afterwards, so nothing is restored), and the
+/// driver's own statement timeout stops it too. A count that has not returned within
+/// `limit + grace` ends the counting: the session is not used again. A count that
+/// fails or times out is "not counted".
 pub(super) async fn count_impacts(
     session: &dyn Session,
     impacts: Vec<Impact>,
@@ -118,6 +137,7 @@ pub(super) async fn count_impacts(
     grace: Duration,
 ) -> Vec<CountedImpact> {
     let pg = session.server_info().kind == DbKind::Postgres;
+    let bound = mysql_count_bound(session.server_info(), limit);
     let mut out: Vec<CountedImpact> = impacts
         .into_iter()
         .map(|impact| CountedImpact {
@@ -143,6 +163,8 @@ pub(super) async fn count_impacts(
             ] {
                 execute(session, &sql, StopSignal::new(), grace, 0).await?;
             }
+        } else if let Some(sql) = &bound {
+            execute(session, sql, StopSignal::new(), grace, 0).await?;
         }
         Ok::<(), DbError>(())
     };
@@ -165,11 +187,7 @@ pub(super) async fn count_impacts(
                 c.counted = true;
             }
             Ok(_) => {}
-            Err(_) => {
-                // The driver did not stop it: stop it on the server ourselves.
-                let _ = tokio::time::timeout(grace, session.cancel_handle().cancel()).await;
-                return out;
-            }
+            Err(_) => return out,
         }
     }
     let _ = tokio::time::timeout(

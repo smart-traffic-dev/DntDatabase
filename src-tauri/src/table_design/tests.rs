@@ -916,8 +916,16 @@ async fn count_timeout_is_not_counted() {
         *f.fake.count_timeouts.lock().unwrap(),
         [Some(Duration::from_millis(100))]
     );
-    assert_eq!(f.fake.cancels.load(Ordering::SeqCst), 0);
-    // A count the driver does not stop (the fake ignores timeouts) is cancelled.
+    // The server bounds it too, inside the read-only transaction.
+    let sent = f.fake.sent();
+    let start = sent
+        .iter()
+        .position(|s| s == "START TRANSACTION READ ONLY")
+        .unwrap();
+    assert_eq!(sent[start + 1], "SET SESSION max_execution_time = 100");
+    assert!(sent[start + 2].starts_with("SELECT COUNT"), "{sent:?}");
+    // A count that does not return in time (the fake ignores timeouts) is not counted
+    // and does not hold the preview up.
     *f.fake.count_delay.lock().unwrap() = Duration::from_secs(5);
     let started = std::time::Instant::now();
     let p = f.sm.table_design_preview(o.design_id, d).await.unwrap();
@@ -930,7 +938,64 @@ async fn count_timeout_is_not_counted() {
     assert_eq!(with_sql.len(), 1, "{:?}", p.impacts);
     assert!(!with_sql[0].counted);
     assert_eq!(with_sql[0].rows, None);
-    assert_eq!(f.fake.cancels.load(Ordering::SeqCst), 1);
+}
+
+/// A MySQL fake that reports itself as `variant` `version`.
+fn mysql_fake_as(variant: &str, version: [u32; 3]) -> Arc<Fake> {
+    let mut v: serde_json::Value = serde_json::from_str(MYSQL_ORDERS).unwrap();
+    v["server"]["variant"] = serde_json::json!(variant);
+    v["server"]["version"] = serde_json::json!(version);
+    Fake::new(&v.to_string(), MYSQL_ORDERS_DDL)
+}
+
+/// MySQL counts are bounded on the server: `max_execution_time` (ms) on MySQL 5.7.8+,
+/// `max_statement_time` (s) on MariaDB, set inside the read-only transaction.
+#[tokio::test]
+async fn mysql_family_counts_are_bounded_on_the_server() {
+    for (variant, version, expected) in [
+        (
+            "MySql8",
+            [8, 0, 36],
+            Some("SET SESSION max_execution_time = 250"),
+        ),
+        (
+            "MySql57",
+            [5, 7, 44],
+            Some("SET SESSION max_execution_time = 250"),
+        ),
+        (
+            "MariaDb",
+            [10, 6, 16],
+            Some("SET SESSION max_statement_time = 0.250"),
+        ),
+        ("MySql57", [5, 7, 7], None),
+    ] {
+        let fake = mysql_fake_as(variant, version);
+        let s = FakeSession {
+            fake: Arc::clone(&fake),
+            tx: Mutex::new(TxState::Idle),
+        };
+        let impact = Impact {
+            kind: dnt_schema::ImpactKind::DataLoss,
+            element: ElementRef::Column("x".into()),
+            message: "m".into(),
+            count_sql: Some("SELECT COUNT(*) FROM t".into()),
+        };
+        let out = apply::count_impacts(
+            &s,
+            vec![impact],
+            Duration::from_millis(250),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(out[0].counted, "{variant}");
+        let sent = fake.sent();
+        let mut want = vec!["START TRANSACTION READ ONLY".to_string()];
+        want.extend(expected.map(str::to_string));
+        want.push("SELECT COUNT(*) FROM t".into());
+        want.push("ROLLBACK".into());
+        assert_eq!(sent, want, "{variant} {version:?}");
+    }
 }
 
 #[tokio::test]

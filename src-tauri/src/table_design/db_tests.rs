@@ -103,6 +103,67 @@ async fn slow_count_is_stopped_on_the_server() {
     }
 }
 
+/// On MySQL / MariaDB the bound is the server's own (`max_execution_time` /
+/// `max_statement_time`): a slow count run with no client-side timeout at all is still
+/// stopped by the server near the bound.
+#[tokio::test]
+async fn mysql_family_count_bound_is_enforced_by_the_server() {
+    require_db!();
+    let mut targets = Target::mysql_family().to_vec();
+    if !targets.contains(&Target::MySql84) {
+        targets.push(Target::MySql84);
+    }
+    for t in targets {
+        let s = connect(t).await;
+        let probe = connect(t).await;
+        let limit = Duration::from_millis(300);
+        let bound = apply::mysql_count_bound(s.server_info(), limit)
+            .unwrap_or_else(|| panic!("{t:?}: no server bound"));
+        crate::ddl_exec::execute(
+            s.as_ref(),
+            "START TRANSACTION READ ONLY",
+            StopSignal::new(),
+            Duration::from_secs(1),
+            0,
+        )
+        .await
+        .unwrap();
+        crate::ddl_exec::execute(
+            s.as_ref(),
+            &bound,
+            StopSignal::new(),
+            Duration::from_secs(1),
+            0,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {bound}: {e}"));
+        let marker = format!("dnt_bound_{}", Uuid::new_v4().simple());
+        let started = Instant::now();
+        // `first_text` runs it without any client-side timeout.
+        let _ = first_text(
+            s.as_ref(),
+            &format!("SELECT CAST(COUNT(*) AS CHAR) FROM (SELECT SLEEP(20) AS {marker}) s"),
+        )
+        .await;
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(5), "{t:?}: {took:?}");
+        let running = format!(
+            "SELECT CAST(COUNT(*) AS CHAR) FROM information_schema.processlist \
+             WHERE info LIKE '%{marker}%' AND id <> CONNECTION_ID()"
+        );
+        assert_eq!(
+            first_text(probe.as_ref(), &running)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("0"),
+            "{t:?}"
+        );
+        close_quietly(s).await;
+        close_quietly(probe).await;
+    }
+}
+
 #[tokio::test]
 async fn sql_mode_reads_and_ddl_is_read_without_ansi_quotes() {
     require_db!();
