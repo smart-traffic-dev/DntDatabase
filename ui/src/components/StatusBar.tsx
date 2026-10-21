@@ -8,6 +8,9 @@ import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { refreshTxInfo, txOf, useTxMode } from '../store/txMode';
 import { useCursor } from '../store/cursor';
+import { useGridSelection } from '../store/gridSelection';
+import { useObjectData } from '../store/objectData';
+import { pageRowsText, useTableData } from '../store/tableData';
 import { canRun, emptyRun, lastRunText, runElapsedMs, runProgress, useQueryRun } from '../store/queryRun';
 import { txAction } from '../store/runQuery';
 import { useTabs } from '../store/tabs';
@@ -133,6 +136,33 @@ export function CursorStatus({ tabId }: { tabId: string }) {
   );
 }
 
+/** The grid selection and the rows on screen of an object tab's Data section; nothing on its other sections. */
+export function DataStatus({ tabId }: { tabId: string }) {
+  const onData = useObjectData((s) => (s.byTab[tabId]?.sub ?? 'data') === 'data');
+  const estimate = useObjectData((s) => {
+    const detail = s.byTab[tabId]?.detail;
+    return detail?.status === 'ok' ? detail.data.row_estimate : null;
+  });
+  const rows = useTableData((s) => {
+    const state = s.byTab[tabId];
+    return state ? pageRowsText(state, estimate) : null;
+  });
+  const selection = useGridSelection((s) => s.byTab[tabId]);
+  if (!onData || rows === null) return null;
+  return (
+    <span className="status-right">
+      {selection && (
+        <span className="status-selection" data-testid="status-data-selection">
+          {selection}
+        </span>
+      )}
+      <span className="status-rows" data-testid="status-data-rows">
+        {rows}
+      </span>
+    </span>
+  );
+}
+
 /**
  * The connection of the active tab (else of the selected tree node), its server version
  * and whether it goes through SSH; coloured by its environment tag.
@@ -142,6 +172,10 @@ export function StatusBar() {
   const queryTabId = useTabs((s) => {
     const tab = s.tabs.find((t) => t.id === s.activeId);
     return tab?.kind === 'query' ? tab.id : undefined;
+  });
+  const objectTabId = useTabs((s) => {
+    const tab = s.tabs.find((t) => t.id === s.activeId);
+    return tab?.kind === 'object' ? tab.id : undefined;
   });
   const tabConnection = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.connectionId);
   // The database the active tab works in: the query tab's context, or the object's database.
@@ -194,6 +228,7 @@ export function StatusBar() {
           UTF-8
         </span>
       )}
+      {objectTabId && <DataStatus tabId={objectTabId} />}
     </footer>
   );
 }

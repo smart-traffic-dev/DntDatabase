@@ -155,6 +155,7 @@ function setup(
     get_table_page_size: () => 100,
     table_data_cancel: () => true,
     data_editable: () => readOnlyInfo,
+    refresh_node: () => null,
     ...handlers,
   });
   useTabs.getState().open(tab);
@@ -173,6 +174,15 @@ function deferred<T>() {
 }
 
 const grid = () => within(screen.getByTestId('grid'));
+
+type User = ReturnType<typeof userEvent.setup>;
+/** Opens the data toolbar's `⋯` menu (page size, count). */
+const openMore = (user: User) => user.click(screen.getByRole('button', { name: 'More data actions' }));
+/** Runs an item of the `⋯` menu. */
+async function dataAction(user: User, name: string) {
+  await openMore(user);
+  await user.click(screen.getByRole('menuitem', { name }));
+}
 const UNKNOWN_TEXT = 'Outcome unknown: the change may have been applied. Reload to check.';
 
 beforeEach(() => {
@@ -186,21 +196,60 @@ describe('DataView', () => {
       get_table_page_size: () => 10,
       table_data: (a) => ((a.offset as number) === 0 ? page(10, 1, true) : page(3, 11, false)),
     });
-    expect(await screen.findByText('Rows 1–10')).toBeInTheDocument();
+    expect(await screen.findByText('1–10')).toBeInTheDocument();
     expect(callsOf('table_data')).toEqual([{ id: ids.prod, obj: objectRef, limit: 10, offset: 0, sort: [], filter: null, requestKey: PAGE_KEY }]);
     expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
     expect(screen.getByTestId('grid')).toHaveAttribute('data-first-row', '1');
 
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    expect(await screen.findByText('Rows 11–13')).toBeInTheDocument();
+    expect(await screen.findByText('11–13')).toBeInTheDocument();
     expect(callsOf('table_data')[1]).toMatchObject({ limit: 10, offset: 10 });
     // Row numbers continue from the offset.
     expect(screen.getByTestId('grid')).toHaveAttribute('data-first-row', '11');
     expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled();
 
     await user.click(screen.getByRole('button', { name: 'Previous page' }));
-    expect(await screen.findByText('Rows 1–10')).toBeInTheDocument();
+    expect(await screen.findByText('1–10')).toBeInTheDocument();
     expect(callsOf('table_data')[2]).toMatchObject({ offset: 0 });
+  });
+
+  it('the toolbar: Filter and the sort chip left; pager, Refresh, Open in query, Export and ⋯ right', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => page(3, 1, false, { key_order: ['id'] }) }, { estimate: 3412 });
+    await screen.findByText('1–3');
+    const bar = screen.getByRole('toolbar', { name: 'Data' });
+    const names = () => within(bar).getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    expect(names()).toEqual(['Filter', 'Previous page', 'Next page', 'Refresh', 'Open in query', 'Export…', 'More data actions']);
+    expect(within(bar).getByTestId('data-pager')).toHaveTextContent('1–3 / ~3,412');
+    // Export is the one secondary-styled button; the rest are quiet.
+    expect([...bar.querySelectorAll('button.secondary')].map((b) => b.textContent)).toEqual(['Export…']);
+    // Icon-only buttons are named and have a tooltip.
+    for (const name of ['Previous page', 'Next page', 'Refresh', 'More data actions']) {
+      expect(within(bar).getByRole('button', { name })).toHaveAttribute('title');
+    }
+    expect(within(bar).getByText('By primary key')).toBeInTheDocument();
+
+    await user.click(grid().getByRole('button', { name: 'id' }));
+    const chip = await within(bar).findByTitle('Sorted by id ↑');
+    expect(names().slice(0, 2)).toEqual(['Filter', 'Clear sort']);
+    expect(chip).toContainElement(within(bar).getByRole('button', { name: 'Clear sort' }));
+  });
+
+  it('Refresh reloads the rows and the table metadata', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => page(3) });
+    await screen.findByText('1–3');
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
+    expect(callsOf('refresh_node')).toHaveLength(1);
+  });
+
+  it('a read-only connection adds no note: the header badge says so', async () => {
+    setup({ table_data: () => page(3) });
+    await screen.findByText('1–3');
+    await waitFor(() => expect(callsOf('data_editable')).toHaveLength(1));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(screen.queryByText('Read-only connection.')).toBeNull();
   });
 
   it('defaults to 100 rows when the setting cannot be read', async () => {
@@ -210,14 +259,14 @@ describe('DataView', () => {
       },
       table_data: () => page(3),
     });
-    expect(await screen.findByText('Rows 1–3')).toBeInTheDocument();
+    expect(await screen.findByText('1–3')).toBeInTheDocument();
     expect(callsOf('table_data')[0]).toMatchObject({ limit: 100 });
   });
 
   it('header clicks sort server-side: asc, desc, none; the arrow is a header mark only', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3) });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     const header = () => grid().getByRole('button', { name: 'we`ird"col' });
 
     await user.click(header());
@@ -225,7 +274,7 @@ describe('DataView', () => {
     expect(callsOf('table_data')[1]).toMatchObject({ offset: 0, sort: [{ column: 'we`ird"col', dir: 'asc' }] });
     // The column keeps its name (copy / export use it); the arrow is drawn in the header.
     await waitFor(() => expect(header()).toHaveAttribute('data-mark', '↑'));
-    expect(screen.getByText(/Sorted by we`ird"col ↑/)).toBeInTheDocument();
+    expect(screen.getByTitle(/Sorted by we`ird"col ↑/)).toHaveTextContent('we`ird"col ↑');
 
     await user.click(header());
     await waitFor(() => expect(callsOf('table_data')).toHaveLength(3));
@@ -236,7 +285,7 @@ describe('DataView', () => {
     await waitFor(() => expect(callsOf('table_data')).toHaveLength(4));
     expect(callsOf('table_data')[3]).toMatchObject({ sort: [] });
     await waitFor(() => expect(header()).toHaveAttribute('data-mark', ''));
-    expect(screen.queryByText(/Sorted by/)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(/Sorted by/)).not.toBeInTheDocument();
   });
 
   it('postgres json columns are not sortable: a friendly note, no request', async () => {
@@ -244,7 +293,7 @@ describe('DataView', () => {
     useConnections.getState().setStored([], [config(ids.prod, 'c', { kind: 'postgres' })]);
     const ref: ObjectRef = { database: 'shop', schema: 'public', name: 'docs', kind: 'Table' };
     setup({ table_data: () => page(2) }, { tab: makeTab(ref) });
-    await screen.findByText('Rows 1–2');
+    await screen.findByText('1–2');
     await user.click(grid().getByRole('button', { name: 'doc' }));
     expect(await screen.findByText("Can't sort by doc: values of type json have no order.")).toBeInTheDocument();
     expect(callsOf('table_data')).toHaveLength(1);
@@ -258,25 +307,28 @@ describe('DataView', () => {
   it('sorting goes back to the first page; Clear sort drops it', async () => {
     const user = userEvent.setup();
     setup({ get_table_page_size: () => 10, table_data: (a) => page(10, (a.offset as number) + 1, true) });
-    await screen.findByText('Rows 1–10');
+    await screen.findByText('1–10');
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByText('Rows 11–20');
+    await screen.findByText('11–20');
     await user.click(grid().getByRole('button', { name: 'id' }));
-    await screen.findByText('Rows 1–10');
+    await screen.findByText('1–10');
     expect(callsOf('table_data').at(-1)).toMatchObject({ offset: 0, sort: [{ column: 'id', dir: 'asc' }] });
     await user.click(screen.getByRole('button', { name: 'Clear sort' }));
     await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ sort: [] }));
   });
 
-  it('the page size select changes only this tab', async () => {
+  it('the page size (in the ⋯ menu) changes only this tab', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3) });
-    await screen.findByText('Rows 1–3');
-    const select = screen.getByRole('combobox', { name: 'Page size' });
-    expect(select).toHaveValue('100');
-    expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(['100', '500', '1,000']);
-    await user.selectOptions(select, '500');
+    await screen.findByText('1–3');
+    await openMore(user);
+    const sizes = screen.getAllByRole('menuitemradio');
+    expect(sizes.map((o) => o.textContent)).toEqual(['✓100 rows per page', '500 rows per page', '1,000 rows per page']);
+    expect(screen.getByRole('menuitemradio', { name: '100 rows per page' })).toHaveAttribute('aria-checked', 'true');
+    await user.click(screen.getByRole('menuitemradio', { name: '500 rows per page' }));
     await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ limit: 500, offset: 0 }));
+    await openMore(user);
+    expect(screen.getByRole('menuitemradio', { name: '500 rows per page' })).toHaveAttribute('aria-checked', 'true');
     expect(useAppSettings.getState().tablePageSize).toBe(100);
     expect(callsOf('set_table_page_size')).toEqual([]);
   });
@@ -294,7 +346,7 @@ describe('DataView', () => {
     expect(alert).toHaveTextContent("Unknown database 'shop'");
     expect(alert).toHaveTextContent('Database does not exist.');
     await user.click(within(alert).getByRole('button', { name: 'Retry' }));
-    expect(await screen.findByText('Rows 1–1')).toBeInTheDocument();
+    expect(await screen.findByText('1–1')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
@@ -311,7 +363,7 @@ describe('DataView', () => {
     });
     const alert = await screen.findByRole('alert');
     await user.click(within(alert).getByRole('button', { name: 'Reconnect' }));
-    expect(await screen.findByText('Rows 1–2')).toBeInTheDocument();
+    expect(await screen.findByText('1–2')).toBeInTheDocument();
     expect(callsOf('open_connection')).toEqual([{ id: ids.prod, prompt: null }]);
   });
 
@@ -350,16 +402,16 @@ describe('DataView', () => {
     expect(screen.getByText(/This page stopped early to stay small/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Next page' }));
     await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ offset: 40 }));
-    expect(await screen.findByText('Rows 41–45')).toBeInTheDocument();
+    expect(await screen.findByText('41–45')).toBeInTheDocument();
     expect(screen.queryByText(/truncated/)).not.toBeInTheDocument();
   });
 
   it('shows the estimate, and Count fetches the exact count', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3), table_row_count: () => ({ rows: 12_400, elapsed_ms: 5 }) }, { estimate: 12_345 });
-    expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Count' }));
-    expect(await screen.findByText('12,400 rows')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('data-total')).toHaveTextContent(/^~12,345$/));
+    await dataAction(user, 'Count rows');
+    await waitFor(() => expect(screen.getByTestId('data-total')).toHaveTextContent(/^12,400$/));
     expect(callsOf('table_row_count')).toEqual([{ id: ids.prod, obj: objectRef, filter: null, requestKey: COUNT_KEY }]);
   });
 
@@ -369,23 +421,23 @@ describe('DataView', () => {
       { table_data: (a) => page(3, (a.offset as number) + 1, true), table_row_count: () => ({ rows: 999, elapsed_ms: 5 }) },
       { estimate: 12_345 },
     );
-    await screen.findByText('Rows 1–3');
-    await user.click(screen.getByRole('button', { name: 'Count' }));
-    expect(await screen.findByText('999 rows')).toBeInTheDocument();
+    await screen.findByText('1–3');
+    await dataAction(user, 'Count rows');
+    await waitFor(() => expect(screen.getByTestId('data-total')).toHaveTextContent(/^999$/));
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByText('Rows 4–6');
+    await screen.findByText('4–6');
     await user.click(screen.getByRole('button', { name: 'Previous page' }));
-    await screen.findByText('Rows 1–3');
-    expect(screen.getByText('999 rows')).toBeInTheDocument();
+    await screen.findByText('1–3');
+    expect(screen.getByTestId('data-total')).toHaveTextContent(/^999$/);
     // Sorting does not change how many rows there are.
     await user.click(grid().getByRole('button', { name: 'id' }));
     await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
-    expect(await screen.findByText('999 rows')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('data-total')).toHaveTextContent(/^999$/));
     expect(callsOf('table_row_count')).toHaveLength(1);
 
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
-    expect(await screen.findByText('~12,345 rows')).toBeInTheDocument();
-    expect(screen.queryByText('999 rows')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByTestId('data-total')).toHaveTextContent(/^~12,345$/));
+    expect(screen.queryByTestId('data-total')?.textContent).not.toBe('999');
   });
 
   it('Prev after a page that stopped early returns to the exact previous offset', async () => {
@@ -398,15 +450,15 @@ describe('DataView', () => {
         return offset === 0 ? page(4, 1, true, { size_capped: true }) : page(10, offset + 1, true);
       },
     });
-    await screen.findByText('Rows 1–4');
+    await screen.findByText('1–4');
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByText('Rows 5–14');
+    await screen.findByText('5–14');
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByText('Rows 15–24');
+    await screen.findByText('15–24');
     await user.click(screen.getByRole('button', { name: 'Previous page' }));
-    await screen.findByText('Rows 5–14');
+    await screen.findByText('5–14');
     await user.click(screen.getByRole('button', { name: 'Previous page' }));
-    await screen.findByText('Rows 1–4');
+    await screen.findByText('1–4');
     expect(callsOf('table_data').map((c) => c.offset)).toEqual([0, 4, 14, 4, 0]);
     expect(screen.getByRole('button', { name: 'Previous page' })).toBeDisabled();
   });
@@ -415,26 +467,28 @@ describe('DataView', () => {
     const user = userEvent.setup();
     const slow = deferred<{ rows: number; elapsed_ms: number }>();
     setup({ table_data: () => page(3), table_row_count: () => slow.promise }, { estimate: 7 });
-    await screen.findByText('Rows 1–3');
-    await user.click(screen.getByRole('button', { name: 'Count' }));
-    expect(await screen.findByRole('button', { name: 'Cancel count' })).toBeInTheDocument();
+    await screen.findByText('1–3');
+    await dataAction(user, 'Count rows');
+    await openMore(user);
+    expect(await screen.findByRole('menuitem', { name: 'Cancel count' })).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     // The running count was cancelled with the old page.
     await waitFor(() => expect(callsOf('table_data_cancel')).toEqual([{ id: ids.prod, requestKey: COUNT_KEY }]));
     slow.resolve({ rows: 123, elapsed_ms: 1 });
-    await screen.findByText('Rows 1–3');
-    expect(screen.queryByText('123 rows')).not.toBeInTheDocument();
-    expect(screen.getByText('~7 rows')).toBeInTheDocument();
+    await screen.findByText('1–3');
+    expect(screen.queryByTestId('data-total')?.textContent).not.toBe('123');
+    expect(screen.getByTestId('data-total')).toHaveTextContent(/^~7$/);
   });
 
   it('Cancel count stops the count', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3), table_row_count: () => new Promise(() => undefined) });
-    await screen.findByText('Rows 1–3');
-    await user.click(screen.getByRole('button', { name: 'Count' }));
-    await user.click(await screen.findByRole('button', { name: 'Cancel count' }));
+    await screen.findByText('1–3');
+    await dataAction(user, 'Count rows');
+    await dataAction(user, 'Cancel count');
     expect(callsOf('table_data_cancel')).toEqual([{ id: ids.prod, requestKey: COUNT_KEY }]);
-    expect(screen.getByRole('button', { name: 'Count' })).toBeInTheDocument();
+    await openMore(user);
+    expect(screen.getByRole('menuitem', { name: 'Count rows' })).toBeInTheDocument();
   });
 
   it('Open in query fills a query tab with the page SELECT', async () => {
@@ -442,11 +496,11 @@ describe('DataView', () => {
     useConnections.getState().setStored([], [config(ids.prod, 'c', { kind: 'postgres' })]);
     const ref: ObjectRef = { database: 'shop', schema: 'public', name: 'đơn_hàng', kind: 'Table' };
     setup({ get_table_page_size: () => 50, table_data: (a) => page(50, (a.offset as number) + 1, true) }, { tab: makeTab(ref) });
-    await screen.findByText('Rows 1–50');
+    await screen.findByText('1–50');
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByText('Rows 51–100');
+    await screen.findByText('51–100');
     await user.click(grid().getByRole('button', { name: 'id' }));
-    await screen.findByText('Rows 1–50');
+    await screen.findByText('1–50');
     await user.click(screen.getByRole('button', { name: 'Open in query' }));
     const doc = [...useQueryDocs.getState().docs.values()].at(-1)!;
     expect(doc).toMatchObject({
@@ -458,10 +512,10 @@ describe('DataView', () => {
 
   it('keeps its page across remounts; closing the tab stops its running load', async () => {
     const { tab, unmount } = setup({ table_data: () => page(2) });
-    await screen.findByText('Rows 1–2');
+    await screen.findByText('1–2');
     unmount();
     render(<DataView tab={tab} estimate={null} />);
-    expect(await screen.findByText('Rows 1–2')).toBeInTheDocument();
+    expect(await screen.findByText('1–2')).toBeInTheDocument();
     expect(callsOf('table_data')).toHaveLength(1);
 
     mockBackend({ table_data: () => new Promise(() => undefined), table_data_cancel: () => true });
@@ -566,7 +620,7 @@ describe('DataView filter and multi-sort', () => {
   it('the filter bar sends a structured filter; Apply reads from the first page and Count uses it; Clear drops it', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3), table_row_count: () => ({ rows: 2, elapsed_ms: 1 }) }, { estimate: 99 });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
     const bar = screen.getByRole('search', { name: 'Filter' });
     // Opening an empty bar offers a first condition on the first column.
@@ -579,9 +633,9 @@ describe('DataView filter and multi-sort', () => {
     await waitFor(() => expect(lastData()).toMatchObject({ offset: 0, filter }));
     expect(await screen.findByText('Filtered (1)')).toBeInTheDocument();
     // The estimate is of the whole table: not shown under a filter.
-    expect(screen.queryByText('~99 rows')).not.toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'Count' }));
-    expect(await screen.findByText('2 rows')).toBeInTheDocument();
+    expect(screen.queryByTestId('data-total')?.textContent).not.toBe('~99');
+    await dataAction(user, 'Count rows');
+    await waitFor(() => expect(screen.getByTestId('data-total')).toHaveTextContent(/^2$/));
     expect(callsOf('table_row_count').at(-1)).toMatchObject({ filter });
 
     // A second row: BETWEEN takes two values; OR for the bar.
@@ -616,7 +670,7 @@ describe('DataView filter and multi-sort', () => {
   it('F3 opens the filter bar and focuses it; the filter is kept per tab', async () => {
     const user = userEvent.setup();
     const { tab, unmount } = setup({ table_data: () => page(2) });
-    await screen.findByText('Rows 1–2');
+    await screen.findByText('1–2');
     screen.getByRole('button', { name: 'Refresh' }).focus();
     await user.keyboard('{F3}');
     const value = await screen.findByRole('textbox', { name: 'Value 1' });
@@ -632,7 +686,7 @@ describe('DataView filter and multi-sort', () => {
   it('an empty filtered result says no rows match', async () => {
     const user = userEvent.setup();
     setup({ table_data: (a) => (a.filter ? page(0) : page(2)) });
-    await screen.findByText('Rows 1–2');
+    await screen.findByText('1–2');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
     await user.type(screen.getByRole('textbox', { name: 'Value 1' }), 'x{Enter}');
     expect(await screen.findByText('No rows match the filter.')).toBeInTheDocument();
@@ -641,7 +695,7 @@ describe('DataView filter and multi-sort', () => {
   it('Shift+click adds a sort key; the header marks are numbered', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3) });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     await user.click(grid().getByRole('button', { name: 'id' }));
     await waitFor(() => expect(lastData()).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
     await user.keyboard('{Shift>}');
@@ -655,7 +709,7 @@ describe('DataView filter and multi-sort', () => {
         ],
       }),
     );
-    expect(await screen.findByText(/Sorted by id ↑, doc ↑/)).toBeInTheDocument();
+    expect(await screen.findByTitle(/Sorted by id ↑, doc ↑/)).toBeInTheDocument();
     await waitFor(() => expect(grid().getByRole('button', { name: 'doc' })).toHaveAttribute('data-mark', '↑2'));
     // A plain click starts over with one key.
     await user.click(grid().getByRole('button', { name: 'doc' }));
@@ -664,7 +718,7 @@ describe('DataView filter and multi-sort', () => {
 
   it('"Filter = this value" from the grid menu adds and applies a condition', async () => {
     setup({ table_data: () => page(3) });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     const tab = makeTab();
     const menu = dataCellMenu(tab);
     const entries = menu({ row: 0, col: 0, value: int(7), column: col('id') });
@@ -694,10 +748,10 @@ describe('DataView filter and multi-sort', () => {
   it('Export… asks for the export dialog with the page, the sort and the filter', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3, 1, false, { truncated_cells: 1 }) });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     await user.click(grid().getByRole('button', { name: 'id' }));
     await waitFor(() => expect(lastData()).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
-    await screen.findByText(/Sorted by id/);
+    await screen.findByTitle(/Sorted by id/);
     await user.click(screen.getByRole('button', { name: 'Export…' }));
     const request = useDialogs.getState().request;
     expect(request?.kind).toBe('exportResult');
@@ -715,7 +769,7 @@ describe('DataView filter and multi-sort', () => {
 
   it('toggleFilterBar (menu hook) toggles the bar of the active object tab', async () => {
     setup({ table_data: () => page(2) });
-    await screen.findByText('Rows 1–2');
+    await screen.findByText('1–2');
     toggleFilterBar();
     expect(await screen.findByRole('search', { name: 'Filter' })).toBeInTheDocument();
     toggleFilterBar();
@@ -735,7 +789,7 @@ describe('DataView editing', () => {
   ) {
     const user = userEvent.setup();
     const view = setup({ table_data: () => rows3(pageOver), data_editable: () => info, ...handlers });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-editable', String(info.editable)));
     if (stage) await user.click(cell(0, 1));
     return { user, ...view };
@@ -915,7 +969,7 @@ describe('DataView editing', () => {
     act(() => openValueEditor({ tabId: tab.id, row: 0, col: 1, column: 'we`ird"col', rowId: JSON.stringify([['id', int(1)]]) }));
     await screen.findByRole('textbox', { name: 'Value' });
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    await screen.findByText('Rows 4–6');
+    await screen.findByText('4–6');
     await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Value' })).not.toBeInTheDocument());
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
@@ -1104,7 +1158,7 @@ describe('DataView editing', () => {
     await act(async () => {
       await useTableData.getState().load(makeTab());
     });
-    await screen.findByText('Rows 1–1');
+    await screen.findByText('1–1');
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await screen.findByRole('dialog', { name: 'Review changes' });
     const edits = (lastCall('data_preview').set as { edits: { row: { key: unknown; xmin: string | null; original: unknown } }[] }).edits;
@@ -1343,7 +1397,7 @@ describe('DataView editing', () => {
         return rows3();
       },
     });
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
     await user.click(screen.getByRole('button', { name: 'Filter' }));
     const bar = screen.getByRole('search', { name: 'Filter' });
     await user.click(within(bar).getByRole('button', { name: 'Raw WHERE' }));

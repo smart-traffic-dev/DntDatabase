@@ -194,6 +194,33 @@ export const StopIcon = () => (
   </Icon>
 );
 
+/** Circular arrow: Refresh. */
+export const RefreshIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7" />
+  </Icon>
+);
+
+/** Pager arrows: previous / next page. */
+export const PrevIcon = () => (
+  <Icon size={14} strokeWidth={2.2}>
+    <path d="M15 6l-6 6 6 6" />
+  </Icon>
+);
+
+export const NextIcon = () => (
+  <Icon size={14} strokeWidth={2.2}>
+    <path d="M9 6l6 6-6 6" />
+  </Icon>
+);
+
+/** Funnel: the data filter bar. */
+export const FilterIcon = () => (
+  <Icon size={14} strokeWidth={2}>
+    <path d="M4 5h16l-6 7.5V19l-4-2v-4.5z" />
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon size={12} strokeWidth={2}>
     <path d="M6 6l12 12M18 6L6 18" />

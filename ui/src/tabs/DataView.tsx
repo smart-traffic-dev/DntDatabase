@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { api, needsReconnect, toAppError } from '../api';
 import type { AppError, CellInput, ColumnMeta, EditableInfo, FilterOp, SortSpec, TableDataPage, Value } from '../bindings';
-import type { MenuEntry } from '../components/ActionMenu';
+import { ActionMenu, type MenuEntry } from '../components/ActionMenu';
+import { CloseIcon, FilterIcon, MoreIcon, NextIcon, PrevIcon, RefreshIcon } from '../components/icons';
 import { selectTopSql } from '../components/newQuery';
 import { dataExportRequest, requestExport, toggleTabFilterBar } from '../dialogs/resultExport';
 import { useAppSettings } from '../store/appSettings';
 import { confirmDiscard, readOnlyCopy, rowIdOf, rowKeyPairs, rowRef, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
+import { useObjectData } from '../store/objectData';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { CHUNK, type ResultSet } from '../store/queryRun';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
-import { draftToFilter, newFilterRow, useTableData, type FilterRow } from '../store/tableData';
+import { reportGridSelection } from '../store/gridSelection';
+import { draftToFilter, newFilterRow, pageTotal, useTableData, type FilterRow } from '../store/tableData';
 import { cellStatus, effectivePage } from './data/editModel';
 import { EditPreviewDialog } from './data/EditPreviewDialog';
 import { copyAs, copySql, type CopyFormat } from './data/copyAs';
@@ -189,6 +192,8 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   const [editableError, setEditableError] = useState<string | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
   const [focusTick, setFocusTick] = useState(0);
+  // The toolbar's `⋯` menu (page size, count), opened under its button.
+  const [more, setMore] = useState<{ x: number; y: number } | null>(null);
   const barRef = useRef<FilterBarHandle>(null);
   // Glide's header click carries no modifier keys through `ResultGrid`: remember Shift here.
   const shift = useRef(false);
@@ -210,6 +215,10 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   useEffect(() => {
     if (focusTick > 0) barRef.current?.focus();
   }, [focusTick]);
+
+  // The grid's selection summary goes to the status bar while this view is shown.
+  const onSelectionSummary = useCallback((summary: string | null) => reportGridSelection(tab.id, summary), [tab.id]);
+  useEffect(() => () => reportGridSelection(tab.id, null), [tab.id]);
 
   // Whether the table may be edited, and how (the answer lives with the staged changes).
   useEffect(() => {
@@ -456,14 +465,32 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   const loading = page?.status === 'loading';
   const first = state.offset + 1;
   const last = state.offset + (data?.rows.length ?? 0);
-  const rowsLabel = data ? (data.rows.length === 0 ? 'No rows' : `Rows ${fmt(first)}–${fmt(last)}`) : '';
+  const range = loading ? 'Loading…' : data ? (data.rows.length === 0 ? 'No rows' : `${fmt(first)}–${fmt(last)}`) : '';
   const filtered = state.filter !== null;
 
   const count = state.count;
-  const total =
-    count?.status === 'ok' ? `${fmt(count.data)} rows`
-    : estimate !== null && !filtered ? `~${fmt(estimate)} rows`
-    : null;
+  const total = pageTotal(state, estimate);
+
+  const refresh = () =>
+    guarded(() => {
+      void store.load(tab);
+      // The metadata too (columns, row estimate): the one Refresh of the Data section.
+      void useObjectData.getState().refresh(tab, 'detail');
+    });
+
+  const moreItems: MenuEntry[] = [
+    ...pageSizeOptions(settingsDefault, state.pageSize).map((n) => ({
+      label: `${fmt(n)} rows per page`,
+      checked: n === state.pageSize,
+      run: () => {
+        if (n !== state.pageSize) guarded(() => store.setPageSize(tab, n));
+      },
+    })),
+    { separator: true },
+    count?.status === 'loading'
+      ? { label: 'Cancel count', run: () => store.cancelCount(tab) }
+      : { label: 'Count rows', run: () => void store.count(tab) },
+  ];
 
   const openInQuery = () => {
     const sql = selectTopSql(tab, engine, { limit: state.pageSize, offset: state.offset, orderBy: sort[0] ?? null });
@@ -531,42 +558,9 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   return (
     <div className="data-view" onKeyDown={onKeyDown}>
       <div className="dv-toolbar" role="toolbar" aria-label="Data">
-        {loading ? (
-          <button type="button" className="qt-btn" onClick={() => store.cancelPage(tab)}>
-            Cancel
-          </button>
-        ) : (
-          <button type="button" className="qt-btn" onClick={() => guarded(() => void store.load(tab))}>
-            Refresh
-          </button>
-        )}
-        <span className="qt-sep" />
-        <button type="button" className="qt-btn" aria-label="Previous page" onClick={() => guarded(() => store.prev(tab))} disabled={loading || state.offset === 0}>
-          ‹ Prev
-        </button>
-        <button type="button" className="qt-btn" aria-label="Next page" onClick={() => guarded(() => store.next(tab))} disabled={loading || !data?.has_more}>
-          Next ›
-        </button>
-        <label className="dv-size">
-          <span>Page size</span>
-          <select className="qt-select" value={state.pageSize} onChange={(e) => {
-              const size = Number(e.target.value);
-              guarded(() => store.setPageSize(tab, size));
-            }}>
-            {pageSizeOptions(settingsDefault, state.pageSize).map((n) => (
-              <option key={n} value={n}>
-                {fmt(n)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="dv-status" aria-live="polite">
-          {loading ? 'Loading…' : rowsLabel}
-        </span>
-        <span className="qt-sep" />
         <button
           type="button"
-          className={`qt-btn${state.filterBarOpen ? ' dv-on' : ''}`}
+          className="dv-btn"
           aria-pressed={state.filterBarOpen}
           title="Filter rows (F3)"
           onClick={() => {
@@ -574,42 +568,77 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
             else openBar();
           }}
         >
+          <FilterIcon />
           Filter
         </button>
         {filtered ? (
           <span className="dv-filtered">Filtered ({state.filter!.raw_where ? 'raw' : state.filter!.conditions.length})</span>
         ) : null}
         {sort.length > 0 ? (
-          <span className="dv-sort">
-            Sorted by {sortLabel(sort)}
-            <button type="button" className="dv-link" onClick={() => guarded(() => store.clearSort(tab))}>
-              Clear sort
+          <span className="dv-chip" title={`Sorted by ${sortLabel(sort)}`}>
+            {sortLabel(sort)}
+            <button type="button" className="dv-chip-x" aria-label="Clear sort" title="Clear sort" onClick={() => guarded(() => store.clearSort(tab))}>
+              <CloseIcon />
             </button>
           </span>
         ) : data && data.key_order.length > 0 ? (
-          <span className="dv-sort dv-key-order" title="Without a sort, pages follow the primary key so paging is stable">
+          <span className="dv-key-order" title="Without a sort, pages follow the primary key so paging is stable">
             By primary key
           </span>
         ) : null}
         <span className="spacer" />
-        {total ? <span className="dv-total">{total}</span> : null}
-        {count?.status === 'loading' ? (
-          <button type="button" className="qt-btn" onClick={() => store.cancelCount(tab)}>
-            Cancel count
+        <span className="dv-pager" data-testid="data-pager" aria-live="polite">
+          <span>{range}</span>
+          {total ? (
+            <>
+              <span aria-hidden="true"> / </span>
+              <span data-testid="data-total" title={total.tip}>
+                {total.text}
+              </span>
+            </>
+          ) : null}
+        </span>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Previous page"
+          title="Previous page"
+          onClick={() => guarded(() => store.prev(tab))}
+          disabled={loading || state.offset === 0}
+        >
+          <PrevIcon />
+        </button>
+        <button
+          type="button"
+          className="icon-btn"
+          aria-label="Next page"
+          title="Next page"
+          onClick={() => guarded(() => store.next(tab))}
+          disabled={loading || !data?.has_more}
+        >
+          <NextIcon />
+        </button>
+        <span className="dv-divider" aria-hidden="true" />
+        {loading ? (
+          <button type="button" className="dv-btn" onClick={() => store.cancelPage(tab)}>
+            Cancel
           </button>
         ) : (
-          <button
-            type="button"
-            className="qt-btn"
-            title={filtered ? 'Count the matching rows exactly (SELECT COUNT(*) … WHERE)' : 'Count the rows exactly (SELECT COUNT(*))'}
-            onClick={() => void store.count(tab)}
-          >
-            Count
+          <button type="button" className="icon-btn" aria-label="Refresh" title="Refresh the rows and the table's metadata" onClick={refresh}>
+            <RefreshIcon />
           </button>
         )}
         <button
           type="button"
-          className="qt-btn"
+          className="dv-btn"
+          title={filtered ? "Open this page's SELECT in a new query tab (without the filter)" : "Open this page's SELECT in a new query tab"}
+          onClick={openInQuery}
+        >
+          Open in query
+        </button>
+        <button
+          type="button"
+          className="dv-btn secondary"
           title="Export these rows or all rows to a file"
           disabled={!data}
           onClick={() => requestExport(dataExportRequest(tab, state))}
@@ -618,12 +647,19 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
         </button>
         <button
           type="button"
-          className="qt-btn"
-          title={filtered ? "Open this page's SELECT in a new query tab (without the filter)" : "Open this page's SELECT in a new query tab"}
-          onClick={openInQuery}
+          className="icon-btn"
+          aria-label="More data actions"
+          title="Page size, count rows"
+          aria-haspopup="menu"
+          aria-expanded={more !== null}
+          onClick={(e) => {
+            const box = e.currentTarget.getBoundingClientRect();
+            setMore(more ? null : { x: box.left, y: box.bottom + 2 });
+          }}
         >
-          Open in query
+          <MoreIcon />
         </button>
+        {more ? <ActionMenu label="Data actions" x={more.x} y={more.y} items={moreItems} checkRole="radio" onClose={() => setMore(null)} /> : null}
       </div>
       {state.filterBarOpen || rawError ? (
         <FilterBar
@@ -669,7 +705,8 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
           Couldn't check whether this table is editable: {editableError}
         </p>
       ) : null}
-      {info && !info.editable ? (
+      {/* A read-only connection is the header's Read-only badge, not a note here. */}
+      {info && !info.editable && info.reason !== 'read_only_connection' ? (
         <p role="status" className="dv-note">
           {readOnlyCopy(info.reason)}
         </p>
@@ -778,6 +815,7 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
               cellsCapped={truncated}
               editing={editing}
               onOpenValue={openCell}
+              onSelectionSummary={onSelectionSummary}
               extraCellMenu={(ctx) => {
                 const column = result.columns[ctx.col];
                 const filters = column

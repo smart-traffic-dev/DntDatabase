@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Value } from '../../bindings';
-import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, type IndexSet, type SelectionLike } from './gridSelection';
+import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, selectionSummary, type IndexSet, type SelectionLike } from './gridSelection';
 
 const set = (...items: number[]): IndexSet => ({ length: items.length, toArray: () => items, first: () => items[0] });
 const empty = set();
@@ -50,5 +50,20 @@ describe('values', () => {
     expect(cellValue({ chunks }, 0, 1)).toEqual({ t: 'Int', v: 2 });
     expect(cellValue({ chunks }, 5, 0)).toEqual({ t: 'Null' });
     expect(blockValues({ chunks }, { rows: [0], cols: [1, 0] })).toEqual([[{ t: 'Int', v: 2 }, { t: 'Int', v: 1 }]]);
+  });
+});
+
+describe('selectionSummary', () => {
+  it('says nothing for no selection or a single cell', () => {
+    expect(selectionSummary(undefined, 10, 3)).toBeNull();
+    expect(selectionSummary(range(1, 1, 1, 1), 10, 3)).toBeNull();
+  });
+
+  it('names whole rows, whole columns and ranges', () => {
+    expect(selectionSummary({ rows: set(1, 4), columns: empty }, 10, 3)).toBe('2 rows selected');
+    expect(selectionSummary({ rows: set(1), columns: empty }, 10, 3)).toBe('1 row selected');
+    expect(selectionSummary({ rows: empty, columns: set(2) }, 10, 3)).toBe('1 column selected');
+    expect(selectionSummary(range(0, 0, 2, 3), 10, 3)).toBe('3 rows × 2 columns selected');
+    expect(selectionSummary(range(0, 0, 3, 1), 10, 3)).toBe('1 row × 3 columns selected');
   });
 });

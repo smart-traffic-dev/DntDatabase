@@ -840,8 +840,13 @@ textarea:focus-visible,
   margin-left: auto;
 }
 
-.status-cursor {
+.status-cursor,
+.status-selection {
   margin-right: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-rows {
   font-variant-numeric: tabular-nums;
 }
 

@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import Editor from '@monaco-editor/react';
 import { needsReconnect } from '../api';
-import { selectTopSql } from '../components/newQuery';
+import { LockIcon, RefreshIcon } from '../components/icons';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
+import { useConnections } from '../store/connections';
 import { useObjectData, type Loadable, type Resource, type SubTab } from '../store/objectData';
-import { useTableData } from '../store/tableData';
 import { DataView } from './DataView';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
 import { editorFontOptions } from '../monaco/fonts';
@@ -123,9 +123,6 @@ function InfoRows({ rows }: { rows: [string, string][] }) {
   );
 }
 
-/** Tables and views can be queried; routines, sequences and the like cannot. */
-const queryable = (kind: Tab['objectRef']['kind']) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
-
 /** Opens a new query tab on the object's connection and database, holding `sql`. */
 function openQuery(tab: Tab, sql: string) {
   const docs = useQueryDocs.getState();
@@ -133,13 +130,40 @@ function openQuery(tab: Tab, sql: string) {
   docs.update(id, { sql });
 }
 
-const selectAllOf = (tab: Tab): string => selectTopSql(tab, dialectOfConnection(tab.connectionId));
+const READ_ONLY_TIP = 'This connection is read-only. Change it in Edit connection.';
+
+/** A section's toolbar (Info, DDL, Structure): its own actions, then Refresh at the right end. */
+function SectionBar({ label, refresh, children }: { label: string; refresh: ReactNode; children?: ReactNode }) {
+  return (
+    <div className="ot-bar" role="toolbar" aria-label={label}>
+      {children}
+      {refresh}
+    </div>
+  );
+}
+
+/** Reloads the visible section (its metadata / DDL); busy while that section loads. */
+function RefreshButton({ busy, onRefresh }: { busy: boolean; onRefresh(): void }) {
+  return (
+    <button
+      type="button"
+      className="icon-btn"
+      aria-label={busy ? 'Refreshing…' : 'Refresh'}
+      title={busy ? 'Loading this section…' : 'Reload this section'}
+      disabled={busy}
+      aria-busy={busy}
+      onClick={onRefresh}
+    >
+      <RefreshIcon />
+    </button>
+  );
+}
 
 /** The row estimate of a loaded detail (views have none). */
 const estimateOf = (detail: Loadable<TableDetail> | undefined): number | null =>
   detail?.status === 'ok' ? detail.data.row_estimate : null;
 
-function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
+function DdlPanel({ ddl, tab, refresh }: { ddl: string; tab: Tab; refresh: ReactNode }) {
   const monacoTheme = useDntMonacoTheme();
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
@@ -162,8 +186,8 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   };
 
   return (
-    <div className="ot-ddl">
-      <div className="ot-ddl-bar">
+    <>
+      <SectionBar label="DDL" refresh={refresh}>
         <button type="button" className="btn small" aria-pressed={wrap} title="Wrap long lines" onClick={() => setWrap((w) => !w)}>
           Wrap
         </button>
@@ -173,34 +197,36 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
         <button type="button" className="btn small" onClick={() => void copy()}>
           {copied ? 'Copied' : 'Copy'}
         </button>
-      </div>
-      {copyError ? (
-        <div role="alert" className="ot-error">
-          Couldn't copy — select the text and press Ctrl+C.
+      </SectionBar>
+      <div className="ot-body ot-ddl">
+        {copyError ? (
+          <div role="alert" className="ot-error">
+            Couldn't copy — select the text and press Ctrl+C.
+          </div>
+        ) : null}
+        <div className="ot-ddl-text" data-testid="object-ddl-text">
+          <Editor
+            language={dialectOfConnection(tab.connectionId) === 'postgres' ? 'pgsql' : 'mysql'}
+            value={ddl}
+            theme={monacoTheme.theme}
+            beforeMount={monacoTheme.beforeMount}
+            options={{
+              readOnly: true,
+              domReadOnly: true,
+              automaticLayout: true,
+              minimap: { enabled: false },
+              ...editorFontOptions(),
+              scrollBeyondLastLine: false,
+              folding: false,
+              renderLineHighlight: 'none',
+              wordWrap: wrap ? 'on' : 'off',
+              lightbulb: { enabled: 'off' as never },
+              ariaLabel: 'DDL',
+            }}
+          />
         </div>
-      ) : null}
-      <div className="ot-ddl-text" data-testid="object-ddl-text">
-        <Editor
-          language={dialectOfConnection(tab.connectionId) === 'postgres' ? 'pgsql' : 'mysql'}
-          value={ddl}
-          theme={monacoTheme.theme}
-          beforeMount={monacoTheme.beforeMount}
-          options={{
-            readOnly: true,
-            domReadOnly: true,
-            automaticLayout: true,
-            minimap: { enabled: false },
-            ...editorFontOptions(),
-            scrollBeyondLastLine: false,
-            folding: false,
-            renderLineHighlight: 'none',
-            wordWrap: wrap ? 'on' : 'off',
-            lightbulb: { enabled: 'off' as never },
-            ariaLabel: 'DDL',
-          }}
-        />
       </div>
-    </div>
+    </>
   );
 }
 
@@ -384,60 +410,51 @@ export function ObjectTab({ tab }: { tab: Tab }) {
   const retry = () => void useObjectData.getState().load(tab, resource, true);
   const reconnect = () => void useObjectData.getState().reconnect(tab, resource);
   const { objectRef } = tab;
-  const path = [objectRef.database, objectRef.schema, objectRef.name].filter(Boolean).join('.');
+  const conn = useConnections((s) => s.summaries.get(tab.connectionId)?.config);
+  const path = [conn?.name, objectRef.database, objectRef.schema].filter(Boolean).join(' › ');
   const state = stored?.[resource];
-  // The Data sub-tab has its own loading state; Refresh reflects the section's metadata / DDL.
-  const refreshing = state?.status === 'loading';
+  // The Data sub-tab has its own Refresh (rows and metadata) in its toolbar.
+  const refresh = (
+    <RefreshButton busy={state?.status === 'loading'} onRefresh={() => void useObjectData.getState().refresh(tab, resource)} />
+  );
 
   return (
     <div className="object-tab">
       <header className="ot-head">
-        <div className="ot-title">
-          <strong>{objectRef.name}</strong>
-          <span className="muted mono">{path}</span>
-        </div>
-        <div className="ot-actions">
-          {queryable(objectRef.kind) && (
-            <button type="button" className="btn" title="Open a query tab with SELECT * on this object" onClick={() => openQuery(tab, selectAllOf(tab))}>
-              Query
+        <strong className="ot-name" title={objectRef.name}>
+          {objectRef.name}
+        </strong>
+        <span className="ot-path" title={path}>
+          {path}
+        </span>
+        {conn?.read_only ? (
+          <span className="ot-ro" title={READ_ONLY_TIP}>
+            <LockIcon />
+            Read-only
+          </span>
+        ) : null}
+        <div role="tablist" aria-label="Object sections" className="segmented ot-tabs" onKeyDown={onKeyDown}>
+          {subs.map((s) => (
+            <button
+              key={s}
+              type="button"
+              role="tab"
+              id={`${uid}-tab-${s}`}
+              aria-selected={s === sub}
+              aria-controls={`${uid}-panel`}
+              tabIndex={s === sub ? 0 : -1}
+              className={`segment${s === sub ? ' on' : ''}`}
+              data-testid={s === 'ddl' ? 'object-tab-ddl' : undefined}
+              ref={(el) => {
+                tabRefs.current[s] = el;
+              }}
+              onClick={() => select(s)}
+            >
+              {SUB_LABEL[s]}
             </button>
-          )}
-          <button
-            type="button"
-            className="btn"
-            disabled={refreshing}
-            aria-busy={refreshing}
-            title={refreshing ? 'Loading the visible section…' : 'Reload the visible section'}
-            onClick={() => {
-              void useObjectData.getState().refresh(tab, resource);
-              if (sub === 'data') void useTableData.getState().load(tab);
-            }}
-          >
-            {refreshing ? 'Refreshing…' : 'Refresh'}
-          </button>
+          ))}
         </div>
       </header>
-      <div role="tablist" aria-label="Object sections" className="ot-tabs" onKeyDown={onKeyDown}>
-        {subs.map((s) => (
-          <button
-            key={s}
-            type="button"
-            role="tab"
-            id={`${uid}-tab-${s}`}
-            aria-selected={s === sub}
-            aria-controls={`${uid}-panel`}
-            tabIndex={s === sub ? 0 : -1}
-            className={`ot-tab${s === sub ? ' active' : ''}`}
-            data-testid={s === 'ddl' ? 'object-tab-ddl' : undefined}
-            ref={(el) => {
-              tabRefs.current[s] = el;
-            }}
-            onClick={() => select(s)}
-          >
-            {SUB_LABEL[s]}
-          </button>
-        ))}
-      </div>
       <div
         role="tabpanel"
         id={`${uid}-panel`}
@@ -446,14 +463,23 @@ export function ObjectTab({ tab }: { tab: Tab }) {
       >
         {sub === 'data' ? (
           <DataView tab={tab} estimate={estimateOf(state as Loadable<TableDetail> | undefined)} />
-        ) : sub === 'ddl' ? (
-          <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
-            {(ddl) => <DdlPanel ddl={ddl} tab={tab} />}
-          </Loaded>
+        ) : sub === 'ddl' && state?.status === 'ok' ? (
+          <DdlPanel ddl={state.data as string} tab={tab} refresh={refresh} />
         ) : (
-          <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
-            {(detail) => (sub === 'info' ? <InfoPanel detail={detail} kind={objectRef.kind} /> : <StructurePanel detail={detail} />)}
-          </Loaded>
+          <>
+            <SectionBar label={SUB_LABEL[sub]} refresh={refresh} />
+            <div className="ot-body">
+              {sub === 'ddl' ? (
+                <Loaded state={state as Loadable<string> | undefined} onRetry={retry} onReconnect={reconnect}>
+                  {() => null}
+                </Loaded>
+              ) : (
+                <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
+                  {(detail) => (sub === 'info' ? <InfoPanel detail={detail} kind={objectRef.kind} /> : <StructurePanel detail={detail} />)}
+                </Loaded>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>

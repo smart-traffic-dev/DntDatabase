@@ -5,55 +5,102 @@
   min-height: 0;
 }
 
+/* One 40px row: name, connection › database path, read-only badge, then the sections on the right. */
 .ot-head {
+  flex: none;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px 0;
-}
-
-.ot-title {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
+  gap: var(--dnt-space-2);
+  height: 40px;
+  padding: 0 var(--dnt-space-3);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
   min-width: 0;
-  font-size: var(--text-body);
 }
 
-.ot-title .mono,
+.ot-name {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dnt-text-md);
+  font-weight: 600;
+  color: var(--dnt-fg);
+}
+
+.ot-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+}
+
+.ot-ro {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  height: 18px;
+  padding: 0 var(--dnt-space-1_5);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-full);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+  cursor: default;
+}
+
+/* The sections: the shared segmented control, sized to its labels and pushed right. */
+.segmented.ot-tabs {
+  flex: none;
+  margin-left: auto;
+}
+
+.ot-tabs .segment {
+  flex: none;
+  padding: 0 var(--dnt-space-3);
+}
+
 .mono {
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
 }
 
-.ot-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 8px 16px 0;
-  border-bottom: 1px solid var(--border);
-}
-
-.ot-tab {
-  height: 30px;
-  padding: 0 14px;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  background: transparent;
-  color: var(--muted);
-}
-
-.ot-tab.active {
-  color: var(--text);
-  font-weight: 500;
-  border-bottom-color: var(--accent);
-}
-
+/* Info / DDL / Structure: a section toolbar, then the scrolling body. */
 .ot-panel {
   flex: 1;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ot-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--dnt-space-2);
+  height: 40px;
+  padding: 0 var(--dnt-space-3);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.ot-bar .icon-btn {
+  width: var(--dnt-ctl-h-md);
+  height: var(--dnt-ctl-h-md);
+}
+
+.ot-bar .icon-btn:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+.ot-body {
+  flex: 1;
+  min-height: 0;
   overflow: auto;
-  padding: 16px;
+  padding: var(--dnt-space-4);
 }
 
 .ot-loading {
@@ -63,10 +110,10 @@
 .ot-error {
   max-width: 640px;
   padding: 10px 12px;
-  border: 1px solid var(--danger-border);
-  border-radius: var(--radius-md);
-  background: var(--danger-fill);
-  color: var(--danger-fg);
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
 }
 
 .ot-error p {
@@ -77,7 +124,7 @@
   margin: 6px 0 0;
   white-space: pre-wrap;
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
 }
 
 .ot-error .btn {
@@ -86,8 +133,8 @@
 
 /* Closed or lost connection: a notice with Reconnect rather than a failure. */
 .ot-error.ot-reconnect {
-  border-color: var(--border);
-  background: var(--studio-bg);
+  border-color: var(--dnt-border);
+  background: var(--dnt-bg-app);
   color: inherit;
 }
 
@@ -101,11 +148,11 @@
   display: grid;
   grid-template-columns: 160px 1fr;
   padding: 6px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dnt-border);
 }
 
 .ot-info dt {
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .ot-info dd {
@@ -116,21 +163,6 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  height: 100%;
-}
-
-.ot-ddl-bar {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.ot-ddl-bar {
-  gap: 8px;
-}
-
-.ot-actions {
-  display: flex;
-  gap: 8px;
 }
 
 /* Read-only Monaco: it fills the panel, so a short DDL is not a lost island in an empty box. */
@@ -138,15 +170,15 @@
   flex: 1;
   min-height: 160px;
   overflow: hidden;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-md);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
 }
 
 .ot-structure h3 {
   margin: 20px 0 6px;
-  font-size: var(--text-caption);
+  font-size: var(--dnt-text-xs);
   font-weight: 600;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -168,7 +200,7 @@
 .ot-table td {
   padding: 5px 10px;
   text-align: left;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dnt-border);
   vertical-align: top;
 }
 
@@ -177,14 +209,14 @@
   position: sticky;
   top: 0;
   z-index: 1;
-  background: var(--studio-sidebar);
+  background: var(--dnt-bg-chrome);
   font-weight: 500;
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .ot-pk {
   margin-left: 6px;
-  background: var(--sel);
+  background: var(--dnt-bg-selected);
   color: var(--dnt-accent-hover);
 }
 

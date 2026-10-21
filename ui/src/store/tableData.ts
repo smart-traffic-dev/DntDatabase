@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, isCancelled, notOpenError, toAppError } from '../api';
 import type { AppError, DataFilter, FilterMode, FilterOp, SortSpec, TableDataPage } from '../bindings';
+import { formatCount } from '../lib/plural';
 import type { Loadable } from './objectData';
 import { promptHandles, reopenConnection } from './reopen';
 import type { ObjectTabRef as Tab } from './tabs';
@@ -151,6 +152,32 @@ export function draftToFilter(draft: FilterDraft): { filter: DataFilter | null; 
     conditions.push({ column: row.column, op: row.op, values });
   }
   return { filter: conditions.length ? { mode: draft.mode, conditions } : null, error: null };
+}
+
+/**
+ * The total shown with the page (`1–100 / ~3,412`): the exact count once asked for, else the
+ * table's estimate (not under a filter: it is of the whole table); null when neither is known.
+ */
+export function pageTotal(state: TableDataState, estimate: number | null): { text: string; tip: string } | null {
+  const filtered = state.filter !== null;
+  if (state.count?.status === 'ok') {
+    const n = formatCount(state.count.data);
+    return { text: n, tip: `${n} ${filtered ? 'matching rows' : 'rows'} (counted)` };
+  }
+  if (estimate === null || filtered) return null;
+  const n = formatCount(estimate);
+  return { text: `~${n}`, tip: `About ${n} rows (the table's estimate; Count rows in ⋯ counts exactly)` };
+}
+
+/** The status bar's row text: "Rows 101–200 of ~3,412", "No rows", null while nothing is loaded. */
+export function pageRowsText(state: TableDataState, estimate: number | null): string | null {
+  if (state.page?.status === 'loading') return 'Loading…';
+  if (state.page?.status !== 'ok') return null;
+  const n = state.page.data.rows.length;
+  if (n === 0) return 'No rows';
+  const total = pageTotal(state, estimate);
+  const rows = `Rows ${formatCount(state.offset + 1)}–${formatCount(state.offset + n)}`;
+  return total ? `${rows} of ${total.text}` : rows;
 }
 
 let counter = 0;

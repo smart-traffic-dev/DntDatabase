@@ -90,7 +90,7 @@ describe('P3 flow: filter, edit, preview, apply, reload', () => {
         <DialogHost />
       </>,
     );
-    await screen.findByText('Rows 1–3');
+    await screen.findByText('1–3');
 
     // 1. Filter id = 2 (server side).
     await user.click(screen.getByRole('button', { name: 'Filter' }));
@@ -99,7 +99,7 @@ describe('P3 flow: filter, edit, preview, apply, reload', () => {
     await user.click(within(bar).getByRole('button', { name: 'Apply' }));
     const filter = { mode: 'and', conditions: [{ column: 'id', op: 'eq', values: ['2'] }] };
     await waitFor(() => expect(callsOf('table_data').at(-1)).toMatchObject({ offset: 0, filter }));
-    await screen.findByText('Rows 1–1');
+    await screen.findByText('1–1');
 
     // 2. Edit a cell, then preview: the dialog shows the real statements, nothing ran yet.
     await user.click(screen.getByRole('button', { name: 'cell 0,1' }));
