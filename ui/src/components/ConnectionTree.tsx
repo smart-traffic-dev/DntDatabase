@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { useConnections } from '../store/connections';
-import { computeRows, connectionIdOf } from '../store/treeModel';
+import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
 import {
   ChevronIcon,
@@ -75,6 +75,14 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       <div role="treeitem" aria-level={row.level} aria-disabled="true" aria-selected="false" data-testid="tree-row" className="tree-row placeholder" style={{ ...style, ...indent }}>
         <span className="chev" />
         <span className="muted">Loading…</span>
+      </div>
+    );
+  }
+  if (row.type === 'empty') {
+    return (
+      <div role="treeitem" aria-level={row.level} aria-disabled="true" aria-selected="false" data-testid="tree-row" className="tree-row placeholder" style={{ ...style, ...indent }}>
+        <span className="chev" />
+        <span className="muted">{emptyLabel(node)}</span>
       </div>
     );
   }
@@ -193,10 +201,20 @@ export function ConnectionTree() {
     scrollRef.current?.focus({ preventScroll: true });
   }, []);
 
-  // Keep the selected row in view when the keyboard moves it.
+  // Keep the selected row in view when the selection changes. Rows changing under a fixed
+  // selection (children loading, an expand / collapse, a refresh) must not yank the scroll position.
+  // A selection whose row is not shown yet (its parent still loading) is revealed once it appears.
+  const unrevealed = useRef<string | undefined>(undefined);
   useEffect(() => {
-    const index = rows.findIndex((r) => r.type === 'node' && r.key === selectedId);
-    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
+    unrevealed.current = selectedId ?? undefined;
+  }, [selectedId]);
+  useEffect(() => {
+    const target = unrevealed.current;
+    if (!target) return;
+    const index = rows.findIndex((r) => r.type === 'node' && r.key === target);
+    if (index < 0) return;
+    unrevealed.current = undefined;
+    virtualizer.scrollToIndex(index, { align: 'auto' });
   }, [selectedId, rows, virtualizer]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {

@@ -20,9 +20,9 @@ export interface TreeNode {
 }
 
 export interface TreeRow {
-  /** Unique row key; placeholder rows are `<node id>#loading` / `#error`. */
+  /** Unique row key; placeholder rows are `<node id>#loading` / `#error` / `#empty`. */
   key: string;
-  type: 'node' | 'loading' | 'error';
+  type: 'node' | 'loading' | 'error' | 'empty';
   /** The node of the row (the owner of a placeholder row). */
   node: TreeNode;
   /** 1-based depth, as `aria-level`. */
@@ -118,6 +118,24 @@ const FOLDER_LABELS: Record<ObjectKind, string> = {
 
 export const folderLabel = (kind: ObjectKind) => FOLDER_LABELS[kind];
 
+/** Text of the placeholder row under an expanded node that has no children. */
+export function emptyLabel(node: TreeNode): string {
+  switch (node.kind) {
+    case 'group':
+      return 'Empty group';
+    case 'connection':
+      return 'No databases';
+    case 'database':
+      return 'No schemas';
+    case 'schema':
+      return 'No objects';
+    case 'folder':
+      return node.folderKind ? `No ${folderLabel(node.folderKind).toLowerCase()}` : 'No objects';
+    default:
+      return 'Nothing here';
+  }
+}
+
 export function isExpandable(node: TreeNode): boolean {
   return node.kind !== 'object';
 }
@@ -163,6 +181,9 @@ export function computeRows(s: RowSource): TreeRow[] {
         rows.push({ key: `${id}#loading`, type: 'loading', node, level: level + 1, expandable: false, expanded: false });
       } else if (node.error) {
         rows.push({ key: `${id}#error`, type: 'error', node, level: level + 1, expandable: false, expanded: false });
+      } else if (s.childIds.get(id)?.length === 0) {
+        // Loaded and empty: say so, rather than an expanded node that looks broken.
+        rows.push({ key: `${id}#empty`, type: 'empty', node, level: level + 1, expandable: false, expanded: false });
       }
     }
   };

@@ -445,6 +445,28 @@ describe('ConnectionTree', () => {
     expect(await screen.findByText('Searching loaded objects')).toBeInTheDocument();
   });
 
+  it('says so under an expanded folder that has no objects', async () => {
+    backend({ list_objects: () => [] });
+    await renderTree();
+    await expandPath(prodNode, dbNode, tablesNode);
+    const empty = await screen.findByText('No tables');
+    expect(empty.closest('[role="treeitem"]')).toHaveAttribute('aria-disabled', 'true');
+    // Not a node: the keyboard skips it.
+    expect(rowLabels()).not.toContain('No tables');
+  });
+
+  it('scrolls to the selection when it changes, not when rows change under it', async () => {
+    backend();
+    await renderTree();
+    const scrollTo = vi.spyOn(Element.prototype, 'scrollTo');
+    act(() => useTree.getState().select(prodNode));
+    const afterSelect = scrollTo.mock.calls.length;
+    expect(afterSelect).toBeGreaterThan(0);
+    await expandPath(groupNodeId(ids.groupB), prodNode, dbNode);
+    expect(scrollTo.mock.calls.length).toBe(afterSelect);
+    scrollTo.mockRestore();
+  });
+
   it('shows the hint of an error under its message', async () => {
     backend({
       list_databases: () => {
