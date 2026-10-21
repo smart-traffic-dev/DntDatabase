@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { $, browser, expect } from '@wdio/globals';
 
 import { evidence } from './evidence';
-import { byId, createConnection, expandRow, runAll, treeRow, typeInEditor } from './helpers';
+import { byId, collapseRow, createConnection, expandRow, runAll, treeRow, typeInEditor } from './helpers';
 
 
 
@@ -38,7 +38,9 @@ async function apply(typed?: string) {
 
   await $('p=Operation applied.').waitForDisplayed({ timeout: 30_000 });
 
+  await $('button=Close').waitForClickable({ timeout: 20_000 });
   await $('button=Close').click();
+  await $('.object-action-dialog').waitForDisplayed({ reverse: true, timeout: 20_000 });
 
 }
 
@@ -66,6 +68,10 @@ for (const pg of [false, true]) {
 
     it('creates a namespace, previews and applies rename/truncate/drop through the real IPC', async () => {
 
+      await browser.keys(['Escape']);
+      for (const other of ['p4a-my', 'p4a-pg']) {
+        if (await (await treeRow(other)).isExisting()) await collapseRow(other);
+      }
       await createConnection({ name: conn, engine: pg ? 'postgres' : 'mysql', port: pg ? 54317 : 33080, user: pg ? 'postgres' : 'root', password: 'dnt_test', env: 'local' });
 
       await expandRow(conn);
@@ -94,7 +100,13 @@ for (const pg of [false, true]) {
 
       await runAll();
 
-      await browser.waitUntil(async () => /1 row affected/.test(await (await byId('result-summary')).getText()), { timeout: 20_000 });
+      await byId('panel-messages').waitForClickable({ timeout: 20_000 });
+      await byId('panel-messages').click();
+      await browser.waitUntil(async () => (await byId('messages').getText()).includes('Done: 2 statements'), { timeout: 20_000 });
+      await expect(byId('messages')).not.toHaveText(expect.stringContaining('Error:'));
+      // SQL entered manually uses the tree's explicit Refresh action. P4a actions refresh automatically.
+      await (await treeRow(ns)).click();
+      await browser.keys(['F5']);
 
       await expandRow('Tables');
 

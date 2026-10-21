@@ -1,7 +1,7 @@
 # P4a — Quản lý object cơ bản, local-first
 
 - Ngày: 2026-10-21
-- Trạng thái: Đề xuất để review, chưa triển khai.
+- Trạng thái: Đã duyệt và triển khai trên branch feat/p4a-object-actions.
 - Cơ sở: code hiện tại đã có query guard, data edit plan, transaction, introspection và streaming export.
 - Tài liệu này thu hẹp phần P4 của roadmap P3–P6 thành một đợt có thể kiểm chứng độc lập.
 
@@ -96,7 +96,7 @@ Thực thi bằng session DDL riêng, không dùng session query tab hoặc data
 
 - PostgreSQL: chạy DDL trong transaction riêng. Chỉ báo committed sau phản hồi COMMIT; chỉ báo rolled_back sau xác nhận rollback hoặc kết quả chắc chắn từ server.
 - MySQL/MariaDB: DDL có thể implicit commit; không hứa rollback. TRUNCATE cảnh báo có thể reset AUTO_INCREMENT. PostgreSQL dùng CONTINUE IDENTITY.
-- Chờ lock tối đa 5 giây qua cơ chế phù hợp phiên bản: PostgreSQL lock_timeout, MySQL/MariaDB session lock_wait_timeout cho metadata lock. Không đổi global settings.
+- Mỗi lần chờ lấy lock tối đa 5 giây qua cơ chế phù hợp phiên bản: PostgreSQL lock_timeout, MySQL/MariaDB session lock_wait_timeout cho metadata lock. Không đổi global settings.
 - Timeout câu lệnh dùng chính sách thực thi hiện có; hết hạn hoặc Stop phải yêu cầu cancel phía server, không chỉ bỏ future phía client.
 - UI tạo operation id trước khi Apply; backend đăng ký id trước khi gửi DDL. Stop dùng command cancel riêng khi Apply đang chờ. Cancel đến trước lúc đăng ký phải được ghi nhận để operation không gửi DDL; id đang dùng bị từ chối. Có thể tái sử dụng hạ tầng run/cancel nếu bảo toàn định danh operation và session.
 - Mất kết nối, timeout hoặc cancel sau khi đã gửi DDL/COMMIT mà không xác nhận được kết quả: outcome_unknown; không retry và không ghi thông báo thành công.
@@ -137,11 +137,12 @@ P4b có spec riêng cho table designer: Columns, PK, index, FK, checks, options,
 
 Thứ tự đề xuất tiếp theo: P4b designer → import dữ liệu/dump-restore → workspace đầy đủ và quản trị. Có thể đảo import lên trước P4b khi nhu cầu chuyển dữ liệu trở thành ưu tiên.
 
-## 10. Ghi ch? tri?n khai
+## 10. Ghi chú triển khai
 
-- Gi? nguy?n ph?m vi local-first, kh?ng th?m CI.
-- Apply d?ng UUID operation do UI t?o tr??c, c? channel ti?n ?? v? command Stop ri?ng.
-- MySQL/MariaDB b?o k?t qu? Unknown m?t c?ch th?n tr?ng khi DDL ?? g?i nh?ng tr? l?i; kh?ng h?a rollback hay t? retry. PostgreSQL ch? b?o rollback khi nh?n x?c nh?n ROLLBACK.
-- TRUNCATE PostgreSQL c?n t?c ??ng b?ng con v? trigger ON TRUNCATE; preview c? c?nh b?o. Tham chi?u: https://www.postgresql.org/docs/12/sql-truncate.html
-- Gi?i h?n lock metadata d?ng session lock_wait_timeout ? MySQL/MariaDB; PostgreSQL d?ng lock_timeout. Tham chi?u: https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_lock_wait_timeout
-- Gi?a ki?m tra metadata v? DDL v?n c? race v?i session b?n ngo?i nh? ?? n?u trong thi?t k?.
+- Giữ nguyên phạm vi local-first, không thêm CI.
+- Apply dùng UUID operation do UI tạo trước, có channel tiến độ và command Stop riêng.
+- MySQL/MariaDB báo Unknown một cách thận trọng khi DDL đã gửi nhưng trả lỗi; không hứa rollback và không tự retry. PostgreSQL chỉ báo rollback khi nhận xác nhận ROLLBACK.
+- TRUNCATE PostgreSQL còn tác động bảng con và trigger ON TRUNCATE; preview có cảnh báo. Tham chiếu: https://www.postgresql.org/docs/12/sql-truncate.html
+- Mỗi lần chờ lock metadata được giới hạn bằng session lock_wait_timeout ở MySQL/MariaDB và lock_timeout ở PostgreSQL. Tham chiếu: https://dev.mysql.com/doc/refman/8.0/en/server-system-variables.html#sysvar_lock_wait_timeout
+- Recheck metadata không loại bỏ hoàn toàn race với session bên ngoài.
+- Đã tích hợp editor groups, toast stack và History sidebar từ main; xem final integration review cùng ngày.
