@@ -103,6 +103,7 @@ pub struct ColumnDetail {
     /// explicit non-default collation; `None` otherwise.
     pub collation: Option<String>,
     pub comment: Option<String>,
+    /// Character set of a text column when it differs from the table default.
     #[serde(default)]
     pub charset: Option<String>,
     /// MySQL ON UPDATE CURRENT_TIMESTAMP[(n)] clause.
@@ -143,13 +144,13 @@ pub struct IndexDetail {
     /// rows already in the table may hold duplicates.
     pub unique: bool,
     pub primary: bool,
-    /// A partial index (PostgreSQL `â€¦ WHERE <predicate>`): it covers only some rows, so
+    /// A partial index (PostgreSQL `… WHERE <predicate>`): it covers only some rows, so
     /// it never identifies a row. Always false on MySQL/MariaDB.
     pub partial: bool,
     pub columns: Vec<String>,
     pub expression: Option<String>,
     pub method: Option<String>,
-    /// Either a full `CREATE INDEX â€¦` statement or, for an index backing a table
+    /// Either a full `CREATE INDEX …` statement or, for an index backing a table
     /// constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).
     pub definition: Option<String>,
     #[serde(default)]
@@ -160,6 +161,7 @@ pub struct IndexDetail {
     pub include: Vec<String>,
     #[serde(default)]
     pub nulls_not_distinct: bool,
+    /// The index's own comment.
     #[serde(default)]
     pub comment: Option<String>,
 }
@@ -196,6 +198,7 @@ pub struct ForeignKeyDetail {
     /// Verbatim server constraint definition when the backend provides one
     /// (e.g. `FOREIGN KEY (a) REFERENCES t(id) DEFERRABLE INITIALLY DEFERRED`).
     pub definition: Option<String>,
+    /// `FULL`, `PARTIAL` or `SIMPLE`; `None` when the server default applies.
     #[serde(default)]
     pub match_type: Option<String>,
     #[serde(default)]
@@ -235,6 +238,7 @@ pub struct TableOptions {
     #[serde(default)]
     #[specta(type = Option<f64>)]
     pub auto_increment: Option<u64>,
+    /// Other table options as `(name, value)` pairs, in a stable order.
     #[serde(default)]
     pub extra: Vec<(String, String)>,
     #[serde(default)]
