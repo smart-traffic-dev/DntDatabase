@@ -48,6 +48,38 @@ describe('QueryToolbar commit mode', () => {
     expect(radio('Auto')).toHaveAttribute('title', 'Commit or roll back the open transaction first');
   });
 
+  it('an open transaction shows its age with Rollback and Commit', async () => {
+    mockBackend({ query_tx: () => 'idle', query_tx_info: () => ({ state: 'idle', since_ms: null, statements: 0 }) });
+    act(() => useTxMode.getState().patch(id, { mode: 'Manual' }));
+    render(<QueryToolbar doc={doc()} />);
+    expect(screen.queryByTestId('query-tx-chip')).toBeNull();
+    expect(screen.queryByTestId('query-tx-commit')).toBeNull();
+    act(() => {
+      useTxMode.getState().patch(id, { info: { state: 'active', since_ms: Date.now() - 65_000, statements: 2 } });
+      useQueryRun.setState({ runs: new Map([[id, { ...emptyRun, txState: 'active' }]]) });
+    });
+    expect(screen.getByTestId('query-tx-chip')).toHaveTextContent('Transaction · 01:05');
+    expect(screen.getByTestId('query-tx-chip')).toHaveClass('warning');
+    expect(screen.getByTestId('query-tx-rollback')).toHaveTextContent('Rollback');
+    await userEvent.setup().click(screen.getByTestId('query-tx-commit'));
+    expect(callsOf('query_tx')).toEqual([{ tabId: id, action: 'Commit' }]);
+  });
+
+  it('an aborted transaction offers Rollback only, and a run disables it with a reason', () => {
+    mockBackend({});
+    act(() => {
+      useTxMode.getState().patch(id, { mode: 'Manual' });
+      useQueryRun.setState({ runs: new Map([[id, { ...emptyRun, txState: 'aborted' }]]) });
+    });
+    render(<QueryToolbar doc={doc()} />);
+    expect(screen.getByTestId('query-tx-chip')).toHaveTextContent('Transaction aborted');
+    expect(screen.queryByTestId('query-tx-commit')).toBeNull();
+    expect(screen.getByTestId('query-tx-rollback')).toBeEnabled();
+    act(() => useQueryRun.setState({ runs: new Map([[id, { ...emptyRun, txState: 'aborted', phase: { kind: 'stopping', since: 0, reason: 'user' } }]]) }));
+    expect(screen.getByTestId('query-tx-rollback')).toBeDisabled();
+    expect(screen.getByTestId('query-tx-rollback')).toHaveAttribute('title', 'A statement is running');
+  });
+
   it('a_refused_switch_to_auto_keeps_manual_and_shows_the_error', async () => {
     mockBackend({
       query_tx_mode: () => {

@@ -99,7 +99,7 @@ describe('AddFavoriteDialog', () => {
     expect(screen.getByRole('dialog', { name: 'Add to favorites' })).toBeInTheDocument();
   });
 
-  it('the query toolbar button opens it for the tab', async () => {
+  it('the query toolbar Run menu item opens it for the tab', async () => {
     mockBackend({});
     const user = userEvent.setup();
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
@@ -111,6 +111,7 @@ describe('AddFavoriteDialog', () => {
         <DialogHost />
       </>,
     );
+    await user.click(screen.getByTestId('query-run-menu'));
     await user.click(screen.getByTestId('query-add-favorite'));
     expect(screen.getByRole('dialog', { name: 'Add to favorites' })).toBeInTheDocument();
     expect(useDialogs.getState().request).toMatchObject({ kind: 'addFavorite', sql: 'SELECT 7', name: 'Query 1' });

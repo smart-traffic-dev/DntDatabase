@@ -23,13 +23,12 @@ describe('SqlEditor theme', () => {
     expect(screen.getByTestId('monaco-mock')).toHaveAttribute('data-theme', 'dnt-dark');
   });
 
-  it('explains_the_keys_while_empty', () => {
+  // The run keys are shown by the collapsed result panel (QueryTab.split.test), not inside the editor.
+  it('shows no placeholder text while empty', () => {
     const empty = { ...doc, sql: '' } as typeof doc;
-    const view = render(<ThemeProvider><SqlEditor doc={empty} engine="mysql" /></ThemeProvider>);
-    expect(screen.getByTestId('editor-placeholder')).toHaveTextContent('Ctrl+Enter runs the statement at the cursor');
-    view.unmount();
-    render(<ThemeProvider><SqlEditor doc={doc} engine="mysql" /></ThemeProvider>);
+    render(<ThemeProvider><SqlEditor doc={empty} engine="mysql" /></ThemeProvider>);
     expect(screen.queryByTestId('editor-placeholder')).toBeNull();
+    expect(screen.getByTestId('query-editor')).not.toHaveTextContent('Ctrl+Enter');
   });
 
   it('dark_toggle_redefines_and_sets_the_dnt_dark_theme', () => {

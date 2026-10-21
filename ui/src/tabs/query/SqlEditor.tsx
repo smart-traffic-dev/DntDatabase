@@ -1,6 +1,6 @@
 import Editor, { type OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
 import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
@@ -105,7 +105,6 @@ const shownText = new Map<string, string>();
 function sameEditor(prev: SqlEditorProps, next: SqlEditorProps): boolean {
   if (prev.engine !== next.engine || prev.doc.id !== next.doc.id) return false;
   if (prev.doc.connectionId !== next.doc.connectionId || prev.doc.database !== next.doc.database) return false;
-  if ((prev.doc.sql === '') !== (next.doc.sql === '')) return false;
   const id = next.doc.id;
   const holds = editors.get(id)?.getValue() ?? shownText.get(id);
   return next.doc.sql === holds;
@@ -116,8 +115,6 @@ export const SqlEditor = memo(SqlEditorView, sameEditor);
 
 function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
   const monacoTheme = useDntMonacoTheme();
-  // The placeholder lines up with the text: left edge of the content area, known once the editor is laid out.
-  const [contentLeft, setContentLeft] = useState<number | null>(null);
   const { connectionId, database } = doc;
   // Load the schema for autocomplete as soon as the editor opens, not on the first suggestion.
   useEffect(() => {
@@ -134,16 +131,6 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
   );
   return (
     <div className="sql-editor" data-testid="query-editor">
-      {doc.sql === '' && (
-        <div
-          className="sql-editor-placeholder"
-          data-testid="editor-placeholder"
-          aria-hidden="true"
-          style={{ left: contentLeft ?? 0, visibility: contentLeft === null ? 'hidden' : 'visible' }}
-        >
-          Ctrl+Enter runs the statement at the cursor · Ctrl+Shift+Enter runs all · Ctrl+Shift+E explains
-        </div>
-      )}
       <Editor
         path={`query://${doc.id}`}
         language={engine === 'postgres' ? 'pgsql' : 'mysql'}
@@ -160,8 +147,6 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
           editor.onDidDispose(() => {
             if (editors.get(doc.id) === editor) editors.delete(doc.id);
           });
-          setContentLeft(editor.getLayoutInfo().contentLeft);
-          editor.onDidLayoutChange((l) => setContentLeft(l.contentLeft));
           bindRunKeys(doc.id, editor, monaco);
           bindEditorFontScale(editor);
           onMount?.(editor, monaco);

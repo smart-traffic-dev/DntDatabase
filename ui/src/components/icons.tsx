@@ -171,6 +171,20 @@ export const EventIcon = () => (
   </Icon>
 );
 
+/** Triangle: Run. */
+export const PlayIcon = () => (
+  <Icon size={12} strokeWidth={2}>
+    <path d="M7 5l12 7-12 7z" fill="currentColor" />
+  </Icon>
+);
+
+/** Square: Stop. */
+export const StopIcon = () => (
+  <Icon size={12} strokeWidth={2}>
+    <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" />
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon size={12} strokeWidth={2}>
     <path d="M6 6l12 12M18 6L6 18" />

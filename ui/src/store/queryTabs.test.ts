@@ -141,6 +141,8 @@ describe('restore', () => {
     const tab = useTabs.getState().tabs[0] as QueryTabRef;
     expect(tab.connectionId).toBeNull();
     render(createElement(QueryTab, { tab }));
+    expect(screen.getByTestId('query-context')).toHaveTextContent('Choose a connection');
+    await userEvent.setup().click(screen.getByTestId('query-context'));
     const select = screen.getByTestId('query-connection') as HTMLSelectElement;
     expect(select.selectedOptions[0]).toHaveTextContent('Choose a connection');
     expect(screen.getByTestId('query-run')).toBeDisabled();
