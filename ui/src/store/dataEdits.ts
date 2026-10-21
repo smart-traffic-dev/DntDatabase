@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
+import { plural } from '../lib/plural';
 import type {
   ApplyReport,
   CellInput,
@@ -286,13 +287,18 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
       // The rest certainly did not apply: a conflict or the server's error says why (rule 7: no "may have").
       const applied = keys.filter((_, i) => i < outcome.applied);
       const conflicts = conflictRows();
+      const reason = failed()?.message ?? (conflicts.length > 0 ? 'a row changed on the server' : 'The changes stopped before all of them were applied.');
+      // The applied changes are on the server: say so, and show the page as it is now.
+      const ran = applied.length;
+      const message = ran > 0 ? `${plural(ran, 'change')} ${ran === 1 ? 'was' : 'were'} applied before the error: ${reason}` : reason;
       patch(tab.id, {
-        staged: applied.length ? without(state.staged, applied) : state.staged,
+        staged: ran ? without(state.staged, applied) : state.staged,
         history: [],
         conflicts: only ? [...new Set([...state.conflicts, ...conflicts])] : conflicts,
         applying: null,
-        error: conflicts.length > 0 ? null : (failed()?.message ?? 'The changes stopped before all of them were applied.'),
+        error: conflicts.length > 0 && ran === 0 ? null : message,
       });
+      if (ran > 0) void useTableData.getState().load(tab);
     } else {
       // Whether anything applied cannot be told: the stage is kept and the user reloads to check.
       patch(tab.id, {

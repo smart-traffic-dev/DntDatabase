@@ -816,6 +816,25 @@ describe('DataView editing', () => {
     expect(useDataEdits.getState().hasStaged(makeTab().id)).toBe(false);
   });
 
+  it('the truncation note points binary-only pages to the value editor', async () => {
+    await editable(
+      { table_data: () => binaryPage(bytes(1000, 64), { truncated: [[0, 2]], truncated_cells: 1 }) },
+      { stage: false },
+    );
+    expect(
+      await screen.findByText('Some binary values are shown as a preview; open them in the value editor (Shift+Enter) to see all bytes.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/open in query/)).not.toBeInTheDocument();
+  });
+
+  it('the truncation note keeps the query hint when a text cell is cut too', async () => {
+    await editable(
+      { table_data: () => binaryPage(bytes(1000, 64), { truncated: [[0, 2], [1, 1]], truncated_cells: 2 }) },
+      { stage: false },
+    );
+    expect(await screen.findByText(/Some values are truncated; open in query to see full values\./)).toBeInTheDocument();
+  });
+
   it('a binary cell the backend lists as truncated is not editable in place', async () => {
     await editable({ table_data: () => binaryPage(bytes(1000, 64), { truncated: [[0, 2]], truncated_cells: 1 }) }, { stage: false });
     expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
@@ -1117,7 +1136,7 @@ describe('DataView editing', () => {
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await user.click(await screen.findByRole('button', { name: 'Confirm' }));
     // The outcome is certain: the server's error is shown, not "may have been applied".
-    expect(await screen.findByText('boom')).toBeInTheDocument();
+    expect(await screen.findByText('1 change was applied before the error: boom')).toBeInTheDocument();
     expect(screen.queryByText(UNKNOWN_TEXT)).not.toBeInTheDocument();
     // The update (edit 0) ran; the INSERT (edit 1) did not: only the INSERT stays staged.
     expect(cell(0, 1)).toHaveAttribute('data-status', '');
@@ -1125,6 +1144,53 @@ describe('DataView editing', () => {
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await screen.findByRole('dialog', { name: 'Review changes' });
     expect((lastCall('data_preview').set as { edits: { op: string }[] }).edits.map((e) => e.op)).toEqual(['insert']);
+  });
+
+  it('a partial apply reloads the page, says how many changes ran and keeps the failed one staged', async () => {
+    const { user } = await editable(
+      {
+        data_preview: () => previewOf({ atomic: 'no' }),
+        data_apply: () =>
+          reportOf({
+            outcome: { outcome: 'partially_applied', applied: 1 },
+            statements: [
+              { index: 0, affected: 1, error: null, conflict: false },
+              { index: 1, affected: null, error: appError('server', 'boom'), conflict: false },
+            ],
+          }),
+      },
+      { stage: false },
+    );
+    fireEvent.keyDown(screen.getByTestId('grid'), { key: 'n', ctrlKey: true });
+    await user.click(cell(0, 1));
+    const before = callsOf('table_data').length;
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('1 change was applied before the error: boom')).toBeInTheDocument();
+    await waitFor(() => expect(callsOf('table_data').length).toBe(before + 1));
+    // The failed INSERT stays staged.
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect((lastCall('data_preview').set as { edits: { op: string }[] }).edits.map((e) => e.op)).toEqual(['insert']);
+  });
+
+  it('a partial apply that ran nothing does not reload', async () => {
+    const { user } = await editable(
+      {
+        data_preview: () => previewOf({ atomic: 'no' }),
+        data_apply: () =>
+          reportOf({
+            outcome: { outcome: 'partially_applied', applied: 0 },
+            statements: [{ index: 0, affected: null, error: appError('server', 'boom'), conflict: false }],
+          }),
+      },
+      { info: editableInfo({ atomic: 'no' }) },
+    );
+    const before = callsOf('table_data').length;
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await user.click(await screen.findByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByText('boom')).toBeInTheDocument();
+    expect(callsOf('table_data')).toHaveLength(before);
   });
 
   it('a conflict on a table without transactions marks the row; no unknown banner', async () => {

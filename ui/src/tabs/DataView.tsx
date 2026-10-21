@@ -520,6 +520,12 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
   const nUpdated = [...staged.updates.values()].reduce((n, u) => n + u.cells.size, 0);
 
   const truncated = data !== null && data.truncated_cells > 0;
+  // Every cut cell is a binary preview (the value editor shows all bytes; a query would not).
+  const onlyBinaryCut =
+    truncated &&
+    data !== null &&
+    data.truncated.length > 0 &&
+    data.rows.every((row, r) => row.every((v, c) => !isCutCell(data, r, c) || v.t === 'Bytes'));
   const capped = data?.size_capped === true;
 
   return (
@@ -733,7 +739,11 @@ export function DataView({ tab, estimate }: { tab: Tab; estimate: number | null 
       ) : null}
       {truncated || capped ? (
         <p role="status" className="dv-note">
-          {truncated ? 'Some values are truncated; open in query to see full values.' : null}
+          {truncated
+            ? onlyBinaryCut
+              ? 'Some binary values are shown as a preview; open them in the value editor (Shift+Enter) to see all bytes.'
+              : 'Some values are truncated; open in query to see full values.'
+            : null}
           {truncated && capped ? ' ' : null}
           {capped ? 'This page stopped early to stay small; Next continues after its last row.' : null}
         </p>
