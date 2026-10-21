@@ -11,6 +11,8 @@
 //! session's `sql_mode` has it, the mode is switched off for that one read and restored.
 mod apply;
 #[cfg(test)]
+mod db_tests;
+#[cfg(test)]
 mod tests;
 
 pub use apply::{CountedImpact, DesignPreview, DesignReport};
@@ -45,6 +47,10 @@ pub(crate) const MAX_DESIGNS: usize = 64;
 
 /// Bound of each impact count query.
 pub(crate) const COUNT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// How long a count stopped on the server may take to end before its session is
+/// given up.
+pub(crate) const COUNT_GRACE: Duration = Duration::from_secs(1);
 
 /// The fingerprint of a design for a table that does not exist yet.
 const NEW_TABLE: &str = "new";
@@ -107,6 +113,8 @@ pub(crate) struct DesignStore {
     pub(crate) operations: DdlOperations,
     /// [`COUNT_TIMEOUT`]; tests set it shorter.
     pub(crate) count_timeout: Duration,
+    /// [`COUNT_GRACE`]; tests set it shorter.
+    pub(crate) count_grace: Duration,
 }
 
 impl Default for DesignStore {
@@ -116,6 +124,7 @@ impl Default for DesignStore {
             plans: Mutex::default(),
             operations: DdlOperations::default(),
             count_timeout: COUNT_TIMEOUT,
+            count_grace: COUNT_GRACE,
         }
     }
 }
@@ -137,8 +146,9 @@ fn session_db(kind: DbKind, scope: &Scope) -> Option<String> {
     (kind == DbKind::Postgres).then(|| scope.database.clone())
 }
 
+/// A metadata read that ran past [`METADATA_CALL_TIMEOUT`] (as metadata calls report it).
 fn timed_out() -> DbError {
-    config_error("table", "Metadata timed out; nothing was changed.")
+    DbError::timeout(dnt_core::error::ConnectStage::Execute)
 }
 
 pub(crate) fn table_changed() -> DbError {
@@ -147,19 +157,30 @@ pub(crate) fn table_changed() -> DbError {
     }
 }
 
-/// First column of the first row, as text.
+/// First column of the first row, as text (a binary value is read as UTF-8: some
+/// servers type system variables as binary strings).
 #[derive(Default)]
 struct FirstText(Option<String>);
+
+impl FirstText {
+    fn text(v: Value) -> Option<String> {
+        match v {
+            Value::Text(s) => Some(s),
+            Value::Bytes { preview, .. } => String::from_utf8(preview).ok(),
+            _ => None,
+        }
+    }
+}
 
 impl RowSink for FirstText {
     fn result_start(&mut self, _: &[ColumnMeta]) {}
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
         if self.0.is_none() {
-            if let Some(Value::Text(s)) =
-                batch.into_iter().next().and_then(|r| r.into_iter().next())
-            {
-                self.0 = Some(s);
-            }
+            self.0 = batch
+                .into_iter()
+                .next()
+                .and_then(|r| r.into_iter().next())
+                .and_then(FirstText::text);
         }
     }
     fn result_end(&mut self, _: &ResultSummary) {}
@@ -167,11 +188,16 @@ impl RowSink for FirstText {
 
 async fn first_text(session: &dyn Session, sql: &str) -> Result<Option<String>, DbError> {
     let mut sink = FirstText::default();
+    let options = ExecOptions {
+        // Every byte of a binary value, not a preview.
+        full_bytes: true,
+        ..ExecOptions::default()
+    };
     session
         .execute_one(
             sql,
             dnt_core::sql::classify(sql, session.dialect()),
-            &ExecOptions::default(),
+            &options,
             &mut sink,
         )
         .await?;

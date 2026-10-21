@@ -16,15 +16,17 @@ use dnt_core::meta::{
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
 use dnt_core::server::{DbKind, ServerInfo};
-use dnt_core::sql::{Dialect, StatementKind};
+use dnt_core::sql::{Dialect, MySqlMode, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
 use dnt_core::value::Value;
 use dnt_schema::TableDef;
 use dnt_store::db::open_in_memory;
+use dnt_store::history::{HistoryFilter, HistoryOrigin};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::KnownHosts;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
@@ -43,8 +45,18 @@ struct Fake {
     seen: Mutex<Vec<String>>,
     /// A statement containing the text fails with the error.
     fail: Mutex<Option<(String, DbError)>>,
-    /// `SELECT COUNT` statements take this long.
+    /// `SELECT COUNT` statements take this long (the fake ignores statement timeouts).
     count_delay: Mutex<Duration>,
+    /// `ExecOptions::timeout` of every `SELECT COUNT`.
+    count_timeouts: Mutex<Vec<Option<Duration>>>,
+    /// Cancel requests received.
+    cancels: AtomicUsize,
+    /// MySQL session `sql_mode`; `ANSI_QUOTES` in it sets the dialect flag.
+    sql_mode: Mutex<String>,
+    /// Whether `ANSI_QUOTES` was on at each `object_ddl` call.
+    ddl_ansi: Mutex<Vec<bool>>,
+    /// `SELECT @@SESSION.sql_mode` answers with a binary value.
+    mode_as_bytes: AtomicBool,
 }
 
 impl Fake {
@@ -57,7 +69,20 @@ impl Fake {
             seen: Mutex::new(Vec::new()),
             fail: Mutex::new(None),
             count_delay: Mutex::new(Duration::ZERO),
+            count_timeouts: Mutex::new(Vec::new()),
+            cancels: AtomicUsize::new(0),
+            sql_mode: Mutex::new("STRICT_TRANS_TABLES".into()),
+            ddl_ansi: Mutex::new(Vec::new()),
+            mode_as_bytes: AtomicBool::new(false),
         })
+    }
+
+    fn ansi(&self) -> bool {
+        self.sql_mode
+            .lock()
+            .unwrap()
+            .split(',')
+            .any(|m| m == "ANSI_QUOTES" || m == "ANSI")
     }
 
     /// The statements sent, without the background SchemaCache load's.
@@ -95,11 +120,12 @@ struct FakeSession {
     tx: Mutex<TxState>,
 }
 
-struct NoopCancel;
+struct CountingCancel(Arc<Fake>);
 
 #[async_trait]
-impl Canceller for NoopCancel {
+impl Canceller for CountingCancel {
     async fn cancel(&self) -> Result<(), DbError> {
+        self.0.cancels.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -113,7 +139,7 @@ impl Session for FakeSession {
         &self,
         stmt: &str,
         _kind: StatementKind,
-        _opts: &ExecOptions,
+        opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         self.fake.seen.lock().unwrap().push(stmt.to_string());
@@ -136,7 +162,24 @@ impl Session for FakeSession {
             elapsed_ms: 0,
         };
         sink.result_start(&[]);
+        if let Some(mode) = stmt.strip_prefix("SET SESSION sql_mode = '") {
+            *self.fake.sql_mode.lock().unwrap() = mode.trim_end_matches('\'').to_string();
+        }
+        if stmt == "SELECT @@SESSION.sql_mode" {
+            let mode = self.fake.sql_mode.lock().unwrap().clone();
+            sink.rows(vec![vec![
+                if self.fake.mode_as_bytes.load(Ordering::SeqCst) {
+                    Value::Bytes {
+                        len: mode.len() as u64,
+                        preview: mode.into_bytes(),
+                    }
+                } else {
+                    Value::Text(mode)
+                },
+            ]]);
+        }
         if upper.starts_with("SELECT COUNT") {
+            self.fake.count_timeouts.lock().unwrap().push(opts.timeout);
             let delay = *self.fake.count_delay.lock().unwrap();
             if !delay.is_zero() {
                 tokio::time::sleep(delay).await;
@@ -153,10 +196,16 @@ impl Session for FakeSession {
         *self.tx.lock().unwrap()
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.fake.server.kind)
+        match self.fake.server.kind {
+            DbKind::MySql => Dialect::MySql(MySqlMode {
+                ansi_quotes: self.fake.ansi(),
+                ..MySqlMode::default()
+            }),
+            DbKind::Postgres => Dialect::Postgres,
+        }
     }
     fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoopCancel)
+        Arc::new(CountingCancel(Arc::clone(&self.fake)))
     }
     fn introspector(&self) -> &dyn Introspector {
         self
@@ -189,6 +238,7 @@ impl Introspector for FakeSession {
         Ok(self.fake.detail.lock().unwrap().clone())
     }
     async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
+        self.fake.ddl_ansi.lock().unwrap().push(self.fake.ansi());
         Ok(self.fake.ddl.lock().unwrap().clone())
     }
 }
@@ -216,6 +266,7 @@ async fn fixture(fake: Arc<Fake>, env: Option<EnvTag>, read_only: bool) -> Fixtu
         HashMap::from([(kind, driver)]),
     );
     sm.table_designs.count_timeout = Duration::from_millis(100);
+    sm.table_designs.count_grace = Duration::from_millis(50);
     let cfg = ConnectionConfig {
         id: Uuid::nil(),
         kind,
@@ -333,16 +384,239 @@ async fn preview_blocks_read_only() {
 async fn preview_detects_changed_table() {
     let f = mysql(None, false).await;
     let o = open(&f).await;
+    // Dropping a column renders a count: none may run once the table changed.
+    let draft = drop_created_at(&o.def);
     f.fake.detail.lock().unwrap().comment = Some("changed elsewhere".into());
     let e =
-        f.sm.table_design_preview(o.design_id, add_note(&o.def))
+        f.sm.table_design_preview(o.design_id, draft)
             .await
             .unwrap_err();
     assert!(
         matches!(&e, DbError::PlanStale { reason } if reason == "Table changed"),
         "{e:?}"
     );
-    assert!(!f.fake.sent().iter().any(|s| s.starts_with("ALTER")));
+    let sent = f.fake.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|s| s.starts_with("SELECT COUNT") || s.contains("READ ONLY")),
+        "{sent:?}"
+    );
+}
+
+/// The stored table without `created_at` (renders a data-loss impact with a count).
+fn drop_created_at(def: &TableDef) -> TableDef {
+    let mut d = def.clone();
+    d.columns.retain(|c| c.name != "created_at");
+    d
+}
+
+#[tokio::test]
+async fn edited_locked_element_is_restored_and_never_rendered() {
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    lock(&f.sm.table_designs.designs)
+        .get_mut(&o.design_id)
+        .unwrap()
+        .base
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "total")
+        .unwrap()
+        .locked = true;
+    // The client clears the flag and edits the locked column.
+    let mut d = o.def.clone();
+    let total = d.columns.iter_mut().find(|c| c.name == "total").unwrap();
+    total.locked = false;
+    total.comment = Some("hacked".into());
+    total.nullable = true;
+    let r =
+        f.sm.table_design_render(o.design_id, d.clone())
+            .await
+            .unwrap();
+    assert!(r.statements.is_empty(), "{r:?}");
+    let e =
+        f.sm.table_design_preview(o.design_id, d.clone())
+            .await
+            .unwrap_err();
+    assert!(matches!(e, DbError::Config { .. }), "{e:?}");
+    // Next to a real change, the locked column still never reaches the SQL.
+    let mut with_note = add_note(&d);
+    with_note
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "total")
+        .unwrap()
+        .comment = Some("hacked".into());
+    let r =
+        f.sm.table_design_render(o.design_id, with_note)
+            .await
+            .unwrap();
+    assert_eq!(r.statements.len(), 1, "{r:?}");
+    assert!(!r.statements[0].contains("hacked"), "{r:?}");
+    assert!(!r.statements[0].contains("`total`"), "{r:?}");
+}
+
+#[tokio::test]
+async fn apply_detects_changed_table_and_sends_nothing() {
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    let p =
+        f.sm.table_design_preview(o.design_id, add_note(&o.def))
+            .await
+            .unwrap();
+    f.fake.detail.lock().unwrap().comment = Some("changed elsewhere".into());
+    let e =
+        f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(&e, DbError::PlanStale { reason } if reason == "Table changed"),
+        "{e:?}"
+    );
+    let sent = f.fake.sent();
+    assert!(
+        !sent
+            .iter()
+            .any(|s| s.starts_with("ALTER") || s.contains("lock_wait_timeout")),
+        "{sent:?}"
+    );
+    let history =
+        f.sm.repo
+            .history_list(&HistoryFilter {
+                connection_id: Some(f.conn),
+                search: None,
+                origin: None,
+                limit: 10,
+            })
+            .unwrap();
+    assert!(history.is_empty());
+}
+
+#[tokio::test]
+async fn history_records_every_statement_as_table_design() {
+    let f = pg().await;
+    let o = open(&f).await;
+    let mut d = add_note(&o.def);
+    d.columns
+        .iter_mut()
+        .find(|c| c.name == "total")
+        .unwrap()
+        .name = "amount".into();
+    let p = f.sm.table_design_preview(o.design_id, d).await.unwrap();
+    assert_eq!(p.statements.len(), 2);
+    let report =
+        f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+            .await
+            .unwrap();
+    assert_eq!(report.outcome, ActionOutcome::Applied, "{report:?}");
+    let history =
+        f.sm.repo
+            .history_list(&HistoryFilter {
+                connection_id: Some(f.conn),
+                search: None,
+                origin: None,
+                limit: 10,
+            })
+            .unwrap();
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0].origin, HistoryOrigin::TableDesign);
+    assert_eq!(history[0].sql_text, p.statements.join(";\n"));
+    assert_eq!(history[0].kind, "ddl");
+}
+
+#[test]
+fn mysql_needs_exactly_one_statement() {
+    let one = vec!["ALTER TABLE t ADD c int".to_string()];
+    let two = vec![one[0].clone(), one[0].clone()];
+    assert!(apply::check_statement_count(DbKind::MySql, &one).is_ok());
+    assert!(matches!(
+        apply::check_statement_count(DbKind::MySql, &two),
+        Err(DbError::Config { .. })
+    ));
+    assert!(matches!(
+        apply::check_statement_count(DbKind::MySql, &[]),
+        Err(DbError::Config { .. })
+    ));
+    assert!(apply::check_statement_count(DbKind::Postgres, &two).is_ok());
+}
+
+#[test]
+fn ansi_quote_modes_are_dropped() {
+    assert_eq!(
+        without_ansi_quotes("STRICT_TRANS_TABLES,ANSI_QUOTES,NO_ZERO_DATE").as_deref(),
+        Some("STRICT_TRANS_TABLES,NO_ZERO_DATE")
+    );
+    assert_eq!(
+        without_ansi_quotes(
+            "REAL_AS_FLOAT,PIPES_AS_CONCAT,ANSI_QUOTES,IGNORE_SPACE,ONLY_FULL_GROUP_BY,ANSI"
+        )
+        .as_deref(),
+        Some("REAL_AS_FLOAT,PIPES_AS_CONCAT,IGNORE_SPACE,ONLY_FULL_GROUP_BY")
+    );
+    assert_eq!(
+        without_ansi_quotes("PIPES_AS_CONCAT,ansi_quotes,ORACLE,MSSQL,DB2,MAXDB,POSTGRESQL")
+            .as_deref(),
+        Some("PIPES_AS_CONCAT")
+    );
+    assert_eq!(without_ansi_quotes("").as_deref(), Some(""));
+    // Anything that is not a plain word is never spliced.
+    assert_eq!(
+        without_ansi_quotes("ANSI_QUOTES,X'; DROP TABLE t; --"),
+        None
+    );
+}
+
+#[test]
+fn auto_increment_counter_is_ignored() {
+    let ddl = "CREATE TABLE `t` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB AUTO_INCREMENT=42 DEFAULT CHARSET=utf8mb4";
+    assert_eq!(
+        strip_auto_increment(ddl),
+        "CREATE TABLE `t` (\n  `id` int NOT NULL AUTO_INCREMENT,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB  DEFAULT CHARSET=utf8mb4"
+    );
+    assert_eq!(
+        strip_auto_increment(ddl),
+        strip_auto_increment(&ddl.replace("=42", "=43"))
+    );
+    assert_eq!(
+        strip_auto_increment("x AUTO_INCREMENT=y"),
+        "x AUTO_INCREMENT=y"
+    );
+}
+
+#[tokio::test]
+async fn ddl_is_read_without_ansi_quotes_and_the_mode_restored() {
+    for as_bytes in [false, true] {
+        let fake = Fake::new(MYSQL_ORDERS, MYSQL_ORDERS_DDL);
+        fake.mode_as_bytes.store(as_bytes, Ordering::SeqCst);
+        *fake.sql_mode.lock().unwrap() = "STRICT_TRANS_TABLES,ANSI_QUOTES".into();
+        let s = FakeSession {
+            fake: Arc::clone(&fake),
+            tx: Mutex::new(TxState::Idle),
+        };
+        let obj = fake.detail.lock().unwrap().object.clone();
+        let ddl = read_ddl(&s, &obj).await.unwrap();
+        assert_eq!(ddl.as_deref(), Some(MYSQL_ORDERS_DDL.trim_end()));
+        assert_eq!(*fake.ddl_ansi.lock().unwrap(), [false]);
+        assert_eq!(
+            fake.sent(),
+            [
+                "SELECT @@SESSION.sql_mode",
+                "SET SESSION sql_mode = 'STRICT_TRANS_TABLES'",
+                "SET SESSION sql_mode = 'STRICT_TRANS_TABLES,ANSI_QUOTES'",
+            ]
+        );
+        assert!(matches!(s.dialect(), Dialect::MySql(m) if m.ansi_quotes));
+    }
+    // Without ANSI_QUOTES nothing is switched.
+    let fake = Fake::new(MYSQL_ORDERS, MYSQL_ORDERS_DDL);
+    let s = FakeSession {
+        fake: Arc::clone(&fake),
+        tx: Mutex::new(TxState::Idle),
+    };
+    let obj = fake.detail.lock().unwrap().object.clone();
+    read_ddl(&s, &obj).await.unwrap();
+    assert!(fake.sent().is_empty());
 }
 
 #[tokio::test]
@@ -496,8 +770,18 @@ async fn count_timeout_is_not_counted() {
     let counted: Vec<_> = p.impacts.iter().filter(|i| i.counted).collect();
     assert_eq!(counted.len(), 1, "{:?}", p.impacts);
     assert_eq!(counted[0].rows, Some(7.0));
-    *f.fake.count_delay.lock().unwrap() = Duration::from_millis(500);
+    // The driver gets the bound as its statement timeout (it stops the statement on
+    // the server when it expires).
+    assert_eq!(
+        *f.fake.count_timeouts.lock().unwrap(),
+        [Some(Duration::from_millis(100))]
+    );
+    assert_eq!(f.fake.cancels.load(Ordering::SeqCst), 0);
+    // A count the driver does not stop (the fake ignores timeouts) is cancelled.
+    *f.fake.count_delay.lock().unwrap() = Duration::from_secs(5);
+    let started = std::time::Instant::now();
     let p = f.sm.table_design_preview(o.design_id, d).await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(3));
     let with_sql: Vec<_> = p
         .impacts
         .iter()
@@ -506,4 +790,51 @@ async fn count_timeout_is_not_counted() {
     assert_eq!(with_sql.len(), 1, "{:?}", p.impacts);
     assert!(!with_sql[0].counted);
     assert_eq!(with_sql[0].rows, None);
+    assert_eq!(f.fake.cancels.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn pg_counts_run_read_only_with_a_server_timeout() {
+    let f = pg().await;
+    let o = open(&f).await;
+    let p =
+        f.sm.table_design_preview(o.design_id, drop_created_at(&o.def))
+            .await
+            .unwrap();
+    assert!(p.impacts.iter().any(|i| i.counted), "{:?}", p.impacts);
+    let sent = f.fake.sent();
+    let begin = sent.iter().position(|s| s == "BEGIN READ ONLY").unwrap();
+    assert_eq!(
+        sent[begin + 1..begin + 3],
+        [
+            "SET LOCAL standard_conforming_strings = on",
+            "SET LOCAL statement_timeout = '100ms'"
+        ]
+    );
+    assert!(sent[begin + 3].starts_with("SELECT COUNT"), "{sent:?}");
+    assert_eq!(sent[begin + 4], "ROLLBACK");
+}
+
+#[tokio::test]
+async fn non_read_counts_never_run() {
+    let fake = Fake::new(PG_ORDERS, "");
+    let s = FakeSession {
+        fake: Arc::clone(&fake),
+        tx: Mutex::new(TxState::Idle),
+    };
+    let impact = Impact {
+        kind: dnt_schema::ImpactKind::DataLoss,
+        element: ElementRef::Column("x".into()),
+        message: "m".into(),
+        count_sql: Some("DELETE FROM t".into()),
+    };
+    let out = apply::count_impacts(
+        &s,
+        vec![impact],
+        Duration::from_millis(100),
+        Duration::from_millis(50),
+    )
+    .await;
+    assert!(!out[0].counted);
+    assert!(!fake.sent().iter().any(|s| s.starts_with("DELETE")));
 }

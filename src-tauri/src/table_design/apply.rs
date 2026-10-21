@@ -14,7 +14,7 @@ use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StopSignal}
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::DbKind;
-use dnt_core::sql::Dialect;
+use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_schema::{Impact, TableDef};
 use dnt_store::history::HistoryOrigin;
@@ -86,29 +86,38 @@ impl RowSink for FirstNumber {
     fn result_end(&mut self, _: &ResultSummary) {}
 }
 
-async fn count_rows(session: &dyn Session, sql: &str) -> Result<Option<f64>, DbError> {
+/// Runs one count with the driver's own statement timeout: on expiry the driver stops
+/// it on the server (MySQL `KILL QUERY`, PostgreSQL cancel request) and waits `grace`.
+async fn count_rows(
+    session: &dyn Session,
+    sql: &str,
+    kind: StatementKind,
+    limit: Duration,
+    grace: Duration,
+) -> Result<Option<f64>, DbError> {
     let mut sink = FirstNumber::default();
-    session
-        .execute_one(
-            sql,
-            dnt_core::sql::classify(sql, session.dialect()),
-            &ExecOptions::default(),
-            &mut sink,
-        )
-        .await?;
+    let options = ExecOptions {
+        timeout: Some(limit),
+        cancel_grace: grace,
+        ..ExecOptions::default()
+    };
+    session.execute_one(sql, kind, &options, &mut sink).await?;
     Ok(sink.0)
 }
 
-/// Runs every `count_sql` in one read-only transaction (PostgreSQL with
-/// `standard_conforming_strings` on), each bounded by `limit`. A count that fails or
-/// times out is "not counted"; after a timeout the session is not used again.
-async fn count_impacts(
+/// Runs every `count_sql` (each must classify as a read) in one read-only transaction
+/// (PostgreSQL: `standard_conforming_strings` on and `statement_timeout` = `limit`).
+/// Each count is bounded by `limit` on the server too (ruling T10-1): the driver
+/// cancels it when its statement timeout expires, and if it has not returned within
+/// `limit + grace` the session's cancel handle is fired and the session is not used
+/// again (the caller closes it). A count that fails or times out is "not counted".
+pub(super) async fn count_impacts(
     session: &dyn Session,
     impacts: Vec<Impact>,
-    pg: bool,
     limit: Duration,
     grace: Duration,
 ) -> Vec<CountedImpact> {
+    let pg = session.server_info().kind == DbKind::Postgres;
     let mut out: Vec<CountedImpact> = impacts
         .into_iter()
         .map(|impact| CountedImpact {
@@ -128,14 +137,12 @@ async fn count_impacts(
         };
         execute(session, start, StopSignal::new(), grace, 0).await?;
         if pg {
-            execute(
-                session,
-                "SET LOCAL standard_conforming_strings = on",
-                StopSignal::new(),
-                grace,
-                0,
-            )
-            .await?;
+            for sql in [
+                "SET LOCAL standard_conforming_strings = on".to_string(),
+                format!("SET LOCAL statement_timeout = '{}ms'", limit.as_millis()),
+            ] {
+                execute(session, &sql, StopSignal::new(), grace, 0).await?;
+            }
         }
         Ok::<(), DbError>(())
     };
@@ -146,14 +153,23 @@ async fn count_impacts(
         let Some(sql) = c.impact.count_sql.clone() else {
             continue;
         };
-        match tokio::time::timeout(limit, count_rows(session, &sql)).await {
+        let kind = classify(&sql, session.dialect());
+        if kind != StatementKind::Read {
+            continue;
+        }
+        match tokio::time::timeout(limit + grace, count_rows(session, &sql, kind, limit, grace))
+            .await
+        {
             Ok(Ok(Some(n))) => {
                 c.rows = Some(n);
                 c.counted = true;
             }
             Ok(_) => {}
-            // Dropped mid-statement: the session is closed by the caller.
-            Err(_) => return out,
+            Err(_) => {
+                // The driver did not stop it: stop it on the server ourselves.
+                let _ = tokio::time::timeout(grace, session.cancel_handle().cancel()).await;
+                return out;
+            }
         }
     }
     let _ = tokio::time::timeout(
@@ -200,6 +216,19 @@ fn judge(
     }
 }
 
+/// MySQL / MariaDB apply a design as ONE statement (`ALTER TABLE` / `CREATE TABLE`);
+/// PostgreSQL needs at least one.
+pub(super) fn check_statement_count(kind: DbKind, statements: &[String]) -> Result<(), DbError> {
+    match (kind, statements.len()) {
+        (_, 0) => Err(config_error("draft", "There are no changes to apply.")),
+        (DbKind::MySql, n) if n != 1 => Err(config_error(
+            "draft",
+            "A MySQL/MariaDB change must be a single statement.",
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn draft_problem(errors: &[dnt_schema::DraftError], error: Option<&str>) -> Option<DbError> {
     if let Some(e) = error {
         return Some(config_error("draft", e));
@@ -225,7 +254,6 @@ impl SessionManager {
         }
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;
-        let pg = cfg.kind == DbKind::Postgres;
         let (session, generation) = rt
             .open_query_session(session_db(cfg.kind, &design.scope))
             .await?;
@@ -248,13 +276,13 @@ impl SessionManager {
             if r.statements.is_empty() {
                 return Err(config_error("draft", "There are no changes to apply."));
             }
+            check_statement_count(cfg.kind, &r.statements)?;
             judge(&r.statements, cfg.env_tag, cfg.read_only, dialect)?;
             let impacts = count_impacts(
                 session.as_ref(),
                 r.impacts,
-                pg,
                 self.table_designs.count_timeout,
-                self.cancel_grace,
+                self.table_designs.count_grace,
             )
             .await;
             Ok((r.statements, impacts))
@@ -502,6 +530,7 @@ impl SessionManager {
         {
             return Err(stale());
         }
+        check_statement_count(cfg.kind, &stored.preview.statements)?;
         judge(
             &stored.preview.statements,
             cfg.env_tag,
