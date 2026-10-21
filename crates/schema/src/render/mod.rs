@@ -68,6 +68,102 @@ impl std::fmt::Display for RenderError {
 
 impl std::error::Error for RenderError {}
 
+fn invalid(message: impl Into<String>) -> RenderError {
+    RenderError::Invalid {
+        message: message.into(),
+    }
+}
+
+fn unsupported(feature: &str, min_version: &str) -> RenderError {
+    RenderError::Unsupported {
+        feature: feature.into(),
+        min_version: min_version.into(),
+    }
+}
+
+/// A name spliced unquoted (engine, character set, collation, row format, index
+/// method): letters, digits and `_` only.
+fn word<'a>(what: &str, v: &'a str) -> Result<&'a str, RenderError> {
+    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        Ok(v)
+    } else {
+        Err(invalid(format!("Invalid {what} \"{v}\".")))
+    }
+}
+
+/// A referential action in its canonical upper-case spelling.
+fn fk_action(action: &str) -> Result<&'static str, RenderError> {
+    const FK_ACTIONS: &[&str] = &[
+        "RESTRICT",
+        "CASCADE",
+        "SET NULL",
+        "NO ACTION",
+        "SET DEFAULT",
+    ];
+    FK_ACTIONS
+        .iter()
+        .find(|a| a.eq_ignore_ascii_case(action.trim()))
+        .copied()
+        .ok_or_else(|| invalid(format!("Unknown referential action \"{action}\".")))
+}
+
+/// `[-+]digits[.digits][e[-+]digits]`.
+fn is_number(s: &str) -> bool {
+    fn digits(s: &str) -> bool {
+        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    }
+    let s = s.strip_prefix(['-', '+']).unwrap_or(s);
+    let (mantissa, exp) = match s.find(['e', 'E']) {
+        Some(i) => (&s[..i], Some(&s[i + 1..])),
+        None => (s, None),
+    };
+    let (int, frac) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (mantissa, None),
+    };
+    digits(int)
+        && frac.is_none_or(digits)
+        && exp.is_none_or(|e| digits(e.strip_prefix(['-', '+']).unwrap_or(e)))
+}
+
+/// Impacts by kind: data loss first, then rebuilds (one per element), then the rest.
+#[derive(Default)]
+struct Impacts {
+    data_loss: Vec<Impact>,
+    rebuild: Vec<Impact>,
+    not_transactional: Vec<Impact>,
+}
+
+impl Impacts {
+    fn data_loss(&mut self, column: &str, message: String, count_sql: Option<String>) {
+        self.data_loss.push(Impact {
+            kind: ImpactKind::DataLoss,
+            element: ElementRef::Column(column.into()),
+            message,
+            count_sql,
+        });
+    }
+
+    fn rebuild(&mut self, column: &str, message: String) {
+        let element = ElementRef::Column(column.into());
+        if !self.rebuild.iter().any(|i| i.element == element) {
+            self.rebuild.push(Impact {
+                kind: ImpactKind::Rebuild,
+                element,
+                message,
+                count_sql: None,
+            });
+        }
+    }
+
+    fn finish(self) -> Vec<Impact> {
+        let mut out = self.data_loss;
+        out.extend(self.rebuild);
+        out.extend(self.not_transactional);
+        out
+    }
+}
+
 /// The statements that turn `old` (the stored table at `table`) into the draft that
 /// [`crate::diff`] compared it with. `changes` is that diff; an empty diff renders no
 /// statement. A [`Change::CreateTable`] diff goes through [`render_create`] instead.
@@ -132,8 +228,11 @@ pub fn primary_key_sql(
     }
 }
 
-/// An index as it appears in `CREATE TABLE` (MySQL) or its own statement (PostgreSQL).
-/// Precondition as [`column_sql`].
+/// An index as it appears in `CREATE TABLE` (MySQL). PostgreSQL: a constraint index
+/// (`IndexDef::constraint`) as it appears in `CREATE TABLE`
+/// (`CONSTRAINT n UNIQUE (…) [INCLUDE (…)]`); a plain index as the tail of its
+/// `pg_get_indexdef` after `ON <table> ` (`USING method (…) [INCLUDE (…)]`), since the
+/// fragment does not know the table. Precondition as [`column_sql`].
 pub fn index_sql(
     i: &IndexDef,
     server: &ServerInfo,

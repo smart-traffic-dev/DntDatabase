@@ -11,7 +11,8 @@
 //! statement fails with "Unknown column"). A column's rename, alteration and move are
 //! one `CHANGE COLUMN` / `MODIFY COLUMN` clause (ruling T6-1).
 
-use super::{Impact, ImpactKind, RenderError, Rendered};
+use super::{fk_action, invalid, is_number, unsupported, word, Impact, ImpactKind, Impacts};
+use super::{RenderError, Rendered};
 use crate::diff::{Change, Position};
 use crate::model::*;
 use crate::types::{type_info, type_text};
@@ -22,19 +23,6 @@ use dnt_core::sql::Dialect;
 
 fn q(name: &str) -> String {
     quote_ident(DbKind::MySql, name)
-}
-
-fn invalid(message: impl Into<String>) -> RenderError {
-    RenderError::Invalid {
-        message: message.into(),
-    }
-}
-
-fn unsupported(feature: &str, min_version: &str) -> RenderError {
-    RenderError::Unsupported {
-        feature: feature.into(),
-        min_version: min_version.into(),
-    }
 }
 
 fn check_dialect(d: Dialect) -> Result<(), RenderError> {
@@ -53,16 +41,6 @@ fn string(s: &str, d: Dialect) -> Result<String, RenderError> {
         BuildError::Invalid { reason, .. } => invalid(format!("Cannot write this text: {reason}.")),
         other => invalid(other.to_string()),
     })
-}
-
-/// A name spliced unquoted (engine, character set, collation, row format, index
-/// method): letters, digits and `_` only.
-fn word<'a>(what: &str, v: &'a str) -> Result<&'a str, RenderError> {
-    if !v.is_empty() && v.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-        Ok(v)
-    } else {
-        Err(invalid(format!("Invalid {what} \"{v}\".")))
-    }
 }
 
 fn names(cols: &[String]) -> String {
@@ -247,35 +225,6 @@ pub(super) fn render(
         statements,
         impacts: impacts.finish(),
     })
-}
-
-/// Impacts by kind: data loss first, then rebuilds (one per element), then the rest.
-#[derive(Default)]
-struct Impacts {
-    data_loss: Vec<Impact>,
-    rebuild: Vec<Impact>,
-    not_transactional: Vec<Impact>,
-}
-
-impl Impacts {
-    fn rebuild(&mut self, column: &str, message: String) {
-        let element = ElementRef::Column(column.into());
-        if !self.rebuild.iter().any(|i| i.element == element) {
-            self.rebuild.push(Impact {
-                kind: ImpactKind::Rebuild,
-                element,
-                message,
-                count_sql: None,
-            });
-        }
-    }
-
-    fn finish(self) -> Vec<Impact> {
-        let mut out = self.data_loss;
-        out.extend(self.rebuild);
-        out.extend(self.not_transactional);
-        out
-    }
 }
 
 /// The state of one `ALTER TABLE` while its clauses are built.
@@ -694,25 +643,6 @@ fn no_literal_default(t: &TypeSpec) -> bool {
     blob_like || SPATIAL.contains(&base.as_str())
 }
 
-/// `[-+]digits[.digits][e[-+]digits]`.
-fn is_number(s: &str) -> bool {
-    fn digits(s: &str) -> bool {
-        !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
-    }
-    let s = s.strip_prefix(['-', '+']).unwrap_or(s);
-    let (mantissa, exp) = match s.find(['e', 'E']) {
-        Some(i) => (&s[..i], Some(&s[i + 1..])),
-        None => (s, None),
-    };
-    let (int, frac) = match mantissa.split_once('.') {
-        Some((i, f)) => (i, Some(f)),
-        None => (mantissa, None),
-    };
-    digits(int)
-        && frac.is_none_or(digits)
-        && exp.is_none_or(|e| digits(e.strip_prefix(['-', '+']).unwrap_or(e)))
-}
-
 /// `CURRENT_TIMESTAMP`, `NOW`, `LOCALTIME`, `LOCALTIMESTAMP`, with `()` or `(n)`.
 fn is_now(t: &str) -> bool {
     let upper = t.to_ascii_uppercase();
@@ -996,14 +926,6 @@ pub(super) fn index_sql(
     Ok(out)
 }
 
-const FK_ACTIONS: &[&str] = &[
-    "RESTRICT",
-    "CASCADE",
-    "SET NULL",
-    "NO ACTION",
-    "SET DEFAULT",
-];
-
 pub(super) fn fk_sql(f: &FkDef, _server: &ServerInfo, d: Dialect) -> Result<String, RenderError> {
     check_dialect(d)?;
     if f.match_type.is_some() {
@@ -1029,11 +951,8 @@ pub(super) fn fk_sql(f: &FkDef, _server: &ServerInfo, d: Dialect) -> Result<Stri
         names(&f.ref_columns)
     );
     for (kw, action) in [("ON DELETE", &f.on_delete), ("ON UPDATE", &f.on_update)] {
-        let a = FK_ACTIONS
-            .iter()
-            .find(|a| a.eq_ignore_ascii_case(action.trim()))
-            .ok_or_else(|| invalid(format!("Unknown referential action \"{action}\".")))?;
-        if *a != "RESTRICT" {
+        let a = fk_action(action)?;
+        if a != "RESTRICT" {
             out.push_str(&format!(" {kw} {a}"));
         }
     }

@@ -14,5 +14,6 @@ specta.workspace = true
 
 [dev-dependencies]
 dnt-driver-mysql = { workspace = true, features = ["test-helpers"] }
+dnt-driver-pg = { workspace = true, features = ["test-helpers"] }
 dnt-testkit.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

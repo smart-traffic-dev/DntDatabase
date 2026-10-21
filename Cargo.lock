@@ -1490,6 +1490,7 @@ version = "0.1.0"
 dependencies = [
  "dnt-core",
  "dnt-driver-mysql",
+ "dnt-driver-pg",
  "dnt-testkit",
  "serde",
  "serde_json",
