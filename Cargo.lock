@@ -1489,9 +1489,12 @@ name = "dnt-schema"
 version = "0.1.0"
 dependencies = [
  "dnt-core",
+ "dnt-driver-mysql",
+ "dnt-testkit",
  "serde",
  "serde_json",
  "specta",
+ "tokio",
 ]
 
 [[package]]

@@ -71,6 +71,9 @@ impl std::error::Error for RenderError {}
 /// The statements that turn `old` (the stored table at `table`) into the draft that
 /// [`crate::diff`] compared it with. `changes` is that diff; an empty diff renders no
 /// statement. A [`Change::CreateTable`] diff goes through [`render_create`] instead.
+///
+/// **Precondition:** the draft passed [`crate::validate`]; expression fields (defaults,
+/// checks, index expressions, custom types) are spliced verbatim.
 pub fn render(
     table: &TableRef,
     old: &TableDef,
@@ -86,6 +89,9 @@ pub fn render(
 
 /// The statements that create `def` as a new table in `table`'s database (and schema),
 /// named `def.name`.
+///
+/// **Precondition:** `def` passed [`crate::validate`] (expression fields are spliced
+/// verbatim).
 pub fn render_create(
     table: &TableRef,
     def: &TableDef,
@@ -99,6 +105,10 @@ pub fn render_create(
 }
 
 /// A column's definition as it appears in `CREATE TABLE`, name first.
+///
+/// **Precondition** (all `*_sql` fragments): the element passed [`crate::validate`] or
+/// is a server-derived locked element; expression fields are spliced verbatim, so the
+/// fragment of an unchecked element must never be sent.
 pub fn column_sql(
     c: &ColumnDef,
     server: &ServerInfo,
@@ -110,7 +120,7 @@ pub fn column_sql(
     }
 }
 
-/// The primary key as it appears in `CREATE TABLE`.
+/// The primary key as it appears in `CREATE TABLE`. Precondition as [`column_sql`].
 pub fn primary_key_sql(
     k: &KeyDef,
     server: &ServerInfo,
@@ -123,6 +133,7 @@ pub fn primary_key_sql(
 }
 
 /// An index as it appears in `CREATE TABLE` (MySQL) or its own statement (PostgreSQL).
+/// Precondition as [`column_sql`].
 pub fn index_sql(
     i: &IndexDef,
     server: &ServerInfo,
@@ -134,7 +145,8 @@ pub fn index_sql(
     }
 }
 
-/// A foreign key constraint as it appears in `CREATE TABLE`.
+/// A foreign key constraint as it appears in `CREATE TABLE`. Precondition as
+/// [`column_sql`].
 pub fn fk_sql(f: &FkDef, server: &ServerInfo, dialect: Dialect) -> Result<String, RenderError> {
     match server.kind {
         DbKind::MySql => mysql::fk_sql(f, server, dialect),
@@ -142,7 +154,7 @@ pub fn fk_sql(f: &FkDef, server: &ServerInfo, dialect: Dialect) -> Result<String
     }
 }
 
-/// A check constraint as it appears in `CREATE TABLE`.
+/// A check constraint as it appears in `CREATE TABLE`. Precondition as [`column_sql`].
 pub fn check_sql(
     c: &CheckDef,
     server: &ServerInfo,

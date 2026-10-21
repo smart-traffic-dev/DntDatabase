@@ -14,7 +14,7 @@
 use super::{Impact, ImpactKind, RenderError, Rendered};
 use crate::diff::{Change, Position};
 use crate::model::*;
-use crate::types::type_text;
+use crate::types::{type_info, type_text};
 use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
 use dnt_core::sql::build::{mysql_quote, BuildError, TableRef};
 use dnt_core::sql::ident::{count_where_sql, qualified_name, quote_ident};
@@ -111,12 +111,23 @@ pub(super) fn render(
         }
     }
 
+    // Under T5-2 a column with no charset / collation follows the table's: when the
+    // table default changes, a re-written column keeps the old one explicitly.
+    let keep_charset = changes.iter().find_map(|c| match c {
+        Change::SetOptions { old: o, new: n }
+            if o.charset != n.charset || o.collation != n.collation =>
+        {
+            Some((o.charset.clone(), o.collation.clone()))
+        }
+        _ => None,
+    });
     let mut alter = Alter {
         old,
         changes,
         server,
         d,
         relation: &relation,
+        keep_charset,
         done: Vec::new(),
         impacts: Impacts::default(),
     };
@@ -130,7 +141,16 @@ pub(super) fn render(
                 "RENAME TO {}",
                 qualified_name(DbKind::MySql, &table.database, None, to)
             )),
-            Change::SetOptions { old: o, new: n } => clauses.extend(changed_options(o, n)?),
+            Change::SetOptions { old: o, new: n } => {
+                let options = changed_options(o, n)?;
+                if options.is_empty() {
+                    return Err(invalid(
+                        "The engine, character set and collation of a table cannot be \
+                         cleared; pick a value instead.",
+                    ));
+                }
+                clauses.extend(options);
+            }
             Change::SetComment { comment } => clauses.push(format!(
                 "COMMENT={}",
                 string(comment.as_deref().unwrap_or(""), d)?
@@ -150,8 +170,15 @@ pub(super) fn render(
             }
             Change::DropIndex { name } => clauses.push(format!("DROP INDEX {}", q(name))),
             Change::DropPrimaryKey { .. } => clauses.push("DROP PRIMARY KEY".into()),
-            Change::RenameColumn { from, .. } => clauses.extend(alter.column(from)?),
-            Change::AlterColumn { old: oc, .. } => clauses.extend(alter.column(&oc.name)?),
+            // A column that also moves gets its one clause at the move, so moves keep
+            // the order diff gave them (a move may name a column moved before it).
+            Change::RenameColumn { from, .. } if !alter.moves(from) => {
+                clauses.extend(alter.column(from)?)
+            }
+            Change::AlterColumn { old: oc, .. } if !alter.moves(&oc.name) => {
+                clauses.extend(alter.column(&oc.name)?)
+            }
+            Change::RenameColumn { .. } | Change::AlterColumn { .. } => {}
             Change::MoveColumn { name, .. } => {
                 let original = alter.original_of(name);
                 clauses.extend(alter.column(&original)?);
@@ -258,6 +285,8 @@ struct Alter<'a> {
     server: &'a ServerInfo,
     d: Dialect,
     relation: &'a str,
+    /// The table's old `(charset, collation)` when this statement changes them.
+    keep_charset: Option<(Option<String>, Option<String>)>,
     /// Original names of the columns whose clause is already out.
     done: Vec<String>,
     impacts: Impacts,
@@ -273,6 +302,13 @@ impl Alter<'_> {
                 _ => None,
             })
             .unwrap_or_else(|| name.to_string())
+    }
+
+    /// Whether column `original` has a `MoveColumn`.
+    fn moves(&self, original: &str) -> bool {
+        self.changes.iter().any(
+            |c| matches!(c, Change::MoveColumn { name, .. } if self.original_of(name) == original),
+        )
     }
 
     /// The one clause for the rename / alteration / move of column `original`
@@ -298,7 +334,7 @@ impl Alter<'_> {
             }
         }
         let new_name = renamed.map_or(original, |n| n.as_str()).to_string();
-        let def = match altered {
+        let mut def = match altered {
             Some((_, new)) => new.clone(),
             None => {
                 let stored = self
@@ -315,6 +351,16 @@ impl Alter<'_> {
                 }
             }
         };
+        if let Some((charset, collation)) = &self.keep_charset {
+            let has_collation = matches!(&def.data_type, TypeSpec::Known { base, .. }
+                if type_info(base, self.server).is_some_and(|t| t.collation));
+            if has_collation && def.charset.is_none() {
+                def.charset = charset.clone();
+                if def.collation.is_none() {
+                    def.collation = collation.clone();
+                }
+            }
+        }
         let body = column_sql(&def, self.server, self.d)?;
         let position = moved.map_or(String::new(), position_sql);
         let clause = match renamed {
@@ -580,6 +626,12 @@ fn default_sql(
 ) -> Result<String, RenderError> {
     match def {
         DefaultSpec::Value { text } => {
+            if server.variant != ServerVariant::MariaDb && no_literal_default(&c.data_type) {
+                return Err(unsupported(
+                    "a value default on a TEXT, BLOB, JSON or spatial column",
+                    "an expression default (MySQL 8.0.13)",
+                ));
+            }
             let numeric = matches!(&c.data_type, TypeSpec::Known { base, .. } if NUMERIC.contains(&base.as_str()));
             if numeric && !is_number(text) {
                 return Err(invalid(format!(
@@ -604,6 +656,42 @@ fn default_sql(
             }
         }
     }
+}
+
+/// MySQL refuses a literal `DEFAULT` on TEXT, BLOB, JSON and spatial columns.
+fn no_literal_default(t: &TypeSpec) -> bool {
+    const SPATIAL: &[&str] = &[
+        "geometry",
+        "point",
+        "linestring",
+        "polygon",
+        "multipoint",
+        "multilinestring",
+        "multipolygon",
+        "geometrycollection",
+        "geomcollection",
+    ];
+    let base = match t {
+        TypeSpec::Known { base, .. } => base.to_ascii_lowercase(),
+        TypeSpec::Custom { text } => text
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    };
+    let blob_like = matches!(
+        base.as_str(),
+        "tinytext"
+            | "text"
+            | "mediumtext"
+            | "longtext"
+            | "tinyblob"
+            | "blob"
+            | "mediumblob"
+            | "longblob"
+            | "json"
+    );
+    blob_like || SPATIAL.contains(&base.as_str())
 }
 
 /// `[-+]digits[.digits][e[-+]digits]`.
@@ -849,7 +937,10 @@ pub(super) fn index_sql(
             (None, Some(e)) => {
                 match server.variant {
                     ServerVariant::MariaDb => {
-                        return Err(unsupported("expression index", "not supported by MariaDB"))
+                        return Err(unsupported(
+                            "expression index",
+                            "MySQL 8.0.13 (not available on MariaDB)",
+                        ))
                     }
                     _ if !mysql8_at_least(server, (8, 0, 13)) => {
                         return Err(unsupported("expression index", "MySQL 8.0.13"))
@@ -890,8 +981,15 @@ pub(super) fn index_sql(
         out.push_str(&format!(" COMMENT {}", string(c, d)?));
     }
     if !i.visible {
-        if server.variant != ServerVariant::MySql8 {
-            return Err(unsupported("invisible index", "MySQL 8.0"));
+        match server.variant {
+            ServerVariant::MySql8 => {}
+            ServerVariant::MariaDb => {
+                return Err(unsupported(
+                    "invisible index",
+                    "MySQL 8.0 (MariaDB has IGNORED indexes, which the designer does not edit)",
+                ))
+            }
+            _ => return Err(unsupported("invisible index", "MySQL 8.0")),
         }
         out.push_str(" INVISIBLE");
     }
@@ -1417,7 +1515,8 @@ mod tests {
         );
         let invisible = RenderError::Unsupported {
             feature: "invisible index".into(),
-            min_version: "MySQL 8.0".into(),
+            min_version:
+                "MySQL 8.0 (MariaDB has IGNORED indexes, which the designer does not edit)".into(),
         };
         let plain = IndexDef {
             parts: vec![idx.parts[0].clone()],
@@ -1658,5 +1757,146 @@ mod tests {
         // No change, no statement.
         let r = render_ok(&old, &old.clone(), &mysql8());
         assert!(r.statements.is_empty() && r.impacts.is_empty());
+    }
+
+    #[test]
+    fn altered_or_renamed_moves_keep_diff_order() {
+        // Draft order id, note, shipped_at, total: `shipped_at` moves after `note`, then
+        // `total` after `shipped_at`. `total` is also altered: its clause must still
+        // come after the move it depends on.
+        let old = orders();
+        let reorder = |t: &mut TableDef| {
+            let cols = t.columns.clone();
+            t.columns = vec![
+                cols[0].clone(),
+                cols[3].clone(),
+                cols[2].clone(),
+                cols[1].clone(),
+            ];
+        };
+        let mut new = old.clone();
+        reorder(&mut new);
+        new.columns[3].comment = Some("x".into());
+        let r = render_ok(&old, &new, &mysql8());
+        assert_eq!(
+            one(&r),
+            "ALTER TABLE `dnt_fixture`.`orders` MODIFY COLUMN `shipped_at` datetime NULL AFTER \
+             `note`, MODIFY COLUMN `total` decimal(12,2) NOT NULL DEFAULT '0.00' COMMENT 'x' \
+             AFTER `shipped_at`"
+        );
+        // Renamed instead of altered.
+        let mut new = old.clone();
+        reorder(&mut new);
+        new.columns[3].name = "amount".into();
+        assert_eq!(
+            one(&render_ok(&old, &new, &mysql8())),
+            "ALTER TABLE `dnt_fixture`.`orders` MODIFY COLUMN `shipped_at` datetime NULL AFTER \
+             `note`, CHANGE COLUMN `total` `amount` decimal(12,2) NOT NULL DEFAULT '0.00' \
+             AFTER `shipped_at`"
+        );
+    }
+
+    #[test]
+    fn table_charset_change_keeps_column_charset() {
+        let old = orders();
+        let mut new = old.clone();
+        new.options.charset = Some("latin1".into());
+        new.options.collation = Some("latin1_swedish_ci".into());
+        new.columns[1].comment = Some("t".into());
+        new.columns[3].comment = Some("n".into());
+        new.columns.push(new_col("extra", sized("varchar", 5)));
+        assert_eq!(
+            one(&render_ok(&old, &new, &mysql8())),
+            "ALTER TABLE `dnt_fixture`.`orders` DEFAULT CHARSET=latin1, \
+             COLLATE=latin1_swedish_ci, MODIFY COLUMN `total` decimal(12,2) NOT NULL DEFAULT \
+             '0.00' COMMENT 't', MODIFY COLUMN `note` varchar(255) CHARACTER SET utf8mb4 \
+             COLLATE utf8mb4_unicode_ci NULL COMMENT 'n', ADD COLUMN `extra` varchar(5) NULL \
+             AFTER `note`"
+        );
+        // An explicit column charset is kept as it is.
+        let mut old = orders();
+        old.columns[3].charset = Some("ascii".into());
+        let mut new = old.clone();
+        new.options.collation = Some("utf8mb4_bin".into());
+        new.columns[3].comment = Some("n".into());
+        assert_eq!(
+            one(&render_ok(&old, &new, &mysql8())),
+            "ALTER TABLE `dnt_fixture`.`orders` COLLATE=utf8mb4_bin, MODIFY COLUMN `note` \
+             varchar(255) CHARACTER SET ascii NULL COMMENT 'n'"
+        );
+    }
+
+    #[test]
+    fn value_default_on_blob_like_columns() {
+        let c = |data_type| ColumnDef {
+            default: value("x"),
+            ..col("c", data_type)
+        };
+        for t in [
+            known("text"),
+            known("json"),
+            known("blob"),
+            TypeSpec::Custom {
+                text: "geometry".into(),
+            },
+        ] {
+            assert!(matches!(
+                column_sql(&c(t.clone()), &mysql8(), MY),
+                Err(RenderError::Unsupported { .. })
+            ));
+        }
+        // MariaDB takes them; an expression default is the MySQL route.
+        assert_eq!(
+            column_sql(&c(known("text")), &mariadb(), MY).unwrap(),
+            "`c` text NULL DEFAULT 'x'"
+        );
+        let e = ColumnDef {
+            default: expr("concat('a', 'b')"),
+            ..col("c", known("text"))
+        };
+        assert_eq!(
+            column_sql(&e, &mysql8(), MY).unwrap(),
+            "`c` text NULL DEFAULT (concat('a', 'b'))"
+        );
+    }
+
+    #[test]
+    fn clearing_options_only_is_invalid() {
+        let old = orders();
+        let mut new = old.clone();
+        new.options.engine = None;
+        let changes = diff(&old, &new).unwrap();
+        assert!(matches!(
+            render(&table("orders"), &old, &changes, &mysql8(), MY),
+            Err(RenderError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn mariadb_unsupported_messages() {
+        let i = IndexDef {
+            original: None,
+            name: "ix".into(),
+            unique: false,
+            parts: vec![IndexPartDef {
+                column: None,
+                expression: Some("lower(`a`)".into()),
+                prefix: None,
+                descending: false,
+            }],
+            method: None,
+            include: vec![],
+            visible: true,
+            comment: None,
+            constraint: false,
+            locked: false,
+        };
+        assert_eq!(
+            index_sql(&i, &mariadb(), MY),
+            Err(RenderError::Unsupported {
+                feature: "expression index".into(),
+                min_version: "MySQL 8.0.13 (not available on MariaDB)".into(),
+            })
+        );
     }
 }
