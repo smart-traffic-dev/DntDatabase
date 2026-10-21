@@ -5,6 +5,7 @@ import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
 import { useDataEdits } from '../store/dataEdits';
 import { useTableData } from '../store/tableData';
+import { useTableDesigns } from '../store/tableDesigns';
 import { useDialogs } from '../store/dialogs';
 import { useToasts } from '../store/toasts';
 import { useQueryDocs } from '../store/queryTabs';
@@ -59,6 +60,7 @@ export function resetStores() {
   useAppSettings.getState().reset();
   useTableData.getState().reset();
   useDataEdits.getState().reset();
-  useDialogs.setState({ objectActionRunning: false, prompt: null, request: null, notice: null, internalError: null, question: null });
+  useTableDesigns.getState().reset();
+  useDialogs.setState({ objectActionRunning: false, tableDesignRunning: false, prompt: null, request: null, notice: null, internalError: null, question: null });
   useToasts.getState().reset();
 }

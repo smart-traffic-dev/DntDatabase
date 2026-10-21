@@ -19,6 +19,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_smallint
     ordinal: 2
     db_type: smallint
@@ -30,6 +35,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_int
     ordinal: 3
     db_type: integer
@@ -41,6 +51,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_bigint
     ordinal: 4
     db_type: bigint
@@ -52,6 +67,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_numeric
     ordinal: 5
     db_type: "numeric(40,10)"
@@ -63,6 +83,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_real
     ordinal: 6
     db_type: real
@@ -74,6 +99,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_double
     ordinal: 7
     db_type: double precision
@@ -85,6 +115,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_boolean
     ordinal: 8
     db_type: boolean
@@ -96,6 +131,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_date
     ordinal: 9
     db_type: date
@@ -107,6 +147,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_time
     ordinal: 10
     db_type: time without time zone
@@ -118,6 +163,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_timestamp
     ordinal: 11
     db_type: timestamp without time zone
@@ -129,6 +179,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_timestamptz
     ordinal: 12
     db_type: timestamp with time zone
@@ -140,6 +195,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_interval
     ordinal: 13
     db_type: interval
@@ -151,6 +211,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_char
     ordinal: 14
     db_type: character(10)
@@ -162,6 +227,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_varchar
     ordinal: 15
     db_type: character varying(255)
@@ -173,6 +243,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_text
     ordinal: 16
     db_type: text
@@ -184,6 +259,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_bytea
     ordinal: 17
     db_type: bytea
@@ -195,6 +275,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_uuid
     ordinal: 18
     db_type: uuid
@@ -206,6 +291,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_json
     ordinal: 19
     db_type: json
@@ -217,6 +307,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_jsonb
     ordinal: 20
     db_type: jsonb
@@ -228,6 +323,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_int_array
     ordinal: 21
     db_type: "integer[]"
@@ -239,6 +339,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_text_array
     ordinal: 22
     db_type: "text[]"
@@ -250,6 +355,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: c_enum
     ordinal: 23
     db_type: order_status
@@ -261,6 +371,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
 primary_key:
   name: all_types_pkey
   unique: true
@@ -271,6 +386,16 @@ primary_key:
   expression: ~
   method: btree
   definition: PRIMARY KEY (id)
+  parts:
+    - column: id
+      expression: ~
+      prefix: ~
+      descending: false
+  visible: true
+  include: []
+  nulls_not_distinct: false
+  comment: ~
+  tablespace: ~
 indexes: []
 foreign_keys: []
 checks: []
@@ -281,6 +406,12 @@ options:
   tablespace: ~
   partitioned_by: ~
   system_versioned: false
+  charset: ~
+  row_format: ~
+  auto_increment: ~
+  extra: []
+  is_partition: false
+  inherits: []
 row_estimate: "[redacted]"
 size_bytes: "[redacted]"
 comment: ~

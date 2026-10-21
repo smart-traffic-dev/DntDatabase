@@ -1,0 +1,19 @@
+[package]
+name = "dnt-schema"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_schema"
+
+[dependencies]
+dnt-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+specta.workspace = true
+
+[dev-dependencies]
+dnt-driver-mysql = { workspace = true, features = ["test-helpers"] }
+dnt-driver-pg = { workspace = true, features = ["test-helpers"] }
+dnt-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

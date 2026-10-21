@@ -14,6 +14,8 @@ export interface PendingPrompt {
 /** Something the UI asks a dialog (built in a later task) to do. */
 export type UiRequest =
   | ({ kind: 'objectAction' } & ObjectActionRequest)
+  /** Review and apply the draft of a table design tab. */
+  | { kind: 'tableDesign'; tabId: string }
   | { kind: 'newConnection' }
   | { kind: 'editConnection'; id: string }
   | { kind: 'newGroup'; parentId: string | null }
@@ -72,6 +74,8 @@ export type Question =
 
 interface DialogsState {
   objectActionRunning: boolean;
+  /** A table design is being applied (quitting waits for its result). */
+  tableDesignRunning: boolean;
   /** The question shown on top of everything else (`ask` sets it). */
   question: Question | null;
   ask(question: Question): void;
@@ -100,6 +104,7 @@ const noticeKey = (text: string) => `notice:${text}`;
 
 export const useDialogs = create<DialogsState>()((set, get) => ({
   objectActionRunning: false,
+  tableDesignRunning: false,
   question: null,
   ask: (question) => set({ question }),
   answer: () => set({ question: null }),

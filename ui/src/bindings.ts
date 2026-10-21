@@ -141,6 +141,54 @@ async objectActionCancel(operationId: string) : Promise<Result<null, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+async tableDesignOpen(connectionId: string, scope: Scope, table: string | null) : Promise<Result<DesignOpen, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_design_open", { connectionId, scope, table }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tableDesignRender(designId: string, draft: TableDef) : Promise<Result<DesignRender, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_design_render", { designId, draft }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tableDesignPreview(designId: string, draft: TableDef) : Promise<Result<DesignPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_design_preview", { designId, draft }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tableDesignApply(planId: string, confirmed: boolean, name: string | null, operationId: string, channel: TAURI_CHANNEL<string>) : Promise<Result<DesignReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_design_apply", { planId, confirmed, name, operationId, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tableDesignCancel(operationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_design_cancel", { operationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async tableDesignClose(designId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("table_design_close", { designId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listDatabases(id: string, showSystem: boolean) : Promise<Result<DatabaseInfo[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_databases", { id, showSystem }) };
@@ -1019,6 +1067,7 @@ export type CellPayload = { kind: "null" } |
  * `CellInput::Base64`.
  */
 { kind: "base64"; data: string; len: number }
+export type CheckDef = { original: string | null; name: string; expression: string; locked: boolean }
 export type CheckDetail = { name: string; expression: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
@@ -1031,12 +1080,50 @@ definition: string | null }
  * (e.g. `numeric(12,2)`).
  */
 export type ColumnBrief = { name: string; data_type: string }
+export type ColumnDef = { original: string | null; name: string; data_type: TypeSpec; nullable: boolean; default: DefaultSpec | null; 
+/**
+ * MySQL/MariaDB only.
+ */
+auto_increment: boolean; 
+/**
+ * PostgreSQL only.
+ */
+identity: IdentityKind | null; 
+/**
+ * MySQL/MariaDB `ON UPDATE` expression (e.g. `CURRENT_TIMESTAMP(6)`).
+ */
+on_update: string | null; 
+/**
+ * `None` when the column uses the table's character set.
+ */
+charset: string | null; 
+/**
+ * `None` when the column uses the table's (or the type's default) collation.
+ */
+collation: string | null; comment: string | null; 
+/**
+ * PostgreSQL `USING` expression for a type change, typed by the user.
+ */
+using: string | null; 
+/**
+ * Generation expression of a generated column (generated columns are locked).
+ */
+generated: string | null; locked: boolean }
 export type ColumnDetail = { name: string; ordinal: number; db_type: string; nullable: boolean; default: string | null; auto_increment: boolean; identity: string | null; generated: string | null; invisible: boolean; 
 /**
  * Collation of a text column (MySQL/MariaDB), or of a PostgreSQL column with an
  * explicit non-default collation; `None` otherwise.
  */
-collation: string | null; comment: string | null }
+collation: string | null; comment: string | null; 
+/**
+ * Character set of a character column. MySQL/MariaDB fill it for every character
+ * column; consumers normalise against the table charset.
+ */
+charset?: string | null; 
+/**
+ * MySQL ON UPDATE CURRENT_TIMESTAMP[(n)] clause.
+ */
+on_update?: string | null; identity_kind?: IdentityKind | null; unsigned?: boolean; enum_values?: string[] }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
 /**
  * A table or view offered by autocomplete after `db.` / `schema.`.
@@ -1079,6 +1166,7 @@ export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boo
  * What `data_copy_sql` writes for each row.
  */
 export type CopySqlFormat = "insert" | "update"
+export type CountedImpact = { impact: Impact; rows: number | null; counted: boolean }
 /**
  * The data view's filter: conditions joined with `AND` or `OR`, or (raw mode) the
  * user's own `WHERE` text.
@@ -1093,7 +1181,34 @@ export type DataFilter = { mode: FilterMode; conditions: FilterCond[];
 raw_where?: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
+export type DefaultSpec = 
+/**
+ * A literal value, unquoted (rendered through the SQL literal builder).
+ */
+{ kind: "value"; text: string } | 
+/**
+ * A SQL expression, rendered verbatim after `check_expression`.
+ */
+{ kind: "expression"; text: string }
+export type DesignOpen = { design_id: string; def: TableDef; locked: Locked[]; catalog: TypeInfo[]; server: ServerInfo; env: EnvTag | null; read_only: boolean }
+export type DesignPreview = { plan_id: string; statements: string[]; impacts: CountedImpact[]; confirm_name: string | null; expires_in_seconds: number; 
+/**
+ * The table's row estimate read with the preview (shown next to rebuild warnings);
+ * `None` for a new table or when the server has none. Exported as a JS number.
+ */
+row_estimate: number | null }
+/**
+ * The live SQL of a draft. `errors` are shown at their elements; `error` is a
+ * problem of the change as a whole (a locked element, an unsupported feature, a
+ * change that cannot be rendered).
+ */
+export type DesignRender = { statements: string[]; impacts: Impact[]; errors: DraftError[]; error: string | null }
+export type DesignReport = { outcome: ActionOutcome; error: AppError | null; warnings: string[]; statements_sent: number }
 export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
+/**
+ * A problem in the draft, shown at the element (and field) that causes it.
+ */
+export type DraftError = { element: ElementRef; field: string | null; message: string }
 /**
  * What a `DROP` removes.
  */
@@ -1168,6 +1283,7 @@ hidden_key: string[];
  * Columns an UPDATE may set (empty when not editable).
  */
 editable_columns: string[]; atomic: Atomicity; protection: ProtectionKind }
+export type ElementRef = { kind: "table" } | { kind: "column"; name: string } | { kind: "primary_key" } | { kind: "index"; name: string } | { kind: "foreign_key"; name: string } | { kind: "check"; name: string } | { kind: "options" }
 export type EnvTag = "production" | "staging" | "local"
 export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
 /**
@@ -1264,12 +1380,21 @@ export type FilterOp = "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "like" | "not_l
  * Exactly two values: low, high.
  */
 "between" | "is_null" | "is_not_null"
+export type FkDef = { original: string | null; name: string; columns: string[]; ref_schema: string | null; ref_table: string; ref_columns: string[]; on_update: string; on_delete: string; 
+/**
+ * PostgreSQL `MATCH FULL` / `MATCH PARTIAL`; `None` = the default (`SIMPLE`).
+ */
+match_type: string | null; deferrable: boolean; initially_deferred: boolean; locked: boolean }
 export type ForeignKeyDetail = { name: string; columns: string[]; ref_schema: string | null; ref_table: string; ref_columns: string[]; on_update: string; on_delete: string; 
 /**
  * Verbatim server constraint definition when the backend provides one
  * (e.g. `FOREIGN KEY (a) REFERENCES t(id) DEFERRABLE INITIALLY DEFERRED`).
  */
-definition: string | null }
+definition: string | null; 
+/**
+ * `FULL`, `PARTIAL` or `SIMPLE`; `None` when the server default applies.
+ */
+match_type?: string | null; deferrable?: boolean; initially_deferred?: boolean }
 export type Group = { id: string; parent_id: string | null; name: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -1305,7 +1430,11 @@ export type HistoryOrigin =
 /**
  * A statement the app built to apply edits of the data view.
  */
-"data_edit" | "object_action"
+"data_edit" | "object_action" | 
+/**
+ * A statement the table designer applied.
+ */
+"table_design"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it
@@ -1313,6 +1442,17 @@ export type HistoryStatus = "ok" | "error" |
  * show such a row as not applied.
  */
 "cancelled"
+export type IdentityKind = "always" | "by_default"
+/**
+ * Something a change does beyond the schema: values it may lose, a table rebuild,
+ * work that cannot be rolled back.
+ */
+export type Impact = { kind: ImpactKind; element: ElementRef; message: string; 
+/**
+ * A read-only `SELECT COUNT(*)` of the affected rows, run before applying.
+ */
+count_sql: string | null }
+export type ImpactKind = "data_loss" | "rebuild" | "not_transactional"
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
@@ -1329,6 +1469,20 @@ skipped: number;
  * uses the old settings).
  */
 overwritten_ids: string[] }
+export type IndexDef = { original: string | null; name: string; unique: boolean; parts: IndexPartDef[]; method: string | null; 
+/**
+ * PostgreSQL `INCLUDE (…)` columns.
+ */
+include: string[]; 
+/**
+ * MySQL 8 `INVISIBLE` is `false`.
+ */
+visible: boolean; comment: string | null; 
+/**
+ * PostgreSQL: the index backs a table constraint (`UNIQUE (…)` / `PRIMARY KEY (…)`)
+ * rather than being a plain `CREATE INDEX`.
+ */
+constraint: boolean; locked: boolean }
 export type IndexDetail = { name: string; 
 /**
  * Unique and usable as such. PostgreSQL reports an invalid index (`indisvalid =
@@ -1345,7 +1499,23 @@ partial: boolean; columns: string[]; expression: string | null; method: string |
  * Either a full `CREATE INDEX …` statement or, for an index backing a table
  * constraint, the constraint fragment (e.g. `PRIMARY KEY (id)`, `UNIQUE (email)`).
  */
-definition: string | null }
+definition: string | null; parts?: IndexPart[]; visible?: boolean; include?: string[]; nulls_not_distinct?: boolean; 
+/**
+ * The index's own comment.
+ */
+comment?: string | null; 
+/**
+ * PostgreSQL: the index's tablespace when it is not the database default (neither
+ * `pg_get_indexdef` nor `pg_get_constraintdef` prints it). Always `None` on
+ * MySQL/MariaDB.
+ */
+tablespace?: string | null }
+export type IndexPart = { column: string | null; expression: string | null; prefix: number | null; descending: boolean }
+export type IndexPartDef = { column: string | null; expression: string | null; 
+/**
+ * MySQL prefix length.
+ */
+prefix: number | null; descending: boolean }
 /**
  * TypeScript type of `Value::Int` / `Value::UInt`: a number when |x| ≤ 2^53, else a string.
  * Only used for the bindings (`#[specta(type = …)]`, exported as
@@ -1353,9 +1523,21 @@ definition: string | null }
  */
 export type JsInteger = number | string
 /**
+ * The primary key.
+ */
+export type KeyDef = { original: string | null; 
+/**
+ * Constraint name (PostgreSQL); MySQL always names it `PRIMARY`.
+ */
+name: string | null; columns: string[]; locked: boolean }
+/**
  * A complete value and the token that stands for it in a later edit.
  */
 export type LoadedCell = { token: string; payload: CellPayload }
+/**
+ * An element the designer must not touch, with why and the server's own text for it.
+ */
+export type Locked = { element: ElementRef; reason: string; server_text: string }
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
 /**
@@ -1380,6 +1562,10 @@ export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | 
  */
 row_estimate: number | null }
 export type OpenResult = { info: ServerInfo; timings: StageTiming[] }
+/**
+ * How a type uses a parameter.
+ */
+export type ParamUse = "None" | "Optional" | "Required"
 /**
  * One node of a normalized plan.
  */
@@ -1737,12 +1923,31 @@ hidden_key: ColumnMeta[];
  * Their values, one entry per row of `rows` (empty without `hidden_key`).
  */
 hidden_key_values: Value[][]; elapsed_ms: number }
+export type TableDef = { 
+/**
+ * `None` for a new table.
+ */
+original_name: string | null; name: string; columns: ColumnDef[]; primary_key: KeyDef | null; indexes: IndexDef[]; foreign_keys: FkDef[]; checks: CheckDef[]; options: TableOptionsDef; comment: string | null; 
+/**
+ * Set when the whole table opens read-only (partitioned, system-versioned,
+ * a PostgreSQL partition or inheriting table).
+ */
+read_only_reason: string | null }
 export type TableDetail = { object: ObjectRef; columns: ColumnDetail[]; primary_key: IndexDetail | null; indexes: IndexDetail[]; foreign_keys: ForeignKeyDetail[]; checks: CheckDetail[]; triggers: TriggerDetail[]; options: TableOptions; 
 /**
  * Exported as JS numbers: estimates and sizes stay far below 2^53.
  */
 row_estimate: number | null; size_bytes: number | null; comment: string | null }
-export type TableOptions = { engine: string | null; collation: string | null; tablespace: string | null; partitioned_by: string | null; system_versioned: boolean }
+export type TableOptions = { engine: string | null; collation: string | null; tablespace: string | null; partitioned_by: string | null; system_versioned: boolean; charset?: string | null; row_format?: string | null; 
+/**
+ * Exported as a JS number: counters stay far below 2^53.
+ */
+auto_increment?: number | null; 
+/**
+ * Other table options as `(name, value)` pairs, in a stable order.
+ */
+extra?: ([string, string])[]; is_partition?: boolean; inherits?: string[] }
+export type TableOptionsDef = { engine: string | null; charset: string | null; collation: string | null; row_format: string | null; locked: boolean }
 export type TableRowCount = { 
 /**
  * Exact `COUNT(*)`.
@@ -1780,6 +1985,19 @@ export type TxState =
  * rejects everything but `ROLLBACK [TO SAVEPOINT]` / `COMMIT` until it ends.
  */
 "aborted"
+/**
+ * One entry of [`crate::type_catalog`]: which fields the designer shows for a type.
+ */
+export type TypeInfo = { base: string; length: ParamUse; precision: ParamUse; scale: ParamUse; unsigned: boolean; 
+/**
+ * Takes a list of values (`enum` / `set`).
+ */
+values: boolean; collation: boolean }
+/**
+ * A column type: a catalog type with its parameters, or text the designer does not
+ * model (arrays, domains, user-defined types, …).
+ */
+export type TypeSpec = { kind: "known"; base: string; length: number | null; precision: number | null; scale: number | null; unsigned: boolean; values: string[] } | { kind: "custom"; text: string }
 /**
  * Why it changes every row.
  */

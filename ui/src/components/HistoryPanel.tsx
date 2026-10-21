@@ -48,7 +48,7 @@ export function HistoryPanel({ onCollapse }: { onCollapse?: () => void }) {
   const focus = useTabs(
     useShallow((s) => {
       const tab = s.tabs.find((t) => t.id === s.activeId);
-      return { id: tab?.id ?? null, kind: tab?.kind ?? null, connectionId: tab?.kind === 'object' ? tab.connectionId : null };
+      return { id: tab?.id ?? null, kind: tab?.kind ?? null, connectionId: tab?.kind === 'object' || tab?.kind === 'design' ? tab.connectionId : null };
     }),
   );
   const docConnection = useQueryDocs((s) => (focus.kind === 'query' && focus.id ? (s.docs.get(focus.id)?.connectionId ?? null) : null));
@@ -428,6 +428,7 @@ export function HistoryPanel({ onCollapse }: { onCollapse?: () => void }) {
                         row.database && <span className="hs-origin">{row.database}</span>
                       )}
                       {row.origin === 'object_action' && <span className="chip hs-data-edit" data-testid="history-object-action">Object action</span>}
+                      {row.origin === 'table_design' && <span className="chip hs-data-edit" data-testid="history-table-design">Table design</span>}
                       {row.origin === 'data_edit' && (
                         <span className="chip hs-data-edit" data-testid="history-data-edit">
                           Data edit

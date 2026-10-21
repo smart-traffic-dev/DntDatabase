@@ -19,6 +19,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: taken_at
     ordinal: 2
     db_type: date
@@ -30,6 +35,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: value
     ordinal: 3
     db_type: numeric
@@ -41,6 +51,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
 primary_key:
   name: measurements_pkey
   unique: true
@@ -52,6 +67,20 @@ primary_key:
   expression: ~
   method: btree
   definition: "PRIMARY KEY (id, taken_at)"
+  parts:
+    - column: id
+      expression: ~
+      prefix: ~
+      descending: false
+    - column: taken_at
+      expression: ~
+      prefix: ~
+      descending: false
+  visible: true
+  include: []
+  nulls_not_distinct: false
+  comment: ~
+  tablespace: ~
 indexes: []
 foreign_keys: []
 checks: []
@@ -62,6 +91,12 @@ options:
   tablespace: ~
   partitioned_by: RANGE (taken_at)
   system_versioned: false
+  charset: ~
+  row_format: ~
+  auto_increment: ~
+  extra: []
+  is_partition: false
+  inherits: []
 row_estimate: "[redacted]"
 size_bytes: "[redacted]"
 comment: ~

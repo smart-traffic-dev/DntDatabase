@@ -1,0 +1,158 @@
+/* SQL preview (designer drawer and the review dialog): numbered SQL, data-loss tint, impacts. Tokens only. */
+
+/* Small helpers shared with the designer (which always renders the preview). */
+.dz-subtle {
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-spacer {
+  flex: 1;
+}
+
+.dz-alert {
+  margin: 0 var(--dnt-space-3) var(--dnt-space-2);
+  padding: var(--dnt-space-1_5) var(--dnt-space-2);
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-preview {
+  flex: none;
+  height: 260px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--dnt-border);
+  background: var(--dnt-bg-chrome);
+}
+
+.dz-preview-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-3);
+  height: 36px;
+  padding: 0 var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.dz-preview .btn:disabled {
+  background: var(--dnt-bg-sunken);
+  border-color: var(--dnt-border-subtle);
+  color: var(--dnt-fg-disabled);
+}
+
+.dz-preview-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.dz-sql-pane {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: var(--dnt-space-2) 0;
+  background: var(--dnt-bg-app);
+}
+
+.dz-sql {
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+  line-height: 20px;
+}
+
+.dz-sql-line {
+  display: flex;
+}
+
+/* Statement boundaries: a hairline and a gap (the SQL itself is shown verbatim, without `;`). */
+.dz-sql-stmt + .dz-sql-stmt {
+  margin-top: var(--dnt-space-1);
+  padding-top: var(--dnt-space-1);
+  border-top: 1px solid var(--dnt-border-subtle);
+}
+
+.dz-ln {
+  flex: none;
+  width: 36px;
+  padding-right: var(--dnt-space-3);
+  color: var(--dnt-fg-disabled);
+  text-align: right;
+  user-select: none;
+}
+
+.dz-code {
+  min-width: 0;
+  padding-right: var(--dnt-space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dz-sql-line.dz-loss {
+  background: var(--dnt-status-danger-bg);
+}
+
+.dz-sql-line.dz-loss .dz-ln {
+  color: var(--dnt-status-danger-fg);
+}
+
+.dz-sql-empty {
+  margin: 0;
+  padding: 0 var(--dnt-space-4);
+}
+
+.dz-impacts {
+  flex: none;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+  padding: var(--dnt-space-3) var(--dnt-space-4);
+  border-left: 1px solid var(--dnt-border-subtle);
+  overflow: auto;
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+}
+
+.dz-impacts ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dz-caption {
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dz-impact {
+  display: flex;
+  gap: var(--dnt-space-2);
+}
+
+.dz-impact > span:first-child {
+  flex: none;
+  font-weight: 700;
+}
+
+.dz-impact-data_loss {
+  color: var(--dnt-status-danger-fg);
+}
+
+.dz-impact-not_transactional {
+  color: var(--dnt-status-warning-fg);
+}
+
+.dz-impact-rebuild {
+  color: var(--dnt-fg-muted);
+}

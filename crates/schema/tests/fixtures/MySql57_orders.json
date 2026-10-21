@@ -1,0 +1,219 @@
+{
+  "detail": {
+    "checks": [],
+    "columns": [
+      {
+        "auto_increment": true,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "int(11)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 1,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "int(11)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "customer_id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 2,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": "utf8mb4",
+        "collation": "utf8mb4_unicode_ci",
+        "comment": null,
+        "db_type": "enum('new','paid','shipped','cancelled')",
+        "default": "new",
+        "enum_values": [
+          "new",
+          "paid",
+          "shipped",
+          "cancelled"
+        ],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "status",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 3,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "decimal(12,2)",
+        "default": "0.00",
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "total",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 4,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "datetime(6)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "created_at",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 5,
+        "unsigned": false
+      }
+    ],
+    "comment": null,
+    "foreign_keys": [
+      {
+        "columns": [
+          "customer_id"
+        ],
+        "deferrable": false,
+        "definition": null,
+        "initially_deferred": false,
+        "match_type": null,
+        "name": "fk_orders_customer",
+        "on_delete": "RESTRICT",
+        "on_update": "RESTRICT",
+        "ref_columns": [
+          "id"
+        ],
+        "ref_schema": null,
+        "ref_table": "customers"
+      }
+    ],
+    "indexes": [
+      {
+        "columns": [
+          "customer_id",
+          "status"
+        ],
+        "comment": null,
+        "definition": null,
+        "expression": null,
+        "include": [],
+        "method": "BTREE",
+        "name": "idx_orders_customer_status",
+        "nulls_not_distinct": false,
+        "partial": false,
+        "parts": [
+          {
+            "column": "customer_id",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          },
+          {
+            "column": "status",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          }
+        ],
+        "primary": false,
+        "tablespace": null,
+        "unique": false,
+        "visible": true
+      }
+    ],
+    "object": {
+      "database": "dnt_fixture",
+      "kind": "Table",
+      "name": "orders",
+      "schema": null
+    },
+    "options": {
+      "auto_increment": null,
+      "charset": "utf8mb4",
+      "collation": "utf8mb4_unicode_ci",
+      "engine": "InnoDB",
+      "extra": [],
+      "inherits": [],
+      "is_partition": false,
+      "partitioned_by": null,
+      "row_format": "Dynamic",
+      "system_versioned": false,
+      "tablespace": null
+    },
+    "primary_key": {
+      "columns": [
+        "id"
+      ],
+      "comment": null,
+      "definition": null,
+      "expression": null,
+      "include": [],
+      "method": "BTREE",
+      "name": "PRIMARY",
+      "nulls_not_distinct": false,
+      "partial": false,
+      "parts": [
+        {
+          "column": "id",
+          "descending": false,
+          "expression": null,
+          "prefix": null
+        }
+      ],
+      "primary": true,
+      "tablespace": null,
+      "unique": true,
+      "visible": true
+    },
+    "row_estimate": null,
+    "size_bytes": null,
+    "triggers": [
+      {
+        "event": "INSERT",
+        "name": "trg_orders_bi",
+        "timing": "BEFORE"
+      }
+    ]
+  },
+  "server": {
+    "kind": "mysql",
+    "variant": "MySql57",
+    "version": [
+      5,
+      7,
+      44
+    ],
+    "version_string": "5.7.44"
+  }
+}

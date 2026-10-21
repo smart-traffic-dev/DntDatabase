@@ -19,6 +19,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: always
+    unsigned: false
+    enum_values: []
   - name: order_id
     ordinal: 2
     db_type: integer
@@ -30,6 +35,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: amount
     ordinal: 3
     db_type: "numeric(12,2)"
@@ -41,6 +51,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: amount_with_tax
     ordinal: 4
     db_type: "numeric(12,2)"
@@ -52,6 +67,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: tags
     ordinal: 5
     db_type: "text[]"
@@ -63,6 +83,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: meta
     ordinal: 6
     db_type: jsonb
@@ -74,6 +99,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: issued_at
     ordinal: 7
     db_type: timestamp with time zone
@@ -85,6 +115,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: ttl
     ordinal: 8
     db_type: interval
@@ -96,6 +131,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
 primary_key:
   name: invoices_pkey
   unique: true
@@ -106,6 +146,16 @@ primary_key:
   expression: ~
   method: btree
   definition: PRIMARY KEY (id)
+  parts:
+    - column: id
+      expression: ~
+      prefix: ~
+      descending: false
+  visible: true
+  include: []
+  nulls_not_distinct: false
+  comment: ~
+  tablespace: ~
 indexes: []
 foreign_keys:
   - name: invoices_order_id_fkey
@@ -118,6 +168,9 @@ foreign_keys:
     on_update: NO ACTION
     on_delete: NO ACTION
     definition: FOREIGN KEY (order_id) REFERENCES public.orders(id)
+    match_type: ~
+    deferrable: false
+    initially_deferred: false
 checks: []
 triggers: []
 options:
@@ -126,6 +179,12 @@ options:
   tablespace: ~
   partitioned_by: ~
   system_versioned: false
+  charset: ~
+  row_format: ~
+  auto_increment: ~
+  extra: []
+  is_partition: false
+  inherits: []
 row_estimate: "[redacted]"
 size_bytes: "[redacted]"
 comment: ~

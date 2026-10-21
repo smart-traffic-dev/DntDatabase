@@ -14,9 +14,9 @@ use async_trait::async_trait;
 use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
-    group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail,
-    ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail,
-    TableOptions, TriggerDetail,
+    group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IdentityKind,
+    IndexDetail, IndexPart, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
+    TableDetail, TableOptions, TriggerDetail,
 };
 use tokio::sync::MutexGuard;
 use tokio_postgres::types::{FromSql, ToSql};
@@ -159,6 +159,11 @@ fn column_detail(r: &Row) -> Result<ColumnDetail, DbError> {
         Some("d") => Some("BY DEFAULT".to_string()),
         _ => None,
     };
+    let identity_kind = match non_empty(r, 5)?.as_deref() {
+        Some("a") => Some(IdentityKind::Always),
+        Some("d") => Some(IdentityKind::ByDefault),
+        _ => None,
+    };
     let generated_stored = non_empty(r, 6)?.as_deref() == Some("s");
     let (default, generated) = if generated_stored {
         (None, expr)
@@ -177,10 +182,12 @@ fn column_detail(r: &Row) -> Result<ColumnDetail, DbError> {
         auto_increment: identity.is_some() || serial,
         default,
         identity,
+        identity_kind,
         generated,
         invisible: false,
         collation: non_empty(r, 8)?,
         comment: non_empty(r, 7)?,
+        ..Default::default()
     })
 }
 
@@ -206,7 +213,26 @@ fn index_details(
                 }
             }),
         };
+        let part_columns: Vec<Option<String>> = get(r, 9)?;
+        let part_exprs: Vec<Option<String>> = get(r, 10)?;
+        let part_desc: Vec<bool> = get(r, 11)?;
+        let parts = part_columns
+            .into_iter()
+            .zip(part_exprs)
+            .zip(part_desc)
+            .map(|((column, expression), descending)| IndexPart {
+                column,
+                expression,
+                prefix: None,
+                descending,
+            })
+            .collect();
         let idx = IndexDetail {
+            parts,
+            include: get(r, 12)?,
+            comment: non_empty(r, 13)?,
+            nulls_not_distinct: get(r, 14)?,
+            tablespace: non_empty(r, 15)?,
             name: get(r, 0)?,
             unique: get(r, 1)?,
             primary: get(r, 2)?,
@@ -215,6 +241,7 @@ fn index_details(
             columns: get(r, 4)?,
             expression: non_empty(r, 5)?,
             definition,
+            ..Default::default()
         };
         if idx.primary {
             primary = Some(idx);
@@ -242,6 +269,14 @@ fn foreign_keys(rows: &[Row], schema: &str) -> Result<Vec<ForeignKeyDetail>, DbE
             on_delete: fk_action(&get::<String>(r, 6)?).into(),
             definition: get::<Option<String>>(r, 7)?
                 .map(|def| qualify_reference(def, &unqualified, &qualified)),
+            // SIMPLE is the server default, so it stays unset.
+            match_type: match non_empty(r, 10)?.as_deref() {
+                Some("f") => Some("FULL".to_string()),
+                Some("p") => Some("PARTIAL".to_string()),
+                _ => None,
+            },
+            deferrable: get(r, 11)?,
+            initially_deferred: get(r, 12)?,
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -521,7 +556,12 @@ impl Introspector for PgSession {
             columns.push(column_detail(r)?);
         }
         let (primary_key, indexes) = index_details(
-            &fetch(client, queries::INDEXES, &[&oid]).await?,
+            &fetch(
+                client,
+                &queries::indexes(self.server_info().version >= (15, 0, 0)),
+                &[&oid],
+            )
+            .await?,
             partitioned,
         )?;
         let foreign_keys = foreign_keys(
@@ -564,6 +604,9 @@ impl Introspector for PgSession {
                 tablespace: non_empty(rel, 5)?,
                 partitioned_by: non_empty(rel, 4)?,
                 system_versioned: false,
+                is_partition: get(rel, 7)?,
+                inherits: get(rel, 8)?,
+                ..Default::default()
             },
             row_estimate: estimate(rel, 2)?,
             size_bytes: estimate(rel, 6)?,

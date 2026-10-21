@@ -19,6 +19,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: customer_id
     ordinal: 2
     db_type: int(11)
@@ -30,6 +35,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: status
     ordinal: 3
     db_type: "enum('new','paid','shipped','cancelled')"
@@ -41,6 +51,15 @@ columns:
     invisible: false
     collation: utf8mb4_unicode_ci
     comment: ~
+    charset: utf8mb4
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values:
+      - new
+      - paid
+      - shipped
+      - cancelled
   - name: total
     ordinal: 4
     db_type: "decimal(12,2)"
@@ -52,6 +71,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
   - name: created_at
     ordinal: 5
     db_type: datetime(6)
@@ -63,6 +87,11 @@ columns:
     invisible: false
     collation: ~
     comment: ~
+    charset: ~
+    on_update: ~
+    identity_kind: ~
+    unsigned: false
+    enum_values: []
 primary_key:
   name: PRIMARY
   unique: true
@@ -73,6 +102,16 @@ primary_key:
   expression: ~
   method: BTREE
   definition: ~
+  parts:
+    - column: id
+      expression: ~
+      prefix: ~
+      descending: false
+  visible: true
+  include: []
+  nulls_not_distinct: false
+  comment: ~
+  tablespace: ~
 indexes:
   - name: idx_orders_customer_status
     unique: false
@@ -84,6 +123,20 @@ indexes:
     expression: ~
     method: BTREE
     definition: ~
+    parts:
+      - column: customer_id
+        expression: ~
+        prefix: ~
+        descending: false
+      - column: status
+        expression: ~
+        prefix: ~
+        descending: false
+    visible: true
+    include: []
+    nulls_not_distinct: false
+    comment: ~
+    tablespace: ~
 foreign_keys:
   - name: fk_orders_customer
     columns:
@@ -95,6 +148,9 @@ foreign_keys:
     on_update: RESTRICT
     on_delete: RESTRICT
     definition: ~
+    match_type: ~
+    deferrable: false
+    initially_deferred: false
 checks: []
 triggers:
   - name: trg_orders_bi
@@ -106,6 +162,12 @@ options:
   tablespace: ~
   partitioned_by: ~
   system_versioned: false
+  charset: utf8mb4
+  row_format: Dynamic
+  auto_increment: 4
+  extra: []
+  is_partition: false
+  inherits: []
 row_estimate: "[redacted]"
 size_bytes: "[redacted]"
 comment: ~

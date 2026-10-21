@@ -181,6 +181,7 @@ export function StatusBar() {
   // The database the active tab works in: the query tab's context, or the object's database.
   const objectDb = useTabs((s) => {
     const tab = s.tabs.find((t) => t.id === s.activeId);
+    if (tab?.kind === 'design') return tab.scope.database;
     return tab?.kind === 'object' ? tab.objectRef.database : null;
   });
   const queryDb = useQueryDocs((s) => (queryTabId ? s.docs.get(queryTabId)?.database ?? null : null));

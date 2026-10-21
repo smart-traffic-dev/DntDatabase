@@ -14,6 +14,7 @@ pub mod favorites;
 pub mod objects;
 pub mod query;
 pub mod settings;
+pub mod table_design;
 pub mod transfer;
 pub mod window;
 pub mod workspace;
@@ -125,6 +126,12 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             objects::object_action_preview,
             objects::object_action_apply,
             objects::object_action_cancel,
+            table_design::table_design_open,
+            table_design::table_design_render,
+            table_design::table_design_preview,
+            table_design::table_design_apply,
+            table_design::table_design_cancel,
+            table_design::table_design_close,
             browse::list_databases,
             browse::list_schemas,
             browse::list_objects,

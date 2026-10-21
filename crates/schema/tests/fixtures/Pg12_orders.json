@@ -1,0 +1,220 @@
+{
+  "detail": {
+    "checks": [
+      {
+        "definition": "CHECK ((total >= (0)::numeric))",
+        "expression": "(total >= (0)::numeric)",
+        "name": "orders_total_check"
+      }
+    ],
+    "columns": [
+      {
+        "auto_increment": true,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "integer",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": "BY DEFAULT",
+        "identity_kind": "by_default",
+        "invisible": false,
+        "name": "id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 1,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "integer",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "customer_id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 2,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "order_status",
+        "default": "'new'::order_status",
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "status",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 3,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "numeric(12,2)",
+        "default": "0",
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "total",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 4,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "timestamp without time zone",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "created_at",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 5,
+        "unsigned": false
+      }
+    ],
+    "comment": null,
+    "foreign_keys": [
+      {
+        "columns": [
+          "customer_id"
+        ],
+        "deferrable": false,
+        "definition": "FOREIGN KEY (customer_id) REFERENCES public.customers(id)",
+        "initially_deferred": false,
+        "match_type": null,
+        "name": "orders_customer_id_fkey",
+        "on_delete": "NO ACTION",
+        "on_update": "NO ACTION",
+        "ref_columns": [
+          "id"
+        ],
+        "ref_schema": null,
+        "ref_table": "customers"
+      }
+    ],
+    "indexes": [
+      {
+        "columns": [
+          "customer_id",
+          "status"
+        ],
+        "comment": null,
+        "definition": "CREATE INDEX idx_orders_customer_status ON public.orders USING btree (customer_id, status)",
+        "expression": null,
+        "include": [],
+        "method": "btree",
+        "name": "idx_orders_customer_status",
+        "nulls_not_distinct": false,
+        "partial": false,
+        "parts": [
+          {
+            "column": "customer_id",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          },
+          {
+            "column": "status",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          }
+        ],
+        "primary": false,
+        "tablespace": null,
+        "unique": false,
+        "visible": true
+      }
+    ],
+    "object": {
+      "database": "dnt_fixture",
+      "kind": "Table",
+      "name": "orders",
+      "schema": "public"
+    },
+    "options": {
+      "auto_increment": null,
+      "charset": null,
+      "collation": null,
+      "engine": null,
+      "extra": [],
+      "inherits": [],
+      "is_partition": false,
+      "partitioned_by": null,
+      "row_format": null,
+      "system_versioned": false,
+      "tablespace": null
+    },
+    "primary_key": {
+      "columns": [
+        "id"
+      ],
+      "comment": null,
+      "definition": "PRIMARY KEY (id)",
+      "expression": null,
+      "include": [],
+      "method": "btree",
+      "name": "orders_pkey",
+      "nulls_not_distinct": false,
+      "partial": false,
+      "parts": [
+        {
+          "column": "id",
+          "descending": false,
+          "expression": null,
+          "prefix": null
+        }
+      ],
+      "primary": true,
+      "tablespace": null,
+      "unique": true,
+      "visible": true
+    },
+    "row_estimate": null,
+    "size_bytes": null,
+    "triggers": [
+      {
+        "event": "INSERT",
+        "name": "trg_orders_bi",
+        "timing": "BEFORE"
+      }
+    ]
+  },
+  "server": {
+    "kind": "postgres",
+    "variant": "Postgres",
+    "version": [
+      12,
+      0,
+      22
+    ],
+    "version_string": "PostgreSQL 12.22 (Debian 12.22-1.pgdg120+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 12.2.0-14) 12.2.0, 64-bit"
+  }
+}

@@ -13,7 +13,7 @@ use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
     group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail,
-    ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail,
+    IndexPart, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail,
     TableOptions, TriggerDetail,
 };
 use dnt_core::server::ServerVariant;
@@ -171,8 +171,11 @@ impl MySqlSession {
     }
 
     fn indexes_query(&self) -> &'static str {
+        let info = self.server_info();
         if self.capabilities().functional_index {
             queries::INDEXES_WITH_EXPRESSION
+        } else if info.variant == ServerVariant::MariaDb && info.version >= (10, 6, 0) {
+            queries::INDEXES_MARIADB
         } else {
             queries::INDEXES
         }
@@ -184,10 +187,10 @@ fn column_detail(r: &TextRow, maria: bool) -> Option<ColumnDetail> {
     // MariaDB reports "no default" on a nullable column as the text `NULL`
     // (a string default would be quoted: `'NULL'`).
     let default = col(r, 4).filter(|d| !(maria && d == "NULL"));
+    let db_type = col(r, 2)?;
     Some(ColumnDetail {
         name: col(r, 0)?,
         ordinal: col(r, 1)?.parse().ok()?,
-        db_type: col(r, 2)?,
         nullable: col(r, 3).as_deref() == Some("YES"),
         default,
         auto_increment: extra.to_ascii_lowercase().contains("auto_increment"),
@@ -196,7 +199,67 @@ fn column_detail(r: &TextRow, maria: bool) -> Option<ColumnDetail> {
         invisible: extra.to_ascii_uppercase().contains("INVISIBLE"),
         collation: non_empty(r, 8),
         comment: non_empty(r, 7),
+        charset: non_empty(r, 9),
+        on_update: on_update_clause(&extra),
+        unsigned: is_unsigned(&db_type),
+        enum_values: enum_values(&db_type),
+        db_type,
+        ..Default::default()
     })
+}
+
+/// Whether a numeric `COLUMN_TYPE` carries `unsigned` (`enum` / `set` members are quoted
+/// text that may contain the word).
+fn is_unsigned(db_type: &str) -> bool {
+    let lower = db_type.to_ascii_lowercase();
+    !(lower.starts_with("enum(") || lower.starts_with("set(")) && lower.contains(" unsigned")
+}
+
+/// The text after `on update ` in `EXTRA` (e.g. `CURRENT_TIMESTAMP(6)`).
+fn on_update_clause(extra: &str) -> Option<String> {
+    const KEY: &str = "on update ";
+    let at = extra.to_ascii_lowercase().find(KEY)?;
+    extra[at + KEY.len()..]
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+}
+
+/// Members of an `enum(...)` / `set(...)` column type, with `''` unescaped.
+fn enum_values(db_type: &str) -> Vec<String> {
+    let lower = db_type.to_ascii_lowercase();
+    if !(lower.starts_with("enum(") || lower.starts_with("set(")) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut cur: Option<String> = None;
+    let mut chars = db_type.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (&mut cur, c) {
+            (None, '\'') => cur = Some(String::new()),
+            (Some(s), '\'') => {
+                if chars.peek() == Some(&'\'') {
+                    chars.next();
+                    s.push('\'');
+                } else {
+                    out.extend(cur.take());
+                }
+            }
+            (Some(s), c) => s.push(c),
+            (None, _) => {}
+        }
+    }
+    out
+}
+
+/// One index part's `SUB_PART`, `COLLATION` (`D` = descending) and column / expression.
+fn index_part(r: &TextRow) -> IndexPart {
+    IndexPart {
+        column: col(r, 3),
+        expression: non_empty(r, 5),
+        prefix: num(r, 6).and_then(|n| u32::try_from(n).ok()),
+        descending: col(r, 7).as_deref() == Some("D"),
+    }
 }
 
 /// Groups index parts (rows ordered by index then position) into indexes by name.
@@ -213,10 +276,14 @@ fn group_indexes(rows: &[TextRow]) -> BTreeMap<String, IndexDetail> {
             expression: None,
             method: non_empty(r, 4),
             definition: None,
+            visible: col(r, 9).as_deref() != Some("NO"),
+            comment: non_empty(r, 8),
+            ..Default::default()
         });
         if let Some(c) = col(r, 3) {
             idx.columns.push(c);
         }
+        idx.parts.push(index_part(r));
         if let Some(e) = non_empty(r, 5) {
             idx.expression = Some(match idx.expression.take() {
                 Some(prev) => format!("{prev}, {e}"),
@@ -245,6 +312,7 @@ fn group_foreign_keys(rows: &[TextRow], db: &str) -> Vec<ForeignKeyDetail> {
             on_delete: col(r, 6).unwrap_or_default(),
             // MySQL table DDL comes verbatim from `SHOW CREATE TABLE`.
             definition: None,
+            ..Default::default()
         });
         fk.columns.extend(col(r, 1));
         fk.ref_columns.extend(col(r, 4));
@@ -335,8 +403,37 @@ impl Introspector for MySqlSession {
         let indexes_sql = self.indexes_query();
 
         let mut conn = self.live_conn().await?;
-        let table = fetch(&mut conn, queries::TABLE, params2(db, name))
-            .await?
+        // MySQL 8 caches `information_schema.TABLES` statistics (AUTO_INCREMENT among
+        // them) for `information_schema_stats_expiry` (24 h by default). Read this one
+        // table with the cache off, then put the session's own value back.
+        let live_stats = self.server_info().variant == ServerVariant::MySql8;
+        let prior_expiry = if live_stats {
+            let prior = fetch(
+                &mut conn,
+                "SELECT @@session.information_schema_stats_expiry",
+                Params::Empty,
+            )
+            .await?;
+            let prior = prior.first().and_then(|r| col(r, 0));
+            conn.query_drop("SET SESSION information_schema_stats_expiry = 0")
+                .await
+                .map_err(map_err)?;
+            prior
+        } else {
+            None
+        };
+        let table_rows = fetch(&mut conn, queries::TABLE, params2(db, name)).await;
+        if live_stats {
+            let restore = format!(
+                "SET SESSION information_schema_stats_expiry = {}",
+                prior_expiry
+                    .filter(|p| p.parse::<u64>().is_ok())
+                    .as_deref()
+                    .unwrap_or("DEFAULT")
+            );
+            conn.query_drop(restore).await.map_err(map_err)?;
+        }
+        let table = table_rows?
             .into_iter()
             .next()
             .ok_or_else(|| no_such_table(obj))?;
@@ -425,6 +522,16 @@ impl Introspector for MySqlSession {
                 tablespace: None,
                 partitioned_by,
                 system_versioned: table_type == "SYSTEM VERSIONED",
+                charset: non_empty(&table, 10),
+                row_format: non_empty(&table, 8),
+                auto_increment: num(&table, 9),
+                extra: create_options
+                    .split_whitespace()
+                    .filter(|o| *o != "partitioned")
+                    .filter_map(|o| o.split_once('='))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+                ..Default::default()
             },
             row_estimate: if is_view { None } else { num(&table, 4) },
             size_bytes,
@@ -483,6 +590,15 @@ mod tests {
 
     fn row(cells: &[Option<&str>]) -> TextRow {
         cells.iter().map(|c| c.map(str::to_string)).collect()
+    }
+
+    #[test]
+    fn unsigned_ignores_enum_members() {
+        assert!(is_unsigned("int(10) unsigned"));
+        assert!(is_unsigned("bigint unsigned zerofill"));
+        assert!(!is_unsigned("int"));
+        assert!(!is_unsigned("enum('a unsigned','b')"));
+        assert!(!is_unsigned("set('x unsigned')"));
     }
 
     #[test]

@@ -1,0 +1,103 @@
+{
+  "detail": {
+    "checks": [],
+    "columns": [
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "int(11)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 1,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": "utf8mb4",
+        "collation": "utf8mb4_unicode_ci",
+        "comment": null,
+        "db_type": "varchar(50)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "we`ird\"col",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 2,
+        "unsigned": false
+      }
+    ],
+    "comment": null,
+    "foreign_keys": [],
+    "indexes": [],
+    "object": {
+      "database": "dnt_fixture",
+      "kind": "Table",
+      "name": "weird_names",
+      "schema": null
+    },
+    "options": {
+      "auto_increment": null,
+      "charset": "utf8mb4",
+      "collation": "utf8mb4_unicode_ci",
+      "engine": "InnoDB",
+      "extra": [],
+      "inherits": [],
+      "is_partition": false,
+      "partitioned_by": null,
+      "row_format": "Dynamic",
+      "system_versioned": false,
+      "tablespace": null
+    },
+    "primary_key": {
+      "columns": [
+        "id"
+      ],
+      "comment": null,
+      "definition": null,
+      "expression": null,
+      "include": [],
+      "method": "BTREE",
+      "name": "PRIMARY",
+      "nulls_not_distinct": false,
+      "partial": false,
+      "parts": [
+        {
+          "column": "id",
+          "descending": false,
+          "expression": null,
+          "prefix": null
+        }
+      ],
+      "primary": true,
+      "tablespace": null,
+      "unique": true,
+      "visible": true
+    },
+    "row_estimate": null,
+    "size_bytes": null,
+    "triggers": []
+  },
+  "server": {
+    "kind": "mysql",
+    "variant": "MariaDb",
+    "version": [
+      10,
+      6,
+      28
+    ],
+    "version_string": "10.6.28-MariaDB-ubu2204"
+  }
+}

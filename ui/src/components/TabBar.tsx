@@ -14,6 +14,7 @@ import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
+import { useTableDesigns } from '../store/tableDesigns';
 import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
@@ -74,6 +75,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
   const unsavedIds = useQueryDocs(
     useShallow((s) => [...s.docs.values()].filter((d) => !!d.filePath && d.dirty).map((d) => d.id)),
   );
+  const dirtyDesignIds = useTableDesigns(useShallow((s) => Object.keys(s.byTab).filter((id) => s.isDirty(id))));
   const txIds = useQueryRun(
     useShallow((s) => [...s.runs].filter(([, r]) => (r.txState ?? 'idle') !== 'idle').map(([id]) => id)),
   );
@@ -259,7 +261,8 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           const env = conn?.env_tag ?? null;
           const readOnly = !!conn?.read_only;
           // `●` only for a tab bound to a file whose text differs from it.
-          const unsaved = tab.kind === 'query' && unsavedIds.includes(tab.id);
+          // A design tab shows it while the draft differs from the table as opened.
+          const unsaved = tab.kind === 'query' ? unsavedIds.includes(tab.id) : tab.kind === 'design' && dirtyDesignIds.includes(tab.id);
           const classes = [
             'tab',
             tab.id === activeId ? 'active' : '',
@@ -318,7 +321,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                   </span>
                 )}
                 {env && <EnvTag env={env} />}
-                <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : KIND_LABEL[tab.objectRef.kind]}</span>
+                <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : tab.kind === 'design' ? 'Design' : KIND_LABEL[tab.objectRef.kind]}</span>
                 <span className="tab-title">{tab.title}</span>
                 {readOnly && (
                   <span className="tab-ro" title="Read-only connection" aria-label="Read-only connection">
@@ -343,7 +346,11 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                 )}
                 {unsaved && (
                   // For screen readers; the close button shows the dot.
-                  <span className="tab-dirty sr-only" title="Unsaved changes" aria-label="Unsaved changes">
+                  <span
+                    className="tab-dirty sr-only"
+                    title={tab.kind === 'design' ? 'Unsaved design changes' : 'Unsaved changes'}
+                    aria-label={tab.kind === 'design' ? 'Unsaved design changes' : 'Unsaved changes'}
+                  >
                     ●
                   </span>
                 )}

@@ -1,0 +1,220 @@
+/* Table designer (board 10): header row, banners, shared field styles (grid: columnsGrid.css, inspector: columnInspector.css, preview: sqlPreview.css). Tokens only. */
+.designer {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--dnt-text-base);
+  line-height: var(--dnt-text-base-lh);
+}
+
+.designer.dz-empty-state {
+  align-items: center;
+  justify-content: center;
+}
+
+.designer .mono {
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+}
+
+/* Banners: lost session, a failed request, a read-only table. */
+.dz-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  padding: var(--dnt-space-1_5) var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-banner span {
+  flex: 1;
+  min-width: 0;
+}
+
+.dz-banner-warning {
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+}
+
+.dz-banner-error {
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+}
+
+.dz-banner-info {
+  background: var(--dnt-status-info-bg);
+  color: var(--dnt-status-info-fg);
+}
+
+/* The previous draft of a stale apply: a read-only list of its changes. */
+.dz-previous {
+  flex: none;
+  max-height: 160px;
+  overflow: auto;
+  padding: var(--dnt-space-2) var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-previous ul {
+  margin: var(--dnt-space-1) 0 0;
+  padding-left: var(--dnt-space-4);
+}
+
+.dz-empty-state .dz-banner {
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-md);
+}
+
+/* Header: one 44 px row. */
+.dz-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-3);
+  height: 44px;
+  min-width: 0;
+  padding: 0 var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.dz-title {
+  font-size: var(--dnt-text-md);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dz-header .dz-subtle {
+  white-space: nowrap;
+}
+
+.dz-header .dz-sections {
+  flex: none;
+  margin-left: var(--dnt-space-2);
+}
+
+.dz-sections .segment,
+.dz-mode .segment {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  font-weight: 500;
+}
+
+.dz-sections .segment:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+.dz-sections .segment:disabled:hover {
+  background: transparent;
+}
+
+.dz-count {
+  font-style: normal;
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-subtle);
+}
+
+.dz-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-2);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+  font-size: var(--dnt-text-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.dz-btn {
+  flex: none;
+  height: var(--dnt-ctl-h-md);
+  white-space: nowrap;
+}
+
+.designer .btn:disabled {
+  background: var(--dnt-bg-sunken);
+  border-color: var(--dnt-border-subtle);
+  color: var(--dnt-fg-disabled);
+}
+
+.dz-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.dz-left {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dz-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.dz-problems {
+  flex: none;
+  margin: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-4) var(--dnt-space-2) var(--dnt-space-8);
+  border-top: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-inspector .dz-alert {
+  margin: 0;
+}
+
+.designer input[type='checkbox'] {
+  accent-color: var(--dnt-accent);
+}
+
+/* Fields: borderless in the grid until hovered; the focus turns the 1px border (theme.css). */
+.dz-input {
+  width: 100%;
+  min-width: 0;
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-1_5);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-xs);
+  background: transparent;
+  color: var(--dnt-fg);
+  font: inherit;
+}
+
+.dz-input.mono {
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-input:focus {
+  background: var(--dnt-bg-app);
+}
+
+.dz-input:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+.dz-input.dz-invalid {
+  border-color: var(--dnt-status-danger-solid);
+  background: var(--dnt-status-danger-bg);
+}
+
+.dz-input.dz-expr {
+  color: var(--dnt-fg-muted);
+  font-style: italic;
+}

@@ -144,7 +144,7 @@ export function requestExport(request: ExportRequest | null) {
 export function openExportDialog(): void {
   const { tabs, activeId } = useTabs.getState();
   const tab = tabs.find((t) => t.id === activeId);
-  if (!tab) return;
+  if (!tab || tab.kind === 'design') return;
   if (tab.kind === 'object') {
     const state = useTableData.getState().byTab[tab.id];
     if (state) requestExport(dataExportRequest(tab, state));

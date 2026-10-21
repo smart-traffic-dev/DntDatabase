@@ -282,6 +282,7 @@ mod tests {
             invisible: false,
             collation: None,
             comment: None,
+            ..Default::default()
         }
     }
 
@@ -295,6 +296,7 @@ mod tests {
             expression: None,
             method: Some("btree".into()),
             definition: Some(definition.into()),
+            ..Default::default()
         }
     }
 
@@ -359,6 +361,7 @@ mod tests {
                 on_update: "NO ACTION".into(),
                 on_delete: "CASCADE".into(),
                 definition: None,
+                ..Default::default()
             }],
             checks: vec![CheckDetail {
                 name: "events_amount_check".into(),
@@ -372,6 +375,7 @@ mod tests {
                 tablespace: None,
                 partitioned_by: Some("RANGE (created_at)".into()),
                 system_versioned: false,
+                ..Default::default()
             },
             row_estimate: None,
             size_bytes: None,

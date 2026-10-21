@@ -4,6 +4,7 @@
 pub mod cache;
 pub mod commands;
 pub mod data_sessions;
+pub mod ddl_exec;
 pub mod desktop;
 pub mod edit_plans;
 pub mod export_format;
@@ -17,3 +18,4 @@ pub mod session_manager;
 pub mod state;
 
 pub mod object_actions;
+pub mod table_design;

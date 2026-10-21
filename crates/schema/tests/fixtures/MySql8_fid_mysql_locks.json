@@ -1,0 +1,183 @@
+{
+  "detail": {
+    "checks": [
+      {
+        "definition": null,
+        "expression": "(`a` > 0)",
+        "name": "ck_enforced"
+      },
+      {
+        "definition": null,
+        "expression": "(`a` < 100)",
+        "name": "ck_not_enforced"
+      }
+    ],
+    "columns": [
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "int",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 1,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "int",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "a",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 2,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": "utf8mb4",
+        "collation": "utf8mb4_unicode_ci",
+        "comment": null,
+        "db_type": "text",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "body",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 3,
+        "unsigned": false
+      }
+    ],
+    "comment": null,
+    "foreign_keys": [],
+    "indexes": [
+      {
+        "columns": [
+          "body"
+        ],
+        "comment": null,
+        "definition": null,
+        "expression": null,
+        "include": [],
+        "method": "FULLTEXT",
+        "name": "ft_body",
+        "nulls_not_distinct": false,
+        "partial": false,
+        "parts": [
+          {
+            "column": "body",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          }
+        ],
+        "primary": false,
+        "tablespace": null,
+        "unique": false,
+        "visible": true
+      },
+      {
+        "columns": [
+          "a"
+        ],
+        "comment": null,
+        "definition": null,
+        "expression": null,
+        "include": [],
+        "method": "BTREE",
+        "name": "k_a",
+        "nulls_not_distinct": false,
+        "partial": false,
+        "parts": [
+          {
+            "column": "a",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          }
+        ],
+        "primary": false,
+        "tablespace": null,
+        "unique": false,
+        "visible": true
+      }
+    ],
+    "object": {
+      "database": "dnt_fixture",
+      "kind": "Table",
+      "name": "fid_mysql_locks",
+      "schema": null
+    },
+    "options": {
+      "auto_increment": null,
+      "charset": "utf8mb4",
+      "collation": "utf8mb4_unicode_ci",
+      "engine": "InnoDB",
+      "extra": [],
+      "inherits": [],
+      "is_partition": false,
+      "partitioned_by": null,
+      "row_format": "Dynamic",
+      "system_versioned": false,
+      "tablespace": null
+    },
+    "primary_key": {
+      "columns": [
+        "id"
+      ],
+      "comment": null,
+      "definition": null,
+      "expression": null,
+      "include": [],
+      "method": "BTREE",
+      "name": "PRIMARY",
+      "nulls_not_distinct": false,
+      "partial": false,
+      "parts": [
+        {
+          "column": "id",
+          "descending": false,
+          "expression": null,
+          "prefix": null
+        }
+      ],
+      "primary": true,
+      "tablespace": null,
+      "unique": true,
+      "visible": true
+    },
+    "row_estimate": null,
+    "size_bytes": null,
+    "triggers": []
+  },
+  "server": {
+    "kind": "mysql",
+    "variant": "MySql8",
+    "version": [
+      8,
+      0,
+      46
+    ],
+    "version_string": "8.0.46"
+  }
+}

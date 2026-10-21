@@ -318,6 +318,7 @@ mod tests {
             invisible: false,
             collation: None,
             comment: None,
+            ..Default::default()
         }
     }
 

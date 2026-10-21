@@ -5,7 +5,7 @@ import { useTree, type TreeNode } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { openNewQuery, openSelectTop } from './newQuery';
-import { openObjectTab } from './openObject';
+import { openDesignTab, openObjectTab } from './openObject';
 
 type Item = MenuEntry;
 const SEP: Item = { separator: true };
@@ -45,6 +45,27 @@ export function objectActionItems(node: TreeNode): Item[] {
   ];
   if (object.kind === 'View' || (pg && object.kind === 'MaterializedView')) return [item('Drop view\u2026', { kind: 'drop_object', object }, true)];
   return [];
+}
+
+/**
+ * The table designer's entries: "Design table" on a table (it also opens on a read-only connection,
+ * view-only) and "New table…" on a MySQL database / PostgreSQL schema (disabled when read-only).
+ * Nothing while the connection is closed.
+ */
+export function designActionItems(node: TreeNode): Item[] {
+  const connectionId = connectionIdOf(node.id);
+  if (!connectionId) return [];
+  const stored = useConnections.getState();
+  const cfg = stored.summaries.get(connectionId)?.config;
+  if (!cfg || !stored.info.has(connectionId)) return [];
+  const object = node.objectRef;
+  if (node.kind === 'object' && object?.kind === 'Table') {
+    return [{ label: 'Design table', run: () => void openDesignTab(connectionId, { database: object.database, schema: object.schema }, object.name) }];
+  }
+  const scope = node.scope;
+  const holdsTables = scope && (cfg.kind === 'postgres' ? node.kind === 'schema' && !!scope.schema : node.kind === 'database');
+  if (!scope || !holdsTables) return [];
+  return [{ label: 'New table…', disabled: cfg.read_only, run: () => void openDesignTab(connectionId, scope, null) }];
 }
 
 function itemsFor(node: TreeNode): Item[] {
@@ -113,13 +134,14 @@ function itemsFor(node: TreeNode): Item[] {
       { label: 'Open', hint: 'Enter', run: () => openObjectTab(node) },
       ...(queryable ? [{ label: 'Select top 1000', run: () => void openSelectTop(node) }] : []),
       newQuery,
+      ...designActionItems(node),
       ...objectActionItems(node),
       SEP,
       refresh,
       copy,
     ];
   }
-  return [newQuery, ...objectActionItems(node), SEP, refresh, copy];
+  return [newQuery, ...designActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {

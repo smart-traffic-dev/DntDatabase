@@ -1,6 +1,6 @@
-import type { ObjectRef } from '../bindings';
+import type { ObjectRef, Scope } from '../bindings';
 import { useObjectData } from '../store/objectData';
-import { useTabs, objectTabId } from '../store/tabs';
+import { designTabId, useTabs, objectTabId } from '../store/tabs';
 import type { TreeNode } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 
@@ -25,6 +25,15 @@ export function openObjectRef(connectionId: string, objectRef: ObjectRef, title:
     tabs.keepTab(id);
   }
   if (opts.ddl) useObjectData.getState().setSub(id, 'ddl');
+  return id;
+}
+
+/** Opens (or activates) the designer tab of a table (`table` null: a new table in `scope`); returns its id. */
+export function openDesignTab(connectionId: string, scope: Scope, table: string | null): string {
+  const id = designTabId(connectionId, scope, table);
+  const tabs = useTabs.getState();
+  tabs.open({ id, kind: 'design', connectionId, scope, table, title: table ?? 'New table' });
+  tabs.keepTab(id);
   return id;
 }
 

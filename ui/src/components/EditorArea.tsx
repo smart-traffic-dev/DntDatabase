@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type DragEvent } from 'react';
 import { groupTabs, useTabs, type LayoutNode, type Side } from '../store/tabs';
 import { useTree } from '../store/tree';
+import { DesignerTab } from '../tabs/designer/DesignerTab';
 import { ObjectTab } from '../tabs/ObjectTab';
 import { QueryTab } from '../tabs/query/QueryTab';
 import { EmptyWorkspace } from './EmptyWorkspace';
@@ -129,6 +130,8 @@ function GroupPane({ groupId, index, welcome }: { groupId: string; index: number
           <ObjectTab key={tab.id} tab={tab} />
         ) : tab?.kind === 'query' ? (
           <QueryTab key={tab.id} tab={tab} />
+        ) : tab?.kind === 'design' ? (
+          <DesignerTab key={tab.id} tab={tab} />
         ) : welcome ? (
           <EmptyWorkspace />
         ) : (

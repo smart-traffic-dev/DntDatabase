@@ -1122,6 +1122,7 @@ mod tests {
             invisible: false,
             collation: None,
             comment: None,
+            ..Default::default()
         }
     }
 
@@ -1298,6 +1299,7 @@ mod tests {
                 expression: None,
                 method: None,
                 definition: None,
+                ..Default::default()
             }),
             indexes: vec![],
             foreign_keys: vec![],
@@ -1309,6 +1311,7 @@ mod tests {
                 tablespace: None,
                 partitioned_by: None,
                 system_versioned: false,
+                ..Default::default()
             },
             row_estimate: None,
             size_bytes: None,

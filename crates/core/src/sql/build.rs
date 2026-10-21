@@ -241,9 +241,21 @@ fn string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError>
 }
 
 fn mysql_string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError> {
+    let quoted = mysql_quote(s, d).map_err(|e| match e {
+        BuildError::Invalid { reason, .. } => invalid(col, &reason),
+        other => other,
+    })?;
+    Ok(format!("_utf8mb4{quoted}"))
+}
+
+/// `s` as a plain MySQL string literal `'…'` (no character set introducer), escaped as
+/// [`literal`] escapes strings for `d`: backslash-escaped (`\\`, `\'`, `\0`) unless
+/// `NO_BACKSLASH_ESCAPES`, where only `'` is doubled and NUL is refused. For DDL
+/// positions that take no introducer (`COMMENT '…'`, `ENUM('…')`, a column `DEFAULT`).
+pub fn mysql_quote(s: &str, d: Dialect) -> Result<String, BuildError> {
     let backslash = matches!(d, Dialect::MySql(m) if !m.no_backslash_escapes);
-    let mut out = String::with_capacity(s.len() + 11);
-    out.push_str("_utf8mb4'");
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
     for c in s.chars() {
         match c {
             '\\' if backslash => out.push_str("\\\\"),
@@ -251,10 +263,10 @@ fn mysql_string(s: &str, col: &ColumnTarget, d: Dialect) -> Result<String, Build
             '\0' if backslash => out.push_str("\\0"),
             '\'' => out.push_str("''"),
             '\0' => {
-                return Err(invalid(
-                    col,
-                    "a NUL character cannot be written under NO_BACKSLASH_ESCAPES",
-                ))
+                return Err(BuildError::Invalid {
+                    column: String::new(),
+                    reason: "a NUL character cannot be written under NO_BACKSLASH_ESCAPES".into(),
+                })
             }
             c => out.push(c),
         }
@@ -732,47 +744,147 @@ fn text_value(s: &str) -> Result<FullValue, BuildError> {
 /// or DDL statement at depth 0 ([`RAW_WHERE_FORBIDDEN`]); `INTO` anywhere. The data view
 /// also runs the query read-only, so this is a first line, not the only one.
 pub fn check_raw_where(where_sql: &str, d: Dialect) -> Result<(), BuildError> {
+    check_fragment(where_sql, d, &RAW_WHERE_RULES)
+}
+
+/// Checks a user-written SQL expression that the table designer places into DDL: a
+/// column default, a generated column, a `USING` conversion, a `CHECK`, an index
+/// expression or a custom type name.
+///
+/// Same rules as [`check_raw_where`], plus: `SELECT` anywhere (no subqueries), a `,`
+/// at depth 0 (one fragment must not carry several DDL clauses) and comments of any
+/// kind (the text is not followed by a newline in DDL, so a `--` comment would
+/// swallow the rest of the line). The server stays the final check.
+///
+/// For MySQL the text must pass under all four lexing modes (`ANSI_QUOTES` ×
+/// `NO_BACKSLASH_ESCAPES`), whatever mode `d` carries: the server's `sql_mode` may
+/// differ from the one assumed, and a literal that hides a clause in one mode must
+/// not slip through.
+pub fn check_expression(text: &str, d: Dialect) -> Result<(), BuildError> {
+    match d {
+        Dialect::Postgres => check_fragment(text, d, &EXPRESSION_RULES),
+        Dialect::MySql(_) => {
+            for ansi_quotes in [false, true] {
+                for no_backslash_escapes in [false, true] {
+                    let mode = crate::sql::MySqlMode {
+                        ansi_quotes,
+                        no_backslash_escapes,
+                    };
+                    check_fragment(text, Dialect::MySql(mode), &EXPRESSION_RULES)?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+/// What [`check_fragment`] refuses beyond the shared rules.
+struct FragmentRules {
+    /// `BuildError::Invalid::column` of a refusal.
+    label: &'static str,
+    /// The noun in messages ("a filter", "an expression").
+    noun: &'static str,
+    /// The empty-text message.
+    empty: &'static str,
+    /// Words refused at any depth (besides `INTO`).
+    forbidden_anywhere: &'static [&'static str],
+    /// Refuse comments (any text between tokens that is not whitespace).
+    no_comments: bool,
+    /// Refuse a `,` at depth 0.
+    no_top_level_comma: bool,
+}
+
+const RAW_WHERE_RULES: FragmentRules = FragmentRules {
+    label: "WHERE",
+    noun: "a filter",
+    empty: "the condition is empty",
+    forbidden_anywhere: &[],
+    no_comments: false,
+    no_top_level_comma: false,
+};
+
+const EXPRESSION_RULES: FragmentRules = FragmentRules {
+    label: "expression",
+    noun: "an expression",
+    empty: "the expression is empty",
+    forbidden_anywhere: &["SELECT"],
+    no_comments: true,
+    no_top_level_comma: true,
+};
+
+/// The rules shared by [`check_raw_where`] and [`check_expression`] (see the former).
+fn check_fragment(text: &str, d: Dialect, rules: &FragmentRules) -> Result<(), BuildError> {
     let bad = |reason: &str| {
         Err(BuildError::Invalid {
-            column: "WHERE".into(),
+            column: rules.label.into(),
             reason: reason.into(),
         })
     };
     // Lexed as it will be sent: an open string or comment swallows the `)`.
-    let wrapped = format!("({where_sql}\n)");
+    let wrapped = format!("({text}\n)");
     let toks = crate::sql::tokenize(&wrapped, d);
     let closes_at = wrapped.len() - 1;
     if !matches!(toks.last(), Some(t) if t.kind == TokKind::Close && t.start == closes_at) {
         return bad("a string, quoted name or comment is not closed");
     }
+    if rules.no_comments {
+        // The lexer drops comments: anything but whitespace between tokens is one.
+        let has_comment = toks
+            .windows(2)
+            .any(|w| !wrapped[w[0].end..w[1].start].trim().is_empty());
+        if has_comment {
+            return bad(&format!("comments are not allowed in {}", rules.noun));
+        }
+    }
     let inner = &toks[1..toks.len() - 1];
     if inner.is_empty() {
-        return bad("the condition is empty");
+        return bad(rules.empty);
     }
     let mut depth = 0usize;
+    // With the comma rule: open `(` / `[` in order, so they must nest properly and a
+    // comma counts as top level only outside both (PG `ARRAY[1, 2]`, `a[1:2]`).
+    let mut nesting: Vec<u8> = Vec::new();
+    let comma_rule = rules.no_top_level_comma;
     for t in inner {
         match t.kind {
-            TokKind::Open => depth += 1,
+            TokKind::Open => {
+                depth += 1;
+                nesting.push(b'(');
+            }
             TokKind::Close => {
-                if depth == 0 {
+                if depth == 0 || (comma_rule && nesting.pop() != Some(b'(')) {
                     return bad("unbalanced parentheses");
                 }
                 depth -= 1;
             }
-            TokKind::Punct(b';') => return bad("a ';' cannot appear in a filter"),
+            TokKind::Punct(b';') => return bad(&format!("a ';' cannot appear in {}", rules.noun)),
+            TokKind::Punct(b'[') if comma_rule => nesting.push(b'['),
+            TokKind::Punct(b']') if comma_rule => {
+                if nesting.pop() != Some(b'[') {
+                    return bad("unbalanced brackets");
+                }
+            }
+            TokKind::Punct(b',') if comma_rule && nesting.is_empty() => {
+                return bad(&format!(
+                    "a ',' outside parentheses cannot appear in {}",
+                    rules.noun
+                ))
+            }
             TokKind::ExecComment => return bad("executable comments are not allowed"),
             TokKind::Word(w) => {
-                if w.eq_ignore_ascii_case("INTO") {
-                    return bad("INTO is not allowed in a filter");
-                }
-                if depth == 0
+                let forbidden_here = (depth == 0
                     && RAW_WHERE_FORBIDDEN
                         .iter()
-                        .any(|k| w.eq_ignore_ascii_case(k))
-                {
+                        .any(|k| w.eq_ignore_ascii_case(k)))
+                    || rules
+                        .forbidden_anywhere
+                        .iter()
+                        .any(|k| w.eq_ignore_ascii_case(k));
+                if w.eq_ignore_ascii_case("INTO") || forbidden_here {
                     return bad(&format!(
-                        "{} is not allowed in a filter",
-                        w.to_ascii_uppercase()
+                        "{} is not allowed in {}",
+                        w.to_ascii_uppercase(),
+                        rules.noun
                     ));
                 }
             }
@@ -781,6 +893,9 @@ pub fn check_raw_where(where_sql: &str, d: Dialect) -> Result<(), BuildError> {
     }
     if depth != 0 {
         return bad("unbalanced parentheses");
+    }
+    if comma_rule && !nesting.is_empty() {
+        return bad("unbalanced brackets");
     }
     Ok(())
 }
@@ -1188,6 +1303,72 @@ mod dml_tests {
             Ok(())
         );
     }
+
+    #[test]
+    fn check_expression_rejects_statements() {
+        for d in [Dialect::MYSQL, NBE, Dialect::Postgres] {
+            for bad in [
+                "1; DROP TABLE t",
+                "(select 1)",
+                "SELECT 1",
+                "a > (SELECT max(b) FROM t)",
+                "",
+                "(a",
+                "a)",
+                "drop table t",
+                "1 INTO @x",
+                "a -- trailing comment",
+                "a /* c */ + 1",
+                // Several clauses in one fragment.
+                "integer, DISABLE TRIGGER ALL",
+                "c::int, OWNER TO x",
+                "int, ADD COLUMN evil int",
+                "a, b",
+                // Brackets must balance and nest with parentheses.
+                "a]",
+                "ARRAY[1, 2",
+                "ARRAY[(1], 2)",
+                "ARRAY[1], 2",
+            ] {
+                assert!(
+                    matches!(check_expression(bad, d), Err(BuildError::Invalid { .. })),
+                    "{d:?} {bad:?}"
+                );
+            }
+            for good in [
+                "now()",
+                "a > 0",
+                "lower(name) = 'select; drop'",
+                "CURRENT_TIMESTAMP",
+                "(price * qty)",
+                "integer[]",
+                "numeric(10,2)",
+                "coalesce(a, b, 0)",
+                "ARRAY[1, 2]",
+                "'{1,2}'::integer[]",
+                "f(ARRAY[1, 2], 3)",
+            ] {
+                assert_eq!(check_expression(good, d), Ok(()), "{d:?} {good:?}");
+            }
+        }
+        // MySQL: every sql_mode lexing must agree, whatever mode the caller passes.
+        // Default mode reads each of these as one string literal; NO_BACKSLASH_ESCAPES
+        // (backslash) or ANSI_QUOTES (double quote) ends it early and exposes a clause.
+        for d in [Dialect::MYSQL, NBE] {
+            for bad in [r"'\' , ADD COLUMN x int, '", r#""\" , ADD COLUMN x int, ""#] {
+                assert!(
+                    matches!(check_expression(bad, d), Err(BuildError::Invalid { .. })),
+                    "{d:?} {bad:?}"
+                );
+            }
+        }
+        assert_eq!(
+            check_expression("concat('a', \"b\")", Dialect::MYSQL),
+            Ok(())
+        );
+        assert!(check_expression("1 /*!50000 + 1 */", Dialect::MYSQL).is_err());
+        assert!(check_expression("a # comment", Dialect::MYSQL).is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1447,17 @@ mod tests {
             lit(t("\"x\""), Ctx("varchar", LogicalType::Text, ansi)),
             "_utf8mb4'\"x\"'"
         );
+    }
+
+    #[test]
+    fn mysql_quote_has_no_introducer() {
+        assert_eq!(mysql_quote("it's C:\\x", MY.2).unwrap(), r"'it\'s C:\\x'");
+        assert_eq!(
+            mysql_quote("it's C:\\x", MY_NBE.2).unwrap(),
+            r"'it''s C:\x'"
+        );
+        assert_eq!(mysql_quote("a\0b", MY.2).unwrap(), r"'a\0b'");
+        assert!(mysql_quote("a\0b", MY_NBE.2).is_err());
     }
 
     #[test]

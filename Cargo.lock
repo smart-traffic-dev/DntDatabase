@@ -1485,6 +1485,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dnt-schema"
+version = "0.1.0"
+dependencies = [
+ "dnt-core",
+ "dnt-driver-mysql",
+ "dnt-driver-pg",
+ "dnt-testkit",
+ "serde",
+ "serde_json",
+ "specta",
+ "tokio",
+]
+
+[[package]]
 name = "dnt-store"
 version = "0.1.0"
 dependencies = [
@@ -1547,6 +1561,7 @@ dependencies = [
  "dnt-driver-mysql",
  "dnt-driver-pg",
  "dnt-query",
+ "dnt-schema",
  "dnt-store",
  "dnt-testkit",
  "dnt-tunnel",

@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ObjectRef } from '../bindings';
+import type { ObjectRef, Scope } from '../bindings';
 import {
   clampRatio,
   isLayoutNode,
@@ -40,7 +40,19 @@ export interface QueryTabRef {
   preview?: boolean;
 }
 
-export type Tab = ObjectTabRef | QueryTabRef;
+/** A table designer tab; `table` is null while designing a new table. The draft lives in `useTableDesigns`. */
+export interface DesignTabRef {
+  id: string;
+  kind: 'design';
+  connectionId: string;
+  scope: Scope;
+  table: string | null;
+  title: string;
+  pinned?: boolean;
+  preview?: boolean;
+}
+
+export type Tab = ObjectTabRef | QueryTabRef | DesignTabRef;
 
 /** What "Reopen closed tab" brings back: an object tab by reference, a query tab with its document. */
 export type ClosedTab = { kind: 'object'; tab: ObjectTabRef } | { kind: 'query'; doc: QueryDoc };
@@ -145,8 +157,14 @@ interface TabsState {
   rename(id: string, title: string): void;
   /** DDL changes object identities without moving tabs between groups. */
   replaceObjectTabs(replacements: Record<string, ObjectTabRef | null>): void;
+  /**
+   * A design tab now designs `table` (it was created or renamed): the tab keeps its place, group and
+   * focus but takes the id of the new table. Returns the new id, or null when the tab is gone or
+   * another tab already has that id (nothing is changed then).
+   */
+  moveDesignTab(id: string, table: string): string | null;
   close(id: string): void;
-  /** Closes every object tab of a connection (it was deleted or replaced); query tabs keep their binding. */
+  /** Closes every object and design tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
   reset(): void;
 }
@@ -154,6 +172,11 @@ interface TabsState {
 /** One tab per object of a connection. */
 export function objectTabId(connectionId: string, o: ObjectRef): string {
   return [connectionId, o.database, o.schema ?? '', o.kind, o.name].map(encodeURIComponent).join('/');
+}
+
+/** One designer tab per table of a connection (one "new table" tab per scope: `table` null). */
+export function designTabId(connectionId: string, scope: Scope, table: string | null): string {
+  return ['design', connectionId, scope.database, scope.schema ?? '', table ?? '\u0000new'].map(encodeURIComponent).join('/');
 }
 
 /** The tabs of one group, in strip order. */
@@ -475,6 +498,28 @@ export const useTabs = create<TabsState>()((set, get) => {
       for (const g of s.groups) next = dropIfEmpty(next, g.id);
       return next;
     }),
+    moveDesignTab: (id, table) => {
+      const tab = get().tabs.find((t) => t.id === id);
+      if (tab?.kind !== 'design') return null;
+      const next = designTabId(tab.connectionId, tab.scope, table);
+      if (next === id) {
+        if (tab.table !== table || tab.title !== table) set((s) => ({ tabs: s.tabs.map((t) => (t.id === id ? { ...tab, table, title: table } : t)) }));
+        return id;
+      }
+      if (get().tabs.some((t) => t.id === next)) return null;
+      update((s) => {
+        const groupOf = { ...s.groupOf };
+        if (groupOf[id]) groupOf[next] = groupOf[id]!;
+        delete groupOf[id];
+        return {
+          ...s,
+          tabs: s.tabs.map((t) => (t.id === id ? { ...tab, id: next, table, title: table } : t)),
+          groupOf,
+          groups: s.groups.map((g) => (g.activeId === id ? { ...g, activeId: next } : g)),
+        };
+      });
+      return next;
+    },
     bind: (id, connectionId) =>
       set((s) => ({ tabs: s.tabs.map((t) => (t.id === id && t.kind === 'query' ? { ...t, connectionId } : t)) })),
     rename: (id, title) =>
@@ -499,7 +544,7 @@ export const useTabs = create<TabsState>()((set, get) => {
       }),
     closeConnection: (connectionId) =>
       update((s) => {
-        const goes = (t: Tab) => t.kind === 'object' && t.connectionId === connectionId;
+        const goes = (t: Tab) => (t.kind === 'object' || t.kind === 'design') && t.connectionId === connectionId;
         const tabs = s.tabs.filter((t) => !goes(t));
         if (tabs.length === s.tabs.length) return null;
         // In each group whose active tab went away: the nearest remaining tab to its left, else the first.

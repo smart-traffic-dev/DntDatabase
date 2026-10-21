@@ -2,11 +2,18 @@ import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataE
 import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
+import { confirmDiscardDesign, confirmDiscardDesigns, designDiscardCount, useTableDesigns } from '../store/tableDesigns';
 import { groupTabs, useTabs, type Tab } from '../store/tabs';
 
 /** A query tab closes through its guards (open transaction, unsaved file), then drops its row. */
 export async function closeTab(tab: Tab): Promise<boolean> {
   if (tab.kind === 'query') return useQueryDocs.getState().closeTab(tab.id);
+  // An unapplied table design is thrown away with the tab: ask first.
+  if (tab.kind === 'design') {
+    if (!(await confirmDiscardDesign(tab.id))) return false;
+    useTabs.getState().close(tab.id);
+    return true;
+  }
   // Staged data edits are thrown away with the tab: ask first.
   if (useDataEdits.getState().hasStaged(tab.id) && !(await confirmDiscard(tab.id))) return false;
   useTabs.getState().close(tab.id);
@@ -17,11 +24,12 @@ export async function closeTab(tab: Tab): Promise<boolean> {
  * Asks before the object tabs of a connection that is going away (deleted, replaced by an import)
  * lose their staged data edits; false when the user keeps them.
  */
-export function confirmDiscardConnection(connectionId: string): Promise<boolean> {
-  const ids = useTabs
-    .getState()
-    .tabs.filter((t) => t.kind === 'object' && t.connectionId === connectionId)
-    .map((t) => t.id);
+export async function confirmDiscardConnection(connectionId: string): Promise<boolean> {
+  const tabs = useTabs.getState().tabs;
+  const ids = tabs.filter((t) => t.kind === 'object' && t.connectionId === connectionId).map((t) => t.id);
+  const designs = tabs.filter((t) => t.kind === 'design' && t.connectionId === connectionId).map((t) => t.id);
+  // Designs first: they discard nothing, so keeping them cancels before any staged edit is dropped.
+  if (!(await confirmDiscardDesigns(designs))) return false;
   return confirmDiscardMany(ids);
 }
 
@@ -30,11 +38,10 @@ export function confirmDiscardConnection(connectionId: string): Promise<boolean>
  * choices are "Discard and import" (true; the edits are discarded) and "Cancel import" (false).
  */
 export function confirmDiscardForImport(connectionIds: string[]): Promise<boolean> {
-  const ids = useTabs
-    .getState()
-    .tabs.filter((t) => t.kind === 'object' && connectionIds.includes(t.connectionId))
-    .map((t) => t.id);
-  const count = ids.reduce((n, id) => n + useDataEdits.getState().changeCount(id), 0);
+  const tabs = useTabs.getState().tabs;
+  const ids = tabs.filter((t) => t.kind === 'object' && connectionIds.includes(t.connectionId)).map((t) => t.id);
+  const designs = tabs.filter((t) => t.kind === 'design' && connectionIds.includes(t.connectionId)).map((t) => t.id);
+  const count = ids.reduce((n, id) => n + useDataEdits.getState().changeCount(id), 0) + designDiscardCount(designs);
   if (count === 0) return Promise.resolve(true);
   return new Promise((resolve) => {
     useDialogs.getState().ask({
@@ -85,6 +92,7 @@ export async function closeGroup(groupId = useTabs.getState().focusedGroupId): P
 /** Whether a tab holds something a close would ask about: unsaved file text, staged edits, an open transaction. */
 function unsaved(tab: Tab): boolean {
   if (tab.kind === 'object') return useDataEdits.getState().hasStaged(tab.id);
+  if (tab.kind === 'design') return useTableDesigns.getState().isDirty(tab.id);
   const doc = useQueryDocs.getState().docs.get(tab.id);
   const tx = useQueryRun.getState().runs.get(tab.id)?.txState ?? 'idle';
   return (!!doc?.filePath && doc.dirty) || tx !== 'idle';

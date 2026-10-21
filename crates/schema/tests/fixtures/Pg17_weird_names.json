@@ -1,0 +1,103 @@
+{
+  "detail": {
+    "checks": [],
+    "columns": [
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "integer",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "id",
+        "nullable": false,
+        "on_update": null,
+        "ordinal": 1,
+        "unsigned": false
+      },
+      {
+        "auto_increment": false,
+        "charset": null,
+        "collation": null,
+        "comment": null,
+        "db_type": "character varying(50)",
+        "default": null,
+        "enum_values": [],
+        "generated": null,
+        "identity": null,
+        "identity_kind": null,
+        "invisible": false,
+        "name": "we`ird\"col",
+        "nullable": true,
+        "on_update": null,
+        "ordinal": 2,
+        "unsigned": false
+      }
+    ],
+    "comment": null,
+    "foreign_keys": [],
+    "indexes": [],
+    "object": {
+      "database": "dnt_fixture",
+      "kind": "Table",
+      "name": "weird_names",
+      "schema": "public"
+    },
+    "options": {
+      "auto_increment": null,
+      "charset": null,
+      "collation": null,
+      "engine": null,
+      "extra": [],
+      "inherits": [],
+      "is_partition": false,
+      "partitioned_by": null,
+      "row_format": null,
+      "system_versioned": false,
+      "tablespace": null
+    },
+    "primary_key": {
+      "columns": [
+        "id"
+      ],
+      "comment": null,
+      "definition": "PRIMARY KEY (id)",
+      "expression": null,
+      "include": [],
+      "method": "btree",
+      "name": "weird_names_pkey",
+      "nulls_not_distinct": false,
+      "partial": false,
+      "parts": [
+        {
+          "column": "id",
+          "descending": false,
+          "expression": null,
+          "prefix": null
+        }
+      ],
+      "primary": true,
+      "tablespace": null,
+      "unique": true,
+      "visible": true
+    },
+    "row_estimate": null,
+    "size_bytes": null,
+    "triggers": []
+  },
+  "server": {
+    "kind": "postgres",
+    "variant": "Postgres",
+    "version": [
+      17,
+      0,
+      11
+    ],
+    "version_string": "PostgreSQL 17.11 (Debian 17.11-1.pgdg13+2) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit"
+  }
+}
