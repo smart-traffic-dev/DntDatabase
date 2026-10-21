@@ -3,11 +3,22 @@ import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Splitter } from './Splitter';
 
-function Harness({ orientation = 'horizontal', start = 200, onChange }: { orientation?: 'horizontal' | 'vertical'; start?: number; onChange?: (v: number) => void }) {
+function Harness({
+  orientation = 'horizontal',
+  start = 200,
+  onChange,
+  reverse,
+}: {
+  orientation?: 'horizontal' | 'vertical';
+  start?: number;
+  onChange?: (v: number) => void;
+  reverse?: boolean;
+}) {
   const [value, setValue] = useState(start);
   return (
     <Splitter
       orientation={orientation}
+      reverse={reverse}
       label="Resize"
       value={value}
       min={100}
@@ -29,6 +40,18 @@ afterEach(() => {
 });
 
 describe('Splitter', () => {
+  it('reverse: the value is the size of the pane after the line, so Left grows it and dragging right shrinks it', () => {
+    render(<Harness orientation="vertical" reverse />);
+    fireEvent.keyDown(bar(), { key: 'ArrowLeft' });
+    expect(bar()).toHaveAttribute('aria-valuenow', '216');
+    fireEvent.keyDown(bar(), { key: 'ArrowRight', shiftKey: true });
+    expect(bar()).toHaveAttribute('aria-valuenow', '152');
+    fireEvent.pointerDown(bar(), { button: 0, clientX: 500, pointerId: 1 });
+    fireEvent.pointerMove(bar(), { clientX: 480, pointerId: 1 });
+    expect(bar()).toHaveAttribute('aria-valuenow', '172');
+    fireEvent.pointerUp(bar(), { pointerId: 1 });
+  });
+
   it('exposes separator semantics', () => {
     render(<Harness />);
     expect(bar()).toHaveAttribute('aria-orientation', 'horizontal');

@@ -713,8 +713,8 @@ describe('useQueryRun', () => {
     expect(useQueryRun.getState().get(TAB).runId).toBe('run-9');
     useQueryRun.getState().apply(TAB, { t: 'done', stop: null, elapsed_ms: 1 });
     expect(useQueryRun.getState().get(TAB).phase.kind).toBe('idle');
-    useQueryRun.getState().setPanel(TAB, 'history');
-    expect(useQueryRun.getState().get(TAB).panel).toBe('history');
+    useQueryRun.getState().setPanel(TAB, 'messages');
+    expect(useQueryRun.getState().get(TAB).panel).toBe('messages');
     useQueryRun.getState().clear(TAB);
     expect(useQueryRun.getState().runs.has(TAB)).toBe(false);
   });

@@ -154,6 +154,48 @@ describe('window shortcuts', () => {
   });
 });
 
+describe('right sidebar and per-group results shortcuts', () => {
+  it('Ctrl+Alt+B toggles the right sidebar, also from a field', () => {
+    expect(ctrl('b', { altKey: true })).toBe(true);
+    expect(useLayout.getState().rightVisible).toBe(true);
+    const field = document.createElement('input');
+    document.body.append(field);
+    ctrl('b', { altKey: true }, field);
+    expect(useLayout.getState().rightVisible).toBe(false);
+    // Plain Ctrl+B is still the left sidebar.
+    ctrl('b');
+    expect(useLayout.getState().sidebarVisible).toBe(false);
+    expect(useLayout.getState().rightVisible).toBe(false);
+  });
+
+  it('Ctrl+Shift+H opens History and focuses its search, also from a field', async () => {
+    const search = document.createElement('input');
+    search.setAttribute('data-testid', 'history-search');
+    const other = document.createElement('input');
+    document.body.append(other);
+    other.focus();
+    expect(ctrl('H', { shiftKey: true }, other)).toBe(true);
+    expect(useLayout.getState().rightVisible).toBe(true);
+    // The panel mounts on the next render: the search is focused as soon as it exists.
+    document.body.append(search);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(search).toHaveFocus();
+  });
+
+  it('Ctrl+J and Ctrl+Shift+J act on the focused editor group only', () => {
+    useLayout.setState({ groupResults: {} });
+    const focused = useTabs.getState().focusedGroupId;
+    ctrl('j');
+    expect(useLayout.getState().groupResults[focused]?.visible).toBe(false);
+    ctrl('j');
+    expect(useLayout.getState().groupResults[focused]?.visible).toBe(true);
+    expect(ctrl('J', { shiftKey: true })).toBe(true);
+    expect(useLayout.getState().groupResults[focused]).toMatchObject({ maximized: true, visible: true });
+    ctrl('J', { shiftKey: true });
+    expect(useLayout.getState().groupResults[focused]?.maximized).toBe(false);
+  });
+});
+
 describe('guards', () => {
   it('are ignored while a modal dialog is open', () => {
     const modal = document.createElement('div');

@@ -7,7 +7,19 @@ import { onGroupShortcut } from './groupShortcuts';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeTab, cycleTab, goToTab, reopenClosedTab } from './tabActions';
-import { focusConnectionTree, openNewConnection, openSettings, openShortcuts, toggleResults, zoomIn, zoomOut, zoomReset } from './windowActions';
+import {
+  focusConnectionTree,
+  openNewConnection,
+  openSettings,
+  openShortcuts,
+  showHistory,
+  toggleMaximizeResults,
+  toggleResults,
+  toggleRightSidebar,
+  zoomIn,
+  zoomOut,
+  zoomReset,
+} from './windowActions';
 
 /** Stops the key for everyone else too (Monaco binds F1, Ctrl+E and others itself). */
 function consume(e: KeyboardEvent) {
@@ -17,7 +29,7 @@ function consume(e: KeyboardEvent) {
 
 /**
  * Navigation and window shortcuts: Ctrl+Shift+P command palette, Ctrl+P quick open,
- * Ctrl+1..8 / Ctrl+9 tab N / last tab, Ctrl+J results panel, Ctrl+E focus the tree,
+ * Ctrl+1..8 / Ctrl+9 tab N / last tab, Ctrl+J results panel (the focused group's), Ctrl+Shift+J maximize them,
  * Ctrl+Shift+N new connection, Ctrl+, settings, Ctrl+= / Ctrl+- / Ctrl+0 code font zoom.
  * Returns true when the key was one of them (already consumed).
  */
@@ -31,6 +43,7 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
   if (key === 'p') return run(e.shiftKey ? showCommandPalette : showQuickOpen);
   if (plain && /^[1-9]$/.test(key)) return run(() => goToTab(Number(key), key === '9'));
   if (plain && key === 'j') return run(toggleResults);
+  if (e.shiftKey && key === 'j') return run(toggleMaximizeResults);
   if (plain && key === 'e') return run(focusConnectionTree);
   if (e.shiftKey && key === 'n') return run(openNewConnection);
   if (plain && key === ',') return run(openSettings);
@@ -48,13 +61,19 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
 /**
  * Window-level query shortcuts (spec §7.1): `Ctrl+S` save (`Ctrl+Shift+S` save as),
  * `Ctrl+O` open a .sql file, `Ctrl+T` new query, `Ctrl+Shift+D` add to favorites,
- * `Ctrl+W` close tab, `Ctrl+B` show / hide the sidebar, `Ctrl+Shift+I` developer tools, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
+ * `Ctrl+W` close tab, `Ctrl+B` show / hide the sidebar, `Ctrl+Alt+B` the right sidebar, `Ctrl+Shift+H` History, `Ctrl+Shift+I` developer tools, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
  * Ignored while a modal dialog is open.
  */
 export function onQueryShortcut(e: KeyboardEvent) {
   if (!document.querySelector('[aria-modal="true"]') && onGroupShortcut(e)) return;
-  if (e.altKey || e.repeat) return;
   const ctrl = e.ctrlKey || e.metaKey;
+  // Ctrl+Alt+B: the right sidebar, from anywhere (a text field included).
+  if (ctrl && e.altKey && !e.shiftKey && !e.repeat && e.key.toLowerCase() === 'b' && !document.querySelector('[aria-modal="true"]')) {
+    consume(e);
+    toggleRightSidebar();
+    return;
+  }
+  if (e.altKey || e.repeat) return;
   if (!ctrl && !(e.key === 'F1' && !e.shiftKey)) return;
   if (document.querySelector('[aria-modal="true"]')) return;
   const key = e.key.toLowerCase();
@@ -69,7 +88,9 @@ export function onQueryShortcut(e: KeyboardEvent) {
   // keep their own keys; only the palette keys reach through, they mean the same everywhere.
   const target = e.target instanceof Element ? e.target : null;
   const inField = !!target?.closest('input, textarea, select, [contenteditable="true"]') && !target.closest('.sql-editor');
-  if (inField && key !== 'p') return;
+  // Ctrl+Shift+H (History search) is no text-field key either, so it works from any field.
+  const everywhere = key === 'p' || (key === 'h' && e.shiftKey);
+  if (inField && !everywhere) return;
   const docs = useQueryDocs.getState();
   if (windowShortcut(e, key)) return;
   // Intentional: Ctrl+PageUp/PageDown switch tabs (as in VS Code) and override Monaco's own
@@ -103,6 +124,9 @@ export function onQueryShortcut(e: KeyboardEvent) {
   } else if (key === 'b' && !e.shiftKey) {
     e.preventDefault();
     useLayout.getState().toggleSidebar();
+  } else if (key === 'h' && e.shiftKey) {
+    e.preventDefault();
+    showHistory();
   } else if (key === 'i' && e.shiftKey) {
     e.preventDefault();
     void openDevtools();

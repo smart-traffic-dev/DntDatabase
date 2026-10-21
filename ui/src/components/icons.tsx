@@ -266,3 +266,53 @@ export const CloseIcon = () => (
   </Icon>
 );
 
+/** Clock with a return arrow: History. */
+export const HistoryIcon = () => (
+  <Icon size={18}>
+    <path d="M3.5 12a8.5 8.5 0 102.6-6.1M3.5 4.5v4h4M12 8v4.5l3 1.8" />
+  </Icon>
+);
+
+/** Code braces: Snippets. */
+export const SnippetsIcon = () => (
+  <Icon size={18}>
+    <path d="M9 4C6.5 4 6.5 6 6.5 8s0 4-2.5 4c2.5 0 2.5 2 2.5 4s0 4 2.5 4M15 4c2.5 0 2.5 2 2.5 4s0 4 2.5 4c-2.5 0-2.5 2-2.5 4s0 4-2.5 4" />
+  </Icon>
+);
+
+/** Table with a header row: Object info. */
+export const ObjectInfoIcon = () => (
+  <Icon size={18}>
+    <rect x="4" y="4" width="16" height="16" rx="2" />
+    <path d="M4 9.5h16M10 9.5V20" />
+  </Icon>
+);
+
+/** Sparkles: AI assistant. */
+export const AssistantIcon = () => (
+  <Icon size={18}>
+    <path d="M10 4l1.8 4.7L16.5 10.5l-4.7 1.8L10 17l-1.8-4.7L3.5 10.5l4.7-1.8zM18 14l.9 2.1L21 17l-2.1.9L18 20l-.9-2.1L15 17l2.1-.9z" />
+  </Icon>
+);
+
+/** Arrows apart / together: maximize and restore the results. */
+export const MaximizeResultsIcon = ({ restore }: { restore: boolean }) => (
+  <Icon size={14} strokeWidth={2}>
+    {restore ? <path d="M5 10h5V5M19 14h-5v5M10 10L4 4M14 14l6 6" /> : <path d="M4 10V4h6M20 14v6h-6M4 4l6 6M20 20l-6-6" />}
+  </Icon>
+);
+
+/** Trash can: clear history. */
+export const TrashIcon = () => (
+  <Icon size={14} strokeWidth={1.8}>
+    <path d="M4 7h16M9.5 7V4.5h5V7M6.5 7l.9 12.5h9.2L17.5 7" />
+  </Icon>
+);
+
+/** Window with a panel on the right: the right sidebar toggle. */
+export const RightSidebarIcon = () => (
+  <Icon size={14}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M15 4v16" />
+  </Icon>
+);

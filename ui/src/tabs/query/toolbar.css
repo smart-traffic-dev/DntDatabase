@@ -211,20 +211,6 @@
   margin-right: var(--dnt-space-1);
 }
 
-/* History: connection / database column of the all-connections scope, Explain marker. */
-.hs-origin {
-  flex: none;
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dnt-fg-muted);
-}
-
-.hs-explain {
-  flex: none;
-}
-
 /* Marker hover: only the message, without the "View Problem / Quick Fix" status bar. */
 .sql-editor .monaco-hover .hover-row.status-bar {
   display: none;

@@ -10,6 +10,7 @@ import { installCloseGuard, useQueryDocs } from './store/queryTabs';
 import './store/queryRun';
 import { DialogHost } from './dialogs/DialogHost';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { RightSidebar } from './components/RightSidebar';
 import { Sidebar } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
 import { EditorArea } from './components/EditorArea';
@@ -109,6 +110,7 @@ export default function App() {
         <ErrorBoundary label="Workspace">
           <EditorArea />
         </ErrorBoundary>
+        <RightSidebar />
       </div>
       <StatusBar />
       <CommandPalette />

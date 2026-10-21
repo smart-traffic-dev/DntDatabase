@@ -1,5 +1,6 @@
 import { useDialogs } from '../store/dialogs';
 import { FONT_SCALE_DEFAULT, useLayout } from '../store/layout';
+import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 
 /** Window-level actions behind the shortcuts and menu items (Ctrl+E, Ctrl+J, zoom, dialogs). */
@@ -28,7 +29,29 @@ export function focusConnectionTree(): void {
   if (!focus()) setTimeout(focus, 0);
 }
 
-export const toggleResults = () => useLayout.getState().toggleResults();
+/** Ctrl+J: shows / hides the results of the focused editor group. */
+export const toggleResults = () => useLayout.getState().toggleGroupResults(useTabs.getState().focusedGroupId);
+/** Ctrl+Shift+J: the focused group's results fill the group, or go back to the split. */
+export const toggleMaximizeResults = () => useLayout.getState().toggleGroupMaximize(useTabs.getState().focusedGroupId);
+
+/** Ctrl+Alt+B: shows / hides the right sidebar. */
+export const toggleRightSidebar = () => useLayout.getState().toggleRight();
+
+const HISTORY_SEARCH = '[data-testid="history-search"]';
+
+/** Ctrl+Shift+H: opens the right sidebar's History and puts the keyboard in its search box. */
+export function showHistory(): void {
+  useLayout.getState().setRightVisible(true);
+  const focus = () => {
+    const el = document.querySelector<HTMLInputElement>(HISTORY_SEARCH);
+    if (!el) return false;
+    el.focus();
+    el.select();
+    return true;
+  };
+  // A collapsed panel mounts the search on the next render.
+  if (!focus()) setTimeout(focus, 0);
+}
 export const zoomIn = () => useLayout.getState().zoomFont(1);
 export const zoomOut = () => useLayout.getState().zoomFont(-1);
 export const zoomReset = () => useLayout.getState().setFontScale(FONT_SCALE_DEFAULT);
