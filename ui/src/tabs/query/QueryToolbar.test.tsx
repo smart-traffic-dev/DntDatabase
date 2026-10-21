@@ -1,11 +1,11 @@
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useConnections } from '../../store/connections';
 import { setExporting } from '../../store/queryExport';
 import { useQueryDocs } from '../../store/queryTabs';
 import { setHasSelection } from '../../store/runQuery';
-import { config, ids, resetStores, serverInfo } from '../../test/backend';
+import { callsOf, config, ids, mockBackend, resetStores, serverInfo } from '../../test/backend';
 import { QueryToolbar } from './QueryToolbar';
 
 describe('QueryToolbar', () => {
@@ -51,6 +51,26 @@ describe('QueryToolbar', () => {
     act(() => setExporting(id, null));
     expect(screen.getByTestId('query-run')).toBeEnabled();
     expect(screen.getByTestId('query-stop')).toBeDisabled();
+  });
+
+  it('lists the databases of an open connection whose tree node was never expanded', async () => {
+    mockBackend({ list_databases: () => [{ name: 'shop' }, { name: 'blog' }] });
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
+    const id = useQueryDocs.getState().newQuery(ids.prod, null);
+    render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    const select = screen.getByTestId('query-database');
+    await waitFor(() => expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default database', 'shop', 'blog']));
+    expect(callsOf('list_databases')).toEqual([{ id: ids.prod, showSystem: false }]);
+    expect(select).not.toHaveAttribute('title');
+  });
+
+  it('does not list databases of a closed connection and says why', () => {
+    mockBackend({});
+    const id = useQueryDocs.getState().newQuery(ids.prod, null);
+    render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    expect(callsOf('list_databases')).toEqual([]);
+    expect(screen.getByTestId('query-database')).toHaveAttribute('title', 'Open the connection to list all its databases');
+    expect(screen.getByTestId('query-explain-menu')).toHaveAttribute('title', 'Explain options');
   });
 
   it('explain_is_enabled_with_a_connection', () => {

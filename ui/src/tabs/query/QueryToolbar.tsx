@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { api } from '../../api';
 import { addQueryToFavorites } from '../../components/favoritesActions';
 import { useConnections } from '../../store/connections';
 import { useExporting } from '../../store/queryExport';
@@ -100,6 +101,7 @@ function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runn
         aria-expanded={open}
         aria-controls={open ? `qt-explain-menu-${tabId}` : undefined}
         disabled={!runnable}
+        title={runnable ? 'Explain options' : why}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => {
           if (e.key === 'Escape') setOpen(false);
@@ -192,6 +194,30 @@ function CommitMode({ tabId, busy }: { tabId: string; busy: boolean }) {
   );
 }
 
+/**
+ * Database names of an open connection (`null`: none). The tree only lists them once its
+ * connection node is expanded; the toolbar must offer them on an already-open connection too.
+ * A failed listing leaves the list empty: the tree's names still show.
+ */
+function useOpenDatabases(connectionId: string | null, showSystem: boolean): string[] {
+  const [listed, setListed] = useState<{ key: string; names: string[] } | null>(null);
+  const key = connectionId ? `${connectionId}:${showSystem}` : null;
+  useEffect(() => {
+    if (!connectionId || !key) return;
+    let live = true;
+    api
+      .listDatabases(connectionId, showSystem)
+      .then((list) => {
+        if (live && Array.isArray(list)) setListed({ key, names: list.map((d) => d.name) });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [connectionId, showSystem, key]);
+  return listed && listed.key === key ? listed.names : [];
+}
+
 /** The fields of a document the toolbar shows: never its text (that changes per keystroke). */
 export type ToolbarDoc = Pick<QueryDoc, 'id' | 'connectionId' | 'database' | 'rowLimit' | 'continueOnError'>;
 
@@ -207,11 +233,16 @@ export const QueryToolbar = memo(QueryToolbarView, sameToolbarDoc);
 
 function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   const summaries = useConnections((s) => s.summaries);
+  const open = useConnections((s) => (doc.connectionId ? s.info.has(doc.connectionId) : false));
   const nodes = useTree((s) => s.nodes);
+  const showSystem = useTree((s) => s.showSystem);
   const update = useQueryDocs((s) => s.update);
+  const fetched = useOpenDatabases(open ? doc.connectionId : null, showSystem);
 
+  // The databases of the connection: the ones the tree has loaded, plus the ones listed for an
+  // open connection whose node was never expanded.
   const prefix = doc.connectionId ? `conn:${doc.connectionId}/db:` : null;
-  const databases = new Set<string>();
+  const databases = new Set<string>(fetched);
   if (prefix) {
     for (const id of nodes.keys()) {
       const raw = id.slice(prefix.length);
@@ -328,6 +359,7 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
         aria-label="Database"
         value={doc.database ?? ''}
         disabled={!doc.connectionId}
+        title={!doc.connectionId ? 'Choose a connection first' : open ? undefined : 'Open the connection to list all its databases'}
         onChange={(e) => update(doc.id, { database: e.target.value || null })}
       >
         <option value="">Default database</option>
