@@ -2,7 +2,7 @@
 
 - Date: 2026-10-21
 - Status: proposed for review, not implemented.
-- Design source: canvas "DntDatabase UX redesign" (https://claude.ai/artifact/3cyv2WneP9K6Nftmg9E8Qa), boards 01–08.
+- Design source: canvas "DntDatabase UX redesign" (https://claude.ai/artifact/3cyv2WneP9K6Nftmg9E8Qa), boards 01–08 and 20–22.
   Boards 09–19 (P4–P7 features) are implemented with those features, not here.
 - Supersedes: `2026-10-20-design-tokens-design.md` ("use dnt-note tokens exactly, no redesign").
 - Previous work-in-progress (connection dialog / query toolbar restyle) is stashed as
@@ -52,9 +52,9 @@ Values: board 02. Contrast: `fg-muted` and `fg-subtle` ≥ 4.5:1 on `bg-chrome` 
   (blue selection/primary, new greys) with no component change.
 - Chat-only tokens (`composer*`, `bubble`, `send-disabled*`, `mention`, `radius-lg 22`, `radius-xl 26`,
   `text-body 15`) are removed once no file references them.
-- CSS files are then moved to `--dnt-*` names file by file in phases 2–5. A file touched by a phase must end
+- CSS files are then moved to `--dnt-*` names file by file in phases 2–6. A file touched by a phase must end
   with no legacy names.
-- `theme/tokenCompliance.test.ts` gains: no `--studio-*` outside the token file (after phase 5), no
+- `theme/tokenCompliance.test.ts` gains: no `--studio-*` outside the token file (after phase 6), no
   `opacity` on `:disabled`, no `outline` wider than 1 px, no `box-shadow` used as a focus ring.
   `theme/cssVars.test.ts` keeps checking every `var()` is defined.
 - `ResultGrid.buildTheme()` and `monaco/dntTheme.ts` read the new semantic tokens (fallback hex values
@@ -95,7 +95,35 @@ Boards 04 and 05.
   selection summary and row count. The `.env-production` red wash of the whole bar is replaced by the
   segment.
 
-## 4. Object tab and Data view (phase 3)
+## 4. Editor groups (phase 3)
+
+Boards 20–22. Split the workspace into up to four editor groups, each with its own tab strip, so several
+queries / objects are visible at once.
+
+- **Model:** `store/tabs.ts` keeps one `tabs` list (a tab still has one identity and one state) and adds
+  `groups: { id: string; tabIds: string[]; activeId?: string }[]`, `focusedGroupId`, and
+  `layout: 'single' | 'columns' | 'rows' | 'grid'` with per-split size ratios. Every tab id is in exactly one group.
+  The existing `activeId` becomes a derived value: the active tab of the focused group, so current callers keep
+  working.
+- **Layouts:** Single, Two columns, Two rows, Grid 2 × 2. Groups: 1–4. Minimum group size 320 × 200 px; splitters
+  as in §7; double-click resets to equal sizes. Layout buttons in the title bar and View → Editor layout.
+- **Focus:** one focused group. Its active tab title is full weight; other groups' active tabs use `fg-muted`.
+  Run, keyboard shortcuts, the status bar, the window title and the command palette act on the focused group.
+- **Opening tabs:** new tabs open in the focused group. Opening an object that is already open focuses its tab in
+  its own group.
+- **Moving:** drag a tab onto a group's edge (split) or centre / tab strip (move); tab menu Split right, Split down,
+  Move to group. Moving keeps a query tab's editor text, results, running query and transaction. A tab is never in
+  two groups.
+- **Closing:** closing a group's last tab closes the group and its neighbour takes the space. Unsaved-change and
+  transaction guards run per tab as today.
+- **Narrow groups:** the query toolbar collapses Explain / Format / Limit into `⋯` under 560 px and Run to an icon
+  under 400 px; the environment badge always stays visible.
+- **Restore:** layout, ratios and each group's tabs are saved with the workspace and restored on start.
+- **Shortcuts:** `Ctrl \` split right, `Ctrl K Ctrl \` split down, `Ctrl Alt 1…4` focus group, `Ctrl K →/←` next /
+  previous group, `Ctrl Alt →/←` move tab to next / previous group, `Ctrl K 1…4` layout preset, `Ctrl K W` close
+  group. `Ctrl 1…9` keeps selecting tabs inside the focused group.
+
+## 4b. Object tab and Data view (phase 4)
 
 Board 04.
 
@@ -113,7 +141,7 @@ Board 04.
   2 (caption, never wrapping), numbers right-aligned with tabular figures, NULL in italic `fg-subtle`, no cell
   lines painted below the last row.
 
-## 5. Query tab (phase 4)
+## 5. Query tab (phase 5)
 
 Board 05.
 
@@ -127,7 +155,7 @@ Board 05.
 - **Results panel:** collapsed to its 32 px tab bar until the first run of the tab; the empty state there shows
   the run shortcuts. After the first run it opens at the saved ratio.
 
-## 6. Dialogs and overlays (phase 5)
+## 6. Dialogs and overlays (phase 6)
 
 Boards 06 and 08.
 
@@ -172,8 +200,9 @@ Each phase is its own commit series and leaves the app shippable.
 
 1. Tokens + base rules + density setting (app re-tints; layout unchanged).
 2. Shell: title bar search, toolbar removal, sidebar views, flat tabs, status bar.
-3. Object tab header + Data toolbar + grid metrics.
-4. Query toolbar, context pill, results collapse.
-5. Dialog frame, connection dialog, palette, toasts, confirm dialog; remove legacy token names.
+3. Editor groups: group model in the tab store, layouts, drag / menus / shortcuts, restore.
+4. Object tab header + Data toolbar + grid metrics.
+5. Query toolbar, context pill, results collapse, narrow-group toolbar.
+6. Dialog frame, connection dialog, palette, toasts, confirm dialog; remove legacy token names.
 
 Out of scope: P4–P7 feature screens, AI, new settings beyond Density.
