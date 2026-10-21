@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState, type KeyboardEvent, type MouseEvent } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import type { Favorite } from '../bindings';
 import { ConfirmDialog, NameDialog } from '../dialogs/SimpleDialogs';
 import { MoveFavoriteDialog } from '../dialogs/AddFavoriteDialog';
@@ -156,8 +156,11 @@ export function FavoritesPanel() {
     ];
   };
 
+  // WebView2 fires `contextmenu` (at 0,0) after the menu key's keydown; keep the keyboard-placed menu.
+  const keyMenuAt = useRef(0);
   const showMenu = (row: FavoriteRow, e: MouseEvent) => {
     e.preventDefault();
+    if (Date.now() - keyMenuAt.current < 300) return;
     setSelectedKey(row.key);
     setMenu({ x: e.clientX, y: e.clientY, row });
   };
@@ -223,7 +226,8 @@ export function FavoritesPanel() {
       case 'F10':
         if (row && (e.key === 'ContextMenu' || e.shiftKey)) {
           e.preventDefault();
-          const box = document.getElementById(rowId(at))?.getBoundingClientRect();
+          keyMenuAt.current = Date.now();
+          const box =document.getElementById(rowId(at))?.getBoundingClientRect();
           setMenu({ x: box ? box.left + 24 : 0, y: box ? box.bottom : 0, row });
         }
         return;

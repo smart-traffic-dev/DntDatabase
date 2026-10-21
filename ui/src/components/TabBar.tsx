@@ -96,8 +96,12 @@ export function TabBar() {
     ];
   };
 
+  // WebView2 still fires `contextmenu` (at 0,0) after the key's keydown; it must not replace the menu
+  // the key just opened under the tab.
+  const keyMenuAt = useRef(0);
   const openContext = (e: ReactMouseEvent, tab: Tab) => {
     e.preventDefault();
+    if (Date.now() - keyMenuAt.current < 300) return;
     setMenu({ x: e.clientX, y: e.clientY, items: contextItems(tab) });
   };
 
@@ -117,6 +121,7 @@ export function TabBar() {
     if (e.key === 'End') return focusAt(tabs.length - 1);
     if (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10')) {
       e.preventDefault();
+      keyMenuAt.current = Date.now();
       const r = e.currentTarget.getBoundingClientRect();
       setMenu({ x: r.left, y: r.bottom, items: contextItems(tab) });
     }
