@@ -1,0 +1,1 @@
+.table-design-dialog label { display: flex; flex-direction: column; gap: var(--dnt-space-2); margin-block: var(--dnt-space-3); }

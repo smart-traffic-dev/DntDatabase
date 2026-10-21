@@ -30,6 +30,8 @@ export interface DesignState {
   lostDesignId: string | null;
   /** The section shown in the designer. */
   subTab: DesignSubTab;
+  /** The draft of an apply that found the table changed (`plan_stale`), kept for comparison after reopening. */
+  staleDraft: TableDef | null;
 }
 
 /** Most undo steps kept per design. */
@@ -67,6 +69,8 @@ interface DesignsStore {
   markLost(tabId: string): void;
   /** Reopens a lost design; the old draft stays in `lostDraft` until restored or discarded. */
   reopen(tabId: string): Promise<void>;
+  /** Remembers `draft` as the one a stale apply left behind (see `DesignState.staleDraft`). */
+  setStaleDraft(tabId: string, draft: TableDef | null): void;
   /** Puts `lostDraft` back as the draft (an undoable edit) once the design is open again. */
   restoreLostDraft(tabId: string): void;
   /** Forgets the tab's design and closes its backend session. */
@@ -88,6 +92,7 @@ const blank = (): DesignState => ({
   lostDraft: null,
   lostDesignId: null,
   subTab: 'columns',
+  staleDraft: null,
 });
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -293,6 +298,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       const target = targets.get(tabId);
       if (target) await openInto(tabId, target);
     },
+    setStaleDraft: (tabId, draft) => patch(tabId, { staleDraft: draft }),
     restoreLostDraft(tabId) {
       const state = entry(tabId);
       const lost = state?.lostDraft;

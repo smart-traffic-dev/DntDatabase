@@ -594,6 +594,10 @@ export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
       notice('An object action is running. Wait for its result, or use Stop and verify the outcome before quitting.');
       return;
     }
+    if (useDialogs.getState().tableDesignRunning) {
+      notice('A table design is being applied. Wait for its result, or use Stop and verify the outcome before quitting.');
+      return;
+    }
     const asking = useDialogs.getState().question?.kind;
     if (busy || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits') return;
     busy = true;

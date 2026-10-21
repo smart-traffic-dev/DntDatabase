@@ -1,6 +1,7 @@
 import { useEffect, useId, type KeyboardEvent } from 'react';
 import type { ElementRef, TableDef } from '../../bindings';
 import { useConnections } from '../../store/connections';
+import { useDialogs } from '../../store/dialogs';
 import { useQueryDocs } from '../../store/queryTabs';
 import { confirmDiscardDesign, useTableDesigns } from '../../store/tableDesigns';
 import type { DesignTabRef } from '../../store/tabs';
@@ -132,8 +133,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
         canDiscard={dirty && !loading && (!lost || reopened)}
         canReview={canReview}
         onDiscard={() => void confirmDiscardDesign(tab.id).then((ok) => ok && useTableDesigns.getState().discard(tab.id))}
-        // The review and apply dialog takes this over (its own task); until then nothing opens.
-        onReview={() => undefined}
+        onReview={() => useDialogs.getState().requestDialog({ kind: 'tableDesign', tabId: tab.id })}
       />
       <div className="dz-main">
         <div className="dz-left">

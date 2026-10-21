@@ -61,6 +61,6 @@ export function resetStores() {
   useTableData.getState().reset();
   useDataEdits.getState().reset();
   useTableDesigns.getState().reset();
-  useDialogs.setState({ objectActionRunning: false, prompt: null, request: null, notice: null, internalError: null, question: null });
+  useDialogs.setState({ objectActionRunning: false, tableDesignRunning: false, prompt: null, request: null, notice: null, internalError: null, question: null });
   useToasts.getState().reset();
 }
