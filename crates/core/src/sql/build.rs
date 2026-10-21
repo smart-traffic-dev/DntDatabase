@@ -739,11 +739,31 @@ pub fn check_raw_where(where_sql: &str, d: Dialect) -> Result<(), BuildError> {
 /// column default, a generated column, a `USING` conversion, a `CHECK`, an index
 /// expression or a custom type name.
 ///
-/// Same rules as [`check_raw_where`], plus: `SELECT` anywhere (no subqueries) and
-/// comments of any kind (the text is not followed by a newline in DDL, so a `--`
-/// comment would swallow the rest of the line). The server stays the final check.
+/// Same rules as [`check_raw_where`], plus: `SELECT` anywhere (no subqueries), a `,`
+/// at depth 0 (one fragment must not carry several DDL clauses) and comments of any
+/// kind (the text is not followed by a newline in DDL, so a `--` comment would
+/// swallow the rest of the line). The server stays the final check.
+///
+/// For MySQL the text must pass under all four lexing modes (`ANSI_QUOTES` ×
+/// `NO_BACKSLASH_ESCAPES`), whatever mode `d` carries: the server's `sql_mode` may
+/// differ from the one assumed, and a literal that hides a clause in one mode must
+/// not slip through.
 pub fn check_expression(text: &str, d: Dialect) -> Result<(), BuildError> {
-    check_fragment(text, d, &EXPRESSION_RULES)
+    match d {
+        Dialect::Postgres => check_fragment(text, d, &EXPRESSION_RULES),
+        Dialect::MySql(_) => {
+            for ansi_quotes in [false, true] {
+                for no_backslash_escapes in [false, true] {
+                    let mode = crate::sql::MySqlMode {
+                        ansi_quotes,
+                        no_backslash_escapes,
+                    };
+                    check_fragment(text, Dialect::MySql(mode), &EXPRESSION_RULES)?;
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// What [`check_fragment`] refuses beyond the shared rules.
@@ -758,6 +778,8 @@ struct FragmentRules {
     forbidden_anywhere: &'static [&'static str],
     /// Refuse comments (any text between tokens that is not whitespace).
     no_comments: bool,
+    /// Refuse a `,` at depth 0.
+    no_top_level_comma: bool,
 }
 
 const RAW_WHERE_RULES: FragmentRules = FragmentRules {
@@ -766,6 +788,7 @@ const RAW_WHERE_RULES: FragmentRules = FragmentRules {
     empty: "the condition is empty",
     forbidden_anywhere: &[],
     no_comments: false,
+    no_top_level_comma: false,
 };
 
 const EXPRESSION_RULES: FragmentRules = FragmentRules {
@@ -774,6 +797,7 @@ const EXPRESSION_RULES: FragmentRules = FragmentRules {
     empty: "the expression is empty",
     forbidden_anywhere: &["SELECT"],
     no_comments: true,
+    no_top_level_comma: true,
 };
 
 /// The rules shared by [`check_raw_where`] and [`check_expression`] (see the former).
@@ -815,6 +839,12 @@ fn check_fragment(text: &str, d: Dialect, rules: &FragmentRules) -> Result<(), B
                 depth -= 1;
             }
             TokKind::Punct(b';') => return bad(&format!("a ';' cannot appear in {}", rules.noun)),
+            TokKind::Punct(b',') if depth == 0 && rules.no_top_level_comma => {
+                return bad(&format!(
+                    "a ',' outside parentheses cannot appear in {}",
+                    rules.noun
+                ))
+            }
             TokKind::ExecComment => return bad("executable comments are not allowed"),
             TokKind::Word(w) => {
                 let forbidden_here = (depth == 0
@@ -1261,6 +1291,10 @@ mod dml_tests {
                 "1 INTO @x",
                 "a -- trailing comment",
                 "a /* c */ + 1",
+                // Several clauses in one fragment.
+                "integer, DISABLE TRIGGER ALL",
+                "c::int, OWNER TO x",
+                "int, ADD COLUMN evil int",
             ] {
                 assert!(
                     matches!(check_expression(bad, d), Err(BuildError::Invalid { .. })),
@@ -1274,10 +1308,27 @@ mod dml_tests {
                 "CURRENT_TIMESTAMP",
                 "(price * qty)",
                 "integer[]",
+                "numeric(10,2)",
+                "coalesce(a, b, 0)",
             ] {
                 assert_eq!(check_expression(good, d), Ok(()), "{d:?} {good:?}");
             }
         }
+        // MySQL: every sql_mode lexing must agree, whatever mode the caller passes.
+        // Default mode reads each of these as one string literal; NO_BACKSLASH_ESCAPES
+        // (backslash) or ANSI_QUOTES (double quote) ends it early and exposes a clause.
+        for d in [Dialect::MYSQL, NBE] {
+            for bad in [r"'\' , ADD COLUMN x int, '", r#""\" , ADD COLUMN x int, ""#] {
+                assert!(
+                    matches!(check_expression(bad, d), Err(BuildError::Invalid { .. })),
+                    "{d:?} {bad:?}"
+                );
+            }
+        }
+        assert_eq!(
+            check_expression("concat('a', \"b\")", Dialect::MYSQL),
+            Ok(())
+        );
         assert!(check_expression("1 /*!50000 + 1 */", Dialect::MYSQL).is_err());
         assert!(check_expression("a # comment", Dialect::MYSQL).is_err());
     }

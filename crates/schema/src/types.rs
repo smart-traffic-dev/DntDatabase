@@ -221,7 +221,8 @@ fn pg_base(name: &str, suffix: &str) -> Option<&'static str> {
         "real" | "float4" => "real",
         "double precision" | "float8" => "double precision",
         "boolean" | "bool" => "boolean",
-        "character" | "char" | "bpchar" => "char",
+        // Not `bpchar`: unbounded `bpchar` is not `char(1)`, so it stays Custom.
+        "character" | "char" => "char",
         "character varying" | "varchar" => "varchar",
         "timestamptz" => "timestamptz",
         "timetz" => "timetz",
@@ -460,6 +461,12 @@ mod tests {
         );
         assert_eq!(parse_type("numeric", &pg), known("numeric"));
         assert_eq!(
+            parse_type("bpchar", &pg),
+            TypeSpec::Custom {
+                text: "bpchar".into()
+            }
+        );
+        assert_eq!(
             parse_type("interval year to month", &pg),
             TypeSpec::Custom {
                 text: "interval year to month".into()
@@ -501,6 +508,7 @@ mod tests {
             ("timestamp(3) with time zone", "timestamptz(3)"),
             ("double precision", "double precision"),
             ("character(10)", "char(10)"),
+            ("bpchar", "bpchar"),
         ] {
             assert_eq!(type_text(&parse_type(x, &pg), &pg), canonical, "{x}");
         }

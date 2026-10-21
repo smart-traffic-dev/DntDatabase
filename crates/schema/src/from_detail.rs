@@ -11,9 +11,13 @@ use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
 /// The draft of an existing table. Every element's `original` is its current name.
 ///
 /// Locked here (the designer cannot represent them faithfully): generated and
-/// invisible columns; a primary key with a prefix, descending or expression part or
-/// `INCLUDE` columns; indexes that are partial, `NULLS NOT DISTINCT` or have an
-/// expression part; `NOT VALID` / `NO INHERIT` checks. The whole table is read-only
+/// invisible columns, and MySQL enum/set columns with a `\` or NUL in a member; a
+/// primary key with a prefix, descending or expression part or `INCLUDE` columns, a
+/// MySQL one with a comment or a non-BTREE method, a PostgreSQL one with clauses after
+/// its column list; indexes that are partial, `NULLS NOT DISTINCT`, MariaDB `IGNORED`,
+/// have an expression part, are a PostgreSQL constraint with clauses after the column
+/// list, or are an invalid PostgreSQL unique index; `NOT VALID` foreign keys;
+/// `NOT VALID` / `NO INHERIT` checks. The whole table is read-only
 /// (`read_only_reason`) when partitioned, system-versioned, a PostgreSQL partition or
 /// an inheriting table. Task 9's fidelity check locks whatever else differs from the
 /// server's DDL.
@@ -27,8 +31,8 @@ pub fn from_detail(detail: &TableDetail, server: &ServerInfo) -> TableDef {
             .iter()
             .map(|c| column(c, opts, server))
             .collect(),
-        primary_key: detail.primary_key.as_ref().map(primary_key),
-        indexes: detail.indexes.iter().map(index).collect(),
+        primary_key: detail.primary_key.as_ref().map(|i| primary_key(i, server)),
+        indexes: detail.indexes.iter().map(|i| index(i, server)).collect(),
         foreign_keys: detail.foreign_keys.iter().map(foreign_key).collect(),
         checks: detail.checks.iter().map(check).collect(),
         options: TableOptionsDef {
@@ -74,6 +78,13 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
             *values = c.enum_values.clone();
         }
     }
+    // Members the designer refuses to render (validate.rs) stay as the server has them.
+    let unsafe_values = match &data_type {
+        TypeSpec::Known { values, .. } => values
+            .iter()
+            .any(|v| v.contains('\0') || (server.kind == DbKind::MySql && v.contains('\\'))),
+        TypeSpec::Custom { .. } => false,
+    };
     let generated = c.generated.clone();
     ColumnDef {
         original: Some(c.name.clone()),
@@ -92,7 +103,7 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
         collation: unless_table(&c.collation, &opts.collation),
         comment: c.comment.clone(),
         using: None,
-        locked: generated.is_some() || c.invisible,
+        locked: generated.is_some() || c.invisible || unsafe_values,
         generated,
     }
 }
@@ -222,28 +233,88 @@ fn parts(i: &IndexDetail) -> Vec<IndexPartDef> {
     }
 }
 
-fn primary_key(i: &IndexDetail) -> KeyDef {
+/// The text after the parenthesised group that opens at byte `open` of `s` (`"…"`
+/// quoted names may hold parentheses); `None` when the group is not closed.
+fn after_group(s: &str, open: usize) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut quoted = false;
+    for (i, c) in s[open..].char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '(' if !quoted => depth += 1,
+            ')' if !quoted => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[open + i + 1..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A PostgreSQL `PRIMARY KEY (…)` / `UNIQUE (…)` constraint definition with clauses
+/// the designer does not model after the column list (`DEFERRABLE`, `INITIALLY
+/// DEFERRED`, `WITH (…)`, `USING INDEX TABLESPACE …`); `INCLUDE (…)` is modelled.
+fn constraint_has_extra(definition: &str) -> bool {
+    let Some(open) = definition.find('(') else {
+        return true;
+    };
+    let Some(rest) = after_group(definition, open) else {
+        return true;
+    };
+    let rest = rest.trim();
+    let rest = match rest.strip_prefix("INCLUDE").map(str::trim_start) {
+        Some(group) if group.starts_with('(') => match after_group(group, 0) {
+            Some(r) => r.trim(),
+            None => return true,
+        },
+        Some(_) => return true,
+        None => rest,
+    };
+    !rest.is_empty()
+}
+
+fn is_constraint_definition(d: &str) -> bool {
+    d.starts_with("UNIQUE (") || d.starts_with("PRIMARY KEY (")
+}
+
+fn primary_key(i: &IndexDetail, server: &ServerInfo) -> KeyDef {
     let plain = parts(i).iter().all(|p| {
         p.column.is_some() && p.expression.is_none() && p.prefix.is_none() && !p.descending
     });
+    let unmodelled = match server.kind {
+        DbKind::MySql => {
+            i.comment.as_deref().is_some_and(|c| !c.is_empty())
+                || i.method
+                    .as_deref()
+                    .is_some_and(|m| !m.eq_ignore_ascii_case("BTREE"))
+        }
+        DbKind::Postgres => i.definition.as_deref().is_some_and(constraint_has_extra),
+    };
     KeyDef {
         original: Some(i.name.clone()),
         name: Some(i.name.clone()),
         columns: i.columns.clone(),
-        locked: !plain || !i.include.is_empty() || i.expression.is_some(),
+        locked: !plain || !i.include.is_empty() || i.expression.is_some() || unmodelled,
     }
 }
 
-fn index(i: &IndexDetail) -> IndexDef {
+fn index(i: &IndexDetail, server: &ServerInfo) -> IndexDef {
     let parts = parts(i);
-    let constraint = i
-        .definition
-        .as_deref()
-        .is_some_and(|d| d.starts_with("UNIQUE (") || d.starts_with("PRIMARY KEY ("));
+    let definition = i.definition.as_deref().unwrap_or("");
+    let constraint = is_constraint_definition(definition);
+    let pg = server.kind == DbKind::Postgres;
     let locked = i.partial
         || i.nulls_not_distinct
         || i.expression.is_some()
-        || parts.iter().any(|p| p.expression.is_some());
+        || parts.iter().any(|p| p.expression.is_some())
+        // MariaDB IGNORED indexes: the designer can only express MySQL 8 INVISIBLE.
+        || (!i.visible && server.variant == ServerVariant::MariaDb)
+        || (pg && constraint && constraint_has_extra(definition))
+        // An invalid unique index (e.g. a failed CONCURRENTLY build) reads as not unique.
+        || (pg && definition.starts_with("CREATE UNIQUE INDEX") && !i.unique);
     IndexDef {
         original: Some(i.name.clone()),
         name: i.name.clone(),
@@ -271,7 +342,11 @@ fn foreign_key(f: &ForeignKeyDetail) -> FkDef {
         match_type: f.match_type.clone(),
         deferrable: f.deferrable,
         initially_deferred: f.initially_deferred,
-        locked: false,
+        // PostgreSQL `NOT VALID`: re-creating it would validate the existing rows.
+        locked: f
+            .definition
+            .as_deref()
+            .is_some_and(|d| d.to_ascii_uppercase().contains("NOT VALID")),
     }
 }
 
@@ -545,6 +620,9 @@ mod tests {
             }
         );
 
+        // An untouched draft (locked elements included) passes validation.
+        assert_eq!(crate::validate(&def, &my), vec![]);
+
         // A partitioned table opens read-only.
         let mut partitioned = mysql_orders();
         partitioned.options.partitioned_by = Some("RANGE (id)".into());
@@ -694,12 +772,124 @@ mod tests {
         assert_eq!(fk.match_type.as_deref(), Some("FULL"));
         assert!(fk.deferrable && fk.initially_deferred);
 
+        assert_eq!(crate::validate(&def, &pg), vec![]);
+
         let mut child = d.clone();
         child.options.is_partition = true;
         assert!(from_detail(&child, &pg).read_only_reason.is_some());
         let mut heir = d.clone();
         heir.options.inherits = vec!["public.base".into()];
         assert!(from_detail(&heir, &pg).read_only_reason.is_some());
+    }
+
+    #[test]
+    fn from_detail_locks_what_it_cannot_model() {
+        // MySQL PK with a comment / a non-default method.
+        let my = mysql8();
+        let mut d = mysql_orders();
+        d.primary_key.as_mut().unwrap().comment = Some("pk".into());
+        assert!(from_detail(&d, &my).primary_key.unwrap().locked);
+        let mut d = mysql_orders();
+        d.primary_key.as_mut().unwrap().method = Some("HASH".into());
+        assert!(from_detail(&d, &my).primary_key.unwrap().locked);
+        assert!(
+            !from_detail(&mysql_orders(), &my)
+                .primary_key
+                .unwrap()
+                .locked
+        );
+
+        // MariaDB IGNORED index.
+        let mut d = mysql_orders();
+        d.indexes[0].visible = false;
+        assert!(from_detail(&d, &mariadb()).indexes[0].locked);
+        // MySQL 8 INVISIBLE is modelled.
+        assert!(!from_detail(&d, &my).indexes[0].locked);
+
+        // MySQL enum members with a backslash or NUL.
+        for bad in ["a\\b", "a\0b"] {
+            let d = detail(vec![ColumnDetail {
+                enum_values: vec!["x".into(), bad.into()],
+                ..column("e", 1, "enum('x','y')")
+            }]);
+            assert!(from_detail(&d, &my).columns[0].locked, "{bad:?}");
+        }
+
+        // PostgreSQL constraints with clauses after the column list.
+        let pg = pg();
+        let pk = |definition: &str| {
+            let mut d = detail(vec![column("id", 1, "integer")]);
+            d.primary_key = Some(IndexDetail {
+                name: "t_pkey".into(),
+                unique: true,
+                primary: true,
+                columns: vec!["id".into()],
+                parts: vec![part("id")],
+                definition: Some(definition.into()),
+                ..Default::default()
+            });
+            from_detail(&d, &pg).primary_key.unwrap().locked
+        };
+        assert!(!pk("PRIMARY KEY (id)"));
+        assert!(!pk("PRIMARY KEY (\"a)b\")"));
+        assert!(pk("PRIMARY KEY (id) DEFERRABLE"));
+        assert!(pk("PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED"));
+        assert!(pk("PRIMARY KEY (id) WITH (fillfactor='70')"));
+        assert!(pk("PRIMARY KEY (id) USING INDEX TABLESPACE fast"));
+        let uq = |definition: &str, include: Vec<String>| {
+            let mut d = detail(vec![column("a", 1, "integer"), column("b", 2, "integer")]);
+            d.indexes = vec![IndexDetail {
+                name: "t_a_key".into(),
+                unique: true,
+                columns: vec!["a".into()],
+                parts: vec![part("a")],
+                include,
+                definition: Some(definition.into()),
+                ..Default::default()
+            }];
+            from_detail(&d, &pg).indexes[0].clone()
+        };
+        let plain = uq("UNIQUE (a)", vec![]);
+        assert!(plain.constraint && !plain.locked);
+        assert!(!uq("UNIQUE (a) INCLUDE (b)", vec!["b".into()]).locked);
+        assert!(uq("UNIQUE (a) DEFERRABLE", vec![]).locked);
+        assert!(
+            uq(
+                "UNIQUE (a) INCLUDE (b) WITH (fillfactor='70')",
+                vec!["b".into()]
+            )
+            .locked
+        );
+
+        // Invalid unique index: the definition says UNIQUE, the catalog says not.
+        let mut d = detail(vec![column("a", 1, "integer")]);
+        d.indexes = vec![IndexDetail {
+            name: "t_a_idx".into(),
+            unique: false,
+            columns: vec!["a".into()],
+            parts: vec![part("a")],
+            definition: Some("CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (a)".into()),
+            ..Default::default()
+        }];
+        assert!(from_detail(&d, &pg).indexes[0].locked);
+        d.indexes[0].unique = true;
+        assert!(!from_detail(&d, &pg).indexes[0].locked);
+
+        // NOT VALID foreign key.
+        let mut d = detail(vec![column("a", 1, "integer")]);
+        d.foreign_keys = vec![ForeignKeyDetail {
+            name: "fk".into(),
+            columns: vec!["a".into()],
+            ref_table: "u".into(),
+            ref_columns: vec!["id".into()],
+            on_update: "NO ACTION".into(),
+            on_delete: "NO ACTION".into(),
+            definition: Some("FOREIGN KEY (a) REFERENCES u(id) NOT VALID".into()),
+            ..Default::default()
+        }];
+        assert!(from_detail(&d, &pg).foreign_keys[0].locked);
+        d.foreign_keys[0].definition = Some("FOREIGN KEY (a) REFERENCES u(id)".into());
+        assert!(!from_detail(&d, &pg).foreign_keys[0].locked);
     }
 
     #[test]

@@ -9,8 +9,13 @@ use dnt_core::sql::ddl::validate_identifier;
 use dnt_core::sql::Dialect;
 use std::collections::HashSet;
 
-/// Problems in `def` for `server`, in element order. Locked elements came from the
-/// server unchanged, so only their names take part (in duplicate checks).
+/// Problems in `def` for `server`, in element order.
+///
+/// The client's `locked` flag is not trusted (ruling T5-4): the injection-safety
+/// checks (identifiers, catalog type names, `check_expression`, raw words, FK actions,
+/// enum members) run on every element. A locked element skips only the shape and
+/// capability rules (it came from the server as is), and a new element (`original:
+/// None`) cannot be locked.
 pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
     let mut v = Validator {
         server,
@@ -30,51 +35,55 @@ pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
     for c in &def.columns {
         let el = ElementRef::Column(c.name.clone());
         if v.name(el.clone(), "name", &c.name) && !seen.insert(v.key(&c.name)) {
-            v.err(el, Some("name"), "Another column has this name.");
+            v.err(el.clone(), Some("name"), "Another column has this name.");
         }
-        if !c.locked {
-            v.column(c);
-        }
+        v.locked_new(&el, &c.original, c.locked);
+        v.column(c, !c.locked);
     }
     let columns: HashSet<String> = def.columns.iter().map(|c| v.key(&c.name)).collect();
     if let Some(pk) = &def.primary_key {
-        if !pk.locked {
-            v.primary_key(pk, &columns);
-        }
+        v.locked_new(&ElementRef::PrimaryKey, &pk.original, pk.locked);
+        v.primary_key(pk, &columns, !pk.locked);
     }
     let mut seen = HashSet::new();
     for i in &def.indexes {
         let el = ElementRef::Index(i.name.clone());
         if v.name(el.clone(), "name", &i.name) && !seen.insert(v.key(&i.name)) {
-            v.err(el, Some("name"), "Another index has this name.");
+            v.err(el.clone(), Some("name"), "Another index has this name.");
         }
-        if !i.locked {
-            v.index(i, &columns);
-        }
+        v.locked_new(&el, &i.original, i.locked);
+        v.index(i, &columns, !i.locked);
     }
     let mut seen = HashSet::new();
     for f in &def.foreign_keys {
         let el = ElementRef::ForeignKey(f.name.clone());
         if v.name(el.clone(), "name", &f.name) && !seen.insert(v.key(&f.name)) {
-            v.err(el, Some("name"), "Another foreign key has this name.");
+            v.err(
+                el.clone(),
+                Some("name"),
+                "Another foreign key has this name.",
+            );
         }
-        if !f.locked {
-            v.foreign_key(f, &columns);
-        }
+        v.locked_new(&el, &f.original, f.locked);
+        v.foreign_key(f, &columns, !f.locked);
     }
     let mut seen = HashSet::new();
     for c in &def.checks {
         let el = ElementRef::Check(c.name.clone());
         if v.name(el.clone(), "name", &c.name) && !seen.insert(v.key(&c.name)) {
-            v.err(el, Some("name"), "Another check has this name.");
+            v.err(el.clone(), Some("name"), "Another check has this name.");
         }
-        if !c.locked {
-            v.check(c);
-        }
+        v.locked_new(&el, &c.original, c.locked);
+        v.check(c, !c.locked);
     }
-    if !def.options.locked {
-        v.options(&def.options);
+    if def.options.locked && def.original_name.is_none() {
+        v.err(
+            ElementRef::Options,
+            Some("locked"),
+            "A new table's options cannot be locked.",
+        );
     }
+    v.options(&def.options);
     v.errs
 }
 
@@ -105,6 +114,17 @@ impl Validator<'_> {
 
     fn mysql(&self) -> bool {
         self.kind == DbKind::MySql
+    }
+
+    /// Only an element that exists on the server can be locked.
+    fn locked_new(&mut self, el: &ElementRef, original: &Option<String>, locked: bool) {
+        if locked && original.is_none() {
+            self.err(
+                el.clone(),
+                Some("locked"),
+                "A new element cannot be locked.",
+            );
+        }
     }
 
     /// Name comparison key: MySQL names compare case-insensitively.
@@ -179,7 +199,28 @@ impl Validator<'_> {
         }
     }
 
-    fn column(&mut self, c: &ColumnDef) {
+    /// Enum / set members: safe to render (always) and distinct (`shape`).
+    fn values(&mut self, el: &ElementRef, values: &[String], shape: bool) {
+        let mut seen = HashSet::new();
+        for v in values {
+            if v.contains('\0') || (self.mysql() && v.contains('\\')) {
+                self.err(
+                    el.clone(),
+                    Some("values"),
+                    "Values cannot contain a backslash or a NUL character.",
+                );
+            } else if shape && !seen.insert(self.key(v)) {
+                self.err(
+                    el.clone(),
+                    Some("values"),
+                    format!("'{v}' is listed twice."),
+                );
+            }
+        }
+    }
+
+    /// `shape`: also check the shape and capability rules (the element is not locked).
+    fn column(&mut self, c: &ColumnDef, shape: bool) {
         let el = ElementRef::Column(c.name.clone());
         let mut collation_ok = true;
         match &c.data_type {
@@ -198,13 +239,16 @@ impl Validator<'_> {
                 unsigned,
                 values,
             } => match type_info(base, self.server) {
+                // The base is rendered as is: it must be a catalog name, locked or not.
                 None => self.err(
                     el.clone(),
                     Some("data_type"),
                     format!("{base} is not a type of this server."),
                 ),
+                Some(_) if !shape => self.values(&el, values, false),
                 Some(ti) => {
                     collation_ok = ti.collation;
+                    self.values(&el, values, true);
                     let params = [
                         ("length", "Length", ti.length, length),
                         ("precision", "Precision", ti.precision, precision),
@@ -262,12 +306,35 @@ impl Validator<'_> {
             self.expression(&el, "generated", g);
         }
         if let Some(u) = &c.using {
+            self.expression(&el, "using", u);
             if self.mysql() {
                 self.err(el.clone(), Some("using"), "USING is PostgreSQL only.");
-            } else {
-                self.expression(&el, "using", u);
             }
         }
+        if let Some(on_update) = &c.on_update {
+            self.expression(&el, "on_update", on_update);
+        }
+        if c.charset.is_some() && self.mysql() {
+            self.word(&el, "charset", &c.charset);
+        }
+        if shape {
+            self.column_shape(&el, c, collation_ok);
+        }
+        if c.collation.is_some() {
+            if self.mysql() {
+                self.word(&el, "collation", &c.collation);
+            } else if c
+                .collation
+                .as_deref()
+                .is_some_and(|s| s.contains('\0') || s.is_empty())
+            {
+                self.err(el.clone(), Some("collation"), "Invalid collation name.");
+            }
+        }
+    }
+
+    /// The column rules that only concern an editable column.
+    fn column_shape(&mut self, el: &ElementRef, c: &ColumnDef, collation_ok: bool) {
         if c.auto_increment && !self.mysql() {
             self.err(
                 el.clone(),
@@ -282,43 +349,36 @@ impl Validator<'_> {
                 "Identity columns are PostgreSQL only; use AUTO_INCREMENT.",
             );
         }
-        if let Some(on_update) = &c.on_update {
-            if self.mysql() {
-                self.expression(&el, "on_update", on_update);
-            } else {
-                self.err(el.clone(), Some("on_update"), "ON UPDATE is MySQL only.");
-            }
+        if c.on_update.is_some() && !self.mysql() {
+            self.err(el.clone(), Some("on_update"), "ON UPDATE is MySQL only.");
         }
-        if c.charset.is_some() {
-            if self.mysql() {
-                self.word(&el, "charset", &c.charset);
-            } else {
-                self.err(
-                    el.clone(),
-                    Some("charset"),
-                    "PostgreSQL columns have no character set.",
-                );
-            }
+        if c.charset.is_some() && !self.mysql() {
+            self.err(
+                el.clone(),
+                Some("charset"),
+                "PostgreSQL columns have no character set.",
+            );
         }
-        if c.collation.is_some() {
-            if !collation_ok {
-                self.err(el.clone(), Some("collation"), "This type has no collation.");
-            } else if self.mysql() {
-                self.word(&el, "collation", &c.collation);
-            } else if c
-                .collation
-                .as_deref()
-                .is_some_and(|s| s.contains('\0') || s.is_empty())
-            {
-                self.err(el.clone(), Some("collation"), "Invalid collation name.");
-            }
+        if c.collation.is_some() && !collation_ok {
+            self.err(el.clone(), Some("collation"), "This type has no collation.");
         }
     }
 
-    fn primary_key(&mut self, pk: &KeyDef, columns: &HashSet<String>) {
+    /// Referenced column names are identifiers too (they are quoted into DDL).
+    fn refs(&mut self, el: &ElementRef, field: &str, names: &[String]) {
+        for n in names {
+            self.name(el.clone(), field, n);
+        }
+    }
+
+    fn primary_key(&mut self, pk: &KeyDef, columns: &HashSet<String>, shape: bool) {
         let el = ElementRef::PrimaryKey;
         if let Some(name) = &pk.name {
             self.name(el.clone(), "name", name);
+        }
+        self.refs(&el, "columns", &pk.columns);
+        if !shape {
+            return;
         }
         if pk.columns.is_empty() {
             self.err(el.clone(), Some("columns"), "Pick at least one column.");
@@ -336,17 +396,36 @@ impl Validator<'_> {
         }
     }
 
-    fn index(&mut self, i: &IndexDef, columns: &HashSet<String>) {
+    fn index(&mut self, i: &IndexDef, columns: &HashSet<String>, shape: bool) {
         let el = ElementRef::Index(i.name.clone());
+        // Safety, locked or not: part expressions, referenced names, the raw method.
+        let mut part_columns = Vec::new();
+        for p in &i.parts {
+            if let Some(c) = &p.column {
+                part_columns.push(c.clone());
+            }
+            if let Some(e) = &p.expression {
+                self.expression(&el, "parts", e);
+            }
+        }
+        self.refs(&el, "parts", &part_columns);
+        self.refs(&el, "include", &i.include);
+        if let Some(m) = &i.method {
+            if m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                self.err(el.clone(), Some("method"), "Invalid index method.");
+            }
+        }
+        if !shape {
+            return;
+        }
         if i.parts.is_empty() {
             self.err(el.clone(), Some("parts"), "Pick at least one column.");
         }
         let caps = MySqlCapabilities::for_server(self.server);
-        let mut part_columns = Vec::new();
         for p in &i.parts {
             match (&p.column, &p.expression) {
-                (Some(c), None) => part_columns.push(c.clone()),
-                (None, Some(e)) => {
+                (Some(_), None) => {}
+                (None, Some(_)) => {
                     if self.mysql() && !caps.functional_index {
                         self.err(
                             el.clone(),
@@ -354,7 +433,6 @@ impl Validator<'_> {
                             "Expression indexes need MySQL 8.0.13 or later.",
                         );
                     }
-                    self.expression(&el, "parts", e);
                 }
                 _ => self.err(
                     el.clone(),
@@ -389,45 +467,43 @@ impl Validator<'_> {
                 "Invisible indexes need MySQL 8.0.",
             );
         }
-        if let Some(m) = &i.method {
-            if m.is_empty() || !m.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-                self.err(el.clone(), Some("method"), "Invalid index method.");
-            }
-        }
     }
 
-    fn foreign_key(&mut self, f: &FkDef, columns: &HashSet<String>) {
+    fn foreign_key(&mut self, f: &FkDef, columns: &HashSet<String>, shape: bool) {
         let el = ElementRef::ForeignKey(f.name.clone());
-        if f.columns.is_empty() {
-            self.err(el.clone(), Some("columns"), "Pick at least one column.");
-        }
-        self.columns_exist(&el, "columns", &f.columns, columns);
+        // Safety, locked or not: names, the raw actions and match type.
+        self.refs(&el, "columns", &f.columns);
         if self.name(el.clone(), "ref_table", &f.ref_table) {
             if let Some(s) = &f.ref_schema {
                 self.name(el.clone(), "ref_schema", s);
             }
         }
-        if f.ref_columns.len() != f.columns.len() {
-            self.err(
-                el.clone(),
-                Some("ref_columns"),
-                "Pick as many referenced columns as columns.",
-            );
-        }
-        for rc in &f.ref_columns {
-            self.name(el.clone(), "ref_columns", rc);
-        }
+        self.refs(&el, "ref_columns", &f.ref_columns);
         for (field, action) in [("on_update", &f.on_update), ("on_delete", &f.on_delete)] {
             if !FK_ACTIONS.iter().any(|a| a.eq_ignore_ascii_case(action)) {
                 self.err(el.clone(), Some(field), "Unknown referential action.");
             }
         }
         if let Some(m) = &f.match_type {
-            if self.mysql() {
-                self.err(el.clone(), Some("match_type"), "MATCH is PostgreSQL only.");
-            } else if !MATCH_TYPES.iter().any(|t| t.eq_ignore_ascii_case(m)) {
+            if !MATCH_TYPES.iter().any(|t| t.eq_ignore_ascii_case(m)) {
                 self.err(el.clone(), Some("match_type"), "Unknown match type.");
+            } else if self.mysql() && shape {
+                self.err(el.clone(), Some("match_type"), "MATCH is PostgreSQL only.");
             }
+        }
+        if !shape {
+            return;
+        }
+        if f.columns.is_empty() {
+            self.err(el.clone(), Some("columns"), "Pick at least one column.");
+        }
+        self.columns_exist(&el, "columns", &f.columns, columns);
+        if f.ref_columns.len() != f.columns.len() {
+            self.err(
+                el.clone(),
+                Some("ref_columns"),
+                "Pick as many referenced columns as columns.",
+            );
         }
         if (f.deferrable || f.initially_deferred) && self.mysql() {
             self.err(
@@ -444,9 +520,9 @@ impl Validator<'_> {
         }
     }
 
-    fn check(&mut self, c: &CheckDef) {
+    fn check(&mut self, c: &CheckDef, shape: bool) {
         let el = ElementRef::Check(c.name.clone());
-        if self.mysql() && !MySqlCapabilities::for_server(self.server).check_constraints {
+        if shape && self.mysql() && !MySqlCapabilities::for_server(self.server).check_constraints {
             self.err(
                 el.clone(),
                 None,
@@ -784,12 +860,157 @@ mod tests {
         t.options.engine = Some("InnoDB".into());
         assert!(has(&validate(&t, &pg), ElementRef::Options, Some("engine")));
 
-        // Locked elements are not re-checked (they came from the server).
+        // The client's `locked` flag is not trusted (T5-4): safety checks still run.
         let mut t = base();
+        t.columns[1].original = Some("a".into());
+        t.columns[1].locked = true;
         t.columns[1].data_type = TypeSpec::Custom {
             text: "geometry srid 4326 -- x".into(),
         };
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("data_type")
+        ));
+        let mut t = base();
+        t.columns[1].original = Some("a".into());
         t.columns[1].locked = true;
-        assert_eq!(validate(&t, &my), vec![]);
+        t.columns[1].data_type = TypeSpec::Known {
+            base: "int; DROP TABLE t".into(),
+            length: None,
+            precision: None,
+            scale: None,
+            unsigned: false,
+            values: vec![],
+        };
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("data_type")
+        ));
+        let mut t = base();
+        t.columns[1].original = Some("a".into());
+        t.columns[1].locked = true;
+        t.columns[1].default = Some(DefaultSpec::Expression {
+            text: "0, ADD COLUMN x int".into(),
+        });
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("default")
+        ));
+        let mut t = base();
+        t.foreign_keys.push(FkDef {
+            original: Some("fk".into()),
+            name: "fk".into(),
+            columns: vec!["a".into()],
+            ref_schema: None,
+            ref_table: "u".into(),
+            ref_columns: vec!["id".into()],
+            on_update: "CASCADE, DROP COLUMN a".into(),
+            on_delete: "CASCADE".into(),
+            match_type: None,
+            deferrable: false,
+            initially_deferred: false,
+            locked: true,
+        });
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::ForeignKey("fk".into()),
+            Some("on_update")
+        ));
+        // ... but shape / capability rules are skipped for a locked server element.
+        let mut t = base();
+        t.columns[1].original = Some("a".into());
+        t.columns[1].locked = true;
+        t.columns[1].data_type = decimal(Some(4), Some(6));
+        t.checks.push(CheckDef {
+            original: Some("c".into()),
+            name: "c".into(),
+            expression: "a > 0".into(),
+            locked: true,
+        });
+        assert_eq!(validate(&t, &mysql57()), vec![]);
+        // A new element cannot be locked.
+        let mut t = base();
+        t.columns[1].locked = true;
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("locked")
+        ));
+        let mut t = base();
+        t.checks.push(CheckDef {
+            original: None,
+            name: "c".into(),
+            expression: "a > 0".into(),
+            locked: true,
+        });
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Check("c".into()),
+            Some("locked")
+        ));
+        let mut t = base();
+        t.primary_key.as_mut().unwrap().locked = true;
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::PrimaryKey,
+            Some("locked")
+        ));
+    }
+
+    #[test]
+    fn validate_enum_values() {
+        let my = mysql8();
+        let with_values = |values: &[&str]| {
+            let mut t = base();
+            t.columns[1].data_type = TypeSpec::Known {
+                base: "enum".into(),
+                length: None,
+                precision: None,
+                scale: None,
+                unsigned: false,
+                values: values.iter().map(|v| v.to_string()).collect(),
+            };
+            t
+        };
+        assert_eq!(validate(&with_values(&["a", "b'c"]), &my), vec![]);
+        for bad in [&["a", "b\\c"][..], &["a\0"], &["a", "b", "A"]] {
+            assert!(
+                has(
+                    &validate(&with_values(bad), &my),
+                    ElementRef::Column("a".into()),
+                    Some("values")
+                ),
+                "{bad:?}"
+            );
+        }
+        // Unsafe members are refused even on a locked column.
+        let mut t = with_values(&["a\\"]);
+        t.columns[1].original = Some("a".into());
+        t.columns[1].locked = true;
+        assert!(has(
+            &validate(&t, &my),
+            ElementRef::Column("a".into()),
+            Some("values")
+        ));
+        // A clause smuggled through a custom type, in any MySQL lexing mode.
+        for text in [
+            "int, ADD COLUMN evil int",
+            r"enum('\', ADD COLUMN x int, ')",
+            r#"enum("\", ADD COLUMN x int, ")"#,
+        ] {
+            let mut t = base();
+            t.columns[1].data_type = TypeSpec::Custom { text: text.into() };
+            assert!(
+                has(
+                    &validate(&t, &my),
+                    ElementRef::Column("a".into()),
+                    Some("data_type")
+                ),
+                "{text:?}"
+            );
+        }
     }
 }
