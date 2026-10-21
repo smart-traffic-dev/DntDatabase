@@ -5,6 +5,8 @@ import type { QueryDoc } from './queryTabs';
 export interface ObjectTabRef {
   id: string;
   kind: 'object';
+  /** A DDL outcome is unknown: hide cached data until the user verifies the object. */
+  needsVerification?: boolean;
   connectionId: string;
   objectRef: ObjectRef;
   title: string;

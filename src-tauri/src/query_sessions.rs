@@ -429,6 +429,18 @@ pub(crate) struct QuerySessions {
 }
 
 impl QuerySessions {
+    /// A DDL operation never settles or borrows a user's transaction.
+    pub(crate) fn check_ddl_idle(&self) -> Result<(), DbError> {
+        let slots: Vec<_> = lock(&self.tabs).slots.values().cloned().collect();
+        for slot in slots {
+            let ts = slot.try_lock().map_err(|_| DbError::Busy)?;
+            if ts.lost_tx || ts.session.as_ref().is_some_and(|s| s.in_transaction()) {
+                return Err(DbError::TransactionOpen);
+            }
+        }
+        Ok(())
+    }
+
     fn get(&self, tab: &str) -> Option<TabSlot> {
         lock(&self.tabs).slots.get(tab).cloned()
     }

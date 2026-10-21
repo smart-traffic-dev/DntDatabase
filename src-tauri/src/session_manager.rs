@@ -322,6 +322,7 @@ pub struct SessionManager {
     pub(crate) plans: PlanStore,
     /// Edit plans of the data view (see `edit_plans`); they live for `plan_ttl` too.
     pub(crate) edit_plans: EditPlanStore,
+    pub(crate) object_actions: crate::object_actions::ActionStore,
     /// Complete cell values by token (`data_cell_fetch`); each lives `loaded_ttl` after
     /// its last use.
     pub(crate) loaded: LoadedStore,
@@ -380,6 +381,7 @@ impl SessionManager {
             schema_error_ttl: SCHEMA_ERROR_TTL,
             plans: PlanStore::default(),
             edit_plans: EditPlanStore::default(),
+            object_actions: crate::object_actions::ActionStore::default(),
             loaded: LoadedStore::default(),
             loaded_ttl: LOADED_TTL,
             cell_fetch_cap: MAX_FETCH_BYTES,
@@ -721,6 +723,7 @@ impl SessionManager {
     pub async fn close(&self, id: Uuid) {
         // A running query is stopped first, so closing does not wait for it; the run
         // still ends with its `done` event.
+        self.object_cancel_connection(id).await;
         self.stop_runs(|r| r.conn == id).await;
         self.bump_generation(id);
         let rt = self

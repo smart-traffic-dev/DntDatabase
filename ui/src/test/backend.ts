@@ -58,5 +58,5 @@ export function resetStores() {
   useAppSettings.getState().reset();
   useTableData.getState().reset();
   useDataEdits.getState().reset();
-  useDialogs.setState({ prompt: null, request: null, notice: null, internalError: null, question: null });
+  useDialogs.setState({ objectActionRunning: false, prompt: null, request: null, notice: null, internalError: null, question: null });
 }

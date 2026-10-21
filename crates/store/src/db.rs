@@ -64,12 +64,30 @@ ALTER TABLE query_history ADD COLUMN origin TEXT NOT NULL DEFAULT 'query'
 ALTER TABLE query_history ADD COLUMN outcome_unknown INTEGER NOT NULL DEFAULT 0;
 ";
 
+// Rebuild only history to extend its origin constraint, preserving ids and rows.
+const MIGRATION_5: &str = "
+CREATE TABLE query_history_next (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  database TEXT NULL, sql_text TEXT NOT NULL, redacted INTEGER NOT NULL,
+  kind TEXT NOT NULL, started_at TEXT NOT NULL, elapsed_ms INTEGER NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok','error','cancelled')),
+  row_count INTEGER NULL, affected INTEGER NULL, error_kind TEXT NULL, error_code TEXT NULL,
+  origin TEXT NOT NULL DEFAULT 'query' CHECK (origin IN ('query','data_edit','object_action')),
+  outcome_unknown INTEGER NOT NULL DEFAULT 0);
+INSERT INTO query_history_next SELECT * FROM query_history;
+DROP TABLE query_history;
+ALTER TABLE query_history_next RENAME TO query_history;
+CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
         M::up(MIGRATION_2),
         M::up(MIGRATION_3),
         M::up(MIGRATION_4),
+        M::up(MIGRATION_5),
     ])
 }
 
@@ -146,7 +164,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -197,6 +215,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!((origin.as_str(), unknown), ("query", 0));
+    }
+    #[test]
+    fn migration_five_preserves_history_ids_origins_and_unknown_outcomes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(MIGRATION_1),
+            M::up(MIGRATION_2),
+            M::up(MIGRATION_3),
+            M::up(MIGRATION_4),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute_batch("INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) VALUES ('c','c',0,'mysql','h',3306,'u','ask','now','now'); INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin,outcome_unknown) VALUES (42,'c','UPDATE t SET a=1',0,'write','now','error','data_edit',1);").unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let row: (i64, String, i64) = conn
+            .query_row(
+                "SELECT id,origin,outcome_unknown FROM query_history",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (42, "data_edit".into(), 1));
+        conn.execute(
+            "UPDATE query_history SET origin='object_action' WHERE id=42",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute("UPDATE query_history SET origin='invalid' WHERE id=42", [])
+            .is_err());
     }
     #[test]
     fn foreign_keys_enabled() {

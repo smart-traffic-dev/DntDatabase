@@ -58,6 +58,7 @@ pub enum HistoryOrigin {
     Query,
     /// A statement the app built to apply edits of the data view.
     DataEdit,
+    ObjectAction,
 }
 
 impl HistoryOrigin {
@@ -65,6 +66,7 @@ impl HistoryOrigin {
         match self {
             HistoryOrigin::Query => "query",
             HistoryOrigin::DataEdit => "data_edit",
+            HistoryOrigin::ObjectAction => "object_action",
         }
     }
 
@@ -72,6 +74,7 @@ impl HistoryOrigin {
         match s {
             "query" => Ok(HistoryOrigin::Query),
             "data_edit" => Ok(HistoryOrigin::DataEdit),
+            "object_action" => Ok(HistoryOrigin::ObjectAction),
             other => Err(DbError::Internal {
                 message: format!("invalid history origin {other:?} in database"),
             }),

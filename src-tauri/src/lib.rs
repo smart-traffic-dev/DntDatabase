@@ -14,3 +14,5 @@ pub mod query_sessions;
 pub mod run_events;
 pub mod session_manager;
 pub mod state;
+
+pub mod object_actions;

@@ -9,7 +9,7 @@ import { DataView } from './DataView';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
 import { editorFontOptions } from '../monaco/fonts';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
-import type { ObjectTabRef as Tab } from '../store/tabs';
+import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
 
 const DASH = '—';
@@ -357,7 +357,7 @@ export function ObjectTab({ tab }: { tab: Tab }) {
 
   // Lazy: fetch the data of the visible sub-tab once; the result is cached for the tab's lifetime.
   useEffect(() => {
-    void useObjectData.getState().load(tab, resource);
+    if (!tab.needsVerification) void useObjectData.getState().load(tab, resource);
   }, [tab, resource]);
 
   const select = useCallback(
@@ -388,6 +388,11 @@ export function ObjectTab({ tab }: { tab: Tab }) {
   const state = stored?.[resource];
   // The Data sub-tab has its own loading state; Refresh reflects the section's metadata / DDL.
   const refreshing = state?.status === 'loading';
+
+  if (tab.needsVerification) return <div role="alert" className="ot-error">
+    <p>Object action outcome unknown. Cached data is hidden. Reload to verify the object before continuing.</p>
+    <button className="btn" onClick={() => useTabs.setState((s) => ({ tabs: s.tabs.map((t) => t.id === tab.id ? { ...t, needsVerification: false } : t) }))}>Reload object</button>
+  </div>;
 
   return (
     <div className="object-tab">

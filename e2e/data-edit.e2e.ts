@@ -63,11 +63,11 @@ async function runScript(sql: string) {
   await runAll();
   await byId('panel-messages').waitForDisplayed({ timeout: 30_000 });
   await byId('panel-messages').click();
-  await browser.waitUntil(async () => (await $$('[data-testid="message-line"]')).length >= 1, {
+  await browser.waitUntil(async () => (await $$('[data-testid="message-line"]').length) >= 1, {
     timeout: 30_000,
     timeoutMsg: `script did not finish: ${sql}`,
   });
-  expect((await $$('[data-testid="message-line"].error')).length).toBe(0);
+  expect((await $$('[data-testid="message-line"].error').length)).toBe(0);
 }
 
 async function expectRows(sql: string, count: number) {

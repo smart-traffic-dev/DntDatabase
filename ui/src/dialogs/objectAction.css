@@ -1,0 +1,3 @@
+.object-action-dialog { max-width: 720px; }
+.object-action-dialog label { display: flex; flex-direction: column; gap: 6px; margin-block: 12px; }
+.object-action-sql { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: 12px; border: 1px solid var(--studio-hairline); }

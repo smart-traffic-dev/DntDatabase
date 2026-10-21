@@ -117,6 +117,30 @@ async trustHostKey(host: string, port: number, fingerprint: string, keyOpenssh: 
     else return { status: "error", error: e  as any };
 }
 },
+async objectActionPreview(connectionId: string, action: ObjectAction) : Promise<Result<ActionPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_preview", { connectionId, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async objectActionApply(planId: string, confirmed: boolean, name: string | null, operationId: string, channel: TAURI_CHANNEL<string>) : Promise<Result<ActionReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_apply", { planId, confirmed, name, operationId, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async objectActionCancel(operationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_cancel", { operationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listDatabases(id: string, showSystem: boolean) : Promise<Result<DatabaseInfo[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_databases", { id, showSystem }) };
@@ -849,6 +873,9 @@ async snippetsDelete(id: string) : Promise<Result<null, AppError>> {
 
 /** user-defined types **/
 
+export type ActionOutcome = "applied" | "not_applied" | "rolled_back" | "unknown"
+export type ActionPreview = { plan_id: string; connection_id: string; action: ObjectAction; sql: string; confirm_name: string | null; warnings: string[]; expires_in_seconds: number }
+export type ActionReport = { outcome: ActionOutcome; error: AppError | null; warnings: string[] }
 export type AppError = { kind: string; message: string; detail: string | null; stage: string | null; 
 /**
  * Connect errors: the stages that completed before the failing one.
@@ -1227,7 +1254,7 @@ export type HistoryOrigin =
 /**
  * A statement the app built to apply edits of the data view.
  */
-"data_edit"
+"data_edit" | "object_action"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it
@@ -1293,6 +1320,7 @@ ansi_quotes?: boolean;
  */
 no_backslash_escapes?: boolean }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
+export type ObjectAction = { kind: "create_namespace"; database: string; name: string } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
 export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | null; 

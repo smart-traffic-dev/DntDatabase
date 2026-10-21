@@ -327,6 +327,7 @@ export function HistoryView({ tabId }: { tabId: string }) {
                   {row.database ? ` · ${row.database}` : ''}
                 </span>
               )}
+              {row.origin === 'object_action' && <span className="chip hs-data-edit">Object action</span>}
               {row.origin === 'data_edit' && (
                 <span className="chip hs-data-edit" data-testid="history-data-edit">
                   Data edit

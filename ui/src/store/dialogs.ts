@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
+import type { ObjectActionRequest } from '../dialogs/ObjectActionDialog';
 import type { ExportRequest } from '../dialogs/resultExport';
 
 /** A prompt the connection tree needs answered before it can open a connection. */
@@ -11,6 +12,7 @@ export interface PendingPrompt {
 
 /** Something the UI asks a dialog (built in a later task) to do. */
 export type UiRequest =
+  | ({ kind: 'objectAction' } & ObjectActionRequest)
   | { kind: 'newConnection' }
   | { kind: 'editConnection'; id: string }
   | { kind: 'newGroup'; parentId: string | null }
@@ -68,6 +70,7 @@ export type Question =
     };
 
 interface DialogsState {
+  objectActionRunning: boolean;
   /** The question shown on top of everything else (`ask` sets it). */
   question: Question | null;
   ask(question: Question): void;
@@ -91,6 +94,7 @@ interface DialogsState {
 }
 
 export const useDialogs = create<DialogsState>()((set) => ({
+  objectActionRunning: false,
   question: null,
   ask: (question) => set({ question }),
   answer: () => set({ question: null }),

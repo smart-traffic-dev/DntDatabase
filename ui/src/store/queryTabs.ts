@@ -583,6 +583,10 @@ export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
   let busy = false;
   return win.onCloseRequested(async (event) => {
     event.preventDefault();
+    if (useDialogs.getState().objectActionRunning) {
+      notice('An object action is running. Wait for its result, or use Stop and verify the outcome before quitting.');
+      return;
+    }
     const asking = useDialogs.getState().question?.kind;
     if (busy || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits') return;
     busy = true;

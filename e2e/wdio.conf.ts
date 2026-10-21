@@ -86,7 +86,7 @@ function cleanup() {
 
 export const config: WebdriverIO.Config = {
   runner: 'local',
-  specs: ['./smoke.e2e.ts', './postgres.e2e.ts', './query.e2e.ts', './data-edit.e2e.ts'],
+  specs: ['./smoke.e2e.ts', './postgres.e2e.ts', './query.e2e.ts', './data-edit.e2e.ts', './object-actions.e2e.ts'],
   maxInstances: 1,
   maxInstancesPerCapability: 1, // both specs share one DNT_DATA_DIR and one tauri-driver port
   hostname: '127.0.0.1',
