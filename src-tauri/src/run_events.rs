@@ -9,9 +9,10 @@
 //! is being stopped. `done` is always the last event of a run, also when the run was
 //! cancelled, its connection or tab closed, or the run task failed.
 
+use crate::result_store::{ResultStore, ResultToken};
 use crate::session_manager::lock;
 use dnt_core::driver::{ExecProgress, ResultSummary, RowSink, StmtOutcome};
-use dnt_core::error::AppError;
+use dnt_core::error::{AppError, DbError};
 use dnt_core::sql::{session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
@@ -59,6 +60,14 @@ pub enum RunEvent {
     Rows {
         result_id: u32,
         rows: Vec<Vec<Value>>,
+    },
+    /// Exact rows were committed to the disk-backed result store.
+    ResultStored { result_id: u32, token: Uuid },
+    RowsStored {
+        result_id: u32,
+        #[specta(type = f64)]
+        start: u64,
+        row_count: u32,
     },
     ResultEnd {
         result_id: u32,
@@ -108,7 +117,10 @@ pub type EventSink = Arc<dyn Fn(RunEvent) -> bool + Send + Sync>;
 /// Per-run options from the toolbar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct RunOptions {
-    /// Row limit per result; clamped to 1..=1 000 000.
+    /// Display row limit per result; clamped to 1..=1 000 000. Rows past it are neither
+    /// stored nor shown (the result is `truncated`), but the driver may still drain them
+    /// to keep the session usable, so the statement can run longer than the shown rows
+    /// took. The SQL is never rewritten and the session never dropped for it.
     pub max_rows: u32,
     pub continue_on_error: bool,
 }
@@ -134,6 +146,9 @@ impl RunFlags {
     }
 }
 
+/// Where the batches of a stored result go instead of `rows` events.
+type StoreRows = Arc<dyn Fn(Vec<Vec<Value>>) + Send + Sync>;
+
 #[derive(Default)]
 struct RowBuffer {
     /// The open result.
@@ -141,6 +156,19 @@ struct RowBuffer {
     rows: Vec<Vec<Value>>,
     /// When the oldest held row arrived.
     since: Option<Instant>,
+    /// The open result is stored: batches go to the result store.
+    store: Option<StoreRows>,
+}
+
+impl RowBuffer {
+    fn deliver(&self, emit: &EventSink, result_id: u32, rows: Vec<Vec<Value>>) {
+        match &self.store {
+            Some(store) => store(rows),
+            None => {
+                emit(RunEvent::Rows { result_id, rows });
+            }
+        }
+    }
 }
 
 /// The rows of the open result, held until a full batch, [`ROWS_EVENT_INTERVAL`] or the
@@ -168,7 +196,7 @@ impl RowStream {
         }
         let rows = std::mem::take(&mut b.rows);
         if let Some(result_id) = b.result_id {
-            (self.emit)(RunEvent::Rows { result_id, rows });
+            b.deliver(&self.emit, result_id, rows);
         }
     }
 
@@ -176,7 +204,13 @@ impl RowStream {
         let mut b = lock(&self.buf);
         self.flush_locked(&mut b);
         b.result_id = Some(result_id);
+        b.store = None;
         (self.emit)(event);
+    }
+
+    /// The open result's batches go to `store` from now on.
+    fn store_into(&self, store: StoreRows) {
+        lock(&self.buf).store = Some(store);
     }
 
     fn push(&self, mut batch: Vec<Vec<Value>>) {
@@ -194,10 +228,7 @@ impl RowStream {
         while b.rows.len() >= self.batch_size {
             let rest = b.rows.split_off(self.batch_size);
             let full = std::mem::replace(&mut b.rows, rest);
-            (self.emit)(RunEvent::Rows {
-                result_id,
-                rows: full,
-            });
+            b.deliver(&self.emit, result_id, full);
             b.since = (!b.rows.is_empty()).then(Instant::now);
         }
         if b.since.is_some_and(|t| t.elapsed() >= ROWS_EVENT_INTERVAL) {
@@ -209,6 +240,7 @@ impl RowStream {
         let mut b = lock(&self.buf);
         self.flush_locked(&mut b);
         b.result_id = None;
+        b.store = None;
         (self.emit)(event);
     }
 
@@ -273,6 +305,8 @@ pub(crate) struct ChannelSink {
     index: Arc<AtomicU32>,
     current: Option<Current>,
     explain: Option<ExplainBuf>,
+    stored: Option<StoredRun>,
+    stored_token: Option<ResultToken>,
     /// A `Ddl` statement succeeded.
     pub(crate) ddl_ok: bool,
     /// The database a successful MySQL `USE` moved the session to (the last one).
@@ -288,6 +322,14 @@ pub(crate) struct ChannelSink {
     /// transaction (`COMMIT`, MySQL `SET autocommit = 1`, DDL or another implicit
     /// commit on MySQL): it may have committed, so the outcome is unknown.
     pub(crate) lost_committing: bool,
+}
+
+pub(crate) struct StoredRun {
+    pub(crate) store: ResultStore,
+    pub(crate) connection: Uuid,
+    pub(crate) tab: String,
+    pub(crate) run: Uuid,
+    pub(crate) fail: Arc<dyn Fn(DbError) + Send + Sync>,
 }
 
 /// Whether `stmt`, run while a transaction is open, commits it.
@@ -383,11 +425,26 @@ impl ChannelSink {
                 rows: Vec::new(),
                 classic: None,
             }),
+            stored: None,
+            stored_token: None,
             ddl_ok: false,
             use_db: None,
             tx_now: TxState::Idle,
             lost_in_tx: false,
             lost_committing: false,
+        }
+    }
+
+    pub(crate) fn store_results(&mut self, stored: StoredRun) {
+        self.stored = Some(stored);
+    }
+
+    /// A stored result that never reached `result_end` (the statement failed or the run
+    /// stopped) is marked incomplete, so an export following it ends instead of waiting.
+    fn abandon_stored(&mut self) {
+        if let (Some(stored), Some(token)) = (&self.stored, self.stored_token.take()) {
+            self.rows.flush();
+            stored.store.abandon(token);
         }
     }
 
@@ -542,6 +599,38 @@ impl RowSink for ChannelSink {
                 columns: cols.to_vec(),
             },
         );
+        if !cols.is_empty() {
+            if let Some(stored) = &self.stored {
+                let token = stored.store.create_result(
+                    stored.connection,
+                    &stored.tab,
+                    stored.run,
+                    result_id,
+                    cols.to_vec(),
+                );
+                self.stored_token = Some(token);
+                (self.emit)(RunEvent::ResultStored {
+                    result_id,
+                    token: token.0,
+                });
+                // Batches are coalesced as before, then written; `rows_stored` follows
+                // once each is on disk.
+                let emit = Arc::clone(&self.emit);
+                let commit: Arc<dyn Fn(u32, u64, u32) + Send + Sync> =
+                    Arc::new(move |result_id, start, row_count| {
+                        emit(RunEvent::RowsStored {
+                            result_id,
+                            start,
+                            row_count,
+                        });
+                    });
+                let store = stored.store.clone();
+                let fail = Arc::clone(&stored.fail);
+                self.rows.store_into(Arc::new(move |rows| {
+                    store.append(token, rows, Arc::clone(&commit), Arc::clone(&fail));
+                }));
+            }
+        }
     }
 
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
@@ -556,6 +645,13 @@ impl RowSink for ChannelSink {
             return;
         }
         let result_id = self.next_result_id.saturating_sub(1);
+        if let (Some(stored), Some(token)) = (&self.stored, self.stored_token.take()) {
+            // Every held row reaches the store before it is complete.
+            self.rows.flush();
+            if let Err(error) = stored.store.finish(token) {
+                (stored.fail)(error);
+            }
+        }
         self.rows.end(RunEvent::ResultEnd {
             result_id,
             affected: summary.affected,
@@ -578,6 +674,12 @@ impl RowSink for ChannelSink {
                 (self.emit)(RunEvent::Abandoning);
             }
         }
+    }
+}
+
+impl Drop for ChannelSink {
+    fn drop(&mut self) {
+        self.abandon_stored();
     }
 }
 
@@ -613,6 +715,7 @@ impl RunSink for ChannelSink {
 
     fn statement_end(&mut self, stmt: &PlannedStmt, result: &Result<StmtOutcome, AppError>) {
         self.rows.flush();
+        self.abandon_stored();
         match result {
             Ok(_) => {
                 if stmt.kind == StatementKind::Ddl {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ResultSet } from '../../store/queryRun';
-import { copyOutcome, initialWidths, overridesFor, sampleRows, withResize, selectionCells, tooLargeMessage } from './ResultGrid';
+import { copyOutcome, emptyPages, initialWidths, overridesFor, pageNeedsRows, sampleRows, storePage, touchPage, withResize, selectionCells, tooLargeMessage } from './ResultGrid';
 
 const result: ResultSet = {
   id: 1,
@@ -140,5 +140,31 @@ describe('selectionCells', () => {
     const onLarge = vi.fn();
     selectionCells(result, { x: 0, y: 0, width: 2, height: 50_000 }, onLarge);
     expect(onLarge).not.toHaveBeenCalled();
+  });
+});
+
+describe('stored result pages', () => {
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => [{ t: 'Int' as const, v: i }]);
+
+  it('evicts the least recently used pages beyond the byte budget, never the new one', () => {
+    let p = emptyPages();
+    p = storePage(p, 0, rows(500), 10, 25);
+    p = storePage(p, 1, rows(500), 10, 25);
+    p = touchPage(p, 0);
+    p = storePage(p, 2, rows(500), 10, 25);
+    expect([...p.pages.keys()].sort()).toEqual([0, 2]);
+    expect(p.chunks[1]).toBeUndefined();
+    expect(p.chunks[0]).toHaveLength(500);
+    // A page larger than the budget alone is still kept.
+    p = storePage(p, 3, rows(1), 100, 25);
+    expect([...p.pages.keys()]).toEqual([3]);
+  });
+
+  it('a partly filled page is fetched again once more rows were committed into it', () => {
+    expect(pageNeedsRows(120, 0, 120)).toBe(false);
+    expect(pageNeedsRows(120, 0, 121)).toBe(true);
+    expect(pageNeedsRows(500, 0, 10_000)).toBe(false);
+    expect(pageNeedsRows(3, 2, 1003)).toBe(false);
+    expect(pageNeedsRows(3, 2, 1004)).toBe(true);
   });
 });

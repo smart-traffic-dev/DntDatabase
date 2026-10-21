@@ -119,6 +119,20 @@ async fn open(state: &AppState, t: Target, read_only: bool) -> Uuid {
     id
 }
 
+/// The rows of each stored result of `events`, read back from the result store as
+/// `{ "rows": [...] }` (the shape `rows` events had).
+fn stored_rows(state: &AppState, events: &Events) -> Vec<Json> {
+    events
+        .of("result_stored")
+        .iter()
+        .map(|e| {
+            let token: Uuid = e["token"].as_str().unwrap().parse().unwrap();
+            let page = state.sessions.results().page(token, 0, 500).unwrap();
+            json!({ "rows": page.rows })
+        })
+        .collect()
+}
+
 /// Plans `text` (all of it) on tab `tab` and runs it; returns the events once done.
 async fn run_all(state: &AppState, tab: &str, id: Uuid, text: &str) -> Arc<Events> {
     let view = state
@@ -160,11 +174,13 @@ async fn run_select_streams_rows() {
             [
                 "statement_start",
                 "result_start",
-                "rows",
+                "result_stored",
+                "rows_stored",
                 "result_end",
                 "statement_start",
                 "result_start",
-                "rows",
+                "result_stored",
+                "rows_stored",
                 "result_end",
                 "done"
             ],
@@ -173,7 +189,7 @@ async fn run_select_streams_rows() {
         let ends = events.of("result_end");
         assert_eq!(ends[0]["row_count"], 2, "{t:?}");
         assert_eq!(ends[1]["result_id"], 1, "{t:?}");
-        let rows = events.of("rows");
+        let rows = stored_rows(&state, &events);
         assert_eq!(rows[1]["rows"][0][0]["v"], "Tiếng Việt 😀", "{t:?}");
         assert_eq!(events.of("done")[0]["stop"], Json::Null, "{t:?}");
         state.sessions.close(id).await;
@@ -398,6 +414,8 @@ async fn explain_tree_per_engine() {
         };
         assert_eq!(explain[0]["plan"]["kind"], want, "{t:?}");
         assert!(events.of("rows").is_empty(), "{t:?}");
+        assert!(events.of("result_stored").is_empty(), "{t:?}");
+        assert!(events.of("result_stored").is_empty(), "{t:?}");
 
         // Explain Analyze of a write is refused before anything runs.
         let err = state
@@ -504,7 +522,7 @@ async fn estimate_on_staging_delete() {
         }
         // Nothing was deleted.
         let events = run_all(&state, "t1", id, &format!("SELECT COUNT(*) FROM {table}")).await;
-        let rows = events.of("rows");
+        let rows = stored_rows(&state, &events);
         let count = &rows[0]["rows"][0][0]["v"];
         assert!(count == 300 || count == "300", "{t:?}: {count}");
         run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;
@@ -562,7 +580,7 @@ async fn rollback_in_manual_mode_restores_rows() {
         let table = format!("p3_manual_{}", &Uuid::new_v4().simple().to_string()[..8]);
         let count_sql = format!("SELECT COUNT(*) FROM {table}");
         let count = |events: Arc<Events>| {
-            let rows = events.of("rows");
+            let rows = stored_rows(&state, &events);
             let v = rows[0]["rows"][0][0]["v"].clone();
             v.as_i64()
                 .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
@@ -673,7 +691,7 @@ async fn rollback_in_manual_mode_restores_rows() {
                 &format!("SELECT id FROM {table} ORDER BY id"),
             )
             .await;
-            let ids: Vec<i64> = events.of("rows")[0]["rows"]
+            let ids: Vec<i64> = stored_rows(&state, &events)[0]["rows"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -694,5 +712,97 @@ async fn rollback_in_manual_mode_restores_rows() {
         assert_eq!(mode.unwrap(), TxState::Idle, "{t:?}");
         run_all(&state, "t1", id, &format!("DROP TABLE {table}")).await;
         state.sessions.close(id).await;
+    }
+}
+
+/// Disk-backed results (spec: backend result spooling): text and binary values larger
+/// than the display preview come back clipped in pages but exact in copy and export,
+/// without running the statement again; closing the connection removes the result.
+#[tokio::test]
+async fn stored_results_are_exact_in_copy_and_export() {
+    use dntdatabase::commands::export::export_query_result_impl;
+    use dntdatabase::export_format::{ExportFormat, ExportOptions};
+    require_db!();
+    let dir = tempfile::tempdir().unwrap();
+    let state = state_in(dir.path());
+    let text = "ab".repeat(70_000);
+    let bytes: Vec<u8> = (0..140_000)
+        .map(|i| if i % 2 == 0 { 0 } else { 0xff })
+        .collect();
+    for t in Target::all() {
+        let id = open(&state, t, false).await;
+        let sql = match t.kind() {
+            DbKind::MySql => "SELECT REPEAT('ab', 70000) AS t, UNHEX(REPEAT('00FF', 70000)) AS b",
+            DbKind::Postgres => {
+                "SELECT repeat('ab', 70000) AS t, decode(repeat('00ff', 70000), 'hex') AS b"
+            }
+        };
+        let events = run_all(&state, "t1", id, sql).await;
+        assert_eq!(
+            events.of("done")[0]["stop"],
+            Json::Null,
+            "{t:?}: {:?}",
+            events.list()
+        );
+        let token: Uuid = events.of("result_stored")[0]["token"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let results = state.sessions.results();
+
+        // The page is a bounded preview with both cells marked incomplete.
+        let page = results.page(token, 0, 500).unwrap();
+        assert_eq!(page.truncated_cells, [(0, 0), (0, 1)], "{t:?}");
+        assert!(page.bytes <= 64 * 1024 * 2, "{t:?}: {}", page.bytes);
+        match &page.rows[0][1] {
+            Value::Bytes { len, preview } => {
+                assert_eq!(*len, 140_000, "{t:?}");
+                assert!(preview.len() < 140_000, "{t:?}");
+            }
+            other => panic!("{t:?}: {other:?}"),
+        }
+
+        // Copy reads the exact values.
+        let exact = results.values(token, &[0], &[0, 1]).unwrap();
+        assert_eq!(exact[0][0], Value::Text(text.clone()), "{t:?}");
+        assert_eq!(
+            exact[0][1],
+            Value::Bytes {
+                len: 140_000,
+                preview: bytes.clone()
+            },
+            "{t:?}"
+        );
+
+        // Export writes them whole, from the store.
+        let path = dir.path().join(format!("{t:?}.csv"));
+        let summary = export_query_result_impl(
+            &state,
+            token,
+            t.kind(),
+            ExportOptions {
+                format: ExportFormat::Csv,
+                delimiter: ",".into(),
+                header: true,
+                quote_all: false,
+                bom: false,
+                table_name: "t".into(),
+                formula_guard: false,
+            },
+            path.to_string_lossy().into_owned(),
+            Uuid::new_v4(),
+            Box::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.rows, 1, "{t:?}");
+        let written = std::fs::read_to_string(&path).unwrap();
+        let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(written, format!("t,b\r\n{text},0x{hex}\r\n"), "{t:?}");
+
+        // Closing the connection detaches the result.
+        state.sessions.close(id).await;
+        assert!(results.page(token, 0, 1).is_err(), "{t:?}");
     }
 }

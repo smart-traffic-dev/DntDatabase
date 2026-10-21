@@ -353,3 +353,13 @@ useTabs.subscribe((state) => {
   }
   useTableData.setState({ byTab: Object.fromEntries(Object.entries(byTab).filter(([id]) => open.has(id))) });
 });
+
+/** Forget a DDL target's old page and cancel requests before loading its new structure. */
+export function invalidateTableData(tabId: string): void {
+  tokens.delete(pageKey(tabId));
+  tokens.delete(countKey(tabId));
+  const state = useTableData.getState().byTab[tabId];
+  if (state?.page?.status === 'loading') cancelRequest(state.connectionId, pageKey(tabId));
+  if (state?.count?.status === 'loading') cancelRequest(state.connectionId, countKey(tabId));
+  useTableData.setState((s) => ({ byTab: Object.fromEntries(Object.entries(s.byTab).filter(([id]) => id !== tabId)) }));
+}

@@ -2,7 +2,6 @@ import { Channel } from '@tauri-apps/api/core';
 import { useRef, useState, type FormEvent } from 'react';
 import { api, isCancelled, toAppError } from '../api';
 import type { ExportFormat, ExportOptions, ExportProgress, ExportSummary } from '../bindings';
-import { setExporting } from '../store/queryExport';
 import { useQueryRun } from '../store/queryRun';
 import { asTxState } from '../store/queryTabs';
 import { Modal } from './Modal';
@@ -18,8 +17,8 @@ export const DELIMITERS: { value: string; label: string }[] = [
 
 type Scope = 'loaded' | 'all';
 
-/** How a running export is stopped: a table export by its request key, a query export by its run id. */
-type Stop = { kind: 'table'; connectionId: string; key: string } | { kind: 'query'; runId: string } | null;
+/** How a running export is stopped: a table export by its request key, a stored query result by its operation id. */
+type Stop = { kind: 'table'; connectionId: string; key: string } | { kind: 'stored'; operation: string } | null;
 
 type Phase =
   | { kind: 'form' }
@@ -38,14 +37,14 @@ interface Props {
 
 /**
  * Export a result to a file: CSV / JSON / Excel / SQL INSERT / Markdown, the loaded rows or all
- * rows. "All rows" is read again by the backend and streamed straight to the file, with progress
- * and Cancel: a table under the data view's filter on a data session, a query result on its tab's
- * own session (the tab shows as busy meanwhile; Stop cancels it). The save dialog is opened by the
- * backend, which only writes the file picked there.
+ * rows. "All rows" is streamed by the backend straight to the file, with progress and Cancel: a
+ * table is read again under the data view's filter on a data session; a query result is written
+ * from the exact rows the backend kept for it, without running its statement again. The save
+ * dialog is opened by the backend, which only writes the file picked there.
  */
 export function ResultExportDialog({ request, onClose }: Props) {
   const [opts, setOpts] = useState<ExportOptions>(() => defaultOptions(request.tableName));
-  const [scope, setScope] = useState<Scope>('loaded');
+  const [scope, setScope] = useState<Scope>(request.all?.kind === 'query' ? 'all' : 'loaded');
   const [phase, setPhase] = useState<Phase>({ kind: 'form' });
   const [error, setError] = useState<string | null>(null);
   const run = useRef(0);
@@ -74,7 +73,7 @@ export function ResultExportDialog({ request, onClose }: Props) {
       all?.kind === 'table'
         ? { kind: 'table', connectionId: all.connectionId, key: `export:${Date.now()}:${++exports}` }
         : all?.kind === 'query'
-          ? { kind: 'query', runId: crypto.randomUUID() }
+          ? { kind: 'stored', operation: crypto.randomUUID() }
           : null;
     setPhase({ kind: 'running', rows: 0, stop });
     const tabId = all?.kind === 'query' ? all.tabId : null;
@@ -89,10 +88,8 @@ export function ResultExportDialog({ request, onClose }: Props) {
         };
         if (all.kind === 'table' && stop?.kind === 'table') {
           summary = await api.exportTable(all.connectionId, all.obj, all.sort, all.filter, opts, path, stop.key, channel);
-        } else if (all.kind === 'query' && stop?.kind === 'query') {
-          // The statement runs on the tab's session: the tab is busy until it ends.
-          setExporting(all.tabId, stop.runId);
-          summary = await api.exportQuery(all.planId, all.index, opts, path, stop.runId, channel);
+        } else if (all.kind === 'query' && stop?.kind === 'stored') {
+          summary = await api.exportQueryResult(all.token, request.engine, opts, path, stop.operation, channel);
         } else {
           return;
         }
@@ -110,8 +107,6 @@ export function ResultExportDialog({ request, onClose }: Props) {
         setError(appError.message);
         setPhase({ kind: 'form' });
       }
-    } finally {
-      if (tabId) setExporting(tabId, null);
     }
   };
 
@@ -120,7 +115,7 @@ export function ResultExportDialog({ request, onClose }: Props) {
     // The backend stops the statement and removes the half-written file.
     const stop = phase.stop;
     if (stop.kind === 'table') api.tableDataCancel(stop.connectionId, stop.key).catch(() => undefined);
-    else api.queryCancel(stop.runId).catch(() => undefined);
+    else api.exportQueryResultCancel(stop.operation).catch(() => undefined);
   };
 
   const close = () => {
@@ -248,20 +243,29 @@ export function ResultExportDialog({ request, onClose }: Props) {
           ) : null}
           <div className="field" role="radiogroup" aria-label="Rows">
             <span className="field-label">Rows</span>
-            <label className="check">
-              <input type="radio" name="rx-scope" checked={scope === 'loaded'} onChange={() => setScope('loaded')} />
-              Loaded rows ({fmt(request.loadedCount)})
-            </label>
-            <label className="check">
-              <input
-                type="radio"
-                name="rx-scope"
-                checked={scope === 'all'}
-                disabled={request.all === null}
-                onChange={() => setScope('all')}
-              />
-              All rows (read again)
-            </label>
+            {request.all?.kind === 'query' ? (
+              <label className="check">
+                <input type="radio" name="rx-scope" checked readOnly />
+                Exact stored result ({fmt(request.loadedCount)} rows)
+              </label>
+            ) : (
+              <>
+                <label className="check">
+                  <input type="radio" name="rx-scope" checked={scope === 'loaded'} onChange={() => setScope('loaded')} />
+                  Loaded rows ({fmt(request.loadedCount)})
+                </label>
+                <label className="check">
+                  <input
+                    type="radio"
+                    name="rx-scope"
+                    checked={scope === 'all'}
+                    disabled={request.all === null}
+                    onChange={() => setScope('all')}
+                  />
+                  All rows (read again)
+                </label>
+              </>
+            )}
             {request.all === null && request.allUnavailable ? <p className="hint">{request.allUnavailable}</p> : null}
             {scope === 'loaded' && request.loadedNote ? <p className="hint">{request.loadedNote}</p> : null}
             {scope === 'loaded' && partial > 0 ? (
@@ -273,7 +277,7 @@ export function ResultExportDialog({ request, onClose }: Props) {
               </p>
             ) : null}
             {scope === 'all' && request.all?.kind === 'query' ? (
-              <p className="hint">Runs the statement again on this tab's session; the tab is busy until the export ends.</p>
+              <p className="hint">Exports the exact rows retained for this result without running the statement again.</p>
             ) : null}
           </div>
           {error && (

@@ -427,6 +427,7 @@ export function HistoryPanel({ onCollapse }: { onCollapse?: () => void }) {
                       ) : (
                         row.database && <span className="hs-origin">{row.database}</span>
                       )}
+                      {row.origin === 'object_action' && <span className="chip hs-data-edit" data-testid="history-object-action">Object action</span>}
                       {row.origin === 'data_edit' && (
                         <span className="chip hs-data-edit" data-testid="history-data-edit">
                           Data edit

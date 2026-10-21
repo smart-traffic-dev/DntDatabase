@@ -5,19 +5,105 @@
 //! first use, one load per database at a time). `completion_objects` lists the tables and
 //! views after `db.` (MySQL) / `schema.` (PostgreSQL) through the tree's browse cache.
 
-use super::guard;
+use super::{blocking, guard};
 use crate::cache::{CompletionObject, SchemaCache};
 use crate::query_sessions::{with_tx_state, PlanView, TabTxInfo, TxAction, TxMode};
+use crate::result_store::{ResultPage, ResultSearch};
 use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::sql::Dialect;
 use dnt_core::tx::TxState;
+use dnt_core::value::Value;
 use dnt_query::Target;
 use std::sync::Arc;
 use tauri::ipc::Channel;
 use tauri::State;
 use uuid::Uuid;
+
+pub async fn query_result_page_impl(
+    state: &AppState,
+    token: Uuid,
+    offset: u64,
+    limit: u32,
+) -> Result<ResultPage, DbError> {
+    let store = state.sessions.results.clone();
+    blocking(move || store.page(token, offset, limit)).await
+}
+
+pub async fn query_result_values_impl(
+    state: &AppState,
+    token: Uuid,
+    rows: Vec<u64>,
+    cols: Vec<u32>,
+) -> Result<Vec<Vec<Value>>, DbError> {
+    let store = state.sessions.results.clone();
+    blocking(move || store.values(token, &rows, &cols)).await
+}
+
+pub async fn query_result_find_impl(
+    state: &AppState,
+    token: Uuid,
+    query: String,
+    max: u32,
+) -> Result<ResultSearch, DbError> {
+    let store = state.sessions.results.clone();
+    blocking(move || store.find(token, &query, max)).await
+}
+
+/// A bounded display page from an exact disk-backed query result.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_result_page(
+    state: State<'_, AppState>,
+    token: Uuid,
+    offset: f64,
+    limit: u32,
+) -> Result<ResultPage, AppError> {
+    let offset = if offset.is_finite() && offset > 0.0 {
+        offset.trunc() as u64
+    } else {
+        0
+    };
+    guard(query_result_page_impl(&state, token, offset, limit)).await
+}
+
+/// Exact selected values for copy/record view; display previews are never used.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_result_values(
+    state: State<'_, AppState>,
+    token: Uuid,
+    rows: Vec<f64>,
+    cols: Vec<u32>,
+) -> Result<Vec<Vec<Value>>, AppError> {
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            if row.is_finite() && row >= 0.0 {
+                Ok(row.trunc() as u64)
+            } else {
+                Err(DbError::Config {
+                    field: Some("copy".into()),
+                    message: "The selected row is invalid.".into(),
+                })
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    guard(query_result_values_impl(&state, token, rows, cols)).await
+}
+
+/// Finds cells in every committed row, including pages not resident in the frontend.
+#[tauri::command]
+#[specta::specta]
+pub async fn query_result_find(
+    state: State<'_, AppState>,
+    token: Uuid,
+    query: String,
+    max: u32,
+) -> Result<ResultSearch, AppError> {
+    guard(query_result_find_impl(&state, token, query, max)).await
+}
 
 pub async fn completion_scope_impl(
     state: &AppState,

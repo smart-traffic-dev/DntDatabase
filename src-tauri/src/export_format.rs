@@ -29,6 +29,7 @@
 //!   `=` `+` `-` `@`, a tab or CR gets a leading `'` (spreadsheets then show it as text).
 
 use crate::commands::transfer::path_error;
+use crate::result_store::{block_outside_executor, value_bytes};
 use dnt_core::driver::{ResultSummary, RowSink};
 use dnt_core::error::DbError;
 use dnt_core::server::DbKind;
@@ -39,6 +40,7 @@ use specta::Type;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -937,18 +939,73 @@ impl Target {
 /// How often progress is reported while streaming.
 const PROGRESS_EVERY: Duration = Duration::from_millis(200);
 
-/// Streams the first result of a statement into a [`FormatWriter`]. A write error
-/// stops taking rows, is kept (see [`ExportSink::take_error`]) and calls `abort`
-/// (which cancels the statement).
+/// Streams the first result of a statement into a [`FormatWriter`] owned by a dedicated
+/// writer thread, so formatting and file writes never run on a Tokio worker. The queue
+/// between them holds at most [`EXPORT_QUEUE_BYTES`] of row payload: a full queue slows
+/// the database stream down. A write error stops taking rows, is kept (see
+/// [`ExportSink::take_error`]) and calls `abort` (which cancels the statement).
 pub struct ExportSink {
-    writer: Box<dyn FormatWriter>,
-    error: Option<DbError>,
+    tx: std::sync::mpsc::Sender<ExportWrite>,
+    gate: Arc<QueueGate>,
+    error: Arc<Mutex<Option<DbError>>>,
     results: usize,
+    /// Rows handed to the writer.
     rows: u64,
-    partial: u32,
-    last: Instant,
-    progress: Box<dyn FnMut(u64) + Send>,
-    abort: Box<dyn Fn() + Send>,
+}
+
+enum ExportWrite {
+    Begin(Vec<ColumnMeta>),
+    Rows(Vec<Vec<Value>>, usize),
+    Finish(std::sync::mpsc::Sender<Result<Written, DbError>>),
+    Abort(std::sync::mpsc::Sender<()>),
+}
+
+/// Most row payload (approximate bytes) queued for the export writer.
+pub const EXPORT_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+
+/// The queued payload; `closed` once the writer stopped taking rows.
+#[derive(Default)]
+struct QueueGate {
+    state: Mutex<(usize, bool)>,
+    changed: std::sync::Condvar,
+}
+
+impl QueueGate {
+    /// Waits until `bytes` more fit (a lone batch always fits); false once closed.
+    fn reserve(&self, bytes: usize) -> bool {
+        let mut state = lock_export(&self.state);
+        loop {
+            let (queued, closed) = *state;
+            if closed {
+                return false;
+            }
+            if queued == 0 || queued.saturating_add(bytes) <= EXPORT_QUEUE_BYTES {
+                state.0 = queued.saturating_add(bytes);
+                return true;
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        let mut state = lock_export(&self.state);
+        state.0 = state.0.saturating_sub(bytes);
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    fn close(&self) {
+        lock_export(&self.state).1 = true;
+        self.changed.notify_all();
+    }
+
+    #[cfg(test)]
+    fn queued(&self) -> usize {
+        lock_export(&self.state).0
+    }
 }
 
 impl ExportSink {
@@ -957,48 +1014,65 @@ impl ExportSink {
         progress: Box<dyn FnMut(u64) + Send>,
         abort: Box<dyn Fn() + Send>,
     ) -> ExportSink {
-        ExportSink {
-            writer,
-            error: None,
-            results: 0,
-            rows: 0,
-            partial: 0,
-            last: Instant::now(),
+        let (tx, rx) = std::sync::mpsc::channel();
+        let error = Arc::new(Mutex::new(None));
+        let gate = Arc::new(QueueGate::default());
+        let worker = ExportWorker {
+            writer: Some(writer),
             progress,
             abort,
+            error: Arc::clone(&error),
+            gate: Arc::clone(&gate),
+        };
+        std::thread::Builder::new()
+            .name("dnt-export-writer".into())
+            .spawn(move || worker.run(rx))
+            .expect("start export writer");
+        ExportSink {
+            tx,
+            gate,
+            error,
+            results: 0,
+            rows: 0,
         }
     }
 
+    /// Rows handed to the writer so far.
     pub fn row_count(&self) -> u64 {
         self.rows
     }
 
     pub fn take_error(&mut self) -> Option<DbError> {
-        self.error.take()
+        lock_export(&self.error).take()
     }
 
-    fn fail(&mut self, e: DbError) {
-        if self.error.is_none() {
-            self.error = Some(e);
-            (self.abort)();
-        }
+    fn send(&self, message: ExportWrite) -> Result<(), DbError> {
+        self.tx
+            .send(message)
+            .map_err(|_| export_error("The export writer stopped unexpectedly."))
     }
 
     /// Completes the file. A statement without a result still gets a valid empty file.
-    pub fn finish(mut self) -> Result<Written, DbError> {
-        if let Some(e) = self.error.take() {
+    pub fn finish(self) -> Result<Written, DbError> {
+        if let Some(e) = lock_export(&self.error).take() {
             return Err(e);
         }
         if self.results == 0 {
-            self.writer.begin(&[])?;
+            self.send(ExportWrite::Begin(Vec::new()))?;
         }
-        self.writer.finish()?;
-        (self.progress)(self.rows);
-        Ok(Written {
-            rows: self.rows,
-            cut_cells: self.writer.cut_cells(),
-            partial_binaries: self.partial,
-        })
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.send(ExportWrite::Finish(tx))?;
+        block_outside_executor(|| rx.recv())
+            .map_err(|_| export_error("The export writer stopped before finishing."))?
+    }
+
+    /// Drops the queued rows and closes the file (so it can be removed).
+    pub fn abort(self) {
+        self.gate.close();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if self.send(ExportWrite::Abort(tx)).is_ok() {
+            let _ = block_outside_executor(|| rx.recv());
+        }
     }
 }
 
@@ -1006,29 +1080,126 @@ impl RowSink for ExportSink {
     fn result_start(&mut self, cols: &[ColumnMeta]) {
         self.results += 1;
         if self.results == 1 {
-            if let Err(e) = self.writer.begin(cols) {
-                self.fail(e);
-            }
+            let _ = self.send(ExportWrite::Begin(cols.to_vec()));
         }
     }
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
-        if self.results != 1 || self.error.is_some() {
+        if self.results != 1 || lock_export(&self.error).is_some() {
             return;
         }
-        for row in batch {
-            if let Err(e) = self.writer.row(&row) {
-                self.fail(e);
-                return;
-            }
-            self.rows += 1;
-            self.partial = self.partial.saturating_add(count_partial(&row));
+        let bytes = batch
+            .iter()
+            .flatten()
+            .map(value_bytes)
+            .sum::<usize>()
+            .saturating_add(batch.len());
+        let count = batch.len() as u64;
+        // A full queue waits here, off the async executor.
+        if !block_outside_executor(|| self.gate.reserve(bytes)) {
+            return;
         }
-        if self.last.elapsed() >= PROGRESS_EVERY {
-            self.last = Instant::now();
-            (self.progress)(self.rows);
+        match self.send(ExportWrite::Rows(batch, bytes)) {
+            Ok(()) => self.rows = self.rows.saturating_add(count),
+            Err(error) => {
+                self.gate.release(bytes);
+                let mut slot = lock_export(&self.error);
+                if slot.is_none() {
+                    *slot = Some(error);
+                }
+            }
         }
     }
     fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+fn lock_export<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The export writer thread: owns the format writer and its file.
+struct ExportWorker {
+    writer: Option<Box<dyn FormatWriter>>,
+    progress: Box<dyn FnMut(u64) + Send>,
+    abort: Box<dyn Fn() + Send>,
+    error: Arc<Mutex<Option<DbError>>>,
+    gate: Arc<QueueGate>,
+}
+
+impl ExportWorker {
+    /// Keeps the first error and stops the statement; queued rows are dropped from now on.
+    fn fail(&self, e: DbError) {
+        let mut slot = lock_export(&self.error);
+        if slot.is_none() {
+            *slot = Some(e);
+            drop(slot);
+            self.gate.close();
+            (self.abort)();
+        }
+    }
+
+    fn failed(&self) -> bool {
+        lock_export(&self.error).is_some()
+    }
+
+    fn run(mut self, rx: std::sync::mpsc::Receiver<ExportWrite>) {
+        let mut rows = 0u64;
+        let mut partial = 0u32;
+        let mut last = Instant::now();
+        while let Ok(message) = rx.recv() {
+            match message {
+                ExportWrite::Begin(columns) => {
+                    if let Some(Err(e)) = self.writer.as_mut().map(|w| w.begin(&columns)) {
+                        self.fail(e);
+                    }
+                }
+                ExportWrite::Rows(batch, bytes) => {
+                    if !self.failed() {
+                        for row in batch {
+                            let Some(writer) = self.writer.as_mut() else {
+                                break;
+                            };
+                            if let Err(e) = writer.row(&row) {
+                                self.fail(e);
+                                break;
+                            }
+                            rows = rows.saturating_add(1);
+                            partial = partial.saturating_add(count_partial(&row));
+                        }
+                        if last.elapsed() >= PROGRESS_EVERY {
+                            last = Instant::now();
+                            (self.progress)(rows);
+                        }
+                    }
+                    self.gate.release(bytes);
+                }
+                ExportWrite::Finish(reply) => {
+                    let result = match (lock_export(&self.error).clone(), self.writer.as_mut()) {
+                        (Some(e), _) => Err(e),
+                        (None, None) => Err(export_error("The export writer was closed.")),
+                        (None, Some(writer)) => writer.finish().map(|_| Written {
+                            rows,
+                            cut_cells: writer.cut_cells(),
+                            partial_binaries: partial,
+                        }),
+                    };
+                    if result.is_ok() {
+                        (self.progress)(rows);
+                    }
+                    drop(self.writer.take());
+                    self.gate.close();
+                    let _ = reply.send(result);
+                    return;
+                }
+                ExportWrite::Abort(reply) => {
+                    drop(self.writer.take());
+                    self.gate.close();
+                    let _ = reply.send(());
+                    return;
+                }
+            }
+        }
+        self.gate.close();
+    }
 }
 
 /// Writes rows already in memory (the loaded rows) to `target`.
@@ -1665,5 +1836,70 @@ mod tests {
         assert_eq!((w.rows, w.cut_cells), (2, 0));
         assert_eq!(read(&path), "a\r\n1\r\n2\r\n");
         assert_eq!(seen.lock().unwrap().last(), Some(&2));
+    }
+
+    /// A writer that takes a row only when the test lets it.
+    struct Gated(std::sync::mpsc::Receiver<()>, Arc<Mutex<u64>>);
+
+    impl FormatWriter for Gated {
+        fn begin(&mut self, _: &[ColumnMeta]) -> Result<(), DbError> {
+            Ok(())
+        }
+        fn row(&mut self, _: &[Value]) -> Result<(), DbError> {
+            self.0.recv().map_err(|_| export_error("closed"))?;
+            *self.1.lock().unwrap() += 1;
+            Ok(())
+        }
+        fn finish(&mut self) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_slow_writer_bounds_the_queued_payload() {
+        let (go, gate) = std::sync::mpsc::channel();
+        let written = Arc::new(Mutex::new(0));
+        let mut sink = ExportSink::new(
+            Box::new(Gated(gate, Arc::clone(&written))),
+            Box::new(|_| {}),
+            Box::new(|| {}),
+        );
+        sink.result_start(&[col("a")]);
+        let batch = || vec![vec![Value::Text("x".repeat(EXPORT_QUEUE_BYTES / 4))]];
+        let producer = std::thread::spawn(move || {
+            for _ in 0..12 {
+                sink.rows(batch());
+                assert!(sink.gate.queued() <= EXPORT_QUEUE_BYTES);
+            }
+            sink
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        // The producer waits on the full queue instead of buffering every batch.
+        assert!(!producer.is_finished());
+        for _ in 0..12 {
+            go.send(()).unwrap();
+        }
+        let sink = producer.join().unwrap();
+        assert_eq!(sink.finish().unwrap().rows, 12);
+        assert_eq!(*written.lock().unwrap(), 12);
+    }
+
+    #[test]
+    fn a_write_error_stops_taking_rows_and_unblocks_the_producer() {
+        let (go, gate) = std::sync::mpsc::channel::<()>();
+        drop(go);
+        let aborted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&aborted);
+        let mut sink = ExportSink::new(
+            Box::new(Gated(gate, Arc::new(Mutex::new(0)))),
+            Box::new(|_| {}),
+            Box::new(move || flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+        );
+        sink.result_start(&[col("a")]);
+        for _ in 0..12 {
+            sink.rows(vec![vec![Value::Text("x".repeat(EXPORT_QUEUE_BYTES / 4))]]);
+        }
+        assert!(aborted.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(sink.finish().is_err());
     }
 }

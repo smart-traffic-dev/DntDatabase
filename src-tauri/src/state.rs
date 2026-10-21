@@ -87,7 +87,8 @@ impl AppState {
             Arc::clone(&secrets),
             KnownHosts::new(paths.known_hosts.clone()),
             default_drivers(),
-        );
+        )
+        .with_result_root(paths.data_dir.join("query-results"))?;
         Ok(AppState {
             repo,
             secrets,

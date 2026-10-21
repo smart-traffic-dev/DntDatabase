@@ -70,8 +70,8 @@ pub(crate) struct TakenSession {
 
 /// Where the current request of a key is.
 enum Phase {
-    /// Its session is being taken / opened: a cancel only removes the entry.
-    Opening,
+    /// Its session is being taken / opened: dropping the sender stops an in-flight connect.
+    Opening(watch::Sender<()>),
     /// Its statement runs: a cancel raises `stop` and sends the driver's cancel.
     Running {
         cancel: CancelHandle,
@@ -140,11 +140,14 @@ pub(crate) struct DataSessions {
 
 /// Stops a request taken out of the map.
 fn stop_request(r: Request) {
-    if let Phase::Running { cancel, stop } = r.phase {
-        stop.stop();
-        tokio::spawn(async move {
-            let _ = cancel.cancel().await;
-        });
+    match r.phase {
+        Phase::Opening(sender) => drop(sender),
+        Phase::Running { cancel, stop } => {
+            stop.stop();
+            tokio::spawn(async move {
+                let _ = cancel.cancel().await;
+            });
+        }
     }
 }
 
@@ -236,16 +239,32 @@ impl DataSessions {
 
     /// Makes request `serial` the current one of `key`, superseding (cancelling) the one
     /// there.
-    fn begin(&self, key: &str, serial: u64) {
+    fn begin(&self, key: &str, serial: u64) -> watch::Receiver<()> {
+        let (opening, receiver) = watch::channel(());
         let previous = lock(&self.requests).insert(
             key.to_string(),
             Request {
                 serial,
-                phase: Phase::Opening,
+                phase: Phase::Opening(opening),
             },
         );
         if let Some(previous) = previous {
             stop_request(previous);
+        }
+        receiver
+    }
+
+    /// Moves request `serial` of `key` back to opening (its retry on a fresh session);
+    /// None when it was cancelled or superseded meanwhile.
+    fn reopen(&self, key: &str, serial: u64) -> Option<watch::Receiver<()>> {
+        let mut requests = lock(&self.requests);
+        match requests.get_mut(key) {
+            Some(r) if r.serial == serial => {
+                let (opening, receiver) = watch::channel(());
+                r.phase = Phase::Opening(opening);
+                Some(receiver)
+            }
+            _ => None,
         }
     }
 
@@ -529,7 +548,7 @@ impl SessionManager {
         let data = &rt.data;
         let serial = data.serial.fetch_add(1, Ordering::SeqCst) + 1;
         // Ours from now on: the previous request of this key is cancelled at once.
-        data.begin(key, serial);
+        let mut opening = data.begin(key, serial);
         let database = db.map(str::to_string);
         let timeout = match (request.no_timeout, rt.cfg.options.query_timeout_s) {
             (true, _) => None,
@@ -545,7 +564,11 @@ impl SessionManager {
             let from_pool = pooled.is_some();
             let (session, tunnel_gen) = match pooled.take() {
                 Some(idle) => (idle.session, idle.tunnel_gen),
-                None => match rt.open_query_session(database.clone()).await {
+                None => match tokio::select! {
+                    biased;
+                    _ = opening.changed() => Err(DbError::cancelled()),
+                    opened = rt.open_query_session(database.clone()) => opened,
+                } {
                     Ok(opened) => opened,
                     Err(e) => {
                         data.finish(key, serial);
@@ -592,6 +615,11 @@ impl SessionManager {
             // something already reached the sink.
             if from_pool && !sink.touched && outcome.as_ref().is_err_and(is_lost) {
                 tokio::spawn(close_quietly(session));
+                // The fresh connect is cancellable like the first one.
+                match data.reopen(key, serial) {
+                    Some(receiver) => opening = receiver,
+                    None => return Err(DbError::cancelled()),
+                }
                 continue;
             }
             // Only a session whose request was never cancelled goes back to the pool: a

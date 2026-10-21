@@ -117,6 +117,30 @@ async trustHostKey(host: string, port: number, fingerprint: string, keyOpenssh: 
     else return { status: "error", error: e  as any };
 }
 },
+async objectActionPreview(connectionId: string, action: ObjectAction) : Promise<Result<ActionPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_preview", { connectionId, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async objectActionApply(planId: string, confirmed: boolean, name: string | null, operationId: string, channel: TAURI_CHANNEL<string>) : Promise<Result<ActionReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_apply", { planId, confirmed, name, operationId, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async objectActionCancel(operationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_cancel", { operationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async listDatabases(id: string, showSystem: boolean) : Promise<Result<DatabaseInfo[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_databases", { id, showSystem }) };
@@ -305,6 +329,39 @@ async queryRun(planId: string, confirmed: boolean, confirmNames: string[], opts:
 async queryCancel(runId: string) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("query_cancel", { runId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A bounded display page from an exact disk-backed query result.
+ */
+async queryResultPage(token: string, offset: number, limit: number) : Promise<Result<ResultPage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_result_page", { token, offset, limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Exact selected values for copy/record view; display previews are never used.
+ */
+async queryResultValues(token: string, rows: number[], cols: number[]) : Promise<Result<Value[][], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_result_values", { token, rows, cols }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Finds cells in every committed row, including pages not resident in the frontend.
+ */
+async queryResultFind(token: string, query: string, max: number) : Promise<Result<ResultSearch, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_result_find", { token, query, max }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -626,6 +683,24 @@ async exportQuery(planId: string, index: number, opts: ExportOptions, path: stri
 }
 },
 /**
+ * Exports the exact disk-backed rows of a completed query result.
+ */
+async exportQueryResult(token: string, kind: DbKind, opts: ExportOptions, path: string, operation: string, channel: TAURI_CHANNEL<ExportProgress>) : Promise<Result<ExportSummary, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_query_result", { token, kind, opts, path, operation, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops the stored-result export `operation`; false when none runs. Its half-written
+ * file is removed.
+ */
+async exportQueryResultCancel(operation: string) : Promise<boolean> {
+    return await TAURI_INVOKE("export_query_result_cancel", { operation });
+},
+/**
  * Shows an exported file in the system file manager ("Open folder"). Only a file an
  * export wrote, and that still exists, is shown; nothing is opened or run.
  */
@@ -849,6 +924,9 @@ async snippetsDelete(id: string) : Promise<Result<null, AppError>> {
 
 /** user-defined types **/
 
+export type ActionOutcome = "applied" | "not_applied" | "rolled_back" | "unknown"
+export type ActionPreview = { plan_id: string; connection_id: string; action: ObjectAction; sql: string; confirm_name: string | null; warnings: string[]; expires_in_seconds: number }
+export type ActionReport = { outcome: ActionOutcome; error: AppError | null; warnings: string[] }
 export type AppError = { kind: string; message: string; detail: string | null; stage: string | null; 
 /**
  * Connect errors: the stages that completed before the failing one.
@@ -1227,7 +1305,7 @@ export type HistoryOrigin =
 /**
  * A statement the app built to apply edits of the data view.
  */
-"data_edit"
+"data_edit" | "object_action"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it
@@ -1293,6 +1371,7 @@ ansi_quotes?: boolean;
  */
 no_backslash_escapes?: boolean }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
+export type ObjectAction = { kind: "create_namespace"; database: string; name: string } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
 export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | null; 
@@ -1393,6 +1472,13 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+export type ResultMatch = { row: number; col: number }
+export type ResultPage = { rows: Value[][]; 
+/**
+ * `(row within page, column)` of display values that are previews.
+ */
+truncated_cells: ([number, number])[]; offset: number; committed_rows: number; done: boolean; bytes: number }
+export type ResultSearch = { matches: ResultMatch[]; capped: boolean }
 export type RowEdit = { op: "update"; row: RowRef; set: ([string, CellInput])[] } | { op: "insert"; values: ([string, CellInput])[] } | { op: "delete"; row: RowRef }
 /**
  * The estimated number of rows a flagged `UPDATE` / `DELETE` changes, from the
@@ -1429,7 +1515,11 @@ export type RunEvent =
 /**
  * At most 500 (`batch_size`) rows of result `result_id`, in order.
  */
-{ t: "rows"; result_id: number; rows: Value[][] } | { t: "result_end"; result_id: number; affected: number | null; row_count: number; truncated: boolean; elapsed_ms: number } | 
+{ t: "rows"; result_id: number; rows: Value[][] } | 
+/**
+ * Exact rows were committed to the disk-backed result store.
+ */
+{ t: "result_stored"; result_id: number; token: string } | { t: "rows_stored"; result_id: number; start: number; row_count: number } | { t: "result_end"; result_id: number; affected: number | null; row_count: number; truncated: boolean; elapsed_ms: number } | 
 /**
  * Statement `index` failed. `error.position` is a UTF-16 offset into the editor
  * text, `error.tx_state` the session's state after the failure, and
@@ -1473,7 +1563,10 @@ export type RunEvent =
  */
 export type RunOptions = { 
 /**
- * Row limit per result; clamped to 1..=1 000 000.
+ * Display row limit per result; clamped to 1..=1 000 000. Rows past it are neither
+ * stored nor shown (the result is `truncated`), but the driver may still drain them
+ * to keep the session usable, so the statement can run longer than the shown rows
+ * took. The SQL is never rewritten and the session never dropped for it.
  */
 max_rows: number; continue_on_error: boolean }
 /**

@@ -3,8 +3,6 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { ColumnMeta, ExportProgress, ObjectRef, Value } from '../bindings';
 import { exportRunOf, setExporting } from '../store/queryExport';
-import { useQueryRun } from '../store/queryRun';
-import { stopQuery } from '../store/runQuery';
 import { callsOf, fail, ids, mockBackend, resetStores } from '../test/backend';
 import { ResultExportDialog } from './ResultExportDialog';
 import { countPartialBinaries, type ExportRequest } from './resultExport';
@@ -139,60 +137,58 @@ describe('ResultExportDialog', () => {
     expect(await screen.findByText('The export was cancelled; no file was written.')).toBeInTheDocument();
   });
 
-  it('all rows of a query result run on its tab, which is busy until the export ends', async () => {
+  it('a query result exports its exact stored rows without running the statement again', async () => {
     const user = userEvent.setup();
     let resolve: (v: unknown) => void = () => undefined;
     mockBackend({
       export_pick_path: () => 'C:\\out\\r.json',
-      export_query: () => new Promise((res) => (resolve = res)),
+      export_query_result: () => new Promise((res) => (resolve = res)),
     });
     render(
       <ResultExportDialog
-        request={request({ all: { kind: 'query', tabId: 'tab-q', connectionId: ids.prod, planId: 'plan-1', index: 2 } })}
+        request={request({ all: { kind: 'query', tabId: 'tab-q', connectionId: ids.prod, token: 'tok-1' } })}
         onClose={() => {}}
       />,
     );
     await user.selectOptions(screen.getByLabelText('Format'), 'json');
-    await user.click(screen.getByRole('radio', { name: 'All rows (read again)' }));
-    expect(screen.getByText(/Runs the statement again on this tab's session/)).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Exact stored result (2 rows)' })).toBeChecked();
+    expect(screen.queryByRole('radio', { name: 'All rows (read again)' })).toBeNull();
+    expect(screen.getByText(/without running the statement again/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    await waitFor(() => expect(callsOf('export_query')).toHaveLength(1));
-    const call = callsOf('export_query')[0]!;
-    expect(call).toMatchObject({ planId: 'plan-1', index: 2, opts: { format: 'json' }, path: 'C:\\out\\r.json' });
-    expect(call.runId).toMatch(/^[0-9a-f-]{36}$/);
-    // The tab shows as running under the export's run id.
-    expect(exportRunOf('tab-q')).toBe(call.runId);
+    await waitFor(() => expect(callsOf('export_query_result')).toHaveLength(1));
+    const call = callsOf('export_query_result')[0]!;
+    expect(call).toMatchObject({ token: 'tok-1', kind: 'mysql', opts: { format: 'json' }, path: 'C:\\out\\r.json' });
+    expect(call.operation).toMatch(/^[0-9a-f-]{36}$/);
+    // Nothing runs on the tab's session: it is not busy.
+    expect(exportRunOf('tab-q')).toBeNull();
+    expect(callsOf('export_query')).toEqual([]);
     await act(async () => resolve(summary(10_000, 'C:\\out\\r.json')));
     expect(await screen.findByText(/Exported 10,000 rows/)).toBeInTheDocument();
-    expect(exportRunOf('tab-q')).toBeNull();
   });
 
-  it("the tab's Stop cancels a query export; a failure updates the tab's transaction state", async () => {
+  it('Cancel stops a stored-result export by its operation id', async () => {
     const user = userEvent.setup();
     let reject: (e: unknown) => void = () => undefined;
     mockBackend({
       export_pick_path: () => 'C:\\out\\r.csv',
-      export_query: () => new Promise((_, rej) => (reject = rej)),
-      query_cancel: () => {
-        reject(fail('cancelled', { tx_state: 'aborted' }).error);
-        return null;
+      export_query_result: () => new Promise((_, rej) => (reject = rej)),
+      export_query_result_cancel: () => {
+        reject(fail('cancelled').error);
+        return true;
       },
     });
     render(
       <ResultExportDialog
-        request={request({ all: { kind: 'query', tabId: 'tab-q', connectionId: ids.prod, planId: 'plan-1', index: 0 } })}
+        request={request({ all: { kind: 'query', tabId: 'tab-q', connectionId: ids.prod, token: 'tok-1' } })}
         onClose={() => {}}
       />,
     );
-    await user.click(screen.getByRole('radio', { name: 'All rows (read again)' }));
     await user.click(screen.getByRole('button', { name: 'Export' }));
-    await waitFor(() => expect(exportRunOf('tab-q')).not.toBeNull());
-    const runId = exportRunOf('tab-q');
-    await act(() => stopQuery('tab-q'));
-    expect(callsOf('query_cancel')).toEqual([{ runId }]);
+    await waitFor(() => expect(callsOf('export_query_result')).toHaveLength(1));
+    const { operation } = callsOf('export_query_result')[0]!;
+    await user.click(screen.getByRole('button', { name: 'Cancel export' }));
+    expect(callsOf('export_query_result_cancel')).toEqual([{ operation }]);
     expect(await screen.findByText('The export was cancelled; no file was written.')).toBeInTheDocument();
-    expect(exportRunOf('tab-q')).toBeNull();
-    expect(useQueryRun.getState().get('tab-q').txState).toBe('aborted');
   });
 
   it('partly loaded binary values: a note before, a count after', async () => {

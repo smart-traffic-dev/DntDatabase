@@ -52,6 +52,7 @@ struct Server {
     writes: Mutex<VecDeque<Result<u64, DbError>>>,
     /// The next `COMMIT` fails with this.
     commit: Mutex<Option<DbError>>,
+    rollback: Mutex<Option<DbError>>,
     /// A recheck (`SELECT 1 FROM …`) finds its row.
     recheck_found: AtomicBool,
     /// Silent reconnects of the sessions so far (`Session::reconnects`).
@@ -95,6 +96,7 @@ impl Server {
             executed: Mutex::default(),
             writes: Mutex::default(),
             commit: Mutex::default(),
+            rollback: Mutex::default(),
             recheck_found: AtomicBool::new(false),
         })
     }
@@ -199,7 +201,11 @@ impl Driver for FakeDriver {
         let number = self.server.sessions.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(FakeSession {
             number,
-            info: detect_mysql("8.0.36").unwrap(),
+            info: if _cfg.kind == DbKind::Postgres {
+                dnt_core::server::detect_pg(170000, "17.0")
+            } else {
+                detect_mysql("8.0.36").unwrap()
+            },
             server: Arc::clone(&self.server),
             tx: Mutex::new(TxState::Idle),
         }))
@@ -322,6 +328,9 @@ impl Session for FakeSession {
                 Ok(done(None))
             }
             "ROLLBACK" => {
+                if let Some(e) = s.rollback.lock().unwrap().take() {
+                    return Err(e);
+                }
                 self.set_tx(TxState::Idle);
                 Ok(done(None))
             }
@@ -332,7 +341,8 @@ impl Session for FakeSession {
                     None => Ok(done(None)),
                 }
             }
-            "UPDATE" | "DELETE" | "INSERT" => {
+            "UPDATE" | "DELETE" | "INSERT" | "CREATE" | "DROP" | "ALTER" | "TRUNCATE"
+            | "RENAME" => {
                 let next = s.writes.lock().unwrap().pop_front().unwrap_or(Ok(1));
                 match next {
                     Ok(NO_COUNT) => Ok(done(None)),
@@ -431,7 +441,16 @@ impl Introspector for FakeSession {
         _scope: &Scope,
         _kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
-        Ok(vec![])
+        Ok(if _kind == ObjectKind::Table {
+            vec![ObjectSummary {
+                name: "items".into(),
+                kind: _kind,
+                comment: None,
+                row_estimate: None,
+            }]
+        } else {
+            vec![]
+        })
     }
     async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
         Ok(vec![])
@@ -445,7 +464,7 @@ impl Introspector for FakeSession {
         Ok(self.server.detail.lock().unwrap().clone())
     }
     async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
-        Ok(String::new())
+        Ok(serde_json::to_string(&*self.server.detail.lock().unwrap()).unwrap())
     }
 }
 
@@ -457,12 +476,18 @@ struct Fixture {
 }
 
 async fn fixture_with(engine: &str, env_tag: Option<EnvTag>) -> Fixture {
+    fixture_kind(engine, env_tag, DbKind::MySql).await
+}
+async fn fixture_kind(engine: &str, env_tag: Option<EnvTag>, kind: DbKind) -> Fixture {
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
     let repo = Arc::new(ConnectionRepo::new(
         open_in_memory().unwrap(),
         Arc::clone(&secrets),
     ));
     let server = Server::new(engine);
+    if kind == DbKind::Postgres {
+        *server.dialect.lock().unwrap() = Dialect::Postgres;
+    }
     let driver: Arc<dyn Driver> = Arc::new(FakeDriver {
         server: Arc::clone(&server),
     });
@@ -471,11 +496,11 @@ async fn fixture_with(engine: &str, env_tag: Option<EnvTag>) -> Fixture {
         Arc::clone(&repo),
         secrets,
         KnownHosts::new(dir.join(format!("dnt_edit_kh_{}", Uuid::new_v4()))),
-        HashMap::from([(DbKind::MySql, driver)]),
+        HashMap::from([(kind, driver)]),
     );
     let cfg = ConnectionConfig {
         id: Uuid::nil(),
-        kind: DbKind::MySql,
+        kind,
         default_db: Some("shop".into()),
         env_tag,
         secret_mode: SecretMode::Saved,
@@ -1652,4 +1677,270 @@ async fn unknown_outcome_is_stored() {
     assert!(rows[0].outcome_unknown);
     assert_eq!(rows[0].status, HistoryStatus::Error);
     assert_eq!(rows[0].error_kind.as_deref(), Some("connection_lost"));
+}
+
+// P4a fault injection reuses the same sessions, repository and history harness as P3.
+mod object_actions {
+    use super::*;
+    use dnt_core::sql::ddl::ObjectAction;
+    use dntdatabase::object_actions::ActionOutcome;
+    fn create() -> ObjectAction {
+        ObjectAction::CreateNamespace {
+            database: "shop".into(),
+            name: "p4_test".into(),
+        }
+    }
+    fn drop_table(pg: bool) -> ObjectAction {
+        let mut o = object();
+        o.schema = pg.then(|| "public".into());
+        ObjectAction::DropObject { object: o }
+    }
+    async fn apply(
+        f: &Fixture,
+        p: Uuid,
+        name: Option<&str>,
+    ) -> Result<dntdatabase::object_actions::ActionReport, DbError> {
+        f.sm.object_action_apply(p, true, name.map(str::to_string), Uuid::new_v4(), &|_| {})
+            .await
+    }
+    #[tokio::test]
+    async fn preview_is_exact_single_use_and_history_has_origin() {
+        let f = fixture().await;
+        let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+        assert!(p.confirm_name.is_none());
+        let r = apply(&f, p.plan_id, None).await.unwrap();
+        assert_eq!(r.outcome, ActionOutcome::Applied);
+        assert_eq!(
+            f.server.executed().iter().filter(|s| **s == p.sql).count(),
+            1
+        );
+        assert!(matches!(
+            apply(&f, p.plan_id, None).await,
+            Err(DbError::PlanExpired)
+        ));
+        let h = f
+            .repo
+            .history_list(&dnt_store::history::HistoryFilter {
+                origin: Some(dnt_store::history::HistoryOrigin::ObjectAction),
+                connection_id: Some(f.id),
+                search: None,
+                limit: 100,
+            })
+            .unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0].sql_text, p.sql);
+    }
+    #[tokio::test]
+    async fn destructive_and_production_confirmation_are_enforced_by_backend() {
+        let f = fixture_with("InnoDB", Some(EnvTag::Production)).await;
+        let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+        assert_eq!(p.confirm_name.as_deref(), Some("p4_test"));
+        assert!(matches!(
+            apply(&f, p.plan_id, Some("P4_TEST")).await,
+            Err(DbError::ConfirmationRequired { .. })
+        ));
+        assert!(!f.server.executed().iter().any(|s| s.starts_with("CREATE")));
+        let f = fixture().await;
+        let p =
+            f.sm.object_action_preview(f.id, drop_table(false))
+                .await
+                .unwrap();
+        assert_eq!(p.confirm_name.as_deref(), Some("items"));
+        assert!(matches!(
+            apply(&f, p.plan_id, None).await,
+            Err(DbError::ConfirmationRequired { .. })
+        ));
+    }
+    #[tokio::test]
+    async fn stop_before_registration_never_sends_ddl() {
+        let f = fixture().await;
+        let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+        let id = Uuid::new_v4();
+        f.sm.object_action_cancel(id).await.unwrap();
+        assert!(matches!(
+            f.sm.object_action_apply(p.plan_id, true, None, id, &|_| {})
+                .await,
+            Err(DbError::Cancelled {
+                outcome_unknown: false,
+                ..
+            })
+        ));
+        assert!(!f.server.executed().iter().any(|s| s.starts_with("CREATE")));
+    }
+    #[tokio::test]
+    async fn metadata_dialect_and_generation_changes_block_ddl() {
+        for change in 0..3 {
+            let f = fixture().await;
+            let p =
+                f.sm.object_action_preview(f.id, drop_table(false))
+                    .await
+                    .unwrap();
+            match change {
+                0 => f.server.detail.lock().unwrap().columns[0].comment = Some("changed".into()),
+                1 => {
+                    *f.server.dialect.lock().unwrap() = Dialect::MySql(MySqlMode {
+                        no_backslash_escapes: true,
+                        ..Default::default()
+                    })
+                }
+                _ => f.sm.simulate_tunnel_replaced(f.id),
+            }
+            assert!(matches!(
+                apply(&f, p.plan_id, Some("items")).await,
+                Err(DbError::PlanStale { .. })
+            ));
+            assert!(!f.server.executed().iter().any(|s| s.starts_with("DROP")));
+        }
+    }
+    #[tokio::test]
+    async fn read_only_and_policy_changes_are_checked_again() {
+        for read_only in [true, false] {
+            let f = fixture().await;
+            let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+            let mut cfg = f.repo.get(f.id).unwrap();
+            if read_only {
+                cfg.read_only = true;
+            } else {
+                cfg.env_tag = Some(EnvTag::Production);
+            }
+            f.repo
+                .update(
+                    cfg,
+                    SecretUpdate {
+                        db_password: SecretChange::Keep,
+                        ssh_password: SecretChange::Keep,
+                        ssh_key_passphrase: SecretChange::Keep,
+                    },
+                )
+                .unwrap();
+            let e = apply(&f, p.plan_id, None).await.unwrap_err();
+            assert!(matches!(
+                e,
+                DbError::Blocked { .. } | DbError::PlanStale { .. }
+            ));
+            if read_only {
+                assert!(matches!(
+                    f.sm.object_action_preview(f.id, create()).await,
+                    Err(DbError::Blocked { .. })
+                ));
+            }
+            assert!(!f.server.executed().iter().any(|s| s.starts_with("CREATE")));
+        }
+    }
+    #[tokio::test]
+    async fn expired_plan_never_sends_ddl() {
+        let mut f = fixture().await;
+        f.sm = f.sm.with_plan_ttl(Duration::ZERO);
+        let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+        assert!(matches!(
+            apply(&f, p.plan_id, None).await,
+            Err(DbError::PlanExpired)
+        ));
+    }
+    #[tokio::test]
+    async fn failed_rollback_never_claims_success_or_rollback() {
+        let f = fixture_kind("InnoDB", None, DbKind::Postgres).await;
+        let p =
+            f.sm.object_action_preview(f.id, drop_table(true))
+                .await
+                .unwrap();
+        f.server.script(vec![Err(lost(true))]);
+        *f.server.rollback.lock().unwrap() = Some(lost(true));
+        let r = apply(&f, p.plan_id, Some("items")).await.unwrap();
+        assert_eq!(r.outcome, ActionOutcome::Unknown);
+        assert!(r.error.unwrap().outcome_unknown);
+    }
+    #[tokio::test]
+    async fn history_failure_after_commit_preserves_success() {
+        let f = fixture_kind("InnoDB", None, DbKind::Postgres).await;
+        let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+        let emit = |stage: &str| {
+            if stage == "committing" {
+                f.repo.delete(f.id).unwrap();
+            }
+        };
+        let r =
+            f.sm.object_action_apply(p.plan_id, true, None, Uuid::new_v4(), &emit)
+                .await
+                .unwrap();
+        assert_eq!(r.outcome, ActionOutcome::Applied);
+        assert!(r.warnings.iter().any(|w| w.contains("History")));
+        assert_eq!(
+            f.server
+                .executed()
+                .iter()
+                .filter(|s| s.starts_with("CREATE SCHEMA"))
+                .count(),
+            1
+        );
+    }
+    #[tokio::test]
+    async fn transaction_open_refuses_preview() {
+        let f = fixture().await;
+        let p =
+            f.sm.query_plan(
+                "q",
+                f.id,
+                Some("shop".into()),
+                "BEGIN",
+                dnt_query::Target::All,
+            )
+            .await
+            .unwrap();
+        let done = Arc::new(Notify::new());
+        let notify = done.clone();
+        f.sm.query_run(
+            p.plan_id,
+            false,
+            dntdatabase::run_events::RunOptions {
+                max_rows: 1000,
+                continue_on_error: false,
+            },
+            Arc::new(move |event| {
+                if matches!(event, dntdatabase::run_events::RunEvent::Done { .. }) {
+                    notify.notify_one();
+                }
+                true
+            }),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), done.notified())
+            .await
+            .unwrap();
+        assert!(matches!(
+            f.sm.object_action_preview(f.id, create()).await,
+            Err(DbError::TransactionOpen)
+        ));
+    }
+    #[tokio::test]
+    async fn postgres_failed_ddl_is_rolled_back_but_commit_loss_is_unknown() {
+        let f = fixture_kind("InnoDB", None, DbKind::Postgres).await;
+        let p =
+            f.sm.object_action_preview(f.id, drop_table(true))
+                .await
+                .unwrap();
+        f.server.script(vec![Err(DbError::Server {
+            code: None,
+            sqlstate: Some("2BP01".into()),
+            message: "dependent view".into(),
+            position: None,
+        })]);
+        let r = apply(&f, p.plan_id, Some("items")).await.unwrap();
+        assert_eq!(r.outcome, ActionOutcome::RolledBack);
+        assert!(f.server.executed().iter().any(|s| s == "ROLLBACK"));
+        let p = f.sm.object_action_preview(f.id, create()).await.unwrap();
+        *f.server.commit.lock().unwrap() = Some(lost(true));
+        let r = apply(&f, p.plan_id, None).await.unwrap();
+        assert_eq!(r.outcome, ActionOutcome::Unknown);
+        assert!(r.error.unwrap().outcome_unknown);
+        assert_eq!(
+            f.server
+                .executed()
+                .iter()
+                .filter(|s| s.starts_with("CREATE SCHEMA"))
+                .count(),
+            1
+        );
+    }
 }

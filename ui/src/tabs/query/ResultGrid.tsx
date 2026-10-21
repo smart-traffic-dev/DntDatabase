@@ -15,6 +15,7 @@ import {
 } from '@glideapps/glide-data-grid';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import type { ObjectRef, Value } from '../../bindings';
+import { api } from '../../api';
 import { ActionMenu, type MenuEntry } from '../../components/ActionMenu';
 import { codeFontSizes, monoFontFamily } from '../../monaco/fonts';
 import { useTokenPx } from '../../theme/useTokenPx';
@@ -45,7 +46,7 @@ import {
   toTsv,
   type Engine,
 } from './gridCopy';
-import { findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
+import { MAX_MATCHES, findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
 import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, selectionSummary, type SelectionLike } from './gridSelection';
 import { selectionStats } from './selectionStats';
 import { GridStats } from './GridStats';
@@ -64,6 +65,50 @@ const NO_LINE = { horizontalBorderColor: 'transparent' };
 const MAX_STATS_CELLS = 50_000;
 /** Two row-number clicks this close (ms) on one row are a double click. */
 const DOUBLE_CLICK_MS = 500;
+const REMOTE_PAGE_BUDGET = 32 * 1024 * 1024;
+
+/** Display pages of a disk-backed query result held in the grid (an LRU within a byte budget). */
+export interface RemotePages {
+  /** The result the pages belong to (null before the first page). */
+  token: string | null;
+  chunks: Value[][][];
+  pages: Map<number, { bytes: number; rows: number; used: number }>;
+  tick: number;
+}
+
+export const emptyPages = (): RemotePages => ({ token: null, chunks: [], pages: new Map(), tick: 0 });
+
+/** True when rows were committed into `page` after it was read with `held` rows. */
+export const pageNeedsRows = (held: number, page: number, rowCount: number) =>
+  held < CHUNK && page * CHUNK + held < rowCount;
+
+/** Marks `page` as just used. */
+export function touchPage(p: RemotePages, page: number): RemotePages {
+  const held = p.pages.get(page);
+  if (!held) return p;
+  const pages = new Map(p.pages);
+  pages.set(page, { ...held, used: p.tick + 1 });
+  return { ...p, pages, tick: p.tick + 1 };
+}
+
+/** `p` with `page` stored, evicting the least recently used other pages beyond `budget` bytes. */
+export function storePage(p: RemotePages, page: number, rows: Value[][], bytes: number, budget: number): RemotePages {
+  const chunks = p.chunks.slice();
+  chunks[page] = rows;
+  const pages = new Map(p.pages);
+  const tick = p.tick + 1;
+  pages.set(page, { bytes, rows: rows.length, used: tick });
+  let total = 0;
+  for (const held of pages.values()) total += held.bytes;
+  const oldest = [...pages.entries()].filter(([at]) => at !== page).sort((a, b) => a[1].used - b[1].used);
+  for (const [at, held] of oldest) {
+    if (total <= budget) break;
+    pages.delete(at);
+    delete chunks[at];
+    total -= held.bytes;
+  }
+  return { ...p, chunks, pages, tick };
+}
 
 type Resized = { cols: ResultSet['columns']; w: Record<number, number> };
 const NO_OVERRIDES: Record<number, number> = {};
@@ -398,9 +443,70 @@ export function ResultGrid({
   }, []);
   useEffect(() => () => clearTimeout(noticeTimer.current), []);
 
+  // Query results keep exact values in the backend. Only visible display pages live here.
+  const [remote, setRemote] = useState<RemotePages>(emptyPages);
+  const remoteRef = useRef(remote);
+  remoteRef.current = remote;
+  const loading = useRef(new Set<number>());
+  const rowCountRef = useRef(result.rowCount);
+  rowCountRef.current = result.rowCount;
+  const tokenRef = useRef(result.token);
+  tokenRef.current = result.token;
+  const visible = useRef({ first: 0, last: 0 });
+  useEffect(() => {
+    setRemote(emptyPages());
+    loading.current.clear();
+  }, [result.token]);
+  const loadPage = useCallback(
+    async (row: number) => {
+      const token = result.token;
+      if (!token || row < 0 || row >= rowCountRef.current) return;
+      const page = Math.floor(row / CHUNK);
+      if (loading.current.has(page)) return;
+      const held = remoteRef.current.pages.get(page);
+      // A page is fetched again only when rows were committed into it since it was read.
+      if (held && !pageNeedsRows(held.rows, page, rowCountRef.current)) {
+        if (held.used !== remoteRef.current.tick) setRemote((previous) => touchPage(previous, page));
+        return;
+      }
+      loading.current.add(page);
+      let again = false;
+      try {
+        const loaded = await api.queryResultPage(token, page * CHUNK, CHUNK);
+        // A page of a replaced result is dropped.
+        if (tokenRef.current !== token) return;
+        setRemote((previous) => storePage({ ...previous, token }, page, loaded.rows, loaded.bytes, REMOTE_PAGE_BUDGET));
+        // Rows committed into the page while it was read.
+        again = pageNeedsRows(loaded.rows.length, page, rowCountRef.current);
+      } catch (error) {
+        say(error instanceof Error ? error.message : 'Could not load result rows', true);
+      } finally {
+        loading.current.delete(page);
+      }
+      if (again) void loadPageRef.current(row);
+    },
+    [result.token, say],
+  );
+  const loadPageRef = useRef(loadPage);
+  loadPageRef.current = loadPage;
+  const loadVisible = useCallback(
+    (first: number, last: number) => {
+      visible.current = { first, last };
+      // The visible pages plus one page of prefetch on each side.
+      for (let page = Math.floor(first / CHUNK) - 1; page <= Math.floor(last / CHUNK) + 1; page++) void loadPage(page * CHUNK);
+    },
+    [loadPage],
+  );
+  // Rows committed while running fill the visible pages without a scroll.
+  useEffect(() => {
+    if (result.token && result.rowCount > 0) loadVisible(visible.current.first, visible.current.last);
+  }, [result.token, result.rowCount, loadVisible]);
+  const chunks = result.token ? remote.chunks : result.chunks;
+  const viewResult = useMemo(() => ({ ...result, chunks }), [result, chunks]);
+
   // Re-fitted once when the first rows arrive (columns can come before rows), never per rows event.
-  const hasRows = (result.chunks[0]?.length ?? 0) > 0;
-  const fitted = useMemo(() => initialWidths(result, font), [result.columns, hasRows, font]); // eslint-disable-line react-hooks/exhaustive-deps
+  const hasRows = (chunks[0]?.length ?? 0) > 0;
+  const fitted = useMemo(() => initialWidths(viewResult, font), [result.columns, hasRows, font]); // eslint-disable-line react-hooks/exhaustive-deps
   // User-resized widths belong to one result: a new result starts from the fitted widths.
   const [resized, setResized] = useState<Resized>({ cols: result.columns, w: {} });
   const overrides = overridesFor(resized, result.columns);
@@ -432,12 +538,13 @@ export function ResultGrid({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
-  const { chunks } = result;
   const gridRef = useRef<DataEditorRef>(null);
 
   const getCellContent = useCallback(
     ([col, row]: Item): GridCell => {
       const value = chunks[Math.floor(row / CHUNK)]?.[row % CHUNK]?.[col];
+      // A stored row not fetched yet (or evicted) is loading, never an empty value.
+      if (!value && result.token) return { kind: GridCellKind.Loading, allowOverlay: false };
       if (!value) return { kind: GridCellKind.Text, data: '', displayData: '', allowOverlay: false };
       const view = cellView(value);
       const max = charsForWidth(widths[col] ?? MIN_COL_WIDTH, charPx);
@@ -456,7 +563,7 @@ export function ResultGrid({
         themeOverride: status ? { ...(view.kind === 'null' ? nullStyle : {}), ...statusStyle[status] } : view.kind === 'null' ? nullStyle : undefined,
       };
     },
-    [chunks, nullStyle, statusStyle, widths, charPx, editing],
+    [chunks, result.token, nullStyle, statusStyle, widths, charPx, editing],
   );
 
   const onCellEdited = useCallback(
@@ -474,10 +581,10 @@ export function ResultGrid({
 
   const getCellsForSelection = useCallback(
     (rect: Rectangle) =>
-      selectionCells(result, rect, (n) => {
+      selectionCells(viewResult, rect, (n) => {
         say(tooLargeMessage(n), true);
       }),
-    [result, say],
+    [viewResult, say],
   );
 
   const drawHeader = useCallback<DrawHeaderCallback>(
@@ -524,13 +631,14 @@ export function ResultGrid({
   const selRef = useRef(sel);
   selRef.current = sel;
   const selectCell = useCallback((col: number, row: number) => {
+    void loadPage(row);
     setSel({
       columns: CompactSelection.empty(),
       rows: CompactSelection.empty(),
       current: { cell: [col, row], range: { x: col, y: row, width: 1, height: 1 }, rangeStack: [] },
     });
     gridRef.current?.scrollTo(col, row);
-  }, []);
+  }, [loadPage]);
 
   const summary = selectionSummary(sel, result.rowCount, result.columns.length);
   useEffect(() => onSelectionSummary?.(summary), [summary, onSelectionSummary]);
@@ -541,13 +649,51 @@ export function ResultGrid({
     if (total < 2 || total > MAX_STATS_CELLS) return null;
     const picked = selectionBlock(sel, result.rowCount, colCount, MAX_STATS_CELLS);
     if (!picked.ok) return null;
-    return selectionStats(blockValues(result, picked.block).flat(), total);
-  }, [sel, result]);
+    // Statistics over rows that are not resident would count them as NULL.
+    if (result.token && picked.block.rows.some((r) => !viewResult.chunks[Math.floor(r / CHUNK)]?.[r % CHUNK])) return null;
+    return selectionStats(blockValues(viewResult, picked.block).flat(), total);
+  }, [sel, result, viewResult]);
 
   // ---- copy ----
   const copyWith = useCallback(
     async (mode: CopyMode, cellColumn?: number | null) => {
-      const outcome = copyOutcome(mode, selRef.current, result, {
+      if (result.token && mode !== 'column') {
+        const picked = selectionBlock(selRef.current, result.rowCount, result.columns.length, MAX_COPY_CELLS);
+        if (!picked.ok) return say(tooLargeMessage(picked.cells), true);
+        if (picked.block.rows.length === 0 || picked.block.cols.length === 0) return say('Select cells first', true);
+        const cols =
+          mode === 'insert' ? Array.from({ length: result.columns.length }, (_, index) => index) : picked.block.cols;
+        try {
+          const values = await api.queryResultValues(result.token, picked.block.rows, cols);
+          let text: string;
+          let message: string;
+          if (mode === 'insert') {
+            const table = tableRef ?? singleSourceTable(result.columns);
+            const made = toInsertStatements({
+              table: table ? qualifiedTable(table, engine) : TABLE_PLACEHOLDER,
+              engine,
+              columns: result.columns.map((column) => column.name),
+              rows: values,
+              rowNumbers: picked.block.rows.map((row) => row + (firstRowNumber ?? 1)),
+            });
+            if (!made.ok) return say(made.message, true);
+            text = made.text;
+            message = `Copied ${countLabel(values.length, 'INSERT')}`;
+          } else {
+            const names = cols.map((col) => result.columns[col]?.name ?? '');
+            const cells = values.length * cols.length;
+            const what = cells === 1 ? '1 cell' : countLabel(values.length, 'row');
+            text = mode === 'csv' ? toCsv(values, names) : toTsv(values, mode === 'tsv-headers' ? names : null);
+            message = `Copied ${what}${mode === 'csv' ? ' as CSV' : mode === 'tsv-headers' ? ' with headers' : ''}`;
+          }
+          if (await writeClipboard(text)) say(message, false);
+          else say('Could not write to the clipboard', true);
+        } catch (error) {
+          say(error instanceof Error ? error.message : 'Could not read the exact result values', true);
+        }
+        return;
+      }
+      const outcome = copyOutcome(mode, selRef.current, viewResult, {
         engine,
         tableRef,
         cellsCapped,
@@ -558,12 +704,32 @@ export function ResultGrid({
       if (await writeClipboard(outcome.text)) say(outcome.message, false);
       else say('Could not write to the clipboard', true);
     },
-    [result, engine, tableRef, cellsCapped, firstRowNumber, say],
+    [result, viewResult, engine, tableRef, cellsCapped, firstRowNumber, say],
   );
 
   // ---- find ----
   const [find, setFind] = useState<{ query: string; at: number } | null>(null);
-  const found = useMemo(() => (find ? findMatches(result, find.query) : null), [find, result]);
+  const localFound = useMemo(() => (find ? findMatches(viewResult, find.query) : null), [find, viewResult]);
+  const [storedFound, setStoredFound] = useState<{ matches: { row: number; col: number }[]; capped: boolean } | null>(null);
+  useEffect(() => {
+    if (!result.token || !find?.query) {
+      setStoredFound(null);
+      return;
+    }
+    let current = true;
+    void api
+      .queryResultFind(result.token, find.query, MAX_MATCHES)
+      .then((matches) => {
+        if (current) setStoredFound(matches);
+      })
+      .catch((error) => {
+        if (current) say(error instanceof Error ? error.message : 'Could not search this result', true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [result.token, find?.query, result.rowCount, say]);
+  const found = result.token ? storedFound : localFound;
   const foundRef = useRef(found);
   foundRef.current = found;
   const showMatch = useCallback(
@@ -619,6 +785,35 @@ export function ResultGrid({
   // ---- record view ----
   const [record, setRecord] = useState(false);
   const recordRow = Math.min(Math.max(0, currentRow(sel) ?? 0), Math.max(0, result.rowCount - 1));
+  const [recordValues, setRecordValues] = useState<{ row: number; values: Value[] } | null>(null);
+  useEffect(() => {
+    if (!record || !result.token || result.columns.length === 0) {
+      setRecordValues(null);
+      return;
+    }
+    let current = true;
+    const cols = result.columns.map((_, index) => index);
+    void api
+      .queryResultValues(result.token, [recordRow], cols)
+      .then((rows) => {
+        if (current) setRecordValues({ row: recordRow, values: rows[0] ?? [] });
+      })
+      .catch((error) => {
+        if (current) say(error instanceof Error ? error.message : 'Could not load the exact record', true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [record, recordRow, result.token, result.columns, say]);
+  const recordResult = useMemo(() => {
+    if (!recordValues || recordValues.row !== recordRow) return viewResult;
+    const recordChunks = viewResult.chunks.slice();
+    const at = Math.floor(recordRow / CHUNK);
+    const chunk = (recordChunks[at] ?? []).slice();
+    chunk[recordRow % CHUNK] = recordValues.values;
+    recordChunks[at] = chunk;
+    return { ...viewResult, chunks: recordChunks };
+  }, [viewResult, recordValues, recordRow]);
   const moveRecord = useCallback(
     (delta: -1 | 1) => {
       const row = currentRow(selRef.current) ?? 0;
@@ -754,12 +949,12 @@ export function ResultGrid({
       items.push({ label: 'Open value editor', hint: 'Shift+Enter', run: () => onOpenValue(row, col) });
     }
     if (onColumn && row >= 0 && row < result.rowCount && extraCellMenu) {
-      const value = cellValue(result, row, col);
+      const value = cellValue(viewResult, row, col);
       const extra = extraCellMenu({ row, col, value, column: result.columns[col]?.name ?? '', selection: selRef.current });
       if (extra.length > 0) items.push({ separator: true }, ...extra);
     }
     return items;
-  }, [menu, copyWith, extraCellMenu, onOpenValue, result]);
+  }, [menu, copyWith, extraCellMenu, onOpenValue, result, viewResult]);
 
   return (
     <div
@@ -815,6 +1010,7 @@ export function ResultGrid({
             smoothScrollY
             gridSelection={sel}
             onGridSelectionChange={setSel}
+            onVisibleRegionChanged={result.token ? (range) => loadVisible(range.y, range.y + range.height - 1) : undefined}
             // Ctrl+F and Ctrl+G belong to the grid tools above, not Glide's built-in search.
             keybindings={{ search: false }}
             onCellClicked={onCellClicked}
@@ -835,7 +1031,7 @@ export function ResultGrid({
         </div>
         {record && (
           <RecordView
-            result={result}
+            result={recordResult}
             row={recordRow}
             rowNumber={recordRow + first}
             onMove={moveRecord}

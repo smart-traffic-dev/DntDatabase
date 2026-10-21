@@ -8,6 +8,7 @@ import { useRunPrompt } from '../store/runPrompt';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
+import { ObjectActionDialog } from './ObjectActionDialog';
 import { AboutDialog } from './AboutDialog';
 import { ShortcutsDialog } from './ShortcutsDialog';
 import { ConnectionDialog } from './ConnectionDialog';
@@ -207,7 +208,9 @@ export function DialogHost() {
   const reload = () => useTree.getState().reloadStored();
 
   let dialog = null;
-  if (request?.kind === 'newConnection') {
+  if (request?.kind === 'objectAction') {
+    dialog = <ObjectActionDialog request={request} onClose={closeRequest} />;
+  } else if (request?.kind === 'newConnection') {
     dialog = (
       <ConnectionDialog
         mode="create"

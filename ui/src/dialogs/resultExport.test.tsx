@@ -35,7 +35,8 @@ function play(stmts: PlanStmtView[], truncated = false): TabRun {
   const events: RunEvent[] = [
     { t: 'statement_start', index: 0, range: [0, 8] },
     { t: 'result_start', result_id: 1, index: 0, columns: [col] },
-    { t: 'rows', result_id: 1, rows: [[{ t: 'Int', v: 1 }], [{ t: 'Int', v: 2 }]] },
+    { t: 'result_stored', result_id: 1, token: 'tok-1' },
+    { t: 'rows_stored', result_id: 1, start: 0, row_count: 2 },
     { t: 'result_end', result_id: 1, row_count: 2, affected: null, truncated, elapsed_ms: 1 },
     { t: 'done', stop: null, elapsed_ms: 1 },
   ];
@@ -53,7 +54,16 @@ function queryTab(run: TabRun): string {
 
 beforeEach(() => {
   resetStores();
-  mockBackend({});
+  mockBackend({
+    query_result_page: () => ({
+      rows: [[{ t: 'Int', v: 1 }], [{ t: 'Int', v: 2 }]],
+      truncated_cells: [],
+      offset: 0,
+      committed_rows: 2,
+      done: true,
+      bytes: 16,
+    }),
+  });
   shownResult.clear();
 });
 
@@ -75,10 +85,9 @@ describe('result export requests', () => {
       title: 'Export result 1',
       engine: 'mysql',
       loadedCount: 2,
-      all: { kind: 'query', connectionId: ids.prod, planId: 'p1', index: 0 },
+      all: { kind: 'query', connectionId: ids.prod, token: 'tok-1' },
       allUnavailable: null,
     });
-    expect(r.rows()).toEqual([[{ t: 'Int', v: 1 }], [{ t: 'Int', v: 2 }]]);
     expect(r.loadedNote).toBe('Only the first 2 rows were fetched.');
     expect(queryExportRequest(id, 5)).toBeNull();
   });
@@ -101,7 +110,7 @@ describe('result export requests', () => {
     await user.click(screen.getByTestId('result-export'));
     expect(useDialogs.getState().request?.kind).toBe('exportResult');
     expect(await screen.findByRole('dialog', { name: 'Export result 1' })).toBeInTheDocument();
-    expect(screen.getByRole('radio', { name: 'All rows (read again)' })).toBeEnabled();
+    expect(screen.getByRole('radio', { name: 'Exact stored result (2 rows)' })).toBeChecked();
   });
 
   it('openExportDialog (menu hook) exports what the active query tab shows', () => {

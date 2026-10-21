@@ -1,3 +1,4 @@
+import type { ObjectAction } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { useTree, type TreeNode } from '../store/tree';
@@ -18,6 +19,34 @@ interface Props {
 
 const uuidOf = (nodeId: string) => nodeId.slice(nodeId.indexOf(':') + 1);
 
+export function objectActionItems(node: TreeNode): Item[] {
+  const connectionId = connectionIdOf(node.id);
+  if (!connectionId) return [];
+  const stored = useConnections.getState();
+  const cfg = stored.summaries.get(connectionId)?.config;
+  if (!cfg || !stored.info.has(connectionId)) return [];
+  const pg = cfg.kind === 'postgres';
+  const item = (label: string, action: ObjectAction, danger = false): Item => ({
+    label, danger, disabled: cfg.read_only,
+    run: () => useDialogs.getState().requestDialog({ kind: 'objectAction', connectionId, action }),
+  });
+  if (node.kind === 'connection' && !pg) return [item('Create database\u2026', { kind: 'create_namespace', database: '', name: '' })];
+  if (node.kind === 'database' && node.scope) {
+    if (pg) return [item('Create schema\u2026', { kind: 'create_namespace', database: node.scope.database, name: '' })];
+    return [item('Drop database\u2026', { kind: 'drop_namespace', database: node.scope.database, name: node.scope.database }, true)];
+  }
+  if (node.kind === 'schema' && node.scope?.schema && pg) return [item('Drop schema\u2026', { kind: 'drop_namespace', database: node.scope.database, name: node.scope.schema }, true)];
+  const object = node.objectRef;
+  if (node.kind !== 'object' || !object) return [];
+  if (object.kind === 'Table') return [
+    item('Rename table\u2026', { kind: 'rename_table', object, name: object.name }),
+    item('Truncate table\u2026', { kind: 'truncate_table', object }, true),
+    item('Drop table\u2026', { kind: 'drop_object', object }, true),
+  ];
+  if (object.kind === 'View' || (pg && object.kind === 'MaterializedView')) return [item('Drop view\u2026', { kind: 'drop_object', object }, true)];
+  return [];
+}
+
 function itemsFor(node: TreeNode): Item[] {
   const tree = useTree.getState();
   const dialogs = useDialogs.getState();
@@ -36,6 +65,7 @@ function itemsFor(node: TreeNode): Item[] {
         ? { label: 'Close', run: () => void tree.closeConnection(connectionId) }
         : { label: 'Open', hint: 'Enter', run: () => tree.expand(node.id) },
       newQuery,
+      ...objectActionItems(node),
       SEP,
       { label: 'Edit', run: () => dialogs.requestDialog({ kind: 'editConnection', id: connectionId }) },
       { label: 'Duplicate', run: () => void tree.duplicateConnection(connectionId) },
@@ -83,12 +113,13 @@ function itemsFor(node: TreeNode): Item[] {
       { label: 'Open', hint: 'Enter', run: () => openObjectTab(node) },
       ...(queryable ? [{ label: 'Select top 1000', run: () => void openSelectTop(node) }] : []),
       newQuery,
+      ...objectActionItems(node),
       SEP,
       refresh,
       copy,
     ];
   }
-  return [newQuery, SEP, refresh, copy];
+  return [newQuery, ...objectActionItems(node), SEP, refresh, copy];
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {

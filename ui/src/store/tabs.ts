@@ -18,6 +18,9 @@ import type { QueryDoc } from './queryTabs';
 export interface ObjectTabRef {
   id: string;
   kind: 'object';
+  /** A DDL outcome is unknown: hide cached data until the user verifies the object. */
+  needsVerification?: boolean;
+  resourceRevision?: number;
   connectionId: string;
   objectRef: ObjectRef;
   title: string;
@@ -140,6 +143,8 @@ interface TabsState {
   /** Rebinds a query tab to another connection (or none). */
   bind(id: string, connectionId: string | null): void;
   rename(id: string, title: string): void;
+  /** DDL changes object identities without moving tabs between groups. */
+  replaceObjectTabs(replacements: Record<string, ObjectTabRef | null>): void;
   close(id: string): void;
   /** Closes every object tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
@@ -444,6 +449,32 @@ export const useTabs = create<TabsState>()((set, get) => {
       for (const t of s.tabs) groupOf[t.id] ??= first;
       set(settle({ ...s, tree: nextTree, groups, groupOf, focusedGroupId: rename.get(saved.focused) ?? first, maximizedGroupId: undefined }));
     },
+    replaceObjectTabs: (replacements) => update((s) => {
+      const tabs = s.tabs.flatMap((tab) => {
+        if (tab.kind !== 'object' || !(tab.id in replacements)) return [tab];
+        const replacement = replacements[tab.id];
+        return replacement ? [replacement] : [];
+      });
+      const groupOf = { ...s.groupOf };
+      for (const [id, replacement] of Object.entries(replacements)) {
+        const home = groupOf[id];
+        delete groupOf[id];
+        if (replacement && home) groupOf[replacement.id] = home;
+      }
+      const groups = s.groups.map((g) => {
+        if (!g.activeId || !(g.activeId in replacements)) return g;
+        const replacement = replacements[g.activeId];
+        if (replacement) return { ...g, activeId: replacement.id };
+        const members = groupTabs(s, g.id);
+        const at = members.findIndex((t) => t.id === g.activeId);
+        const surviving = (t: Tab) => !(t.id in replacements) || replacements[t.id] !== null;
+        const next = members.slice(at + 1).find(surviving) ?? members.slice(0, at).reverse().find(surviving);
+        return { ...g, activeId: next ? replacements[next.id]?.id ?? next.id : undefined };
+      });
+      let next: Core = { ...s, tabs, groupOf, groups };
+      for (const g of s.groups) next = dropIfEmpty(next, g.id);
+      return next;
+    }),
     bind: (id, connectionId) =>
       set((s) => ({ tabs: s.tabs.map((t) => (t.id === id && t.kind === 'query' ? { ...t, connectionId } : t)) })),
     rename: (id, title) =>

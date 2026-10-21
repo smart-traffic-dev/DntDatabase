@@ -75,6 +75,16 @@ for (const e of engines) {
       const rows = Number((await summaryText()).match(/(\d+) rows/)![1]);
       expect(rows).toBeGreaterThan(0);
       await expect(byId('result-grid')).toBeDisplayed();
+      // The rows are read from the backend result store page by page: real cells render.
+      await browser.waitUntil(
+        async () =>
+          browser.execute(() =>
+            [...document.querySelectorAll('[data-testid="result-grid"] [role="gridcell"]')].some((c) =>
+              /^\d+$/.test(c.textContent?.trim() ?? ''),
+            ),
+          ),
+        { timeout: 15_000, timeoutMsg: 'no stored result cells rendered' },
+      );
       await evidence(`${e.prefix}-02-select-grid`);
 
       // 3. Script with an error: Messages show it and the editor carries a marker.
@@ -85,7 +95,7 @@ for (const e of engines) {
         async () => {
           if (await byId('run-confirm').isDisplayed()) return true;
           if (await byId('panel-messages').isDisplayed()) await byId('panel-messages').click();
-          return (await $$('[data-testid="message-line"].error')).length > 0;
+          return (await $$('[data-testid="message-line"].error').length) > 0;
         },
         { timeout: 30_000, timeoutMsg: 'script neither asked nor failed' },
       );
@@ -95,11 +105,11 @@ for (const e of engines) {
         await byId('run-confirm').waitForDisplayed({ reverse: true, timeout: 15_000 });
       }
       await byId('panel-messages').click();
-      await browser.waitUntil(async () => (await $$('[data-testid="message-line"].error')).length > 0, {
+      await browser.waitUntil(async () => (await $$('[data-testid="message-line"].error').length) > 0, {
         timeout: 30_000,
         timeoutMsg: 'no error message line',
       });
-      await browser.waitUntil(async () => (await $$('.monaco-editor .squiggly-error')).length > 0, {
+      await browser.waitUntil(async () => (await $$('.monaco-editor .squiggly-error').length) > 0, {
         timeout: 10_000,
         timeoutMsg: 'no error marker in the editor',
       });
@@ -113,11 +123,11 @@ for (const e of engines) {
       await byId('run-confirm-run').click();
       await byId('run-confirm').waitForDisplayed({ reverse: true, timeout: 15_000 });
       await byId('panel-messages').click();
-      await browser.waitUntil(async () => (await $$('[data-testid="message-line"]')).length >= 3, {
+      await browser.waitUntil(async () => (await $$('[data-testid="message-line"]').length) >= 3, {
         timeout: 30_000,
         timeoutMsg: 'setup script did not finish',
       });
-      expect((await $$('[data-testid="message-line"].error')).length).toBe(0);
+      expect((await $$('[data-testid="message-line"].error').length)).toBe(0);
       await evidence(`${e.prefix}-05-setup-done`);
 
       // 5. DELETE asks; Cancel runs nothing.
@@ -171,7 +181,7 @@ for (const e of engines) {
       await byId('run-confirm-name').setValue('e2e_guard');
       await byId('run-confirm-run').click();
       await byId('run-confirm').waitForDisplayed({ reverse: true, timeout: 15_000 });
-      await browser.waitUntil(async () => (await $$('[data-testid="message-line"]')).length > 0, { timeout: 30_000 });
+      await browser.waitUntil(async () => (await $$('[data-testid="message-line"]').length) > 0, { timeout: 30_000 });
       await evidence(`${e.prefix}-11-cleanup`);
       // Both engines have a dnt_fixture: fold this connection so the next run picks its own.
       await collapseRow(e.conn.name);

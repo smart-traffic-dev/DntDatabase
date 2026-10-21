@@ -301,9 +301,9 @@ describe('QueryToolbar', () => {
       await user.click(screen.getByTestId('query-more'));
       const menu = screen.getByRole('menu', { name: 'More query actions' });
       const labels = [...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent);
-      expect(labels.slice(0, 7)).toEqual(['Explain', 'Explain Analyze', 'Format SQL', 'Limit 1,000', 'Limit 10,000', 'Limit 100,000', 'Limit 1,000,000']);
-      expect(within(menu).getByRole('menuitemradio', { name: /Limit 10,000$/ })).toHaveAttribute('aria-checked', 'true');
-      await user.click(within(menu).getByRole('menuitemradio', { name: /Limit 1,000$/ }));
+      expect(labels.slice(0, 7)).toEqual(['Explain', 'Explain Analyze', 'Format SQL', 'Display limit 1,000', 'Display limit 10,000', 'Display limit 100,000', 'Display limit 1,000,000']);
+      expect(within(menu).getByRole('menuitemradio', { name: /Display limit 10,000$/ })).toHaveAttribute('aria-checked', 'true');
+      await user.click(within(menu).getByRole('menuitemradio', { name: /Display limit 1,000$/ }));
       expect(useQueryDocs.getState().docs.get(id)!.rowLimit).toBe(1000);
     });
   });

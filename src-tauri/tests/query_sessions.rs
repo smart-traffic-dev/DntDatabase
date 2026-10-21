@@ -2000,14 +2000,16 @@ async fn events_follow_contract() {
     let f = fixture(DbKind::MySql);
     let id = open(&f, config(DbKind::MySql)).await;
     let events = run_text(&f, id, "SELECT rows_1200", opts()).await;
+    // Rows go to the result store; events only announce committed ranges.
     assert_eq!(
         events.tags(),
         [
             "statement_start",
             "result_start",
-            "rows",
-            "rows",
-            "rows",
+            "result_stored",
+            "rows_stored",
+            "rows_stored",
+            "rows_stored",
             "result_end",
             "done"
         ]
@@ -2020,16 +2022,38 @@ async fn events_follow_contract() {
     assert_eq!(list[1]["result_id"], 0);
     assert_eq!(list[1]["index"], 0);
     assert_eq!(list[1]["columns"][0]["name"], "n");
-    let sizes: Vec<usize> = events
-        .of("rows")
+    assert_eq!(list[2]["result_id"], 0);
+    let ranges: Vec<(u64, u64)> = events
+        .of("rows_stored")
         .iter()
-        .map(|e| e["rows"].as_array().unwrap().len())
+        .map(|e| {
+            (
+                e["start"].as_u64().unwrap(),
+                e["row_count"].as_u64().unwrap(),
+            )
+        })
         .collect();
-    assert_eq!(sizes, [500, 500, 200]);
-    assert_eq!(list[5]["row_count"], 1200);
-    assert_eq!(list[5]["truncated"], false);
-    assert_eq!(list[6]["stop"], Json::Null);
-    assert!(list[6]["elapsed_ms"].is_number());
+    assert_eq!(ranges, [(0, 500), (500, 500), (1000, 200)]);
+    assert_eq!(list[6]["row_count"], 1200);
+    assert_eq!(list[6]["truncated"], false);
+    assert_eq!(list[7]["stop"], Json::Null);
+    assert!(list[7]["elapsed_ms"].is_number());
+    // The exact rows are read back by page and by selected cell.
+    let token: uuid::Uuid = list[2]["token"].as_str().unwrap().parse().unwrap();
+    let page = f.sm.results().page(token, 500, 500).unwrap();
+    assert_eq!(
+        (page.rows.len(), page.committed_rows, page.done),
+        (500, 1200, true)
+    );
+    assert_eq!(
+        f.sm.results().values(token, &[1199], &[0]).unwrap(),
+        [[page_value_of(&f, token, 1199)]]
+    );
+}
+
+/// The exact value of `row` / column 0 of a stored result, read through a page.
+fn page_value_of(f: &Fixture, token: uuid::Uuid, row: u64) -> Value {
+    f.sm.results().page(token, row, 1).unwrap().rows[0][0].clone()
 }
 
 #[tokio::test]
@@ -2037,14 +2061,20 @@ async fn partial_batches_are_coalesced() {
     let f = fixture(DbKind::MySql);
     let id = open(&f, config(DbKind::MySql)).await;
     let events = run_text(&f, id, "SELECT trickle", opts()).await;
-    let rows = events.of("rows");
-    assert!((1..=2).contains(&rows.len()), "{} rows events", rows.len());
-    let all: Vec<i64> = rows
-        .iter()
-        .flat_map(|e| e["rows"].as_array().unwrap().clone())
-        .map(|r| r[0]["v"].as_i64().unwrap())
-        .collect();
-    assert_eq!(all, (0..100).collect::<Vec<_>>());
+    let stored = events.of("rows_stored");
+    assert!(
+        (1..=2).contains(&stored.len()),
+        "{} rows_stored events",
+        stored.len()
+    );
+    let token: uuid::Uuid = events.of("result_stored")[0]["token"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let page = f.sm.results().page(token, 0, 500).unwrap();
+    let all: Vec<Value> = page.rows.into_iter().map(|r| r[0].clone()).collect();
+    assert_eq!(all, (0..100).map(Value::Int).collect::<Vec<_>>());
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ import { useTabs, type ObjectTabRef } from '../store/tabs';
 /** How "all rows" are read again on the backend (none: only the loaded rows can be exported). */
 export type ExportAll =
   | { kind: 'table'; connectionId: string; obj: ObjectRef; sort: SortSpec[]; filter: DataFilter | null }
-  | { kind: 'query'; tabId: string; connectionId: string; planId: string; index: number };
+  | { kind: 'query'; tabId: string; connectionId: string; token: string };
 
 export interface ExportRequest {
   /** Dialog title, e.g. "Export orders". */
@@ -114,8 +114,7 @@ export function queryExportRequest(tabId: string, at: number): ExportRequest | n
   const connectionId = run.origin?.connectionId ?? doc?.connectionId ?? null;
   if (!connectionId) return null;
   const alive = planAlive(run, doc);
-  const unavailable = queryAllUnavailable(run, result, alive);
-  const planId = run.plan?.plan_id ?? null;
+  const unavailable = result.token ? null : queryAllUnavailable(run, result, alive);
   return {
     title: `Export result ${at + 1}`,
     engine: dialectOfConnection(connectionId),
@@ -126,7 +125,7 @@ export function queryExportRequest(tabId: string, at: number): ExportRequest | n
     loadedCount: result.rowCount,
     loadedNote: result.truncated ? `Only the first ${plural(result.rowCount, 'row')} were fetched.` : null,
     partialBinaries: countPartialBinaries(resultRows(result)),
-    all: unavailable || !planId ? null : { kind: 'query', tabId, connectionId, planId, index: result.index },
+    all: unavailable || !result.token ? null : { kind: 'query', tabId, connectionId, token: result.token },
     allUnavailable: unavailable,
   };
 }

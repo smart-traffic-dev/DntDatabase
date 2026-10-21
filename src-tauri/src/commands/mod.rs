@@ -11,6 +11,7 @@ pub mod connections;
 pub mod data;
 pub mod export;
 pub mod favorites;
+pub mod objects;
 pub mod query;
 pub mod settings;
 pub mod transfer;
@@ -121,6 +122,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             connections::close_connection,
             connections::connection_state,
             connections::trust_host_key,
+            objects::object_action_preview,
+            objects::object_action_apply,
+            objects::object_action_cancel,
             browse::list_databases,
             browse::list_schemas,
             browse::list_objects,
@@ -138,6 +142,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             query::query_close_tab,
             query::query_run,
             query::query_cancel,
+            query::query_result_page,
+            query::query_result_values,
+            query::query_result_find,
             query::query_explain,
             query::query_plan_statement,
             transfer::export_connections,
@@ -166,6 +173,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             export::export_rows,
             export::export_table,
             export::export_query,
+            export::export_query_result,
+            export::export_query_result_cancel,
             export::reveal_export,
             export::export_pick_path,
             window::open_devtools,

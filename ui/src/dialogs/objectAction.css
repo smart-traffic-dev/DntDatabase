@@ -1,0 +1,2 @@
+.object-action-dialog label { display: flex; flex-direction: column; gap: var(--dnt-space-2); margin-block: var(--dnt-space-3); }
+.object-action-sql { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; padding: var(--dnt-space-3); border: 1px solid var(--dnt-border-subtle); border-radius: var(--dnt-radius-sm); background: var(--dnt-bg-sunken); }
