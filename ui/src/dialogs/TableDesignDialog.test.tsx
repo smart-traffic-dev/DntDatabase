@@ -117,6 +117,8 @@ it('stale_offers_reopen', async () => {
   expect(await screen.findByRole('alert')).toHaveTextContent('The table changed since you opened it.');
   const stale = useTableDesigns.getState().byTab[tab.id]!.draft;
   expect(useTableDesigns.getState().byTab[tab.id]!.staleDraft).toEqual(stale);
+  // The definition the draft was edited from is kept with it (its changes are measured against it).
+  expect(useTableDesigns.getState().byTab[tab.id]!.staleBase).toEqual(opened().def);
   await user.click(screen.getByRole('button', { name: 'Reopen' }));
   expect(onClose).toHaveBeenCalled();
   await vi.waitFor(() => expect(opens()).toBe(2));

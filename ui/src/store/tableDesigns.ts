@@ -32,6 +32,8 @@ export interface DesignState {
   subTab: DesignSubTab;
   /** The draft of an apply that found the table changed (`plan_stale`), kept for comparison after reopening. */
   staleDraft: TableDef | null;
+  /** The definition `staleDraft` was edited from (what its changes are measured against). */
+  staleBase: TableDef | null;
 }
 
 /** Most undo steps kept per design. */
@@ -74,8 +76,11 @@ interface DesignsStore {
    * re-keyed to a new table name). Call it right before the tabs store changes the id.
    */
   rekey(oldId: string, newId: string): void;
-  /** Remembers `draft` as the one a stale apply left behind (see `DesignState.staleDraft`). */
-  setStaleDraft(tabId: string, draft: TableDef | null): void;
+  /**
+   * Remembers `draft` (edited from `base`) as the one a stale apply left behind (see
+   * `DesignState.staleDraft`); `null` forgets both.
+   */
+  setStaleDraft(tabId: string, draft: TableDef | null, base?: TableDef | null): void;
   /** Puts `lostDraft` back as the draft (an undoable edit) once the design is open again. */
   restoreLostDraft(tabId: string): void;
   /** Forgets the tab's design and closes its backend session. */
@@ -98,6 +103,7 @@ const blank = (): DesignState => ({
   lostDesignId: null,
   subTab: 'columns',
   staleDraft: null,
+  staleBase: null,
 });
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -166,6 +172,49 @@ export function countChanges(base: TableDef, draft: TableDef): number {
   const keptOrder = draft.columns.filter((c) => c.original !== null && baseOrder.includes(c.original)).map((c) => c.original!);
   if (!deepEqual(baseOrder.filter((k) => keptOrder.includes(k)), keptOrder)) n++;
   return n;
+}
+
+/** One line per element of a list added, removed, renamed or modified (matched by `original`). */
+function describeList(label: string, base: Element[], draft: Element[]): string[] {
+  const baseByKey = new Map(base.map((b) => [b.original ?? b.name, b]));
+  const kept = new Set<string>();
+  const lines: string[] = [];
+  for (const d of draft) {
+    const b = d.original === null ? undefined : baseByKey.get(d.original);
+    if (!b) {
+      lines.push(`${label} "${d.name}" added`);
+      continue;
+    }
+    kept.add(d.original!);
+    if (deepEqual(d, b)) continue;
+    if (d.name === b.name) lines.push(`${label} "${d.name}" modified`);
+    else lines.push(`${label} "${b.name}" renamed to "${d.name}"${deepEqual({ ...d, name: b.name }, b) ? '' : ' and modified'}`);
+  }
+  for (const [key, b] of baseByKey) if (!kept.has(key)) lines.push(`${label} "${b.name}" removed`);
+  return lines;
+}
+
+/**
+ * The changes of `draft` against `base`, one line per element (the same elements `countChanges`
+ * counts): the table's name, columns, their order, the primary key, indexes, foreign keys, checks,
+ * options and comment.
+ */
+export function describeChanges(base: TableDef, draft: TableDef): string[] {
+  const lines: string[] = [];
+  if (base.name !== draft.name) lines.push(`Table renamed to "${draft.name}"`);
+  lines.push(...describeList('Column', base.columns, draft.columns));
+  const baseOrder = base.columns.map((c) => c.original ?? c.name);
+  const keptOrder = draft.columns.filter((c) => c.original !== null && baseOrder.includes(c.original)).map((c) => c.original!);
+  if (!deepEqual(baseOrder.filter((k) => keptOrder.includes(k)), keptOrder)) lines.push('Columns reordered');
+  if (!deepEqual(base.primary_key, draft.primary_key)) {
+    lines.push(draft.primary_key === null ? 'Primary key removed' : base.primary_key === null ? 'Primary key added' : 'Primary key modified');
+  }
+  lines.push(...describeList('Index', base.indexes, draft.indexes));
+  lines.push(...describeList('Foreign key', base.foreign_keys, draft.foreign_keys));
+  lines.push(...describeList('Check', base.checks, draft.checks));
+  if (!deepEqual(base.options, draft.options)) lines.push('Table options changed');
+  if (base.comment !== draft.comment) lines.push('Comment changed');
+  return lines;
 }
 
 export const useTableDesigns = create<DesignsStore>()((set, get) => {
@@ -285,7 +334,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       clearTimer(tabId);
       lastCoalesce.delete(tabId);
       bump(tabId);
-      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null, lostDesignId: null, staleDraft: null });
+      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null, lostDesignId: null, staleDraft: null, staleBase: null });
     },
     async reload(tabId) {
       const target = targets.get(tabId);
@@ -322,7 +371,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
         return { byTab: { ...rest, [newId]: state } };
       });
     },
-    setStaleDraft: (tabId, draft) => patch(tabId, { staleDraft: draft }),
+    setStaleDraft: (tabId, draft, base = null) => patch(tabId, { staleDraft: draft, staleBase: draft ? base : null }),
     restoreLostDraft(tabId) {
       const state = entry(tabId);
       const lost = state?.lostDraft;

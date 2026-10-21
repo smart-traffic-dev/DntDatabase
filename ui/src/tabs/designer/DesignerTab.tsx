@@ -1,9 +1,9 @@
-import { useEffect, useId, type KeyboardEvent } from 'react';
+import { useEffect, useId, useState, type KeyboardEvent } from 'react';
 import type { ElementRef, TableDef } from '../../bindings';
 import { useConnections } from '../../store/connections';
 import { useDialogs } from '../../store/dialogs';
 import { useQueryDocs } from '../../store/queryTabs';
-import { confirmDiscardDesign, useTableDesigns } from '../../store/tableDesigns';
+import { confirmDiscardDesign, describeChanges, useTableDesigns } from '../../store/tableDesigns';
 import type { DesignTabRef } from '../../store/tabs';
 import { addColumn } from './columnModel';
 import { ColumnInspector } from './ColumnInspector';
@@ -18,9 +18,28 @@ import { DesignerHeader, subPanelId, subTabId } from './DesignerHeader';
 import { SqlPreview } from './SqlPreview';
 import './designer.css';
 
+/** The changes of the draft a stale apply left behind, read-only (for comparison, never restored wholesale). */
+function PreviousDraft({ lines }: { lines: string[] }) {
+  return (
+    <section className="dz-previous" aria-label="Previous draft">
+      <strong className="dz-caption">Your previous changes</strong>
+      {lines.length === 0 ? (
+        <span className="dz-subtle">No changes.</span>
+      ) : (
+        <ul>
+          {lines.map((line, i) => (
+            <li key={i}>{line}</li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
 /** The table designer (board 10): header, the section's editor with its inspector, and the live SQL. */
 export function DesignerTab({ tab }: { tab: DesignTabRef }) {
   const uid = useId();
+  const [showPrevious, setShowPrevious] = useState(false);
   const state = useTableDesigns((s) => s.byTab[tab.id]);
   const dirty = useTableDesigns((s) => s.isDirty(tab.id));
   const changes = useTableDesigns((s) => s.changeCount(tab.id));
@@ -49,7 +68,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
   }
 
   const designs = useTableDesigns.getState();
-  const { open, draft, render, loading, lostDraft, subTab, selection } = state;
+  const { open, draft, render, loading, lostDraft, subTab, selection, staleDraft } = state;
   const lost = lostDraft !== null;
   const reopened = lost && open.design_id !== state.lostDesignId;
   const readOnlyReason = open.def.read_only_reason ?? (open.read_only ? 'the connection is read-only.' : null);
@@ -109,6 +128,25 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
           )}
         </div>
       ) : null}
+      {staleDraft ? (
+        <div className="dz-banner dz-banner-warning" role="status">
+          <span>The table changed. Your previous draft is kept for comparison.</span>
+          <button type="button" className="btn small" aria-expanded={showPrevious} onClick={() => setShowPrevious((v) => !v)}>
+            {showPrevious ? 'Hide previous draft' : 'Show previous draft'}
+          </button>
+          <button
+            type="button"
+            className="btn small"
+            onClick={() => {
+              setShowPrevious(false);
+              designs.setStaleDraft(tab.id, null);
+            }}
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+      {staleDraft && showPrevious ? <PreviousDraft lines={describeChanges(state.staleBase ?? open.def, staleDraft)} /> : null}
       {state.error ? (
         <div className="dz-banner dz-banner-error" role="alert">
           <span>{state.error}</span>

@@ -49,6 +49,21 @@
   color: var(--dnt-status-info-fg);
 }
 
+/* The previous draft of a stale apply: a read-only list of its changes. */
+.dz-previous {
+  flex: none;
+  max-height: 160px;
+  overflow: auto;
+  padding: var(--dnt-space-2) var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+.dz-previous ul {
+  margin: var(--dnt-space-1) 0 0;
+  padding-left: var(--dnt-space-4);
+}
+
 .dz-empty-state .dz-banner {
   border: 1px solid var(--dnt-status-danger-border);
   border-radius: var(--dnt-radius-md);

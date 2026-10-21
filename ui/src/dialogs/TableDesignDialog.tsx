@@ -104,8 +104,8 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
     if (isDesignLost(e)) return lost();
     if (e.kind === 'plan_expired') setExpired(true);
     if (isStale(e)) {
-      const draft = useTableDesigns.getState().byTab[id]?.draft ?? null;
-      useTableDesigns.getState().setStaleDraft(id, draft);
+      const state = useTableDesigns.getState().byTab[id];
+      useTableDesigns.getState().setStaleDraft(id, state?.draft ?? null, state?.open?.def ?? null);
       setStale(true);
       setError(STALE_MESSAGE);
       return;

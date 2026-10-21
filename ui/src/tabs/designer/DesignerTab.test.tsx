@@ -186,6 +186,29 @@ describe('DesignerTab', () => {
     expect(screen.getByRole('button', { name: 'Add column' })).toBeDisabled();
   });
 
+  it('after a stale apply the previous draft is kept for comparison, read-only, until dismissed', async () => {
+    const user = userEvent.setup();
+    setup();
+    await screen.findByRole('table', { name: 'Columns' });
+    const base = def();
+    const previous = { ...base, columns: [base.columns[0]!, { ...base.columns[1]!, name: 'amount' }, column('note', { original: null })] };
+    act(() => useTableDesigns.getState().setStaleDraft(tab.id, previous, base));
+    const banner = screen.getByText('The table changed. Your previous draft is kept for comparison.').closest('.dz-banner') as HTMLElement;
+    expect(screen.queryByRole('region', { name: 'Previous draft' })).toBeNull();
+    await user.click(within(banner).getByRole('button', { name: 'Show previous draft' }));
+    const panel = screen.getByRole('region', { name: 'Previous draft' });
+    expect(within(panel).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Column "total" renamed to "amount"', 'Column "note" added']);
+    // A comparison only: the current draft is untouched and nothing restores the old one wholesale.
+    expect(rows().map((r) => r.getAttribute('data-column'))).toEqual(['id', 'total']);
+    expect(screen.queryByRole('button', { name: /restore/i })).toBeNull();
+    await user.click(within(banner).getByRole('button', { name: 'Hide previous draft' }));
+    expect(screen.queryByRole('region', { name: 'Previous draft' })).toBeNull();
+    await user.click(within(banner).getByRole('button', { name: 'Dismiss' }));
+    expect(screen.queryByText('The table changed. Your previous draft is kept for comparison.')).toBeNull();
+    expect(useTableDesigns.getState().byTab[tab.id]!.staleDraft).toBeNull();
+    expect(useTableDesigns.getState().byTab[tab.id]!.staleBase).toBeNull();
+  });
+
   it('a failed open shows the error', async () => {
     mockBackend({ table_design_open: () => { throw new Failure(appError('internal', 'no such table')); }, table_design_close: () => null });
     useTabs.getState().open(tab);

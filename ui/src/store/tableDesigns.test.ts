@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ColumnDef, DesignOpen, DesignRender, TableDef } from '../bindings';
 import { appError, callsOf, Failure, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
 import { useConnections } from './connections';
-import { useTableDesigns } from './tableDesigns';
+import { describeChanges, useTableDesigns } from './tableDesigns';
 
 const column = (name: string): ColumnDef => ({
   original: name,
@@ -62,6 +62,57 @@ async function loaded() {
 }
 
 const lostError = () => new Failure(appError('config', 'This designer is no longer open; open the table again.', { field: 'design_id' }));
+
+describe('previous draft kept after a stale apply', () => {
+  it('describes each change of a draft against its base', () => {
+    const base: TableDef = {
+      ...def,
+      columns: [column('id'), column('total'), column('gone')],
+      indexes: [{ original: 'ix_total', name: 'ix_total', unique: false, parts: [], method: null, include: [], visible: true, comment: null, constraint: false, locked: false }],
+      checks: [{ original: 'ck', name: 'ck', expression: 'total > 0', locked: false }],
+    };
+    const draft: TableDef = {
+      ...base,
+      name: 'orders2',
+      columns: [{ ...column('total'), name: 'amount' }, { ...column('id'), nullable: false }, { ...column('note'), original: null }],
+      primary_key: null,
+      indexes: [],
+      checks: [{ original: 'ck', name: 'ck', expression: 'total >= 0', locked: false }],
+      options: { ...base.options, engine: 'MyISAM' },
+      comment: 'hello',
+    };
+    expect(describeChanges(base, draft)).toEqual([
+      'Table renamed to "orders2"',
+      'Column "total" renamed to "amount"',
+      'Column "id" modified',
+      'Column "note" added',
+      'Column "gone" removed',
+      'Columns reordered',
+      'Primary key removed',
+      'Index "ix_total" removed',
+      'Check "ck" modified',
+      'Table options changed',
+      'Comment changed',
+    ]);
+    expect(describeChanges(base, base)).toEqual([]);
+  });
+
+  it('keeps the base with the stale draft and forgets both together', async () => {
+    mockBackend({ table_design_open: () => opened(), table_design_render: () => rendered, table_design_close: () => null });
+    await store().load(TAB, ids.prod, scope, 'orders');
+    const draft = addColumn('note')(def);
+    store().setStaleDraft(TAB, draft, def);
+    expect(state().staleDraft).toEqual(draft);
+    expect(state().staleBase).toEqual(def);
+    // Reopening keeps them for comparison; the draft starts from the new structure.
+    await store().reload(TAB);
+    expect(state().staleBase).toEqual(def);
+    expect(state().draft).toEqual(def);
+    store().setStaleDraft(TAB, null);
+    expect(state().staleDraft).toBeNull();
+    expect(state().staleBase).toBeNull();
+  });
+});
 
 describe('table design fix round', () => {
   it('a failed reload keeps the draft and the live session, and sets the error', async () => {
