@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useConnections } from '../../store/connections';
@@ -124,6 +124,30 @@ describe('QueryToolbar', () => {
     expect(stop).toHaveAttribute('title', 'Stop (Esc)');
     act(() => useQueryRun.setState({ runs: new Map() }));
     expect(screen.getByTestId('query-run')).toBeEnabled();
+  });
+
+  it('the second click of a double-click on Run does not stop the run it started; focus stays on the slot', () => {
+    vi.useFakeTimers();
+    try {
+      const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+      render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+      mockBackend({ query_cancel: () => null });
+      const run = screen.getByTestId('query-run');
+      run.focus();
+      act(() => useQueryRun.setState({ runs: new Map([[id, { ...startRun(emptyRun, PLAN as never, 0), runId: 'r1' }]]) }));
+      const stop = screen.getByTestId('query-stop');
+      // Same element: the keyboard focus is not lost when Run turns into Stop.
+      expect(stop).toBe(run);
+      expect(stop).toHaveFocus();
+      fireEvent.click(stop, { detail: 2 });
+      fireEvent.click(stop, { detail: 1 });
+      expect(callsOf('query_cancel')).toHaveLength(0);
+      act(() => void vi.advanceTimersByTime(500));
+      fireEvent.click(stop, { detail: 1 });
+      expect(callsOf('query_cancel')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('an_export_of_the_tabs_result_makes_it_busy_and_stoppable', () => {

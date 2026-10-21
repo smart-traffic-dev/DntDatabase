@@ -17,6 +17,7 @@ import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
 import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon } from './icons';
+import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
 import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
@@ -105,12 +106,12 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
       { separator: true },
       { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
       { separator: true },
-      { label: 'Split right', hint: 'Ctrl+\\', disabled: !canSplit, run: () => useTabs.getState().splitTab(tab.id, 'right') },
-      { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !canSplit, run: () => useTabs.getState().splitTab(tab.id, 'down') },
+      { label: 'Split right', hint: 'Ctrl+\\', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'right'), focusFocusedGroup()) },
+      { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'down'), focusFocusedGroup()) },
       ...groups
         .map((g, i) => ({ g, i }))
         .filter(({ g }) => g.id !== groupId)
-        .map(({ g, i }) => ({ label: `Move to group ${i + 1}`, run: () => useTabs.getState().moveTab(tab.id, g.id) })),
+        .map(({ g, i }) => ({ label: `Move to group ${i + 1}`, run: () => (useTabs.getState().moveTab(tab.id, g.id), focusFocusedGroup()) })),
       { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
       { separator: true },
       { label: 'Copy title', run: () => void navigator.clipboard?.writeText(tab.title).catch(() => undefined) },

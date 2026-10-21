@@ -238,6 +238,9 @@ function MenuButton({
   );
 }
 
+/** Stop ignores clicks this long after it replaced Run (a double-click on Run must not cancel). */
+const STOP_GUARD_MS = 400;
+
 /**
  * Run split button: Run (primary; "Run on PROD" as a danger outline on a Production connection)
  * or, while the tab runs or exports, Stop (danger) in the same place. Its menu holds Run all,
@@ -263,6 +266,10 @@ function RunSplit({
   iconOnly: boolean;
 }) {
   const update = useQueryDocs((s) => s.update);
+  const stopShownAt = useRef(0);
+  useLayoutEffect(() => {
+    if (stoppable) stopShownAt.current = Date.now();
+  }, [stoppable]);
   const prod = env === 'production';
   const runLabel = prod ? 'Run on PROD' : 'Run';
   const tone = stoppable ? 'danger' : prod ? 'danger-outline' : 'qt-primary';
@@ -308,7 +315,12 @@ function RunSplit({
           data-testid="query-stop"
           aria-label={iconOnly ? 'Stop' : undefined}
           title={exporting ? 'Stop the export (Esc)' : 'Stop (Esc)'}
-          onClick={() => void stopQuery(doc.id)}
+          onClick={(e) => {
+            // The second click of a double-click on Run lands here once Run became Stop: ignore it,
+            // and any click in the first moments after Stop appeared.
+            if (e.detail > 1 || Date.now() - stopShownAt.current < STOP_GUARD_MS) return;
+            void stopQuery(doc.id);
+          }}
         >
           <StopIcon />
           {!iconOnly && <span>Stop</span>}

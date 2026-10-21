@@ -105,7 +105,7 @@ function ImplicitCommitWarning({ stmts }: { stmts: PlanStmtView[] }) {
  * (UPDATE/DELETE without WHERE, TRUNCATE; any connection) also gets a warning, with the server's
  * row estimate when there is one. A statement that asks for a typed name (`confirm_name`) gets a
  * box, and Run stays off until each matches exactly. One dialog covers it all. Cancel is the default:
- * it has the focus, and Enter in a name box presses it too (the Modal's alertdialog rule).
+ * it has the focus; Enter in a name box does nothing (the Modal's alertdialog rule).
  */
 export function RunConfirmDialog({ plan, onDone }: Props) {
   const total = plan.stmts.length;

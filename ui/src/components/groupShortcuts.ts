@@ -1,4 +1,5 @@
 import { useTabs, type EditorLayout } from '../store/tabs';
+import { focusFocusedGroup } from './focusGroup';
 import { closeGroup } from './tabActions';
 
 /** How long a `Ctrl+K` waits for its second key. */
@@ -21,6 +22,7 @@ function consume(e: KeyboardEvent) {
 function splitActive(direction: 'right' | 'down') {
   const { activeId, splitTab } = useTabs.getState();
   if (activeId) splitTab(activeId, direction);
+  focusFocusedGroup();
 }
 
 /**
@@ -37,19 +39,33 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
   const key = e.key.toLowerCase();
   const tabs = useTabs.getState();
 
+  const target = e.target instanceof Element ? e.target : null;
+  const inEditor = !!target?.closest('.sql-editor');
   if (chordAt && Date.now() - chordAt <= CHORD_MS && !e.altKey && !e.shiftKey) {
     if (key === 'control' || key === 'meta') return false;
     chordAt = 0;
     const run = (action: () => void) => {
-      consume(e);
+      // In the SQL editor Monaco saw the Ctrl+K too: let the key reach it (prevented, so it is
+      // not typed) so it leaves its own chord mode instead of waiting for another key.
+      if (inEditor) e.preventDefault();
+      else consume(e);
       action();
       return true;
     };
-    if (key === '\\') return run(() => splitActive('down'));
-    if (key === 'arrowright') return run(() => tabs.focusNeighbour(1));
-    if (key === 'arrowleft') return run(() => tabs.focusNeighbour(-1));
+    // Exact modifiers: Ctrl+K Ctrl+1..7 are Monaco's fold levels, Ctrl+K Ctrl+W is not ours.
+    if (key === '\\' && ctrl) return run(() => splitActive('down'));
+    if (ctrl) return false;
+    if (key === 'arrowright') return run(() => {
+      tabs.focusNeighbour(1);
+      focusFocusedGroup();
+    });
+    if (key === 'arrowleft') return run(() => {
+      tabs.focusNeighbour(-1);
+      focusFocusedGroup();
+    });
     if (PRESETS[key]) return run(() => tabs.setLayout(PRESETS[key]!));
-    if (key === 'w') return run(() => void closeGroup());
+    // With one group, "close the group" would close every tab: as in the View menu, it needs two.
+    if (key === 'w' && tabs.groups.length > 1) return run(() => void closeGroup());
     return false;
   }
   chordAt = 0;
@@ -62,18 +78,22 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
       if (!group) return false;
       consume(e);
       tabs.focusGroup(group.id);
+      focusFocusedGroup();
       return true;
     }
     if (key === 'arrowright' || key === 'arrowleft') {
       consume(e);
       tabs.moveToNeighbour(key === 'arrowright' ? 1 : -1);
+      focusFocusedGroup();
       return true;
     }
     return false;
   }
   if (e.altKey || e.shiftKey) return false;
   if (key === 'k') {
-    chordAt = Date.now();
+    // Fields other than the SQL editor (the sidebar filter, the palette input) keep their keys.
+    const inField = !!target?.closest('input, textarea, select, [contenteditable="true"]') && !inEditor;
+    if (!inField) chordAt = Date.now();
     return false;
   }
   if (key === '\\') {

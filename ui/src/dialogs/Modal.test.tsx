@@ -70,7 +70,13 @@ describe('Modal frame (spec §6)', () => {
       </Modal>,
     );
     const user = userEvent.setup();
+    // Enter in a text box does nothing: no run, and no silent cancel of what was just typed.
     await user.type(screen.getByLabelText('Type the name'), 'orders{Enter}');
+    expect(cancel).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    // Enter elsewhere in the dialog is the safe default.
+    screen.getByRole('alertdialog').focus();
+    await user.keyboard('{Enter}');
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(run).not.toHaveBeenCalled();
     // Enter on a focused button still presses that button.

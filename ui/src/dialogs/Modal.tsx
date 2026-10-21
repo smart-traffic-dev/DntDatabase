@@ -64,6 +64,12 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
     if (e.key === 'Enter' && role === 'alertdialog') {
       const target = e.target as HTMLElement;
       if (target.closest('button, a[href], textarea, select')) return;
+      // In a text box (a typed confirmation name) Enter does nothing: cancelling there would drop
+      // what the user just typed, with nothing run and nothing said.
+      if (target.closest('input:not([type="checkbox"], [type="radio"])')) {
+        e.preventDefault();
+        return;
+      }
       const safe = ref.current?.querySelector<HTMLElement>('[data-cancel]');
       if (safe) {
         e.preventDefault();
