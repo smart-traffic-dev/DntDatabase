@@ -13,7 +13,7 @@ import { explainQuery, note as noteError, runFromEditor, stopQuery, txAction, us
 import { setTxMode, txOf, useTxMode } from '../../store/txMode';
 import type { EnvTag, TxMode } from '../../bindings';
 import { EDIT_COMMANDS, editorOf } from './activeEditor';
-import { analyzeAvailable } from './explainTree';
+import { ANALYZE_NEEDS, useRunGate } from './runGate';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 import { MAX_GROUPS, useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
@@ -153,7 +153,6 @@ function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runn
   );
 }
 
-const ANALYZE_NEEDS = 'Explain Analyze needs MySQL 8.0.18 or later';
 
 /**
  * A button that opens an `ActionMenu` under itself (right-aligned: the cluster is at the strip's
@@ -651,7 +650,6 @@ function formatTab(tabId: string) {
 const limitText = (n: number) => n.toLocaleString('en-US');
 
 function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
-  const summaries = useConnections((s) => s.summaries);
   const env = useConnections((s) => (doc.connectionId ? (s.summaries.get(doc.connectionId)?.config.env_tag ?? null) : null));
   const update = useQueryDocs((s) => s.update);
   const bar = useRef<HTMLDivElement>(null);
@@ -664,18 +662,8 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   // "All rows" of a result being exported runs on this tab's session: the tab is busy.
   const exporting = useExporting((s) => s.runs.has(doc.id));
   const canSplit = useTabs((s) => s.groups.length < MAX_GROUPS);
-  const runnable = !!doc.connectionId && summaries.has(doc.connectionId) && canRun(run) && !starting && !exporting;
+  const { runnable, why, analyzeOk } = useRunGate(doc.id, doc.connectionId);
   const stoppable = canStop(run) || exporting;
-  const why = runnable
-    ? undefined
-    : !doc.connectionId
-      ? 'Choose a connection to run queries'
-      : !summaries.has(doc.connectionId)
-        ? 'The connection of this tab no longer exists'
-        : exporting
-          ? 'An export is reading this tab’s result — stop it first'
-          : 'A statement is running — stop it first';
-  const analyzeOk = analyzeAvailable(useConnections((s) => (doc.connectionId ? s.info.get(doc.connectionId) : undefined)));
   const busy = !canRun(run) || starting || exporting;
   const commitItems = useCommitMode(doc.id, busy);
 

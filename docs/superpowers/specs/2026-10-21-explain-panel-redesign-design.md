@@ -74,7 +74,8 @@ One 44 px row, only for tree plans with cost data:
   same information in one line and stays accurate for any plan size.
 - Segment colours: the hottest node is `--dnt-status-warning-solid`; the others are
   `--dnt-accent` fading toward `--dnt-bg-app` by rank (`color-mix`, 100 % → 25 %); `Other` is
-  `--dnt-border-strong`. Labels are drawn only inside segments wide enough to hold them.
+  `--dnt-border-strong`. No text inside segments (contrast on the faded ones); the `title` and
+  `aria-label` carry the label, cost and share.
 - Without Analyze: show a `Not analyzed` tag and no time; keep cost/rows estimates, and add a
   **Run Explain Analyze** button (see *Explain Analyze buttons*).
 

@@ -1,80 +1,112 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { PlanNode } from '../../bindings';
+import { SearchIcon } from '../../components/icons';
 import { emptyRun, useQueryRun } from '../../store/queryRun';
+import { useQueryDocs } from '../../store/queryTabs';
+import { explainQuery } from '../../store/runQuery';
+import { showToast } from '../../store/toasts';
 import { hottestNode, selfCosts } from './explainTree';
+import {
+  ancestorsOf,
+  fmtMs,
+  fmtNum,
+  fmtPct,
+  nodeTotals,
+  planWarnings,
+  reportsPerLoop,
+  selfCostTotal,
+  selfShare,
+} from './explainModel';
+import { ExplainDetails } from './ExplainDetails';
+import { ExplainGrid } from './ExplainGrid';
+import { AnalyzeButton, ExplainOverview } from './ExplainOverview';
+import { PlanTreeView } from './PlanTreeView';
+import { useRunGate } from './runGate';
 
-type Costs = Map<PlanNode, number | null>;
+type View = 'tree' | 'grid' | 'raw';
 
-// Rounded first, so float noise (0.9 - 0.55) does not show as 0.35000000000000003.
-const fmt = (n: number) => {
-  const r = Math.round(n * 100) / 100;
-  return Number.isInteger(r) ? String(r) : r.toFixed(2);
-};
-
-function Metrics({ node, costs }: { node: PlanNode; costs: Costs }) {
-  const parts: string[] = [];
-  const own = costs.get(node) ?? null;
-  if (node.est_cost !== null) parts.push(`cost ${fmt(node.est_cost)}`);
-  if (own !== null) parts.push(`self ${fmt(own)}`);
-  if (node.est_rows !== null) parts.push(`rows ${fmt(node.est_rows)}`);
-  if (node.actual_rows !== null) parts.push(`actual rows ${fmt(node.actual_rows)}`);
-  if (node.actual_ms !== null) parts.push(`${fmt(node.actual_ms)} ms`);
-  if (node.loops !== null) parts.push(`loops ${fmt(node.loops)}`);
-  return parts.length > 0 ? <span className="ex-metrics">{parts.join(' · ')}</span> : null;
-}
-
-function TreeNode({ node, hot, costs }: { node: PlanNode; hot: PlanNode | null; costs: Costs }) {
-  const [open, setOpen] = useState(true);
-  const hasChildren = node.children.length > 0;
-  return (
-    <li>
-      <div className={`ex-node${node === hot ? ' hot' : ''}`} data-testid="explain-node">
-        {hasChildren ? (
-          <button
-            type="button"
-            className="ex-toggle"
-            aria-expanded={open}
-            aria-label={open ? `Collapse ${node.label}` : `Expand ${node.label}`}
-            onClick={() => setOpen((v) => !v)}
-          >
-            {open ? '▾' : '▸'}
-          </button>
-        ) : (
-          <span className="ex-toggle" aria-hidden="true" />
-        )}
-        <span className="ex-label">{node.label}</span>
-        {node.detail && <span className="ex-detail">{node.detail}</span>}
-        <Metrics node={node} costs={costs} />
-      </div>
-      {hasChildren && open && (
-        <ul>
-          {node.children.map((c, i) => (
-            <TreeNode key={i} node={c} hot={hot} costs={costs} />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
-
-/** The plan tree, its own costs computed once per plan. */
-function PlanTreeView({ root }: { root: PlanNode }) {
-  const { costs, hot } = useMemo(() => {
-    const costs = selfCosts(root);
-    return { costs, hot: hottestNode(root, costs) };
-  }, [root]);
-  return (
-    <ul className="ex-tree">
-      <TreeNode node={root} hot={hot} costs={costs} />
-    </ul>
-  );
-}
-
-/** The Explain panel of a query tab: plan tree (or table), "Raw" output, and refusals. */
+/**
+ * The Explain panel of a query tab: the plan tree, the flat grid, the engine's raw output, and
+ * the refusals. Selection, filter, collapse and the view live here; the views stay presentational.
+ */
 export function ExplainView({ tabId }: { tabId: string }) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
-  const [raw, setRaw] = useState(false);
+  const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
+  const gate = useRunGate(tabId, connectionId);
+  const perLoop = reportsPerLoop(gate.info);
   const plan = run.explain;
+  const root = plan?.kind === 'tree' ? plan.root : null;
+  const isTable = plan?.kind === 'table';
+
+  const costs = useMemo(
+    () => (root === null ? new Map<PlanNode, number | null>() : selfCosts(root)),
+    [root],
+  );
+  const hot = useMemo(() => (root === null ? null : hottestNode(root, costs)), [root, costs]);
+  const warnings = useMemo(() => (root === null ? new Map() : planWarnings(root)), [root]);
+  const shareTotal = useMemo(() => (root === null ? null : selfCostTotal(costs)), [root, costs]);
+
+  const [view, setView] = useState<View>('tree');
+  const [selected, setSelected] = useState<PlanNode | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<PlanNode>>(new Set());
+  const [filter, setFilter] = useState('');
+
+  // A new plan starts clean: default view, the hottest node selected, everything expanded.
+  useEffect(() => {
+    setView(plan?.kind === 'table' ? 'grid' : 'tree');
+    setSelected(null);
+    setCollapsed(new Set());
+    setFilter('');
+  }, [plan]);
+
+  const mode: View = isTable && view === 'tree' ? 'grid' : view;
+  const current = selected !== null && costs.has(selected) ? selected : (hot ?? root);
+
+  const select = (node: PlanNode) => {
+    setSelected(node);
+    if (root === null) return;
+    // Reveal the node in the tree even when an ancestor is collapsed.
+    setCollapsed((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      for (const ancestor of ancestorsOf(root, node)) next.delete(ancestor);
+      return next;
+    });
+  };
+
+  const toggle = (node: PlanNode) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(node)) next.delete(node);
+      else next.add(node);
+      return next;
+    });
+  };
+
+  const collapseAll = () => {
+    if (root === null) return;
+    const all = new Set<PlanNode>();
+    const visit = (node: PlanNode) => {
+      if (node.children.length > 0) all.add(node);
+      node.children.forEach(visit);
+    };
+    visit(root);
+    setCollapsed(all);
+  };
+
+  const copy = () => {
+    if (!plan) return;
+    void navigator.clipboard
+      ?.writeText(plan.raw)
+      .then(() => showToast({ kind: 'success', title: 'Plan copied' }))
+      .catch(() => undefined);
+  };
+
+  const own = current === null ? null : (costs.get(current) ?? null);
+  const share = current === null ? null : selfShare(current, costs, shareTotal);
+  const planMs = root === null ? null : nodeTotals(root, perLoop).ms;
+  const currentMs = current === null ? null : nodeTotals(current, perLoop).ms;
+  const explain = (analyze: boolean) => void explainQuery(tabId, analyze);
 
   let body;
   if (run.explainError) {
@@ -84,8 +116,25 @@ export function ExplainView({ tabId }: { tabId: string }) {
       </div>
     );
   } else if (!plan) {
-    body = <div className="qr-empty">No plan yet. Run Explain (Ctrl+Shift+E) on the statement at the cursor.</div>;
-  } else if (raw) {
+    body = (
+      <div className="qr-empty ex-start">
+        <p>No plan yet for the statement at the cursor.</p>
+        <div className="ex-start-actions">
+          <button
+            type="button"
+            className="ex-btn primary"
+            disabled={!gate.runnable}
+            title={gate.runnable ? 'Explain (Ctrl+Shift+E)' : gate.why}
+            onClick={() => explain(false)}
+          >
+            Explain <kbd>Ctrl+Shift+E</kbd>
+          </button>
+          <AnalyzeButton gate={gate} onAnalyze={() => explain(true)} label="Explain Analyze" />
+        </div>
+        <p className="ex-start-note">Analyze runs the statement; on Production it asks first.</p>
+      </div>
+    );
+  } else if (mode === 'raw') {
     body = (
       <pre className="ex-raw" data-testid="explain-raw">
         {plan.raw}
@@ -93,39 +142,170 @@ export function ExplainView({ tabId }: { tabId: string }) {
     );
   } else if (plan.kind === 'table') {
     body = (
-      <table className="ex-table" data-testid="explain-table">
-        <thead>
-          <tr>
-            {plan.columns.map((c, i) => (
-              <th key={i}>{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {plan.rows.map((r, i) => (
-            <tr key={i}>
-              {r.map((v, j) => (
-                <td key={j}>{v}</td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      <ExplainGrid
+        plan={plan}
+        costs={costs}
+        warnings={warnings}
+        hot={hot}
+        selected={null}
+        filter={filter}
+        onSelect={() => undefined}
+      />
     );
   } else {
-    body = <PlanTreeView root={plan.root} />;
+    body = (
+      <div className="ex-main">
+        <div className="ex-pane">
+          {mode === 'tree' ? (
+            <PlanTreeView
+              root={plan.root}
+              costs={costs}
+              warnings={warnings}
+              hot={hot}
+              selected={current}
+              collapsed={collapsed}
+              filter={filter}
+              total={shareTotal}
+              perLoop={perLoop}
+              onToggle={toggle}
+              onSelect={select}
+            />
+          ) : (
+            <ExplainGrid
+              plan={plan}
+              costs={costs}
+              warnings={warnings}
+              hot={hot}
+              selected={current}
+              filter={filter}
+              onSelect={select}
+            />
+          )}
+        </div>
+        {current !== null && (
+          <ExplainDetails
+            node={current}
+            costs={costs}
+            total={shareTotal}
+            warnings={warnings.get(current) ?? []}
+            perLoop={perLoop}
+            planMs={planMs}
+          />
+        )}
+      </div>
+    );
   }
 
   return (
     <div className="ex-view" data-testid="explain-view">
       {plan && !run.explainError && (
-        <div className="ex-bar">
-          <button type="button" className="btn small" aria-pressed={raw} onClick={() => setRaw((v) => !v)}>
-            Raw
+        <div className="ex-bar" role="toolbar" aria-label="Explain controls">
+          <div className="ex-views" role="group" aria-label="Plan view">
+            {!isTable && (
+              <button
+                type="button"
+                className="ex-view-btn"
+                aria-pressed={mode === 'tree'}
+                onClick={() => setView('tree')}
+              >
+                Tree
+              </button>
+            )}
+            <button
+              type="button"
+              className="ex-view-btn"
+              aria-pressed={mode === 'grid'}
+              onClick={() => setView('grid')}
+            >
+              Grid
+            </button>
+            <button
+              type="button"
+              className="ex-view-btn"
+              aria-pressed={mode === 'raw'}
+              onClick={() => setView(mode === 'raw' ? (isTable ? 'grid' : 'tree') : 'raw')}
+            >
+              Raw
+            </button>
+          </div>
+
+          {mode !== 'raw' && (
+            <div className="ex-search">
+              <SearchIcon />
+              <input
+                type="text"
+                value={filter}
+                placeholder="Filter nodes…"
+                aria-label="Filter plan nodes"
+                onChange={(e) => setFilter(e.target.value)}
+              />
+              {filter.length > 0 && (
+                <button
+                  type="button"
+                  className="ex-search-clear"
+                  aria-label="Clear filter"
+                  onClick={() => setFilter('')}
+                >
+                  ×
+                </button>
+              )}
+            </div>
+          )}
+
+          {mode === 'tree' && !isTable && (
+            <>
+              <button
+                type="button"
+                className="ex-btn"
+                disabled={filter.trim().length > 0}
+                title={filter.trim().length > 0 ? 'Clear the filter to change the tree' : undefined}
+                onClick={() => setCollapsed(new Set())}
+              >
+                Expand all
+              </button>
+              <button
+                type="button"
+                className="ex-btn"
+                disabled={filter.trim().length > 0}
+                title={filter.trim().length > 0 ? 'Clear the filter to change the tree' : undefined}
+                onClick={collapseAll}
+              >
+                Collapse all
+              </button>
+            </>
+          )}
+
+          <span className="ex-bar-spacer" />
+          <button type="button" className="ex-btn" onClick={copy}>
+            Copy plan
           </button>
         </div>
       )}
+
+      {root !== null && mode !== 'raw' && (
+        <ExplainOverview
+          root={root}
+          costs={costs}
+          warnings={warnings}
+          hot={hot}
+          selected={current}
+          gate={gate}
+          onSelect={select}
+          onAnalyze={() => explain(true)}
+        />
+      )}
+
       <div className="ex-body">{body}</div>
+
+      {root !== null && mode !== 'raw' && current !== null && (
+        <div className="ex-foot" data-testid="explain-foot">
+          <span className="ex-foot-label">{current.label}</span>
+          <span>
+            self {fmtNum(own)} ({fmtPct(share)})
+          </span>
+          {currentMs !== null && <span>{fmtMs(currentMs)}</span>}
+        </div>
+      )}
     </div>
   );
 }
