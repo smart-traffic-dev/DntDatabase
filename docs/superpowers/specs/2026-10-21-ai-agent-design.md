@@ -122,7 +122,8 @@ Mở query tab mới với SQL + comment đầu tab (`-- Đề xuất bởi AI: 
 ### 4.5 Opt-in và đồng ý
 
 - Bật AI cho một connection mở dialog đồng ý: nói rõ dữ liệu dòng sẽ được gửi tới `<host của base URL>`, mức
-  quyền ghi theo env của connection.
+  quyền ghi theo env của connection. Nút "Bật AI" chỉ bật khi người dùng tick "Tôi được phép chia sẻ dữ liệu của
+  database này với endpoint trên"; Enter = Cancel.
 - Đồng ý gắn với origin của endpoint. Đổi base URL sang origin khác → mọi connection đã opt-in phải đồng ý lại.
 - Cờ opt-in không đi theo file export connection (`.dntconn`); import về luôn tắt.
 
