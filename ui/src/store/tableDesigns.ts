@@ -70,6 +70,8 @@ const blank = (): DesignState => ({ open: null, draft: null, past: [], future: [
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 /** Bumped per request of a tab: only the newest answer is kept. */
 const sequence = new Map<string, number>();
+/** Bumped per open / reopen / reload of a tab (never by renders or edits): only the newest open lands. */
+const openSeq = new Map<string, number>();
 const targets = new Map<string, Target>();
 
 const bump = (tabId: string) => {
@@ -173,22 +175,27 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
   /**
    * Opens the design of `target` and swaps it in. The tab keeps its current design (and draft)
    * until the new one is open, and the old backend session closes only after that; a failure
-   * keeps the old state and sets `error`.
+   * keeps the old state and sets `error`. Only a newer open or a dispose supersedes an open
+   * (`openSeq`); edits, renders and `markLost` do not touch it, and edits are ignored meanwhile.
+   * A `lostDraft` present when the open ends stays (the user's work is never dropped here).
    */
-  async function openInto(tabId: string, target: Target, keepLost: boolean) {
+  async function openInto(tabId: string, target: Target) {
     targets.set(tabId, target);
     clearTimer(tabId);
-    const seq = bump(tabId);
+    const seq = (openSeq.get(tabId) ?? 0) + 1;
+    openSeq.set(tabId, seq);
     const had = entry(tabId)?.open ?? null;
     if (had) patch(tabId, { loading: true, error: null });
     else patch(tabId, { ...blank(), loading: true });
     try {
       const open = await api.tableDesignOpen(target.connectionId, target.scope, target.table);
       // The tab was closed, or another load started, while the session opened.
-      if (!entry(tabId) || sequence.get(tabId) !== seq) {
+      if (!entry(tabId) || openSeq.get(tabId) !== seq) {
         closeSession(open.design_id);
         return;
       }
+      // Answers still on their way belong to the old design.
+      bump(tabId);
       patch(tabId, {
         open,
         draft: open.def,
@@ -198,11 +205,10 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
         render: null,
         loading: false,
         error: null,
-        lostDraft: keepLost ? (entry(tabId)?.lostDraft ?? null) : null,
       });
       if (had && had.design_id !== open.design_id) closeSession(had.design_id);
     } catch (e) {
-      if (!entry(tabId) || sequence.get(tabId) !== seq) return;
+      if (!entry(tabId) || openSeq.get(tabId) !== seq) return;
       patch(tabId, { loading: false, error: toAppError(e).message });
       // The old design stays live: its pending live SQL is asked for again.
       if (had && !entry(tabId)?.lostDraft && get().isDirty(tabId)) scheduleRender(tabId);
@@ -211,11 +217,11 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
 
   return {
     byTab: {},
-    load: (tabId, connectionId, scope, table) => openInto(tabId, { connectionId, scope, table }, false),
+    load: (tabId, connectionId, scope, table) => openInto(tabId, { connectionId, scope, table }),
     edit(tabId, recipe) {
       const state = entry(tabId);
-      // A lost design takes no edits: reopen it first.
-      if (!state?.draft || state.lostDraft) return;
+      // A lost design takes no edits (reopen it first), nor does one that is being (re)opened.
+      if (!state?.draft || state.lostDraft || state.loading) return;
       const next = recipe(state.draft);
       if (next === state.draft) return;
       setDraft(tabId, next, [...state.past, state.draft].slice(-UNDO_LIMIT), []);
@@ -223,13 +229,13 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
     undo(tabId) {
       const state = entry(tabId);
       const previous = state?.past.at(-1);
-      if (!state?.draft || !previous) return;
+      if (!state?.draft || !previous || state.loading) return;
       setDraft(tabId, previous, state.past.slice(0, -1), [...state.future, state.draft]);
     },
     redo(tabId) {
       const state = entry(tabId);
       const next = state?.future.at(-1);
-      if (!state?.draft || !next) return;
+      if (!state?.draft || !next || state.loading) return;
       setDraft(tabId, next, [...state.past, state.draft].slice(-UNDO_LIMIT), state.future.slice(0, -1));
     },
     select: (tabId, el) => patch(tabId, { selection: el }),
@@ -242,7 +248,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
     },
     async reload(tabId) {
       const target = targets.get(tabId);
-      if (target) await openInto(tabId, target, false);
+      if (target) await openInto(tabId, target);
     },
     markLost(tabId) {
       const state = entry(tabId);
@@ -253,18 +259,19 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
     },
     async reopen(tabId) {
       const target = targets.get(tabId);
-      if (target) await openInto(tabId, target, true);
+      if (target) await openInto(tabId, target);
     },
     restoreLostDraft(tabId) {
       const state = entry(tabId);
       const lost = state?.lostDraft;
-      if (!state?.draft || !lost) return;
+      if (!state?.draft || !lost || state.loading) return;
       patch(tabId, { lostDraft: null });
       setDraft(tabId, lost, [...state.past, state.draft].slice(-UNDO_LIMIT), []);
     },
     dispose(tabId) {
       clearTimer(tabId);
       sequence.delete(tabId);
+      openSeq.delete(tabId);
       targets.delete(tabId);
       const designId = entry(tabId)?.open?.design_id;
       set((s) => ({ byTab: Object.fromEntries(Object.entries(s.byTab).filter(([id]) => id !== tabId)) }));
@@ -285,6 +292,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
       sequence.clear();
+      openSeq.clear();
       targets.clear();
       set({ byTab: {} });
     },

@@ -112,6 +112,100 @@ describe('table design fix round', () => {
     expect(callsOf('table_design_close')).toEqual([{ designId: 'd1' }]);
   });
 
+  function slowReload() {
+    const slow: { resolve?: (o: DesignOpen) => void } = {};
+    let first = true;
+    mockBackend({
+      table_design_open: () => {
+        if (first) {
+          first = false;
+          return opened();
+        }
+        return new Promise<DesignOpen>((r) => { slow.resolve = r; });
+      },
+      table_design_close: () => null,
+      table_design_render: () => rendered,
+    });
+    return slow;
+  }
+
+  it('edits, undo, redo and a discard during a pending reload do not cancel it', async () => {
+    const slow = slowReload();
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    await vi.advanceTimersByTimeAsync(300);
+    const reloading = store().reload(TAB);
+    expect(state().loading).toBe(true);
+    // Edits are ignored while the reload runs, so nothing is scheduled or superseded.
+    store().edit(TAB, addColumn('b'));
+    store().undo(TAB);
+    store().redo(TAB);
+    expect(state().draft!.columns).toHaveLength(3);
+    expect(state().past).toHaveLength(1);
+    store().discard(TAB);
+    await vi.advanceTimersByTimeAsync(1000);
+    slow.resolve!({ ...opened(), design_id: 'd2' });
+    await reloading;
+    expect(state().loading).toBe(false);
+    expect(state().open!.design_id).toBe('d2');
+    expect(state().draft).toEqual(def);
+    expect(state().error).toBeNull();
+    expect(callsOf('table_design_close')).toEqual([{ designId: 'd1' }]);
+  });
+
+  it('a render answer in flight when the reload lands is dropped', async () => {
+    const slow = slowReload();
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    await vi.advanceTimersByTimeAsync(300);
+    const reloading = store().reload(TAB);
+    slow.resolve!({ ...opened(), design_id: 'd2' });
+    await reloading;
+    expect(state().render).toBeNull();
+    expect(state().loading).toBe(false);
+  });
+
+  it('markLost during a pending reload keeps the draft as lostDraft and the reload still completes', async () => {
+    const slow = slowReload();
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    const reloading = store().reload(TAB);
+    store().markLost(TAB);
+    expect(state().lostDraft!.columns).toHaveLength(3);
+    slow.resolve!({ ...opened(), design_id: 'd2' });
+    await reloading;
+    expect(state().loading).toBe(false);
+    expect(state().open!.design_id).toBe('d2');
+    expect(state().lostDraft!.columns).toHaveLength(3);
+    expect(callsOf('table_design_close')).toEqual([{ designId: 'd1' }]);
+  });
+
+  it('a newer open supersedes an older one: the older session is closed, loading ends once', async () => {
+    const resolvers: ((o: DesignOpen) => void)[] = [];
+    let first = true;
+    mockBackend({
+      table_design_open: () => {
+        if (first) {
+          first = false;
+          return opened();
+        }
+        return new Promise<DesignOpen>((r) => resolvers.push(r));
+      },
+      table_design_close: () => null,
+    });
+    await loaded();
+    const a = store().reload(TAB);
+    const b = store().reload(TAB);
+    resolvers[0]!({ ...opened(), design_id: 'd2' });
+    await a;
+    expect(state().loading).toBe(true);
+    resolvers[1]!({ ...opened(), design_id: 'd3' });
+    await b;
+    expect(state().loading).toBe(false);
+    expect(state().open!.design_id).toBe('d3');
+    expect(callsOf('table_design_close').map((c) => c.designId).sort()).toEqual(['d1', 'd2']);
+  });
+
   it('a render that finds the design gone marks it lost and keeps the draft', async () => {
     mockBackend({ table_design_open: () => opened(), table_design_render: () => { throw lostError(); }, table_design_close: () => null });
     await loaded();
