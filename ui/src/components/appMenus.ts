@@ -4,7 +4,7 @@ import { explainQuery, runFromEditor, stopQuery } from '../store/runQuery';
 import { useDialogs } from '../store/dialogs';
 import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
-import { useTabs, type Tab } from '../store/tabs';
+import { MAX_GROUPS, useTabs, type EditorLayout, type Tab } from '../store/tabs';
 import type { Theme } from '../theme/ThemeProvider';
 import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
 import type { MenuAction, MenuEntry } from './ActionMenu';
@@ -13,7 +13,7 @@ import { addActiveQueryToFavorites, listFavoritesForMenu, openSnippetsManager } 
 import { openExportDialog, toggleFilterBar } from '../dialogs/resultExport';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
-import { closeTab, reopenClosedTab } from './tabActions';
+import { closeGroup, closeTab, reopenClosedTab } from './tabActions';
 import { focusConnectionTree, toggleResults, zoomIn, zoomOut, zoomReset } from './windowActions';
 
 /** What the menu model depends on: plain data, so the builder is a pure function. */
@@ -37,7 +37,17 @@ export interface MenuState {
   stoppable: boolean;
   /** The editor of the active query tab has selected text. */
   hasSelection: boolean;
+  /** The editor group layout and how many groups are open. */
+  layout: EditorLayout;
+  groupCount: number;
 }
+
+const LAYOUTS: { layout: EditorLayout; label: string; key: string }[] = [
+  { layout: 'single', label: 'Single', key: '1' },
+  { layout: 'columns', label: 'Two columns', key: '2' },
+  { layout: 'rows', label: 'Two rows', key: '3' },
+  { layout: 'grid', label: 'Grid 2 × 2', key: '4' },
+];
 
 export interface AppMenu {
   id: 'file' | 'edit' | 'view' | 'query' | 'favorites' | 'tools' | 'help';
@@ -71,6 +81,11 @@ function exitApp() {
     // Not inside Tauri (browser preview).
   }
 }
+
+const splitFocused = (direction: 'right' | 'down') => {
+  const { activeId, splitTab } = useTabs.getState();
+  if (activeId) splitTab(activeId, direction);
+};
 
 const activeTab = (): Tab | undefined => {
   const { tabs, activeId } = useTabs.getState();
@@ -166,6 +181,16 @@ export function buildMenus(s: MenuState): AppMenu[] {
         soon('Tables list'),
         soon('Views list'),
         soon('Functions list'),
+        sep,
+        ...LAYOUTS.map((l) => ({
+          label: `Layout: ${l.label}`,
+          hint: `Ctrl+K ${l.key}`,
+          checked: s.layout === l.layout,
+          run: () => useTabs.getState().setLayout(l.layout),
+        })),
+        { label: 'Split right', hint: 'Ctrl+\\', disabled: !s.hasTab || s.groupCount >= MAX_GROUPS, run: () => splitFocused('right') },
+        { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !s.hasTab || s.groupCount >= MAX_GROUPS, run: () => splitFocused('down') },
+        { label: 'Close group', hint: 'Ctrl+K W', disabled: s.groupCount < 2, run: () => void closeGroup() },
         sep,
         { label: 'Command palette', hint: 'Ctrl+Shift+P', run: showCommandPalette },
         { label: 'Go to object', hint: 'Ctrl+P', run: showQuickOpen },

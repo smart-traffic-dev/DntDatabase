@@ -14,6 +14,8 @@ const base: MenuState = {
   runnable: false,
   stoppable: false,
   hasSelection: false,
+  layout: 'single',
+  groupCount: 1,
 };
 
 const items = (menu: string, state: Partial<MenuState> = {}) =>
@@ -77,12 +79,30 @@ describe('buildMenus', () => {
   });
 
   it('View ticks the current theme and the sidebar toggle', () => {
-    const checked = (state: Partial<MenuState>) => items('View', state).filter((i) => i.checked).map((i) => i.label);
+    const checked = (state: Partial<MenuState>) =>
+      items('View', state)
+        .filter((i) => i.checked && !i.label.startsWith('Layout:'))
+        .map((i) => i.label);
     expect(checked({ theme: 'light', sidebarVisible: false, resultsVisible: false })).toEqual(['Light']);
     expect(checked({ theme: 'dark' })).toEqual(['Dark', 'Show sidebar', 'Show results']);
     expect(checked({ theme: 'system', resultsVisible: false })).toEqual(['System', 'Show sidebar']);
     expect(item('View', 'Light')?.checked).toBe(false);
     expect(item('View', 'Reset layout')?.checked).toBeUndefined();
+  });
+
+  it('View offers the editor layouts (current one ticked) and the splits', () => {
+    const layouts = (state: Partial<MenuState>) =>
+      items('View', state).filter((i) => i.label.startsWith('Layout:')).map((i) => [i.label, i.hint, i.checked]);
+    expect(layouts({ layout: 'rows', groupCount: 2 })).toEqual([
+      ['Layout: Single', 'Ctrl+K 1', false],
+      ['Layout: Two columns', 'Ctrl+K 2', false],
+      ['Layout: Two rows', 'Ctrl+K 3', true],
+      ['Layout: Grid 2 × 2', 'Ctrl+K 4', false],
+    ]);
+    expect(item('View', 'Split right', { hasTab: true })?.hint).toBe('Ctrl+\\');
+    expect(item('View', 'Split right', { hasTab: true, groupCount: 4 })?.disabled).toBe(true);
+    expect(item('View', 'Split down')?.disabled).toBe(true);
+    expect(item('View', 'Close group', { groupCount: 2 })?.disabled).toBe(false);
   });
 
   it('choosing a theme calls setTheme', () => {
@@ -121,7 +141,8 @@ describe('buildMenus', () => {
     expect(item('Tools', 'Developer tools')?.hint).toBe('Ctrl+Shift+I');
     expect(item('Tools', 'Settings…')?.hint).toBe('Ctrl+,');
     expect(item('Help', 'Keyboard shortcuts')?.hint).toBe('F1');
-    expect(items('View').filter((i) => i.hint && i.hint !== 'Coming soon').map((i) => [i.label, i.hint])).toEqual([
+    const group = /^(Layout:|Split|Close group)/;
+    expect(items('View').filter((i) => i.hint && i.hint !== 'Coming soon' && !group.test(i.label)).map((i) => [i.label, i.hint])).toEqual([
       ['Show sidebar', 'Ctrl+B'],
       ['Show results', 'Ctrl+J'],
       ['Filter rows (Data tab)', 'F3'],

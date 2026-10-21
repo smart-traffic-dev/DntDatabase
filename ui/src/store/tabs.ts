@@ -74,6 +74,8 @@ interface TabsState {
   /** Focuses the next / previous group, wrapping around. */
   focusNeighbour(step: 1 | -1): void;
   setLayout(layout: EditorLayout): void;
+  /** Removes a group that holds no tab (never the last group). */
+  dropGroup(groupId: string): void;
   setRatios(ratios: Partial<{ x: number; y: number }>): void;
   arrangement(): Arrangement;
   /** Puts the open tabs back into a saved arrangement (tabs it does not know go to the first group). */
@@ -284,6 +286,7 @@ export const useTabs = create<TabsState>()((set, get) => {
         const focusedGroupId = keep.has(s.focusedGroupId) ? s.focusedGroupId : last;
         return { ...s, groups, groupOf, focusedGroupId, layout };
       }),
+    dropGroup: (groupId) => update((s) => dropIfEmpty(s, groupId)),
     setRatios: (r) =>
       set((s) => ({
         ratios: { x: r.x === undefined ? s.ratios.x : clampRatio(r.x), y: r.y === undefined ? s.ratios.y : clampRatio(r.y) },

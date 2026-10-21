@@ -80,6 +80,15 @@ describe('TitleBar', () => {
     expect(usePalette.getState()).toMatchObject({ open: true, initial: '' });
   });
 
+  it('the layout button picks an editor layout', async () => {
+    render(<TitleBar />);
+    await flush();
+    fireEvent.click(screen.getByRole('button', { name: 'Editor layout' }));
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /Two rows/ }));
+    expect(useTabs.getState().layout).toBe('rows');
+    expect(useTabs.getState().groups).toHaveLength(2);
+  });
+
   it('the search button does not start a window drag', async () => {
     render(<TitleBar />);
     await flush();

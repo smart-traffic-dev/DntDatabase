@@ -1,8 +1,9 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { showQuickOpen } from '../store/palette';
-import { useTabs } from '../store/tabs';
-import { LogoIcon, SearchIcon } from './icons';
+import { useTabs, type EditorLayout } from '../store/tabs';
+import { ActionMenu } from './ActionMenu';
+import { LayoutIcon, LogoIcon, SearchIcon } from './icons';
 import { MenuBar } from './MenuBar';
 import './titleBar.css';
 
@@ -33,6 +34,53 @@ const Glyph = ({ children }: { children: ReactNode }) => (
     {children}
   </svg>
 );
+
+const LAYOUT_ITEMS: { layout: EditorLayout; label: string; hint: string }[] = [
+  { layout: 'single', label: 'Single', hint: 'Ctrl+K 1' },
+  { layout: 'columns', label: 'Two columns', hint: 'Ctrl+K 2' },
+  { layout: 'rows', label: 'Two rows', hint: 'Ctrl+K 3' },
+  { layout: 'grid', label: 'Grid 2 × 2', hint: 'Ctrl+K 4' },
+];
+
+/** Editor layout picker, left of the window buttons. */
+function LayoutButton() {
+  const layout = useTabs((s) => s.layout);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        className="icon-btn titlebar-layout"
+        aria-label="Editor layout"
+        title="Editor layout"
+        aria-haspopup="menu"
+        aria-expanded={menu !== null}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          setMenu({ x: Math.max(8, r.right - 200), y: r.bottom });
+        }}
+      >
+        <LayoutIcon layout={layout} />
+      </button>
+      {menu && (
+        <ActionMenu
+          label="Editor layout"
+          checkRole="radio"
+          x={menu.x}
+          y={menu.y}
+          items={LAYOUT_ITEMS.map((l) => ({
+            label: l.label,
+            hint: l.hint,
+            checked: layout === l.layout,
+            run: () => useTabs.getState().setLayout(l.layout),
+          }))}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
+  );
+}
 
 /**
  * The window's title bar (the native one is off: `decorations: false`). Drag to move (Aero
@@ -114,6 +162,7 @@ export function TitleBar() {
           <kbd className="keycap">Ctrl P</kbd>
         </button>
       </div>
+      <LayoutButton />
       <div className="titlebar-controls">
         <button
           type="button"

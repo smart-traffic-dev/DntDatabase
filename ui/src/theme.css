@@ -542,6 +542,59 @@ textarea:focus-visible,
   border-bottom: 1px solid var(--dnt-border-subtle);
 }
 
+/* Editor groups (spec §4): nested flex rows / columns; splitters draw the 1px lines between groups. */
+.editor-col,
+.editor-row,
+.editor-cell,
+.editor-group {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor-col,
+.editor-group {
+  flex-direction: column;
+}
+
+.editor-col,
+.editor-cell,
+.editor-group {
+  flex: 1;
+}
+
+.editor-group .tab-content {
+  position: relative;
+}
+
+/* Other groups' active tabs stay readable but step back. */
+.tabstrip.unfocused .tab.active {
+  color: var(--dnt-fg-muted);
+  font-weight: 400;
+}
+
+.tabstrip.drop-over {
+  background: var(--dnt-accent-subtle);
+}
+
+/* Where a dragged tab will land: the whole pane (move) or its right / bottom half (split). */
+.drop-zone {
+  position: absolute;
+  inset: 0;
+  z-index: var(--dnt-z-sticky);
+  border: 1px solid var(--dnt-accent);
+  background: var(--dnt-accent-subtle);
+  pointer-events: none;
+}
+
+.drop-zone.zone-right {
+  left: 50%;
+}
+
+.drop-zone.zone-down {
+  top: 50%;
+}
+
 /* Scrolls sideways inside itself; the scrollbar is hidden so it cannot shift the layout. */
 .tabbar {
   flex: 0 1 auto;

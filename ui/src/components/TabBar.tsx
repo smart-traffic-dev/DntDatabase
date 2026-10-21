@@ -1,7 +1,9 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
+  type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type WheelEvent,
@@ -11,15 +13,20 @@ import type { ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
-import { useTabs, type Tab } from '../store/tabs';
+import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
 import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon } from './icons';
 import { openNewQuery } from './newQuery';
 import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
-/** DOM id of a tab's button (the tab panel's `aria-controls` target is `#tab-content`). */
+/** DOM id of a tab's button. */
 export const tabDomId = (id: string) => `tab-${encodeURIComponent(id)}`;
+/** DOM id of a group's tab panel (the `aria-controls` target of its tabs). */
+export const tabContentId = (groupId: string) => `tab-content-${groupId}`;
+
+/** Drag payload type of a tab being moved between groups. */
+export const TAB_DRAG_TYPE = 'text/x-dnt-tab';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
   Table: 'TBL',
@@ -33,10 +40,18 @@ const KIND_LABEL: Record<ObjectKind, string> = {
   Type: 'TYPE',
 };
 
-export function TabBar() {
-  const tabs = useTabs((s) => s.tabs);
-  const activeId = useTabs((s) => s.activeId);
+/** The tab strip of one editor group (by default the focused one). */
+export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
+  const focusedGroupId = useTabs((s) => s.focusedGroupId);
+  const groupId = groupProp ?? focusedGroupId;
+  const allTabs = useTabs((s) => s.tabs);
+  const groupOf = useTabs((s) => s.groupOf);
+  const tabs = useMemo(() => groupTabs({ tabs: allTabs, groupOf }, groupId), [allTabs, groupOf, groupId]);
+  const activeId = useTabs((s) => s.groups.find((g) => g.id === groupId)?.activeId);
+  const groups = useTabs((s) => s.groups);
+  const focused = groupId === focusedGroupId;
   const activate = useTabs((s) => s.activate);
+  const [dropOver, setDropOver] = useState(false);
   const summaries = useConnections((s) => s.summaries);
   // Derived id lists, not the docs / runs maps: typing replaces the docs map on every keystroke.
   // `useShallow` keeps the same array while the ids do not change, so nothing re-renders.
@@ -47,6 +62,7 @@ export function TabBar() {
     useShallow((s) => [...s.runs].filter(([, r]) => (r.txState ?? 'idle') !== 'idle').map(([id]) => id)),
   );
   const canReopen = useTabs((s) => s.closed.length > 0);
+  const canSplit = groups.length < MAX_GROUPS;
   const strip = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuEntry[] } | null>(null);
 
@@ -85,9 +101,16 @@ export function TabBar() {
       { label: 'Close', hint: 'Ctrl+W', run: () => void closeTab(tab) },
       { label: 'Close others', disabled: others.length === 0, run: () => void closeOtherTabs(tab) },
       { label: 'Close tabs to the right', disabled: right.length === 0, run: () => void closeTabsToRight(tab) },
-      { label: 'Close all', disabled: unpinned.length === 0, run: () => void closeAllTabs() },
+      { label: 'Close all', disabled: unpinned.length === 0, run: () => void closeAllTabs(groupId) },
       { separator: true },
       { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
+      { separator: true },
+      { label: 'Split right', hint: 'Ctrl+\\', disabled: !canSplit, run: () => useTabs.getState().splitTab(tab.id, 'right') },
+      { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !canSplit, run: () => useTabs.getState().splitTab(tab.id, 'down') },
+      ...groups
+        .map((g, i) => ({ g, i }))
+        .filter(({ g }) => g.id !== groupId)
+        .map(({ g, i }) => ({ label: `Move to group ${i + 1}`, run: () => useTabs.getState().moveTab(tab.id, g.id) })),
       { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
       { separator: true },
       { label: 'Copy title', run: () => void navigator.clipboard?.writeText(tab.title).catch(() => undefined) },
@@ -130,8 +153,31 @@ export function TabBar() {
   // The roving tab stop: the active tab, else the first one.
   const stopId = tabs.some((t) => t.id === activeId) ? activeId : tabs[0]?.id;
 
+  // Drag a tab onto another group's strip to move it there (before the tab under the pointer).
+  const isTabDrag = (e: DragEvent) => [...(e.dataTransfer?.types ?? [])].includes(TAB_DRAG_TYPE);
+  const onDrop = (e: DragEvent<HTMLDivElement>) => {
+    setDropOver(false);
+    const id = e.dataTransfer.getData(TAB_DRAG_TYPE);
+    if (!id) return;
+    e.preventDefault();
+    const over = (e.target as Element).closest<HTMLElement>('.tab')?.dataset.tabId;
+    const at = over ? tabs.findIndex((t) => t.id === over) : -1;
+    useTabs.getState().moveTab(id, groupId, at >= 0 ? at : undefined);
+  };
+
   return (
-    <div className="tabstrip">
+    <div
+      className={`tabstrip${focused ? '' : ' unfocused'}${dropOver ? ' drop-over' : ''}`}
+      onMouseDown={() => !focused && useTabs.getState().focusGroup(groupId)}
+      onDragOver={(e) => {
+        if (!isTabDrag(e)) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        setDropOver(true);
+      }}
+      onDragLeave={() => setDropOver(false)}
+      onDrop={onDrop}
+    >
       <div role="tablist" aria-label="Open tabs" className="tabbar" ref={strip} onWheel={onWheel}>
         {tabs.map((tab, index) => {
           const conn = tab.connectionId ? summaries.get(tab.connectionId)?.config : undefined;
@@ -146,13 +192,24 @@ export function TabBar() {
             .filter(Boolean)
             .join(' · ');
           return (
-            <div key={tab.id} className={classes} data-tab-id={tab.id} title={tip} onContextMenu={(e) => openContext(e, tab)}>
+            <div
+              key={tab.id}
+              className={classes}
+              data-tab-id={tab.id}
+              title={tip}
+              draggable
+              onDragStart={(e) => {
+                e.dataTransfer.setData(TAB_DRAG_TYPE, tab.id);
+                e.dataTransfer.effectAllowed = 'move';
+              }}
+              onContextMenu={(e) => openContext(e, tab)}
+            >
               <button
                 type="button"
                 role="tab"
                 id={tabDomId(tab.id)}
                 aria-selected={tab.id === activeId}
-                aria-controls="tab-content"
+                aria-controls={tabContentId(groupId)}
                 tabIndex={tab.id === stopId ? 0 : -1}
                 className="tab-label"
                 onClick={() => activate(tab.id)}

@@ -28,6 +28,8 @@ export function useMenuState(): MenuState {
   const stoppable = useQueryRun((s) => canStop(queryTabId ? (s.runs.get(queryTabId) ?? emptyRun) : emptyRun));
   const starting = useStarting((s) => (queryTabId ? s.ids.has(queryTabId) : false));
   const hasSelection = useSelection((s) => (queryTabId ? s.ids.has(queryTabId) : false));
+  const layout = useTabs((s) => s.layout);
+  const groupCount = useTabs((s) => s.groups.length);
   return {
     theme,
     setTheme,
@@ -41,5 +43,7 @@ export function useMenuState(): MenuState {
     runnable: queryTabId !== null && !!bound && stored && idle && !starting,
     stoppable,
     hasSelection,
+    layout,
+    groupCount,
   };
 }

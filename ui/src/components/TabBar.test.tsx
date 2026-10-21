@@ -8,7 +8,7 @@ import { emptyRun, useQueryRun } from '../store/queryRun';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs } from '../store/tabs';
 import { callsOf, config, fail, ids, mockBackend, resetStores } from '../test/backend';
-import { TabBar } from './TabBar';
+import { TabBar, tabContentId } from './TabBar';
 
 const orders = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
 
@@ -185,7 +185,7 @@ describe('TabBar', () => {
     // Only the active tab is in the Tab order.
     expect(tab('gamma')).toHaveAttribute('tabindex', '0');
     expect(tab('alpha')).toHaveAttribute('tabindex', '-1');
-    expect(tab('alpha')).toHaveAttribute('aria-controls', 'tab-content');
+    expect(tab('alpha')).toHaveAttribute('aria-controls', tabContentId(useTabs.getState().focusedGroupId));
 
     act(() => tab('gamma').focus());
     await user.keyboard('{Home}');

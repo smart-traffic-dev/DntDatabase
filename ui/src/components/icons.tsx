@@ -171,6 +171,15 @@ export const EventIcon = () => (
   </Icon>
 );
 
+/** The editor layout as a small diagram: one pane, two columns, two rows or a 2 × 2 grid. */
+export const LayoutIcon = ({ layout }: { layout: 'single' | 'columns' | 'rows' | 'grid' }) => (
+  <Icon size={14}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    {(layout === 'columns' || layout === 'grid') && <path d="M12 4v16" />}
+    {(layout === 'rows' || layout === 'grid') && <path d="M3 12h18" />}
+  </Icon>
+);
+
 export const CloseIcon = () => (
   <Icon size={12} strokeWidth={2}>
     <path d="M6 6l12 12M18 6L6 18" />

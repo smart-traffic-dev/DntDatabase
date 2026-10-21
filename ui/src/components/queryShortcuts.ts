@@ -3,6 +3,7 @@ import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { openDevtools } from './appMenus';
 import { addActiveQueryToFavorites } from './favoritesActions';
+import { onGroupShortcut } from './groupShortcuts';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeTab, cycleTab, goToTab, reopenClosedTab } from './tabActions';
@@ -51,6 +52,7 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
  * Ignored while a modal dialog is open.
  */
 export function onQueryShortcut(e: KeyboardEvent) {
+  if (!document.querySelector('[aria-modal="true"]') && onGroupShortcut(e)) return;
   if (e.altKey || e.repeat) return;
   const ctrl = e.ctrlKey || e.metaKey;
   if (!ctrl && !(e.key === 'F1' && !e.shiftKey)) return;
