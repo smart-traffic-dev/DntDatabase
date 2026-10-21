@@ -2,10 +2,10 @@ import { memo, useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { useShallow } from 'zustand/react/shallow';
 import { Splitter } from '../../components/Splitter';
 import { useConnections } from '../../store/connections';
-import { EDITOR_MIN_PX, EDITOR_RATIO_DEFAULT, RESULT_MIN_PX, editorPixels, useLayout } from '../../store/layout';
+import { EDITOR_MIN_PX, EDITOR_RATIO_DEFAULT, RESULT_MIN_PX, editorPixels, resultsOf, useLayout } from '../../store/layout';
 import { emptyRun, useQueryRun, type TabRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
-import type { QueryTabRef } from '../../store/tabs';
+import { useTabs, type QueryTabRef } from '../../store/tabs';
 import type { Engine } from '../../query/engine';
 import { useEditorMarks, type EditorLike, type MonacoLike } from './editorMarks';
 import { QueryToolbar } from './QueryToolbar';
@@ -64,12 +64,18 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   const engine = kind ?? toolbarDoc?.dialect ?? 'mysql';
   useEditorMarks(mounted, engine, run);
   // The editor / results split: a fraction of the measured body height (not subscribed to the text).
-  const ratio = useLayout((s) => s.editorRatio);
-  const setEditorRatio = useLayout((s) => s.setEditorRatio);
-  const resultsVisible = useLayout((s) => s.resultsVisible);
+  // Visibility, split and maximize belong to the editor group the tab sits in.
+  const groupId = useTabs((s) => s.groupOf[tab.id] ?? s.focusedGroupId);
+  const results = useLayout(useShallow((s) => resultsOf(s, groupId)));
+  const { ratio, maximized } = results;
+  const resultsVisible = results.visible;
+  const setGroupRatio = useLayout((s) => s.setGroupRatio);
+  const toggleGroupMaximize = useLayout((s) => s.toggleGroupMaximize);
   const [opened, setOpened] = useState(false);
   const onOpenResults = useCallback(() => setOpened(true), []);
-  const collapsed = !ranOnce(run) && !opened;
+  // Maximizing a tab that never ran opens its (empty) results: collapsed below gives way to it.
+  const onToggleMaximize = useCallback(() => toggleGroupMaximize(groupId), [groupId, toggleGroupMaximize]);
+  const collapsed = !ranOnce(run) && !opened && !maximized;
   const splitRef = useRef<HTMLDivElement>(null);
   const [total, setTotal] = useState(0);
   const missing = !toolbarDoc;
@@ -96,13 +102,17 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
       <div className="query-split" ref={splitRef}>
         <div
           className="query-editor-pane"
+          hidden={maximized && resultsVisible}
           style={{ flex: !resultsVisible || collapsed ? '1 1 0' : editor === null ? `0 0 ${ratio * 100}%` : `0 0 ${editor}px` }}
         >
           <EditorHost tabId={tab.id} engine={engine} onMount={onMount} />
         </div>
-        {resultsVisible && collapsed && <ResultPanel tabId={tab.id} collapsed onOpen={onOpenResults} />}
+        {resultsVisible && collapsed && (
+          <ResultPanel tabId={tab.id} collapsed onOpen={onOpenResults} maximized={false} onToggleMaximize={onToggleMaximize} />
+        )}
         {resultsVisible && !collapsed && (
           <>
+            {!maximized && (
             <Splitter
               orientation="horizontal"
               label="Resize editor and results"
@@ -110,9 +120,10 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
               min={EDITOR_MIN_PX}
               max={Math.max(EDITOR_MIN_PX, total - RESULT_MIN_PX)}
               defaultValue={editorPixels(EDITOR_RATIO_DEFAULT, total)}
-              onChange={(px) => total > 0 && setEditorRatio(px / total)}
+              onChange={(px) => total > 0 && setGroupRatio(groupId, px / total)}
             />
-            <ResultPanel tabId={tab.id} />
+            )}
+            <ResultPanel tabId={tab.id} maximized={maximized} onToggleMaximize={onToggleMaximize} />
           </>
         )}
       </div>

@@ -1,11 +1,11 @@
 import { memo, useEffect, useRef, useState } from 'react';
 import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
+import { MaximizeResultsIcon } from '../../components/icons';
 import { plural } from '../../lib/plural';
 import { dialectOfConnection, useQueryDocs } from '../../store/queryTabs';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { ExplainView } from './ExplainView';
-import { HistoryView } from './HistoryView';
 import { MessagesView } from './MessagesView';
 import { ResultGrid } from './ResultGrid';
 import { PLAN_GONE, rerunStatement, usePlanAlive } from './rerun';
@@ -58,7 +58,20 @@ function RunKeys() {
  */
 export const ResultPanel = memo(ResultPanelView);
 
-function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; collapsed?: boolean; onOpen?: () => void }) {
+function ResultPanelView({
+  tabId,
+  collapsed = false,
+  onOpen,
+  maximized = false,
+  onToggleMaximize,
+}: {
+  tabId: string;
+  collapsed?: boolean;
+  onOpen?: () => void;
+  /** The results fill the group (the editor is folded). */
+  maximized?: boolean;
+  onToggleMaximize?: () => void;
+}) {
   const run = useQueryRun((s) => s.runs.get(tabId) ?? emptyRun);
   const setRunPanel = useQueryRun((s) => s.setPanel);
   const setPanel = (id: string, panel: TabRun['panel']) => {
@@ -76,7 +89,6 @@ function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; 
   const result = run.results[at];
   const showResult = run.panel === 'result' && result !== undefined;
   const showExplain = run.panel === 'explain';
-  const showHistory = run.panel === 'history';
   const hasExplain = run.explain !== null || run.explainError !== null;
   const readStatement = result ? run.plan?.stmts.find((s) => s.index === result.index)?.kind === 'read' : false;
   const errors = errorCount(run);
@@ -125,9 +137,9 @@ function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; 
         <button
           type="button"
           role="tab"
-          aria-selected={!showResult && !showExplain && !showHistory}
+          aria-selected={!showResult && !showExplain}
           aria-label={errors > 0 ? `Messages (${plural(errors, 'error')})` : undefined}
-          className={`qr-tab${!showResult && !showExplain && !showHistory ? ' active' : ''}`}
+          className={`qr-tab${!showResult && !showExplain ? ' active' : ''}`}
           data-testid="panel-messages"
           onClick={() => setPanel(tabId, 'messages')}
         >
@@ -150,16 +162,6 @@ function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; 
             Explain
           </button>
         )}
-        <button
-          type="button"
-          role="tab"
-          aria-selected={showHistory}
-          className={`qr-tab${showHistory ? ' active' : ''}`}
-          data-testid="panel-history"
-          onClick={() => setPanel(tabId, 'history')}
-        >
-          History
-        </button>
         {showResult && <Summary result={result} />}
         {showResult && result.columns.length > 0 && (
           <button
@@ -174,6 +176,19 @@ function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; 
           </button>
         )}
         {collapsed && <RunKeys />}
+        {onToggleMaximize && (
+          <button
+            type="button"
+            className={`icon-btn qr-maximize${collapsed || !showResult ? ' push' : ''}`}
+            data-testid="result-maximize"
+            aria-label={maximized ? 'Restore results' : 'Maximize results'}
+            aria-pressed={maximized}
+            title={maximized ? 'Restore results (Ctrl+Shift+J)' : 'Maximize results (Ctrl+Shift+J)'}
+            onClick={onToggleMaximize}
+          >
+            <MaximizeResultsIcon restore={maximized} />
+          </button>
+        )}
       </div>
       {collapsed ? null : showResult ? (
         <>
@@ -207,8 +222,6 @@ function ResultPanelView({ tabId, collapsed = false, onOpen }: { tabId: string; 
         </>
       ) : showExplain ? (
         <ExplainView tabId={tabId} />
-      ) : showHistory ? (
-        <HistoryView tabId={tabId} />
       ) : (
         <MessagesView tabId={tabId} run={run} />
       )}

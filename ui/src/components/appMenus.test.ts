@@ -6,6 +6,7 @@ const base: MenuState = {
   theme: 'system',
   setTheme: () => {},
   sidebarVisible: true,
+  rightSidebarVisible: false,
   resultsVisible: true,
   hasTab: false,
   canReopen: false,
@@ -86,6 +87,7 @@ describe('buildMenus', () => {
     expect(checked({ theme: 'light', sidebarVisible: false, resultsVisible: false })).toEqual(['Light']);
     expect(checked({ theme: 'dark' })).toEqual(['Dark', 'Show sidebar', 'Show results']);
     expect(checked({ theme: 'system', resultsVisible: false })).toEqual(['System', 'Show sidebar']);
+    expect(checked({ theme: 'dark', rightSidebarVisible: true })).toEqual(['Dark', 'Show sidebar', 'Show results', 'Right sidebar']);
     expect(item('View', 'Light')?.checked).toBe(false);
     expect(item('View', 'Reset layout')?.checked).toBeUndefined();
   });
@@ -145,6 +147,9 @@ describe('buildMenus', () => {
     expect(items('View').filter((i) => i.hint && i.hint !== 'Coming soon' && !group.test(i.label)).map((i) => [i.label, i.hint])).toEqual([
       ['Show sidebar', 'Ctrl+B'],
       ['Show results', 'Ctrl+J'],
+      ['Maximize results', 'Ctrl+Shift+J'],
+      ['Right sidebar', 'Ctrl+Alt+B'],
+      ['History', 'Ctrl+Shift+H'],
       ['Filter rows (Data tab)', 'F3'],
       ['Focus connection tree', 'Ctrl+E'],
       ['Command palette', 'Ctrl+Shift+P'],

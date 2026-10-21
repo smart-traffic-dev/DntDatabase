@@ -14,14 +14,16 @@ import { openExportDialog, toggleFilterBar } from '../dialogs/resultExport';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeGroup, closeTab, reopenClosedTab } from './tabActions';
-import { focusConnectionTree, toggleResults, zoomIn, zoomOut, zoomReset } from './windowActions';
+import { focusConnectionTree, showHistory, toggleMaximizeResults, toggleResults, toggleRightSidebar, zoomIn, zoomOut, zoomReset } from './windowActions';
 
 /** What the menu model depends on: plain data, so the builder is a pure function. */
 export interface MenuState {
   theme: Theme;
   setTheme(theme: Theme): void;
   sidebarVisible: boolean;
-  /** The result panel of query tabs is shown. */
+  /** The right sidebar (History) is open. */
+  rightSidebarVisible: boolean;
+  /** The result panel of the focused editor group is shown. */
   resultsVisible: boolean;
   /** A tab is open. */
   hasTab: boolean;
@@ -176,6 +178,9 @@ export function buildMenus(s: MenuState): AppMenu[] {
         sep,
         { label: 'Show sidebar', hint: 'Ctrl+B', checked: s.sidebarVisible, run: () => useLayout.getState().toggleSidebar() },
         { label: 'Show results', hint: 'Ctrl+J', checked: s.resultsVisible, run: toggleResults },
+        { label: 'Maximize results', hint: 'Ctrl+Shift+J', run: toggleMaximizeResults },
+        { label: 'Right sidebar', hint: 'Ctrl+Alt+B', checked: s.rightSidebarVisible, run: toggleRightSidebar },
+        { label: 'History', hint: 'Ctrl+Shift+H', run: showHistory },
         { label: 'Filter rows (Data tab)', hint: 'F3', disabled: !s.hasTab, run: toggleFilterBar },
         { label: 'Focus connection tree', hint: 'Ctrl+E', run: focusConnectionTree },
         soon('Tables list'),

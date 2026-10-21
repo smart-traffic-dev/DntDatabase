@@ -117,7 +117,7 @@ export interface TabRun {
   explain: PlanTree | null;
   /** Why Explain did not start (`query_explain` refused), shown in the Explain panel. */
   explainError: string | null;
-  panel: 'result' | 'messages' | 'history' | 'explain';
+  panel: 'result' | 'messages' | 'explain';
   activeResult: number;
   lastRun: LastRun | null;
   /** The statement being run (from `statement_start`), null outside a run. */

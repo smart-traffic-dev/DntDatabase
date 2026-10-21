@@ -624,12 +624,13 @@ describe(`UX audit tour (${P})`, () => {
       await shot('explain-mysql-raw');
     });
     await step('history', async () => {
-      await byId('panel-history').click();
+      await byId('right-sidebar-history').click();
       await browser.pause(1000);
       await shot('history');
       await $('[data-testid="history-connection"]').selectByVisibleText('All connections');
       await browser.pause(800);
       await shot('history-all');
+      await byId('right-sidebar-history').click();
     });
     await step('tx-active', async () => {
       await setSql('START TRANSACTION');

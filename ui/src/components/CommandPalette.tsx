@@ -11,7 +11,7 @@ import { useMenuState } from './useMenuState';
 import './palette.css';
 
 /** Most rows the list shows. */
-const MAX_ROWS = 50;
+const MAX_ROWS = 60;
 
 /** The hint of a planned menu item; such items are listed last and never run. */
 const COMING_SOON = 'Coming soon';

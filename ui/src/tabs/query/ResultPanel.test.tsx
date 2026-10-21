@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanStmtView, RunEvent, Value } from '../../bindings';
 import { emptyRun, reduceRun, startRun, useQueryRun, type TabRun } from '../../store/queryRun';
-import { appError, mockBackend, resetStores } from '../../test/backend';
+import { appError, resetStores } from '../../test/backend';
 import { ResultPanel } from './ResultPanel';
 import { PLAN_GONE, rerunStatement } from './rerun';
 
@@ -130,14 +130,11 @@ describe('ResultPanel', () => {
     expect(screen.getByTestId('result-summary')).toBeInTheDocument();
   });
 
-  it('history_tab_shows_the_history_view', async () => {
-    mockBackend({ history_list: () => [] });
+  it('has_no_history_tab_history_lives_in_the_right_sidebar', () => {
     show(play(result(1, 0, 3)));
-    expect(screen.queryByTestId('explain-view')).toBeNull();
-    await userEvent.setup().click(screen.getByTestId('panel-history'));
-    expect(useQueryRun.getState().get('t').panel).toBe('history');
-    expect(await screen.findByTestId('history-view')).toBeInTheDocument();
-    expect(screen.queryByTestId('result-summary')).toBeNull();
+    expect(screen.queryByTestId('panel-history')).toBeNull();
+    expect(screen.queryByTestId('history-view')).toBeNull();
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Result 1', 'Messages']);
   });
 
   it('explain_event_opens_the_explain_panel', () => {
@@ -154,8 +151,7 @@ describe('ResultPanel', () => {
     const strip = screen.getByTestId('result-tabs');
     expect(strip).toContainElement(screen.getByTestId('result-tab-41'));
     expect(strip).not.toContainElement(screen.getByTestId('panel-messages'));
-    expect(strip).not.toContainElement(screen.getByTestId('panel-history'));
-    expect(screen.getByRole('tablist')).toContainElement(screen.getByTestId('panel-history'));
+    expect(screen.getByRole('tablist')).toContainElement(screen.getByTestId('panel-messages'));
   });
 
   it('messages_tab_is_badged_with_the_error_count', () => {

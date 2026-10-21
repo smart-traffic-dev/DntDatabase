@@ -1,9 +1,10 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { useLayout } from '../store/layout';
 import { showQuickOpen } from '../store/palette';
 import { useTabs, type EditorLayout } from '../store/tabs';
 import { ActionMenu } from './ActionMenu';
-import { LayoutIcon, LogoIcon, SearchIcon } from './icons';
+import { LayoutIcon, LogoIcon, RightSidebarIcon, SearchIcon } from './icons';
 import { MenuBar } from './MenuBar';
 import './titleBar.css';
 
@@ -79,6 +80,26 @@ function LayoutButton() {
         />
       )}
     </>
+  );
+}
+
+/** Shows or hides the right sidebar (History); lit while it is open. */
+function RightSidebarButton() {
+  const visible = useLayout((s) => s.rightVisible);
+  const toggle = useLayout((s) => s.toggleRight);
+  return (
+    <button
+      type="button"
+      className={`icon-btn titlebar-layout${visible ? ' on' : ''}`}
+      data-testid="titlebar-right-sidebar"
+      aria-label="Right sidebar"
+      aria-pressed={visible}
+      title="Toggle right sidebar (Ctrl+Alt+B)"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={toggle}
+    >
+      <RightSidebarIcon />
+    </button>
   );
 }
 
@@ -163,6 +184,7 @@ export function TitleBar() {
         </button>
       </div>
       <LayoutButton />
+      <RightSidebarButton />
       <div className="titlebar-controls">
         <button
           type="button"

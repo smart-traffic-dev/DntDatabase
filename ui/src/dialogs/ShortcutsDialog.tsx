@@ -61,7 +61,10 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     group: 'Window',
     items: [
       ['Show / hide the sidebar', 'Ctrl+B'],
-      ['Show / hide the result panel', 'Ctrl+J'],
+      ['Show / hide the right sidebar', 'Ctrl+Alt+B'],
+      ['Open History and search it', 'Ctrl+Shift+H'],
+      ['Show / hide the result panel (focused group)', 'Ctrl+J'],
+      ['Maximize / restore the result panel', 'Ctrl+Shift+J'],
       ['New connection', 'Ctrl+Shift+N'],
       ['Settings', 'Ctrl+,'],
       ['Keyboard shortcuts', 'F1'],

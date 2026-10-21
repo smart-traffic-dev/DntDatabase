@@ -137,6 +137,11 @@
   flex-direction: column;
 }
 
+/* Results maximized: the editor folds away (it stays mounted, so its text and undo history survive). */
+.query-editor-pane[hidden] {
+  display: none;
+}
+
 /* Results (spec 6.2) */
 .qr-panel {
   flex: 1;
@@ -170,7 +175,7 @@
   border-bottom: 1px solid var(--dnt-border);
 }
 
-/* The result tabs scroll inside this strip; Messages / Explain / History / summary stay pinned. */
+/* The result tabs scroll inside this strip; Messages / Explain / summary stay pinned. */
 .qr-tabs-scroll {
   display: flex;
   flex: 0 1 auto;
@@ -478,105 +483,11 @@
   text-align: left;
 }
 
-/* History panel (spec 8.1) */
-.hs-view {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
+.qr-maximize {
+  flex: none;
+  margin-left: var(--dnt-space-1);
 }
 
-.hs-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 12px;
-  border-bottom: 1px solid var(--dnt-border);
-}
-
-.hs-bar .spacer {
-  flex: 1;
-}
-
-.hs-search {
-  height: 26px;
-  min-width: 220px;
-  border: 1px solid var(--dnt-border);
-  border-radius: var(--dnt-radius-sm);
-  padding: 0 8px;
-  background: var(--dnt-bg-app);
-  color: inherit;
-  font: inherit;
-}
-
-.hs-confirm {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--dnt-status-danger-fg);
-}
-
-.hs-list {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  font-size: var(--dnt-text-sm);
-}
-
-.hs-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 3px 12px;
-  border-bottom: 1px solid var(--dnt-border);
-  cursor: default;
-  user-select: none;
-}
-
-.hs-row.selected {
-  background: var(--dnt-bg-selected);
-}
-
-.hs-time,
-.hs-elapsed {
-  color: var(--dnt-fg-muted);
-  white-space: nowrap;
-}
-
-.hs-status {
-  min-width: 64px;
-}
-
-.hs-status.error {
-  color: var(--dnt-status-danger-fg);
-}
-
-.hs-status.cancelled,
-.hs-status.unknown {
-  color: var(--dnt-fg-muted);
-  white-space: nowrap;
-}
-
-.hs-row:focus-visible {
-  outline: 1px solid var(--dnt-focus);
-  outline-offset: -1px;
-}
-
-.hs-elapsed {
-  min-width: 60px;
-  text-align: right;
-}
-
-.hs-sql {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--font-mono);
-}
-
-.hs-redacted {
-  background: var(--dnt-bg-sunken);
-  color: var(--dnt-fg-muted);
+.qr-maximize.push {
+  margin-left: auto;
 }

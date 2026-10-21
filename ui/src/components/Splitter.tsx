@@ -15,6 +15,8 @@ interface Props {
   defaultValue: number;
   onChange(value: number): void;
   label: string;
+  /** The value is the size of the pane after the line (a right-hand panel): dragging right shrinks it. */
+  reverse?: boolean;
 }
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
@@ -24,7 +26,7 @@ const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(mi
  * follows the pointer outside the bar), arrow keys (16 px, Shift 64 px), Home / End and a
  * double-click reset.
  */
-export function Splitter({ orientation, value, min, max, defaultValue, onChange, label }: Props) {
+export function Splitter({ orientation, value, min, max, defaultValue, onChange, label, reverse = false }: Props) {
   const [dragging, setDragging] = useState(false);
   const start = useRef<{ pointer: number; value: number } | null>(null);
   const vertical = orientation === 'vertical';
@@ -42,7 +44,7 @@ export function Splitter({ orientation, value, min, max, defaultValue, onChange,
   };
   const onPointerMove = (e: PointerEvent<HTMLDivElement>) => {
     const s = start.current;
-    if (s) change(s.value + axis(e) - s.pointer);
+    if (s) change(s.value + (reverse ? -1 : 1) * (axis(e) - s.pointer));
   };
   const end = (e: PointerEvent<HTMLDivElement>) => {
     if (!start.current) return;
@@ -55,7 +57,8 @@ export function Splitter({ orientation, value, min, max, defaultValue, onChange,
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     const step = e.shiftKey ? SPLITTER_BIG_STEP : SPLITTER_STEP;
-    const [less, more] = vertical ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+    const [first, second] = vertical ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+    const [less, more] = reverse ? [second, first] : [first, second];
     if (e.key === less) change(value - step);
     else if (e.key === more) change(value + step);
     else if (e.key === 'Home') change(min);
