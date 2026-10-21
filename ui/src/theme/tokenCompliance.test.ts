@@ -41,6 +41,49 @@ describe('design token compliance', () => {
     expect(offending).toEqual([]);
   });
 
+  /** Every `selector { body }` rule (top level or inside an at-rule) of a stylesheet. */
+  const rules = (css: string) =>
+    [...strip(css).matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => ({ selector: (m[1] ?? '').trim(), body: m[2] ?? '' }));
+
+  it('disabled is never opacity', () => {
+    const offending: string[] = [];
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) {
+        if (r.selector.includes(':disabled') && !r.selector.includes(':not(:disabled)') && /(^|[;\s])opacity\s*:/.test(r.body)) {
+          offending.push(`${file}: ${r.selector}`);
+        }
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
+  it('focus is at most 1px and never a ring', () => {
+    const offending: string[] = [];
+    for (const [file, raw] of appSheets()) {
+      for (const r of rules(raw)) {
+        for (const d of declarations(r.body)) {
+          const outline = /^outline\s*:\s*(\d+(?:\.\d+)?)px/.exec(d);
+          if (outline && Number(outline[1]) > 1) offending.push(`${file}: ${r.selector}: ${d}`);
+          if (r.selector.includes(':focus') && /^box-shadow\s*:/.test(d) && !/^box-shadow\s*:\s*none$/.test(d)) {
+            offending.push(`${file}: ${r.selector}: ${d}`);
+          }
+        }
+      }
+    }
+    expect(offending).toEqual([]);
+  });
+
+  it('focus is visible on rows and menu items', () => {
+    const theme = sheets['../theme.css'] ?? '';
+    expect(theme.length).toBeGreaterThan(1000);
+    const forSelector = (sel: string) => rules(theme).filter((r) => r.selector.split(',').map((s) => s.trim()).includes(sel));
+    for (const sel of ["[role='menuitem']:focus-visible", "[role='option']:focus-visible"]) {
+      const matched = forSelector(sel);
+      expect(matched.some((r) => /outline\s*:\s*1px solid var\(--dnt-focus\)/.test(r.body)), sel).toBe(true);
+      expect(matched.some((r) => /outline\s*:\s*none/.test(r.body)), sel).toBe(false);
+    }
+  });
+
   it('font-size, font-family, radius and shadow use tokens', () => {
     const offending: string[] = [];
     for (const [file, raw] of appSheets()) {

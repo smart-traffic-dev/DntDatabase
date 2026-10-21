@@ -102,8 +102,11 @@ fieldset.export-form {
   opacity: 0.9;
 }
 
+/* Disabled (spec §2.3): its own colours, never opacity; also overrides .primary / .danger fills. */
 .btn:disabled {
-  opacity: 0.4;
+  background: var(--dnt-bg-sunken);
+  border-color: var(--dnt-border-subtle);
+  color: var(--dnt-fg-disabled);
 }
 
 /* Connection dialog */

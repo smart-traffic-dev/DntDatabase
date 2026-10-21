@@ -32,8 +32,9 @@
 }
 
 .qt-btn:disabled {
-  color: var(--muted);
-  opacity: 0.4;
+  background: var(--dnt-bg-sunken);
+  border-color: var(--dnt-border-subtle);
+  color: var(--dnt-fg-disabled);
 }
 
 .qt-run:not(:disabled) {
@@ -330,8 +331,7 @@
 }
 
 .qt-menu-item:disabled {
-  color: var(--muted);
-  opacity: 0.6;
+  color: var(--dnt-fg-disabled);
 }
 
 /* Explain panel (spec 8.2) */

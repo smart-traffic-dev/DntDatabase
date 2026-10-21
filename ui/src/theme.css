@@ -1,33 +1,27 @@
 /*
- * App aliases over the dnt-note tokens in ui/src/theme/tokens.css.
- * `--bg`, `--text`, `--border`, `--accent`, `--danger` come from the token file's
- * legacy aliases; the rest are DntDatabase-specific names for the same values.
+ * App aliases over the --dnt- tokens in ui/src/theme/tokens.css, kept until each stylesheet uses
+ * --dnt-* names directly (spec 2026-10-21-ux-redesign §2.2).
  */
 :root {
-  --panel: var(--studio-bg);
-  --sidebar: var(--studio-sidebar);
-  --muted: var(--studio-fg-secondary);
-  --sel: var(--studio-selected);
-  --hover: var(--studio-hover);
-  --tabstrip: var(--studio-sidebar);
-  --icon: var(--studio-fg-secondary);
-  --accent-fg: var(--studio-accent-fg);
-  --accent-hover: var(--studio-accent-hover);
-  --danger-fill: var(--studio-danger-fill);
-  --danger-border: var(--studio-danger-border);
-  --production: var(--studio-danger);
-  --production-bg: var(--studio-danger-fill);
-  /*
-   * Text-safe red: the token danger (#d7373f on #fdeeee = 4.1:1, dark #e5484d on #3a2224 = 3.7:1)
-   * fails WCAG AA at 11-12 px. These give 5.8:1 (light) / 5.9:1 (dark) on the danger fill.
-   * `--production` stays for borders and stripes.
-   */
-  --danger-fg: #b42318;
-  --production-fg: var(--danger-fg);
-  /* P2 query editor (not in the dnt-note tokens): warning and current-statement colours. */
-  --warning-bg: #fff4d6;
-  --warning-fg: #7a4b00;
-  --current-stmt-bg: color-mix(in srgb, var(--studio-fg) 6%, transparent);
+  --panel: var(--dnt-bg-app);
+  --sidebar: var(--dnt-bg-chrome);
+  --muted: var(--dnt-fg-muted);
+  --sel: var(--dnt-bg-selected);
+  --hover: var(--dnt-bg-hover);
+  --tabstrip: var(--dnt-bg-chrome);
+  --icon: var(--dnt-fg-muted);
+  --accent-fg: var(--dnt-on-accent);
+  --accent-hover: var(--dnt-accent-hover);
+  --danger-fill: var(--dnt-status-danger-bg);
+  --danger-border: var(--dnt-status-danger-border);
+  /* --production / --danger are fills and stripes; text uses the AA-safe --*-fg. */
+  --production: var(--dnt-env-prod);
+  --production-bg: var(--dnt-status-danger-bg);
+  --danger-fg: var(--dnt-status-danger-fg);
+  --production-fg: var(--dnt-status-danger-fg);
+  --warning-bg: var(--dnt-status-warning-bg);
+  --warning-fg: var(--dnt-status-warning-fg);
+  --current-stmt-bg: color-mix(in srgb, var(--dnt-fg) 6%, transparent);
   /*
    * Code font for every mono surface (editor, suggest list, grid, DDL, messages, history).
    * The token's stack starts with `ui-monospace` (Safari only) then 'Cascadia Code', whose
@@ -44,9 +38,6 @@
 .dark {
   --titlebar-close-bg: #c42b1c;
   --titlebar-close-bg-pressed: #b2382f;
-  --danger-fg: #ff7b7f;
-  --warning-bg: #3a3020;
-  --warning-fg: #f0c674;
 }
 
 * {
@@ -81,11 +72,36 @@ button:disabled {
   cursor: default;
 }
 
-/* The token base rules remove the focus ring on text fields; show focus on the border instead. */
+/*
+ * Keyboard focus (spec §2.3): never a ring, glow or thick outline. Everything gets a 1px inset accent
+ * outline; text fields show focus by turning their own 1px border accent instead.
+ */
+:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+[role='menuitem']:focus-visible,
+[role='menuitemradio']:focus-visible,
+[role='option']:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
 input:focus,
 select:focus,
-textarea:focus {
-  border-color: var(--studio-fg-tertiary);
+textarea:focus,
+[contenteditable='true']:focus {
+  border-color: var(--dnt-focus);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[contenteditable='true']:focus-visible,
+.monaco-editor :focus-visible,
+.cm-editor :focus-visible {
+  outline: none;
 }
 
 .app {
@@ -140,7 +156,11 @@ textarea:focus {
 }
 
 .tool:disabled {
-  opacity: 0.4;
+  color: var(--dnt-fg-disabled);
+}
+
+.tool:disabled svg {
+  color: var(--dnt-fg-disabled);
 }
 
 /* Sidebar */
@@ -228,7 +248,7 @@ textarea:focus {
 }
 
 .tree:focus-visible .tree-row.selected {
-  outline: 1px solid var(--studio-fg-tertiary);
+  outline: 1px solid var(--dnt-focus);
   outline-offset: -1px;
 }
 
@@ -247,8 +267,13 @@ textarea:focus {
   background: var(--studio-hover);
 }
 
+/* Selection is blue while the tree has focus, grey otherwise (spec §2.3). */
 .tree-row.selected {
-  background: var(--sel);
+  background: var(--dnt-bg-selected-muted);
+}
+
+.tree:focus-within .tree-row.selected {
+  background: var(--dnt-bg-selected);
 }
 
 .tree-row.drop-target {
@@ -256,22 +281,6 @@ textarea:focus {
   outline-offset: -1px;
 }
 
-/* Keyboard focus: one thin token ring everywhere (the token base rule is a 2px ring). */
-:focus-visible {
-  outline: 1px solid var(--studio-fg-tertiary);
-  outline-offset: -1px;
-}
-
-input:focus-visible,
-textarea:focus-visible,
-.cm-editor :focus-visible,
-[contenteditable='true']:focus-visible,
-[role='menuitem']:focus-visible,
-[role='menuitemradio']:focus-visible,
-[role='option']:focus-visible,
-.tree:focus-visible {
-  outline: none;
-}
 
 .tree-row.kind-group .label {
   font-weight: 600;
@@ -477,8 +486,7 @@ textarea:focus-visible,
 }
 
 .context-menu button:disabled {
-  color: var(--muted);
-  opacity: 0.5;
+  color: var(--dnt-fg-disabled);
 }
 
 .context-menu .menu-label {
