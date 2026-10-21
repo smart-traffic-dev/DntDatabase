@@ -346,7 +346,11 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                 )}
                 {unsaved && (
                   // For screen readers; the close button shows the dot.
-                  <span className="tab-dirty sr-only" title="Unsaved changes" aria-label="Unsaved changes">
+                  <span
+                    className="tab-dirty sr-only"
+                    title={tab.kind === 'design' ? 'Unsaved design changes' : 'Unsaved changes'}
+                    aria-label={tab.kind === 'design' ? 'Unsaved design changes' : 'Unsaved changes'}
+                  >
                     ●
                   </span>
                 )}

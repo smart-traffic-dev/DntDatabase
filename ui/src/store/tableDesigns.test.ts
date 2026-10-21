@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ColumnDef, DesignOpen, DesignRender, TableDef } from '../bindings';
-import { callsOf, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
+import { appError, callsOf, Failure, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
+import { useConnections } from './connections';
 import { useTableDesigns } from './tableDesigns';
 
 const column = (name: string): ColumnDef => ({
@@ -59,6 +60,142 @@ afterEach(() => vi.useRealTimers());
 async function loaded() {
   await store().load(TAB, ids.prod, scope, 'orders');
 }
+
+const lostError = () => new Failure(appError('config', 'This designer is no longer open; open the table again.', { field: 'design_id' }));
+
+describe('table design fix round', () => {
+  it('a failed reload keeps the draft and the live session, and sets the error', async () => {
+    let fail = false;
+    mockBackend({
+      table_design_open: () => {
+        if (fail) throw new Failure(appError('internal', 'server gone'));
+        return opened();
+      },
+      table_design_render: () => rendered,
+      table_design_close: () => null,
+    });
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    await vi.advanceTimersByTimeAsync(300);
+    fail = true;
+    await store().reload(TAB);
+    expect(state().open!.design_id).toBe('d1');
+    expect(state().draft!.columns).toHaveLength(3);
+    expect(state().past).toHaveLength(1);
+    expect(state().loading).toBe(false);
+    expect(state().error).toContain('server gone');
+    expect(callsOf('table_design_close')).toEqual([]);
+  });
+
+  it('a reload keeps the old design shown while the new one opens', async () => {
+    const slow: { resolve?: (o: DesignOpen) => void } = {};
+    let first = true;
+    mockBackend({
+      table_design_open: () => {
+        if (first) {
+          first = false;
+          return opened();
+        }
+        return new Promise<DesignOpen>((r) => { slow.resolve = r; });
+      },
+      table_design_close: () => null,
+      table_design_render: () => rendered,
+    });
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    const reloading = store().reload(TAB);
+    expect(state().draft!.columns).toHaveLength(3);
+    expect(state().loading).toBe(true);
+    slow.resolve!({ ...opened(), design_id: 'd2' });
+    await reloading;
+    expect(state().open!.design_id).toBe('d2');
+    expect(callsOf('table_design_close')).toEqual([{ designId: 'd1' }]);
+  });
+
+  it('a render that finds the design gone marks it lost and keeps the draft', async () => {
+    mockBackend({ table_design_open: () => opened(), table_design_render: () => { throw lostError(); }, table_design_close: () => null });
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(state().lostDraft!.columns).toHaveLength(3);
+    expect(state().error).toBeNull();
+    expect(store().isDirty(TAB)).toBe(true);
+    expect(store().changeCount(TAB)).toBe(1);
+    // A lost design takes no more edits.
+    store().edit(TAB, addColumn('b'));
+    expect(state().draft!.columns).toHaveLength(3);
+  });
+
+  it('a render that fails otherwise only sets the error', async () => {
+    mockBackend({ table_design_open: () => opened(), table_design_render: () => { throw new Failure(appError('internal', 'oops')); }, table_design_close: () => null });
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    await vi.advanceTimersByTimeAsync(300);
+    expect(state().lostDraft).toBeNull();
+    expect(state().error).toContain('oops');
+  });
+
+  it('a connection that closes marks its designs lost', async () => {
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    useConnections.getState().clearInfo(ids.prod);
+    expect(state().lostDraft!.columns).toHaveLength(3);
+  });
+
+  it('reopen opens a fresh session, keeps the lost draft until restored, and restore is undoable', async () => {
+    let n = 0;
+    mockBackend({
+      table_design_open: () => ({ ...opened(), design_id: `d${++n}` }),
+      table_design_render: () => rendered,
+      table_design_close: () => null,
+    });
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    store().markLost(TAB);
+    await store().reopen(TAB);
+    expect(state().open!.design_id).toBe('d2');
+    expect(state().draft).toEqual(def);
+    expect(state().lostDraft!.columns).toHaveLength(3);
+    expect(store().isDirty(TAB)).toBe(true);
+    store().restoreLostDraft(TAB);
+    expect(state().lostDraft).toBeNull();
+    expect(state().draft!.columns).toHaveLength(3);
+    store().undo(TAB);
+    expect(state().draft).toEqual(def);
+  });
+
+  it('a failed reopen keeps the lost draft', async () => {
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    store().markLost(TAB);
+    mockBackend({ table_design_open: () => { throw new Failure(appError('not_open', 'This connection is not open.')); } });
+    await store().reopen(TAB);
+    expect(state().lostDraft!.columns).toHaveLength(3);
+    expect(state().error).toContain('not open');
+  });
+
+  it('discard clears a lost draft', async () => {
+    await loaded();
+    store().edit(TAB, addColumn('a'));
+    store().markLost(TAB);
+    store().discard(TAB);
+    expect(state().lostDraft).toBeNull();
+    expect(store().isDirty(TAB)).toBe(false);
+  });
+
+  it('the undo stack is capped at 100 steps', async () => {
+    await loaded();
+    for (let i = 0; i < 120; i++) store().edit(TAB, (d) => ({ ...d, comment: `c${i}` }));
+    expect(state().past).toHaveLength(100);
+  });
+
+  it('counts a table rename and a comment change separately', async () => {
+    await loaded();
+    store().edit(TAB, (d) => ({ ...d, name: 'orders2', comment: 'hi' }));
+    expect(store().changeCount(TAB)).toBe(2);
+  });
+});
 
 describe('table design draft store', () => {
   it('load opens the design and starts the draft from its definition', async () => {

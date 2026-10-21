@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import type { DesignOpen, DesignRender, ElementRef, Scope, TableDef } from '../bindings';
-import { api, toAppError } from '../api';
+import type { AppError, DesignOpen, DesignRender, ElementRef, Scope, TableDef } from '../bindings';
+import { api, needsReconnect, toAppError } from '../api';
+import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { setDesignDraftsSource } from './queryTabs';
 import { useTabs } from './tabs';
@@ -17,6 +18,19 @@ export interface DesignState {
   render: DesignRender | null;
   loading: boolean;
   error: string | null;
+  /**
+   * The backend session is gone (the connection closed, or the designer was closed behind the tab):
+   * the draft as it was at that moment, kept until the user reopens and restores or discards it.
+   */
+  lostDraft: TableDef | null;
+}
+
+/** Most undo steps kept per design. */
+export const UNDO_LIMIT = 100;
+
+/** The backend no longer has this design (or its connection): nothing was sent, the draft is still ours. */
+export function isDesignLost(e: AppError): boolean {
+  return (e.kind === 'config' && e.field === 'design_id') || needsReconnect(e);
 }
 
 interface Target {
@@ -38,6 +52,12 @@ interface DesignsStore {
   discard(tabId: string): void;
   /** Opens a fresh session for the same table (after an apply or a stale design). */
   reload(tabId: string): Promise<void>;
+  /** The backend session is gone: keep the draft in `lostDraft` and stop rendering. */
+  markLost(tabId: string): void;
+  /** Reopens a lost design; the old draft stays in `lostDraft` until restored or discarded. */
+  reopen(tabId: string): Promise<void>;
+  /** Puts `lostDraft` back as the draft (an undoable edit) once the design is open again. */
+  restoreLostDraft(tabId: string): void;
   /** Forgets the tab's design and closes its backend session. */
   dispose(tabId: string): void;
   isDirty(tabId: string): boolean;
@@ -45,7 +65,7 @@ interface DesignsStore {
   reset(): void;
 }
 
-const blank = (): DesignState => ({ open: null, draft: null, past: [], future: [], selection: null, render: null, loading: false, error: null });
+const blank = (): DesignState => ({ open: null, draft: null, past: [], future: [], selection: null, render: null, loading: false, error: null, lostDraft: null });
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 /** Bumped per request of a tab: only the newest answer is kept. */
@@ -95,14 +115,15 @@ function listChanges(base: Element[], draft: Element[]): number {
 
 /**
  * The number of top-level elements that differ: columns, indexes, foreign keys and checks added,
- * removed or modified (matched by `original`); the primary key; the table's own name and comment;
- * its options; and one for a reordering of the columns that stay.
+ * removed or modified (matched by `original`); the primary key; the table's name and its comment
+ * (one each); its options; and one for a reordering of the columns that stay.
  */
 export function countChanges(base: TableDef, draft: TableDef): number {
   let n = listChanges(base.columns, draft.columns) + listChanges(base.indexes, draft.indexes);
   n += listChanges(base.foreign_keys, draft.foreign_keys) + listChanges(base.checks, draft.checks);
   if (!deepEqual(base.primary_key, draft.primary_key)) n++;
-  if (base.name !== draft.name || base.comment !== draft.comment) n++;
+  if (base.name !== draft.name) n++;
+  if (base.comment !== draft.comment) n++;
   if (!deepEqual(base.options, draft.options)) n++;
   const baseOrder = base.columns.map((c) => c.original ?? c.name);
   const keptOrder = draft.columns.filter((c) => c.original !== null && baseOrder.includes(c.original)).map((c) => c.original!);
@@ -130,7 +151,10 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
             if (sequence.get(tabId) === seq && entry(tabId)) patch(tabId, { render, error: null });
           })
           .catch((e) => {
-            if (sequence.get(tabId) === seq && entry(tabId)) patch(tabId, { error: toAppError(e).message });
+            if (sequence.get(tabId) !== seq || !entry(tabId)) return;
+            const error = toAppError(e);
+            if (isDesignLost(error)) get().markLost(tabId);
+            else patch(tabId, { error: error.message });
           });
       }, RENDER_DEBOUNCE_MS),
     );
@@ -146,33 +170,55 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
     scheduleRender(tabId);
   };
 
+  /**
+   * Opens the design of `target` and swaps it in. The tab keeps its current design (and draft)
+   * until the new one is open, and the old backend session closes only after that; a failure
+   * keeps the old state and sets `error`.
+   */
+  async function openInto(tabId: string, target: Target, keepLost: boolean) {
+    targets.set(tabId, target);
+    clearTimer(tabId);
+    const seq = bump(tabId);
+    const had = entry(tabId)?.open ?? null;
+    if (had) patch(tabId, { loading: true, error: null });
+    else patch(tabId, { ...blank(), loading: true });
+    try {
+      const open = await api.tableDesignOpen(target.connectionId, target.scope, target.table);
+      // The tab was closed, or another load started, while the session opened.
+      if (!entry(tabId) || sequence.get(tabId) !== seq) {
+        closeSession(open.design_id);
+        return;
+      }
+      patch(tabId, {
+        open,
+        draft: open.def,
+        past: [],
+        future: [],
+        selection: null,
+        render: null,
+        loading: false,
+        error: null,
+        lostDraft: keepLost ? (entry(tabId)?.lostDraft ?? null) : null,
+      });
+      if (had && had.design_id !== open.design_id) closeSession(had.design_id);
+    } catch (e) {
+      if (!entry(tabId) || sequence.get(tabId) !== seq) return;
+      patch(tabId, { loading: false, error: toAppError(e).message });
+      // The old design stays live: its pending live SQL is asked for again.
+      if (had && !entry(tabId)?.lostDraft && get().isDirty(tabId)) scheduleRender(tabId);
+    }
+  }
+
   return {
     byTab: {},
-    async load(tabId, connectionId, scope, table) {
-      targets.set(tabId, { connectionId, scope, table });
-      clearTimer(tabId);
-      const seq = bump(tabId);
-      const previous = entry(tabId)?.open?.design_id;
-      patch(tabId, { ...blank(), loading: true });
-      try {
-        const open = await api.tableDesignOpen(connectionId, scope, table);
-        // The tab was closed, or another load started, while the session opened.
-        if (!entry(tabId) || sequence.get(tabId) !== seq) {
-          closeSession(open.design_id);
-          return;
-        }
-        patch(tabId, { open, draft: open.def, loading: false, error: null });
-        if (previous && previous !== open.design_id) closeSession(previous);
-      } catch (e) {
-        if (entry(tabId) && sequence.get(tabId) === seq) patch(tabId, { loading: false, error: toAppError(e).message });
-      }
-    },
+    load: (tabId, connectionId, scope, table) => openInto(tabId, { connectionId, scope, table }, false),
     edit(tabId, recipe) {
       const state = entry(tabId);
-      if (!state?.draft) return;
+      // A lost design takes no edits: reopen it first.
+      if (!state?.draft || state.lostDraft) return;
       const next = recipe(state.draft);
       if (next === state.draft) return;
-      setDraft(tabId, next, [...state.past, state.draft], []);
+      setDraft(tabId, next, [...state.past, state.draft].slice(-UNDO_LIMIT), []);
     },
     undo(tabId) {
       const state = entry(tabId);
@@ -184,7 +230,7 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       const state = entry(tabId);
       const next = state?.future.at(-1);
       if (!state?.draft || !next) return;
-      setDraft(tabId, next, [...state.past, state.draft], state.future.slice(0, -1));
+      setDraft(tabId, next, [...state.past, state.draft].slice(-UNDO_LIMIT), state.future.slice(0, -1));
     },
     select: (tabId, el) => patch(tabId, { selection: el }),
     discard(tabId) {
@@ -192,11 +238,29 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       if (!state?.open) return;
       clearTimer(tabId);
       bump(tabId);
-      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null });
+      patch(tabId, { draft: state.open.def, past: [], future: [], selection: null, render: null, error: null, lostDraft: null });
     },
     async reload(tabId) {
       const target = targets.get(tabId);
-      if (target) await get().load(tabId, target.connectionId, target.scope, target.table);
+      if (target) await openInto(tabId, target, false);
+    },
+    markLost(tabId) {
+      const state = entry(tabId);
+      if (!state?.draft || state.lostDraft) return;
+      clearTimer(tabId);
+      bump(tabId);
+      patch(tabId, { lostDraft: state.draft, loading: false, error: null });
+    },
+    async reopen(tabId) {
+      const target = targets.get(tabId);
+      if (target) await openInto(tabId, target, true);
+    },
+    restoreLostDraft(tabId) {
+      const state = entry(tabId);
+      const lost = state?.lostDraft;
+      if (!state?.draft || !lost) return;
+      patch(tabId, { lostDraft: null });
+      setDraft(tabId, lost, [...state.past, state.draft].slice(-UNDO_LIMIT), []);
     },
     dispose(tabId) {
       clearTimer(tabId);
@@ -206,13 +270,16 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
       set((s) => ({ byTab: Object.fromEntries(Object.entries(s.byTab).filter(([id]) => id !== tabId)) }));
       if (designId) closeSession(designId);
     },
+    // A lost design's draft still counts: it is the user's work.
     isDirty(tabId) {
       const state = entry(tabId);
-      return !!state?.open && !!state.draft && !deepEqual(state.draft, state.open.def);
+      const draft = state?.lostDraft ?? state?.draft;
+      return !!state?.open && !!draft && !deepEqual(draft, state.open.def);
     },
     changeCount(tabId) {
       const state = entry(tabId);
-      return state?.open && state.draft ? countChanges(state.open.def, state.draft) : 0;
+      const draft = state?.lostDraft ?? state?.draft;
+      return state?.open && draft ? countChanges(state.open.def, draft) : 0;
     },
     reset() {
       for (const t of timers.values()) clearTimeout(t);
@@ -228,20 +295,26 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
 export const tabsWithDirtyDesigns = () =>
   Object.keys(useTableDesigns.getState().byTab).filter((id) => useTableDesigns.getState().isDirty(id));
 
-/** Asks before the unapplied designs of `tabIds` are thrown away (closing, quitting); true to go on. */
-export function confirmDiscardDesigns(tabIds: string[]): Promise<boolean> {
+/** The changes that closing `tabIds` would throw away; a dirty design always counts at least one. */
+export function designDiscardCount(tabIds: string[]): number {
   const { isDirty, changeCount } = useTableDesigns.getState();
-  const dirty = tabIds.filter((id) => isDirty(id));
-  if (dirty.length === 0) return Promise.resolve(true);
-  // A dirty design always counts at least one change (it asks even when the diff finds none).
-  const count = dirty.reduce((n, id) => n + Math.max(1, changeCount(id)), 0);
+  return tabIds.filter((id) => isDirty(id)).reduce((n, id) => n + Math.max(1, changeCount(id)), 0);
+}
+
+/**
+ * Asks before the unapplied designs of `tabIds` are thrown away (closing, quitting, a connection
+ * going); true to go on. It discards nothing itself: the drafts go when their tabs close, so a
+ * later cancelled step (another question, a quit) keeps them.
+ */
+export function confirmDiscardDesigns(tabIds: string[]): Promise<boolean> {
+  const count = designDiscardCount(tabIds);
+  if (count === 0) return Promise.resolve(true);
   return new Promise((resolve) => {
     useDialogs.getState().ask({
       kind: 'discardEdits',
       count,
       done: (discard) => {
         useDialogs.getState().answer();
-        if (discard) for (const id of dirty) useTableDesigns.getState().discard(id);
         resolve(discard);
       },
     });
@@ -253,6 +326,14 @@ export const confirmDiscardDesign = (tabId: string) => confirmDiscardDesigns([ta
 
 // Quitting the app asks about unapplied designs too (the close guard lives in `queryTabs`).
 setDesignDraftsSource(() => confirmDiscardDesigns(tabsWithDirtyDesigns()));
+
+// A connection that closes or drops takes its designs' backend sessions with it: the drafts stay, marked lost.
+useConnections.subscribe((state, prev) => {
+  if (state.info === prev.info) return;
+  const gone = [...prev.info.keys()].filter((id) => !state.info.has(id));
+  if (gone.length === 0) return;
+  for (const [tabId, target] of targets) if (gone.includes(target.connectionId)) useTableDesigns.getState().markLost(tabId);
+});
 
 // Closing a design tab closes its backend session and forgets the draft.
 useTabs.subscribe((state) => {

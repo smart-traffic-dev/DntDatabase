@@ -1,11 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDialogs } from '../store/dialogs';
-import { installCloseGuard, type CloseGuardWindow } from '../store/queryTabs';
+import { installCloseGuard, setRunningSource, useQueryDocs, type CloseGuardWindow } from '../store/queryTabs';
 import { useTableDesigns } from '../store/tableDesigns';
 import { designTabId, useTabs, type DesignTabRef } from '../store/tabs';
 import type { DesignOpen, TableDef } from '../bindings';
 import { callsOf, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
-import { closeTab } from './tabActions';
+import { closeAllTabs, closeOtherTabs, closeSavedTabs, closeTab, confirmDiscardConnection, confirmDiscardForImport } from './tabActions';
 
 const scope = { database: 'shop', schema: null };
 const tab: DesignTabRef = { id: designTabId(ids.prod, scope, 'orders'), kind: 'design', connectionId: ids.prod, scope, table: 'orders', title: 'orders' };
@@ -38,6 +38,96 @@ async function dirtyDesign() {
 beforeEach(() => {
   resetStores();
   mockBackend({ table_design_open: () => open, table_design_render: () => ({ statements: [], impacts: [], errors: [], error: null }), table_design_close: () => null });
+});
+
+describe('design tabs with connections, bulk closes and quitting', () => {
+  it('deleting a connection asks about its dirty designs, and closing it closes the tab and session', async () => {
+    await dirtyDesign();
+    const asking = confirmDiscardConnection(ids.prod);
+    await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
+    question().done(false);
+    expect(await asking).toBe(false);
+    expect(useTabs.getState().tabs).toHaveLength(1);
+    expect(useTableDesigns.getState().isDirty(tab.id)).toBe(true);
+
+    const again = confirmDiscardConnection(ids.prod);
+    await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
+    question().done(true);
+    expect(await again).toBe(true);
+    useTabs.getState().closeConnection(ids.prod);
+    expect(useTabs.getState().tabs).toEqual([]);
+    expect(useTableDesigns.getState().byTab[tab.id]).toBeUndefined();
+    expect(callsOf('table_design_close')).toEqual([{ designId: 'd1' }]);
+  });
+
+  it('a clean design does not make a connection delete ask', async () => {
+    useTabs.getState().open(tab);
+    await useTableDesigns.getState().load(tab.id, ids.prod, scope, 'orders');
+    expect(await confirmDiscardConnection(ids.prod)).toBe(true);
+    expect(useDialogs.getState().question).toBeNull();
+  });
+
+  it('an import that replaces the connection counts dirty designs in its question', async () => {
+    await dirtyDesign();
+    const asking = confirmDiscardForImport([ids.prod]);
+    await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardForImport'));
+    const q = useDialogs.getState().question;
+    expect(q).toMatchObject({ kind: 'discardForImport', count: 1 });
+    if (q?.kind === 'discardForImport') q.done(false);
+    expect(await asking).toBe(false);
+    expect(useTableDesigns.getState().isDirty(tab.id)).toBe(true);
+  });
+
+  it('Close others and Close all ask about a dirty design; Close saved leaves it open', async () => {
+    const other: DesignTabRef = { ...tab, id: designTabId(ids.prod, scope, 'other'), table: 'other', title: 'other' };
+    useTabs.getState().open(other);
+    await dirtyDesign();
+    await closeSavedTabs();
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([tab.id]);
+    useTabs.getState().open(other);
+
+    const closing = closeOtherTabs(other);
+    await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
+    question().done(false);
+    await closing;
+    expect(useTabs.getState().tabs.map((t) => t.id)).toContain(tab.id);
+
+    const all = closeAllTabs();
+    await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
+    question().done(true);
+    await all;
+    expect(useTabs.getState().tabs).toEqual([]);
+  });
+
+  it('quitting keeps the drafts when a later quit question is cancelled', async () => {
+    await dirtyDesign();
+    mockBackend({ tabs_save: () => null, query_close_tab: () => null, table_design_close: () => null });
+    useQueryDocs.getState().newQuery(null, null);
+    setRunningSource(() => true);
+    try {
+      let handler: ((e: { preventDefault(): void }) => unknown) | undefined;
+      const win: CloseGuardWindow = {
+        onCloseRequested: vi.fn(async (h) => {
+          handler = h;
+          return () => undefined;
+        }),
+        destroy: vi.fn(async () => undefined),
+      };
+      await installCloseGuard(win);
+      const quitting = handler!({ preventDefault: () => undefined });
+      await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
+      question().done(true);
+      await vi.waitFor(() => expect(useDialogs.getState().question?.kind).toBe('appClose'));
+      const q = useDialogs.getState().question;
+      if (q?.kind === 'appClose') q.done();
+      await quitting;
+      expect(win.destroy).not.toHaveBeenCalled();
+      expect(useTableDesigns.getState().isDirty(tab.id)).toBe(true);
+      expect(useTableDesigns.getState().byTab[tab.id]?.draft?.comment).toBe('changed');
+    } finally {
+      setRunningSource(null);
+    }
+  });
 });
 
 describe('design tab close guards', () => {

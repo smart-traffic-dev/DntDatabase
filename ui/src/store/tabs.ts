@@ -158,7 +158,7 @@ interface TabsState {
   /** DDL changes object identities without moving tabs between groups. */
   replaceObjectTabs(replacements: Record<string, ObjectTabRef | null>): void;
   close(id: string): void;
-  /** Closes every object tab of a connection (it was deleted or replaced); query tabs keep their binding. */
+  /** Closes every object and design tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
   reset(): void;
 }
@@ -516,7 +516,7 @@ export const useTabs = create<TabsState>()((set, get) => {
       }),
     closeConnection: (connectionId) =>
       update((s) => {
-        const goes = (t: Tab) => t.kind === 'object' && t.connectionId === connectionId;
+        const goes = (t: Tab) => (t.kind === 'object' || t.kind === 'design') && t.connectionId === connectionId;
         const tabs = s.tabs.filter((t) => !goes(t));
         if (tabs.length === s.tabs.length) return null;
         // In each group whose active tab went away: the nearest remaining tab to its left, else the first.
