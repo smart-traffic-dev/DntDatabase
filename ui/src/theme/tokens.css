@@ -1,181 +1,345 @@
 /*
- * Design tokens copied from dnt-note (dungnt1312/dnt-note, commit 170211f,
- * src/theme/tokens.css — "Studio theme", ChatGPT style).
+ * DntDatabase design tokens (spec: docs/superpowers/specs/2026-10-21-ux-redesign-design.md §2).
  *
- * Token names and values are unchanged. The only adaptation is syntax: this
- * project has no Tailwind, so the `@theme inline` and `@theme` blocks are
- * declared on `:root`. The legacy aliases, base focus/selection/scrollbar
- * rules and the reduced-motion guard are copied as-is.
+ * Three layers, prefix `--dnt-`:
+ *   1. Primitive  — raw palette. Only this file reads it.
+ *   2. Semantic   — roles, with a light (`:root`) and a dark (`.dark`) value. Components use these.
+ *   3. Component  — sizes that follow the density setting (`[data-density='comfortable']`), plus the
+ *                   fixed spacing / radius / type / motion / z-index scales.
+ *
+ * The names the app used before (`--studio-*`, `--bg`, `--text`, `--color-*`, `--text-callout`, …) are kept
+ * at the end as aliases of the semantic tokens until every stylesheet has moved to `--dnt-*`.
  */
 
+/* 1. Primitive */
+:root {
+  --dnt-gray-0: #ffffff;
+  --dnt-gray-25: #fafafa;
+  --dnt-gray-50: #f4f4f5;
+  --dnt-gray-100: #ebebed;
+  --dnt-gray-200: #dedee1;
+  --dnt-gray-300: #c6c6ca;
+  --dnt-gray-400: #9d9da3;
+  --dnt-gray-500: #707076;
+  --dnt-gray-600: #5a5a60;
+  --dnt-gray-700: #3f3f44;
+  --dnt-gray-800: #2a2a2e;
+  --dnt-gray-850: #222225;
+  --dnt-gray-900: #1b1b1e;
+  --dnt-gray-950: #131315;
+
+  --dnt-blue-50: #eef3fe;
+  --dnt-blue-100: #dce7fd;
+  --dnt-blue-400: #6b9bf2;
+  --dnt-blue-500: #3b78e7;
+  --dnt-blue-600: #2563d9;
+  --dnt-blue-700: #1d4fb0;
+
+  --dnt-red-50: #fdeeee;
+  --dnt-red-200: #f5c2c2;
+  --dnt-red-500: #dc3b3b;
+  --dnt-red-700: #b42318;
+
+  --dnt-amber-50: #fff6e0;
+  --dnt-amber-200: #f6d98c;
+  --dnt-amber-500: #d99a00;
+  --dnt-amber-700: #7a4b00;
+
+  --dnt-green-50: #eaf7ef;
+  --dnt-green-200: #b5e2c6;
+  --dnt-green-600: #1a7f46;
+}
+
+/* 2. Semantic — light */
 :root {
   color-scheme: light;
 
-  --studio-bg: #ffffff;
-  --studio-sidebar: #f9f9f9;
-  --studio-hover: #efefef;
-  --studio-selected: #e8e8e8;
-  --studio-hairline: #e8e8e8;
-  --studio-control: #ffffff;
-  --studio-subtle: #f7f7f7;
-  --studio-bubble: #f4f4f4;
+  --dnt-bg-app: var(--dnt-gray-0);
+  --dnt-bg-chrome: var(--dnt-gray-25);
+  --dnt-bg-sunken: var(--dnt-gray-50);
+  --dnt-bg-raised: var(--dnt-gray-0);
+  --dnt-bg-hover: rgba(19, 19, 21, 0.05);
+  --dnt-bg-active: rgba(19, 19, 21, 0.09);
+  --dnt-bg-selected: var(--dnt-blue-100);
+  --dnt-bg-selected-muted: var(--dnt-gray-100);
 
-  /* secondary ≥ 4.5:1, tertiary ≥ 3:1 on --studio-bg */
-  --studio-fg: #0d0d0d;
-  --studio-fg-secondary: #5d5d5d;
-  --studio-fg-tertiary: #8a8a8a;
+  --dnt-border-subtle: var(--dnt-gray-100);
+  --dnt-border: var(--dnt-gray-200);
+  --dnt-border-strong: var(--dnt-gray-300);
 
-  --studio-accent: #0d0d0d;
-  --studio-accent-fg: #ffffff;
-  --studio-accent-hover: #333333;
-  --studio-danger: #d7373f;
-  --studio-danger-fill: #fdeeee;
-  --studio-danger-border: #f3caca;
+  /* fg 17:1, fg-muted 6.9:1, fg-subtle 4.7:1 on bg-chrome */
+  --dnt-fg: var(--dnt-gray-950);
+  --dnt-fg-muted: var(--dnt-gray-600);
+  --dnt-fg-subtle: var(--dnt-gray-500);
+  --dnt-fg-disabled: var(--dnt-gray-400);
 
-  --studio-composer: #ffffff;
-  --studio-composer-border: #e3e3e3;
-  --studio-composer-hover: #f0f0f0;
-  --studio-send-disabled: #d7d7d7;
-  --studio-send-disabled-fg: #ffffff;
-  --studio-popover: #ffffff;
-  --studio-mention: rgba(0, 0, 0, 0.07);
-  --studio-scrollbar: #d4d4d4;
-  --studio-shadow: 0 12px 30px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.06);
+  --dnt-accent: var(--dnt-blue-600);
+  --dnt-accent-hover: var(--dnt-blue-700);
+  --dnt-on-accent: #ffffff;
+  --dnt-accent-subtle: var(--dnt-blue-50);
+  --dnt-focus: var(--dnt-blue-500);
+
+  --dnt-status-danger-fg: var(--dnt-red-700);
+  --dnt-status-danger-bg: var(--dnt-red-50);
+  --dnt-status-danger-border: var(--dnt-red-200);
+  --dnt-status-danger-solid: var(--dnt-red-500);
+  --dnt-status-warning-fg: var(--dnt-amber-700);
+  --dnt-status-warning-bg: var(--dnt-amber-50);
+  --dnt-status-warning-border: var(--dnt-amber-200);
+  --dnt-status-warning-solid: var(--dnt-amber-500);
+  --dnt-status-success-fg: var(--dnt-green-600);
+  --dnt-status-success-bg: var(--dnt-green-50);
+  --dnt-status-success-border: var(--dnt-green-200);
+  --dnt-status-success-solid: #23a05a;
+  --dnt-status-info-fg: var(--dnt-blue-700);
+  --dnt-status-info-bg: var(--dnt-blue-50);
+  --dnt-status-info-border: var(--dnt-blue-100);
+  --dnt-status-info-solid: var(--dnt-blue-600);
+
+  --dnt-env-prod: var(--dnt-status-danger-solid);
+  --dnt-env-staging: var(--dnt-status-warning-solid);
+  --dnt-env-local: var(--dnt-gray-400);
+
+  --dnt-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --dnt-shadow-2: 0 6px 20px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --dnt-shadow-3: 0 20px 48px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
+  --dnt-scrim: rgba(19, 19, 21, 0.32);
 }
 
+/* 2. Semantic — dark */
 .dark {
   color-scheme: dark;
 
-  --studio-bg: #212121;
-  --studio-sidebar: #181818;
-  --studio-hover: #2a2a2a;
-  --studio-selected: #303030;
-  --studio-hairline: #363636;
-  --studio-control: #2a2a2a;
-  --studio-subtle: #262626;
-  --studio-bubble: #303030;
+  --dnt-bg-app: var(--dnt-gray-900);
+  --dnt-bg-chrome: var(--dnt-gray-950);
+  --dnt-bg-sunken: #161618;
+  --dnt-bg-raised: #26262a;
+  --dnt-bg-hover: rgba(255, 255, 255, 0.06);
+  --dnt-bg-active: rgba(255, 255, 255, 0.1);
+  --dnt-bg-selected: rgba(59, 120, 231, 0.28);
+  --dnt-bg-selected-muted: var(--dnt-gray-800);
 
-  --studio-fg: #ececec;
-  --studio-fg-secondary: #b4b4b4;
-  --studio-fg-tertiary: #8c8c8c;
+  --dnt-border-subtle: #242427;
+  --dnt-border: #2f2f33;
+  --dnt-border-strong: #45454b;
 
-  --studio-accent: #f3f3f3;
-  --studio-accent-fg: #0d0d0d;
-  --studio-accent-hover: #d6d6d6;
-  --studio-danger: #e5484d;
-  --studio-danger-fill: #3a2224;
-  --studio-danger-border: #5a2f31;
+  --dnt-fg: #ececee;
+  --dnt-fg-muted: #b3b3b8;
+  --dnt-fg-subtle: #8e8e94;
+  --dnt-fg-disabled: var(--dnt-gray-600);
 
-  --studio-composer: #303030;
-  --studio-composer-border: #3d3d3d;
-  --studio-composer-hover: #424242;
-  --studio-send-disabled: #7a7a7a;
-  --studio-send-disabled-fg: #2f2f2f;
-  --studio-popover: #353535;
-  --studio-mention: rgba(255, 255, 255, 0.14);
-  --studio-scrollbar: #4a4a4a;
-  --studio-shadow: 0 12px 30px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --dnt-accent: var(--dnt-blue-400);
+  --dnt-accent-hover: #8ab0f5;
+  --dnt-on-accent: #0b1830;
+  --dnt-accent-subtle: rgba(59, 120, 231, 0.18);
+  --dnt-focus: var(--dnt-blue-400);
+
+  --dnt-status-danger-fg: #ff8a8a;
+  --dnt-status-danger-bg: #3a2224;
+  --dnt-status-danger-border: #5a2f31;
+  --dnt-status-danger-solid: #e5484d;
+  --dnt-status-warning-fg: #f0c674;
+  --dnt-status-warning-bg: #362c17;
+  --dnt-status-warning-border: #5a4618;
+  --dnt-status-warning-solid: #e0a82e;
+  --dnt-status-success-fg: #5fd08f;
+  --dnt-status-success-bg: #1b3326;
+  --dnt-status-success-border: #2a5a3c;
+  --dnt-status-success-solid: #2fb36a;
+  --dnt-status-info-fg: #8ab0f5;
+  --dnt-status-info-bg: #1a2540;
+  --dnt-status-info-border: #2a3b63;
+  --dnt-status-info-solid: var(--dnt-blue-400);
+
+  --dnt-env-prod: var(--dnt-status-danger-solid);
+  --dnt-env-staging: var(--dnt-status-warning-solid);
+  --dnt-env-local: var(--dnt-gray-600);
+
+  --dnt-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.15);
+  --dnt-shadow-2: 0 6px 20px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.15);
+  --dnt-shadow-3: 0 20px 48px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.2);
+  --dnt-scrim: rgba(0, 0, 0, 0.55);
 }
 
-/* Legacy aliases — keep standalone windows on-theme. */
+/* 3. Component — compact (default) */
+:root {
+  --dnt-ctl-h-xs: 20px;
+  --dnt-ctl-h-sm: 24px;
+  --dnt-ctl-h-md: 28px;
+  --dnt-ctl-h-lg: 32px;
+  --dnt-row-h-tree: 24px;
+  --dnt-row-h-grid: 24px;
+  --dnt-row-h-menu: 28px;
+  --dnt-titlebar-h: 36px;
+  --dnt-tab-h: 34px;
+  --dnt-statusbar-h: 24px;
+  --dnt-icon-size: 16px;
+
+  --dnt-space-0_5: 2px;
+  --dnt-space-1: 4px;
+  --dnt-space-1_5: 6px;
+  --dnt-space-2: 8px;
+  --dnt-space-3: 12px;
+  --dnt-space-4: 16px;
+  --dnt-space-6: 24px;
+  --dnt-space-8: 32px;
+
+  --dnt-radius-xs: 3px;
+  --dnt-radius-sm: 5px;
+  --dnt-radius-md: 7px;
+  --dnt-radius-lg: 10px;
+  --dnt-radius-full: 999px;
+
+  --dnt-text-xs: 11px;
+  --dnt-text-xs-lh: 16px;
+  --dnt-text-sm: 12px;
+  --dnt-text-sm-lh: 16px;
+  --dnt-text-base: 13px;
+  --dnt-text-base-lh: 18px;
+  --dnt-text-md: 14px;
+  --dnt-text-md-lh: 20px;
+  --dnt-text-lg: 16px;
+  --dnt-text-lg-lh: 22px;
+  --dnt-text-xl: 20px;
+  --dnt-text-xl-lh: 28px;
+  --dnt-text-2xl: 28px;
+  --dnt-text-2xl-lh: 34px;
+
+  --dnt-dur-1: 80ms;
+  --dnt-dur-2: 140ms;
+  --dnt-dur-3: 220ms;
+  --dnt-ease-std: cubic-bezier(0.2, 0, 0, 1);
+  --dnt-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
+  --dnt-z-sticky: 10;
+  --dnt-z-dropdown: 100;
+  --dnt-z-overlay: 200;
+  --dnt-z-modal: 300;
+  --dnt-z-toast: 400;
+  --dnt-z-tooltip: 500;
+}
+
+/* 3. Component — comfortable */
+[data-density='comfortable'] {
+  --dnt-ctl-h-xs: 22px;
+  --dnt-ctl-h-sm: 26px;
+  --dnt-ctl-h-md: 30px;
+  --dnt-ctl-h-lg: 36px;
+  --dnt-row-h-tree: 28px;
+  --dnt-row-h-grid: 30px;
+  --dnt-row-h-menu: 32px;
+  --dnt-titlebar-h: 40px;
+  --dnt-tab-h: 38px;
+  --dnt-statusbar-h: 26px;
+}
+
+/* Legacy names: aliases of the tokens above, kept until every stylesheet uses --dnt-*. */
 :root,
 .dark {
-  --bg: var(--studio-bg);
-  --bg-panel: var(--studio-sidebar);
-  --bg-elevated: var(--studio-control);
-  --bg-hover: var(--studio-hover);
-  --text: var(--studio-fg);
-  --text-secondary: var(--studio-fg-secondary);
-  --text-faint: var(--studio-fg-tertiary);
-  --border: var(--studio-hairline);
-  --accent: var(--studio-accent);
-  --accent-soft: var(--studio-hover);
-  --danger: var(--studio-danger);
-  --code-bg: var(--studio-subtle);
+  --studio-bg: var(--dnt-bg-app);
+  --studio-sidebar: var(--dnt-bg-chrome);
+  --studio-hover: var(--dnt-bg-hover);
+  --studio-selected: var(--dnt-bg-selected);
+  --studio-hairline: var(--dnt-border);
+  --studio-control: var(--dnt-bg-app);
+  --studio-subtle: var(--dnt-bg-sunken);
+  --studio-bubble: var(--dnt-bg-sunken);
+  --studio-fg: var(--dnt-fg);
+  --studio-fg-secondary: var(--dnt-fg-muted);
+  --studio-fg-tertiary: var(--dnt-fg-subtle);
+  --studio-accent: var(--dnt-accent);
+  --studio-accent-fg: var(--dnt-on-accent);
+  --studio-accent-hover: var(--dnt-accent-hover);
+  --studio-danger: var(--dnt-status-danger-solid);
+  --studio-danger-fill: var(--dnt-status-danger-bg);
+  --studio-danger-border: var(--dnt-status-danger-border);
+  --studio-composer: var(--dnt-bg-app);
+  --studio-composer-border: var(--dnt-border);
+  --studio-composer-hover: var(--dnt-bg-hover);
+  --studio-send-disabled: var(--dnt-bg-active);
+  --studio-send-disabled-fg: var(--dnt-fg-disabled);
+  --studio-popover: var(--dnt-bg-raised);
+  --studio-mention: var(--dnt-accent-subtle);
+  --studio-scrollbar: var(--dnt-border-strong);
+  --studio-shadow: var(--dnt-shadow-2);
 
-  /* `@theme inline` colour aliases. */
-  --color-app: var(--studio-bg);
-  --color-sidebar: var(--studio-sidebar);
-  --color-hover: var(--studio-hover);
-  --color-selected: var(--studio-selected);
-  --color-hairline: var(--studio-hairline);
-  --color-control: var(--studio-control);
-  --color-subtle: var(--studio-subtle);
-  --color-bubble: var(--studio-bubble);
-  --color-fg: var(--studio-fg);
-  --color-fg-secondary: var(--studio-fg-secondary);
-  --color-fg-tertiary: var(--studio-fg-tertiary);
-  --color-accent: var(--studio-accent);
-  --color-accent-fg: var(--studio-accent-fg);
-  --color-accent-hover: var(--studio-accent-hover);
-  --color-danger: var(--studio-danger);
-  --color-danger-fill: var(--studio-danger-fill);
-  --color-danger-border: var(--studio-danger-border);
-  --color-composer: var(--studio-composer);
-  --color-composer-border: var(--studio-composer-border);
-  --color-composer-hover: var(--studio-composer-hover);
-  --color-send-disabled: var(--studio-send-disabled);
-  --color-send-disabled-fg: var(--studio-send-disabled-fg);
-  --color-popover: var(--studio-popover);
-  --color-mention: var(--studio-mention);
-  --shadow-popover: var(--studio-shadow);
+  --bg: var(--dnt-bg-app);
+  --bg-panel: var(--dnt-bg-chrome);
+  --bg-elevated: var(--dnt-bg-raised);
+  --bg-hover: var(--dnt-bg-hover);
+  --text: var(--dnt-fg);
+  --text-secondary: var(--dnt-fg-muted);
+  --text-faint: var(--dnt-fg-subtle);
+  --border: var(--dnt-border);
+  --accent: var(--dnt-accent);
+  --accent-soft: var(--dnt-bg-hover);
+  --danger: var(--dnt-status-danger-solid);
+  --code-bg: var(--dnt-bg-sunken);
 
-  /* `@theme` typography and radii. */
+  --color-app: var(--dnt-bg-app);
+  --color-sidebar: var(--dnt-bg-chrome);
+  --color-hover: var(--dnt-bg-hover);
+  --color-selected: var(--dnt-bg-selected);
+  --color-hairline: var(--dnt-border);
+  --color-control: var(--dnt-bg-app);
+  --color-subtle: var(--dnt-bg-sunken);
+  --color-bubble: var(--dnt-bg-sunken);
+  --color-fg: var(--dnt-fg);
+  --color-fg-secondary: var(--dnt-fg-muted);
+  --color-fg-tertiary: var(--dnt-fg-subtle);
+  --color-accent: var(--dnt-accent);
+  --color-accent-fg: var(--dnt-on-accent);
+  --color-accent-hover: var(--dnt-accent-hover);
+  --color-danger: var(--dnt-status-danger-solid);
+  --color-danger-fill: var(--dnt-status-danger-bg);
+  --color-danger-border: var(--dnt-status-danger-border);
+  --color-composer: var(--dnt-bg-app);
+  --color-composer-border: var(--dnt-border);
+  --color-composer-hover: var(--dnt-bg-hover);
+  --color-send-disabled: var(--dnt-bg-active);
+  --color-send-disabled-fg: var(--dnt-fg-disabled);
+  --color-popover: var(--dnt-bg-raised);
+  --color-mention: var(--dnt-accent-subtle);
+  --shadow-popover: var(--dnt-shadow-2);
+
   --font-sans:
     ui-sans-serif, -apple-system, system-ui, 'Segoe UI Variable Text', 'Segoe UI', Helvetica,
     Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
   --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
 
-  --text-caption: 11px;
-  --text-caption--line-height: 16px;
-  --text-footnote: 12px;
-  --text-footnote--line-height: 16px;
-  --text-callout: 13px;
-  --text-callout--line-height: 18px;
-  --text-body: 15px;
-  --text-body--line-height: 24px;
-  --text-headline: 17px;
-  --text-headline--line-height: 24px;
-  --text-title: 22px;
-  --text-title--line-height: 28px;
-  --text-large-title: 28px;
-  --text-large-title--line-height: 34px;
+  --text-caption: var(--dnt-text-xs);
+  --text-caption--line-height: var(--dnt-text-xs-lh);
+  --text-footnote: var(--dnt-text-sm);
+  --text-footnote--line-height: var(--dnt-text-sm-lh);
+  --text-callout: var(--dnt-text-base);
+  --text-callout--line-height: var(--dnt-text-base-lh);
+  --text-body: var(--dnt-text-md);
+  --text-body--line-height: var(--dnt-text-md-lh);
+  --text-headline: var(--dnt-text-lg);
+  --text-headline--line-height: var(--dnt-text-lg-lh);
+  --text-title: var(--dnt-text-xl);
+  --text-title--line-height: var(--dnt-text-xl-lh);
+  --text-large-title: var(--dnt-text-2xl);
+  --text-large-title--line-height: var(--dnt-text-2xl-lh);
 
-  /* control · card/popover · bubble — plus the composer card */
-  --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 22px;
-  --radius-xl: 26px;
+  --radius-sm: var(--dnt-radius-sm);
+  --radius-md: var(--dnt-radius-md);
+  --radius-lg: var(--dnt-radius-lg);
+  --radius-xl: var(--dnt-radius-lg);
 }
 
 ::selection {
-  background: color-mix(in srgb, var(--studio-fg) 18%, transparent);
-}
-
-:focus-visible {
-  outline: 2px solid var(--studio-fg-secondary);
-  outline-offset: 2px;
-}
-
-/* Text fields and menu rows show focus through their own border/fill instead of a ring. */
-input:focus-visible,
-textarea:focus-visible,
-.cm-editor :focus-visible,
-[contenteditable='true']:focus-visible,
-[role='menuitem']:focus-visible,
-[role='menuitemradio']:focus-visible,
-[role='option']:focus-visible {
-  outline: none;
+  background: color-mix(in srgb, var(--dnt-accent) 24%, transparent);
 }
 
 ::placeholder {
-  color: var(--studio-fg-tertiary);
+  color: var(--dnt-fg-subtle);
   opacity: 1;
 }
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--studio-scrollbar) transparent;
+  scrollbar-color: var(--dnt-border-strong) transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {
