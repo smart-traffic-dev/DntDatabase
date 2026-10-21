@@ -4,7 +4,7 @@ Date: 2026-10-21. Branch: `feat/p4a-object-actions`.
 
 ## Baseline
 
-P4a started at `a21d293` and was saved in `18eea24`. Main `5d75886` was merged in `c117507`; main `3c350a5` was merged in `54030b9`. The latter only adds the Explain redesign spec. The main worktree and its uncommitted changes were preserved. No CI changes.
+P4a started at `a21d293` and was saved in `18eea24`. Main `5d75886` was merged in `c117507`; main `3c350a5` was merged in `54030b9`. The latter only adds the Explain redesign spec. Main `7f5e5c9` was then merged in `a2bcdd7` (menu placement and autocomplete CSS); the UI suite and native smoke were rebuilt and rerun against that baseline. The main worktree and its uncommitted changes were preserved. No CI changes.
 
 ## Conflicts resolved
 
@@ -24,7 +24,7 @@ Direct merge conflicts were dialogs.ts, ObjectTab.tsx, test/backend.ts, and modi
 
 | Check | Result |
 |---|---|
-| Full UI Vitest | 122 files, 1,338 tests passed |
+| Full UI Vitest | 122 files, 1,339 tests passed |
 | UI lint and TypeScript | Passed |
 | UI production build | Passed; existing bundle-size warning remains |
 | Desktop E2E TypeScript | Passed |
@@ -37,7 +37,7 @@ The integration matrix actually ran against MySQL 5.7/8.0, MariaDB 10.6/11.4, an
 
 Desktop smoke follows real UI and IPC: create a private namespace, create/insert a table through SQL, rename, truncate, drop the table, and drop the namespace. Raw SQL uses explicit F5 tree refresh; P4a actions refresh automatically. Tests wait until Apply and refresh complete before closing the dialog.
 
-Evidence: `e2e/evidence/2026-10-21T08-07-28/` (gitignored). The SQL-preview/typed-confirmation screenshot was visually inspected on the merged UI. After the passing run, independent server queries found no p4a_smoke_% namespaces on MySQL 8 or PostgreSQL 17. The runner removed its test credentials. Cleanup only targets UUID namespaces created by the test.
+Evidence: `e2e/evidence/2026-10-21T08-13-29/` (gitignored). The SQL-preview/typed-confirmation screenshot was visually inspected on the merged UI. After the passing run, independent server queries found no p4a_smoke_% namespaces on MySQL 8 or PostgreSQL 17. The runner removed its test credentials. Cleanup only targets UUID namespaces created by the test.
 
 ## Specific regressions covered
 
@@ -50,3 +50,5 @@ Evidence: `e2e/evidence/2026-10-21T08-07-28/` (gitignored). The SQL-preview/type
 ## Limits
 
 This desktop run covers P4a, not every pre-existing desktop spec. Raw SQL DDL still needs manual tree refresh. MySQL/MariaDB conservatively report Unknown after a sent DDL fails, rather than promising rollback. Metadata rechecks cannot eliminate races with external sessions.
+
+The main worktree also contains uncommitted Explain redesign files. Their changed paths and ex-* CSS scope were inspected and do not overlap the P4a changes. They were preserved and are not included in the tested binary; the tested baseline is committed main 7f5e5c9.
