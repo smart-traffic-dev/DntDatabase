@@ -21,14 +21,14 @@ describe('CSS custom properties', () => {
     expect(undefinedUses).toEqual([]);
   });
 
-  // --danger / --production are fill and stripe colours; as text they miss AA contrast on the
-  // tinted backgrounds. Text uses --danger-fg / --production-fg.
-  it('text colour never uses the low-contrast --danger / --production', () => {
+  // The danger / env solids are fill and stripe colours; as text they miss AA contrast on the
+  // tinted backgrounds. Text uses --dnt-status-danger-fg.
+  it('text colour never uses the low-contrast danger / production solids', () => {
     const offending: string[] = [];
     for (const [file, raw] of Object.entries(sheets)) {
       const css = raw.replace(/\/\*[\s\S]*?\*\//g, '');
       for (const m of css.matchAll(/(?:^|[;{\s])color\s*:\s*([^;}]*)/g)) {
-        if (/var\(\s*--(?:danger|production)\s*[),]/.test(m[1] ?? '')) offending.push(`${file}: color: ${m[1]}`);
+        if (/var\(\s*--dnt-(?:status-danger-solid|env-prod)\s*[),]/.test(m[1] ?? '')) offending.push(`${file}: color: ${m[1]}`);
       }
     }
     expect(offending).toEqual([]);

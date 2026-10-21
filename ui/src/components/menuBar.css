@@ -10,15 +10,15 @@
   border: 0;
   border-radius: 0;
   background: transparent;
-  color: var(--text);
+  color: var(--dnt-fg);
   font: inherit;
-  font-size: var(--text-callout);
+  font-size: var(--dnt-text-base);
   cursor: default;
 }
 
 .menubar-btn:hover,
 .menubar-btn.open {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .menubar-btn u {
@@ -28,5 +28,5 @@
 
 /* Inactive window: dimmed like the title. */
 .titlebar.inactive .menubar-btn:not(:hover):not(.open) {
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }

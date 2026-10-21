@@ -306,8 +306,8 @@ fieldset.export-form {
 
 .field label,
 .field-label {
-  font-size: var(--text-footnote);
-  color: var(--muted);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-muted);
 }
 
 .field input:not([type='checkbox']),
@@ -315,15 +315,15 @@ fieldset.export-form {
   height: 30px;
   padding: 0 8px;
   border: 1px solid var(--dlg-line);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
   font: inherit;
   color: inherit;
   min-width: 0;
 }
 
 .field input[aria-invalid='true'] {
-  border-color: var(--danger);
+  border-color: var(--dnt-status-danger-solid);
 }
 
 .field .row {
@@ -340,20 +340,20 @@ fieldset.export-form {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: var(--text-callout);
-  color: var(--text);
+  font-size: var(--dnt-text-base);
+  color: var(--dnt-fg);
 }
 
 .field-error {
   margin: 0;
-  color: var(--danger-fg);
-  font-size: var(--text-footnote);
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
 }
 
 .hint {
   margin: 0;
-  font-size: var(--text-footnote);
-  color: var(--muted);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-muted);
 }
 
 /* Appearance selector (Settings). */
@@ -368,21 +368,21 @@ fieldset.export-form {
 
 .theme-option {
   height: 34px;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
-  color: var(--studio-fg-secondary);
-  font-size: var(--text-callout);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-base);
 }
 
 .theme-option:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .theme-option[aria-checked='true'] {
-  border-color: var(--studio-fg);
-  box-shadow: inset 0 0 0 1px var(--studio-fg);
-  color: var(--studio-fg);
+  border-color: var(--dnt-fg);
+  box-shadow: inset 0 0 0 1px var(--dnt-fg);
+  color: var(--dnt-fg);
   font-weight: 500;
 }
 
@@ -493,17 +493,17 @@ fieldset.export-form {
 .result {
   margin: 0 16px 10px;
   padding: 8px 10px;
-  border: 1px solid var(--studio-hairline);
-  border-radius: var(--radius-md);
-  font-size: var(--text-footnote);
-  background: var(--studio-subtle);
-  color: var(--studio-fg);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  font-size: var(--dnt-text-sm);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg);
 }
 
 .result.bad {
-  background: var(--studio-danger-fill);
-  border-color: var(--studio-danger-border);
-  color: var(--danger-fg);
+  background: var(--dnt-status-danger-bg);
+  border-color: var(--dnt-status-danger-border);
+  color: var(--dnt-status-danger-fg);
 }
 
 .result p {
@@ -518,7 +518,7 @@ fieldset.export-form {
 }
 
 .kv dt {
-  color: var(--muted);
+  color: var(--dnt-fg-muted);
 }
 
 .kv dd {
@@ -542,7 +542,7 @@ fieldset.export-form {
   max-height: 260px;
   overflow: auto;
   border: 1px solid var(--dlg-line);
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
 }
 
 .export-node,
@@ -556,13 +556,13 @@ fieldset.export-form {
 .import-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
 }
 
 .import-table th,
 .import-table td {
   padding: 4px 8px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dnt-border);
   text-align: left;
   vertical-align: top;
 }
@@ -575,13 +575,13 @@ fieldset.export-form {
 .import-skipped {
   margin: 0;
   padding-left: 16px;
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
 }
 
 .import-heading {
   margin: 0 0 4px;
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
   text-transform: uppercase;
 }
 
@@ -592,13 +592,13 @@ fieldset.export-form {
   margin: 0;
   padding: 8px 10px;
   border: 1px solid var(--dlg-line);
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
 }
 
 .import-policy legend {
   padding: 0 4px;
-  font-size: var(--text-footnote);
-  color: var(--muted);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-muted);
 }
 
 /* Production guard (board 08): the PRODUCTION badge in the header and a danger hairline, no thick frame. */
@@ -675,9 +675,9 @@ fieldset.export-form {
 /* Unbounded writes (UPDATE/DELETE without WHERE, TRUNCATE): a tinted block, no stripe. */
 .run-confirm-warning {
   padding: 8px 10px;
-  border-radius: var(--radius-sm);
-  background: var(--warning-bg);
-  color: var(--warning-fg);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
 }
 
 .run-confirm-warning-title {
@@ -705,12 +705,12 @@ fieldset.export-form {
 
 .run-confirm-note {
   padding-left: 24px;
-  font-size: var(--text-footnote);
-  color: var(--muted);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-muted);
 }
 
 .run-confirm-note.warn {
-  color: var(--danger-fg);
+  color: var(--dnt-status-danger-fg);
 }
 
 /* "Type <name> to confirm" boxes. */
@@ -758,15 +758,15 @@ fieldset.export-form {
 .field select:disabled,
 fieldset:disabled input,
 fieldset:disabled select {
-  background: var(--studio-subtle);
-  color: var(--studio-fg-tertiary);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-subtle);
   border-style: dashed;
   cursor: not-allowed;
 }
 
 fieldset:disabled .field label,
 fieldset:disabled .field-label {
-  color: var(--studio-fg-tertiary);
+  color: var(--dnt-fg-subtle);
 }
 
 /* One reveal control for every password field; hide the engine's own eye. */
@@ -793,15 +793,15 @@ input::-ms-clear {
   transform: translateY(-50%);
   padding: 2px 6px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: none;
-  color: var(--studio-fg-secondary);
-  font-size: var(--text-caption);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
 }
 
 .pw-toggle:hover {
-  background: var(--hover);
-  color: var(--studio-fg);
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
 }
 
 .export-bulk {

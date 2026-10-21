@@ -6,9 +6,6 @@
  *   2. Semantic   — roles, with a light (`:root`) and a dark (`.dark`) value. Components use these.
  *   3. Component  — sizes that follow the density setting (`[data-density='comfortable']`), plus the
  *                   fixed spacing / radius / type / motion / z-index scales.
- *
- * The names the app used before (`--studio-*`, `--bg`, `--text`, `--color-*`, `--text-callout`, …) are kept
- * at the end as aliases of the semantic tokens until every stylesheet has moved to `--dnt-*`.
  */
 
 /* 1. Primitive */
@@ -233,99 +230,13 @@
   --dnt-statusbar-h: 26px;
 }
 
-/* Legacy names: aliases of the tokens above, kept until every stylesheet uses --dnt-*. */
+/* App-level fonts (no --dnt- token). */
 :root,
 .dark {
-  --studio-bg: var(--dnt-bg-app);
-  --studio-sidebar: var(--dnt-bg-chrome);
-  --studio-hover: var(--dnt-bg-hover);
-  --studio-selected: var(--dnt-bg-selected);
-  --studio-hairline: var(--dnt-border);
-  --studio-control: var(--dnt-bg-app);
-  --studio-subtle: var(--dnt-bg-sunken);
-  --studio-bubble: var(--dnt-bg-sunken);
-  --studio-fg: var(--dnt-fg);
-  --studio-fg-secondary: var(--dnt-fg-muted);
-  --studio-fg-tertiary: var(--dnt-fg-subtle);
-  --studio-accent: var(--dnt-accent);
-  --studio-accent-fg: var(--dnt-on-accent);
-  --studio-accent-hover: var(--dnt-accent-hover);
-  --studio-danger: var(--dnt-status-danger-solid);
-  --studio-danger-fill: var(--dnt-status-danger-bg);
-  --studio-danger-border: var(--dnt-status-danger-border);
-  --studio-composer: var(--dnt-bg-app);
-  --studio-composer-border: var(--dnt-border);
-  --studio-composer-hover: var(--dnt-bg-hover);
-  --studio-send-disabled: var(--dnt-bg-active);
-  --studio-send-disabled-fg: var(--dnt-fg-disabled);
-  --studio-popover: var(--dnt-bg-raised);
-  --studio-mention: var(--dnt-accent-subtle);
-  --studio-scrollbar: var(--dnt-border-strong);
-  --studio-shadow: var(--dnt-shadow-2);
-
-  --bg: var(--dnt-bg-app);
-  --bg-panel: var(--dnt-bg-chrome);
-  --bg-elevated: var(--dnt-bg-raised);
-  --bg-hover: var(--dnt-bg-hover);
-  --text: var(--dnt-fg);
-  --text-secondary: var(--dnt-fg-muted);
-  --text-faint: var(--dnt-fg-subtle);
-  --border: var(--dnt-border);
-  --accent: var(--dnt-accent);
-  --accent-soft: var(--dnt-bg-hover);
-  --danger: var(--dnt-status-danger-solid);
-  --code-bg: var(--dnt-bg-sunken);
-
-  --color-app: var(--dnt-bg-app);
-  --color-sidebar: var(--dnt-bg-chrome);
-  --color-hover: var(--dnt-bg-hover);
-  --color-selected: var(--dnt-bg-selected);
-  --color-hairline: var(--dnt-border);
-  --color-control: var(--dnt-bg-app);
-  --color-subtle: var(--dnt-bg-sunken);
-  --color-bubble: var(--dnt-bg-sunken);
-  --color-fg: var(--dnt-fg);
-  --color-fg-secondary: var(--dnt-fg-muted);
-  --color-fg-tertiary: var(--dnt-fg-subtle);
-  --color-accent: var(--dnt-accent);
-  --color-accent-fg: var(--dnt-on-accent);
-  --color-accent-hover: var(--dnt-accent-hover);
-  --color-danger: var(--dnt-status-danger-solid);
-  --color-danger-fill: var(--dnt-status-danger-bg);
-  --color-danger-border: var(--dnt-status-danger-border);
-  --color-composer: var(--dnt-bg-app);
-  --color-composer-border: var(--dnt-border);
-  --color-composer-hover: var(--dnt-bg-hover);
-  --color-send-disabled: var(--dnt-bg-active);
-  --color-send-disabled-fg: var(--dnt-fg-disabled);
-  --color-popover: var(--dnt-bg-raised);
-  --color-mention: var(--dnt-accent-subtle);
-  --shadow-popover: var(--dnt-shadow-2);
-
   --font-sans:
     ui-sans-serif, -apple-system, system-ui, 'Segoe UI Variable Text', 'Segoe UI', Helvetica,
     Arial, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
   --font-mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
-
-  --text-caption: var(--dnt-text-xs);
-  --text-caption--line-height: var(--dnt-text-xs-lh);
-  --text-footnote: var(--dnt-text-sm);
-  --text-footnote--line-height: var(--dnt-text-sm-lh);
-  --text-callout: var(--dnt-text-base);
-  --text-callout--line-height: var(--dnt-text-base-lh);
-  --text-body: var(--dnt-text-md);
-  --text-body--line-height: var(--dnt-text-md-lh);
-  --text-headline: var(--dnt-text-lg);
-  --text-headline--line-height: var(--dnt-text-lg-lh);
-  --text-title: var(--dnt-text-xl);
-  --text-title--line-height: var(--dnt-text-xl-lh);
-  --text-large-title: var(--dnt-text-2xl);
-  --text-large-title--line-height: var(--dnt-text-2xl-lh);
-
-  --radius-sm: var(--dnt-radius-sm);
-  --radius-md: var(--dnt-radius-md);
-  --radius-lg: var(--dnt-radius-lg);
-  --radius-xl: var(--dnt-radius-lg);
 }
 
 ::selection {

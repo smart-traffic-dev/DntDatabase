@@ -91,11 +91,10 @@ describe('design tokens', () => {
     expect(resolve(comfortable, '--dnt-row-h-grid')).toBe('30px');
   });
 
-  it('legacy names still resolve to the new values', () => {
-    expect(resolve(light, '--studio-accent')).toBe('#2563d9');
-    expect(resolve(dark, '--studio-accent')).toBe('#6b9bf2');
-    expect(resolve(light, '--accent')).toBe('#2563d9');
-    expect(resolve(light, '--studio-selected')).toBe(resolve(light, '--dnt-bg-selected'));
-    expect(resolve(light, '--text-callout')).toBe('13px');
+  it('legacy names are gone', () => {
+    for (const name of ['--studio-accent', '--studio-selected', '--accent', '--text-callout', '--color-fg', '--bg', '--radius-sm']) {
+      expect(light.has(name), name).toBe(false);
+    }
+    expect(resolve(light, '--dnt-text-base')).toBe('13px');
   });
 });

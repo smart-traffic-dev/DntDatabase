@@ -10,7 +10,7 @@
 .splitter::after {
   content: '';
   position: absolute;
-  background: var(--border);
+  background: var(--dnt-border);
 }
 
 .splitter.vertical {
@@ -44,5 +44,5 @@
 .splitter:hover,
 .splitter:focus-visible,
 .splitter.dragging {
-  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  background: color-mix(in srgb, var(--dnt-accent) 22%, transparent);
 }

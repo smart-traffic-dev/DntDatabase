@@ -6,9 +6,9 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  border-left: 1px solid var(--border);
-  background: var(--panel);
-  color: var(--text);
+  border-left: 1px solid var(--dnt-border);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
 }
 
 .ve-head {
@@ -17,7 +17,7 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 12px;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dnt-border);
 }
 
 .ve-title {
@@ -30,25 +30,25 @@
   display: flex;
   gap: 4px;
   padding: 4px 12px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--dnt-border);
 }
 
 .ve-tab {
   padding: 4px 10px;
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
-  color: var(--text);
-  font-size: var(--text-footnote);
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-sm);
   cursor: pointer;
 }
 
 .ve-tab:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .ve-on {
-  background: var(--sel);
+  background: var(--dnt-bg-selected);
 }
 
 .ve-body {
@@ -70,12 +70,12 @@
   min-height: 120px;
   resize: none;
   padding: 6px 8px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
   background: transparent;
-  color: var(--text);
+  color: var(--dnt-fg);
   font-family: var(--font-mono);
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -88,8 +88,8 @@
   flex: 1;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
 }
 
 .ve-image img {
@@ -99,13 +99,13 @@
 
 .ve-note {
   margin: 0;
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
 }
 
 .ve-error {
   margin: 0;
-  color: var(--danger-fg);
-  font-size: var(--text-footnote);
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
 }
 
 .ve-actions {
@@ -114,5 +114,5 @@
   flex-wrap: wrap;
   gap: 8px;
   padding: 6px 12px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--dnt-border);
 }

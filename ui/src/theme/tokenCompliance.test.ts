@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+﻿import { describe, expect, it } from 'vitest';
 
 const sheets = import.meta.glob('../**/*.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 
@@ -101,8 +101,8 @@ describe('design token compliance', () => {
   // #2563d9 on the selection fill is 4.36:1, under AA for the small labels that sit on it.
   it('accent text on the selection fill uses the darker accent-hover', () => {
     const offending: string[] = [];
-    const selFill = /background(-color)?\s*:\s*var\(--(sel|dnt-bg-selected)\)/;
-    const accentText = /(^|[;\s])color\s*:\s*var\(--(accent|dnt-accent)\)/;
+    const selFill = /background(-color)?\s*:\s*var\(--dnt-bg-selected\)/;
+    const accentText = /(^|[;\s])color\s*:\s*var\(--dnt-accent\)/;
     for (const [file, raw] of appSheets()) {
       for (const r of rules(raw)) if (selFill.test(r.body) && accentText.test(r.body)) offending.push(`${file}: ${r.selector}`);
     }
@@ -114,6 +114,34 @@ describe('design token compliance', () => {
     }
     if (!rules(palette).some((r) => r.selector.includes('.active') && r.selector.includes('.palette-match'))) {
       offending.push('palette.css: no rule for .palette-row.active .palette-match');
+    }
+    expect(offending).toEqual([]);
+  });
+
+  it('no legacy token names', () => {
+    // Exact legacy names; the app-level values kept on purpose (--font-*, --sidebar-width, --titlebar-close-*) are not listed.
+    const legacy = new Set(
+      ('--bg --bg-panel --bg-elevated --bg-hover --text --text-secondary --text-faint --border --accent --accent-soft --accent-fg ' +
+        '--accent-hover --danger --danger-fg --danger-fill --danger-border --code-bg --panel --sidebar --muted --sel --hover --tabstrip --icon ' +
+        '--production --production-bg --production-fg --warning-bg --warning-fg --current-stmt-bg --shadow-popover ' +
+        '--radius-sm --radius-md --radius-lg --radius-xl --text-caption --text-footnote --text-callout --text-body --text-headline ' +
+        '--text-title --text-large-title').split(' '),
+    );
+    const isLegacy = (n: string) =>
+      legacy.has(n) || /^--(studio|color)-/.test(n) || /^--text-[\w-]+--line-height$/.test(n);
+    const sources = import.meta.glob(['../**/*.ts', '../**/*.tsx', '!../**/*.test.*'], {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    }) as Record<string, string>;
+    expect(Object.keys(sources).length).toBeGreaterThan(20);
+    const offending: string[] = [];
+    // The token files are scanned too: the alias definitions must be gone, not just their uses.
+    for (const [file, raw] of [...Object.entries(sheets), ...Object.entries(sources)]) {
+      for (const line of strip(raw).split('\n')) {
+        const names = line.match(/--[a-z][\w-]*/g) ?? [];
+        for (const n of names) if (isLegacy(n)) offending.push(`${file}: ${n}`);
+      }
     }
     expect(offending).toEqual([]);
   });
@@ -132,3 +160,4 @@ describe('design token compliance', () => {
     expect(offending).toEqual([]);
   });
 });
+

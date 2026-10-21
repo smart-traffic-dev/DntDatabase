@@ -13,7 +13,7 @@
   gap: 8px;
   padding: 12px 8px;
   border-right: 1px solid var(--dlg-line);
-  background: var(--sidebar);
+  background: var(--dnt-bg-chrome);
 }
 
 .snippets-list {
@@ -29,22 +29,22 @@
   display: flex;
   flex-direction: column;
   padding: 4px 8px;
-  border-radius: var(--radius-sm);
+  border-radius: var(--dnt-radius-sm);
   cursor: pointer;
 }
 
 .snippets-item:hover {
-  background: var(--hover);
+  background: var(--dnt-bg-hover);
 }
 
 .snippets-item.selected {
-  background: var(--sel);
+  background: var(--dnt-bg-selected);
 }
 
 .snippets-label,
 .snippets-empty {
-  font-size: var(--text-caption);
-  color: var(--muted);
+  font-size: var(--dnt-text-xs);
+  color: var(--dnt-fg-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -71,10 +71,10 @@
   min-height: 140px;
   padding: 6px 8px;
   border: 1px solid var(--dlg-line);
-  border-radius: var(--radius-sm);
-  background: var(--studio-control);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
   color: inherit;
-  font-size: var(--text-footnote);
+  font-size: var(--dnt-text-sm);
   resize: vertical;
 }
 
