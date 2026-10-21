@@ -103,7 +103,13 @@ pub enum DiffError {
 /// `new`, renaming or dropping a column that a locked element uses (a column of a
 /// locked key, index or FK, or a word-boundary, case-insensitive mention in a locked
 /// index expression, a locked check or a generated column), and any change at all
-/// to a table with a `read_only_reason`.
+/// to a table with a `read_only_reason`. A locked column never moves: the columns
+/// that keep their place are chosen to include every locked one when possible.
+///
+/// Refused with [`DiffError::Invalid`]: `original`s that do not fit the stored table,
+/// and name collisions inside one diff (ruling T6-2: swaps, chains, a rename onto
+/// a dropped element's name, a new element reusing a name another element holds or
+/// renames away), which the user applies in two steps.
 pub fn diff(old: &TableDef, new: &TableDef) -> Result<Vec<Change>, DiffError> {
     let Some(old_name) = &old.original_name else {
         return Ok(vec![Change::CreateTable]);
@@ -132,6 +138,9 @@ pub fn diff(old: &TableDef, new: &TableDef) -> Result<Vec<Change>, DiffError> {
             errs.push(new_locked(ElementRef::PrimaryKey));
         }
     }
+    if errs.is_empty() {
+        name_collisions(old, new, &cols, &idxs, &fks, &checks, &mut errs);
+    }
     if !errs.is_empty() {
         return Err(DiffError::Invalid(errs));
     }
@@ -143,10 +152,12 @@ pub fn diff(old: &TableDef, new: &TableDef) -> Result<Vec<Change>, DiffError> {
         .map(|&(o, n)| (old.columns[o].name.as_str(), new.columns[n].name.as_str()))
         .filter(|(o, n)| o != n)
         .collect();
+    // Case-insensitive, like `locked_user`.
     let follow = |name: &String| -> String {
+        let lower = name.to_lowercase();
         renames
             .iter()
-            .find(|(o, _)| *o == name.as_str())
+            .find(|(o, _)| o.to_lowercase() == lower)
             .map_or_else(|| name.clone(), |(_, n)| n.to_string())
     };
 
@@ -182,7 +193,7 @@ pub fn diff(old: &TableDef, new: &TableDef) -> Result<Vec<Change>, DiffError> {
             name: oc.name.clone(),
         });
     }
-    out.move_column = moves(&cols.pairs, new);
+    out.move_column = moves(&cols.pairs, old, new)?;
     for &n in &cols.added {
         let position = match n {
             0 => Position::First,
@@ -532,6 +543,106 @@ fn pair<T: Element>(old: &[T], new: &[T], errs: &mut Vec<DraftError>) -> Pairing
     }
 }
 
+/// Names in one namespace: the old elements' original names, and the draft
+/// elements with the old element they stand for.
+#[derive(Default)]
+struct Namespace {
+    /// Lowercased original name of each old element (its index is its id).
+    olds: Vec<String>,
+    /// `(old id, draft name, element, claims)`: `claims` when the name is new or
+    /// changed, i.e. the draft takes a name the stored table does not give it.
+    drafts: Vec<(Option<usize>, String, ElementRef, bool)>,
+}
+
+impl Namespace {
+    fn add<T: Element>(&mut self, old: &[T], new: &[T], p: &Pairing) {
+        let base = self.olds.len();
+        let key = |e: &T| e.original().unwrap_or(e.name()).to_string();
+        self.olds.extend(old.iter().map(|e| key(e).to_lowercase()));
+        for &(o, n) in &p.pairs {
+            let e = &new[n];
+            let claims = e.name() != key(&old[o]);
+            self.drafts
+                .push((Some(base + o), e.name().to_string(), e.element(), claims));
+        }
+        for &n in &p.added {
+            let e = &new[n];
+            self.drafts
+                .push((None, e.name().to_string(), e.element(), true));
+        }
+    }
+
+    /// A name the draft takes must not be an original name of another old element
+    /// (swaps, chains, renames onto dropped elements, reuse of a name renamed away)
+    /// nor the draft name of another element.
+    fn check(&self, errs: &mut Vec<DraftError>) {
+        for (i, (me, name, element, claims)) in self.drafts.iter().enumerate() {
+            if !claims {
+                continue;
+            }
+            let lower = name.to_lowercase();
+            let held = self
+                .olds
+                .iter()
+                .enumerate()
+                .any(|(k, o)| Some(k) != *me && *o == lower);
+            let taken = self
+                .drafts
+                .iter()
+                .enumerate()
+                .any(|(j, d)| j != i && d.1.to_lowercase() == lower);
+            if held || taken {
+                errs.push(DraftError {
+                    element: element.clone(),
+                    field: Some("name".into()),
+                    message: format!(
+                        "\"{name}\" is still used by another element during this change. \
+                         Apply it in two steps."
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// Name collisions inside one diff (ruling T6-2). Columns are one namespace; keys,
+/// indexes, foreign keys and checks share another (PostgreSQL keeps index and
+/// constraint names in one relation namespace).
+fn name_collisions(
+    old: &TableDef,
+    new: &TableDef,
+    cols: &Pairing,
+    idxs: &Pairing,
+    fks: &Pairing,
+    checks: &Pairing,
+    errs: &mut Vec<DraftError>,
+) {
+    let mut columns = Namespace::default();
+    columns.add(&old.columns, &new.columns, cols);
+    columns.check(errs);
+
+    let mut constraints = Namespace::default();
+    constraints.add(&old.indexes, &new.indexes, idxs);
+    constraints.add(&old.foreign_keys, &new.foreign_keys, fks);
+    constraints.add(&old.checks, &new.checks, checks);
+    let old_pk = old
+        .primary_key
+        .as_ref()
+        .and_then(|k| k.original.as_ref().or(k.name.as_ref()));
+    let pk_id = old_pk.map(|key| {
+        constraints.olds.push(key.to_lowercase());
+        constraints.olds.len() - 1
+    });
+    if let Some(name) = new.primary_key.as_ref().and_then(|k| k.name.as_ref()) {
+        // A replacement key stands for the old one: it is dropped before the add.
+        let claims = new.primary_key.as_ref().unwrap().original.is_none() || Some(name) != old_pk;
+        constraints
+            .drafts
+            .push((pk_id, name.clone(), ElementRef::PrimaryKey, claims));
+    }
+    constraints.check(errs);
+}
+
 fn bad_original(element: ElementRef) -> DraftError {
     DraftError {
         element,
@@ -600,15 +711,32 @@ fn check_content(c: &CheckDef) -> CheckDef {
 }
 
 /// `MoveColumn`s for the kept columns whose relative order changed: the columns
-/// outside a longest run already in order move, each after the previous kept column
-/// of the draft (new columns are added after the moves run).
-fn moves(pairs: &[(usize, usize)], new: &TableDef) -> Vec<Change> {
+/// outside the run that stays in order move, each after the previous kept column
+/// of the draft (new columns are added after the moves run). The run keeps as many
+/// locked columns as possible, then as many columns as possible; a locked column
+/// that still has to move refuses the diff.
+fn moves(
+    pairs: &[(usize, usize)],
+    old: &TableDef,
+    new: &TableDef,
+) -> Result<Vec<Change>, DiffError> {
     let seq: Vec<usize> = pairs.iter().map(|&(o, _)| o).collect();
-    let stay = longest_increasing(&seq);
+    let is_locked = |&(o, n): &(usize, usize)| old.columns[o].locked || new.columns[n].locked;
+    let weight: Vec<usize> = pairs
+        .iter()
+        .map(|p| if is_locked(p) { pairs.len() + 1 } else { 1 })
+        .collect();
+    let stay = stable_run(&seq, &weight);
     let mut out = Vec::new();
-    for (i, &(_, n)) in pairs.iter().enumerate() {
+    for (i, &(o, n)) in pairs.iter().enumerate() {
         if stay[i] {
             continue;
+        }
+        if is_locked(&pairs[i]) {
+            return Err(DiffError::Locked {
+                element: ElementRef::Column(old.columns[o].name.clone()),
+                reason: "This column is locked and cannot be moved.".into(),
+            });
         }
         let position = match i {
             0 => Position::First,
@@ -619,23 +747,24 @@ fn moves(pairs: &[(usize, usize)], new: &TableDef) -> Vec<Change> {
             position,
         });
     }
-    out
+    Ok(out)
 }
 
-/// Marks one longest strictly increasing subsequence of `seq`.
-fn longest_increasing(seq: &[usize]) -> Vec<bool> {
-    let mut len = vec![1usize; seq.len()];
+/// Marks the strictly increasing subsequence of `seq` with the largest total
+/// `weight` (the earliest one on ties).
+fn stable_run(seq: &[usize], weight: &[usize]) -> Vec<bool> {
+    let mut score = weight.to_vec();
     let mut prev = vec![usize::MAX; seq.len()];
     for i in 0..seq.len() {
         for j in 0..i {
-            if seq[j] < seq[i] && len[j] + 1 > len[i] {
-                len[i] = len[j] + 1;
+            if seq[j] < seq[i] && score[j] + weight[i] > score[i] {
+                score[i] = score[j] + weight[i];
                 prev[i] = j;
             }
         }
     }
     let mut stay = vec![false; seq.len()];
-    let best = (0..seq.len()).max_by_key(|&i| (len[i], std::cmp::Reverse(i)));
+    let best = (0..seq.len()).max_by_key(|&i| (score[i], std::cmp::Reverse(i)));
     let mut at = best.unwrap_or(usize::MAX);
     while at != usize::MAX {
         stay[at] = true;
@@ -1277,6 +1406,195 @@ mod tests {
         let mut new = old.clone();
         new.original_name = Some("other".into());
         assert_eq!(invalid_err(diff(&old, &new))[0].element, ElementRef::Table);
+    }
+
+    #[test]
+    fn locked_column_stays_in_place() {
+        // Unweighted, the stable run would keep id, b, c and move `a`; a locked `a`
+        // stays and `b` moves around it.
+        let mut old = stored();
+        old.columns[1].locked = true;
+        let mut new = old.clone();
+        new.columns = vec![col("id"), col("b"), old.columns[1].clone(), col("c")];
+        assert_eq!(
+            diff(&old, &new),
+            Ok(vec![Change::MoveColumn {
+                name: "b".into(),
+                position: Position::After("id".into())
+            }])
+        );
+        // Dragging a locked column to the front moves the others instead.
+        let mut new = old.clone();
+        new.columns = vec![old.columns[1].clone(), col("id"), col("b"), col("c")];
+        assert_eq!(
+            diff(&old, &new),
+            Ok(vec![Change::MoveColumn {
+                name: "id".into(),
+                position: Position::After("a".into())
+            }])
+        );
+    }
+
+    #[test]
+    fn locked_column_that_must_move_is_refused() {
+        let mut old = stored();
+        old.columns[1].locked = true;
+        old.columns[2].locked = true;
+        let mut new = old.clone();
+        new.columns.swap(1, 2);
+        let el = locked_err(diff(&old, &new));
+        assert!(
+            el == ElementRef::Column("a".into()) || el == ElementRef::Column("b".into()),
+            "{el:?}"
+        );
+    }
+
+    fn collision(r: Result<Vec<Change>, DiffError>) -> ElementRef {
+        let errs = invalid_err(r);
+        assert_eq!(errs[0].field.as_deref(), Some("name"), "{errs:?}");
+        assert!(errs[0].message.contains("two steps"), "{errs:?}");
+        errs[0].element.clone()
+    }
+
+    #[test]
+    fn column_name_collisions_are_invalid() {
+        let old = stored();
+        // Swap a <-> b.
+        let mut new = old.clone();
+        new.columns[1].name = "b".into();
+        new.columns[2].name = "a".into();
+        new.indexes.clear();
+        new.foreign_keys.clear();
+        assert_eq!(collision(diff(&old, &new)), ElementRef::Column("b".into()));
+        // Chain a -> b, b -> x.
+        let mut new = old.clone();
+        new.columns[1].name = "b".into();
+        new.columns[2].name = "x".into();
+        new.indexes.clear();
+        new.foreign_keys.clear();
+        assert_eq!(collision(diff(&old, &new)), ElementRef::Column("b".into()));
+        // Rename onto a dropped column.
+        let mut new = old.clone();
+        new.columns.remove(3);
+        new.columns[1].name = "C".into();
+        new.indexes.clear();
+        assert_eq!(collision(diff(&old, &new)), ElementRef::Column("C".into()));
+        // A new column reusing a name renamed away.
+        let mut new = old.clone();
+        new.columns[1].name = "a2".into();
+        new.indexes[0].parts[0].column = Some("a2".into());
+        new.columns.push(ColumnDef {
+            original: None,
+            ..col("a")
+        });
+        assert_eq!(collision(diff(&old, &new)), ElementRef::Column("a".into()));
+        // A new column named like a dropped one.
+        let mut new = old.clone();
+        new.columns[3] = ColumnDef {
+            original: None,
+            ..col("c")
+        };
+        assert_eq!(collision(diff(&old, &new)), ElementRef::Column("c".into()));
+        // Case-only rename of a column is fine.
+        let mut new = old.clone();
+        new.columns[3].name = "C".into();
+        assert!(diff(&old, &new).is_ok());
+    }
+
+    #[test]
+    fn constraint_name_collisions_are_invalid() {
+        let mut old = stored();
+        old.indexes.push(index("idx_b", vec![part("b")]));
+        old.checks.push(CheckDef {
+            original: Some("ck".into()),
+            name: "ck".into(),
+            expression: "a > 0".into(),
+            locked: false,
+        });
+        // Index swap.
+        let mut new = old.clone();
+        new.indexes[0].name = "idx_b".into();
+        new.indexes[1].name = "idx_a".into();
+        assert_eq!(
+            collision(diff(&old, &new)),
+            ElementRef::Index("idx_b".into())
+        );
+        // Index renamed onto an FK's name (one namespace).
+        let mut new = old.clone();
+        new.indexes[0].name = "fk_b".into();
+        assert_eq!(
+            collision(diff(&old, &new)),
+            ElementRef::Index("fk_b".into())
+        );
+        // A new check named like a dropped index.
+        let mut new = old.clone();
+        new.indexes.remove(1);
+        new.checks.push(CheckDef {
+            original: None,
+            name: "idx_b".into(),
+            expression: "b > 0".into(),
+            locked: false,
+        });
+        assert_eq!(
+            collision(diff(&old, &new)),
+            ElementRef::Check("idx_b".into())
+        );
+        // Renamed and changed FK (drop + add) onto a check's name.
+        let mut new = old.clone();
+        new.foreign_keys[0].name = "ck".into();
+        new.foreign_keys[0].on_delete = "CASCADE".into();
+        assert_eq!(
+            collision(diff(&old, &new)),
+            ElementRef::ForeignKey("ck".into())
+        );
+        // A new FK reusing the name of an FK renamed away.
+        let mut new = old.clone();
+        new.foreign_keys[0].name = "fk_b2".into();
+        new.foreign_keys.push(FkDef {
+            original: None,
+            ..fk("fk_b", "c")
+        });
+        assert_eq!(
+            collision(diff(&old, &new)),
+            ElementRef::ForeignKey("fk_b".into())
+        );
+        // A new PK named like an index; a replacement PK keeping the old name is fine.
+        let mut new = old.clone();
+        new.primary_key = Some(KeyDef {
+            original: None,
+            name: Some("idx_a".into()),
+            columns: vec!["id".into()],
+            locked: false,
+        });
+        assert_eq!(collision(diff(&old, &new)), ElementRef::PrimaryKey);
+        let mut new = old.clone();
+        new.primary_key = Some(KeyDef {
+            original: None,
+            name: Some("PRIMARY".into()),
+            columns: vec!["id".into(), "a".into()],
+            locked: false,
+        });
+        assert!(diff(&old, &new).is_ok());
+    }
+
+    #[test]
+    fn fk_and_its_backing_index_may_share_a_name() {
+        // MySQL names an FK's index after the FK; changing the FK is drop + add.
+        let mut old = stored();
+        old.indexes.push(index("fk_b", vec![part("b")]));
+        let mut new = old.clone();
+        new.foreign_keys[0].on_delete = "CASCADE".into();
+        assert_eq!(
+            diff(&old, &new),
+            Ok(vec![
+                Change::DropForeignKey {
+                    name: "fk_b".into()
+                },
+                Change::AddForeignKey {
+                    fk: new.foreign_keys[0].clone()
+                },
+            ])
+        );
     }
 
     #[test]
