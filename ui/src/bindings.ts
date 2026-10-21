@@ -987,7 +987,8 @@ export type ColumnDetail = { name: string; ordinal: number; db_type: string; nul
  */
 collation: string | null; comment: string | null; 
 /**
- * Character set of a text column when it differs from the table default.
+ * Character set of a character column. MySQL/MariaDB fill it for every character
+ * column; consumers normalise against the table charset.
  */
 charset?: string | null; 
 /**
@@ -1266,7 +1267,11 @@ export type HistoryOrigin =
 /**
  * A statement the app built to apply edits of the data view.
  */
-"data_edit" | "object_action"
+"data_edit" | "object_action" | 
+/**
+ * A statement the table designer applied.
+ */
+"table_design"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it

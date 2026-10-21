@@ -59,6 +59,8 @@ pub enum HistoryOrigin {
     /// A statement the app built to apply edits of the data view.
     DataEdit,
     ObjectAction,
+    /// A statement the table designer applied.
+    TableDesign,
 }
 
 impl HistoryOrigin {
@@ -67,6 +69,7 @@ impl HistoryOrigin {
             HistoryOrigin::Query => "query",
             HistoryOrigin::DataEdit => "data_edit",
             HistoryOrigin::ObjectAction => "object_action",
+            HistoryOrigin::TableDesign => "table_design",
         }
     }
 
@@ -75,6 +78,7 @@ impl HistoryOrigin {
             "query" => Ok(HistoryOrigin::Query),
             "data_edit" => Ok(HistoryOrigin::DataEdit),
             "object_action" => Ok(HistoryOrigin::ObjectAction),
+            "table_design" => Ok(HistoryOrigin::TableDesign),
             other => Err(DbError::Internal {
                 message: format!("invalid history origin {other:?} in database"),
             }),
@@ -380,6 +384,15 @@ impl RawEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_round_trips_table_design() {
+        assert_eq!(HistoryOrigin::TableDesign.as_str(), "table_design");
+        assert_eq!(
+            HistoryOrigin::parse("table_design").unwrap(),
+            HistoryOrigin::TableDesign
+        );
+    }
 
     #[test]
     fn escapes_like_wildcards() {
