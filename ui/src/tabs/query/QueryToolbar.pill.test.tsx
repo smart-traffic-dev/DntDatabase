@@ -15,32 +15,33 @@ beforeEach(() => {
 });
 afterEach(() => vi.restoreAllMocks());
 
-describe('context pill picker in a narrow group', () => {
-  it('shifts left to stay inside the query tab instead of being cut off', async () => {
+// The picker opens under the chip, right-aligned with it (the chip is near the strip's right end).
+describe('context chip picker in a narrow group', () => {
+  it('shifts right to stay inside the group instead of being cut off at its left edge', async () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains('query-tab')) return rect(0, 360);
-      if (this.classList.contains('qt-popover')) return rect(130, 260); // right edge 390 > 360
+      if (this.classList.contains('editor-group')) return rect(100, 360);
+      if (this.classList.contains('qt-popover')) return rect(70, 260); // left edge 70 < 100
       return rect(0, 0);
     });
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(
-      <div className="query-tab">
+      <div className="editor-group">
         <QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />
       </div>,
     );
     await userEvent.setup().click(screen.getByTestId('query-context'));
-    expect(screen.getByRole('dialog', { name: 'Connection and database' }).style.transform).toBe('translateX(-38px)');
+    expect(screen.getByRole('dialog', { name: 'Connection and database' }).style.transform).toBe('translateX(38px)');
   });
 
   it('stays put when it fits', async () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
-      if (this.classList.contains('query-tab')) return rect(0, 1000);
-      if (this.classList.contains('qt-popover')) return rect(130, 260);
+      if (this.classList.contains('editor-group')) return rect(0, 1000);
+      if (this.classList.contains('qt-popover')) return rect(500, 260);
       return rect(0, 0);
     });
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(
-      <div className="query-tab">
+      <div className="editor-group">
         <QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />
       </div>,
     );

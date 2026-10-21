@@ -15,7 +15,7 @@ import { toggleFilterBar } from '../dialogs/resultExport';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { useAppSettings } from '../store/appSettings';
 import { appError, callsOf, config, fail, ids, mockBackend, resetStores, serverInfo, sampleTree } from '../test/backend';
-import { DataView, dataCellMenu, filterValueText, pageSizeOptions, pageToResult, sortMarks, unsortable } from './DataView';
+import { DataActions, DataPager, DataView, dataCellMenu, filterValueText, pageSizeOptions, pageToResult, sortMarks, unsortable } from './DataView';
 
 // The grid draws on a canvas: a stand-in with one header button per column (calls
 // `onHeaderClicked` like Glide's header click, shows the header mark) and the row numbering.
@@ -159,7 +159,20 @@ function setup(
     ...handlers,
   });
   useTabs.getState().open(tab);
-  return { tab, ...render(<DataView tab={tab} estimate={estimate} />) };
+  return { tab, ...render(withControls(tab, estimate)) };
+}
+
+/** The data view with its controls: the strip's actions (Filter, Refresh, ⋯) and the sub-tab row's pager. */
+function withControls(tab: Tab, estimate: number | null = null) {
+  return (
+    <>
+      <div role="toolbar" aria-label="Object">
+        <DataActions tab={tab} />
+      </div>
+      <DataPager tab={tab} estimate={estimate} />
+      <DataView tab={tab} />
+    </>
+  );
 }
 
 /** A promise the test resolves (or rejects) by hand. */
@@ -213,26 +226,27 @@ describe('DataView', () => {
     expect(callsOf('table_data')[2]).toMatchObject({ offset: 0 });
   });
 
-  it('the toolbar: Filter and the sort chip left; pager, Refresh, Open in query, Export and ⋯ right', async () => {
+  it('the strip actions are Filter, Refresh and ⋯; the pager holds the sort chip, the range, Previous and Next', async () => {
     const user = userEvent.setup();
     setup({ table_data: () => page(3, 1, false, { key_order: ['id'] }) }, { estimate: 3412 });
     await screen.findByText('1–3');
-    const bar = screen.getByRole('toolbar', { name: 'Data' });
-    const names = () => within(bar).getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent);
-    expect(names()).toEqual(['Filter', 'Previous page', 'Next page', 'Refresh', 'Open in query', 'Export…', 'More data actions']);
-    expect(within(bar).getByTestId('data-pager')).toHaveTextContent('1–3 / ~3,412');
-    // Export is the one secondary-styled button; the rest are quiet.
-    expect([...bar.querySelectorAll('button.secondary')].map((b) => b.textContent)).toEqual(['Export…']);
-    // Icon-only buttons are named and have a tooltip.
-    for (const name of ['Previous page', 'Next page', 'Refresh', 'More data actions']) {
-      expect(within(bar).getByRole('button', { name })).toHaveAttribute('title');
+    const actions = screen.getByRole('toolbar', { name: 'Object' });
+    const names = (el: HTMLElement) => within(el).getAllByRole('button').map((b) => b.getAttribute('aria-label') ?? b.textContent);
+    expect(names(actions)).toEqual(['Filter', 'Refresh', 'More data actions']);
+    // Icon-only buttons are named and have a tooltip (with the shortcut where there is one).
+    for (const name of ['Filter', 'Refresh', 'More data actions']) {
+      expect(within(actions).getByRole('button', { name })).toHaveAttribute('title');
     }
-    expect(within(bar).getByText('By primary key')).toBeInTheDocument();
+    expect(within(actions).getByRole('button', { name: 'Filter' })).toHaveAttribute('title', 'Filter rows (F3)');
+    const pager = screen.getByRole('group', { name: 'Pages' });
+    expect(names(pager)).toEqual(['Previous page', 'Next page']);
+    expect(within(pager).getByTestId('data-pager')).toHaveTextContent('1–3 / ~3,412');
+    expect(within(pager).getByText('By primary key')).toBeInTheDocument();
 
     await user.click(grid().getByRole('button', { name: 'id' }));
-    const chip = await within(bar).findByTitle('Sorted by id ↑');
-    expect(names().slice(0, 2)).toEqual(['Filter', 'Clear sort']);
-    expect(chip).toContainElement(within(bar).getByRole('button', { name: 'Clear sort' }));
+    const chip = await within(pager).findByTitle('Sorted by id ↑');
+    expect(names(pager)[0]).toBe('Clear sort');
+    expect(chip).toContainElement(within(pager).getByRole('button', { name: 'Clear sort' }));
   });
 
   it('Refresh reloads the rows and the table metadata', async () => {
@@ -501,7 +515,7 @@ describe('DataView', () => {
     await screen.findByText('51–100');
     await user.click(grid().getByRole('button', { name: 'id' }));
     await screen.findByText('1–50');
-    await user.click(screen.getByRole('button', { name: 'Open in query' }));
+    await dataAction(user, 'Open in query');
     const doc = [...useQueryDocs.getState().docs.values()].at(-1)!;
     expect(doc).toMatchObject({
       connectionId: ids.prod,
@@ -514,7 +528,7 @@ describe('DataView', () => {
     const { tab, unmount } = setup({ table_data: () => page(2) });
     await screen.findByText('1–2');
     unmount();
-    render(<DataView tab={tab} estimate={null} />);
+    render(withControls(tab));
     expect(await screen.findByText('1–2')).toBeInTheDocument();
     expect(callsOf('table_data')).toHaveLength(1);
 
@@ -671,14 +685,15 @@ describe('DataView filter and multi-sort', () => {
     const user = userEvent.setup();
     const { tab, unmount } = setup({ table_data: () => page(2) });
     await screen.findByText('1–2');
-    screen.getByRole('button', { name: 'Refresh' }).focus();
+    // F3 anywhere in the view (here: a grid header).
+    grid().getByRole('button', { name: 'id' }).focus();
     await user.keyboard('{F3}');
     const value = await screen.findByRole('textbox', { name: 'Value 1' });
     await waitFor(() => expect(value).toHaveFocus());
     await user.type(value, '5{Enter}');
     await waitFor(() => expect(lastData()).toMatchObject({ filter: { conditions: [{ column: 'id', op: 'eq', values: ['5'] }] } }));
     unmount();
-    render(<DataView tab={tab} estimate={null} />);
+    render(withControls(tab));
     expect(await screen.findByRole('textbox', { name: 'Value 1' })).toHaveValue('5');
     expect(screen.getByText('Filtered (1)')).toBeInTheDocument();
   });
@@ -752,7 +767,7 @@ describe('DataView filter and multi-sort', () => {
     await user.click(grid().getByRole('button', { name: 'id' }));
     await waitFor(() => expect(lastData()).toMatchObject({ sort: [{ column: 'id', dir: 'asc' }] }));
     await screen.findByTitle(/Sorted by id/);
-    await user.click(screen.getByRole('button', { name: 'Export…' }));
+    await dataAction(user, 'Export…');
     const request = useDialogs.getState().request;
     expect(request?.kind).toBe('exportResult');
     if (request?.kind !== 'exportResult') return;

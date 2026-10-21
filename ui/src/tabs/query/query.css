@@ -8,20 +8,6 @@
   overflow-x: clip;
 }
 
-/* Toolbar (40 px, one row): Run split, Explain, Format | context pill, Limit, transaction area. */
-.query-toolbar {
-  flex: none;
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: var(--dnt-space-2);
-  height: 40px;
-  min-width: 0;
-  padding: 0 var(--dnt-space-3);
-  border-bottom: 1px solid var(--dnt-border);
-  background: var(--dnt-bg-chrome);
-}
-
 .qt-btn {
   flex: none;
   display: inline-flex;
@@ -79,25 +65,6 @@
   border-color: var(--dnt-status-danger-fg);
 }
 
-/* The caret of a coloured split keeps a hairline between the two halves. */
-.qt-split-caret.qt-primary:not(:disabled),
-.qt-split-caret.danger {
-  border-left: 1px solid color-mix(in srgb, var(--dnt-on-accent) 35%, transparent);
-}
-
-.qt-icon {
-  padding: 0;
-  width: var(--dnt-ctl-h-md);
-  justify-content: center;
-}
-
-.qt-sep {
-  flex: none;
-  width: 1px;
-  height: 20px;
-  background: var(--dnt-border);
-}
-
 .qt-select {
   height: var(--dnt-ctl-h-md);
   border: 1px solid var(--dnt-border);
@@ -107,14 +74,6 @@
   max-width: 220px;
 }
 
-.qt-field {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--dnt-space-1_5);
-  color: var(--dnt-fg-muted);
-  font-size: var(--dnt-text-sm);
-}
 
 .sql-editor {
   flex: 1;
@@ -343,22 +302,11 @@
   cursor: pointer;
 }
 
-/* Toolbar: Explain split button and its menu */
+/* Run / Explain with their ▾ and the Explain menu */
 .qt-split {
   position: relative;
   display: inline-flex;
-}
-
-.qt-split-main {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-.qt-split-caret {
-  padding: 0 6px;
-  border-left: 0;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
+  align-items: center;
 }
 
 .qt-menu {

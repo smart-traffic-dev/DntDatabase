@@ -8,7 +8,6 @@ import { useQueryDocs } from '../../store/queryTabs';
 import type { QueryTabRef } from '../../store/tabs';
 import type { Engine } from '../../query/engine';
 import { useEditorMarks, type EditorLike, type MonacoLike } from './editorMarks';
-import { QueryToolbar } from './QueryToolbar';
 import { ResultPanel } from './ResultPanel';
 import { SqlEditor, type SqlEditorProps } from './SqlEditor';
 import './query.css';
@@ -35,25 +34,17 @@ const ranOnce = (run: TabRun) =>
   run.runId !== null || run.phase.kind !== 'idle' || run.explain !== null || run.explainError !== null || run.messages.length > 0;
 
 /**
- * A query tab: toolbar over the editor, results and messages below. Until the tab first runs,
+ * A query tab: the editor, results and messages below (its controls are in the tab strip). Until the tab first runs,
  * the results are collapsed to their tab bar (which shows the run keys); clicking one of its
  * tabs opens them too.
  */
 export function QueryTab({ tab }: { tab: QueryTabRef }) {
-  // Field selectors only (not the document): the text changes on every keystroke.
+  // Field selectors only (not the document): the text changes on every keystroke. The toolbar
+  // is in the group's tab strip (TabStripActions).
   const toolbarDoc = useQueryDocs(
     useShallow((s) => {
       const d = s.docs.get(tab.id);
-      return d
-        ? {
-            id: d.id,
-            connectionId: d.connectionId,
-            database: d.database,
-            rowLimit: d.rowLimit,
-            continueOnError: d.continueOnError,
-            dialect: d.dialect,
-          }
-        : null;
+      return d ? { connectionId: d.connectionId, dialect: d.dialect } : null;
     }),
   );
   const connectionId = toolbarDoc?.connectionId ?? null;
@@ -92,7 +83,6 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   }
   return (
     <div className="query-tab">
-      <QueryToolbar doc={toolbarDoc} />
       <div className="query-split" ref={splitRef}>
         <div
           className="query-editor-pane"

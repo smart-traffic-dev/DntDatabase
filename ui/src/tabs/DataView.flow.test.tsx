@@ -5,7 +5,7 @@ import type { ApplyReport, ColumnMeta, EditPreview, EditableInfo, ObjectRef, Tab
 import { DialogHost } from '../dialogs/DialogHost';
 import { objectTabId, useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import { callsOf, ids, mockBackend, resetStores } from '../test/backend';
-import { DataView } from './DataView';
+import { DataActions, DataPager, DataView } from './DataView';
 
 // P3 acceptance (Task 17, ruling R1): the browser-level scenario "filter -> edit a cell -> preview ->
 // apply -> page reloads" walked end to end through the real DataView, stores and dialogs. The canvas
@@ -86,7 +86,10 @@ describe('P3 flow: filter, edit, preview, apply, reload', () => {
     const user = userEvent.setup();
     render(
       <>
-        <DataView tab={tab} estimate={null} />
+        {/* Filter is in the tab strip, the pager in the sub-tab row (editor v2 §2). */}
+        <DataActions tab={tab} />
+        <DataPager tab={tab} estimate={null} />
+        <DataView tab={tab} />
         <DialogHost />
       </>,
     );

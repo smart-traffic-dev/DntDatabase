@@ -1,70 +1,157 @@
-/* Shortcut hint inside the Run button (hidden on a narrow toolbar). */
-.qt-kbd {
-  margin-left: var(--dnt-space-1);
-  font-family: var(--font-mono);
+/*
+ * The action cluster at the right end of a group's tab strip (editor v2 §2): 26 px icon
+ * buttons, a context chip, the open transaction. Never shrinks: the strip's tabs shrink and
+ * scroll first.
+ */
+.tab-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 var(--dnt-space-1) 0 var(--dnt-space-2);
+  white-space: nowrap;
+}
+
+.ta-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--dnt-space-1);
+  min-width: var(--dnt-ctl-h-sm);
+  height: var(--dnt-ctl-h-sm);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+}
+
+.ta-btn:hover:not(:disabled),
+.ta-caret:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.ta-btn:disabled,
+.ta-caret:disabled {
+  background: transparent;
+  color: var(--dnt-fg-disabled);
+}
+
+.ta-btn[aria-pressed='true'],
+.ta-btn[aria-expanded='true'],
+.ta-caret[aria-expanded='true'] {
+  background: var(--dnt-bg-active);
+}
+
+/* Run: accent icon; on a Production connection: danger icon. Stop (same element): danger. */
+.ta-btn.qt-primary:not(:disabled) {
+  color: var(--dnt-accent);
+}
+
+.ta-btn.danger-outline:not(:disabled),
+.ta-btn.danger:not(:disabled),
+.ta-btn.ta-rollback:not(:disabled) {
+  color: var(--dnt-status-danger-fg);
+}
+
+.ta-btn.ta-commit:not(:disabled) {
+  color: var(--dnt-status-success-fg);
+}
+
+/* Stop with the elapsed time beside the square. */
+.ta-btn.qt-stop {
+  padding: 0 var(--dnt-space-1_5);
+}
+
+.ta-elapsed {
   font-size: var(--dnt-text-xs);
-  font-weight: 400;
-  color: inherit;
+  font-variant-numeric: tabular-nums;
+  color: var(--dnt-fg-muted);
 }
 
-.query-toolbar:not(.w-wide) .qt-kbd {
-  display: none;
+/* The ▾ of Run and Explain: a narrow button joined to its icon. */
+.ta-caret {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: var(--dnt-ctl-h-sm);
+  margin-left: -2px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
 }
 
-@media (max-width: 1100px) {
-  .qt-kbd {
-    display: none;
-  }
+.ta-caret svg {
+  width: 10px;
+  height: 10px;
 }
 
-/* Context pill `[ENV] connection › database`: the name shrinks, the badge never does. */
+.ta-sep {
+  flex: none;
+  width: 1px;
+  height: 16px;
+  margin: 0 var(--dnt-space-1);
+  background: var(--dnt-border);
+}
+
+/* Context chip `[ENV] database`: the name shrinks, the badge never does. */
 .qt-context {
   position: relative;
   display: inline-flex;
   flex: 0 1 auto;
   min-width: 0;
+  margin-right: var(--dnt-space-1);
 }
 
-.qt-pill {
+.ta-chip {
   display: inline-flex;
   align-items: center;
-  gap: var(--dnt-space-1_5);
+  gap: var(--dnt-space-1);
   min-width: 0;
-  max-width: 360px;
-  height: var(--dnt-ctl-h-md);
-  padding: 0 var(--dnt-space-2);
-  border: 1px solid var(--dnt-border);
-  border-radius: var(--dnt-radius-full);
-  background: var(--dnt-bg-app);
-  font-size: var(--dnt-text-base);
+  max-width: 160px;
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-1_5);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-sm);
 }
 
-.qt-pill:hover {
+button.ta-chip:hover {
   background: var(--dnt-bg-hover);
 }
 
-.qt-pill[aria-expanded='true'] {
+.ta-chip[aria-expanded='true'] {
   border-color: var(--dnt-focus);
 }
 
-.qt-pill-text {
+.ta-chip-static {
+  margin-right: var(--dnt-space-1);
+  cursor: default;
+}
+
+.ta-chip-text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.qt-pill-sep {
-  margin: 0 var(--dnt-space-1);
-  color: var(--dnt-fg-subtle);
-}
-
-.qt-pill-default {
+.ta-chip > svg,
+.ta-chip-ro {
+  flex: none;
+  display: inline-flex;
   color: var(--dnt-fg-muted);
 }
 
-.qt-pill > svg {
-  flex: none;
+.ta-chip-default {
   color: var(--dnt-fg-muted);
 }
 
@@ -91,11 +178,11 @@
   background: var(--dnt-env-local);
 }
 
-/* The picker: connection and database selects under the pill. */
+/* The picker: connection and database selects under the chip, right-aligned with it. */
 .qt-popover {
   position: absolute;
   top: 100%;
-  left: 0;
+  right: 0;
   z-index: var(--dnt-z-dropdown);
   display: flex;
   flex-direction: column;
@@ -107,6 +194,7 @@
   border: 1px solid var(--dnt-border);
   border-radius: var(--dnt-radius-md);
   box-shadow: var(--dnt-shadow-2);
+  white-space: normal;
 }
 
 .qt-pick {
@@ -122,29 +210,25 @@
   color: var(--dnt-fg);
 }
 
-.qt-limit {
-  height: var(--dnt-ctl-h-sm);
-  font-size: var(--dnt-text-sm);
+/* The Explain menu opens under its icon, right-aligned (the cluster is at the window's right). */
+.tab-actions .qt-menu {
+  left: auto;
+  right: 0;
+  z-index: var(--dnt-z-dropdown);
 }
 
-/* Right end: Auto | Manual, then the open transaction (chip, Rollback, Commit). */
-.qt-tx {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--dnt-space-2);
-  margin-left: auto;
-}
-
+/* The open transaction: amber "Tx mm:ss" (red when aborted), only while one is open. */
 .qt-tx-chip {
   flex: none;
-  height: var(--dnt-ctl-h-sm);
+  height: 22px;
   display: inline-flex;
   align-items: center;
-  padding: 0 var(--dnt-space-2);
+  margin-right: 2px;
+  padding: 0 var(--dnt-space-1_5);
   border: 1px solid;
-  border-radius: var(--dnt-radius-full);
-  font-size: var(--dnt-text-sm);
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -159,28 +243,6 @@
   background: var(--dnt-status-danger-bg);
   border-color: var(--dnt-status-danger-border);
   color: var(--dnt-status-danger-fg);
-}
-
-/* Auto | Manual commit mode: two joined buttons. */
-.qt-segs {
-  display: inline-flex;
-}
-
-.qt-seg:first-child {
-  border-top-right-radius: 0;
-  border-bottom-right-radius: 0;
-}
-
-.qt-seg:last-child {
-  margin-left: -1px;
-  border-top-left-radius: 0;
-  border-bottom-left-radius: 0;
-}
-
-.qt-seg.on {
-  background: var(--dnt-accent);
-  border-color: var(--dnt-accent);
-  color: var(--dnt-on-accent);
 }
 
 /* Collapsed results: the run keys on the right of the tab bar. A hint that does not fit wraps out of sight whole. */

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { $, $$, browser } from '@wdio/globals';
 import { evidence, evidenceDir } from './evidence';
-import { byId, expandRow, inContextPicker, isRunning, toggleContinueOnError, treeRow } from './helpers';
+import { byId, expandRow, inContextPicker, isRunning, setRowLimit, toggleContinueOnError, treeRow } from './helpers';
 
 const THEME = process.env.AUDIT_THEME ?? 'light';
 const SIZE = process.env.AUDIT_SIZE ?? 'default';
@@ -535,7 +535,7 @@ describe(`UX audit tour (${P})`, () => {
       await idle();
       note(`150k-row SELECT with default limit: ${Date.now() - t0} ms`);
       await shot('result-truncated');
-      await byId('query-row-limit').selectByAttribute('value', '1000000');
+      await setRowLimit(1000000);
       t0 = Date.now();
       await runCurrent();
       await browser.pause(1500);
@@ -560,7 +560,7 @@ describe(`UX audit tour (${P})`, () => {
         await browser.setWindowSize(1024, 700);
         await browser.pause(800);
       }
-      await byId('query-row-limit').selectByAttribute('value', '10000');
+      await setRowLimit(10000);
     });
     await step('messages-errors', async () => {
       await toggleContinueOnError();
@@ -670,7 +670,7 @@ describe(`UX audit tour (${P})`, () => {
       await browser.pause(500);
       await shot('pg-messages-notice-error');
       await setSql('SELECT * FROM generate_series(1, 200000) g');
-      await byId('query-row-limit').selectByAttribute('value', '1000000');
+      await setRowLimit(1000000);
       const t0 = Date.now();
       await runCurrent();
       await idle();

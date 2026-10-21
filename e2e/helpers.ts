@@ -92,6 +92,16 @@ export async function inContextPicker(fn: () => Promise<void>) {
   await byId('query-connection').waitForDisplayed({ reverse: true, timeout: 5_000 });
 }
 
+/**
+ * Sets the row limit of the active query tab: a radio item of the `⋯` menu at the right end of
+ * the group's tab strip (choosing it closes the menu).
+ */
+export async function setRowLimit(limit: 1000 | 10000 | 100000 | 1000000) {
+  await byId('query-more').click();
+  await byId(`query-row-limit-${limit}`).waitForClickable({ timeout: 5_000 });
+  await byId(`query-row-limit-${limit}`).click();
+}
+
 /** Toggles "Continue on error" in the Run split menu (choosing it closes the menu). */
 export async function toggleContinueOnError() {
   await byId('query-run-menu').click();
