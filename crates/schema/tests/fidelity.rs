@@ -16,6 +16,7 @@ use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::path::PathBuf;
 
 const PG_SCRATCH: &str = "fid_scratch";
+const PG_TABLESPACE: &str = "dnt_fid_ts";
 
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -137,16 +138,32 @@ async fn capture_fixtures() {
         ] {
             capture_pg(t, &s, schema, table).await;
         }
-        // Lock cases (T5-6): index opclass, per-part COLLATE, NULLS FIRST, WITH (…)
-        // storage parameters and an EXCLUDE constraint, next to a plain index.
+        // Lock cases (T5-6, T9-1): index opclass, per-part COLLATE, NULLS FIRST, WITH (…)
+        // storage parameters, an EXCLUDE constraint and a plain and a constraint index
+        // in a non-default tablespace, next to a plain index. The tablespace directory
+        // is made through the server (superuser `COPY … TO PROGRAM`), and CREATE /
+        // DROP TABLESPACE run on their own (not inside a transaction block).
         pg_exec(&s, &format!("DROP SCHEMA IF EXISTS {PG_SCRATCH} CASCADE")).await;
+        pg_exec(&s, &format!("DROP TABLESPACE IF EXISTS {PG_TABLESPACE}")).await;
+        pg_exec(
+            &s,
+            &format!("COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/{PG_TABLESPACE}'"),
+        )
+        .await;
+        pg_exec(
+            &s,
+            &format!("CREATE TABLESPACE {PG_TABLESPACE} LOCATION '/tmp/{PG_TABLESPACE}'"),
+        )
+        .await;
         pg_exec(&s, &format!("CREATE SCHEMA {PG_SCRATCH}")).await;
         pg_exec(
             &s,
             &format!(
                 "CREATE TABLE {PG_SCRATCH}.fid_pg_locks (id integer PRIMARY KEY, \
                  name text NULL, span int4range NULL, \
-                 CONSTRAINT fid_excl EXCLUDE USING gist (span WITH &&)); \
+                 CONSTRAINT fid_excl EXCLUDE USING gist (span WITH &&), \
+                 CONSTRAINT fid_uq_ts UNIQUE (id, name) USING INDEX TABLESPACE {PG_TABLESPACE}); \
+                 CREATE INDEX idx_ts ON {PG_SCRATCH}.fid_pg_locks (name) TABLESPACE {PG_TABLESPACE}; \
                  CREATE INDEX idx_plain ON {PG_SCRATCH}.fid_pg_locks (name); \
                  CREATE INDEX idx_opclass ON {PG_SCRATCH}.fid_pg_locks (name text_pattern_ops); \
                  CREATE INDEX idx_collate ON {PG_SCRATCH}.fid_pg_locks (name COLLATE \"C\"); \
@@ -157,5 +174,6 @@ async fn capture_fixtures() {
         .await;
         capture_pg(t, &s, PG_SCRATCH, "fid_pg_locks").await;
         pg_exec(&s, &format!("DROP SCHEMA {PG_SCRATCH} CASCADE")).await;
+        pg_exec(&s, &format!("DROP TABLESPACE {PG_TABLESPACE}")).await;
     }
 }

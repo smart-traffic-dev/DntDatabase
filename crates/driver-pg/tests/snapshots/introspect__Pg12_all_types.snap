@@ -395,6 +395,7 @@ primary_key:
   include: []
   nulls_not_distinct: false
   comment: ~
+  tablespace: ~
 indexes: []
 foreign_keys: []
 checks: []

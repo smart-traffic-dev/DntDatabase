@@ -148,6 +148,7 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
         "unique": false,
         "visible": true
       }
@@ -192,6 +193,7 @@
         }
       ],
       "primary": true,
+      "tablespace": null,
       "unique": true,
       "visible": true
     },

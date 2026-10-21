@@ -107,6 +107,7 @@ primary_key:
   include: []
   nulls_not_distinct: false
   comment: ~
+  tablespace: ~
 indexes:
   - name: idx_orders_customer_status
     unique: false
@@ -131,6 +132,7 @@ indexes:
     include: []
     nulls_not_distinct: false
     comment: ~
+    tablespace: ~
 foreign_keys:
   - name: orders_customer_id_fkey
     columns:

@@ -124,8 +124,9 @@ pub(crate) const COLUMNS: &str = "SELECT a.attname::text, a.attnum::int4, \
 /// Indexes (`$1` = relation oid): name, unique (and valid), primary, access method, key
 /// columns, expressions, `CREATE INDEX` statement, definition of the constraint it backs,
 /// partial (has a predicate), then per key position the column (NULL for an expression),
-/// the expression and descending flag, the INCLUDE columns, the index comment and
-/// NULLS NOT DISTINCT (only selected from PostgreSQL 15, `false` before).
+/// the expression and descending flag, the INCLUDE columns, the index comment,
+/// NULLS NOT DISTINCT (only selected from PostgreSQL 15, `false` before) and the
+/// index's own tablespace (NULL for the database default, `reltablespace = 0`).
 pub(crate) fn indexes(nulls_not_distinct: bool) -> String {
     let nnd = if nulls_not_distinct {
         "i.indnullsnotdistinct"
@@ -156,9 +157,10 @@ pub(crate) fn indexes(nulls_not_distinct: bool) -> String {
      ARRAY(SELECT a.attname::text FROM unnest(i.indkey::int2[]) WITH ORDINALITY k(attnum, ord) \
            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.attnum \
            WHERE k.ord > i.indnkeyatts ORDER BY k.ord), \
-     obj_description(i.indexrelid, 'pg_class'), {nnd} \
+     obj_description(i.indexrelid, 'pg_class'), {nnd}, its.spcname::text \
      FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid \
      JOIN pg_am am ON am.oid = ic.relam \
+     LEFT JOIN pg_tablespace its ON its.oid = ic.reltablespace \
      LEFT JOIN pg_constraint con ON con.conindid = i.indexrelid AND con.conrelid = i.indrelid \
           AND con.contype IN ('p', 'u', 'x') \
      WHERE i.indrelid = $1"

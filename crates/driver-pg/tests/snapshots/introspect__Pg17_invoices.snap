@@ -155,6 +155,7 @@ primary_key:
   include: []
   nulls_not_distinct: false
   comment: ~
+  tablespace: ~
 indexes: []
 foreign_keys:
   - name: invoices_order_id_fkey

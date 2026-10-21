@@ -1316,7 +1316,13 @@ definition: string | null; parts?: IndexPart[]; visible?: boolean; include?: str
 /**
  * The index's own comment.
  */
-comment?: string | null }
+comment?: string | null; 
+/**
+ * PostgreSQL: the index's tablespace when it is not the database default (neither
+ * `pg_get_indexdef` nor `pg_get_constraintdef` prints it). Always `None` on
+ * MySQL/MariaDB.
+ */
+tablespace?: string | null }
 export type IndexPart = { column: string | null; expression: string | null; prefix: number | null; descending: boolean }
 /**
  * TypeScript type of `Value::Int` / `Value::UInt`: a number when |x| ≤ 2^53, else a string.

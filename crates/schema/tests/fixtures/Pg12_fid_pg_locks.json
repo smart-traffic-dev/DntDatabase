@@ -81,7 +81,40 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
         "unique": false,
+        "visible": true
+      },
+      {
+        "columns": [
+          "id",
+          "name"
+        ],
+        "comment": null,
+        "definition": "UNIQUE (id, name)",
+        "expression": null,
+        "include": [],
+        "method": "btree",
+        "name": "fid_uq_ts",
+        "nulls_not_distinct": false,
+        "partial": false,
+        "parts": [
+          {
+            "column": "id",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          },
+          {
+            "column": "name",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          }
+        ],
+        "primary": false,
+        "tablespace": "dnt_fid_ts",
+        "unique": true,
         "visible": true
       },
       {
@@ -105,6 +138,7 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
         "unique": false,
         "visible": true
       },
@@ -129,6 +163,7 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
         "unique": false,
         "visible": true
       },
@@ -153,6 +188,7 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
         "unique": false,
         "visible": true
       },
@@ -177,6 +213,32 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
+        "unique": false,
+        "visible": true
+      },
+      {
+        "columns": [
+          "name"
+        ],
+        "comment": null,
+        "definition": "CREATE INDEX idx_ts ON fid_scratch.fid_pg_locks USING btree (name)",
+        "expression": null,
+        "include": [],
+        "method": "btree",
+        "name": "idx_ts",
+        "nulls_not_distinct": false,
+        "partial": false,
+        "parts": [
+          {
+            "column": "name",
+            "descending": false,
+            "expression": null,
+            "prefix": null
+          }
+        ],
+        "primary": false,
+        "tablespace": "dnt_fid_ts",
         "unique": false,
         "visible": true
       },
@@ -201,6 +263,7 @@
           }
         ],
         "primary": false,
+        "tablespace": null,
         "unique": false,
         "visible": true
       }
@@ -245,6 +308,7 @@
         }
       ],
       "primary": true,
+      "tablespace": null,
       "unique": true,
       "visible": true
     },

@@ -241,7 +241,7 @@ fn pg_base(name: &str, suffix: &str) -> Option<&'static str> {
 }
 
 /// The display width MySQL 5.7 / MariaDB report when none was given.
-fn default_display_width(base: &str, unsigned: bool) -> Option<u32> {
+pub(crate) fn default_display_width(base: &str, unsigned: bool) -> Option<u32> {
     Some(match (base, unsigned) {
         ("tinyint", false) => 4,
         ("tinyint", true) => 3,

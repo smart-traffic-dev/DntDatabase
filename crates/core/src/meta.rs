@@ -165,6 +165,11 @@ pub struct IndexDetail {
     /// The index's own comment.
     #[serde(default)]
     pub comment: Option<String>,
+    /// PostgreSQL: the index's tablespace when it is not the database default (neither
+    /// `pg_get_indexdef` nor `pg_get_constraintdef` prints it). Always `None` on
+    /// MySQL/MariaDB.
+    #[serde(default)]
+    pub tablespace: Option<String>,
 }
 
 impl Default for IndexDetail {
@@ -183,6 +188,7 @@ impl Default for IndexDetail {
             include: Vec::new(),
             nulls_not_distinct: false,
             comment: None,
+            tablespace: None,
         }
     }
 }

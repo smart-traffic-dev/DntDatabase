@@ -208,6 +208,7 @@
         }
       ],
       "primary": true,
+      "tablespace": null,
       "unique": true,
       "visible": true
     },

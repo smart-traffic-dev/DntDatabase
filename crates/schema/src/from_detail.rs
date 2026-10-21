@@ -16,7 +16,8 @@ use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
 /// MySQL one with a comment or a non-BTREE method, a PostgreSQL one with clauses after
 /// its column list; indexes that are partial, `NULLS NOT DISTINCT`, MariaDB `IGNORED`,
 /// have an expression part, are a PostgreSQL constraint with clauses after the column
-/// list, or are an invalid PostgreSQL unique index; `NOT VALID` foreign keys;
+/// list, or are an invalid PostgreSQL unique index; a primary key or index in a
+/// non-default tablespace; `NOT VALID` foreign keys;
 /// `NOT VALID` / `NO INHERIT` checks. The whole table is read-only
 /// (`read_only_reason`) when partitioned, system-versioned, a PostgreSQL partition or
 /// an inheriting table. Task 9's fidelity check locks whatever else differs from the
@@ -302,7 +303,12 @@ fn primary_key(i: &IndexDetail, server: &ServerInfo) -> KeyDef {
         original: Some(i.name.clone()),
         name: Some(i.name.clone()),
         columns: i.columns.clone(),
-        locked: !plain || !i.include.is_empty() || i.expression.is_some() || unmodelled,
+        locked: !plain
+            || !i.include.is_empty()
+            || i.expression.is_some()
+            || unmodelled
+            // Re-creating it would move it to the default tablespace (ruling T9-1).
+            || i.tablespace.is_some(),
     }
 }
 
@@ -319,7 +325,9 @@ fn index(i: &IndexDetail, server: &ServerInfo) -> IndexDef {
         || (!i.visible && server.variant == ServerVariant::MariaDb)
         || (pg && constraint && constraint_has_extra(definition))
         // An invalid unique index (e.g. a failed CONCURRENTLY build) reads as not unique.
-        || (pg && definition.starts_with("CREATE UNIQUE INDEX") && !i.unique);
+        || (pg && definition.starts_with("CREATE UNIQUE INDEX") && !i.unique)
+        // A non-default tablespace: re-creating the index would move it (ruling T9-1).
+        || i.tablespace.is_some();
     IndexDef {
         original: Some(i.name.clone()),
         name: i.name.clone(),
@@ -895,6 +903,45 @@ mod tests {
         assert!(from_detail(&d, &pg).foreign_keys[0].locked);
         d.foreign_keys[0].definition = Some("FOREIGN KEY (a) REFERENCES u(id)".into());
         assert!(!from_detail(&d, &pg).foreign_keys[0].locked);
+
+        // A non-default tablespace (T9-1): primary key, constraint and plain indexes.
+        let mut d = detail(vec![column("a", 1, "integer"), column("b", 2, "integer")]);
+        d.primary_key = Some(IndexDetail {
+            name: "t_pkey".into(),
+            unique: true,
+            primary: true,
+            columns: vec!["a".into()],
+            parts: vec![part("a")],
+            definition: Some("PRIMARY KEY (a)".into()),
+            tablespace: Some("fast".into()),
+            ..Default::default()
+        });
+        d.indexes = vec![
+            IndexDetail {
+                name: "t_b_key".into(),
+                unique: true,
+                columns: vec!["b".into()],
+                parts: vec![part("b")],
+                definition: Some("UNIQUE (b)".into()),
+                tablespace: Some("fast".into()),
+                ..Default::default()
+            },
+            IndexDetail {
+                name: "t_b_idx".into(),
+                columns: vec!["b".into()],
+                parts: vec![part("b")],
+                definition: Some("CREATE INDEX t_b_idx ON public.t USING btree (b)".into()),
+                tablespace: Some("fast".into()),
+                ..Default::default()
+            },
+        ];
+        let def = from_detail(&d, &pg);
+        assert!(def.primary_key.unwrap().locked);
+        assert!(def.indexes.iter().all(|i| i.locked));
+        for i in &mut d.indexes {
+            i.tablespace = None;
+        }
+        assert!(from_detail(&d, &pg).indexes.iter().all(|i| !i.locked));
     }
 
     #[test]

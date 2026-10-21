@@ -11,8 +11,9 @@
 //! punctuation, keyword case, string literal escapes (`''` and `\'` read the same),
 //! PostgreSQL identifier quotes that change nothing. MySQL lines also drop what the
 //! server adds or leaves out by itself: `DEFAULT NULL` / `NULL` on nullable columns,
-//! `CHARACTER SET` / `COLLATE` equal to the table's, integer display widths and
-//! `year(4)` (5.7, MariaDB), `USING BTREE`, `RESTRICT` / `NO ACTION` referential actions
+//! `CHARACTER SET` / `COLLATE` equal to the table's, integer display widths equal to
+//! the server default for the type (`int(11)`, `int(10) unsigned`; `tinyint(1)` stays)
+//! and `year(4)` (5.7, MariaDB), `USING BTREE`, `RESTRICT` / `NO ACTION` referential actions
 //! (the same in InnoDB), the quotes around numeric defaults (MariaDB prints them bare,
 //! render always quotes, ruling T7-3) and MariaDB's `current_timestamp()` parentheses.
 //! A `/*!NNNNN … */` version comment counts as its content.
@@ -25,8 +26,8 @@
 use crate::from_detail::{is_cast_suffix, unquote};
 use crate::model::*;
 use crate::render::{check_sql, column_sql, fk_sql, index_sql, primary_key_sql, RenderError};
-use crate::types::type_text;
-use dnt_core::meta::{ColumnDetail, TableDetail};
+use crate::types::{default_display_width, type_text};
+use dnt_core::meta::{ColumnDetail, IndexDetail, TableDetail};
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::Dialect;
@@ -68,7 +69,9 @@ pub fn fidelity(
 }
 
 /// Marks the locked elements of `def`; an index or check the draft lacks is added from
-/// its server text (locked); [`ElementRef::Table`] makes the table read-only.
+/// its server text (locked), and a check whose text cannot be read makes the table
+/// read-only, as does [`ElementRef::Table`]. Never unlocks anything and keeps an
+/// existing `read_only_reason`.
 pub fn apply_locks(def: &mut TableDef, locks: &[Locked]) {
     fn is(original: &Option<String>, name: &str, want: &str) -> bool {
         original.as_deref().unwrap_or(name) == want
@@ -112,16 +115,20 @@ pub fn apply_locks(def: &mut TableDef, locks: &[Locked]) {
             ElementRef::Check(n) => {
                 match def.checks.iter_mut().find(|c| is(&c.original, &c.name, n)) {
                     Some(c) => c.locked = true,
-                    None => {
-                        if let Some(expression) = check_expression(&l.server_text) {
-                            def.checks.push(CheckDef {
-                                original: Some(n.clone()),
-                                name: n.clone(),
-                                expression,
-                                locked: true,
-                            });
+                    None => match check_expression(&l.server_text) {
+                        Some(expression) => def.checks.push(CheckDef {
+                            original: Some(n.clone()),
+                            name: n.clone(),
+                            expression,
+                            locked: true,
+                        }),
+                        // It cannot be shown, so nothing on this table may be edited.
+                        None => {
+                            if def.read_only_reason.is_none() {
+                                def.read_only_reason = Some(UNKNOWN.into());
+                            }
                         }
-                    }
+                    },
                 }
             }
             ElementRef::Options => def.options.locked = true,
@@ -321,15 +328,6 @@ fn paren_group(s: &str) -> Option<&str> {
 // ---------------------------------------------------------------------------------
 // MySQL / MariaDB
 
-const INT_TYPES: &[&str] = &[
-    "tinyint",
-    "smallint",
-    "mediumint",
-    "int",
-    "integer",
-    "bigint",
-];
-
 /// A `SHOW CREATE TABLE` element line (or a rendered fragment), normalised. `column`:
 /// the nullable-column rules apply.
 fn mysql_norm(s: &str, table: &TableOptionsDef, column: bool) -> Vec<Tok> {
@@ -345,10 +343,15 @@ fn mysql_norm(s: &str, table: &TableOptionsDef, column: bool) -> Vec<Tok> {
         let word = |j: usize, w: &str| is_word(at(j), w);
         let punct = |j: usize, c: char| is_punct(at(j), c);
         if let Some(Tok::Word(w)) = at(0) {
-            let int = INT_TYPES.contains(&w.as_str());
-            let width = matches!(at(2), Some(Tok::Word(n))
-                if n.bytes().all(|b| b.is_ascii_digit()) && (int || n == "4"));
-            if (int || w == "year") && punct(1, '(') && width && punct(3, ')') {
+            // Only the width the server prints when none was given: `tinyint(1)` or
+            // `int(5)` mean something and stay.
+            let base = if w == "integer" { "int" } else { w.as_str() };
+            let unsigned = word(4, "unsigned");
+            let default = default_display_width(base, unsigned)
+                .map(|n| n.to_string())
+                .or_else(|| (w == "year").then(|| "4".to_string()));
+            let width = matches!((at(2), &default), (Some(Tok::Word(n)), Some(d)) if n == d);
+            if punct(1, '(') && width && punct(3, ')') {
                 out.push(t[i].clone());
                 i += 4;
                 continue;
@@ -969,6 +972,26 @@ fn pg_index_tail(definition: &str, unique: bool) -> Option<Vec<Tok>> {
     Some(t[i..].to_vec())
 }
 
+/// The lock of an index (or primary key) stored outside the default tablespace
+/// (ruling T9-1): re-creating it would move it, and its definitions do not say so.
+fn in_tablespace(element: ElementRef, index: Option<&IndexDetail>) -> Option<Locked> {
+    let index = index?;
+    let ts = index.tablespace.as_deref()?;
+    let text = format!(
+        "{} TABLESPACE {}",
+        index.definition.as_deref().unwrap_or(&index.name),
+        quote_ident(DbKind::Postgres, ts)
+    );
+    Some(lock(
+        element,
+        &format!(
+            "This index is stored in tablespace \"{ts}\"; the designer would re-create it in \
+             the default tablespace."
+        ),
+        text,
+    ))
+}
+
 fn pg_fidelity(
     def: &TableDef,
     detail: &TableDetail,
@@ -992,10 +1015,11 @@ fn pg_fidelity(
     }
 
     // A constraint or index: its server definition against the rendered one.
-    let mut compare = |element: ElementRef,
-                       locked: bool,
-                       definition: Option<&str>,
-                       same: &dyn Fn(&str) -> bool| {
+    let compare = |out: &mut Vec<Locked>,
+                   element: ElementRef,
+                   locked: bool,
+                   definition: Option<&str>,
+                   same: &dyn Fn(&str) -> bool| {
         let Some(definition) = definition else {
             out.push(lock(element, MISMATCH, ""));
             return;
@@ -1010,22 +1034,29 @@ fn pg_fidelity(
         |r: Result<String, RenderError>| r.ok().map(|r| without_constraint_name(pg_norm(&r)));
 
     if let Some(pk) = &def.primary_key {
-        let definition = detail
-            .primary_key
-            .as_ref()
-            .and_then(|i| i.definition.as_deref());
-        let mine = rendered(primary_key_sql(pk, server, d));
-        compare(ElementRef::PrimaryKey, pk.locked, definition, &|s| {
-            mine.as_ref() == Some(&pg_norm(s))
-        });
+        let server_pk = detail.primary_key.as_ref();
+        if let Some(l) = in_tablespace(ElementRef::PrimaryKey, server_pk) {
+            out.push(l);
+        } else {
+            let definition = server_pk.and_then(|i| i.definition.as_deref());
+            let mine = rendered(primary_key_sql(pk, server, d));
+            compare(
+                &mut out,
+                ElementRef::PrimaryKey,
+                pk.locked,
+                definition,
+                &|s| mine.as_ref() == Some(&pg_norm(s)),
+            );
+        }
     }
     for i in &def.indexes {
         let k = key(&i.original, &i.name);
-        let definition = detail
-            .indexes
-            .iter()
-            .find(|x| x.name == k)
-            .and_then(|x| x.definition.as_deref());
+        let server_index = detail.indexes.iter().find(|x| x.name == k);
+        if let Some(l) = in_tablespace(ElementRef::Index(k.to_string()), server_index) {
+            out.push(l);
+            continue;
+        }
+        let definition = server_index.and_then(|x| x.definition.as_deref());
         let r = index_sql(i, server, d);
         let same = |s: &str| {
             // EXCLUDE constraints (T5-6+): the designer has no exclusion constraints.
@@ -1042,6 +1073,7 @@ fn pg_fidelity(
             }
         };
         compare(
+            &mut out,
             ElementRef::Index(k.to_string()),
             i.locked,
             definition,
@@ -1065,6 +1097,7 @@ fn pg_fidelity(
         };
         let mine = rendered(fk_sql(&qualified, server, d));
         compare(
+            &mut out,
             ElementRef::ForeignKey(k.to_string()),
             f.locked,
             definition,
@@ -1080,6 +1113,7 @@ fn pg_fidelity(
             .and_then(|x| x.definition.as_deref());
         let mine = rendered(check_sql(c, server, d));
         compare(
+            &mut out,
             ElementRef::Check(k.to_string()),
             c.locked,
             definition,
@@ -1261,15 +1295,26 @@ mod tests {
                 elements(&locks),
                 vec![
                     idx("fid_excl"),
+                    idx("fid_uq_ts"),
                     idx("idx_collate"),
                     idx("idx_nulls"),
                     idx("idx_opclass"),
+                    idx("idx_ts"),
                     idx("idx_with"),
                 ],
                 "{target}: {locks:#?}"
             );
+            // Tablespace (T9-1): neither pg_get_* function prints it; the lock does.
+            for i in [1, 5] {
+                assert!(locks[i].reason.contains("\"dnt_fid_ts\""), "{:?}", locks[i]);
+                assert!(
+                    locks[i].server_text.ends_with(" TABLESPACE \"dnt_fid_ts\""),
+                    "{:?}",
+                    locks[i]
+                );
+            }
             assert_eq!(
-                locks[4].server_text,
+                locks[6].server_text,
                 "CREATE INDEX idx_with ON fid_scratch.fid_pg_locks USING btree (name) \
                  WITH (fillfactor='70')"
             );
@@ -1354,6 +1399,227 @@ mod tests {
             let locks = fidelity(&f.def(), &d, None, &f.server);
             assert_eq!(elements(&locks), vec![col("created_at")], "{target}");
         }
+    }
+
+    fn table_opts() -> TableOptionsDef {
+        TableOptionsDef {
+            engine: Some("InnoDB".into()),
+            charset: Some("utf8mb4".into()),
+            collation: Some("utf8mb4_unicode_ci".into()),
+            row_format: None,
+            locked: false,
+        }
+    }
+
+    /// `ddl` with the element line containing `marker` replaced by `line`.
+    fn replace_line(ddl: &str, marker: &str, line: &str) -> String {
+        let out: Vec<String> = ddl
+            .lines()
+            .map(|l| {
+                if l.contains(marker) {
+                    line.to_string()
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect();
+        assert!(out.iter().any(|l| l == line), "{marker} not in {ddl}");
+        out.join("\n")
+    }
+
+    #[test]
+    fn only_default_display_widths_are_dropped() {
+        let t = table_opts();
+        let n = |s: &str| mysql_norm(s, &t, true);
+        assert_eq!(n("`a` int(11) DEFAULT NULL"), n("`a` int NULL"));
+        assert_eq!(
+            n("`a` int(10) unsigned NOT NULL"),
+            n("`a` int unsigned NOT NULL")
+        );
+        assert_eq!(
+            n("`a` bigint(20) unsigned NULL"),
+            n("`a` bigint unsigned NULL")
+        );
+        assert_eq!(n("`a` tinyint(4) NULL"), n("`a` tinyint NULL"));
+        assert_eq!(n("`y` year(4) NULL"), n("`y` year NULL"));
+        // A width the user gave is part of the type.
+        assert_ne!(n("`b` tinyint(1) DEFAULT NULL"), n("`b` tinyint NULL"));
+        assert_ne!(n("`a` int(5) NULL"), n("`a` int NULL"));
+        assert_ne!(n("`a` int(11) unsigned NULL"), n("`a` int unsigned NULL"));
+
+        // Through fidelity: server `tinyint(1)` vs a draft `tinyint` locks the column.
+        for target in MYSQL {
+            let f = fixture(target, "weird_names");
+            let ddl = replace_line(
+                f.ddl.as_deref().unwrap(),
+                "`id` int",
+                "  `id` tinyint(1) NOT NULL,",
+            );
+            let mut def = f.def();
+            def.columns[0].data_type = crate::parse_type("tinyint", &f.server);
+            assert_eq!(
+                elements(&f.locks_with(&def, Some(&ddl))),
+                vec![col("id")],
+                "{target}"
+            );
+            // The same width in the draft matches.
+            def.columns[0].data_type = crate::parse_type("tinyint(1)", &f.server);
+            assert_eq!(f.locks_with(&def, Some(&ddl)), vec![], "{target}");
+        }
+    }
+
+    #[test]
+    fn server_charset_or_collation_the_draft_lacks_locks() {
+        for target in MYSQL {
+            let f = fixture(target, "weird_names");
+            for line in [
+                "  `we``ird\"col` varchar(50) COLLATE utf8mb4_bin DEFAULT NULL,",
+                "  `we``ird\"col` varchar(50) CHARACTER SET latin1 DEFAULT NULL,",
+                "  `we``ird\"col` varchar(50) CHARACTER SET latin1 COLLATE latin1_bin DEFAULT NULL,",
+            ] {
+                let ddl = replace_line(f.ddl.as_deref().unwrap(), "ird\"col", line);
+                assert_eq!(
+                    elements(&f.locks_with(&f.def(), Some(&ddl))),
+                    vec![col("we`ird\"col")],
+                    "{target}: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mysql_index_and_on_update_differences_lock() {
+        for target in MYSQL {
+            let f = fixture(target, "orders");
+            let ddl = f.ddl.clone().unwrap();
+            let index = idx("idx_orders_customer_status");
+            for line in [
+                "  KEY `idx_orders_customer_status` (`customer_id`,`status` DESC),",
+                "  KEY `idx_orders_customer_status` (`customer_id`,`status`(3)),",
+                "  KEY `idx_orders_customer_status` (`customer_id`,`status`) COMMENT 'x',",
+            ] {
+                let edited = replace_line(&ddl, "KEY `idx_orders_customer_status`", line);
+                assert_eq!(
+                    elements(&f.locks_with(&f.def(), Some(&edited))),
+                    vec![index.clone()],
+                    "{target}: {line}"
+                );
+            }
+            // A changed index comment, from the draft side.
+            let mut def = f.def();
+            def.indexes[0].comment = Some("y".into());
+            assert_eq!(
+                elements(&f.locks_with(&def, Some(&ddl))),
+                vec![index.clone()],
+                "{target}"
+            );
+            // The server has no ON UPDATE where the draft has one.
+            let mut def = f.def();
+            let created = def
+                .columns
+                .iter_mut()
+                .find(|c| c.name == "created_at")
+                .unwrap();
+            created.on_update = Some("CURRENT_TIMESTAMP(6)".into());
+            assert_eq!(
+                elements(&f.locks_with(&def, Some(&ddl))),
+                vec![col("created_at")],
+                "{target}"
+            );
+        }
+    }
+
+    #[test]
+    fn leftover_column_pk_or_unknown_line_makes_the_table_read_only() {
+        for target in MYSQL {
+            let f = fixture(target, "weird_names");
+            let ddl = f.ddl.clone().unwrap();
+            let mut cases = vec![
+                (
+                    replace_line(
+                        &ddl,
+                        "PRIMARY KEY",
+                        "  `ghost` int DEFAULT NULL,\n  PRIMARY KEY (`id`)",
+                    ),
+                    f.def(),
+                ),
+                (
+                    replace_line(
+                        &ddl,
+                        "PRIMARY KEY",
+                        "  PRIMARY KEY (`id`),\n  PERIOD FOR SYSTEM_TIME (`a`,`b`)",
+                    ),
+                    f.def(),
+                ),
+            ];
+            let mut no_pk = f.def();
+            no_pk.primary_key = None;
+            cases.push((ddl.clone(), no_pk));
+            for (edited, def) in cases {
+                let locks = f.locks_with(&def, Some(&edited));
+                assert_eq!(
+                    elements(&locks),
+                    vec![ElementRef::Table],
+                    "{target}: {edited}"
+                );
+                assert_eq!(locks[0].reason, UNKNOWN);
+                let mut def = def;
+                apply_locks(&mut def, &locks);
+                assert_eq!(def.read_only_reason.as_deref(), Some(UNKNOWN), "{target}");
+            }
+        }
+    }
+
+    #[test]
+    fn unreadable_leftover_check_makes_the_table_read_only() {
+        let f = fixture("MySql8", "orders");
+        let mut def = f.def();
+        let locks = vec![lock(
+            ElementRef::Check("ghost".into()),
+            MISMATCH,
+            "CONSTRAINT `ghost` CHECK",
+        )];
+        apply_locks(&mut def, &locks);
+        assert!(def.checks.iter().all(|c| c.name != "ghost"));
+        assert_eq!(def.read_only_reason.as_deref(), Some(UNKNOWN));
+        // A readable one is added, locked, and the table stays editable.
+        let mut def = f.def();
+        let locks = vec![lock(
+            ElementRef::Check("ghost".into()),
+            MISMATCH,
+            "CONSTRAINT `ghost` CHECK ((`total` < 10)) /*!80016 NOT ENFORCED */",
+        )];
+        apply_locks(&mut def, &locks);
+        let ghost = def.checks.iter().find(|c| c.name == "ghost").unwrap();
+        assert!(ghost.locked);
+        assert_eq!(ghost.expression, "(`total` < 10)");
+        assert_eq!(def.read_only_reason, None);
+    }
+
+    #[test]
+    fn apply_locks_never_unlocks() {
+        let f = fixture("MySql8", "orders");
+        let mut def = f.def();
+        def.columns[1].locked = true;
+        def.options.locked = true;
+        def.read_only_reason = Some("earlier".into());
+        let before = def.clone();
+        apply_locks(&mut def, &[]);
+        assert_eq!(def, before);
+        apply_locks(
+            &mut def,
+            &[
+                lock(col("id"), MISMATCH, ""),
+                lock(ElementRef::Table, NO_DDL, ""),
+                lock(
+                    ElementRef::Check("ghost".into()),
+                    MISMATCH,
+                    "CONSTRAINT `ghost` CHECK",
+                ),
+            ],
+        );
+        assert!(def.columns[0].locked && def.columns[1].locked && def.options.locked);
+        assert_eq!(def.read_only_reason.as_deref(), Some("earlier"));
     }
 
     #[test]

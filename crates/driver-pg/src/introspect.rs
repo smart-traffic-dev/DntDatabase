@@ -232,6 +232,7 @@ fn index_details(
             include: get(r, 12)?,
             comment: non_empty(r, 13)?,
             nulls_not_distinct: get(r, 14)?,
+            tablespace: non_empty(r, 15)?,
             name: get(r, 0)?,
             unique: get(r, 1)?,
             primary: get(r, 2)?,
