@@ -1,9 +1,13 @@
 import type {
+  ColumnDef,
   ColumnDetail,
   ColumnMeta,
   ConnectionConfig,
   ConnectionSummary,
   DatabaseInfo,
+  DesignPreview,
+  DesignRender,
+  DesignReport,
   EditableInfo,
   HistoryEntry,
   IndexDetail,
@@ -13,11 +17,14 @@ import type {
   Scope,
   ServerInfo,
   TableDataPage,
+  TableDef,
   TableDetail,
   Tree,
+  TypeInfo,
+  TypeSpec,
   Value,
 } from '../../ui/src/bindings';
-import { fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
+import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
 import type { Handler } from './shim';
 
 /** The id the dialog sends while creating (see `NIL_UUID` in ConnectionDialog). */
@@ -197,6 +204,106 @@ const HISTORY: HistoryEntry[] = [
   },
 ];
 
+const known = (base: string, over: Partial<Extract<TypeSpec, { kind: 'known' }>> = {}): TypeSpec => ({
+  kind: 'known',
+  base,
+  length: null,
+  precision: null,
+  scale: null,
+  unsigned: false,
+  values: [],
+  ...over,
+});
+
+function columnDef(name: string, data_type: TypeSpec, over: Partial<ColumnDef> = {}): ColumnDef {
+  return {
+    original: name,
+    name,
+    data_type,
+    nullable: false,
+    default: null,
+    auto_increment: false,
+    identity: null,
+    on_update: null,
+    charset: null,
+    collation: null,
+    comment: null,
+    using: null,
+    generated: null,
+    locked: false,
+    ...over,
+  };
+}
+
+/** The canned MySQL 8 `orders` design: eight columns, primary key, one index. */
+function ordersDesign(totalPrecision: number): TableDef {
+  return {
+    original_name: 'orders',
+    name: 'orders',
+    columns: [
+      columnDef('id', known('bigint'), { auto_increment: true }),
+      columnDef('customer_id', known('bigint')),
+      columnDef('status', known('varchar', { length: 20 }), { default: { kind: 'value', text: 'new' } }),
+      columnDef('total', known('decimal', { precision: totalPrecision, scale: 2 }), { default: { kind: 'value', text: '0.00' } }),
+      columnDef('currency', known('char', { length: 3 }), { default: { kind: 'value', text: 'USD' } }),
+      columnDef('note', known('text'), { nullable: true }),
+      columnDef('created_at', known('datetime'), { default: { kind: 'expression', text: 'CURRENT_TIMESTAMP' } }),
+      columnDef('updated_at', known('datetime'), { nullable: true }),
+    ],
+    primary_key: { original: 'PRIMARY', name: 'PRIMARY', columns: ['id'], locked: false },
+    indexes: [
+      {
+        original: 'orders_customer_id_idx',
+        name: 'orders_customer_id_idx',
+        unique: false,
+        parts: [{ column: 'customer_id', expression: null, prefix: null, descending: false }],
+        method: 'BTREE',
+        include: [],
+        visible: true,
+        comment: null,
+        constraint: false,
+        locked: false,
+      },
+    ],
+    foreign_keys: [],
+    checks: [],
+    options: { engine: 'InnoDB', charset: null, collation: null, row_format: null, locked: false },
+    comment: null,
+    read_only_reason: null,
+  };
+}
+
+const info = (base: string, over: Partial<TypeInfo> = {}): TypeInfo => ({
+  base,
+  length: 'None',
+  precision: 'None',
+  scale: 'None',
+  unsigned: false,
+  values: false,
+  collation: false,
+  ...over,
+});
+const CATALOG: TypeInfo[] = [
+  info('bigint', { unsigned: true }),
+  info('decimal', { precision: 'Optional', scale: 'Optional', unsigned: true }),
+  info('varchar', { length: 'Required', collation: true }),
+  info('char', { length: 'Optional', collation: true }),
+  info('text', { collation: true }),
+  info('datetime', { precision: 'Optional' }),
+];
+
+const lostDesign = () => new Failure(appError('config', 'unknown design', { field: 'design_id' }));
+
+/** The one statement the canned render produces: only `total`'s precision is modelled. */
+function renderOrders(draft: TableDef, basePrecision: number): string[] {
+  const total = draft.columns.find((c) => c.original === 'total');
+  if (!total || total.data_type.kind !== 'known') return [];
+  const { precision, scale } = total.data_type;
+  if (precision === basePrecision && scale === 2) return [];
+  const type = precision === null ? 'decimal' : scale === null ? `decimal(${precision})` : `decimal(${precision},${scale})`;
+  return [`ALTER TABLE \`dnt_fixture\`.\`orders\` MODIFY COLUMN \`total\` ${type} NOT NULL DEFAULT '0.00'`];
+}
+
 export interface FakeBackend {
   /** Commands the app called, in order — for asserting what the UI asked the backend. */
   calls: { cmd: string; args: Record<string, unknown> }[];
@@ -213,6 +320,11 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   const open = new Map<string, ServerInfo>();
   const calls: FakeBackend['calls'] = [];
   let history = [...HISTORY];
+  // Table designer state: `orders.total`'s base precision, open designs (id -> connection), plans (id -> precision).
+  let totalPrecision = 12;
+  let designSeq = 0;
+  const designs = new Map<string, string>();
+  const plans = new Map<string, number>();
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -297,6 +409,52 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
       return pageOf();
     },
     table_data_cancel: () => true,
+
+    // The table designer: one canned MySQL 8 `orders` design; only `total`'s precision is editable
+    // end to end (apply stores the planned precision as the new base).
+    table_design_open: ({ connectionId }) => {
+      const id = connectionId as string;
+      const server = requireOpen(id);
+      const designId = `design-${++designSeq}`;
+      designs.set(designId, id);
+      return {
+        design_id: designId,
+        def: ordersDesign(totalPrecision),
+        locked: [],
+        catalog: CATALOG,
+        server,
+        env: connections.find((c) => c.id === id)?.env_tag ?? null,
+        read_only: false,
+      };
+    },
+    table_design_render: ({ designId, draft }): DesignRender => {
+      if (!designs.has(designId as string)) throw lostDesign();
+      return { statements: renderOrders(draft as TableDef, totalPrecision), impacts: [], errors: [], error: null };
+    },
+    table_design_preview: ({ designId, draft }): DesignPreview => {
+      const conn = designs.get(designId as string);
+      if (!conn) throw lostDesign();
+      const planId = `plan-${++designSeq}`;
+      const statements = renderOrders(draft as TableDef, totalPrecision);
+      const total = (draft as TableDef).columns.find((c) => c.original === 'total');
+      plans.set(planId, total?.data_type.kind === 'known' ? (total.data_type.precision ?? totalPrecision) : totalPrecision);
+      const env = connections.find((c) => c.id === conn)?.env_tag ?? null;
+      return { plan_id: planId, statements, impacts: [], confirm_name: env === 'production' ? 'orders' : null, expires_in_seconds: 600 };
+    },
+    table_design_apply: ({ planId, confirmed, name }): DesignReport => {
+      const precision = plans.get(planId as string);
+      if (precision === undefined) throw fail('plan_stale');
+      const prod = [...designs.values()].some((c) => connections.find((x) => x.id === c)?.env_tag === 'production');
+      if (!confirmed || (prod && name !== 'orders')) return { outcome: 'not_applied', error: null, warnings: [], statements_sent: 0 };
+      totalPrecision = precision;
+      plans.delete(planId as string);
+      return { outcome: 'applied', error: null, warnings: [], statements_sent: 1 };
+    },
+    table_design_cancel: () => null,
+    table_design_close: ({ designId }) => {
+      designs.delete(designId as string);
+      return null;
+    },
 
     // The cache is a backend optimisation; nothing to invalidate here.
     refresh_node: () => null,
