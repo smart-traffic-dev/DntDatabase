@@ -248,13 +248,26 @@ impl Scratch {
                 quote_ident(self.t.kind(), &self.ns)
             )
         };
-        // A fresh session: the body may have left its own in a transaction or holding locks.
-        let cleanup = connect(self.t).await;
-        let cleaned = sql(cleanup.as_ref(), &drop).await;
-        cleanup.close().await;
-        self.s.close().await;
+        // The app's and the body's sessions go first (they may hold locks or an open
+        // transaction); the DROP runs on a fresh session whose lock wait is bounded, so a
+        // stuck lock fails the cleanup instead of hanging the test.
         self.state.sessions.close(self.id).await;
+        self.s.close().await;
+        let cleanup = connect(self.t).await;
+        let bound = if self.pg {
+            "SET lock_timeout = '10s'"
+        } else {
+            "SET SESSION lock_wait_timeout = 10"
+        };
+        let cleaned = match sql(cleanup.as_ref(), bound).await {
+            Ok(_) => sql(cleanup.as_ref(), &drop).await,
+            Err(e) => Err(e),
+        };
+        cleanup.close().await;
         if let Err(panic) = result {
+            if let Err(e) = &cleaned {
+                eprintln!("cleanup {:?} failed after a panic: {drop}: {e}", self.t);
+            }
             std::panic::resume_unwind(panic);
         }
         assert!(cleaned.is_ok(), "cleanup {:?}: {cleaned:?}", self.t);
@@ -500,8 +513,20 @@ async fn step(
     edit: impl FnOnce(&mut TableDef),
     fix: impl FnOnce(&mut TableDef, &TableDef),
 ) -> TableDef {
+    step_on(sc, "t", "t", what, edit, fix).await
+}
+
+/// [`step`] on table `from`, re-opened as `to` (a rename of the table).
+async fn step_on(
+    sc: &Scratch,
+    from: &str,
+    to: &str,
+    what: &str,
+    edit: impl FnOnce(&mut TableDef),
+    fix: impl FnOnce(&mut TableDef, &TableDef),
+) -> TableDef {
     let t = sc.t;
-    let o = sc.open_table("t").await;
+    let o = sc.open_table(from).await;
     assert!(o.locked.is_empty(), "{t:?} {what}: {:#?}", o.locked);
     let mut draft = o.def.clone();
     edit(&mut draft);
@@ -516,8 +541,10 @@ async fn step(
     );
     assert!(report.warnings.is_empty(), "{t:?} {what}: {report:?}");
     sc.close_design(o.design_id).await;
-    let after = sc.open_table("t").await;
+    let after = sc.open_table(to).await;
     sc.close_design(after.design_id).await;
+    assert_eq!(after.def.name, to, "{t:?} {what}");
+    assert_eq!(after.def.original_name.as_deref(), Some(to), "{t:?} {what}");
     assert!(after.locked.is_empty(), "{t:?} {what}: {:#?}", after.locked);
     fix(&mut draft, &after.def);
     assert_eq!(norm(after.def.clone()), norm(draft), "{t:?} {what}");
@@ -525,6 +552,32 @@ async fn step(
 }
 
 fn no_fix(_: &mut TableDef, _: &TableDef) {}
+
+/// A check expression as the server stores it, without identifier quotes, outer
+/// parentheses and extra whitespace: `(`code` > 0)` / `(code > 0)` -> `code > 0`.
+fn norm_expression(e: &str) -> String {
+    let mut s: String = e.chars().filter(|c| *c != '`' && *c != '"').collect();
+    loop {
+        let t = s.trim();
+        let wrapped = t.starts_with('(') && t.ends_with(')') && {
+            // The first `(` closes at the very end.
+            let mut depth = 0i32;
+            t.char_indices().all(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                depth > 0 || i == t.len() - 1
+            })
+        };
+        if !wrapped {
+            break;
+        }
+        s = t[1..t.len() - 1].to_string();
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
 
 fn col_index(d: &TableDef, name: &str) -> usize {
     d.columns
@@ -739,12 +792,13 @@ async fn apply_each_change_kind() {
                         })
                     },
                     // The server stores the expression in its own form (`(`code` > 0)`,
-                    // `(code > 0)`): checked to name the column, then taken as is.
+                    // `(code > 0)`): it must normalise to the draft's, then is taken as is.
                     |draft, after| {
                         let got = after.checks.iter().find(|c| c.name == "ck_code");
                         let got = got.expect("ck_code after apply");
-                        assert!(
-                            got.expression.contains("code") && got.expression.contains('0'),
+                        assert_eq!(
+                            norm_expression(&got.expression),
+                            "code > 0",
                             "{t:?}: {}",
                             got.expression
                         );
@@ -777,6 +831,36 @@ async fn apply_each_change_kind() {
                 &sc,
                 "comment",
                 |d| d.comment = Some("designer's comment".into()),
+                no_fix,
+            )
+            .await;
+
+            // Rename the table, then back.
+            step_on(
+                &sc,
+                "t",
+                "t_renamed",
+                "rename table",
+                |d| d.name = "t_renamed".into(),
+                no_fix,
+            )
+            .await;
+            assert_eq!(
+                sc.rows(&format!(
+                    "SELECT id FROM {} ORDER BY id",
+                    sc.rel("t_renamed")
+                ))
+                .await
+                .len(),
+                3,
+                "{t:?}"
+            );
+            step_on(
+                &sc,
+                "t_renamed",
+                "t",
+                "rename table back",
+                |d| d.name = "t".into(),
                 no_fix,
             )
             .await;
@@ -969,7 +1053,13 @@ async fn pg_error_rolls_back_all() {
         let sc = Scratch::new(t).await;
         let body = async {
             let (design, mut draft) = add_column_draft(&sc).await;
-            // Row 3 holds NULL in `a`.
+            // Changes ordered before the failing one, which succeed and must be undone:
+            // drop index `ix_parent` (drops first) and rename `b` -> `b2` (renames before
+            // alters).
+            draft.indexes.retain(|i| i.name != "ix_parent");
+            let b = col_index(&draft, "b");
+            draft.columns[b].name = "b2".into();
+            // Row 3 holds NULL in `a`: SET NOT NULL fails, before ADD COLUMN `added`.
             let i = col_index(&draft, "a");
             draft.columns[i].nullable = false;
             let report = sc
@@ -982,7 +1072,21 @@ async fn pg_error_rolls_back_all() {
                 "{t:?}: {report:?}"
             );
             assert!(report.error.is_some(), "{t:?}: {report:?}");
+            assert!(
+                report.statements_sent >= 3,
+                "{t:?}: the failing statement must come after the others: {report:?}"
+            );
             assert!(!has_column(&sc, "added").await, "{t:?}");
+            assert!(has_column(&sc, "b").await, "{t:?}: rename not undone");
+            assert!(!has_column(&sc, "b2").await, "{t:?}: rename not undone");
+            let index = sc
+                .rows(&format!(
+                    "SELECT count(*)::text FROM pg_indexes \
+                     WHERE schemaname = '{}' AND indexname = 'ix_parent'",
+                    sc.ns
+                ))
+                .await;
+            assert_eq!(index, vec![vec!["1".to_string()]], "{t:?}: drop not undone");
             let nullable = sc
                 .rows(&format!(
                     "SELECT is_nullable FROM information_schema.columns \
@@ -1049,21 +1153,19 @@ async fn lock_wait_times_out() {
             // ALTER is refused (1205) -> NotApplied. PostgreSQL: the re-check's own read
             // of the table waits for the ACCESS EXCLUSIVE lock and is refused by
             // `lock_timeout` (55P03) before anything is sent: an error, nothing applied.
+            // Ruling T11-1: on PostgreSQL the 55P03 error itself, nothing sent.
             match r {
-                Ok(r) => {
-                    assert!(
-                        matches!(
-                            r.outcome,
-                            ActionOutcome::NotApplied | ActionOutcome::RolledBack
-                        ),
-                        "{t:?}: {r:?}"
-                    );
-                    assert!(r.error.is_some(), "{t:?}: {r:?}");
+                Ok(r) if !sc.pg => {
+                    assert_eq!(r.outcome, ActionOutcome::NotApplied, "{t:?}: {r:?}");
+                    assert_eq!(r.statements_sent, 1, "{t:?}: {r:?}");
+                    let e = r.error.as_ref().expect("an error");
+                    assert_eq!(e.server_code.as_deref(), Some("1205"), "{t:?}: {r:?}");
+                    assert!(!e.outcome_unknown, "{t:?}: {r:?}");
                 }
                 Err(DbError::Server {
                     sqlstate: Some(s), ..
                 }) if sc.pg && s == "55P03" => {}
-                Err(e) => panic!("{t:?}: {e:?}"),
+                other => panic!("{t:?}: {other:?}"),
             }
             assert!(
                 // The 5 s lock wait, plus opening the DDL session and (MySQL, a statement
