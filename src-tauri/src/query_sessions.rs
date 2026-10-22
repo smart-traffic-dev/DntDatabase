@@ -69,6 +69,9 @@ pub(crate) const SLOT_CLOSE_WAIT: Duration = Duration::from_secs(5);
 
 /// Rows per `rows` event and per driver batch.
 pub const RUN_BATCH_SIZE: usize = 500;
+/// Rows decoded by a driver before they reach the disk/export backpressure boundary.
+/// UI events are still coalesced to [`RUN_BATCH_SIZE`].
+const STREAM_BATCH_SIZE: usize = 32;
 
 /// Upper bound of `RunOptions::max_rows`.
 pub const MAX_ROWS_LIMIT: u32 = 1_000_000;
@@ -1846,7 +1849,7 @@ impl ExportRun {
         } = self;
         let exec = ExecOptions {
             max_rows: usize::MAX,
-            batch_size: RUN_BATCH_SIZE,
+            batch_size: STREAM_BATCH_SIZE,
             timeout: None,
             cancel_grace,
             stop: cancel.signal(),
@@ -2506,7 +2509,7 @@ impl SessionManager {
 
         let exec = ExecOptions {
             max_rows: opts.max_rows.clamp(1, MAX_ROWS_LIMIT) as usize,
-            batch_size: RUN_BATCH_SIZE,
+            batch_size: STREAM_BATCH_SIZE,
             timeout: (cfg.options.query_timeout_s > 0)
                 .then(|| Duration::from_secs(cfg.options.query_timeout_s.into())),
             cancel_grace: self.cancel_grace,

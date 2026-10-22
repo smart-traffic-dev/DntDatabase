@@ -244,6 +244,16 @@ impl RowStream {
         (self.emit)(event);
     }
 
+    /// Closes a result whose backing store failed. Its statement error is emitted by
+    /// the run task; no `result_end` may advertise uncommitted rows as complete.
+    fn fail(&self) {
+        let mut b = lock(&self.buf);
+        b.rows.clear();
+        b.since = None;
+        b.result_id = None;
+        b.store = None;
+    }
+
     /// Sends whatever is held.
     pub(crate) fn flush(&self) {
         let mut b = lock(&self.buf);
@@ -645,12 +655,18 @@ impl RowSink for ChannelSink {
             return;
         }
         let result_id = self.next_result_id.saturating_sub(1);
+        let mut stored_ok = true;
         if let (Some(stored), Some(token)) = (&self.stored, self.stored_token.take()) {
             // Every held row reaches the store before it is complete.
             self.rows.flush();
             if let Err(error) = stored.store.finish(token) {
                 (stored.fail)(error);
+                stored_ok = false;
             }
+        }
+        if !stored_ok {
+            self.rows.fail();
+            return;
         }
         self.rows.end(RunEvent::ResultEnd {
             result_id,
@@ -829,6 +845,27 @@ mod tests {
         assert!(matches!(
             seen.lock().unwrap().last(),
             Some(RunEvent::Rows { result_id: 4, rows }) if rows.len() == 1
+        ));
+    }
+
+    #[test]
+    fn failed_backing_store_never_announces_a_complete_result() {
+        let (emit, seen) = collector();
+        let rows = RowStream::new(emit, 500);
+        rows.start(
+            8,
+            RunEvent::ResultStart {
+                result_id: 8,
+                index: 0,
+                columns: vec![],
+            },
+        );
+        rows.push(vec![row(1)]);
+        rows.fail();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        assert!(matches!(
+            seen.lock().unwrap().last(),
+            Some(RunEvent::ResultStart { result_id: 8, .. })
         ));
     }
 

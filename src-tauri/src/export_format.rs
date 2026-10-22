@@ -962,6 +962,7 @@ enum ExportWrite {
 
 /// Most row payload (approximate bytes) queued for the export writer.
 pub const EXPORT_QUEUE_BYTES: usize = 32 * 1024 * 1024;
+const EXPORT_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// The queued payload; `closed` once the writer stopped taking rows.
 #[derive(Default)]
@@ -1052,6 +1053,29 @@ impl ExportSink {
             .map_err(|_| export_error("The export writer stopped unexpectedly."))
     }
 
+    fn enqueue_rows(&mut self, batch: Vec<Vec<Value>>, bytes: usize) -> bool {
+        let count = batch.len() as u64;
+        // A full queue waits here, off the async executor. One indivisible oversized
+        // row may pass only while the queue is empty.
+        if !block_outside_executor(|| self.gate.reserve(bytes)) {
+            return false;
+        }
+        match self.send(ExportWrite::Rows(batch, bytes)) {
+            Ok(()) => {
+                self.rows = self.rows.saturating_add(count);
+                true
+            }
+            Err(error) => {
+                self.gate.release(bytes);
+                let mut slot = lock_export(&self.error);
+                if slot.is_none() {
+                    *slot = Some(error);
+                }
+                false
+            }
+        }
+    }
+
     /// Completes the file. A statement without a result still gets a valid empty file.
     pub fn finish(self) -> Result<Written, DbError> {
         if let Some(e) = lock_export(&self.error).take() {
@@ -1087,26 +1111,21 @@ impl RowSink for ExportSink {
         if self.results != 1 || lock_export(&self.error).is_some() {
             return;
         }
-        let bytes = batch
-            .iter()
-            .flatten()
-            .map(value_bytes)
-            .sum::<usize>()
-            .saturating_add(batch.len());
-        let count = batch.len() as u64;
-        // A full queue waits here, off the async executor.
-        if !block_outside_executor(|| self.gate.reserve(bytes)) {
-            return;
-        }
-        match self.send(ExportWrite::Rows(batch, bytes)) {
-            Ok(()) => self.rows = self.rows.saturating_add(count),
-            Err(error) => {
-                self.gate.release(bytes);
-                let mut slot = lock_export(&self.error);
-                if slot.is_none() {
-                    *slot = Some(error);
+        let mut frame = Vec::new();
+        let mut frame_bytes = 0usize;
+        for row in batch {
+            let row_bytes = row.iter().map(value_bytes).sum::<usize>().saturating_add(1);
+            if !frame.is_empty() && frame_bytes.saturating_add(row_bytes) > EXPORT_FRAME_BYTES {
+                if !self.enqueue_rows(std::mem::take(&mut frame), frame_bytes) {
+                    return;
                 }
+                frame_bytes = 0;
             }
+            frame_bytes = frame_bytes.saturating_add(row_bytes);
+            frame.push(row);
+        }
+        if !frame.is_empty() {
+            self.enqueue_rows(frame, frame_bytes);
         }
     }
     fn result_end(&mut self, _summary: &ResultSummary) {}

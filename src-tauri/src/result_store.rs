@@ -13,17 +13,20 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 pub const RESULT_PAGE_ROWS: usize = 500;
 pub const RESULT_PAGE_BYTES: usize = 4 * 1024 * 1024;
 pub const RESULT_CELL_BYTES: usize = 64 * 1024;
-const WRITER_QUEUE_FRAMES: usize = 8;
 const FRAME_TARGET_BYTES: usize = 4 * 1024 * 1024;
+const WRITER_QUEUE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_COPY_CELLS: usize = 100_000;
+const MAX_EXPORT_OPERATIONS: usize = 256;
+const EXPORT_PRECANCEL_TTL: Duration = Duration::from_secs(300);
 
 fn store_error(message: impl Into<String>) -> DbError {
     DbError::Internal {
@@ -74,9 +77,61 @@ struct StoreState {
     root: PathBuf,
     entries: Mutex<HashMap<Uuid, Arc<Entry>>>,
     by_tab: Mutex<HashMap<String, HashSet<Uuid>>>,
-    exports: Mutex<HashMap<Uuid, Arc<AtomicBool>>>,
+    exports: Mutex<HashMap<Uuid, ExportOperation>>,
     /// Locked while this process owns `root`, so another instance's startup cleanup skips it.
     _owner: Option<File>,
+}
+
+struct ExportOperation {
+    cancel: Arc<AtomicBool>,
+    active: bool,
+    since: Instant,
+}
+
+/// Approximate encoded bytes waiting for the result writer. A single oversized frame
+/// may pass only while the queue is empty, so an exact value larger than the budget can
+/// still be stored without allowing several such frames to accumulate.
+#[derive(Default)]
+struct WriterGate {
+    state: Mutex<(usize, bool)>,
+    changed: Condvar,
+}
+
+impl WriterGate {
+    fn reserve(&self, bytes: usize) -> bool {
+        let mut state = lock(&self.state);
+        loop {
+            let (queued, closed) = *state;
+            if closed {
+                return false;
+            }
+            if queued == 0 || queued.saturating_add(bytes) <= WRITER_QUEUE_BYTES {
+                state.0 = queued.saturating_add(bytes);
+                return true;
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+
+    fn release(&self, bytes: usize) {
+        let mut state = lock(&self.state);
+        state.0 = state.0.saturating_sub(bytes);
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    fn close(&self) {
+        lock(&self.state).1 = true;
+        self.changed.notify_all();
+    }
+
+    #[cfg(test)]
+    fn queued(&self) -> usize {
+        lock(&self.state).0
+    }
 }
 
 const OWNER_LOCK: &str = "owner.lock";
@@ -135,6 +190,7 @@ enum WriteMessage {
     Frame {
         entry: Arc<Entry>,
         bytes: Vec<u8>,
+        queued_bytes: usize,
         rows: u32,
         commit: Commit,
         fail: Fail,
@@ -156,7 +212,8 @@ enum WriteMessage {
 #[derive(Clone)]
 pub struct ResultStore {
     state: Arc<StoreState>,
-    tx: SyncSender<WriteMessage>,
+    tx: Sender<WriteMessage>,
+    gate: Arc<WriterGate>,
     _worker: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
@@ -182,15 +239,18 @@ impl ResultStore {
             _owner: Some(owner),
             ..StoreState::default()
         });
-        let (tx, rx) = mpsc::sync_channel(WRITER_QUEUE_FRAMES);
+        let (tx, rx) = mpsc::channel();
+        let gate = Arc::new(WriterGate::default());
         let worker_state = Arc::clone(&state);
+        let worker_gate = Arc::clone(&gate);
         let worker = std::thread::Builder::new()
             .name("dnt-result-writer".into())
-            .spawn(move || writer_loop(worker_state, rx))
+            .spawn(move || writer_loop(worker_state, worker_gate, rx))
             .map_err(|e| store_error(format!("cannot start query result writer: {e}")))?;
         Ok(ResultStore {
             state,
             tx,
+            gate,
             _worker: Arc::new(Mutex::new(Some(worker))),
         })
     }
@@ -285,38 +345,77 @@ impl ResultStore {
         let Some(entry) = lock(&self.state.entries).get(&token.0).cloned() else {
             return;
         };
-        for rows in split_rows(rows) {
-            let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
-            let bytes = codec::encode_rows(&rows);
-            let message = WriteMessage::Frame {
-                entry: Arc::clone(&entry),
-                bytes,
-                rows: count,
-                commit: Arc::clone(&commit),
-                fail: Arc::clone(&fail),
-            };
-            if block_outside_executor(|| self.tx.send(message)).is_err() {
-                let error = store_error("query result writer stopped");
-                lock(&entry.state).error = Some(error.clone());
-                fail(error);
-                return;
+        let mut frame = Vec::new();
+        let mut frame_bytes = 0usize;
+        for row in rows {
+            let row_bytes = row
+                .iter()
+                .map(value_bytes)
+                .sum::<usize>()
+                .saturating_add(64);
+            if !frame.is_empty() && frame_bytes.saturating_add(row_bytes) > FRAME_TARGET_BYTES {
+                if !self.append_frame(&entry, std::mem::take(&mut frame), &commit, &fail) {
+                    return;
+                }
+                frame_bytes = 0;
             }
+            frame_bytes = frame_bytes.saturating_add(row_bytes);
+            frame.push(row);
         }
+        if !frame.is_empty() {
+            self.append_frame(&entry, frame, &commit, &fail);
+        }
+    }
+
+    fn append_frame(
+        &self,
+        entry: &Arc<Entry>,
+        rows: Vec<Vec<Value>>,
+        commit: &Commit,
+        fail: &Fail,
+    ) -> bool {
+        let count = u32::try_from(rows.len()).unwrap_or(u32::MAX);
+        let bytes = codec::encode_rows(&rows);
+        let queued_bytes = bytes.len();
+        if !block_outside_executor(|| self.gate.reserve(queued_bytes)) {
+            let error = store_error("query result writer stopped");
+            lock(&entry.state).error = Some(error.clone());
+            entry.changed.notify_all();
+            fail(error);
+            return false;
+        }
+        let message = WriteMessage::Frame {
+            entry: Arc::clone(entry),
+            bytes,
+            queued_bytes,
+            rows: count,
+            commit: Arc::clone(commit),
+            fail: Arc::clone(fail),
+        };
+        if self.tx.send(message).is_err() {
+            self.gate.release(queued_bytes);
+            let error = store_error("query result writer stopped");
+            lock(&entry.state).error = Some(error.clone());
+            entry.changed.notify_all();
+            fail(error);
+            return false;
+        }
+        true
     }
 
     /// Marks a result whose statement ended before `finish` as incomplete, once the
     /// frames already queued for it are written. Never blocks.
     pub(crate) fn abandon(&self, token: ResultToken) {
         if let Ok(entry) = self.entry(token.0) {
-            // An unbounded wait is not allowed here (drop paths): a full queue marks it now.
-            match self.tx.try_send(WriteMessage::Abandon {
-                entry: Arc::clone(&entry),
-            }) {
-                Ok(()) => {}
-                Err(_) => {
-                    lock(&entry.state).abandoned = true;
-                    entry.changed.notify_all();
-                }
+            if self
+                .tx
+                .send(WriteMessage::Abandon {
+                    entry: Arc::clone(&entry),
+                })
+                .is_err()
+            {
+                lock(&entry.state).abandoned = true;
+                entry.changed.notify_all();
             }
         }
     }
@@ -475,18 +574,47 @@ impl ResultStore {
     }
 
     pub fn begin_export(&self, operation: Uuid) -> Arc<AtomicBool> {
-        let cancel = Arc::new(AtomicBool::new(false));
-        if let Some(old) = lock(&self.state.exports).insert(operation, Arc::clone(&cancel)) {
-            old.store(true, Ordering::SeqCst);
+        let mut exports = lock(&self.state.exports);
+        exports.retain(|_, export| export.active || export.since.elapsed() < EXPORT_PRECANCEL_TTL);
+        if let Some(export) = exports.get_mut(&operation) {
+            // A pre-cancel stays raised. A duplicate active operation is cancelled too.
+            if export.active {
+                export.cancel.store(true, Ordering::SeqCst);
+            }
+            export.active = true;
+            export.since = Instant::now();
+            return Arc::clone(&export.cancel);
         }
+        let cancel = Arc::new(AtomicBool::new(false));
+        exports.insert(
+            operation,
+            ExportOperation {
+                cancel: Arc::clone(&cancel),
+                active: true,
+                since: Instant::now(),
+            },
+        );
         cancel
     }
 
     pub fn cancel_export(&self, operation: Uuid) -> bool {
-        let Some(cancel) = lock(&self.state.exports).get(&operation).cloned() else {
+        let mut exports = lock(&self.state.exports);
+        exports.retain(|_, export| export.active || export.since.elapsed() < EXPORT_PRECANCEL_TTL);
+        if let Some(export) = exports.get(&operation) {
+            export.cancel.store(true, Ordering::SeqCst);
+            return true;
+        }
+        if exports.len() >= MAX_EXPORT_OPERATIONS {
             return false;
-        };
-        cancel.store(true, Ordering::SeqCst);
+        }
+        exports.insert(
+            operation,
+            ExportOperation {
+                cancel: Arc::new(AtomicBool::new(true)),
+                active: false,
+                since: Instant::now(),
+            },
+        );
         true
     }
 
@@ -568,7 +696,7 @@ pub struct ResultSearch {
     pub capped: bool,
 }
 
-fn writer_loop(state: Arc<StoreState>, rx: Receiver<WriteMessage>) {
+fn writer_loop(state: Arc<StoreState>, gate: Arc<WriterGate>, rx: Receiver<WriteMessage>) {
     let mut files: HashMap<Uuid, File> = HashMap::new();
     while let Ok(message) = rx.recv() {
         match message {
@@ -585,6 +713,7 @@ fn writer_loop(state: Arc<StoreState>, rx: Receiver<WriteMessage>) {
             WriteMessage::Frame {
                 entry,
                 bytes,
+                queued_bytes,
                 rows,
                 commit,
                 fail,
@@ -600,6 +729,7 @@ fn writer_loop(state: Arc<StoreState>, rx: Receiver<WriteMessage>) {
                         fail(error);
                     }
                 }
+                gate.release(queued_bytes);
             }
             WriteMessage::Abandon { entry } => {
                 files.remove(&entry.token);
@@ -639,6 +769,7 @@ fn writer_loop(state: Arc<StoreState>, rx: Receiver<WriteMessage>) {
             }
         }
     }
+    gate.close();
     drop(files);
     let _ = std::fs::remove_dir_all(&state.root);
 }
@@ -686,29 +817,6 @@ fn write_frame(
     drop(state);
     entry.changed.notify_all();
     Ok(Some(start))
-}
-
-fn split_rows(rows: Vec<Vec<Value>>) -> Vec<Vec<Vec<Value>>> {
-    let mut out = Vec::new();
-    let mut batch = Vec::new();
-    let mut bytes = 0usize;
-    for row in rows {
-        let size = row
-            .iter()
-            .map(value_bytes)
-            .sum::<usize>()
-            .saturating_add(64);
-        if !batch.is_empty() && bytes.saturating_add(size) > FRAME_TARGET_BYTES {
-            out.push(std::mem::take(&mut batch));
-            bytes = 0;
-        }
-        bytes = bytes.saturating_add(size);
-        batch.push(row);
-    }
-    if !batch.is_empty() {
-        out.push(batch);
-    }
-    out
 }
 
 /// Decodes one committed frame, opening the result file on first use.
@@ -904,28 +1012,40 @@ fn display_value(value: Value, cap: usize) -> (Value, bool) {
 }
 
 fn display_rows(rows: Vec<Vec<Value>>) -> (Vec<Vec<Value>>, Vec<(u32, u32)>, usize) {
-    let total_cells = rows.iter().map(Vec::len).sum::<usize>().max(1);
-    let dynamic_cap = (RESULT_PAGE_BYTES / total_cells).min(RESULT_CELL_BYTES);
     let mut truncated = Vec::new();
     let mut bytes = 0usize;
-    let rows = rows
-        .into_iter()
-        .enumerate()
-        .map(|(r, row)| {
-            row.into_iter()
-                .enumerate()
-                .map(|(c, value)| {
-                    let (value, cut) = display_value(value, dynamic_cap);
-                    if cut {
-                        truncated.push((r as u32, c as u32));
-                    }
-                    bytes = bytes.saturating_add(value_bytes(&value));
-                    value
-                })
-                .collect()
-        })
-        .collect();
-    (rows, truncated, bytes)
+    let mut shown = Vec::new();
+    for row in rows {
+        let remaining = RESULT_PAGE_BYTES.saturating_sub(bytes);
+        let cap = (remaining / row.len().max(1)).min(RESULT_CELL_BYTES);
+        let mut row_truncated = Vec::new();
+        let row: Vec<Value> = row
+            .into_iter()
+            .enumerate()
+            .map(|(c, value)| {
+                let (value, cut) = display_value(value, cap);
+                if cut {
+                    row_truncated.push(c as u32);
+                }
+                value
+            })
+            .collect();
+        let row_bytes = row.iter().map(value_bytes).sum::<usize>();
+        // Always return one row so a value larger than the budget can still be reached.
+        // Database column-count limits keep fixed-size cells of one row below the budget;
+        // only a single indivisible value can make this exception larger.
+        if !shown.is_empty() && bytes.saturating_add(row_bytes) > RESULT_PAGE_BYTES {
+            break;
+        }
+        let row_index = shown.len() as u32;
+        truncated.extend(row_truncated.into_iter().map(|column| (row_index, column)));
+        bytes = bytes.saturating_add(row_bytes);
+        shown.push(row);
+        if bytes >= RESULT_PAGE_BYTES {
+            break;
+        }
+    }
+    (shown, truncated, bytes)
 }
 
 /// The exact on-disk row encoding. JSON is not used: it cannot carry a NaN or an
@@ -1170,7 +1290,15 @@ mod tests {
         let frames = lock(&store.entry(token.0).unwrap().state).frames.len();
         assert!(frames >= 3, "{frames} frames");
         let page = store.page(token.0, 120, 500).unwrap();
-        assert_eq!(page.rows.len(), 180);
+        assert!(!page.rows.is_empty() && page.rows.len() < 180);
+        assert!(page.bytes <= RESULT_PAGE_BYTES);
+        let next = store
+            .page(token.0, 120 + page.rows.len() as u64, 500)
+            .unwrap();
+        assert!(
+            !next.rows.is_empty(),
+            "the byte-capped page has a continuation"
+        );
         assert_eq!(page.committed_rows, 300);
         assert!(page.done);
         let exact = store.values(token.0, &[299, 0, 150, 0], &[0]).unwrap();
@@ -1342,5 +1470,50 @@ mod tests {
         let token = store.create_result(Uuid::nil(), "tab", Uuid::new_v4(), 0, vec![]);
         store.begin_run("tab");
         assert!(store.page(token.0, 0, 1).is_err());
+    }
+
+    #[test]
+    fn export_cancel_before_registration_is_kept() {
+        let (_dir, store) = store();
+        let operation = Uuid::new_v4();
+        assert!(store.cancel_export(operation));
+        let cancel = store.begin_export(operation);
+        assert!(cancel.load(Ordering::SeqCst));
+        store.finish_export(operation);
+    }
+
+    #[test]
+    fn writer_gate_bounds_several_frames_and_allows_one_oversized_frame() {
+        let gate = Arc::new(WriterGate::default());
+        assert!(gate.reserve(24 * 1024 * 1024));
+        let waiting = Arc::clone(&gate);
+        let entered = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&entered);
+        let thread = std::thread::spawn(move || {
+            assert!(waiting.reserve(16 * 1024 * 1024));
+            seen.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(!entered.load(Ordering::SeqCst));
+        assert_eq!(gate.queued(), 24 * 1024 * 1024);
+        gate.release(24 * 1024 * 1024);
+        thread.join().unwrap();
+        assert_eq!(gate.queued(), 16 * 1024 * 1024);
+        gate.release(16 * 1024 * 1024);
+        assert!(gate.reserve(WRITER_QUEUE_BYTES + 1));
+        assert_eq!(gate.queued(), WRITER_QUEUE_BYTES + 1);
+    }
+
+    #[test]
+    fn wide_fixed_value_pages_stop_at_the_byte_budget() {
+        let (_dir, store) = store();
+        let columns = (0..1_100).map(|i| col(&format!("c{i}"))).collect();
+        let token = store.create_result(Uuid::nil(), "wide", Uuid::new_v4(), 0, columns);
+        let row = vec![Value::UInt(1); 1_100];
+        store.append(token, vec![row; 500], ignore(), panic_on_fail());
+        store.finish(token).unwrap();
+        let page = store.page(token.0, 0, 500).unwrap();
+        assert!(page.rows.len() < 500);
+        assert!(page.bytes <= RESULT_PAGE_BYTES, "{}", page.bytes);
     }
 }

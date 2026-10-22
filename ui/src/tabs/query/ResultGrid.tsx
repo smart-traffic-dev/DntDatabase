@@ -463,7 +463,8 @@ export function ResultGrid({
       if (!token || row < 0 || row >= rowCountRef.current) return;
       const page = Math.floor(row / CHUNK);
       if (loading.current.has(page)) return;
-      const held = remoteRef.current.pages.get(page);
+      const sameResult = remoteRef.current.token === token;
+      const held = sameResult ? remoteRef.current.pages.get(page) : undefined;
       // A page is fetched again only when rows were committed into it since it was read.
       if (held && !pageNeedsRows(held.rows, page, rowCountRef.current)) {
         if (held.used !== remoteRef.current.tick) setRemote((previous) => touchPage(previous, page));
@@ -472,12 +473,24 @@ export function ResultGrid({
       loading.current.add(page);
       let again = false;
       try {
-        const loaded = await api.queryResultPage(token, page * CHUNK, CHUNK);
-        // A page of a replaced result is dropped.
+        const start = page * CHUNK;
+        let rows = sameResult ? (remoteRef.current.chunks[page]?.slice() ?? []) : [];
+        let bytes = held?.bytes ?? 0;
+        // One backend response is capped by bytes and may contain fewer than 500 rows.
+        // Continue from its exact offset until this grid chunk or the committed range is full.
+        while (rows.length < CHUNK) {
+          const available = Math.min(CHUNK, Math.max(0, rowCountRef.current - start));
+          if (rows.length >= available) break;
+          const loaded = await api.queryResultPage(token, start + rows.length, available - rows.length);
+          if (tokenRef.current !== token) return;
+          if (loaded.rows.length === 0) break;
+          rows = rows.concat(loaded.rows);
+          bytes += loaded.bytes;
+        }
         if (tokenRef.current !== token) return;
-        setRemote((previous) => storePage({ ...previous, token }, page, loaded.rows, loaded.bytes, REMOTE_PAGE_BUDGET));
+        setRemote((previous) => storePage({ ...previous, token }, page, rows, bytes, REMOTE_PAGE_BUDGET));
         // Rows committed into the page while it was read.
-        again = pageNeedsRows(loaded.rows.length, page, rowCountRef.current);
+        again = pageNeedsRows(rows.length, page, rowCountRef.current);
       } catch (error) {
         say(error instanceof Error ? error.message : 'Could not load result rows', true);
       } finally {
