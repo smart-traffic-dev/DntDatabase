@@ -1,4 +1,4 @@
-﻿import { act, render } from '@testing-library/react';
+import { act, render } from '@testing-library/react';
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ThemeProvider } from '../theme/ThemeProvider';
