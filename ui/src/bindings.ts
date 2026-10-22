@@ -117,6 +117,17 @@ async trustHostKey(host: string, port: number, fingerprint: string, keyOpenssh: 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Reads a pasted connection string into the dialog's fields (nothing is stored or logged).
+ */
+async parseConnectionString(input: string) : Promise<Result<ParsedConnString, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("parse_connection_string", { input }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async objectActionPreview(connectionId: string, action: ObjectAction) : Promise<Result<ActionPreview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("object_action_preview", { connectionId, action }) };
@@ -1152,6 +1163,10 @@ export type ConnOptions = { version: number; connect_timeout_s: number; ssh_time
  */
 query_timeout_s: number }
 export type ConnState = { state: "disconnected" } | { state: "connecting"; stage: ConnectStage } | { state: "connected" } | { state: "reconnecting" } | { state: "failed" }
+/**
+ * The engine a connection string names (MariaDB is told apart from MySQL only by its scheme).
+ */
+export type ConnStringEngine = "mysql" | "mariadb" | "postgres"
 export type ConnectStage = "resolve_secrets" | "open_tunnel" | "connect_db" | "detect_server" | "execute"
 export type ConnectionConfig = { id: string; group_id: string | null; name: string; 
 /**
@@ -1566,6 +1581,23 @@ export type OpenResult = { info: ServerInfo; timings: StageTiming[] }
  * How a type uses a parameter.
  */
 export type ParamUse = "None" | "Optional" | "Required"
+/**
+ * The values read from a connection string; a `None` field was not in the string.
+ */
+export type ParsedConnString = { 
+/**
+ * `None` for a libpq keyword/value string that names no engine (it is PostgreSQL's format,
+ * so the UI treats it as PostgreSQL).
+ */
+engine: ConnStringEngine | null; host: string | null; port: number | null; user: string | null; password: string | null; database: string | null; ssl_mode: SslMode | null; application_name: string | null; connect_timeout_s: number | null; 
+/**
+ * Parameters that were not understood (`key=value`), so nothing is dropped silently.
+ */
+ignored: string[]; 
+/**
+ * Things worth telling the user (e.g. only the first of several hosts is used).
+ */
+warnings: string[] }
 /**
  * One node of a normalized plan.
  */

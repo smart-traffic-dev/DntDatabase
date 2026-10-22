@@ -1,12 +1,10 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { useLayout } from '../store/layout';
 import { showQuickOpen } from '../store/palette';
-import type { LayoutPreset } from '../store/layoutTree';
 import { useTabs } from '../store/tabs';
-import { ActionMenu } from './ActionMenu';
-import { LayoutIcon, LogoIcon, RightSidebarIcon, SearchIcon } from './icons';
+import { LogoIcon, SearchIcon, SettingsIcon } from './icons';
 import { MenuBar } from './MenuBar';
+import { openSettings } from './windowActions';
 import './titleBar.css';
 
 /** The window calls the title bar makes (a subset of Tauri's `Window`). */
@@ -37,69 +35,18 @@ const Glyph = ({ children }: { children: ReactNode }) => (
   </svg>
 );
 
-const LAYOUT_ITEMS: { layout: LayoutPreset; label: string; hint: string }[] = [
-  { layout: 'single', label: 'Single', hint: 'Ctrl+K 1' },
-  { layout: 'columns', label: 'Two columns', hint: 'Ctrl+K 2' },
-  { layout: 'rows', label: 'Two rows', hint: 'Ctrl+K 3' },
-  { layout: 'grid', label: 'Grid 2 × 2', hint: 'Ctrl+K 4' },
-];
-
-/** Editor layout picker, left of the window buttons. */
-function LayoutButton() {
-  const layout = useTabs((s) => s.layout);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  return (
-    <>
-      <button
-        type="button"
-        className="icon-btn titlebar-layout"
-        aria-label="Editor layout"
-        title="Editor layout"
-        aria-haspopup="menu"
-        aria-expanded={menu !== null}
-        onMouseDown={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          setMenu({ x: Math.max(8, r.right - 200), y: r.bottom });
-        }}
-      >
-        <LayoutIcon layout={layout} />
-      </button>
-      {menu && (
-        <ActionMenu
-          label="Editor layout"
-          checkRole="radio"
-          x={menu.x}
-          y={menu.y}
-          items={LAYOUT_ITEMS.map((l) => ({
-            label: l.label,
-            hint: l.hint,
-            checked: layout === l.layout,
-            run: () => useTabs.getState().setLayout(l.layout),
-          }))}
-          onClose={() => setMenu(null)}
-        />
-      )}
-    </>
-  );
-}
-
-/** Shows or hides the right sidebar (History); lit while it is open. */
-function RightSidebarButton() {
-  const visible = useLayout((s) => s.rightVisible);
-  const toggle = useLayout((s) => s.toggleRight);
+/** The one settings entry on the bar: theme, layout, query options and shortcuts are tabs of the Settings dialog. */
+function SettingsButton() {
   return (
     <button
       type="button"
-      className={`icon-btn titlebar-layout${visible ? ' on' : ''}`}
-      data-testid="titlebar-right-sidebar"
-      aria-label="Right sidebar"
-      aria-pressed={visible}
-      title="Toggle right sidebar (Ctrl+Alt+B)"
+      className="icon-btn titlebar-layout"
+      aria-label="Settings"
+      title="Settings (Ctrl+,)"
       onMouseDown={(e) => e.stopPropagation()}
-      onClick={toggle}
+      onClick={openSettings}
     >
-      <RightSidebarIcon />
+      <SettingsIcon />
     </button>
   );
 }
@@ -184,8 +131,7 @@ export function TitleBar() {
           <kbd className="keycap">Ctrl P</kbd>
         </button>
       </div>
-      <LayoutButton />
-      <RightSidebarButton />
+      <SettingsButton />
       <div className="titlebar-controls">
         <button
           type="button"

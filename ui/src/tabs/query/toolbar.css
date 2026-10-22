@@ -1,14 +1,15 @@
 /*
- * The action cluster at the right end of a group's tab strip (editor v2 §2): 26 px icon
- * buttons, a context chip, the open transaction. Never shrinks: the strip's tabs shrink and
- * scroll first.
+ * The active tab's toolbar, a row of its own under the group's tab strip: the context chip on
+ * the left, then Run / Explain with their names, the open transaction, and `⋯` at the right end.
+ * In a narrow group the buttons drop their names (icons only).
  */
 .tab-actions {
-  flex: none;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
-  gap: 1px;
-  padding: 0 var(--dnt-space-1) 0 var(--dnt-space-2);
+  gap: var(--dnt-space-1);
+  padding: 0 var(--dnt-space-2);
   white-space: nowrap;
 }
 
@@ -17,14 +18,38 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--dnt-space-1);
-  min-width: var(--dnt-ctl-h-sm);
-  height: var(--dnt-ctl-h-sm);
-  padding: 0;
+  gap: var(--dnt-space-1_5);
+  min-width: var(--dnt-ctl-h-md);
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-1_5);
   border: 1px solid transparent;
   border-radius: var(--dnt-radius-sm);
   background: transparent;
   color: var(--dnt-fg-muted);
+}
+
+/* A button's name beside its icon; the icon keeps the button's tone (accent Run, red Stop). */
+.ta-label {
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg);
+}
+
+.ta-btn.danger .ta-label,
+.ta-btn.danger-outline .ta-label {
+  color: inherit;
+}
+
+.ta-btn:disabled .ta-label {
+  color: var(--dnt-fg-disabled);
+}
+
+.tab-actions.w-narrow .ta-label {
+  display: none;
+}
+
+/* Pushes `⋯` to the row's right end. */
+.ta-fill {
+  flex: 1;
 }
 
 .ta-btn:hover:not(:disabled),
@@ -77,9 +102,9 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: var(--dnt-ctl-h-sm);
-  margin-left: -2px;
+  width: 16px;
+  height: var(--dnt-ctl-h-md);
+  margin-left: calc(-1 * var(--dnt-space-1));
   padding: 0;
   border: 1px solid transparent;
   border-radius: var(--dnt-radius-sm);
@@ -95,29 +120,29 @@
 .ta-sep {
   flex: none;
   width: 1px;
-  height: 16px;
-  margin: 0 var(--dnt-space-1);
+  height: 18px;
+  margin: 0 var(--dnt-space-1_5);
   background: var(--dnt-border);
 }
 
-/* Context chip `[ENV] database`: the name shrinks, the badge never does. */
+/* Context chip `[ENV] database ▾`: the name shrinks, the badge never does. */
 .qt-context {
   position: relative;
   display: inline-flex;
   flex: 0 1 auto;
   min-width: 0;
-  margin-right: var(--dnt-space-1);
 }
 
+/* Drawn as a select (it opens the connection and database picker). */
 .ta-chip {
   display: inline-flex;
   align-items: center;
-  gap: var(--dnt-space-1);
+  gap: var(--dnt-space-1_5);
   min-width: 0;
-  max-width: 160px;
-  height: var(--dnt-ctl-h-sm);
-  padding: 0 var(--dnt-space-1_5);
-  border: 1px solid transparent;
+  max-width: 260px;
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
   border-radius: var(--dnt-radius-sm);
   background: transparent;
   color: var(--dnt-fg);
@@ -132,8 +157,22 @@ button.ta-chip:hover {
   border-color: var(--dnt-focus);
 }
 
+.ta-chip-caret {
+  flex: none;
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--dnt-fg-muted);
+}
+
+.ta-chip-caret svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* An object tab's chip only shows where it is: no select border. */
 .ta-chip-static {
   margin-right: var(--dnt-space-1);
+  border-color: transparent;
   cursor: default;
 }
 
@@ -178,11 +217,11 @@ button.ta-chip:hover {
   background: var(--dnt-env-local);
 }
 
-/* The picker: connection and database selects under the chip, right-aligned with it. */
+/* The picker: connection and database selects under the chip, left-aligned with it. */
 .qt-popover {
   position: absolute;
   top: 100%;
-  right: 0;
+  left: 0;
   z-index: var(--dnt-z-dropdown);
   display: flex;
   flex-direction: column;
@@ -210,10 +249,8 @@ button.ta-chip:hover {
   color: var(--dnt-fg);
 }
 
-/* The Explain menu opens under its icon, right-aligned (the cluster is at the window's right). */
+/* The Explain menu opens under its button, left-aligned. */
 .tab-actions .qt-menu {
-  left: auto;
-  right: 0;
   z-index: var(--dnt-z-dropdown);
 }
 

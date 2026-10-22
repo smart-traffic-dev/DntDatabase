@@ -12,6 +12,7 @@ import {
   runPlanned,
   runQuery,
   stopQuery,
+  targetOf,
   txAction,
   unregisterEditor,
 } from './runQuery';
@@ -400,6 +401,20 @@ describe('runQuery', () => {
     expect(callsOf('query_plan')).toEqual([]);
     await runFromEditor(tab, 'cursor');
     expect(callsOf('query_plan')[0]).toMatchObject({ target: { Cursor: 0 } });
+    unregisterEditor(tab);
+  });
+
+  it('the Run button runs the whole script without a selection, the selection with one', async () => {
+    let empty = true;
+    registerEditor(tab, {
+      getModel: () => ({ getOffsetAt: (p: { column: number }) => p.column - 1 }),
+      getSelection: () => ({ isEmpty: () => empty, getStartPosition: () => ({ lineNumber: 1, column: 1 }), getEndPosition: () => ({ lineNumber: 1, column: 9 }) }),
+      getPosition: () => ({ lineNumber: 1, column: 9 }),
+    });
+    await runFromEditor(tab, 'script');
+    expect(callsOf('query_plan')[0]).toMatchObject({ target: 'All' });
+    empty = false;
+    expect(targetOf(tab, 'script')).toEqual({ Selection: [0, 8] });
     unregisterEditor(tab);
   });
 

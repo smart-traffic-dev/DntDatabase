@@ -349,7 +349,7 @@ textarea:focus-visible,
   line-height: 1;
 }
 
-/* Production is the only environment with a colour; S/L stay neutral and carry a letter. */
+/* Production is the only environment with a colour; STG / LCL stay neutral. */
 .env-tag.env-production {
   background: var(--dnt-status-danger-bg);
   border-color: var(--dnt-status-danger-border);
@@ -520,6 +520,15 @@ textarea:focus-visible,
   display: flex;
   align-items: stretch;
   height: var(--dnt-tab-h);
+  background: var(--dnt-bg-chrome);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+/* The active tab's actions: a row of their own under the tab strip. */
+.tabstrip-toolbar {
+  display: flex;
+  align-items: center;
+  min-height: var(--dnt-tab-h);
   background: var(--dnt-bg-chrome);
   border-bottom: 1px solid var(--dnt-border-subtle);
 }

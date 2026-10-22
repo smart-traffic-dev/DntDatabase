@@ -17,10 +17,10 @@ import { ANALYZE_NEEDS, useRunGate } from './runGate';
 import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 import { MAX_GROUPS, useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
-import { ENV_SHORT, belowRight, useStripWidth } from '../stripWidth';
+import { ENV_SHORT, belowLeft, belowRight, useStripWidth } from '../stripWidth';
 import './toolbar.css';
 
-const RUN_TIP = 'Run the statement at the cursor (Ctrl+Enter)';
+const RUN_TIP = 'Run the selection, or every statement (Ctrl+R)';
 
 /**
  * Explain (icon) and its menu (Explain, Explain Analyze). The menu takes focus when it opens;
@@ -100,6 +100,7 @@ function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runn
         onClick={() => void explainQuery(tabId, false)}
       >
         <ExplainIcon />
+        <span className="ta-label">Explain</span>
       </button>
       <button
         ref={caret}
@@ -155,9 +156,9 @@ function ExplainSplit({ tabId, runnable, analyzeOk, why }: { tabId: string; runn
 
 
 /**
- * A button that opens an `ActionMenu` under itself (right-aligned: the cluster is at the strip's
- * right end). A second press closes the menu (its mousedown is kept from the menu's outside-click
- * handler, which would reopen it).
+ * A button that opens an `ActionMenu` under itself, right-aligned with it by default (`align`
+ * "left" for a button at the toolbar's left side). A second press closes the menu (its mousedown
+ * is kept from the menu's outside-click handler, which would reopen it).
  */
 export function MenuButton({
   label,
@@ -165,6 +166,7 @@ export function MenuButton({
   testId,
   className,
   disabled,
+  align = 'right',
   items,
   checkRole,
   children,
@@ -175,12 +177,15 @@ export function MenuButton({
   testId?: string;
   className: string;
   disabled?: boolean;
+  align?: 'left' | 'right';
   items: () => MenuEntry[];
   checkRole?: 'checkbox' | 'radio';
   children: ReactNode;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [at, setAt] = useState<{ x: number; y: number } | null>(null);
+  // A split's ▾ starts its menu under the split's main button, not under the narrow caret.
+  const place = () => (align === 'left' ? belowLeft(ref.current?.parentElement ?? ref.current) : belowRight(ref.current));
   return (
     <>
       <button
@@ -196,11 +201,11 @@ export function MenuButton({
         onMouseDown={(e) => {
           if (at) e.stopPropagation();
         }}
-        onClick={() => setAt((v) => (v ? null : belowRight(ref.current)))}
+        onClick={() => setAt((v) => (v ? null : place()))}
         onKeyDown={(e) => {
           if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !at) {
             e.preventDefault();
-            setAt(belowRight(ref.current));
+            setAt(place());
           }
         }}
       >
@@ -215,7 +220,8 @@ export function MenuButton({
 const STOP_GUARD_MS = 400;
 
 /**
- * Run (icon; red on a Production connection) or, while the tab runs or exports, Stop in the same
+ * Run (the selection, else every statement; red on a Production connection) or, while the tab
+ * runs or exports, Stop in the same
  * element and slot with the elapsed time inside it. Its ▾ menu holds Run statement, Run all,
  * Run selection, Continue on error and Add to favorites.
  */
@@ -306,6 +312,7 @@ function RunSplit({
           }}
         >
           <StopIcon />
+          <span className="ta-label">Stop</span>
           {elapsed !== null && (
             <span className="ta-elapsed" data-testid="query-elapsed">
               {formatClock(elapsed)}
@@ -320,12 +327,13 @@ function RunSplit({
           aria-label={runLabel}
           disabled={!runnable}
           title={runnable ? RUN_TIP : why}
-          onClick={() => void runFromEditor(doc.id, 'cursor')}
+          onClick={() => void runFromEditor(doc.id, 'script')}
         >
           <PlayIcon />
+          <span className="ta-label">{runLabel}</span>
         </button>
       )}
-      <MenuButton label="Run options" testId="query-run-menu" className="ta-caret" items={items}>
+      <MenuButton label="Run options" testId="query-run-menu" className="ta-caret" align="left" items={items}>
         <ChevronDownIcon />
       </MenuButton>
     </span>
@@ -388,6 +396,7 @@ function TxControls({ tabId, busy }: { tabId: string; busy: boolean }) {
   const age = since !== null ? formatClock(Math.max(0, now - since)) : null;
   return (
     <>
+      <span className="ta-sep" aria-hidden="true" />
       <span
         className={`qt-tx-chip ${active ? 'warning' : 'danger'}`}
         data-testid="query-tx-chip"
@@ -420,7 +429,6 @@ function TxControls({ tabId, busy }: { tabId: string; busy: boolean }) {
       >
         <RollbackIcon />
       </button>
-      <span className="ta-sep" aria-hidden="true" />
     </>
   );
 }
@@ -598,7 +606,12 @@ function ContextChip({ doc, env, narrow }: { doc: ToolbarDoc; env: EnvTag | null
         {narrow ? (
           !env && <DatabaseIcon />
         ) : (
-          <span className={`ta-chip-text${doc.database ? '' : ' ta-chip-default'}`}>{text}</span>
+          <>
+            <span className={`ta-chip-text${doc.database ? '' : ' ta-chip-default'}`}>{text}</span>
+            <span className="ta-chip-caret" aria-hidden="true">
+              <ChevronDownIcon />
+            </span>
+          </>
         )}
       </button>
       {open && (
@@ -633,9 +646,9 @@ const sameToolbarDoc = (a: { doc: ToolbarDoc }, b: { doc: ToolbarDoc }) =>
   a.doc.continueOnError === b.doc.continueOnError;
 
 /**
- * The query tab's action cluster at the right end of its group's tab strip (editor v2 §2):
- * context chip, open transaction (only while open), Run / Stop ▾, Explain ▾ and `⋯` (Format,
- * Limit, Auto / Manual commit, Open in new group).
+ * The query tab's toolbar, on its own row under the group's tab strip: context chip, Run / Stop ▾,
+ * Explain ▾, open transaction (only while open) and, at the right end, `⋯` (Format, Limit,
+ * Auto / Manual commit, Open in new group).
  */
 export const QueryToolbar = memo(QueryToolbarView, sameToolbarDoc);
 
@@ -717,9 +730,11 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   return (
     <div className={`tab-actions w-${width}`} role="toolbar" aria-label="Query" ref={bar}>
       <ContextChip doc={doc} env={env} narrow={narrow} />
-      <TxControls tabId={doc.id} busy={busy} />
+      <span className="ta-sep" aria-hidden="true" />
       <RunSplit doc={doc} env={env} runnable={runnable} stoppable={stoppable} exporting={exporting} hasSelection={hasSelection} why={why} />
       {!narrow && <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} why={why} />}
+      <TxControls tabId={doc.id} busy={busy} />
+      <span className="ta-fill" />
       <MenuButton
         label="More query actions"
         title="Format, limit, commit mode, open in new group"

@@ -147,8 +147,8 @@ function ResultPanelView({
             Explain
           </button>
         )}
-        {showResult && <Summary result={result} />}
-        {showResult && result.columns.length > 0 && (
+        {showResult && !collapsed && <Summary result={result} />}
+        {showResult && !collapsed && result.columns.length > 0 && (
           <button
             type="button"
             className="btn small"
@@ -160,23 +160,10 @@ function ResultPanelView({
             Export…
           </button>
         )}
-        {onToggleCollapse && (
-          <button
-            type="button"
-            className={`icon-btn qr-collapse${collapsed || !showResult ? ' push' : ''}`}
-            data-testid="result-collapse"
-            aria-label={collapsed ? 'Expand results' : 'Collapse results'}
-            aria-expanded={!collapsed}
-            title={collapsed ? 'Expand results' : 'Collapse results'}
-            onClick={onToggleCollapse}
-          >
-            <ChevronDownIcon />
-          </button>
-        )}
         {onToggleMaximize && (
           <button
             type="button"
-            className={`icon-btn qr-maximize${!onToggleCollapse && (collapsed || !showResult) ? ' push' : ''}`}
+            className={`icon-btn qr-maximize${collapsed || !showResult ? ' push' : ''}`}
             data-testid="result-maximize"
             aria-label={maximized ? 'Restore results' : 'Maximize results'}
             aria-pressed={maximized}
@@ -184,6 +171,19 @@ function ResultPanelView({
             onClick={onToggleMaximize}
           >
             <MaximizeResultsIcon restore={maximized} />
+          </button>
+        )}
+        {onToggleCollapse && (
+          <button
+            type="button"
+            className={`icon-btn qr-collapse${!onToggleMaximize && (collapsed || !showResult) ? ' push' : ''}`}
+            data-testid="result-collapse"
+            aria-label={collapsed ? 'Expand results' : 'Collapse results'}
+            aria-expanded={!collapsed}
+            title={collapsed ? 'Expand results' : 'Collapse results'}
+            onClick={onToggleCollapse}
+          >
+            <ChevronDownIcon />
           </button>
         )}
       </div>

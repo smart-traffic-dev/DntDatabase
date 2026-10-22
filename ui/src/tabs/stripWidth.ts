@@ -18,7 +18,7 @@ const widthOf = (px: number): StripWidth => (px > 0 && px < NARROW_GROUP_PX ? 'n
 export function useStripWidth(ref: RefObject<HTMLElement | null>): StripWidth {
   const [width, setWidth] = useState<StripWidth>('wide');
   useLayoutEffect(() => {
-    const el = ref.current?.closest<HTMLElement>('.tabstrip') ?? ref.current;
+    const el = ref.current?.closest<HTMLElement>('.tabstrip-toolbar') ?? ref.current;
     if (!el) return;
     setWidth(widthOf(el.getBoundingClientRect().width));
     if (typeof ResizeObserver === 'undefined') return;
@@ -32,8 +32,14 @@ export function useStripWidth(ref: RefObject<HTMLElement | null>): StripWidth {
   return width;
 }
 
-/** Where a menu opened from `el` goes: under it, right-aligned with it (the cluster is at the strip's right end). */
+/** Where a menu opened from `el` goes: under it, right-aligned with it (a button at the toolbar's right end). */
 export const belowRight = (el: HTMLElement | null, menuWidth = 220) => {
   const r = el?.getBoundingClientRect();
   return { x: Math.max(4, (r?.right ?? 0) - menuWidth), y: (r?.bottom ?? 0) + 2 };
+};
+
+/** Under `el`, left-aligned with it (a button at the toolbar's left side). */
+export const belowLeft = (el: HTMLElement | null) => {
+  const r = el?.getBoundingClientRect();
+  return { x: Math.max(4, r?.left ?? 0), y: (r?.bottom ?? 0) + 2 };
 };

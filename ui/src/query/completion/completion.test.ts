@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CompletionObject, SchemaCache } from '../../bindings';
 import { callsOf, mockBackend } from '../../test/backend';
 import { forgetCompletionConnection, invalidateCompletion, useCompletion } from '../../store/completion';
+import { useConnections } from '../../store/connections';
+import { useDialogs } from '../../store/dialogs';
+import { openQuietly, quietOpenFailed, resetQuietOpens } from '../../store/reopen';
+import { config, openResult, serverInfo } from '../../test/fixtures/data';
 import { analyze } from './context';
 import { disposeCompletion, ensureCompletion, registerCompletion } from './monacoProvider';
 import { BUILTIN_SNIPPETS } from './snippets';
@@ -351,6 +355,8 @@ describe('monaco provider: fix round 1', () => {
 
   beforeEach(() => {
     useCompletion.reset();
+    useConnections.getState().reset();
+    resetQuietOpens();
     mockBackend({
       statement_ranges: () => [],
       completion_scope: () => ({ database: 'shop', tables: mysqlScope.tables }),
@@ -562,21 +568,145 @@ describe('monaco provider: fix round 1', () => {
     expect(result.incomplete).toBeFalsy();
   });
 
-  it('failed_scope_marks_the_result_incomplete', async () => {
+  /** A backend whose connection is closed until `open_connection` (a restored tab). */
+  const closedUntilOpened = (open: () => unknown) => {
+    let isOpen = false;
     mockBackend({
       statement_ranges: () => [],
       completion_scope: () => {
-        throw { kind: 'not_open', message: 'x' };
+        if (!isOpen) throw { kind: 'not_open', message: 'This connection is not open.' };
+        return { database: 'shop', tables: mysqlScope.tables };
+      },
+      list_databases: () => {
+        if (!isOpen) throw { kind: 'not_open', message: 'This connection is not open.' };
+        return [{ name: 'shop' }];
+      },
+      connection_state: () => ({ state: isOpen ? 'connected' : 'disconnected' }),
+      open_connection: () => {
+        const r = open();
+        isOpen = true;
+        return r;
+      },
+      list_tree: () => ({ groups: [], connections: [] }),
+    });
+  };
+  type Listed = { suggestions: { label: string }[]; incomplete?: boolean };
+  const listAt = (p: FakeProvider, model: unknown) => p.provideCompletionItems(model, { lineNumber: 1 }, {}, live) as unknown as Listed;
+
+  it('not_open_scope_opens_the_connection_quietly_then_lists_tables', async () => {
+    closedUntilOpened(() => openResult(serverInfo('MySql8')));
+    await useCompletion.scope(conn, 'shop'); // the prefetch of a restored tab: fails, never connects
+    expect(callsOf('open_connection')).toEqual([]);
+    const { monaco, providers } = fakeMonaco();
+    const model = fakeModel('SELECT * FROM |');
+    const widget = document.createElement('div');
+    widget.className = 'suggest-widget';
+    const dom = document.createElement('div');
+    dom.appendChild(widget);
+    // Monaco's list is on screen before its 100 ms `visible` class.
+    Object.assign(widget, { checkVisibility: () => true });
+    const trigger = vi.fn();
+    const editors = [{ getModel: () => model, getDomNode: () => dom, trigger }];
+    registerCompletion({ ...monaco, editor: { getEditors: () => editors } } as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    // Typing: still opening, so Monaco asks again; two keystrokes share one open.
+    expect(listAt(p, model).incomplete).toBe(true);
+    expect(listAt(p, model).incomplete).toBe(true);
+    await vi.waitFor(() => expect(trigger).toHaveBeenCalledWith('dnt', 'editor.action.triggerSuggest', {}));
+    expect(callsOf('open_connection')).toEqual([{ id: conn, prompt: null }]);
+    expect(useConnections.getState().info.has(conn)).toBe(true);
+    const after = listAt(p, model);
+    expect(after.suggestions.map((s) => s.label)).toContain('orders');
+    expect(after.incomplete).toBeFalsy();
+  });
+
+  it('failed_quiet_open_is_not_retried_per_keystroke', async () => {
+    closedUntilOpened(() => {
+      throw { kind: 'password_required', message: 'Password required.' };
+    });
+    await useCompletion.scope(conn, 'shop');
+    const { monaco, providers } = fakeMonaco();
+    registerCompletion(monaco as never, target);
+    const p = providers.get('mysql') as FakeProvider;
+    const model = fakeModel('SELECT * FROM |');
+    listAt(p, model);
+    await vi.waitFor(() => expect(quietOpenFailed(conn)).toBe(true));
+    // No prompt from autocomplete, and a failed load is final: Monaco filters, no re-request per key.
+    expect(useDialogs.getState().prompt).toBeFalsy();
+    expect(listAt(p, model).incomplete).toBeFalsy();
+    listAt(p, model);
+    expect(callsOf('open_connection')).toHaveLength(1);
+  });
+
+  it('rejected_credentials_never_log_in_again_quietly_a_transient_failure_does', async () => {
+    let failure: unknown = { kind: 'auth', message: 'Authentication failed.', retryable: false };
+    mockBackend({
+      connection_state: () => ({ state: 'disconnected' }),
+      open_connection: () => {
+        throw failure;
+      },
+      list_tree: () => ({ groups: [], connections: [] }),
+    });
+    vi.useFakeTimers();
+    try {
+      expect(await openQuietly(conn)).toBe(false);
+      vi.advanceTimersByTime(60_000);
+      // No failed login per typing pause: blocked until the user opens the connection.
+      expect(await openQuietly(conn)).toBe(false);
+      expect(callsOf('open_connection')).toHaveLength(1);
+      useConnections.getState().setInfo(conn, serverInfo('MySql8'));
+      useConnections.getState().clearInfo(conn);
+      failure = { kind: 'network', message: 'Unreachable.', retryable: true };
+      expect(await openQuietly(conn)).toBe(false);
+      expect(callsOf('open_connection')).toHaveLength(2);
+      expect(await openQuietly(conn)).toBe(false);
+      expect(callsOf('open_connection')).toHaveLength(2);
+      vi.advanceTimersByTime(10_001);
+      await openQuietly(conn);
+      expect(callsOf('open_connection')).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a_production_connection_is_never_opened_quietly', async () => {
+    mockBackend({
+      connection_state: () => ({ state: 'disconnected' }),
+      open_connection: () => openResult(serverInfo('MySql8')),
+    });
+    useConnections.getState().setStored([], [config(conn, 'prod', { env_tag: 'production' })]);
+    expect(await openQuietly(conn)).toBe(false);
+    expect(quietOpenFailed(conn)).toBe(true);
+    expect(callsOf('open_connection')).toEqual([]);
+  });
+
+  it('an_open_already_in_flight_is_not_superseded', async () => {
+    mockBackend({
+      connection_state: () => ({ state: 'connecting', stage: 'connect_db' }),
+      open_connection: () => openResult(serverInfo('MySql8')),
+    });
+    expect(await openQuietly(conn)).toBe(false);
+    expect(callsOf('open_connection')).toEqual([]);
+    // Short wait only: the user's open lands in `useConnections` and clears it.
+    useConnections.getState().setInfo(conn, serverInfo('MySql8'));
+    expect(quietOpenFailed(conn)).toBe(false);
+    expect(await openQuietly(conn)).toBe(true);
+  });
+
+  it('failed_scope_of_an_open_connection_is_not_incomplete', async () => {
+    mockBackend({
+      statement_ranges: () => [],
+      completion_scope: () => {
+        throw { kind: 'internal', message: 'boom' };
       },
       list_databases: () => [{ name: 'shop' }],
     });
+    useConnections.getState().setInfo(conn, serverInfo('MySql8'));
+    await loaded();
     const { monaco, providers } = fakeMonaco();
     registerCompletion(monaco as never, target);
-    const result = (await providers
-      .get('mysql')
-      ?.provideCompletionItems(fakeModel('SELECT * FROM |'), { lineNumber: 1 }, {}, live)) as { incomplete?: boolean };
-    // Monaco asks again on the next keystroke instead of filtering a table-less list.
-    expect(result.incomplete).toBe(true);
+    expect(listAt(providers.get('mysql') as FakeProvider, fakeModel('SELECT * FROM |')).incomplete).toBeFalsy();
+    expect(callsOf('completion_scope')).toHaveLength(1);
   });
 
   it('cancelled_request_returns_nothing', async () => {
@@ -779,6 +909,30 @@ describe('completion cache', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('connection_open_drops_its_failed_loads', async () => {
+    const other = '22222222-2222-4222-8222-222222222222';
+    let isOpen = false;
+    mockBackend({
+      completion_scope: ({ connId, database }) => {
+        if (connId === conn && !isOpen) throw { kind: 'not_open', message: 'x' };
+        return cache(database as string);
+      },
+    });
+    useConnections.getState().reset();
+    expect(await useCompletion.scope(conn, 'shop')).toBeNull();
+    await useCompletion.scope(other, 'shop');
+    // Another connection opening keeps this failure (within its window).
+    useConnections.getState().setInfo(other, serverInfo('MySql8'));
+    expect(await useCompletion.scope(conn, 'shop')).toBeNull();
+    expect(callsOf('completion_scope')).toHaveLength(2);
+    // This one opening: the failure is gone at once, the loaded scope of `other` stays.
+    isOpen = true;
+    useConnections.getState().setInfo(conn, serverInfo('MySql8'));
+    expect((await useCompletion.scope(conn, 'shop'))?.tables).toHaveLength(4);
+    await useCompletion.scope(other, 'shop');
+    expect(callsOf('completion_scope')).toHaveLength(3);
   });
 
   it('containers_and_objects_follow_the_engine', async () => {

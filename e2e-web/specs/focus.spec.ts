@@ -23,9 +23,9 @@ test.describe('keyboard focus is visible', () => {
 
   test('dialog text field gets an accent border', async ({ page }) => {
     await byId(page, 'new-connection').click();
-    const name = byId(page, 'conn-name');
-    await name.focus();
-    await expect.poll(() => name.evaluate((el) => getComputedStyle(el).borderTopColor)).toBe(await focusColor(page));
+    const host = byId(page, 'conn-host');
+    await host.focus();
+    await expect.poll(() => host.evaluate((el) => getComputedStyle(el).borderTopColor)).toBe(await focusColor(page));
   });
 
   test('sidebar filter gets an accent border', async ({ page }) => {
@@ -39,8 +39,10 @@ test.describe('keyboard focus is visible', () => {
     const box = page.getByRole('checkbox').first();
     await page.keyboard.press('Shift');
     await box.focus();
+    // The box is visually replaced by the switch track, which shows the outline.
     const style = await box.evaluate((el) => {
-      const s = getComputedStyle(el);
+      const track = el.nextElementSibling ?? el;
+      const s = getComputedStyle(track);
       return { style: s.outlineStyle, width: s.outlineWidth, color: s.outlineColor };
     });
     expect(style.style).not.toBe('none');

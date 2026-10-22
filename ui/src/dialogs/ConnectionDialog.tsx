@@ -4,8 +4,10 @@ import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, stageLabel, toAp
 import type {
   AppError,
   ConnectionConfig,
+  DbKind,
   EnvTag,
   OpenResult,
+  ParsedConnString,
   SecretChangeInput,
   SecretsInput,
   SecretsUpdateInput,
@@ -15,30 +17,27 @@ import type {
   StageTiming,
 } from '../bindings';
 import { EnvTag as EnvTagBadge } from '../components/EnvTag';
-import { CheckIcon, ErrorIcon } from '../components/icons';
+import { EngineLogo } from '../components/EngineLogo';
+import { CheckIcon, ChevronDownIcon, ErrorIcon, LockIcon } from '../components/icons';
 import { useConnections } from '../store/connections';
+import { autoName, DEFAULT_HOST, defaultPort, defaultUser, ENGINES, engineInfo } from './connectionDefaults';
 import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
 import { PasswordInput } from './PasswordInput';
 import { ConfirmDialog } from './SimpleDialogs';
 
-type TabId = 'general' | 'ssh' | 'ssl' | 'advanced';
-type Engine = 'mysql' | 'mariadb' | 'postgres';
+/**
+ * One page (single-page redesign): name, engine, server and environment always show; the
+ * connection URL, SSH tunnel, SSL / TLS and Advanced are folded rows that open in place.
+ */
+type Fold = 'url' | 'ssh' | 'ssl' | 'advanced';
+
+/** Where a field lives: on the page itself, or inside a fold (which opens to show its error). */
+type SectionId = 'main' | Fold;
 
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
-/** The section nav (spec §6): a vertical tab list, each section with a one-word state hint. */
-const TABS: { id: TabId; label: string }[] = [
-  { id: 'general', label: 'General' },
-  { id: 'ssh', label: 'SSH tunnel' },
-  { id: 'ssl', label: 'SSL / TLS' },
-  { id: 'advanced', label: 'Advanced' },
-];
 
-const ENGINES: { id: Engine; label: string; badge: string }[] = [
-  { id: 'mysql', label: 'MySQL', badge: 'My' },
-  { id: 'mariadb', label: 'MariaDB', badge: 'Ma' },
-  { id: 'postgres', label: 'PostgreSQL', badge: 'Pg' },
-];
+const PORT_MAX = 65_535;
 
 const SSL_MODES: { id: SslMode; label: string }[] = [
   { id: 'disable', label: 'Disable' },
@@ -55,23 +54,28 @@ const ENVIRONMENTS: { id: '' | EnvTag; label: string; testid: string }[] = [
   { id: 'production', label: 'Production', testid: 'conn-env-production' },
 ];
 
-/** Backend `config` error paths -> the input (and the tab holding it). */
-const FIELDS: Record<string, { tab: TabId; id: string }> = {
-  name: { tab: 'general', id: 'cd-name' },
-  group_id: { tab: 'general', id: 'cd-group' },
-  parent_id: { tab: 'general', id: 'cd-group' },
-  host: { tab: 'general', id: 'cd-host' },
-  port: { tab: 'general', id: 'cd-port' },
-  'ssh.host': { tab: 'ssh', id: 'cd-ssh-host' },
-  'ssh.user': { tab: 'ssh', id: 'cd-ssh-user' },
-  'ssh.key_path': { tab: 'ssh', id: 'cd-ssh-key' },
-  passphrase: { tab: 'ssh', id: 'cd-ssh-passphrase' },
-  'ssl.ca_path': { tab: 'ssl', id: 'cd-ssl-ca' },
-  'ssl.cert_path': { tab: 'ssl', id: 'cd-ssl-cert' },
-  'ssl.key_path': { tab: 'ssl', id: 'cd-ssl-key' },
+/** Field error paths (the backend's `config` errors and the dialog's own checks) -> the input, its section. */
+const FIELDS: Record<string, { section: SectionId; id: string }> = {
+  name: { section: 'main', id: 'cd-name' },
+  group_id: { section: 'advanced', id: 'cd-group' },
+  parent_id: { section: 'advanced', id: 'cd-group' },
+  host: { section: 'main', id: 'cd-host' },
+  port: { section: 'main', id: 'cd-port' },
+  conn_string: { section: 'url', id: 'cd-conn-string' },
+  ssh_host: { section: 'ssh', id: 'cd-ssh-host' },
+  'ssh.host': { section: 'ssh', id: 'cd-ssh-host' },
+  'ssh.port': { section: 'ssh', id: 'cd-ssh-port' },
+  'ssh.user': { section: 'ssh', id: 'cd-ssh-user' },
+  'ssh.key_path': { section: 'ssh', id: 'cd-ssh-key' },
+  passphrase: { section: 'ssh', id: 'cd-ssh-passphrase' },
+  'ssl.ca_path': { section: 'ssl', id: 'cd-ssl-ca' },
+  'ssl.cert_path': { section: 'ssl', id: 'cd-ssl-cert' },
+  'ssl.key_path': { section: 'ssl', id: 'cd-ssl-key' },
+  'options.connect_timeout_s': { section: 'advanced', id: 'cd-timeout' },
+  'options.ssh_timeout_s': { section: 'advanced', id: 'cd-ssh-timeout' },
 };
 
-/** Backend field path -> the form value it comes from. */
+/** Field path -> the form value it comes from. */
 const FIELD_KEYS: Record<string, keyof Form> = {
   name: 'name',
   group_id: 'groupId',
@@ -79,12 +83,15 @@ const FIELD_KEYS: Record<string, keyof Form> = {
   host: 'host',
   port: 'port',
   'ssh.host': 'sshHost',
+  'ssh.port': 'sshPort',
   'ssh.user': 'sshUser',
   'ssh.key_path': 'sshKeyPath',
   passphrase: 'passphrase',
   'ssl.ca_path': 'sslCa',
   'ssl.cert_path': 'sslCert',
   'ssl.key_path': 'sslKey',
+  'options.connect_timeout_s': 'connectTimeout',
+  'options.ssh_timeout_s': 'sshTimeout',
 };
 
 interface FieldError {
@@ -108,10 +115,8 @@ const ENGINE_NAME: Record<ServerVariant, string> = {
   Postgres: 'PostgreSQL',
 };
 
-const defaultPort = (engine: Engine) => (engine === 'postgres' ? 5432 : 3306);
-
 interface Form {
-  engine: Engine;
+  engine: DbKind;
   name: string;
   groupId: string;
   host: string;
@@ -145,15 +150,17 @@ interface Form {
 }
 
 function initialForm(initial: ConnectionConfig | undefined): Form {
-  const engine: Engine = initial?.kind === 'postgres' ? 'postgres' : 'mysql';
+  const engine: DbKind = initial?.kind ?? 'mysql';
   return {
     engine,
     name: initial?.name ?? '',
     groupId: initial?.group_id ?? '',
-    host: initial?.host ?? '',
+    // A new connection starts filled in with a local server's defaults (localhost, the engine's
+    // port and admin user); switching the engine swaps the ones still untouched.
+    host: initial?.host ?? DEFAULT_HOST,
     port: String(initial?.port ?? defaultPort(engine)),
     portTouched: !!initial && initial.port !== defaultPort(engine),
-    username: initial?.username ?? '',
+    username: initial?.username ?? defaultUser(engine),
     password: '',
     passwordTouched: false,
     defaultDb: initial?.default_db ?? '',
@@ -195,15 +202,55 @@ export function queryTimeoutSeconds(s: string): number {
   return Math.min(MAX_QUERY_TIMEOUT_S, Math.max(0, Math.floor(num(s, 0))));
 }
 
-/** The Advanced fields are what a new connection starts with (its section hint says Defaults). */
-const advancedIsDefault = (f: Form) =>
-  num(f.connectTimeout, 10) === 10 && num(f.sshTimeout, 10) === 10 && f.appName.trim() === '' && queryTimeoutSeconds(f.queryTimeout) === 0;
+/** Why a whole-number field is out of `min..=max`; empty is fine (it means the default). */
+function rangeError(s: string, min: number, max: number, what: string): string | null {
+  if (s.trim() === '') return null;
+  const n = Number(s);
+  return Number.isInteger(n) && n >= min && n <= max ? null : `Enter ${what} from ${min} to ${max}.`;
+}
+
+/** The dialog's own checks, in form order: the first problem as a field error path and message. */
+export function formProblem(f: Pick<Form, 'port' | 'sshOn' | 'sshPort' | 'connectTimeout' | 'sshTimeout'>) {
+  const checks: [string, string | null][] = [
+    ['port', rangeError(f.port, 1, PORT_MAX, 'a port')],
+    ['ssh.port', f.sshOn ? rangeError(f.sshPort, 1, PORT_MAX, 'a port') : null],
+    ['options.connect_timeout_s', rangeError(f.connectTimeout, 1, MAX_QUERY_TIMEOUT_S, 'whole seconds')],
+    ['options.ssh_timeout_s', rangeError(f.sshTimeout, 1, MAX_QUERY_TIMEOUT_S, 'whole seconds')],
+  ];
+  const hit = checks.find(([, message]) => message !== null);
+  return hit ? { field: hit[0], message: hit[1]! } : null;
+}
+
+/** CA / client certificate files matter once the server is verified, or when some are already set. */
+const showsSslFiles = (f: Form) =>
+  f.sslMode === 'verify_ca' || f.sslMode === 'verify_full' || (f.sslMode !== 'disable' && !!(f.sslCa || f.sslCert || f.sslKey));
+
+const CLOSED: Record<Fold, boolean> = { url: false, ssh: false, ssl: false, advanced: false };
+
+/** The form on another engine: a port and user still at the old engine's default (or empty) follow the new one. */
+export function withEngine<F extends Pick<Form, 'engine' | 'port' | 'portTouched' | 'username'>>(f: F, engine: DbKind): F {
+  if (engine === f.engine) return f;
+  const user = f.username.trim();
+  return {
+    ...f,
+    engine,
+    port: f.portTouched && f.port.trim() !== '' ? f.port : String(defaultPort(engine)),
+    portTouched: f.portTouched && f.port.trim() !== '',
+    username: user === '' || user === defaultUser(f.engine) ? defaultUser(engine) : f.username,
+  };
+}
 
 type TestState =
   | { state: 'idle' }
   | { state: 'running' }
   | { state: 'ok'; result: OpenResult }
   | { state: 'failed'; error: AppError; mismatch: boolean };
+
+type ParseState =
+  | { state: 'idle' }
+  | { state: 'parsing' }
+  | { state: 'ok'; parsed: ParsedConnString }
+  | { state: 'failed'; message: string };
 
 interface HostKeyRequest {
   host: string;
@@ -227,14 +274,17 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const [baseline] = useState(() => JSON.stringify(initialForm(initial)));
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const dirty = JSON.stringify(form) !== baseline;
-  const [tab, setTab] = useState<TabId>('general');
+  const [open, setOpen] = useState<Record<Fold, boolean>>(CLOSED);
   const [rawFieldError, setFieldError] = useState<FieldError | null>(null);
   const [saveError, setSaveError] = useState<AppError | null>(null);
   const [saving, setSaving] = useState(false);
   const [test, setTest] = useState<TestState>({ state: 'idle' });
   const [hostKey, setHostKey] = useState<HostKeyRequest | null>(null);
   const [showDetail, setShowDetail] = useState(false);
+  const [connString, setConnString] = useState('');
+  const [parse, setParse] = useState<ParseState>({ state: 'idle' });
   const testSeq = useRef(0);
+  const parseSeq = useRef(0);
   const testButton = useRef<HTMLButtonElement>(null);
   const detailsButton = useRef<HTMLButtonElement>(null);
 
@@ -246,29 +296,79 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
 
-  // Move the cursor to the input a backend error points at.
+  const toggleFold = (id: Fold) => setOpen((o) => ({ ...o, [id]: !o[id] }));
+
+  // Move the cursor to the input an error points at (its fold is opened first).
   useEffect(() => {
     if (!fieldError) return;
     const target = FIELDS[fieldError.field];
     if (target) document.getElementById(target.id)?.focus();
   }, [fieldError]);
 
-  const chooseEngine = (engine: Engine) =>
-    setForm((f) => ({
-      ...f,
-      engine,
-      port: f.portTouched ? f.port : String(defaultPort(engine)),
-    }));
+  const chooseEngine = (engine: DbKind) => setForm((f) => withEngine(f, engine));
+
+  /** Fills the form from a parsed connection string (values it did not name are left alone). */
+  const applyParsed = (p: ParsedConnString) => {
+    setForm((prev) => {
+      // No scheme (`user@host/db`) keeps the chosen engine; MariaDB shares the MySQL driver.
+      const f = p.engine === null ? prev : withEngine(prev, p.engine === 'postgres' ? 'postgres' : 'mysql');
+      return {
+        ...f,
+        host: p.host ?? f.host,
+        port: p.port ? String(p.port) : f.port,
+        portTouched: p.port ? true : f.portTouched,
+        username: p.user ?? f.username,
+        password: p.password ?? f.password,
+        passwordTouched: p.password !== null ? true : f.passwordTouched,
+        defaultDb: p.database ?? f.defaultDb,
+        sslMode: p.ssl_mode ?? f.sslMode,
+        appName: p.application_name ?? f.appName,
+        connectTimeout: p.connect_timeout_s ? String(p.connect_timeout_s) : f.connectTimeout,
+      };
+    });
+  };
+
+  // Parse the pasted string once the user pauses; a stale answer is dropped.
+  useEffect(() => {
+    const text = connString.trim();
+    const seq = ++parseSeq.current;
+    if (text === '') {
+      setParse({ state: 'idle' });
+      return;
+    }
+    setParse({ state: 'parsing' });
+    const timer = setTimeout(() => {
+      api
+        .parseConnectionString(text)
+        .then((parsed) => {
+          if (seq !== parseSeq.current) return;
+          applyParsed(parsed);
+          setParse({ state: 'ok', parsed });
+        })
+        .catch((e: unknown) => {
+          if (seq !== parseSeq.current) return;
+          setParse({ state: 'failed', message: toAppError(e).message });
+        });
+    }, 300);
+    return () => clearTimeout(timer);
+    // Deliberately keyed on the text only; `applyParsed` fills the other fields.
+  }, [connString]);
+
+  /** The values an empty field stands for: host, port, login, and the name derived from them. */
+  const host = () => form.host.trim() || DEFAULT_HOST;
+  const port = () => num(form.port, defaultPort(form.engine));
+  const username = () => form.username.trim() || defaultUser(form.engine);
+  const name = () => form.name.trim() || autoName(form.host, form.defaultDb);
 
   const buildConfig = (): ConnectionConfig => ({
     id: initial?.id ?? NIL_UUID,
     group_id: form.groupId || null,
-    name: form.name.trim(),
+    name: name(),
     sort_order: initial?.sort_order ?? 0,
-    kind: form.engine === 'postgres' ? 'postgres' : 'mysql',
-    host: form.host.trim(),
-    port: num(form.port, defaultPort(form.engine)),
-    username: form.username,
+    kind: form.engine,
+    host: host(),
+    port: port(),
+    username: username(),
     default_db: orNull(form.defaultDb),
     env_tag: form.envTag === '' ? null : form.envTag,
     read_only: form.readOnly,
@@ -331,23 +431,32 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     };
   };
 
-  /** Shows a `config` error under its input; false when it is not one. */
-  const showFieldError = (error: AppError): boolean => {
-    const target = error.field ? FIELDS[error.field] : undefined;
-    if (error.kind !== 'config' || !error.field || !target) return false;
-    setTab(target.tab);
-    setFieldError({
-      field: error.field,
-      message: error.message,
-      value: String(form[FIELD_KEYS[error.field] ?? 'name']),
-    });
+  /** Shows `message` under the input of `field` (opening its fold); false for an unknown field. */
+  const pointAt = (field: string, message: string): boolean => {
+    const target = FIELDS[field];
+    if (!target) return false;
+    const { section } = target;
+    if (section !== 'main') setOpen((o) => ({ ...o, [section]: true }));
+    setFieldError({ field, message, value: String(form[FIELD_KEYS[field] ?? 'name']) });
     return true;
   };
 
+  /** A backend `config` error goes under its input; false when it is not one. */
+  const showFieldError = (error: AppError): boolean =>
+    error.kind === 'config' && !!error.field && pointAt(error.field, error.message);
+
+  /** The dialog's own checks before anything is sent; false (and the field marked) on a problem. */
+  const checkForm = (): boolean => {
+    const problem = formProblem(form);
+    if (problem) pointAt(problem.field, problem.message);
+    return !problem;
+  };
+
   const save = async () => {
-    setSaving(true);
     setFieldError(null);
     setSaveError(null);
+    if (!checkForm()) return;
+    setSaving(true);
     try {
       const cfg = buildConfig();
       const saved =
@@ -363,10 +472,11 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   };
 
   const runTest = async () => {
-    const seq = ++testSeq.current;
-    setTest({ state: 'running' });
     setFieldError(null);
     setShowDetail(false);
+    if (!checkForm()) return;
+    const seq = ++testSeq.current;
+    setTest({ state: 'running' });
     try {
       const result = await api.testConnection(buildConfig(), typedSecrets());
       if (seq === testSeq.current) setTest({ state: 'ok', result });
@@ -430,29 +540,53 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       </p>
     ) : null;
   };
-  /** Tabs holding an error get a marker. */
-  const errorTab = fieldError ? FIELDS[fieldError.field]?.tab : undefined;
-  const engineLabel = ENGINES.find((e) => e.id === form.engine)?.label ?? 'MySQL';
+  /** The fold holding an error says so in its row. */
+  const errorSection = fieldError ? FIELDS[fieldError.field]?.section : undefined;
+  const info = engineInfo(form.engine);
 
-  /** The state hint of a section in the nav; a section holding an error says so instead. */
-  const hint = (id: TabId): string => {
-    if (errorTab === id) return 'Error';
-    if (id === 'general') return engineLabel;
-    if (id === 'ssh') return form.sshOn ? 'On' : 'Off';
+  /** The one-line state of a folded row, shown at its right end. */
+  const summary = (id: Exclude<Fold, 'url'>): string => {
+    if (id === 'ssh') {
+      if (!form.sshOn) return 'Off';
+      const sshHost = form.sshHost.trim();
+      if (!sshHost) return 'On';
+      const user = form.sshUser.trim();
+      return `${user ? `${user}@` : ''}${sshHost}:${num(form.sshPort, 22)}`;
+    }
     if (id === 'ssl') return SSL_MODES.find((m) => m.id === form.sslMode)?.label ?? '';
-    return advancedIsDefault(form) ? 'Defaults' : 'Custom';
+    const query = queryTimeoutSeconds(form.queryTimeout);
+    return [
+      groups.find((g) => g.id === form.groupId)?.name ?? 'No group',
+      `Connect ${num(form.connectTimeout, 10)} s`,
+      `Query ${query === 0 ? 'off' : `${query} s`}`,
+    ].join(' · ');
   };
 
-  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>) => {
-    const dir = e.key === 'ArrowDown' || e.key === 'ArrowRight' ? 1 : e.key === 'ArrowUp' || e.key === 'ArrowLeft' ? -1 : 0;
-    if (!dir) return;
-    e.preventDefault();
-    const index = TABS.findIndex((t) => t.id === tab);
-    const next = TABS[(index + dir + TABS.length) % TABS.length];
-    if (next) {
-      setTab(next.id);
-      document.getElementById(`cd-tab-${next.id}`)?.focus();
-    }
+  /** A folded row: its name and state; open, it shows its fields right under it. */
+  const fold = (id: Exclude<Fold, 'url'>, label: string, body: ReactNode) => {
+    const hasError = errorSection === id;
+    return (
+      <section className={`conn-fold${open[id] ? ' open' : ''}${hasError ? ' has-error' : ''}`}>
+        <button
+          type="button"
+          className="conn-fold-head"
+          id={`cd-fold-${id}`}
+          data-testid={`conn-section-${id}`}
+          aria-expanded={open[id]}
+          aria-controls={`cd-fold-${id}-body`}
+          onClick={() => toggleFold(id)}
+        >
+          <ChevronDownIcon />
+          <span className="conn-fold-title">{label}</span>
+          <span className="conn-fold-hint">{hasError ? 'Error' : summary(id)}</span>
+        </button>
+        {open[id] && (
+          <div id={`cd-fold-${id}-body`} className="conn-fold-body" role="region" aria-labelledby={`cd-fold-${id}`}>
+            {body}
+          </div>
+        )}
+      </section>
+    );
   };
 
   const pathInput = (id: string, label: string, field: 'sshKeyPath' | 'sslCa' | 'sslCert' | 'sslKey', errField?: string) => (
@@ -468,63 +602,136 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     </div>
   );
 
-  const panel: Record<TabId, ReactNode> = {
-    general: (
-      <div className="grid">
-        <div className="field span2">
-          <span id="cd-engine-title" className="field-label">
-            Engine
+  /** A checkbox with the project's switch look; the native box stays the control (and the focus ring). */
+  const toggle = (checked: boolean, onChange: (v: boolean) => void, text: ReactNode, hint?: ReactNode) => (
+    <div className="switch-field">
+      <label className="switch-label">
+        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <span className="switch-track" aria-hidden="true" />
+        <span>{text}</span>
+      </label>
+      {hint && <p className="hint">{hint}</p>}
+    </div>
+  );
+
+  const urlField = (
+    <div className="field conn-string" id="cd-url">
+      <label htmlFor="cd-conn-string">Connection URL</label>
+      <input
+        id="cd-conn-string"
+        data-testid="conn-string"
+        value={connString}
+        placeholder={form.engine === 'postgres' ? 'postgresql://user:password@host:5432/database' : 'mysql://user:password@host:3306/database'}
+        spellCheck={false}
+        autoComplete="off"
+        // Opened from its link: the cursor goes straight into it.
+        autoFocus={!fieldError}
+        onChange={(e) => setConnString(e.target.value)}
+        // Enter right after a paste would save before the string is parsed.
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') e.preventDefault();
+        }}
+        {...aria('conn_string')}
+        aria-invalid={parse.state === 'failed' || !!err('conn_string') || undefined}
+        aria-describedby={parse.state === 'failed' ? 'cd-conn-string-parse-err' : aria('conn_string')['aria-describedby']}
+      />
+      {errorFor('conn_string')}
+      {parse.state === 'ok' && (
+        <div className="parse-ok" role="status" data-testid="parse-result">
+          <CheckIcon />
+          <span>
+            Parsed · {info.label} · {form.host || DEFAULT_HOST}:{port()}
           </span>
-          <div role="radiogroup" aria-labelledby="cd-engine-title" className="chip-group">
-            {ENGINES.map((en) => (
-              <label key={en.id} className={`choice-chip${form.engine === en.id ? ' on' : ''}`}>
-                <input
-                  type="radio"
-                  name="engine"
-                  // The badge is decoration: the name is the engine alone.
-                  aria-label={en.label}
-                  data-testid={`conn-engine-${en.id}`}
-                  checked={form.engine === en.id}
-                  onChange={() => chooseEngine(en.id)}
-                />
-                <span className={`engine-badge engine-${en.id}`} aria-hidden="true">
-                  {en.badge}
-                </span>
-                <span>{en.label}</span>
-              </label>
-            ))}
+          {parse.parsed.ignored.length > 0 && <span className="parse-note">Ignored: {parse.parsed.ignored.join(', ')}</span>}
+          {parse.parsed.warnings.map((w) => (
+            <span key={w} className="parse-note">
+              {w}
+            </span>
+          ))}
+        </div>
+      )}
+      {parse.state === 'failed' && (
+        <p className="field-error" id="cd-conn-string-parse-err" role="alert">
+          {parse.message}
+        </p>
+      )}
+    </div>
+  );
+
+  const envHelp = [
+    form.envTag === 'production' ? 'Asks before statements that change data or structure, and is marked PROD in tabs and the status bar.' : null,
+    form.readOnly ? 'Sessions are opened read-only on the server.' : null,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const main = (
+    <>
+      <div className="field">
+        <span className="field-label" id="cd-engine-title">
+          Engine
+        </span>
+        <div className="engine-cards" role="radiogroup" aria-labelledby="cd-engine-title">
+          {ENGINES.map((en) => (
+            <label key={en.id} className={`engine-card${form.engine === en.id ? ' on' : ''}`}>
+              <input
+                type="radio"
+                name="engine"
+                id={`cd-engine-${en.id}`}
+                data-testid={`conn-engine-${en.id}`}
+                checked={form.engine === en.id}
+                onChange={() => chooseEngine(en.id)}
+              />
+              {/* The marks are decoration: the card is named by its text. */}
+              <span className="engine-card-logos">
+                {en.logos.map((logo) => (
+                  <EngineLogo key={logo} engine={logo} size={28} />
+                ))}
+              </span>
+              <span className="engine-card-text">
+                <span className="engine-card-name">{en.label}</span>
+                <span className="engine-card-port">Port {en.port}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div className="field">
+        <label htmlFor="cd-name">Name</label>
+        <input
+          id="cd-name"
+          data-testid="conn-name"
+          value={form.name}
+          placeholder={autoName(form.host, form.defaultDb)}
+          onChange={(e) => set('name', e.target.value)}
+          {...aria('name')}
+        />
+        {errorFor('name')}
+      </div>
+
+      {open.url && urlField}
+
+      <div className="conn-row conn-row-host">
+        <div className="field">
+          <div className="field-label-row">
+            <label htmlFor="cd-host">Host</label>
+            <button
+              type="button"
+              className="link-btn"
+              data-testid="conn-url-toggle"
+              aria-expanded={open.url}
+              aria-controls="cd-url"
+              onClick={() => toggleFold('url')}
+            >
+              {open.url ? 'Hide connection URL' : 'Paste connection URL'}
+            </button>
           </div>
-        </div>
-        <div className="field">
-          <label htmlFor="cd-name">Name</label>
-          <input
-            id="cd-name"
-            data-testid="conn-name"
-            value={form.name}
-            onChange={(e) => set('name', e.target.value)}
-            {...aria('name')}
-          />
-          {errorFor('name')}
-        </div>
-        <div className="field">
-          <label htmlFor="cd-group">Group</label>
-          <select id="cd-group" value={form.groupId} onChange={(e) => set('groupId', e.target.value)} {...aria('group_id')}>
-            <option value="">No group</option>
-            {groups.map((g) => (
-              <option key={g.id} value={g.id}>
-                {g.name}
-              </option>
-            ))}
-          </select>
-          {errorFor('group_id')}
-          {errorFor('parent_id')}
-        </div>
-        <div className="field">
-          <label htmlFor="cd-host">Host</label>
           <input
             id="cd-host"
             data-testid="conn-host"
             value={form.host}
+            placeholder={DEFAULT_HOST}
             onChange={(e) => set('host', e.target.value)}
             {...aria('host')}
           />
@@ -536,21 +743,33 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             id="cd-port"
             data-testid="conn-port"
             type="number"
+            min={1}
+            max={PORT_MAX}
+            step={1}
             value={form.port}
+            placeholder={String(info.port)}
             onChange={(e) => setForm((f) => ({ ...f, port: e.target.value, portTouched: true }))}
             {...aria('port')}
           />
-          {errorFor('port') ?? (
-            <p className="hint">
-              {num(form.port, -1) === defaultPort(form.engine)
-                ? `Default for ${engineLabel}`
-                : `${engineLabel} default: ${defaultPort(form.engine)}`}
-            </p>
-          )}
+          {errorFor('port') ??
+            (form.port.trim() !== '' && num(form.port, -1) !== info.port ? (
+              <p className="hint conn-port-hint" title={`${info.label} default: ${info.port}`}>
+                Default: {info.port}
+              </p>
+            ) : null)}
         </div>
+      </div>
+
+      <div className="conn-row">
         <div className="field">
           <label htmlFor="cd-user">User</label>
-          <input id="cd-user" data-testid="conn-user" value={form.username} onChange={(e) => set('username', e.target.value)} />
+          <input
+            id="cd-user"
+            data-testid="conn-user"
+            value={form.username}
+            placeholder={defaultUser(form.engine)}
+            onChange={(e) => set('username', e.target.value)}
+          />
         </div>
         <div className="field">
           <label htmlFor="cd-password">Password</label>
@@ -564,26 +783,47 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             onChange={(e) => setForm((f) => ({ ...f, password: e.target.value, passwordTouched: true }))}
           />
         </div>
-        <div className="field span2">
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={form.savePassword}
-              onChange={(e) => set('savePassword', e.target.checked)}
-            />
-            <span>Save password in Windows Credential Manager</span>
-          </label>
-          {!form.savePassword && <p className="hint">You will be asked for the password each time. Test uses what you typed above.</p>}
+      </div>
+
+      <div className="conn-row conn-row-db">
+        <div className="field">
+          <label htmlFor="cd-db">Database</label>
+          <input
+            id="cd-db"
+            value={form.defaultDb}
+            placeholder={form.engine === 'postgres' ? defaultUser(form.engine) : 'All databases'}
+            onChange={(e) => set('defaultDb', e.target.value)}
+          />
         </div>
-        <div className="field span2 section-break">
-          <span id="cd-env-title" className="field-label">
-            Environment
-          </span>
-          <div role="radiogroup" aria-labelledby="cd-env-title" aria-describedby="cd-env-help" className="chip-group">
+        <label className="check conn-save-pw" title="Saved in Windows Credential Manager">
+          <input
+            type="checkbox"
+            data-testid="conn-save-password"
+            checked={form.savePassword}
+            onChange={(e) => set('savePassword', e.target.checked)}
+          />
+          Save password
+        </label>
+      </div>
+      {!form.savePassword && (
+        <p className="hint conn-hint">You'll be asked for the password each time. Test uses what you typed above.</p>
+      )}
+
+      <div className="field conn-env">
+        <span className="field-label" id="cd-env-title">
+          Environment
+        </span>
+        <div className="conn-env-row">
+          <div
+            role="radiogroup"
+            aria-labelledby="cd-env-title"
+            aria-describedby={envHelp ? 'cd-env-help' : undefined}
+            className="chip-group"
+          >
             {ENVIRONMENTS.map((env) => (
               <label
                 key={env.id || 'none'}
-                className={`choice-chip${form.envTag === env.id ? ' on' : ''}${env.id ? ` env-${env.id}` : ''}`}
+                className={`chip-opt${form.envTag === env.id ? ' on' : ''}${env.id ? ` env-${env.id}` : ''}`}
               >
                 <input
                   type="radio"
@@ -597,33 +837,32 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               </label>
             ))}
           </div>
+          <label className={`chip-opt conn-readonly${form.readOnly ? ' on' : ''}`} title="Open sessions read-only on the server">
+            <input
+              type="checkbox"
+              data-testid="conn-read-only"
+              checked={form.readOnly}
+              onChange={(e) => set('readOnly', e.target.checked)}
+            />
+            <LockIcon />
+            <span>Read-only</span>
+          </label>
+        </div>
+        {envHelp && (
           <p id="cd-env-help" className="hint">
-            Production asks before running statements that change data or structure, and is marked PROD in tabs and
-            the status bar.
+            {envHelp}
           </p>
-        </div>
-        <div className="field">
-          <label htmlFor="cd-db">Default database</label>
-          <input id="cd-db" value={form.defaultDb} onChange={(e) => set('defaultDb', e.target.value)} />
-        </div>
-        <div className="field check-cell">
-          <label className="check">
-            <input type="checkbox" checked={form.readOnly} onChange={(e) => set('readOnly', e.target.checked)} />
-            <span>Read-only connection</span>
-          </label>
-          {form.readOnly && <p className="hint">Sessions are opened read-only on the server.</p>}
-        </div>
+        )}
       </div>
-    ),
-    ssh: (
-      <div className="grid">
-        <div className="field span2">
-          <label className="check">
-            <input type="checkbox" checked={form.sshOn} onChange={(e) => set('sshOn', e.target.checked)} />
-            <span>Connect through an SSH tunnel</span>
-          </label>
-        </div>
-        <fieldset className="contents" disabled={!form.sshOn}>
+    </>
+  );
+
+  const sshBody = (
+    <>
+      {toggle(form.sshOn, (v) => set('sshOn', v), 'Connect through an SSH tunnel')}
+      {/* The tunnel's fields only take room once the tunnel is on. */}
+      {form.sshOn && (
+        <div className="grid">
           <div className="field">
             <label htmlFor="cd-ssh-host">SSH host</label>
             <input id="cd-ssh-host" value={form.sshHost} onChange={(e) => set('sshHost', e.target.value)} {...aria('ssh.host')} />
@@ -631,7 +870,18 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           </div>
           <div className="field">
             <label htmlFor="cd-ssh-port">SSH port</label>
-            <input id="cd-ssh-port" type="number" value={form.sshPort} onChange={(e) => set('sshPort', e.target.value)} />
+            <input
+              id="cd-ssh-port"
+              type="number"
+              min={1}
+              max={PORT_MAX}
+              step={1}
+              value={form.sshPort}
+              placeholder="22"
+              onChange={(e) => set('sshPort', e.target.value)}
+              {...aria('ssh.port')}
+            />
+            {errorFor('ssh.port')}
           </div>
           <div className="field">
             <label htmlFor="cd-ssh-user">SSH user</label>
@@ -640,10 +890,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           </div>
           <div className="field">
             <label htmlFor="cd-ssh-auth">Authentication</label>
-            <select id="cd-ssh-auth" value={form.sshAuth} onChange={(e) => set('sshAuth', e.target.value as SshAuth)}>
-              <option value="key">Private key</option>
-              <option value="password">Password</option>
-            </select>
+            <div className="select-wrap">
+              <select id="cd-ssh-auth" value={form.sshAuth} onChange={(e) => set('sshAuth', e.target.value as SshAuth)}>
+                <option value="key">Private key</option>
+                <option value="password">Password</option>
+              </select>
+              <ChevronDownIcon />
+            </div>
           </div>
           {form.sshAuth === 'password' ? (
             <div className="field span2">
@@ -675,56 +928,114 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               </div>
             </>
           )}
-        </fieldset>
+        </div>
+      )}
+    </>
+  );
+
+  const sslBody = (
+    <>
+      <div className="field">
+        <span className="field-label" id="cd-ssl-title">
+          Mode
+        </span>
+        <div className="seg-group" role="radiogroup" aria-labelledby="cd-ssl-title">
+          {SSL_MODES.map((m) => (
+            <label key={m.id} className={`segment${form.sslMode === m.id ? ' on' : ''}`}>
+              <input
+                type="radio"
+                name="ssl-mode"
+                aria-label={m.label}
+                data-testid={`conn-ssl-${m.id}`}
+                checked={form.sslMode === m.id}
+                onChange={() => set('sslMode', m.id)}
+              />
+              <span>{m.label}</span>
+            </label>
+          ))}
+        </div>
+        {form.sslMode !== 'prefer' && form.sslMode !== 'disable' && (
+          <p className="hint">
+            {form.sslMode === 'require'
+              ? 'Encrypted, but the server certificate is not verified.'
+              : 'Needs a CA certificate; a client certificate is optional.'}
+          </p>
+        )}
       </div>
-    ),
-    ssl: (
-      <div className="grid">
-        <div className="field span2">
-          <label htmlFor="cd-ssl-mode">SSL mode</label>
-          <select id="cd-ssl-mode" value={form.sslMode} onChange={(e) => set('sslMode', e.target.value as SslMode)}>
-            {SSL_MODES.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
+      {/* An error on one of the files (e.g. an unreadable key) shows them too. */}
+      {(showsSslFiles(form) || !!fieldError?.field.startsWith('ssl.')) && (
+        <div className="grid">
+          <div className="span2">{pathInput('cd-ssl-ca', 'CA certificate', 'sslCa', 'ssl.ca_path')}</div>
+          <div className="span2">{pathInput('cd-ssl-cert', 'Client certificate', 'sslCert', 'ssl.cert_path')}</div>
+          <div className="span2">{pathInput('cd-ssl-key', 'Client key', 'sslKey', 'ssl.key_path')}</div>
+        </div>
+      )}
+    </>
+  );
+
+  const advancedBody = (
+    <div className="grid">
+      <div className="field">
+        <label htmlFor="cd-group">Group</label>
+        <div className="select-wrap">
+          <select id="cd-group" value={form.groupId} onChange={(e) => set('groupId', e.target.value)} {...aria('group_id')}>
+            <option value="">No group</option>
+            {groups.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
               </option>
             ))}
           </select>
+          <ChevronDownIcon />
         </div>
-        <div className="span2">{pathInput('cd-ssl-ca', 'CA certificate', 'sslCa', 'ssl.ca_path')}</div>
-        <div className="span2">{pathInput('cd-ssl-cert', 'Client certificate', 'sslCert', 'ssl.cert_path')}</div>
-        <div className="span2">{pathInput('cd-ssl-key', 'Client key', 'sslKey', 'ssl.key_path')}</div>
+        {errorFor('group_id')}
+        {errorFor('parent_id')}
       </div>
-    ),
-    advanced: (
-      <div className="grid">
-        <div className="field">
-          <label htmlFor="cd-timeout">Connect timeout (s)</label>
-          <input id="cd-timeout" type="number" min={1} value={form.connectTimeout} onChange={(e) => set('connectTimeout', e.target.value)} />
-        </div>
-        <div className="field">
-          <label htmlFor="cd-ssh-timeout">SSH timeout (s)</label>
-          <input id="cd-ssh-timeout" type="number" min={1} value={form.sshTimeout} onChange={(e) => set('sshTimeout', e.target.value)} />
-        </div>
-        <div className="field span2">
-          <label htmlFor="cd-query-timeout">Query timeout (s)</label>
-          <input
-            id="cd-query-timeout"
-            data-testid="conn-query-timeout"
-            type="number"
-            min={0}
-            step={1}
-            value={form.queryTimeout}
-            onChange={(e) => set('queryTimeout', e.target.value)}
-          />
-          <p className="hint">0 means no timeout. A query that runs longer is stopped. At most {MAX_QUERY_TIMEOUT_S} (one day).</p>
-        </div>
-        <div className="field span2">
-          <label htmlFor="cd-app">Application name</label>
-          <input id="cd-app" value={form.appName} onChange={(e) => set('appName', e.target.value)} />
-        </div>
+      <div className="field">
+        <label htmlFor="cd-app">Application name</label>
+        <input id="cd-app" value={form.appName} onChange={(e) => set('appName', e.target.value)} />
       </div>
-    ),
-  };
+      <div className="field">
+        <label htmlFor="cd-timeout">Connect timeout (s)</label>
+        <input
+          id="cd-timeout"
+          type="number"
+          min={1}
+          step={1}
+          value={form.connectTimeout}
+          onChange={(e) => set('connectTimeout', e.target.value)}
+          {...aria('options.connect_timeout_s')}
+        />
+        {errorFor('options.connect_timeout_s')}
+      </div>
+      <div className="field">
+        <label htmlFor="cd-ssh-timeout">SSH timeout (s)</label>
+        <input
+          id="cd-ssh-timeout"
+          type="number"
+          min={1}
+          step={1}
+          value={form.sshTimeout}
+          onChange={(e) => set('sshTimeout', e.target.value)}
+          {...aria('options.ssh_timeout_s')}
+        />
+        {errorFor('options.ssh_timeout_s')}
+      </div>
+      <div className="field span2">
+        <label htmlFor="cd-query-timeout">Query timeout (s)</label>
+        <input
+          id="cd-query-timeout"
+          data-testid="conn-query-timeout"
+          type="number"
+          min={0}
+          step={1}
+          value={form.queryTimeout}
+          onChange={(e) => set('queryTimeout', e.target.value)}
+        />
+        <p className="hint">0 means no timeout. A query that runs longer is stopped. At most {MAX_QUERY_TIMEOUT_S} (one day).</p>
+      </div>
+    </div>
+  );
 
   const steps = test.state === 'failed' && test.error.timings ? timingsText(test.error.timings).replace(/^ · /, '') : '';
   const hasDetails = test.state === 'failed' && (test.mismatch || !!test.error.detail || steps !== '');
@@ -826,43 +1137,24 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       <Modal
         title={mode === 'edit' ? 'Edit connection' : 'New connection'}
         onClose={requestClose}
-        className="wide conn-dialog"
-        initialFocus="#cd-name"
+        className="conn-dialog"
+        initialFocus={mode === 'edit' ? '#cd-host' : `#cd-engine-${form.engine}`}
         badge={form.envTag === 'production' ? <EnvTagBadge env="production" variant="chip" testId="env-chip" /> : undefined}
       >
         <form
           className="conn-form"
+          noValidate
           onSubmit={(e) => {
             e.preventDefault();
             void save();
           }}
         >
-          <div className="conn-body">
-            <div role="tablist" aria-label="Connection settings" aria-orientation="vertical" className="conn-nav">
-              {TABS.map((t) => (
-                <button
-                  key={t.id}
-                  type="button"
-                  role="tab"
-                  id={`cd-tab-${t.id}`}
-                  aria-selected={tab === t.id}
-                  aria-controls={`cd-panel-${t.id}`}
-                  aria-labelledby={`cd-tab-${t.id}-label`}
-                  aria-describedby={`cd-tab-${t.id}-hint`}
-                  tabIndex={tab === t.id ? 0 : -1}
-                  className={`conn-nav-item${tab === t.id ? ' on' : ''}${errorTab === t.id ? ' has-error' : ''}`}
-                  onClick={() => setTab(t.id)}
-                  onKeyDown={onTabKey}
-                >
-                  <span id={`cd-tab-${t.id}-label`}>{t.label}</span>
-                  <span id={`cd-tab-${t.id}-hint`} className="conn-nav-hint">
-                    {hint(t.id)}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <div role="tabpanel" id={`cd-panel-${tab}`} aria-labelledby={`cd-tab-${tab}`} className="conn-main panel">
-              {panel[tab]}
+          <div className="conn-page" data-testid="conn-panel">
+            {main}
+            <div className="conn-folds">
+              {fold('ssh', 'SSH tunnel', sshBody)}
+              {fold('ssl', 'SSL / TLS', sslBody)}
+              {fold('advanced', 'Advanced', advancedBody)}
             </div>
           </div>
 

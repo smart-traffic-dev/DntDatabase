@@ -17,9 +17,9 @@ import {
   reportsPerLoop,
   selfCostTotal,
   selfShare,
+  type Insight,
 } from './explainModel';
-import { ExplainClassic } from './ExplainClassic';
-import { ExplainDetails } from './ExplainDetails';
+import { ClassicSummary, ExplainClassic, ExplainFoot } from './ExplainClassic';
 import { ExplainGrid } from './ExplainGrid';
 import { ExplainJson, isJson } from './ExplainJson';
 import { AnalyzeButton, ExplainOverview } from './ExplainOverview';
@@ -198,16 +198,6 @@ export function ExplainView({ tabId }: { tabId: string }) {
             />
           )}
         </div>
-        {current !== null && (
-          <ExplainDetails
-            node={current}
-            costs={costs}
-            total={shareTotal}
-            warnings={warnings.get(current) ?? []}
-            perLoop={perLoop}
-            planMs={planMs}
-          />
-        )}
       </div>
     );
   }
@@ -216,13 +206,13 @@ export function ExplainView({ tabId }: { tabId: string }) {
     <div className="ex-view" data-testid="explain-view">
       {plan && !run.explainError && (
         <div className="ex-bar" role="toolbar" aria-label="Explain controls">
-          <div className="ex-vtabs" role="tablist" aria-label="Plan view">
+          <div className="segmented ex-views" role="tablist" aria-label="Plan view">
             {views.map((v) => (
               <button
                 key={v.id}
                 type="button"
                 role="tab"
-                className="ex-vtab"
+                className={`segment${mode === v.id ? ' on' : ''}`}
                 aria-selected={mode === v.id}
                 onClick={() => setView(v.id)}
               >
@@ -281,6 +271,7 @@ export function ExplainView({ tabId }: { tabId: string }) {
           )}
 
           <span className="ex-bar-spacer" />
+          {mode === 'grid' && classic !== null && <ClassicSummary table={classic} />}
           <button type="button" className="ex-btn" onClick={copy}>
             Copy plan
           </button>
@@ -293,7 +284,6 @@ export function ExplainView({ tabId }: { tabId: string }) {
           costs={costs}
           warnings={warnings}
           hot={hot}
-          selected={current}
           gate={gate}
           onSelect={select}
           onAnalyze={() => explain(true)}
@@ -303,13 +293,15 @@ export function ExplainView({ tabId }: { tabId: string }) {
       <div className="ex-body">{body}</div>
 
       {root !== null && nodeView && current !== null && (
-        <div className="ex-foot" data-testid="explain-foot">
-          <span className="ex-foot-label">{current.label}</span>
-          <span>
-            self {fmtNum(own)} ({fmtPct(share)})
-          </span>
-          {currentMs !== null && <span>{fmtMs(currentMs)}</span>}
-        </div>
+        <ExplainFoot
+          label={current.label}
+          warnings={(warnings.get(current) ?? []).map((w: Insight) => w.title)}
+          parts={[
+            `self ${fmtNum(own)} (${fmtPct(share)})`,
+            ...(currentMs !== null ? [`${fmtMs(currentMs)} in total`] : []),
+            ...(current.detail !== null ? [current.detail] : []),
+          ]}
+        />
       )}
     </div>
   );

@@ -1,11 +1,11 @@
-import { Modal } from './Modal';
-
-const SHORTCUTS: { group: string; items: [string, string][] }[] = [
+/** The app's keyboard shortcuts, listed on the Settings dialog's Shortcuts tab. */
+export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   {
     group: 'Query',
     items: [
       ['Run the statement at the cursor', 'Ctrl+Enter / F9'],
-      ['Run all statements', 'Ctrl+Shift+Enter / Ctrl+R'],
+      ['Run the selection, or all statements', 'Ctrl+R'],
+      ['Run all statements', 'Ctrl+Shift+Enter'],
       ['Run the selection', 'Ctrl+Shift+R'],
       ['Explain', 'Ctrl+Shift+E'],
       ['Stop the running query', 'Esc'],
@@ -65,6 +65,7 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
       ['Open History and search it', 'Ctrl+Shift+H'],
       ['Show / hide the result panel (focused group)', 'Ctrl+J'],
       ['Maximize / restore the result panel', 'Ctrl+Shift+J'],
+      ['Editor layout: single / columns / rows / grid', 'Ctrl+K 1 … 4'],
       ['New connection', 'Ctrl+Shift+N'],
       ['Settings', 'Ctrl+,'],
       ['Keyboard shortcuts', 'F1'],
@@ -74,33 +75,3 @@ const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     ],
   },
 ];
-
-/** The app's keyboard shortcuts (Help > Keyboard shortcuts). */
-export function ShortcutsDialog({ onClose }: { onClose(): void }) {
-  return (
-    <Modal title="Keyboard shortcuts" onClose={onClose} className="narrow">
-      <div className="modal-body stack">
-        {SHORTCUTS.map((g) => (
-          <section key={g.group}>
-            <h3 className="field-label">{g.group}</h3>
-            <dl className="kv">
-              {g.items.map(([action, keys]) => (
-                <div key={action} style={{ display: 'contents' }}>
-                  <dt>{action}</dt>
-                  <dd>
-                    <kbd className="mono">{keys}</kbd>
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-        ))}
-      </div>
-      <footer className="modal-foot">
-        <button type="button" className="btn" onClick={onClose}>
-          Close
-        </button>
-      </footer>
-    </Modal>
-  );
-}

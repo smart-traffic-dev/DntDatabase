@@ -46,6 +46,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            desktop::create_main_window(app)?;
             desktop::harden_main_webview(app);
             Ok(())
         })

@@ -25,15 +25,15 @@ export interface ConnectionForm {
   password: string;
 }
 
-/** Fills the New connection dialog and (optionally) runs its Test button. */
+/** Fills the New connection dialog (one page: name, engine, server, login). */
 export async function fillConnectionDialog(page: Page, form: ConnectionForm): Promise<void> {
   await byId(page, 'new-connection').click();
-  await byId(page, 'conn-name').fill(form.name);
   await byId(page, `conn-engine-${form.engine}`).check();
   await byId(page, 'conn-host').fill(form.host ?? '127.0.0.1');
   await byId(page, 'conn-port').fill(String(form.port));
   await byId(page, 'conn-user').fill(form.user);
   await byId(page, 'conn-password').fill(form.password);
+  await byId(page, 'conn-name').fill(form.name);
 }
 
 /** Saves the open connection dialog; the tree reloads with the new connection. */

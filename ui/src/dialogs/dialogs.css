@@ -116,18 +116,523 @@ fieldset.export-form {
   color: var(--dnt-fg-disabled);
 }
 
-/* Connection dialog (spec §6, board 06): section nav on the left, the form on the right, Test in the footer. */
-.conn-form {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
+/* Connection dialog frame (spec §6, board 06): shared with Settings; the wizard lays itself out below. */
 .conn-body {
   display: flex;
   min-height: 0;
   /* Sizes to the section's content; a long one scrolls inside .conn-main. */
   max-height: calc(100vh - 32px - 48px - 52px);
+}
+
+/* Connection dialog (single page): one column of fields, folded rows for the rest; never taller than the window. */
+.modal.conn-dialog {
+  width: 600px;
+  max-height: min(720px, calc(100vh - 32px));
+}
+
+.conn-form {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The page scrolls inside the frame; the header and footer stay put. */
+.conn-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-3);
+  padding: var(--dnt-space-4) var(--dnt-space-6) var(--dnt-space-3);
+  overflow: auto;
+}
+
+.conn-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--dnt-space-3);
+  align-items: start;
+}
+
+/* Engine first: one card per driver, its marks and default port; the chosen one in the accent. */
+.engine-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--dnt-space-3);
+}
+
+.engine-card {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-3);
+  min-width: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-app);
+  cursor: pointer;
+}
+
+.engine-card:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.engine-card input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.engine-card:focus-within {
+  border-color: var(--dnt-focus);
+}
+
+.engine-card.on {
+  border-color: var(--dnt-accent);
+  background: var(--dnt-accent-subtle);
+}
+
+.engine-card-logos {
+  display: flex;
+  gap: var(--dnt-space-1);
+}
+
+.engine-card-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.engine-card-name {
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-base);
+  line-height: var(--dnt-text-base-lh);
+  font-weight: 500;
+}
+
+.engine-card-port {
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+  line-height: var(--dnt-text-xs-lh);
+}
+
+.conn-row-host {
+  grid-template-columns: minmax(0, 1fr) 112px;
+}
+
+/* Database and the Save password box share a row; the box sits on the input's line. */
+.conn-row-db {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+}
+
+.conn-save-pw {
+  height: 30px;
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-muted);
+  white-space: nowrap;
+}
+
+.conn-port-hint {
+  font-size: var(--dnt-text-xs);
+  white-space: nowrap;
+}
+
+.conn-hint {
+  margin-top: calc(-1 * var(--dnt-space-2));
+  font-size: var(--dnt-text-xs);
+}
+
+/* A label with an action at its right end (Host · Paste connection URL). */
+.field-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--dnt-space-2);
+}
+
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dnt-accent);
+  font-size: var(--dnt-text-xs);
+}
+
+.link-btn:hover {
+  color: var(--dnt-accent-hover);
+  text-decoration: underline;
+}
+
+/* A select with the app's chevron instead of the native arrow. */
+.select-wrap {
+  position: relative;
+  display: flex;
+}
+
+.field .select-wrap select {
+  flex: 1;
+  appearance: none;
+  padding-right: 28px;
+}
+
+.select-wrap > svg {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--dnt-fg-muted);
+}
+
+/* Environment: a row of chips, Read-only at its right end. */
+.conn-env-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dnt-space-2);
+}
+
+.chip-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dnt-space-1_5);
+}
+
+.chip-opt {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-3);
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  cursor: pointer;
+}
+
+.chip-opt:hover {
+  color: var(--dnt-fg);
+  background: var(--dnt-bg-hover);
+}
+
+.chip-opt input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.chip-opt:focus-within {
+  border-color: var(--dnt-focus);
+}
+
+.chip-opt.on {
+  border-color: var(--dnt-accent);
+  background: var(--dnt-accent-subtle);
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
+.chip-opt.env-production.on {
+  border-color: var(--dnt-status-danger-border);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+}
+
+.conn-readonly {
+  margin-left: auto;
+}
+
+.conn-readonly svg {
+  width: 12px;
+  height: 12px;
+}
+
+.conn-env .hint {
+  font-size: var(--dnt-text-xs);
+}
+
+/* Vendor marks: the glyph in the brand colour on a light tile (readable in both themes). */
+.engine-logo {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-gray-100);
+}
+
+.engine-logo svg {
+  width: 62%;
+  height: 62%;
+  fill: currentColor;
+}
+
+.engine-logo.engine-mysql {
+  background: var(--dnt-brand-mysql-bg);
+  color: var(--dnt-brand-mysql);
+}
+
+.engine-logo.engine-mariadb {
+  background: var(--dnt-brand-mariadb-bg);
+  color: var(--dnt-brand-mariadb);
+}
+
+.engine-logo.engine-postgres {
+  background: var(--dnt-brand-postgres-bg);
+  color: var(--dnt-brand-postgres);
+}
+
+.dark .engine-logo {
+  background: var(--dnt-gray-100);
+}
+
+/* Connection string: pasted right above the fields it fills. */
+.conn-string {
+  gap: var(--dnt-space-2);
+}
+
+.conn-string input {
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+}
+
+.field label .opt {
+  color: var(--dnt-fg-subtle);
+  font-weight: 400;
+}
+
+.parse-ok {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dnt-space-1) var(--dnt-space-2);
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border: 1px solid var(--dnt-status-success-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-status-success-bg);
+  color: var(--dnt-status-success-fg);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+}
+
+.parse-ok > svg {
+  flex: none;
+}
+
+.parse-note {
+  flex-basis: 100%;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+}
+
+/* A checkbox drawn as a switch; the native box stays the control (and keeps its focus ring). */
+.switch-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
+  min-width: 0;
+}
+
+.switch-label {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--dnt-space-2);
+  cursor: pointer;
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-base);
+  line-height: var(--dnt-text-base-lh);
+}
+
+.switch-label input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+}
+
+.switch-track {
+  position: relative;
+  flex: none;
+  width: 28px;
+  height: 16px;
+  margin-top: 1px;
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-border-strong);
+  transition: background var(--dnt-dur-1) var(--dnt-ease-std);
+}
+
+.switch-track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--dnt-radius-full);
+  background: var(--dnt-gray-0);
+  box-shadow: var(--dnt-shadow-1);
+  transition: transform var(--dnt-dur-1) var(--dnt-ease-std);
+}
+
+.switch-label input:checked + .switch-track {
+  background: var(--dnt-accent);
+}
+
+.switch-label input:checked + .switch-track::after {
+  transform: translateX(12px);
+}
+
+.switch-label input:focus-visible + .switch-track {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: 2px;
+}
+
+/* The hint lines up with the label text, not under the switch. */
+.switch-field .hint {
+  padding-left: calc(28px + var(--dnt-space-2));
+  font-size: var(--dnt-text-xs);
+  line-height: var(--dnt-text-xs-lh);
+}
+
+/* Segmented radio group (SSL mode, Environment): a sunken track, the chosen segment raised. */
+.seg-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px;
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+}
+
+.segment {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-3);
+  border-radius: var(--dnt-radius-sm);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  cursor: pointer;
+}
+
+.segment:hover {
+  color: var(--dnt-fg);
+}
+
+.segment input {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.segment:focus-within {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+.segment.on {
+  background: var(--dnt-bg-raised);
+  box-shadow: var(--dnt-shadow-1);
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
+.segment.env-production.on {
+  color: var(--dnt-status-danger-fg);
+}
+
+/* Folded rows (SSH tunnel, SSL / TLS, Advanced): a line each, its state at the right; open, the fields follow. */
+.conn-folds {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--dnt-space-1);
+  border-top: 1px solid var(--dlg-line);
+}
+
+.conn-fold {
+  border-bottom: 1px solid var(--dlg-line);
+}
+
+.conn-fold-head {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--dnt-space-1);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: none;
+  color: var(--dnt-fg);
+  font: inherit;
+  text-align: left;
+}
+
+.conn-fold-head:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.conn-fold-head:focus-visible {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
+.conn-fold-head > svg {
+  flex: none;
+  color: var(--dnt-fg-muted);
+  transform: rotate(-90deg);
+  transition: transform var(--dnt-dur-1) var(--dnt-ease-std);
+}
+
+.conn-fold.open .conn-fold-head > svg {
+  transform: none;
+}
+
+.conn-fold-title {
+  font-weight: 500;
+}
+
+.conn-fold-hint {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+.conn-fold.has-error .conn-fold-hint {
+  color: var(--dnt-status-danger-fg);
+  font-weight: 600;
+}
+
+.conn-fold-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-3);
+  padding: var(--dnt-space-1) var(--dnt-space-1) var(--dnt-space-4) calc(var(--dnt-space-1) + 16px + var(--dnt-space-2));
+}
+
+.conn-fold-body .grid {
+  gap: var(--dnt-space-3);
 }
 
 .conn-nav {
@@ -187,54 +692,33 @@ fieldset.export-form {
 .conn-main {
   flex: 1;
   min-width: 0;
-  overflow: auto;
 }
 
-/* A row of radio chips (engine, environment): the native radio stays, the chip is its label. */
-.chip-group {
-  display: flex;
+/* Settings: the connection dialog's side-nav frame at a steady height, so switching tabs never resizes it. */
+.settings-body {
+  height: min(520px, calc(100vh - 32px - 48px - 52px));
+}
+
+.settings-section + .settings-section {
+  margin-top: var(--dnt-space-2);
+}
+
+.settings-actions {
+  flex-direction: row;
   flex-wrap: wrap;
   gap: var(--dnt-space-2);
 }
 
-.choice-chip {
-  display: inline-flex;
+.settings-stepper {
+  display: flex;
   align-items: center;
-  gap: var(--dnt-space-1_5);
-  height: var(--dnt-ctl-h-md);
-  padding: 0 var(--dnt-space-3) 0 var(--dnt-space-2);
-  border: 1px solid var(--dlg-line);
-  border-radius: var(--dnt-radius-sm);
-  background: var(--dnt-bg-raised);
-  color: var(--dnt-fg-muted);
-  font-size: var(--dnt-text-base);
-  font-weight: 500;
-  cursor: pointer;
+  gap: var(--dnt-space-2);
 }
 
-.choice-chip:hover {
-  background: var(--dnt-bg-hover);
-}
-
-.choice-chip input {
-  margin: 0;
-  accent-color: var(--dnt-accent);
-}
-
-.choice-chip.on {
-  border-color: var(--dnt-accent);
-  background: var(--dnt-accent-subtle);
-  color: var(--dnt-fg);
-}
-
-.choice-chip.env-production.on {
-  border-color: var(--dnt-status-danger-solid);
-  background: var(--dnt-status-danger-bg);
-  color: var(--dnt-status-danger-fg);
-}
-
-.choice-chip.env-production.on input {
-  accent-color: var(--dnt-status-danger-solid);
+.settings-stepper-value {
+  min-width: 48px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .env-dot {
@@ -251,31 +735,6 @@ fieldset.export-form {
 
 .env-production .env-dot {
   background: var(--dnt-env-prod);
-}
-
-/* Two-letter engine mark. */
-.engine-badge {
-  flex: none;
-  width: 18px;
-  height: 18px;
-  border-radius: var(--dnt-radius-xs);
-  background: var(--dnt-accent-subtle);
-  color: var(--dnt-accent-hover);
-  font-size: var(--dnt-text-xs);
-  font-weight: 700;
-  line-height: 18px;
-  text-align: center;
-}
-
-/* A field that starts a new group of the form (Environment): a hairline above it. */
-.grid .section-break {
-  padding-top: var(--dnt-space-3);
-  border-top: 1px solid var(--dnt-border-subtle);
-}
-
-/* The Read-only checkbox lines up with the input next to it. */
-.grid .check-cell {
-  justify-content: flex-end;
 }
 
 .panel {

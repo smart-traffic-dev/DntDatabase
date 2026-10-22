@@ -5,7 +5,6 @@ import { useQueryDocs } from '../store/queryTabs';
 import { useSelection, useStarting } from '../store/runQuery';
 import { useTabs } from '../store/tabs';
 import { getActiveEditor } from '../tabs/query/activeEditor';
-import { useTheme } from '../theme/ThemeProvider';
 import type { MenuState } from './appMenus';
 
 /**
@@ -13,7 +12,6 @@ import type { MenuState } from './appMenus';
  * keystroke). Shared by the menu bar and the command palette, which lists the same actions.
  */
 export function useMenuState(): MenuState {
-  const { theme, setTheme } = useTheme();
   const sidebarVisible = useLayout((s) => s.sidebarVisible);
   const rightSidebarVisible = useLayout((s) => s.rightVisible);
   const focusedGroup = useTabs((s) => s.focusedGroupId);
@@ -34,8 +32,6 @@ export function useMenuState(): MenuState {
   const groupCount = useTabs((s) => s.groups.length);
   const maximized = useTabs((s) => !!s.maximizedGroupId);
   return {
-    theme,
-    setTheme,
     sidebarVisible,
     rightSidebarVisible,
     resultsVisible,

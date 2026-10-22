@@ -1,0 +1,465 @@
+<title>DntDatabase Roadmap</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column; a Now/Next/Later board on top, then a phase timeline on a left rail. */
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f6f7f9;
+  --line: #e3e5ea;
+  --fg: #131418;
+  --fg-muted: #555963;
+  --fg-subtle: #6c707a;
+  --accent: #2563d9;
+  --accent-soft: #eaf1fd;
+  --done: #1a7f46;
+  --done-soft: #e8f6ee;
+  --wip: #a35f00;
+  --wip-soft: #fff4dc;
+  --plan: #5d6270;
+  --plan-soft: #eff0f3;
+  --font-body: 'Be Vietnam Pro', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #17181b; --bg-soft: #1f2024; --line: #2e3036; --fg: #ececee; --fg-muted: #b4b6bd; --fg-subtle: #959aa3;
+    --accent: #7aa5f4; --accent-soft: #1c2742; --done: #63d095; --done-soft: #183024; --wip: #f0c674; --wip-soft: #362c17;
+    --plan: #a9adb7; --plan-soft: #26282d; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #17181b; --bg-soft: #1f2024; --line: #2e3036; --fg: #ececee; --fg-muted: #b4b6bd; --fg-subtle: #959aa3;
+  --accent: #7aa5f4; --accent-soft: #1c2742; --done: #63d095; --done-soft: #183024; --wip: #f0c674; --wip-soft: #362c17;
+  --plan: #a9adb7; --plan-soft: #26282d; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 64px;
+}
+.wrap { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 48px; }
+h1, h2, h3 { text-wrap: balance; margin: 0; line-height: 1.25; }
+h2 { font-size: 20px; font-weight: 700; }
+h3 { font-size: 16px; font-weight: 600; }
+p { margin: 0; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+code { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+a { color: var(--accent); }
+.eyebrow { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-subtle); }
+section { display: flex; flex-direction: column; gap: 16px; }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.section-head p { color: var(--fg-muted); font-size: 14px; }
+
+/* Header */
+header { display: flex; flex-direction: column; gap: 14px; }
+header h1 { font-size: clamp(30px, 5vw, 42px); font-weight: 700; letter-spacing: -0.02em; }
+.goal { font-size: 18px; color: var(--fg-muted); max-width: 64ch; }
+.goal b { color: var(--fg); font-weight: 600; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--fg-subtle); }
+.promise { display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; background: var(--bg-soft); border: 1px solid var(--line); border-radius: 8px; max-width: 760px; }
+.promise svg { flex: none; color: var(--accent); margin-top: 3px; }
+.promise p { font-size: 14px; color: var(--fg-muted); }
+.promise b { color: var(--fg); }
+
+/* Stats */
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 8px; }
+.stat { padding: 14px 16px; display: flex; flex-direction: column; gap: 2px; }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat b { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stat span { font-size: 13px; color: var(--fg-muted); }
+
+/* Progress bar of the phases */
+.phasebar { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.phasebar div { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--fg-muted); min-width: 0; }
+.phasebar i { height: 8px; border-radius: 4px; background: var(--plan-soft); border: 1px solid var(--line); }
+.phasebar .done i { background: var(--done); border-color: var(--done); }
+.phasebar .wip i { background: linear-gradient(90deg, var(--wip) 40%, var(--wip-soft) 40%); border-color: var(--wip); }
+.phasebar .part i { background: linear-gradient(90deg, var(--plan) 20%, var(--plan-soft) 20%); }
+.phasebar b { color: var(--fg); font-weight: 600; }
+
+/* Now / Next / Later */
+.board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.lane { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.lane-head { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+.lane-head small { font-weight: 400; color: var(--fg-subtle); font-size: 13px; }
+.item { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; background: var(--bg); }
+.item h3 { font-size: 15px; }
+.item p { font-size: 13.5px; color: var(--fg-muted); }
+.item .who { font-size: 12px; color: var(--fg-subtle); }
+
+/* Status chip */
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.chip::before { content: ""; width: 7px; height: 7px; border-radius: 999px; background: currentColor; }
+.chip.done { background: var(--done-soft); color: var(--done); }
+.chip.wip { background: var(--wip-soft); color: var(--wip); }
+.chip.plan { background: var(--plan-soft); color: var(--plan); }
+
+/* Timeline */
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.phase { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 20px; position: relative; padding-bottom: 28px; }
+.phase:last-child { padding-bottom: 0; }
+.when { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; padding-top: 2px; }
+.when .code { font-family: var(--font-mono); font-size: 13px; font-weight: 500; color: var(--fg-subtle); }
+.when .date { font-size: 13px; color: var(--fg-muted); font-variant-numeric: tabular-nums; }
+.body { display: flex; flex-direction: column; gap: 10px; padding-left: 22px; border-left: 1px solid var(--line); position: relative; min-width: 0; }
+.body::before { content: ""; position: absolute; left: -6px; top: 6px; width: 11px; height: 11px; border-radius: 999px; background: var(--bg); border: 2px solid var(--plan); }
+.phase.done .body::before { background: var(--done); border-color: var(--done); }
+.phase.wip .body::before { background: var(--wip-soft); border-color: var(--wip); }
+.body h3 { font-size: 18px; font-weight: 700; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.body > p { color: var(--fg-muted); font-size: 14.5px; max-width: 70ch; }
+.cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 28px; }
+.cols h4 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-subtle); }
+ul.ticks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
+ul.ticks li { display: grid; grid-template-columns: 16px minmax(0, 1fr); gap: 8px; }
+ul.ticks li::before { content: ""; width: 10px; height: 10px; margin-top: 6px; border-radius: 3px; border: 1.5px solid var(--plan); }
+ul.ticks.ok li::before { background: var(--done); border-color: var(--done); }
+ul.ticks.go li::before { background: var(--wip-soft); border-color: var(--wip); }
+.refs { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12.5px; color: var(--fg-subtle); }
+
+/* Principles + engines */
+.two { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 32px; }
+ol.rules { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: var(--fg-muted); }
+ol.rules b { color: var(--fg); font-weight: 600; }
+.table-box { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-subtle); background: var(--bg-soft); }
+td.v { font-family: var(--font-mono); font-size: 13px; }
+footer { font-size: 13px; color: var(--fg-subtle); border-top: 1px solid var(--line); padding-top: 16px; }
+
+@media (max-width: 820px) {
+  .board, .two { grid-template-columns: minmax(0, 1fr); }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat:nth-child(3) { border-left: 0; }
+  .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+}
+@media (max-width: 620px) {
+  .phase { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .when { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+  .phasebar { grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: 12px; }
+}
+</style>
+
+<div class="wrap">
+
+<header>
+  <span class="eyebrow">Lộ trình dự án · DntDatabase</span>
+  <h1>DntDatabase Roadmap</h1>
+  <p class="goal">Công cụ quản trị cơ sở dữ liệu desktop để <b>team dùng hằng ngày thay cho Navicat</b>. Viết bằng Rust + Tauri 2 và React. Chạy trên Windows trước, hỗ trợ MySQL, MariaDB và PostgreSQL.</p>
+  <div class="promise">
+    <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 1.5 2.5 3.8v4c0 3.2 2.3 5.6 5.5 6.7 3.2-1.1 5.5-3.5 5.5-6.7v-4z"></path><path d="m5.6 8 1.7 1.7 3.2-3.4"></path></svg>
+    <p><b>Lời hứa xuyên suốt:</b> không ai lỡ tay ghi lên Production hay vào connection read-only. Câu ghi nào cũng có preview và đi qua guard ở backend.</p>
+  </div>
+  <div class="meta">
+    <span>Cập nhật: 21/10/2026</span>
+    <span>Nhánh <code>main</code> tại <span class="mono">90555bf</span></span>
+    <span>Bắt đầu: 19/10/2026</span>
+  </div>
+</header>
+
+<section aria-labelledby="where">
+  <div class="section-head">
+    <h2 id="where">Đang ở đâu</h2>
+    <p>3 trong 7 giai đoạn tính năng đã xong; giao diện đã làm lại toàn bộ.</p>
+  </div>
+  <div class="phasebar" aria-label="Tiến độ theo giai đoạn">
+    <div class="done"><i></i><span><b>P1</b> Lõi</span></div>
+    <div class="done"><i></i><span><b>P2</b> Query</span></div>
+    <div class="done"><i></i><span><b>P3</b> Dữ liệu</span></div>
+    <div class="wip"><i></i><span><b>P4</b> Object</span></div>
+    <div class="part"><i></i><span><b>P5</b> Import/Export</span></div>
+    <div><i></i><span><b>P6</b> Quản trị</span></div>
+    <div><i></i><span><b>P7</b> AI agent</span></div>
+  </div>
+  <div class="stats">
+    <div class="stat"><b>335</b><span>commit trong 3 ngày</span></div>
+    <div class="stat"><b>1,353</b><span>unit test UI, tất cả pass</span></div>
+    <div class="stat"><b>17</b><span>e2e web, tất cả pass</span></div>
+    <div class="stat"><b>6</b><span>phiên bản server trong ma trận test</span></div>
+  </div>
+</section>
+
+<section aria-labelledby="board">
+  <div class="section-head">
+    <h2 id="board">Đang làm, tiếp theo, sau đó</h2>
+  </div>
+  <div class="board">
+    <div class="lane">
+      <div class="lane-head"><span class="chip wip">Đang làm</span><small>2 việc</small></div>
+      <div class="item">
+        <h3>Explain panel làm lại</h3>
+        <p>Overview chi phí, cây plan theo cột, grid sắp xếp được, inspector. Spec đã cập nhật lần 2.</p>
+        <span class="who">Session khác · code chưa commit trên main</span>
+      </div>
+      <div class="item">
+        <h3>P4a: Object actions</h3>
+        <p>Create, Rename, Drop, Truncate từ cây connection, có preview SQL và xác nhận. Đã kiểm với main, chờ merge.</p>
+        <span class="who">Session khác · nhánh <span class="mono">feat/p4a-object-actions</span></span>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-head"><span class="chip plan">Tiếp theo</span><small>sau khi P4a vào main</small></div>
+      <div class="item">
+        <h3>P4b: Table designer</h3>
+        <p>Crate <code>schema</code> mới: mô hình bảng, diff, sinh DDL theo engine. Save đi qua diff, preview, guard rồi mới chạy.</p>
+        <span class="who">Cần viết spec · canvas board 10</span>
+      </div>
+      <div class="item">
+        <h3>P4c: Sửa và apply DDL</h3>
+        <p>Sửa định nghĩa view, routine, trigger rồi apply có preview.</p>
+        <span class="who">Cần viết spec · canvas board 11</span>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-head"><span class="chip plan">Sau đó</span></div>
+      <div class="item">
+        <h3>P5: Import, dump, restore</h3>
+        <p>Khung job chạy nền có tiến độ và Stop, wizard import, dump/restore.</p>
+        <span class="who">Canvas board 12–13</span>
+      </div>
+      <div class="item">
+        <h3>P6 rồi P7</h3>
+        <p>Process list, user và quyền, so sánh schema, ER diagram. Sau cùng là AI agent theo policy.</p>
+        <span class="who">Canvas board 14–19</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="phases">
+  <div class="section-head">
+    <h2 id="phases">Các giai đoạn</h2>
+    <p>Mỗi giai đoạn có spec và plan riêng trong <code>docs/superpowers</code>.</p>
+  </div>
+  <ol class="timeline">
+
+    <li class="phase done">
+      <div class="when"><span class="code">P1</span><span class="chip done">Xong</span><span class="date">19/10 → 20/10</span></div>
+      <div class="body">
+        <h3>Lõi: kết nối và duyệt schema</h3>
+        <p>Nền móng của app: driver cho từng engine, quản lý connection, tunnel và duyệt object.</p>
+        <div class="cols">
+          <div>
+            <h4>Đã có</h4>
+            <ul class="ticks ok">
+              <li>Driver MySQL / MariaDB và PostgreSQL, TLS 5 chế độ</li>
+              <li>SSH tunnel (password, private key) có kiểm host key</li>
+              <li>Connection, nhóm, env tag, read-only 2 lớp</li>
+              <li>Secret trong Windows Credential Manager</li>
+            </ul>
+          </div>
+          <div>
+            <h4>&nbsp;</h4>
+            <ul class="ticks ok">
+              <li>Export / import <code>.dntconn</code> mã hoá bằng passphrase</li>
+              <li>Import connection từ Navicat <code>.ncx</code></li>
+              <li>Cây object theo biến thể engine; Info, DDL, Structure</li>
+            </ul>
+          </div>
+        </div>
+        <div class="refs"><span>PR #1 merge 20/10</span><span>spec <code>2026-10-19-p1-core-design.md</code></span></div>
+      </div>
+    </li>
+
+    <li class="phase done">
+      <div class="when"><span class="code">P2</span><span class="chip done">Xong</span><span class="date">20/10</span></div>
+      <div class="body">
+        <h3>Query: soạn và chạy SQL an toàn</h3>
+        <p>Editor, chạy nhiều câu, kết quả dạng lưới và guard cho Production.</p>
+        <div class="cols">
+          <div>
+            <h4>Đã có</h4>
+            <ul class="ticks ok">
+              <li>Monaco, autocomplete theo schema, nhiều tab lưu lại được</li>
+              <li>Chạy câu tại con trỏ, vùng chọn hoặc cả tab; Stop có grace</li>
+              <li>Guard Production và read-only; cảnh báo ghi thiếu WHERE</li>
+              <li>Trạng thái transaction, timeout, ẩn mật khẩu trong History</li>
+            </ul>
+          </div>
+          <div>
+            <h4>&nbsp;</h4>
+            <ul class="ticks ok">
+              <li>Explain, History, Format, file <code>.sql</code></li>
+              <li>Favorites và snippets</li>
+              <li>Lưới kết quả: copy, find, go to row, record view</li>
+            </ul>
+          </div>
+        </div>
+        <div class="refs"><span>PR #2 merge 20/10</span><span>spec <code>2026-10-19-p2-query-design.md</code></span></div>
+      </div>
+    </li>
+
+    <li class="phase done">
+      <div class="when"><span class="code">P3</span><span class="chip done">Xong</span><span class="date">20/10 → 21/10</span></div>
+      <div class="body">
+        <h3>Dữ liệu an toàn: mở bảng, lọc, sửa</h3>
+        <p>Đóng các khoảng trống chặn việc thay Navicat: sửa dữ liệu và lọc phía server.</p>
+        <div class="cols">
+          <div>
+            <h4>Đã có</h4>
+            <ul class="ticks ok">
+              <li>Data tab phân trang, lọc và sort nhiều cột phía server</li>
+              <li>Sửa ô, thêm và xoá dòng theo kiểu staged</li>
+              <li>Edit plan bất biến, apply trong transaction</li>
+              <li>Manual commit theo tab; xác nhận bằng cách gõ tên</li>
+            </ul>
+          </div>
+          <div>
+            <h4>&nbsp;</h4>
+            <ul class="ticks ok">
+              <li>Xem và sửa giá trị lớn (đọc nguyên vẹn, không cắt)</li>
+              <li>Copy as; History ghi nguồn gốc câu ghi do app sinh</li>
+              <li>Export kết quả ra CSV, JSON, Excel, SQL, Markdown</li>
+            </ul>
+          </div>
+        </div>
+        <div class="refs"><span>Merge 21/10 06:47</span><span>plan <code>2026-10-20-p3-data.md</code></span></div>
+      </div>
+    </li>
+
+    <li class="phase done">
+      <div class="when"><span class="code">UX</span><span class="chip done">Xong</span><span class="date">21/10</span></div>
+      <div class="body">
+        <h3>Làm lại giao diện và editor groups</h3>
+        <p>Chạy song song với các giai đoạn tính năng. Thiết kế theo canvas UX redesign, sau đó nâng lên editor kiểu VS Code.</p>
+        <div class="cols">
+          <div>
+            <h4>UX redesign, 6 phase</h4>
+            <ul class="ticks ok">
+              <li>Design token 3 lớp <code>--dnt-*</code>, dark mode, density</li>
+              <li>Focus 1px, disabled không dùng opacity</li>
+              <li>Shell: search trên title bar, bỏ toolbar, tab phẳng</li>
+              <li>Object tab, query toolbar, dialog, palette, toast</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Editor v2</h4>
+            <ul class="ticks ok">
+              <li>Editor groups chia tối đa 4 vùng, kéo tab với 5 drop zone</li>
+              <li>Preview tab, maximize, kết quả riêng cho từng group</li>
+              <li>Toolbar tối giản trong tab strip</li>
+              <li>Right sidebar: History dùng chung cả app</li>
+            </ul>
+          </div>
+        </div>
+        <div class="refs"><span>spec <code>2026-10-21-ux-redesign-design.md</code></span><span><code>2026-10-21-editor-v2-design.md</code></span><span><a href="https://claude.ai/artifact/3cyv2WneP9K6Nftmg9E8Qa">Canvas UX redesign</a></span></div>
+      </div>
+    </li>
+
+    <li class="phase wip">
+      <div class="when"><span class="code">P4</span><span class="chip wip">Đang làm</span><span class="date">từ 21/10</span></div>
+      <div class="body">
+        <h3>Object: tạo, sửa, xoá cấu trúc</h3>
+        <p>Quản lý cấu trúc DB mà không phải tự viết DDL. Chia làm ba đợt để mỗi đợt kiểm chứng được riêng.</p>
+        <div class="cols">
+          <div>
+            <h4>Đang làm</h4>
+            <ul class="ticks go">
+              <li>P4a: tạo / xoá database hoặc schema, đổi tên, xoá, truncate bảng, xoá view</li>
+              <li>Không tự thêm CASCADE; chặn khi có transaction mở</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Còn lại</h4>
+            <ul class="ticks">
+              <li>P4b: crate <code>schema</code> (mô hình, diff, render DDL) và table designer</li>
+              <li>P4c: sửa và apply DDL cho view, routine, trigger</li>
+            </ul>
+          </div>
+        </div>
+        <div class="refs"><span>spec <code>2026-10-21-p4a-object-actions-design.md</code></span><span>roadmap §6</span></div>
+      </div>
+    </li>
+
+    <li class="phase">
+      <div class="when"><span class="code">P5</span><span class="chip plan">Một phần</span><span class="date">chưa bắt đầu</span></div>
+      <div class="body">
+        <h3>Import, export, backup</h3>
+        <p>Đưa dữ liệu vào ra và sao lưu. Export kết quả đã làm sớm trong P3; phần còn lại cần khung job chạy nền.</p>
+        <div class="cols">
+          <div>
+            <h4>Đã có</h4>
+            <ul class="ticks ok">
+              <li>Export kết quả query và Data tab, ghi dạng stream</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Còn lại</h4>
+            <ul class="ticks">
+              <li>Khung job: tiến độ, Stop, log, không chặn UI</li>
+              <li>Wizard import (map cột, chạy thử)</li>
+              <li>Dump và restore, tách câu dạng stream</li>
+            </ul>
+          </div>
+        </div>
+        <div class="refs"><span>roadmap §7</span><span>canvas board 12–13</span></div>
+      </div>
+    </li>
+
+    <li class="phase">
+      <div class="when"><span class="code">P6</span><span class="chip plan">Kế hoạch</span></div>
+      <div class="body">
+        <h3>Quản trị và nâng cao</h3>
+        <p>Các việc của người quản trị server và so sánh cấu trúc.</p>
+        <ul class="ticks">
+          <li>Process list, biến server, trạng thái và dung lượng</li>
+          <li>User và quyền</li>
+          <li>So sánh schema (dùng lại crate <code>schema</code> của P4), ER diagram, workspace</li>
+        </ul>
+        <div class="refs"><span>roadmap §8</span><span>canvas board 14–16</span></div>
+      </div>
+    </li>
+
+    <li class="phase">
+      <div class="when"><span class="code">P7</span><span class="chip plan">Đã có spec</span></div>
+      <div class="body">
+        <h3>AI agent theo policy</h3>
+        <p>Agent chạy cục bộ, đề xuất và chạy SQL theo policy duyệt / đề xuất / chặn. Spec đã viết, hoãn đến sau P6.</p>
+        <div class="refs"><span>spec <code>2026-10-21-ai-agent-design.md</code></span><span>canvas board 17–19</span></div>
+      </div>
+    </li>
+
+  </ol>
+</section>
+
+<section aria-labelledby="rules">
+  <div class="two">
+    <div style="display: flex; flex-direction: column; gap: 12px; min-width: 0">
+      <h2 id="rules">Nguyên tắc cho mọi giai đoạn</h2>
+      <ol class="rules">
+        <li><b>Câu ghi nào cũng có preview.</b> SQL trong preview là đúng SQL được gửi đi.</li>
+        <li><b>Câu ghi nào cũng qua guard ở backend,</b> kể cả SQL do app sinh.</li>
+        <li><b>Mỗi việc chỉ có một chỗ sinh SQL,</b> test được không cần DB.</li>
+        <li><b>Tác vụ dài là job:</b> có tiến độ, Stop, log, không chặn UI.</li>
+        <li><b>Bám phiên bản server:</b> chạy được trên cả ma trận, hoặc tắt kèm lý do.</li>
+        <li><b>Mọi thay đổi được ghi vào History.</b></li>
+        <li><b>Không hứa điều server không bảo đảm;</b> không tự retry khi kết quả không rõ.</li>
+        <li><b>Không ghi từ dữ liệu đã bị cắt để hiển thị.</b></li>
+      </ol>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 12px; min-width: 0">
+      <h2>Ma trận server</h2>
+      <div class="table-box">
+        <table>
+          <thead><tr><th>Engine</th><th>Phiên bản test</th></tr></thead>
+          <tbody>
+            <tr><td>MySQL</td><td class="v">5.7 · 8.0 · 8.4</td></tr>
+            <tr><td>MariaDB</td><td class="v">10.6 · 11.4</td></tr>
+            <tr><td>PostgreSQL</td><td class="v">12 · 17</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="font-size: 13px; color: var(--fg-subtle)">Ngoài phạm vi: driver mới (SQLite, SQL Server, Oracle), đồng bộ cloud.</p>
+    </div>
+  </div>
+</section>
+
+<footer>Nguồn: lịch sử git của <code>main</code>, các spec và plan trong <code>docs/superpowers</code>, các nhánh đang mở. Số test lấy từ lần chạy ngày 21/10.</footer>
+
+</div>

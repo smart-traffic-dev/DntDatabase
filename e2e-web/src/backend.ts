@@ -14,6 +14,7 @@ import type {
   ObjectKind,
   ObjectRef,
   ObjectSummary,
+  ParsedConnString,
   Scope,
   ServerInfo,
   TableDataPage,
@@ -53,6 +54,71 @@ const DDL: Record<string, string> = {
 
 const infoOf = (cfg: ConnectionConfig): ServerInfo =>
   cfg.kind === 'postgres' ? serverInfo('Postgres', [17, 0, 0]) : serverInfo('MySql8', [8, 0, 36]);
+
+/**
+ * A minimal mirror of `dnt-core`'s connection-string parser, enough to drive the dialog in the
+ * browser tests (the real one is exercised by the Rust unit tests).
+ */
+function parseConnString(input: string): ParsedConnString {
+  const parsed: ParsedConnString = {
+    engine: null,
+    host: null,
+    port: null,
+    user: null,
+    password: null,
+    database: null,
+    ssl_mode: null,
+    application_name: null,
+    connect_timeout_s: null,
+    ignored: [],
+    warnings: [],
+  };
+  const text = input.trim().replace(/^jdbc:/, '');
+  const scheme = /^(postgres(?:ql)?|mysql|mariadb):\/\//i.exec(text);
+  const url = scheme ? text.slice(scheme[0].length) : text;
+  if (scheme) {
+    const name = scheme[1]!.toLowerCase();
+    parsed.engine = name.startsWith('postgres') ? 'postgres' : name === 'mariadb' ? 'mariadb' : 'mysql';
+  } else if (!text.includes('=')) {
+    throw appError('config', `unsupported scheme "${text.split('://')[0]}://"`, { field: 'conn_string' });
+  }
+  const [main, query] = url.split('?') as [string, string | undefined];
+  const slash = main.indexOf('/');
+  const authority = slash < 0 ? main : main.slice(0, slash);
+  if (slash >= 0) parsed.database = main.slice(slash + 1) || null;
+  const at = authority.lastIndexOf('@');
+  const hosts = at < 0 ? authority : authority.slice(at + 1);
+  if (at >= 0) {
+    const [user, password] = authority.slice(0, at).split(/:(.*)/s) as [string, string | undefined];
+    parsed.user = user || null;
+    if (password !== undefined) parsed.password = decodeURIComponent(password);
+  }
+  const colon = hosts.lastIndexOf(':');
+  parsed.host = (colon < 0 ? hosts : hosts.slice(0, colon)) || null;
+  if (colon >= 0) parsed.port = Number(hosts.slice(colon + 1));
+  for (const pair of (query ?? '').split('&').filter(Boolean)) {
+    const [k, v = ''] = pair.split('=') as [string, string | undefined];
+    const key = k.toLowerCase().replace(/-/g, '_');
+    if (key === 'sslmode' || key === 'ssl_mode') {
+      parsed.ssl_mode = v.toLowerCase().replace('-', '_') as ParsedConnString['ssl_mode'];
+    } else if (key === 'application_name') {
+      parsed.application_name = v;
+    } else if (key === 'connect_timeout') {
+      parsed.connect_timeout_s = Number(v);
+    } else if (key === 'dbname' || key === 'database') {
+      parsed.database = v;
+    } else if (key === 'user' || key === 'username') {
+      parsed.user = v;
+    } else if (key === 'host') {
+      parsed.host = v;
+    } else if (key === 'port') {
+      parsed.port = Number(v);
+    } else {
+      parsed.ignored.push(`${k}=${v}`);
+    }
+  }
+  return parsed;
+}
 
 function column(name: string, ordinal: number, dbType: string, over: Partial<ColumnDetail> = {}): ColumnDetail {
   return {
@@ -370,6 +436,11 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     },
 
     test_connection: ({ cfg }) => openResult(infoOf(cfg as ConnectionConfig)),
+
+    // The real parser is in Rust (dnt-core); this echo is enough to drive the dialog.
+    parse_connection_string: ({ input }) => parseConnString(String(input)),
+
+    connection_state: ({ id }) => ({ state: open.has(String(id)) ? 'connected' : 'disconnected' }),
 
     open_connection: ({ id }) => {
       const cfg = connections.find((c) => c.id === id);

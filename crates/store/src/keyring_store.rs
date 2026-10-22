@@ -35,8 +35,7 @@ impl KeyringSecretStore {
     }
 
     fn entry(&self, conn: Uuid, kind: SecretKind) -> Result<Entry, DbError> {
-        Entry::new(&self.service, &secret_key(conn, kind))
-            .map_err(|e| secret_err("open", kind, e))
+        Entry::new(&self.service, &secret_key(conn, kind)).map_err(|e| secret_err("open", kind, e))
     }
 }
 

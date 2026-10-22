@@ -6,7 +6,6 @@ import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
 import type { LayoutPreset } from '../store/layoutTree';
 import { MAX_GROUPS, useTabs, type EditorLayout, type Tab } from '../store/tabs';
-import type { Theme } from '../theme/ThemeProvider';
 import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
 import type { MenuAction, MenuEntry } from './ActionMenu';
 import { transferItems } from './ActionMenu';
@@ -19,8 +18,6 @@ import { focusConnectionTree, showHistory, toggleMaximizeResults, toggleResults,
 
 /** What the menu model depends on: plain data, so the builder is a pure function. */
 export interface MenuState {
-  theme: Theme;
-  setTheme(theme: Theme): void;
   sidebarVisible: boolean;
   /** The right sidebar (History) is open. */
   rightSidebarVisible: boolean;
@@ -113,12 +110,6 @@ export function buildMenus(s: MenuState): AppMenu[] {
     disabled: !s.hasEditor,
     run: () => void runEditorCommand(id),
   });
-  const theme = (label: string, value: Theme): MenuAction => ({
-    label,
-    checked: s.theme === value,
-    run: () => s.setTheme(value),
-  });
-
   return [
     {
       id: 'file',
@@ -175,9 +166,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
       label: 'View',
       mnemonic: 'V',
       items: [
-        theme('Light', 'light'),
-        theme('Dark', 'dark'),
-        theme('System', 'system'),
+        { label: 'Appearance…', run: () => dialog({ kind: 'settings', tab: 'appearance' }) },
         sep,
         { label: 'Show sidebar', hint: 'Ctrl+B', checked: s.sidebarVisible, run: () => useLayout.getState().toggleSidebar() },
         { label: 'Show results', hint: 'Ctrl+J', checked: s.resultsVisible, run: toggleResults },
@@ -258,7 +247,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
       label: 'Help',
       mnemonic: 'H',
       items: [
-        { label: 'Keyboard shortcuts', hint: 'F1', run: () => dialog({ kind: 'shortcuts' }) },
+        { label: 'Keyboard shortcuts', hint: 'F1', run: () => dialog({ kind: 'settings', tab: 'shortcuts' }) },
         { label: 'About DntDatabase', run: () => dialog({ kind: 'about' }) },
       ],
     },

@@ -123,6 +123,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             connections::close_connection,
             connections::connection_state,
             connections::trust_host_key,
+            connections::parse_connection_string,
             objects::object_action_preview,
             objects::object_action_apply,
             objects::object_action_cancel,

@@ -159,7 +159,7 @@ describe('command palette', () => {
       press({ key: 'P', ctrlKey: true, shiftKey: true });
       expect(sections()[0]?.title).toBe('File');
       fireEvent.click(screen.getByRole('option', { name: /^Keyboard shortcuts/ }));
-      expect(useDialogs.getState().request).toEqual({ kind: 'shortcuts' });
+      expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'shortcuts' });
     } finally {
       get.mockRestore();
       set.mockRestore();
@@ -202,7 +202,7 @@ describe('command palette', () => {
     mount();
     press({ key: 'P', ctrlKey: true, shiftKey: true });
     fireEvent.click(screen.getByRole('option', { name: /^Keyboard shortcuts/ }));
-    expect(useDialogs.getState().request).toEqual({ kind: 'shortcuts' });
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'shortcuts' });
     expect(screen.queryByRole('dialog')).toBeNull();
     press({ key: 'P', ctrlKey: true, shiftKey: true });
     fireEvent.mouseDown(document.body);

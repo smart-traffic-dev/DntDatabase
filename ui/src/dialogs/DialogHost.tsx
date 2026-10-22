@@ -11,7 +11,6 @@ import { connNodeId, groupNodeId } from '../store/treeModel';
 import { ObjectActionDialog } from './ObjectActionDialog';
 import { TableDesignDialog } from './TableDesignDialog';
 import { AboutDialog } from './AboutDialog';
-import { ShortcutsDialog } from './ShortcutsDialog';
 import { ConnectionDialog } from './ConnectionDialog';
 import { ExportDialog } from './ExportDialog';
 import { ResultExportDialog } from './ResultExportDialog';
@@ -301,7 +300,8 @@ export function DialogHost() {
   } else if (request?.kind === 'import') {
     dialog = <ImportDialog onClose={closeRequest} />;
   } else if (request?.kind === 'settings') {
-    dialog = <SettingsDialog onClose={closeRequest} />;
+    // Keyed by tab: F1 while Settings is open switches to the Shortcuts tab.
+    dialog = <SettingsDialog key={request.tab ?? 'appearance'} initialTab={request.tab} onClose={closeRequest} />;
   } else if (request?.kind === 'addFavorite') {
     dialog = (
       <AddFavoriteDialog
@@ -318,8 +318,6 @@ export function DialogHost() {
     );
   } else if (request?.kind === 'snippets') {
     dialog = <SnippetsDialog onClose={closeRequest} />;
-  } else if (request?.kind === 'shortcuts') {
-    dialog = <ShortcutsDialog onClose={closeRequest} />;
   } else if (request?.kind === 'about') {
     dialog = <AboutDialog onClose={closeRequest} />;
   } else if (request?.kind === 'deleteNode') {

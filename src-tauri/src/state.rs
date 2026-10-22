@@ -18,8 +18,13 @@ use std::sync::Arc;
 /// Overrides the data directory (used by E2E tests).
 pub const DATA_DIR_ENV: &str = "DNT_DATA_DIR";
 
-/// Directory name under the OS data directory (`%APPDATA%` on Windows).
-const APP_DIR: &str = "DntDatabase";
+/// Directory name under the OS data directory (`%APPDATA%` on Windows). Debug builds use
+/// their own, so a dev build never shares the app database, result files or logs with an
+/// installed release build running at the same time.
+#[cfg(not(debug_assertions))]
+pub const APP_DIR: &str = "DntDatabase";
+#[cfg(debug_assertions)]
+pub const APP_DIR: &str = "DntDatabase-dev";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
@@ -30,7 +35,7 @@ pub struct AppPaths {
 }
 
 impl AppPaths {
-    /// `$DNT_DATA_DIR` when set, otherwise `<OS data dir>/DntDatabase`.
+    /// `$DNT_DATA_DIR` when set, otherwise `<OS data dir>/<APP_DIR>`.
     pub fn resolve() -> Result<AppPaths, DbError> {
         if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|d| !d.is_empty()) {
             return Ok(AppPaths::in_dir(PathBuf::from(dir)));
@@ -119,10 +124,10 @@ mod tests {
         assert_eq!(paths.logs_dir, dir.path().join("logs"));
 
         let default = AppPaths::resolve().unwrap();
-        assert_eq!(
-            default.data_dir,
-            dirs::data_dir().unwrap().join("DntDatabase")
-        );
+        assert_eq!(default.data_dir, dirs::data_dir().unwrap().join(APP_DIR));
+        // A debug build must never resolve to the release data directory.
+        #[cfg(debug_assertions)]
+        assert_eq!(APP_DIR, "DntDatabase-dev");
     }
 
     #[test]

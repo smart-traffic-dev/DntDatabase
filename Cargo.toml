@@ -64,6 +64,12 @@ windows-core = "0.62"
 zeroize = "1"
 
 # Argon2id (m = 64 MiB) is very slow unoptimised; keep debug builds and tests usable.
+# Keep debug builds small: line tables are enough for backtraces, and the
+# incremental cache otherwise grows to tens of GB per target dir.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
 [profile.dev.package.argon2]
 opt-level = 3
 

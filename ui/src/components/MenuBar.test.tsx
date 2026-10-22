@@ -204,7 +204,7 @@ describe('MenuBar', () => {
     mount();
     fireEvent.click(top('Help'));
     fireEvent.click(screen.getByRole('menuitem', { name: /^Keyboard shortcuts/ }));
-    expect(useDialogs.getState().request).toEqual({ kind: 'shortcuts' });
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'shortcuts' });
     fireEvent.click(top('Help'));
     fireEvent.click(screen.getByRole('menuitem', { name: 'About DntDatabase' }));
     expect(useDialogs.getState().request).toEqual({ kind: 'about' });
@@ -229,15 +229,12 @@ describe('MenuBar', () => {
     expect(callsOf('open_devtools')).toHaveLength(1);
   });
 
-  it('View shows the current theme with a check mark and switches it', () => {
+  it('View > Appearance… opens Settings on its Appearance tab (the theme moved there)', () => {
     mount();
     fireEvent.click(top('View'));
-    expect(screen.getByRole('menuitemcheckbox', { name: /System/ })).toHaveAttribute('aria-checked', 'true');
-    expect(screen.getByRole('menuitemcheckbox', { name: /Dark/ })).toHaveAttribute('aria-checked', 'false');
-    fireEvent.click(screen.getByRole('menuitemcheckbox', { name: /Dark/ }));
-    expect(localStorage.getItem('theme')).toBe('dark');
-    fireEvent.click(top('View'));
-    expect(screen.getByRole('menuitemcheckbox', { name: /Dark/ })).toHaveAttribute('aria-checked', 'true');
+    expect(screen.queryByRole('menuitemcheckbox', { name: /Dark/ })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Appearance…' }));
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'appearance' });
   });
 
   it('View > Show sidebar toggles the layout and Reset layout restores the defaults', () => {

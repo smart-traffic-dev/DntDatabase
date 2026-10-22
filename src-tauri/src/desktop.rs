@@ -13,7 +13,32 @@
 //! still compiled in (the `devtools` feature of `tauri`) and open only from Tools > Developer
 //! tools (the `open_devtools` command) or the app's own Ctrl+Shift+I shortcut.
 
-use tauri::{Manager, Runtime};
+use tauri::{Manager, Runtime, WebviewWindowBuilder};
+
+/// Creates the `main` window from `tauri.conf.json` (which has `"create": false` so it can be
+/// built here). Debug builds give it their own WebView2 data folder: builds sharing one folder
+/// share one WebView2 browser process, owned by whichever started first, so stopping a dev
+/// build (`cargo run`, E2E) would otherwise kill a running release build's webview and leave
+/// its window black and unresponsive. Release builds keep Tauri's default folder.
+pub fn create_main_window<R: Runtime>(app: &tauri::App<R>) -> tauri::Result<()> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .ok_or_else(|| tauri::Error::WindowNotFound)?
+        .clone();
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::from_config(app, &config)?;
+    // WebView2 adds the `EBWebView` folder itself (as for the release default).
+    #[cfg(debug_assertions)]
+    if let Some(local) = dirs::data_local_dir() {
+        builder = builder.data_directory(local.join(crate::state::APP_DIR));
+    }
+    builder.build()?;
+    Ok(())
+}
 
 /// Applies the WebView2 settings to the `main` window. Failures are logged, never fatal:
 /// the app works without them (the UI guard still blocks the browser keys).

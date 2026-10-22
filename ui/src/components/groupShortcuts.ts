@@ -9,6 +9,9 @@ const PRESETS: Record<string, LayoutPreset> = { '1': 'single', '2': 'columns', '
 
 let chordAt = 0;
 
+/** Whether a `Ctrl+K` waits for its second key (which may be a plain key). */
+export const chordPending = () => chordAt !== 0 && Date.now() - chordAt <= CHORD_MS;
+
 /** Forgets a pending `Ctrl+K` (tests). */
 export function resetChord() {
   chordAt = 0;

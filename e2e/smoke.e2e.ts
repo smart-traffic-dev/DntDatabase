@@ -25,7 +25,6 @@ describe('DntDatabase smoke', () => {
     await evidence('01-app-start');
     await byId('new-connection').click();
 
-    await byId('conn-name').setValue('e2e-mysql8');
     await byId('conn-engine-mysql').click();
     await byId('conn-host').setValue('127.0.0.1');
     await byId('conn-port').setValue('33080');
@@ -39,7 +38,8 @@ describe('DntDatabase smoke', () => {
     await expect(result).toHaveText(expect.stringContaining('Connected'));
     await evidence('03-test-connected');
 
-    await byId('conn-save').click();
+    await byId('conn-name').setValue('e2e-mysql8');
+    await byId('conn-save').click(); // Save
 
     await expandRow('e2e-mysql8');
     await expandRow('dnt_fixture');

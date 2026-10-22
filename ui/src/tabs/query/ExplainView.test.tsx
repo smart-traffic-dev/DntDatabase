@@ -99,7 +99,7 @@ describe('ExplainView', () => {
 
   it('selects_the_hottest_node_by_default', () => {
     show({ explain: TREE });
-    expect(screen.getByTestId('explain-details')).toHaveTextContent('Seq Scan');
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('Seq Scan');
   });
 
   // F04: LD-62, a MySQL plan (mysql84 fixture costs, already per subtree from the backend)
@@ -224,7 +224,7 @@ describe('ExplainView', () => {
     const index = screen.getAllByTestId('explain-node').find((n) => n.textContent?.includes('Index Scan'))!;
     index.focus();
     await user.keyboard('{Enter}');
-    expect(screen.getByTestId('explain-details')).toHaveTextContent('Index Scan');
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('Index Scan');
 
     await user.click(screen.getByRole('tab', { name: 'Grid' }));
     expect(screen.getAllByTestId('explain-row').find((r) => r.classList.contains('sel'))).toHaveTextContent(
@@ -232,7 +232,7 @@ describe('ExplainView', () => {
     );
     await user.click(screen.getByRole('tab', { name: 'Tree' }));
     expect(screen.queryByText('Filter')).not.toBeInTheDocument();
-    expect(screen.getByTestId('explain-details')).toHaveTextContent('Index Scan');
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('Index Scan');
   });
 
   it('labels_warning_pills_for_screen_readers', () => {
@@ -260,7 +260,7 @@ describe('ExplainView', () => {
     expect(screen.getByText('Index Scan')).toBeInTheDocument();
   });
 
-  it('shows_the_overview, warnings and the inspector', async () => {
+  it('shows_the_overview, warnings and the summary line', async () => {
     const scan: PlanNode = {
       label: 'Seq Scan on orders',
       detail: 'Filter: (status = paid)',
@@ -277,7 +277,7 @@ describe('ExplainView', () => {
     expect(screen.getByTestId('explain-overview')).toHaveTextContent('240.5 ms');
     expect(screen.getByTestId('explain-overview')).toHaveTextContent('⚠ 3');
 
-    const details = screen.getByTestId('explain-details');
+    const details = screen.getByTestId('explain-foot');
     expect(details).toHaveTextContent('Full table scan');
     expect(details).toHaveTextContent('Estimate skew 42×');
     expect(details).toHaveTextContent('High loop count');
@@ -285,11 +285,19 @@ describe('ExplainView', () => {
     expect(screen.getAllByTestId('explain-warning').length).toBeGreaterThan(0);
   });
 
-  it('selects_a_node_from_the_cost_bar', async () => {
+  it('the_hot_button_selects_the_hottest_node', async () => {
     const user = userEvent.setup();
     show({ explain: TREE });
-    await user.click(screen.getByRole('button', { name: /^Index Scan: self cost/ }));
-    expect(screen.getByTestId('explain-details')).toHaveTextContent('Index Scan');
+    await user.click(screen.getAllByTestId('explain-node').find((n) => n.textContent?.includes('Index Scan'))!);
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('Index Scan');
+    await user.click(screen.getByTitle('Hottest node — click to select'));
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('Seq Scan');
+  });
+
+  it('an_estimate_only_plan_has_no_actual_time_loops_or_warn_columns', () => {
+    show({ explain: TREE });
+    const header = document.querySelector('.ex-head')!;
+    expect(header.textContent).toBe('NodeCostSelf costEst. rows');
   });
 
   it('json_tab_shows_the_plan_indented', async () => {
@@ -334,14 +342,13 @@ describe('ExplainView', () => {
     expect(screen.getByTestId('explain-summary')).toHaveTextContent('Using filesort');
   });
 
-  it('the_inspector_reads_the_selected_row', async () => {
+  it('the_summary_line_reads_the_selected_row', async () => {
     const user = userEvent.setup();
     show({ explain: { ...TREE, classic: CLASSIC } });
-    const details = () => screen.getByTestId('explain-details');
+    const details = () => screen.getByTestId('explain-foot');
     expect(details()).toHaveTextContent('Row 1 · e');
     expect(details()).toHaveTextContent('Full table scan. MySQL reads every row of the table, about 10,302 rows.');
     expect(details()).toHaveTextContent('An index exists (idx_student) but the optimizer did not use it.');
-    expect(details()).toHaveTextContent('≈ 3,434');
     expect(details()).toHaveTextContent('The ORDER BY sorts rows without an index.');
 
     await user.click(within(screen.getByTestId('explain-table')).getAllByTestId('explain-classic-row')[1]!);
@@ -428,39 +435,21 @@ describe('ExplainView', () => {
     expect(screen.getByTestId('explain-view')).toHaveTextContent('Ctrl+Shift+E');
   });
 
-  it('only_the_hottest_self_cost_bar_is_amber', () => {
-    show({ explain: TREE });
-    const bars = screen.getAllByTestId('explain-node').map((n) => ({
-      text: n.textContent ?? '',
-      fill: (n.querySelector('.ex-selfbar') as HTMLElement).style.background,
-    }));
-    for (const b of bars) {
-      expect(b.fill).toBe(b.text.includes('Seq Scan') ? 'var(--dnt-status-warning-solid)' : 'var(--dnt-accent)');
-    }
-    const segments = within(screen.getByRole('group', { name: 'Self cost distribution' })).getAllByRole('button');
-    expect(segments[0]).toHaveAccessibleName(/^Seq Scan/);
-    expect(segments[0]!.style.background).toBe('var(--dnt-status-warning-solid)');
-    expect(segments[1]!.style.background).toContain('var(--dnt-accent)');
-  });
-
-  it('inspector_shows_time_per_loop_and_in_total_on_mysql', () => {
+  it('the_summary_line_shows_the_time_in_total_on_mysql', () => {
     const tab = tabOn('MySql8');
     show({ explain: LOOPED }, tab);
-    const details = screen.getByTestId('explain-details');
-    expect(details).toHaveTextContent('Time per loop0.03 ms');
-    expect(details).toHaveTextContent('Time in total≈ 149.4 ms');
-    expect(details).toHaveTextContent('35.7%');
-    expect(details).toHaveTextContent('Rows in total209,160');
-    expect(screen.getByTestId('explain-foot')).toHaveTextContent('149.4 ms');
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('149.4 ms in total');
   });
 
-  it('inspector_shows_totals_only_on_mariadb', () => {
+  it('the_summary_line_takes_mariadb_times_as_totals', () => {
     const tab = tabOn('MariaDb', [11, 4, 2]);
     show({ explain: LOOPED }, tab);
-    const details = screen.getByTestId('explain-details');
-    expect(details).not.toHaveTextContent('Time per loop');
-    expect(details).toHaveTextContent('Time in total0.03 ms');
-    expect(details).not.toHaveTextContent('Rows in total');
+    expect(screen.getByTestId('explain-foot')).toHaveTextContent('0.03 ms in total');
+  });
+
+  it('has_no_side_inspector', () => {
+    show({ explain: { ...TREE, classic: CLASSIC } });
+    expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
   });
 
   it('table_plan_tints_known_slow_values', () => {

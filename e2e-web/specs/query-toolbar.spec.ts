@@ -6,10 +6,10 @@ import { createBackend } from '../src/backend';
 import { installBackend } from '../src/shim';
 import { expect, test } from '../src/test';
 
-// Spec 2026-10-21-editor-v2 §2: the query controls are an action cluster at the right end of the
-// group's tab strip (no toolbar row); the context chip opens the connection / database picker;
-// results stay collapsed until the first run; under 360 px the cluster keeps the chip badge,
-// Run / Stop and `⋯`. Widths depend on real layout, so these run in Chromium.
+// The query controls are a toolbar row of their own under the group's tab strip (as in
+// Navicat); the context chip opens the connection / database picker; results stay collapsed
+// until the first run; under 360 px the toolbar keeps the chip badge, Run / Stop and `⋯`.
+// Widths depend on real layout, so these run in Chromium.
 
 const tree = (): Tree => ({
   groups: [],
@@ -37,20 +37,27 @@ async function bindProd(page: Page) {
 }
 
 const strip = (page: Page) => page.locator('.tabstrip').first();
-const stripWidth = async (page: Page) => (await strip(page).boundingBox())!.width;
+const toolbarRow = (page: Page) => page.locator('.tabstrip-toolbar').first();
+const rowWidth = async (page: Page) => (await toolbarRow(page).boundingBox())!.width;
 
-test.describe('query toolbar in the tab strip', () => {
-  test('the cluster sits in the strip; the chip picks the connection; Run turns red on PROD', async ({ page }) => {
+test.describe('query toolbar row', () => {
+  test('the toolbar has its own row under the tabs; the chip picks the connection; Run turns red on PROD', async ({ page }) => {
     await page.setViewportSize({ width: 1400, height: 800 });
     await openQuery(page);
     const toolbar = page.getByRole('toolbar', { name: 'Query' });
-    // Inside the tab strip, at its right end: no 40 px row of its own.
-    await expect(strip(page).getByRole('toolbar', { name: 'Query' })).toHaveCount(1);
+    // Not in the tab strip: on the row under it, spanning the group.
+    await expect(strip(page).getByRole('toolbar', { name: 'Query' })).toHaveCount(0);
+    await expect(toolbarRow(page).getByRole('toolbar', { name: 'Query' })).toHaveCount(1);
     const box = (await toolbar.boundingBox())!;
-    const row = (await strip(page).boundingBox())!;
-    expect(box.y).toBeGreaterThanOrEqual(row.y);
-    expect(box.y + box.height).toBeLessThanOrEqual(row.y + row.height);
-    expect(row.x + row.width - (box.x + box.width)).toBeLessThan(16);
+    const tabs = (await strip(page).boundingBox())!;
+    const row = (await toolbarRow(page).boundingBox())!;
+    expect(row.y).toBeGreaterThanOrEqual(tabs.y + tabs.height - 1);
+    expect(box.width).toBeGreaterThan(row.width - 2);
+    // The chip leads the row; ⋯ ends it.
+    const chipBox = (await byId(page, 'query-context').boundingBox())!;
+    const moreBox = (await byId(page, 'query-more').boundingBox())!;
+    expect(chipBox.x - row.x).toBeLessThan(16);
+    expect(row.x + row.width - (moreBox.x + moreBox.width)).toBeLessThan(16);
 
     const chip = byId(page, 'query-context');
     await expect(chip).toHaveText(/Choose a connection/);
@@ -93,7 +100,7 @@ test.describe('query toolbar in the tab strip', () => {
     await expect(page.getByRole('separator', { name: 'Resize editor and results' })).toHaveCount(0);
   });
 
-  test('in a group under 360 px the cluster keeps the chip badge, Run and ⋯; Explain moves into ⋯', async ({ page }) => {
+  test('in a group under 360 px the toolbar keeps the chip badge, Run and ⋯; Explain moves into ⋯', async ({ page }) => {
     await page.setViewportSize({ width: 1400, height: 800 });
     await openQuery(page);
     await bindProd(page);
@@ -102,7 +109,7 @@ test.describe('query toolbar in the tab strip', () => {
 
     // The sidebar is 280 px by default: a 620 px window leaves the group under 360 px.
     await page.setViewportSize({ width: 620, height: 800 });
-    await expect.poll(() => stripWidth(page)).toBeLessThan(360);
+    await expect.poll(() => rowWidth(page)).toBeLessThan(360);
     await expect(byId(page, 'query-explain')).toHaveCount(0);
     await expect(byId(page, 'query-context')).toHaveText('PROD');
     await expect(byId(page, 'query-run')).toBeVisible();
@@ -110,9 +117,9 @@ test.describe('query toolbar in the tab strip', () => {
     await byId(page, 'query-more').click();
     await expect(byId(page, 'query-more-explain')).toBeVisible();
     await page.keyboard.press('Escape');
-    // The cluster still fits the strip, at its right end.
+    // The toolbar still fits its row.
     const box = (await page.getByRole('toolbar', { name: 'Query' }).boundingBox())!;
-    const row = (await strip(page).boundingBox())!;
+    const row = (await toolbarRow(page).boundingBox())!;
     expect(box.x + box.width).toBeLessThanOrEqual(row.x + row.width + 1);
   });
 });

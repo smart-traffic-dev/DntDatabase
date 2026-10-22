@@ -4,6 +4,7 @@ import type * as Monaco from 'monaco-editor';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
+import { openQuietly, quietOpenFailed } from '../../store/reopen';
 import type { Engine } from '../engine';
 import { suggest, type Suggestion } from './provider';
 import { allSnippets } from './snippets';
@@ -56,6 +57,17 @@ function snippetItems(monaco: typeof Monaco, range: Monaco.IRange): Monaco.langu
     sortText: `zz${String(i).padStart(4, '0')}`,
     range,
   }));
+}
+
+/**
+ * Whether the suggest list of `editor` is on screen. Monaco adds `visible` 100 ms after it
+ * shows the list (a fade-in), so the class alone misses a load that settles in that window.
+ */
+function suggestShown(editor: Monaco.editor.ICodeEditor): boolean {
+  const widget = editor.getDomNode()?.querySelector('.suggest-widget');
+  if (!widget) return false;
+  const check = (widget as Element & { checkVisibility?: (o: object) => boolean }).checkVisibility;
+  return check ? check.call(widget, { visibilityProperty: true }) : widget.classList.contains('visible');
 }
 
 /** Starts loading the autocomplete data of a target (e.g. when its editor opens). Never waits. */
@@ -128,7 +140,7 @@ export function registerCompletion(
       waiting.delete(model);
       for (const editor of monaco.editor?.getEditors?.() ?? []) {
         if (editor.getModel() !== model) continue;
-        if (!editor.getDomNode()?.querySelector('.suggest-widget.visible')) continue;
+        if (!suggestShown(editor)) continue;
         editor.trigger('dnt', 'editor.action.triggerSuggest', {});
       }
     });
@@ -157,18 +169,23 @@ export function registerCompletion(
       });
       const word = model.getWordUntilPosition(position);
       const range = new monaco.Range(position.lineNumber, word.startColumn, position.lineNumber, word.endColumn);
-      // No scope (loading or failed): Monaco asks again on the next keystroke instead of
-      // only filtering a list without the tables.
-      const incomplete = (Boolean(connId && db) && !scope) || containers === undefined;
-      if (connId && (scope === undefined || containers === undefined)) {
-        refreshWhenLoaded(
-          model,
-          Promise.all([
-            db ? useCompletion.scope(connId, db) : null,
-            db || engine === 'mysql' ? useCompletion.containers(connId, db ?? '', engine) : null,
-          ]),
-        );
-      }
+      const loads = () =>
+        Promise.all([
+          db ? useCompletion.scope(connId as string, db) : null,
+          db || engine === 'mysql' ? useCompletion.containers(connId as string, db ?? '', engine) : null,
+        ]);
+      // The scope failed because the connection is not open yet (a restored tab: restoring
+      // never connects). Typing here opens it quietly, then the tables load.
+      const opening =
+        Boolean(connId && db) &&
+        scope === null &&
+        !useConnections.getState().info.has(connId as string) &&
+        !quietOpenFailed(connId as string);
+      if (opening) refreshWhenLoaded(model, openQuietly(connId as string).then((ok) => (ok ? loads() : null)));
+      else if (connId && (scope === undefined || containers === undefined)) refreshWhenLoaded(model, loads());
+      // Still loading (or opening): Monaco asks again on the next keystroke instead of only
+      // filtering a list without the tables. A failed load is final until it is retried.
+      const incomplete = (Boolean(connId && db) && scope === undefined) || containers === undefined || opening;
       // Snippets are not offered after a `.` (a member name follows).
       const dotted = text[offset - (word.endColumn - word.startColumn) - 1] === '.';
       const toList = (list: Suggestion[]): Monaco.languages.CompletionList => ({

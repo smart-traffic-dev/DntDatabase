@@ -118,7 +118,15 @@ export function MessagesView({ tabId, run }: { tabId: string; run: TabRun }) {
               tabIndex={target ? 0 : undefined}
               title={target ? 'Show in the editor' : undefined}
               aria-description={target ? 'Show in editor' : undefined}
-              onClick={target ? (e: MouseEvent) => !(e.target as HTMLElement).closest('button') && jump(target) : undefined}
+              // A drag that selects the message text (to copy it) ends in a click: that is not a jump.
+              onClick={
+                target
+                  ? (e: MouseEvent) => {
+                      if ((e.target as HTMLElement).closest('button') || window.getSelection()?.toString()) return;
+                      jump(target);
+                    }
+                  : undefined
+              }
               onKeyDown={
                 target
                   ? (e: KeyboardEvent) => {

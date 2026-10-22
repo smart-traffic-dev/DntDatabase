@@ -1,6 +1,5 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { useLayout } from '../store/layout';
 import { usePalette } from '../store/palette';
 import { useTabs } from '../store/tabs';
 
@@ -81,28 +80,24 @@ describe('TitleBar', () => {
     expect(usePalette.getState()).toMatchObject({ open: true, mode: 'objects' });
   });
 
-  it('the layout button picks an editor layout', async () => {
+  it('the settings button opens the settings dialog', async () => {
+    const { useDialogs } = await import('../store/dialogs');
     render(<TitleBar />);
     await flush();
-    fireEvent.click(screen.getByRole('button', { name: 'Editor layout' }));
-    fireEvent.click(screen.getByRole('menuitemradio', { name: /Two rows/ }));
-    expect(useTabs.getState().layout).toBe('rows');
-    expect(useTabs.getState().groups).toHaveLength(2);
-  });
-
-  it('the right sidebar button shows its state and toggles the panel', async () => {
-    useLayout.setState({ rightVisible: false });
-    render(<TitleBar />);
-    await flush();
-    const button = screen.getByRole('button', { name: 'Right sidebar' });
-    expect(button).toHaveAttribute('title', 'Toggle right sidebar (Ctrl+Alt+B)');
-    expect(button).toHaveAttribute('aria-pressed', 'false');
-    fireEvent.click(button);
-    expect(useLayout.getState().rightVisible).toBe(true);
-    expect(button).toHaveAttribute('aria-pressed', 'true');
+    const button = screen.getByRole('button', { name: 'Settings' });
+    expect(button).toHaveAttribute('title', 'Settings (Ctrl+,)');
+    expect(screen.queryByRole('button', { name: 'Editor layout' })).toBeNull();
     fireEvent.mouseDown(button, { button: 0, detail: 1 });
     expect(win.startDragging).not.toHaveBeenCalled();
-    useLayout.setState({ rightVisible: false });
+    fireEvent.click(button);
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings' });
+    useDialogs.getState().closeRequest();
+  });
+
+  it('has no right sidebar button (the sidebar header toggle covers it)', async () => {
+    render(<TitleBar />);
+    await flush();
+    expect(screen.queryByRole('button', { name: 'Right sidebar' })).toBeNull();
   });
 
   it('the search button does not start a window drag', async () => {

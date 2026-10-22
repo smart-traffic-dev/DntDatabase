@@ -51,6 +51,7 @@ describe('DialogHost', () => {
     useDialogs.getState().requestDialog({ kind: 'newConnection' });
     const user = userEvent.setup();
     render(<DialogHost />);
+    await user.type(screen.getByTestId('conn-host'), 'h');
     await user.type(screen.getByTestId('conn-name'), 'legacy-crm');
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(useTree.getState().selectedId).toBe(`conn:${ids.legacy}`));
@@ -65,6 +66,7 @@ describe('DialogHost', () => {
     useDialogs.getState().requestDialog({ kind: 'newConnection' });
     const user = userEvent.setup();
     render(<DialogHost />);
+    await user.type(screen.getByTestId('conn-host'), 'h');
     await user.type(screen.getByTestId('conn-name'), 'legacy-crm');
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(useTree.getState().selectedId).toBe(`conn:${ids.legacy}`));
@@ -230,7 +232,7 @@ describe('DialogHost', () => {
       get_confirm_unbounded_writes: () => true,
       get_idle_tx_warn_minutes: () => 5,
     });
-    useDialogs.getState().requestDialog({ kind: 'settings' });
+    useDialogs.getState().requestDialog({ kind: 'settings', tab: 'advanced' });
     const user = userEvent.setup();
     render(<DialogHost />);
     const box = await screen.findByRole('checkbox', { name: /Debug logging/ });
@@ -255,7 +257,7 @@ describe('DialogHost', () => {
       get_confirm_unbounded_writes: () => true,
       get_idle_tx_warn_minutes: () => 5,
     });
-    useDialogs.getState().requestDialog({ kind: 'settings' });
+    useDialogs.getState().requestDialog({ kind: 'settings', tab: 'queryData' });
     const user = userEvent.setup();
     render(<DialogHost />);
     const input = await screen.findByRole('spinbutton', { name: 'Table data page size' });
@@ -285,7 +287,7 @@ describe('DialogHost', () => {
         return null;
       },
     });
-    useDialogs.getState().requestDialog({ kind: 'settings' });
+    useDialogs.getState().requestDialog({ kind: 'settings', tab: 'queryData' });
     const user = userEvent.setup();
     render(<DialogHost />);
     const box = await screen.findByRole('checkbox', { name: 'Confirm UPDATE/DELETE without WHERE' });
@@ -311,7 +313,7 @@ describe('DialogHost', () => {
         throw fail('busy');
       },
     });
-    useDialogs.getState().requestDialog({ kind: 'settings' });
+    useDialogs.getState().requestDialog({ kind: 'settings', tab: 'queryData' });
     const user = userEvent.setup();
     render(<DialogHost />);
     const box = await screen.findByRole('checkbox', { name: 'Confirm UPDATE/DELETE without WHERE' });

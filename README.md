@@ -26,6 +26,16 @@ pnpm tauri dev
 
 Run it from the repository root. It starts the Vite dev server on **port 5173**, which must be free.
 
+For manual testing, fill the dev build's connection list with the Docker test matrix (MySQL 5.7 / 8.0 / 8.4,
+MariaDB 10.6 / 11.4, PostgreSQL 12 / 17, plus Production, read-only, limited-user, SSL, SSH and failure
+scenarios). It writes only to the dev data directory (`%APPDATA%\DntDatabase-dev`), skips names that already
+exist, and `--reset` drops the three `Docker ·` groups first:
+
+```powershell
+docker compose -f testdata/docker-compose.test.yml up -d --wait
+cargo run -p dnt-testkit --bin seed_dev
+```
+
 ## Tests
 
 Unit tests (no database needed; run `gen_fixtures` first, the TLS tests read `testdata/certs`):

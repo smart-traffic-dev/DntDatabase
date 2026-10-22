@@ -44,9 +44,9 @@ describe('TabBar', () => {
     const tab = (title: string) => screen.getByRole('tab', { name: new RegExp(title) }).closest('.tab')!;
     expect(tab('p_orders')).toHaveClass('env-production');
     expect(tab('p_orders').querySelector('.env-tag.env-production')).toHaveAttribute('title', 'Environment: production');
-    expect(tab('p_orders').querySelector('.env-tag')?.textContent).toBe('P');
+    expect(tab('p_orders').querySelector('.env-tag')?.textContent).toBe('PROD');
     expect(tab('s_orders').querySelector('.env-tag.env-staging')).not.toBeNull();
-    expect(tab('s_orders').querySelector('.env-tag')?.textContent).toBe('S');
+    expect(tab('s_orders').querySelector('.env-tag')?.textContent).toBe('STG');
     expect(tab('c_orders').querySelector('.env-tag')).toBeNull();
     expect(tab('c_orders')).not.toHaveClass('env-production');
   });

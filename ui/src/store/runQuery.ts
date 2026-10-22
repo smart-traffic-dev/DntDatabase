@@ -120,12 +120,15 @@ export function revealInEditor(
   return false;
 }
 
+export type RunMode = 'cursor' | 'script' | 'selection' | 'all';
+
 /**
- * The run target of a tab. `cursor` (Run, Ctrl+Enter): the selection if there is one, else the
- * statement at the cursor. `selection` (Run selection): the selection only, null without one.
+ * The run target of a tab. `cursor` (Ctrl+Enter): the selection if there is one, else the
+ * statement at the cursor. `script` (Navicat's Run: the Run button, Ctrl+R): the selection if
+ * there is one, else the whole tab. `selection` (Run selection): the selection only, null without one.
  * `all` (Ctrl+Shift+Enter): the whole tab.
  */
-export function targetOf(tabId: string, mode: 'cursor' | 'selection' | 'all'): Target | null {
+export function targetOf(tabId: string, mode: RunMode): Target | null {
   if (mode === 'all') return 'All';
   const editor = editors.get(tabId);
   const model = editor?.getModel();
@@ -135,16 +138,18 @@ export function targetOf(tabId: string, mode: 'cursor' | 'selection' | 'all'): T
       return { Selection: [model.getOffsetAt(sel.getStartPosition()), model.getOffsetAt(sel.getEndPosition())] };
     }
     if (mode === 'selection') return null;
+    if (mode === 'script') return 'All';
     const pos = editor.getPosition();
     if (pos) return { Cursor: model.getOffsetAt(pos) };
   } else if (mode === 'selection') {
     return null;
   }
+  if (mode === 'script') return 'All';
   return { Cursor: useQueryDocs.getState().docs.get(tabId)?.cursor ?? 0 };
 }
 
 /** Runs the toolbar / key action of a tab. */
-export async function runFromEditor(tabId: string, mode: 'cursor' | 'selection' | 'all'): Promise<void> {
+export async function runFromEditor(tabId: string, mode: RunMode): Promise<void> {
   const target = targetOf(tabId, mode);
   if (target) await runQuery(tabId, target);
 }

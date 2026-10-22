@@ -7,6 +7,7 @@ use super::{blocking, guard};
 use crate::session_manager::{ConnState, OpenResult};
 use crate::state::AppState;
 use dnt_core::config::ConnectionConfig;
+use dnt_core::conn_string::ParsedConnString;
 use dnt_core::error::{AppError, DbError};
 use dnt_store::repo::{Group, NewSecrets, NodeId, SecretChange, SecretUpdate, Tree};
 use dnt_tunnel::KnownHosts;
@@ -337,4 +338,11 @@ pub async fn trust_host_key(
         key_openssh,
     ))
     .await
+}
+
+/// Reads a pasted connection string into the dialog's fields (nothing is stored or logged).
+#[tauri::command]
+#[specta::specta]
+pub async fn parse_connection_string(input: String) -> Result<ParsedConnString, AppError> {
+    guard(async move { dnt_core::conn_string::parse_connection_string(&input) }).await
 }

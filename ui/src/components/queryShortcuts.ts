@@ -3,7 +3,7 @@ import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { openDevtools } from './appMenus';
 import { addActiveQueryToFavorites } from './favoritesActions';
-import { onGroupShortcut } from './groupShortcuts';
+import { chordPending, onGroupShortcut } from './groupShortcuts';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeTab, cycleTab, goToTab, reopenClosedTab } from './tabActions';
@@ -65,17 +65,21 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
  * Ignored while a modal dialog is open.
  */
 export function onQueryShortcut(e: KeyboardEvent) {
-  if (!document.querySelector('[aria-modal="true"]') && onGroupShortcut(e)) return;
   const ctrl = e.ctrlKey || e.metaKey;
+  // Plain typing is no shortcut (only F1, or the second key of a Ctrl+K chord): it never
+  // reaches the modal lookup below, a query over the whole document on every keystroke.
+  if (!ctrl && e.key !== 'F1' && !chordPending()) return;
+  const modal = !!document.querySelector('[aria-modal="true"]');
+  if (!modal && onGroupShortcut(e)) return;
   // Ctrl+Alt+B: the right sidebar, from anywhere (a text field included).
-  if (ctrl && e.altKey && !e.shiftKey && !e.repeat && e.key.toLowerCase() === 'b' && !document.querySelector('[aria-modal="true"]')) {
+  if (ctrl && e.altKey && !e.shiftKey && !e.repeat && e.key.toLowerCase() === 'b' && !modal) {
     consume(e);
     toggleRightSidebar();
     return;
   }
   if (e.altKey || e.repeat) return;
   if (!ctrl && !(e.key === 'F1' && !e.shiftKey)) return;
-  if (document.querySelector('[aria-modal="true"]')) return;
+  if (modal) return;
   const key = e.key.toLowerCase();
   // F1 is the app's keyboard shortcuts everywhere, Monaco's own F1 palette included
   // (that one is the palette command "Editor: Command palette").

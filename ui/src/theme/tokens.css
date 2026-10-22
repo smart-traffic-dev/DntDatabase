@@ -45,6 +45,14 @@
   --dnt-green-50: #eaf7ef;
   --dnt-green-200: #b5e2c6;
   --dnt-green-600: #1a7f46;
+
+  /* Engine brand marks (simple-icons); a light tile keeps every glyph readable in both themes. */
+  --dnt-brand-mysql: #00758f;
+  --dnt-brand-mysql-bg: #e8f1f7;
+  --dnt-brand-mariadb: #003545;
+  --dnt-brand-mariadb-bg: #e6eef0;
+  --dnt-brand-postgres: #336791;
+  --dnt-brand-postgres-bg: #e9eef9;
 }
 
 /* 2. Semantic — light */

@@ -67,7 +67,7 @@ describe('QueryToolbar', () => {
     view.unmount();
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
-    expect(screen.getByTestId('query-run')).toHaveAttribute('title', expect.stringContaining('Ctrl+Enter'));
+    expect(screen.getByTestId('query-run')).toHaveAttribute('title', expect.stringContaining('Ctrl+R'));
     await openRunMenu(user);
     expect(screen.getByTestId('query-run-all')).toBeEnabled();
     expect(screen.getByTestId('query-run-all')).toHaveTextContent('Ctrl+Shift+Enter');
@@ -292,7 +292,7 @@ describe('QueryToolbar', () => {
       expect(screen.queryByTestId('query-explain')).toBeNull();
       const run = screen.getByTestId('query-run');
       expect(run).toHaveAttribute('aria-label', 'Run on PROD');
-      expect(run).toHaveAttribute('title', 'Run the statement at the cursor (Ctrl+Enter)');
+      expect(run).toHaveAttribute('title', 'Run the selection, or every statement (Ctrl+R)');
       // Badge only: the database is in the chip's name and tooltip.
       const chip = screen.getByTestId('query-context');
       expect(chip).toHaveTextContent(/^PROD$/);

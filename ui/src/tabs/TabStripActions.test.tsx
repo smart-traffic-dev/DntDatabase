@@ -34,8 +34,8 @@ const PLAN = {
   tx_state: 'idle' as const,
 };
 
-const strip = () => document.querySelector<HTMLElement>('.tabstrip')!;
-const cluster = () => within(strip()).getByRole('toolbar');
+const row = () => document.querySelector<HTMLElement>('.tabstrip-toolbar')!;
+const cluster = () => within(row()).getByRole('toolbar');
 
 beforeEach(() => {
   resetStores();
@@ -56,7 +56,7 @@ describe('tab strip actions: query tab', () => {
     }
     // Icon buttons: named, with the shortcut in the tooltip.
     expect(within(bar).getByTestId('query-run')).toHaveAttribute('aria-label', 'Run on PROD');
-    expect(within(bar).getByTestId('query-run')).toHaveAttribute('title', 'Run the statement at the cursor (Ctrl+Enter)');
+    expect(within(bar).getByTestId('query-run')).toHaveAttribute('title', 'Run the selection, or every statement (Ctrl+R)');
     expect(within(bar).getByTestId('query-explain')).toHaveAttribute('aria-label', 'Explain');
     expect(within(bar).getByTestId('query-explain')).toHaveAttribute('title', 'Explain (Ctrl+Shift+E)');
     // The chip: environment badge and database; the connection is in the tooltip.

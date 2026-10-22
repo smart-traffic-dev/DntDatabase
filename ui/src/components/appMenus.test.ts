@@ -1,10 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { MenuAction, MenuEntry } from './ActionMenu';
 import { buildMenus, type MenuState } from './appMenus';
 
 const base: MenuState = {
-  theme: 'system',
-  setTheme: () => {},
   sidebarVisible: true,
   rightSidebarVisible: false,
   resultsVisible: true,
@@ -80,16 +78,15 @@ describe('buildMenus', () => {
     expect(items('Edit').map((i) => i.label)).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Paste', 'Select all', 'Find', 'Replace', 'Format SQL', 'Toggle comment', 'Duplicate line', 'Upper case', 'Lower case']);
   });
 
-  it('View ticks the current theme and the sidebar toggle', () => {
+  it('View ticks the panel toggles; the theme lives in Settings > Appearance', () => {
     const checked = (state: Partial<MenuState>) =>
       items('View', state)
         .filter((i) => i.checked && !i.label.startsWith('Layout:'))
         .map((i) => i.label);
-    expect(checked({ theme: 'light', sidebarVisible: false, resultsVisible: false })).toEqual(['Light']);
-    expect(checked({ theme: 'dark' })).toEqual(['Dark', 'Show sidebar', 'Show results']);
-    expect(checked({ theme: 'system', resultsVisible: false })).toEqual(['System', 'Show sidebar']);
-    expect(checked({ theme: 'dark', rightSidebarVisible: true })).toEqual(['Dark', 'Show sidebar', 'Show results', 'Right sidebar']);
-    expect(item('View', 'Light')?.checked).toBe(false);
+    expect(checked({ sidebarVisible: false, resultsVisible: false })).toEqual([]);
+    expect(checked({})).toEqual(['Show sidebar', 'Show results']);
+    expect(checked({ rightSidebarVisible: true })).toEqual(['Show sidebar', 'Show results', 'Right sidebar']);
+    expect(item('View', 'Light')).toBeUndefined();
     expect(item('View', 'Reset layout')?.checked).toBeUndefined();
   });
 
@@ -111,10 +108,13 @@ describe('buildMenus', () => {
     expect(item('View', 'Maximize group')?.disabled).toBe(true);
   });
 
-  it('choosing a theme calls setTheme', () => {
-    const setTheme = vi.fn();
-    item('View', 'Dark', { setTheme })?.run();
-    expect(setTheme).toHaveBeenCalledWith('dark');
+  it('View > Appearance… and Help > Keyboard shortcuts open Settings on their tab', async () => {
+    const { useDialogs } = await import('../store/dialogs');
+    item('View', 'Appearance…')?.run();
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'appearance' });
+    item('Help', 'Keyboard shortcuts')?.run();
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'shortcuts' });
+    useDialogs.getState().closeRequest();
   });
 
   it('Query items are disabled without a runnable query tab', () => {

@@ -1,6 +1,5 @@
 import { useMemo, type ReactNode } from 'react';
 import {
-  ACCESS_LADDER,
   accessTone,
   classicSummary,
   explainRow,
@@ -52,13 +51,48 @@ function Cell({ column, value }: { column: string; value: string | null }) {
   return <SlowValue column={column} value={value} />;
 }
 
-/** Where `type` sits from best to worst. */
-function Ladder({ current }: { current?: string | null }) {
+/**
+ * The line under a plan about its selected row or node: the name, its warnings (warning colour),
+ * then the plain-words reading. One line; the whole text is in the tooltip.
+ */
+export function ExplainFoot({ label, warnings, parts }: { label: string; warnings: string[]; parts: string[] }) {
+  const all = [...warnings.map((w) => `⚠ ${w}`), ...parts];
   return (
-    <span className="ex-ladder" role="img" aria-label={`Access types from best to worst${current ? `; this row: ${current}` : ''}`}>
-      {ACCESS_LADDER.map((t) => (
-        <span key={t} className={t === current ? 'cur' : undefined}>
-          {t}
+    <div className="ex-foot" data-testid="explain-foot" title={[label, ...all].join('\n')}>
+      <span className="ex-foot-label">{label}</span>
+      <span className="ex-foot-text">
+        {warnings.map((w) => (
+          <span key={w} className="warn">
+            ⚠ {w}
+          </span>
+        ))}
+        {parts.map((p, i) => (
+          <span key={i}>{p}</span>
+        ))}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * The classic plan in one line for the Explain bar: tables, rows read on the first one, then the
+ * warnings (full scans, filesort, temporary) in the warning colour.
+ */
+export function ClassicSummary({ table }: { table: ClassicTable }) {
+  const summary = useMemo(() => classicSummary(table), [table]);
+  const warnings = [
+    ...(summary.fullScans > 0 ? [`${summary.fullScans} full table scan${summary.fullScans === 1 ? '' : 's'}`] : []),
+    ...summary.slowExtra,
+  ];
+  return (
+    <span className="ex-summary" data-testid="explain-summary">
+      <span>
+        {summary.tables} table{summary.tables === 1 ? '' : 's'}
+      </span>
+      {summary.firstRows !== null && <span>≈ {fmtInt(summary.firstRows)} rows read on the first table</span>}
+      {warnings.map((w) => (
+        <span key={w} className="warn">
+          {w}
         </span>
       ))}
     </span>
@@ -77,10 +111,10 @@ interface Props {
 
 /**
  * The classic EXPLAIN grid of MySQL / MariaDB (Navicat-style): the server's columns, (Null)
- * like the result grid, slow values tinted, and the selected row read in plain words.
+ * like the result grid, slow values tinted, and the selected row read in plain words (its
+ * summary line is in the Explain bar: `ClassicSummary`).
  */
 export function ExplainClassic({ table, filter, selected, analyzedMs, onSelect, onOpenTree }: Props) {
-  const summary = useMemo(() => classicSummary(table), [table]);
   const q = filter.trim().toLowerCase();
   const rows = table.rows
     .map((row, index) => ({ row, index }))
@@ -92,24 +126,6 @@ export function ExplainClassic({ table, filter, selected, analyzedMs, onSelect, 
     <>
       <div className="ex-main">
         <div className="ex-pane ex-classic">
-          <div className="ex-chips" data-testid="explain-summary">
-            <span className="ex-chip">
-              {summary.tables} table{summary.tables === 1 ? '' : 's'}
-            </span>
-            {summary.firstRows !== null && (
-              <span className="ex-chip">≈ {fmtInt(summary.firstRows)} rows read on the first table</span>
-            )}
-            {summary.fullScans > 0 && (
-              <span className="ex-chip warn">
-                ⚠ {summary.fullScans} full table scan{summary.fullScans === 1 ? '' : 's'}
-              </span>
-            )}
-            {summary.slowExtra.map((s) => (
-              <span key={s} className="ex-chip warn">
-                {s}
-              </span>
-            ))}
-          </div>
           {analyzedMs !== null && (
             <div className="ex-note" role="note">
               <span>Analyzed in {fmtMs(analyzedMs)}. The grid shows the optimizer’s estimates.</span>
@@ -165,78 +181,17 @@ export function ExplainClassic({ table, filter, selected, analyzedMs, onSelect, 
                 </tbody>
               </table>
             )}
-            <div className="ex-legend">
-              <span>type, best → worst</span>
-              <Ladder />
-              <span className="ex-legend-hint">Click a row to read it in plain words.</span>
-            </div>
           </div>
         </div>
 
-        {reading !== null && current !== null && (
-          <aside className="ex-details" data-testid="explain-details" aria-label="Selected row">
-            <div className="ex-details-head">
-              <div className="ex-details-title">
-                <h3>
-                  Row {current + 1}
-                  {reading.table !== null && ` · ${reading.table}`}
-                  {reading.type === 'ALL' && <span className="ex-hotpill">FULL SCAN</span>}
-                </h3>
-              </div>
-            </div>
-            <div className="ex-details-scroll">
-              <section className="ex-section">
-                <h4>Access</h4>
-                <Ladder current={reading.type} />
-                <p className="ex-say">{reading.access}</p>
-              </section>
-              <section className="ex-section">
-                <h4>Index</h4>
-                <div className="ex-kv">
-                  <span>Possible keys</span>
-                  <b>{reading.possibleKeys ?? '—'}</b>
-                </div>
-                <div className="ex-kv">
-                  <span>Key used</span>
-                  <b>{reading.key ?? 'none'}</b>
-                </div>
-                <p className="ex-say">{reading.index}</p>
-              </section>
-              <section className="ex-section">
-                <h4>Rows</h4>
-                <div className="ex-kv">
-                  <span>Examined</span>
-                  <b>{reading.examined === null ? '—' : `≈ ${fmtInt(reading.examined)}`}</b>
-                </div>
-                <div className="ex-kv">
-                  <span>Pass the condition{reading.filtered === null ? '' : ` (filtered ${reading.filtered}%)`}</span>
-                  <b>{reading.passing === null ? '—' : `≈ ${fmtInt(reading.passing)}`}</b>
-                </div>
-              </section>
-              {reading.extra.length > 0 && (
-                <section className="ex-section">
-                  <h4>Extra</h4>
-                  {reading.extra.map((x, i) => (
-                    <div className="ex-extra" key={i}>
-                      <code className={x.slow ? 'warn' : undefined}>{x.text}</code>
-                      {x.note !== null && <span>{x.note}</span>}
-                    </div>
-                  ))}
-                </section>
-              )}
-            </div>
-          </aside>
-        )}
       </div>
 
       {reading !== null && current !== null && (
-        <div className="ex-foot" data-testid="explain-foot">
-          <span className="ex-foot-label">
-            Row {current + 1}
-            {reading.table !== null && ` · ${reading.table}`}
-          </span>
-          <span>{reading.access}</span>
-        </div>
+        <ExplainFoot
+          label={`Row ${current + 1}${reading.table !== null ? ` · ${reading.table}` : ''}`}
+          warnings={reading.extra.filter((x) => x.slow && x.note !== null).map((x) => x.note!)}
+          parts={[reading.access, reading.index]}
+        />
       )}
     </>
   );

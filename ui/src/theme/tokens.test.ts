@@ -43,6 +43,8 @@ function contrast(a: string, b: string): number {
 }
 
 const PRIMITIVE = /^--dnt-(gray|blue|red|amber|green)-\d+$/;
+/** Brand marks are primitives too: the vendor's colour, not a role. */
+const BRAND = /^--dnt-brand-[a-z]+(-bg)?$/;
 const COMPONENT = /^--dnt-(ctl-h|row-h|titlebar-h|tab-h|statusbar-h|icon-size|space|radius|text|dur|ease|z)-?/;
 
 describe('design tokens', () => {
@@ -52,7 +54,7 @@ describe('design tokens', () => {
   });
 
   it('every semantic token is defined for light and dark', () => {
-    const semantic = [...light.keys()].filter((n) => n.startsWith('--dnt-') && !PRIMITIVE.test(n) && !COMPONENT.test(n));
+    const semantic = [...light.keys()].filter((n) => n.startsWith('--dnt-') && !PRIMITIVE.test(n) && !BRAND.test(n) && !COMPONENT.test(n));
     expect(semantic.length).toBeGreaterThan(30);
     const darkOwn = block(raw, '.dark');
     expect(semantic.filter((n) => !darkOwn.has(n))).toEqual([]);

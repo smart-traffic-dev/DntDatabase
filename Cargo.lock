@@ -1529,11 +1529,13 @@ dependencies = [
 name = "dnt-testkit"
 version = "0.1.0"
 dependencies = [
+ "dirs 6.0.0",
  "dnt-core",
  "dnt-store",
  "rcgen",
  "secrecy",
  "ssh-key 0.6.7",
+ "uuid",
 ]
 
 [[package]]

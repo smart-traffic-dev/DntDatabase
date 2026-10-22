@@ -29,7 +29,7 @@ use dnt_core::server::{DbKind, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::{KnownHosts, SshSecrets, Tunnel};
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -291,6 +291,29 @@ fn ask_for_missing_key_passphrase(e: DbError) -> DbError {
         DbError::AtStage { stage, timings, .. } if missing => {
             DbError::at_stage(stage, timings, password_required())
         }
+        e => e,
+    }
+}
+
+/// A saved connection that reached the server without any database password and was
+/// refused: the stored password is most likely missing, so ask for it instead of showing
+/// a bare authentication failure. Servers that accept an empty password never get here.
+fn ask_for_missing_db_password(
+    e: DbError,
+    cfg: &ConnectionConfig,
+    secrets: &ConnSecrets,
+) -> DbError {
+    let missing = cfg.secret_mode == SecretMode::Saved
+        && secrets
+            .db_password
+            .as_ref()
+            .map_or(true, |p| p.expose_secret().is_empty())
+        && matches!(e.unstaged(), DbError::Auth { .. });
+    match e {
+        DbError::AtStage { stage, timings, .. } if missing => {
+            DbError::at_stage(stage, timings, password_required())
+        }
+        _ if missing => password_required(),
         e => e,
     }
 }
@@ -614,7 +637,8 @@ impl SessionManager {
         let opened = self
             .connect_pipeline(&cfg, &secrets, timings, &report)
             .await
-            .map_err(ask_for_missing_key_passphrase)?;
+            .map_err(ask_for_missing_key_passphrase)
+            .map_err(|e| ask_for_missing_db_password(e, &cfg, &secrets))?;
         Ok((cfg, secrets, opened))
     }
 
@@ -640,8 +664,18 @@ impl SessionManager {
                     Some(s) => Ok(Some(s)),
                     None => self.secrets.get(cfg.id, kind),
                 };
+                let typed_db = prompt.db_password.is_some();
+                let db_password = stored(prompt.db_password, SecretKind::DbPassword)?;
+                // Diagnostics only: presence, never the value.
+                tracing::debug!(
+                    connection = %cfg.id,
+                    typed = typed_db,
+                    present = db_password.is_some(),
+                    empty = db_password.as_ref().is_some_and(|p| p.expose_secret().is_empty()),
+                    "resolved database password"
+                );
                 ConnSecrets {
-                    db_password: stored(prompt.db_password, SecretKind::DbPassword)?,
+                    db_password,
                     ssh_password: stored(prompt.ssh_password, SecretKind::SshPassword)?,
                     ssh_key_passphrase: stored(
                         prompt.ssh_key_passphrase,
@@ -1481,6 +1515,56 @@ mod tests {
     fn manager_is_send_and_sync() {
         assert_send_sync::<SessionManager>();
         assert_send_sync::<ConnectionRuntime>();
+    }
+
+    mod missing_password {
+        use super::super::{ask_for_missing_db_password, ConnSecrets, PASSWORD_REQUIRED};
+        use dnt_core::config::{ConnectionConfig, SecretMode};
+        use dnt_core::error::DbError;
+        use dnt_core::test_util::sample_config;
+        use secrecy::SecretString;
+
+        fn auth() -> DbError {
+            DbError::Auth {
+                message: "denied".into(),
+            }
+        }
+
+        fn saved() -> ConnectionConfig {
+            ConnectionConfig {
+                secret_mode: SecretMode::Saved,
+                ..sample_config()
+            }
+        }
+
+        fn is_prompt(e: &DbError) -> bool {
+            matches!(e.unstaged(), DbError::Secret { message } if message == PASSWORD_REQUIRED)
+        }
+
+        #[test]
+        fn saved_without_password_asks_for_it() {
+            let e = ask_for_missing_db_password(auth(), &saved(), &ConnSecrets::default());
+            assert!(is_prompt(&e));
+        }
+
+        #[test]
+        fn a_sent_password_keeps_the_auth_error() {
+            let secrets = ConnSecrets {
+                db_password: Some(SecretString::from("pw")),
+                ..ConnSecrets::default()
+            };
+            let e = ask_for_missing_db_password(auth(), &saved(), &secrets);
+            assert!(matches!(e, DbError::Auth { .. }));
+        }
+
+        #[test]
+        fn other_errors_pass_through() {
+            let other = DbError::Secret {
+                message: "boom".into(),
+            };
+            let e = ask_for_missing_db_password(other, &saved(), &ConnSecrets::default());
+            assert!(!is_prompt(&e));
+        }
     }
 
     mod target {

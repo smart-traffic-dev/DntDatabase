@@ -1,4 +1,5 @@
 pub mod config;
+pub mod conn_string;
 pub mod driver;
 pub mod error;
 pub mod meta;

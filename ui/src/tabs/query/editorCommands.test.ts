@@ -311,7 +311,7 @@ describe('registered actions', () => {
 
   beforeEach(() => runFromEditor.mockClear());
 
-  it('F9_Ctrl_R_and_Ctrl_Shift_R_run_cursor_all_selection', () => {
+  it('F9_Ctrl_R_and_Ctrl_Shift_R_run_cursor_script_selection', () => {
     const actions = register();
     const by = (id: string) => actions.find((a) => a.id === id)!;
     expect(by('dnt.runAtCursor').keybindings).toEqual([monaco.KeyCode.F9]);
@@ -321,7 +321,7 @@ describe('registered actions', () => {
     by('dnt.runAtCursor').run({});
     by('dnt.runAll').run({});
     by('dnt.runSelection').run({});
-    expect(runFromEditor.mock.calls).toEqual([['tab-1', 'cursor'], ['tab-1', 'all'], ['tab-1', 'selection']]);
+    expect(runFromEditor.mock.calls).toEqual([['tab-1', 'cursor'], ['tab-1', 'script'], ['tab-1', 'selection']]);
   });
 
   it('every_action_is_in_the_context_menu_with_a_label', () => {

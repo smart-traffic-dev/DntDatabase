@@ -58,4 +58,5 @@ export const zoomReset = () => useLayout.getState().setFontScale(FONT_SCALE_DEFA
 
 export const openNewConnection = () => useDialogs.getState().requestDialog({ kind: 'newConnection' });
 export const openSettings = () => useDialogs.getState().requestDialog({ kind: 'settings' });
-export const openShortcuts = () => useDialogs.getState().requestDialog({ kind: 'shortcuts' });
+/** F1: the keyboard shortcuts live on a tab of the settings dialog. */
+export const openShortcuts = () => useDialogs.getState().requestDialog({ kind: 'settings', tab: 'shortcuts' });

@@ -226,7 +226,9 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
     focusFocusedGroup();
   };
 
+  const activeTab = tabs.find((t) => t.id === activeId);
   return (
+    <>
     <div
       className={`tabstrip${focused ? '' : ' unfocused'}`}
       onMouseDown={() => !focused && useTabs.getState().focusGroup(groupId)}
@@ -404,8 +406,14 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           </button>
         </span>
       )}
-      <TabStripActions groupId={groupId} tab={tabs.find((t) => t.id === activeId)} />
       {menu && <ActionMenu label="Tabs" checkRole="radio" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </div>
+    {/* The active tab's controls sit on their own row under the tabs, as in Navicat's toolbar. */}
+    {activeTab && (
+      <div className="tabstrip-toolbar">
+        <TabStripActions groupId={groupId} tab={activeTab} />
+      </div>
+    )}
+    </>
   );
 }

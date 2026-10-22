@@ -55,8 +55,11 @@ async function waitGone(id: string, timeout = 15_000) {
 async function openNewConnection() {
   await byId('new-connection').waitForClickable({ timeout: 30_000 });
   await byId('new-connection').click();
-  await byId('conn-name').waitForDisplayed({ timeout: 10_000 });
+  await byId('conn-engine-mysql').waitForDisplayed({ timeout: 10_000 });
 }
+
+/** MariaDB shares the MySQL driver: one engine choice covers both. */
+const engineChoice = (engine: Conn['engine']) => (engine === 'postgres' ? 'postgres' : 'mysql');
 
 interface Conn {
   name: string;
@@ -71,23 +74,27 @@ interface Conn {
   group?: string;
 }
 
+/** Fills the one-page dialog (Advanced opens only for a group). */
 async function fillGeneral(c: Conn) {
-  await byId('conn-name').setValue(c.name);
-  await byId(`conn-engine-${c.engine}`).click();
+  await byId(`conn-engine-${engineChoice(c.engine)}`).click();
   await byId('conn-host').setValue(c.host ?? '127.0.0.1');
   await byId('conn-port').setValue(String(c.port));
   await byId('conn-user').setValue(c.user);
   if (c.password !== undefined) await byId('conn-password').setValue(c.password);
-  if (c.env) await byId(`conn-env-${c.env}`).click();
-  if (c.group) await $('#cd-group').selectByVisibleText(c.group);
-  if (c.readOnly) await $("//label[contains(.,'Read-only connection')]/input").click();
   if (c.savePassword === false) await $("//label[contains(.,'Save password')]/input").click();
+  await byId('conn-name').setValue(c.name);
+  if (c.env) await byId(`conn-env-${c.env}`).click();
+  if (c.group) {
+    await byId('conn-section-advanced').click();
+    await $('#cd-group').selectByVisibleText(c.group);
+  }
+  if (c.readOnly) await byId('conn-read-only').click();
 }
 
 async function createConnection(c: Conn) {
   await openNewConnection();
   await fillGeneral(c);
-  await byId('conn-save').click();
+  await byId('conn-save').click(); // Save
   await byId('conn-name').waitForDisplayed({ reverse: true, timeout: 15_000 });
 }
 
@@ -220,20 +227,22 @@ describe(`UX audit tour (${P})`, () => {
     // ---- connection dialog ----
     await step('conn-dialog', async () => {
       await openNewConnection();
-      await shot('conn-general-empty');
+      await shot('conn-dialog-empty');
       if (THEME === 'light' && SIZE === 'default') {
         note(`conn dialog tab order: ${(await tabOrder(22)).join(' > ')}`);
       }
-      await byId('conn-save').click();
-      await browser.pause(800);
-      await shot('conn-save-empty-field-error');
-      await fillGeneral({ name: 'shop-prod', engine: 'mysql', port: 33080, user: 'root', password: 'dnt_test', env: 'production' });
-      await shot('conn-general-prod');
-      for (const t of ['ssh', 'ssl', 'advanced']) {
-        await $(`#cd-tab-${t}`).click();
-        await shot(`conn-tab-${t}`);
-      }
-      await $('#cd-tab-general').click();
+      await byId('conn-engine-mysql').click();
+      await byId('conn-host').setValue('127.0.0.1');
+      await byId('conn-port').setValue('33080');
+      await byId('conn-user').setValue('root');
+      await byId('conn-password').setValue('dnt_test');
+      await shot('conn-dialog-server');
+      await byId('conn-section-ssh').click();
+      await shot('conn-section-ssh');
+      await byId('conn-section-ssh').click();
+      await byId('conn-name').setValue('shop-prod');
+      await byId('conn-env-production').click();
+      await shot('conn-dialog-filled');
       await byId('conn-test').click();
       await byId('test-result').waitForDisplayed({ timeout: 30_000 });
       await shot('conn-test-ok');
@@ -297,8 +306,8 @@ describe(`UX audit tour (${P})`, () => {
     await step('ssh-hostkey', async () => {
       await openNewConnection();
       await fillGeneral({ name: 'via-ssh', engine: 'mysql', host: 'mysql8', port: 3306, user: 'root', password: 'dnt_test' });
-      await $('#cd-tab-ssh').click();
-      await $("//label[contains(.,'SSH tunnel')]/input").click();
+      await byId('conn-section-ssh').click();
+      await $("//label[contains(.,'Connect through an SSH tunnel')]/input").click();
       await $('#cd-ssh-host').setValue('127.0.0.1');
       await $('#cd-ssh-port').setValue('2222');
       await $('#cd-ssh-user').setValue('dnt');
@@ -312,7 +321,7 @@ describe(`UX audit tour (${P})`, () => {
       await byId('test-result').waitForDisplayed({ timeout: 30_000 });
       await browser.pause(1500);
       await shot('ssh-test-ok');
-      await byId('conn-save').click();
+      await byId('conn-save').click(); // Save
       await byId('conn-name').waitForDisplayed({ reverse: true, timeout: 15_000 });
     });
 

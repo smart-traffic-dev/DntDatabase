@@ -315,10 +315,11 @@ const bindings: Binding[] = [
   },
   {
     id: 'dnt.runAll',
-    label: 'Run All',
+    label: 'Run',
     keys: (m) => [m.KeyMod.CtrlCmd | m.KeyCode.KeyR],
     order: 2,
-    run: (_e, tabId) => void runFromEditor(tabId, 'all'),
+    // Navicat's Run: the selection if there is one, else every statement.
+    run: (_e, tabId) => void runFromEditor(tabId, 'script'),
   },
   {
     id: 'dnt.runSelection',

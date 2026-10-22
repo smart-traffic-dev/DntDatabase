@@ -24,7 +24,6 @@ describe('DntDatabase PostgreSQL 17', () => {
     await byId('new-connection').waitForClickable({ timeout: 30_000 });
     await byId('new-connection').click();
 
-    await byId('conn-name').setValue('e2e-pg17');
     await byId('conn-engine-postgres').click();
     await byId('conn-host').setValue('127.0.0.1');
     await byId('conn-port').setValue('54317');
@@ -38,7 +37,8 @@ describe('DntDatabase PostgreSQL 17', () => {
     await expect(result).toHaveText(expect.stringContaining('Connected'));
     await evidence('pg-02-test-connected');
 
-    await byId('conn-save').click();
+    await byId('conn-name').setValue('e2e-pg17');
+    await byId('conn-save').click(); // Save
 
     await expandRow('e2e-pg17');
     await expandRow('dnt_fixture');

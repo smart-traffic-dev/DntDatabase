@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { api, toAppError } from '../api';
-import type { LogLevel } from '../bindings';
+import { commands, type LogLevel } from '../bindings';
+import { toggleResults, toggleRightSidebar, zoomIn, zoomOut, zoomReset } from '../components/windowActions';
 import {
   DEFAULT_IDLE_TX_WARN_MINUTES,
   DEFAULT_TABLE_PAGE_SIZE,
@@ -12,8 +13,12 @@ import {
   isValidPageSize,
   useAppSettings,
 } from '../store/appSettings';
+import { FONT_SCALE_DEFAULT, FONT_SCALE_MAX, FONT_SCALE_MIN, resultsOf, useLayout } from '../store/layout';
+import type { LayoutPreset } from '../store/layoutTree';
+import { useTabs } from '../store/tabs';
 import { useTheme, type Density, type Theme } from '../theme/ThemeProvider';
 import { Modal } from './Modal';
+import { SHORTCUTS } from './shortcutsList';
 
 const THEMES: { id: Theme; label: string }[] = [
   { id: 'light', label: 'Light' },
@@ -236,9 +241,132 @@ function UnboundedWritesField() {
   );
 }
 
-/** App settings: appearance (local), debug logging, the table page size and the unbounded-write confirmation (stored in app.db). */
-export function SettingsDialog({ onClose }: { onClose(): void }) {
+/** A row of radio chips (theme, density, editor layout). */
+function ChoiceGroup<T extends string>({
+  label,
+  options,
+  value,
+  onChange,
+  columns = 3,
+}: {
+  label: string;
+  options: { id: T; label: string }[];
+  value: T;
+  onChange(value: T): void;
+  columns?: number;
+}) {
+  return (
+    <div className="field">
+      <span className="field-label">{label}</span>
+      <div className="theme-options" role="radiogroup" aria-label={label} style={{ gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+        {options.map((o) => (
+          <button key={o.id} type="button" role="radio" aria-checked={value === o.id} className="theme-option" onClick={() => onChange(o.id)}>
+            {o.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Code font size: the same scale as Ctrl+= / Ctrl+- / Ctrl+0. */
+function FontScaleField() {
+  const scale = useLayout((s) => s.fontScale);
+  const percent = Math.round(scale * 100);
+  return (
+    <div className="field">
+      <span className="field-label" id="settings-font-scale-label">
+        Code font size
+      </span>
+      <div className="settings-stepper" role="group" aria-labelledby="settings-font-scale-label">
+        <button type="button" className="btn" aria-label="Smaller" title="Smaller (Ctrl+-)" disabled={scale <= FONT_SCALE_MIN} onClick={zoomOut}>
+          −
+        </button>
+        <output className="settings-stepper-value" aria-live="polite">
+          {percent}%
+        </output>
+        <button type="button" className="btn" aria-label="Bigger" title="Bigger (Ctrl+=)" disabled={scale >= FONT_SCALE_MAX} onClick={zoomIn}>
+          +
+        </button>
+        <button type="button" className="btn" disabled={scale === FONT_SCALE_DEFAULT} onClick={zoomReset}>
+          Reset
+        </button>
+      </div>
+      <p className="hint">Editor and result grid text. Ctrl+= / Ctrl+- / Ctrl+0 do the same.</p>
+    </div>
+  );
+}
+
+function AppearancePanel() {
   const { theme, setTheme, density, setDensity } = useTheme();
+  return (
+    <>
+      <ChoiceGroup label="Theme" options={THEMES} value={theme} onChange={setTheme} />
+      <ChoiceGroup label="Density" options={DENSITIES} value={density} onChange={setDensity} columns={2} />
+      <FontScaleField />
+    </>
+  );
+}
+
+const LAYOUTS: { id: LayoutPreset; label: string }[] = [
+  { id: 'single', label: 'Single' },
+  { id: 'columns', label: 'Two columns' },
+  { id: 'rows', label: 'Two rows' },
+  { id: 'grid', label: 'Grid 2 × 2' },
+];
+
+function LayoutPanel() {
+  const layout = useTabs((s) => s.layout);
+  const sidebarVisible = useLayout((s) => s.sidebarVisible);
+  const rightVisible = useLayout((s) => s.rightVisible);
+  const focusedGroup = useTabs((s) => s.focusedGroupId);
+  const resultsVisible = useLayout((s) => resultsOf(s, focusedGroup).visible);
+  return (
+    <>
+      <ChoiceGroup
+        label="Editor layout"
+        options={LAYOUTS}
+        // A custom split (dragged or split by hand) matches no preset: none is checked.
+        value={layout as LayoutPreset}
+        onChange={(l) => useTabs.getState().setLayout(l)}
+        columns={4}
+      />
+      <p className="hint">Ctrl+K 1 … 4 switch layouts from the keyboard.</p>
+      <label className="check">
+        <input type="checkbox" checked={sidebarVisible} onChange={() => useLayout.getState().toggleSidebar()} />
+        <span>Show sidebar (Ctrl+B)</span>
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={rightVisible} onChange={toggleRightSidebar} />
+        <span>Show right sidebar (Ctrl+Alt+B)</span>
+      </label>
+      <label className="check">
+        <input type="checkbox" checked={resultsVisible} onChange={toggleResults} />
+        <span>Show results of the focused group (Ctrl+J)</span>
+      </label>
+      <div className="field">
+        <div>
+          <button type="button" className="btn" onClick={() => useLayout.getState().reset()}>
+            Reset layout
+          </button>
+        </div>
+        <p className="hint">Restores the default sidebar width and editor / result split.</p>
+      </div>
+    </>
+  );
+}
+
+function QueryDataPanel() {
+  return (
+    <>
+      <PageSizeField />
+      <UnboundedWritesField />
+      <IdleTxField />
+    </>
+  );
+}
+
+function AdvancedPanel() {
   const [level, setLevel] = useState<LogLevel | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -272,61 +400,128 @@ export function SettingsDialog({ onClose }: { onClose(): void }) {
     }
   };
 
+  const openLogs = async () => {
+    setError(null);
+    try {
+      await api.openLogFolder();
+    } catch (e) {
+      setError(toAppError(e).message);
+    }
+  };
+
   return (
-    <Modal title="Settings" onClose={onClose} className="narrow">
-      <div className="modal-body stack">
-        <div className="field">
-          <span className="field-label">Appearance</span>
-          <div className="theme-options" role="radiogroup" aria-label="Appearance">
-            {THEMES.map((t) => (
-              <button
-                key={t.id}
-                type="button"
-                role="radio"
-                aria-checked={theme === t.id}
-                className="theme-option"
-                onClick={() => setTheme(t.id)}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="field">
-          <span className="field-label">Density</span>
-          <div className="theme-options" role="radiogroup" aria-label="Density">
-            {DENSITIES.map((d) => (
-              <button
-                key={d.id}
-                type="button"
-                role="radio"
-                aria-checked={density === d.id}
-                className="theme-option"
-                onClick={() => setDensity(d.id)}
-              >
-                {d.label}
-              </button>
-            ))}
-          </div>
-        </div>
+    <>
+      <div className="field">
         <label className="check">
           <input
             type="checkbox"
             checked={level === 'Debug'}
             disabled={level === null || busy}
+            aria-describedby="settings-debug-hint"
             onChange={(e) => void toggle(e.target.checked)}
           />
           <span>Debug logging</span>
         </label>
-        <p className="hint">Writes more detail to the log files. Passwords are never logged.</p>
-        <PageSizeField />
-        <UnboundedWritesField />
-        <IdleTxField />
-        {error && (
-          <p role="alert" className="field-error">
-            {error}
-          </p>
-        )}
+        <p id="settings-debug-hint" className="hint">
+          Writes more detail to the log files. Passwords are never logged.
+        </p>
+      </div>
+      <div className="field settings-actions">
+        <button type="button" className="btn" onClick={() => void openLogs()}>
+          Open log folder
+        </button>
+        <button type="button" className="btn" onClick={() => void commands.openDevtools().catch(() => {})}>
+          Developer tools
+        </button>
+      </div>
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
+function ShortcutsPanel() {
+  return (
+    <>
+      {SHORTCUTS.map((g) => (
+        <section key={g.group} className="settings-section">
+          <h3 className="field-label">{g.group}</h3>
+          <dl className="kv">
+            {g.items.map(([action, keys]) => (
+              <div key={action} style={{ display: 'contents' }}>
+                <dt>{action}</dt>
+                <dd>
+                  <kbd className="mono">{keys}</kbd>
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+      ))}
+    </>
+  );
+}
+
+export type SettingsTab = 'appearance' | 'layout' | 'queryData' | 'advanced' | 'shortcuts';
+
+const TABS: { id: SettingsTab; label: string; render(): ReactNode }[] = [
+  { id: 'appearance', label: 'Appearance', render: () => <AppearancePanel /> },
+  { id: 'layout', label: 'Layout', render: () => <LayoutPanel /> },
+  { id: 'queryData', label: 'Query & data', render: () => <QueryDataPanel /> },
+  { id: 'advanced', label: 'Advanced', render: () => <AdvancedPanel /> },
+  { id: 'shortcuts', label: 'Keyboard shortcuts', render: () => <ShortcutsPanel /> },
+];
+
+/**
+ * Every app setting in one place, one tab per area: Appearance (theme, density, code font),
+ * Layout (editor layout, panels), Query & data (stored in app.db), Advanced (logging, tools)
+ * and the keyboard shortcuts reference. Each change applies at once; Close just closes.
+ */
+export function SettingsDialog({ onClose, initialTab = 'appearance' }: { onClose(): void; initialTab?: SettingsTab }) {
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
+  const current = TABS.find((t) => t.id === tab) ?? TABS[0]!;
+
+  const onTabKey = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const index = TABS.findIndex((t) => t.id === tab);
+    let next: number | null = null;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight') next = (index + 1) % TABS.length;
+    else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') next = (index - 1 + TABS.length) % TABS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = TABS.length - 1;
+    const target = next === null ? undefined : TABS[next];
+    if (!target) return;
+    e.preventDefault();
+    setTab(target.id);
+    document.getElementById(`settings-tab-${target.id}`)?.focus();
+  };
+
+  return (
+    <Modal title="Settings" onClose={onClose} className="wide settings-dialog" initialFocus={`#settings-tab-${initialTab}`} testId="settings-dialog">
+      <div className="conn-body settings-body">
+        <div role="tablist" aria-label="Settings sections" aria-orientation="vertical" className="conn-nav">
+          {TABS.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              id={`settings-tab-${t.id}`}
+              aria-selected={tab === t.id}
+              aria-controls="settings-panel"
+              tabIndex={tab === t.id ? 0 : -1}
+              className={`conn-nav-item${tab === t.id ? ' on' : ''}`}
+              onClick={() => setTab(t.id)}
+              onKeyDown={onTabKey}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div role="tabpanel" id="settings-panel" aria-labelledby={`settings-tab-${tab}`} className="conn-main panel stack" key={tab}>
+          {current.render()}
+        </div>
       </div>
       <footer className="modal-foot">
         <span className="spacer" />

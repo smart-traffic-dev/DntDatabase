@@ -5,6 +5,7 @@
 import { commands, type CompletionObject, type Result } from '../bindings';
 import type { CompletionScope } from '../query/completion/provider';
 import type { Engine } from '../query/engine';
+import { useConnections } from './connections';
 
 /** How long a failed fetch is remembered before the next completion tries again. */
 const FAILURE_TTL_MS = 10_000;
@@ -140,6 +141,22 @@ export const useCompletion = {
 export function forgetCompletionConnection(connectionId: string): void {
   invalidateCompletion(connectionId);
 }
+
+/**
+ * Drops the failed loads of a connection (kept for `FAILURE_TTL_MS`), e.g. the `not_open`
+ * of a restored tab's scope, so the next completion loads again. Loaded entries stay.
+ */
+function dropFailures(connectionId: string): void {
+  for (const [k, e] of entries) {
+    if (k.split('\u0000')[1] === connectionId && e.expires !== undefined) entries.delete(k);
+  }
+}
+
+// A connection that opens (tree, Reconnect, a run, autocomplete itself): what failed while it
+// was closed loads again instead of waiting out the failure window.
+useConnections.subscribe((s, prev) => {
+  for (const id of s.info.keys()) if (!prev.info.has(id)) dropFailures(id);
+});
 
 /**
  * Called after a DDL statement ran without error in a tab (spec §7.3), or when a connection

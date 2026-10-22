@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  appError,
   backendError,
   callsOf,
   config,
@@ -13,9 +14,26 @@ import {
 } from '../test/backend';
 const sheet = import.meta.glob('./dialogs.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const css = Object.values(sheet)[0] ?? '';
-import { ConnectionDialog, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds } from './ConnectionDialog';
+import { ConnectionDialog, formProblem, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds, withEngine } from './ConnectionDialog';
 
 beforeEach(resetStores);
+
+type User = ReturnType<typeof userEvent.setup>;
+type FoldName = 'ssh' | 'ssl' | 'advanced';
+
+const foldRow = (fold: FoldName) => screen.getByTestId(`conn-section-${fold}`);
+
+/** Opens a folded row (SSH tunnel, SSL / TLS, Advanced); its fields show right under it. */
+async function openFold(user: User, fold: FoldName) {
+  if (foldRow(fold).getAttribute('aria-expanded') !== 'true') await user.click(foldRow(fold));
+  expect(foldRow(fold)).toHaveAttribute('aria-expanded', 'true');
+}
+
+/** Picks the engine card. */
+const chooseEngine = (user: User, engine: 'mysql' | 'postgres') => user.click(screen.getByTestId(`conn-engine-${engine}`));
+
+/** Shows the connection URL field under Name / Engine. */
+const openUrl = (user: User) => user.click(screen.getByTestId('conn-url-toggle'));
 
 const okResult = {
   info: { ...serverInfo('MySql8'), version_string: '8.0.36' },
@@ -26,75 +44,189 @@ const okResult = {
 };
 
 describe('ConnectionDialog', () => {
-  it('switching_engine_updates_default_port', async () => {
+  it('a new connection starts with local defaults; switching engine swaps the untouched ones', async () => {
     mockBackend({});
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    const port = screen.getByTestId('conn-port');
-    expect(port).toHaveValue(3306);
-    expect(screen.getByText('Default for MySQL')).toBeInTheDocument();
-    await user.click(screen.getByTestId('conn-engine-postgres'));
-    expect(port).toHaveValue(5432);
-    expect(screen.getByText('Default for PostgreSQL')).toBeInTheDocument();
-    await user.click(screen.getByLabelText('MariaDB'));
-    expect(port).toHaveValue(3306);
-    // The selected radio is the only indicator: no duplicate chip.
-    expect(screen.queryByText('MariaDB', { selector: '.chip' })).not.toBeInTheDocument();
-    // An edited port is kept, and the note names the default it differs from.
-    await user.clear(port);
-    await user.type(port, '3307');
-    await user.click(screen.getByTestId('conn-engine-postgres'));
-    expect(port).toHaveValue(3307);
-    expect(screen.getByText('PostgreSQL default: 5432')).toBeInTheDocument();
+    const port = () => screen.getByTestId('conn-port');
+    const login = () => screen.getByTestId('conn-user');
+    expect(screen.getByTestId('conn-host')).toHaveValue('localhost');
+    expect(port()).toHaveValue(3306);
+    expect(login()).toHaveValue('root');
+    // At its default, the port needs no note.
+    expect(screen.queryByText(/^Default:/)).toBeNull();
+
+    await chooseEngine(user, 'postgres');
+    expect(port()).toHaveValue(5432);
+    expect(login()).toHaveValue('postgres');
+
+    // An edited port and user are kept, and a short note names the default the port differs from.
+    await chooseEngine(user, 'mysql');
+    expect(port()).toHaveValue(3306);
+    await user.clear(port());
+    await user.type(port(), '3307');
+    await user.clear(login());
+    await user.type(login(), 'app');
+    await chooseEngine(user, 'postgres');
+    expect(port()).toHaveValue(3307);
+    expect(login()).toHaveValue('app');
+    expect(screen.getByText('Default: 5432')).toHaveAttribute('title', 'PostgreSQL default: 5432');
   });
 
-  it('engine is the first field of General, each option with its badge', () => {
+  it('withEngine swaps only the values still at the old default', () => {
+    const f = { engine: 'mysql' as const, port: '3306', portTouched: false, username: 'root' };
+    expect(withEngine(f, 'postgres')).toMatchObject({ engine: 'postgres', port: '5432', username: 'postgres' });
+    expect(withEngine({ ...f, port: '3307', portTouched: true, username: 'app' }, 'postgres')).toMatchObject({ port: '3307', username: 'app' });
+    // A cleared port or user takes the new engine's default.
+    expect(withEngine({ ...f, port: '', portTouched: true, username: '' }, 'postgres')).toMatchObject({ port: '5432', username: 'postgres' });
+    expect(withEngine(f, 'mysql')).toBe(f);
+  });
+
+  it('one page: Engine cards first with their marks, then Name; a new connection starts on Engine', () => {
     mockBackend({});
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    const panel = screen.getByRole('tabpanel');
-    const engine = screen.getByRole('radiogroup', { name: 'Engine' });
-    expect(panel.querySelector('.field')).toBe(engine.closest('.field'));
-    for (const [id, badge] of [
-      ['conn-engine-mysql', 'My'],
-      ['conn-engine-mariadb', 'Ma'],
-      ['conn-engine-postgres', 'Pg'],
-    ] as const) {
-      const option = screen.getByTestId(id).closest('label')!;
-      expect(option.querySelector('.engine-badge')).toHaveTextContent(badge);
+    // No rail and no steps: every main field is on the page.
+    expect(screen.queryByRole('tablist')).toBeNull();
+    for (const id of ['conn-name', 'conn-host', 'conn-port', 'conn-user', 'conn-password']) {
+      expect(screen.getByTestId(id)).toBeVisible();
     }
+    const engine = screen.getByRole('radiogroup', { name: 'Engine' });
+    expect(within(engine).getAllByRole('radio')).toHaveLength(2);
+    // MySQL and MariaDB share one driver, so one card carries both marks, visible beside the name.
+    const mysql = screen.getByTestId('conn-engine-mysql').closest('label')!;
+    expect(mysql).toHaveTextContent('MySQL / MariaDBPort 3306');
+    expect(mysql.querySelectorAll('.engine-logo svg path')).toHaveLength(2);
+    expect(screen.getByTestId('conn-engine-postgres').closest('label')).toHaveTextContent('PostgreSQLPort 5432');
     expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
+    // The engine comes before the name in the page order.
+    expect(engine.compareDocumentPosition(screen.getByTestId('conn-name')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByTestId('conn-engine-mysql')).toHaveFocus();
   });
 
-  it('the section nav is vertical and shows a state hint on each section', async () => {
+  it('folded rows show their state, open in place, and Save is always there', async () => {
     mockBackend({});
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    const nav = screen.getByRole('tablist', { name: 'Connection settings' });
-    expect(nav).toHaveAttribute('aria-orientation', 'vertical');
-    const tab = (name: string) => screen.getByRole('tab', { name });
-    expect(tab('General')).toHaveAccessibleDescription('MySQL');
-    expect(tab('SSH tunnel')).toHaveAccessibleDescription('Off');
-    expect(tab('SSL / TLS')).toHaveAccessibleDescription('Prefer');
-    expect(tab('Advanced')).toHaveAccessibleDescription('Defaults');
-    await user.click(screen.getByTestId('conn-engine-postgres'));
-    expect(tab('General')).toHaveAccessibleDescription('PostgreSQL');
-    await user.click(tab('SSH tunnel'));
+    for (const f of ['ssh', 'ssl', 'advanced'] as const) expect(foldRow(f)).toHaveAttribute('aria-expanded', 'false');
+    expect(foldRow('ssh')).toHaveTextContent('SSH tunnelOff');
+    expect(foldRow('ssl')).toHaveTextContent('SSL / TLSPrefer');
+    expect(foldRow('advanced')).toHaveTextContent('AdvancedNo group · Connect 10 s · Query off');
+    expect(screen.getByTestId('conn-save')).toHaveTextContent('Save');
+
+    await openFold(user, 'ssh');
     await user.click(screen.getByLabelText('Connect through an SSH tunnel'));
-    expect(tab('SSH tunnel')).toHaveAccessibleDescription('On');
-    await user.click(tab('SSL / TLS'));
-    await user.selectOptions(screen.getByLabelText('SSL mode'), 'require');
-    expect(tab('SSL / TLS')).toHaveAccessibleDescription('Require');
-    await user.click(tab('Advanced'));
+    expect(foldRow('ssh')).toHaveTextContent('On');
+    await user.type(screen.getByLabelText('SSH host'), 'bastion');
+    await user.type(screen.getByLabelText('SSH user'), 'ops');
+    expect(foldRow('ssh')).toHaveTextContent('ops@bastion:22');
+    await openFold(user, 'ssl');
+    await user.click(screen.getByTestId('conn-ssl-require'));
+    expect(foldRow('ssl')).toHaveTextContent('Require');
+    // A second click folds the row again.
+    await user.click(foldRow('ssh'));
+    expect(foldRow('ssh')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByLabelText('SSH host')).toBeNull();
+  });
+
+  it('Edit opens with the host focused and the name on the page', () => {
+    const stored = config(ids.prod, 'shop');
+    mockBackend({});
+    render(<ConnectionDialog mode="edit" initial={stored.config} onClose={vi.fn()} />);
+    expect(screen.getByTestId('conn-host')).toHaveFocus();
+    expect(screen.getByTestId('conn-name')).toHaveValue(stored.config.name);
+  });
+
+  it('a quick local connection saves straight from Connection', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await user.type(screen.getByTestId('conn-password'), 'pw');
+    // Enter in a field submits the form: that is Save.
+    await user.keyboard('{Enter}');
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: { kind: 'mysql', host: 'localhost', port: 3306, name: 'localhost' },
+      secrets: { db_password: 'pw' },
+    });
+  });
+
+  it('an out-of-range port is refused before anything is sent', async () => {
+    mockBackend({ create_connection: (a) => a.cfg, test_connection: () => okResult });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.type(screen.getByTestId('conn-port'), '70000');
+    await user.click(screen.getByTestId('conn-save'));
+    // Save goes back to the field holding the problem.
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter a port from 1 to 65535.');
+    await waitFor(() => expect(screen.getByTestId('conn-port')).toHaveFocus());
+    await user.click(screen.getByTestId('conn-test'));
+    expect(callsOf('create_connection')).toHaveLength(0);
+    expect(callsOf('test_connection')).toHaveLength(0);
+  });
+
+  it('formProblem checks ports and timeouts in form order', () => {
+    const ok = { port: '', sshOn: false, sshPort: '22', connectTimeout: '10', sshTimeout: '10' };
+    expect(formProblem(ok)).toBeNull();
+    expect(formProblem({ ...ok, port: '5432' })).toBeNull();
+    for (const port of ['0', '-1', '65536', '3306.5', '1e9']) {
+      expect(formProblem({ ...ok, port })).toMatchObject({ field: 'port' });
+    }
+    // The SSH port only counts while the tunnel is on.
+    expect(formProblem({ ...ok, sshPort: '0' })).toBeNull();
+    expect(formProblem({ ...ok, sshOn: true, sshPort: '0' })).toMatchObject({ field: 'ssh.port' });
+    expect(formProblem({ ...ok, connectTimeout: '0' })).toMatchObject({ field: 'options.connect_timeout_s' });
+    expect(formProblem({ ...ok, port: '0', connectTimeout: '0' })).toMatchObject({ field: 'port' });
+  });
+
+  it('a bad timeout opens Advanced again, marks the row and points at the field', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await openFold(user, 'advanced');
     await user.clear(screen.getByLabelText('Connect timeout (s)'));
-    await user.type(screen.getByLabelText('Connect timeout (s)'), '30');
-    expect(tab('Advanced')).toHaveAccessibleDescription('Custom');
-    // ArrowDown / ArrowUp move between sections.
-    tab('Advanced').focus();
-    await user.keyboard('{ArrowDown}');
-    expect(tab('General')).toHaveFocus();
-    expect(tab('General')).toHaveAttribute('aria-selected', 'true');
-    await user.keyboard('{ArrowUp}');
-    expect(tab('Advanced')).toHaveFocus();
+    await user.type(screen.getByLabelText('Connect timeout (s)'), '0');
+    await user.click(foldRow('advanced'));
+    expect(foldRow('advanced')).toHaveAttribute('aria-expanded', 'false');
+    await user.click(screen.getByTestId('conn-save'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Enter whole seconds from 1 to 86400.');
+    expect(foldRow('advanced')).toHaveAttribute('aria-expanded', 'true');
+    expect(foldRow('advanced')).toHaveTextContent('AdvancedError');
+    await waitFor(() => expect(screen.getByLabelText('Connect timeout (s)')).toHaveFocus());
+    expect(callsOf('create_connection')).toHaveLength(0);
+  });
+
+  it('SSH fields appear only with the tunnel on; certificate files only when they matter', async () => {
+    mockBackend({});
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await openFold(user, 'ssh');
+    expect(screen.queryByLabelText('SSH host')).toBeNull();
+    await user.click(screen.getByLabelText('Connect through an SSH tunnel'));
+    expect(screen.getByLabelText('SSH host')).toBeEnabled();
+
+    await openFold(user, 'ssl');
+    expect(screen.queryByLabelText('CA certificate')).toBeNull();
+    await user.click(screen.getByTestId('conn-ssl-require'));
+    expect(screen.queryByLabelText('CA certificate')).toBeNull();
+    await user.click(screen.getByTestId('conn-ssl-verify_ca'));
+    expect(screen.getByLabelText('CA certificate')).toBeInTheDocument();
+    expect(screen.getByLabelText('Client key')).toBeInTheDocument();
+  });
+
+  it('a stored certificate stays visible under Require', async () => {
+    const stored = config(ids.prod, 'shop').config;
+    mockBackend({});
+    const user = userEvent.setup();
+    render(
+      <ConnectionDialog
+        mode="edit"
+        initial={{ ...stored, ssl: { version: 1, mode: 'require', ca_path: null, cert_path: 'c.pem', key_path: 'k.pem' } }}
+        onClose={vi.fn()}
+      />,
+    );
+    await openFold(user, 'ssl');
+    expect(screen.getByLabelText('Client certificate')).toHaveValue('c.pem');
   });
 
   it('environment is a radio chip group; Production explains what it changes and is saved', async () => {
@@ -102,6 +234,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await user.type(screen.getByTestId('conn-host'), 'h');
     const group = screen.getByRole('radiogroup', { name: 'Environment' });
     expect(within(group).getAllByRole('radio').map((r) => r.closest('label')?.textContent)).toEqual([
       'None',
@@ -111,11 +244,12 @@ describe('ConnectionDialog', () => {
     ]);
     expect(screen.getByTestId('conn-env-none')).toBeChecked();
     expect(screen.queryByTestId('env-chip')).toBeNull();
-    expect(group).toHaveAccessibleDescription(/Production asks before running statements that change data/);
+    // The explanation only shows once it applies.
+    expect(group).not.toHaveAttribute('aria-describedby');
     await user.click(screen.getByTestId('conn-env-production'));
+    expect(group).toHaveAccessibleDescription(/Asks before statements that change data or structure/);
     expect(screen.getByTestId('env-chip')).toHaveTextContent('Production');
     await user.type(screen.getByTestId('conn-name'), 'p');
-    await user.type(screen.getByTestId('conn-host'), 'h');
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { env_tag: 'production' } });
@@ -138,7 +272,7 @@ describe('ConnectionDialog', () => {
     expect(screen.queryByTestId('test-result')).toBeNull();
   });
 
-  it('field_error_focuses_tab', async () => {
+  it('field_error_focuses_step', async () => {
     mockBackend({
       create_connection: () => {
         throw fail('field_ssh_key_path');
@@ -146,14 +280,14 @@ describe('ConnectionDialog', () => {
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    await user.click(screen.getByRole('tab', { name: 'SSH tunnel' }));
+    await openFold(user, 'ssh');
     await user.click(screen.getByLabelText('Connect through an SSH tunnel'));
-    await user.click(screen.getByRole('tab', { name: 'General' }));
+    await user.click(foldRow('ssh'));
     await user.type(screen.getByTestId('conn-name'), 'x');
     await user.click(screen.getByTestId('conn-save'));
-    const ssh = await screen.findByRole('tab', { name: 'SSH tunnel', selected: true });
-    // The section holding the error says so in its hint.
-    expect(ssh).toHaveAccessibleDescription('Error');
+    // The row holding the error opens again and says so instead of its state.
+    await waitFor(() => expect(foldRow('ssh')).toHaveAttribute('aria-expanded', 'true'));
+    expect(foldRow('ssh')).toHaveTextContent('SSH tunnelError');
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('SSH key authentication requires a private key file.');
     expect(screen.getByLabelText('Key file')).toHaveAttribute('aria-invalid', 'true');
@@ -177,7 +311,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     await user.click(screen.getByTestId('conn-test'));
-    expect(await screen.findByRole('tab', { name: 'SSL / TLS', selected: true })).toBeInTheDocument();
+    await waitFor(() => expect(foldRow('ssl')).toHaveAttribute('aria-expanded', 'true'));
     expect(await screen.findByRole('alert')).toHaveTextContent('Cannot read the client key file');
     expect(screen.getByLabelText('Client key')).toHaveAttribute('aria-invalid', 'true');
   });
@@ -325,19 +459,22 @@ describe('ConnectionDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('the test result sits on the footer left; the body sizes to its content within a max height', async () => {
+  it('the test result sits on the footer left; a long page scrolls inside the frame', async () => {
     mockBackend({ test_connection: () => okResult });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     const foot = screen.getByRole('dialog').querySelector('.modal-foot') as HTMLElement;
     const slot = foot.querySelector('.test-slot');
     expect(slot).not.toBeNull();
-    // Test and its result first, then Cancel and Save on the right.
+    // Test and its result first, then Cancel and Save on the right; no Back / Next.
     expect(foot.firstElementChild).toContainElement(screen.getByTestId('conn-test'));
     expect(foot.lastElementChild).toBe(screen.getByTestId('conn-save'));
-    const body = /\.conn-body\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
-    expect(body).toMatch(/max-height:/);
-    expect(body).not.toMatch(/(^|[;\s])height:/);
+    expect(screen.getByTestId('conn-save')).toHaveTextContent('Save');
+    expect(screen.queryByTestId('conn-back')).toBeNull();
+    // Open folds can make the page long: it scrolls between the fixed header and footer.
+    const page = /\.conn-page\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(page).toMatch(/overflow:\s*auto/);
+    expect(screen.getByTestId('conn-panel')).toHaveClass('conn-page');
     await user.click(screen.getByTestId('conn-test'));
     const result = await screen.findByTestId('test-result');
     expect(slot).toContainElement(result);
@@ -371,6 +508,7 @@ describe('ConnectionDialog', () => {
     render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
     expect(screen.getByTestId('conn-password')).toHaveAttribute('placeholder', '••••••••');
     expect(screen.getByTestId('env-chip')).toHaveTextContent('Production');
+    expect(screen.getByTestId('conn-save')).toHaveTextContent('Save');
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     const call = callsOf('update_connection')[0];
@@ -395,10 +533,12 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="create" onClose={onClose} />);
-    await user.type(screen.getByTestId('conn-name'), 'local');
+    await user.clear(screen.getByTestId('conn-host'));
     await user.type(screen.getByTestId('conn-host'), '127.0.0.1');
+    await user.clear(screen.getByTestId('conn-user'));
     await user.type(screen.getByTestId('conn-user'), 'root');
     await user.type(screen.getByTestId('conn-password'), 'secret');
+    await user.type(screen.getByTestId('conn-name'), 'local');
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(callsOf('create_connection')[0]).toMatchObject({
@@ -422,7 +562,7 @@ describe('ConnectionDialog', () => {
     const stored = config(ids.prod, 'shop', { read_only: true });
     const onClose = vi.fn();
     const { unmount } = render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
-    const box = screen.getByLabelText('Read-only connection');
+    const box = screen.getByTestId('conn-read-only');
     expect(box).toBeChecked();
     await user.click(box);
     await user.click(screen.getByTestId('conn-save'));
@@ -431,25 +571,28 @@ describe('ConnectionDialog', () => {
     unmount();
 
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    expect(screen.getByLabelText('Read-only connection')).not.toBeChecked();
-    await user.type(screen.getByTestId('conn-name'), 'ro');
     await user.type(screen.getByTestId('conn-host'), 'h');
-    await user.click(screen.getByLabelText('Read-only connection'));
+    expect(screen.getByTestId('conn-read-only')).not.toBeChecked();
+    await user.type(screen.getByTestId('conn-name'), 'ro');
+    await user.click(screen.getByTestId('conn-read-only'));
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
     expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { read_only: true } });
   });
 
-  it('labels_are_associated', () => {
+  it('labels_are_associated', async () => {
     mockBackend({});
+    const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    for (const label of ['Name', 'Group', 'Host', 'Port', 'User', 'Password', 'Default database']) {
+    expect(screen.getByRole('radiogroup', { name: 'Engine' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
+    for (const label of ['Name', 'Host', 'Port', 'User', 'Password', 'Database', 'Save password']) {
       expect(screen.getByLabelText(label)).toBeInTheDocument();
     }
-    expect(screen.getByRole('radiogroup', { name: 'Engine' })).toBeInTheDocument();
     expect(screen.getByRole('radiogroup', { name: 'Environment' })).toBeInTheDocument();
-    expect(screen.getByRole('dialog')).toHaveAttribute('aria-modal', 'true');
-    expect(screen.getByRole('tablist')).toBeInTheDocument();
+    expect(screen.getByRole('checkbox', { name: 'Read-only' })).toBeInTheDocument();
+    await openFold(user, 'advanced');
+    for (const label of ['Group', 'Application name']) expect(screen.getByLabelText(label)).toBeInTheDocument();
   });
 
   it('ask_mode_clears_stored_secrets', async () => {
@@ -457,7 +600,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="edit" initial={config(ids.prod, 'x').config} hasDbPassword onClose={onClose} />);
-    await user.click(screen.getByLabelText('Save password in Windows Credential Manager'));
+    await user.click(screen.getByLabelText('Save password'));
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(callsOf('update_connection')[0]).toMatchObject({
@@ -480,9 +623,9 @@ describe('ConnectionDialog', () => {
     mockBackend({ create_connection: (a) => a.cfg });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    await user.type(screen.getByTestId('conn-name'), 'q');
     await user.type(screen.getByTestId('conn-host'), 'h');
-    await user.click(screen.getByRole('tab', { name: 'Advanced' }));
+    await user.type(screen.getByTestId('conn-name'), 'q');
+    await openFold(user, 'advanced');
     const field = screen.getByTestId('conn-query-timeout');
     expect(field).toHaveValue(0);
     expect(screen.getByLabelText('Query timeout (s)')).toBe(field);
@@ -504,7 +647,7 @@ describe('ConnectionDialog', () => {
         onClose={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole('tab', { name: 'Advanced' }));
+    await openFold(user, 'advanced');
     const field = screen.getByTestId('conn-query-timeout');
     expect(field).toHaveValue(45);
     // Emptied: no timeout. (The browser itself refuses negative and fractional input.)
@@ -533,14 +676,134 @@ describe('ConnectionDialog', () => {
     mockBackend({ create_connection: (a) => a.cfg });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    await user.type(screen.getByTestId('conn-name'), 'q');
     await user.type(screen.getByTestId('conn-host'), 'h');
-    await user.click(screen.getByRole('tab', { name: 'Advanced' }));
+    await user.type(screen.getByTestId('conn-name'), 'q');
+    await openFold(user, 'advanced');
     const field = screen.getByTestId('conn-query-timeout');
     await user.clear(field);
     await user.type(field, '99999999999');
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
     expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { options: { query_timeout_s: 86_400 } } });
+  });
+
+  it('an empty host, user and name fall back to the engine defaults', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="create" onClose={onClose} />);
+    await chooseEngine(user, 'postgres');
+    // The name follows the defaults: `database @ host`, or the host.
+    expect(screen.getByTestId('conn-name')).toHaveAttribute('placeholder', 'localhost');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: { name: 'localhost', host: 'localhost', port: 5432, username: 'postgres', default_db: null },
+    });
+  });
+
+  it('the name is suggested from the database and host', async () => {
+    mockBackend({ create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.clear(screen.getByTestId('conn-host'));
+    await user.type(screen.getByTestId('conn-host'), 'db.internal');
+    await user.type(screen.getByLabelText('Database'), 'sales');
+    expect(screen.getByTestId('conn-name')).toHaveAttribute('placeholder', 'sales @ db.internal');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { name: 'sales @ db.internal' } });
+  });
+
+  it('a pasted connection string fills the fields and can still be edited', async () => {
+    mockBackend({
+      parse_connection_string: (a) => {
+        expect(a.input).toBe('postgresql://app:s3cret@db.internal:6432/sales?sslmode=require&charset=utf8');
+        return {
+          engine: 'postgres',
+          host: 'db.internal',
+          port: 6432,
+          user: 'app',
+          password: 's3cret',
+          database: 'sales',
+          ssl_mode: 'require',
+          application_name: null,
+          connect_timeout_s: null,
+          ignored: ['charset=utf8'],
+          warnings: ['Several hosts are listed; only the first (db.internal) is used.'],
+        };
+      },
+      create_connection: (a) => a.cfg,
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await openUrl(user);
+    await user.type(screen.getByTestId('conn-string'), 'postgresql://app:s3cret@db.internal:6432/sales?sslmode=require&charset=utf8');
+    const parsed = await screen.findByTestId('parse-result', {}, { timeout: 3_000 });
+    expect(parsed).toHaveTextContent('Parsed · PostgreSQL · db.internal:6432');
+    expect(parsed).toHaveTextContent('Ignored: charset=utf8');
+    expect(parsed).toHaveTextContent('only the first');
+    // The engine follows the scheme, the fields right below follow the values.
+    expect(screen.getByTestId('conn-engine-postgres')).toBeChecked();
+    expect(screen.getByTestId('conn-host')).toHaveValue('db.internal');
+    expect(screen.getByTestId('conn-port')).toHaveValue(6432);
+    expect(screen.getByTestId('conn-user')).toHaveValue('app');
+    expect(screen.getByTestId('conn-password')).toHaveValue('s3cret');
+    expect(screen.getByLabelText('Database')).toHaveValue('sales');
+    await openFold(user, 'ssl');
+    expect(screen.getByTestId('conn-ssl-require')).toBeChecked();
+  });
+
+  it('an unreadable connection string says why and changes nothing', async () => {
+    mockBackend({
+      parse_connection_string: () => {
+        throw appError('config', 'unsupported scheme "redis://"; use postgresql://, mysql:// or mariadb://', {
+          field: 'conn_string',
+        });
+      },
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await openUrl(user);
+    await user.type(screen.getByTestId('conn-string'), 'redis://localhost');
+    const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
+    expect(alert).toHaveTextContent('unsupported scheme "redis://"');
+    expect(screen.getByTestId('conn-string')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
+  });
+
+  it('a string without a scheme keeps the chosen engine; mariadb:// picks MySQL / MariaDB', async () => {
+    const parsed = (engine: 'mariadb' | null) => ({
+      engine,
+      host: 'db.internal',
+      port: null,
+      user: 'app',
+      password: null,
+      database: 'sales',
+      ssl_mode: null,
+      application_name: null,
+      connect_timeout_s: null,
+      ignored: [],
+      warnings: [],
+    });
+    let next: 'mariadb' | null = null;
+    mockBackend({ parse_connection_string: () => parsed(next), create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await chooseEngine(user, 'postgres');
+    await openUrl(user);
+    await user.type(screen.getByTestId('conn-string'), 'app@db.internal/sales');
+    await screen.findByTestId('parse-result', {}, { timeout: 3_000 });
+    expect(screen.getByTestId('conn-engine-postgres')).toBeChecked();
+    // The port was not named: it stays the engine default.
+    expect(screen.getByTestId('conn-port')).toHaveValue(5432);
+
+    next = 'mariadb';
+    await user.clear(screen.getByTestId('conn-string'));
+    await user.type(screen.getByTestId('conn-string'), 'mariadb://app@db.internal/sales');
+    await waitFor(() => expect(screen.getByTestId('conn-engine-mysql')).toBeChecked(), { timeout: 3_000 });
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({ cfg: { kind: 'mysql', port: 3306 } });
   });
 });

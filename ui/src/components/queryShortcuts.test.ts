@@ -40,6 +40,24 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
+describe('typing', () => {
+  it('plain keys never query the document; the second key of a Ctrl+K chord still works', () => {
+    useQueryDocs.getState().newQuery(null, null);
+    const lookup = vi.spyOn(document, 'querySelector');
+    try {
+      for (const key of ['s', 'E', ' ', '1', 'Enter', 'Backspace']) press({ key });
+      press({ key: 'S', shiftKey: true });
+      expect(lookup).not.toHaveBeenCalled();
+      // Ctrl+K then a plain 2: the "columns" layout preset.
+      ctrl('k');
+      press({ key: '2' });
+      expect(useTabs.getState().layout).toBe('columns');
+    } finally {
+      lookup.mockRestore();
+    }
+  });
+});
+
 describe('tab shortcuts', () => {
   beforeEach(() => {
     for (const n of ['a', 'b', 'c']) useTabs.getState().open(objectTab(n));
@@ -75,13 +93,13 @@ describe('window shortcuts', () => {
     expect(useLayout.getState().resultsVisible).toBe(true);
   });
 
-  it('Ctrl+Shift+N, Ctrl+, and F1 open the new connection, settings and shortcuts dialogs', () => {
+  it('Ctrl+Shift+N, Ctrl+, and F1 open the new connection dialog, settings, and settings on its Shortcuts tab', () => {
     ctrl('N', { shiftKey: true });
     expect(useDialogs.getState().request).toEqual({ kind: 'newConnection' });
     ctrl(',');
     expect(useDialogs.getState().request).toEqual({ kind: 'settings' });
     expect(press({ key: 'F1' })).toBe(true);
-    expect(useDialogs.getState().request).toEqual({ kind: 'shortcuts' });
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'shortcuts' });
   });
 
   it('F1 wins inside the editor: it is stopped before Monaco sees it', () => {
@@ -93,7 +111,7 @@ describe('window shortcuts', () => {
     const monaco = vi.fn();
     editor.addEventListener('keydown', monaco);
     press({ key: 'F1' }, textarea);
-    expect(useDialogs.getState().request).toEqual({ kind: 'shortcuts' });
+    expect(useDialogs.getState().request).toEqual({ kind: 'settings', tab: 'shortcuts' });
     expect(monaco).not.toHaveBeenCalled();
     // Ctrl+E (Monaco binds it too) is ours as well.
     ctrl('e', {}, textarea);

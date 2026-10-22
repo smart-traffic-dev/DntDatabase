@@ -16,9 +16,16 @@ name = "gen_fixtures"
 path = "src/bin/gen_fixtures.rs"
 required-features = ["gen-fixtures"]
 
+# Fills the dev build's connection list with the Docker test matrix (see the file's header).
+[[bin]]
+name = "seed_dev"
+path = "src/bin/seed_dev.rs"
+
 [dependencies]
+dirs.workspace = true
 dnt-core.workspace = true
 dnt-store.workspace = true
 secrecy.workspace = true
+uuid.workspace = true
 rcgen = { version = "0.13", optional = true }
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "encryption", "getrandom"], optional = true }

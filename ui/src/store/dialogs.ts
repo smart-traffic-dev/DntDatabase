@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
 import type { ObjectActionRequest } from '../dialogs/ObjectActionDialog';
 import type { ExportRequest } from '../dialogs/resultExport';
+import type { SettingsTab } from '../dialogs/SettingsDialog';
 import { useToasts } from './toasts';
 
 /** A prompt the connection tree needs answered before it can open a connection. */
@@ -23,7 +24,8 @@ export type UiRequest =
   | { kind: 'deleteNode'; node: NodeId; label: string }
   | { kind: 'export'; preselected?: NodeId[] }
   | { kind: 'import' }
-  | { kind: 'settings' }
+  /** The settings dialog, opened on `tab` (Appearance by default). */
+  | { kind: 'settings'; tab?: SettingsTab }
   /** Export a query result or the data view to a file. */
   | { kind: 'exportResult'; request: ExportRequest }
   /** Save `sql` (a query tab's selection or whole text) as a favorite. */
@@ -38,7 +40,6 @@ export type UiRequest =
     }
   /** The user snippets manager. */
   | { kind: 'snippets' }
-  | { kind: 'shortcuts' }
   | { kind: 'about' };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */

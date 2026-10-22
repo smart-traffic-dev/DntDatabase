@@ -37,18 +37,21 @@ export interface ConnOpts {
   env?: 'production' | 'staging' | 'local';
 }
 
-/** Fills the connection dialog, tests, and saves. */
+/** MariaDB shares the MySQL driver: one engine choice covers both. */
+export const engineChoice = (engine: 'mysql' | 'mariadb' | 'postgres') => (engine === 'postgres' ? 'postgres' : 'mysql');
+
+/** Fills the connection dialog (one page) and saves. */
 export async function createConnection(o: ConnOpts) {
   await byId('new-connection').waitForClickable({ timeout: 30_000 });
   await byId('new-connection').click();
-  await byId('conn-name').setValue(o.name);
-  await byId(`conn-engine-${o.engine}`).click();
+  await byId(`conn-engine-${engineChoice(o.engine)}`).click();
   await byId('conn-host').setValue('127.0.0.1');
   await byId('conn-port').setValue(String(o.port));
   await byId('conn-user').setValue(o.user);
   await byId('conn-password').setValue(o.password);
+  await byId('conn-name').setValue(o.name);
   if (o.env) await byId(`conn-env-${o.env}`).click();
-  await byId('conn-save').click();
+  await byId('conn-save').click(); // Save
 }
 
 export async function focusEditor() {

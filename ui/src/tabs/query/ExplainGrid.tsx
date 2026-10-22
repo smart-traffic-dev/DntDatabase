@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { PlanNode } from '../../bindings';
-import { fmtInt, fmtMs, fmtNum, flattenPlan, iconOf, matchesFilter, rowsRatio, type FlatNode, type Insight } from './explainModel';
+import { fmtInt, fmtMs, fmtNum, flattenPlan, matchesFilter, rowsRatio, type FlatNode, type Insight } from './explainModel';
 import { Highlight } from './ExplainHighlight';
 
 type SortKey = 'plan' | 'cost' | 'self' | 'est' | 'actual' | 'ratio' | 'time' | 'loops';
@@ -116,6 +116,10 @@ export function ExplainGrid({ root, costs, warnings, hot, selected, filter, onSe
     });
     return sorted;
   }, [ordered, filter, sort, costs]);
+  // Columns with nothing to show are left out: an estimate-only plan has no actual rows or time.
+  const analyzed = useMemo(() => flat.some((f) => f.node.actual_rows !== null || f.node.actual_ms !== null), [flat]);
+  const hasLoops = useMemo(() => flat.some((f) => f.node.loops !== null), [flat]);
+  const hasWarnings = useMemo(() => [...warnings.values()].some((w) => w.length > 0), [warnings]);
 
   return (
     <div className="ex-scroll">
@@ -133,37 +137,19 @@ export function ExplainGrid({ root, costs, warnings, hot, selected, filter, onSe
               <SortHeader k="cost" label="Cost" className="r" sort={sort} onSort={onSort} />
               <SortHeader k="self" label="Self" className="r" sort={sort} onSort={onSort} />
               <SortHeader k="est" label="Est. rows" className="r" sort={sort} onSort={onSort} />
-              <SortHeader
-                k="actual"
-                label="Actual"
-                className="r ex-col-actual"
-                sort={sort}
-                onSort={onSort}
-              />
-              <SortHeader
-                k="ratio"
-                label="×"
-                className="r ex-col-actual"
-                sort={sort}
-                onSort={onSort}
-              />
-              <SortHeader
-                k="time"
-                label="Time"
-                className="r ex-col-time"
-                sort={sort}
-                onSort={onSort}
-              />
-              <SortHeader
-                k="loops"
-                label="Loops"
-                className="r ex-col-loops"
-                sort={sort}
-                onSort={onSort}
-              />
-              <th scope="col" className="r">
-                Warn
-              </th>
+              {analyzed && (
+                <>
+                  <SortHeader k="actual" label="Actual" className="r ex-col-actual" sort={sort} onSort={onSort} />
+                  <SortHeader k="ratio" label="×" className="r ex-col-actual" sort={sort} onSort={onSort} />
+                  <SortHeader k="time" label="Time" className="r ex-col-time" sort={sort} onSort={onSort} />
+                </>
+              )}
+              {hasLoops && <SortHeader k="loops" label="Loops" className="r ex-col-loops" sort={sort} onSort={onSort} />}
+              {hasWarnings && (
+                <th scope="col" className="r">
+                  Warn
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
@@ -171,7 +157,6 @@ export function ExplainGrid({ root, costs, warnings, hot, selected, filter, onSe
               const node = f.node;
               const own = costs.get(node) ?? null;
               const found = warnings.get(node) ?? [];
-              const icon = iconOf(node.label);
               return (
                 <tr
                   key={f.order}
@@ -192,9 +177,6 @@ export function ExplainGrid({ root, costs, warnings, hot, selected, filter, onSe
                       <span className="ex-guides" aria-hidden="true">
                         {guidesOf(f)}
                       </span>
-                      <span className={`ex-ico ${icon.kind}`} aria-hidden="true">
-                        {icon.glyph}
-                      </span>
                       <span className="ex-label" title={node.label}>
                         <Highlight text={node.label} filter={filter} />
                       </span>
@@ -207,25 +189,31 @@ export function ExplainGrid({ root, costs, warnings, hot, selected, filter, onSe
                   <td className="r">{fmtNum(node.est_cost)}</td>
                   <td className="r">{fmtNum(own)}</td>
                   <td className="r">{fmtInt(node.est_rows)}</td>
-                  <td className={`r ex-col-actual${found.some((w) => w.kind === 'skew') ? ' skew' : ''}`}>
-                    {fmtInt(node.actual_rows)}
-                  </td>
-                  <td className="r ex-col-actual">{ratioText(node)}</td>
-                  <td className="r ex-col-time">{fmtMs(node.actual_ms)}</td>
-                  <td className="r ex-col-loops">{fmtInt(node.loops)}</td>
-                  <td className="r">
-                    {found.length > 0 && (
-                      <span
-                        className="ex-warnpill"
-                        data-testid="explain-warning"
-                        role="img"
-                        aria-label={`${found.length} warning${found.length === 1 ? '' : 's'}`}
-                        title={found.map((w) => `${w.title}: ${w.body}`).join('\n')}
-                      >
-                        ⚠ {found.length}
-                      </span>
-                    )}
-                  </td>
+                  {analyzed && (
+                    <>
+                      <td className={`r ex-col-actual${found.some((w) => w.kind === 'skew') ? ' skew' : ''}`}>
+                        {fmtInt(node.actual_rows)}
+                      </td>
+                      <td className="r ex-col-actual">{ratioText(node)}</td>
+                      <td className="r ex-col-time">{fmtMs(node.actual_ms)}</td>
+                    </>
+                  )}
+                  {hasLoops && <td className="r ex-col-loops">{fmtInt(node.loops)}</td>}
+                  {hasWarnings && (
+                    <td className="r">
+                      {found.length > 0 && (
+                        <span
+                          className="ex-warnpill"
+                          data-testid="explain-warning"
+                          role="img"
+                          aria-label={`${found.length} warning${found.length === 1 ? '' : 's'}`}
+                          title={found.map((w) => `${w.title}: ${w.body}`).join('\n')}
+                        >
+                          ⚠ {found.length}
+                        </span>
+                      )}
+                    </td>
+                  )}
                 </tr>
               );
             })}

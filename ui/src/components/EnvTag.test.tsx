@@ -3,10 +3,10 @@ import { describe, expect, it } from 'vitest';
 import { EnvTag } from './EnvTag';
 
 describe('EnvTag', () => {
-  it('is a letter badge by default', () => {
+  it('is a short PROD / STG / LCL badge by default', () => {
     render(<EnvTag env="production" />);
     const tag = screen.getByLabelText('Environment: production');
-    expect(tag).toHaveTextContent(/^P$/);
+    expect(tag).toHaveTextContent(/^PROD$/);
     expect(tag).toHaveClass('env-tag', 'env-production');
     expect(tag).not.toHaveClass('chip');
   });

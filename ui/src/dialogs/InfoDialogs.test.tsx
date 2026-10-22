@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDialogs } from '../store/dialogs';
-import { resetStores } from '../test/backend';
+import { mockBackend, resetStores } from '../test/backend';
 import { DialogHost } from './DialogHost';
 
 const app = vi.hoisted(() => ({ getVersion: vi.fn(async () => '1.2.3') }));
@@ -14,10 +14,13 @@ beforeEach(() => {
 });
 
 describe('Help dialogs', () => {
-  it('lists the keyboard shortcuts and closes', () => {
+  it('F1 opens Settings on the Keyboard shortcuts tab, and Close closes it', () => {
+    mockBackend({ get_log_level: () => 'Info' });
     render(<DialogHost />);
-    act(() => useDialogs.getState().requestDialog({ kind: 'shortcuts' }));
-    const dialog = screen.getByRole('dialog', { name: 'Keyboard shortcuts' });
+    act(() => useDialogs.getState().requestDialog({ kind: 'settings', tab: 'shortcuts' }));
+    const dialog = screen.getByRole('dialog', { name: 'Settings' });
+    expect(screen.getByRole('tab', { name: 'Keyboard shortcuts' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Keyboard shortcuts' })).toHaveFocus();
     expect(dialog).toHaveTextContent('Ctrl+B');
     expect(dialog).toHaveTextContent('Ctrl+Shift+I');
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
