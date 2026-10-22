@@ -8,11 +8,36 @@ use uuid::Uuid;
 
 const SERVICE: &str = "DntDatabase";
 
-#[derive(Debug, Default, Clone, Copy)]
-pub struct KeyringSecretStore;
+/// Overrides the keychain service name, so the E2E run keeps its secrets apart from the
+/// user's real ones (its cleanup only ever touches that service).
+pub const SERVICE_ENV: &str = "DNT_KEYRING_SERVICE";
 
-fn entry(conn: Uuid, kind: SecretKind) -> Result<Entry, DbError> {
-    Entry::new(SERVICE, &secret_key(conn, kind)).map_err(|e| secret_err("open", kind, e))
+#[derive(Debug, Clone)]
+pub struct KeyringSecretStore {
+    service: String,
+}
+
+impl Default for KeyringSecretStore {
+    fn default() -> Self {
+        KeyringSecretStore {
+            service: SERVICE.to_owned(),
+        }
+    }
+}
+
+impl KeyringSecretStore {
+    /// `$DNT_KEYRING_SERVICE` when set, otherwise `DntDatabase`.
+    pub fn from_env() -> Self {
+        match std::env::var(SERVICE_ENV) {
+            Ok(service) if !service.is_empty() => KeyringSecretStore { service },
+            _ => KeyringSecretStore::default(),
+        }
+    }
+
+    fn entry(&self, conn: Uuid, kind: SecretKind) -> Result<Entry, DbError> {
+        Entry::new(&self.service, &secret_key(conn, kind))
+            .map_err(|e| secret_err("open", kind, e))
+    }
 }
 
 /// Error text names the operation and secret kind only; keyring errors never carry the value.
@@ -24,7 +49,7 @@ fn secret_err(op: &str, kind: SecretKind, err: keyring::Error) -> DbError {
 
 impl SecretStore for KeyringSecretStore {
     fn get(&self, conn: Uuid, kind: SecretKind) -> Result<Option<SecretString>, DbError> {
-        match entry(conn, kind)?.get_password() {
+        match self.entry(conn, kind)?.get_password() {
             Ok(value) => Ok(Some(SecretString::from(value))),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(e) => Err(secret_err("read", kind, e)),
@@ -33,7 +58,7 @@ impl SecretStore for KeyringSecretStore {
 
     /// Reads the entry's attributes, not its secret: the password never reaches our memory.
     fn has(&self, conn: Uuid, kind: SecretKind) -> Result<bool, DbError> {
-        match entry(conn, kind)?.get_attributes() {
+        match self.entry(conn, kind)?.get_attributes() {
             Ok(_) => Ok(true),
             Err(keyring::Error::NoEntry) => Ok(false),
             Err(e) => Err(secret_err("check", kind, e)),
@@ -41,13 +66,13 @@ impl SecretStore for KeyringSecretStore {
     }
 
     fn set(&self, conn: Uuid, kind: SecretKind, value: &SecretString) -> Result<(), DbError> {
-        entry(conn, kind)?
+        self.entry(conn, kind)?
             .set_password(value.expose_secret())
             .map_err(|e| secret_err("write", kind, e))
     }
 
     fn delete(&self, conn: Uuid, kind: SecretKind) -> Result<(), DbError> {
-        match entry(conn, kind)?.delete_credential() {
+        match self.entry(conn, kind)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(e) => Err(secret_err("delete", kind, e)),
         }
@@ -68,7 +93,7 @@ mod tests {
     #[test]
     #[ignore = "touches the real OS credential manager"]
     fn real_credential_manager_roundtrip() {
-        let store = KeyringSecretStore;
+        let store = KeyringSecretStore::default();
         let id = Uuid::new_v4();
         assert!(store.get(id, SecretKind::DbPassword).unwrap().is_none());
 

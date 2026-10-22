@@ -28,13 +28,22 @@ const tauriDriver = process.env.TAURI_DRIVER
 
 let driver: ChildProcess | undefined;
 let dataDir = '';
-let credentialsBefore = new Set<string>();
+/** Taken in `onPrepare`; null until then, and cleanup deletes nothing without it. */
+let credentialsBefore: Set<string> | null = null;
 
-/** Credential Manager targets written by the app: `DntDatabase/<uuid>/<kind>`. */
+/**
+ * Keychain service of the app under test (`DNT_KEYRING_SERVICE`), so the run never shares
+ * entries with the user's own `DntDatabase` ones.
+ */
+const KEYRING_SERVICE = 'DntDatabase-e2e';
+
+/** Credential Manager targets the app under test wrote: `DntDatabase/<uuid>/<kind>.<service>`. */
 function appCredentials(): Set<string> {
   const out = execFileSync('cmdkey', ['/list'], { encoding: 'utf8' });
   const targets = out.match(/target=(\S*DntDatabase\/[0-9a-f-]{36}\/\w+\S*)/gi) ?? [];
-  return new Set(targets.map((t) => t.slice('target='.length)));
+  return new Set(
+    targets.map((t) => t.slice('target='.length)).filter((t) => t.endsWith(`.${KEYRING_SERVICE}`)),
+  );
 }
 
 async function waitForDriver(child: ChildProcess): Promise<void> {
@@ -71,8 +80,12 @@ function cleanup() {
     if (driver?.pid) execFileSync('taskkill', ['/PID', String(driver.pid), '/T', '/F'], { stdio: 'ignore' });
   });
   step('remove test credentials', () => {
+    // `onPrepare` failed before the snapshot (WDIO still runs `onComplete`): without it
+    // every entry looks new, so delete nothing.
+    const before = credentialsBefore;
+    if (!before) return;
     for (const target of appCredentials()) {
-      if (!credentialsBefore.has(target)) {
+      if (!before.has(target)) {
         execFileSync('cmdkey', [`/delete:${target}`], { stdio: 'ignore' });
         console.log(`removed test credential ${target}`);
       }
@@ -116,6 +129,7 @@ export const config: WebdriverIO.Config = {
     // A fresh data dir per run; the app (spawned by the driver) inherits this environment.
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dnt-e2e-'));
     process.env.DNT_DATA_DIR = dataDir;
+    process.env.DNT_KEYRING_SERVICE = KEYRING_SERVICE;
     // One evidence folder per run, shared with the worker process.
     process.env.E2E_EVIDENCE_DIR ??= path.join(
       here,

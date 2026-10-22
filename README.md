@@ -92,8 +92,9 @@ pnpm --dir e2e test
 `build:app` uses a dedicated `--target-dir target/e2e`, so other cargo builds (`cargo test`, a plain `cargo build`)
 can no longer overwrite the binary the test launches. Re-run it after UI or Rust changes.
 Optional environment: `MSEDGEDRIVER` (path to msedgedriver.exe), `TAURI_DRIVER` (path to tauri-driver.exe,
-default `%CARGO_HOME%\bin`). The run uses a fresh temporary `DNT_DATA_DIR` and removes the test password it stored
-in Windows Credential Manager when it finishes.
+default `%CARGO_HOME%\bin`). The run uses a fresh temporary `DNT_DATA_DIR` and its own keychain service
+(`DNT_KEYRING_SERVICE=DntDatabase-e2e`), and removes the test passwords it stored in Windows Credential Manager when it
+finishes. A run that stops before it starts (a missing driver or binary) removes nothing.
 
 ### Browser E2E (UI)
 
@@ -144,4 +145,5 @@ cargo run -p dntdatabase --example export_bindings
 App data lives in `%APPDATA%\DntDatabase\`: `app.db` (SQLite), `known_hosts` and `logs\`
 (`dntdatabase.log.<date>`, daily rotation, 7 days kept). Set `DNT_DATA_DIR` to use another directory
 (used by the E2E test). Secrets are kept in Windows Credential Manager under `DntDatabase/<connection uuid>/<kind>`,
-never in SQLite or logs.
+never in SQLite or logs. Set `DNT_KEYRING_SERVICE` to store them under another keychain service than `DntDatabase`
+(the E2E test uses `DntDatabase-e2e`, so its cleanup never touches your saved passwords).

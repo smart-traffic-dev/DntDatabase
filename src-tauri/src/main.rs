@@ -23,7 +23,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let log = logging::init(&paths.logs_dir);
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "DntDatabase starting");
 
-    let state = AppState::open(paths, Arc::new(KeyringSecretStore))?;
+    let state = AppState::open(paths, Arc::new(KeyringSecretStore::from_env()))?;
     // The level chosen in Settings (Debug logging) survives restarts.
     let level = commands::settings::saved_log_level(&state.repo);
     if level != logging::LogLevel::Info {
