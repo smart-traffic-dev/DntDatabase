@@ -307,7 +307,7 @@ fn ask_for_missing_db_password(
         && secrets
             .db_password
             .as_ref()
-            .map_or(true, |p| p.expose_secret().is_empty())
+            .is_none_or(|p| p.expose_secret().is_empty())
         && matches!(e.unstaged(), DbError::Auth { .. });
     match e {
         DbError::AtStage { stage, timings, .. } if missing => {
@@ -371,6 +371,8 @@ pub struct SessionManager {
     pub(crate) data_page_cap: usize,
     /// How long `close` waits for a running edit apply before it cancels it.
     pub(crate) apply_close_wait: Duration,
+    /// Background jobs (see `jobs`).
+    pub(crate) jobs: crate::jobs::JobManager,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -396,6 +398,7 @@ impl SessionManager {
         known_hosts: KnownHosts,
         drivers: HashMap<DbKind, Arc<dyn Driver>>,
     ) -> Self {
+        let jobs = crate::jobs::JobManager::new(Arc::clone(&repo));
         SessionManager {
             drivers,
             repo,
@@ -423,6 +426,7 @@ impl SessionManager {
             data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,
             data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
             apply_close_wait: SLOT_CLOSE_WAIT,
+            jobs,
         }
     }
 
@@ -773,6 +777,7 @@ impl SessionManager {
     /// Closes the tunnel and every metadata session and forgets the connection. An `open`
     /// in flight is superseded (it closes what it opened and returns `Cancelled`).
     pub async fn close(&self, id: Uuid) {
+        self.jobs.cancel_connection(id).await;
         // A running query is stopped first, so closing does not wait for it; the run
         // still ends with its `done` event.
         self.object_cancel_connection(id).await;

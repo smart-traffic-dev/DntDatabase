@@ -20,6 +20,8 @@ test-helpers = []
 tauri-build.workspace = true
 
 [dependencies]
+# `JobRunner` (jobs) is an async trait object.
+async-trait.workspace = true
 dirs.workspace = true
 dnt-core.workspace = true
 dnt-driver-mysql.workspace = true
@@ -33,7 +35,8 @@ rust_xlsxwriter.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-specta.workspace = true
+# `serde_json`: `JobParams` carries each job kind's request as a JSON value.
+specta = { workspace = true, features = ["serde_json"] }
 specta-typescript.workspace = true
 # `devtools`: `WebviewWindow::open_devtools` also exists in release builds (Tools > Developer tools).
 tauri = { workspace = true, features = ["devtools"] }
