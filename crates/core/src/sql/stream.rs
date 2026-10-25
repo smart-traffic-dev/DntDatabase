@@ -11,14 +11,16 @@
 //! (`\…`) lines are reported as their own events.
 //!
 //! Memory: the buffer holds the current statement plus the unscanned tail. Since
-//! nothing is decided after the last `\n`, a line is buffered whole until its `\n`
-//! arrives (or `finish`); only a construct waiting for its end is bounded by
-//! `max_statement_bytes` before that.
+//! nothing is decided after the last `\n` before `finish`, a newline-free tail longer
+//! than `max_statement_bytes` (plus the delimiter and a `\r`) is refused as `StatementTooLarge` (even when it would
+//! have held several short statements), and so is a statement or construct waiting
+//! for its end beyond the limit. Only a comment-only fragment, which `split` drops,
+//! is never counted.
 
 use std::collections::VecDeque;
 
 use super::lexer::{is_kw, skip_at, tokenize, word_at, Dialect, Skipped, TokKind};
-use super::split::{delimiter_directive_at, line_blank_before, statement_text};
+use super::split::{delimiter_directive_at, leading_blank_len, line_blank_before, statement_text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SplitOptions {
@@ -50,7 +52,10 @@ pub struct StreamStatement {
 pub enum SplitEvent {
     Statement(StreamStatement),
     /// `COPY … FROM stdin` data block (PG, `detect_client`): from the line after the
-    /// COPY statement's delimiter up to and including the `\.` line (or end of input).
+    /// COPY statement's delimiter (or after the client command line that flushed it)
+    /// up to and including the `\.` line (or end of input). Any text after the
+    /// delimiter on the COPY statement's own line is dropped, not validated and not
+    /// reported. Data bytes are not checked for UTF-8.
     CopyData {
         start: u64,
         end: u64,
@@ -93,7 +98,8 @@ pub struct StreamSplitter {
     head: usize,
     /// Next byte to decide on; `head..scan` holds no boundary.
     scan: usize,
-    /// First non-whitespace byte of the current segment.
+    /// First significant byte of the current segment (not whitespace and not part
+    /// of a plain comment): where a too-large statement is reported to start.
     first: Option<usize>,
     /// Whether the part of `buf[head]`'s line before `head` holds only spaces/tabs.
     line_blank: bool,
@@ -204,7 +210,10 @@ impl StreamSplitter {
         self.done && self.queue.is_empty()
     }
 
-    /// Absolute offset up to which the input has been turned into events.
+    /// Absolute offset of the first byte not yet consumed: everything before it was
+    /// returned as (or queued for) an event or dropped as a blank fragment. Inside a
+    /// COPY data block it advances line by line (the block's `CopyData` event comes
+    /// only at its end), so it can run ahead of the events returned.
     pub fn consumed(&self) -> u64 {
         self.abs(self.head)
     }
@@ -337,7 +346,7 @@ impl StreamSplitter {
                 && self.opts.detect_client
                 && line_blank_before(&self.buf[self.head..], i - self.head, self.line_blank)
             {
-                self.emit(i)?;
+                let copy = self.emit(i)?;
                 let (end, next) = self.line_after(i);
                 let line = self.utf8(i, end)?.trim_end();
                 let start = self.abs(i);
@@ -348,6 +357,10 @@ impl StreamSplitter {
                 };
                 self.queue.push_back(SplitEvent::ClientCommand(cmd));
                 self.advance(next);
+                if copy {
+                    // A COPY sent by the command (e.g. `\g`): its data follows the line.
+                    self.enter_copy();
+                }
                 return Ok(true);
             }
             if self.dialect.is_mysql() && c.eq_ignore_ascii_case(&b'd') {
@@ -365,16 +378,22 @@ impl StreamSplitter {
             }
             match skip_at(&self.buf, i, self.dialect) {
                 Some((kind, end)) => {
+                    let significant = kind != Skipped::Comment;
                     if end >= self.buf.len() && !self.finished {
-                        let from = self.first.unwrap_or(i);
-                        if self.buf.len() - from > self.opts.max_statement_bytes {
-                            return Err(self.too_large(from));
+                        // A plain comment before any significant byte may still turn
+                        // out to be a blank fragment (dropped like in `split`), so it
+                        // does not count against the limit.
+                        let from = self.first.or(significant.then_some(i));
+                        if let Some(from) = from {
+                            if self.buf.len() - from > self.opts.max_statement_bytes {
+                                return Err(self.too_large(from));
+                            }
                         }
                         self.wait_for = self.received + (self.buf.len() - i) as u64;
                         return Ok(false);
                     }
-                    self.first.get_or_insert(i);
-                    if kind != Skipped::Comment {
+                    if significant {
+                        self.first.get_or_insert(i);
                         self.check_size(end)?;
                     }
                     self.scan = end;
@@ -400,6 +419,7 @@ impl StreamSplitter {
             }
         }
         if !self.finished {
+            self.check_undecided_tail(limit)?;
             return Ok(false);
         }
         let end = self.buf.len();
@@ -411,6 +431,29 @@ impl StreamSplitter {
             self.done = true;
         }
         Ok(true)
+    }
+
+    /// Bytes after the last `\n` are not decided before `finish`. When that tail
+    /// (from its first non-whitespace byte) alone exceeds the limit, the statement
+    /// holding it may be that large, and buffering on would be unbounded: refuse.
+    /// A long line holding several short statements is refused too.
+    fn check_undecided_tail(&self, limit: usize) -> Result<(), SplitError> {
+        // Room for a statement at the limit followed by its delimiter and a `\r`.
+        let max = self.opts.max_statement_bytes + self.delim.len() + 1;
+        let from = limit.max(self.scan);
+        if self.buf.len() - from <= max {
+            return Ok(());
+        }
+        let Some(p) = self.buf[from..]
+            .iter()
+            .position(|c| !c.is_ascii_whitespace())
+        else {
+            return Ok(());
+        };
+        if self.buf.len() - (from + p) <= max {
+            return Ok(());
+        }
+        Err(self.too_large(self.first.unwrap_or(from + p)))
     }
 
     fn enter_copy(&mut self) {
@@ -472,6 +515,14 @@ fn plain_table(delim0: u8) -> [bool; 256] {
 /// Whether `stmt` is PG `COPY … FROM STDIN`: first word `COPY`, and at paren depth 0
 /// a `FROM` immediately followed by the word `STDIN` (ASCII case-insensitive).
 pub fn is_copy_from_stdin(stmt: &str) -> bool {
+    // Cheap check first, so large INSERTs are never tokenized.
+    let lead = leading_blank_len(stmt, Dialect::Postgres);
+    let starts_with_copy = stmt.as_bytes()[lead..]
+        .get(..4)
+        .is_some_and(|w| w.eq_ignore_ascii_case(b"copy"));
+    if !starts_with_copy {
+        return false;
+    }
     let toks = tokenize(stmt, Dialect::Postgres);
     if !is_kw(word_at(&toks, 0), "COPY") {
         return false;
@@ -721,6 +772,12 @@ mod tests {
         assert!(!is_copy_from_stdin("SELECT 1 FROM stdin"));
         assert!(!is_copy_from_stdin("COPY t TO stdout"));
         assert!(!is_copy_from_stdin("COPY t FROM 'stdin'"));
+        assert!(is_copy_from_stdin("-- c\n /* d */ copy t from stdin"));
+        assert!(!is_copy_from_stdin("copyx t from stdin"));
+        assert!(!is_copy_from_stdin("cop"));
+        assert!(!is_copy_from_stdin(
+            "INSERT INTO t SELECT 'COPY t FROM stdin'"
+        ));
     }
 
     #[test]
@@ -863,6 +920,80 @@ mod tests {
         // Exactly at the limit is fine.
         let ok = split_all(b"select 123456789;", MYSQL, opts, 3).unwrap();
         assert_eq!(ok, vec![stmt("select 123456789", 0)]);
+    }
+
+    fn small_limit() -> SplitOptions {
+        SplitOptions {
+            detect_client: false,
+            max_statement_bytes: 16,
+        }
+    }
+
+    /// Nothing after the last `\n` is decided before `finish`, so a newline-free tail
+    /// longer than the limit is refused instead of buffered without bound.
+    #[test]
+    fn newline_free_line_over_limit_is_an_error() {
+        let mut s = StreamSplitter::new(MYSQL, small_limit());
+        s.push(&[b'x'; 40]);
+        assert_eq!(
+            s.next_event(),
+            Err(SplitError::StatementTooLarge {
+                start: 0,
+                limit: 16
+            })
+        );
+        // Leading whitespace (also before the last newline) is not counted.
+        let mut s = StreamSplitter::new(MYSQL, small_limit());
+        s.push(b"select 1;\n   ");
+        assert_eq!(s.next_event().unwrap(), Some(stmt("select 1", 0)));
+        // A statement at the limit with its `;` and a `\r` still fits.
+        s.push(&[b'y'; 18]);
+        assert_eq!(s.next_event().unwrap(), None);
+        s.push(b"y");
+        assert_eq!(
+            s.next_event(),
+            Err(SplitError::StatementTooLarge {
+                start: 13,
+                limit: 16
+            })
+        );
+    }
+
+    /// A comment-only fragment is dropped like in `split`, whatever the chunking,
+    /// so it never counts against the limit.
+    #[test]
+    fn comment_only_fragment_ignores_the_limit_for_any_chunking() {
+        let input = format!("select 1;\n/*\n{}\n*/;\nselect 2;\n", "a".repeat(32));
+        let at = input.find("select 2").unwrap() as u64;
+        for chunk in CHUNKS {
+            assert_eq!(
+                split_all(input.as_bytes(), MYSQL, small_limit(), chunk),
+                Ok(vec![stmt("select 1", 0), stmt("select 2", at)]),
+                "chunk {chunk}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_flushed_by_client_command_reads_data_after_it() {
+        let input = "COPY t FROM stdin\n\\g\n1\n\\.\nSELECT 1;";
+        let data = input.find("1\n").unwrap() as u64;
+        let after = input.find("SELECT").unwrap() as u64;
+        for chunk in CHUNKS {
+            assert_eq!(
+                split_all(input.as_bytes(), Postgres, detect(), chunk).unwrap(),
+                vec![
+                    stmt("COPY t FROM stdin", 0),
+                    command("\\g", 18),
+                    SplitEvent::CopyData {
+                        start: data,
+                        end: after
+                    },
+                    stmt("SELECT 1", after),
+                ],
+                "chunk {chunk}"
+            );
+        }
     }
 
     #[test]
