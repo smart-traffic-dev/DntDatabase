@@ -63,3 +63,5 @@ dnt-testkit.workspace = true
 dntdatabase = { path = ".", features = ["test-helpers"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Reads back `.sql.gz` dumps in tests.
+flate2.workspace = true

@@ -1184,6 +1184,42 @@ async importStart(planId: string, confirm: ImportConfirm) : Promise<Result<strin
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * The tables, views (PostgreSQL also stand-alone sequences and types) the built-in dump
+ * can hold, and the objects it skips with the reason (R22).
+ */
+async dumpObjects(connectionId: string, database: string, schemas: string[]) : Promise<Result<DumpObjects, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dump_objects", { connectionId, database, schemas }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the save dialog for a dump file from the backend and admits the picked path for
+ * `dump_start`. `None`: cancelled.
+ */
+async dumpPickPath(baseName: string, compress: boolean) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dump_pick_path", { baseName, compress }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a dump job (no confirmation: a read, allowed on read-only connections);
+ * returns its id.
+ */
+async dumpStart(request: DumpRequest) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dump_start", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1546,6 +1582,46 @@ export type DryRunRequest = { request: ImportRequest; server_check: boolean;
  * The user confirmed the server check's statements where the guard asks (Production).
  */
 confirmed?: boolean }
+/**
+ * One object a dump can hold.
+ */
+export type DumpObject = { 
+/**
+ * PostgreSQL: the schema; MySQL: `None`.
+ */
+schema: string | null; name: string; 
+/**
+ * `Table`, `View`; PostgreSQL also `Sequence` (stand-alone) and `Type` (enum, composite).
+ */
+kind: ObjectKind; 
+/**
+ * Tables: dump the rows too.
+ */
+data: boolean }
+/**
+ * What `dump_objects` lists: the selectable objects and the skipped ones.
+ */
+export type DumpObjects = { objects: DumpObject[]; skipped: SkippedObject[] }
+/**
+ * What the user asked to dump (also the stored parameters of "Run again").
+ */
+export type DumpRequest = { connection_id: string; database: string; 
+/**
+ * PostgreSQL: the schemas the dump covers (named in the header).
+ */
+schemas: string[]; objects: DumpObject[]; 
+/**
+ * `DROP … IF EXISTS` before each object is created.
+ */
+include_drop: boolean; 
+/**
+ * Write `.sql.gz` (gzip).
+ */
+compress: boolean; 
+/**
+ * A path admitted by `dump_pick_path`.
+ */
+path: string }
 /**
  * What `data_preview` returns: the stored plan's id and the statements `data_apply`
  * will send.
@@ -2269,6 +2345,10 @@ export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres"
  * An entry of the import file that cannot be imported at all.
  */
 export type SkippedItem = { name: string; reason: string }
+/**
+ * An object the integrated dump does not cover (R22), and why.
+ */
+export type SkippedObject = { schema: string | null; name: string; kind: ObjectKind; reason: string }
 export type Snippet = { id: string; 
 /**
  * What the user types to trigger it; unique, case-insensitively.

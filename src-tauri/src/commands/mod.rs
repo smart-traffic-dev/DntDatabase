@@ -21,6 +21,8 @@ pub mod transfer;
 pub mod window;
 pub mod workspace;
 
+pub mod backup;
+
 use dnt_core::error::{AppError, DbError};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::FutureExt;
@@ -227,6 +229,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             import_data::import_dry_run,
             import_data::import_prepare,
             import_data::import_start,
+            backup::dump_objects,
+            backup::dump_pick_path,
+            backup::dump_start,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.

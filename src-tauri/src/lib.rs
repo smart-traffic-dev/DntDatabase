@@ -22,3 +22,5 @@ pub mod table_design;
 
 pub mod import_data;
 pub mod jobs;
+
+pub mod backup;

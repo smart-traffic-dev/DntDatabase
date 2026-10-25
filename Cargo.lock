@@ -1658,6 +1658,7 @@ dependencies = [
  "dnt-transfer",
  "dnt-tunnel",
  "dntdatabase",
+ "flate2",
  "futures-util",
  "rust_xlsxwriter",
  "secrecy",
