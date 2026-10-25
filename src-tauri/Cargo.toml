@@ -45,7 +45,8 @@ tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
 tauri-specta.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+# `process` + `io-util`: the external tool runner (N7, backup/ext_tools.rs).
+tokio = { workspace = true, features = ["rt", "process", "io-util"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true

@@ -1,16 +1,24 @@
 //! Backup (spec §7): the integrated dump ("DntDatabase dump v1", §7.1, R22–R24, R29).
-//! Later tasks add the external tools (N7) and restore.
+//! Later tasks add restore.
 //!
 //! - `dump`: the selectable objects of a database (with the skipped ones and why, R22),
 //!   `dump_start` and the dump job ([`dump::DumpJob`]).
+//! - `ext_tools`: N7, the external tool runner (discovery, secret files, process
+//!   plumbing, Stop = kill; §7.2, R25–R29); `tool_dump`: dumps through `mysqldump`,
+//!   `mariadb-dump` or `pg_dump`.
 //!
 //! A dump only reads: it runs on its own session inside one read-only snapshot (R24), is
 //! allowed on read-only connections and needs no confirmation. Its file is written as
 //! `<file>.dntpart` and renamed when complete; a failed or stopped dump removes it (R29).
 //! Values become SQL only through `dnt_core::sql::build::dump_row_tuple`.
 pub mod dump;
+pub mod ext_tools;
 #[cfg(test)]
 mod tests;
+pub mod tool_dump;
+
+pub use ext_tools::ToolsList;
+pub use tool_dump::ToolDumpRequest;
 
 use dnt_core::meta::ObjectKind;
 use serde::{Deserialize, Serialize};

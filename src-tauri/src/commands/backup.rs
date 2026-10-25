@@ -1,10 +1,11 @@
-//! Dump commands (spec §7.1): the objects a database offers, the backend's save dialog
-//! and the start of a dump job. `dump_start` accepts only a path picked in
+//! Dump commands (spec §7.1, §7.2): the objects a database offers, the backend's save
+//! dialog, the start of a dump job, the external tools found and the start of a tool
+//! dump. `dump_start` and `tool_dump_start` accept only a path picked in
 //! `dump_pick_path`.
 
 use super::export::file_stem;
 use super::guard;
-use crate::backup::{DumpObjects, DumpRequest};
+use crate::backup::{DumpObjects, DumpRequest, ToolDumpRequest, ToolsList};
 use crate::file_picks::FileAccess;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -102,6 +103,49 @@ pub async fn dump_start(
     request: DumpRequest,
 ) -> Result<Uuid, AppError> {
     guard(dump_start_impl(&state, request)).await
+}
+
+pub async fn tools_list_impl(state: &AppState) -> Result<ToolsList, DbError> {
+    let repo = std::sync::Arc::clone(&state.repo);
+    let configured = tokio::task::spawn_blocking(move || {
+        crate::commands::settings::saved_external_tools_dir(&repo)
+    })
+    .await
+    .map_err(|e| DbError::Internal {
+        message: format!("reading the external tools folder failed: {e}"),
+    })?;
+    let path_env = std::env::var_os("PATH");
+    Ok(crate::backup::ext_tools::list_tools(configured.as_deref(), path_env.as_deref()).await)
+}
+
+pub async fn tool_dump_start_impl(
+    state: &AppState,
+    request: ToolDumpRequest,
+) -> Result<Uuid, DbError> {
+    state
+        .file_picks
+        .check(FileAccess::DumpWrite, &request.path)?;
+    state.sessions.tool_dump_start(request).await
+}
+
+/// The external tools found (the External tools folder first, then `PATH`) with their
+/// version, the missing ones and the folders searched (R25).
+#[tauri::command]
+#[specta::specta]
+pub async fn tools_list(state: State<'_, AppState>) -> Result<ToolsList, AppError> {
+    guard(tools_list_impl(&state)).await
+}
+
+/// Starts a dump through `mysqldump`, `mariadb-dump` or `pg_dump` (a read: no
+/// confirmation, allowed on read-only connections); returns its id. The path must come
+/// from `dump_pick_path`.
+#[tauri::command]
+#[specta::specta]
+pub async fn tool_dump_start(
+    state: State<'_, AppState>,
+    request: ToolDumpRequest,
+) -> Result<Uuid, AppError> {
+    guard(tool_dump_start_impl(&state, request)).await
 }
 
 #[cfg(test)]

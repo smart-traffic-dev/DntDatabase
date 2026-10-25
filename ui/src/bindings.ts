@@ -1220,6 +1220,31 @@ async dumpStart(request: DumpRequest) : Promise<Result<string, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * The external tools found (the External tools folder first, then `PATH`) with their
+ * version, the missing ones and the folders searched (R25).
+ */
+async toolsList() : Promise<Result<ToolsList, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tools_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a dump through `mysqldump`, `mariadb-dump` or `pg_dump` (a read: no
+ * confirmation, allowed on read-only connections); returns its id. The path must come
+ * from `dump_pick_path`.
+ */
+async toolDumpStart(request: ToolDumpRequest) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tool_dump_start", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -2084,6 +2109,14 @@ ansi_quotes?: boolean;
  * `NO_BACKSLASH_ESCAPES`: `'…'` and `"…"` strings have no backslash escape.
  */
 no_backslash_escapes?: boolean }
+/**
+ * mysqldump / mariadb-dump options (spec §7.2).
+ */
+export type MysqlDumpOptions = { 
+/**
+ * Empty: every table of the database.
+ */
+tables: string[]; structure: boolean; data: boolean; routines: boolean; events: boolean; triggers: boolean; single_transaction: boolean }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
 export type ObjectAction = { kind: "create_namespace"; database: string; name: string } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
@@ -2115,6 +2148,19 @@ ignored: string[];
  * Things worth telling the user (e.g. only the first of several hosts is used).
  */
 warnings: string[] }
+export type PgDumpFormat = "plain" | "custom" | "tar"
+/**
+ * pg_dump options (spec §7.2).
+ */
+export type PgDumpOptions = { 
+/**
+ * Empty: every schema.
+ */
+schemas: string[]; 
+/**
+ * `(schema, table)`; empty: every table of the chosen schemas.
+ */
+tables: ([string, string])[]; structure: boolean; data: boolean; format: PgDumpFormat; no_owner: boolean; no_privileges: boolean }
 /**
  * One node of a normalized plan.
  */
@@ -2557,6 +2603,51 @@ max_chars: number | null; collation: string | null;
  * MySQL `… UNSIGNED` integer: negative values are refused.
  */
 unsigned?: boolean }
+/**
+ * The only programs the app ever spawns (R25).
+ */
+export type Tool = "mysql_dump" | "mariadb_dump" | "pg_dump" | "pg_restore" | "psql"
+/**
+ * A dump through an external tool (also the stored parameters of "Run again").
+ */
+export type ToolDumpRequest = { connection_id: string; database: string; 
+/**
+ * `mysqldump` / `mariadb-dump` (MySQL family) or `pg_dump` (PostgreSQL).
+ */
+tool: Tool; 
+/**
+ * The options of `mysqldump` / `mariadb-dump`.
+ */
+mysql: MysqlDumpOptions | null; 
+/**
+ * The options of `pg_dump`.
+ */
+pg: PgDumpOptions | null; 
+/**
+ * Write `.sql.gz` (the tool's output, gzipped by the app).
+ */
+compress: boolean; 
+/**
+ * A path admitted by `dump_pick_path`.
+ */
+path: string }
+/**
+ * A tool that was found, with what `<tool> --version` printed.
+ */
+export type ToolInfo = { tool: Tool; path: string; 
+/**
+ * The first line `--version` printed (`mysqldump  Ver 8.4.3 for Win64 …`).
+ */
+version: string; 
+/**
+ * A MariaDB client (`mariadb-dump`, or a `mysqldump` built by MariaDB).
+ */
+mariadb: boolean }
+/**
+ * What `tools_list` returns: the tools found (with their version), the ones missing,
+ * and the folders searched in order.
+ */
+export type ToolsList = { tools: ToolInfo[]; missing: Tool[]; searched: string[] }
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
 export type TxAction = "Commit" | "Rollback"

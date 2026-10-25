@@ -1313,6 +1313,11 @@ impl ConnectionRuntime {
         }
     }
 
+    /// The server detected when the connection opened.
+    pub(crate) fn server_info(&self) -> &ServerInfo {
+        &self.info
+    }
+
     /// The slot of `database`, created empty on first use.
     fn schema_slot(&self, database: &str) -> Arc<SchemaSlot> {
         Arc::clone(
