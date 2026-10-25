@@ -10,7 +10,12 @@ import type {
   DesignReport,
   EditableInfo,
   HistoryEntry,
+  ImportConfirm,
+  ImportMode,
+  ImportRequest,
+  ImportTarget,
   IndexDetail,
+  KeyChoice,
   ObjectKind,
   ObjectRef,
   ObjectSummary,
@@ -20,12 +25,14 @@ import type {
   TableDataPage,
   TableDef,
   TableDetail,
+  TargetColumn,
   Tree,
   TypeInfo,
   TypeSpec,
   Value,
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
+import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
 import type { Handler } from './shim';
 
 /** The id the dialog sends while creating (see `NIL_UUID` in ConnectionDialog). */
@@ -391,6 +398,9 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   let designSeq = 0;
   const designs = new Map<string, string>();
   const plans = new Map<string, number>();
+  // Data import: reviewed plans (id -> request); one counter for dry runs, plans and jobs.
+  let importSeq = 0;
+  const importPlans = new Map<string, ImportRequest>();
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -571,6 +581,37 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     set_jobs_per_connection: () => null,
     get_external_tools_dir: () => null,
     set_external_tools_dir: () => null,
+
+    // The data import wizard (P5b): `orders.csv` into the canned `orders`; `specs/import-wizard.spec.ts`.
+    import_pick_file: () => IMPORT_FILE,
+    import_inspect: ({ path }) => {
+      if (path !== IMPORT_FILE) throw new Failure(appError('config', 'this file was not picked', { field: 'path' }));
+      return ordersInspection;
+    },
+    import_target: ({ connectionId }): ImportTarget => {
+      const cfg = connections.find((c) => c.id === connectionId);
+      return ordersTarget(cfg?.env_tag ?? null, requireOpen(connectionId as string), cfg?.read_only ?? false);
+    },
+    import_auto_map: ({ source, targets }) => autoMap(source as string[], targets as TargetColumn[]),
+    import_check_mapping: ({ mode, keys }) => checkMapping(mode as ImportMode, keys as KeyChoice[]),
+    import_dry_run: () => `dry-${++importSeq}`,
+    import_prepare: ({ request }) => {
+      const req = request as ImportRequest;
+      const planId = `import-plan-${++importSeq}`;
+      importPlans.set(planId, req);
+      return importPreview(req, planId, connections.find((c) => c.id === req.connection_id)?.env_tag ?? null);
+    },
+    import_start: ({ planId, confirm }) => {
+      const req = importPlans.get(planId as string);
+      if (!req) throw fail('plan_stale');
+      importPlans.delete(planId as string);
+      const c = confirm as ImportConfirm;
+      const prod = connections.find((x) => x.id === req.connection_id)?.env_tag === 'production';
+      if (!c.confirmed || (prod && c.name !== req.table.name)) {
+        throw new Failure(appError('config', 'the import was not confirmed', { field: 'confirm' }));
+      }
+      return `import-${++importSeq}`;
+    },
   };
 
   const all = { ...handlers, ...overrides };
