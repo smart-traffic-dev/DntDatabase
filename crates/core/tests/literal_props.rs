@@ -2,7 +2,7 @@
 //! `core::sql::tokenize`) sees exactly one string literal, nothing that ends the
 //! statement, and the literal's body decodes back to the original text.
 
-use dnt_core::sql::build::{literal, BuildError, ColumnTarget};
+use dnt_core::sql::build::{dump_literal, literal, BuildError, ColumnTarget};
 use dnt_core::sql::{tokenize, Dialect, MySqlMode, TokKind};
 use dnt_core::value::{FullValue, LogicalType, Value};
 use proptest::prelude::*;
@@ -120,8 +120,139 @@ fn decode(quoted: &str, d: Dialect) -> String {
     out
 }
 
+/// An array item as a tiny PG `array_in` reads it back.
+#[derive(Debug, Clone, PartialEq)]
+enum Item {
+    Null,
+    Text(String),
+    Array(Vec<Item>),
+}
+
+impl Item {
+    fn to_value(&self) -> Value {
+        match self {
+            Item::Null => Value::Null,
+            Item::Text(s) => Value::Text(s.clone()),
+            Item::Array(items) => Value::Array(items.iter().map(Item::to_value).collect()),
+        }
+    }
+}
+
+fn items() -> impl Strategy<Value = Vec<Item>> {
+    let leaf = prop_oneof![
+        1 => Just(Item::Null),
+        6 => text().prop_map(Item::Text),
+    ];
+    let item = leaf.prop_recursive(2, 24, 6, |inner| {
+        prop::collection::vec(inner, 0..6).prop_map(Item::Array)
+    });
+    prop::collection::vec(item, 0..8)
+}
+
+/// PG `array_in` for text items: `{…}` of items separated by `,`; an item is `"…"` (with
+/// `\` escaping the next character), a nested `{…}`, or bare text up to `,` / `}` where
+/// `NULL` (any case) is a null.
+fn parse_array(s: &str) -> Vec<Item> {
+    fn array(chars: &mut std::iter::Peekable<std::str::Chars>) -> Vec<Item> {
+        assert_eq!(chars.next(), Some('{'));
+        let mut out = Vec::new();
+        if chars.peek() == Some(&'}') {
+            chars.next();
+            return out;
+        }
+        loop {
+            match chars.peek() {
+                Some('{') => out.push(Item::Array(array(chars))),
+                Some('"') => {
+                    chars.next();
+                    let mut t = String::new();
+                    loop {
+                        match chars.next().expect("unterminated quoted item") {
+                            '\\' => t.push(chars.next().expect("dangling backslash")),
+                            '"' => break,
+                            c => t.push(c),
+                        }
+                    }
+                    out.push(Item::Text(t));
+                }
+                _ => {
+                    let mut t = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if c == ',' || c == '}' {
+                            break;
+                        }
+                        assert!(c != '"' && c != '\\' && c != '{', "unquoted special {c:?}");
+                        assert!(!c.is_whitespace(), "unquoted whitespace");
+                        t.push(c);
+                        chars.next();
+                    }
+                    assert!(!t.is_empty(), "empty bare item");
+                    out.push(if t.eq_ignore_ascii_case("null") {
+                        Item::Null
+                    } else {
+                        Item::Text(t)
+                    });
+                }
+            }
+            match chars.next() {
+                Some(',') => {}
+                Some('}') => return out,
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+    }
+    let mut chars = s.chars().peekable();
+    let out = array(&mut chars);
+    assert_eq!(chars.next(), None, "text after the array");
+    out
+}
+
+fn has_nul(items: &[Item]) -> bool {
+    items.iter().any(|i| match i {
+        Item::Null => false,
+        Item::Text(s) => s.contains('\0'),
+        Item::Array(inner) => has_nul(inner),
+    })
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
+
+    /// A PG array dump literal is one string literal cast to the column's type, and its
+    /// array text reads back as the items.
+    #[test]
+    fn dump_literal_pg_array_round_trips(items in items()) {
+        let col = ColumnTarget {
+            name: "c".into(),
+            db_type: "text[]".into(),
+            logical: LogicalType::Array,
+            collation: None,
+        };
+        let v = FullValue::try_from_value(Value::Array(
+            items.iter().map(Item::to_value).collect(),
+        ))
+        .unwrap();
+        let d = Dialect::Postgres;
+        let sql = match dump_literal(&v, &col, d) {
+            Ok(sql) => sql,
+            Err(BuildError::Invalid { .. }) => {
+                prop_assert!(has_nul(&items), "{:?}", items);
+                return Ok(());
+            }
+            Err(e) => return Err(TestCaseError::fail(format!("{items:?}: {e}"))),
+        };
+        prop_assert!(!has_nul(&items));
+        let toks = tokenize(&sql, d);
+        let kinds: Vec<_> = toks.iter().map(|t| t.kind).collect();
+        prop_assert_eq!(
+            kinds,
+            vec![TokKind::Quoted, TokKind::Punct(b':'), TokKind::Punct(b':'), TokKind::Word("text"), TokKind::Punct(b'['), TokKind::Punct(b']')],
+            "{}", sql
+        );
+        let body = &sql[toks[0].start..toks[0].end];
+        prop_assert!(body.starts_with('\''));
+        prop_assert_eq!(parse_array(&decode(body, d)), items, "{}", sql);
+    }
 
     #[test]
     fn literal_never_escapes_its_quotes(

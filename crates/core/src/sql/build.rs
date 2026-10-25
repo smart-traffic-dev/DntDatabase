@@ -42,7 +42,8 @@ pub enum BuildError {
 /// - Booleans: MySQL `1`/`0`, PG `TRUE`/`FALSE`. Binary: MySQL `X'…'`, PG `'\x…'::bytea`.
 /// - MySQL JSON: `CAST(_utf8mb4'…' AS JSON)`.
 /// - Arrays, `Value::Other` and columns of logical type `Other` (spatial, range,
-///   composite, …) are [`BuildError::Unsupported`].
+///   composite, …) are [`BuildError::Unsupported`] (a dump writes PG arrays and
+///   `Other` values with [`dump_literal`]).
 pub fn literal(v: &FullValue, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError> {
     if v.is_null() {
         return Ok("NULL".into());
@@ -97,13 +98,19 @@ fn invalid(col: &ColumnTarget, reason: &str) -> BuildError {
     }
 }
 
-fn binary(b: &[u8], d: Dialect) -> String {
+/// Lower-case hex digits of `b`.
+fn hex(b: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut hex = String::with_capacity(b.len() * 2);
     for &x in b {
         hex.push(DIGITS[usize::from(x >> 4)] as char);
         hex.push(DIGITS[usize::from(x & 0xf)] as char);
     }
+    hex
+}
+
+fn binary(b: &[u8], d: Dialect) -> String {
+    let hex = hex(b);
     match d {
         Dialect::MySql(_) => format!("X'{hex}'"),
         Dialect::Postgres => format!("'\\x{hex}'::bytea"),
@@ -421,6 +428,111 @@ fn take_arrays(s: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------------------
+// Dump literals: what a dump writes beyond `literal` (spec §6.4).
+// ---------------------------------------------------------------------------------------
+
+/// [`literal`], plus on PostgreSQL a `Value::Array` as `'<array text>'::<db_type>`
+/// ([`pg_array_text`]) and a `Value::Other` as `'<text>'::<db_type>` (the value's text as
+/// the server printed it). The cast target is rendered like every PG cast (from the
+/// type's parsed structure); a NUL anywhere in the text is `Invalid`, an incomplete
+/// binary array item `NotFull`. MySQL `Value::Other` / `Value::Array` stay `Unsupported`.
+pub fn dump_literal(v: &FullValue, col: &ColumnTarget, d: Dialect) -> Result<String, BuildError> {
+    if d == Dialect::Postgres {
+        let text = match v.as_value() {
+            Some(Value::Array(items)) => Some(pg_array_text(items).ok_or(BuildError::NotFull)?),
+            Some(Value::Other { text, .. }) => Some(text.clone()),
+            _ => None,
+        };
+        if let Some(text) = text {
+            if text.contains('\0') {
+                return Err(invalid(col, "PostgreSQL text cannot hold a NUL character"));
+            }
+            return Ok(format!(
+                "'{}'::{}",
+                text.replace('\'', "''"),
+                pg_cast_target(col)?
+            ));
+        }
+    }
+    literal(v, col, d)
+}
+
+/// A PostgreSQL array value in its text form (`{1,NULL,"a b",{2,3}}`), the same quoting
+/// as the CSV export's arrays: an item is written bare unless it is empty, reads as
+/// `NULL` (any case), or holds `,` `{` `}` `"` `\` or whitespace; then it is
+/// double-quoted with `\` and `"` backslash-escaped. `Value::Null` is `NULL`, a nested
+/// array its own `{…}`, a binary item its text form `\x…` (so always quoted), a float
+/// the shortest text that reads back the same (or `NaN` / `Infinity` / `-Infinity`).
+/// `None` when a binary item (at any depth) is not complete.
+///
+/// The result is array *text*, not SQL: [`dump_literal`] quotes it as a string literal.
+pub fn pg_array_text(items: &[Value]) -> Option<String> {
+    let mut out = String::from("{");
+    for (i, v) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        match v {
+            Value::Null => out.push_str("NULL"),
+            Value::Array(inner) => out.push_str(&pg_array_text(inner)?),
+            Value::Bytes { len, preview } => {
+                if (preview.len() as u64) < *len {
+                    return None;
+                }
+                push_array_item(&mut out, &format!("\\x{}", hex(preview)));
+            }
+            other => push_array_item(&mut out, &array_item_text(other)),
+        }
+    }
+    out.push('}');
+    Some(out)
+}
+
+/// The text of a scalar array item (not `Null`, `Array` or `Bytes`).
+fn array_item_text(v: &Value) -> String {
+    match v {
+        Value::Bool(b) => b.to_string(),
+        Value::Int(n) => n.to_string(),
+        Value::UInt(n) => n.to_string(),
+        Value::Float(f) if f.is_nan() => "NaN".into(),
+        Value::Float(f) if f.is_infinite() => {
+            if *f > 0.0 { "Infinity" } else { "-Infinity" }.into()
+        }
+        Value::Float(f) => format!("{f:?}"),
+        Value::Decimal(s)
+        | Value::Text(s)
+        | Value::Json(s)
+        | Value::Uuid(s)
+        | Value::Date(s)
+        | Value::Time(s)
+        | Value::DateTime(s)
+        | Value::TimestampTz(s)
+        | Value::Other { text: s, .. } => s.clone(),
+        Value::Null | Value::Array(_) | Value::Bytes { .. } => String::new(),
+    }
+}
+
+fn push_array_item(out: &mut String, t: &str) {
+    let plain = !t.is_empty()
+        && !t.eq_ignore_ascii_case("null")
+        && !t
+            .chars()
+            .any(|c| matches!(c, ',' | '{' | '}' | '"' | '\\') || c.is_whitespace());
+    if plain {
+        out.push_str(t);
+    } else {
+        out.push('"');
+        for c in t.chars() {
+            if matches!(c, '"' | '\\') {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out.push('"');
+    }
+}
+
+// ---------------------------------------------------------------------------------------
 // Statements: key-based DML and the raw WHERE check.
 // ---------------------------------------------------------------------------------------
 
@@ -566,6 +678,190 @@ pub fn insert_sql(
         sql.push_str(&format!(" RETURNING {}", names.join(", ")));
     }
     Ok(sql)
+}
+
+/// What an `INSERT` does when a row collides with an existing key (R14).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum OnConflict {
+    /// No clause: the server reports the duplicate.
+    #[default]
+    Error,
+    /// Upsert on `key` (the columns of the primary key or a NOT NULL unique index),
+    /// setting the `update` columns from the new row. With no `update` column: PG
+    /// `DO NOTHING`, MySQL `<first key column> = <first key column>`. Every `key` and
+    /// `update` column must be one of the inserted columns.
+    Update {
+        key: Vec<String>,
+        update: Vec<String>,
+    },
+}
+
+/// How [`insert_sql_with`] / [`insert_head`] / [`insert_tail`] write an `INSERT`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InsertOptions {
+    /// PostgreSQL `OVERRIDING SYSTEM VALUE` (write an `IDENTITY ALWAYS` column);
+    /// `Invalid` on MySQL.
+    pub overriding_system_value: bool,
+    pub on_conflict: OnConflict,
+}
+
+/// `INSERT INTO <relation> (<cols>)[ OVERRIDING SYSTEM VALUE] VALUES ` (with the trailing
+/// space): the part of [`insert_sql_with`] before the row tuples. MySQL with no columns:
+/// `INSERT INTO <relation> () VALUES ` (all-default rows `()`); PostgreSQL needs at
+/// least one column (its all-default form `DEFAULT VALUES` takes no tuples).
+pub fn insert_head(
+    t: &TableRef,
+    cols: &[ColumnTarget],
+    opts: &InsertOptions,
+    d: Dialect,
+) -> Result<String, BuildError> {
+    let relation = relation_for(t, d)?;
+    if opts.overriding_system_value && d != Dialect::Postgres {
+        return Err(BuildError::Invalid {
+            column: String::new(),
+            reason: "OVERRIDING SYSTEM VALUE is PostgreSQL only".into(),
+        });
+    }
+    if cols.is_empty() && d == Dialect::Postgres {
+        return Err(BuildError::Invalid {
+            column: String::new(),
+            reason: "a PostgreSQL multi-row INSERT needs at least one column".into(),
+        });
+    }
+    let kind = kind_of(d);
+    let names: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+    let overriding = if opts.overriding_system_value {
+        " OVERRIDING SYSTEM VALUE"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "INSERT INTO {relation} ({}){overriding} VALUES ",
+        names.join(", ")
+    ))
+}
+
+/// The part of [`insert_sql_with`] after the row tuples: `""`, MySQL
+/// ` ON DUPLICATE KEY UPDATE `c` = VALUES(`c`), …` or PostgreSQL
+/// ` ON CONFLICT ("k", …) DO UPDATE SET "c" = EXCLUDED."c", …` / ` … DO NOTHING`.
+pub fn insert_tail(
+    cols: &[ColumnTarget],
+    opts: &InsertOptions,
+    d: Dialect,
+) -> Result<String, BuildError> {
+    let OnConflict::Update { key, update } = &opts.on_conflict else {
+        return Ok(String::new());
+    };
+    if key.is_empty() {
+        return Err(BuildError::Invalid {
+            column: String::new(),
+            reason: "an upsert needs at least one key column".into(),
+        });
+    }
+    for name in key.iter().chain(update) {
+        if !cols.iter().any(|c| &c.name == name) {
+            return Err(BuildError::Invalid {
+                column: name.clone(),
+                reason: "an upsert column must be one of the inserted columns".into(),
+            });
+        }
+    }
+    let kind = kind_of(d);
+    let q = |n: &str| quote_ident(kind, n);
+    Ok(match d {
+        Dialect::MySql(_) => {
+            let sets: Vec<String> = if update.is_empty() {
+                vec![format!("{0} = {0}", q(&key[0]))]
+            } else {
+                update
+                    .iter()
+                    .map(|n| format!("{0} = VALUES({0})", q(n)))
+                    .collect()
+            };
+            format!(" ON DUPLICATE KEY UPDATE {}", sets.join(", "))
+        }
+        Dialect::Postgres => {
+            let keys: Vec<String> = key.iter().map(|n| q(n)).collect();
+            if update.is_empty() {
+                format!(" ON CONFLICT ({}) DO NOTHING", keys.join(", "))
+            } else {
+                let sets: Vec<String> = update
+                    .iter()
+                    .map(|n| format!("{0} = EXCLUDED.{0}", q(n)))
+                    .collect();
+                format!(
+                    " ON CONFLICT ({}) DO UPDATE SET {}",
+                    keys.join(", "),
+                    sets.join(", ")
+                )
+            }
+        }
+    })
+}
+
+/// One row as `(<lit>, <lit>, …)` with [`literal`] (one value per column).
+pub fn row_tuple(
+    cols: &[ColumnTarget],
+    row: &[FullValue],
+    d: Dialect,
+) -> Result<String, BuildError> {
+    tuple_with(cols, row, d, literal)
+}
+
+/// One row as `(<lit>, …)` with [`dump_literal`] (PG arrays and `Other` values too).
+pub fn dump_row_tuple(
+    cols: &[ColumnTarget],
+    row: &[FullValue],
+    d: Dialect,
+) -> Result<String, BuildError> {
+    tuple_with(cols, row, d, dump_literal)
+}
+
+type LiteralFn = fn(&FullValue, &ColumnTarget, Dialect) -> Result<String, BuildError>;
+
+fn tuple_with(
+    cols: &[ColumnTarget],
+    row: &[FullValue],
+    d: Dialect,
+    lit: LiteralFn,
+) -> Result<String, BuildError> {
+    if row.len() != cols.len() {
+        return Err(BuildError::Invalid {
+            column: String::new(),
+            reason: format!("a row has {} values for {} columns", row.len(), cols.len()),
+        });
+    }
+    let values = cols
+        .iter()
+        .zip(row)
+        .map(|(c, v)| lit(v, c, d))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("({})", values.join(", ")))
+}
+
+/// [`insert_head`] + the rows' [`row_tuple`]s joined with `", "` + [`insert_tail`]. With
+/// default options this is byte for byte [`insert_sql`] without `RETURNING` (except
+/// that PostgreSQL with no columns is refused, see [`insert_head`]).
+pub fn insert_sql_with(
+    t: &TableRef,
+    cols: &[ColumnTarget],
+    rows: &[Vec<FullValue>],
+    opts: &InsertOptions,
+    d: Dialect,
+) -> Result<String, BuildError> {
+    let head = insert_head(t, cols, opts, d)?;
+    if rows.is_empty() {
+        return Err(BuildError::Invalid {
+            column: String::new(),
+            reason: "an INSERT needs at least one row".into(),
+        });
+    }
+    let tail = insert_tail(cols, opts, d)?;
+    let tuples = rows
+        .iter()
+        .map(|r| row_tuple(cols, r, d))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("{head}{}{tail}", tuples.join(", ")))
 }
 
 /// `UPDATE <relation> SET <col> = <lit>, … WHERE <key>[ AND <guard>]`.
@@ -1222,6 +1518,288 @@ mod dml_tests {
         }
     }
 
+    fn upsert(key: &[&str], update: &[&str]) -> InsertOptions {
+        InsertOptions {
+            overriding_system_value: false,
+            on_conflict: OnConflict::Update {
+                key: key.iter().map(|s| s.to_string()).collect(),
+                update: update.iter().map(|s| s.to_string()).collect(),
+            },
+        }
+    }
+
+    #[test]
+    fn upsert_mysql() {
+        let cols = [
+            id_my(),
+            name_my("utf8mb4_bin"),
+            c("qty", "int", LogicalType::Integer, None),
+        ];
+        let rows = vec![vec![int(1), text("a"), int(2)]];
+        assert_eq!(
+            insert_sql_with(
+                &my_table(),
+                &cols,
+                &rows,
+                &upsert(&["id"], &["name", "qty"]),
+                Dialect::MYSQL
+            )
+            .unwrap(),
+            "INSERT INTO `shop`.`users` (`id`, `name`, `qty`) VALUES (1, _utf8mb4'a', 2) \
+             ON DUPLICATE KEY UPDATE `name` = VALUES(`name`), `qty` = VALUES(`qty`)"
+        );
+    }
+
+    #[test]
+    fn upsert_mysql_key_only() {
+        let cols = [id_my(), c("k2", "int", LogicalType::Integer, None)];
+        let rows = vec![vec![int(1), int(2)]];
+        assert_eq!(
+            insert_sql_with(
+                &my_table(),
+                &cols,
+                &rows,
+                &upsert(&["id", "k2"], &[]),
+                Dialect::MYSQL
+            )
+            .unwrap(),
+            "INSERT INTO `shop`.`users` (`id`, `k2`) VALUES (1, 2) \
+             ON DUPLICATE KEY UPDATE `id` = `id`"
+        );
+    }
+
+    #[test]
+    fn upsert_pg() {
+        let cols = [
+            id_pg(),
+            c("k2", "int4", LogicalType::Integer, None),
+            name_pg(),
+        ];
+        let rows = vec![
+            vec![int(1), int(2), text("a")],
+            vec![int(3), int(4), null()],
+        ];
+        assert_eq!(
+            insert_sql_with(
+                &pg_table(),
+                &cols,
+                &rows,
+                &upsert(&["id", "k2"], &["name"]),
+                Dialect::Postgres
+            )
+            .unwrap(),
+            "INSERT INTO \"public\".\"users\" (\"id\", \"k2\", \"name\") \
+             VALUES (1, 2, 'a'), (3, 4, NULL) \
+             ON CONFLICT (\"id\", \"k2\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""
+        );
+    }
+
+    #[test]
+    fn upsert_pg_do_nothing() {
+        let cols = [id_pg(), name_pg()];
+        assert_eq!(
+            insert_tail(&cols, &upsert(&["id"], &[]), Dialect::Postgres).unwrap(),
+            " ON CONFLICT (\"id\") DO NOTHING"
+        );
+    }
+
+    #[test]
+    fn upsert_checks_its_columns() {
+        let cols = [id_pg(), name_pg()];
+        for opts in [
+            upsert(&[], &["name"]),
+            upsert(&["missing"], &["name"]),
+            upsert(&["id"], &["missing"]),
+        ] {
+            for d in [Dialect::Postgres, Dialect::MYSQL] {
+                assert!(
+                    matches!(
+                        insert_tail(&cols, &opts, d),
+                        Err(BuildError::Invalid { .. })
+                    ),
+                    "{opts:?} {d:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overriding_system_value_pg() {
+        let opts = InsertOptions {
+            overriding_system_value: true,
+            on_conflict: OnConflict::Error,
+        };
+        assert_eq!(
+            insert_sql_with(
+                &pg_table(),
+                &[id_pg()],
+                &[vec![int(1)]],
+                &opts,
+                Dialect::Postgres
+            )
+            .unwrap(),
+            "INSERT INTO \"public\".\"users\" (\"id\") OVERRIDING SYSTEM VALUE VALUES (1)"
+        );
+        assert_eq!(
+            insert_head(&pg_table(), &[id_pg()], &opts, Dialect::Postgres).unwrap(),
+            "INSERT INTO \"public\".\"users\" (\"id\") OVERRIDING SYSTEM VALUE VALUES "
+        );
+    }
+
+    #[test]
+    fn overriding_refused_on_mysql() {
+        let opts = InsertOptions {
+            overriding_system_value: true,
+            on_conflict: OnConflict::Error,
+        };
+        assert!(matches!(
+            insert_head(&my_table(), &[id_my()], &opts, Dialect::MYSQL),
+            Err(BuildError::Invalid { .. })
+        ));
+        assert!(matches!(
+            insert_sql_with(
+                &my_table(),
+                &[id_my()],
+                &[vec![int(1)]],
+                &opts,
+                Dialect::MYSQL
+            ),
+            Err(BuildError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn head_tuples_tail_equal_insert_sql_with() {
+        let pg_cols = [id_pg(), name_pg()];
+        let my_cols = [id_my(), name_my("utf8mb4_bin")];
+        let rows = vec![vec![int(1), text("it's")], vec![int(2), null()]];
+        let cases: Vec<(TableRef, &[ColumnTarget], InsertOptions, Dialect)> = vec![
+            (
+                pg_table(),
+                &pg_cols,
+                InsertOptions::default(),
+                Dialect::Postgres,
+            ),
+            (
+                pg_table(),
+                &pg_cols,
+                upsert(&["id"], &["name"]),
+                Dialect::Postgres,
+            ),
+            (
+                pg_table(),
+                &pg_cols,
+                InsertOptions {
+                    overriding_system_value: true,
+                    on_conflict: OnConflict::Update {
+                        key: vec!["id".into()],
+                        update: vec![],
+                    },
+                },
+                Dialect::Postgres,
+            ),
+            (
+                my_table(),
+                &my_cols,
+                InsertOptions::default(),
+                Dialect::MYSQL,
+            ),
+            (
+                my_table(),
+                &my_cols,
+                upsert(&["id"], &["name"]),
+                Dialect::MYSQL,
+            ),
+            (my_table(), &my_cols, upsert(&["id"], &[]), NBE),
+        ];
+        for (t, cols, opts, d) in cases {
+            let whole = insert_sql_with(&t, cols, &rows, &opts, d).unwrap();
+            let parts = format!(
+                "{}{}, {}{}",
+                insert_head(&t, cols, &opts, d).unwrap(),
+                row_tuple(cols, &rows[0], d).unwrap(),
+                row_tuple(cols, &rows[1], d).unwrap(),
+                insert_tail(cols, &opts, d).unwrap()
+            );
+            assert_eq!(parts, whole, "{opts:?} {d:?}");
+        }
+        // MySQL all-default rows.
+        assert_eq!(
+            insert_head(&my_table(), &[], &InsertOptions::default(), Dialect::MYSQL).unwrap()
+                + &row_tuple(&[], &[], Dialect::MYSQL).unwrap(),
+            "INSERT INTO `shop`.`users` () VALUES ()"
+        );
+        // A row with the wrong number of values.
+        assert!(matches!(
+            row_tuple(&pg_cols, &[int(1)], Dialect::Postgres),
+            Err(BuildError::Invalid { .. })
+        ));
+        // PG all-default rows have no tuple form.
+        assert!(matches!(
+            insert_head(
+                &pg_table(),
+                &[],
+                &InsertOptions::default(),
+                Dialect::Postgres
+            ),
+            Err(BuildError::Invalid { .. })
+        ));
+        assert!(matches!(
+            insert_sql_with(
+                &pg_table(),
+                &pg_cols,
+                &[],
+                &InsertOptions::default(),
+                Dialect::Postgres
+            ),
+            Err(BuildError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn insert_sql_with_default_options_equals_insert_sql() {
+        let opts = InsertOptions::default();
+        let pg_cols = [id_pg(), name_pg()];
+        let my_cols = [id_my(), name_my("utf8mb4_bin")];
+        let rows = vec![vec![int(1), text("a\\'b")], vec![int(2), null()]];
+        assert_eq!(
+            insert_sql_with(&pg_table(), &pg_cols, &rows, &opts, Dialect::Postgres).unwrap(),
+            insert_sql(&pg_table(), &pg_cols, &rows, &[], Dialect::Postgres).unwrap()
+        );
+        for d in [Dialect::MYSQL, NBE] {
+            assert_eq!(
+                insert_sql_with(&my_table(), &my_cols, &rows, &opts, d).unwrap(),
+                insert_sql(&my_table(), &my_cols, &rows, &[], d).unwrap()
+            );
+        }
+        assert_eq!(
+            insert_sql_with(&my_table(), &[], &[vec![], vec![]], &opts, Dialect::MYSQL).unwrap(),
+            insert_sql(&my_table(), &[], &[vec![], vec![]], &[], Dialect::MYSQL).unwrap()
+        );
+        // The dialect must match the table, as for `insert_sql`.
+        assert!(matches!(
+            insert_sql_with(&pg_table(), &pg_cols, &rows, &opts, Dialect::MYSQL),
+            Err(BuildError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn dump_row_tuple_uses_dump_literals() {
+        let cols = [id_pg(), c("tags", "text[]", LogicalType::Array, None)];
+        let row = [
+            int(1),
+            fv(Value::Array(vec![Value::Text("a b".into()), Value::Null])),
+        ];
+        assert_eq!(
+            dump_row_tuple(&cols, &row, Dialect::Postgres).unwrap(),
+            "(1, '{\"a b\",NULL}'::text[])"
+        );
+        assert!(matches!(
+            row_tuple(&cols, &row, Dialect::Postgres),
+            Err(BuildError::Unsupported { .. })
+        ));
+    }
+
     #[test]
     fn raw_where_clause_wraps_so_a_line_comment_cannot_eat_the_rest() {
         assert_eq!(
@@ -1746,5 +2324,138 @@ mod tests {
             lit_err(t("POINT(1 2)"), MY_GEOM),
             BuildError::Unsupported { .. }
         ));
+    }
+
+    fn dump(v: FullValue, c: Ctx) -> Result<String, BuildError> {
+        dump_literal(&v, &col(&c), c.2)
+    }
+
+    #[test]
+    fn dump_literal_pg_array_and_other() {
+        let ints = full(Value::Array(vec![
+            Value::Int(1),
+            Value::Null,
+            Value::Int(3),
+        ]));
+        assert_eq!(
+            dump(
+                ints,
+                Ctx("integer[]", LogicalType::Array, Dialect::Postgres)
+            )
+            .unwrap(),
+            "'{1,NULL,3}'::integer[]"
+        );
+        let mixed = full(Value::Array(vec![
+            Value::Int(1),
+            Value::Null,
+            Value::Text("a b".into()),
+        ]));
+        assert_eq!(
+            dump(mixed, Ctx("text[]", LogicalType::Array, Dialect::Postgres)).unwrap(),
+            "'{1,NULL,\"a b\"}'::text[]"
+        );
+        // A quote inside an item is doubled by the SQL literal, not the array text.
+        let quoted = full(Value::Array(vec![Value::Text("it's".into())]));
+        assert_eq!(
+            dump(quoted, Ctx("text[]", LogicalType::Array, Dialect::Postgres)).unwrap(),
+            "'{it''s}'::text[]"
+        );
+        let other = full(Value::Other {
+            type_name: "interval".into(),
+            text: "1 day".into(),
+        });
+        assert_eq!(dump(other, PG_INTERVAL).unwrap(), "'1 day'::interval");
+        // Everything else is `literal`.
+        assert_eq!(dump(t("x"), PG_ENUM).unwrap(), "'x'::order_status");
+        assert_eq!(dump(full(Value::Null), PG_ARR).unwrap(), "NULL");
+        assert_eq!(
+            dump(FullValue::bytes(vec![1]), PG_BYTEA).unwrap(),
+            r"'\x01'::bytea"
+        );
+        // The cast target is rendered from structure, never spliced in.
+        let other = full(Value::Other {
+            type_name: "x".into(),
+            text: "1".into(),
+        });
+        assert!(matches!(
+            dump(
+                other,
+                Ctx("int; DROP TABLE t", LogicalType::Other, Dialect::Postgres)
+            ),
+            Err(BuildError::Unsupported { .. })
+        ));
+        // NUL cannot be stored in PG text.
+        let nul = full(Value::Array(vec![Value::Text("a\0".into())]));
+        assert!(matches!(
+            dump(nul, Ctx("text[]", LogicalType::Array, Dialect::Postgres)),
+            Err(BuildError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn dump_literal_mysql_other_unsupported() {
+        let other = full(Value::Other {
+            type_name: "geometry".into(),
+            text: "POINT(1 2)".into(),
+        });
+        assert!(matches!(
+            dump(other, MY_GEOM),
+            Err(BuildError::Unsupported { .. })
+        ));
+        let arr = full(Value::Array(vec![Value::Int(1)]));
+        assert!(matches!(
+            dump(arr, Ctx("json", LogicalType::Json, Dialect::MYSQL)),
+            Err(BuildError::Unsupported { .. })
+        ));
+        assert_eq!(dump(t("a"), MY).unwrap(), "_utf8mb4'a'");
+    }
+
+    #[test]
+    fn pg_array_text_quoting() {
+        let text = |s: &str| Value::Text(s.into());
+        assert_eq!(pg_array_text(&[]).unwrap(), "{}");
+        assert_eq!(
+            pg_array_text(&[
+                text("plain"),
+                text(""),
+                text("null"),
+                text("NULL"),
+                text("a,b"),
+                text("{x}"),
+                text("say \"hi\""),
+                text("back\\slash"),
+                text("tab\there"),
+                text("Nguyễn"),
+                Value::Null,
+            ])
+            .unwrap(),
+            r#"{plain,"","null","NULL","a,b","{x}","say \"hi\"","back\\slash","tab"#.to_string()
+                + "\there\",Nguyễn,NULL}"
+        );
+        // Nested arrays, numbers, booleans, floats.
+        assert_eq!(
+            pg_array_text(&[
+                Value::Array(vec![Value::Int(1), Value::UInt(2)]),
+                Value::Array(vec![Value::Float(1.5), Value::Float(f64::NAN)]),
+            ])
+            .unwrap(),
+            "{{1,2},{1.5,NaN}}"
+        );
+        assert_eq!(
+            pg_array_text(&[Value::Bool(true), Value::Bool(false)]).unwrap(),
+            "{true,false}"
+        );
+        // bytea items in their text form; incomplete ones refuse the whole array.
+        assert_eq!(
+            pg_array_text(&[Value::bytes(&[0, 0xff])]).unwrap(),
+            r#"{"\\x00ff"}"#
+        );
+        assert_eq!(
+            pg_array_text(&[Value::Array(vec![Value::Bytes {
+                len: 10,
+                preview: vec![1]
+            }])]),
+            None
+        );
     }
 }
