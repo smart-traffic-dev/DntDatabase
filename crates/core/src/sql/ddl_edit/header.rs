@@ -145,11 +145,24 @@ type QualifiedIdent = (Option<String>, String, (usize, usize), usize);
 
 /// `identifier [. identifier]` at token `i`: (qualifier, name, byte span, next token).
 fn qualified_ident(stmt: &str, toks: &[Token], i: usize, d: Dialect) -> Option<QualifiedIdent> {
+    // PostgreSQL `U&"…"` (Unicode-escaped) names are refused, not read as `u`.
+    let unicode = |k: usize| {
+        is_kw(word_at(toks, k), "U")
+            && toks
+                .get(k + 1)
+                .is_some_and(|t| t.kind == TokKind::Punct(b'&'))
+    };
+    if unicode(i) {
+        return None;
+    }
     let first = ident(stmt, toks.get(i)?, d)?;
     let start = toks[i].start;
     let is_dot = |k: usize| toks.get(k).is_some_and(|t| t.kind == TokKind::Punct(b'.'));
     if !is_dot(i + 1) {
         return Some((None, first, (start, toks[i].end), i + 1));
+    }
+    if unicode(i + 2) {
+        return None;
     }
     let second = ident(stmt, toks.get(i + 2)?, d)?;
     if is_dot(i + 3) {
@@ -209,6 +222,21 @@ fn kind_word(kind: ObjectKind) -> &'static str {
     }
 }
 
+/// Whether the text's name is the object's name: MySQL routine and event names are
+/// case-insensitive (ASCII); everything else compares exactly.
+fn same_name(kind: ObjectKind, text: &str, object: &str, pg: bool) -> bool {
+    let insensitive = !pg
+        && matches!(
+            kind,
+            ObjectKind::Function | ObjectKind::Procedure | ObjectKind::Event
+        );
+    if insensitive {
+        text.eq_ignore_ascii_case(object)
+    } else {
+        text == object
+    }
+}
+
 /// Checks that the header defines the target object, on this engine and version:
 /// spec §5.1 steps 4–5.
 pub fn check_target(h: &Header, t: &EditTarget, server: &ServerInfo) -> Result<(), DbError> {
@@ -227,10 +255,7 @@ pub fn check_target(h: &Header, t: &EditTarget, server: &ServerInfo) -> Result<(
     }
     // Engine and version.
     if h.or_replace {
-        let mysql_proper = matches!(
-            server.variant,
-            ServerVariant::MySql57 | ServerVariant::MySql8
-        );
+        let mysql_proper = !pg && server.variant != ServerVariant::MariaDb;
         if mysql_proper
             && matches!(
                 h.kind,
@@ -256,7 +281,7 @@ pub fn check_target(h: &Header, t: &EditTarget, server: &ServerInfo) -> Result<(
     }
     // The name.
     match &t.name {
-        Some(n) if &h.name != n => {
+        Some(n) if !same_name(h.kind, &h.name, n, pg) => {
             let shown = match &h.qualifier {
                 Some(q) => format!("`{q}`.`{}`", h.name),
                 None => format!("`{}`", h.name),
@@ -610,6 +635,31 @@ mod tests {
             "{m}"
         );
         assert!(m.contains("`q`"), "{m}");
+        // MySQL routine and event names are case-insensitive; views and triggers are not.
+        check("CREATE PROCEDURE P() BEGIN END", MY, &p, &mysql8()).unwrap();
+        let ev = target(ObjectKind::Event, None, Some("e"));
+        check(
+            "CREATE EVENT E ON SCHEDULE EVERY 1 DAY DO SELECT 1",
+            MY,
+            &ev,
+            &mysql8(),
+        )
+        .unwrap();
+        let v = target(ObjectKind::View, None, Some("v"));
+        text_refusal(check("CREATE VIEW V AS SELECT 1", MY, &v, &mysql8()));
+        let pf = target(ObjectKind::Function, Some("public"), Some("f"));
+        text_refusal(check(
+            "CREATE FUNCTION public.\"F\"() RETURNS int AS 'SELECT 1' LANGUAGE sql",
+            PG,
+            &pf,
+            &pg17(),
+        ));
+        // A Unicode-escaped PostgreSQL name is not read as `u`.
+        text_refusal(parse_header(
+            "CREATE OR REPLACE VIEW public.U&\"x\" AS SELECT 1",
+            PG,
+        ));
+        text_refusal(parse_header("CREATE VIEW u&\"x\" AS SELECT 1", PG));
         // Other database / schema.
         text_refusal(check(
             "CREATE PROCEDURE other.p() BEGIN END",

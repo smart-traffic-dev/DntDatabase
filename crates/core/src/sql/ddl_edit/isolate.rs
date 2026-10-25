@@ -1,12 +1,12 @@
 //! Spec §5.1 steps 1–2: the one statement of the edited text.
 
-use super::{editable_kind, text_error, MAX_TEXT_BYTES};
+use super::{editable_kind, parse_header, text_error, MAX_TEXT_BYTES};
 use crate::error::DbError;
 use crate::meta::ObjectKind;
 use crate::server::ServerInfo;
 use crate::sql::lexer::{is_kw, tokenize, word_at, Dialect, TokKind, Token};
 use crate::sql::multi::resplits;
-use crate::sql::split::split;
+use crate::sql::split::{delimiter_directive, split};
 
 const ONE_STATEMENT: &str = "Only one statement can be applied; remove the other statements.";
 const AFTER_BODY: &str =
@@ -34,11 +34,7 @@ pub fn isolate(
     }
     match dialect {
         Dialect::MySql(_) => {
-            if toks.iter().any(|t| t.kind == TokKind::ExecComment) {
-                return Err(text_error(
-                    "Executable comments (/*! … */) cannot be applied here; remove them.",
-                ));
-            }
+            refuse_exec_comments(&toks)?;
             if matches!(
                 kind,
                 ObjectKind::Function
@@ -51,10 +47,12 @@ pub fn isolate(
                 } else {
                     text.trim().to_string()
                 };
+                refuse_exec_comments(&tokenize(&candidate, dialect))?;
                 let end = body_end(&candidate, dialect)?;
                 Ok(candidate[..end].trim().to_string())
             } else {
                 let stmt = only_statement(text, dialect)?;
+                refuse_exec_comments(&tokenize(&stmt, dialect))?;
                 if resplits(&stmt, dialect) {
                     return Err(text_error(ONE_STATEMENT));
                 }
@@ -87,6 +85,16 @@ pub fn isolate(
     }
 }
 
+/// MySQL executable comments (`/*! … */`) run depending on the server version.
+fn refuse_exec_comments(toks: &[Token]) -> Result<(), DbError> {
+    if toks.iter().any(|t| t.kind == TokKind::ExecComment) {
+        return Err(text_error(
+            "Executable comments (/*! … */) cannot be applied here; remove them.",
+        ));
+    }
+    Ok(())
+}
+
 /// The only `split` statement of `text`.
 fn only_statement(text: &str, dialect: Dialect) -> Result<String, DbError> {
     let mut stmts = split(text, dialect);
@@ -99,19 +107,12 @@ fn only_statement(text: &str, dialect: Dialect) -> Result<String, DbError> {
     }
 }
 
-/// Whether `text` holds a MySQL client `DELIMITER` line, as `split` reads one: the
-/// word `DELIMITER` (outside strings and comments) with only blanks before it on its
-/// line and a space or tab after it.
+/// Whether `text` holds a MySQL client `DELIMITER` line, as `split` reads one (a
+/// `DELIMITER` word outside strings and comments that `split` takes as a directive).
 fn has_delimiter_directive(text: &str, toks: &[Token]) -> bool {
-    let b = text.as_bytes();
     toks.iter().any(|t| {
         matches!(t.kind, TokKind::Word(w) if w.eq_ignore_ascii_case("DELIMITER"))
-            && matches!(b.get(t.end), Some(b' ' | b'\t'))
-            && b[..t.start]
-                .iter()
-                .rev()
-                .take_while(|&&c| c != b'\n')
-                .all(|&c| c == b' ' || c == b'\t')
+            && delimiter_directive(text, t.start).is_some()
     })
 }
 
@@ -119,20 +120,47 @@ fn has_delimiter_directive(text: &str, toks: &[Token]) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Block {
     Begin,
-    Case,
+    /// A `CASE` statement (closed by `END CASE`).
+    CaseStmt,
+    /// A `CASE` expression (closed by `END`).
+    CaseExpr,
 }
+
+const QUOTE_BEGIN: &str =
+    "BEGIN can only open a block at the start of a statement; quote it (`begin`) if it is a name.";
 
 /// The MySQL body scanner: the byte offset where the one compound statement of
 /// `stmt` ends (its first `;` at paren and block depth 0, or the end of the text),
 /// refusing the text when anything but `;` follows, or when its blocks or
-/// parentheses do not balance. Refuses rather than guesses (spec R6).
+/// parentheses do not balance.
+///
+/// Refuses rather than guesses (spec R6): when unsure it under-counts blocks, since
+/// an under-count can only end the statement early, which then refuses the rest. So
+/// `BEGIN` opens a block only at the start of a statement (the body's first token,
+/// after `;`, a label, a block's `BEGIN`, `LOOP`, `REPEAT`, a `WHILE`'s `DO`, `THEN` /
+/// `ELSE` outside a CASE expression, or a handler's condition list); after `.` it is
+/// a name, and anywhere else the text is refused. `CASE` after `.` is a name.
 fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
     let toks = tokenize(stmt, dialect);
+    let header = parse_header(stmt, dialect)?;
+    let after_name = toks
+        .iter()
+        .position(|t| t.start >= header.name_span.1)
+        .unwrap_or(toks.len());
+    let body = body_start(&toks, after_name, header.kind);
     let mut paren: i64 = 0;
     let mut blocks: Vec<Block> = Vec::new();
+    // Token indexes known to start a statement (the body, handler statements).
+    let mut starts: Vec<usize> = body.into_iter().collect();
+    // `WHILE`s whose `DO` has not been seen yet.
+    let mut whiles = 0usize;
+    let mut at_start = false;
     let mut i = 0;
     while i < toks.len() {
         let t = toks[i];
+        let start = at_start || starts.contains(&i);
+        let prev_dot = i > 0 && toks[i - 1].kind == TokKind::Punct(b'.');
+        let mut next_start = false;
         match t.kind {
             TokKind::Open => paren += 1,
             TokKind::Close => {
@@ -154,18 +182,28 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
                 }
                 return Ok(t.start);
             }
-            TokKind::Word(w) if paren == 0 => {
-                if w.eq_ignore_ascii_case("BEGIN") {
-                    if !is_name(&toks, i) {
-                        blocks.push(Block::Begin);
+            TokKind::Punct(b';') | TokKind::Punct(b':') if paren == 0 => next_start = true,
+            TokKind::Word(w) if paren == 0 && !prev_dot => {
+                let kw = |k: &str| w.eq_ignore_ascii_case(k);
+                if kw("BEGIN") {
+                    let label = toks
+                        .get(i + 1)
+                        .is_some_and(|n| n.kind == TokKind::Punct(b':'));
+                    if !start || label {
+                        return Err(text_error(QUOTE_BEGIN));
                     }
-                } else if w.eq_ignore_ascii_case("CASE") {
-                    blocks.push(Block::Case);
-                } else if w.eq_ignore_ascii_case("END") {
-                    // The END of a CASE expression is often followed by `AS`, `FROM`,
-                    // `,` or `)`: when a CASE is the innermost open block, only the
-                    // previous token can make this END a name.
-                    let name = if blocks.last() == Some(&Block::Case) {
+                    blocks.push(Block::Begin);
+                    next_start = true;
+                } else if kw("CASE") {
+                    blocks.push(if start {
+                        Block::CaseStmt
+                    } else {
+                        Block::CaseExpr
+                    });
+                } else if kw("END") {
+                    // Ending a CASE expression early only under-counts; a name END is
+                    // recognised by the tokens around it otherwise.
+                    let name = if blocks.last() == Some(&Block::CaseExpr) {
                         is_name_by_prev(&toks, i)
                     } else {
                         is_name(&toks, i)
@@ -188,10 +226,24 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
                             }
                         }
                     }
+                } else if (kw("LOOP") || kw("REPEAT")) && start {
+                    next_start = true;
+                } else if kw("WHILE") && start {
+                    whiles += 1;
+                } else if kw("DO") && whiles > 0 {
+                    whiles -= 1;
+                    next_start = true;
+                } else if (kw("THEN") || kw("ELSE")) && blocks.last() != Some(&Block::CaseExpr) {
+                    next_start = true;
+                } else if kw("DECLARE") && start {
+                    if let Some(k) = handler_start(&toks, i) {
+                        starts.push(k);
+                    }
                 }
             }
             _ => {}
         }
+        at_start = next_start;
         i += 1;
     }
     if !blocks.is_empty() {
@@ -207,7 +259,180 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
     Ok(stmt.len())
 }
 
-/// Whether the `BEGIN`/`END` at token `i` stands where a name would (spec §5.1).
+fn kw_at(toks: &[Token], i: usize, k: &str) -> bool {
+    is_kw(word_at(toks, i), k)
+}
+
+/// The index past the parenthesised group opening at `i`.
+fn skip_group(toks: &[Token], i: usize) -> Option<usize> {
+    if toks.get(i)?.kind != TokKind::Open {
+        return None;
+    }
+    let mut depth = 0i64;
+    for (j, t) in toks.iter().enumerate().skip(i) {
+        match t.kind {
+            TokKind::Open => depth += 1,
+            TokKind::Close => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(j + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The index past routine characteristics starting at `i`.
+fn skip_characteristics(toks: &[Token], mut i: usize) -> usize {
+    loop {
+        let k = |o: usize, w: &str| kw_at(toks, i + o, w);
+        let comment = k(0, "COMMENT") && toks.get(i + 1).is_some_and(|t| t.kind == TokKind::Quoted);
+        let two = comment
+            || ((k(0, "LANGUAGE") || k(0, "CONTAINS") || k(0, "NO")) && k(1, "SQL"))
+            || (k(0, "NOT") && k(1, "DETERMINISTIC"));
+        let three = ((k(0, "READS") || k(0, "MODIFIES")) && k(1, "SQL") && k(2, "DATA"))
+            || (k(0, "SQL") && k(1, "SECURITY") && (k(2, "DEFINER") || k(2, "INVOKER")));
+        i += if two {
+            2
+        } else if three {
+            3
+        } else if k(0, "DETERMINISTIC") {
+            1
+        } else {
+            return i;
+        };
+    }
+}
+
+/// The index past a `RETURNS` data type starting at `i` (a type name, an optional
+/// length, and the usual attributes); a type it does not know leaves the index
+/// inside the type, so the body's first token is not found (an under-count).
+fn skip_type(toks: &[Token], mut i: usize) -> Option<usize> {
+    word_at(toks, i)?;
+    i += 1;
+    loop {
+        let k = |o: usize, w: &str| kw_at(toks, i + o, w);
+        if toks.get(i).is_some_and(|t| t.kind == TokKind::Open) {
+            i = skip_group(toks, i)?;
+        } else if [
+            "UNSIGNED",
+            "SIGNED",
+            "ZEROFILL",
+            "BINARY",
+            "ASCII",
+            "UNICODE",
+            "PRECISION",
+            "VARYING",
+        ]
+        .iter()
+        .any(|w| k(0, w))
+        {
+            i += 1;
+        } else if (k(0, "CHARACTER") || k(0, "CHAR"))
+            && k(1, "SET")
+            && word_at(toks, i + 2).is_some()
+        {
+            i += 3;
+        } else if (k(0, "CHARSET") || k(0, "COLLATE"))
+            && toks
+                .get(i + 1)
+                .is_some_and(|t| matches!(t.kind, TokKind::Word(_) | TokKind::Quoted))
+        {
+            i += 2;
+        } else {
+            return Some(i);
+        }
+    }
+}
+
+/// The index of the body's first token, from the token just past the name.
+fn body_start(toks: &[Token], after_name: usize, kind: ObjectKind) -> Option<usize> {
+    let depth0 = |from: usize| {
+        let mut depth = 0i64;
+        toks.iter()
+            .enumerate()
+            .skip(from)
+            .filter_map(move |(j, t)| {
+                match t.kind {
+                    TokKind::Open => depth += 1,
+                    TokKind::Close => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(j)
+            })
+    };
+    match kind {
+        ObjectKind::Procedure => Some(skip_characteristics(toks, skip_group(toks, after_name)?)),
+        ObjectKind::Function => {
+            let i = skip_group(toks, after_name)?;
+            if !kw_at(toks, i, "RETURNS") {
+                return None;
+            }
+            Some(skip_characteristics(toks, skip_type(toks, i + 1)?))
+        }
+        ObjectKind::Trigger => {
+            let row = depth0(after_name).find(|&j| {
+                kw_at(toks, j, "FOR") && kw_at(toks, j + 1, "EACH") && kw_at(toks, j + 2, "ROW")
+            })? + 3;
+            if !(kw_at(toks, row, "FOLLOWS") || kw_at(toks, row, "PRECEDES")) {
+                return Some(row);
+            }
+            let is_ident = |j: usize| {
+                toks.get(j)
+                    .is_some_and(|t| matches!(t.kind, TokKind::Word(_) | TokKind::Quoted))
+            };
+            if !is_ident(row + 1) {
+                return None;
+            }
+            if toks
+                .get(row + 2)
+                .is_some_and(|t| t.kind == TokKind::Punct(b'.'))
+            {
+                return is_ident(row + 3).then_some(row + 4);
+            }
+            Some(row + 2)
+        }
+        ObjectKind::Event => depth0(after_name)
+            .find(|&j| kw_at(toks, j, "DO"))
+            .map(|j| j + 1),
+        _ => None,
+    }
+}
+
+/// For `DECLARE <action> HANDLER FOR <conditions>` at `i`, the index of the handler
+/// statement's first token.
+fn handler_start(toks: &[Token], i: usize) -> Option<usize> {
+    if !(kw_at(toks, i + 2, "HANDLER") && kw_at(toks, i + 3, "FOR")) {
+        return None;
+    }
+    let mut j = i + 4;
+    loop {
+        if kw_at(toks, j, "SQLSTATE") {
+            j += 1;
+            if kw_at(toks, j, "VALUE") {
+                j += 1;
+            }
+            if toks.get(j)?.kind != TokKind::Quoted {
+                return None;
+            }
+            j += 1;
+        } else if kw_at(toks, j, "NOT") && kw_at(toks, j + 1, "FOUND") {
+            j += 2;
+        } else {
+            word_at(toks, j)?;
+            j += 1;
+        }
+        if toks.get(j).is_some_and(|t| t.kind == TokKind::Punct(b',')) {
+            j += 1;
+        } else {
+            return Some(j);
+        }
+    }
+}
+
+/// Whether the `END` at token `i` stands where a name would (spec §5.1).
 fn is_name(toks: &[Token], i: usize) -> bool {
     is_name_by_prev(toks, i)
         || toks.get(i + 1).is_some_and(|n| {
@@ -295,7 +520,14 @@ mod tests {
             "CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN SELECT 'err'; END; SELECT 1; END",
             "CREATE PROCEDURE p() BEGIN SELECT `begin`, `end` FROM t; END",
             "CREATE PROCEDURE p() BEGIN SELECT t.end FROM t; SELECT t.begin, a FROM t; END",
-            "CREATE PROCEDURE p() BEGIN SELECT end FROM t; SELECT a AS begin FROM t; END",
+            "CREATE PROCEDURE p() BEGIN SELECT end FROM t; SELECT a AS `begin` FROM t; SELECT t.case FROM t; END",
+            "CREATE PROCEDURE p(a INT) BEGIN IF a THEN BEGIN SELECT 1; END; ELSEIF a > 2 THEN BEGIN END; ELSE BEGIN SELECT 2; END; END IF; END",
+            "CREATE PROCEDURE p(a INT) BEGIN CASE WHEN a = 1 THEN BEGIN SELECT 1; END; ELSE BEGIN END; END CASE; END",
+            "CREATE PROCEDURE p(a INT) BEGIN WHILE a > 0 DO BEGIN SET a = a - 1; END; END WHILE; l: REPEAT BEGIN SET a = a + 1; END; UNTIL a > 3 END REPEAT l; LOOP BEGIN LEAVE l; END; END LOOP; END",
+            "CREATE PROCEDURE p() BEGIN DECLARE EXIT HANDLER FOR SQLSTATE VALUE '23000', NOT FOUND, 1062, SQLWARNING BEGIN ROLLBACK; END; SELECT 1; END",
+            "CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR SQLSTATE '42S02' SET @x = 1; SELECT 1; END",
+            "CREATE PROCEDURE p() CASE WHEN 1 THEN BEGIN SELECT 1; END; END CASE",
+            "CREATE PROCEDURE p() LANGUAGE SQL NOT DETERMINISTIC READS SQL DATA SQL SECURITY INVOKER COMMENT 'x' BEGIN SELECT 1; END",
             "CREATE PROCEDURE p() BEGIN SELECT CASE WHEN a THEN 1 END, CASE WHEN b THEN 2 END FROM t; SELECT (CASE WHEN a THEN 1 END) = 1; END",
             "CREATE PROCEDURE p() SELECT 1",
             "CREATE PROCEDURE p() SELECT CASE WHEN a THEN 1 END FROM t",
@@ -316,6 +548,37 @@ mod tests {
         assert_eq!(ok(f, ObjectKind::Function), f);
         let f1 = "CREATE FUNCTION f(a INT) RETURNS INT DETERMINISTIC RETURN a + 1";
         assert_eq!(ok(f1, ObjectKind::Function), f1);
+        for f in [
+            "CREATE FUNCTION f() RETURNS INT BEGIN RETURN 1; END",
+            "CREATE FUNCTION f() RETURNS varchar(10) CHARSET utf8mb4 COLLATE utf8mb4_0900_ai_ci DETERMINISTIC BEGIN RETURN 'a'; END",
+            "CREATE FUNCTION f() RETURNS DECIMAL(10,2) UNSIGNED NO SQL BEGIN RETURN 1; END",
+            "CREATE FUNCTION f() RETURNS INT l: BEGIN RETURN 1; END l",
+        ] {
+            assert_eq!(ok(f, ObjectKind::Function), f);
+        }
+        for trg in [
+            "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW FOLLOWS other BEGIN SET NEW.a = 1; END",
+            "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW PRECEDES `db`.`o` BEGIN SET NEW.a = 1; END",
+        ] {
+            assert_eq!(ok(trg, ObjectKind::Trigger), trg);
+        }
+        let ev = "CREATE EVENT e ON SCHEDULE EVERY 1 DAY STARTS NOW() ON COMPLETION PRESERVE DISABLE COMMENT 'c' DO BEGIN DELETE FROM t; END";
+        assert_eq!(ok(ev, ObjectKind::Event), ev);
+    }
+
+    #[test]
+    fn unquoted_begin_name_is_refused() {
+        for text in [
+            "CREATE PROCEDURE p() BEGIN SELECT a AS begin FROM t; END",
+            "CREATE PROCEDURE p() BEGIN SELECT a FROM t ORDER BY begin; END",
+            "CREATE FUNCTION f() RETURNS INT RETURN a AND begin",
+            "CREATE PROCEDURE p() BEGIN DO begin; END",
+            "CREATE PROCEDURE p() begin: BEGIN END",
+            "CREATE FUNCTION f() RETURNS NATIONAL CHAR(10) BEGIN RETURN 'a'; END",
+        ] {
+            let m = refused(isolate(text, ObjectKind::Procedure, MY, &mysql8()));
+            assert!(m.contains("quote it"), "{text}: {m}");
+        }
     }
 
     #[test]
@@ -330,6 +593,15 @@ mod tests {
             "CREATE PROCEDURE p() SELECT 1); DROP TABLE t; SELECT (2",
             "CREATE PROCEDURE p() SELECT (1; DROP TABLE t)",
             "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW SET NEW.a = 1; DELETE FROM t",
+            // Review: a name BEGIN / CASE must never hide a second statement.
+            "CREATE PROCEDURE p() SELECT a FROM t ORDER BY begin; DELETE FROM t; END",
+            "CREATE PROCEDURE p() SELECT t.case FROM t; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN SELECT t.case FROM t; END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() SELECT * FROM t ORDER BY begin; DELETE FROM t WHERE end < NOW()",
+            "CREATE PROCEDURE p() BEGIN DO begin; END; DROP TABLE x; END",
+            "CREATE FUNCTION f() RETURNS INT RETURN a AND begin; DROP TABLE x; END",
+            "CREATE PROCEDURE p() SELECT CASE WHEN a THEN begin END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN SELECT CASE WHEN a THEN begin END; END; DROP TABLE x; END",
         ] {
             let msg = refused(isolate(text, ObjectKind::Procedure, MY, &mysql8()));
             assert!(!msg.is_empty(), "{text}");

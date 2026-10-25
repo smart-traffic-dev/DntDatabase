@@ -110,7 +110,7 @@ pub fn strip_comments(stmt: &str, dialect: Dialect) -> String {
 /// Recognises a MySQL client `DELIMITER <tok>` line starting at `i` (only
 /// spaces/tabs may precede it on its line). Returns the new delimiter and the
 /// offset just past the directive's line.
-fn delimiter_directive(sql: &str, i: usize) -> Option<(&str, usize)> {
+pub(super) fn delimiter_directive(sql: &str, i: usize) -> Option<(&str, usize)> {
     const KW: &[u8] = b"delimiter";
     let b = sql.as_bytes();
     // Match the keyword before scanning back over the line's leading blanks: only a
