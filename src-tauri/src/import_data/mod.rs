@@ -264,8 +264,7 @@ impl Layout {
         if cols.is_empty() {
             return Err(config_error("mapping", "Map at least one column."));
         }
-        let names: Vec<String> = cols.iter().map(|c| c.name.clone()).collect();
-        let opts = insert_options(&req.mode, &names, req.override_identity);
+        let opts = insert_options(&req.mode, &cols, req.override_identity);
         let layout = Layout {
             table: table_ref(kind, &req.table),
             targets: cols.iter().map(TargetColumn::column_target).collect(),

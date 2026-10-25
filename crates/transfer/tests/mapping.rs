@@ -236,6 +236,11 @@ fn upsert_key_must_be_mapped_and_a_key() {
     let partial = [m("a", Some(1)), m("c", Some(3))];
     let r = check_mapping(&partial, &t, &keys(), &up(&["a", "b"]), false);
     assert_eq!(columns_of_errors(&r), [Some("b".to_string())]);
+    // A repeated key column is refused.
+    let r = check_mapping(&all, &t, &keys(), &up(&["id", "id"]), false);
+    assert_eq!(columns_of_errors(&r), [Some("id".to_string())], "{r:?}");
+    let r = check_mapping(&all, &t, &keys(), &up(&["a", "b", "a"]), false);
+    assert_eq!(columns_of_errors(&r), [Some("a".to_string())], "{r:?}");
 }
 
 #[test]
@@ -254,7 +259,7 @@ fn upsert_without_non_key_columns_warns() {
 
 #[test]
 fn insert_options_per_mode() {
-    let mapped = s(&["id", "a", "b"]);
+    let mapped = [target("id"), target("a"), target("b")];
     assert_eq!(
         insert_options(&ImportMode::Append, &mapped, false),
         InsertOptions::default()
@@ -274,6 +279,38 @@ fn insert_options_per_mode() {
                 key: s(&["id"]),
                 update: s(&["a", "b"])
             }
+        }
+    );
+}
+
+#[test]
+fn upsert_never_updates_identity_always_or_generated_columns() {
+    let mut id = target("id");
+    id.identity = Some(IdentityKind::Always);
+    let mut by_default = target("seq");
+    by_default.identity = Some(IdentityKind::ByDefault);
+    let mut g = target("g");
+    g.generated = true;
+    let mapped = [target("k"), id, by_default, g, target("a")];
+    assert_eq!(
+        insert_options(&ImportMode::Upsert { key: s(&["k"]) }, &mapped, true),
+        InsertOptions {
+            overriding_system_value: true,
+            on_conflict: OnConflict::Update {
+                key: s(&["k"]),
+                update: s(&["seq", "a"])
+            }
+        }
+    );
+    // Only unwritable non-key columns: nothing to update (PG DO NOTHING).
+    let mut id = target("id");
+    id.identity = Some(IdentityKind::Always);
+    let only = [target("k"), id];
+    assert_eq!(
+        insert_options(&ImportMode::Upsert { key: s(&["k"]) }, &only, true).on_conflict,
+        OnConflict::Update {
+            key: s(&["k"]),
+            update: Vec::new()
         }
     );
 }

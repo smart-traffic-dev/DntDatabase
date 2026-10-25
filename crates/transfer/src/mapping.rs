@@ -226,8 +226,11 @@ fn check_upsert_key(
         return;
     }
     let before = r.errors.len();
+    let mut listed: HashSet<&str> = HashSet::new();
     for k in key {
-        if !targets.iter().any(|t| &t.name == k) {
+        if !listed.insert(k.as_str()) {
+            r.error(Some(k), format!("Key column {k} is listed more than once."));
+        } else if !targets.iter().any(|t| &t.name == k) {
             r.error(
                 Some(k),
                 format!("Key column {k} does not exist in the target table."),
@@ -251,7 +254,10 @@ fn check_upsert_key(
                 .into(),
         );
     }
-    if r.errors.len() == before && mapped.iter().all(|c| wanted.contains(c)) {
+    let updated = mapped
+        .iter()
+        .any(|c| !wanted.contains(c) && targets.iter().any(|t| t.name == *c && updatable(t)));
+    if r.errors.len() == before && !updated {
         r.warning(
             None,
             "Only key columns are mapped: rows whose key already exists are left unchanged.".into(),
@@ -259,22 +265,29 @@ fn check_upsert_key(
     }
 }
 
+/// A column an upsert may `SET`: PostgreSQL refuses `SET` on an identity `ALWAYS` column (even
+/// with `OVERRIDING SYSTEM VALUE`) and on a generated column.
+fn updatable(t: &TargetColumn) -> bool {
+    !t.generated && t.identity != Some(IdentityKind::Always)
+}
+
 /// The builder options of `mode` over the mapped columns (in insert order). Upsert updates
-/// every mapped column that is not part of the key. `override_identity` becomes PostgreSQL
+/// every mapped column that is not part of the key and can be updated (not identity `ALWAYS`,
+/// not generated); with none left PG writes `DO NOTHING`. `override_identity` becomes PostgreSQL
 /// `OVERRIDING SYSTEM VALUE`: pass `false` on MySQL (the builder refuses it there).
 pub fn insert_options(
     mode: &ImportMode,
-    mapped_columns: &[String],
+    mapped: &[TargetColumn],
     override_identity: bool,
 ) -> InsertOptions {
     let on_conflict = match mode {
         ImportMode::Append | ImportMode::Replace { .. } => OnConflict::Error,
         ImportMode::Upsert { key } => OnConflict::Update {
             key: key.clone(),
-            update: mapped_columns
+            update: mapped
                 .iter()
-                .filter(|c| !key.contains(c))
-                .cloned()
+                .filter(|c| !key.contains(&c.name) && updatable(c))
+                .map(|c| c.name.clone())
                 .collect(),
         },
     };

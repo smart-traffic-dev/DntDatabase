@@ -80,6 +80,12 @@ impl TargetColumn {
         }
     }
 
+    /// `character(n)` / `char(n)` / `bpchar` (blank-padded, not `character varying`).
+    fn is_fixed_char(&self) -> bool {
+        let t = self.db_type.trim().to_ascii_lowercase();
+        t.starts_with("character(") || t.starts_with("char(") || t.starts_with("bpchar")
+    }
+
     /// `timestamp with time zone` / `timestamptz` / `time with time zone` / `timetz`.
     fn has_zone(&self) -> bool {
         let t = self.db_type.to_ascii_lowercase();
@@ -152,9 +158,7 @@ pub enum CellReason {
 impl fmt::Display for CellReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CellReason::NotNull => {
-                f.write_str("NULL is not allowed (the column is NOT NULL and has no default)")
-            }
+            CellReason::NotNull => f.write_str("NULL is not allowed (the column is NOT NULL)"),
             CellReason::Invalid { expected } => write!(f, "not {expected}"),
             CellReason::OutOfRange => f.write_str("the number is out of range"),
             CellReason::Negative => f.write_str("a negative number for an unsigned column"),
@@ -177,7 +181,12 @@ pub struct CellError {
 ///
 /// Text cells are trimmed (`opts.trim`), then a `null_text` match is NULL and an empty cell is
 /// [`EmptyAs`] in a text column, NULL elsewhere. Numbers, JSON and date cells keep their text
-/// verbatim. NULL into a NOT NULL column without default is refused.
+/// verbatim.
+///
+/// NULL into a NOT NULL column is refused even when the column has a default: a mapped column
+/// is written with an explicit NULL, never its default (leave the column unmapped to get the
+/// default). The one exception is a MySQL `AUTO_INCREMENT` column, where NULL makes the server
+/// generate the value.
 pub fn convert(
     cell: &Cell,
     col: &TargetColumn,
@@ -212,7 +221,9 @@ pub fn convert(
     };
     match value {
         Some(v) => Ok(v),
-        None if !col.nullable && !col.has_default => Err(fail(CellReason::NotNull)),
+        None if !col.nullable && !(kind == DbKind::MySql && col.auto_increment) => {
+            Err(fail(CellReason::NotNull))
+        }
         None => Ok(plain(Value::Null)),
     }
 }
@@ -246,7 +257,13 @@ fn from_text(
     let v = match col.logical {
         L::Text => {
             if let Some(max) = col.max_chars {
-                if s.chars().count() > max as usize {
+                // PostgreSQL `character(n)` drops trailing spaces that do not fit.
+                let counted = if pg && col.is_fixed_char() {
+                    s.trim_end_matches(' ')
+                } else {
+                    s
+                };
+                if counted.chars().count() > max as usize {
                     return Err(CellReason::TooLong { max });
                 }
             }
@@ -276,7 +293,12 @@ fn from_text(
         L::Date => return invalid("a date (YYYY-MM-DD)"),
         L::Time => {
             let body = if col.has_zone() { strip_zone(s) } else { s };
-            if !is_time(body) {
+            let ok = if pg {
+                is_time(body)
+            } else {
+                is_mysql_time(body)
+            };
+            if !ok {
                 return invalid("a time (HH:MM:SS)");
             }
             Value::Time(s.into())
@@ -406,6 +428,17 @@ fn is_time(s: &str) -> bool {
         _ => false,
     };
     ok_parts && frac.is_none_or(|f| digits(f) && f.len() <= 6)
+}
+
+/// MySQL `TIME` is a duration: `[-]H{1,3}:MM[:SS[.f{1,6}]]` with hours up to 838.
+fn is_mysql_time(s: &str) -> bool {
+    let body = s.strip_prefix('-').unwrap_or(s);
+    let Some((h, rest)) = body.split_once(':') else {
+        return false;
+    };
+    let hours_ok =
+        (1..=3).contains(&h.len()) && digits(h) && h.parse::<u32>().is_ok_and(|n| n <= 838);
+    hours_ok && is_time(&format!("00:{rest}"))
 }
 
 /// `s` without a trailing `Z` / `±HH[:MM]` / `±HHMM` zone.

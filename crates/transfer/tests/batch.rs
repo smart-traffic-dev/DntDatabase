@@ -180,6 +180,52 @@ fn max_rows_one_sends_every_row_alone() {
 }
 
 #[test]
+fn pg_upsert_starts_a_new_batch_when_a_key_repeats() {
+    let (kind, d) = dialects()[1];
+    let rows = vec![
+        row(1, "a"),
+        row(2, "b"),
+        row(1, "c"),
+        row(3, "d"),
+        row(2, "e"),
+        row(2, "f"),
+    ];
+    let mut b = BatchBuilder::new(table(kind), cols(), upsert(), d, 1000, 1 << 20).unwrap();
+    let batches = run(&mut b, &rows);
+    assert_eq!(
+        batches
+            .iter()
+            .map(|b| b.records.clone())
+            .collect::<Vec<_>>(),
+        [vec![10, 11], vec![12, 13, 14], vec![15]]
+    );
+    // Each batch is still exactly insert_sql_with of its rows.
+    assert_eq!(
+        batches[1].sql,
+        insert_sql_with(&table(kind), &cols(), &rows[2..5], &upsert(), d).unwrap()
+    );
+}
+
+#[test]
+fn repeated_keys_stay_together_without_pg_upsert() {
+    let rows = vec![row(1, "a"), row(1, "b"), row(1, "c")];
+    // MySQL upsert handles a repeated key in one statement; plain PG inserts have no key.
+    for (kind, d, opts) in [
+        (DbKind::MySql, Dialect::MYSQL, upsert()),
+        (
+            DbKind::Postgres,
+            Dialect::Postgres,
+            InsertOptions::default(),
+        ),
+    ] {
+        let mut b = BatchBuilder::new(table(kind), cols(), opts, d, 1000, 1 << 20).unwrap();
+        let batches = run(&mut b, &rows);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].rows, 3);
+    }
+}
+
+#[test]
 fn template_is_head_and_tail() {
     let (kind, d) = dialects()[1];
     let b = BatchBuilder::new(table(kind), cols(), upsert(), d, 10, 1 << 20).unwrap();

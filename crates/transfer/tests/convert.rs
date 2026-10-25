@@ -362,13 +362,66 @@ fn null_text_empty_cells_and_trim() {
 }
 
 #[test]
-fn null_into_not_null_without_default_is_an_error() {
+fn null_into_not_null_is_an_error_even_with_a_default() {
     let mut c = col(LogicalType::Integer, "int");
     c.nullable = false;
     assert_eq!(err(Cell::Null, &c, MY), CellReason::NotNull);
     assert_eq!(err(text(""), &c, MY), CellReason::NotNull);
+    // A mapped column gets an explicit NULL, never its default: refused.
     c.has_default = true;
+    assert_eq!(err(Cell::Null, &c, MY), CellReason::NotNull);
+    assert_eq!(err(Cell::Null, &c, PG), CellReason::NotNull);
+    // Except MySQL AUTO_INCREMENT: NULL makes MySQL generate the value.
+    c.auto_increment = true;
     assert!(convert(&Cell::Null, &c, &opts(), MY).unwrap().is_null());
+    assert!(convert(&text(""), &c, &opts(), MY).unwrap().is_null());
+    // PostgreSQL identity is not AUTO_INCREMENT.
+    let mut id = col(LogicalType::Integer, "integer");
+    id.nullable = false;
+    id.has_default = true;
+    id.identity = Some(IdentityKind::ByDefault);
+    assert_eq!(err(Cell::Null, &id, PG), CellReason::NotNull);
+}
+
+#[test]
+fn mysql_time_is_a_duration_pg_time_is_a_clock() {
+    let t = col(LogicalType::Time, "time");
+    for ok_my in ["838:59:59", "-1:00:00", "5:04", "-838:59:59.5", "03:04:05"] {
+        assert_eq!(
+            ok(text(ok_my), &t, MY),
+            Value::Time(ok_my.into()),
+            "{ok_my}"
+        );
+    }
+    for bad_my in ["1000:00:00", "--1:00", "1:2:3", "+1:00:00"] {
+        assert!(
+            matches!(err(text(bad_my), &t, MY), CellReason::Invalid { .. }),
+            "{bad_my}"
+        );
+    }
+    for bad_pg in ["838:59:59", "-1:00:00", "5:04", "24:00:01"] {
+        assert!(
+            matches!(err(text(bad_pg), &t, PG), CellReason::Invalid { .. }),
+            "{bad_pg}"
+        );
+    }
+    assert_eq!(ok(text("23:59:59"), &t, PG), Value::Time("23:59:59".into()));
+}
+
+#[test]
+fn pg_fixed_char_ignores_trailing_spaces() {
+    let mut c = col(LogicalType::Text, "character(3)");
+    c.max_chars = Some(3);
+    assert_eq!(ok(text("ab    "), &c, PG), Value::Text("ab    ".into()));
+    assert_eq!(err(text("abcd  "), &c, PG), CellReason::TooLong { max: 3 });
+    let mut b = col(LogicalType::Text, "char(3)");
+    b.max_chars = Some(3);
+    assert_eq!(ok(text("abc "), &b, PG), Value::Text("abc ".into()));
+    // varchar counts every character; MySQL keeps the plain rule.
+    let mut v = col(LogicalType::Text, "character varying(3)");
+    v.max_chars = Some(3);
+    assert_eq!(err(text("ab  "), &v, PG), CellReason::TooLong { max: 3 });
+    assert_eq!(err(text("abc "), &b, MY), CellReason::TooLong { max: 3 });
 }
 
 #[test]
