@@ -20,6 +20,7 @@ import type {
   ObjectRef,
   ObjectSummary,
   ParsedConnString,
+  RestoreRequest,
   Scope,
   ServerInfo,
   TableDataPage,
@@ -32,6 +33,7 @@ import type {
   Value,
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
+import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
 import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
 import type { Handler } from './shim';
 
@@ -401,6 +403,9 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   // Data import: reviewed plans (id -> request); one counter for dry runs, plans and jobs.
   let importSeq = 0;
   const importPlans = new Map<string, ImportRequest>();
+  // Dump and restore: analyzed restore plans (id -> request); one counter for plans and jobs.
+  let backupSeq = 0;
+  const restorePlans = new Map<string, RestoreRequest>();
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -611,6 +616,37 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
         throw new Failure(appError('config', 'the import was not confirmed', { field: 'confirm' }));
       }
       return `import-${++importSeq}`;
+    },
+
+    // Dump and restore (P5c): `dnt_fixture` dumped by the built-in dump; `RESTORE_FILE` restored by
+    // the built-in runner, `PSQL_FILE` refused (psql missing); `specs/backup.spec.ts`.
+    dump_objects: () => fixtureDumpObjects,
+    dump_pick_path: () => DUMP_FILE,
+    dump_start: () => `dump-${++backupSeq}`,
+    tools_list: () => noTools,
+    tool_dump_start: () => {
+      throw new Failure(appError('config', 'no external tool in the browser tests', { field: 'tool' }));
+    },
+    restore_pick_file: () => RESTORE_FILE,
+    restore_preview: ({ request }) => {
+      const req = request as RestoreRequest;
+      if (req.path === PSQL_FILE) {
+        throw fail('internal', { kind: 'unsupported', message: 'This feature is not supported by the server.', detail: `${PSQL_FILE_MESSAGE} (server version 8.0.36)` });
+      }
+      if (req.path !== RESTORE_FILE) throw new Failure(appError('config', 'this file was not picked', { field: 'path' }));
+      const planId = `restore-plan-${++backupSeq}`;
+      restorePlans.set(planId, req);
+      return appRunnerPreview(req, planId, connections.find((c) => c.id === req.connection_id)?.env_tag ?? null);
+    },
+    restore_start: ({ planId, confirmed, name }) => {
+      const req = restorePlans.get(planId as string);
+      if (!req) throw fail('plan_stale');
+      restorePlans.delete(planId as string);
+      const prod = connections.find((x) => x.id === req.connection_id)?.env_tag === 'production';
+      if (!confirmed || (prod && name !== req.database)) {
+        throw new Failure(appError('config', 'the restore was not confirmed', { field: 'confirm' }));
+      }
+      return `restore-${++backupSeq}`;
     },
   };
 
