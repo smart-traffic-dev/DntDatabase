@@ -1449,7 +1449,15 @@ export type HistoryOrigin =
 /**
  * A statement the table designer applied.
  */
-"table_design"
+"table_design" | 
+/**
+ * One entry per data import job (summary comment plus statement templates).
+ */
+"import" | 
+/**
+ * One entry per restore job.
+ */
+"restore"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it

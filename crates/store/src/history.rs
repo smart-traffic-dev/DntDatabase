@@ -61,6 +61,10 @@ pub enum HistoryOrigin {
     ObjectAction,
     /// A statement the table designer applied.
     TableDesign,
+    /// One entry per data import job (summary comment plus statement templates).
+    Import,
+    /// One entry per restore job.
+    Restore,
 }
 
 impl HistoryOrigin {
@@ -70,6 +74,8 @@ impl HistoryOrigin {
             HistoryOrigin::DataEdit => "data_edit",
             HistoryOrigin::ObjectAction => "object_action",
             HistoryOrigin::TableDesign => "table_design",
+            HistoryOrigin::Import => "import",
+            HistoryOrigin::Restore => "restore",
         }
     }
 
@@ -79,6 +85,8 @@ impl HistoryOrigin {
             "data_edit" => Ok(HistoryOrigin::DataEdit),
             "object_action" => Ok(HistoryOrigin::ObjectAction),
             "table_design" => Ok(HistoryOrigin::TableDesign),
+            "import" => Ok(HistoryOrigin::Import),
+            "restore" => Ok(HistoryOrigin::Restore),
             other => Err(DbError::Internal {
                 message: format!("invalid history origin {other:?} in database"),
             }),
@@ -392,6 +400,18 @@ mod tests {
             HistoryOrigin::parse("table_design").unwrap(),
             HistoryOrigin::TableDesign
         );
+    }
+
+    #[test]
+    fn origin_round_trips_import_restore() {
+        for (origin, s) in [
+            (HistoryOrigin::Import, "import"),
+            (HistoryOrigin::Restore, "restore"),
+        ] {
+            assert_eq!(origin.as_str(), s);
+            assert_eq!(HistoryOrigin::parse(s).unwrap(), origin);
+            assert_eq!(serde_json::to_string(&origin).unwrap(), format!("\"{s}\""));
+        }
     }
 
     #[test]
