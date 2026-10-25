@@ -48,17 +48,24 @@ pub fn split(sql: &str, dialect: Dialect) -> Vec<Statement> {
 }
 
 fn push(out: &mut Vec<Statement>, sql: &str, from: usize, to: usize, dialect: Dialect) {
-    let raw = &sql[from..to];
+    if let Some((offset, text)) = statement_text(&sql[from..to], dialect) {
+        let start = from + offset;
+        out.push(Statement {
+            text: text.to_string(),
+            start,
+            end: start + text.len(),
+        });
+    }
+}
+
+/// The statement a raw fragment between two delimiters holds: its offset in `raw`
+/// and its trimmed text, or `None` when the fragment is blank.
+pub(super) fn statement_text(raw: &str, dialect: Dialect) -> Option<(usize, &str)> {
     let text = raw.trim();
     if is_blank(text, dialect) {
-        return;
+        return None;
     }
-    let start = from + (raw.len() - raw.trim_start().len());
-    out.push(Statement {
-        text: text.to_string(),
-        start,
-        end: start + text.len(),
-    });
+    Some((raw.len() - raw.trim_start().len(), text))
 }
 
 /// True when `s` holds nothing but whitespace and comments.
@@ -111,20 +118,26 @@ pub fn strip_comments(stmt: &str, dialect: Dialect) -> String {
 /// spaces/tabs may precede it on its line). Returns the new delimiter and the
 /// offset just past the directive's line.
 fn delimiter_directive(sql: &str, i: usize) -> Option<(&str, usize)> {
+    let (tok, next) = delimiter_directive_at(sql.as_bytes(), i, true)?;
+    Some((&sql[tok], next))
+}
+
+/// Byte-level [`delimiter_directive`]: the new delimiter is returned as a range of
+/// `b`. `head_blank` tells whether the part of `b[0]`'s line before `b` holds only
+/// spaces/tabs (true when `b` starts the input).
+pub(super) fn delimiter_directive_at(
+    b: &[u8],
+    i: usize,
+    head_blank: bool,
+) -> Option<(std::ops::Range<usize>, usize)> {
     const KW: &[u8] = b"delimiter";
-    let b = sql.as_bytes();
     // Match the keyword before scanning back over the line's leading blanks: only a
     // `d` preceded by blanks pays for that scan, and the scan stops at the first
     // non-blank, so the blanks of a line are scanned at most once in all.
     if !b.get(i..i + KW.len())?.eq_ignore_ascii_case(KW) {
         return None;
     }
-    let line_start = b[..i]
-        .iter()
-        .rev()
-        .take_while(|&&c| c != b'\n')
-        .all(|&c| c == b' ' || c == b'\t');
-    if !line_start {
+    if !line_blank_before(b, i, head_blank) {
         return None;
     }
     let mut j = i + KW.len();
@@ -145,28 +158,33 @@ fn delimiter_directive(sql: &str, i: usize) -> Option<(&str, usize)> {
         .iter()
         .position(|&c| c == b'\n')
         .map_or(b.len(), |p| j + p + 1);
-    Some((&sql[tok_start..j], next))
+    Some((tok_start..j, next))
 }
 
+/// Whether only spaces/tabs precede `b[i]` on its line. The scan stops at the first
+/// newline or non-blank; when it reaches `b[0]`, `head_blank` tells whether the
+/// part of the line before `b` was blank.
+pub(super) fn line_blank_before(b: &[u8], i: usize, head_blank: bool) -> bool {
+    for &c in b[..i].iter().rev() {
+        match c {
+            b'\n' => return true,
+            b' ' | b'\t' => {}
+            _ => return false,
+        }
+    }
+    head_blank
+}
+
+/// Split test tables, shared with the streaming splitter's tests.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sql::{classify, MySqlMode, StatementKind};
+pub(crate) mod fixtures {
+    use super::Dialect;
     const MYSQL: Dialect = Dialect::MYSQL;
     use Dialect::Postgres;
 
-    #[test]
-    fn leading_blank_len_skips_whitespace_and_plain_comments() {
-        assert_eq!(leading_blank_len("-- c\n  # d\nSELECT 1", MYSQL), 11);
-        assert_eq!(leading_blank_len("/* a /* b */ */ SELECT", Postgres), 16);
-        // `#` is not a comment in PG; executable comments are significant.
-        assert_eq!(leading_blank_len("# x", Postgres), 0);
-        assert_eq!(leading_blank_len(" /*!40101 SET x=1 */", MYSQL), 1);
-        assert_eq!(leading_blank_len(" -- only\n", MYSQL), 9);
-        assert_eq!(leading_blank_len("", MYSQL), 0);
-    }
+    pub(crate) type Case = (&'static str, Dialect, Vec<&'static str>);
 
-    fn cases() -> Vec<(&'static str, Dialect, Vec<&'static str>)> {
+    pub(crate) fn cases() -> Vec<Case> {
         vec![
             ("select 1; select 2", MYSQL, vec!["select 1", "select 2"]),
             (
@@ -210,7 +228,7 @@ mod tests {
         ]
     }
 
-    fn extra_cases() -> Vec<(&'static str, Dialect, Vec<&'static str>)> {
+    pub(crate) fn extra_cases() -> Vec<Case> {
         vec![
             // MySQL strings honour backslash escapes.
             (
@@ -295,6 +313,26 @@ mod tests {
                 vec!["select $thẻ$ ; $thẻ$", "select 2"],
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{cases, extra_cases};
+    use super::*;
+    use crate::sql::{classify, MySqlMode, StatementKind};
+    const MYSQL: Dialect = Dialect::MYSQL;
+    use Dialect::Postgres;
+
+    #[test]
+    fn leading_blank_len_skips_whitespace_and_plain_comments() {
+        assert_eq!(leading_blank_len("-- c\n  # d\nSELECT 1", MYSQL), 11);
+        assert_eq!(leading_blank_len("/* a /* b */ */ SELECT", Postgres), 16);
+        // `#` is not a comment in PG; executable comments are significant.
+        assert_eq!(leading_blank_len("# x", Postgres), 0);
+        assert_eq!(leading_blank_len(" /*!40101 SET x=1 */", MYSQL), 1);
+        assert_eq!(leading_blank_len(" -- only\n", MYSQL), 9);
+        assert_eq!(leading_blank_len("", MYSQL), 0);
     }
 
     #[test]
