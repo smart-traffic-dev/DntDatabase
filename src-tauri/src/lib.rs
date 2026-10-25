@@ -21,3 +21,8 @@ pub mod object_actions;
 pub mod table_design;
 
 pub mod ddl_edit;
+
+pub mod import_data;
+pub mod jobs;
+
+pub mod backup;

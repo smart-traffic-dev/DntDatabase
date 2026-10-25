@@ -17,6 +17,7 @@ import { txAction } from '../store/runQuery';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
+import { JobsCounter } from '../jobs/JobsCounter';
 import { LockIcon } from './icons';
 import { formatClock, formatElapsed, shortVersion } from './statusFormat';
 
@@ -234,6 +235,7 @@ export function StatusBar() {
         </span>
       )}
       {objectTabId && <DataStatus tabId={objectTabId} />}
+      <JobsCounter />
     </footer>
   );
 }

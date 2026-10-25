@@ -17,7 +17,27 @@ export const MAX_IDLE_TX_WARN_MINUTES = 120;
 export const isValidIdleTxMinutes = (n: number) =>
   Number.isInteger(n) && n >= MIN_IDLE_TX_WARN_MINUTES && n <= MAX_IDLE_TX_WARN_MINUTES;
 
+/** Background jobs that may run at once on one connection (P5 R2: default 2, 1..8). */
+export const DEFAULT_JOBS_PER_CONNECTION = 2;
+export const MIN_JOBS_PER_CONNECTION = 1;
+export const MAX_JOBS_PER_CONNECTION = 8;
+
+export const isValidJobsPerConnection = (n: number) =>
+  Number.isInteger(n) && n >= MIN_JOBS_PER_CONNECTION && n <= MAX_JOBS_PER_CONNECTION;
+
 interface AppSettingsState {
+  /** The stored per-connection job limit; the default until loaded. */
+  jobsPerConnection: number;
+  /** Reads the limit once (the default when it cannot be read). */
+  loadJobsPerConnection(): Promise<number>;
+  /** Stores a new limit (rejects with the backend's error). */
+  setJobsPerConnection(n: number): Promise<void>;
+  /** The folder searched first for the external dump tools (P5 R25); `null`: `PATH` only. */
+  externalToolsDir: string | null;
+  /** Reads the folder once (`null` when it cannot be read). */
+  loadExternalToolsDir(): Promise<string | null>;
+  /** Stores the folder, `null` clears it (rejects with the backend's error). */
+  setExternalToolsDir(dir: string | null): Promise<void>;
   /** The stored idle-transaction warning threshold; the default until loaded. */
   idleTxWarnMinutes: number;
   /** Reads the threshold once (the default when it cannot be read). */
@@ -36,9 +56,53 @@ interface AppSettingsState {
 let loading: Promise<number> | null = null;
 let idleLoading: Promise<number> | null = null;
 let idleLoaded = false;
+let jobsLoading: Promise<number> | null = null;
+let jobsLoaded = false;
+let toolsLoading: Promise<string | null> | null = null;
+let toolsLoaded = false;
 
 /** App preferences stored in the backend's `app_settings` (app.db). */
 export const useAppSettings = create<AppSettingsState>()((set, get) => ({
+  jobsPerConnection: DEFAULT_JOBS_PER_CONNECTION,
+  loadJobsPerConnection() {
+    if (jobsLoaded) return Promise.resolve(get().jobsPerConnection);
+    jobsLoading ??= api
+      .getJobsPerConnection()
+      .then((n) => (isValidJobsPerConnection(n) ? n : DEFAULT_JOBS_PER_CONNECTION))
+      .catch(() => DEFAULT_JOBS_PER_CONNECTION)
+      .then((n) => {
+        // A save that landed meanwhile wins.
+        if (!jobsLoaded) set({ jobsPerConnection: n });
+        jobsLoaded = true;
+        jobsLoading = null;
+        return get().jobsPerConnection;
+      });
+    return jobsLoading;
+  },
+  async setJobsPerConnection(n) {
+    await api.setJobsPerConnection(n);
+    jobsLoaded = true;
+    set({ jobsPerConnection: n });
+  },
+  externalToolsDir: null,
+  loadExternalToolsDir() {
+    if (toolsLoaded) return Promise.resolve(get().externalToolsDir);
+    toolsLoading ??= api
+      .getExternalToolsDir()
+      .catch(() => null)
+      .then((dir) => {
+        if (!toolsLoaded) set({ externalToolsDir: dir });
+        toolsLoaded = true;
+        toolsLoading = null;
+        return get().externalToolsDir;
+      });
+    return toolsLoading;
+  },
+  async setExternalToolsDir(dir) {
+    await api.setExternalToolsDir(dir);
+    toolsLoaded = true;
+    set({ externalToolsDir: dir });
+  },
   tablePageSize: null,
   idleTxWarnMinutes: DEFAULT_IDLE_TX_WARN_MINUTES,
   loadIdleTxWarnMinutes() {
@@ -84,6 +148,15 @@ export const useAppSettings = create<AppSettingsState>()((set, get) => ({
     loading = null;
     idleLoading = null;
     idleLoaded = false;
-    set({ tablePageSize: null, idleTxWarnMinutes: DEFAULT_IDLE_TX_WARN_MINUTES });
+    jobsLoading = null;
+    jobsLoaded = false;
+    toolsLoading = null;
+    toolsLoaded = false;
+    set({
+      tablePageSize: null,
+      idleTxWarnMinutes: DEFAULT_IDLE_TX_WARN_MINUTES,
+      jobsPerConnection: DEFAULT_JOBS_PER_CONNECTION,
+      externalToolsDir: null,
+    });
   },
 }));

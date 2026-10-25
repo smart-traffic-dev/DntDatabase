@@ -287,6 +287,13 @@ export const HistoryIcon = () => (
   </Icon>
 );
 
+/** A list with check marks: background Jobs. */
+export const JobsIcon = () => (
+  <Icon size={18}>
+    <path d="M3 17l2 2 4-4M3 7l2 2 4-4M13 6h8M13 12h8M13 18h8" />
+  </Icon>
+);
+
 /** Code braces: Snippets. */
 export const SnippetsIcon = () => (
   <Icon size={18}>

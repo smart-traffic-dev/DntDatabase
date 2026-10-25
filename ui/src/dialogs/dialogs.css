@@ -715,6 +715,18 @@ fieldset.export-form {
   gap: var(--dnt-space-2);
 }
 
+/* A path field with its Browse button (External tools folder). */
+.settings-path-row {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+}
+
+.settings-path-row input {
+  flex: 1;
+  min-width: 0;
+}
+
 .settings-stepper-value {
   min-width: 48px;
   text-align: center;

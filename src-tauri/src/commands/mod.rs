@@ -11,6 +11,8 @@ pub mod connections;
 pub mod data;
 pub mod export;
 pub mod favorites;
+pub mod import_data;
+pub mod jobs;
 pub mod objects;
 pub mod query;
 pub mod settings;
@@ -20,6 +22,8 @@ pub mod window;
 pub mod workspace;
 
 pub mod ddl_edit;
+
+pub mod backup;
 
 use dnt_core::error::{AppError, DbError};
 use dnt_core::value::{ColumnMeta, Value};
@@ -213,12 +217,41 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ddl_edit::ddl_edit_cancel,
             ddl_edit::ddl_edit_close,
             ddl_edit::ddl_edit_apply,
+            jobs::job_list,
+            jobs::job_detail,
+            jobs::job_cancel,
+            jobs::job_active_count,
+            jobs::job_stop_all,
+            jobs::job_reveal_result,
+            jobs::job_clear_history,
+            settings::get_jobs_per_connection,
+            settings::set_jobs_per_connection,
+            settings::get_external_tools_dir,
+            settings::set_external_tools_dir,
+            import_data::import_pick_file,
+            import_data::import_inspect,
+            import_data::import_target,
+            import_data::import_auto_map,
+            import_data::import_check_mapping,
+            import_data::import_dry_run,
+            import_data::import_prepare,
+            import_data::import_start,
+            backup::dump_objects,
+            backup::dump_pick_path,
+            backup::dump_start,
+            backup::tools_list,
+            backup::tool_dump_start,
+            backup::restore_pick_file,
+            backup::restore_preview,
+            backup::restore_start,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.
         .events(tauri_specta::collect_events![])
         .typ::<Value>()
         .typ::<ColumnMeta>()
+        // Payload of the `job://progress` app event (emitted by `jobs::TauriJobEvents`).
+        .typ::<crate::jobs::JobEvent>()
 }
 
 /// The TypeScript exporter. 64-bit integers must carry an explicit `#[specta(type = …)]`

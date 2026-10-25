@@ -373,6 +373,12 @@ pub struct SessionManager {
     pub(crate) apply_close_wait: Duration,
     /// Open DDL edits, their plans and applies (see `ddl_edit`).
     pub(crate) ddl_edits: crate::ddl_edit::DdlEditStore,
+    /// Background jobs (see `jobs`). Public: `main.rs` installs the event sink.
+    pub jobs: crate::jobs::JobManager,
+    /// Single-use import plans (see `import_data`).
+    pub(crate) import_plans: crate::import_data::ImportPlanStore,
+    /// Single-use restore plans (see `backup::restore`).
+    pub(crate) restore_plans: crate::backup::RestorePlanStore,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -398,6 +404,7 @@ impl SessionManager {
         known_hosts: KnownHosts,
         drivers: HashMap<DbKind, Arc<dyn Driver>>,
     ) -> Self {
+        let jobs = crate::jobs::JobManager::new(Arc::clone(&repo));
         SessionManager {
             drivers,
             repo,
@@ -426,6 +433,9 @@ impl SessionManager {
             data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
             apply_close_wait: SLOT_CLOSE_WAIT,
             ddl_edits: crate::ddl_edit::DdlEditStore::default(),
+            jobs,
+            import_plans: crate::import_data::ImportPlanStore::default(),
+            restore_plans: crate::backup::RestorePlanStore::default(),
         }
     }
 
@@ -776,6 +786,7 @@ impl SessionManager {
     /// Closes the tunnel and every metadata session and forgets the connection. An `open`
     /// in flight is superseded (it closes what it opened and returns `Cancelled`).
     pub async fn close(&self, id: Uuid) {
+        self.jobs.cancel_connection(id).await;
         // A running query is stopped first, so closing does not wait for it; the run
         // still ends with its `done` event.
         self.object_cancel_connection(id).await;
@@ -796,6 +807,8 @@ impl SessionManager {
         self.edit_plans.drop_conn(id);
         self.loaded.drop_conn(id);
         self.results.remove_connection(id);
+        self.import_plans.drop_conn(id);
+        self.restore_plans.drop_conn(id);
     }
 
     /// Every runtime, without holding the map's lock.
@@ -1306,6 +1319,11 @@ impl ConnectionRuntime {
             DbKind::MySql => self.cfg.default_db.clone(),
             DbKind::Postgres => self.home.clone(),
         }
+    }
+
+    /// The server detected when the connection opened.
+    pub(crate) fn server_info(&self) -> &ServerInfo {
+        &self.info
     }
 
     /// The slot of `database`, created empty on first use.

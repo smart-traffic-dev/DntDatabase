@@ -1,12 +1,17 @@
 //! Application settings: log level, table page size, the unbounded-write
-//! confirmation and the idle-transaction warning delay (persisted in `app_settings`),
-//! and the log folder.
+//! confirmation, the idle-transaction warning delay, the per-connection job limit and
+//! the external tools folder (persisted in `app_settings`), and the log folder.
 
 use super::{blocking, guard};
+use crate::jobs::{
+    saved_jobs_per_connection, JOBS_PER_CONNECTION_KEY, MAX_JOBS_PER_CONNECTION,
+    MIN_JOBS_PER_CONNECTION,
+};
 use crate::logging::{LogHandle, LogLevel};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_store::repo::ConnectionRepo;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 use tauri_plugin_opener::OpenerExt;
@@ -227,6 +232,117 @@ pub async fn set_idle_tx_warn_minutes(
     minutes: u32,
 ) -> Result<(), AppError> {
     guard(set_idle_tx_warn_minutes_impl(&state, minutes)).await
+}
+
+pub async fn get_jobs_per_connection_impl(state: &AppState) -> Result<u32, DbError> {
+    let repo = Arc::clone(&state.repo);
+    blocking(move || Ok(saved_jobs_per_connection(&repo))).await
+}
+
+/// Stores the limit (1–8, else `config`, field `n`); queued jobs re-check it at once.
+pub async fn set_jobs_per_connection_impl(state: &AppState, n: u32) -> Result<(), DbError> {
+    if !(MIN_JOBS_PER_CONNECTION..=MAX_JOBS_PER_CONNECTION).contains(&n) {
+        return Err(DbError::Config {
+            field: Some("n".into()),
+            message: format!(
+                "the number of jobs per connection must be between {MIN_JOBS_PER_CONNECTION} \
+                 and {MAX_JOBS_PER_CONNECTION}"
+            ),
+        });
+    }
+    let repo = Arc::clone(&state.repo);
+    blocking(move || repo.set_app_setting(JOBS_PER_CONNECTION_KEY, &n.to_string())).await?;
+    state.sessions.jobs.limit_changed();
+    Ok(())
+}
+
+/// Background jobs that may run at the same time on one connection (default 2).
+#[tauri::command]
+#[specta::specta]
+pub async fn get_jobs_per_connection(state: State<'_, AppState>) -> Result<u32, AppError> {
+    guard(get_jobs_per_connection_impl(&state)).await
+}
+
+/// Stores the per-connection job limit: 1 to 8, else `config` (field `n`).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_jobs_per_connection(state: State<'_, AppState>, n: u32) -> Result<(), AppError> {
+    guard(set_jobs_per_connection_impl(&state, n)).await
+}
+
+/// `app_settings` key of the folder searched first for external tools (R25); empty or
+/// missing: none.
+pub const EXTERNAL_TOOLS_DIR_KEY: &str = "external_tools_dir";
+
+/// The stored external tools folder; `None` when none is stored or it cannot be read.
+/// It is not checked again here (the tool lookup skips a folder that no longer exists).
+pub fn saved_external_tools_dir(repo: &ConnectionRepo) -> Option<PathBuf> {
+    match repo.app_setting(EXTERNAL_TOOLS_DIR_KEY) {
+        Ok(Some(v)) if !v.trim().is_empty() => Some(PathBuf::from(v)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the external tools folder setting");
+            None
+        }
+    }
+}
+
+pub async fn get_external_tools_dir_impl(state: &AppState) -> Result<Option<String>, DbError> {
+    let repo = Arc::clone(&state.repo);
+    blocking(move || Ok(saved_external_tools_dir(&repo).map(|p| p.to_string_lossy().into_owned())))
+        .await
+}
+
+/// Stores the external tools folder: an absolute path of an existing directory, else
+/// `config` (field `dir`). `None` or blank clears it.
+pub async fn set_external_tools_dir_impl(
+    state: &AppState,
+    dir: Option<String>,
+) -> Result<(), DbError> {
+    let dir = dir.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty());
+    let repo = Arc::clone(&state.repo);
+    blocking(move || {
+        let value = match dir {
+            None => String::new(),
+            Some(d) => {
+                let path = Path::new(&d);
+                let refuse = |message: &str| DbError::Config {
+                    field: Some("dir".into()),
+                    message: message.into(),
+                };
+                if !path.is_absolute() {
+                    return Err(refuse("The tools folder must be a full path."));
+                }
+                if !path.is_dir() {
+                    return Err(refuse("The tools folder does not exist."));
+                }
+                d
+            }
+        };
+        repo.set_app_setting(EXTERNAL_TOOLS_DIR_KEY, &value)
+    })
+    .await
+}
+
+/// The folder searched first for `mysqldump`, `pg_dump` and the other external tools;
+/// `None`: only `PATH`.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_external_tools_dir(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
+    guard(get_external_tools_dir_impl(&state)).await
+}
+
+/// Stores the external tools folder (absolute, existing; `None` clears it), else
+/// `config` (field `dir`).
+#[tauri::command]
+#[specta::specta]
+pub async fn set_external_tools_dir(
+    state: State<'_, AppState>,
+    dir: Option<String>,
+) -> Result<(), AppError> {
+    guard(set_external_tools_dir_impl(&state, dir)).await
 }
 
 /// Opens the log folder in the system file manager.

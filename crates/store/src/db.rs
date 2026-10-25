@@ -99,6 +99,35 @@ ALTER TABLE query_history_next RENAME TO query_history;
 CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
 ";
 
+/// P5 spec §4.4: persisted background jobs, and history rebuilt once more to allow the
+/// import and restore origins, preserving ids and rows.
+const MIGRATION_7: &str = "
+CREATE TABLE jobs (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('import','import_dry_run','dump','tool_dump','restore','tool_restore','export')),
+  connection_id TEXT NULL REFERENCES connections(id) ON DELETE SET NULL,
+  title TEXT NOT NULL, params_json TEXT NULL, rerunnable INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK (state IN ('queued','running','done','failed','cancelled')),
+  created_at TEXT NOT NULL, started_at TEXT NULL, finished_at TEXT NULL,
+  result_path TEXT NULL, summary TEXT NULL, error_json TEXT NULL,
+  outcome_unknown INTEGER NOT NULL DEFAULT 0, log_json TEXT NOT NULL DEFAULT '[]', dropped_lines INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX jobs_created ON jobs(created_at DESC);
+CREATE TABLE query_history_next (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  database TEXT NULL, sql_text TEXT NOT NULL, redacted INTEGER NOT NULL,
+  kind TEXT NOT NULL, started_at TEXT NOT NULL, elapsed_ms INTEGER NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok','error','cancelled')),
+  row_count INTEGER NULL, affected INTEGER NULL, error_kind TEXT NULL, error_code TEXT NULL,
+  origin TEXT NOT NULL DEFAULT 'query'
+    CHECK (origin IN ('query','data_edit','object_action','table_design','import','restore')),
+  outcome_unknown INTEGER NOT NULL DEFAULT 0);
+INSERT INTO query_history_next SELECT * FROM query_history;
+DROP TABLE query_history;
+ALTER TABLE query_history_next RENAME TO query_history;
+CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -107,6 +136,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_4),
         M::up(MIGRATION_5),
         M::up(MIGRATION_6),
+        M::up(MIGRATION_7),
     ])
 }
 
@@ -183,7 +213,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 6);
+        assert_eq!(v, 7);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -296,6 +326,75 @@ mod tests {
         assert!(conn
             .execute("UPDATE query_history SET origin='invalid' WHERE id=7", [])
             .is_err());
+    }
+    #[test]
+    fn migration_7_adds_jobs_and_origins() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        Migrations::new(vec![
+            M::up(MIGRATION_1),
+            M::up(MIGRATION_2),
+            M::up(MIGRATION_3),
+            M::up(MIGRATION_4),
+            M::up(MIGRATION_5),
+            M::up(MIGRATION_6),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute_batch("INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) VALUES ('c','c',0,'mysql','h',3306,'u','ask','now','now'); INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin,outcome_unknown) VALUES (9,'c','ALTER TABLE t ADD c INT',0,'ddl','now','ok','table_design',1);").unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 7);
+        let row: (i64, String, i64) = conn
+            .query_row(
+                "SELECT id,origin,outcome_unknown FROM query_history",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (9, "table_design".into(), 1));
+        for origin in ["import", "restore"] {
+            conn.execute(
+                "INSERT INTO query_history (connection_id,sql_text,redacted,kind,started_at,status,origin) \
+                 VALUES ('c','INSERT INTO t VALUES (1)',0,'write','now','ok',?1)",
+                [origin],
+            )
+            .unwrap();
+        }
+        assert!(conn
+            .execute("UPDATE query_history SET origin='invalid' WHERE id=9", [])
+            .is_err());
+
+        let insert_job = |kind: &str, state: &str| {
+            conn.execute(
+                "INSERT INTO jobs (id,kind,connection_id,title,state,created_at) \
+                 VALUES (?1,?2,'c','t',?3,'now')",
+                [
+                    format!("{kind}-{state}"),
+                    kind.to_string(),
+                    state.to_string(),
+                ],
+            )
+        };
+        insert_job("import", "queued").unwrap();
+        assert!(insert_job("x", "queued").is_err());
+        assert!(insert_job("dump", "y").is_err());
+        let (log, dropped, rerun, unknown): (String, i64, i64, i64) = conn
+            .query_row(
+                "SELECT log_json,dropped_lines,rerunnable,outcome_unknown FROM jobs",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!((log.as_str(), dropped, rerun, unknown), ("[]", 0, 0, 0));
+        conn.execute("DELETE FROM connections WHERE id='c'", [])
+            .unwrap();
+        let conn_id: Option<String> = conn
+            .query_row("SELECT connection_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(conn_id, None);
     }
     #[test]
     fn foreign_keys_enabled() {

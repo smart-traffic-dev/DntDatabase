@@ -213,6 +213,20 @@ describe('HistoryPanel rows', () => {
     expect(within(list[0]!).queryByText('redacted')).toBeNull();
   });
 
+  it('marks import and restore jobs', async () => {
+    rows = [
+      entry(1, { origin: 'import', kind: 'write', sql_text: '-- Import a.csv into t: append, 3 rows, 1 batches' }),
+      entry(2, { origin: 'restore', kind: 'write', sql_text: '-- Restore a.sql (abc123) into shop: 4 statements' }),
+      entry(3),
+    ];
+    render(<HistoryPanel />);
+    const list = await rowsOf();
+    expect(within(list[0]!).getByTestId('history-import')).toHaveTextContent('Import');
+    expect(within(list[1]!).getByTestId('history-restore')).toHaveTextContent('Restore');
+    expect(within(list[2]!).queryByTestId('history-import')).toBeNull();
+    expect(within(list[2]!).queryByTestId('history-restore')).toBeNull();
+  });
+
   it('the all-connections scope names the connection of each row', async () => {
     const user = userEvent.setup();
     rows = [entry(1), entry(2, { connection_id: 'gone-conn', database: null })];

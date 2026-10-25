@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
-import { RIGHT_DEFAULT, RIGHT_MAX, RIGHT_MIN, useLayout } from '../store/layout';
+import { JobsPanel } from '../jobs/JobsPanel';
+import { RIGHT_DEFAULT, RIGHT_MAX, RIGHT_MIN, useLayout, type RightActivity } from '../store/layout';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HistoryPanel } from './HistoryPanel';
-import { AssistantIcon, HistoryIcon, ObjectInfoIcon, SnippetsIcon } from './icons';
+import { AssistantIcon, HistoryIcon, JobsIcon, ObjectInfoIcon, SnippetsIcon } from './icons';
 import { Splitter } from './Splitter';
 import './rightSidebar.css';
 
@@ -17,20 +18,22 @@ interface Activity {
 
 const ACTIVITIES: Activity[] = [
   { id: 'history', label: 'History', icon: <HistoryIcon />, enabled: true, hint: 'Ctrl+Shift+H' },
+  { id: 'jobs', label: 'Jobs', icon: <JobsIcon />, enabled: true },
   { id: 'snippets', label: 'Snippets', icon: <SnippetsIcon />, enabled: false },
   { id: 'object-info', label: 'Object info', icon: <ObjectInfoIcon />, enabled: false },
   { id: 'assistant', label: 'AI assistant', icon: <AssistantIcon />, enabled: false },
 ];
 
 /**
- * The right edge of the window (spec §3): a panel (History) that resizes and collapses, and a
- * 40 px activity bar that stays. Clicking the active icon collapses the panel.
+ * The right edge of the window (spec §3): a panel (History or Jobs) that resizes and collapses,
+ * and a 40 px activity bar that stays. Clicking the active icon collapses the panel.
  */
 export function RightSidebar() {
   const visible = useLayout((s) => s.rightVisible);
   const width = useLayout((s) => s.rightWidth);
+  const activity = useLayout((s) => s.rightActivity);
   const setWidth = useLayout((s) => s.setRightWidth);
-  const toggle = useLayout((s) => s.toggleRight);
+  const show = useLayout((s) => s.showRightActivity);
   const setVisible = useLayout((s) => s.setRightVisible);
 
   return (
@@ -48,15 +51,21 @@ export function RightSidebar() {
             onChange={setWidth}
           />
           <aside className="rs-panel" data-testid="right-sidebar-panel" style={{ width }}>
-            <ErrorBoundary label="History">
-              <HistoryPanel onCollapse={() => setVisible(false)} />
-            </ErrorBoundary>
+            {activity === 'jobs' ? (
+              <ErrorBoundary label="Jobs">
+                <JobsPanel onCollapse={() => setVisible(false)} />
+              </ErrorBoundary>
+            ) : (
+              <ErrorBoundary label="History">
+                <HistoryPanel onCollapse={() => setVisible(false)} />
+              </ErrorBoundary>
+            )}
           </aside>
         </>
       )}
       <nav className="rs-activity" aria-label="Right sidebar" data-testid="right-sidebar-bar">
         {ACTIVITIES.map((a) => {
-          const on = a.enabled && visible;
+          const on = a.enabled && visible && a.id === activity;
           const label = a.enabled ? a.label : `${a.label} (coming soon)`;
           return (
             <button
@@ -68,7 +77,7 @@ export function RightSidebar() {
               aria-pressed={a.enabled ? on : undefined}
               title={a.hint ? `${a.label} (${a.hint})` : label}
               disabled={!a.enabled}
-              onClick={toggle}
+              onClick={() => show(a.id as RightActivity)}
             >
               {a.icon}
             </button>

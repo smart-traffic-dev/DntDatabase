@@ -7,6 +7,7 @@ import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { openNewQuery, openSelectTop } from './newQuery';
 import { DDL_EDITABLE_KINDS, openDdlEditTab } from './openDdlEdit';
 import { openDesignTab, openObjectTab } from './openObject';
+import { backupActionItems } from '../transfer/backup/backupMenu';
 
 type Item = MenuEntry;
 const SEP: Item = { separator: true };
@@ -107,6 +108,18 @@ export function ddlActionItems(node: TreeNode): Item[] {
   return [{ label: NEW_LABELS[kind] ?? `New ${kind.toLowerCase()}…`, disabled: cfg.read_only, run: () => void openDdlEditTab(connectionId, scope, kind, null, null) }];
 }
 
+/**
+ * "Import data…" on a table of an open connection: the import wizard with the table pre-filled.
+ * Enabled on read-only connections too (the file check runs there; the import itself is blocked).
+ */
+export function importActionItems(node: TreeNode): Item[] {
+  const connectionId = connectionIdOf(node.id);
+  const object = node.objectRef;
+  if (!connectionId || node.kind !== 'object' || object?.kind !== 'Table') return [];
+  if (!useConnections.getState().info.has(connectionId)) return [];
+  return [{ label: 'Import data…', run: () => useDialogs.getState().requestDialog({ kind: 'importData', connectionId, table: object }) }];
+}
+
 function itemsFor(node: TreeNode): Item[] {
   const tree = useTree.getState();
   const dialogs = useDialogs.getState();
@@ -175,13 +188,15 @@ function itemsFor(node: TreeNode): Item[] {
       newQuery,
       ...designActionItems(node),
       ...ddlActionItems(node),
+      ...importActionItems(node),
+      ...backupActionItems(node),
       ...objectActionItems(node),
       SEP,
       refresh,
       copy,
     ];
   }
-  return [newQuery, ...designActionItems(node), ...ddlActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
+  return [newQuery, ...designActionItems(node), ...ddlActionItems(node), ...backupActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {

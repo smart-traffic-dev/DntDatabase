@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
+import type { AppError, DumpRequest, EnvTag, ImportRequest, NodeId, ObjectRef, RestoreRequest, ToolDumpRequest, TxAction } from '../bindings';
 import type { ObjectActionRequest } from '../dialogs/ObjectActionDialog';
 import type { ExportRequest } from '../dialogs/resultExport';
 import type { SettingsTab } from '../dialogs/SettingsDialog';
@@ -42,7 +42,25 @@ export type UiRequest =
   | { kind: 'snippets' }
   | { kind: 'about' }
   /** Review and apply the text of a DDL editor tab. */
-  | { kind: 'ddlEdit'; tabId: string };
+  | { kind: 'ddlEdit'; tabId: string }
+  /** The data import wizard; `table` from the tree, `params` from "Run again" (R5). */
+  | { kind: 'importData'; connectionId: string; table?: ObjectRef; params?: ImportRequest }
+  /**
+   * The dump dialog on `database` (PostgreSQL: `schema`, or every schema when absent); `table` from
+   * "Dump table…" (pre-selected), `params` from "Run again" (R5).
+   */
+  | {
+      kind: 'dump';
+      connectionId: string;
+      database: string;
+      schema?: string | null;
+      table?: string;
+      params?: { kind: 'dump'; request: DumpRequest } | { kind: 'tool_dump'; request: ToolDumpRequest };
+      /** Set by every "Run again": a fresh dialog even when the same job is re-run twice. */
+      rerun?: number;
+    }
+  /** The restore dialog; `params` from "Run again" (R5: analyzed and confirmed again). */
+  | { kind: 'restore'; connectionId: string; database?: string; params?: RestoreRequest; rerun?: number };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =
@@ -73,7 +91,9 @@ export type Question =
       /** Rolls every transaction back, then quits. */
       quit(): Promise<void>;
       done(): void;
-    };
+    }
+  /** Quitting while `count` background jobs are queued or running (R8): `quit` stops them all first. */
+  | { kind: 'jobsRunning'; count: number; quit(): Promise<void>; done(): void };
 
 interface DialogsState {
   objectActionRunning: boolean;

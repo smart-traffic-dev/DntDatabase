@@ -4,22 +4,31 @@ import type {
   ColumnMeta,
   ConnectionConfig,
   ConnectionSummary,
+  DataImportPreview,
   DatabaseInfo,
   DesignPreview,
   DesignRender,
   DesignReport,
   EditableInfo,
   HistoryEntry,
+  ImportConfirm,
+  ImportMode,
+  ImportRequest,
+  ImportTarget,
   IndexDetail,
+  JobSummary,
+  KeyChoice,
   ObjectKind,
   ObjectRef,
   ObjectSummary,
   ParsedConnString,
+  RestoreRequest,
   Scope,
   ServerInfo,
   TableDataPage,
   TableDef,
   TableDetail,
+  TargetColumn,
   Tree,
   TypeInfo,
   TypeSpec,
@@ -27,6 +36,9 @@ import type {
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
 import { createDdlFake, type DdlFakeState } from './ddlEdit';
+import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
+import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
+import { jobDetail, jobProgress, jobSummary } from './jobs';
 import type { Handler } from './shim';
 
 /** The id the dialog sends while creating (see `NIL_UUID` in ConnectionDialog). */
@@ -394,6 +406,14 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   let designSeq = 0;
   const designs = new Map<string, string>();
   const plans = new Map<string, number>();
+  // Data import: reviewed plans (id -> request); one counter for dry runs, plans and jobs.
+  let importSeq = 0;
+  const importPlans = new Map<string, { request: ImportRequest; preview: DataImportPreview }>();
+  // Jobs the fake started (dry runs): `job_list` / `job_detail` answer them as the job manager would.
+  const fakeJobs = new Map<string, JobSummary>();
+  // Dump and restore: analyzed restore plans (id -> request); one counter for plans and jobs.
+  let backupSeq = 0;
+  const restorePlans = new Map<string, RestoreRequest>();
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -564,6 +584,106 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     // The DDL editor (`ddlEdit.ts`).
     ...ddl.handlers,
+    // Background jobs (P5): only those the fake started (dry runs); `specs/jobs.spec.ts` overrides these.
+    job_list: () => [...fakeJobs.values()],
+    job_active_count: () => [...fakeJobs.values()].filter((j) => j.state === 'queued' || j.state === 'running').length,
+    job_detail: ({ id }) => {
+      const job = fakeJobs.get(id as string);
+      if (!job) throw new Failure(appError('config', 'unknown job', { field: 'id' }));
+      return jobDetail(job);
+    },
+    job_cancel: () => false,
+    job_stop_all: () => null,
+    job_reveal_result: () => null,
+    job_clear_history: () => null,
+    get_jobs_per_connection: () => 2,
+    set_jobs_per_connection: () => null,
+    get_external_tools_dir: () => null,
+    set_external_tools_dir: () => null,
+
+    // The data import wizard (P5b): `orders.csv` into the canned `orders`; `specs/import-wizard.spec.ts`.
+    import_pick_file: () => IMPORT_FILE,
+    import_inspect: ({ path }) => {
+      if (path !== IMPORT_FILE) throw new Failure(appError('config', 'this file was not picked', { field: 'path' }));
+      return ordersInspection;
+    },
+    import_target: ({ connectionId }): ImportTarget => {
+      const cfg = connections.find((c) => c.id === connectionId);
+      return ordersTarget(cfg?.env_tag ?? null, requireOpen(connectionId as string), cfg?.read_only ?? false);
+    },
+    import_auto_map: ({ source, targets }) => autoMap(source as string[], targets as TargetColumn[]),
+    import_check_mapping: ({ mode, keys }) => checkMapping(mode as ImportMode, keys as KeyChoice[]),
+    // The dry run is a job: the job manager lists it from the start (queued, then running).
+    import_dry_run: ({ request }) => {
+      const { request: req, server_check: server } = request as { request: ImportRequest; server_check: boolean };
+      const id = `dry-${++importSeq}`;
+      fakeJobs.set(
+        id,
+        jobSummary({
+          id,
+          kind: 'import_dry_run',
+          connection_id: req.connection_id,
+          title: `${server ? 'Validate on server' : 'Check'} orders.csv for ${req.table.name}`,
+          state: 'running',
+          progress: jobProgress({ phase: 'Checking', done: 0, total: ordersInspection.total_bytes, unit: 'bytes' }),
+        }),
+      );
+      return id;
+    },
+    import_prepare: ({ request }) => {
+      const req = request as ImportRequest;
+      const planId = `import-plan-${++importSeq}`;
+      const preview = importPreview(req, planId, connections.find((c) => c.id === req.connection_id)?.env_tag ?? null);
+      importPlans.set(planId, { request: req, preview });
+      return preview;
+    },
+    // As `import_start` of `src-tauri/src/import_data/plan.rs`: an unknown plan has expired; a
+    // missing confirmation, typed name or irreversible pre-step acknowledgement is refused.
+    import_start: ({ planId, confirm }) => {
+      const plan = importPlans.get(planId as string);
+      if (!plan) throw fail('plan_expired');
+      importPlans.delete(planId as string);
+      const c = confirm as ImportConfirm;
+      const want = plan.preview.confirm;
+      const nameOk = want.kind !== 'type_name' || c.name === want.name;
+      const irreversible = !!plan.preview.pre_step?.irreversible;
+      if (!c.confirmed || !nameOk || (irreversible && !c.irreversible_ack)) throw fail('confirmation_required');
+      return `import-${++importSeq}`;
+    },
+
+    // Dump and restore (P5c): `dnt_fixture` dumped by the built-in dump; `RESTORE_FILE` restored by
+    // the built-in runner, `PSQL_FILE` refused (psql missing); `specs/backup.spec.ts`.
+    dump_objects: () => fixtureDumpObjects,
+    dump_pick_path: () => DUMP_FILE,
+    dump_start: () => `dump-${++backupSeq}`,
+    tools_list: () => noTools,
+    tool_dump_start: () => {
+      throw new Failure(appError('config', 'no external tool in the browser tests', { field: 'tool' }));
+    },
+    restore_pick_file: () => RESTORE_FILE,
+    // As `restore_preview` / `restore_start` of `src-tauri/src/backup/restore.rs`: a read-only
+    // connection is `blocked`, an unknown plan has expired, a wrong typed name needs confirmation.
+    restore_preview: ({ request }) => {
+      const req = request as RestoreRequest;
+      const cfg = connections.find((c) => c.id === req.connection_id);
+      if (cfg?.read_only) throw fail('blocked');
+      if (req.path === PSQL_FILE) {
+        throw fail('internal', { kind: 'unsupported', message: 'This feature is not supported by the server.', detail: `${PSQL_FILE_MESSAGE} (server version 8.0.36)` });
+      }
+      if (req.path !== RESTORE_FILE) throw new Failure(appError('config', 'this file was not picked', { field: 'path' }));
+      const planId = `restore-plan-${++backupSeq}`;
+      restorePlans.set(planId, req);
+      return appRunnerPreview(req, planId, cfg?.env_tag ?? null, cfg?.kind ?? 'mysql');
+    },
+    restore_start: ({ planId, confirmed, name }) => {
+      const req = restorePlans.get(planId as string);
+      if (!req) throw fail('plan_expired');
+      restorePlans.delete(planId as string);
+      const cfg = connections.find((x) => x.id === req.connection_id);
+      if (cfg?.read_only) throw fail('blocked');
+      if (!confirmed || (cfg?.env_tag === 'production' && name !== req.database)) throw fail('confirmation_required');
+      return `restore-${++backupSeq}`;
+    },
   };
 
   const all = { ...handlers, ...overrides };

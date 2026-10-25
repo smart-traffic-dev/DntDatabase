@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { confirmDiscardConnection } from '../components/tabActions';
+import { plural } from '../lib/plural';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs';
 import { useRunPrompt } from '../store/runPrompt';
@@ -27,6 +28,13 @@ import { TxCloseDialog } from './TxCloseDialog';
 import { AddFavoriteDialog } from './AddFavoriteDialog';
 import { SnippetsDialog } from './SnippetsDialog';
 import { ToastHost } from './ToastHost';
+import { ImportWizard } from '../transfer/import/ImportWizard';
+// Registers "Run again" of import jobs and dry runs (R5).
+import '../transfer/import/rerunImport';
+import { DumpDialog } from '../transfer/backup/DumpDialog';
+import { RestoreDialog } from '../transfer/backup/RestoreDialog';
+// Registers "Run again" of dumps, tool dumps and restores (R5).
+import '../transfer/backup/rerunBackup';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
 function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
@@ -182,6 +190,18 @@ function QuestionHost({ question }: { question: Question }) {
       />
     );
   }
+  if (question.kind === 'jobsRunning') {
+    const one = question.count === 1;
+    return (
+      <ConfirmDialog
+        title="Background jobs are running"
+        message={`${plural(question.count, 'background job')} ${one ? 'is' : 'are'} running. Quitting stops ${one ? 'it' : 'them'}.`}
+        confirmLabel="Stop jobs and quit"
+        onClose={question.done}
+        onConfirm={question.quit}
+      />
+    );
+  }
   return <AppCloseDialog tabs={question.tabs} onQuit={question.quit} onCancel={question.done} />;
 }
 
@@ -323,6 +343,38 @@ export function DialogHost() {
     dialog = <SnippetsDialog onClose={closeRequest} />;
   } else if (request?.kind === 'about') {
     dialog = <AboutDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'importData') {
+    dialog = (
+      <ImportWizard
+        key={`${request.connectionId}:${request.table?.database ?? ''}.${request.table?.schema ?? ''}.${request.table?.name ?? ''}:${request.params ? 'rerun' : ''}`}
+        connectionId={request.connectionId}
+        table={request.table}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
+  } else if (request?.kind === 'dump') {
+    dialog = (
+      <DumpDialog
+        key={`${request.connectionId}:${request.database}.${request.schema ?? ''}.${request.table ?? ''}:${request.rerun ?? ''}`}
+        connectionId={request.connectionId}
+        database={request.database}
+        schema={request.schema}
+        table={request.table}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
+  } else if (request?.kind === 'restore') {
+    dialog = (
+      <RestoreDialog
+        key={`${request.connectionId}:${request.database ?? ''}:${request.rerun ?? ''}`}
+        connectionId={request.connectionId}
+        database={request.database}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';

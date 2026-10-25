@@ -1010,6 +1010,319 @@ async ddlEditApply(planId: string, confirmed: boolean, name: string | null, oper
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Live jobs first, then finished ones; `limit` default 200, at most 500.
+ */
+async jobList(limit: number | null) : Promise<Result<JobSummary[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_list", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A job with its log and the parameters it was started with.
+ */
+async jobDetail(id: string) : Promise<Result<JobDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_detail", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops a job; `false` when it is not queued or running.
+ */
+async jobCancel(id: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_cancel", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Queued and running jobs (status bar, close guard).
+ */
+async jobActiveCount() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_active_count") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops every job and waits up to 5 seconds for them to end (close guard).
+ */
+async jobStopAll() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_stop_all") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Shows a job's result file in the system file manager, only when the job recorded it
+ * and the file exists; nothing is opened or run.
+ */
+async jobRevealResult(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_reveal_result", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes the finished jobs; queued and running ones stay.
+ */
+async jobClearHistory() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_clear_history") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Background jobs that may run at the same time on one connection (default 2).
+ */
+async getJobsPerConnection() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_jobs_per_connection") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the per-connection job limit: 1 to 8, else `config` (field `n`).
+ */
+async setJobsPerConnection(n: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_jobs_per_connection", { n }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The folder searched first for `mysqldump`, `pg_dump` and the other external tools;
+ * `None`: only `PATH`.
+ */
+async getExternalToolsDir() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_external_tools_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the external tools folder (absolute, existing; `None` clears it), else
+ * `config` (field `dir`).
+ */
+async setExternalToolsDir(dir: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_external_tools_dir", { dir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the Open dialog for a data file (CSV/TSV/TXT, JSON/JSONL/NDJSON, XLSX) from the
+ * backend and admits the picked path for the import commands. `None`: cancelled.
+ */
+async importPickFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_pick_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The file's columns and first 100 records (only a file picked in `import_pick_file`).
+ */
+async importInspect(path: string, source: SourceOptions) : Promise<Result<Inspection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_inspect", { path, source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The target table's columns (with the driver's types), upsert keys and transaction
+ * policy, read on a short-lived dedicated session.
+ */
+async importTarget(connectionId: string, table: ObjectRef) : Promise<Result<ImportTarget, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_target", { connectionId, table }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The automatic mapping of source columns to target columns (no database).
+ */
+async importAutoMap(source: string[], targets: TargetColumn[]) : Promise<Result<Mapping[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_auto_map", { source, targets }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The mapping's errors and warnings for `mode` (no database).
+ */
+async importCheckMapping(mapping: Mapping[], targets: TargetColumn[], keys: KeyChoice[], mode: ImportMode, overrideIdentity: boolean) : Promise<Result<MappingReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_check_mapping", { mapping, targets, keys, mode, overrideIdentity }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a dry-run job; returns its id.
+ */
+async importDryRun(request: DryRunRequest) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_dry_run", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reads the target and the file and returns the reviewed plan.
+ */
+async importPrepare(request: ImportRequest) : Promise<Result<DataImportPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_prepare", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-checks the plan and starts the import job; returns its id.
+ */
+async importStart(planId: string, confirm: ImportConfirm) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_start", { planId, confirm }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The tables, views (PostgreSQL also stand-alone sequences and types) the built-in dump
+ * can hold, and the objects it skips with the reason (R22).
+ */
+async dumpObjects(connectionId: string, database: string, schemas: string[]) : Promise<Result<DumpObjects, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dump_objects", { connectionId, database, schemas }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the save dialog for a dump file from the backend and admits the picked path for
+ * `dump_start` / `tool_dump_start`. `format`: a pg_dump tool dump's format (`custom` /
+ * `tar` name the file `.dump` / `.tar`); `null` for SQL output. `None`: cancelled.
+ */
+async dumpPickPath(baseName: string, compress: boolean, format: PgDumpFormat | null) : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dump_pick_path", { baseName, compress, format }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a dump job (no confirmation: a read, allowed on read-only connections);
+ * returns its id.
+ */
+async dumpStart(request: DumpRequest) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dump_start", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The external tools found (the External tools folder first, then `PATH`) with their
+ * version, the missing ones and the folders searched (R25).
+ */
+async toolsList() : Promise<Result<ToolsList, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tools_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a dump through `mysqldump`, `mariadb-dump` or `pg_dump` (a read: no
+ * confirmation, allowed on read-only connections); returns its id. The path must come
+ * from `dump_pick_path`.
+ */
+async toolDumpStart(request: ToolDumpRequest) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("tool_dump_start", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Opens the Open dialog for a file to restore from the backend and admits the picked
+ * path for `restore_preview`. `None`: cancelled. The restore path is chosen by content,
+ * not by extension.
+ */
+async restorePickFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_pick_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Analyzes a file for a restore (path, statistics or TOC, command line, warnings,
+ * confirmation) and stores a single-use plan. Nothing is sent to the target.
+ */
+async restorePreview(request: RestoreRequest) : Promise<Result<RestorePreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_preview", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-checks the plan and starts the restore job; returns its id. Production needs the
+ * database name typed in `name`.
+ */
+async restoreStart(planId: string, confirmed: boolean, name: string | null) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_start", { planId, confirmed, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1084,6 +1397,39 @@ error: AppError | null }
  * Whether a set of edits can be applied all-or-nothing (spec §4.2a).
  */
 export type Atomicity = "yes" | "no" | "unknown"
+/**
+ * How binary columns read their text.
+ */
+export type BinaryEncoding = 
+/**
+ * `0x…` or bare hex digits.
+ */
+"hex" | 
+/**
+ * Standard alphabet, padding optional. Renamed explicitly: specta's snake_case would
+ * export `base_64` while serde reads and writes `base64`.
+ */
+"base64" | 
+/**
+ * The UTF-8 bytes of the text (renamed for the same reason: `utf8_text`).
+ */
+"utf8_text"
+/**
+ * One source value. Conversion to the target type happens later (`convert`).
+ */
+export type Cell = { t: "Null" } | { t: "Text"; v: string } | 
+/**
+ * Number text as written in JSON, or an XLSX number (integers without `.0`).
+ */
+{ t: "Number"; v: string } | { t: "Bool"; v: boolean } | 
+/**
+ * A nested JSON object or array, verbatim.
+ */
+{ t: "Json"; v: string } | 
+/**
+ * An XLSX date/time, ISO 8601 with seconds (`2024-01-02`, `2024-01-02T03:04:05`, `03:04:05`).
+ */
+{ t: "DateTime"; v: string }
 /**
  * What the user typed or picked for one cell.
  */
@@ -1180,6 +1526,22 @@ export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; 
  * A table or view offered by autocomplete after `db.` / `schema.`.
  */
 export type CompletionObject = { schema: string | null; name: string; kind: ObjectKind }
+/**
+ * How the user confirms the start (R20).
+ */
+export type ConfirmLevel = 
+/**
+ * The review step's Start button.
+ */
+{ kind: "none" } | 
+/**
+ * Staging: "I understand".
+ */
+{ kind: "click" } | 
+/**
+ * Production: type the table name.
+ */
+{ kind: "type_name"; name: string }
 export type ConflictKind = 
 /**
  * A stored connection has the same id; resolved by the [`ConflictPolicy`].
@@ -1217,6 +1579,15 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
  * A connection as shown in the tree: config plus secret *presence* flags, never values.
  */
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
+export type ConvertOptions = { empty: EmptyAs; 
+/**
+ * A text cell equal to this (after trimming when `trim`) is NULL, e.g. `\N` or `NULL`.
+ */
+null_text: string | null; 
+/**
+ * Trim spaces around text cells first.
+ */
+trim: boolean; binary: BinaryEncoding }
 /**
  * What `data_copy_sql` writes for each row.
  */
@@ -1234,6 +1605,23 @@ export type DataFilter = { mode: FilterMode; conditions: FilterCond[];
  * never goes through [`build_where`]. Absent / null: structured mode.
  */
 raw_where?: string | null }
+/**
+ * The review step: what `import_start` will run (R19). Exported to TypeScript as
+ * `DataImportPreview` (the connections import already has an `ImportPreview`).
+ */
+export type DataImportPreview = { plan_id: string; file: FileFacts; table: ObjectRef; 
+/**
+ * The whole import is one transaction (R15).
+ */
+transactional: boolean; pre_step: PreStep | null; insert_head: string; insert_tail: string; 
+/**
+ * The first rows of the file as one `INSERT` (at most 10 rows).
+ */
+sample: string | null; warnings: string[]; confirm: ConfirmLevel; 
+/**
+ * Production with an irreversible pre-step: the name typed for it (the table's).
+ */
+irreversible_name: string | null; expires_in_seconds: number }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type DdlEditOpen = { edit_id: string; text: string; target: EditTarget; object: ObjectRef | null; server: ServerInfo; env: EnvTag | null; read_only: boolean; strategies: Strategy[]; strategy: Strategy | null; 
@@ -1324,6 +1712,55 @@ export type DropTarget = { kind: DropKind;
  * the statement names nothing readable (`DROP OPERATOR + (int, int)`).
  */
 name: string }
+/**
+ * A dry run (R18): every record is read and converted; with `server_check` the rows are
+ * also inserted into a temporary copy of the table (not on read-only connections).
+ */
+export type DryRunRequest = { request: ImportRequest; server_check: boolean; 
+/**
+ * The user confirmed the server check's statements where the guard asks (Production).
+ */
+confirmed?: boolean }
+/**
+ * One object a dump can hold.
+ */
+export type DumpObject = { 
+/**
+ * PostgreSQL: the schema; MySQL: `None`.
+ */
+schema: string | null; name: string; 
+/**
+ * `Table`, `View`; PostgreSQL also `Sequence` (stand-alone) and `Type` (enum, composite).
+ */
+kind: ObjectKind; 
+/**
+ * Tables: dump the rows too.
+ */
+data: boolean }
+/**
+ * What `dump_objects` lists: the selectable objects and the skipped ones.
+ */
+export type DumpObjects = { objects: DumpObject[]; skipped: SkippedObject[] }
+/**
+ * What the user asked to dump (also the stored parameters of "Run again").
+ */
+export type DumpRequest = { connection_id: string; database: string; 
+/**
+ * PostgreSQL: the schemas the dump covers (named in the header).
+ */
+schemas: string[]; objects: DumpObject[]; 
+/**
+ * `DROP … IF EXISTS` before each object is created.
+ */
+include_drop: boolean; 
+/**
+ * Write `.sql.gz` (gzip).
+ */
+compress: boolean; 
+/**
+ * A path admitted by `dump_pick_path`.
+ */
+path: string }
 export type EditOutcome = "applied" | "not_applied" | "rolled_back" | 
 /**
  * MySQL: some statements ran, then one failed and the object is not as before.
@@ -1395,7 +1832,23 @@ hidden_key: string[];
  */
 editable_columns: string[]; atomic: Atomicity; protection: ProtectionKind }
 export type ElementRef = { kind: "table" } | { kind: "column"; name: string } | { kind: "primary_key" } | { kind: "index"; name: string } | { kind: "foreign_key"; name: string } | { kind: "check"; name: string } | { kind: "options" }
+/**
+ * What an empty text cell becomes in a text column (other columns always get NULL).
+ */
+export type EmptyAs = "null" | "empty_string"
 export type EnvTag = "production" | "staging" | "local"
+/**
+ * What a refused row does.
+ */
+export type ErrorPolicy = 
+/**
+ * The first error stops the import.
+ */
+{ kind: "stop" } | 
+/**
+ * Skip refused rows and log them; more than `max_errors` stops the import (R16).
+ */
+{ kind: "skip"; max_errors: number }
 export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
 /**
  * What the export dialog chose.
@@ -1458,6 +1911,19 @@ sort: number }
  * What `favorite_create` / `favorite_update` take.
  */
 export type FavoriteInput = { name: string; folder: string | null; sql: string; connection_id: string | null; database: string | null }
+export type FileFacts = { 
+/**
+ * File name without its directory.
+ */
+name: string; 
+/**
+ * Bytes hashed (the file size at the time of hashing).
+ */
+size: number; 
+/**
+ * Lower-case hex SHA-256 of the content.
+ */
+sha256: string }
 /**
  * What the UI asks a dialog for (`file_pick_open` / `file_pick_save`).
  */
@@ -1545,7 +2011,15 @@ export type HistoryOrigin =
 /**
  * A statement the table designer applied.
  */
-"table_design"
+"table_design" | 
+/**
+ * One entry per data import job (summary comment plus statement templates).
+ */
+"import" | 
+/**
+ * One entry per restore job.
+ */
+"restore"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it
@@ -1564,12 +2038,53 @@ export type Impact = { kind: ImpactKind; element: ElementRef; message: string;
  */
 count_sql: string | null }
 export type ImpactKind = "data_loss" | "rebuild" | "not_transactional"
+export type ImportConfirm = { confirmed: boolean; 
+/**
+ * The typed table name (Production).
+ */
+name: string | null; 
+/**
+ * The irreversible pre-step was acknowledged.
+ */
+irreversible_ack: boolean }
+/**
+ * What the import does with the rows already in the table.
+ */
+export type ImportMode = { kind: "append" } | 
+/**
+ * Delete every row first (`TRUNCATE` when `truncate`), then insert (R17).
+ */
+{ kind: "replace"; truncate: boolean } | 
+/**
+ * Insert or update by `key`: the primary key or a NOT NULL unique index (R14).
+ */
+{ kind: "upsert"; key: string[] }
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
  * Destination group names joined by " / "; empty for the root.
  */
 group_path: string; conflict: ConflictKind | null; has_password: boolean; warnings: string[] }
+/**
+ * What the user asked to import (also the stored parameters of "Run again").
+ */
+export type ImportRequest = { connection_id: string; table: ObjectRef; 
+/**
+ * A path admitted by `import_pick_file`.
+ */
+path: string; source: SourceOptions; mapping: Mapping[]; mode: ImportMode; errors: ErrorPolicy; convert: ConvertOptions; 
+/**
+ * Rows per `INSERT` (0 = 1,000).
+ */
+batch_rows: number; 
+/**
+ * Bytes of SQL per `INSERT` (0 = 1 MiB).
+ */
+batch_bytes: number; 
+/**
+ * PostgreSQL `OVERRIDING SYSTEM VALUE` (write identity `ALWAYS` columns).
+ */
+override_identity: boolean }
 export type ImportResult = { imported: number; overwritten: number; 
 /**
  * Conflicts skipped by policy plus entries the parser could not import.
@@ -1580,6 +2095,10 @@ skipped: number;
  * uses the old settings).
  */
 overwritten_ids: string[] }
+/**
+ * The target as the wizard shows it (R13).
+ */
+export type ImportTarget = { columns: TargetColumn[]; keys: KeyChoice[]; atomicity: Atomicity; env: EnvTag | null; read_only: boolean; server: ServerInfo }
 export type IndexDef = { original: string | null; name: string; unique: boolean; parts: IndexPartDef[]; method: string | null; 
 /**
  * PostgreSQL `INCLUDE (…)` columns.
@@ -1627,12 +2146,64 @@ export type IndexPartDef = { column: string | null; expression: string | null;
  * MySQL prefix length.
  */
 prefix: number | null; descending: boolean }
+export type Inspection = { columns: string[]; 
+/**
+ * The first [`INSPECT_ROWS`] records at most.
+ */
+rows: SourceRecord[]; 
+/**
+ * XLSX: all sheet names; empty otherwise.
+ */
+sheets: string[]; 
+/**
+ * CSV: the delimiter used (guessed when the options gave none).
+ */
+delimiter: string | null; total_bytes: number }
+export type JobDetail = { job: JobSummary; log: JobLogLine[]; 
+/**
+ * Log lines not kept (memory keeps the first and last 1,000; the store 250 + 250).
+ */
+dropped_lines: number; params: JobParams | null }
+/**
+ * Payload of the `job://progress` app event.
+ */
+export type JobEvent = { job: JobSummary; 
+/**
+ * Log lines added since the previous event of this job.
+ */
+new_log: JobLogLine[] }
+export type JobKind = "import" | "import_dry_run" | "dump" | "tool_dump" | "restore" | "tool_restore" | "export"
+export type JobLogLevel = "info" | "warn" | "error"
+export type JobLogLine = { 
+/**
+ * RFC 3339 UTC with milliseconds.
+ */
+at: string; level: JobLogLevel; message: string }
+/**
+ * The request a job was started with, for "Run again". The payload is the request type
+ * of the kind (ImportRequest, DryRunRequest, DumpRequest, ToolDumpRequest,
+ * RestoreRequest) carried as a JSON value, so the job framework does not depend on the
+ * import/backup modules.
+ */
+export type JobParams = { kind: "import"; request: JsonValue } | { kind: "import_dry_run"; request: JsonValue } | { kind: "dump"; request: JsonValue } | { kind: "tool_dump"; request: JsonValue } | { kind: "restore"; request: JsonValue } | { kind: "tool_restore"; request: JsonValue }
+export type JobProgress = { 
+/**
+ * What the job is doing ("Reading file", "Rows", …); empty before it reports.
+ */
+phase: string; done: number; total: number | null; unit: ProgressUnit }
+export type JobState = "queued" | "running" | "done" | "failed" | "cancelled"
+export type JobSummary = { id: string; kind: JobKind; connection_id: string | null; title: string; state: JobState; progress: JobProgress; created_at: string; started_at: string | null; finished_at: string | null; result_path: string | null; summary: string | null; error: AppError | null; outcome_unknown: boolean; rerunnable: boolean }
 /**
  * TypeScript type of `Value::Int` / `Value::UInt`: a number when |x| ≤ 2^53, else a string.
  * Only used for the bindings (`#[specta(type = …)]`, exported as
  * `type JsInteger = number | string`), never constructed.
  */
 export type JsInteger = number | string
+export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
+/**
+ * A key an upsert can use.
+ */
+export type KeyChoice = { name: string; columns: string[]; primary: boolean }
 /**
  * The primary key.
  */
@@ -1652,6 +2223,16 @@ export type Locked = { element: ElementRef; reason: string; server_text: string 
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
 /**
+ * One target column and the source column (index) it reads, if any.
+ */
+export type Mapping = { target: string; source: number | null }
+export type MappingIssue = { 
+/**
+ * The target column concerned, if one is.
+ */
+column: string | null; message: string }
+export type MappingReport = { errors: MappingIssue[]; warnings: MappingIssue[] }
+/**
  * The MySQL `sql_mode` flags that change how a script is lexed.
  */
 export type MySqlMode = { 
@@ -1663,6 +2244,14 @@ ansi_quotes?: boolean;
  * `NO_BACKSLASH_ESCAPES`: `'…'` and `"…"` strings have no backslash escape.
  */
 no_backslash_escapes?: boolean }
+/**
+ * mysqldump / mariadb-dump options (spec §7.2).
+ */
+export type MysqlDumpOptions = { 
+/**
+ * Empty: every table of the database.
+ */
+tables: string[]; structure: boolean; data: boolean; routines: boolean; events: boolean; triggers: boolean; single_transaction: boolean }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
 export type ObjectAction = { kind: "create_namespace"; database: string; name: string } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
@@ -1698,6 +2287,19 @@ ignored: string[];
  * Things worth telling the user (e.g. only the first of several hosts is used).
  */
 warnings: string[] }
+export type PgDumpFormat = "plain" | "custom" | "tar"
+/**
+ * pg_dump options (spec §7.2).
+ */
+export type PgDumpOptions = { 
+/**
+ * Empty: every schema.
+ */
+schemas: string[]; 
+/**
+ * `(schema, table)`; empty: every table of the chosen schemas.
+ */
+tables: ([string, string])[]; structure: boolean; data: boolean; format: PgDumpFormat; no_owner: boolean; no_privileges: boolean }
 /**
  * One node of a normalized plan.
  */
@@ -1757,6 +2359,15 @@ export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialec
  */
 tx_state: TxState }
 /**
+ * What runs before the inserts of a replace-all import (R17).
+ */
+export type PreStep = { sql: string; 
+/**
+ * Sent and committed on its own before the inserts: it cannot be rolled back.
+ */
+irreversible: boolean; warning: string | null }
+export type ProgressUnit = "rows" | "bytes" | "statements" | "none"
+/**
  * How much of a row a statement's guard checks (spec §5.2).
  */
 export type Protection = 
@@ -1790,6 +2401,67 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+/**
+ * Which of the three restore paths a file takes (R30).
+ */
+export type RestorePath = 
+/**
+ * The app's own runner: N6 splitter + query guard, one statement at a time.
+ */
+"app_runner" | 
+/**
+ * `psql -f -` (COPY blocks, psql commands).
+ */
+"psql" | 
+/**
+ * `pg_restore` (pg_dump custom or tar archive).
+ */
+"pg_restore"
+/**
+ * What `restore_start` will run.
+ */
+export type RestorePreview = { plan_id: string; path: RestorePath; file: FileFacts; compressed: boolean; 
+/**
+ * Text files: the statement counts.
+ */
+stats: ScanStats | null; 
+/**
+ * pg_restore: the archive's TOC entries (at most 2,000).
+ */
+toc: string[]; toc_truncated: boolean; 
+/**
+ * psql / pg_restore: the command line (never a secret).
+ */
+command: string | null; tool: ToolInfo | null; 
+/**
+ * The restore runs in one transaction (a failure restores nothing).
+ */
+transactional: boolean; warnings: string[]; confirm: ConfirmLevel; expires_in_seconds: number }
+/**
+ * What the user asked to restore (also the stored parameters of "Run again").
+ */
+export type RestoreRequest = { connection_id: string; 
+/**
+ * The target database.
+ */
+database: string; 
+/**
+ * A path admitted by `restore_pick_file`.
+ */
+path: string; 
+/**
+ * psql / pg_restore `--single-transaction` (the app runner decides from the file,
+ * R31).
+ */
+single_transaction: boolean; 
+/**
+ * pg_restore `--clean --if-exists`.
+ */
+clean: boolean; 
+/**
+ * pg_restore `--no-owner`.
+ */
+no_owner: boolean }
 export type ResultMatch = { row: number; col: number }
 export type ResultPage = { rows: Value[][]; 
 /**
@@ -1888,6 +2560,26 @@ export type RunOptions = {
  */
 max_rows: number; continue_on_error: boolean }
 /**
+ * What a text file holds (statement counts by kind).
+ */
+export type ScanStats = { statements: number; reads: number; writes: number; ddl: number; transaction: number; other: number; 
+/**
+ * `DROP …` statements.
+ */
+drops: number; 
+/**
+ * `COPY … FROM stdin` data blocks.
+ */
+copy_blocks: number; 
+/**
+ * `\…` client command lines.
+ */
+client_commands: number; 
+/**
+ * The file starts with the app's dump header (`-- DntDatabase dump v1`).
+ */
+app_dump: boolean }
+/**
  * Table / view names and their columns (with types) of one database (PostgreSQL: of the
  * schemas in `current_schemas(false)` of that database's metadata session). One per
  * database, loaded lazily (see `SessionManager::schema_cache_for`).
@@ -1919,6 +2611,10 @@ export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres"
  * An entry of the import file that cannot be imported at all.
  */
 export type SkippedItem = { name: string; reason: string }
+/**
+ * An object the integrated dump does not cover (R22), and why.
+ */
+export type SkippedObject = { schema: string | null; name: string; kind: ObjectKind; reason: string }
 export type Snippet = { id: string; 
 /**
  * What the user types to trigger it; unique, case-insensitively.
@@ -1934,6 +2630,28 @@ export type SortDir = "asc" | "desc"
  * Server-side `ORDER BY` of one column (which must be a column of the object).
  */
 export type SortSpec = { column: string; dir: SortDir }
+export type SourceFormat = "csv" | "json" | "jsonl" | "xlsx"
+export type SourceOptions = { format: SourceFormat; 
+/**
+ * CSV only: one of `,` `;` tab `|`; `None` guesses from the first line.
+ */
+delimiter: string | null; 
+/**
+ * CSV and XLSX: the first row names the columns.
+ */
+header: boolean; 
+/**
+ * XLSX only: sheet name; `None` = the first sheet.
+ */
+sheet: string | null }
+/**
+ * Exported to TypeScript as `SourceRecord` (`Record` is a TypeScript built-in type).
+ */
+export type SourceRecord = { 
+/**
+ * 1-based: CSV line where the record starts, JSON element index, JSONL line, XLSX row.
+ */
+number: number; cells: Cell[] }
 export type SshAuth = "password" | "key"
 export type SshConfig = { version?: number; host: string; port: number; user: string; auth: SshAuth; key_path: string | null }
 export type SslConfig = { version?: number; mode: SslMode; ca_path: string | null; cert_path: string | null; key_path: string | null }
@@ -2093,6 +2811,67 @@ rows: number; elapsed_ms: number }
  * What the user asked to run. Offsets are UTF-16 code units into the editor text.
  */
 export type Target = { Cursor: number } | { Selection: [number, number] } | "All"
+/**
+ * A column of the import target as conversion and mapping need it.
+ */
+export type TargetColumn = { name: string; db_type: string; logical: LogicalType; nullable: boolean; 
+/**
+ * A default, `AUTO_INCREMENT` or an identity: the column may be left out of the `INSERT`.
+ */
+has_default: boolean; auto_increment: boolean; identity: IdentityKind | null; generated: boolean; enum_values: string[]; 
+/**
+ * `char(n)` / `varchar(n)` / `character(n)` / `character varying(n)`.
+ */
+max_chars: number | null; collation: string | null; 
+/**
+ * MySQL `… UNSIGNED` integer: negative values are refused.
+ */
+unsigned?: boolean }
+/**
+ * The only programs the app ever spawns (R25).
+ */
+export type Tool = "mysql_dump" | "mariadb_dump" | "pg_dump" | "pg_restore" | "psql"
+/**
+ * A dump through an external tool (also the stored parameters of "Run again").
+ */
+export type ToolDumpRequest = { connection_id: string; database: string; 
+/**
+ * `mysqldump` / `mariadb-dump` (MySQL family) or `pg_dump` (PostgreSQL).
+ */
+tool: Tool; 
+/**
+ * The options of `mysqldump` / `mariadb-dump`.
+ */
+mysql: MysqlDumpOptions | null; 
+/**
+ * The options of `pg_dump`.
+ */
+pg: PgDumpOptions | null; 
+/**
+ * Write `.sql.gz` (the tool's output, gzipped by the app).
+ */
+compress: boolean; 
+/**
+ * A path admitted by `dump_pick_path`.
+ */
+path: string }
+/**
+ * A tool that was found, with what `<tool> --version` printed.
+ */
+export type ToolInfo = { tool: Tool; path: string; 
+/**
+ * The first line `--version` printed (`mysqldump  Ver 8.4.3 for Win64 …`).
+ */
+version: string; 
+/**
+ * A MariaDB client (`mariadb-dump`, or a `mysqldump` built by MariaDB).
+ */
+mariadb: boolean }
+/**
+ * What `tools_list` returns: the tools found (with their version), the ones missing,
+ * and the folders searched in order.
+ */
+export type ToolsList = { tools: ToolInfo[]; missing: Tool[]; searched: string[] }
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
 export type TxAction = "Commit" | "Rollback"

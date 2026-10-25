@@ -20,6 +20,8 @@ test-helpers = []
 tauri-build.workspace = true
 
 [dependencies]
+# `JobRunner` (jobs) is an async trait object.
+async-trait.workspace = true
 dirs.workspace = true
 dnt-core.workspace = true
 dnt-driver-mysql.workspace = true
@@ -27,13 +29,15 @@ dnt-driver-pg.workspace = true
 dnt-query.workspace = true
 dnt-schema.workspace = true
 dnt-store.workspace = true
+dnt-transfer.workspace = true
 dnt-tunnel.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 rust_xlsxwriter.workspace = true
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-specta.workspace = true
+# `serde_json`: `JobParams` carries each job kind's request as a JSON value.
+specta = { workspace = true, features = ["serde_json"] }
 specta-typescript.workspace = true
 # `devtools`: `WebviewWindow::open_devtools` also exists in release builds (Tools > Developer tools).
 tauri = { workspace = true, features = ["devtools"] }
@@ -41,7 +45,8 @@ tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
 tauri-specta.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["rt"] }
+# `process` + `io-util`: the external tool runner (N7, backup/ext_tools.rs).
+tokio = { workspace = true, features = ["rt", "process", "io-util"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
@@ -59,3 +64,5 @@ dnt-testkit.workspace = true
 dntdatabase = { path = ".", features = ["test-helpers"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Reads back `.sql.gz` dumps in tests.
+flate2.workspace = true

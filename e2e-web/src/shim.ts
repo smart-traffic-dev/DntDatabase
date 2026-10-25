@@ -11,21 +11,72 @@ type Envelope = { ok: true; value: unknown } | { ok: false; error: AppError };
 /**
  * Installed before the app's own scripts. The generated bindings call
  * `window.__TAURI_INTERNALS__.invoke`, so defining it here is all the UI needs:
- * no Tauri runtime, no HTTP server. There is no window metadata, so the window API
+ * no Tauri runtime, no HTTP server. `listen` of `@tauri-apps/api/event` works too (the event
+ * plugin's listen / unlisten are answered in the page, see `emitEvent`). There is no window metadata, so the window API
  * (`getCurrentWindow`) throws, which the app treats as "not inside Tauri".
  */
 const INIT_SCRIPT = `(() => {
+  // transformCallback registry (channels and event handlers), as Tauri keeps it: id -> function.
+  const callbacks = new Map();
+  let nextCallback = 1;
+  // Event listeners: what \`plugin:event|listen\` registered, as {event, eventId, handler}.
+  let listeners = [];
+  let nextEventId = 1;
+  const unregisterListener = (event, eventId) => {
+    listeners = listeners.filter((l) => !(l.event === event && l.eventId === eventId));
+  };
+
+  // The event plugin's commands stay in the page: the backend's emit() is \`window.__e2eEmit\`.
+  const local = {
+    'plugin:event|listen': ({ event, handler }) => {
+      const eventId = nextEventId++;
+      listeners.push({ event, eventId, handler });
+      return eventId;
+    },
+    'plugin:event|unlisten': ({ event, eventId }) => {
+      unregisterListener(event, eventId);
+      return null;
+    },
+  };
+
   window.__TAURI_INTERNALS__ = {
     invoke: async (cmd, args) => {
+      if (local[cmd]) return local[cmd](args ?? {});
       const reply = await window.__e2eInvoke(cmd, args ?? {});
       if (reply.ok) return reply.value;
       // Tauri rejects with the deserialized error payload (a plain object), not an Error.
       // tauri-specta turns that into {status:"error"} and src/api turns it into AppErrorEx.
       throw reply.error;
     },
-    // Used by channels and events (streamed query results); the flows tested here do not stream.
-    transformCallback: () => 0,
+    transformCallback: (callback, once = false) => {
+      const id = nextCallback++;
+      callbacks.set(id, (data) => {
+        if (once) callbacks.delete(id);
+        return callback && callback(data);
+      });
+      return id;
+    },
+    unregisterCallback: (id) => {
+      callbacks.delete(id);
+    },
+    runCallback: (id, data) => {
+      const callback = callbacks.get(id);
+      if (callback) callback(data);
+    },
     convertFileSrc: (path) => path,
+  };
+  window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener };
+
+  /** Number of listeners of \`event\` (emitEvent waits for one). */
+  window.__e2eListenerCount = (event) => listeners.filter((l) => l.event === event).length;
+  /** Delivers an app event as Tauri does: each handler gets {event, id, payload}. */
+  window.__e2eEmit = (event, payload) => {
+    const targets = listeners.filter((l) => l.event === event);
+    for (const l of targets) {
+      const callback = callbacks.get(l.handler);
+      if (callback) callback({ event, id: l.eventId, payload });
+    }
+    return targets.length;
   };
 })();`;
 
@@ -62,4 +113,21 @@ export async function installBackend(page: Page, handlers: Record<string, Handle
     }
   });
   await page.addInitScript(INIT_SCRIPT);
+}
+
+/**
+ * Emits a Tauri app event to the page, as the backend's `Emitter::emit` would: every handler
+ * registered through `listen(event, …)` of `@tauri-apps/api/event` receives `{event, id, payload}`.
+ * Waits until the UI listens to `event` (its `listen` call is asynchronous), so an event is never
+ * sent into the void.
+ */
+export async function emitEvent(page: Page, event: string, payload: unknown): Promise<void> {
+  await page.waitForFunction(
+    (name) => (window as unknown as { __e2eListenerCount(e: string): number }).__e2eListenerCount(name) > 0,
+    event,
+  );
+  await page.evaluate(
+    ([name, data]) => (window as unknown as { __e2eEmit(e: string, p: unknown): number }).__e2eEmit(name as string, data),
+    [event, payload] as const,
+  );
 }

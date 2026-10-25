@@ -79,6 +79,7 @@ describe('layout store', () => {
       fontScale: 1,
       rightVisible: false,
       rightWidth: RIGHT_DEFAULT,
+      rightActivity: 'history',
     });
     useLayout.setState({ sidebarWidth: 1, sidebarVisible: true, editorRatio: 0.9 });
     reloadLayout();
@@ -176,6 +177,20 @@ describe('right sidebar', () => {
     useLayout.setState({ rightVisible: false, rightWidth: 300 });
     reloadLayout();
     expect([useLayout.getState().rightVisible, useLayout.getState().rightWidth]).toEqual([true, 400]);
+  });
+
+  it('showRightActivity opens a panel, the active one again collapses it; the choice persists', () => {
+    expect(useLayout.getState().rightActivity).toBe('history');
+    useLayout.getState().showRightActivity('jobs');
+    expect([useLayout.getState().rightVisible, useLayout.getState().rightActivity]).toEqual([true, 'jobs']);
+    useLayout.getState().showRightActivity('jobs');
+    expect(useLayout.getState().rightVisible).toBe(false);
+    useLayout.setState({ rightActivity: 'history' });
+    reloadLayout();
+    expect(useLayout.getState().rightActivity).toBe('jobs');
+    localStorage.setItem('dnt.layout', JSON.stringify({ rightActivity: 'nope' }));
+    reloadLayout();
+    expect(useLayout.getState().rightActivity).toBe('history');
   });
 
   it('setRightVisible opens or closes without toggling', () => {

@@ -4,6 +4,7 @@ pub mod db;
 pub mod dntconn;
 pub mod favorites;
 pub mod history;
+pub mod jobs;
 pub mod keyring_store;
 pub mod ncx;
 pub mod repo;

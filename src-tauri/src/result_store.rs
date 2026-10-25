@@ -435,6 +435,11 @@ impl ResultStore {
         })
     }
 
+    /// The connection whose query produced the result `token` (`None` once it is gone).
+    pub fn connection_of(&self, token: Uuid) -> Option<Uuid> {
+        lock(&self.state.entries).get(&token).map(|e| e.connection)
+    }
+
     fn entry(&self, token: Uuid) -> Result<Arc<Entry>, DbError> {
         lock(&self.state.entries)
             .get(&token)
@@ -1373,7 +1378,9 @@ mod tests {
         store.finish(token).unwrap();
         let path = store.entry(token.0).unwrap().path.clone();
         assert!(path.exists());
+        assert_eq!(store.connection_of(token.0), Some(conn));
         store.remove_connection(conn);
+        assert_eq!(store.connection_of(token.0), None);
         assert!(store.page(token.0, 0, 1).is_err());
         // The writer removes the file asynchronously, in order.
         let (tx, rx) = mpsc::channel();

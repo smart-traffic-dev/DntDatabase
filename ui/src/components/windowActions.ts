@@ -41,7 +41,7 @@ const HISTORY_SEARCH = '[data-testid="history-search"]';
 
 /** Ctrl+Shift+H: opens the right sidebar's History and puts the keyboard in its search box. */
 export function showHistory(): void {
-  useLayout.getState().setRightVisible(true);
+  useLayout.getState().openRightActivity('history');
   const focus = () => {
     const el = document.querySelector<HTMLInputElement>(HISTORY_SEARCH);
     if (!el) return false;
@@ -52,6 +52,10 @@ export function showHistory(): void {
   // A collapsed panel mounts the search on the next render.
   if (!focus()) setTimeout(focus, 0);
 }
+
+/** The status bar's jobs counter: opens the right sidebar on the Jobs panel. */
+export const showJobs = () => useLayout.getState().openRightActivity('jobs');
+
 export const zoomIn = () => useLayout.getState().zoomFont(1);
 export const zoomOut = () => useLayout.getState().zoomFont(-1);
 export const zoomReset = () => useLayout.getState().setFontScale(FONT_SCALE_DEFAULT);

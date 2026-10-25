@@ -26,6 +26,9 @@ pub const APP_DIR: &str = "DntDatabase";
 #[cfg(debug_assertions)]
 pub const APP_DIR: &str = "DntDatabase-dev";
 
+/// Directory of the jobs' temporary files, below the data directory.
+pub const JOB_TMP_DIR: &str = "job-tmp";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub data_dir: PathBuf,
@@ -94,6 +97,12 @@ impl AppState {
             default_drivers(),
         )
         .with_result_root(paths.data_dir.join("query-results"))?;
+        // Jobs: temporary files under the data directory; jobs the last exit interrupted
+        // become failed with an unknown outcome and their leftover files go (R7).
+        sessions.jobs.set_tmp_root(paths.data_dir.join(JOB_TMP_DIR));
+        if let Err(e) = sessions.jobs.recover() {
+            tracing::warn!(error = %e, "could not recover the jobs of the last run");
+        }
         Ok(AppState {
             repo,
             secrets,

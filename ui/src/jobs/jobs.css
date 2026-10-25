@@ -1,0 +1,273 @@
+/* Jobs panel of the right sidebar (P5 spec 4.5): flat rows like History, 1px focus borders. */
+.jb-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.jb-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px var(--dnt-space-3);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  cursor: default;
+}
+
+.jb-item:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.jb-row,
+.jb-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  min-width: 0;
+}
+
+.jb-open {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-xs);
+  background: transparent;
+  color: var(--dnt-fg);
+  font: inherit;
+  font-size: var(--dnt-text-sm);
+  text-align: left;
+}
+
+.jb-open:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: 0;
+}
+
+.jb-title {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.jb-meta {
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.jb-meta .spacer {
+  flex: 1;
+}
+
+.jb-conn {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jb-progress-text,
+.jb-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jb-elapsed {
+  flex: none;
+}
+
+.jb-item.error .jb-summary,
+.jb-error {
+  color: var(--dnt-status-danger-fg);
+}
+
+.jb-item.warn .jb-summary,
+.jb-warn {
+  color: var(--dnt-status-warning-fg);
+}
+
+/* State chips: tinted, never dimmed. */
+.jb-state.ok {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-status-success-bg);
+  color: var(--dnt-status-success-fg);
+}
+
+.jb-state.error {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+}
+
+.jb-state.warn {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+}
+
+.jb-state.live {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-status-info-bg);
+  color: var(--dnt-status-info-fg);
+}
+
+.jb-bar {
+  position: relative;
+  height: 4px;
+  overflow: hidden;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
+}
+
+.jb-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--dnt-accent);
+}
+
+.jb-bar.indeterminate .jb-bar-fill {
+  width: 30%;
+  animation: jb-slide 1.2s linear infinite;
+}
+
+.jb-bar.queued .jb-bar-fill {
+  width: 0;
+  animation: none;
+}
+
+@keyframes jb-slide {
+  from {
+    left: -30%;
+  }
+  to {
+    left: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jb-bar.indeterminate .jb-bar-fill {
+    left: 0;
+    width: 100%;
+    animation: none;
+    background: var(--dnt-border);
+  }
+}
+
+/* Detail view */
+.jb-detail {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  font-size: var(--dnt-text-sm);
+}
+
+.jb-detail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  min-width: 0;
+}
+
+.jb-detail-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jb-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px var(--dnt-space-3);
+  margin: 0;
+}
+
+.jb-facts dt {
+  color: var(--dnt-fg-muted);
+}
+
+.jb-facts dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.jb-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dnt-space-1_5);
+}
+
+.jb-dropped {
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+}
+
+.jb-log {
+  flex: 1;
+  min-height: 80px;
+  margin: 0;
+  overflow: auto;
+  padding: var(--dnt-space-2);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg);
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-xs);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.jb-log:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+.jb-line.warn {
+  color: var(--dnt-status-warning-fg);
+}
+
+.jb-line.error {
+  color: var(--dnt-status-danger-fg);
+}
+
+.jb-log-empty {
+  color: var(--dnt-fg-muted);
+}
+
+/* Status bar counter */
+.status-jobs {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.status-right ~ .status-jobs {
+  margin-left: 0;
+}
+
+.status-jobs:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.status-jobs:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}

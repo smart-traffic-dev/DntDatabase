@@ -4,6 +4,7 @@ import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
 import type { Engine } from '../query/engine';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
+import { liveJobCount } from './jobs';
 import { useTabs } from './tabs';
 
 export type RowLimit = 1000 | 10000 | 100000 | 1000000;
@@ -588,7 +589,44 @@ async function openTransactions(): Promise<{ doc: QueryDoc; running: boolean }[]
 }
 
 /**
- * App close (spec §7.2): saves every tab (a failed save asks "Quit anyway / Cancel"), then
+ * Live background jobs: asks "Stop jobs and quit" / Cancel; `true` once every job was told to
+ * stop (`job_stop_all` waits up to 5 s) or when none runs.
+ */
+async function confirmStopJobs(): Promise<boolean> {
+  const count = await liveJobCount();
+  if (count <= 0) return true;
+  return new Promise<boolean>((resolve) => {
+    // Settled once: Cancel / Esc while `job_stop_all` runs must not also answer "keep running".
+    let stopping = false;
+    let settled = false;
+    useDialogs.getState().ask({
+      kind: 'jobsRunning',
+      count,
+      quit: async () => {
+        if (settled || stopping) return;
+        stopping = true;
+        try {
+          // A failure keeps the question open with the error (ConfirmDialog shows it).
+          await api.jobStopAll();
+        } finally {
+          stopping = false;
+        }
+        settled = true;
+        useDialogs.getState().answer();
+        resolve(true);
+      },
+      done: () => {
+        if (stopping || settled) return;
+        settled = true;
+        useDialogs.getState().answer();
+        resolve(false);
+      },
+    });
+  });
+}
+
+/**
+ * App close (spec §7.2): live background jobs are stopped first (after asking, P5 R8), then saves every tab (a failed save asks "Quit anyway / Cancel"), then
  * quits, unless tabs have an open transaction or a running statement: `AppCloseDialog` lists
  * them with "Rollback all & quit" / "Cancel".
  */
@@ -609,9 +647,11 @@ export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
       return;
     }
     const asking = useDialogs.getState().question?.kind;
-    if (busy || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits') return;
+    if (busy || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits' || asking === 'jobsRunning') return;
     busy = true;
     try {
+      // Background jobs first (R8): quitting stops them all (bounded wait) before the rest of the flow.
+      if (!(await confirmStopJobs())) return;
       // Staged data edits are not saved anywhere: quitting throws them away, so ask first.
       if (!(await stagedEdits.confirm())) return;
       if (!(await designDrafts.confirm())) return;
