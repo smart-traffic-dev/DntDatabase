@@ -10,7 +10,6 @@ import { backendError, callsOf, config, fail, ids, mockBackend, resetStores, sam
 import { useObjectData } from '../store/objectData';
 import { openObjectTab } from '../components/openObject';
 import { ObjectActions } from './ObjectActions';
-import { READ_ONLY_TIP } from './objectSections';
 import { ObjectTab, formatBytes } from './ObjectTab';
 
 const ref = (kind: ObjectKind, name = 'orders', schema: string | null = null): ObjectRef => ({
@@ -292,21 +291,30 @@ describe('ObjectTab', () => {
     expect(callsOf('ddl_edit_open')[0]).toEqual({ connectionId: ids.prod, scope: { database: 'shop', schema: null }, kind: 'Function', name: 'f_add', table: null });
   });
 
-  it('ddl_panel_edit_is_disabled_read_only', async () => {
+  it('ddl_panel_edit_opens_view_only_on_read_only', async () => {
     const user = userEvent.setup();
     useConnections.getState().setStored([], [config(ids.prod, 'ro', { read_only: true })]);
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
+    setup(makeTab('Function', 'f_add'), { ddl_edit_open: () => new Promise(() => undefined), ddl_edit_close: () => null });
+    await screen.findByTestId('monaco-mock');
+    // Enabled like the tree's Edit definition: the editor opens view-only and says why.
+    const edit = screen.getByRole('button', { name: 'Edit' });
+    expect(edit).toBeEnabled();
+    await user.click(edit);
+    expect(useTabs.getState().tabs.some((t) => t.kind === 'ddl')).toBe(true);
+  });
+
+  it('ddl_panel_has_no_edit_when_the_connection_is_not_open', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'shop-prod')]);
     setup(makeTab('Function', 'f_add'));
     await screen.findByTestId('monaco-mock');
-    const edit = screen.getByRole('button', { name: 'Edit' });
-    expect(edit).toBeDisabled();
-    expect(edit).toHaveAttribute('title', READ_ONLY_TIP);
-    await user.click(edit);
-    expect(useTabs.getState().tabs.some((t) => t.kind === 'ddl')).toBe(false);
+    expect(screen.queryByRole('button', { name: 'Edit' })).not.toBeInTheDocument();
   });
 
   it('ddl_panel_has_no_edit_for_tables', async () => {
     const user = userEvent.setup();
     useConnections.getState().setStored([], [config(ids.prod, 'shop-prod')]);
+    useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
     setup(makeTab('Table'));
     await user.click(screen.getByTestId('object-tab-ddl'));
     await screen.findByTestId('monaco-mock');

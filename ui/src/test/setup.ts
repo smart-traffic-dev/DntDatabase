@@ -18,7 +18,7 @@ vi.mock('@monaco-editor/react', async () => {
       value?: string;
       language?: string;
       theme?: string;
-      options?: { wordWrap?: string };
+      options?: { wordWrap?: string; readOnly?: boolean };
       onChange?: (value: string | undefined) => void;
     }) =>
       React.createElement('textarea', {
@@ -26,6 +26,7 @@ vi.mock('@monaco-editor/react', async () => {
         'data-language': props.language,
         'data-theme': props.theme,
         'data-word-wrap': props.options?.wordWrap,
+        'data-read-only': props.options?.readOnly === undefined ? undefined : String(props.options.readOnly),
         value: props.value ?? '',
         onChange: (e: { target: { value: string } }) => props.onChange?.(e.target.value),
       }),
