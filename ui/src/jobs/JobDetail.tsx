@@ -51,6 +51,7 @@ export function JobDetail({ id, onBack }: { id: string; onBack(): void }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const logRef = useRef<HTMLPreElement>(null);
+  const backRef = useRef<HTMLButtonElement>(null);
   const live = job ? isLive(job.state) : false;
   const now = useNow(live, null);
   const state = job?.state;
@@ -75,6 +76,12 @@ export function JobDetail({ id, onBack }: { id: string; onBack(): void }) {
       if (timer) clearInterval(timer);
     };
   }, [id, state, live]);
+
+  // Opening the detail moves the keyboard focus to Back (the row it came from is gone).
+  const shown = !!job;
+  useEffect(() => {
+    if (shown) backRef.current?.focus();
+  }, [shown]);
 
   // Newest at the bottom: keep the end in view as lines arrive.
   useLayoutEffect(() => {
@@ -109,7 +116,7 @@ export function JobDetail({ id, onBack }: { id: string; onBack(): void }) {
   return (
     <div className="jb-detail" data-testid="job-detail">
       <div className="jb-detail-head">
-        <button type="button" className="btn small" aria-label="Back to jobs" title="Back to jobs" onClick={onBack}>
+        <button ref={backRef} type="button" className="btn small" aria-label="Back to jobs" title="Back to jobs" onClick={onBack}>
           Back
         </button>
         <strong className="jb-detail-title" title={job.title}>

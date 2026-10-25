@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { api, toAppError } from '../../api';
 import type { AppError, ImportRequest, ObjectRef } from '../../bindings';
 import { EnvTag } from '../../components/EnvTag';
@@ -77,25 +77,34 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
     };
   }, [state.connectionId, state.table, target]);
 
-  const autoMap = (): (() => void) | undefined => {
-    if (!inspection || !target) return undefined;
-    let live = true;
+  // Only the newest auto map applies (the effect's and "Auto map" clicks may overlap); a new file
+  // or table also drops an answer still on its way.
+  const autoMapSeq = useRef(0);
+  const autoMap = () => {
+    const my = ++autoMapSeq.current;
+    if (!inspection || !target) return;
     api.importAutoMap(inspection.columns, target.columns).then(
-      (result) => live && dispatch({ type: 'mapping', mapping: result }),
-      (e) => live && setCheckError(toAppError(e).message),
+      (result) => my === autoMapSeq.current && dispatch({ type: 'mapping', mapping: result }),
+      (e) => my === autoMapSeq.current && setCheckError(toAppError(e).message),
     );
-    return () => {
-      live = false;
-    };
   };
 
   // A fresh file and table are auto-mapped once (stored parameters keep their mapping).
   useEffect(() => {
-    if (mapping.length > 0) return;
-    return autoMap();
+    if (mapping.length === 0) autoMap();
+    const seq = autoMapSeq;
+    return () => {
+      seq.current++;
+    };
     // `autoMap` reads exactly these.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspection, target, mapping.length]);
+
+  // A changed request makes a failed review worth preparing again (the old error no longer applies).
+  const requestKey = JSON.stringify(buildRequest(state));
+  useEffect(() => {
+    setReviewError(null);
+  }, [requestKey]);
 
   // The backend checks every mapping, mode and identity choice (the UI never re-implements the rules).
   useEffect(() => {
@@ -144,13 +153,15 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
     setStarting(true);
     setReviewError(null);
     try {
-      await api.importStart(preview.plan_id, {
+      const jobId = await api.importStart(preview.plan_id, {
         confirmed: true,
         name: preview.confirm.kind === 'type_name' ? confirmation.typed : null,
         irreversible_ack: confirmation.irreversibleAck,
       });
       setStarting(false);
       onClose();
+      // The Jobs panel opens on the job just started.
+      useJobs.getState().openJob(jobId);
       showJobs();
       void useJobs.getState().load();
     } catch (e) {

@@ -85,7 +85,8 @@ export function ConfirmDialog({ title, message, confirmLabel, cancelLabel = 'Can
   };
 
   return (
-    <Modal title={title} onClose={onClose} className="narrow" role="alertdialog" initialFocus="[data-cancel]">
+    // While the confirmed action runs, Cancel / Esc cannot answer the question a second time.
+    <Modal title={title} onClose={() => !busy && onClose()} className="narrow" role="alertdialog" initialFocus="[data-cancel]">
       <div className="modal-body stack">
         <p>{message}</p>
         {error && (
@@ -95,7 +96,7 @@ export function ConfirmDialog({ title, message, confirmLabel, cancelLabel = 'Can
         )}
       </div>
       <footer className="modal-foot">
-        <button type="button" className="btn" data-cancel onClick={onClose}>
+        <button type="button" className="btn" data-cancel disabled={busy} onClick={onClose}>
           {cancelLabel}
         </button>
         <button type="button" className="btn danger" disabled={busy} onClick={() => void confirm()}>

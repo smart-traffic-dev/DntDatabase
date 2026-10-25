@@ -14,7 +14,7 @@ import type {
 } from '../../bindings';
 
 /**
- * The import wizard's state (spec Â§6.7): a pure reducer, so the step gating and what each change
+ * The import wizard's state (spec §6.7): a pure reducer, so the step gating and what each change
  * invalidates are tested without React. Every backend answer enters through an action; the
  * mapping rules themselves stay in the backend (`import_auto_map`, `import_check_mapping`).
  */
@@ -196,7 +196,8 @@ export function reduce(s: WizardState, a: WizardAction): WizardState {
     case 'mode':
       return { ...s, ...dropChecks, mode: a.mode, report: null };
     case 'errors':
-      return { ...s, ...dropPlan, errors: a.errors };
+      // The dry run collects errors up to `max_errors`: its result belongs to the old policy.
+      return { ...s, ...dropChecks, errors: a.errors };
     case 'convert':
       return { ...s, ...dropChecks, convert: { ...s.convert, ...a.patch } };
     case 'batch':

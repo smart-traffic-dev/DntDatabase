@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api, toAppError } from '../../../api';
 import type { JobLogLine } from '../../../bindings';
 import { progressText, stateLabel } from '../../../jobs/jobFormat';
@@ -38,19 +38,30 @@ export function CheckStep({ state, dispatch }: StepProps) {
     };
   }, [run, ended]);
 
+  // Answers of a start made before the step was left (any change leaves it) are dropped.
+  const seq = useRef(0);
+  useEffect(() => {
+    const s = seq;
+    return () => {
+      s.current++;
+    };
+  }, []);
+
   const start = async (server: boolean) => {
     const request = buildRequest(state);
     if (!request) return;
+    const my = ++seq.current;
     setError(null);
     setStarting(true);
     try {
       const jobId = await api.importDryRun({ request, server_check: server, confirmed: server && production && confirmed });
+      if (my !== seq.current) return;
       dispatch({ type: 'dryRun', jobId, server });
       void useJobs.getState().load();
     } catch (e) {
-      setError(toAppError(e).message);
+      if (my === seq.current) setError(toAppError(e).message);
     } finally {
-      setStarting(false);
+      if (my === seq.current) setStarting(false);
     }
   };
 

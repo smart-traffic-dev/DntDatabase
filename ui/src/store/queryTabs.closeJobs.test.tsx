@@ -79,6 +79,29 @@ describe('app close guard with background jobs (R8)', () => {
     expect(win.order).toEqual(['job_active_count', 'job_stop_all', 'tabs_save', 'destroy']);
   });
 
+  it('while job_stop_all runs Cancel and Esc do nothing; the quit goes on', async () => {
+    const { win, requestClose } = fakeWindow();
+    let release: (() => void) | null = null;
+    mockBackend({
+      job_active_count: () => 1,
+      job_stop_all: () => new Promise<null>((r) => (release = () => r(null))),
+      tabs_save: () => null,
+      query_close_tab: () => null,
+      query_tx: () => 'idle',
+    });
+    render(<DialogHost />);
+    await installCloseGuard(win);
+    void requestClose();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: 'Stop jobs and quit' }));
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    expect(cancel).toBeDisabled();
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    release!();
+    await waitFor(() => expect(win.destroy).toHaveBeenCalled());
+  });
+
   it('no live job: no question, the app closes', async () => {
     const { win, requestClose } = fakeWindow();
     backend(win.order, () => 0);

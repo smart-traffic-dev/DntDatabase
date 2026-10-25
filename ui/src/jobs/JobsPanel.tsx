@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toAppError } from '../api';
 import type { JobSummary } from '../bindings';
 import { ChevronIcon, TrashIcon } from '../components/icons';
@@ -82,7 +82,11 @@ function JobRow({ job, now, onOpen }: { job: JobSummary; now: number; onOpen(): 
 export function JobsPanel({ onCollapse }: { onCollapse?: () => void }) {
   const order = useJobs((s) => s.order);
   const jobs = useJobs((s) => s.jobs);
-  const [openId, setOpenId] = useState<string | null>(null);
+  // In the store: starting an import opens the panel on its job.
+  const openId = useJobs((s) => s.openId);
+  const setOpenId = useJobs((s) => s.openJob);
+  const listRef = useRef<HTMLDivElement>(null);
+  const lastOpen = useRef<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const anyLive = order.some((id) => jobs[id] && isLive(jobs[id].state));
   const now = useNow(anyLive, null);
@@ -90,6 +94,19 @@ export function JobsPanel({ onCollapse }: { onCollapse?: () => void }) {
   useEffect(() => {
     void useJobs.getState().load();
   }, []);
+
+  // Back from a detail: the keyboard focus returns to the row it was opened from.
+  useEffect(() => {
+    if (openId !== null) {
+      lastOpen.current = openId;
+      return;
+    }
+    const id = lastOpen.current;
+    lastOpen.current = null;
+    if (!id) return;
+    const row = [...(listRef.current?.querySelectorAll<HTMLElement>('[data-job-id]') ?? [])].find((r) => r.dataset.jobId === id);
+    row?.querySelector<HTMLElement>('.jb-open')?.focus();
+  }, [openId]);
 
   const clear = async () => {
     setError(null);
@@ -107,7 +124,7 @@ export function JobsPanel({ onCollapse }: { onCollapse?: () => void }) {
       <div className="rs-head">
         <strong className="rs-title">JOBS</strong>
         <span className="spacer" />
-        {openId === null && (
+        {!(openId !== null && jobs[openId]) && (
           <button
             type="button"
             className="icon-btn"
@@ -141,7 +158,7 @@ export function JobsPanel({ onCollapse }: { onCollapse?: () => void }) {
       {openId !== null && jobs[openId] ? (
         <JobDetail id={openId} onBack={() => setOpenId(null)} />
       ) : (
-        <div className="hs-list">
+        <div className="hs-list" ref={listRef}>
           {order.length === 0 ? (
             <div className="qr-empty">No background jobs.</div>
           ) : (

@@ -55,6 +55,41 @@ describe('useJobs', () => {
     expect(useJobs.getState().loaded).toBe(true);
   });
 
+  it('a late live event does not bring a finished job back to running', () => {
+    const { apply } = useJobs.getState();
+    apply(event(jobSummary({ id: 'a', state: 'done', summary: '100 rows' })));
+    apply(event(jobSummary({ id: 'a', state: 'running' })));
+    expect(useJobs.getState().jobs.a!.state).toBe('done');
+    expect(useJobs.getState().activeCount()).toBe(0);
+  });
+
+  it('an older job_list answer arriving after a newer one is dropped', async () => {
+    let release: (() => void) | null = null;
+    let n = 0;
+    mockBackend({
+      job_list: async () => {
+        n++;
+        if (n === 1) {
+          await new Promise<void>((r) => (release = r));
+          return [jobSummary({ id: 'old-answer', state: 'running' })];
+        }
+        return [jobSummary({ id: 'new-answer', state: 'done' })];
+      },
+    });
+    const first = useJobs.getState().load();
+    await useJobs.getState().load();
+    release!();
+    await first;
+    expect(useJobs.getState().order).toEqual(['new-answer']);
+  });
+
+  it('openJob sets the job the panel shows; reset clears it', () => {
+    useJobs.getState().openJob('a');
+    expect(useJobs.getState().openId).toBe('a');
+    useJobs.getState().reset();
+    expect(useJobs.getState().openId).toBeNull();
+  });
+
   it('listens to job://progress and polls job_list every 2 s only while a job is live', async () => {
     vi.useFakeTimers();
     let list: JobSummary[] = [jobSummary({ id: 'a', state: 'running' })];

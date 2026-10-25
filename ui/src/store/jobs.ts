@@ -29,6 +29,10 @@ interface JobsState {
   order: string[];
   /** A `job_list` answer has arrived at least once. */
   loaded: boolean;
+  /** The job whose detail the Jobs panel shows (null: the list). */
+  openId: string | null;
+  /** Shows `id`'s detail in the Jobs panel (e.g. the import just started); null returns to the list. */
+  openJob(id: string | null): void;
   /** Reads `job_list` (failures are ignored: the next poll or event catches up). */
   load(): Promise<void>;
   /** Listens to `job://progress` (ignored outside Tauri) and polls while jobs are live; returns the unsubscribe. */
@@ -61,6 +65,13 @@ export async function liveJobCount(): Promise<number> {
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let subscribers = 0;
+/** `load` calls sent / the newest one applied: an older answer arriving later is dropped. */
+let loadSeq = 0;
+let loadApplied = 0;
+
+/** A final state never goes back to live (an answer or event sent before the final one arrived late). */
+const merge = (known: JobSummary | undefined, incoming: JobSummary) =>
+  known && !isLive(known.state) && isLive(incoming.state) ? known : incoming;
 
 function stopPolling() {
   if (pollTimer !== null) clearInterval(pollTimer);
@@ -78,7 +89,10 @@ export const useJobs = create<JobsState>()((set, get) => ({
   jobs: {},
   order: [],
   loaded: false,
+  openId: null,
+  openJob: (openId) => set({ openId }),
   async load() {
+    const seq = ++loadSeq;
     // Straight to the bindings: a poll that fails every 2 s must not raise the internal-error toast.
     let result;
     try {
@@ -87,13 +101,13 @@ export const useJobs = create<JobsState>()((set, get) => ({
       return;
     }
     if (result.status !== 'ok') return;
+    // Overlapping loads: a newer answer was applied already.
+    if (seq < loadApplied) return;
+    loadApplied = seq;
     const current = get().jobs;
     const jobs: Record<string, JobSummary> = {};
-    for (const job of result.data) {
-      const known = current[job.id];
-      // An answer sent before a final event must not bring the job back to life.
-      jobs[job.id] = known && !isLive(known.state) && isLive(job.state) ? known : job;
-    }
+    // An answer sent before a final event must not bring the job back to life.
+    for (const job of result.data) jobs[job.id] = merge(current[job.id], job);
     // A job that just ended may have been sent by event but not be in this answer yet.
     for (const [id, known] of Object.entries(current)) if (!(id in jobs) && isLive(known.state)) jobs[id] = known;
     set({ jobs, order: sortOrder(jobs), loaded: true });
@@ -125,7 +139,8 @@ export const useJobs = create<JobsState>()((set, get) => ({
     };
   },
   apply(ev) {
-    const jobs = { ...get().jobs, [ev.job.id]: ev.job };
+    const current = get().jobs;
+    const jobs = { ...current, [ev.job.id]: merge(current[ev.job.id], ev.job) };
     set({ jobs, order: sortOrder(jobs) });
     syncPolling();
   },
@@ -147,6 +162,8 @@ export const useJobs = create<JobsState>()((set, get) => ({
   reset() {
     stopPolling();
     subscribers = 0;
-    set({ jobs: {}, order: [], loaded: false });
+    loadSeq = 0;
+    loadApplied = 0;
+    set({ jobs: {}, order: [], loaded: false, openId: null });
   },
 }));

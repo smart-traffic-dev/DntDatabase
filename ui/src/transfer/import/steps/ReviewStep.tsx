@@ -89,11 +89,8 @@ export function ReviewStep({ preview, preparing, error, onPrepareAgain, confirma
 
           <section className="stack" aria-label="Insert statements">
             <h3 className="import-heading">INSERT template</h3>
-            <pre className="import-wizard-sql">
-              {preview.insert_head}
-              {'(…), (…)'}
-              {preview.insert_tail}
-            </pre>
+            {/* One string: the head ends and the tail starts with their own spaces (verbatim, R19). */}
+            <pre className="import-wizard-sql">{`${preview.insert_head}(…), (…), …${preview.insert_tail}`}</pre>
             {preview.sample && (
               <>
                 <h3 className="import-heading">First rows</h3>
@@ -104,8 +101,8 @@ export function ReviewStep({ preview, preparing, error, onPrepareAgain, confirma
 
           {preview.warnings.length > 0 && (
             <ul className="import-issues warn">
-              {preview.warnings.map((w) => (
-                <li key={w}>{w}</li>
+              {preview.warnings.map((w, i) => (
+                <li key={i}>{w}</li>
               ))}
             </ul>
           )}

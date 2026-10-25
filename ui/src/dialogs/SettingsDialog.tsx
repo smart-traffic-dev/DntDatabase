@@ -408,7 +408,7 @@ function JobsPerConnectionField() {
         step={1}
         value={value}
         aria-invalid={error ? true : undefined}
-        aria-describedby="settings-jobs-per-connection-hint"
+        aria-describedby={error ? 'settings-jobs-per-connection-hint settings-jobs-per-connection-error' : 'settings-jobs-per-connection-hint'}
         onChange={(e) => {
           setSaved(false);
           setText(e.target.value);
@@ -426,7 +426,7 @@ function JobsPerConnectionField() {
         more wait in the queue.{saved ? ' Saved.' : ''}
       </p>
       {error && (
-        <p role="alert" className="field-error">
+        <p id="settings-jobs-per-connection-error" role="alert" className="field-error">
           {error}
         </p>
       )}
@@ -487,7 +487,7 @@ function ExternalToolsDirField() {
           placeholder="PATH only"
           value={value}
           aria-invalid={error ? true : undefined}
-          aria-describedby="settings-external-tools-hint"
+          aria-describedby={error ? 'settings-external-tools-hint settings-external-tools-error' : 'settings-external-tools-hint'}
           onChange={(e) => {
             setSaved(false);
             setText(e.target.value);
@@ -511,7 +511,7 @@ function ExternalToolsDirField() {
         use PATH only.{saved ? ' Saved.' : ''}
       </p>
       {error && (
-        <p role="alert" className="field-error">
+        <p id="settings-external-tools-error" role="alert" className="field-error">
           {error}
         </p>
       )}

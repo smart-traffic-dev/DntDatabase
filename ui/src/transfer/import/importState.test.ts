@@ -142,6 +142,12 @@ describe('invalidation', () => {
     expect(s.mapping).toHaveLength(2);
     expect(s.report).toEqual(ok);
   });
+
+  it('a new error policy drops the dry run (its result was collected under the old one)', () => {
+    const s = run(ready(), { type: 'dryRun', jobId: 'j1', server: true }, { type: 'errors', errors: { kind: 'skip', max_errors: 5 } });
+    expect(s.dryRun).toBeNull();
+    expect(s.report).toEqual(ok);
+  });
 });
 
 describe('buildRequest and params', () => {

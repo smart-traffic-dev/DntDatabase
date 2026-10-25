@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import type { BinaryEncoding, EmptyAs, ImportMode, KeyChoice } from '../../../bindings';
 import { DEFAULT_MAX_ERRORS } from '../importState';
 import { IssueList } from './MappingStep';
@@ -14,13 +15,48 @@ const BINARY: { value: BinaryEncoding; label: string }[] = [
   { value: 'base64', label: 'Base64' },
   { value: 'utf8_text', label: 'UTF-8 text' },
 ];
+
+/** The backend's limits (`MAX_BATCH_ROWS`, `MAX_BATCH_BYTES` / 1 KiB, `MIN_BATCH_BYTES`). */
+export const MAX_BATCH_ROWS = 100_000;
+export const MAX_BATCH_KIB = 65_536;
+const MAX_ERRORS_LIMIT = 4_294_967_295;
+
 const sameColumns = (a: string[], b: string[]) => a.length === b.length && a.every((c, i) => c === b[i]);
 
-/** A whole number from an input, or `fallback` when it is not one ≥ `min`. */
-const whole = (text: string, min: number, fallback: number) => {
-  const n = Number(text);
-  return Number.isInteger(n) && n >= min ? n : fallback;
-};
+/**
+ * A whole-number input clamped to `min`..`max`. What the user types stays as typed (an empty box
+ * while retyping does not snap back); only a valid number reaches `onValue`, clamped.
+ */
+function NumberField({ id, label, value, min, max, onValue }: { id: string; label: string; value: number; min: number; max: number; onValue(n: number): void }) {
+  const [text, setText] = useState(String(value));
+  const [shown, setShown] = useState(value);
+  // A value set from outside (or clamped) replaces the text.
+  if (shown !== value) {
+    setShown(value);
+    setText(String(value));
+  }
+  return (
+    <div className="field">
+      <label htmlFor={id}>{label}</label>
+      <input
+        id={id}
+        type="number"
+        min={min}
+        max={max}
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value);
+          const n = Number(e.target.value);
+          if (e.target.value.trim() === '' || !Number.isFinite(n)) return;
+          const clamped = Math.min(max, Math.max(min, Math.trunc(n)));
+          setShown(clamped);
+          onValue(clamped);
+        }}
+        onBlur={() => setText(String(value))}
+      />
+    </div>
+  );
+}
 
 /** Step 4: mode, error policy, conversion and batch options. */
 export function OptionsStep({ state, dispatch }: StepProps) {
@@ -106,14 +142,14 @@ export function OptionsStep({ state, dispatch }: StepProps) {
           <span>Skip and log the row</span>
         </label>
         {errors.kind === 'skip' && (
-          <div className="import-wizard-sub field">
-            <label htmlFor="iw-max-errors">Stop after this many refused rows</label>
-            <input
+          <div className="import-wizard-sub">
+            <NumberField
               id="iw-max-errors"
-              type="number"
-              min={1}
+              label="Stop after this many refused rows"
               value={errors.max_errors}
-              onChange={(e) => dispatch({ type: 'errors', errors: { kind: 'skip', max_errors: whole(e.target.value, 1, errors.max_errors) } })}
+              min={1}
+              max={MAX_ERRORS_LIMIT}
+              onValue={(max_errors) => dispatch({ type: 'errors', errors: { kind: 'skip', max_errors } })}
             />
           </div>
         )}
@@ -153,28 +189,22 @@ export function OptionsStep({ state, dispatch }: StepProps) {
       </div>
 
       <div className="import-wizard-options">
-        <div className="field">
-          <label htmlFor="iw-batch-rows">Rows per batch</label>
-          <input
-            id="iw-batch-rows"
-            type="number"
-            min={1}
-            max={100000}
-            value={state.batchRows}
-            onChange={(e) => dispatch({ type: 'batch', rows: whole(e.target.value, 1, state.batchRows), bytes: state.batchBytes })}
-          />
-        </div>
-        <div className="field">
-          <label htmlFor="iw-batch-kib">Batch size (KiB)</label>
-          <input
-            id="iw-batch-kib"
-            type="number"
-            min={1}
-            max={65536}
-            value={Math.round(state.batchBytes / 1024)}
-            onChange={(e) => dispatch({ type: 'batch', rows: state.batchRows, bytes: whole(e.target.value, 1, state.batchBytes / 1024) * 1024 })}
-          />
-        </div>
+        <NumberField
+          id="iw-batch-rows"
+          label="Rows per batch"
+          value={state.batchRows}
+          min={1}
+          max={MAX_BATCH_ROWS}
+          onValue={(rows) => dispatch({ type: 'batch', rows, bytes: state.batchBytes })}
+        />
+        <NumberField
+          id="iw-batch-kib"
+          label="Batch size (KiB)"
+          value={Math.round(state.batchBytes / 1024)}
+          min={1}
+          max={MAX_BATCH_KIB}
+          onValue={(kib) => dispatch({ type: 'batch', rows: state.batchRows, bytes: kib * 1024 })}
+        />
         {hasIdentity && (
           <label className="check import-wizard-check">
             <input type="checkbox" checked={state.overrideIdentity} onChange={(e) => dispatch({ type: 'overrideIdentity', value: e.target.checked })} />

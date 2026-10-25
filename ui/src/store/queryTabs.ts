@@ -590,16 +590,28 @@ async function confirmStopJobs(): Promise<boolean> {
   const count = await liveJobCount();
   if (count <= 0) return true;
   return new Promise<boolean>((resolve) => {
+    // Settled once: Cancel / Esc while `job_stop_all` runs must not also answer "keep running".
+    let stopping = false;
+    let settled = false;
     useDialogs.getState().ask({
       kind: 'jobsRunning',
       count,
       quit: async () => {
-        // A failure keeps the question open with the error (ConfirmDialog shows it).
-        await api.jobStopAll();
+        if (settled || stopping) return;
+        stopping = true;
+        try {
+          // A failure keeps the question open with the error (ConfirmDialog shows it).
+          await api.jobStopAll();
+        } finally {
+          stopping = false;
+        }
+        settled = true;
         useDialogs.getState().answer();
         resolve(true);
       },
       done: () => {
+        if (stopping || settled) return;
+        settled = true;
         useDialogs.getState().answer();
         resolve(false);
       },

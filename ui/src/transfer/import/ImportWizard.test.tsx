@@ -307,6 +307,75 @@ describe('ImportWizard', () => {
     expect(next()).toBeDisabled();
   });
 
+  it('options reach the request with the wire names; batch fields clamp to the backend limits', async () => {
+    backend();
+    const u = user();
+    open();
+    await toMapping(u);
+    await u.click(next());
+    await u.selectOptions(screen.getByLabelText('Binary columns'), 'Base64');
+    const rows = screen.getByLabelText('Rows per batch');
+    await u.clear(rows);
+    // An empty box while retyping does not snap back to the old value.
+    expect(rows).toHaveValue(null);
+    await u.type(rows, '150000');
+    const kib = screen.getByLabelText('Batch size (KiB)');
+    await u.clear(kib);
+    await u.type(kib, '99999');
+    await u.tab();
+    expect(kib).toHaveValue(65536);
+    await u.click(screen.getByLabelText('Skip and log the row'));
+    await waitFor(() => expect(next()).toBeEnabled());
+    await u.click(next());
+    await u.click(next());
+    await screen.findByTestId('import-review');
+    await waitFor(() => expect(callsOf('import_prepare')).toHaveLength(1));
+    expect(callsOf('import_prepare')[0]?.request).toMatchObject({
+      convert: { binary: 'base64' },
+      batch_rows: 100000,
+      batch_bytes: 65536 * 1024,
+      errors: { kind: 'skip', max_errors: 1000 },
+    });
+  });
+
+  it('Start opens the Jobs panel on the started job', async () => {
+    backend();
+    const u = user();
+    open();
+    await toMapping(u);
+    await u.click(next());
+    await u.click(next());
+    await u.click(next());
+    await screen.findByTestId('import-review');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start import' })).toBeEnabled());
+    await u.click(screen.getByRole('button', { name: 'Start import' }));
+    await waitFor(() => expect(useJobs.getState().openId).toBe('job-9'));
+  });
+
+  it('a failed review is prepared again after the request changed', async () => {
+    let n = 0;
+    backend({
+      import_prepare: () => {
+        n++;
+        if (n === 1) throw fail('plan_stale');
+        return preview();
+      },
+    });
+    const u = user();
+    open();
+    await toMapping(u);
+    await u.click(next());
+    await u.click(next());
+    await u.click(next());
+    expect(await screen.findByText('The file or the table changed; prepare again.')).toBeInTheDocument();
+    await u.click(screen.getByRole('button', { name: /Options$/ }));
+    await u.click(screen.getByLabelText('Trim spaces around text'));
+    await u.click(screen.getByRole('button', { name: /Review$/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start import' })).toBeEnabled());
+    expect(screen.queryByText('The file or the table changed; prepare again.')).toBeNull();
+    expect(callsOf('import_prepare')).toHaveLength(2);
+  });
+
   it('read-only connections cannot validate on the server', async () => {
     backend({ import_target: () => target({ read_only: true }) });
     const u = user();

@@ -131,6 +131,23 @@ describe('JobsPanel', () => {
     unregister();
   });
 
+  it('focus goes to Back on open and back to the row on return; openJob opens a detail from outside', async () => {
+    mockBackend({ job_list: () => [done, failed], job_detail: () => jobDetail(done) });
+    seed([done, failed]);
+    const user = userEvent.setup();
+    render(<JobsPanel />);
+    const row = screen.getAllByTestId('job-row').find((r) => r.getAttribute('data-job-id') === 'done')!;
+    await user.click(within(row).getByRole('button', { name: /Show details/ }));
+    const back = await screen.findByRole('button', { name: 'Back to jobs' });
+    expect(back).toHaveFocus();
+    await user.click(back);
+    const again = screen.getAllByTestId('job-row').find((r) => r.getAttribute('data-job-id') === 'done')!;
+    expect(within(again).getByRole('button', { name: /Show details/ })).toHaveFocus();
+
+    act(() => useJobs.getState().openJob('fail'));
+    expect(await screen.findByTestId('job-detail')).toHaveTextContent('Restore shop from shop.sql');
+  });
+
   it('Run again is absent for a job that cannot run again', async () => {
     mockBackend({
       job_list: () => [failed],
