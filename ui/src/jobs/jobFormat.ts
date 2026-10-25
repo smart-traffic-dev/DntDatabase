@@ -4,7 +4,7 @@ import { formatCount } from '../lib/plural';
 /** Texts of the Jobs panel: kinds, states, progress and elapsed time. */
 
 /** Base-1024 size with one decimal ("1.5 KB"), as the object tab shows sizes. */
-function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${Math.round(bytes)} B`;
   const units = ['KB', 'MB', 'GB', 'TB'];
   let value = bytes;

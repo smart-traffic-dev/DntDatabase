@@ -68,6 +68,18 @@ export function designActionItems(node: TreeNode): Item[] {
   return [{ label: 'New table…', disabled: cfg.read_only, run: () => void openDesignTab(connectionId, scope, null) }];
 }
 
+/**
+ * "Import data…" on a table of an open connection: the import wizard with the table pre-filled.
+ * Enabled on read-only connections too (the file check runs there; the import itself is blocked).
+ */
+export function importActionItems(node: TreeNode): Item[] {
+  const connectionId = connectionIdOf(node.id);
+  const object = node.objectRef;
+  if (!connectionId || node.kind !== 'object' || object?.kind !== 'Table') return [];
+  if (!useConnections.getState().info.has(connectionId)) return [];
+  return [{ label: 'Import data…', run: () => useDialogs.getState().requestDialog({ kind: 'importData', connectionId, table: object }) }];
+}
+
 function itemsFor(node: TreeNode): Item[] {
   const tree = useTree.getState();
   const dialogs = useDialogs.getState();
@@ -135,6 +147,7 @@ function itemsFor(node: TreeNode): Item[] {
       ...(queryable ? [{ label: 'Select top 1000', run: () => void openSelectTop(node) }] : []),
       newQuery,
       ...designActionItems(node),
+      ...importActionItems(node),
       ...objectActionItems(node),
       SEP,
       refresh,

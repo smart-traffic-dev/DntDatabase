@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppError, EnvTag, NodeId, TxAction } from '../bindings';
+import type { AppError, EnvTag, ImportRequest, NodeId, ObjectRef, TxAction } from '../bindings';
 import type { ObjectActionRequest } from '../dialogs/ObjectActionDialog';
 import type { ExportRequest } from '../dialogs/resultExport';
 import type { SettingsTab } from '../dialogs/SettingsDialog';
@@ -40,7 +40,9 @@ export type UiRequest =
     }
   /** The user snippets manager. */
   | { kind: 'snippets' }
-  | { kind: 'about' };
+  | { kind: 'about' }
+  /** The data import wizard; `table` from the tree, `params` from "Run again" (R5). */
+  | { kind: 'importData'; connectionId: string; table?: ObjectRef; params?: ImportRequest };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =

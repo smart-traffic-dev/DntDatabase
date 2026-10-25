@@ -4,7 +4,8 @@ import { useConnections } from '../store/connections';
 import { designTabId, useTabs } from '../store/tabs';
 import { config, ids, resetStores, serverInfo } from '../test/backend';
 import type { TreeNode } from '../store/tree';
-import { designActionItems } from './TreeContextMenu';
+import { useDialogs } from '../store/dialogs';
+import { designActionItems, importActionItems } from './TreeContextMenu';
 
 const table: ObjectRef = { database: 'shop', schema: null, name: 'orders', kind: 'Table' };
 const tableNode: TreeNode = { id: `conn:${ids.prod}/obj`, kind: 'object', label: 'orders', objectRef: table };
@@ -49,6 +50,18 @@ describe('table designer tree entries', () => {
     useConnections.getState().setStored([], [config(ids.prod, 'ro', { read_only: true })]);
     expect(entry(databaseNode, 'New table…')).toMatchObject({ disabled: true });
     expect(entry(tableNode, 'Design table')).not.toHaveProperty('disabled', true);
+  });
+
+  it('Import data… on a table opens the import wizard pre-filled (also read-only); not on a view', () => {
+    const found = importActionItems(tableNode).find((e) => 'label' in e && e.label === 'Import data…');
+    if (!found || !('run' in found)) throw new Error('no "Import data…" item');
+    found.run();
+    expect(useDialogs.getState().request).toEqual({ kind: 'importData', connectionId: ids.prod, table });
+    useConnections.getState().setStored([], [config(ids.prod, 'ro', { read_only: true })]);
+    expect(importActionItems(tableNode)[0]).not.toHaveProperty('disabled', true);
+    expect(importActionItems({ ...tableNode, objectRef: { ...table, kind: 'View' } })).toEqual([]);
+    useConnections.getState().clearInfo(ids.prod);
+    expect(importActionItems(tableNode)).toEqual([]);
   });
 
   it('nothing while the connection is closed, and nothing on a view', () => {

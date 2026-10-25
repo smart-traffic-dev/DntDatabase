@@ -1,0 +1,266 @@
+/* Import wizard (spec §6.7): steps on the left, the step's page on the right. */
+
+.modal.import-wizard {
+  width: 920px;
+  height: min(680px, calc(100vh - 32px));
+}
+
+.import-wizard-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.import-wizard-nav {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-0_5);
+  width: 168px;
+  padding: var(--dnt-space-3) var(--dnt-space-2);
+  border-right: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
+}
+
+.import-wizard-step {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  width: 100%;
+  height: var(--dnt-ctl-h-lg);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: none;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-base);
+  text-align: left;
+}
+
+.import-wizard-step:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.import-wizard-step:focus-visible {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
+.import-wizard-step.on {
+  background: var(--dnt-bg-selected);
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
+/* Not yet reachable: a muted colour, never opacity. */
+.import-wizard-step:disabled {
+  color: var(--dnt-fg-disabled);
+  cursor: default;
+}
+
+.import-wizard-step-no {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--dnt-border);
+  border-radius: 50%;
+  font-size: var(--dnt-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-wizard-step.on .import-wizard-step-no {
+  border-color: var(--dnt-accent);
+  color: var(--dnt-accent);
+}
+
+.import-wizard-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.import-wizard-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--dnt-space-3);
+}
+
+.import-wizard-options .field {
+  width: 200px;
+}
+
+.import-wizard-options input,
+.import-wizard-sub input,
+.import-mapping select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  font: inherit;
+  color: inherit;
+  min-width: 0;
+}
+
+.import-wizard-options input[type='checkbox'],
+.import-wizard-sub input[type='radio'] {
+  height: auto;
+}
+
+.import-wizard-options input:focus-visible,
+.import-wizard-sub input:focus-visible,
+.import-mapping select:focus-visible {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
+.import-mapping select {
+  width: 100%;
+}
+
+.import-mapping select[aria-invalid='true'] {
+  border-color: var(--dnt-status-danger-fg);
+}
+
+.import-wizard-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--dnt-text-base);
+  color: var(--dnt-fg);
+}
+
+.import-wizard-fieldset {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.import-wizard-fieldset legend {
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.import-wizard-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 24px;
+}
+
+.import-wizard-sub .field {
+  width: 320px;
+}
+
+.import-wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+}
+
+/* The preview grids scroll inside the page; the header row stays visible. */
+.import-wizard-grid {
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+}
+
+.import-wizard-grid .import-table th {
+  position: sticky;
+  top: 0;
+  background: var(--dnt-bg-raised);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.import-wizard-grid .import-table td {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-mapping td {
+  white-space: normal;
+}
+
+.import-rownum {
+  color: var(--dnt-fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.import-null {
+  color: var(--dnt-fg-muted);
+  font-style: italic;
+}
+
+.import-required {
+  color: var(--dnt-status-danger-fg);
+}
+
+.import-issues {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: var(--dnt-text-sm);
+}
+
+.import-issues.error {
+  color: var(--dnt-status-danger-fg);
+}
+
+.import-issues.warn {
+  color: var(--dnt-fg);
+}
+
+.import-wizard-note {
+  margin: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border: 1px solid var(--dnt-status-danger-fg);
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-sm);
+}
+
+.import-wizard-sql {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.import-wizard-run {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+}
+
+.import-wizard-run p {
+  margin: 0;
+}
+
+.import-wizard-log {
+  margin: 0;
+  padding-left: 18px;
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+}
+
+.import-wizard-log .error {
+  color: var(--dnt-status-danger-fg);
+}

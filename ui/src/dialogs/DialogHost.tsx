@@ -27,6 +27,9 @@ import { TxCloseDialog } from './TxCloseDialog';
 import { AddFavoriteDialog } from './AddFavoriteDialog';
 import { SnippetsDialog } from './SnippetsDialog';
 import { ToastHost } from './ToastHost';
+import { ImportWizard } from '../transfer/import/ImportWizard';
+// Registers "Run again" of import jobs and dry runs (R5).
+import '../transfer/import/rerunImport';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
 function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
@@ -333,6 +336,16 @@ export function DialogHost() {
     dialog = <SnippetsDialog onClose={closeRequest} />;
   } else if (request?.kind === 'about') {
     dialog = <AboutDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'importData') {
+    dialog = (
+      <ImportWizard
+        key={`${request.connectionId}:${request.table?.database ?? ''}.${request.table?.schema ?? ''}.${request.table?.name ?? ''}:${request.params ? 'rerun' : ''}`}
+        connectionId={request.connectionId}
+        table={request.table}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';
