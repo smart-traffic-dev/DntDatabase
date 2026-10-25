@@ -71,7 +71,9 @@ export type Question =
       /** Rolls every transaction back, then quits. */
       quit(): Promise<void>;
       done(): void;
-    };
+    }
+  /** Quitting while `count` background jobs are queued or running (R8): `quit` stops them all first. */
+  | { kind: 'jobsRunning'; count: number; quit(): Promise<void>; done(): void };
 
 interface DialogsState {
   objectActionRunning: boolean;

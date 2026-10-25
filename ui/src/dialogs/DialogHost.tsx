@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, isPasswordRequired, toAppError } from '../api';
 import type { AppError, ConnectionConfig, SecretsInput } from '../bindings';
 import { confirmDiscardConnection } from '../components/tabActions';
+import { plural } from '../lib/plural';
 import { useConnections } from '../store/connections';
 import { useDialogs, type PendingPrompt, type Question } from '../store/dialogs';
 import { useRunPrompt } from '../store/runPrompt';
@@ -178,6 +179,18 @@ function QuestionHost({ question }: { question: Question }) {
         confirmLabel="Quit anyway"
         onClose={() => question.done(false)}
         onConfirm={async () => question.done(true)}
+      />
+    );
+  }
+  if (question.kind === 'jobsRunning') {
+    const one = question.count === 1;
+    return (
+      <ConfirmDialog
+        title="Background jobs are running"
+        message={`${plural(question.count, 'background job')} ${one ? 'is' : 'are'} running. Quitting stops ${one ? 'it' : 'them'}.`}
+        confirmLabel="Stop jobs and quit"
+        onClose={question.done}
+        onConfirm={question.quit}
       />
     );
   }

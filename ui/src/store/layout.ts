@@ -19,6 +19,10 @@ export const RIGHT_MAX = 560;
 
 const STORAGE_KEY = 'dnt.layout';
 
+/** The panels of the right sidebar that exist. */
+export type RightActivity = 'history' | 'jobs';
+const isRightActivity = (v: unknown): v is RightActivity => v === 'history' || v === 'jobs';
+
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
 const clampSidebar = (n: number) => (Number.isFinite(n) ? Math.round(clamp(n, SIDEBAR_MIN, SIDEBAR_MAX)) : SIDEBAR_DEFAULT);
@@ -73,11 +77,14 @@ interface Saved {
   /** The right sidebar (activity bar + History panel) is open. */
   rightVisible: boolean;
   rightWidth: number;
+  /** The panel the right sidebar shows (History or Jobs). */
+  rightActivity: RightActivity;
 }
 
 const defaults = (): Saved => ({
   rightVisible: false,
   rightWidth: RIGHT_DEFAULT,
+  rightActivity: 'history',
   sidebarWidth: SIDEBAR_DEFAULT,
   sidebarVisible: true,
   editorRatio: EDITOR_RATIO_DEFAULT,
@@ -98,6 +105,7 @@ function load(): Saved {
       fontScale: typeof v?.fontScale === 'number' ? clampFontScale(v.fontScale) : FONT_SCALE_DEFAULT,
       rightVisible: typeof v?.rightVisible === 'boolean' ? v.rightVisible : false,
       rightWidth: typeof v?.rightWidth === 'number' ? clampRight(v.rightWidth) : RIGHT_DEFAULT,
+      rightActivity: isRightActivity(v?.rightActivity) ? v.rightActivity : 'history',
     };
   } catch {
     return defaults();
@@ -120,6 +128,10 @@ interface LayoutState extends Saved {
   setRightWidth(width: number): void;
   toggleRight(): void;
   setRightVisible(visible: boolean): void;
+  /** Opens the right sidebar on `activity`; clicking the activity already shown collapses it. */
+  showRightActivity(activity: RightActivity): void;
+  /** Opens the right sidebar on `activity` (never collapses). */
+  openRightActivity(activity: RightActivity): void;
   setEditorRatio(ratio: number): void;
   toggleResults(): void;
   /** Shows / hides the results of one group (the global value follows, so a new group starts the same). */
@@ -140,8 +152,8 @@ export const useLayout = create<LayoutState>()((set, get) => {
   /** Applies a change and persists the result. */
   const apply = (patch: Partial<Saved> & { groupResults?: Record<string, Partial<GroupResults>> }) => {
     set(patch);
-    const { sidebarWidth, sidebarVisible, editorRatio, resultsVisible, fontScale, rightVisible, rightWidth } = get();
-    save({ sidebarWidth, sidebarVisible, editorRatio, resultsVisible, fontScale, rightVisible, rightWidth });
+    const { sidebarWidth, sidebarVisible, editorRatio, resultsVisible, fontScale, rightVisible, rightWidth, rightActivity } = get();
+    save({ sidebarWidth, sidebarVisible, editorRatio, resultsVisible, fontScale, rightVisible, rightWidth, rightActivity });
   };
   /**
    * A change to one group. Every open group (and this one) first keeps the values it shows now,
@@ -161,6 +173,13 @@ export const useLayout = create<LayoutState>()((set, get) => {
     setRightWidth: (width) => apply({ rightWidth: clampRight(width) }),
     toggleRight: () => apply({ rightVisible: !get().rightVisible }),
     setRightVisible: (visible) => apply({ rightVisible: visible }),
+    showRightActivity: (activity) =>
+      apply(
+        get().rightVisible && get().rightActivity === activity
+          ? { rightVisible: false }
+          : { rightVisible: true, rightActivity: activity },
+      ),
+    openRightActivity: (activity) => apply({ rightVisible: true, rightActivity: activity }),
     setEditorRatio: (ratio) => apply({ editorRatio: clampRatio(ratio) }),
     toggleResults: () => apply({ resultsVisible: !get().resultsVisible }),
     toggleGroupResults: (groupId) => {

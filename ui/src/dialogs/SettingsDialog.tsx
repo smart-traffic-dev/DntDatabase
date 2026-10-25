@@ -2,14 +2,19 @@ import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { api, toAppError } from '../api';
 import { commands, type LogLevel } from '../bindings';
 import { toggleResults, toggleRightSidebar, zoomIn, zoomOut, zoomReset } from '../components/windowActions';
+import { open as pickFolder } from '@tauri-apps/plugin-dialog';
 import {
   DEFAULT_IDLE_TX_WARN_MINUTES,
+  DEFAULT_JOBS_PER_CONNECTION,
   DEFAULT_TABLE_PAGE_SIZE,
   MAX_IDLE_TX_WARN_MINUTES,
+  MAX_JOBS_PER_CONNECTION,
   MAX_TABLE_PAGE_SIZE,
   MIN_IDLE_TX_WARN_MINUTES,
+  MIN_JOBS_PER_CONNECTION,
   MIN_TABLE_PAGE_SIZE,
   isValidIdleTxMinutes,
+  isValidJobsPerConnection,
   isValidPageSize,
   useAppSettings,
 } from '../store/appSettings';
@@ -356,12 +361,172 @@ function LayoutPanel() {
   );
 }
 
+/** "Background jobs per connection" (P5 R2): imports, dumps and restores that may run at once on one connection. */
+function JobsPerConnectionField() {
+  const stored = useAppSettings((s) => s.jobsPerConnection);
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    void useAppSettings.getState().loadJobsPerConnection();
+  }, []);
+
+  const value = text ?? String(stored);
+  const commit = async () => {
+    if (text === null) return;
+    const n = Number(text.trim());
+    if (text.trim() === '' || !isValidJobsPerConnection(n)) {
+      setError(`Enter a whole number from ${MIN_JOBS_PER_CONNECTION} to ${MAX_JOBS_PER_CONNECTION}.`);
+      return;
+    }
+    setError(null);
+    if (n === stored) {
+      setText(null);
+      return;
+    }
+    try {
+      await useAppSettings.getState().setJobsPerConnection(n);
+      setText(null);
+      setSaved(true);
+    } catch (e) {
+      setError(toAppError(e).message);
+    }
+  };
+
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor="settings-jobs-per-connection">
+        Background jobs per connection
+      </label>
+      <input
+        id="settings-jobs-per-connection"
+        type="number"
+        inputMode="numeric"
+        min={MIN_JOBS_PER_CONNECTION}
+        max={MAX_JOBS_PER_CONNECTION}
+        step={1}
+        value={value}
+        aria-invalid={error ? true : undefined}
+        aria-describedby="settings-jobs-per-connection-hint"
+        onChange={(e) => {
+          setSaved(false);
+          setText(e.target.value);
+        }}
+        onBlur={() => void commit()}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            void commit();
+          }
+        }}
+      />
+      <p id="settings-jobs-per-connection-hint" className="hint">
+        Imports, dumps and restores that run at the same time on one connection ({DEFAULT_JOBS_PER_CONNECTION} by default);
+        more wait in the queue.{saved ? ' Saved.' : ''}
+      </p>
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/** "External tools folder" (P5 R25): searched first for mysqldump, pg_dump and the other tools; empty = PATH only. */
+function ExternalToolsDirField() {
+  const stored = useAppSettings((s) => s.externalToolsDir);
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    void useAppSettings.getState().loadExternalToolsDir();
+  }, []);
+
+  const value = text ?? stored ?? '';
+  const save = async (raw: string) => {
+    const dir = raw.trim() === '' ? null : raw.trim();
+    setError(null);
+    if (dir === stored) {
+      setText(null);
+      return;
+    }
+    try {
+      await useAppSettings.getState().setExternalToolsDir(dir);
+      setText(null);
+      setSaved(true);
+    } catch (e) {
+      setText(raw);
+      setError(toAppError(e).message);
+    }
+  };
+  const browse = async () => {
+    try {
+      const picked = await pickFolder({ directory: true, multiple: false, defaultPath: stored ?? undefined });
+      if (typeof picked === 'string') {
+        setSaved(false);
+        await save(picked);
+      }
+    } catch {
+      // The picker is unavailable (or cancelled): the path can still be typed.
+    }
+  };
+
+  return (
+    <div className="field">
+      <label className="field-label" htmlFor="settings-external-tools">
+        External tools folder
+      </label>
+      <div className="settings-path-row">
+        <input
+          id="settings-external-tools"
+          type="text"
+          spellCheck={false}
+          placeholder="PATH only"
+          value={value}
+          aria-invalid={error ? true : undefined}
+          aria-describedby="settings-external-tools-hint"
+          onChange={(e) => {
+            setSaved(false);
+            setText(e.target.value);
+          }}
+          onBlur={() => {
+            if (text !== null) void save(text);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && text !== null) {
+              e.preventDefault();
+              void save(text);
+            }
+          }}
+        />
+        <button type="button" className="btn" onClick={() => void browse()}>
+          Browse…
+        </button>
+      </div>
+      <p id="settings-external-tools-hint" className="hint">
+        Searched first for mysqldump, mariadb-dump, pg_dump, pg_restore and psql; then every folder on PATH. Leave empty to
+        use PATH only.{saved ? ' Saved.' : ''}
+      </p>
+      {error && (
+        <p role="alert" className="field-error">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function QueryDataPanel() {
   return (
     <>
       <PageSizeField />
       <UnboundedWritesField />
       <IdleTxField />
+      <JobsPerConnectionField />
+      <ExternalToolsDirField />
     </>
   );
 }

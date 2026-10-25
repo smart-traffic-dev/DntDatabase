@@ -231,6 +231,8 @@ describe('DialogHost', () => {
       get_table_page_size: () => 100,
       get_confirm_unbounded_writes: () => true,
       get_idle_tx_warn_minutes: () => 5,
+      get_jobs_per_connection: () => 2,
+      get_external_tools_dir: () => null,
     });
     useDialogs.getState().requestDialog({ kind: 'settings', tab: 'advanced' });
     const user = userEvent.setup();
@@ -256,6 +258,8 @@ describe('DialogHost', () => {
       },
       get_confirm_unbounded_writes: () => true,
       get_idle_tx_warn_minutes: () => 5,
+      get_jobs_per_connection: () => 2,
+      get_external_tools_dir: () => null,
     });
     useDialogs.getState().requestDialog({ kind: 'settings', tab: 'queryData' });
     const user = userEvent.setup();
@@ -282,6 +286,8 @@ describe('DialogHost', () => {
       get_table_page_size: () => 100,
       get_confirm_unbounded_writes: () => on,
       get_idle_tx_warn_minutes: () => 5,
+      get_jobs_per_connection: () => 2,
+      get_external_tools_dir: () => null,
       set_confirm_unbounded_writes: (a) => {
         on = a.enabled as boolean;
         return null;
@@ -309,6 +315,8 @@ describe('DialogHost', () => {
       get_table_page_size: () => 100,
       get_confirm_unbounded_writes: () => true,
       get_idle_tx_warn_minutes: () => 5,
+      get_jobs_per_connection: () => 2,
+      get_external_tools_dir: () => null,
       set_confirm_unbounded_writes: () => {
         throw fail('busy');
       },

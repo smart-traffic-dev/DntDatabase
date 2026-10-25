@@ -17,6 +17,7 @@ import { EditorArea } from './components/EditorArea';
 import { TitleBar } from './components/TitleBar';
 import { persistArrangement, restoreArrangement } from './store/editorArrangement';
 import { installRunMarks } from './store/runMarks';
+import { useJobs } from './store/jobs';
 import { useTabs } from './store/tabs';
 import { useTree } from './store/tree';
 
@@ -46,6 +47,9 @@ export default function App() {
 
   // Result marks on query tabs whose run ended out of sight.
   useEffect(() => installRunMarks(), []);
+
+  // Background jobs: `job://progress` events plus a poll while any job is live (P5 R4).
+  useEffect(() => useJobs.getState().subscribe(), []);
 
   useEffect(() => {
     // Capture: the shortcuts work inside the editor too.

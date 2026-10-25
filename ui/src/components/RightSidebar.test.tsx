@@ -15,17 +15,19 @@ beforeEach(() => {
 const bar = () => screen.getByRole('navigation', { name: 'Right sidebar' });
 
 describe('RightSidebar', () => {
-  it('has an activity bar with History enabled and the planned panels disabled as coming soon', () => {
+  it('has an activity bar with History and Jobs enabled and the planned panels disabled as coming soon', () => {
     render(<RightSidebar />);
     const buttons = within(bar()).getAllByRole('button');
     expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
       'History',
+      'Jobs',
       'Snippets (coming soon)',
       'Object info (coming soon)',
       'AI assistant (coming soon)',
     ]);
     expect(buttons[0]).toBeEnabled();
-    for (const b of buttons.slice(1)) {
+    expect(buttons[1]).toBeEnabled();
+    for (const b of buttons.slice(2)) {
       expect(b).toBeDisabled();
       expect(b).toHaveAttribute('title', expect.stringContaining('coming soon'));
     }
@@ -45,6 +47,28 @@ describe('RightSidebar', () => {
     expect(JSON.parse(localStorage.getItem('dnt.layout') ?? '{}').rightVisible).toBe(true);
     await user.click(history);
     expect(screen.queryByTestId('history-view')).toBeNull();
+    expect(useLayout.getState().rightVisible).toBe(false);
+  });
+
+  it('the Jobs icon shows the Jobs panel, History switches back, and the choice persists', async () => {
+    const user = userEvent.setup();
+    render(<RightSidebar />);
+    const history = within(bar()).getByRole('button', { name: 'History' });
+    const jobs = within(bar()).getByRole('button', { name: 'Jobs' });
+    await user.click(jobs);
+    expect(await screen.findByTestId('jobs-view')).toBeInTheDocument();
+    expect(screen.queryByTestId('history-view')).toBeNull();
+    expect(jobs).toHaveAttribute('aria-pressed', 'true');
+    expect(history).toHaveAttribute('aria-pressed', 'false');
+    expect(JSON.parse(localStorage.getItem('dnt.layout') ?? '{}').rightActivity).toBe('jobs');
+
+    await user.click(history);
+    expect(await screen.findByTestId('history-view')).toBeInTheDocument();
+    expect(screen.queryByTestId('jobs-view')).toBeNull();
+    expect(useLayout.getState().rightVisible).toBe(true);
+
+    // The active icon collapses the panel.
+    await user.click(history);
     expect(useLayout.getState().rightVisible).toBe(false);
   });
 

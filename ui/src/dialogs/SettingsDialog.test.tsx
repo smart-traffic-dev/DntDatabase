@@ -17,6 +17,8 @@ describe('SettingsDialog', () => {
       get_confirm_unbounded_writes: () => true,
       get_idle_tx_warn_minutes: () => 5,
       set_idle_tx_warn_minutes: () => null,
+      get_jobs_per_connection: () => 2,
+      get_external_tools_dir: () => null,
     });
   });
 
