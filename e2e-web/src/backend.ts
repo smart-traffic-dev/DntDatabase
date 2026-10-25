@@ -556,6 +556,21 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     'plugin:dialog|message': () => null,
     'plugin:opener|open_url': () => null,
     'plugin:opener|reveal_item_in_dir': () => null,
+
+    // Background jobs (P5): none by default; `specs/jobs.spec.ts` overrides these.
+    job_list: () => [],
+    job_active_count: () => 0,
+    job_detail: () => {
+      throw new Failure(appError('config', 'unknown job', { field: 'id' }));
+    },
+    job_cancel: () => false,
+    job_stop_all: () => null,
+    job_reveal_result: () => null,
+    job_clear_history: () => null,
+    get_jobs_per_connection: () => 2,
+    set_jobs_per_connection: () => null,
+    get_external_tools_dir: () => null,
+    set_external_tools_dir: () => null,
   };
 
   const all = { ...handlers, ...overrides };
