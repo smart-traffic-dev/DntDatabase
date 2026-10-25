@@ -1245,6 +1245,43 @@ async toolDumpStart(request: ToolDumpRequest) : Promise<Result<string, AppError>
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Opens the Open dialog for a file to restore from the backend and admits the picked
+ * path for `restore_preview`. `None`: cancelled. The restore path is chosen by content,
+ * not by extension.
+ */
+async restorePickFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_pick_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Analyzes a file for a restore (path, statistics or TOC, command line, warnings,
+ * confirmation) and stores a single-use plan. Nothing is sent to the target.
+ */
+async restorePreview(request: RestoreRequest) : Promise<Result<RestorePreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_preview", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-checks the plan and starts the restore job; returns its id. Production needs the
+ * database name typed in `name`.
+ */
+async restoreStart(planId: string, confirmed: boolean, name: string | null) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("restore_start", { planId, confirmed, name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -2262,6 +2299,67 @@ cursor: number; file_path: string | null; dirty: boolean; continue_on_error: boo
  * RFC 3339 UTC; set by `tabs_save` (the value passed in is ignored).
  */
 updated_at: string }
+/**
+ * Which of the three restore paths a file takes (R30).
+ */
+export type RestorePath = 
+/**
+ * The app's own runner: N6 splitter + query guard, one statement at a time.
+ */
+"app_runner" | 
+/**
+ * `psql -f -` (COPY blocks, psql commands).
+ */
+"psql" | 
+/**
+ * `pg_restore` (pg_dump custom or tar archive).
+ */
+"pg_restore"
+/**
+ * What `restore_start` will run.
+ */
+export type RestorePreview = { plan_id: string; path: RestorePath; file: FileFacts; compressed: boolean; 
+/**
+ * Text files: the statement counts.
+ */
+stats: ScanStats | null; 
+/**
+ * pg_restore: the archive's TOC entries (at most 2,000).
+ */
+toc: string[]; toc_truncated: boolean; 
+/**
+ * psql / pg_restore: the command line (never a secret).
+ */
+command: string | null; tool: ToolInfo | null; 
+/**
+ * The restore runs in one transaction (a failure restores nothing).
+ */
+transactional: boolean; warnings: string[]; confirm: ConfirmLevel; expires_in_seconds: number }
+/**
+ * What the user asked to restore (also the stored parameters of "Run again").
+ */
+export type RestoreRequest = { connection_id: string; 
+/**
+ * The target database.
+ */
+database: string; 
+/**
+ * A path admitted by `restore_pick_file`.
+ */
+path: string; 
+/**
+ * psql / pg_restore `--single-transaction` (the app runner decides from the file,
+ * R31).
+ */
+single_transaction: boolean; 
+/**
+ * pg_restore `--clean --if-exists`.
+ */
+clean: boolean; 
+/**
+ * pg_restore `--no-owner`.
+ */
+no_owner: boolean }
 export type ResultMatch = { row: number; col: number }
 export type ResultPage = { rows: Value[][]; 
 /**
@@ -2359,6 +2457,26 @@ export type RunOptions = {
  * took. The SQL is never rewritten and the session never dropped for it.
  */
 max_rows: number; continue_on_error: boolean }
+/**
+ * What a text file holds (statement counts by kind).
+ */
+export type ScanStats = { statements: number; reads: number; writes: number; ddl: number; transaction: number; other: number; 
+/**
+ * `DROP …` statements.
+ */
+drops: number; 
+/**
+ * `COPY … FROM stdin` data blocks.
+ */
+copy_blocks: number; 
+/**
+ * `\…` client command lines.
+ */
+client_commands: number; 
+/**
+ * The file starts with the app's dump header (`-- DntDatabase dump v1`).
+ */
+app_dump: boolean }
 /**
  * Table / view names and their columns (with types) of one database (PostgreSQL: of the
  * schemas in `current_schemas(false)` of that database's metadata session). One per

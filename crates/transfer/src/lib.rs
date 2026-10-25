@@ -6,6 +6,7 @@
 
 pub mod batch;
 pub mod convert;
+pub mod detect;
 pub mod dump;
 pub mod facts;
 pub mod mapping;

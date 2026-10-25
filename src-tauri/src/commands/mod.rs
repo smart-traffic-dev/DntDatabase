@@ -234,6 +234,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             backup::dump_start,
             backup::tools_list,
             backup::tool_dump_start,
+            backup::restore_pick_file,
+            backup::restore_preview,
+            backup::restore_start,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.

@@ -375,6 +375,8 @@ pub struct SessionManager {
     pub jobs: crate::jobs::JobManager,
     /// Single-use import plans (see `import_data`).
     pub(crate) import_plans: crate::import_data::ImportPlanStore,
+    /// Single-use restore plans (see `backup::restore`).
+    pub(crate) restore_plans: crate::backup::RestorePlanStore,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -430,6 +432,7 @@ impl SessionManager {
             apply_close_wait: SLOT_CLOSE_WAIT,
             jobs,
             import_plans: crate::import_data::ImportPlanStore::default(),
+            restore_plans: crate::backup::RestorePlanStore::default(),
         }
     }
 
@@ -801,6 +804,7 @@ impl SessionManager {
         self.loaded.drop_conn(id);
         self.results.remove_connection(id);
         self.import_plans.drop_conn(id);
+        self.restore_plans.drop_conn(id);
     }
 
     /// Every runtime, without holding the map's lock.

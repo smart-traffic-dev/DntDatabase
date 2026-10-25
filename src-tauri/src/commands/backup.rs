@@ -5,7 +5,9 @@
 
 use super::export::file_stem;
 use super::guard;
-use crate::backup::{DumpObjects, DumpRequest, ToolDumpRequest, ToolsList};
+use crate::backup::{
+    DumpObjects, DumpRequest, RestorePreview, RestoreRequest, ToolDumpRequest, ToolsList,
+};
 use crate::file_picks::FileAccess;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
@@ -146,6 +148,86 @@ pub async fn tool_dump_start(
     request: ToolDumpRequest,
 ) -> Result<Uuid, AppError> {
     guard(tool_dump_start_impl(&state, request)).await
+}
+
+pub async fn restore_preview_impl(
+    state: &AppState,
+    request: RestoreRequest,
+) -> Result<RestorePreview, DbError> {
+    state
+        .file_picks
+        .check(FileAccess::RestoreRead, &request.path)?;
+    state.sessions.restore_preview(request).await
+}
+
+pub async fn restore_start_impl(
+    state: &AppState,
+    plan_id: Uuid,
+    confirmed: bool,
+    name: Option<String>,
+) -> Result<Uuid, DbError> {
+    state.sessions.restore_start(plan_id, confirmed, name).await
+}
+
+/// Opens the Open dialog for a file to restore from the backend and admits the picked
+/// path for `restore_preview`. `None`: cancelled. The restore path is chosen by content,
+/// not by extension.
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_pick_file(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, AppError> {
+    guard(async {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        window
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .add_filter("Dumps", &["sql", "gz", "dump", "backup", "tar"])
+            .add_filter("All files", &["*"])
+            .pick_file(move |picked| {
+                let _ = tx.send(picked);
+            });
+        let picked = rx.await.map_err(|_| DbError::Internal {
+            message: "the file dialog closed without an answer".into(),
+        })?;
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| DbError::Internal {
+            message: format!("the file dialog returned no file path: {e}"),
+        })?;
+        state
+            .file_picks
+            .admit(FileAccess::RestoreRead, path)
+            .map(Some)
+    })
+    .await
+}
+
+/// Analyzes a file for a restore (path, statistics or TOC, command line, warnings,
+/// confirmation) and stores a single-use plan. Nothing is sent to the target.
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_preview(
+    state: State<'_, AppState>,
+    request: RestoreRequest,
+) -> Result<RestorePreview, AppError> {
+    guard(restore_preview_impl(&state, request)).await
+}
+
+/// Re-checks the plan and starts the restore job; returns its id. Production needs the
+/// database name typed in `name`.
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_start(
+    state: State<'_, AppState>,
+    plan_id: Uuid,
+    confirmed: bool,
+    name: Option<String>,
+) -> Result<Uuid, AppError> {
+    guard(restore_start_impl(&state, plan_id, confirmed, name)).await
 }
 
 #[cfg(test)]

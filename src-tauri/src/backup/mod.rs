@@ -16,8 +16,11 @@ pub mod ext_tools;
 #[cfg(test)]
 mod tests;
 pub mod tool_dump;
+// Restore: three guarded paths (app runner, psql, pg_restore; §7.3, R30–R34).
+pub mod restore;
 
 pub use ext_tools::ToolsList;
+pub use restore::{RestorePlanStore, RestorePreview, RestoreRequest};
 pub use tool_dump::ToolDumpRequest;
 
 use dnt_core::meta::ObjectKind;
