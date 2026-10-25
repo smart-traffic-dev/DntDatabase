@@ -11,6 +11,7 @@ pub mod connections;
 pub mod data;
 pub mod export;
 pub mod favorites;
+pub mod import_data;
 pub mod jobs;
 pub mod objects;
 pub mod query;
@@ -218,6 +219,14 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::set_jobs_per_connection,
             settings::get_external_tools_dir,
             settings::set_external_tools_dir,
+            import_data::import_pick_file,
+            import_data::import_inspect,
+            import_data::import_target,
+            import_data::import_auto_map,
+            import_data::import_check_mapping,
+            import_data::import_dry_run,
+            import_data::import_prepare,
+            import_data::import_start,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.

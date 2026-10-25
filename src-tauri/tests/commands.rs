@@ -344,6 +344,32 @@ fn bindings_are_current() {
     );
 }
 
+/// Two Rust types with the same name would both be exported (specta does not refuse it),
+/// and a type named like a TypeScript built-in shadows it in the bindings.
+#[test]
+fn bindings_type_names_are_unique() {
+    let dir = tempfile::tempdir().unwrap();
+    let fresh = dir.path().join("bindings.ts");
+    export_bindings(&fresh).unwrap();
+    let text = std::fs::read_to_string(&fresh).unwrap();
+    let mut seen = std::collections::HashSet::new();
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("export type ") else {
+            continue;
+        };
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        assert!(seen.insert(name.clone()), "type {name} is exported twice");
+        assert!(
+            !["Record", "Partial", "Pick", "Omit", "Map", "Set", "Promise"]
+                .contains(&name.as_str()),
+            "type {name} shadows a TypeScript built-in"
+        );
+    }
+}
+
 /// A `.sql` path as picked in the backend's dialog.
 fn picked_sql(state: &AppState, file: &std::path::Path) -> String {
     state

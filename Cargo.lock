@@ -1655,6 +1655,7 @@ dependencies = [
  "dnt-schema",
  "dnt-store",
  "dnt-testkit",
+ "dnt-transfer",
  "dnt-tunnel",
  "dntdatabase",
  "futures-util",

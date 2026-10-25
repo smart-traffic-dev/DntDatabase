@@ -373,6 +373,8 @@ pub struct SessionManager {
     pub(crate) apply_close_wait: Duration,
     /// Background jobs (see `jobs`). Public: `main.rs` installs the event sink.
     pub jobs: crate::jobs::JobManager,
+    /// Single-use import plans (see `import_data`).
+    pub(crate) import_plans: crate::import_data::ImportPlanStore,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -427,6 +429,7 @@ impl SessionManager {
             data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
             apply_close_wait: SLOT_CLOSE_WAIT,
             jobs,
+            import_plans: crate::import_data::ImportPlanStore::default(),
         }
     }
 
@@ -797,6 +800,7 @@ impl SessionManager {
         self.edit_plans.drop_conn(id);
         self.loaded.drop_conn(id);
         self.results.remove_connection(id);
+        self.import_plans.drop_conn(id);
     }
 
     /// Every runtime, without holding the map's lock.

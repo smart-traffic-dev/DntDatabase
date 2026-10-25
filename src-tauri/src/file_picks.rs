@@ -46,6 +46,12 @@ pub enum FileAccess {
     CellValueRead,
     /// `data_cell_save_file`.
     CellValueWrite,
+    /// A data file to import (`import_pick_file`): `import_inspect`, the dry run, the plan.
+    ImportRead,
+    /// A dump file to write.
+    DumpWrite,
+    /// A dump file to restore.
+    RestoreRead,
 }
 
 impl FileAccess {

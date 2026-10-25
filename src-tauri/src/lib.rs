@@ -20,4 +20,5 @@ pub mod state;
 pub mod object_actions;
 pub mod table_design;
 
+pub mod import_data;
 pub mod jobs;

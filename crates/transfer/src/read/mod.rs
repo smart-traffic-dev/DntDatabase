@@ -54,7 +54,9 @@ pub enum Cell {
     DateTime(String),
 }
 
+/// Exported to TypeScript as `SourceRecord` (`Record` is a TypeScript built-in type).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename = "SourceRecord")]
 pub struct Record {
     /// 1-based: CSV line where the record starts, JSON element index, JSONL line, XLSX row.
     #[specta(type = f64)]

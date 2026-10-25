@@ -29,6 +29,7 @@ dnt-driver-pg.workspace = true
 dnt-query.workspace = true
 dnt-schema.workspace = true
 dnt-store.workspace = true
+dnt-transfer.workspace = true
 dnt-tunnel.workspace = true
 futures-util = { workspace = true, features = ["std"] }
 rust_xlsxwriter.workspace = true

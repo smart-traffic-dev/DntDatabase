@@ -1094,6 +1094,96 @@ async setExternalToolsDir(dir: string | null) : Promise<Result<null, AppError>> 
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Opens the Open dialog for a data file (CSV/TSV/TXT, JSON/JSONL/NDJSON, XLSX) from the
+ * backend and admits the picked path for the import commands. `None`: cancelled.
+ */
+async importPickFile() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_pick_file") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The file's columns and first 100 records (only a file picked in `import_pick_file`).
+ */
+async importInspect(path: string, source: SourceOptions) : Promise<Result<Inspection, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_inspect", { path, source }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The target table's columns (with the driver's types), upsert keys and transaction
+ * policy, read on a short-lived dedicated session.
+ */
+async importTarget(connectionId: string, table: ObjectRef) : Promise<Result<ImportTarget, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_target", { connectionId, table }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The automatic mapping of source columns to target columns (no database).
+ */
+async importAutoMap(source: string[], targets: TargetColumn[]) : Promise<Result<Mapping[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_auto_map", { source, targets }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The mapping's errors and warnings for `mode` (no database).
+ */
+async importCheckMapping(mapping: Mapping[], targets: TargetColumn[], keys: KeyChoice[], mode: ImportMode, overrideIdentity: boolean) : Promise<Result<MappingReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_check_mapping", { mapping, targets, keys, mode, overrideIdentity }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a dry-run job; returns its id.
+ */
+async importDryRun(request: DryRunRequest) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_dry_run", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reads the target and the file and returns the reviewed plan.
+ */
+async importPrepare(request: ImportRequest) : Promise<Result<DataImportPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_prepare", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-checks the plan and starts the import job; returns its id.
+ */
+async importStart(planId: string, confirm: ImportConfirm) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("import_start", { planId, confirm }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1168,6 +1258,38 @@ error: AppError | null }
  * Whether a set of edits can be applied all-or-nothing (spec §4.2a).
  */
 export type Atomicity = "yes" | "no" | "unknown"
+/**
+ * How binary columns read their text.
+ */
+export type BinaryEncoding = 
+/**
+ * `0x…` or bare hex digits.
+ */
+"hex" | 
+/**
+ * Standard alphabet, padding optional.
+ */
+"base_64" | 
+/**
+ * The UTF-8 bytes of the text.
+ */
+"utf_8_text"
+/**
+ * One source value. Conversion to the target type happens later (`convert`).
+ */
+export type Cell = { t: "Null" } | { t: "Text"; v: string } | 
+/**
+ * Number text as written in JSON, or an XLSX number (integers without `.0`).
+ */
+{ t: "Number"; v: string } | { t: "Bool"; v: boolean } | 
+/**
+ * A nested JSON object or array, verbatim.
+ */
+{ t: "Json"; v: string } | 
+/**
+ * An XLSX date/time, ISO 8601 with seconds (`2024-01-02`, `2024-01-02T03:04:05`, `03:04:05`).
+ */
+{ t: "DateTime"; v: string }
 /**
  * What the user typed or picked for one cell.
  */
@@ -1264,6 +1386,22 @@ export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; 
  * A table or view offered by autocomplete after `db.` / `schema.`.
  */
 export type CompletionObject = { schema: string | null; name: string; kind: ObjectKind }
+/**
+ * How the user confirms the start (R20).
+ */
+export type ConfirmLevel = 
+/**
+ * The review step's Start button.
+ */
+{ kind: "none" } | 
+/**
+ * Staging: "I understand".
+ */
+{ kind: "click" } | 
+/**
+ * Production: type the table name.
+ */
+{ kind: "type_name"; name: string }
 export type ConflictKind = 
 /**
  * A stored connection has the same id; resolved by the [`ConflictPolicy`].
@@ -1301,6 +1439,15 @@ sort_order: number; kind: DbKind; host: string; port: number; username: string; 
  * A connection as shown in the tree: config plus secret *presence* flags, never values.
  */
 export type ConnectionSummary = { config: ConnectionConfig; has_db_password: boolean; has_ssh_secret: boolean; last_connected_at: string | null }
+export type ConvertOptions = { empty: EmptyAs; 
+/**
+ * A text cell equal to this (after trimming when `trim`) is NULL, e.g. `\N` or `NULL`.
+ */
+null_text: string | null; 
+/**
+ * Trim spaces around text cells first.
+ */
+trim: boolean; binary: BinaryEncoding }
 /**
  * What `data_copy_sql` writes for each row.
  */
@@ -1318,6 +1465,23 @@ export type DataFilter = { mode: FilterMode; conditions: FilterCond[];
  * never goes through [`build_where`]. Absent / null: structured mode.
  */
 raw_where?: string | null }
+/**
+ * The review step: what `import_start` will run (R19). Exported to TypeScript as
+ * `DataImportPreview` (the connections import already has an `ImportPreview`).
+ */
+export type DataImportPreview = { plan_id: string; file: FileFacts; table: ObjectRef; 
+/**
+ * The whole import is one transaction (R15).
+ */
+transactional: boolean; pre_step: PreStep | null; insert_head: string; insert_tail: string; 
+/**
+ * The first rows of the file as one `INSERT` (at most 10 rows).
+ */
+sample: string | null; warnings: string[]; confirm: ConfirmLevel; 
+/**
+ * Production with an irreversible pre-step: the name typed for it (the table's).
+ */
+irreversible_name: string | null; expires_in_seconds: number }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
 export type DefaultSpec = 
@@ -1374,6 +1538,15 @@ export type DropTarget = { kind: DropKind;
  */
 name: string }
 /**
+ * A dry run (R18): every record is read and converted; with `server_check` the rows are
+ * also inserted into a temporary copy of the table (not on read-only connections).
+ */
+export type DryRunRequest = { request: ImportRequest; server_check: boolean; 
+/**
+ * The user confirmed the server check's statements where the guard asks (Production).
+ */
+confirmed?: boolean }
+/**
  * What `data_preview` returns: the stored plan's id and the statements `data_apply`
  * will send.
  */
@@ -1423,7 +1596,23 @@ hidden_key: string[];
  */
 editable_columns: string[]; atomic: Atomicity; protection: ProtectionKind }
 export type ElementRef = { kind: "table" } | { kind: "column"; name: string } | { kind: "primary_key" } | { kind: "index"; name: string } | { kind: "foreign_key"; name: string } | { kind: "check"; name: string } | { kind: "options" }
+/**
+ * What an empty text cell becomes in a text column (other columns always get NULL).
+ */
+export type EmptyAs = "null" | "empty_string"
 export type EnvTag = "production" | "staging" | "local"
+/**
+ * What a refused row does.
+ */
+export type ErrorPolicy = 
+/**
+ * The first error stops the import.
+ */
+{ kind: "stop" } | 
+/**
+ * Skip refused rows and log them; more than `max_errors` stops the import (R16).
+ */
+{ kind: "skip"; max_errors: number }
 export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
 /**
  * What the export dialog chose.
@@ -1486,6 +1675,19 @@ sort: number }
  * What `favorite_create` / `favorite_update` take.
  */
 export type FavoriteInput = { name: string; folder: string | null; sql: string; connection_id: string | null; database: string | null }
+export type FileFacts = { 
+/**
+ * File name without its directory.
+ */
+name: string; 
+/**
+ * Bytes hashed (the file size at the time of hashing).
+ */
+size: number; 
+/**
+ * Lower-case hex SHA-256 of the content.
+ */
+sha256: string }
 /**
  * What the UI asks a dialog for (`file_pick_open` / `file_pick_save`).
  */
@@ -1600,12 +1802,53 @@ export type Impact = { kind: ImpactKind; element: ElementRef; message: string;
  */
 count_sql: string | null }
 export type ImpactKind = "data_loss" | "rebuild" | "not_transactional"
+export type ImportConfirm = { confirmed: boolean; 
+/**
+ * The typed table name (Production).
+ */
+name: string | null; 
+/**
+ * The irreversible pre-step was acknowledged.
+ */
+irreversible_ack: boolean }
+/**
+ * What the import does with the rows already in the table.
+ */
+export type ImportMode = { kind: "append" } | 
+/**
+ * Delete every row first (`TRUNCATE` when `truncate`), then insert (R17).
+ */
+{ kind: "replace"; truncate: boolean } | 
+/**
+ * Insert or update by `key`: the primary key or a NOT NULL unique index (R14).
+ */
+{ kind: "upsert"; key: string[] }
 export type ImportPreview = { rows: ImportPreviewRow[]; skipped: SkippedItem[] }
 export type ImportPreviewRow = { id: string; name: string; kind: DbKind; host: string; 
 /**
  * Destination group names joined by " / "; empty for the root.
  */
 group_path: string; conflict: ConflictKind | null; has_password: boolean; warnings: string[] }
+/**
+ * What the user asked to import (also the stored parameters of "Run again").
+ */
+export type ImportRequest = { connection_id: string; table: ObjectRef; 
+/**
+ * A path admitted by `import_pick_file`.
+ */
+path: string; source: SourceOptions; mapping: Mapping[]; mode: ImportMode; errors: ErrorPolicy; convert: ConvertOptions; 
+/**
+ * Rows per `INSERT` (0 = 1,000).
+ */
+batch_rows: number; 
+/**
+ * Bytes of SQL per `INSERT` (0 = 1 MiB).
+ */
+batch_bytes: number; 
+/**
+ * PostgreSQL `OVERRIDING SYSTEM VALUE` (write identity `ALWAYS` columns).
+ */
+override_identity: boolean }
 export type ImportResult = { imported: number; overwritten: number; 
 /**
  * Conflicts skipped by policy plus entries the parser could not import.
@@ -1616,6 +1859,10 @@ skipped: number;
  * uses the old settings).
  */
 overwritten_ids: string[] }
+/**
+ * The target as the wizard shows it (R13).
+ */
+export type ImportTarget = { columns: TargetColumn[]; keys: KeyChoice[]; atomicity: Atomicity; env: EnvTag | null; read_only: boolean; server: ServerInfo }
 export type IndexDef = { original: string | null; name: string; unique: boolean; parts: IndexPartDef[]; method: string | null; 
 /**
  * PostgreSQL `INCLUDE (…)` columns.
@@ -1663,6 +1910,19 @@ export type IndexPartDef = { column: string | null; expression: string | null;
  * MySQL prefix length.
  */
 prefix: number | null; descending: boolean }
+export type Inspection = { columns: string[]; 
+/**
+ * The first [`INSPECT_ROWS`] records at most.
+ */
+rows: SourceRecord[]; 
+/**
+ * XLSX: all sheet names; empty otherwise.
+ */
+sheets: string[]; 
+/**
+ * CSV: the delimiter used (guessed when the options gave none).
+ */
+delimiter: string | null; total_bytes: number }
 export type JobDetail = { job: JobSummary; log: JobLogLine[]; 
 /**
  * Log lines not kept (memory keeps the first and last 1,000; the store 250 + 250).
@@ -1705,6 +1965,10 @@ export type JobSummary = { id: string; kind: JobKind; connection_id: string | nu
 export type JsInteger = number | string
 export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
 /**
+ * A key an upsert can use.
+ */
+export type KeyChoice = { name: string; columns: string[]; primary: boolean }
+/**
  * The primary key.
  */
 export type KeyDef = { original: string | null; 
@@ -1722,6 +1986,16 @@ export type LoadedCell = { token: string; payload: CellPayload }
 export type Locked = { element: ElementRef; reason: string; server_text: string }
 export type LogLevel = "Info" | "Debug"
 export type LogicalType = "Integer" | "Decimal" | "Float" | "Text" | "Binary" | "Bool" | "Date" | "Time" | "DateTime" | "Json" | "Uuid" | "Array" | "Enum" | "Other"
+/**
+ * One target column and the source column (index) it reads, if any.
+ */
+export type Mapping = { target: string; source: number | null }
+export type MappingIssue = { 
+/**
+ * The target column concerned, if one is.
+ */
+column: string | null; message: string }
+export type MappingReport = { errors: MappingIssue[]; warnings: MappingIssue[] }
 /**
  * The MySQL `sql_mode` flags that change how a script is lexed.
  */
@@ -1823,6 +2097,14 @@ export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialec
  * The tab session's transaction state when the plan was made.
  */
 tx_state: TxState }
+/**
+ * What runs before the inserts of a replace-all import (R17).
+ */
+export type PreStep = { sql: string; 
+/**
+ * Sent and committed on its own before the inserts: it cannot be rolled back.
+ */
+irreversible: boolean; warning: string | null }
 export type ProgressUnit = "rows" | "bytes" | "statements" | "none"
 /**
  * How much of a row a statement's guard checks (spec §5.2).
@@ -2002,6 +2284,28 @@ export type SortDir = "asc" | "desc"
  * Server-side `ORDER BY` of one column (which must be a column of the object).
  */
 export type SortSpec = { column: string; dir: SortDir }
+export type SourceFormat = "csv" | "json" | "jsonl" | "xlsx"
+export type SourceOptions = { format: SourceFormat; 
+/**
+ * CSV only: one of `,` `;` tab `|`; `None` guesses from the first line.
+ */
+delimiter: string | null; 
+/**
+ * CSV and XLSX: the first row names the columns.
+ */
+header: boolean; 
+/**
+ * XLSX only: sheet name; `None` = the first sheet.
+ */
+sheet: string | null }
+/**
+ * Exported to TypeScript as `SourceRecord` (`Record` is a TypeScript built-in type).
+ */
+export type SourceRecord = { 
+/**
+ * 1-based: CSV line where the record starts, JSON element index, JSONL line, XLSX row.
+ */
+number: number; cells: Cell[] }
 export type SshAuth = "password" | "key"
 export type SshConfig = { version?: number; host: string; port: number; user: string; auth: SshAuth; key_path: string | null }
 export type SslConfig = { version?: number; mode: SslMode; ca_path: string | null; cert_path: string | null; key_path: string | null }
@@ -2157,6 +2461,22 @@ rows: number; elapsed_ms: number }
  * What the user asked to run. Offsets are UTF-16 code units into the editor text.
  */
 export type Target = { Cursor: number } | { Selection: [number, number] } | "All"
+/**
+ * A column of the import target as conversion and mapping need it.
+ */
+export type TargetColumn = { name: string; db_type: string; logical: LogicalType; nullable: boolean; 
+/**
+ * A default, `AUTO_INCREMENT` or an identity: the column may be left out of the `INSERT`.
+ */
+has_default: boolean; auto_increment: boolean; identity: IdentityKind | null; generated: boolean; enum_values: string[]; 
+/**
+ * `char(n)` / `varchar(n)` / `character(n)` / `character varying(n)`.
+ */
+max_chars: number | null; collation: string | null; 
+/**
+ * MySQL `… UNSIGNED` integer: negative values are refused.
+ */
+unsigned?: boolean }
 export type Tree = { groups: Group[]; connections: ConnectionSummary[] }
 export type TriggerDetail = { name: string; timing: string; event: string }
 export type TxAction = "Commit" | "Rollback"
