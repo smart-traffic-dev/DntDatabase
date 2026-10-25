@@ -119,9 +119,12 @@ pub enum BinaryEncoding {
     /// `0x…` or bare hex digits.
     #[default]
     Hex,
-    /// Standard alphabet, padding optional.
+    /// Standard alphabet, padding optional. Renamed explicitly: specta's snake_case would
+    /// export `base_64` while serde reads and writes `base64`.
+    #[serde(rename = "base64")]
     Base64,
-    /// The UTF-8 bytes of the text.
+    /// The UTF-8 bytes of the text (renamed for the same reason: `utf8_text`).
+    #[serde(rename = "utf8_text")]
     Utf8Text,
 }
 
@@ -512,6 +515,20 @@ fn binary(s: &str, enc: BinaryEncoding) -> Result<Vec<u8>, CellReason> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wire names equal what the TypeScript bindings export (specta would write
+    /// `base_64` / `utf_8_text` for serde's `base64` / `utf8_text` without the renames).
+    #[test]
+    fn binary_encoding_wire_names() {
+        for (v, name) in [
+            (BinaryEncoding::Hex, "\"hex\""),
+            (BinaryEncoding::Base64, "\"base64\""),
+            (BinaryEncoding::Utf8Text, "\"utf8_text\""),
+        ] {
+            assert_eq!(serde_json::to_string(&v).unwrap(), name);
+            assert_eq!(serde_json::from_str::<BinaryEncoding>(name).unwrap(), v);
+        }
+    }
 
     #[test]
     fn zone_stripping() {

@@ -1365,13 +1365,14 @@ export type BinaryEncoding =
  */
 "hex" | 
 /**
- * Standard alphabet, padding optional.
+ * Standard alphabet, padding optional. Renamed explicitly: specta's snake_case would
+ * export `base_64` while serde reads and writes `base64`.
  */
-"base_64" | 
+"base64" | 
 /**
- * The UTF-8 bytes of the text.
+ * The UTF-8 bytes of the text (renamed for the same reason: `utf8_text`).
  */
-"utf_8_text"
+"utf8_text"
 /**
  * One source value. Conversion to the target type happens later (`convert`).
  */

@@ -8,6 +8,12 @@ export function defaultKey(keys: KeyChoice[]): KeyChoice | null {
   return keys.find((k) => k.primary) ?? keys[0] ?? null;
 }
 
+/** Typed against the bindings, so a renamed wire value fails to compile. */
+const BINARY: { value: BinaryEncoding; label: string }[] = [
+  { value: 'hex', label: 'Hex (0x… or bare hex)' },
+  { value: 'base64', label: 'Base64' },
+  { value: 'utf8_text', label: 'UTF-8 text' },
+];
 const sameColumns = (a: string[], b: string[]) => a.length === b.length && a.every((c, i) => c === b[i]);
 
 /** A whole number from an input, or `fallback` when it is not one ≥ `min`. */
@@ -133,9 +139,11 @@ export function OptionsStep({ state, dispatch }: StepProps) {
         <div className="field">
           <label htmlFor="iw-binary">Binary columns</label>
           <select id="iw-binary" value={convert.binary} onChange={(e) => dispatch({ type: 'convert', patch: { binary: e.target.value as BinaryEncoding } })}>
-            <option value="hex">Hex (0x… or bare hex)</option>
-            <option value="base_64">Base64</option>
-            <option value="utf_8_text">UTF-8 text</option>
+            {BINARY.map((b) => (
+              <option key={b.value} value={b.value}>
+                {b.label}
+              </option>
+            ))}
           </select>
         </div>
         <label className="check import-wizard-check">
