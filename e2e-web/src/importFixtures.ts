@@ -9,6 +9,7 @@ import type {
   Mapping,
   MappingReport,
   ObjectRef,
+  PreStep,
   ServerInfo,
   TargetColumn,
 } from '../../ui/src/bindings';
@@ -81,25 +82,40 @@ export function checkMapping(mode: ImportMode, keys: KeyChoice[]): MappingReport
 
 const q = (name: string) => `\`${name}\``;
 
+/**
+ * The pre-step of a replace-all import into the canned InnoDB `orders` (transactional): as
+ * `pre_step` of `src-tauri/src/import_data/plan.rs`, a MySQL `TRUNCATE` commits at once, so it is
+ * irreversible; `DELETE` runs inside the import's transaction.
+ */
+function preStep(mode: ImportMode, rel: string): PreStep | null {
+  if (mode.kind !== 'replace') return null;
+  if (!mode.truncate) return { sql: `DELETE FROM ${rel}`, irreversible: false, warning: null };
+  return { sql: `TRUNCATE ${rel}`, irreversible: true, warning: 'Existing rows are deleted even if the import fails later.' };
+}
+
 /** The review of `request` (MySQL syntax); Production asks for the table name. */
 export function importPreview(request: ImportRequest, planId: string, env: EnvTag | null): DataImportPreview {
   const table: ObjectRef = request.table;
+  const rel = `${q(table.database)}.${q(table.name)}`;
   const columns = request.mapping.filter((m) => m.source !== null).map((m) => q(m.target));
-  const head = `INSERT INTO ${q(table.database)}.${q(table.name)} (${columns.join(', ')}) VALUES `;
+  const head = `INSERT INTO ${rel} (${columns.join(', ')}) VALUES `;
   const update = request.mapping.filter((m) => m.source !== null && !(request.mode.kind === 'upsert' && request.mode.key.includes(m.target)));
   const tail = request.mode.kind === 'upsert' ? ` ON DUPLICATE KEY UPDATE ${update.map((m) => `${q(m.target)} = VALUES(${q(m.target)})`).join(', ')}` : '';
+  const pre = preStep(request.mode, rel);
+  const irreversible = !!pre?.irreversible;
+  const truncate = request.mode.kind === 'replace' && request.mode.truncate;
   return {
     plan_id: planId,
     file: { name: 'orders.csv', size: ordersInspection.total_bytes, sha256: '3f2a9c0d81b7e4f5a6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d' },
     table,
     transactional: true,
-    pre_step: null,
+    pre_step: pre,
     insert_head: head,
     insert_tail: tail,
     sample: null,
-    warnings: [],
+    warnings: truncate ? ['TRUNCATE commits at once and resets AUTO_INCREMENT.'] : [],
     confirm: env === 'production' ? { kind: 'type_name', name: table.name } : env === 'staging' ? { kind: 'click' } : { kind: 'none' },
-    irreversible_name: null,
+    irreversible_name: env === 'production' && irreversible ? table.name : null,
     expires_in_seconds: 600,
   };
 }

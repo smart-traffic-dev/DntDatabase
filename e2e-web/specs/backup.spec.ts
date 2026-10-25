@@ -1,7 +1,7 @@
 import { config, ids } from '../../ui/src/test/fixtures/data';
 import { byId, expandRow, treeRow } from '../src/app';
 import { createBackend } from '../src/backend';
-import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE } from '../src/backupFixtures';
+import { DUMP_FILE, MYSQL_NOT_TRANSACTIONAL, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE } from '../src/backupFixtures';
 import { jobDetail, jobProgress, jobSummary } from '../src/jobs';
 import { installBackend } from '../src/shim';
 import { expect, test } from '../src/test';
@@ -93,11 +93,12 @@ test.describe('dump and restore dialogs (browser, fake IPC backend)', () => {
     await expect(dialog).toContainText(RESTORE_FILE);
     await analyzeButton.click();
 
-    // The preview: the built-in runner, 12 statements, one transaction.
+    // The preview: the built-in runner, 12 statements; a MySQL restore is never in one transaction.
     const preview = byId(page, 'restore-preview');
     await expect(byId(page, 'restore-path')).toHaveText('Built-in runner');
     await expect(preview.getByRole('table', { name: 'Statements' }).getByRole('row', { name: /Statements/ })).toContainText('12');
-    await expect(preview).toContainText('One transaction: a failure restores nothing.');
+    await expect(preview).toContainText('Not in one transaction.');
+    await expect(preview).toContainText(MYSQL_NOT_TRANSACTIONAL);
     const previewed = backend.calls.filter((c) => c.cmd === 'restore_preview');
     expect(previewed).toHaveLength(1);
     expect(previewed[0]!.args.request).toEqual({

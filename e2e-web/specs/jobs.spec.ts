@@ -12,8 +12,10 @@ test.describe('jobs panel (browser, fake IPC backend)', () => {
   test('a running job shows its progress from events; Stop cancels it and the final event shows Cancelled', async ({ page }) => {
     let job: JobSummary = jobSummary({
       id: 'job-run',
-      title: 'Import orders.csv into orders',
-      progress: jobProgress({ phase: 'Rows', done: 100, total: 1000, unit: 'rows' }),
+      kind: 'export',
+      title: 'Export orders to orders.csv',
+      // A tracked export reports its phase and the rows written.
+      progress: jobProgress({ phase: 'Exporting', done: 100, total: 1000, unit: 'rows' }),
     });
     const backend = createBackend({
       job_list: () => [job],
@@ -32,15 +34,15 @@ test.describe('jobs panel (browser, fake IPC backend)', () => {
     await expect(counter).toHaveText('1 job');
     await counter.click();
     await expect(page.getByTestId('jobs-view')).toBeVisible();
-    const row = page.getByTestId('job-row').filter({ hasText: 'Import orders.csv into orders' });
-    await expect(row).toContainText('Rows · 100 / 1,000 rows');
+    const row = page.getByTestId('job-row').filter({ hasText: 'Export orders to orders.csv' });
+    await expect(row).toContainText('Exporting · 100 / 1,000 rows');
     const lists = () => backend.calls.filter((c) => c.cmd === 'job_list').length;
     const listsBeforeEvents = lists();
 
     // A progress event advances the row.
-    job = { ...job, progress: jobProgress({ phase: 'Rows', done: 500, total: 1000, unit: 'rows' }) };
+    job = { ...job, progress: jobProgress({ phase: 'Exporting', done: 500, total: 1000, unit: 'rows' }) };
     await emitEvent(page, JOB_EVENT, jobEvent(job));
-    await expect(row).toContainText('Rows · 500 / 1,000 rows');
+    await expect(row).toContainText('Exporting · 500 / 1,000 rows');
     await expect(row.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50');
 
     // Stop asks the backend to cancel this job.

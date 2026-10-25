@@ -4,6 +4,7 @@ import type {
   ColumnMeta,
   ConnectionConfig,
   ConnectionSummary,
+  DataImportPreview,
   DatabaseInfo,
   DesignPreview,
   DesignRender,
@@ -15,6 +16,7 @@ import type {
   ImportRequest,
   ImportTarget,
   IndexDetail,
+  JobSummary,
   KeyChoice,
   ObjectKind,
   ObjectRef,
@@ -35,6 +37,7 @@ import type {
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
 import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
 import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
+import { jobDetail, jobProgress, jobSummary } from './jobs';
 import type { Handler } from './shim';
 
 /** The id the dialog sends while creating (see `NIL_UUID` in ConnectionDialog). */
@@ -402,7 +405,9 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   const plans = new Map<string, number>();
   // Data import: reviewed plans (id -> request); one counter for dry runs, plans and jobs.
   let importSeq = 0;
-  const importPlans = new Map<string, ImportRequest>();
+  const importPlans = new Map<string, { request: ImportRequest; preview: DataImportPreview }>();
+  // Jobs the fake started (dry runs): `job_list` / `job_detail` answer them as the job manager would.
+  const fakeJobs = new Map<string, JobSummary>();
   // Dump and restore: analyzed restore plans (id -> request); one counter for plans and jobs.
   let backupSeq = 0;
   const restorePlans = new Map<string, RestoreRequest>();
@@ -572,11 +577,13 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     'plugin:opener|open_url': () => null,
     'plugin:opener|reveal_item_in_dir': () => null,
 
-    // Background jobs (P5): none by default; `specs/jobs.spec.ts` overrides these.
-    job_list: () => [],
-    job_active_count: () => 0,
-    job_detail: () => {
-      throw new Failure(appError('config', 'unknown job', { field: 'id' }));
+    // Background jobs (P5): only those the fake started (dry runs); `specs/jobs.spec.ts` overrides these.
+    job_list: () => [...fakeJobs.values()],
+    job_active_count: () => [...fakeJobs.values()].filter((j) => j.state === 'queued' || j.state === 'running').length,
+    job_detail: ({ id }) => {
+      const job = fakeJobs.get(id as string);
+      if (!job) throw new Failure(appError('config', 'unknown job', { field: 'id' }));
+      return jobDetail(job);
     },
     job_cancel: () => false,
     job_stop_all: () => null,
@@ -599,22 +606,41 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     },
     import_auto_map: ({ source, targets }) => autoMap(source as string[], targets as TargetColumn[]),
     import_check_mapping: ({ mode, keys }) => checkMapping(mode as ImportMode, keys as KeyChoice[]),
-    import_dry_run: () => `dry-${++importSeq}`,
+    // The dry run is a job: the job manager lists it from the start (queued, then running).
+    import_dry_run: ({ request }) => {
+      const { request: req, server_check: server } = request as { request: ImportRequest; server_check: boolean };
+      const id = `dry-${++importSeq}`;
+      fakeJobs.set(
+        id,
+        jobSummary({
+          id,
+          kind: 'import_dry_run',
+          connection_id: req.connection_id,
+          title: `${server ? 'Validate on server' : 'Check'} orders.csv for ${req.table.name}`,
+          state: 'running',
+          progress: jobProgress({ phase: 'Checking', done: 0, total: ordersInspection.total_bytes, unit: 'bytes' }),
+        }),
+      );
+      return id;
+    },
     import_prepare: ({ request }) => {
       const req = request as ImportRequest;
       const planId = `import-plan-${++importSeq}`;
-      importPlans.set(planId, req);
-      return importPreview(req, planId, connections.find((c) => c.id === req.connection_id)?.env_tag ?? null);
+      const preview = importPreview(req, planId, connections.find((c) => c.id === req.connection_id)?.env_tag ?? null);
+      importPlans.set(planId, { request: req, preview });
+      return preview;
     },
+    // As `import_start` of `src-tauri/src/import_data/plan.rs`: an unknown plan has expired; a
+    // missing confirmation, typed name or irreversible pre-step acknowledgement is refused.
     import_start: ({ planId, confirm }) => {
-      const req = importPlans.get(planId as string);
-      if (!req) throw fail('plan_stale');
+      const plan = importPlans.get(planId as string);
+      if (!plan) throw fail('plan_expired');
       importPlans.delete(planId as string);
       const c = confirm as ImportConfirm;
-      const prod = connections.find((x) => x.id === req.connection_id)?.env_tag === 'production';
-      if (!c.confirmed || (prod && c.name !== req.table.name)) {
-        throw new Failure(appError('config', 'the import was not confirmed', { field: 'confirm' }));
-      }
+      const want = plan.preview.confirm;
+      const nameOk = want.kind !== 'type_name' || c.name === want.name;
+      const irreversible = !!plan.preview.pre_step?.irreversible;
+      if (!c.confirmed || !nameOk || (irreversible && !c.irreversible_ack)) throw fail('confirmation_required');
       return `import-${++importSeq}`;
     },
 
@@ -628,24 +654,27 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
       throw new Failure(appError('config', 'no external tool in the browser tests', { field: 'tool' }));
     },
     restore_pick_file: () => RESTORE_FILE,
+    // As `restore_preview` / `restore_start` of `src-tauri/src/backup/restore.rs`: a read-only
+    // connection is `blocked`, an unknown plan has expired, a wrong typed name needs confirmation.
     restore_preview: ({ request }) => {
       const req = request as RestoreRequest;
+      const cfg = connections.find((c) => c.id === req.connection_id);
+      if (cfg?.read_only) throw fail('blocked');
       if (req.path === PSQL_FILE) {
         throw fail('internal', { kind: 'unsupported', message: 'This feature is not supported by the server.', detail: `${PSQL_FILE_MESSAGE} (server version 8.0.36)` });
       }
       if (req.path !== RESTORE_FILE) throw new Failure(appError('config', 'this file was not picked', { field: 'path' }));
       const planId = `restore-plan-${++backupSeq}`;
       restorePlans.set(planId, req);
-      return appRunnerPreview(req, planId, connections.find((c) => c.id === req.connection_id)?.env_tag ?? null);
+      return appRunnerPreview(req, planId, cfg?.env_tag ?? null, cfg?.kind ?? 'mysql');
     },
     restore_start: ({ planId, confirmed, name }) => {
       const req = restorePlans.get(planId as string);
-      if (!req) throw fail('plan_stale');
+      if (!req) throw fail('plan_expired');
       restorePlans.delete(planId as string);
-      const prod = connections.find((x) => x.id === req.connection_id)?.env_tag === 'production';
-      if (!confirmed || (prod && name !== req.database)) {
-        throw new Failure(appError('config', 'the restore was not confirmed', { field: 'confirm' }));
-      }
+      const cfg = connections.find((x) => x.id === req.connection_id);
+      if (cfg?.read_only) throw fail('blocked');
+      if (!confirmed || (cfg?.env_tag === 'production' && name !== req.database)) throw fail('confirmation_required');
       return `restore-${++backupSeq}`;
     },
   };

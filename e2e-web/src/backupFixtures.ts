@@ -1,4 +1,4 @@
-import type { ConfirmLevel, DumpObjects, EnvTag, RestorePreview, RestoreRequest, ToolsList } from '../../ui/src/bindings';
+import type { ConfirmLevel, DbKind, DumpObjects, EnvTag, RestorePreview, RestoreRequest, ToolsList } from '../../ui/src/bindings';
 
 /** What `dump_pick_path` answers: the absolute path of the chosen output file. */
 export const DUMP_FILE = 'C:\\backups\\dnt_fixture.sql';
@@ -32,20 +32,28 @@ export function restoreConfirm(env: EnvTag | null, database: string): ConfirmLev
   return { kind: 'none' };
 }
 
-/** The built-in runner's preview of `RESTORE_FILE`: 12 statements, one transaction. */
-export function appRunnerPreview(req: RestoreRequest, planId: string, env: EnvTag | null): RestorePreview {
+/** `restore_preview`'s warning for every MySQL / MariaDB file (`src-tauri/src/backup/restore.rs`). */
+export const MYSQL_NOT_TRANSACTIONAL = 'MySQL restores are not transactional (DDL commits at once): a failure leaves a partial restore.';
+
+/**
+ * The built-in runner's preview of `RESTORE_FILE`: 12 statements. As the backend decides: a
+ * MySQL restore is never in one transaction (DDL commits at once); a PostgreSQL one is, and then
+ * the file holds no transaction-control statements of its own.
+ */
+export function appRunnerPreview(req: RestoreRequest, planId: string, env: EnvTag | null, kind: DbKind): RestorePreview {
+  const pg = kind === 'postgres';
   return {
     plan_id: planId,
     path: 'app_runner',
     file: { name: 'dnt_fixture.sql', size: 4096, sha256: 'a3f1c9e07b2d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789ab' },
     compressed: false,
-    stats: { statements: 12, reads: 0, writes: 6, ddl: 4, transaction: 2, other: 0, drops: 0, copy_blocks: 0, client_commands: 0, app_dump: true },
+    stats: { statements: 12, reads: 0, writes: 6, ddl: 4, transaction: pg ? 0 : 2, other: 0, drops: 0, copy_blocks: 0, client_commands: 0, app_dump: true },
     toc: [],
     toc_truncated: false,
     command: null,
     tool: null,
-    transactional: true,
-    warnings: [],
+    transactional: pg,
+    warnings: pg ? [] : [MYSQL_NOT_TRANSACTIONAL],
     confirm: restoreConfirm(env, req.database),
     expires_in_seconds: 600,
   };
