@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use dnt_core::config::ResolvedConfig;
 use dnt_core::error::DbError;
 use dnt_transfer::tools::{
-    find_tool, mask, mysql_option_file, open_input, pgpass_line, search_dirs, tool_info,
-    Invocation, SecretFileSpec, Tool, ToolError, ToolInfo, ToolOutput,
+    find_tool, is_scrubbed_env, mask, mysql_option_file, open_input, pgpass_line, search_dirs,
+    tool_info, Invocation, SecretFileSpec, Tool, ToolError, ToolInfo, ToolOutput,
 };
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -72,41 +72,67 @@ pub(crate) fn tool_error(e: ToolError) -> DbError {
     config_error("tool", &e.to_string())
 }
 
+/// A command for a whitelisted tool: killed when dropped, no console window, and an
+/// environment without the database clients' variables (`PG*`, `MYSQL_*`, `LIBMYSQL_*`,
+/// `MARIADB_*`; `SystemRoot`, `PATH`, `TEMP`… are kept).
 fn base_command(program: &Path) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
     cmd.kill_on_drop(true);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
+    for (k, _) in std::env::vars_os() {
+        if is_scrubbed_env(&k) {
+            cmd.env_remove(k);
+        }
+    }
+    for k in dnt_transfer::tools::ENV_REMOVE {
+        cmd.env_remove(k);
+    }
     cmd
 }
 
-/// `<tool> --version` (bounded by [`VERSION_TIMEOUT`]) → its [`ToolInfo`].
+/// Most of `--version`'s output read (the first line is all that is used).
+const MAX_PROBE_BYTES: u64 = 64 * 1024;
+
+/// `<tool> --version` (bounded by [`VERSION_TIMEOUT`], output by [`MAX_PROBE_BYTES`])
+/// → its [`ToolInfo`].
 pub async fn probe(tool: Tool, path: &Path) -> Result<ToolInfo, DbError> {
     let mut cmd = base_command(path);
     cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    for k in dnt_transfer::tools::ENV_REMOVE {
-        cmd.env_remove(k);
-    }
     let name = tool.name();
-    let out = tokio::time::timeout(VERSION_TIMEOUT, cmd.output())
+    let run = async {
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| config_error("tool", &format!("Could not start {name}: {e}.")))?;
+        let mut out = Vec::new();
+        if let Some(stdout) = child.stdout.take() {
+            // A tool printing more than the cap gets a closed pipe and exits.
+            let _ = stdout.take(MAX_PROBE_BYTES).read_to_end(&mut out).await;
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| config_error("tool", &format!("Could not run {name}: {e}.")))?;
+        Ok::<_, DbError>((status, out))
+    };
+    let (status, out) = tokio::time::timeout(VERSION_TIMEOUT, run)
         .await
         .map_err(|_| {
             config_error(
                 "tool",
                 &format!("{name} did not answer --version within 5 seconds."),
             )
-        })?
-        .map_err(|e| config_error("tool", &format!("Could not start {name}: {e}.")))?;
-    if !out.status.success() {
+        })??;
+    if !status.success() {
         return Err(config_error(
             "tool",
-            &format!("{name} --version failed ({}).", out.status),
+            &format!("{name} --version failed ({status})."),
         ));
     }
-    Ok(tool_info(tool, path, &String::from_utf8_lossy(&out.stdout)))
+    Ok(tool_info(tool, path, &String::from_utf8_lossy(&out)))
 }
 
 /// The tool found in `configured` / `path_env`, probed.
@@ -127,7 +153,8 @@ pub async fn locate(
     probe(tool, &path).await
 }
 
-/// Every whitelisted tool: found and answering `--version`, or missing.
+/// Every whitelisted tool: found and answering `--version`, or missing. The tools are
+/// probed concurrently (the list waits at most about one [`VERSION_TIMEOUT`]).
 pub async fn list_tools(configured: Option<&Path>, path_env: Option<&OsStr>) -> ToolsList {
     let mut list = ToolsList {
         tools: Vec::new(),
@@ -137,8 +164,14 @@ pub async fn list_tools(configured: Option<&Path>, path_env: Option<&OsStr>) -> 
             .map(|d| d.to_string_lossy().into_owned())
             .collect(),
     };
-    for tool in Tool::ALL {
-        match locate(tool, configured, path_env).await {
+    let probed = futures_util::future::join_all(
+        Tool::ALL
+            .into_iter()
+            .map(|tool| async move { (tool, locate(tool, configured, path_env).await) }),
+    )
+    .await;
+    for (tool, found) in probed {
+        match found {
             Ok(info) => list.tools.push(info),
             Err(e) => {
                 if find_tool(tool, configured, path_env).is_some() {
@@ -309,8 +342,8 @@ pub struct RunReport {
 struct SecretFile(Option<PathBuf>);
 
 impl SecretFile {
-    fn write(spec: &SecretFileSpec, password: Option<&str>) -> Result<SecretFile, DbError> {
-        let (path, contents) = match spec {
+    fn write(inv: &Invocation, password: Option<&str>) -> Result<SecretFile, DbError> {
+        let (path, contents) = match &inv.secret {
             SecretFileSpec::None => return Ok(SecretFile(None)),
             SecretFileSpec::MysqlOptionFile(p) => (
                 p,
@@ -321,9 +354,14 @@ impl SecretFile {
             ),
             SecretFileSpec::PgPass(p) => (
                 p,
-                match password {
-                    Some(pw) => pgpass_line(pw).map_err(tool_error)?,
-                    None => String::new(),
+                match (password, &inv.pgpass_scope) {
+                    (Some(pw), Some(scope)) => pgpass_line(scope, pw).map_err(tool_error)?,
+                    (Some(_), None) => {
+                        return Err(DbError::Internal {
+                            message: "a pgpass file without the server it is for".into(),
+                        })
+                    }
+                    (None, _) => String::new(),
                 },
             ),
         };
@@ -381,6 +419,39 @@ fn cut(line: &str) -> String {
     s
 }
 
+/// `bytes` without a trailing part that begins the password (a chunk cut inside the
+/// password), and whether one was removed.
+fn strip_password_prefix<'a>(bytes: &'a [u8], password: &str) -> (&'a [u8], bool) {
+    let pw = password.as_bytes();
+    for k in (1..pw.len()).rev() {
+        if bytes.ends_with(&pw[..k]) {
+            return (&bytes[..bytes.len() - k], true);
+        }
+    }
+    (bytes, false)
+}
+
+/// One stderr line for the log: masked first (so a password crossing the cut is still
+/// masked), then cut to [`MAX_LINE_CHARS`]. `partial`: the bytes are a forced chunk of
+/// a longer line, whose end may hold the beginning of the password.
+fn log_line(bytes: &[u8], password: &str, partial: bool) -> Option<String> {
+    let (bytes, stripped) = if partial && !password.is_empty() {
+        strip_password_prefix(bytes, password)
+    } else {
+        (bytes, false)
+    };
+    let text = String::from_utf8_lossy(bytes);
+    let text = text.trim_end_matches(['\r', '\n']);
+    let mut masked = mask(text, password);
+    if stripped {
+        masked.push_str("******");
+    }
+    if masked.trim().is_empty() {
+        return None;
+    }
+    Some(cut(&masked))
+}
+
 /// Logs stderr line by line, masked; a line longer than four times
 /// [`MAX_LINE_CHARS`] bytes is logged cut and the rest of it skipped.
 async fn read_stderr(mut pipe: ReadPipe, ctx: &dyn RunCtx, password: &str) {
@@ -388,14 +459,10 @@ async fn read_stderr(mut pipe: ReadPipe, ctx: &dyn RunCtx, password: &str) {
     let mut pending: Vec<u8> = Vec::new();
     let mut skipping = false;
     let mut buf = vec![0u8; 8 * 1024];
-    let emit = |bytes: &[u8]| {
-        let text = String::from_utf8_lossy(bytes);
-        let text = text.trim_end_matches(['\r', '\n']);
-        if text.trim().is_empty() {
-            return;
+    let emit = |bytes: &[u8], partial: bool| {
+        if let Some(line) = log_line(bytes, password, partial) {
+            ctx.tool_line(level_of(&line), line);
         }
-        let line = mask(&cut(text), password);
-        ctx.tool_line(level_of(&line), line);
     };
     loop {
         let n = match pipe.read(&mut buf).await {
@@ -408,19 +475,19 @@ async fn read_stderr(mut pipe: ReadPipe, ctx: &dyn RunCtx, password: &str) {
             if skipping {
                 skipping = false;
             } else {
-                emit(&line);
+                emit(&line, false);
             }
         }
         if pending.len() > max_pending {
             if !skipping {
-                emit(&pending);
+                emit(&pending, true);
                 skipping = true;
             }
             pending.clear();
         }
     }
     if !skipping && !pending.is_empty() {
-        emit(&pending);
+        emit(&pending, false);
     }
 }
 
@@ -549,7 +616,7 @@ pub async fn run_tool(
         stdout,
     } = run;
     let password = password.map(|p| p.expose_secret());
-    let secret = SecretFile::write(&inv.secret, password)?;
+    let secret = SecretFile::write(inv, password)?;
     let program = inv
         .program
         .file_name()

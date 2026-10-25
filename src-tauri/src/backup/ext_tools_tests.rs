@@ -3,8 +3,8 @@
 
 use super::*;
 use dnt_transfer::tools::{
-    find_tool, mysql_option_file, open_input, pgpass_line, Invocation, SecretFileSpec, StdoutUse,
-    Tool, ToolOutput, ENV_REMOVE,
+    find_tool, mysql_option_file, open_input, pgpass_line, Invocation, PgPassScope, SecretFileSpec,
+    StdoutUse, Tool, ToolOutput, ENV_REMOVE,
 };
 use secrecy::SecretString;
 use std::io::{Read, Write};
@@ -184,8 +184,17 @@ fn invocation(secret: SecretFileSpec, stdout: StdoutUse, stdin_file: bool) -> In
         env_remove: ENV_REMOVE.to_vec(),
         env_set: vec![],
         secret,
+        pgpass_scope: Some(scope()),
         stdin_file,
         stdout,
+    }
+}
+
+fn scope() -> PgPassScope {
+    PgPassScope {
+        host: "127.0.0.1".into(),
+        port: 54317,
+        user: "app".into(),
     }
 }
 
@@ -285,7 +294,7 @@ async fn runner_writes_stdout_masks_stderr_and_removes_secret() {
 async fn pgpass_secret_and_missing_password() {
     let dir = tempfile::tempdir().unwrap();
     for (pw, expected) in [
-        (Some(password()), pgpass_line(PASSWORD).unwrap()),
+        (Some(password()), pgpass_line(&scope(), PASSWORD).unwrap()),
         (None, String::new()),
     ] {
         let secret = dir.path().join("pgpass.conf");
@@ -581,6 +590,77 @@ async fn long_stderr_lines_are_cut() {
     assert_eq!(lines[1].1, "short");
 }
 
+/// The password is masked before a line is cut: one crossing the cut leaves no prefix.
+#[test]
+fn mask_before_cut() {
+    let line = format!("{}{PASSWORD} tail", "x".repeat(MAX_LINE_CHARS - 4));
+    let logged = log_line(line.as_bytes(), PASSWORD, false).unwrap();
+    assert!(!logged.contains("Sup3"), "{logged}");
+    assert!(
+        logged.ends_with("xxxx**…") || logged.contains("**"),
+        "{logged}"
+    );
+    assert_eq!(logged.chars().count(), MAX_LINE_CHARS + 1);
+}
+
+/// A forced chunk of an over-long stderr line (no newline within the limit) that ends
+/// inside the password: the password's beginning is masked too, and the rest of the
+/// line (holding the password's end) is never logged.
+#[tokio::test(flavor = "multi_thread")]
+async fn forced_chunk_masks_a_split_password() {
+    // The fake's pipe delivers 1 KiB pieces, so the forced flush (past four times
+    // MAX_LINE_CHARS bytes) happens at 16 KiB: the password straddles it.
+    let mut stderr = "x".repeat(16 * 1024 - 5).into_bytes();
+    stderr.extend_from_slice(PASSWORD.as_bytes());
+    stderr.extend_from_slice(b" more\nnext\n");
+    let seen = Arc::new(Seen::default());
+    let spawner = FakeSpawner {
+        script: Script {
+            stdout: vec![],
+            stderr,
+            ..Script::default()
+        },
+        seen,
+    };
+    let ctx = FakeCtx::default();
+    let inv = invocation(SecretFileSpec::None, StdoutUse::Discard, false);
+    run_tool(
+        &spawner,
+        &ctx,
+        ToolRun {
+            inv: &inv,
+            password: Some(&password()),
+            stdin: None,
+            stdout: StdoutSink::Discard,
+        },
+    )
+    .await
+    .unwrap();
+    let text = ctx.text();
+    for k in 3..=PASSWORD.len() {
+        assert!(!text.contains(&PASSWORD[..k]), "prefix {k} leaked");
+        assert!(
+            !text.contains(&PASSWORD[PASSWORD.len() - k..]),
+            "suffix {k} leaked"
+        );
+    }
+    // The long line once (cut), its rest skipped, then the next line.
+    let lines = ctx.lines.lock().unwrap().clone();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1].1, "next");
+    // Directly: a chunk ending with the password's beginning.
+    let chunk = format!("abc {}", &PASSWORD[..6]);
+    assert_eq!(
+        log_line(chunk.as_bytes(), PASSWORD, true).unwrap(),
+        "abc ******"
+    );
+    assert_eq!(
+        log_line(chunk.as_bytes(), PASSWORD, false).unwrap(),
+        chunk,
+        "a whole line ending like that is just text"
+    );
+}
+
 /// A real process through [`OsSpawner`]: `mysqldump --version` (skipped when the tool
 /// is not installed).
 #[tokio::test(flavor = "multi_thread")]
@@ -598,6 +678,7 @@ async fn real_mysqldump_version_when_installed() {
         env_remove: ENV_REMOVE.to_vec(),
         env_set: vec![],
         secret: SecretFileSpec::None,
+        pgpass_scope: None,
         stdin_file: false,
         stdout: StdoutUse::List,
     };

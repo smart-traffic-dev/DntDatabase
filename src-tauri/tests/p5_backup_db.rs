@@ -550,37 +550,57 @@ async fn mysqldump_file_restores_via_app_runner() {
     let state = app_state(dir.path());
     let conn = open_conn(&state, t, false).await;
     let path = dir.path().join("mysqldump.sql");
-    // TODO(N7): `đơn_hàng` is left out: on Windows mysqldump reads its arguments in the
-    // ANSI code page, so a non-ASCII table name arrives mangled ("don_h?ng") and the
-    // dump fails. Reported to the controller; the view is left out because mysqldump
-    // keeps its `p5_src.` qualifiers.
-    let tables: Vec<&str> = TABLES.iter().copied().filter(|n| n.is_ascii()).collect();
+    // On Windows mysqldump reads its arguments in the ANSI code page, so a non-ASCII
+    // table name would arrive mangled ("don_h?ng"): the tool dump refuses `đơn_hàng`
+    // up front, before any job exists, and the dump below leaves it out. The view is
+    // left out because mysqldump keeps its `p5_src.` qualifiers.
+    let tool_request = |tables: &[&str], path: String| ToolDumpRequest {
+        connection_id: conn,
+        database: SRC.into(),
+        tool: Tool::MysqlDump,
+        mysql: Some(MysqlDumpOptions {
+            tables: tables.iter().map(|s| s.to_string()).collect(),
+            structure: true,
+            data: true,
+            routines: false,
+            events: false,
+            triggers: false,
+            single_transaction: true,
+        }),
+        pg: None,
+        compress: false,
+        path,
+    };
+    if dnt_transfer::tools::ARGV_ASCII_ONLY {
+        let admitted = state
+            .file_picks
+            .admit(FileAccess::DumpWrite, path.clone())
+            .unwrap();
+        let jobs_before = state.sessions.jobs.list(100).unwrap().len();
+        let e = tool_dump_start_impl(&state, tool_request(&TABLES, admitted))
+            .await
+            .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("External tools on Windows cannot receive non-ASCII names"),
+            "{e}"
+        );
+        assert!(e.to_string().contains("đơn_hàng"), "{e}");
+        assert_eq!(state.sessions.jobs.list(100).unwrap().len(), jobs_before);
+        assert!(!path.exists());
+    }
+    let tables: Vec<&str> = TABLES
+        .iter()
+        .copied()
+        .filter(|n| n.is_ascii() || !dnt_transfer::tools::ARGV_ASCII_ONLY)
+        .collect();
     let admitted = state
         .file_picks
         .admit(FileAccess::DumpWrite, path.clone())
         .unwrap();
-    let id = tool_dump_start_impl(
-        &state,
-        ToolDumpRequest {
-            connection_id: conn,
-            database: SRC.into(),
-            tool: Tool::MysqlDump,
-            mysql: Some(MysqlDumpOptions {
-                tables: tables.iter().map(|s| s.to_string()).collect(),
-                structure: true,
-                data: true,
-                routines: false,
-                events: false,
-                triggers: false,
-                single_transaction: true,
-            }),
-            pg: None,
-            compress: false,
-            path: admitted,
-        },
-    )
-    .await
-    .unwrap();
+    let id = tool_dump_start_impl(&state, tool_request(&tables, admitted))
+        .await
+        .unwrap();
     assert_done(t, &finish(&state, id).await);
     scope.fresh_target(DST2).await;
     let (preview, d) = restore(&state, conn, t, &path, DST2).await;

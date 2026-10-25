@@ -16,17 +16,27 @@
 //!   `--dbname=<conninfo>` without a password and `--no-password`.
 //! - The password is never an argument or an environment value (R27): MySQL reads it
 //!   from the option file ([`mysql_option_file`]), PostgreSQL from a pgpass file
-//!   ([`pgpass_line`]) named by `PGPASSFILE` (a path). [`ENV_REMOVE`] is dropped from the
-//!   child's environment. MySQL clients also read the login-path file
-//!   (`.mylogin.cnf`) even with `--defaults-file`; `MYSQL_TEST_LOGIN_FILE` points it at
-//!   a file that does not exist, so a saved login path cannot override the option file.
+//!   ([`pgpass_line`]) named by `PGPASSFILE` (a path). The pgpass line names the one
+//!   host, port and user the tool was started for (never `*:*:*:*`), so a `\connect` to
+//!   another server inside a restored file does not receive the password. [`ENV_REMOVE`]
+//!   and every variable [`is_scrubbed_env`] matches are dropped from the child's
+//!   environment. MySQL clients also read the login-path file (`.mylogin.cnf`) even with
+//!   `--defaults-file`; `MYSQL_TEST_LOGIN_FILE` points it at a file that does not exist,
+//!   so a saved login path cannot override the option file.
 //! - Through an SSH tunnel `verify-full` / `VERIFY_IDENTITY` is refused (R28).
+//! - On Windows ([`ARGV_ASCII_ONLY`]) non-ASCII names and paths are refused: the clients
+//!   read their arguments and environment in the ANSI code page and would receive them
+//!   mangled.
 //!
 //! Additions to spec §7.2 found against the real clients: mysqldump also gets
 //! `--no-tablespaces` (MySQL 8.0.21+ needs the `PROCESS` privilege to dump tablespaces,
 //! which ordinary users lack) and a MySQL 8 client gets `--get-server-public-key` when
-//! the connection may be plaintext (a `caching_sha2_password` account fails without TLS
-//! otherwise; the app's own driver does the same key exchange).
+//! the connection may be plaintext (TLS off or `prefer`): a `caching_sha2_password`
+//! account fails without TLS otherwise. Trade-off: the client then takes the server's
+//! RSA public key unverified over the plaintext connection, so an active attacker on the
+//! path could substitute a key and learn the password; this is exactly what the app's
+//! own driver does on such a connection (no new exposure), and TLS (`require` or a
+//! verify mode) avoids it.
 
 use dnt_core::config::{ResolvedConfig, SslConfig, SslMode};
 use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
@@ -292,13 +302,38 @@ pub struct Invocation {
     /// Paths only, never a secret.
     pub env_set: Vec<(&'static str, OsString)>,
     pub secret: SecretFileSpec,
+    /// The one server the pgpass line is valid for (PostgreSQL tools).
+    pub pgpass_scope: Option<PgPassScope>,
     /// stdin is fed from the restore file.
     pub stdin_file: bool,
     pub stdout: StdoutUse,
 }
 
+/// Host, port and user a pgpass line matches: only the server the tool was started
+/// for, so a `\connect` to another host in a restored file never gets the password.
+/// Through an SSH tunnel the host is the tunnel's local end (`127.0.0.1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgPassScope {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+}
+
 /// Removed from every tool's environment (R27).
 pub const ENV_REMOVE: [&str; 4] = ["PGPASSWORD", "MYSQL_PWD", "PGSERVICE", "PGSERVICEFILE"];
+
+/// A variable of the app's own environment a tool never inherits (R27): every `PG*`
+/// (libpq reads `PGHOST`, `PGSSLMODE`, `PGPASSWORD`, `PGSERVICE`, …), `MYSQL_*`,
+/// `LIBMYSQL_*` and `MARIADB_*`. What the invocation sets itself (`PGPASSFILE`,
+/// `MYSQL_TEST_LOGIN_FILE`) is set after the scrub; `SystemRoot`, `PATH`, `TEMP` and the
+/// rest are kept.
+pub fn is_scrubbed_env(name: &OsStr) -> bool {
+    let n = name.to_string_lossy().to_ascii_uppercase();
+    n.starts_with("PG")
+        || n.starts_with("MYSQL_")
+        || n.starts_with("LIBMYSQL_")
+        || n.starts_with("MARIADB_")
+}
 
 /// The login-path file MySQL clients are pointed at: next to the option file, never
 /// created.
@@ -327,17 +362,31 @@ pub enum ToolError {
          break for PostgreSQL)."
     )]
     UnsafePassword,
+    #[error(
+        "External tools on Windows cannot receive non-ASCII names ({what} {name:?}); use the \
+         built-in dump."
+    )]
+    NonAsciiName { what: &'static str, name: String },
+    #[error(
+        "External tools on Windows cannot receive non-ASCII paths ({what} {path:?}); use a \
+         folder whose path is ASCII only."
+    )]
+    NonAsciiPath { what: &'static str, path: String },
 }
+
+/// On Windows the MySQL and PostgreSQL clients read their arguments (and environment) in
+/// the ANSI code page, so a non-ASCII name or path arrives mangled (mysqldump 8.4:
+/// `đơn_hàng` becomes `don_h?ng`, "Illegal mix of collations"). Such values are refused
+/// up front instead.
+pub const ARGV_ASCII_ONLY: bool = cfg!(windows);
 
 fn has_control(s: &str) -> bool {
     s.contains(['\0', '\r', '\n'])
 }
 
-/// An object name passed as its own argument: not empty, not starting with `-`, no
-/// NUL/CR/LF (R26).
-fn check_name(what: &'static str, name: &str) -> Result<(), ToolError> {
-    if name.is_empty() || name.starts_with('-') || has_control(name) {
-        return Err(ToolError::UnsafeName {
+fn check_ascii_name(what: &'static str, name: &str) -> Result<(), ToolError> {
+    if ARGV_ASCII_ONLY && !name.is_ascii() {
+        return Err(ToolError::NonAsciiName {
             what,
             name: name.to_string(),
         });
@@ -345,7 +394,19 @@ fn check_name(what: &'static str, name: &str) -> Result<(), ToolError> {
     Ok(())
 }
 
-/// A value inside an option (`--user=…`, conninfo): no NUL/CR/LF.
+/// An object name passed as its own argument: not empty, not starting with `-`, no
+/// NUL/CR/LF (R26); ASCII on Windows.
+fn check_name(what: &'static str, name: &str) -> Result<(), ToolError> {
+    if name.is_empty() || name.starts_with('-') || has_control(name) {
+        return Err(ToolError::UnsafeName {
+            what,
+            name: name.to_string(),
+        });
+    }
+    check_ascii_name(what, name)
+}
+
+/// A value inside an option (`--user=…`, conninfo): no NUL/CR/LF; ASCII on Windows.
 fn check_text(what: &'static str, text: &str) -> Result<(), ToolError> {
     if has_control(text) {
         return Err(ToolError::UnsafeName {
@@ -353,15 +414,28 @@ fn check_text(what: &'static str, text: &str) -> Result<(), ToolError> {
             name: text.to_string(),
         });
     }
-    Ok(())
+    check_ascii_name(what, text)
 }
 
+/// A path passed in an argument or the environment: UTF-8, no NUL/CR/LF; ASCII on
+/// Windows.
 fn path_text<'a>(what: &'static str, p: &'a Path) -> Result<&'a str, ToolError> {
     let s = p.to_str().ok_or_else(|| ToolError::UnsafeName {
         what,
         name: p.to_string_lossy().into_owned(),
     })?;
-    check_text(what, s)?;
+    if has_control(s) {
+        return Err(ToolError::UnsafeName {
+            what,
+            name: s.to_string(),
+        });
+    }
+    if ARGV_ASCII_ONLY && !s.is_ascii() {
+        return Err(ToolError::NonAsciiPath {
+            what,
+            path: s.to_string(),
+        });
+    }
     Ok(s)
 }
 
@@ -465,10 +539,9 @@ pub fn mysql_dump_args(
     }
     check_text("Host", &conn.host)?;
     check_text("User", &conn.user)?;
-    let mut first = OsString::from("--defaults-file=");
-    first.push(secret);
+    let secret_text = path_text("Temporary folder", secret)?;
     let mut a = vec![
-        first,
+        opt("--defaults-file", secret_text),
         "--protocol=TCP".into(),
         opt("--host", &conn.host),
         opt("--port", &conn.port.to_string()),
@@ -533,6 +606,7 @@ pub fn mysql_dump_args(
             secret.with_file_name(NO_LOGIN_PATH_FILE).into_os_string(),
         )],
         secret: SecretFileSpec::MysqlOptionFile(secret.to_path_buf()),
+        pgpass_scope: None,
         stdin_file: false,
         stdout: StdoutUse::File,
     })
@@ -589,8 +663,19 @@ fn pg_pattern(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-fn pg_env(pgpass: &Path) -> Vec<(&'static str, OsString)> {
-    vec![("PGPASSFILE", pgpass.as_os_str().to_os_string())]
+/// `PGPASSFILE=<pgpass>` (a path, checked like an argument: libpq reads the environment
+/// in the ANSI code page too).
+fn pg_env(pgpass: &Path) -> Result<Vec<(&'static str, OsString)>, ToolError> {
+    let p = path_text("Temporary folder", pgpass)?;
+    Ok(vec![("PGPASSFILE", OsString::from(p))])
+}
+
+fn pg_scope(conn: &ToolConn) -> Option<PgPassScope> {
+    Some(PgPassScope {
+        host: conn.host.clone(),
+        port: conn.port,
+        user: conn.user.clone(),
+    })
 }
 
 /// pg_dump (spec §7.2): output on stdout in every format (R29).
@@ -647,8 +732,9 @@ pub fn pg_dump_args(
         program: PathBuf::from(&info.path),
         args: a,
         env_remove: ENV_REMOVE.to_vec(),
-        env_set: pg_env(pgpass),
+        env_set: pg_env(pgpass)?,
         secret: SecretFileSpec::PgPass(pgpass.to_path_buf()),
+        pgpass_scope: pg_scope(conn),
         stdin_file: false,
         stdout: StdoutUse::File,
     })
@@ -679,8 +765,9 @@ pub fn psql_args(
         program: PathBuf::from(&info.path),
         args: a,
         env_remove: ENV_REMOVE.to_vec(),
-        env_set: pg_env(pgpass),
+        env_set: pg_env(pgpass)?,
         secret: SecretFileSpec::PgPass(pgpass.to_path_buf()),
+        pgpass_scope: pg_scope(conn),
         stdin_file: true,
         stdout: StdoutUse::Discard,
     })
@@ -723,8 +810,9 @@ pub fn pg_restore_args(
         program: PathBuf::from(&info.path),
         args: a,
         env_remove: ENV_REMOVE.to_vec(),
-        env_set: pg_env(pgpass),
+        env_set: pg_env(pgpass)?,
         secret: SecretFileSpec::PgPass(pgpass.to_path_buf()),
+        pgpass_scope: pg_scope(conn),
         stdin_file: false,
         stdout: StdoutUse::Discard,
     })
@@ -743,6 +831,7 @@ pub fn pg_restore_list_args(info: &ToolInfo, file: &Path) -> Result<Invocation, 
         env_remove: ENV_REMOVE.to_vec(),
         env_set: Vec::new(),
         secret: SecretFileSpec::None,
+        pgpass_scope: None,
         stdin_file: false,
         stdout: StdoutUse::List,
     })
@@ -769,14 +858,32 @@ pub fn mysql_option_file(password: &str) -> Result<String, ToolError> {
     Ok(format!("[client]\npassword=\"{esc}\"\n"))
 }
 
-/// The pgpass line matching any host, port, database and user, `\` and `:` escaped.
-/// NUL, CR and LF cannot be carried.
-pub fn pgpass_line(password: &str) -> Result<String, ToolError> {
+fn pgpass_field(s: &str) -> String {
+    s.replace('\\', "\\\\").replace(':', "\\:")
+}
+
+/// The pgpass line `host:port:*:user:password` valid for exactly the scope's server
+/// and user (any database), every field with `\` and `:` escaped (R27). NUL, CR and LF
+/// cannot be carried.
+pub fn pgpass_line(scope: &PgPassScope, password: &str) -> Result<String, ToolError> {
     if has_control(password) {
         return Err(ToolError::UnsafePassword);
     }
-    let esc = password.replace('\\', "\\\\").replace(':', "\\:");
-    Ok(format!("*:*:*:*:{esc}\n"))
+    for (what, s) in [("Host", &scope.host), ("User", &scope.user)] {
+        if has_control(s) {
+            return Err(ToolError::UnsafeName {
+                what,
+                name: s.clone(),
+            });
+        }
+    }
+    Ok(format!(
+        "{}:{}:*:{}:{}\n",
+        pgpass_field(&scope.host),
+        scope.port,
+        pgpass_field(&scope.user),
+        pgpass_field(password)
+    ))
 }
 
 fn shell_quote(s: &str) -> String {

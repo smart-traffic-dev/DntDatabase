@@ -572,18 +572,19 @@ fn unsafe_names_refused() {
         mysql_dump_args(&mysql84(), &c, &srv, &mysql_opts(&[]), &secret()),
         Err(ToolError::UnsafeName { .. })
     ));
-    // Names with spaces, quotes and non-ASCII are fine.
+    // Names with spaces, quotes and dashes inside are fine (non-ASCII: see
+    // `non_ascii_refused_on_windows`).
     let ok = mysql_dump_args(
         &mysql84(),
         &conn(DbKind::MySql, "shop"),
         &srv,
-        &mysql_opts(&["đơn hàng", "a\"b", "x-y"]),
+        &mysql_opts(&["don hang", "a\"b", "x-y"]),
         &secret(),
     )
     .unwrap();
     assert_eq!(
         args(&ok)[args(&ok).len() - 3..],
-        ["đơn hàng", "a\"b", "x-y"]
+        ["don hang", "a\"b", "x-y"]
     );
 }
 
@@ -895,13 +896,236 @@ fn option_file_and_pgpass_escaping() {
     );
     assert_eq!(mysql_option_file("").unwrap(), "[client]\npassword=\"\"\n");
     assert_eq!(mysql_option_file("a\0b"), Err(ToolError::UnsafePassword));
+    let local = scope("127.0.0.1", 5432, "app");
     assert_eq!(
-        pgpass_line("p\"a\\ss:w").unwrap(),
-        "*:*:*:*:p\"a\\\\ss\\:w\n"
+        pgpass_line(&local, "p\"a\\ss:w").unwrap(),
+        "127.0.0.1:5432:*:app:p\"a\\\\ss\\:w\n"
     );
-    assert_eq!(pgpass_line("plain").unwrap(), "*:*:*:*:plain\n");
+    assert_eq!(
+        pgpass_line(&local, "plain").unwrap(),
+        "127.0.0.1:5432:*:app:plain\n"
+    );
+    // Every field is escaped (an IPv6 host has colons, a user may hold `\`).
+    assert_eq!(
+        pgpass_line(&scope("::1", 6432, r"dom\u:x"), "pw").unwrap(),
+        r"\:\:1:6432:*:dom\\u\:x:pw".to_string() + "\n"
+    );
     for bad in ["a\nb", "a\rb", "a\0b"] {
-        assert_eq!(pgpass_line(bad), Err(ToolError::UnsafePassword), "{bad:?}");
+        assert_eq!(
+            pgpass_line(&local, bad),
+            Err(ToolError::UnsafePassword),
+            "{bad:?}"
+        );
+    }
+    assert!(matches!(
+        pgpass_line(&scope("a\nb", 1, "u"), "pw"),
+        Err(ToolError::UnsafeName { .. })
+    ));
+}
+
+fn scope(host: &str, port: u16, user: &str) -> PgPassScope {
+    PgPassScope {
+        host: host.into(),
+        port,
+        user: user.into(),
+    }
+}
+
+/// The pgpass line is valid only for the server the tool was started for (a `\connect`
+/// elsewhere in a restored file gets no password); through a tunnel that is the local
+/// end.
+#[test]
+fn pgpass_scope_is_the_tool_server() {
+    let tunnelled = ToolConn {
+        host: "127.0.0.1".into(),
+        port: 50123,
+        user: "app".into(),
+        tunnelled: true,
+        ..conn(DbKind::Postgres, "app")
+    };
+    let invs = [
+        pg_dump_args(
+            &info(Tool::PgDump, "pg_dump (PostgreSQL) 17.2"),
+            &tunnelled,
+            &pg_opts(),
+            &pgpass(),
+        )
+        .unwrap(),
+        psql_args(
+            &info(Tool::Psql, "psql (PostgreSQL) 17.2"),
+            &tunnelled,
+            &PsqlOptions {
+                single_transaction: false,
+            },
+            &pgpass(),
+        )
+        .unwrap(),
+        pg_restore_args(
+            &info(Tool::PgRestore, "pg_restore (PostgreSQL) 17.2"),
+            &tunnelled,
+            &PgRestoreOptions {
+                single_transaction: false,
+                clean: false,
+                no_owner: false,
+                no_privileges: false,
+            },
+            &pgpass(),
+            Path::new(r"C:\d.dump"),
+        )
+        .unwrap(),
+    ];
+    for inv in &invs {
+        assert_eq!(inv.pgpass_scope, Some(scope("127.0.0.1", 50123, "app")));
+        let line = pgpass_line(inv.pgpass_scope.as_ref().unwrap(), PASSWORD).unwrap();
+        assert!(line.starts_with("127.0.0.1:50123:*:app:"), "{line}");
+        assert!(!line.starts_with("*:"));
+    }
+    let mysql = mysql_dump_args(
+        &mysql84(),
+        &conn(DbKind::MySql, "shop"),
+        &server(ServerVariant::MySql8, (8, 0, 36)),
+        &mysql_opts(&[]),
+        &secret(),
+    )
+    .unwrap();
+    assert_eq!(mysql.pgpass_scope, None);
+}
+
+#[test]
+fn scrubbed_environment() {
+    for name in [
+        "PGHOST",
+        "PGPASSWORD",
+        "PGSSLMODE",
+        "PGSERVICEFILE",
+        "pgpassfile",
+        "MYSQL_PWD",
+        "MYSQL_HOST",
+        "mysql_test_login_file",
+        "LIBMYSQL_ENABLE_CLEARTEXT_PLUGIN",
+        "MARIADB_PWD",
+    ] {
+        assert!(is_scrubbed_env(OsStr::new(name)), "{name}");
+    }
+    for name in [
+        "SystemRoot",
+        "PATH",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+        "APPDATA",
+        "MYSQLX",
+    ] {
+        assert!(!is_scrubbed_env(OsStr::new(name)), "{name}");
+    }
+}
+
+/// On Windows the clients read argv and the environment in the ANSI code page, so
+/// non-ASCII names, users and paths are refused before anything runs; elsewhere they
+/// pass through.
+#[test]
+fn non_ascii_refused_on_windows() {
+    let srv = server(ServerVariant::MySql8, (8, 0, 36));
+    let pgd = info(Tool::PgDump, "pg_dump (PostgreSQL) 17.2");
+    let mysql_table = mysql_dump_args(
+        &mysql84(),
+        &conn(DbKind::MySql, "shop"),
+        &srv,
+        &mysql_opts(&["đơn_hàng"]),
+        &secret(),
+    );
+    let mysql_db = mysql_dump_args(
+        &mysql84(),
+        &conn(DbKind::MySql, "cửa_hàng"),
+        &srv,
+        &mysql_opts(&[]),
+        &secret(),
+    );
+    let mysql_user = mysql_dump_args(
+        &mysql84(),
+        &ToolConn {
+            user: "người_dùng".into(),
+            ..conn(DbKind::MySql, "shop")
+        },
+        &srv,
+        &mysql_opts(&[]),
+        &secret(),
+    );
+    let pg_schema = pg_dump_args(
+        &pgd,
+        &conn(DbKind::Postgres, "app"),
+        &PgDumpOptions {
+            schemas: vec!["bán_hàng".into()],
+            ..pg_opts()
+        },
+        &pgpass(),
+    );
+    let pg_table = pg_dump_args(
+        &pgd,
+        &conn(DbKind::Postgres, "app"),
+        &PgDumpOptions {
+            tables: vec![("public".into(), "đơn_hàng".into())],
+            ..pg_opts()
+        },
+        &pgpass(),
+    );
+    let pg_db = pg_dump_args(
+        &pgd,
+        &conn(DbKind::Postgres, "dữ_liệu"),
+        &pg_opts(),
+        &pgpass(),
+    );
+    let secret_path = mysql_dump_args(
+        &mysql84(),
+        &conn(DbKind::MySql, "shop"),
+        &srv,
+        &mysql_opts(&[]),
+        Path::new(r"C:\Users\Đức\job-tmp\j1\client.cnf"),
+    );
+    let pgpass_path = pg_dump_args(
+        &pgd,
+        &conn(DbKind::Postgres, "app"),
+        &pg_opts(),
+        Path::new(r"C:\Users\Đức\job-tmp\j1\pgpass.conf"),
+    );
+    let restore_file = pg_restore_list_args(
+        &info(Tool::PgRestore, "pg_restore (PostgreSQL) 17.2"),
+        Path::new(r"D:\Sao lưu\app.dump"),
+    );
+    if ARGV_ASCII_ONLY {
+        for r in [
+            mysql_table,
+            mysql_db,
+            mysql_user,
+            pg_schema,
+            pg_table,
+            pg_db,
+        ] {
+            let e = r.unwrap_err();
+            assert!(matches!(e, ToolError::NonAsciiName { .. }), "{e:?}");
+            assert!(e
+                .to_string()
+                .starts_with("External tools on Windows cannot receive non-ASCII names"));
+            assert!(e.to_string().contains("use the built-in dump"));
+        }
+        for r in [secret_path, pgpass_path] {
+            assert!(matches!(r, Err(ToolError::NonAsciiPath { .. })), "{r:?}");
+        }
+        assert!(matches!(restore_file, Err(ToolError::NonAsciiPath { .. })));
+    } else {
+        for r in [
+            mysql_table,
+            mysql_db,
+            mysql_user,
+            pg_schema,
+            pg_table,
+            pg_db,
+            secret_path,
+            pgpass_path,
+        ] {
+            assert!(r.is_ok(), "{r:?}");
+        }
+        assert!(restore_file.is_ok());
     }
 }
 
@@ -970,7 +1194,9 @@ fn secrets_never_in_args_env_or_log() {
     }
     // The secret lives only in the file contents.
     assert!(mysql_option_file(PASSWORD).unwrap().contains(PASSWORD));
-    assert!(pgpass_line(PASSWORD).unwrap().contains(PASSWORD));
+    assert!(pgpass_line(&scope("127.0.0.1", 5432, "app"), PASSWORD)
+        .unwrap()
+        .contains(PASSWORD));
     // Stderr lines are masked.
     let line = format!(
         "mysqldump: Got error: 1045: Access denied (using password: {PASSWORD}) {PASSWORD}"
@@ -1000,6 +1226,7 @@ fn shown_command_quotes_arguments() {
         env_remove: ENV_REMOVE.to_vec(),
         env_set: vec![("PGPASSFILE", OsString::from(r"C:\tmp\pgpass.conf"))],
         secret: SecretFileSpec::PgPass(PathBuf::from(r"C:\tmp\pgpass.conf")),
+        pgpass_scope: None,
         stdin_file: false,
         stdout: StdoutUse::File,
     };
