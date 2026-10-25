@@ -64,14 +64,17 @@ pub(crate) const LIST_ROUTINES: &str = "SELECT p.proname::text, obj_description(
      WHERE n.nspname = $1 AND p.prokind::text = $2 \
      AND has_function_privilege(p.oid, 'EXECUTE')";
 
-/// User triggers on visible relations of one schema (`$1` = schema): name, comment.
+/// User triggers on visible relations of one schema (`$1` = schema): name, comment. Names
+/// are unique per table, not per schema: one row per name, the comment taken from the
+/// first table by name.
 pub(crate) fn list_triggers() -> String {
     format!(
-        "SELECT t.tgname::text, obj_description(t.oid, 'pg_trigger') \
+        "SELECT DISTINCT ON (t.tgname) t.tgname::text, obj_description(t.oid, 'pg_trigger') \
          FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
          WHERE n.nspname = $1 AND NOT t.tgisinternal \
-         AND has_table_privilege(c.oid, {ANY_TABLE_PRIVILEGE})"
+         AND has_table_privilege(c.oid, {ANY_TABLE_PRIVILEGE}) \
+         ORDER BY t.tgname, c.relname"
     )
 }
 

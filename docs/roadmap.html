@@ -212,8 +212,8 @@ footer { font-size: 13px; color: var(--fg-subtle); border-top: 1px solid var(--l
       </div>
       <div class="item">
         <h3>P4c: Sửa và apply DDL</h3>
-        <p>Sửa định nghĩa view, routine, trigger rồi apply có preview.</p>
-        <span class="who">Cần viết spec · canvas board 11</span>
+        <p>Sửa định nghĩa view, materialized view, function, procedure, trigger, event (và tạo mới từ template) rồi apply có preview đúng từng byte, guard, kiểm tra stale; MySQL báo rõ khoảng hở drop + create và đề nghị khôi phục.</p>
+        <span class="who">Đã làm trên branch <code>feat/p4c-ddl-edit</code>, chờ merge · spec 2026-10-25</span>
       </div>
     </div>
     <div class="lane">
@@ -369,7 +369,7 @@ footer { font-size: 13px; color: var(--fg-subtle); border-top: 1px solid var(--l
             <h4>Còn lại</h4>
             <ul class="ticks">
               <li>P4b: crate <code>schema</code> (mô hình, diff, render DDL) và table designer</li>
-              <li>P4c: sửa và apply DDL cho view, routine, trigger</li>
+              <li>P4c: sửa và apply DDL cho view, routine, trigger, event — xong trên branch <code>feat/p4c-ddl-edit</code>, chờ merge</li>
             </ul>
           </div>
         </div>

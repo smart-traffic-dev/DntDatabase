@@ -1,0 +1,124 @@
+/* DDL editor tab: one header row like the table designer, notes, banners, Monaco. Tokens only. */
+.ddl-editor {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  font-size: var(--dnt-text-base);
+  line-height: var(--dnt-text-base-lh);
+}
+
+.ddl-editor.ddl-empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.ddl-subtle {
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+/* Header: one 44 px row. */
+.ddl-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-3);
+  height: 44px;
+  min-width: 0;
+  padding: 0 var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.ddl-title {
+  font-size: var(--dnt-text-md);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ddl-header .ddl-subtle {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ddl-header .ddl-strategy {
+  flex: none;
+  margin-left: var(--dnt-space-2);
+}
+
+.ddl-strategy .segment {
+  flex: none;
+  font-weight: 500;
+}
+
+.ddl-spacer {
+  flex: 1;
+}
+
+.ddl-btn {
+  flex: none;
+  height: var(--dnt-ctl-h-md);
+  white-space: nowrap;
+}
+
+.ddl-editor .btn:disabled {
+  background: var(--dnt-bg-sunken);
+  border-color: var(--dnt-border-subtle);
+  color: var(--dnt-fg-disabled);
+}
+
+/* Engine and kind notes: muted, one per line. */
+.ddl-notes {
+  flex: none;
+  margin: 0;
+  padding: var(--dnt-space-1_5) var(--dnt-space-4);
+  list-style: none;
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+}
+
+/* Banners: blocked, lost session, stale object, a failed request. */
+.ddl-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  padding: var(--dnt-space-1_5) var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  font-size: var(--dnt-text-sm);
+}
+
+.ddl-banner span {
+  flex: 1;
+  min-width: 0;
+}
+
+.ddl-banner-warning {
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+}
+
+.ddl-banner-error {
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+}
+
+.ddl-banner-info {
+  background: var(--dnt-status-info-bg);
+  color: var(--dnt-status-info-fg);
+}
+
+.ddl-empty .ddl-banner {
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-md);
+}
+
+.ddl-body {
+  flex: 1;
+  min-height: 0;
+}

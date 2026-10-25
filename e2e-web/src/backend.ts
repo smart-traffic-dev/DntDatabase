@@ -26,6 +26,7 @@ import type {
   Value,
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
+import { createDdlFake, type DdlFakeState } from './ddlEdit';
 import type { Handler } from './shim';
 
 /** The id the dialog sends while creating (see `NIL_UUID` in ConnectionDialog). */
@@ -374,6 +375,8 @@ export interface FakeBackend {
   /** Commands the app called, in order — for asserting what the UI asked the backend. */
   calls: { cmd: string; args: Record<string, unknown> }[];
   handlers: Record<string, Handler>;
+  /** The DDL editor's server objects and failure switches (see `DdlFakeState`). */
+  ddl: DdlFakeState;
 }
 
 /**
@@ -404,6 +407,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     if (!info) throw fail('not_open');
     return info;
   };
+  const ddl = createDdlFake(requireOpen, (id) => connections.find((c) => c.id === id));
 
   const handlers: Record<string, Handler> = {
     // Startup: the stored connections, the restored query tabs, favorites and snippets.
@@ -459,15 +463,16 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     list_schemas: () => [{ name: 'public' }],
 
-    list_objects: ({ scope, kind }): ObjectSummary[] => {
-      if (kind !== 'Table') return [];
+    list_objects: ({ id, scope, kind }): ObjectSummary[] => {
+      if (kind !== 'Table') return ddl.listObjects(id as string, scope as Scope, kind as ObjectKind);
       if ((scope as Scope).database !== 'dnt_fixture') return [];
       return [{ name: 'orders', kind: kind as ObjectKind, comment: null, row_estimate: 3 }];
     },
 
     table_detail: ({ id, obj }) => detailOf(requireOpen(id as string).variant, obj as ObjectRef),
 
-    object_ddl: ({ id }) => DDL[requireOpen(id as string).variant] ?? '',
+    object_ddl: ({ id, obj }) =>
+      (obj as ObjectRef).kind === 'Table' ? (DDL[requireOpen(id as string).variant] ?? '') : ddl.objectDdl(id as string, obj as ObjectRef),
 
     // The Data sub-tab.
     get_table_page_size: () => 100,
@@ -556,11 +561,15 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     'plugin:dialog|message': () => null,
     'plugin:opener|open_url': () => null,
     'plugin:opener|reveal_item_in_dir': () => null,
+
+    // The DDL editor (`ddlEdit.ts`).
+    ...ddl.handlers,
   };
 
   const all = { ...handlers, ...overrides };
   return {
     calls,
+    ddl: ddl.state,
     handlers: Object.fromEntries(
       Object.entries(all).map(([cmd, handler]) => [
         cmd,

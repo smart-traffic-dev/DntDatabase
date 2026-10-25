@@ -72,6 +72,7 @@ describe('tree store', () => {
       'Materialized views',
       'Functions',
       'Procedures',
+      'Triggers',
       'Sequences',
       'Types',
     ]);

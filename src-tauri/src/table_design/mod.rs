@@ -269,7 +269,7 @@ async fn read_ddl(session: &dyn Session, obj: &ObjectRef) -> Result<Option<Strin
 /// supported" error (MySQL 1031 / 1178 / 1235, PostgreSQL 0A000), or the MySQL
 /// driver's own "not available to this user" (no code, no SQLSTATE). Anything else (a
 /// lock wait such as MySQL 1205, a deadlock, a timeout) is transient and is an error.
-fn ddl_not_shown(e: &DbError) -> bool {
+pub(crate) fn ddl_not_shown(e: &DbError) -> bool {
     match e {
         DbError::Server {
             code: None,

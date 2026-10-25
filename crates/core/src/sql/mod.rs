@@ -3,6 +3,7 @@
 pub mod build;
 mod classify;
 pub mod ddl;
+pub mod ddl_edit;
 mod effect;
 pub mod filter;
 pub mod ident;

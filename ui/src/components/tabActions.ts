@@ -1,4 +1,5 @@
 import { confirmDiscard, confirmDiscardMany, useDataEdits } from '../store/dataEdits';
+import { confirmDiscardDdl, ddlDiscardCount, useDdlEdits } from '../store/ddlEdits';
 import { useDialogs } from '../store/dialogs';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
@@ -14,10 +15,34 @@ export async function closeTab(tab: Tab): Promise<boolean> {
     useTabs.getState().close(tab.id);
     return true;
   }
+  // Unapplied DDL text is thrown away with the tab: ask first.
+  if (tab.kind === 'ddl') {
+    if (!(await confirmDiscardDdl([tab.id]))) return false;
+    useTabs.getState().close(tab.id);
+    return true;
+  }
   // Staged data edits are thrown away with the tab: ask first.
   if (useDataEdits.getState().hasStaged(tab.id) && !(await confirmDiscard(tab.id))) return false;
   useTabs.getState().close(tab.id);
   return true;
+}
+
+/** One `discardEdits` question for unapplied designs and DDL text together (either alone asks its own way). */
+function confirmDiscardDrafts(designs: string[], ddl: string[]): Promise<boolean> {
+  const designCount = designDiscardCount(designs);
+  const ddlCount = ddlDiscardCount(ddl);
+  if (ddlCount === 0) return confirmDiscardDesigns(designs);
+  if (designCount === 0) return confirmDiscardDdl(ddl);
+  return new Promise((resolve) => {
+    useDialogs.getState().ask({
+      kind: 'discardEdits',
+      count: designCount + ddlCount,
+      done: (discard) => {
+        useDialogs.getState().answer();
+        resolve(discard);
+      },
+    });
+  });
 }
 
 /**
@@ -28,8 +53,9 @@ export async function confirmDiscardConnection(connectionId: string): Promise<bo
   const tabs = useTabs.getState().tabs;
   const ids = tabs.filter((t) => t.kind === 'object' && t.connectionId === connectionId).map((t) => t.id);
   const designs = tabs.filter((t) => t.kind === 'design' && t.connectionId === connectionId).map((t) => t.id);
-  // Designs first: they discard nothing, so keeping them cancels before any staged edit is dropped.
-  if (!(await confirmDiscardDesigns(designs))) return false;
+  const ddl = tabs.filter((t) => t.kind === 'ddl' && t.connectionId === connectionId).map((t) => t.id);
+  // Designs and DDL text first: they discard nothing, so keeping them cancels before any staged edit is dropped.
+  if (!(await confirmDiscardDrafts(designs, ddl))) return false;
   return confirmDiscardMany(ids);
 }
 
@@ -41,7 +67,8 @@ export function confirmDiscardForImport(connectionIds: string[]): Promise<boolea
   const tabs = useTabs.getState().tabs;
   const ids = tabs.filter((t) => t.kind === 'object' && connectionIds.includes(t.connectionId)).map((t) => t.id);
   const designs = tabs.filter((t) => t.kind === 'design' && connectionIds.includes(t.connectionId)).map((t) => t.id);
-  const count = ids.reduce((n, id) => n + useDataEdits.getState().changeCount(id), 0) + designDiscardCount(designs);
+  const ddl = tabs.filter((t) => t.kind === 'ddl' && connectionIds.includes(t.connectionId)).map((t) => t.id);
+  const count = ids.reduce((n, id) => n + useDataEdits.getState().changeCount(id), 0) + designDiscardCount(designs) + ddlDiscardCount(ddl);
   if (count === 0) return Promise.resolve(true);
   return new Promise((resolve) => {
     useDialogs.getState().ask({
@@ -93,6 +120,7 @@ export async function closeGroup(groupId = useTabs.getState().focusedGroupId): P
 function unsaved(tab: Tab): boolean {
   if (tab.kind === 'object') return useDataEdits.getState().hasStaged(tab.id);
   if (tab.kind === 'design') return useTableDesigns.getState().isDirty(tab.id);
+  if (tab.kind === 'ddl') return useDdlEdits.getState().isDirty(tab.id);
   const doc = useQueryDocs.getState().docs.get(tab.id);
   const tx = useQueryRun.getState().runs.get(tab.id)?.txState ?? 'idle';
   return (!!doc?.filePath && doc.dirty) || tx !== 'idle';

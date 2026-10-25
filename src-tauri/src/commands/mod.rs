@@ -19,6 +19,8 @@ pub mod transfer;
 pub mod window;
 pub mod workspace;
 
+pub mod ddl_edit;
+
 use dnt_core::error::{AppError, DbError};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::FutureExt;
@@ -206,6 +208,11 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             favorites::snippets_create,
             favorites::snippets_update,
             favorites::snippets_delete,
+            ddl_edit::ddl_edit_open,
+            ddl_edit::ddl_edit_preview,
+            ddl_edit::ddl_edit_cancel,
+            ddl_edit::ddl_edit_close,
+            ddl_edit::ddl_edit_apply,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.

@@ -15,6 +15,7 @@ import { useConnections } from '../store/connections';
 import { useQueryDocs } from '../store/queryTabs';
 import { useQueryRun } from '../store/queryRun';
 import { useTableDesigns } from '../store/tableDesigns';
+import { useDdlEdits } from '../store/ddlEdits';
 import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
@@ -51,6 +52,14 @@ const KIND_LABEL: Record<ObjectKind, string> = {
   Type: 'TYPE',
 };
 
+/** What the `●` of an unsaved tab says, per tab kind. */
+const DIRTY_LABEL: Record<Tab['kind'], string> = {
+  object: 'Unsaved changes',
+  query: 'Unsaved changes',
+  design: 'Unsaved design changes',
+  ddl: 'Unsaved DDL changes',
+};
+
 /** The tab strip of one editor group (by default the focused one). */
 export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
   const focusedGroupId = useTabs((s) => s.focusedGroupId);
@@ -76,6 +85,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
     useShallow((s) => [...s.docs.values()].filter((d) => !!d.filePath && d.dirty).map((d) => d.id)),
   );
   const dirtyDesignIds = useTableDesigns(useShallow((s) => Object.keys(s.byTab).filter((id) => s.isDirty(id))));
+  const dirtyDdlIds = useDdlEdits(useShallow((s) => Object.keys(s.byTab).filter((id) => s.isDirty(id))));
   const txIds = useQueryRun(
     useShallow((s) => [...s.runs].filter(([, r]) => (r.txState ?? 'idle') !== 'idle').map(([id]) => id)),
   );
@@ -263,8 +273,13 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           const env = conn?.env_tag ?? null;
           const readOnly = !!conn?.read_only;
           // `●` only for a tab bound to a file whose text differs from it.
-          // A design tab shows it while the draft differs from the table as opened.
-          const unsaved = tab.kind === 'query' ? unsavedIds.includes(tab.id) : tab.kind === 'design' && dirtyDesignIds.includes(tab.id);
+          // A design tab shows it while the draft differs from the table as opened; a DDL tab while its text differs from its base.
+          const unsaved =
+            tab.kind === 'query'
+              ? unsavedIds.includes(tab.id)
+              : tab.kind === 'design'
+                ? dirtyDesignIds.includes(tab.id)
+                : tab.kind === 'ddl' && dirtyDdlIds.includes(tab.id);
           const classes = [
             'tab',
             tab.id === activeId ? 'active' : '',
@@ -323,7 +338,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                   </span>
                 )}
                 {env && <EnvTag env={env} />}
-                <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : tab.kind === 'design' ? 'Design' : KIND_LABEL[tab.objectRef.kind]}</span>
+                <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : tab.kind === 'design' ? 'Design' : tab.kind === 'ddl' ? 'DDL' : KIND_LABEL[tab.objectRef.kind]}</span>
                 <span className="tab-title">{tab.title}</span>
                 {readOnly && (
                   <span className="tab-ro" title="Read-only connection" aria-label="Read-only connection">
@@ -350,8 +365,8 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                   // For screen readers; the close button shows the dot.
                   <span
                     className="tab-dirty sr-only"
-                    title={tab.kind === 'design' ? 'Unsaved design changes' : 'Unsaved changes'}
-                    aria-label={tab.kind === 'design' ? 'Unsaved design changes' : 'Unsaved changes'}
+                    title={DIRTY_LABEL[tab.kind]}
+                    aria-label={DIRTY_LABEL[tab.kind]}
                   >
                     ●
                   </span>

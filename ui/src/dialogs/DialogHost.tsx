@@ -10,6 +10,7 @@ import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
 import { ObjectActionDialog } from './ObjectActionDialog';
 import { TableDesignDialog } from './TableDesignDialog';
+import { DdlEditDialog } from './DdlEditDialog';
 import { AboutDialog } from './AboutDialog';
 import { ConnectionDialog } from './ConnectionDialog';
 import { ExportDialog } from './ExportDialog';
@@ -212,6 +213,8 @@ export function DialogHost() {
     dialog = <ObjectActionDialog request={request} onClose={closeRequest} />;
   } else if (request?.kind === 'tableDesign') {
     dialog = <TableDesignDialog key={request.tabId} tabId={request.tabId} onClose={closeRequest} />;
+  } else if (request?.kind === 'ddlEdit') {
+    dialog = <DdlEditDialog key={request.tabId} tabId={request.tabId} onClose={closeRequest} />;
   } else if (request?.kind === 'newConnection') {
     dialog = (
       <ConnectionDialog
