@@ -30,6 +30,10 @@ import { ToastHost } from './ToastHost';
 import { ImportWizard } from '../transfer/import/ImportWizard';
 // Registers "Run again" of import jobs and dry runs (R5).
 import '../transfer/import/rerunImport';
+import { DumpDialog } from '../transfer/backup/DumpDialog';
+import { RestoreDialog } from '../transfer/backup/RestoreDialog';
+// Registers "Run again" of dumps, tool dumps and restores (R5).
+import '../transfer/backup/rerunBackup';
 
 /** Secrets the stored connection lacks (or, in Ask mode, always needs). */
 function neededSecrets(cfg: ConnectionConfig | undefined, hasDb: boolean, hasSsh: boolean, error: AppError): SecretNeed[] {
@@ -342,6 +346,28 @@ export function DialogHost() {
         key={`${request.connectionId}:${request.table?.database ?? ''}.${request.table?.schema ?? ''}.${request.table?.name ?? ''}:${request.params ? 'rerun' : ''}`}
         connectionId={request.connectionId}
         table={request.table}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
+  } else if (request?.kind === 'dump') {
+    dialog = (
+      <DumpDialog
+        key={`${request.connectionId}:${request.database}.${request.schema ?? ''}.${request.table ?? ''}:${request.params ? 'rerun' : ''}`}
+        connectionId={request.connectionId}
+        database={request.database}
+        schema={request.schema}
+        table={request.table}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
+  } else if (request?.kind === 'restore') {
+    dialog = (
+      <RestoreDialog
+        key={`${request.connectionId}:${request.database ?? ''}:${request.params ? 'rerun' : ''}`}
+        connectionId={request.connectionId}
+        database={request.database}
         params={request.params}
         onClose={closeRequest}
       />

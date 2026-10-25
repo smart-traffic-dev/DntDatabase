@@ -6,6 +6,7 @@ import { connectionIdOf } from '../store/treeModel';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { openNewQuery, openSelectTop } from './newQuery';
 import { openDesignTab, openObjectTab } from './openObject';
+import { backupActionItems } from '../transfer/backup/backupMenu';
 
 type Item = MenuEntry;
 const SEP: Item = { separator: true };
@@ -148,13 +149,14 @@ function itemsFor(node: TreeNode): Item[] {
       newQuery,
       ...designActionItems(node),
       ...importActionItems(node),
+      ...backupActionItems(node),
       ...objectActionItems(node),
       SEP,
       refresh,
       copy,
     ];
   }
-  return [newQuery, ...designActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
+  return [newQuery, ...designActionItems(node), ...backupActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {
