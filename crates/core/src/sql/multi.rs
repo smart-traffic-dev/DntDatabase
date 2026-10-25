@@ -60,7 +60,7 @@ fn compound_body(toks: &[Token]) -> bool {
 }
 
 /// The index past the user spec of a `DEFINER =` starting at token `i`.
-fn skip_user(toks: &[Token], mut i: usize) -> Option<usize> {
+pub(super) fn skip_user(toks: &[Token], mut i: usize) -> Option<usize> {
     let first = toks.get(i)?;
     match first.kind {
         TokKind::Word(w) if w.eq_ignore_ascii_case("CURRENT_USER") => {
