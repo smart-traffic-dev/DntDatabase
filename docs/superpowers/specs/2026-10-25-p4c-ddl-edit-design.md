@@ -212,7 +212,7 @@ added by the executor (not listed in the preview, which says "Runs in one transa
 | MySQL event, edit | `DROP EVENT q(x)` · text | yes | — |
 | MariaDB function/procedure/trigger/event, edit | text with `OR REPLACE` inserted | no | — |
 | PostgreSQL view/function/procedure, Replace | text with `OR REPLACE` inserted if absent | no | routine: exactly one `pg_proc` row with this name, of this kind; view: relation is a view |
-| PostgreSQL view, Recreate | `DROP VIEW q(x) RESTRICT` · text | no (transaction) | relation is a view |
+| PostgreSQL view, Recreate | `DROP VIEW q(x) RESTRICT` · text · every former user trigger (`pg_get_triggerdef`) and rule other than `_RETURN` (`pg_get_ruledef`), read at open | no (transaction) | relation is a view |
 | PostgreSQL function/procedure, Recreate | `DROP {KIND} q(x)(<identity args>) RESTRICT` · text | no | exactly one `pg_proc` row, of this kind |
 | PostgreSQL materialized view, edit | `DROP MATERIALIZED VIEW q(x) RESTRICT` · text · every former index definition | no | relation is a materialized view |
 | PostgreSQL trigger, edit | `DROP TRIGGER "t" ON q(table)` · text | no | trigger `t` exists on the original table's oid |

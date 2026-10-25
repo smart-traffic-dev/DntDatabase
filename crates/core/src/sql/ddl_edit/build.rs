@@ -28,6 +28,12 @@ pub struct CatalogFacts {
     /// PostgreSQL views and materialized views: `pg_class.reloptions` (`key=value`).
     #[serde(default)]
     pub reloptions: Vec<String>,
+    /// PostgreSQL views: `pg_get_triggerdef` of every user trigger, in order.
+    #[serde(default)]
+    pub trigger_defs: Vec<String>,
+    /// PostgreSQL views: `pg_get_ruledef` of every rule other than `_RETURN`, in order.
+    #[serde(default)]
+    pub rule_defs: Vec<String>,
 }
 
 /// A read run inside the PostgreSQL transaction before COMMIT: one text value that
@@ -159,6 +165,14 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
             (ObjectKind::View, Strategy::Recreate) => {
                 out.statements.push(format!("DROP VIEW {q} RESTRICT"));
                 out.statements.push(stmt.to_string());
+                // The drop takes the view's triggers and rules with it.
+                out.statements.extend(
+                    facts
+                        .trigger_defs
+                        .iter()
+                        .chain(&facts.rule_defs)
+                        .map(|d| d.trim_end().trim_end_matches(';').to_string()),
+                );
             }
             (ObjectKind::MaterializedView, Strategy::Recreate) => {
                 out.statements
@@ -243,6 +257,32 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
             }
             if t.kind == ObjectKind::MaterializedView {
                 out.warnings.push(MV_REFILL.into());
+            }
+            if t.kind == ObjectKind::View {
+                let count = |n: usize, one: &str| match n {
+                    0 => None,
+                    1 => Some(format!("1 {one}")),
+                    n => Some(format!("{n} {one}s")),
+                };
+                let parts: Vec<String> = [
+                    count(facts.trigger_defs.len(), "trigger"),
+                    count(facts.rule_defs.len(), "rule"),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if !parts.is_empty() {
+                    let (verb, def, fit) = if facts.trigger_defs.len() + facts.rule_defs.len() == 1
+                    {
+                        ("is", "its current definition", "it no longer fits")
+                    } else {
+                        ("are", "their current definitions", "they no longer fit")
+                    };
+                    out.warnings.push(format!(
+                        "The view's {} {verb} re-created after it from {def}; the change is rolled back if {fit} the new view.",
+                        parts.join(" and ")
+                    ));
+                }
             }
         }
     } else {
@@ -1075,6 +1115,36 @@ mod tests {
             assert!(strategies(&my_target(k, None), &mysql8()).is_empty());
         }
         assert!(strategies(&pg_target(View, None), &pg17()).is_empty());
+    }
+
+    #[test]
+    fn pg_view_recreate_restores_triggers_and_rules() {
+        let v = pg_target(ObjectKind::View, Some("v"));
+        let facts = CatalogFacts {
+            trigger_defs: strs(&[
+                "CREATE TRIGGER vi INSTEAD OF INSERT ON public.v FOR EACH ROW EXECUTE FUNCTION public.f()",
+            ]),
+            rule_defs: strs(&["CREATE RULE vd AS\n    ON DELETE TO public.v DO INSTEAD NOTHING;"]),
+            ..Default::default()
+        };
+        let text = "CREATE VIEW public.v AS SELECT 1 AS a";
+        let b = ok(&v, text, Some(Strategy::Recreate), &pg17(), &facts);
+        assert_eq!(
+            b.statements,
+            strs(&[
+                "DROP VIEW \"public\".\"v\" RESTRICT",
+                text,
+                "CREATE TRIGGER vi INSTEAD OF INSERT ON public.v FOR EACH ROW EXECUTE FUNCTION public.f()",
+                "CREATE RULE vd AS\n    ON DELETE TO public.v DO INSTEAD NOTHING",
+            ])
+        );
+        assert!(b.warnings.contains(
+            &"The view's 1 trigger and 1 rule are re-created after it from their current definitions; the change is rolled back if they no longer fit the new view.".to_string()
+        ), "{:?}", b.warnings);
+        // Replace keeps them: nothing is re-created.
+        let b = ok(&v, text, Some(Strategy::Replace), &pg17(), &facts);
+        assert_eq!(b.statements.len(), 1);
+        assert!(!b.warnings.iter().any(|w| w.contains("re-created after it")));
     }
 
     #[test]

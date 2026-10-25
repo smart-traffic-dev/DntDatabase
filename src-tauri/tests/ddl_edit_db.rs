@@ -762,6 +762,81 @@ async fn pg_view_options_survive_edits() {
 }
 
 #[tokio::test]
+async fn pg_view_recreate_keeps_triggers_and_rules() {
+    require_db!();
+    each_target!(Target::pg(), |sc| {
+        let t = sc.t;
+        let ns = sc.ns.clone();
+        create_t(&sc).await;
+        for stmt in [
+            format!("CREATE VIEW {ns}.v AS SELECT id, a FROM {ns}.t"),
+            format!("CREATE FUNCTION {ns}.vi() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN INSERT INTO {ns}.t (id, a, b) VALUES (NEW.id, 7, 7); RETURN NEW; END $$"),
+            format!("CREATE TRIGGER vi INSTEAD OF INSERT ON {ns}.v FOR EACH ROW EXECUTE FUNCTION {ns}.vi()"),
+            format!("CREATE RULE vd AS ON DELETE TO {ns}.v DO INSTEAD NOTHING"),
+        ] {
+            sc.exec(&stmt).await;
+        }
+        let o = sc.edit_open(ObjectKind::View, Some("v"), None).await;
+        let text = format!("CREATE VIEW {ns}.v AS SELECT id, a, b FROM {ns}.t");
+        let p = sc
+            .preview(o.edit_id, &text, Some(Strategy::Recreate))
+            .await
+            .unwrap();
+        assert_eq!(p.statements.len(), 4, "{t:?}: {:?}", p.statements);
+        assert!(
+            p.statements[2].starts_with("CREATE TRIGGER vi INSTEAD OF INSERT"),
+            "{t:?}: {:?}",
+            p.statements
+        );
+        assert!(
+            p.statements[3].starts_with("CREATE RULE vd AS"),
+            "{t:?}: {:?}",
+            p.statements
+        );
+        let r = sc.apply_plan(&p).await.unwrap();
+        assert_eq!(r.outcome, EditOutcome::Applied, "{t:?}: {r:?}");
+        // The trigger still routes inserts, the rule still swallows deletes.
+        sc.exec(&format!("INSERT INTO {ns}.v (id) VALUES (5)"))
+            .await;
+        assert_eq!(
+            sc.one(&format!("SELECT a FROM {ns}.t WHERE id = 5")).await,
+            "7"
+        );
+        sc.exec(&format!("DELETE FROM {ns}.v")).await;
+        assert_eq!(
+            sc.one(&format!("SELECT count(*)::text FROM {ns}.t")).await,
+            "2"
+        );
+        // A rule that no longer fits the new view rolls the change back.
+        sc.exec(&format!(
+            "CREATE RULE vu AS ON UPDATE TO {ns}.v DO INSTEAD UPDATE {ns}.t SET b = NEW.b WHERE id = OLD.id"
+        ))
+        .await;
+        let o = sc.edit_open(ObjectKind::View, Some("v"), None).await;
+        let r = sc
+            .edit_apply(
+                o.edit_id,
+                &format!("CREATE VIEW {ns}.v AS SELECT id, a FROM {ns}.t"),
+                Some(Strategy::Recreate),
+            )
+            .await;
+        assert_eq!(r.outcome, EditOutcome::RolledBack, "{t:?}: {r:?}");
+        assert_eq!(r.object_state, ObjectState::Unchanged);
+        assert_eq!(
+            sc.one(&format!("SELECT b FROM {ns}.v WHERE id = 1")).await,
+            "0"
+        );
+        assert_eq!(
+            sc.one(&format!(
+                "SELECT count(*)::text FROM pg_rewrite WHERE ev_class = '{ns}.v'::regclass AND rulename <> '_RETURN'"
+            ))
+            .await,
+            "2"
+        );
+    });
+}
+
+#[tokio::test]
 async fn mysql_trigger_gap_and_restore() {
     require_db!();
     each_target!([Target::MySql57, Target::MySql8], |sc| {

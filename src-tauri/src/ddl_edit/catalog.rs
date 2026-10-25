@@ -13,6 +13,8 @@ pub(crate) const PG_ROUTINE_SQL: &str = "SELECT count(*) OVER ()::text, p.prokin
 pub(crate) const PG_RELATION_SQL: &str = "SELECT c.oid::text, c.relkind::text, (obj_description(c.oid, 'pg_class') IS NOT NULL)::text, (c.relacl IS NOT NULL)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2";
 pub(crate) const PG_RELOPTIONS_SQL: &str =
     "SELECT o FROM pg_class c, unnest(c.reloptions) WITH ORDINALITY u(o, n) WHERE c.oid = $1::oid ORDER BY n";
+pub(crate) const PG_VIEW_TRIGGERS_SQL: &str = "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t WHERE t.tgrelid = $1::oid AND NOT t.tgisinternal ORDER BY t.tgname";
+pub(crate) const PG_VIEW_RULES_SQL: &str = "SELECT pg_get_ruledef(r.oid) FROM pg_rewrite r WHERE r.ev_class = $1::oid AND r.rulename <> '_RETURN' ORDER BY r.rulename";
 pub(crate) const PG_INDEX_SQL: &str = "SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE i.indrelid = $1::oid ORDER BY ic.relname";
 pub(crate) const PG_TRIGGER_SQL: &str = "SELECT c.relname::text, c.oid::text, (obj_description(t.oid, 'pg_trigger') IS NOT NULL)::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND t.tgname = $2 AND NOT t.tgisinternal";
 pub(crate) const MYSQL_TRIGGER_SQL: &str = "SELECT EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = ?";
@@ -167,6 +169,9 @@ pub(crate) async fn facts(
                         facts.reloptions = texts(session, PG_RELOPTIONS_SQL, &oid).await?;
                         if col(r, 1).as_deref() == Some("m") {
                             facts.index_defs = texts(session, PG_INDEX_SQL, &oid).await?;
+                        } else {
+                            facts.trigger_defs = texts(session, PG_VIEW_TRIGGERS_SQL, &oid).await?;
+                            facts.rule_defs = texts(session, PG_VIEW_RULES_SQL, &oid).await?;
                         }
                     }
                 }
