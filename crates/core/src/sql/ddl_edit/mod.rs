@@ -2,11 +2,15 @@
 //! that the user's edited text is exactly one `CREATE` statement of the object
 //! being edited, before anything is built or sent.
 
+mod build;
 mod header;
 mod isolate;
+mod template;
 
+pub use build::{build, strategies, BuildInput, Built, CatalogFacts, PostCheck};
 pub use header::{check_target, parse_header, Header};
 pub use isolate::isolate;
+pub use template::{notes, template};
 
 use crate::error::DbError;
 use crate::meta::ObjectKind;
