@@ -182,6 +182,29 @@ it('partial_offers_restore', async () => {
   expect(onClose).toHaveBeenCalled();
 });
 
+it('a missing object turns the tab into a create without the restore click', async () => {
+  const partial = report({
+    outcome: 'partial',
+    error: appError('query', 'You have an error in your SQL syntax'),
+    executed: ['DROP VIEW `shop`.`v`'],
+    failed: EDITED,
+    object_state: 'missing',
+    restore_text: SERVER_TEXT,
+    object: null,
+    text: null,
+  });
+  const { user, onClose } = await setup(null, { ddl_edit_apply: () => partial });
+  await user.click(await applyButton());
+  expect(await screen.findByText('The changes were applied only in part.')).toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: 'Close' }));
+  expect(onClose).toHaveBeenCalled();
+  // The user's text stays, as a create of the same name; the original stays on offer.
+  expect(edit().text).toBe(EDITED);
+  expect(edit().target.name).toBeNull();
+  expect(edit().base).toBe('');
+  expect(edit().missing).toEqual({ name: 'v', text: SERVER_TEXT });
+});
+
 it('unknown_marks_object_tab', async () => {
   const unknown = report({ outcome: 'unknown', error: appError('connection_lost', 'The connection was lost.'), object_state: 'unknown', object: null, text: null });
   const { user, onClose } = await setup(null, { ddl_edit_apply: () => unknown });

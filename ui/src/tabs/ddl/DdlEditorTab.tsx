@@ -146,6 +146,21 @@ export function DdlEditorTab({ tab }: { tab: DdlTabRef }) {
           </button>
         </div>
       ) : null}
+      {state.missing && target.name === null ? (
+        <div className="ddl-banner ddl-banner-warning" role="status">
+          <span>{state.missing.name} no longer exists on the server. Applying this text creates it.</span>
+          {state.missing.text !== null ? (
+            <button
+              type="button"
+              className="btn small"
+              disabled={loading || state.text === state.missing.text}
+              onClick={() => edits.restore(tab.id, state.missing!.text!)}
+            >
+              Put the original definition in the editor
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {state.stale && !state.lost ? (
         <div className="ddl-banner ddl-banner-warning" role="status">
           <span>The object changed on the server since you opened it. Your text is kept; review it before applying.</span>

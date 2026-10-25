@@ -199,6 +199,8 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
     if (result) {
       setPreview(null);
       setReport(result);
+      // The backend made the edit a create of the same name: so does the tab, restore click or not.
+      if (result.object_state === 'missing') useDdlEdits.getState().missing(tabId, result.restore_text);
       const reportError = result.error;
       const name = result.object?.name ?? target.name;
       if (result.outcome === 'applied') {
@@ -250,7 +252,7 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
 
   const production = env === 'production';
   const locked = preview !== null && preview.confirm_name !== null && typed !== preview.confirm_name;
-  const objectName = edit?.target.name ?? 'new object';
+  const objectName = edit?.target.name ?? edit?.missing?.name ?? 'new object';
   const failedList = report && (report.executed.length > 0 || report.failed !== null);
 
   return (

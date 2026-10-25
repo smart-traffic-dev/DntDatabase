@@ -164,6 +164,38 @@ describe('ddl edits store', () => {
     expect(store().findTab(target)).toBeNull();
   });
 
+  it('missing_turns_the_edit_into_a_create_and_keeps_the_restore_text', async () => {
+    mockBackend({ ddl_edit_open: () => ({ ...opened(), strategies: ['replace'], strategy: 'replace' }), ddl_edit_close: () => null });
+    await store().load(TAB, target);
+    const mine = `${VIEW}, 2 AS b`;
+    store().setText(TAB, mine);
+    store().missing(TAB, VIEW);
+    // The text stays; the edit is a create of the same name, ready to review.
+    expect(state()).toMatchObject({ base: '', text: mine, strategy: null, missing: { name: 'v', text: VIEW } });
+    expect(state().target.name).toBeNull();
+    expect(state().open).toMatchObject({ object: null, strategies: [], strategy: null });
+    expect(store().isDirty(TAB)).toBe(true);
+    expect(store().findTab(target)).toBeNull();
+    // The original definition is still offered, and stays offered once put in the editor.
+    store().restore(TAB, VIEW);
+    expect(state()).toMatchObject({ text: VIEW, base: '', missing: { name: 'v', text: VIEW } });
+    // A successful create clears it.
+    await store().applied(TAB, {
+      outcome: 'applied',
+      error: null,
+      warnings: [],
+      statements_sent: 1,
+      executed: [],
+      failed: null,
+      object_state: 'changed',
+      restore_text: null,
+      object: { database: 'shop', schema: null, name: 'v', kind: 'View' },
+      text: VIEW,
+    } as DdlEditReport);
+    expect(state().missing).toBeNull();
+    expect(state().target.name).toBe('v');
+  });
+
   it('lost_on_connection_close', async () => {
     useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
     await store().load(TAB, target);

@@ -191,6 +191,24 @@ describe('DdlEditorTab', () => {
     expect(review()).toBeEnabled();
   });
 
+  it('a_missing_object_is_a_create_with_the_original_on_offer', async () => {
+    const user = userEvent.setup();
+    await setup(openOf({ server: serverInfo('Postgres', [17, 2, 0]), strategies: ['replace', 'recreate'], strategy: 'replace' }));
+    const mine = 'CREATE VIEW `v` AS select 2';
+    fireEvent.change(editor(), { target: { value: mine } });
+    act(() => useDdlEdits.getState().missing(TAB_ID, VIEW));
+    expect(screen.getByText('v no longer exists on the server. Applying this text creates it.')).toBeInTheDocument();
+    expect(screen.getByText('View · new')).toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup', { name: 'Strategy' })).not.toBeInTheDocument();
+    expect(editor().value).toBe(mine);
+    expect(review()).toBeEnabled();
+    const put = screen.getByRole('button', { name: 'Put the original definition in the editor' });
+    await user.click(put);
+    expect(editor().value).toBe(VIEW);
+    expect(put).toBeDisabled();
+    expect(review()).toBeEnabled();
+  });
+
   it('a_failed_open_shows_the_error_and_retries', async () => {
     const user = userEvent.setup();
     let calls = 0;
