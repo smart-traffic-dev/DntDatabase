@@ -1,5 +1,6 @@
 //! DDL edits against an in-process fake driver: the object's DDL, canned answers to
 //! the catalog reads (by statement prefix) and the objects `list_objects` returns.
+use super::apply::OWNER_NOT_RESTORED;
 use super::catalog::{MYSQL_SAME_TIMING_SQL, MYSQL_TRIGGER_SQL, PG_ROUTINE_SQL, PG_TRIGGER_SQL};
 use super::*;
 use async_trait::async_trait;
@@ -1264,6 +1265,39 @@ async fn stale_object_sends_nothing() {
     let e = apply(&f, p.plan_id, None).await.unwrap_err();
     assert!(matches!(&e, DbError::PlanStale { .. }), "{e:?}");
     assert!(!f.fake.sent().contains(&p.statements[0]));
+}
+
+#[tokio::test]
+async fn pg_recreate_owner_failure_is_explained() {
+    let fake = Fake::new(pg17(), PG_FUNC);
+    fake.answer(
+        PG_ROUTINE_SQL,
+        vec![vec!["1", "f", "x integer", "false", "false", "app_owner"]],
+    );
+    let f = fixture(fake, None, false).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    assert_eq!(
+        f.sm.ddl_edits
+            .get(o.edit_id)
+            .unwrap()
+            .facts
+            .owner
+            .as_deref(),
+        Some("app_owner")
+    );
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC.into(), Some(Strategy::Recreate))
+            .await
+            .unwrap();
+    assert_eq!(
+        p.statements.last().map(String::as_str),
+        Some("ALTER FUNCTION \"public\".\"f\" OWNER TO \"app_owner\"")
+    );
+    f.fake.fail_on("OWNER TO", server_error("42501"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::RolledBack, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unchanged);
+    assert_eq!(r.warnings, [OWNER_NOT_RESTORED], "{r:?}");
 }
 
 #[tokio::test]

@@ -9,8 +9,8 @@ use dnt_core::sql::classify;
 use dnt_core::sql::ddl_edit::{CatalogFacts, EditTarget};
 use dnt_core::value::{ColumnMeta, Value};
 
-pub(crate) const PG_ROUTINE_SQL: &str = "SELECT count(*) OVER ()::text, p.prokind::text, pg_get_function_identity_arguments(p.oid), (obj_description(p.oid, 'pg_proc') IS NOT NULL)::text, (p.proacl IS NOT NULL)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = $2";
-pub(crate) const PG_RELATION_SQL: &str = "SELECT c.oid::text, c.relkind::text, (obj_description(c.oid, 'pg_class') IS NOT NULL)::text, (c.relacl IS NOT NULL)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2";
+pub(crate) const PG_ROUTINE_SQL: &str = "SELECT count(*) OVER ()::text, p.prokind::text, pg_get_function_identity_arguments(p.oid), (obj_description(p.oid, 'pg_proc') IS NOT NULL)::text, (p.proacl IS NOT NULL)::text, NULLIF(pg_get_userbyid(p.proowner)::text, current_user::text) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = $2";
+pub(crate) const PG_RELATION_SQL: &str = "SELECT c.oid::text, c.relkind::text, (obj_description(c.oid, 'pg_class') IS NOT NULL)::text, (c.relacl IS NOT NULL)::text, NULLIF(pg_get_userbyid(c.relowner)::text, current_user::text) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2";
 pub(crate) const PG_RELOPTIONS_SQL: &str =
     "SELECT o FROM pg_class c, unnest(c.reloptions) WITH ORDINALITY u(o, n) WHERE c.oid = $1::oid ORDER BY n";
 pub(crate) const PG_VIEW_TRIGGERS_SQL: &str = "SELECT pg_get_triggerdef(t.oid) FROM pg_trigger t WHERE t.tgrelid = $1::oid AND NOT t.tgisinternal ORDER BY t.tgname";
@@ -158,6 +158,7 @@ pub(crate) async fn facts(
                     facts.identity_args = col(r, 2);
                     facts.has_comment = flag(r, 3);
                     facts.has_grants = flag(r, 4);
+                    facts.owner = col(r, 5);
                 }
             }
             ObjectKind::View | ObjectKind::MaterializedView => {
@@ -165,6 +166,7 @@ pub(crate) async fn facts(
                 if let Some(r) = found.first() {
                     facts.has_comment = flag(r, 2);
                     facts.has_grants = flag(r, 3);
+                    facts.owner = col(r, 4);
                     if let Some(oid) = col(r, 0) {
                         facts.reloptions = texts(session, PG_RELOPTIONS_SQL, &oid).await?;
                         if col(r, 1).as_deref() == Some("m") {

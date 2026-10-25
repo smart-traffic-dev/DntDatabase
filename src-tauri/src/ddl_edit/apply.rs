@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const NOT_RELOADED: &str = "The definition could not be reloaded; reopen the editor.";
+pub(crate) const OWNER_NOT_RESTORED: &str = "The re-created object could not be given back to its owner, so the change was rolled back. Apply it as the owner or a member of the owner's role, or use CREATE OR REPLACE.";
 const RECONNECTED: &str =
     "The connection was re-established during the apply; every statement completed.";
 
@@ -398,6 +399,16 @@ impl SessionManager {
                         action
                     };
                     report.outcome = edit_outcome(action);
+                    // The plan's last statement gives a re-created object back to its
+                    // owner (build); the server's "must be able to SET ROLE" alone does
+                    // not say why the edit ran it.
+                    let owner_failed = done + 1 == total
+                        && (done as u32) < sent
+                        && statements[done].starts_with("ALTER ")
+                        && statements[done].contains(" OWNER TO ");
+                    if owner_failed && action == ActionOutcome::RolledBack {
+                        report.warnings.push(OWNER_NOT_RESTORED.into());
+                    }
                     report.object_state = match action {
                         ActionOutcome::RolledBack | ActionOutcome::NotApplied => {
                             ObjectState::Unchanged

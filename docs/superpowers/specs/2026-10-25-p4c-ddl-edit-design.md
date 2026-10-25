@@ -108,7 +108,7 @@ pub fn strategies(t: &EditTarget, server: &ServerInfo) -> Vec<Strategy>;
 
 - `catalog.rs`: parameterised catalog reads on the edit's session (`ExecOptions::params`, PostgreSQL `$n`,
   MySQL `?`): PostgreSQL routine rows by schema + name (count, `prokind`, identity arguments, has comment,
-  has ACL), relation facts (oid, `relkind`, has comment, has ACL, `reloptions`, materialized-view index
+  has ACL, owner), relation facts (oid, `relkind`, has comment, has ACL, owner, `reloptions`, materialized-view index
   definitions via `pg_get_indexdef`), trigger rows by schema + name (count, table name, table oid, has comment); MySQL trigger
   facts (table, timing, event, number of other triggers with the same timing and event on that table).
 - `mod.rs`: `DdlEditStore { edits, plans, operations: DdlOperations }`, `ddl_edit_open`, `ddl_edit_preview`,
@@ -217,6 +217,8 @@ added by the executor (not listed in the preview, which says "Runs in one transa
 | PostgreSQL materialized view, edit | `DROP MATERIALIZED VIEW q(x) RESTRICT` · text · every former index definition | no | relation is a materialized view |
 | PostgreSQL trigger, edit | `DROP TRIGGER "t" ON q(table)` · text | no | trigger `t` exists on the original table's oid |
 | any, new | text | no | the object exists in the target schema |
+
+A PostgreSQL view, materialized view, function or procedure Recreate ends with `ALTER {KIND} q(x) OWNER TO <owner>` (routines named without arguments; the post-check makes the name unique), the owner read at open (only when it is not the connection's user), after the re-created indexes, triggers and rules. A failure rolls the transaction back and the report says the owner could not be restored.
 
 Warnings (concrete where the catalog knows): the MySQL gap ("Between DROP and CREATE the procedure does not
 exist; calls fail" / "writes to `orders` do not fire this trigger" / "a scheduled run may be missed"); MySQL

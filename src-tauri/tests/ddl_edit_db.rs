@@ -837,6 +837,64 @@ async fn pg_view_recreate_keeps_triggers_and_rules() {
 }
 
 #[tokio::test]
+async fn pg_recreate_keeps_owner() {
+    require_db!();
+    for t in Target::pg() {
+        let sc = Scratch::new(t).await;
+        let role = format!("p4c_owner_{}", &Uuid::new_v4().simple().to_string()[..12]);
+        sc.exec(&format!("CREATE ROLE {role} NOLOGIN")).await;
+        let r = AssertUnwindSafe(async {
+            let ns = sc.ns.clone();
+            create_t(&sc).await;
+            for stmt in [
+                format!("CREATE VIEW {ns}.v AS SELECT id FROM {ns}.t"),
+                format!("CREATE MATERIALIZED VIEW {ns}.mv AS SELECT id FROM {ns}.t"),
+                format!("CREATE FUNCTION {ns}.f(x integer) RETURNS integer LANGUAGE sql AS $$ SELECT x $$"),
+                format!("CREATE PROCEDURE {ns}.p() LANGUAGE sql AS $$ SELECT 1 $$"),
+                format!("ALTER VIEW {ns}.v OWNER TO {role}"),
+                format!("ALTER MATERIALIZED VIEW {ns}.mv OWNER TO {role}"),
+                format!("ALTER FUNCTION {ns}.f(integer) OWNER TO {role}"),
+                format!("ALTER PROCEDURE {ns}.p() OWNER TO {role}"),
+            ] {
+                sc.exec(&stmt).await;
+            }
+            let owner_of_rel = |name: &str| {
+                format!("SELECT pg_get_userbyid(relowner)::text FROM pg_class WHERE oid = '{ns}.{name}'::regclass")
+            };
+            let owner_of_proc = |name: &str| {
+                format!("SELECT pg_get_userbyid(p.proowner)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = '{ns}' AND p.proname = '{name}'")
+            };
+            for (kind, name, text, owner_sql) in [
+                (ObjectKind::View, "v", format!("CREATE VIEW {ns}.v AS SELECT id, a FROM {ns}.t"), owner_of_rel("v")),
+                (ObjectKind::MaterializedView, "mv", format!("CREATE MATERIALIZED VIEW {ns}.mv AS SELECT id, a FROM {ns}.t"), owner_of_rel("mv")),
+                // A new signature: the owner is set by name, not by the old arguments.
+                (ObjectKind::Function, "f", format!("CREATE FUNCTION {ns}.f(x bigint) RETURNS bigint LANGUAGE sql AS $$ SELECT x $$"), owner_of_proc("f")),
+                (ObjectKind::Procedure, "p", format!("CREATE PROCEDURE {ns}.p() LANGUAGE sql AS $$ SELECT 2 $$"), owner_of_proc("p")),
+            ] {
+                let o = sc.edit_open(kind, Some(name), None).await;
+                let p = sc.preview(o.edit_id, &text, Some(Strategy::Recreate)).await.unwrap();
+                assert!(
+                    p.statements.last().unwrap().ends_with(&format!("OWNER TO \"{role}\"")),
+                    "{t:?}: {:?}",
+                    p.statements
+                );
+                let r = sc.apply_plan(&p).await.unwrap();
+                assert_eq!(r.outcome, EditOutcome::Applied, "{t:?} {kind:?}: {r:?}");
+                assert_eq!(sc.one(&owner_sql).await, role, "{t:?} {kind:?}");
+            }
+        })
+        .catch_unwind()
+        .await;
+        let _ = sql(sc.s.as_ref(), &format!("DROP OWNED BY {role}")).await;
+        let dropped = sql(sc.s.as_ref(), &format!("DROP ROLE {role}")).await;
+        if r.is_ok() {
+            assert!(dropped.is_ok(), "{t:?}: DROP ROLE {role}: {dropped:?}");
+        }
+        sc.finish(r).await;
+    }
+}
+
+#[tokio::test]
 async fn mysql_trigger_gap_and_restore() {
     require_db!();
     each_target!([Target::MySql57, Target::MySql8], |sc| {

@@ -34,6 +34,10 @@ pub struct CatalogFacts {
     /// PostgreSQL views: `pg_get_ruledef` of every rule other than `_RETURN`, in order.
     #[serde(default)]
     pub rule_defs: Vec<String>,
+    /// PostgreSQL views, materialized views and routines: the owner role, when it is not the
+    /// connection's user (who owns what it re-creates anyway).
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// A read run inside the PostgreSQL transaction before COMMIT: one text value that
@@ -203,6 +207,26 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
             }
             _ => unreachable!("strategies() offers no other PostgreSQL edit"),
         }
+        // The re-created object belongs to the applying user: give it back to its
+        // owner, last (the triggers, rules and indexes above need the creator's rights).
+        // A routine is named without arguments: the post-check makes it the only one.
+        let owner = facts.owner.as_deref().filter(|_| {
+            dropped
+                && matches!(
+                    t.kind,
+                    ObjectKind::View
+                        | ObjectKind::MaterializedView
+                        | ObjectKind::Function
+                        | ObjectKind::Procedure
+                )
+        });
+        if let Some(owner) = owner {
+            out.statements.push(format!(
+                "ALTER {} {q} OWNER TO {}",
+                kind_word(t.kind),
+                quote_ident(DbKind::Postgres, owner)
+            ));
+        }
         // Post-check.
         match t.kind {
             ObjectKind::Function | ObjectKind::Procedure => {
@@ -257,6 +281,9 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
             }
             if t.kind == ObjectKind::MaterializedView {
                 out.warnings.push(MV_REFILL.into());
+            }
+            if let Some(owner) = owner {
+                out.warnings.push(owner_warning(what, owner));
             }
             if t.kind == ObjectKind::View {
                 let count = |n: usize, one: &str| match n {
@@ -367,6 +394,11 @@ fn missing_fact(field: &str, what: &str) -> DbError {
         field: Some(field.into()),
         message: format!("The object's {what} is not known; reopen the editor."),
     }
+}
+
+/// The warning of a PostgreSQL re-create that gives the object back to `owner`.
+fn owner_warning(what: &str, owner: &str) -> String {
+    format!("The re-created {what} is given back to its owner {owner}; if you cannot act as {owner}, the change is rolled back.")
 }
 
 fn not_one_routine(name: &str) -> String {
@@ -1145,6 +1177,101 @@ mod tests {
         let b = ok(&v, text, Some(Strategy::Replace), &pg17(), &facts);
         assert_eq!(b.statements.len(), 1);
         assert!(!b.warnings.iter().any(|w| w.contains("re-created after it")));
+    }
+
+    #[test]
+    fn pg_recreate_restores_owner() {
+        let owner = CatalogFacts {
+            owner: Some("App Owner".into()),
+            identity_args: Some("a integer".into()),
+            ..Default::default()
+        };
+        let note = |what: &str| {
+            format!("The re-created {what} is given back to its owner App Owner; if you cannot act as App Owner, the change is rolled back.")
+        };
+        // View.
+        let v = pg_target(ObjectKind::View, Some("v"));
+        let b = ok(
+            &v,
+            "CREATE VIEW public.v AS SELECT 1",
+            Some(Strategy::Recreate),
+            &pg17(),
+            &owner,
+        );
+        assert_eq!(
+            b.statements.last().unwrap(),
+            "ALTER VIEW \"public\".\"v\" OWNER TO \"App Owner\""
+        );
+        assert!(b.warnings.contains(&note("view")), "{:?}", b.warnings);
+        // Replace keeps the owner.
+        let b = ok(
+            &v,
+            "CREATE VIEW public.v AS SELECT 1",
+            Some(Strategy::Replace),
+            &pg17(),
+            &owner,
+        );
+        assert_eq!(b.statements.len(), 1);
+        assert!(!b.warnings.contains(&note("view")));
+        // Materialized view: after its indexes.
+        let mv = pg_target(ObjectKind::MaterializedView, Some("mv"));
+        let mut facts = owner.clone();
+        facts.index_defs = strs(&["CREATE INDEX i ON public.mv USING btree (a)"]);
+        let b = ok(
+            &mv,
+            "CREATE MATERIALIZED VIEW public.mv AS SELECT 1 AS a",
+            Some(Strategy::Recreate),
+            &pg12(),
+            &facts,
+        );
+        assert_eq!(
+            b.statements[2..],
+            strs(&[
+                "CREATE INDEX i ON public.mv USING btree (a)",
+                "ALTER MATERIALIZED VIEW \"public\".\"mv\" OWNER TO \"App Owner\"",
+            ])
+        );
+        assert!(b.warnings.contains(&note("materialized view")));
+        // Routines: by name (the post-check makes it the only one; its arguments may
+        // have changed).
+        for (kind, word) in [
+            (ObjectKind::Function, "FUNCTION"),
+            (ObjectKind::Procedure, "PROCEDURE"),
+        ] {
+            let t = pg_target(kind, Some("f"));
+            let text = match kind {
+                ObjectKind::Function => {
+                    "CREATE FUNCTION public.f(b text) RETURNS int LANGUAGE sql AS 'SELECT 1'"
+                }
+                _ => "CREATE PROCEDURE public.f(b text) LANGUAGE sql AS 'SELECT 1'",
+            };
+            let b = ok(&t, text, Some(Strategy::Recreate), &pg17(), &owner);
+            assert_eq!(
+                b.statements,
+                vec![
+                    format!("DROP {word} \"public\".\"f\"(a integer) RESTRICT"),
+                    text.to_string(),
+                    format!("ALTER {word} \"public\".\"f\" OWNER TO \"App Owner\""),
+                ]
+            );
+        }
+        // A trigger has no owner.
+        let mut trg = pg_target(ObjectKind::Trigger, Some("trg"));
+        trg.table = Some("orders".into());
+        let tf = CatalogFacts {
+            owner: Some("x".into()),
+            table: Some("orders".into()),
+            table_oid: Some(1),
+            ..Default::default()
+        };
+        let b = ok(
+            &trg,
+            "CREATE TRIGGER trg BEFORE UPDATE ON orders FOR EACH ROW EXECUTE FUNCTION public.f()",
+            Some(Strategy::Recreate),
+            &pg17(),
+            &tf,
+        );
+        assert_eq!(b.statements.len(), 2);
     }
 
     #[test]
