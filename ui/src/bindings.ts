@@ -970,6 +970,38 @@ async snippetsDelete(id: string) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async ddlEditOpen(connectionId: string, scope: Scope, kind: ObjectKind, name: string | null, table: string | null) : Promise<Result<DdlEditOpen, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ddl_edit_open", { connectionId, scope, kind, name, table }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async ddlEditPreview(editId: string, text: string, strategy: Strategy | null) : Promise<Result<DdlEditPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ddl_edit_preview", { editId, text, strategy }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async ddlEditCancel(operationId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ddl_edit_cancel", { operationId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async ddlEditClose(editId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ddl_edit_close", { editId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1196,6 +1228,20 @@ export type DataFilter = { mode: FilterMode; conditions: FilterCond[];
 raw_where?: string | null }
 export type DatabaseInfo = { name: string }
 export type DbKind = "mysql" | "postgres"
+export type DdlEditOpen = { edit_id: string; text: string; target: EditTarget; object: ObjectRef | null; server: ServerInfo; env: EnvTag | null; read_only: boolean; strategies: Strategy[]; strategy: Strategy | null; 
+/**
+ * The edit is not possible (read-only, overloads, DDL not shown).
+ */
+blocked_reason: string | null; 
+/**
+ * Engine/kind notes shown in the editor header.
+ */
+notes: string[] }
+export type DdlEditPreview = { plan_id: string; statements: string[]; warnings: string[]; 
+/**
+ * One sentence per check run before COMMIT (PostgreSQL).
+ */
+checks: string[]; transactional: boolean; gap: boolean; confirm_name: string | null; expires_in_seconds: number }
 export type DefaultSpec = 
 /**
  * A literal value, unquoted (rendered through the SQL literal builder).
@@ -1274,6 +1320,22 @@ export type EditSet = { object: ObjectRef; edits: RowEdit[];
  * Drop every row guard (an explicit "Overwrite" after a conflict).
  */
 overwrite: boolean }
+/**
+ * What the edited text must define and where.
+ */
+export type EditTarget = { kind: ObjectKind; database: string; 
+/**
+ * PostgreSQL only.
+ */
+schema: string | null; 
+/**
+ * `None`: a new object.
+ */
+name: string | null; 
+/**
+ * A trigger's table (edit: from the catalog; new: optional hint).
+ */
+table: string | null }
 /**
  * Whether the data view may edit an object, and how (`data_editable`).
  */
@@ -1901,6 +1963,10 @@ export type StopReason =
  * `index`: "sql_mode changed; run the remaining statements again".
  */
 { kind: "dialect_changed"; index: number }
+/**
+ * How an existing object is changed: `CREATE OR REPLACE`, or drop and re-create.
+ */
+export type Strategy = "replace" | "recreate"
 /**
  * The transaction of a query tab, for the status bar and the idle-transaction warning.
  */

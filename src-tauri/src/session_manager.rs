@@ -371,6 +371,8 @@ pub struct SessionManager {
     pub(crate) data_page_cap: usize,
     /// How long `close` waits for a running edit apply before it cancels it.
     pub(crate) apply_close_wait: Duration,
+    /// Open DDL edits, their plans and applies (see `ddl_edit`).
+    pub(crate) ddl_edits: crate::ddl_edit::DdlEditStore,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -423,6 +425,7 @@ impl SessionManager {
             data_cell_cap: crate::data_sessions::MAX_CELL_BYTES,
             data_page_cap: crate::data_sessions::MAX_PAGE_BYTES,
             apply_close_wait: SLOT_CLOSE_WAIT,
+            ddl_edits: crate::ddl_edit::DdlEditStore::default(),
         }
     }
 
@@ -777,6 +780,7 @@ impl SessionManager {
         // still ends with its `done` event.
         self.object_cancel_connection(id).await;
         self.design_cancel_connection(id).await;
+        self.ddl_edit_cancel_connection(id).await;
         self.stop_runs(|r| r.conn == id).await;
         self.bump_generation(id);
         let rt = self
