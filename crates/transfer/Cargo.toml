@@ -1,0 +1,25 @@
+[package]
+name = "dnt-transfer"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_transfer"
+
+[dependencies]
+calamine.workspace = true
+csv.workspace = true
+dnt-core.workspace = true
+flate2.workspace = true
+hex.workspace = true
+serde.workspace = true
+# raw_value: keep JSON numbers and nested values verbatim (additive; no behaviour change elsewhere).
+serde_json = { workspace = true, features = ["raw_value"] }
+sha2.workspace = true
+specta.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "=1.5.0"
+rust_xlsxwriter.workspace = true
+tempfile.workspace = true
