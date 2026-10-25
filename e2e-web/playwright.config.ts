@@ -5,7 +5,8 @@ import { defineConfig, devices } from '@playwright/test';
 //
 // A port of its own: 5173 belongs to `pnpm tauri dev` and to whatever else the machine
 // happens to run, and `reuseExistingServer` would happily reuse that server.
-const PORT = 5174;
+// `E2E_WEB_PORT` lets parallel checkouts (worktrees) each run their own server.
+const PORT = Number(process.env.E2E_WEB_PORT ?? 5174);
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
