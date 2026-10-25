@@ -2237,7 +2237,8 @@ impl RunTask {
         let mut sink = ChannelSink::new(
             Arc::clone(&self.emit),
             Arc::clone(&self.flags),
-            self.exec.batch_size,
+            // The driver decodes in STREAM_BATCH_SIZE rows; UI events stay coalesced.
+            RUN_BATCH_SIZE,
             self.plan.dialect,
             HistoryCtx {
                 repo: Arc::clone(&self.repo),
