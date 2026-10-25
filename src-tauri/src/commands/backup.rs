@@ -11,6 +11,7 @@ use crate::backup::{
 use crate::file_picks::FileAccess;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
+use dnt_transfer::tools::PgDumpFormat;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
@@ -40,6 +41,30 @@ pub fn dump_file_name(base_name: &str, compress: bool) -> String {
     format!("{}.{ext}", file_stem(base_name))
 }
 
+/// The save dialog's file name, filter name and filter extension of a dump: a pg_dump
+/// archive (`custom` / `tar`) gets `.dump` / `.tar` (already compressed or not, never
+/// gzipped by the app); otherwise `.sql` / `.sql.gz` per `compress`.
+pub fn dump_file_kind(
+    base_name: &str,
+    compress: bool,
+    format: Option<PgDumpFormat>,
+) -> (String, &'static str, &'static str) {
+    match format {
+        Some(PgDumpFormat::Custom) => (
+            format!("{}.dump", file_stem(base_name)),
+            "pg_dump custom archive",
+            "dump",
+        ),
+        Some(PgDumpFormat::Tar) => (
+            format!("{}.tar", file_stem(base_name)),
+            "pg_dump tar archive",
+            "tar",
+        ),
+        _ if compress => (dump_file_name(base_name, true), "Compressed SQL dump", "gz"),
+        _ => (dump_file_name(base_name, false), "SQL dump", "sql"),
+    }
+}
+
 /// The tables, views (PostgreSQL also stand-alone sequences and types) the built-in dump
 /// can hold, and the objects it skips with the reason (R22).
 #[tauri::command]
@@ -54,7 +79,8 @@ pub async fn dump_objects(
 }
 
 /// Opens the save dialog for a dump file from the backend and admits the picked path for
-/// `dump_start`. `None`: cancelled.
+/// `dump_start` / `tool_dump_start`. `format`: a pg_dump tool dump's format (`custom` /
+/// `tar` name the file `.dump` / `.tar`); `null` for SQL output. `None`: cancelled.
 #[tauri::command]
 #[specta::specta]
 pub async fn dump_pick_path(
@@ -62,19 +88,16 @@ pub async fn dump_pick_path(
     state: State<'_, AppState>,
     base_name: String,
     compress: bool,
+    format: Option<PgDumpFormat>,
 ) -> Result<Option<String>, AppError> {
     guard(async move {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let (filter, ext) = if compress {
-            ("Compressed SQL dump", "gz")
-        } else {
-            ("SQL dump", "sql")
-        };
+        let (file_name, filter, ext) = dump_file_kind(&base_name, compress, format);
         window
             .dialog()
             .file()
             .set_parent(&window)
-            .set_file_name(dump_file_name(&base_name, compress))
+            .set_file_name(file_name)
             .add_filter(filter, &[ext])
             .save_file(move |picked| {
                 let _ = tx.send(picked);
@@ -239,5 +262,25 @@ mod tests {
         assert_eq!(dump_file_name("shop", false), "shop.sql");
         assert_eq!(dump_file_name("shop", true), "shop.sql.gz");
         assert_eq!(dump_file_name("a/b:c", false), "a_b_c.sql");
+    }
+
+    #[test]
+    fn dump_file_kinds() {
+        assert_eq!(
+            dump_file_kind("shop", false, None),
+            ("shop.sql".to_string(), "SQL dump", "sql")
+        );
+        assert_eq!(
+            dump_file_kind("shop", true, Some(PgDumpFormat::Plain)),
+            ("shop.sql.gz".to_string(), "Compressed SQL dump", "gz")
+        );
+        assert_eq!(
+            dump_file_kind("shop", true, Some(PgDumpFormat::Custom)).0,
+            "shop.dump"
+        );
+        assert_eq!(
+            dump_file_kind("shop", false, Some(PgDumpFormat::Tar)).0,
+            "shop.tar"
+        );
     }
 }

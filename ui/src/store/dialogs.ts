@@ -54,9 +54,11 @@ export type UiRequest =
       schema?: string | null;
       table?: string;
       params?: { kind: 'dump'; request: DumpRequest } | { kind: 'tool_dump'; request: ToolDumpRequest };
+      /** Set by every "Run again": a fresh dialog even when the same job is re-run twice. */
+      rerun?: number;
     }
   /** The restore dialog; `params` from "Run again" (R5: analyzed and confirmed again). */
-  | { kind: 'restore'; connectionId: string; database?: string; params?: RestoreRequest };
+  | { kind: 'restore'; connectionId: string; database?: string; params?: RestoreRequest; rerun?: number };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =

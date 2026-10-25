@@ -1,4 +1,4 @@
-import { useEffect, useState, type UIEvent } from 'react';
+import { useEffect, useRef, useState, type UIEvent } from 'react';
 import { api, toAppError } from '../../api';
 import type { RestorePreview, RestoreRequest, ScanStats } from '../../bindings';
 import { EnvTag } from '../../components/EnvTag';
@@ -99,12 +99,17 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
   const [singleTransaction, setSingleTransaction] = useState(params?.single_transaction ?? true);
   const [clean, setClean] = useState(params?.clean ?? false);
   const [noOwner, setNoOwner] = useState(params?.no_owner ?? false);
-  const [preview, setPreview] = useState<RestorePreview | null>(null);
+  // The analysis together with the request it answered: the confirmation names what was analyzed.
+  const [analyzed, setAnalyzed] = useState<{ request: RestoreRequest; preview: RestorePreview } | null>(null);
+  const preview = analyzed?.preview ?? null;
   const [failure, setFailure] = useState<Failure | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [starting, setStarting] = useState(false);
   const [picking, setPicking] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation>(NO_CONFIRMATION);
+  const [databasesError, setDatabasesError] = useState<string | null>(null);
+  // Bumped by every analysis and every input change: an answer for an older one is dropped.
+  const analysisSeq = useRef(0);
 
   useEffect(() => {
     let live = true;
@@ -115,8 +120,8 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
         setDatabases(names);
         setTarget((current) => current || names[0] || '');
       },
-      // The database stays as given; the analysis reports a wrong one.
-      () => undefined,
+      // The database stays as given (the analysis reports a wrong one); say why the list is short.
+      (e) => live && setDatabasesError(`The databases could not be listed: ${toAppError(e).message}`),
     );
     return () => {
       live = false;
@@ -125,7 +130,10 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
 
   /** Every input change drops the analysis: its plan was made for the old inputs. */
   const changed = () => {
-    setPreview(null);
+    analysisSeq.current += 1;
+    // An analysis in flight is abandoned (its answer is dropped).
+    setAnalyzing(false);
+    setAnalyzed(null);
     setFailure(null);
     setConfirmation(NO_CONFIRMATION);
   };
@@ -139,7 +147,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
         changed();
       }
     } catch (e) {
-      setFailure({ message: toAppError(e).message, unsupported: false });
+      setFailure({ message: restoreMessage(toAppError(e)), unsupported: false });
     } finally {
       setPicking(false);
     }
@@ -154,14 +162,16 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
     const req = request();
     if (!req) return;
     changed();
+    const seq = analysisSeq.current;
     setAnalyzing(true);
     try {
-      setPreview(await api.restorePreview(req));
+      const result = await api.restorePreview(req);
+      if (seq === analysisSeq.current) setAnalyzed({ request: req, preview: result });
     } catch (e) {
       const err = toAppError(e);
-      setFailure({ message: restoreMessage(err), unsupported: err.kind === 'unsupported' });
+      if (seq === analysisSeq.current) setFailure({ message: restoreMessage(err), unsupported: err.kind === 'unsupported' });
     } finally {
-      setAnalyzing(false);
+      if (seq === analysisSeq.current) setAnalyzing(false);
     }
   };
 
@@ -178,8 +188,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
     } catch (e) {
       // The plan is single use: whatever failed, the file must be analyzed again.
       const err = toAppError(e);
-      setPreview(null);
-      setConfirmation(NO_CONFIRMATION);
+      changed();
       setFailure({ message: restoreMessage(err), unsupported: err.kind === 'unsupported' });
       setStarting(false);
     }
@@ -189,7 +198,10 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
     if (!starting) onClose();
   };
 
-  const canAnalyze = !!path && !!target && !analyzing && !starting && !picking && !readOnly;
+  // While a file is analyzed or a restore starts, the inputs stay as they were sent.
+  const busy = analyzing || starting || picking;
+  const analyzedDatabase = analyzed?.request.database ?? target;
+  const canAnalyze = !!path && !!target && !busy && !readOnly;
   const canStart = !!preview && !starting && !analyzing && !readOnly && confirmationDone(preview, confirmation);
   const options = databases.includes(target) || !target ? databases : [target, ...databases];
 
@@ -213,7 +225,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
               <span className="hint">No file chosen.</span>
             )}
             <span className="spacer" />
-            <button type="button" className="btn" disabled={picking || starting} onClick={() => void browse()}>
+            <button type="button" className="btn" disabled={busy} onClick={() => void browse()}>
               Browse…
             </button>
           </div>
@@ -230,6 +242,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
             <span className="field-label">Database</span>
             <select
               value={target}
+              disabled={busy}
               onChange={(e) => {
                 setTarget(e.target.value);
                 changed();
@@ -242,11 +255,13 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
               ))}
             </select>
           </label>
+          {databasesError && <p className="field-error">{databasesError}</p>}
           {pg && (
             <div className="backup-options">
               <label className="check">
                 <input
                   type="checkbox"
+                  disabled={busy}
                   checked={singleTransaction}
                   onChange={(e) => {
                     setSingleTransaction(e.target.checked);
@@ -258,6 +273,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
               <label className="check">
                 <input
                   type="checkbox"
+                  disabled={busy}
                   checked={clean}
                   onChange={(e) => {
                     setClean(e.target.checked);
@@ -269,6 +285,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
               <label className="check">
                 <input
                   type="checkbox"
+                  disabled={busy}
                   checked={noOwner}
                   onChange={(e) => {
                     setNoOwner(e.target.checked);
@@ -364,7 +381,7 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
             {preview.confirm.kind === 'click' && (
               <label className="check">
                 <input type="checkbox" checked={confirmation.understood} onChange={(e) => setConfirmation({ ...confirmation, understood: e.target.checked })} />
-                <span>I understand that the restore changes {target}</span>
+                <span>I understand that the restore changes {analyzedDatabase}</span>
               </label>
             )}
             {preview.confirm.kind === 'type_name' && (

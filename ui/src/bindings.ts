@@ -1199,11 +1199,12 @@ async dumpObjects(connectionId: string, database: string, schemas: string[]) : P
 },
 /**
  * Opens the save dialog for a dump file from the backend and admits the picked path for
- * `dump_start`. `None`: cancelled.
+ * `dump_start` / `tool_dump_start`. `format`: a pg_dump tool dump's format (`custom` /
+ * `tar` name the file `.dump` / `.tar`); `null` for SQL output. `None`: cancelled.
  */
-async dumpPickPath(baseName: string, compress: boolean) : Promise<Result<string | null, AppError>> {
+async dumpPickPath(baseName: string, compress: boolean, format: PgDumpFormat | null) : Promise<Result<string | null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("dump_pick_path", { baseName, compress }) };
+    return { status: "ok", data: await TAURI_INVOKE("dump_pick_path", { baseName, compress, format }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

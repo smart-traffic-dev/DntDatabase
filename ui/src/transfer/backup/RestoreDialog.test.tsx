@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RestorePreview, RestoreRequest } from '../../bindings';
@@ -163,7 +163,8 @@ describe('RestoreDialog', () => {
     const onClose = open();
     await pickAndAnalyze(u);
     await u.click(startButton());
-    expect(await screen.findByText('The file or the connection changed; analyze again.')).toBeInTheDocument();
+    // The backend's reason follows the instruction.
+    expect(await screen.findByRole('alert')).toHaveTextContent("The file or the connection changed; analyze again. (the table's structure changed)");
     expect(onClose).not.toHaveBeenCalled();
     // The plan is used up: no preview, Start disabled until analyzed again.
     expect(screen.queryByTestId('restore-preview')).toBeNull();
@@ -219,6 +220,60 @@ describe('RestoreDialog', () => {
     expect(startButton()).toBeDisabled();
   });
 
+  it('a late analysis for inputs changed meanwhile is dropped; inputs are locked while it runs', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'shop-stg', { env_tag: 'staging' })]);
+    const pending: Array<(v: RestorePreview) => void> = [];
+    backend({ restore_preview: () => new Promise<RestorePreview>((resolve) => pending.push(resolve)) });
+    const u = user();
+    open();
+    await u.click(screen.getByRole('button', { name: 'Browse…' }));
+    await screen.findByText('C:\\dumps\\shop.sql');
+    await u.click(analyze());
+    await waitFor(() => expect(pending).toHaveLength(1));
+    const select = screen.getByLabelText('Database');
+    expect(select).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Browse…' })).toBeDisabled();
+    // A change that still gets through (the select is disabled for the user) drops the analysis in flight.
+    fireEvent.change(select, { target: { value: 'shop_copy' } });
+    await act(async () => pending[0]!(preview({ confirm: { kind: 'click' } })));
+    expect(screen.queryByTestId('restore-preview')).toBeNull();
+    expect(startButton()).toBeDisabled();
+
+    // Analyzed for shop_copy: the confirmation names the analyzed database.
+    await waitFor(() => expect(analyze()).toBeEnabled());
+    await u.click(analyze());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(callsOf('restore_preview')[1]?.request).toMatchObject({ database: 'shop_copy' });
+    await act(async () => pending[1]!(preview({ plan_id: 'plan-8', confirm: { kind: 'click' } })));
+    await screen.findByTestId('restore-preview');
+    await u.click(screen.getByLabelText('I understand that the restore changes shop_copy'));
+    await u.click(startButton());
+    expect(callsOf('restore_start')).toEqual([{ planId: 'plan-8', confirmed: true, name: null }]);
+  });
+
+  it('a database list failure is shown; the given database stays', async () => {
+    backend({
+      list_databases: () => {
+        throw fail('not_open');
+      },
+    });
+    open();
+    expect(await screen.findByText(/^The databases could not be listed: /)).toBeInTheDocument();
+    expect(screen.getByLabelText('Database')).toHaveValue('shop');
+  });
+
+  it('a file picked before a restart must be chosen again', async () => {
+    backend({
+      restore_preview: () => {
+        throw appError('config', 'Choose the file in the file dialog.', { field: 'path' });
+      },
+    });
+    const u = user();
+    open({ database: 'shop', params: { connection_id: ids.prod, database: 'shop', path: 'C:\\dumps\\shop.sql', single_transaction: true, clean: false, no_owner: false } });
+    await u.click(analyze());
+    expect(await screen.findByRole('alert')).toHaveTextContent('Choose the file again (files picked before a restart must be chosen again).');
+  });
+
   it('read-only connections cannot analyze', async () => {
     useConnections.getState().setStored([], [config(ids.prod, 'ro', { read_only: true })]);
     backend();
@@ -243,7 +298,7 @@ describe('Run again (restore)', () => {
 
   it('reopens pre-filled and requires Analyze and confirmation again', async () => {
     expect(rerun({ kind: 'restore', request: request as never })).toBe(true);
-    expect(useDialogs.getState().request).toEqual({ kind: 'restore', connectionId: ids.prod, database: 'shop', params: request });
+    expect(useDialogs.getState().request).toEqual({ kind: 'restore', connectionId: ids.prod, database: 'shop', params: request, rerun: expect.any(Number) });
     expect(rerun({ kind: 'tool_restore', request: request as never })).toBe(true);
     expect(useDialogs.getState().request).toMatchObject({ kind: 'restore', params: request });
 

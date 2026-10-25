@@ -353,7 +353,7 @@ export function DialogHost() {
   } else if (request?.kind === 'dump') {
     dialog = (
       <DumpDialog
-        key={`${request.connectionId}:${request.database}.${request.schema ?? ''}.${request.table ?? ''}:${request.params ? 'rerun' : ''}`}
+        key={`${request.connectionId}:${request.database}.${request.schema ?? ''}.${request.table ?? ''}:${request.rerun ?? ''}`}
         connectionId={request.connectionId}
         database={request.database}
         schema={request.schema}
@@ -365,7 +365,7 @@ export function DialogHost() {
   } else if (request?.kind === 'restore') {
     dialog = (
       <RestoreDialog
-        key={`${request.connectionId}:${request.database ?? ''}:${request.params ? 'rerun' : ''}`}
+        key={`${request.connectionId}:${request.database ?? ''}:${request.rerun ?? ''}`}
         connectionId={request.connectionId}
         database={request.database}
         params={request.params}

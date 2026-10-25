@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { api, toAppError } from '../../api';
 import type {
   DumpObject,
@@ -17,7 +17,7 @@ import { Modal } from '../../dialogs/Modal';
 import { useConnections } from '../../store/connections';
 import type { UiRequest } from '../../store/dialogs';
 import { useJobs } from '../../store/jobs';
-import { TOOL_LABEL } from './backupFormat';
+import { pickedFileMessage, TOOL_LABEL } from './backupFormat';
 import './backup.css';
 
 /** What "Run again" hands the dialog: the stored request of a built-in or a tool dump. */
@@ -71,6 +71,9 @@ const PG_DEFAULTS: PgDumpOptions = {
   no_privileges: false,
 };
 
+/** What the output file's extension depends on: a pg_dump archive format, else `.sql` / `.sql.gz`. */
+const fileKindOf = (format: PgDumpFormat, compress: boolean) => (format !== 'plain' ? format : compress ? 'sql.gz' : 'sql');
+
 /**
  * The dump dialog (spec §7.4): the built-in dump or an external tool, the objects to dump (with
  * the data toggle of each table and the objects the built-in dump skips), the options and the
@@ -100,7 +103,13 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
   const [compress, setCompress] = useState(params?.request.compress ?? false);
   const [mysql, setMysql] = useState<MysqlDumpOptions>(toolParams?.mysql ?? MYSQL_DEFAULTS);
   const [pgOpts, setPgOpts] = useState<PgDumpOptions>(toolParams?.pg ?? PG_DEFAULTS);
-  const [path, setPath] = useState<string | null>(params?.request.path ?? null);
+  // The output file with the kind (extension) it was picked for.
+  const [picked, setPicked] = useState<{ path: string; kind: string } | null>(() => {
+    if (!params) return null;
+    const format = params.kind === 'tool_dump' && params.request.tool === 'pg_dump' ? (params.request.pg?.format ?? 'plain') : 'plain';
+    return { path: params.request.path, kind: fileKindOf(format, params.request.compress) };
+  });
+  const methodRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [picking, setPicking] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -136,12 +145,14 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
 
   useEffect(() => {
     if (schemas === null) return;
+    // The listing of other schemas is stale: nothing can start until this one answers.
+    setListing(null);
+    setListError(null);
     if (pg && schemas.length === 0) {
       setListing({ objects: [], skipped: [] });
       return;
     }
     let live = true;
-    setListError(null);
     api.dumpObjects(connectionId, database, schemas).then(
       (result) => {
         if (!live) return;
@@ -185,12 +196,17 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
   }
 
   const objects = listing?.objects ?? [];
-  const selected = objects.filter((o) => picks[keyOf(o)]?.on);
-  const allOn = selected.length === objects.length;
   const builtin = method === 'builtin';
+  // External tools dump types with their tables and cannot name one: types are listed for the built-in dump only.
+  const visible = builtin ? objects : objects.filter((o) => o.kind !== 'Type');
+  const selected = visible.filter((o) => picks[keyOf(o)]?.on);
+  const allOn = selected.length === visible.length;
   const toolInfo = builtin ? null : (tools?.tools.find((t) => t.tool === method) ?? null);
   const archive = method === 'pg_dump' && pgOpts.format !== 'plain';
   const toolMethods: Tool[] = pg ? ['pg_dump'] : ['mysql_dump', 'mariadb_dump'];
+  const fileKind = fileKindOf(archive ? pgOpts.format : 'plain', compress);
+  // A file picked for another kind (extension) no longer fits: Browse again.
+  const path = picked && picked.kind === fileKind ? picked.path : null;
   const toolOutputEmpty = !builtin && (pg ? !pgOpts.structure && !pgOpts.data : !mysql.structure && !mysql.data);
 
   const display = (o: { schema: string | null; name: string }) => (pg && o.schema ? `${o.schema}.${o.name}` : o.name);
@@ -211,13 +227,6 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
     setSchemas(next.sort((a, b) => rank(a) - rank(b) || a.localeCompare(b)));
   };
 
-  /** The picked file's extension follows Compress: changing it asks for a file again. */
-  const changeCompress = (value: boolean) => {
-    if (value === compress) return;
-    setCompress(value);
-    setPath(null);
-  };
-
   const baseName = () => {
     if (table) return table;
     if (pg && schemas?.length === 1) return `${database}-${schemas[0]}`;
@@ -228,8 +237,8 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
     setPicking(true);
     setError(null);
     try {
-      const picked = await api.dumpPickPath(baseName(), compress && !archive);
-      if (picked) setPath(picked);
+      const chosen = await api.dumpPickPath(baseName(), compress && !archive, method === 'pg_dump' ? pgOpts.format : null);
+      if (chosen) setPicked({ path: chosen, kind: fileKind });
     } catch (e) {
       setError(toAppError(e).message);
     } finally {
@@ -277,7 +286,8 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
       showJobs();
       void useJobs.getState().load();
     } catch (e) {
-      setError(toAppError(e).message);
+      const err = toAppError(e);
+      setError(pickedFileMessage(err) ?? err.message);
       setStarting(false);
     }
   };
@@ -287,20 +297,51 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
   };
 
   const methodLabel = (m: Method) => (m === 'builtin' ? 'Built-in' : TOOL_LABEL[m]);
+  const methods: Method[] = ['builtin', ...toolMethods];
+
+  const onMethodKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
+    const last = methods.length - 1;
+    const to =
+      e.key === 'ArrowRight' || e.key === 'ArrowDown'
+        ? (i + 1) % methods.length
+        : e.key === 'ArrowLeft' || e.key === 'ArrowUp'
+          ? (i + last) % methods.length
+          : e.key === 'Home'
+            ? 0
+            : e.key === 'End'
+              ? last
+              : null;
+    if (to === null) return;
+    e.preventDefault();
+    const next = methods[to];
+    if (!next) return;
+    setMethod(next);
+    methodRefs.current[to]?.focus();
+  };
+
+  // "Dump table…" on a table the built-in dump skips (a PostgreSQL partitioned table, …): say why.
+  const skippedTable = table && listing ? listing.skipped.find((s) => s.name === table && (!schema || s.schema === schema)) : undefined;
+  const nothingSelected = !!listing && selected.length === 0 && objects.length > 0;
 
   return (
     <Modal title={table ? `Dump table ${table}` : `Dump ${database}`} onClose={close} className="backup-dialog" testId="dump-dialog">
       <div className="modal-body stack backup-body">
         <section className="stack" aria-label="Method">
           <div className="segmented backup-methods" role="radiogroup" aria-label="Dump method">
-            {(['builtin', ...toolMethods] as Method[]).map((m) => (
+            {methods.map((m, i) => (
               <button
                 key={m}
+                ref={(el) => {
+                  methodRefs.current[i] = el;
+                }}
                 type="button"
                 role="radio"
                 aria-checked={method === m}
+                // A radio group: one Tab stop, the arrow keys move the choice.
+                tabIndex={method === m ? 0 : -1}
                 className={`segment${method === m ? ' on' : ''}`}
                 onClick={() => setMethod(m)}
+                onKeyDown={(e) => onMethodKey(e, i)}
               >
                 {methodLabel(m)}
               </button>
@@ -380,7 +421,7 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
             <div className="backup-objects" data-testid="dump-objects">
               {objects.length === 0 && <p className="hint">Nothing to dump here.</p>}
               {GROUPS.map(({ kind, label }) => {
-                const group = objects.filter((o) => o.kind === kind);
+                const group = visible.filter((o) => o.kind === kind);
                 if (group.length === 0) return null;
                 const dataColumn = builtin && kind === 'Table';
                 return (
@@ -417,7 +458,16 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
               })}
             </div>
           )}
-          {listing && objects.length > 0 && selected.length === 0 && <p className="field-error">Choose at least one object.</p>}
+          {nothingSelected && (
+            <p className="field-error">
+              {builtin ? 'Choose at least one object.' : `Choose at least one ${pg ? 'table, view or sequence' : 'table or view'} for ${methodLabel(method)}.`}
+            </p>
+          )}
+          {skippedTable && (
+            <p className="backup-note">
+              {table} is not in the built-in dump: {skippedTable.reason}
+            </p>
+          )}
           {builtin && listing && listing.skipped.length > 0 && (
             <details className="backup-skipped" data-testid="dump-skipped">
               <summary>Not in the built-in dump ({listing.skipped.length})</summary>
@@ -482,7 +532,6 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
                     onChange={(e) => {
                       const format = e.target.value as PgDumpFormat;
                       setPgOpts({ ...pgOpts, format });
-                      if (format !== 'plain') changeCompress(false);
                     }}
                   >
                     <option value="plain">Plain SQL</option>
@@ -493,7 +542,7 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
               </>
             )}
             <label className="check">
-              <input type="checkbox" checked={compress && !archive} disabled={archive} onChange={(e) => changeCompress(e.target.checked)} />
+              <input type="checkbox" checked={compress && !archive} disabled={archive} onChange={(e) => setCompress(e.target.checked)} />
               <span>Compress (.sql.gz)</span>
             </label>
           </div>

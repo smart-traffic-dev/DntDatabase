@@ -7,13 +7,19 @@ import { useDialogs } from '../../store/dialogs';
  * Start button; a restore reopens pre-filled but must be analyzed and confirmed again (its plan
  * was single use). Nothing runs from here.
  */
+
+// Every "Run again" opens a fresh dialog (the handlers get the stored parameters, not the job id).
+let reruns = 0;
+
 function reopenDump(params: { kind: 'dump'; request: DumpRequest } | { kind: 'tool_dump'; request: ToolDumpRequest }) {
   const { connection_id: connectionId, database } = params.request;
-  useDialogs.getState().requestDialog({ kind: 'dump', connectionId, database, params });
+  reruns += 1;
+  useDialogs.getState().requestDialog({ kind: 'dump', connectionId, database, params, rerun: reruns });
 }
 
 function reopenRestore(request: RestoreRequest) {
-  useDialogs.getState().requestDialog({ kind: 'restore', connectionId: request.connection_id, database: request.database, params: request });
+  reruns += 1;
+  useDialogs.getState().requestDialog({ kind: 'restore', connectionId: request.connection_id, database: request.database, params: request, rerun: reruns });
 }
 
 registerRerun('dump', (p: JobParams) => reopenDump({ kind: 'dump', request: p.request as unknown as DumpRequest }));

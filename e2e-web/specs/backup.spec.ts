@@ -45,7 +45,7 @@ test.describe('dump and restore dialogs (browser, fake IPC backend)', () => {
     await expect(startButton).toBeDisabled();
     await dialog.getByRole('button', { name: 'Browse…' }).click();
     await expect(dialog).toContainText(DUMP_FILE);
-    expect(backend.calls.find((c) => c.cmd === 'dump_pick_path')?.args).toEqual({ baseName: 'dnt_fixture', compress: false });
+    expect(backend.calls.find((c) => c.cmd === 'dump_pick_path')?.args).toEqual({ baseName: 'dnt_fixture', compress: false, format: null });
 
     // Only the table: the view is left out.
     await objects.getByRole('group', { name: 'Views' }).getByRole('checkbox').uncheck();
