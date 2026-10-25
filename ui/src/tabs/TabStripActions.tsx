@@ -24,8 +24,8 @@ function QueryActions({ tabId }: { tabId: string }) {
  */
 export function TabStripActions({ tab }: { groupId: string; tab: Tab | undefined }) {
   if (!tab) return null;
-  // The designer has no strip controls of its own yet.
-  if (tab.kind === 'design') return null;
+  // The designer and the DDL editor have no strip controls of their own (their header holds them).
+  if (tab.kind === 'design' || tab.kind === 'ddl') return null;
   // Keyed by tab: an open menu or picker never carries over to the next active tab.
   return tab.kind === 'query' ? <QueryActions key={tab.id} tabId={tab.id} /> : <ObjectActions key={tab.id} tab={tab} />;
 }

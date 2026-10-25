@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ObjectRef, Scope } from '../bindings';
+import type { ObjectKind, ObjectRef, Scope } from '../bindings';
 import {
   clampRatio,
   isLayoutNode,
@@ -52,7 +52,18 @@ export interface DesignTabRef {
   preview?: boolean;
 }
 
-export type Tab = ObjectTabRef | QueryTabRef | DesignTabRef;
+/** A DDL editor tab (id `ddl/<uuid>`); its edit target and text live in `useDdlEdits`. */
+export interface DdlTabRef {
+  id: string;
+  kind: 'ddl';
+  connectionId: string;
+  objectKind: ObjectKind;
+  title: string;
+  pinned?: boolean;
+  preview?: boolean;
+}
+
+export type Tab = ObjectTabRef | QueryTabRef | DesignTabRef | DdlTabRef;
 
 /** What "Reopen closed tab" brings back: an object tab by reference, a query tab with its document. */
 export type ClosedTab = { kind: 'object'; tab: ObjectTabRef } | { kind: 'query'; doc: QueryDoc };
@@ -164,7 +175,7 @@ interface TabsState {
    */
   moveDesignTab(id: string, table: string): string | null;
   close(id: string): void;
-  /** Closes every object and design tab of a connection (it was deleted or replaced); query tabs keep their binding. */
+  /** Closes every object, design and DDL tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
   reset(): void;
 }
@@ -544,7 +555,7 @@ export const useTabs = create<TabsState>()((set, get) => {
       }),
     closeConnection: (connectionId) =>
       update((s) => {
-        const goes = (t: Tab) => (t.kind === 'object' || t.kind === 'design') && t.connectionId === connectionId;
+        const goes = (t: Tab) => (t.kind === 'object' || t.kind === 'design' || t.kind === 'ddl') && t.connectionId === connectionId;
         const tabs = s.tabs.filter((t) => !goes(t));
         if (tabs.length === s.tabs.length) return null;
         // In each group whose active tab went away: the nearest remaining tab to its left, else the first.

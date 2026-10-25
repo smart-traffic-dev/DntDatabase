@@ -1,10 +1,11 @@
-import type { ObjectAction } from '../bindings';
+import type { ObjectAction, ObjectKind } from '../bindings';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { useTree, type TreeNode } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { openNewQuery, openSelectTop } from './newQuery';
+import { DDL_EDITABLE_KINDS, openDdlEditTab } from './openDdlEdit';
 import { openDesignTab, openObjectTab } from './openObject';
 
 type Item = MenuEntry;
@@ -66,6 +67,44 @@ export function designActionItems(node: TreeNode): Item[] {
   const holdsTables = scope && (cfg.kind === 'postgres' ? node.kind === 'schema' && !!scope.schema : node.kind === 'database');
   if (!scope || !holdsTables) return [];
   return [{ label: 'New table…', disabled: cfg.read_only, run: () => void openDesignTab(connectionId, scope, null) }];
+}
+
+const NEW_LABELS: Partial<Record<ObjectKind, string>> = {
+  View: 'New view…',
+  MaterializedView: 'New materialized view…',
+  Function: 'New function…',
+  Procedure: 'New procedure…',
+  Trigger: 'New trigger…',
+  Event: 'New event…',
+};
+
+/**
+ * The DDL editor's entries: "Edit definition" on an object of an editable kind (it also opens on a
+ * read-only connection, where the editor shows why it cannot apply), "New view…" / "New function…" …
+ * on the folder of an editable kind, and "New trigger…" on a table (both disabled when read-only).
+ * Nothing while the connection is closed.
+ */
+export function ddlActionItems(node: TreeNode): Item[] {
+  const connectionId = connectionIdOf(node.id);
+  if (!connectionId) return [];
+  const stored = useConnections.getState();
+  const cfg = stored.summaries.get(connectionId)?.config;
+  if (!cfg || !stored.info.has(connectionId)) return [];
+  const editable = DDL_EDITABLE_KINDS[cfg.kind === 'postgres' ? 'postgres' : 'mysql'];
+  const object = node.objectRef;
+  if (node.kind === 'object' && object) {
+    const scope = { database: object.database, schema: object.schema };
+    if (object.kind === 'Table') {
+      if (!editable.includes('Trigger')) return [];
+      return [{ label: 'New trigger…', disabled: cfg.read_only, run: () => void openDdlEditTab(connectionId, scope, 'Trigger', null, object.name) }];
+    }
+    if (!editable.includes(object.kind)) return [];
+    return [{ label: 'Edit definition', run: () => void openDdlEditTab(connectionId, scope, object.kind, object.name, null) }];
+  }
+  const kind = node.folderKind;
+  if (node.kind !== 'folder' || !kind || !node.scope || !editable.includes(kind)) return [];
+  const scope = node.scope;
+  return [{ label: NEW_LABELS[kind] ?? `New ${kind.toLowerCase()}…`, disabled: cfg.read_only, run: () => void openDdlEditTab(connectionId, scope, kind, null, null) }];
 }
 
 function itemsFor(node: TreeNode): Item[] {
@@ -135,13 +174,14 @@ function itemsFor(node: TreeNode): Item[] {
       ...(queryable ? [{ label: 'Select top 1000', run: () => void openSelectTop(node) }] : []),
       newQuery,
       ...designActionItems(node),
+      ...ddlActionItems(node),
       ...objectActionItems(node),
       SEP,
       refresh,
       copy,
     ];
   }
-  return [newQuery, ...designActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
+  return [newQuery, ...designActionItems(node), ...ddlActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {

@@ -5,6 +5,7 @@ import { useNow } from '../lib/useNow';
 import { useQueryDocs } from '../store/queryTabs';
 import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
+import { useDdlEdits } from '../store/ddlEdits';
 import { useDialogs } from '../store/dialogs';
 import { refreshTxInfo, txOf, useTxMode } from '../store/txMode';
 import { useCursor } from '../store/cursor';
@@ -179,9 +180,12 @@ export function StatusBar() {
   });
   const tabConnection = useTabs((s) => s.tabs.find((t) => t.id === s.activeId)?.connectionId);
   // The database the active tab works in: the query tab's context, or the object's database.
+  const activeId = useTabs((s) => s.activeId);
+  const ddlDb = useDdlEdits((s) => (activeId ? s.byTab[activeId]?.target.scope.database ?? null : null));
   const objectDb = useTabs((s) => {
     const tab = s.tabs.find((t) => t.id === s.activeId);
     if (tab?.kind === 'design') return tab.scope.database;
+    if (tab?.kind === 'ddl') return ddlDb;
     return tab?.kind === 'object' ? tab.objectRef.database : null;
   });
   const queryDb = useQueryDocs((s) => (queryTabId ? s.docs.get(queryTabId)?.database ?? null : null));

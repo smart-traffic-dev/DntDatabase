@@ -40,7 +40,9 @@ export type UiRequest =
     }
   /** The user snippets manager. */
   | { kind: 'snippets' }
-  | { kind: 'about' };
+  | { kind: 'about' }
+  /** Review and apply the text of a DDL editor tab. */
+  | { kind: 'ddlEdit'; tabId: string };
 
 /** A question a store awaits (closing a tab, quitting): `DialogHost` shows it and answers through `done`. */
 export type Question =
@@ -77,6 +79,8 @@ interface DialogsState {
   objectActionRunning: boolean;
   /** A table design is being applied (quitting waits for its result). */
   tableDesignRunning: boolean;
+  /** A DDL edit is being applied (quitting waits for its result). */
+  ddlEditRunning: boolean;
   /** The question shown on top of everything else (`ask` sets it). */
   question: Question | null;
   ask(question: Question): void;
@@ -106,6 +110,7 @@ const noticeKey = (text: string) => `notice:${text}`;
 export const useDialogs = create<DialogsState>()((set, get) => ({
   objectActionRunning: false,
   tableDesignRunning: false,
+  ddlEditRunning: false,
   question: null,
   ask: (question) => set({ question }),
   answer: () => set({ question: null }),

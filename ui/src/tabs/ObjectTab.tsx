@@ -4,7 +4,9 @@ import { needsReconnect } from '../api';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable, type SubTab } from '../store/objectData';
 import { DataPager, DataView } from './DataView';
-import { resourceOf, subTabsOf, useSubTab } from './objectSections';
+import { READ_ONLY_TIP, resourceOf, subTabsOf, useSubTab } from './objectSections';
+import { DDL_EDITABLE_KINDS, openDdlEditTab } from '../components/openDdlEdit';
+import { useConnections } from '../store/connections';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
 import { editorFontOptions } from '../monaco/fonts';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
@@ -129,6 +131,8 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const [wrap, setWrap] = useState(false);
   const timer = useRef<number | undefined>(undefined);
   useEffect(() => () => window.clearTimeout(timer.current), []);
+  const conn = useConnections((s) => s.summaries.get(tab.connectionId)?.config);
+  const editable = !!conn && DDL_EDITABLE_KINDS[conn.kind === 'postgres' ? 'postgres' : 'mysql'].includes(tab.objectRef.kind);
 
   const copy = async () => {
     try {
@@ -153,6 +157,20 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
         <button type="button" className="btn small" onClick={() => openQuery(tab, ddl)}>
           Open in editor
         </button>
+        {editable ? (
+          <button
+            type="button"
+            className="btn small"
+            disabled={!!conn?.read_only}
+            title={conn?.read_only ? READ_ONLY_TIP : 'Edit and apply this definition'}
+            onClick={() => {
+              const { objectRef: o } = tab;
+              openDdlEditTab(tab.connectionId, { database: o.database, schema: o.schema }, o.kind, o.name, null);
+            }}
+          >
+            Edit
+          </button>
+        ) : null}
         <button type="button" className="btn small" onClick={() => void copy()}>
           {copied ? 'Copied' : 'Copy'}
         </button>
