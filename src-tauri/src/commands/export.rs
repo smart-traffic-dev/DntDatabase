@@ -244,7 +244,7 @@ async fn stream_to_file(
     let mut s = Stream::open(&opts, kind, &path, progress)?;
     let outcome = {
         let exec = std::pin::pin!(state.sessions.data_exec(id, db, key, &request, &mut s.sink));
-        // A write error (disk fullâ€¦) or a Stop stops the statement through its key.
+        // A write error (disk full…) or a Stop stops the statement through its key.
         let failed = Arc::clone(&s.failed);
         let watch = std::pin::pin!(async {
             let failed = std::pin::pin!(failed.notified());
@@ -290,7 +290,7 @@ pub async fn export_query_result_impl(
     let progress = tracked_progress(progress, &job);
     let result = async {
         let stream = Stream::open(&opts, kind, &path, progress)?;
-        // A write error (disk fullâ€¦) stops reading the stored rows.
+        // A write error (disk full…) stops reading the stored rows.
         let failed = Arc::clone(&stream.failed);
         let stop = Arc::clone(&cancel);
         let watcher = tokio::spawn(async move {
@@ -814,6 +814,6 @@ mod tests {
         assert_eq!(file_stem("x\u{0}y\n"), "x_y_");
         assert_eq!(file_stem("  "), "export");
         assert_eq!(file_stem("name."), "name");
-        assert_eq!(file_stem(&"Ã©".repeat(300)).chars().count(), 100);
+        assert_eq!(file_stem(&"é".repeat(300)).chars().count(), 100);
     }
 }

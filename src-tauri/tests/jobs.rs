@@ -294,3 +294,382 @@ async fn startup_recovers_interrupted_jobs_and_cleans_tmp() {
     assert_eq!(detail.job.state, JobState::Failed);
     assert!(detail.job.outcome_unknown);
 }
+
+/// Tracked streaming exports (R3) against an in-process fake driver: Stop from the Jobs
+/// panel reaches each export's own cancel path.
+mod tracked_exports {
+    use super::*;
+    use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
+    use dnt_core::driver::{
+        CancelHandle, Canceller, CellMode, Driver, ExecOptions, Introspector, ResultSummary,
+        RowSink, Session, StmtOutcome,
+    };
+    use dnt_core::meta::{
+        DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
+        TableDetail,
+    };
+    use dnt_core::secret::SecretStore;
+    use dnt_core::server::{detect_mysql, DbKind, ServerInfo};
+    use dnt_core::sql::{Dialect, StatementKind};
+    use dnt_core::test_util::sample_config;
+    use dnt_core::tx::TxState;
+    use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
+    use dnt_query::Target as Pick;
+    use dnt_store::repo::{ConnectionRepo, NewSecrets};
+    use dnt_tunnel::KnownHosts;
+    use dntdatabase::commands::export::{export_query_impl, export_table_impl, Progress};
+    use dntdatabase::commands::query::query_plan_impl;
+    use dntdatabase::export_format::{ExportFormat, ExportOptions};
+    use dntdatabase::export_paths::ExportPaths;
+    use dntdatabase::file_picks::FilePicks;
+    use dntdatabase::session_manager::SessionManager;
+    use secrecy::SecretString;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    /// What the fake server saw.
+    #[derive(Default)]
+    struct Log {
+        /// Calls of a session's cancel handle.
+        cancel_calls: AtomicUsize,
+        /// Set by a cancel handle; cleared when a statement starts.
+        cancelled: AtomicBool,
+        /// Statements that mention `slow` and started streaming.
+        slow_started: AtomicUsize,
+    }
+
+    struct FakeDriver(Arc<Log>);
+
+    #[async_trait]
+    impl Driver for FakeDriver {
+        fn kind(&self) -> DbKind {
+            DbKind::MySql
+        }
+        async fn connect(&self, _cfg: &ResolvedConfig) -> Result<Box<dyn Session>, DbError> {
+            Ok(Box::new(FakeSession {
+                info: detect_mysql("8.0.36").unwrap(),
+                log: Arc::clone(&self.0),
+            }))
+        }
+    }
+
+    struct FakeSession {
+        info: ServerInfo,
+        log: Arc<Log>,
+    }
+
+    struct FakeCancel(Arc<Log>);
+
+    #[async_trait]
+    impl Canceller for FakeCancel {
+        async fn cancel(&self) -> Result<(), DbError> {
+            self.0.cancel_calls.fetch_add(1, Ordering::SeqCst);
+            self.0.cancelled.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    fn column() -> ColumnMeta {
+        ColumnMeta {
+            name: "n".into(),
+            db_type: "INT".into(),
+            logical: LogicalType::Integer,
+            nullable: Some(false),
+            origin_table: None,
+            origin_column: None,
+        }
+    }
+
+    fn send(sink: &mut dyn RowSink, opts: &ExecOptions, row: Vec<Value>) {
+        match opts.cells {
+            CellMode::Preview => sink.rows(vec![row]),
+            CellMode::Full { .. } => sink.full_rows(vec![row
+                .into_iter()
+                .map(|v| FullValue::try_from_value(v).unwrap())
+                .collect()]),
+        }
+    }
+
+    #[async_trait]
+    impl Session for FakeSession {
+        fn server_info(&self) -> &ServerInfo {
+            &self.info
+        }
+        /// A statement mentioning `slow` streams a row every 10 ms for 10 s unless it is
+        /// stopped or cancelled (then `Cancelled`); anything else returns no result.
+        async fn execute_one(
+            &self,
+            stmt: &str,
+            _kind: StatementKind,
+            opts: &ExecOptions,
+            sink: &mut dyn RowSink,
+        ) -> Result<StmtOutcome, DbError> {
+            self.log.cancelled.store(false, Ordering::SeqCst);
+            let summary = |row_count| ResultSummary {
+                affected: None,
+                row_count,
+                truncated: false,
+                elapsed_ms: 1,
+            };
+            if !stmt.to_ascii_lowercase().contains("slow") {
+                sink.result_start(&[]);
+                sink.result_end(&summary(0));
+                return Ok(StmtOutcome {
+                    results: vec![summary(0)],
+                    late_completion: false,
+                });
+            }
+            self.log.slow_started.fetch_add(1, Ordering::SeqCst);
+            sink.result_start(&[column()]);
+            for i in 0..1000 {
+                if opts.stop.is_stopped() || self.log.cancelled.load(Ordering::SeqCst) {
+                    return Err(DbError::Cancelled {
+                        outcome_unknown: false,
+                        was_in_tx: false,
+                    });
+                }
+                send(sink, opts, vec![Value::Int(i)]);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            sink.result_end(&summary(1000));
+            Ok(StmtOutcome {
+                results: vec![summary(1000)],
+                late_completion: false,
+            })
+        }
+        fn tx_state(&self) -> TxState {
+            TxState::Idle
+        }
+        fn dialect(&self) -> Dialect {
+            Dialect::for_kind(DbKind::MySql)
+        }
+        fn cancel_handle(&self) -> CancelHandle {
+            Arc::new(FakeCancel(Arc::clone(&self.log)))
+        }
+        fn introspector(&self) -> &dyn Introspector {
+            self
+        }
+        async fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn close(self: Box<Self>) {}
+    }
+
+    #[async_trait]
+    impl Introspector for FakeSession {
+        async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
+            Ok(vec![])
+        }
+        async fn list_schemas(&self, _db: &str) -> Result<Vec<SchemaInfo>, DbError> {
+            Ok(vec![])
+        }
+        async fn list_objects(
+            &self,
+            _scope: &Scope,
+            _kind: ObjectKind,
+        ) -> Result<Vec<ObjectSummary>, DbError> {
+            Ok(vec![])
+        }
+        async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
+            Ok(vec![])
+        }
+        /// No detail: the export reads without a stable order (as for a view).
+        async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
+            Err(DbError::Internal {
+                message: "n/a".into(),
+            })
+        }
+        async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
+            Ok(String::new())
+        }
+    }
+
+    /// An app state whose MySQL driver is the fake, with one open connection.
+    async fn fake_state(dir: &std::path::Path) -> (Arc<AppState>, Uuid, Arc<Log>) {
+        let paths = AppPaths::in_dir(dir.join("data"));
+        std::fs::create_dir_all(&paths.data_dir).unwrap();
+        let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
+        let repo = Arc::new(ConnectionRepo::new(
+            dnt_store::db::open(&paths.db_file).unwrap(),
+            Arc::clone(&secrets),
+        ));
+        let log = Arc::new(Log::default());
+        let driver: Arc<dyn Driver> = Arc::new(FakeDriver(Arc::clone(&log)));
+        let sessions = SessionManager::new(
+            Arc::clone(&repo),
+            Arc::clone(&secrets),
+            KnownHosts::new(paths.known_hosts.clone()),
+            HashMap::from([(DbKind::MySql, driver)]),
+        )
+        .with_result_root(paths.data_dir.join("query-results"))
+        .unwrap();
+        let cfg = ConnectionConfig {
+            id: Uuid::nil(),
+            kind: DbKind::MySql,
+            name: "Shop".into(),
+            default_db: None,
+            env_tag: None,
+            read_only: false,
+            secret_mode: SecretMode::Saved,
+            ..sample_config()
+        };
+        let id = repo
+            .create(
+                cfg,
+                NewSecrets {
+                    db_password: Some(SecretString::from("pw")),
+                    ssh_password: None,
+                    ssh_key_passphrase: None,
+                },
+            )
+            .unwrap()
+            .id;
+        sessions.open(id, None).await.unwrap();
+        let state = AppState {
+            repo,
+            secrets,
+            sessions,
+            paths,
+            export_paths: ExportPaths::default(),
+            file_picks: FilePicks::default(),
+        };
+        (Arc::new(state), id, log)
+    }
+
+    fn csv() -> ExportOptions {
+        ExportOptions {
+            format: ExportFormat::Csv,
+            delimiter: ",".into(),
+            header: true,
+            quote_all: false,
+            bom: false,
+            table_name: String::new(),
+            formula_guard: false,
+        }
+    }
+
+    fn no_progress() -> Progress {
+        Box::new(|_| {})
+    }
+
+    /// The live tracked export, once its statement streams rows.
+    async fn running_export(state: &AppState, log: &Log) -> Uuid {
+        for _ in 0..1000 {
+            let live = state.sessions.jobs.list(10).unwrap();
+            if let Some(job) = live.first() {
+                if job.state == JobState::Running
+                    && log.slow_started.load(Ordering::SeqCst) > 0
+                    && job.progress.done > 0.0
+                {
+                    assert_eq!(job.kind, JobKind::Export);
+                    return job.id;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("no running tracked export");
+    }
+
+    /// Stop from the Jobs panel cancels a table export like `table_data_cancel(id, key)`:
+    /// the statement ends cancelled, no file is left and the job is cancelled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn job_stop_cancels_table_export_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, id, log) = fake_state(dir.path()).await;
+        let path = dir.path().join("slow.csv");
+        let export = {
+            let state = Arc::clone(&state);
+            let path = path.to_string_lossy().into_owned();
+            tokio::spawn(async move {
+                let obj = ObjectRef {
+                    database: "shop".into(),
+                    schema: None,
+                    name: "slow".into(),
+                    kind: ObjectKind::Table,
+                };
+                export_table_impl(
+                    &state,
+                    id,
+                    obj,
+                    vec![],
+                    None,
+                    csv(),
+                    path,
+                    "export:slow".into(),
+                    no_progress(),
+                )
+                .await
+            })
+        };
+        let job = running_export(&state, &log).await;
+        let detail = job_detail_impl(&state, job).await.unwrap();
+        assert_eq!(detail.job.title, "Export slow to slow.csv");
+        assert_eq!(detail.job.connection_id, Some(id));
+
+        assert!(job_cancel_impl(&state, job).await.unwrap());
+        let err = tokio::time::timeout(Duration::from_secs(5), export)
+            .await
+            .expect("the export stops")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, DbError::Cancelled { .. }), "{err:?}");
+        assert!(state.sessions.jobs.wait(job, Duration::from_secs(5)).await);
+        let detail = job_detail_impl(&state, job).await.unwrap();
+        assert_eq!(detail.job.state, JobState::Cancelled);
+        assert_eq!(detail.job.result_path, None);
+        assert!(!path.exists());
+    }
+
+    /// Stop from the Jobs panel stops a query export like `query_cancel(run_id)`: the
+    /// run's canceller reaches the tab session's statement.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn job_stop_cancels_query_export_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, id, log) = fake_state(dir.path()).await;
+        let plan = query_plan_impl(
+            &state,
+            "tab-1".into(),
+            id,
+            None,
+            "SELECT n FROM slow".into(),
+            Pick::All,
+        )
+        .await
+        .unwrap();
+        let path = dir.path().join("q.csv");
+        let export = {
+            let state = Arc::clone(&state);
+            let path = path.to_string_lossy().into_owned();
+            tokio::spawn(async move {
+                export_query_impl(
+                    &state,
+                    plan.plan_id,
+                    0,
+                    csv(),
+                    path,
+                    Uuid::new_v4(),
+                    no_progress(),
+                )
+                .await
+            })
+        };
+        let job = running_export(&state, &log).await;
+        let detail = job_detail_impl(&state, job).await.unwrap();
+        assert_eq!(detail.job.title, "Export query result to q.csv");
+        assert_eq!(detail.job.connection_id, Some(id));
+
+        assert!(job_cancel_impl(&state, job).await.unwrap());
+        let err = tokio::time::timeout(Duration::from_secs(5), export)
+            .await
+            .expect("the export stops")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, DbError::Cancelled { .. }), "{err:?}");
+        // The run's canceller (the one `query_cancel` uses) reached the session.
+        assert!(log.cancel_calls.load(Ordering::SeqCst) >= 1);
+        assert!(state.sessions.jobs.wait(job, Duration::from_secs(5)).await);
+        let detail = job_detail_impl(&state, job).await.unwrap();
+        assert_eq!(detail.job.state, JobState::Cancelled);
+        assert!(!path.exists());
+    }
+}
