@@ -252,9 +252,12 @@ fingerprint, send the stored statements in order with progress `executing i/n`, 
 
 ### 6.2 PostgreSQL
 
-`BEGIN`, the statements, each post-check (a mismatch rolls back with its message), `COMMIT`. Outcomes via
+`BEGIN`, `SET LOCAL standard_conforming_strings = on` (as the designer; keeps the server's lexing equal to
+the app's), the statements, each post-check (a mismatch rolls back with its message), `COMMIT`. Outcomes via
 `ddl_exec::failure_outcome`: `RolledBack` only when the server confirmed `ROLLBACK`; a lost `COMMIT` is
-`Unknown`. `object_state` = `Changed` on success, `Unchanged` after a confirmed rollback, `Unknown` otherwise.
+`Unknown`; a failure before the first plan statement is `NotApplied`. `object_state` = `Changed` on success,
+`Unchanged` after a confirmed rollback or `NotApplied`, `Unknown` otherwise. `executed` / `failed` are only
+filled for `Partial` (MySQL).
 
 ### 6.3 MySQL / MariaDB (not transactional)
 
