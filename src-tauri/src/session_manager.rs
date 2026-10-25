@@ -307,7 +307,7 @@ fn ask_for_missing_db_password(
         && secrets
             .db_password
             .as_ref()
-            .map_or(true, |p| p.expose_secret().is_empty())
+            .is_none_or(|p| p.expose_secret().is_empty())
         && matches!(e.unstaged(), DbError::Auth { .. });
     match e {
         DbError::AtStage { stage, timings, .. } if missing => {

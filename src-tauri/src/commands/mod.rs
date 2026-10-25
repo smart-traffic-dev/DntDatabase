@@ -212,6 +212,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             ddl_edit::ddl_edit_preview,
             ddl_edit::ddl_edit_cancel,
             ddl_edit::ddl_edit_close,
+            ddl_edit::ddl_edit_apply,
         ])
         // No events; registering (none) drops the stray `TAURI_CHANNEL` type that
         // `Channel` arguments add, which the bindings import from `@tauri-apps/api`.

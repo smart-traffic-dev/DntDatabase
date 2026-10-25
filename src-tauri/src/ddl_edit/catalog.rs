@@ -56,12 +56,24 @@ async fn rows(
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Vec<Option<String>>>, DbError> {
-    let mut sink = TextRows::default();
     let options = ExecOptions {
         params: params.iter().map(|p| p.to_string()).collect(),
+        ..ExecOptions::default()
+    };
+    rows_with(session, sql, options).await
+}
+
+/// Every row of `sql` run with `options` (its params, stop and timeout), as text.
+pub(crate) async fn rows_with(
+    session: &dyn Session,
+    sql: &str,
+    options: ExecOptions,
+) -> Result<Vec<Vec<Option<String>>>, DbError> {
+    let mut sink = TextRows::default();
+    let options = ExecOptions {
         // Every byte of a binary value (MySQL may type catalog text as binary).
         full_bytes: true,
-        ..ExecOptions::default()
+        ..options
     };
     session
         .execute_one(sql, classify(sql, session.dialect()), &options, &mut sink)
@@ -104,6 +116,32 @@ pub(crate) async fn facts(
                     ));
                 }
                 if let Some(r) = found.first() {
+                    let expected = if t.kind == ObjectKind::Procedure {
+                        "p"
+                    } else {
+                        "f"
+                    };
+                    let actual = col(r, 1).unwrap_or_default();
+                    if actual != expected {
+                        let what = match actual.as_str() {
+                            "p" => "procedure",
+                            "f" => "function",
+                            "a" => "aggregate function",
+                            "w" => "window function",
+                            _ => "routine of another kind",
+                        };
+                        let wanted = if expected == "p" {
+                            "procedure"
+                        } else {
+                            "function"
+                        };
+                        return Ok((
+                            facts,
+                            Some(format!(
+                                "{name} in {schema} is a {what}, not a {wanted}; edit it with a query tab."
+                            )),
+                        ));
+                    }
                     facts.identity_args = col(r, 2);
                     facts.has_comment = flag(r, 3);
                     facts.has_grants = flag(r, 4);

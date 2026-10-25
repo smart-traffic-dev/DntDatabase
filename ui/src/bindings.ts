@@ -1002,6 +1002,14 @@ async ddlEditClose(editId: string) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+async ddlEditApply(planId: string, confirmed: boolean, name: string | null, operationId: string, channel: TAURI_CHANNEL<string>) : Promise<Result<DdlEditReport, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ddl_edit_apply", { planId, confirmed, name, operationId, channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1242,6 +1250,23 @@ export type DdlEditPreview = { plan_id: string; statements: string[]; warnings: 
  * One sentence per check run before COMMIT (PostgreSQL).
  */
 checks: string[]; transactional: boolean; gap: boolean; confirm_name: string | null; expires_in_seconds: number }
+export type DdlEditReport = { outcome: EditOutcome; error: AppError | null; warnings: string[]; statements_sent: number; 
+/**
+ * The plan statements that completed.
+ */
+executed: string[]; 
+/**
+ * The plan statement that failed.
+ */
+failed: string | null; object_state: ObjectState; 
+/**
+ * `Missing`: the original DDL, offered for a create of the same name.
+ */
+restore_text: string | null; 
+/**
+ * Applied: the object as it is now, and its DDL re-read from the server.
+ */
+object: ObjectRef | null; text: string | null }
 export type DefaultSpec = 
 /**
  * A literal value, unquoted (rendered through the SQL literal builder).
@@ -1295,6 +1320,11 @@ export type DropTarget = { kind: DropKind;
  * the statement names nothing readable (`DROP OPERATOR + (int, int)`).
  */
 name: string }
+export type EditOutcome = "applied" | "not_applied" | "rolled_back" | 
+/**
+ * MySQL: some statements ran, then one failed and the object is not as before.
+ */
+"partial" | "unknown"
 /**
  * What `data_preview` returns: the stored plan's id and the statements `data_apply`
  * will send.
@@ -1633,6 +1663,10 @@ export type NodeId = { type: "group"; id: string } | { type: "connection"; id: s
 export type ObjectAction = { kind: "create_namespace"; database: string; name: string } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
+/**
+ * The edited object after the apply, as far as the app knows.
+ */
+export type ObjectState = "unchanged" | "changed" | "missing" | "unknown"
 export type ObjectSummary = { name: string; kind: ObjectKind; comment: string | null; 
 /**
  * Exported as a JS number: estimates stay far below 2^53.

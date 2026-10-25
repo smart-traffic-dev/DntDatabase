@@ -20,9 +20,11 @@ use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
 use dnt_core::value::Value;
 use dnt_store::db::open_in_memory;
+use dnt_store::history::{HistoryEntry, HistoryFilter};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::KnownHosts;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
@@ -56,6 +58,14 @@ struct Fake {
     answers: Mutex<Vec<(String, Vec<Vec<Value>>)>>,
     /// Names `list_objects` returns per kind.
     objects: Mutex<HashMap<ObjectKind, Vec<String>>>,
+    /// A statement containing the text fails with the error.
+    fail: Mutex<Option<(String, DbError)>>,
+    /// A statement containing the text (once it succeeded) sets the DDL to the second.
+    sets_ddl: Mutex<Option<(String, String)>>,
+    /// Run once by the next `list_objects`.
+    on_list: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Sessions opened.
+    connects: AtomicUsize,
 }
 
 impl Fake {
@@ -67,7 +77,15 @@ impl Fake {
             seen: Mutex::new(Vec::new()),
             answers: Mutex::new(Vec::new()),
             objects: Mutex::new(HashMap::new()),
+            fail: Mutex::new(None),
+            sets_ddl: Mutex::new(None),
+            on_list: Mutex::new(None),
+            connects: AtomicUsize::new(0),
         })
+    }
+
+    fn fail_on(&self, text: &str, e: DbError) {
+        *self.fail.lock().unwrap() = Some((text.to_string(), e));
     }
 
     fn answer(&self, prefix: &str, rows: Vec<Vec<&str>>) {
@@ -115,6 +133,7 @@ impl Driver for FakeDriver {
         &self,
         _cfg: &dnt_core::config::ResolvedConfig,
     ) -> Result<Box<dyn Session>, DbError> {
+        self.0.connects.fetch_add(1, AtomicOrdering::SeqCst);
         Ok(Box::new(FakeSession {
             fake: Arc::clone(&self.0),
             tx: Mutex::new(TxState::Idle),
@@ -153,6 +172,18 @@ impl Session for FakeSession {
             .lock()
             .unwrap()
             .push((stmt.to_string(), opts.params.clone()));
+        let fail = self.fake.fail.lock().unwrap().clone();
+        if let Some((text, e)) = fail {
+            if stmt.contains(&text) {
+                return Err(e);
+            }
+        }
+        let sets = self.fake.sets_ddl.lock().unwrap().clone();
+        if let Some((text, ddl)) = sets {
+            if stmt.contains(&text) {
+                *self.fake.ddl.lock().unwrap() = ddl;
+            }
+        }
         let upper = stmt.to_ascii_uppercase();
         if upper.starts_with("BEGIN") || upper.starts_with("START TRANSACTION") {
             *self.tx.lock().unwrap() = TxState::Active;
@@ -217,6 +248,10 @@ impl Introspector for FakeSession {
         _scope: &Scope,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
+        let hook = self.fake.on_list.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
         Ok(self
             .fake
             .objects
@@ -848,4 +883,672 @@ async fn cancel_before_apply_is_remembered() {
     f.sm.ddl_edit_cancel(id).await.unwrap();
     let (_guard, stop) = f.sm.ddl_edits.operations.register(id, f.conn).unwrap();
     assert!(stop.is_stopped());
+}
+
+// ---- Task 4 review fixes ----
+
+#[tokio::test]
+async fn preview_new_name_check_ignores_case_on_mysql() {
+    for (kind, listed) in [
+        (ObjectKind::View, (ObjectKind::Table, "NEW_VIEW")),
+        (
+            ObjectKind::Procedure,
+            (ObjectKind::Procedure, "New_Procedure"),
+        ),
+        (ObjectKind::Trigger, (ObjectKind::Trigger, "NEW_TRIGGER")),
+    ] {
+        let f = fixture(Fake::new(mysql8(), ""), None, false).await;
+        let o = open(&f, kind, None).await;
+        f.fake
+            .objects
+            .lock()
+            .unwrap()
+            .insert(listed.0, vec![listed.1.into()]);
+        let e =
+            f.sm.ddl_edit_preview(o.edit_id, o.text.clone(), None)
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(&e, DbError::Config { message, .. } if message.contains("already exists")),
+            "{kind:?}: {e:?}"
+        );
+    }
+    // PostgreSQL names compare exactly.
+    let f = fixture(Fake::new(pg17(), ""), None, false).await;
+    let o = open(&f, ObjectKind::Function, None).await;
+    f.fake
+        .objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::Function, vec!["New_Function".into()]);
+    f.sm.ddl_edit_preview(o.edit_id, o.text.clone(), None)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn preview_stores_no_plan_for_an_edit_closed_meanwhile() {
+    let f = fixture(Fake::new(mysql8(), ""), None, false).await;
+    let o = open(&f, ObjectKind::View, None).await;
+    let sm = Arc::clone(&f.sm);
+    let id = o.edit_id;
+    // The edit is closed while the preview reads the catalog.
+    *f.fake.on_list.lock().unwrap() = Some(Box::new(move || {
+        lock(&sm.ddl_edits.edits).remove(&id);
+    }));
+    let e =
+        f.sm.ddl_edit_preview(o.edit_id, o.text.clone(), None)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(&e, DbError::Config { field: Some(x), .. } if x == "edit_id"),
+        "{e:?}"
+    );
+    assert!(lock(&f.sm.ddl_edits.plans).is_empty());
+}
+
+#[tokio::test]
+async fn open_checks_capacity_before_opening_a_session() {
+    let f = fixture(Fake::new(mysql8(), ""), None, false).await;
+    for _ in 0..MAX_EDITS {
+        open(&f, ObjectKind::View, None).await;
+    }
+    let before = f.fake.connects.load(AtomicOrdering::SeqCst);
+    let e =
+        f.sm.ddl_edit_open(f.conn, scope(&f), ObjectKind::View, None, None)
+            .await
+            .unwrap_err();
+    assert!(matches!(e, DbError::Busy), "{e:?}");
+    assert_eq!(f.fake.connects.load(AtomicOrdering::SeqCst), before);
+}
+
+#[tokio::test]
+async fn open_blocks_routine_of_another_kind() {
+    let fake = Fake::new(pg17(), PG_FUNC);
+    fake.answer(
+        PG_ROUTINE_SQL,
+        vec![vec!["1", "p", "x integer", "false", "false"]],
+    );
+    let f = fixture(fake, None, false).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    assert_eq!(
+        o.blocked_reason.as_deref(),
+        Some("f in public is a procedure, not a function; edit it with a query tab.")
+    );
+    let fake = Fake::new(pg17(), PG_FUNC);
+    fake.answer(
+        PG_ROUTINE_SQL,
+        vec![vec!["1", "a", "x integer", "false", "false"]],
+    );
+    let f = fixture(fake, None, false).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    assert!(
+        o.blocked_reason
+            .as_deref()
+            .is_some_and(|r| r.contains("aggregate function")),
+        "{:?}",
+        o.blocked_reason
+    );
+}
+
+// ---- Apply (spec §6) ----
+
+const MYSQL_TRIGGER: &str =
+    "CREATE DEFINER=`root`@`%` TRIGGER `t` BEFORE INSERT ON `orders` FOR EACH ROW SET NEW.a = 1";
+const PG_FUNC_AFTER: &str = "CREATE OR REPLACE FUNCTION public.f(x integer)\n RETURNS integer\n LANGUAGE sql\nAS $function$ SELECT x + 1 $function$";
+
+fn no_progress(_: &str) {}
+
+async fn apply(f: &Fixture, plan: Uuid, name: Option<&str>) -> Result<DdlEditReport, DbError> {
+    f.sm.ddl_edit_apply(
+        plan,
+        true,
+        name.map(Into::into),
+        Uuid::new_v4(),
+        &no_progress,
+    )
+    .await
+}
+
+fn history(f: &Fixture) -> Vec<HistoryEntry> {
+    f.sm.repo
+        .history_list(&HistoryFilter {
+            connection_id: Some(f.conn),
+            search: None,
+            origin: None,
+            limit: 10,
+        })
+        .unwrap()
+}
+
+fn server_error(code: &str) -> DbError {
+    DbError::Server {
+        code: Some(code.into()),
+        sqlstate: Some("42000".into()),
+        message: "refused".into(),
+        position: None,
+    }
+}
+
+/// The plan's post-checks (PostgreSQL).
+fn checks_of(f: &Fixture, plan: Uuid) -> Vec<PostCheck> {
+    lock(&f.sm.ddl_edits.plans)[&plan].checks.clone()
+}
+
+/// What was sent from `mark` on, without reads other than `keep` (catalog reads,
+/// the SchemaCache refresh after the DDL).
+fn sent_since(f: &Fixture, mark: usize, keep: &[String]) -> Vec<String> {
+    f.fake.sent()[mark..]
+        .iter()
+        .filter(|s| !s.starts_with("SELECT") || keep.contains(s))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn apply_sends_exact_plan_statements() {
+    // PostgreSQL: lock bound, BEGIN, statements, post-check read, COMMIT.
+    let f = pg_function(pg17()).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC.into(), Some(Strategy::Replace))
+            .await
+            .unwrap();
+    let checks = checks_of(&f, p.plan_id);
+    assert_eq!(checks.len(), 1);
+    f.fake.answer(&checks[0].sql, vec![vec!["1:f"]]);
+    let mark = f.fake.sent().len();
+    let stages = Mutex::new(Vec::new());
+    let r =
+        f.sm.ddl_edit_apply(p.plan_id, true, None, Uuid::new_v4(), &|s| {
+            stages.lock().unwrap().push(s.to_string())
+        })
+        .await
+        .unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Changed);
+    assert_eq!(r.statements_sent, 1);
+    assert_eq!(r.executed, p.statements);
+    assert_eq!(r.failed, None);
+    assert!(r.error.is_none());
+    let mut expected = vec![
+        "SET lock_timeout = '5s'".to_string(),
+        "BEGIN".into(),
+        "SET LOCAL standard_conforming_strings = on".into(),
+    ];
+    expected.extend(p.statements.iter().cloned());
+    expected.push(checks[0].sql.clone());
+    expected.push("COMMIT".into());
+    assert_eq!(sent_since(&f, mark, &[checks[0].sql.clone()]), expected);
+    assert_eq!(f.fake.params_of(&checks[0].sql), [checks[0].params.clone()]);
+    assert!(stages
+        .lock()
+        .unwrap()
+        .contains(&"executing 1/1".to_string()));
+
+    // MySQL: lock bound, then the statements one by one.
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    let mark = f.fake.sent().len();
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    assert_eq!(r.statements_sent, 4);
+    let mut expected = vec!["SET SESSION lock_wait_timeout = 5".to_string()];
+    expected.extend(p.statements.iter().cloned());
+    assert_eq!(sent_since(&f, mark, &[]), expected);
+}
+
+#[tokio::test]
+async fn plan_is_single_use() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_VIEW), None, false).await;
+    let o = open(&f, ObjectKind::View, Some("v")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_VIEW.into(), o.strategy)
+            .await
+            .unwrap();
+    apply(&f, p.plan_id, None).await.unwrap();
+    let mark = f.fake.sent().len();
+    assert!(matches!(
+        apply(&f, p.plan_id, None).await,
+        Err(DbError::PlanExpired)
+    ));
+    // An expired plan sends nothing either.
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_VIEW.into(), o.strategy)
+            .await
+            .unwrap();
+    lock(&f.sm.ddl_edits.plans)
+        .get_mut(&p.plan_id)
+        .unwrap()
+        .expires = Instant::now() - Duration::from_secs(1);
+    assert!(matches!(
+        apply(&f, p.plan_id, None).await,
+        Err(DbError::PlanExpired)
+    ));
+    assert_eq!(f.fake.sent().len(), mark);
+}
+
+#[tokio::test]
+async fn production_requires_exact_name() {
+    let f = fixture(
+        Fake::new(mysql8(), MYSQL_VIEW),
+        Some(EnvTag::Production),
+        false,
+    )
+    .await;
+    let o = open(&f, ObjectKind::View, Some("v")).await;
+    let preview = || async {
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_VIEW.into(), o.strategy)
+            .await
+            .unwrap()
+    };
+    let mark = f.fake.sent().len();
+    for name in [None, Some("V"), Some(" v")] {
+        let p = preview().await;
+        assert_eq!(p.confirm_name.as_deref(), Some("v"));
+        let e = apply(&f, p.plan_id, name).await.unwrap_err();
+        assert!(
+            matches!(e, DbError::ConfirmationRequired { .. }),
+            "{name:?}: {e:?}"
+        );
+        // The plan was consumed.
+        assert!(matches!(
+            apply(&f, p.plan_id, Some("v")).await,
+            Err(DbError::PlanExpired)
+        ));
+    }
+    // Not confirmed at all.
+    let p = preview().await;
+    let e =
+        f.sm.ddl_edit_apply(
+            p.plan_id,
+            false,
+            Some("v".into()),
+            Uuid::new_v4(),
+            &no_progress,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DbError::ConfirmationRequired { .. }), "{e:?}");
+    assert!(f.fake.sent()[mark..]
+        .iter()
+        .all(|s| !s.contains("VIEW") && !s.starts_with("SET")));
+    let p = preview().await;
+    let r = apply(&f, p.plan_id, Some("v")).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+}
+
+#[tokio::test]
+async fn stale_object_sends_nothing() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    *f.fake.ddl.lock().unwrap() = MYSQL_PROC.replace("SELECT x", "SELECT x + 1");
+    let mark = f.fake.sent().len();
+    let e = apply(&f, p.plan_id, None).await.unwrap_err();
+    assert!(
+        matches!(&e, DbError::PlanStale { reason } if reason == "The object changed since the editor opened it."),
+        "{e:?}"
+    );
+    let sent = f.fake.sent()[mark..].to_vec();
+    assert!(sent.iter().all(|s| !p.statements.contains(s)), "{sent:?}");
+    assert!(history(&f).is_empty());
+
+    // A new object whose name was taken meanwhile.
+    let f = fixture(Fake::new(mysql8(), ""), None, false).await;
+    let o = open(&f, ObjectKind::View, None).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, o.text.clone(), None)
+            .await
+            .unwrap();
+    f.fake
+        .objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::View, vec!["new_view".into()]);
+    let e = apply(&f, p.plan_id, None).await.unwrap_err();
+    assert!(matches!(&e, DbError::PlanStale { .. }), "{e:?}");
+    assert!(!f.fake.sent().contains(&p.statements[0]));
+}
+
+#[tokio::test]
+async fn pg_failure_rolls_back() {
+    let f = pg_function(pg17()).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC.into(), Some(Strategy::Recreate))
+            .await
+            .unwrap();
+    assert_eq!(p.statements.len(), 2);
+    f.fake
+        .fail_on("CREATE OR REPLACE FUNCTION", server_error("42P13"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::RolledBack, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unchanged);
+    assert_eq!(r.statements_sent, 2);
+    assert_eq!(r.executed, p.statements[..1]);
+    assert_eq!(r.failed.as_deref(), Some(p.statements[1].as_str()));
+    assert!(!r.error.as_ref().unwrap().outcome_unknown);
+    assert_eq!(r.restore_text, None);
+    let sent = f.fake.sent();
+    assert!(sent.contains(&"ROLLBACK".to_string()), "{sent:?}");
+    assert!(!sent.contains(&"COMMIT".to_string()), "{sent:?}");
+    let h = history(&f);
+    assert_eq!(h.len(), 1);
+    assert!(!h[0].outcome_unknown);
+    // The edit keeps its base.
+    let edit = f.sm.ddl_edits.get(o.edit_id).unwrap();
+    assert_eq!(edit.base_text, PG_FUNC);
+    assert!(edit.object.is_some());
+}
+
+#[tokio::test]
+async fn pg_post_check_failure_rolls_back() {
+    let f = pg_function(pg17()).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC.into(), Some(Strategy::Replace))
+            .await
+            .unwrap();
+    let check = checks_of(&f, p.plan_id).remove(0);
+    f.fake.answer(&check.sql, vec![vec!["2:f"]]);
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::RolledBack, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unchanged);
+    let error = r.error.unwrap();
+    assert_eq!(error.field.as_deref(), Some("check"));
+    assert_eq!(error.message, check.failure);
+    let sent = f.fake.sent();
+    assert!(sent.contains(&"ROLLBACK".to_string()), "{sent:?}");
+    assert!(!sent.contains(&"COMMIT".to_string()), "{sent:?}");
+}
+
+#[tokio::test]
+async fn pg_commit_lost_is_unknown() {
+    let f = pg_function(pg17()).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC.into(), Some(Strategy::Replace))
+            .await
+            .unwrap();
+    let check = checks_of(&f, p.plan_id).remove(0);
+    f.fake.answer(&check.sql, vec![vec!["1:f"]]);
+    f.fake.fail_on(
+        "COMMIT",
+        DbError::ConnectionLost {
+            was_in_tx: true,
+            outcome_unknown: true,
+            message: "lost".into(),
+        },
+    );
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Unknown, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unknown);
+    assert!(r.error.as_ref().unwrap().outcome_unknown);
+    let h = history(&f);
+    assert_eq!(h.len(), 1);
+    assert!(h[0].outcome_unknown);
+}
+
+#[tokio::test]
+async fn mysql_failure_after_drop_is_partial_with_restore() {
+    let fake = Fake::new(mysql8(), MYSQL_TRIGGER);
+    fake.answer(MYSQL_TRIGGER_SQL, vec![vec!["orders", "BEFORE", "INSERT"]]);
+    fake.answer(MYSQL_SAME_TIMING_SQL, vec![vec!["0"]]);
+    let f = fixture(fake, None, false).await;
+    let o = open(&f, ObjectKind::Trigger, Some("t")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap();
+    assert_eq!(p.statements, ["DROP TRIGGER `shop`.`t`", MYSQL_TRIGGER]);
+    // The CREATE fails; `list_objects` then lacks the trigger.
+    f.fake.fail_on("CREATE DEFINER", server_error("1064"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Partial, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Missing);
+    assert_eq!(r.executed, ["DROP TRIGGER `shop`.`t`"]);
+    assert_eq!(r.failed.as_deref(), Some(MYSQL_TRIGGER));
+    assert_eq!(r.restore_text.as_deref(), Some(MYSQL_TRIGGER));
+    assert_eq!(r.statements_sent, 2);
+    assert!(!r.error.as_ref().unwrap().outcome_unknown);
+    // History: a failure, not unknown.
+    let h = history(&f);
+    assert_eq!(h.len(), 1);
+    assert!(!h[0].outcome_unknown);
+    assert_eq!(h[0].status, dnt_store::history::HistoryStatus::Error);
+    // The edit is now a new one of the same name.
+    let edit = f.sm.ddl_edits.get(o.edit_id).unwrap();
+    assert_eq!(edit.object, None);
+    assert_eq!(edit.target.name, None);
+    assert_eq!(edit.fingerprint, ABSENT);
+    // The restore is an ordinary create.
+    *f.fake.fail.lock().unwrap() = None;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, r.restore_text.unwrap(), None)
+            .await
+            .unwrap();
+    assert_eq!(p.statements, [MYSQL_TRIGGER]);
+    assert!(lock(&f.sm.ddl_edits.plans)[&p.plan_id].new);
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+}
+
+#[tokio::test]
+async fn mysql_rehearsal_failure_is_not_applied() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    f.fake
+        .objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::Procedure, vec!["p".into()]);
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    f.fake.fail_on(&p.statements[0], server_error("1064"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::NotApplied, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unchanged);
+    assert!(r.executed.is_empty());
+    assert_eq!(r.failed.as_deref(), Some(p.statements[0].as_str()));
+    assert_eq!(r.statements_sent, 1);
+    assert!(
+        !r.warnings.iter().any(|w| w.contains("left behind")),
+        "{:?}",
+        r.warnings
+    );
+    let sent = f.fake.sent();
+    assert!(!sent.iter().any(|s| s.starts_with("DROP")), "{sent:?}");
+    assert_eq!(f.sm.ddl_edits.get(o.edit_id).unwrap().base_text, MYSQL_PROC);
+
+    // The rehearsal routine was created, but its DROP failed: it is named with its DROP.
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    f.fake.fail_on(&p.statements[1], server_error("1370"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::NotApplied, "{r:?}");
+    let rehearsal = p.statements[1]
+        .strip_prefix("DROP PROCEDURE `")
+        .unwrap()
+        .trim_end_matches('`');
+    assert!(
+        r.warnings.contains(&format!(
+            "A check routine `{rehearsal}` was left behind; drop it with: DROP PROCEDURE `{rehearsal}`"
+        )),
+        "{:?}",
+        r.warnings
+    );
+}
+
+#[tokio::test]
+async fn success_updates_base_and_turns_new_into_edit() {
+    // A new view becomes an edit of the created view.
+    const CREATED: &str = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select 1 AS `id`";
+    let f = fixture(Fake::new(mysql8(), CREATED), None, false).await;
+    let o = open(&f, ObjectKind::View, None).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, o.text.clone(), None)
+            .await
+            .unwrap();
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    let object = ObjectRef {
+        database: "shop".into(),
+        schema: None,
+        name: "new_view".into(),
+        kind: ObjectKind::View,
+    };
+    assert_eq!(r.object.as_ref(), Some(&object));
+    assert_eq!(r.text.as_deref(), Some(CREATED));
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    let edit = f.sm.ddl_edits.get(o.edit_id).unwrap();
+    assert_eq!(edit.object, Some(object));
+    assert_eq!(edit.target.name.as_deref(), Some("new_view"));
+    assert_eq!(edit.base_text, CREATED);
+    assert_ne!(edit.fingerprint, ABSENT);
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, CREATED.into(), Some(Strategy::Replace))
+            .await
+            .unwrap();
+    assert!(!lock(&f.sm.ddl_edits.plans)[&p.plan_id].new);
+    assert!(p.statements[0].starts_with("CREATE OR REPLACE"));
+
+    // An edit takes the server's DDL after the change as its new base.
+    let f = pg_function(pg17()).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC_AFTER.into(), Some(Strategy::Replace))
+            .await
+            .unwrap();
+    let check = checks_of(&f, p.plan_id).remove(0);
+    f.fake.answer(&check.sql, vec![vec!["1:f"]]);
+    *f.fake.sets_ddl.lock().unwrap() = Some(("COMMIT".into(), PG_FUNC_AFTER.into()));
+    let before = f.sm.ddl_edits.get(o.edit_id).unwrap().fingerprint;
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    assert_eq!(r.text.as_deref(), Some(PG_FUNC_AFTER));
+    let edit = f.sm.ddl_edits.get(o.edit_id).unwrap();
+    assert_eq!(edit.base_text, PG_FUNC_AFTER);
+    assert_ne!(edit.fingerprint, before);
+
+    // A failed re-read keeps Applied and asks to reopen.
+    let f = fixture(Fake::new(mysql8(), ""), None, false).await;
+    let o = open(&f, ObjectKind::View, None).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, o.text.clone(), None)
+            .await
+            .unwrap();
+    *f.fake.ddl_error.lock().unwrap() = Some(DbError::Internal {
+        message: "gone".into(),
+    });
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    assert_eq!(
+        r.warnings,
+        ["The definition could not be reloaded; reopen the editor."]
+    );
+    assert_eq!(r.text, None);
+}
+
+#[tokio::test]
+async fn history_uses_object_action_and_delimiter_form() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    apply(&f, p.plan_id, None).await.unwrap();
+    let h = history(&f);
+    assert_eq!(h.len(), 1, "{h:?}");
+    assert_eq!(h[0].origin, HISTORY_ORIGIN);
+    assert_eq!(h[0].origin, HistoryOrigin::ObjectAction);
+    assert_eq!(h[0].kind, "ddl");
+    assert_eq!(h[0].database.as_deref(), Some("shop"));
+    assert_eq!(
+        h[0].sql_text,
+        format!(
+            "DELIMITER $$\n{}$$\n{}$$\n{}$$\n{}$$\nDELIMITER ;",
+            p.statements[0], p.statements[1], p.statements[2], p.statements[3]
+        )
+    );
+
+    // A MySQL view and every PostgreSQL plan are joined with `;`.
+    let f = fixture(Fake::new(mysql8(), MYSQL_VIEW), None, false).await;
+    let o = open(&f, ObjectKind::View, Some("v")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_VIEW.into(), o.strategy)
+            .await
+            .unwrap();
+    apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(history(&f)[0].sql_text, p.statements.join(";\n"));
+    let statements = [
+        "DROP VIEW x".to_string(),
+        "CREATE VIEW x AS SELECT 1".into(),
+    ];
+    assert_eq!(
+        super::apply::history_sql(DbKind::Postgres, ObjectKind::Function, &statements),
+        "DROP VIEW x;\nCREATE VIEW x AS SELECT 1"
+    );
+}
+
+#[tokio::test]
+async fn cancel_before_send_sends_nothing() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    let op = Uuid::new_v4();
+    f.sm.ddl_edit_cancel(op).await.unwrap();
+    let mark = f.fake.sent().len();
+    let e =
+        f.sm.ddl_edit_apply(p.plan_id, true, None, op, &no_progress)
+            .await
+            .unwrap_err();
+    assert!(matches!(e, DbError::Cancelled { .. }), "{e:?}");
+    assert_eq!(f.fake.sent().len(), mark);
+    assert!(history(&f).is_empty());
+    assert!(matches!(
+        apply(&f, p.plan_id, None).await,
+        Err(DbError::PlanExpired)
+    ));
+}
+
+#[tokio::test]
+async fn apply_blocks_read_only() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_VIEW), None, false).await;
+    let o = open(&f, ObjectKind::View, Some("v")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_VIEW.into(), o.strategy)
+            .await
+            .unwrap();
+    let mut cfg = f.sm.repo.get(f.conn).unwrap();
+    cfg.read_only = true;
+    f.sm.repo
+        .update(
+            cfg,
+            dnt_store::repo::SecretUpdate {
+                db_password: dnt_store::repo::SecretChange::Keep,
+                ssh_password: dnt_store::repo::SecretChange::Keep,
+                ssh_key_passphrase: dnt_store::repo::SecretChange::Keep,
+            },
+        )
+        .unwrap();
+    let mark = f.fake.sent().len();
+    let e = apply(&f, p.plan_id, None).await.unwrap_err();
+    assert!(matches!(e, DbError::Blocked { .. }), "{e:?}");
+    assert_eq!(f.fake.sent().len(), mark);
 }

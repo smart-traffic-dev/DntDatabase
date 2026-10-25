@@ -5,9 +5,12 @@
 //! The UI sends the edited text and a strategy, never statements. The text only runs
 //! after `isolate` + `parse_header` + `check_target` accepted it, and the statements
 //! previewed are exactly the ones a plan stores (and the apply sends).
+mod apply;
 mod catalog;
 #[cfg(test)]
 mod tests;
+
+pub use apply::{DdlEditReport, EditOutcome, ObjectState};
 
 use crate::ddl_exec::DdlOperations;
 use crate::object_actions::{stale, MAX_PLANS};
@@ -39,7 +42,6 @@ pub(crate) const MAX_EDITS: usize = 64;
 
 /// The History origin of DDL edit applies (ruling R1: no store migration in P4c; a
 /// dedicated `ddl_edit` origin is a follow-up).
-#[allow(dead_code)] // Read by the apply.
 pub(crate) const HISTORY_ORIGIN: HistoryOrigin = HistoryOrigin::ObjectAction;
 
 /// The fingerprint of an edit of an object that does not exist yet.
@@ -98,16 +100,12 @@ pub(crate) struct Edit {
     pub(crate) blocked: Option<String>,
 }
 
-/// A single-use plan of an edit: exactly what the apply sends and checks.
-#[allow(dead_code)] // Read by the apply.
+/// A single-use plan of an edit: exactly what the apply sends and checks (the preview
+/// holds the warnings, check notes and flags shown).
 pub(crate) struct EditPlan {
     pub(crate) preview: DdlEditPreview,
     pub(crate) statements: Vec<String>,
     pub(crate) checks: Vec<PostCheck>,
-    pub(crate) check_notes: Vec<String>,
-    pub(crate) warnings: Vec<String>,
-    pub(crate) gap: bool,
-    pub(crate) transactional: bool,
     pub(crate) edit_id: Uuid,
     pub(crate) conn: Uuid,
     pub(crate) scope: Scope,
@@ -116,14 +114,14 @@ pub(crate) struct EditPlan {
     /// The plan creates the object.
     pub(crate) new: bool,
     pub(crate) kind: ObjectKind,
-    pub(crate) server: ServerInfo,
     pub(crate) rt: Arc<ConnectionRuntime>,
     pub(crate) generation: u64,
     pub(crate) env: Option<EnvTag>,
     pub(crate) dialect: Dialect,
     pub(crate) fingerprint: String,
     pub(crate) base_text: String,
-    pub(crate) facts: CatalogFacts,
+    /// MySQL routine edits: the (unquoted) name of the rehearsal routine (R5).
+    pub(crate) rehearsal: Option<String>,
     pub(crate) expires: Instant,
 }
 
@@ -136,13 +134,15 @@ pub(crate) struct DdlEditStore {
 
 impl DdlEditStore {
     pub(crate) fn get(&self, id: Uuid) -> Result<Edit, DbError> {
-        lock(&self.edits).get(&id).cloned().ok_or_else(|| {
-            config_error(
-                "edit_id",
-                "This editor is no longer open; open the object again.",
-            )
-        })
+        lock(&self.edits).get(&id).cloned().ok_or_else(edit_closed)
     }
+}
+
+fn edit_closed() -> DbError {
+    config_error(
+        "edit_id",
+        "This editor is no longer open; open the object again.",
+    )
 }
 
 /// A metadata read that ran past [`METADATA_CALL_TIMEOUT`].
@@ -183,7 +183,7 @@ fn fingerprint_of(text: &str, facts: &CatalogFacts) -> String {
 }
 
 /// An existing object as the server has it now.
-pub(crate) struct ObjectState {
+pub(crate) struct ObjectRead {
     pub(crate) text: String,
     pub(crate) facts: CatalogFacts,
     pub(crate) fingerprint: String,
@@ -197,7 +197,7 @@ pub(crate) async fn read_object(
     session: &dyn Session,
     t: &EditTarget,
     name: &str,
-) -> Result<ObjectState, DbError> {
+) -> Result<ObjectRead, DbError> {
     let obj = object_ref(t, name);
     let (text, facts, blocked) = match session.introspector().object_ddl(&obj).await {
         Ok(text) => {
@@ -211,7 +211,7 @@ pub(crate) async fn read_object(
         ),
         Err(e) => return Err(e),
     };
-    Ok(ObjectState {
+    Ok(ObjectRead {
         fingerprint: fingerprint_of(&text, &facts),
         text,
         facts,
@@ -242,25 +242,63 @@ fn namespace_kinds(kind: ObjectKind, engine: DbKind) -> Vec<ObjectKind> {
     }
 }
 
+/// Whether a catalog name is `name`: MySQL / MariaDB compare ASCII case-insensitively
+/// (routine and event names always are; table, view and trigger names are on servers
+/// with `lower_case_table_names` set, e.g. Windows), PostgreSQL exactly.
+pub(crate) fn same_catalog_name(engine: DbKind, catalog: &str, name: &str) -> bool {
+    match engine {
+        DbKind::MySql => catalog.eq_ignore_ascii_case(name),
+        DbKind::Postgres => catalog == name,
+    }
+}
+
+/// Whether an object of `t.kind` named `name` is listed in `t`'s scope.
+pub(crate) async fn object_listed(
+    session: &dyn Session,
+    t: &EditTarget,
+    name: &str,
+) -> Result<bool, DbError> {
+    let engine = session.server_info().kind;
+    Ok(session
+        .introspector()
+        .list_objects(&scope_of(t), t.kind)
+        .await?
+        .iter()
+        .any(|o| same_catalog_name(engine, &o.name, name)))
+}
+
+/// Whether `name` is taken among the kinds sharing the namespace of `t.kind`.
+pub(crate) async fn name_taken(
+    session: &dyn Session,
+    t: &EditTarget,
+    name: &str,
+) -> Result<bool, DbError> {
+    let scope = scope_of(t);
+    let i = session.introspector();
+    let engine = session.server_info().kind;
+    for k in namespace_kinds(t.kind, engine) {
+        if i.list_objects(&scope, k)
+            .await?
+            .iter()
+            .any(|o| same_catalog_name(engine, &o.name, name))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// A new object's name must not be taken among the kinds sharing its namespace.
 pub(crate) async fn check_name_free(
     session: &dyn Session,
     t: &EditTarget,
     name: &str,
 ) -> Result<(), DbError> {
-    let scope = scope_of(t);
-    let i = session.introspector();
-    for k in namespace_kinds(t.kind, session.server_info().kind) {
-        if i.list_objects(&scope, k)
-            .await?
-            .iter()
-            .any(|o| o.name == name)
-        {
-            return Err(config_error(
-                "text",
-                &format!("An object named {name} already exists."),
-            ));
-        }
+    if name_taken(session, t, name).await? {
+        return Err(config_error(
+            "text",
+            &format!("An object named {name} already exists."),
+        ));
     }
     Ok(())
 }
@@ -335,6 +373,9 @@ impl SessionManager {
             return Err(config_error("name", "An object name is required."));
         }
         let rt = self.runtime(conn)?;
+        if lock(&self.ddl_edits.edits).len() >= MAX_EDITS {
+            return Err(DbError::Busy);
+        }
         let (session, _) = rt.open_query_session(Some(scope.database.clone())).await?;
         let server = session.server_info().clone();
         let dialect = session.dialect();
@@ -493,6 +534,21 @@ impl SessionManager {
             confirm_name: confirm_name(cfg.env_tag, built.gap, &name),
             expires_in_seconds: self.plan_ttl.as_secs().min(u32::MAX as u64) as u32,
         };
+        let rehearsal = (edit.server.kind == DbKind::MySql
+            && built.gap
+            && matches!(target.kind, ObjectKind::Function | ObjectKind::Procedure))
+        .then_some(rehearsal);
+        // The edit may have been closed (or changed by an apply) while this preview ran:
+        // its plan is stored only while the edit is still the one previewed. The edits
+        // lock is held across the insert, so a concurrent close drops this plan too.
+        let edits = lock(&self.ddl_edits.edits);
+        match edits.get(&edit_id) {
+            None => return Err(edit_closed()),
+            Some(e) if e.fingerprint != edit.fingerprint || e.object != edit.object => {
+                return Err(object_changed())
+            }
+            Some(_) => {}
+        }
         let mut plans = lock(&self.ddl_edits.plans);
         plans.retain(|_, p| p.expires > Instant::now());
         if plans.len() >= MAX_PLANS {
@@ -504,24 +560,19 @@ impl SessionManager {
                 preview: preview.clone(),
                 statements: built.statements,
                 checks: built.checks,
-                check_notes: built.check_notes,
-                warnings: built.warnings,
-                gap: built.gap,
-                transactional: built.transactional,
                 edit_id,
                 conn,
                 scope: scope_of(&target),
                 kind: target.kind,
                 target,
                 new,
-                server: edit.server.clone(),
                 rt,
                 generation,
                 env: cfg.env_tag,
                 dialect,
                 fingerprint: edit.fingerprint.clone(),
                 base_text: edit.base_text.clone(),
-                facts: edit.facts.clone(),
+                rehearsal,
                 expires: Instant::now() + self.plan_ttl,
             },
         );
