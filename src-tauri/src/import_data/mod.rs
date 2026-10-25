@@ -19,6 +19,15 @@
 //! - No write is retried; an unanswered `COMMIT` or a lost in-flight batch outside a
 //!   transaction is `outcome_unknown`, kept in the job and its History entry.
 //!
+//! Statements that do NOT pass `plan` + guard, and why none can touch the target:
+//! - the target read `SELECT <cols> FROM <t> WHERE 1 = 0` (built from quoted identifiers
+//!   only; `WHERE 1 = 0` returns no row and changes nothing) and the driver's
+//!   introspection calls (`table_detail`), which only read catalogs;
+//! - cleanup after a failure or Stop: `ROLLBACK` (ends the job's own transaction; it can
+//!   only undo) and, on MySQL, `DROP TEMPORARY TABLE IF EXISTS <dnt_import_check_…>`
+//!   (`TEMPORARY` limits it to the session's own temporary table, whose name the job
+//!   generated). They are sent with a fresh stop signal so a Stop still cleans up.
+//!
 //! Known limits (documented, R21): the file is hashed at start and again after the last
 //! record was read (before `COMMIT`); a change in between that reverts before the end goes
 //! unnoticed. Outside a transaction the batches written before a mismatch stay.

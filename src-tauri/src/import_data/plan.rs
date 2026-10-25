@@ -2,7 +2,10 @@
 //! statement templates, judges them and stores a single-use plan; `import_start`
 //! re-checks everything the plan depends on and submits the import job. `import_dry_run`
 //! submits a dry-run job (R18).
-use super::run::{create_temp_sql, hash_file, temp_table, Context, DryRunJob, ImportJob};
+use super::run::{
+    check_sources, create_temp_sql, file_changed_before, file_columns, hash_file, temp_table,
+    Context, DryRunJob, ImportJob,
+};
 use super::target::{read_target_bounded, statement_atomic, table_changed, TargetRead};
 use super::{
     build_error, guard_ctx, judge_all, normalise, session_db, table_ref, ConfirmLevel,
@@ -274,6 +277,10 @@ impl SessionManager {
             return Err(mapping_error(&report));
         }
         let layout = Layout::new(&request, &read.columns, cfg.kind, dialect)?;
+        check_sources(
+            &request,
+            file_columns(path.clone(), request.source.clone()).await?,
+        )?;
         let transactional = cfg.kind == DbKind::Postgres || read.atomicity == Atomicity::Yes;
         let pre = pre_step(&request.mode, &layout.table, transactional);
         let insert_head = layout.head().map_err(build_error)?;
@@ -379,9 +386,7 @@ impl SessionManager {
         }
         let file = hash_file(PathBuf::from(&stored.request.path)).await?;
         if file.sha256 != stored.preview.file.sha256 || file.size != stored.preview.file.size {
-            return Err(DbError::PlanStale {
-                reason: "The file changed since the preview; preview again.".into(),
-            });
+            return Err(file_changed_before());
         }
         let (session, generation) = stored
             .rt
@@ -442,6 +447,8 @@ impl SessionManager {
         let conn = req.request.connection_id;
         let cfg = self.repo.get(conn)?;
         let request = normalise(req.request, cfg.kind)?;
+        let columns = file_columns(PathBuf::from(&request.path), request.source.clone()).await?;
+        check_sources(&request, columns)?;
         if req.server_check {
             if cfg.read_only {
                 return Err(DbError::Blocked { count: 1 });

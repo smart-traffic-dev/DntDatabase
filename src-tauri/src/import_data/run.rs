@@ -16,11 +16,16 @@
 //!   SAVEPOINT dnt_import` after it; a batch the server rejects is undone with `ROLLBACK
 //!   TO SAVEPOINT dnt_import` and its rows are re-sent one per statement, each under its
 //!   own savepoint. Skip mode outside a transaction sends one row per statement.
-//! - Dry run with server check: [`SET standard_conforming_strings = on`], `BEGIN` /
-//!   `START TRANSACTION`, `CREATE TEMP[ORARY] TABLE <tmp> …`, [PG: `ALTER TABLE <tmp>
-//!   ALTER COLUMN c DROP DEFAULT, ALTER COLUMN c DROP NOT NULL` for `nextval(` defaults],
-//!   inserts into `<tmp>` as in skip mode, `ROLLBACK`, [MySQL: `DROP TEMPORARY TABLE IF
-//!   EXISTS <tmp>`]. Without server check only the target read is sent.
+//! - Dry run with server check, PostgreSQL: `SET standard_conforming_strings = on`,
+//!   `BEGIN`, `CREATE TEMP TABLE <tmp> (LIKE …)`, [`ALTER TABLE <tmp> ALTER COLUMN c DROP
+//!   DEFAULT, ALTER COLUMN c DROP NOT NULL` for `nextval(` defaults], inserts into `<tmp>`
+//!   as in skip mode, `ROLLBACK` (drops `<tmp>`).
+//! - Dry run with server check, MySQL: `CREATE TEMPORARY TABLE <tmp> LIKE <t>` (before
+//!   the transaction: GTID consistency), `START TRANSACTION`, inserts, `ROLLBACK`, `DROP
+//!   TEMPORARY TABLE IF EXISTS <tmp>`. Without server check only the target read is sent.
+//!
+//! The import job re-hashes the file before anything is sent (a queued job may find it
+//! changed) and after the last record (before `COMMIT`).
 use super::target::{read_target_bounded, statement_atomic, table_changed, TargetRead};
 use super::{
     build_error, guard_ctx, max_errors, mode_label, session_db, verdict, ImportRequest, Layout,
@@ -207,6 +212,44 @@ pub(crate) async fn hash_file(path: PathBuf) -> Result<FileFacts, DbError> {
 // Errors
 // ---------------------------------------------------------------------------------------
 
+/// The file is not the one the preview hashed (R21).
+pub(crate) fn file_changed_before() -> DbError {
+    DbError::PlanStale {
+        reason: "The file changed since the preview; preview again.".into(),
+    }
+}
+
+/// The mapped source columns exist in the file (`columns` of its reader).
+pub(crate) fn check_sources(req: &ImportRequest, columns: usize) -> Result<(), DbError> {
+    for m in &req.mapping {
+        if let Some(src) = m.source.filter(|s| *s as usize >= columns) {
+            return Err(config_error(
+                "mapping",
+                &format!(
+                    "Column {} reads source column {} but the file has {} columns.",
+                    m.target,
+                    src + 1,
+                    columns
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The number of columns the file has (its reader's), on the blocking pool.
+pub(crate) async fn file_columns(path: PathBuf, source: SourceOptions) -> Result<usize, DbError> {
+    tokio::task::spawn_blocking(move || {
+        dnt_transfer::read::open(&path, &source)
+            .map(|r| r.columns().len())
+            .map_err(|e| config_error("file", &e.to_string()))
+    })
+    .await
+    .map_err(|e| DbError::Internal {
+        message: format!("reading the file failed: {e}"),
+    })?
+}
+
 /// The error ending a job once more rows than allowed were refused.
 fn too_many_errors(max: u32) -> DbError {
     config_error(
@@ -384,6 +427,21 @@ impl<'a> Writer<'a> {
     /// changed its dialect, never when the guard blocks it. A write (`rows` > 0 or a
     /// pre-step) re-checks the connection first.
     async fn send(&mut self, sql: &str, write: Option<u32>) -> Result<(), DbError> {
+        self.send_as(sql, write, false).await
+    }
+
+    /// Sends `COMMIT`; `commit_sent` is set only once it passed every check and is
+    /// handed to the driver.
+    async fn send_commit(&mut self) -> Result<(), DbError> {
+        self.send_as("COMMIT", None, true).await
+    }
+
+    async fn send_as(
+        &mut self,
+        sql: &str,
+        write: Option<u32>,
+        commit: bool,
+    ) -> Result<(), DbError> {
         if self.ctx.is_stopped() {
             return Err(stopped());
         }
@@ -404,6 +462,9 @@ impl<'a> Writer<'a> {
             self.sent_any = true;
             self.inflight = true;
             self.inflight_rows = rows;
+        }
+        if commit {
+            self.commit_sent = true;
         }
         execute(
             self.session,
@@ -656,17 +717,24 @@ impl JobRunner for ImportJob {
         w.savepoints = w.skip && self.transactional;
         let mut pre_done = false;
         let result = self.body(&mut w, generation, &mut pre_done).await;
-        let outcome = match result {
-            Ok(()) => Ok(JobDone {
-                summary: format!(
-                    "Imported {} rows ({} skipped) into {} in {} batches",
-                    w.imported, w.skipped, self.request.table.name, w.written
-                ),
-                result_path: None,
-            }),
-            Err(e) => Err(self.failure(&w, e, pre_done).await),
+        // Rows the server kept: `None` when the outcome is unknown.
+        let (outcome, committed) = match result {
+            Ok(()) => (
+                Ok(JobDone {
+                    summary: format!(
+                        "Imported {} rows ({} skipped) into {} in {} batches",
+                        w.imported, w.skipped, self.request.table.name, w.written
+                    ),
+                    result_path: None,
+                }),
+                Some(w.imported),
+            ),
+            Err(e) => {
+                let (f, committed) = self.failure(&w, e, pre_done).await;
+                (Err(f), committed)
+            }
         };
-        let (sent_any, imported, written) = (w.sent_any, w.imported, w.written);
+        let (sent_any, written) = (w.sent_any, w.written);
         ctx.set_cancel(None);
         close_quietly(session).await;
         if sent_any {
@@ -679,7 +747,7 @@ impl JobRunner for ImportJob {
                 .history(
                     &started_at,
                     started.elapsed(),
-                    imported,
+                    committed,
                     written,
                     error.as_ref(),
                 )
@@ -701,6 +769,12 @@ impl ImportJob {
     ) -> Result<(), DbError> {
         if generation != self.context.generation || w.session.dialect() != self.dialect {
             return Err(stale());
+        }
+        // The file as it is now (R21): a job that waited in the queue may find it
+        // changed since the start's check; nothing is sent then.
+        let now = hash_file(PathBuf::from(&self.request.path)).await?;
+        if now.sha256 != self.file.sha256 || now.size != self.file.size {
+            return Err(file_changed_before());
         }
         let pg = self.layout.kind == DbKind::Postgres;
         if pg {
@@ -765,21 +839,40 @@ impl ImportJob {
             if ctx.is_stopped() {
                 return Err(stopped());
             }
-            w.commit_sent = true;
-            w.send("COMMIT", None).await?;
+            w.send_commit().await?;
             w.in_tx = false;
         }
         Ok(())
     }
 
     /// What a failed import did (spec §6.6 step 6). An open transaction is rolled back.
-    async fn failure(&self, w: &Writer<'_>, e: DbError, pre_done: bool) -> JobFailure {
-        let base = JobFailure::from(e.clone()).summary;
+    /// Also returns the rows the server kept (`None`: unknown).
+    async fn failure(
+        &self,
+        w: &Writer<'_>,
+        e: DbError,
+        pre_done: bool,
+    ) -> (JobFailure, Option<u64>) {
+        // A stale plan says why in its own words (the file or the table changed).
+        let base = match &e {
+            DbError::PlanStale { reason } => reason.clone(),
+            e => JobFailure::from(e.clone()).summary,
+        };
         let mut base = base.trim_end().to_string();
         if !base.ends_with('.') {
             base.push('.');
         }
-        let (unknown, mut note) = if w.commit_sent {
+        let refused_commit = w.commit_sent && matches!(e, DbError::Server { .. });
+        let (unknown, mut note) = if refused_commit {
+            // The server answered COMMIT with an error: nothing was committed.
+            if w.session.in_transaction() {
+                let _ = w.cleanup("ROLLBACK").await;
+            }
+            (
+                false,
+                "The server refused the COMMIT; no row was imported.".to_string(),
+            )
+        } else if w.commit_sent {
             (
                 true,
                 "COMMIT was sent but not answered; the outcome is unknown.".to_string(),
@@ -815,11 +908,20 @@ impl ImportJob {
         if pre_done {
             note.push_str(" The existing rows were already deleted by the pre-step.");
         }
-        JobFailure {
+        let committed = if unknown {
+            None
+        } else if w.in_tx || w.commit_sent {
+            Some(0)
+        } else {
+            // Autocommit: the batches that succeeded stay.
+            Some(w.imported)
+        };
+        let failure = JobFailure {
             error: with_outcome(e, unknown),
             outcome_unknown: unknown,
             summary: format!("{base} {note}"),
-        }
+        };
+        (failure, committed)
     }
 
     /// The job's one History entry (R10): a summary comment, the pre-step and the
@@ -828,7 +930,7 @@ impl ImportJob {
         &self,
         started_at: &str,
         elapsed: Duration,
-        imported: u64,
+        committed: Option<u64>,
         written: u64,
         error: Option<&AppError>,
     ) -> bool {
@@ -839,7 +941,7 @@ impl ImportJob {
             self.file.name,
             self.request.table.name,
             mode_label(&self.request.mode),
-            imported,
+            committed.map_or_else(|| "unknown".to_string(), |n| n.to_string()),
             written
         );
         if let Some(p) = &self.pre_step {
@@ -862,7 +964,7 @@ impl ImportJob {
                 HistoryStatus::Error
             },
             row_count: None,
-            affected: Some(imported),
+            affected: committed,
             error_kind: error.map(|e| e.kind.clone()),
             error_code: error.and_then(|e| e.server_code.clone().or_else(|| e.sqlstate.clone())),
             origin: HistoryOrigin::Import,
@@ -945,7 +1047,7 @@ struct DryState {
 
 #[async_trait]
 impl JobRunner for DryRunJob {
-    async fn run(mut self: Box<Self>, ctx: JobCtx) -> Result<JobDone, JobFailure> {
+    async fn run(self: Box<Self>, ctx: JobCtx) -> Result<JobDone, JobFailure> {
         let kind = self.context.rt.cfg.kind;
         let (session, generation) = self
             .context
@@ -953,7 +1055,6 @@ impl JobRunner for DryRunJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
-        self.context.generation = generation;
         ctx.set_cancel(Some(session.cancel_handle()));
         let cfg = self.context.rt.cfg.clone();
         let mut w = Writer::new(
@@ -971,7 +1072,7 @@ impl JobRunner for DryRunJob {
         w.max_errors = max_errors(&self.request.errors);
         w.send_rows = self.server_check;
         let mut state = DryState::default();
-        let result = self.body(&mut w, &mut state).await;
+        let result = self.body(&mut w, generation, &mut state).await;
         // Nothing the dry run did stays: the transaction is rolled back (PostgreSQL drops
         // the temporary table with it), MySQL drops the temporary table.
         if w.in_tx && w.cleanup("ROLLBACK").await.is_ok() {
@@ -1016,8 +1117,18 @@ impl JobRunner for DryRunJob {
 }
 
 impl DryRunJob {
-    async fn body(&self, w: &mut Writer<'_>, state: &mut DryState) -> Result<(), DbError> {
+    async fn body(
+        &self,
+        w: &mut Writer<'_>,
+        generation: u64,
+        state: &mut DryState,
+    ) -> Result<(), DbError> {
         let kind = self.context.rt.cfg.kind;
+        // The session must reach the server the job was submitted for (the tunnel of
+        // the submit time), or the server check writes elsewhere.
+        if self.server_check && generation != self.context.generation {
+            return Err(stale());
+        }
         let read = read_target_bounded(w.session, &self.request.table).await?;
         let report = check_mapping(
             &self.request.mapping,
@@ -1030,6 +1141,12 @@ impl DryRunJob {
             return Err(super::plan::mapping_error(&report));
         }
         let layout = Layout::new(&self.request, &read.columns, kind, w.dialect)?;
+        let columns = file_columns(
+            PathBuf::from(&self.request.path),
+            self.request.source.clone(),
+        )
+        .await?;
+        check_sources(&self.request, columns)?;
         let reader = spawn_reader(
             PathBuf::from(&self.request.path),
             self.request.source.clone(),
@@ -1058,11 +1175,19 @@ impl DryRunJob {
         } else {
             None
         };
-        w.send(if pg { "BEGIN" } else { "START TRANSACTION" }, None)
-            .await?;
-        w.in_tx = true;
-        w.send(&create, Some(0)).await?;
+        // The cleanup drops the table if it exists, so it is known before it is created.
         state.temp = Some(tmp);
+        if pg {
+            w.send("BEGIN", None).await?;
+            w.in_tx = true;
+            w.send(&create, Some(0)).await?;
+        } else {
+            // MySQL: outside the transaction (GTID consistency refuses CREATE TEMPORARY
+            // TABLE inside one on some servers); the cleanup drops it.
+            w.send(&create, Some(0)).await?;
+            w.send("START TRANSACTION", None).await?;
+            w.in_tx = true;
+        }
         if let Some(alter) = alter {
             w.send(&alter, Some(0)).await?;
         }

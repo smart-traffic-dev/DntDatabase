@@ -367,6 +367,16 @@ struct Fx {
 const CSV: &str = "id,name,note\n1,a,x\n2,b,\n3,c,z\n";
 
 async fn fixture(kind: DbKind, engine: Option<&str>, env: Option<EnvTag>, read_only: bool) -> Fx {
+    fixture_with(kind, engine, env, read_only, None).await
+}
+
+async fn fixture_with(
+    kind: DbKind,
+    engine: Option<&str>,
+    env: Option<EnvTag>,
+    read_only: bool,
+    plan_ttl: Option<Duration>,
+) -> Fx {
     let server = match kind {
         DbKind::MySql => ServerInfo {
             kind,
@@ -396,7 +406,7 @@ async fn fixture(kind: DbKind, engine: Option<&str>, env: Option<EnvTag>, read_o
     ));
     let driver: Arc<dyn Driver> = Arc::new(FakeDriver(Arc::clone(&fake)));
     let dir = tempfile::tempdir().unwrap();
-    let sm = SessionManager::new(
+    let mut sm = SessionManager::new(
         Arc::clone(&repo),
         secrets,
         KnownHosts::new(dir.path().join("known_hosts")),
@@ -421,6 +431,9 @@ async fn fixture(kind: DbKind, engine: Option<&str>, env: Option<EnvTag>, read_o
         )
         .unwrap()
         .id;
+    if let Some(ttl) = plan_ttl {
+        sm.plan_ttl = ttl;
+    }
     let sm = Arc::new(sm);
     sm.open(conn, None).await.unwrap();
     let csv = dir.path().join("items.csv");
@@ -1043,6 +1056,13 @@ async fn stop_mode_rolls_back_on_server_error() {
     assert_eq!(h[0].origin, HistoryOrigin::Import);
     assert_eq!(h[0].status, HistoryStatus::Error);
     assert!(!h[0].outcome_unknown);
+    // Nothing was committed.
+    assert_eq!(h[0].affected, Some(0));
+    assert!(
+        h[0].sql_text.contains(": append, 0 rows"),
+        "{}",
+        h[0].sql_text
+    );
 }
 
 #[tokio::test]
@@ -1437,4 +1457,267 @@ fn shape_counts_rows() {
         shape(&["INSERT INTO t (a) VALUES (1), (2)".to_string()]),
         ["INSERT x2"]
     );
+}
+
+// ---------------------------------------------------------------------------------------
+// Review fixes
+// ---------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn queued_job_rechecks_the_file_before_sending() {
+    let fx = pg().await;
+    fx.repo.set_app_setting("jobs_per_connection", "1").unwrap();
+    // A second file for the queued job: the running one keeps its own.
+    let other = fx.csv.with_file_name("other.csv");
+    std::fs::write(&other, "id,name,note\n7,q,\n").unwrap();
+    let mut queued = fx.append();
+    queued.path = other.to_string_lossy().into_owned();
+    let queued_plan = fx.sm.import_prepare(queued).await.unwrap();
+    let (first, _) = start_slow(&fx).await;
+    let second = fx
+        .sm
+        .import_start(queued_plan.plan_id, ok_confirm(None))
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.sm.jobs.detail(second).unwrap().job.state,
+        JobState::Queued
+    );
+    std::fs::write(&other, "id,name,note\n8,r,\n").unwrap();
+    assert_eq!(fx.wait(first).await.job.state, JobState::Done);
+    let d = fx.wait(second).await;
+    assert_eq!(d.job.state, JobState::Failed, "{:?}", d.job);
+    assert_eq!(d.job.error.as_ref().unwrap().kind, "plan_stale");
+    // The summary says why (M7), not the generic stale text.
+    assert!(
+        d.job
+            .summary
+            .as_deref()
+            .unwrap()
+            .starts_with("The file changed since the preview"),
+        "{:?}",
+        d.job.summary
+    );
+    let sent = fx.fake.sent();
+    assert!(!sent.iter().any(|s| s.contains("'q'") || s.contains("'r'")));
+    assert_eq!(sent.iter().filter(|s| *s == "BEGIN").count(), 1, "{sent:?}");
+    // Nothing was sent: no History entry for the queued job.
+    assert_eq!(fx.history().len(), 1);
+}
+
+#[tokio::test]
+async fn commit_refused_by_the_server_is_not_committed() {
+    let fx = pg().await;
+    fx.fake.fail("COMMIT", server_error("40001"));
+    let (_, d) = fx.import(fx.append()).await;
+    assert_eq!(d.job.state, JobState::Failed);
+    assert!(!d.job.outcome_unknown);
+    assert!(!d.job.error.as_ref().unwrap().outcome_unknown);
+    assert!(
+        d.job
+            .summary
+            .as_deref()
+            .unwrap()
+            .contains("refused the COMMIT"),
+        "{:?}",
+        d.job.summary
+    );
+    let h = fx.history();
+    assert!(!h[0].outcome_unknown);
+    assert_eq!(h[0].affected, Some(0));
+}
+
+#[tokio::test]
+async fn lost_commit_has_no_row_count() {
+    let fx = pg().await;
+    fx.fake.kill_on(
+        "COMMIT",
+        DbError::ConnectionLost {
+            was_in_tx: true,
+            outcome_unknown: true,
+            message: "gone".into(),
+        },
+    );
+    fx.import(fx.append()).await;
+    let h = fx.history();
+    assert_eq!(h[0].affected, None);
+    assert!(
+        h[0].sql_text.contains(": append, unknown rows"),
+        "{}",
+        h[0].sql_text
+    );
+}
+
+#[tokio::test]
+async fn mapping_to_a_missing_source_column_is_refused() {
+    let fx = pg().await;
+    let mut req = fx.append();
+    req.mapping[2].source = Some(3);
+    let r = fx.sm.import_prepare(req.clone()).await;
+    assert!(
+        matches!(&r, Err(DbError::Config { field: Some(f), message }) if f == "mapping" && message.contains("3 columns")),
+        "{r:?}"
+    );
+    let r = fx
+        .sm
+        .import_dry_run(DryRunRequest {
+            request: req,
+            server_check: false,
+            confirmed: false,
+        })
+        .await;
+    assert!(
+        matches!(&r, Err(DbError::Config { field: Some(f), .. }) if f == "mapping"),
+        "{r:?}"
+    );
+}
+
+#[tokio::test]
+async fn expired_plan_is_refused() {
+    let fx = fixture_with(
+        DbKind::Postgres,
+        None,
+        None,
+        false,
+        Some(Duration::from_millis(50)),
+    )
+    .await;
+    let preview = fx.sm.import_prepare(fx.append()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let mark = fx.fake.mark();
+    let r = fx.sm.import_start(preview.plan_id, ok_confirm(None)).await;
+    assert!(matches!(r, Err(DbError::PlanExpired)), "{r:?}");
+    assert!(fx.fake.since(mark).is_empty());
+}
+
+#[tokio::test]
+async fn same_size_file_change_is_stale() {
+    let fx = pg().await;
+    let preview = fx.sm.import_prepare(fx.append()).await.unwrap();
+    let changed = CSV.replace("1,a,x", "1,q,x");
+    assert_eq!(changed.len(), CSV.len());
+    fx.write_csv(&changed);
+    let mark = fx.fake.mark();
+    let r = fx.sm.import_start(preview.plan_id, ok_confirm(None)).await;
+    assert!(matches!(r, Err(DbError::PlanStale { .. })), "{r:?}");
+    assert!(fx.fake.since(mark).is_empty());
+}
+
+#[tokio::test]
+async fn production_irreversible_pre_step_needs_name_and_ack() {
+    let fx = fixture(
+        DbKind::MySql,
+        Some("InnoDB"),
+        Some(EnvTag::Production),
+        false,
+    )
+    .await;
+    let req = fx.request(ImportMode::Replace { truncate: true }, ErrorPolicy::Stop);
+    for (name, ack) in [(Some("items"), false), (None, true), (Some("Items"), true)] {
+        let preview = fx.sm.import_prepare(req.clone()).await.unwrap();
+        assert_eq!(preview.irreversible_name.as_deref(), Some("items"));
+        let mark = fx.fake.mark();
+        let r = fx
+            .sm
+            .import_start(
+                preview.plan_id,
+                ImportConfirm {
+                    confirmed: true,
+                    name: name.map(str::to_string),
+                    irreversible_ack: ack,
+                },
+            )
+            .await;
+        assert!(
+            matches!(r, Err(DbError::ConfirmationRequired { .. })),
+            "{name:?} {ack}: {r:?}"
+        );
+        assert!(fx.fake.since(mark).is_empty());
+    }
+    let (_, d) = fx.import(req).await;
+    assert_eq!(d.job.state, JobState::Done, "{:?}", d.job);
+}
+
+#[tokio::test]
+async fn mysql_dry_run_creates_the_temp_table_before_the_transaction() {
+    let fx = mysql("InnoDB").await;
+    let mark = fx.fake.mark();
+    let d = fx.dry_run(fx.append(), true).await;
+    assert_eq!(d.job.state, JobState::Done);
+    let sent = shape(&fx.fake.since(mark));
+    assert!(sent[0].starts_with("CREATE TEMPORARY TABLE"), "{sent:?}");
+    assert_eq!(sent[1], "START TRANSACTION");
+    assert_eq!(sent[sent.len() - 2], "ROLLBACK");
+    assert!(sent[sent.len() - 1].starts_with("DROP TEMPORARY TABLE IF EXISTS"));
+}
+
+#[tokio::test]
+async fn dry_run_cleans_up_after_an_error() {
+    for (kind, fail) in [
+        (DbKind::MySql, "INSERT"),
+        (DbKind::MySql, "CREATE TEMPORARY"),
+        (DbKind::Postgres, "INSERT"),
+    ] {
+        let fx = fixture(kind, Some("InnoDB"), None, false).await;
+        // A deadlock is never a row error: it ends the dry run.
+        fx.fake.fail(
+            fail,
+            server_error(if kind == DbKind::MySql {
+                "1213"
+            } else {
+                "40P01"
+            }),
+        );
+        let mark = fx.fake.mark();
+        let d = fx.dry_run(fx.append(), true).await;
+        assert_eq!(d.job.state, JobState::Failed, "{kind:?} {fail}");
+        assert!(!d.job.outcome_unknown);
+        let sent = shape(&fx.fake.since(mark));
+        if kind == DbKind::MySql {
+            // The temporary table is dropped even when its CREATE failed.
+            assert!(
+                sent.last()
+                    .unwrap()
+                    .starts_with("DROP TEMPORARY TABLE IF EXISTS"),
+                "{sent:?}"
+            );
+            if fail == "INSERT" {
+                assert_eq!(sent[sent.len() - 2], "ROLLBACK", "{sent:?}");
+            }
+        } else {
+            assert_eq!(sent.last().unwrap(), "ROLLBACK", "{sent:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn dry_run_cleans_up_after_stop() {
+    let fx = mysql("InnoDB").await;
+    *fx.fake.delay.lock().unwrap() = Some(("'b'".into(), Duration::from_millis(300)));
+    let mut req = fx.append();
+    req.batch_rows = 1;
+    let mark = fx.fake.mark();
+    let id = fx
+        .sm
+        .import_dry_run(DryRunRequest {
+            request: req,
+            server_check: true,
+            confirmed: true,
+        })
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if fx.fake.since(mark).iter().any(|s| s.contains("'b'")) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(fx.sm.jobs.cancel(id).await);
+    let d = fx.wait(id).await;
+    assert_eq!(d.job.state, JobState::Cancelled, "{:?}", d.job);
+    let sent = shape(&fx.fake.since(mark));
+    // Nothing more is inserted after the Stop; the cleanup still runs.
+    assert!(!fx.fake.since(mark).iter().any(|s| s.contains("'c'")));
+    assert_eq!(sent[sent.len() - 2], "ROLLBACK", "{sent:?}");
+    assert!(sent[sent.len() - 1].starts_with("DROP TEMPORARY TABLE IF EXISTS"));
 }

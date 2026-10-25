@@ -669,3 +669,71 @@ async fn history_commands() {
     history_clear_impl(&state).await.unwrap();
     assert!(history_list_impl(&state, all).await.unwrap().is_empty());
 }
+
+/// The import commands that read the file take only a path picked in
+/// `import_pick_file` (admitted for `ImportRead`), not one admitted for another use.
+#[tokio::test]
+async fn import_commands_refuse_a_path_not_picked_for_import() {
+    use dnt_core::meta::{ObjectKind, ObjectRef};
+    use dnt_transfer::read::{SourceFormat, SourceOptions};
+    use dntdatabase::commands::import_data::{
+        import_dry_run_impl, import_inspect_impl, import_prepare_impl,
+    };
+    use dntdatabase::import_data::{DryRunRequest, ImportRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let state = app_state(dir.path(), Arc::new(MemorySecretStore::default()));
+    let file = dir.path().join("data.csv");
+    std::fs::write(&file, "a\n1\n").unwrap();
+    // Admitted, but for another use.
+    let path = state
+        .file_picks
+        .admit(FileAccess::CellValueRead, file.clone())
+        .unwrap();
+    let source = SourceOptions {
+        format: SourceFormat::Csv,
+        delimiter: None,
+        header: true,
+        sheet: None,
+    };
+    let request = ImportRequest {
+        connection_id: Uuid::new_v4(),
+        table: ObjectRef {
+            database: "db".into(),
+            schema: None,
+            name: "t".into(),
+            kind: ObjectKind::Table,
+        },
+        path: path.clone(),
+        source: source.clone(),
+        mapping: vec![],
+        mode: dnt_transfer::mapping::ImportMode::Append,
+        errors: dnt_transfer::mapping::ErrorPolicy::Stop,
+        convert: Default::default(),
+        batch_rows: 0,
+        batch_bytes: 0,
+        override_identity: false,
+    };
+    let refused = |e: dnt_core::error::DbError| matches!(e, dnt_core::error::DbError::Config { field: Some(f), .. } if f == "path");
+    assert!(refused(
+        import_inspect_impl(&state, path.clone(), source)
+            .await
+            .unwrap_err()
+    ));
+    assert!(refused(
+        import_prepare_impl(&state, request.clone())
+            .await
+            .unwrap_err()
+    ));
+    assert!(refused(
+        import_dry_run_impl(
+            &state,
+            DryRunRequest {
+                request,
+                server_check: false,
+                confirmed: false,
+            },
+        )
+        .await
+        .unwrap_err()
+    ));
+}
