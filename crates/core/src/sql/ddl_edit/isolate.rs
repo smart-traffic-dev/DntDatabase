@@ -140,6 +140,26 @@ const MISMATCH: &str =
 /// Words that open or close blocks: as an unquoted label they are refused.
 const BLOCK_WORDS: [&str; 7] = ["BEGIN", "END", "IF", "CASE", "LOOP", "WHILE", "REPEAT"];
 
+/// Words never taken as an end label (processed as keywords instead).
+const END_LABEL_KEYWORDS: [&str; 13] = [
+    "BEGIN", "END", "IF", "CASE", "LOOP", "WHILE", "REPEAT", "ELSE", "ELSEIF", "THEN", "WHEN",
+    "UNTIL", "DO",
+];
+
+/// Whether `t` is an identifier token: a word not starting with a digit, or a
+/// backtick-quoted (or, under `ANSI_QUOTES`, double-quoted) name.
+fn is_identifier(stmt: &str, t: &Token, dialect: Dialect) -> bool {
+    match t.kind {
+        TokKind::Word(w) => !w.starts_with(|c: char| c.is_ascii_digit()),
+        TokKind::Quoted => match stmt.as_bytes()[t.start] {
+            b'`' => true,
+            b'"' => matches!(dialect, Dialect::MySql(m) if m.ansi_quotes),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 /// The MySQL body scanner: the byte offset where the one compound statement of
 /// `stmt` ends (its first `;` at paren depth 0 with no block open, or the end of the
 /// text), refusing the text when anything but `;` follows, or when its blocks or
@@ -168,7 +188,10 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
     while i < toks.len() {
         let t = toks[i];
         let start = at_start || starts.contains(&i);
-        let prev_dot = i > 0 && toks[i - 1].kind == TokKind::Punct(b'.');
+        // A word after `ident.` is a name (`t.end`); after `1.` (a decimal) it is not.
+        let prev_dot = i > 1
+            && toks[i - 1].kind == TokKind::Punct(b'.')
+            && is_identifier(stmt, &toks[i - 2], dialect);
         let mut next_start = false;
         match t.kind {
             TokKind::Open => paren += 1,
@@ -245,13 +268,22 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
                         None if matches!(open, Block::Begin | Block::CaseExpr) => {}
                         _ => return Err(text_error(MISMATCH)),
                     }
-                    // An optional end label.
-                    if open != Block::CaseExpr
-                        && open != Block::If
-                        && open != Block::CaseStmt
-                        && toks
-                            .get(i + 1)
-                            .is_some_and(|n| matches!(n.kind, TokKind::Word(_) | TokKind::Quoted))
+                    // An optional end label: a name that is not a keyword of the block
+                    // syntax, followed by `;` or the end of the text.
+                    let label = toks.get(i + 1).is_some_and(|n| match n.kind {
+                        TokKind::Word(w) => {
+                            !END_LABEL_KEYWORDS.iter().any(|k| w.eq_ignore_ascii_case(k))
+                        }
+                        TokKind::Quoted => is_identifier(stmt, n, dialect),
+                        _ => false,
+                    }) && toks
+                        .get(i + 2)
+                        .is_none_or(|n| n.kind == TokKind::Punct(b';'));
+                    if label
+                        && matches!(
+                            open,
+                            Block::Begin | Block::Loop | Block::While | Block::Repeat
+                        )
                     {
                         i += 1;
                     }
@@ -549,6 +581,7 @@ mod tests {
             "CREATE PROCEDURE p(a INT) IF a > 1 THEN SELECT 1; ELSEIF a = 0 THEN BEGIN SELECT 0; END; ELSE SELECT 2; END IF",
             "CREATE PROCEDURE p(a INT) CASE a WHEN 1 THEN SELECT 1; ELSE CASE WHEN a > 2 THEN SELECT 2; ELSE BEGIN END; END CASE; END CASE",
             "CREATE PROCEDURE p() l: LOOP LEAVE l; END LOOP l",
+            "CREATE PROCEDURE p() `l`: BEGIN SELECT `t`.end, t.begin, 1.5 FROM t; END `l`",
             "CREATE PROCEDURE p() BEGIN DECLARE done INT DEFAULT 0; DECLARE x INT; DECLARE c CURSOR FOR SELECT a FROM t WHERE IF(a, 1, 0) = 1; DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1; OPEN c; rd: LOOP FETCH c INTO x; IF done THEN LEAVE rd; END IF; ITERATE rd; END LOOP rd; CLOSE c; SELECT REPEAT('a', 2), CASE WHEN x THEN 1 END AS y FROM t WHERE CASE x WHEN 1 THEN 1 ELSE 0 END = 1; END",
             "CREATE PROCEDURE p(a INT) BEGIN IF CASE WHEN a THEN 1 END = 1 THEN SET a = 1; END IF; WHILE CASE WHEN a > 0 THEN 1 ELSE 0 END DO SET a = a - 1; END WHILE; REPEAT SET a = a + 1; UNTIL CASE WHEN a > 2 THEN 1 END END REPEAT; END",
             "CREATE PROCEDURE p(a INT) BEGIN IF a THEN BEGIN SELECT 1; END; ELSEIF a > 2 THEN BEGIN END; ELSE BEGIN SELECT 2; END; END IF; END",
@@ -644,6 +677,16 @@ mod tests {
             "CREATE PROCEDURE p() BEGIN CASE a WHEN 1 THEN SELECT 1; END; END; DROP TABLE x",
             "CREATE PROCEDURE p() l: LOOP SELECT 1; END l; DROP TABLE x",
             "CREATE PROCEDURE p() x: SELECT 1; DROP TABLE x",
+            // Round 3: a block keyword is never an end label; `1.` is a decimal.
+            "CREATE PROCEDURE p() BEGIN BEGIN SELECT 1; END END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN l: LOOP SELECT 1; END LOOP END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN WHILE a DO SELECT 1; END WHILE END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN REPEAT SELECT 1; UNTIL a END REPEAT END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN BEGIN SELECT 1; END l END; DROP TABLE x; END",
+            "CREATE PROCEDURE p() SELECT CASE WHEN a THEN 1. END FROM t; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN SET @v = CASE WHEN a THEN 1 ELSE 2. END; END; DROP TABLE x; END",
+            "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW SET NEW.a = CASE WHEN NEW.b THEN 1. END; DELETE FROM t; END",
+            "CREATE PROCEDURE p() BEGIN SELECT 'a'.end; END; DROP TABLE x; END",
         ] {
             let msg = refused(isolate(text, ObjectKind::Procedure, MY, &mysql8()));
             assert!(!msg.is_empty(), "{text}");
