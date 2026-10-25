@@ -3,11 +3,17 @@
 //! persistence; tracks the streaming exports that keep their own execution path (R3).
 //!
 //! Concurrency: one std `Mutex<State>` holds every job and the per-connection queues; it
-//! is never held across an `.await`. Queued jobs wait on `slot_changed` (a `Notify` woken
-//! whenever a slot frees, a job is stopped or a queue head leaves), re-checking their
-//! queue position and the limit under the mutex. A job that is stopped while queued never
+//! is never held across an `.await`. Each connection's queue has a `Notify`, woken when
+//! one of its slots frees, one of its queued jobs is stopped or leaves the queue, or the
+//! limit setting changes ([`JobManager::limit_changed`]); the queue head re-checks its
+//! position and the limit under the mutex. A job that is stopped while queued never
 //! enters its runner: the transition to `running` checks the stop signal under the same
 //! mutex that `cancel` raises it under.
+//!
+//! Persistence: every SQLite call runs on the blocking pool. A job's insert starts at
+//! `submit`/`track` and every later write of that job awaits it first, so the writes of
+//! one job reach the store in order. `list`, `detail`, `clear_finished` and `recover`
+//! read/write SQLite synchronously: commands call them through `commands::blocking`.
 
 use super::model::{
     JobDetail, JobEvent, JobKind, JobLogLevel, JobLogLine, JobParams, JobProgress, JobState,
@@ -21,8 +27,11 @@ use dnt_core::driver::{CancelHandle, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_store::jobs::JobRecord;
 use dnt_store::repo::ConnectionRepo;
+use futures_util::future::{BoxFuture, Shared};
+use futures_util::FutureExt;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
@@ -74,6 +83,12 @@ pub struct JobSpec {
 
 /// The work of a submitted job. It runs on a tokio task; it checks `ctx.is_stopped()`
 /// between batches/statements and never sends a statement once it is raised.
+///
+/// After a Stop the runner returns `Err` (normally `DbError::Cancelled`, with
+/// `outcome_unknown` when a write may have been applied): an error returned after a
+/// Stop is recorded as `cancelled`, whatever its kind. `Ok` is always recorded as
+/// `done`, even after a Stop, because it says the work completed. Progress and log
+/// calls made after the runner returned are ignored.
 #[async_trait]
 pub trait JobRunner: Send + 'static {
     async fn run(self: Box<Self>, ctx: JobCtx) -> Result<JobDone, JobFailure>;
@@ -90,17 +105,20 @@ pub struct JobFailure {
     pub error: DbError,
     /// The last write may or may not have been applied.
     pub outcome_unknown: bool,
+    /// Written by the app; never the server's message (it is stored, R6).
     pub summary: String,
 }
 
 impl From<DbError> for JobFailure {
-    /// The error's own message as the summary; `outcome_unknown` as the error says.
+    /// `outcome_unknown` as the error says. The summary is the error's app-written
+    /// message, or `Server error <code>` (and the like) for kinds whose message wraps
+    /// server/driver text.
     fn from(error: DbError) -> Self {
         let app = AppError::from(error.clone());
         JobFailure {
             error,
             outcome_unknown: app.outcome_unknown,
-            summary: app.message,
+            summary: persist::generic_error_text(&app).unwrap_or(app.message),
         }
     }
 }
@@ -137,6 +155,8 @@ impl LogBuf {
 }
 
 type Kill = Arc<dyn Fn() + Send + Sync>;
+/// Completes when the job's insert is done (successfully or not).
+type Inserted = Shared<BoxFuture<'static, ()>>;
 
 struct Live {
     /// Creation order (newest first in lists).
@@ -148,7 +168,8 @@ struct Live {
     /// Kills an external process, or (tracked jobs) the export's cancel closure.
     kill: Option<Kill>,
     log: LogBuf,
-    /// Log lines not sent in an event yet.
+    /// Log lines not sent in an event yet. Capped at [`MAX_LIVE_LOG_LINES`] (oldest
+    /// dropped): a UI that misses lines re-reads the job's detail.
     pending: VecDeque<JobLogLine>,
     /// Something changed since the last event.
     dirty: bool,
@@ -156,10 +177,11 @@ struct Live {
     flush_scheduled: bool,
     tmp_dir: Option<PathBuf>,
     /// The runner returned (or the tracked job finished): a Stop no longer changes the
-    /// outcome.
+    /// outcome, and progress/log calls are ignored.
     returned: bool,
     /// The final state is persisted and the temporary directory removed.
     settled: bool,
+    inserted: Inserted,
 }
 
 impl Live {
@@ -179,6 +201,7 @@ impl Live {
             tmp_dir: None,
             returned: false,
             settled: false,
+            inserted: futures_util::future::ready(()).boxed().shared(),
         }
     }
 
@@ -197,15 +220,36 @@ struct Slots {
     /// Queued jobs of the connection, oldest first.
     queue: VecDeque<Uuid>,
     running: u32,
+    changed: Arc<Notify>,
 }
 
 #[derive(Default)]
 struct State {
     seq: u64,
     jobs: HashMap<Uuid, Live>,
+    /// Only connections with queued or running jobs.
     conns: HashMap<Uuid, Slots>,
     /// Settled jobs still in memory, oldest first.
     finished: VecDeque<Uuid>,
+}
+
+impl State {
+    /// Removes `conn`'s entry once nothing is queued or running on it.
+    fn tidy(&mut self, conn: Uuid) {
+        if self
+            .conns
+            .get(&conn)
+            .is_some_and(|s| s.running == 0 && s.queue.is_empty())
+        {
+            self.conns.remove(&conn);
+        }
+    }
+
+    fn notify_conn(&self, conn: Uuid) {
+        if let Some(s) = self.conns.get(&conn) {
+            s.changed.notify_waiters();
+        }
+    }
 }
 
 type LimitReader = Arc<dyn Fn() -> u32 + Send + Sync>;
@@ -213,8 +257,6 @@ type LimitReader = Arc<dyn Fn() -> u32 + Send + Sync>;
 struct Inner {
     repo: Arc<ConnectionRepo>,
     state: Mutex<State>,
-    /// A slot freed, a queued job was stopped or left its queue.
-    slot_changed: Notify,
     /// A job settled.
     settled: Notify,
     events: RwLock<Option<Arc<dyn JobEvents>>>,
@@ -273,6 +315,21 @@ impl Final {
     }
 }
 
+/// Runs `cancel` on the runtime without waiting for it (a driver's cancel may take
+/// seconds); without a runtime it is skipped with a warning.
+fn spawn_cancel(handle: CancelHandle) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn(async move {
+                if let Err(e) = handle.cancel().await {
+                    tracing::warn!(error = %e, "could not cancel a job's statement");
+                }
+            });
+        }
+        Err(_) => tracing::warn!("no async runtime: a job's statement was not cancelled"),
+    }
+}
+
 /// Runs and tracks background jobs; `Clone` shares the same manager.
 #[derive(Clone)]
 pub struct JobManager {
@@ -280,8 +337,8 @@ pub struct JobManager {
 }
 
 impl JobManager {
-    /// The per-connection limit is read from the repo's `app_settings` each time a job
-    /// waits for its slot.
+    /// The per-connection limit is read from the repo's `app_settings` when a job at the
+    /// head of its queue waits for a slot.
     pub fn new(repo: Arc<ConnectionRepo>) -> Self {
         let reader_repo = Arc::clone(&repo);
         let limit: LimitReader = Arc::new(move || {
@@ -297,7 +354,6 @@ impl JobManager {
             inner: Arc::new(Inner {
                 repo,
                 state: Mutex::new(State::default()),
-                slot_changed: Notify::new(),
                 settled: Notify::new(),
                 events: RwLock::new(None),
                 emit_lock: Mutex::new(()),
@@ -307,8 +363,8 @@ impl JobManager {
         }
     }
 
-    /// Replaces where the per-connection limit comes from (tests). The value is clamped
-    /// to 1–8.
+    /// Replaces where the per-connection limit comes from. The value is clamped to 1–8.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub fn with_limit_reader(self, f: impl Fn() -> u32 + Send + Sync + 'static) -> Self {
         *self
             .inner
@@ -344,8 +400,16 @@ impl JobManager {
             .clone()
     }
 
+    /// The per-connection limit setting changed: queued jobs re-check it now.
+    pub fn limit_changed(&self) {
+        for slots in lock(&self.inner.state).conns.values() {
+            slots.changed.notify_waiters();
+        }
+    }
+
     /// Startup recovery (R7): deletes every leftover temporary job file and marks jobs
-    /// left queued/running as failed with an unknown outcome.
+    /// left queued/running as failed with an unknown outcome. Synchronous (file system
+    /// and SQLite).
     pub fn recover(&self) -> Result<(), DbError> {
         if let Some(root) = self.tmp_root() {
             if let Ok(entries) = std::fs::read_dir(&root) {
@@ -391,24 +455,46 @@ impl JobManager {
         }
     }
 
-    /// Stores the job as queued, emits an event and starts a task that waits for a run
-    /// slot of its connection, then runs `runner`. Must be called inside a tokio runtime.
-    pub fn submit(&self, spec: JobSpec, runner: Box<dyn JobRunner>) -> Result<Uuid, DbError> {
-        let id = Uuid::new_v4();
-        let summary = Self::new_summary(&spec, id, JobState::Queued, &utc_millis_now());
-        let live = {
-            let mut st = lock(&self.inner.state);
-            st.seq += 1;
-            Live::new(st.seq, summary, spec.params)
-        };
-        self.inner.repo.job_insert(&live.record())?;
-        {
-            let mut st = lock(&self.inner.state);
-            if let Some(conn) = spec.connection_id {
-                st.conns.entry(conn).or_default().queue.push_back(id);
+    /// Starts storing the job's first row on the blocking pool (inline without a
+    /// runtime); the returned future completes when it is stored or failed (logged).
+    fn insert(&self, record: JobRecord) -> Inserted {
+        let repo = Arc::clone(&self.inner.repo);
+        let save = move || {
+            if let Err(e) = repo.job_insert(&record) {
+                tracing::warn!(error = %e, "could not save a job");
             }
-            st.jobs.insert(id, live);
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => rt.spawn_blocking(save).map(|_| ()).boxed().shared(),
+            Err(_) => {
+                save();
+                futures_util::future::ready(()).boxed().shared()
+            }
         }
+    }
+
+    /// Registers a new job (in memory, and its store insert started).
+    fn register(&self, spec: &JobSpec, state: JobState, kill: Option<Kill>) -> Uuid {
+        let id = Uuid::new_v4();
+        let summary = Self::new_summary(spec, id, state, &utc_millis_now());
+        let mut st = lock(&self.inner.state);
+        st.seq += 1;
+        let mut live = Live::new(st.seq, summary, spec.params.clone());
+        live.kill = kill;
+        live.inserted = self.insert(live.record());
+        if let (JobState::Queued, Some(conn)) = (state, spec.connection_id) {
+            st.conns.entry(conn).or_default().queue.push_back(id);
+        }
+        st.jobs.insert(id, live);
+        id
+    }
+
+    /// Registers the job as queued (stored on the blocking pool; a store failure is
+    /// logged and never fails the job), emits an event and starts a task that waits for
+    /// a run slot of its connection, then runs `runner`. Must be called inside a tokio
+    /// runtime.
+    pub fn submit(&self, spec: JobSpec, runner: Box<dyn JobRunner>) -> Result<Uuid, DbError> {
+        let id = self.register(&spec, JobState::Queued, None);
         self.emit(id, true);
         let mgr = self.clone();
         tokio::spawn(async move { mgr.drive(id, spec.connection_id, runner).await });
@@ -487,31 +573,76 @@ impl JobManager {
             .unwrap_or(DEFAULT_JOBS_PER_CONNECTION)
     }
 
+    /// Leaves the queue of `conn` after a Stop and wakes the jobs behind it.
+    fn leave_queue(st: &mut State, conn: Uuid, id: Uuid) {
+        if let Some(slots) = st.conns.get_mut(&conn) {
+            slots.queue.retain(|q| *q != id);
+        }
+        st.notify_conn(conn);
+        st.tidy(conn);
+    }
+
     /// Waits until `id` is the oldest queued job of `conn` and a slot is free; `false`
-    /// when it was stopped first (it then left the queue).
+    /// when it was stopped first (it then left the queue). Only the queue head reads the
+    /// limit, once per wake.
     async fn acquire_slot(&self, conn: Uuid, id: Uuid) -> bool {
+        enum Check {
+            Stopped,
+            Head,
+            Behind,
+        }
+        let check = |st: &State| -> Check {
+            if st.jobs.get(&id).is_none_or(|l| l.stop.is_stopped()) {
+                Check::Stopped
+            } else if st
+                .conns
+                .get(&conn)
+                .is_some_and(|s| s.queue.front() == Some(&id))
+            {
+                Check::Head
+            } else {
+                Check::Behind
+            }
+        };
         loop {
-            let limit = self.read_limit().await;
-            let changed = self.inner.slot_changed.notified();
+            let notify = match lock(&self.inner.state).conns.get(&conn) {
+                Some(s) => Arc::clone(&s.changed),
+                None => return false, // not queued (cannot happen for a submitted job)
+            };
+            let changed = notify.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            {
+            let head = {
                 let mut st = lock(&self.inner.state);
-                let stopped = st.jobs.get(&id).is_none_or(|live| live.stop.is_stopped());
-                let slots = st.conns.entry(conn).or_default();
-                if stopped {
-                    slots.queue.retain(|q| *q != id);
-                    drop(st);
-                    self.inner.slot_changed.notify_waiters();
-                    return false;
+                match check(&st) {
+                    Check::Stopped => {
+                        Self::leave_queue(&mut st, conn, id);
+                        return false;
+                    }
+                    Check::Head => true,
+                    Check::Behind => false,
                 }
-                if slots.queue.front() == Some(&id) && slots.running < limit {
-                    slots.queue.pop_front();
-                    slots.running += 1;
-                    drop(st);
-                    // The next job of the queue may fit too.
-                    self.inner.slot_changed.notify_waiters();
-                    return true;
+            };
+            if head {
+                let limit = self.read_limit().await;
+                let mut st = lock(&self.inner.state);
+                match check(&st) {
+                    Check::Stopped => {
+                        Self::leave_queue(&mut st, conn, id);
+                        return false;
+                    }
+                    Check::Head => {
+                        if let Some(slots) = st.conns.get_mut(&conn) {
+                            if slots.running < limit {
+                                slots.queue.pop_front();
+                                slots.running += 1;
+                                // The next job of the queue may fit too.
+                                slots.changed.notify_waiters();
+                                return true;
+                            }
+                        }
+                    }
+                    Check::Behind => {}
                 }
             }
             changed.await;
@@ -519,27 +650,28 @@ impl JobManager {
     }
 
     fn release_slot(&self, conn: Uuid) {
-        {
-            let mut st = lock(&self.inner.state);
-            if let Some(slots) = st.conns.get_mut(&conn) {
-                slots.running = slots.running.saturating_sub(1);
-                if slots.running == 0 && slots.queue.is_empty() {
-                    st.conns.remove(&conn);
-                }
-            }
+        let mut st = lock(&self.inner.state);
+        if let Some(slots) = st.conns.get_mut(&conn) {
+            slots.running = slots.running.saturating_sub(1);
+            slots.changed.notify_waiters();
         }
-        self.inner.slot_changed.notify_waiters();
+        st.tidy(conn);
     }
 
-    /// Writes the job's current row (blocking pool); a failure is logged, never fatal.
+    /// Writes the job's current row; a failure is logged, never fatal.
     async fn persist(&self, id: Uuid) {
-        let record = lock(&self.inner.state).jobs.get(&id).map(Live::record);
-        if let Some(record) = record {
-            self.store(record, false).await;
+        let row = lock(&self.inner.state)
+            .jobs
+            .get(&id)
+            .map(|l| (l.inserted.clone(), l.record()));
+        if let Some((inserted, record)) = row {
+            self.store(inserted, record, false).await;
         }
     }
 
-    async fn store(&self, record: JobRecord, prune: bool) {
+    /// Updates a job's row on the blocking pool once its insert is done.
+    async fn store(&self, inserted: Inserted, record: JobRecord, prune: bool) {
+        inserted.await;
         let repo = Arc::clone(&self.inner.repo);
         let saved = tokio::task::spawn_blocking(move || {
             repo.job_update(&record)?;
@@ -556,10 +688,22 @@ impl JobManager {
         }
     }
 
+    /// Waits until the job's first row is stored (tests).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub async fn stored(&self, id: Uuid) {
+        let inserted = lock(&self.inner.state)
+            .jobs
+            .get(&id)
+            .map(|l| l.inserted.clone());
+        if let Some(inserted) = inserted {
+            inserted.await;
+        }
+    }
+
     /// Records the final state, emits it, persists it, removes the temporary directory
     /// and marks the job settled.
     async fn settle(&self, id: Uuid, fin: Final) {
-        let (record, tmp) = {
+        let (inserted, record, tmp) = {
             let mut st = lock(&self.inner.state);
             let Some(live) = st.jobs.get_mut(&id) else {
                 return;
@@ -575,10 +719,10 @@ impl JobManager {
             live.cancel = None;
             live.kill = None;
             live.dirty = true;
-            (live.record(), live.tmp_dir.take())
+            (live.inserted.clone(), live.record(), live.tmp_dir.take())
         };
         self.emit(id, true);
-        self.store(record, true).await;
+        self.store(inserted, record, true).await;
         if let Some(dir) = tmp {
             let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(dir)).await;
             if let Ok(Err(e)) = removed {
@@ -685,6 +829,9 @@ impl JobManager {
             let Some(live) = st.jobs.get_mut(&id) else {
                 return;
             };
+            if live.returned {
+                return;
+            }
             live.summary.progress = progress;
             live.dirty = true;
         }
@@ -697,6 +844,9 @@ impl JobManager {
             let Some(live) = st.jobs.get_mut(&id) else {
                 return;
             };
+            if live.returned {
+                return;
+            }
             if live.pending.len() == MAX_LIVE_LOG_LINES {
                 live.pending.pop_front();
             }
@@ -710,23 +860,12 @@ impl JobManager {
     /// Registers a job that runs on its own execution path (R3): `running` at once, no
     /// slot; Stop calls `cancel`. Report progress and the outcome on the returned handle.
     pub fn track(&self, spec: JobSpec, cancel: Box<dyn Fn() + Send + Sync>) -> TrackedJob {
-        let id = Uuid::new_v4();
-        let summary = Self::new_summary(&spec, id, JobState::Running, &utc_millis_now());
-        let mut live = {
-            let mut st = lock(&self.inner.state);
-            st.seq += 1;
-            Live::new(st.seq, summary, spec.params)
-        };
-        live.kill = Some(Arc::from(cancel));
-        if let Err(e) = self.inner.repo.job_insert(&live.record()) {
-            tracing::warn!(error = %e, "could not save a tracked job");
-        }
-        lock(&self.inner.state).jobs.insert(id, live);
+        let id = self.register(&spec, JobState::Running, Some(Arc::from(cancel)));
         self.emit(id, true);
         TrackedJob {
             mgr: self.clone(),
             id,
-            finished: std::sync::atomic::AtomicBool::new(false),
+            finished: AtomicBool::new(false),
         }
     }
 
@@ -747,28 +886,37 @@ impl JobManager {
             .await;
     }
 
-    /// Stops a queued or running job: raises its stop signal, then calls its statement
-    /// canceller and/or kill closure. `false` when the job is not live.
-    pub async fn cancel(&self, id: Uuid) -> bool {
+    /// Raises the job's stop signal and calls its kill closure, synchronously; returns
+    /// its statement canceller to call. `None` when the job is not live.
+    fn raise(&self, id: Uuid) -> Option<Option<CancelHandle>> {
         let (handle, kill) = {
-            let mut st = lock(&self.inner.state);
-            let Some(live) = st.jobs.get_mut(&id) else {
-                return false;
-            };
+            let st = lock(&self.inner.state);
+            let live = st.jobs.get(&id)?;
             if !live.summary.state.is_live() {
-                return false;
+                return None;
             }
             if live.returned {
                 // Already ending; a Stop no longer changes anything.
-                return true;
+                return Some(None);
             }
             live.stop.stop();
+            if let Some(conn) = live.summary.connection_id {
+                st.notify_conn(conn);
+            }
             (live.cancel.clone(), live.kill.clone())
         };
-        self.inner.slot_changed.notify_waiters();
         if let Some(kill) = kill {
             kill();
         }
+        Some(handle)
+    }
+
+    /// Stops a queued or running job: raises its stop signal, calls its kill closure,
+    /// then awaits its statement canceller. `false` when the job is not live.
+    pub async fn cancel(&self, id: Uuid) -> bool {
+        let Some(handle) = self.raise(id) else {
+            return false;
+        };
         if let Some(handle) = handle {
             if let Err(e) = handle.cancel().await {
                 tracing::warn!(error = %e, "could not cancel a job's statement");
@@ -786,18 +934,25 @@ impl JobManager {
             .collect()
     }
 
-    /// Stops every queued/running job of `conn` (R9), tracked exports included.
-    pub async fn cancel_connection(&self, conn: Uuid) {
-        for id in self.live_ids(|live| live.summary.connection_id == Some(conn)) {
-            self.cancel(id).await;
+    /// Raises the stop of every job in `ids` and starts their cancellers without waiting.
+    fn raise_all(&self, ids: Vec<Uuid>) {
+        for id in ids {
+            if let Some(Some(handle)) = self.raise(id) {
+                spawn_cancel(handle);
+            }
         }
     }
 
-    /// Stops every job and waits up to `wait` for them to settle (R8).
+    /// Stops every queued/running job of `conn` (R9), tracked exports included. Returns
+    /// at once: the statement cancellers run in the background.
+    pub async fn cancel_connection(&self, conn: Uuid) {
+        self.raise_all(self.live_ids(|live| live.summary.connection_id == Some(conn)));
+    }
+
+    /// Stops every job (cancellers run concurrently in the background) and waits at most
+    /// `wait` for them to settle (R8).
     pub async fn stop_all(&self, wait: Duration) {
-        for id in self.live_ids(|_| true) {
-            self.cancel(id).await;
-        }
+        self.raise_all(self.live_ids(|_| true));
         let _ = tokio::time::timeout(wait, async {
             loop {
                 let settled = self.inner.settled.notified();
@@ -814,6 +969,7 @@ impl JobManager {
 
     /// Waits up to `timeout` for job `id` to settle (final state persisted). `true` when
     /// it did, or when no such job is in memory.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub async fn wait(&self, id: Uuid, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, async {
             loop {
@@ -846,6 +1002,7 @@ impl JobManager {
 
     /// Live jobs (newest first), then stored ones (newest created first); at most
     /// `limit`. A finished job still in memory shows its full detail (server messages).
+    /// Reads SQLite synchronously.
     pub fn list(&self, limit: u32) -> Result<Vec<JobSummary>, DbError> {
         let limit = limit as usize;
         let (mut live, finished) = {
@@ -885,7 +1042,7 @@ impl JobManager {
     }
 
     /// A job with its log and parameters: from memory while the app runs, else from the
-    /// store (persisted log, R6).
+    /// store (persisted log, R6). Reads SQLite synchronously.
     pub fn detail(&self, id: Uuid) -> Result<JobDetail, DbError> {
         if let Some(live) = lock(&self.inner.state).jobs.get(&id) {
             return Ok(JobDetail {
@@ -905,7 +1062,8 @@ impl JobManager {
             })
     }
 
-    /// Deletes every finished job (store and memory); live jobs stay.
+    /// Deletes every finished job (store and memory); live jobs stay. Writes SQLite
+    /// synchronously.
     pub fn clear_finished(&self) -> Result<(), DbError> {
         self.inner.repo.job_clear_finished()?;
         let mut st = lock(&self.inner.state);
@@ -982,7 +1140,7 @@ impl JobCtx {
     }
 
     /// The running statement's canceller (`None` between statements). Set after a Stop,
-    /// it is called at once.
+    /// it is started at once.
     pub fn set_cancel(&self, handle: Option<CancelHandle>) {
         let late = {
             let mut st = lock(&self.mgr.inner.state);
@@ -995,11 +1153,7 @@ impl JobCtx {
             }
         };
         if let (true, Some(handle)) = (late, handle) {
-            if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                rt.spawn(async move {
-                    let _ = handle.cancel().await;
-                });
-            }
+            spawn_cancel(handle);
         }
     }
 
@@ -1033,7 +1187,7 @@ impl JobCtx {
 pub struct TrackedJob {
     mgr: JobManager,
     id: Uuid,
-    finished: std::sync::atomic::AtomicBool,
+    finished: AtomicBool,
 }
 
 impl TrackedJob {
@@ -1061,10 +1215,7 @@ impl TrackedJob {
     /// Records the outcome (the first call wins): `Ok` → done; an error after a Stop or
     /// a `Cancelled` error → cancelled; else failed.
     pub async fn finish(&self, outcome: Result<JobDone, DbError>) {
-        if self
-            .finished
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
+        if self.finished.swap(true, Ordering::SeqCst) {
             return;
         }
         self.mgr.finish_tracked(self.id, outcome).await;
@@ -1073,21 +1224,27 @@ impl TrackedJob {
 
 impl Drop for TrackedJob {
     fn drop(&mut self) {
-        if self.finished.load(std::sync::atomic::Ordering::SeqCst) {
+        if self.finished.load(Ordering::SeqCst) {
             return;
         }
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            let mgr = self.mgr.clone();
-            let id = self.id;
-            rt.spawn(async move {
-                mgr.finish_tracked(
-                    id,
-                    Err(DbError::Internal {
-                        message: "the job ended without reporting its outcome".into(),
-                    }),
-                )
-                .await;
-            });
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                let mgr = self.mgr.clone();
+                let id = self.id;
+                rt.spawn(async move {
+                    mgr.finish_tracked(
+                        id,
+                        Err(DbError::Internal {
+                            message: "the job ended without reporting its outcome".into(),
+                        }),
+                    )
+                    .await;
+                });
+            }
+            Err(_) => tracing::warn!(
+                job = %self.id,
+                "a tracked job was dropped without an outcome outside the async runtime"
+            ),
         }
     }
 }

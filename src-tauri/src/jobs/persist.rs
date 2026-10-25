@@ -21,16 +21,47 @@ pub(super) fn server_error_text(code: Option<&str>) -> String {
     }
 }
 
-/// The error as stored: a server error loses its server text.
+/// The fixed text stored instead of the message of an error kind whose message or
+/// detail wraps driver/server text; `None` for kinds whose text the app writes.
+pub(super) fn generic_error_text(e: &AppError) -> Option<String> {
+    Some(match e.kind.as_str() {
+        "server" => server_error_text(e.server_code.as_deref()),
+        "auth" => "Authentication failed.".into(),
+        "connect" => "Could not connect to the database server.".into(),
+        "connection_lost" => "The connection to the server was lost.".into(),
+        "tls" => "TLS handshake failed.".into(),
+        _ => return None,
+    })
+}
+
+/// The error as stored: kinds wrapping driver/server text keep their kind, codes and
+/// outcome flags only; the message becomes a fixed text and detail/hint/position go.
 pub(super) fn persisted_error(e: &AppError) -> AppError {
     let mut e = e.clone();
-    if e.kind == "server" {
-        e.message = server_error_text(e.server_code.as_deref());
+    if let Some(text) = generic_error_text(&e) {
+        e.message = text;
         e.detail = None;
         e.hint = None;
         e.position = None;
     }
     e
+}
+
+/// The summary as stored: one that repeats the server/driver text of the job's error
+/// is replaced by the error's fixed text.
+pub(super) fn persisted_summary(summary: Option<&str>, error: Option<&AppError>) -> Option<String> {
+    let summary = summary?;
+    if let Some(e) = error {
+        if let Some(text) = generic_error_text(e) {
+            // These kinds carry the driver/server text in `detail` (a server error also
+            // in `message`; the app-written messages of the others are fixed texts).
+            let leaks = |t: &str| !t.is_empty() && summary.contains(t);
+            if (e.kind == "server" && leaks(&e.message)) || e.detail.as_deref().is_some_and(leaks) {
+                return Some(text);
+            }
+        }
+    }
+    Some(summary.to_owned())
 }
 
 fn persisted_line(l: &JobLogLine) -> JobLogLine {
@@ -111,7 +142,7 @@ pub(super) fn to_record(
         started_at: job.started_at.clone(),
         finished_at: job.finished_at.clone(),
         result_path: job.result_path.clone(),
-        summary: job.summary.clone(),
+        summary: persisted_summary(job.summary.as_deref(), job.error.as_ref()),
         error_json: job
             .error
             .as_ref()

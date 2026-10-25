@@ -211,9 +211,10 @@ async fn runs_and_persists_done() {
             }),
         )
         .unwrap();
-    // Inserted as queued before the task ran.
+    // Inserted on the blocking pool (as queued; the job may have started meanwhile).
+    f.mgr.stored(id).await;
     let r = record(&f, id);
-    assert_eq!(r.state, "queued");
+    assert!(r.state == "queued" || r.state == "running", "{}", r.state);
     assert_eq!(r.kind, "dump");
     assert!(r.rerunnable);
     assert!(r.params_json.unwrap().contains("shop"));
@@ -381,6 +382,8 @@ async fn stop_queued_job_never_runs() {
         )
         .unwrap();
     assert_eq!(f.mgr.detail(queued).unwrap().job.state, JobState::Queued);
+    f.mgr.stored(queued).await;
+    assert_eq!(record(&f, queued).state, "queued");
     assert!(f.mgr.cancel(queued).await);
     let s = finish(&f, queued).await;
     assert_eq!(s.state, JobState::Cancelled);
@@ -488,11 +491,13 @@ async fn stop_between_batches_sends_nothing_more() {
 #[tokio::test]
 async fn events_are_throttled_but_final_state_always_sent() {
     let f = fixture();
+    let took = Arc::new(Mutex::new(Duration::ZERO));
+    let t = Arc::clone(&took);
     let id = f
         .mgr
         .submit(
             spec(Some(Uuid::new_v4())),
-            runner(|ctx| async move {
+            runner(move |ctx| async move {
                 let started = Instant::now();
                 ctx.log(JobLogLevel::Info, "start");
                 for i in 0..1000u64 {
@@ -500,12 +505,16 @@ async fn events_are_throttled_but_final_state_always_sent() {
                 }
                 ctx.log(JobLogLevel::Info, "middle");
                 ctx.log(JobLogLevel::Warn, "end");
-                assert!(started.elapsed() < Duration::from_millis(100));
+                *t.lock().unwrap() = started.elapsed();
                 Ok(done("ok"))
             }),
         )
         .unwrap();
     finish(&f, id).await;
+    // At most one progress event per interval, plus the first one, whatever the speed
+    // of the machine (normally the loop takes a few ms: no progress event at all).
+    let intervals = (took.lock().unwrap().as_millis() / EVENT_INTERVAL.as_millis()) as usize;
+    let max_progress = 2 + intervals;
     let ev = f.events.of(id);
     let states: Vec<JobState> = ev.iter().map(|e| e.job.state).collect();
     assert_eq!(states.first(), Some(&JobState::Queued));
@@ -515,8 +524,8 @@ async fn events_are_throttled_but_final_state_always_sent() {
     assert_eq!(last.job.progress.total, Some(1000.0));
     // One event for the running transition plus at most two progress events.
     let running = states.iter().filter(|s| **s == JobState::Running).count();
-    assert!((1..=3).contains(&running), "{states:?}");
-    assert!(ev.len() <= 5, "{states:?}");
+    assert!((1..=1 + max_progress).contains(&running), "{states:?}");
+    assert!(ev.len() <= 3 + max_progress, "{states:?}");
     // Every log line reaches the UI exactly once.
     let lines: Vec<String> = ev
         .iter()
@@ -750,6 +759,7 @@ async fn tracked_job_progress_finish_and_cancel_closure() {
     assert_eq!(d.job.state, JobState::Running);
     assert!(d.job.started_at.is_some());
     assert_eq!(f.mgr.active_count(), 1);
+    f.mgr.stored(t.id()).await;
     assert_eq!(record(&f, t.id()).state, "running");
     assert_eq!(record(&f, t.id()).kind, "export");
 
@@ -845,4 +855,212 @@ async fn list_merges_live_and_history_newest_first() {
     assert_eq!(ids, [live]);
     gate.notify_one();
     finish(&f, live).await;
+}
+
+const ALICE: &str = "alice@example.com";
+
+fn duplicate() -> DbError {
+    DbError::Server {
+        code: Some("1062".into()),
+        sqlstate: Some("23000".into()),
+        message: format!("Duplicate entry '{ALICE}' for key 'email'"),
+        position: Some(3),
+    }
+}
+
+async fn failed_with(f: &Fixture, failure: JobFailure) -> (JobSummary, JobRecord) {
+    let id = f
+        .mgr
+        .submit(spec(None), runner(move |_ctx| async move { Err(failure) }))
+        .unwrap();
+    let s = finish(f, id).await;
+    (s, record(f, id))
+}
+
+#[tokio::test]
+async fn server_text_is_never_persisted() {
+    let f = fixture();
+    // `From<DbError>` gives a generic summary for a server error.
+    let (s, r) = failed_with(&f, JobFailure::from(duplicate())).await;
+    assert_eq!(s.summary.as_deref(), Some("Server error 1062"));
+    assert!(s.error.unwrap().message.contains(ALICE)); // shown while the app runs
+    assert_eq!(r.summary.as_deref(), Some("Server error 1062"));
+    let json = r.error_json.unwrap();
+    assert!(!json.contains(ALICE), "{json}");
+    assert!(json.contains("\"server_code\":\"1062\""), "{json}");
+
+    // A runner summary that repeats the server text is redacted when stored.
+    let (_, r) = failed_with(
+        &f,
+        JobFailure {
+            error: duplicate(),
+            outcome_unknown: false,
+            summary: format!("Batch 3 failed: Duplicate entry '{ALICE}' for key 'email'"),
+        },
+    )
+    .await;
+    assert_eq!(r.summary.as_deref(), Some("Server error 1062"));
+    // One that does not is kept.
+    let (_, r) = failed_with(
+        &f,
+        JobFailure {
+            error: duplicate(),
+            outcome_unknown: false,
+            summary: "Stopped at batch 3; 200 rows written.".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        r.summary.as_deref(),
+        Some("Stopped at batch 3; 200 rows written.")
+    );
+
+    // Auth, connect and connection-lost errors keep only kind and flags.
+    for (error, kind) in [
+        (
+            DbError::Auth {
+                message: format!("Access denied for user '{ALICE}'"),
+            },
+            "auth",
+        ),
+        (
+            DbError::Connect {
+                message: format!("host {ALICE} unreachable"),
+            },
+            "connect",
+        ),
+        (
+            DbError::ConnectionLost {
+                was_in_tx: true,
+                outcome_unknown: true,
+                message: format!("reset while sending '{ALICE}'"),
+            },
+            "connection_lost",
+        ),
+    ] {
+        let (s, r) = failed_with(&f, JobFailure::from(error)).await;
+        let json = r.error_json.unwrap();
+        assert!(json.contains(&format!("\"kind\":\"{kind}\"")), "{json}");
+        assert!(!json.contains(ALICE), "{json}");
+        assert!(!r.summary.unwrap().contains(ALICE));
+        assert_eq!(r.outcome_unknown, s.outcome_unknown);
+    }
+    let (s, r) = failed_with(
+        &f,
+        JobFailure::from(DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: ALICE.into(),
+        }),
+    )
+    .await;
+    assert!(s.outcome_unknown && r.outcome_unknown);
+    assert!(r.error_json.unwrap().contains("\"outcome_unknown\":true"));
+}
+
+struct SlowCanceller(Arc<Notify>);
+
+#[async_trait]
+impl Canceller for SlowCanceller {
+    async fn cancel(&self) -> Result<(), DbError> {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        self.0.notify_one();
+        Ok(())
+    }
+}
+
+/// Waits for its (slow) canceller, then ends cancelled.
+fn slow_to_cancel(entered: mpsc::UnboundedSender<Uuid>) -> Box<dyn JobRunner> {
+    runner(move |ctx| async move {
+        let woke = Arc::new(Notify::new());
+        ctx.set_cancel(Some(Arc::new(SlowCanceller(Arc::clone(&woke)))));
+        entered.send(ctx.id()).unwrap();
+        woke.notified().await;
+        Err(cancelled_failure())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_all_and_cancel_connection_do_not_wait_for_slow_cancellers() {
+    let f = fixture();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let ids: Vec<Uuid> = (0..3)
+        .map(|_| {
+            f.mgr
+                .submit(spec(Some(Uuid::new_v4())), slow_to_cancel(tx.clone()))
+                .unwrap()
+        })
+        .collect();
+    for _ in 0..3 {
+        recv(&mut rx).await;
+    }
+    let started = Instant::now();
+    f.mgr.stop_all(Duration::from_millis(300)).await;
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(600), "{took:?}");
+    // The cancellers ran concurrently: all three end ~800 ms after the stop.
+    for id in &ids {
+        assert_eq!(finish(&f, *id).await.state, JobState::Cancelled);
+    }
+    assert!(started.elapsed() < Duration::from_millis(2000));
+
+    let conn = Uuid::new_v4();
+    let id = f.mgr.submit(spec(Some(conn)), slow_to_cancel(tx)).unwrap();
+    recv(&mut rx).await;
+    let started = Instant::now();
+    f.mgr.cancel_connection(conn).await;
+    assert!(started.elapsed() < Duration::from_millis(300));
+    assert_eq!(finish(&f, id).await.state, JobState::Cancelled);
+}
+
+#[tokio::test]
+async fn limit_changed_wakes_queued_jobs() {
+    let f = fixture();
+    f.limit.store(1, Ordering::SeqCst);
+    let conn = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let gate = Arc::new(Notify::new());
+    let first = f
+        .mgr
+        .submit(spec(Some(conn)), gated(tx.clone(), Arc::clone(&gate)))
+        .unwrap();
+    assert_eq!(recv(&mut rx).await, first);
+    let second = f
+        .mgr
+        .submit(spec(Some(conn)), gated(tx, Arc::clone(&gate)))
+        .unwrap();
+    stays_empty(&mut rx).await;
+    f.limit.store(2, Ordering::SeqCst);
+    f.mgr.limit_changed();
+    assert_eq!(recv(&mut rx).await, second);
+    gate.notify_waiters();
+    finish(&f, first).await;
+    finish(&f, second).await;
+}
+
+#[tokio::test]
+async fn progress_and_log_after_return_are_ignored() {
+    let f = fixture();
+    let kept: Arc<Mutex<Option<JobCtx>>> = Arc::default();
+    let k = Arc::clone(&kept);
+    let id = f
+        .mgr
+        .submit(
+            spec(None),
+            runner(move |ctx| async move {
+                ctx.progress("Rows", 5, None, ProgressUnit::Rows);
+                *k.lock().unwrap() = Some(ctx);
+                Ok(done("ok"))
+            }),
+        )
+        .unwrap();
+    finish(&f, id).await;
+    let events = f.events.of(id).len();
+    let ctx = kept.lock().unwrap().take().unwrap();
+    ctx.progress("Rows", 99, None, ProgressUnit::Rows);
+    ctx.log(JobLogLevel::Info, "late");
+    let d = f.mgr.detail(id).unwrap();
+    assert_eq!(d.job.progress.done, 5.0);
+    assert!(d.log.is_empty());
+    assert_eq!(f.events.of(id).len(), events);
 }
