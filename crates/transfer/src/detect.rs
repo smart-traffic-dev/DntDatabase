@@ -13,31 +13,29 @@
 //!    with a `\` client command (a `\…` line, or a backslash outside quoted text such as
 //!    `SELECT 1\G`) is refused. There is no fourth path.
 //!
-//! Refusals ([`Refusal`]), found at preview so the typed confirmation covers what runs
-//! (R31): `CREATE` / `DROP` / `ALTER DATABASE` (MySQL also `SCHEMA`) naming another
-//! database, `USE <db>` naming a database other than the target, a file of the other
-//! engine (by its header, or MySQL `/*!` comments on PostgreSQL), and (psql path) client
-//! commands other than `\connect` / `\c` to the target and pg_dump's `\restrict` /
-//! `\unrestrict` (a `\!` would run a shell command; `\i`, `\o`, `\copy`, `\set` …
-//! would read or write other files or change psql's error handling). `CREATE DATABASE`
-//! and `DROP DATABASE` are always refused, whatever they name. The restore job applies
-//! [`statement_refusal`] again to every statement before it is sent.
+//! Refusals ([`Refusal`]) are found at preview so the typed confirmation covers what
+//! runs (R31), and the restore job applies [`statement_refusal`] again to every statement
+//! before it is sent: see [`statement_refusal`] (database statements, MySQL prepared /
+//! stored code and `DELIMITER`-merged statements, backslash client commands, PostgreSQL
+//! string-lexing settings), [`psql_command_refusal`] (psql lines), [`ModeTracker`]
+//! (`sql_mode` changes it cannot follow), a file of the other engine (by its header, or
+//! MySQL `/*!` comments on PostgreSQL), and a psql file not written by pg_dump.
 //!
 //! Classification uses `dnt_core::sql::classify` only (this crate does not depend on
 //! `dnt_query`; the job judges every statement with the query guard).
 //!
-//! Known limit: the scan cannot run `SET sql_mode`, so it follows a literal
-//! `SET [SESSION] sql_mode = '…'` lexically ([`sql_mode_after`]) and falls back to the
-//! session's mode for anything else (`SET sql_mode = @OLD_SQL_MODE`); the job re-reads
-//! the real session mode after every statement (R33) and checks every statement again.
+//! Known limits: statements naming another database by qualification (`DROP TABLE
+//! other.t`) are not detected; a function or trigger the file creates can change settings
+//! when it runs later.
 
 use std::io::{self, BufReader, Chain, Cursor, Read};
 use std::path::Path;
 
 use dnt_core::server::DbKind;
 use dnt_core::sql::{
-    classify, leading_blank_len, leading_keywords, readings, session_effect, tokenize, Dialect,
-    MySqlMode, SplitError, SplitEvent, SplitOptions, StatementKind, StreamSplitter, TokKind, Token,
+    classify, leading_blank_len, leading_keywords, readings, resplit_reading, session_effect,
+    tokenize, Dialect, MySqlMode, SplitError, SplitEvent, SplitOptions, StatementKind,
+    StreamSplitter, TokKind, Token,
 };
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
@@ -174,6 +172,13 @@ fn engine_name(kind: DbKind) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refusal(pub String);
 
+/// The MySQL-family server a file is restored into: which executable comments it runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MySqlServer {
+    pub version: (u32, u32, u32),
+    pub mariadb: bool,
+}
+
 /// The identifier a token holds: backquotes / double quotes removed (doubled quotes
 /// undone), words as they are.
 fn ident_text(s: &str, t: &Token) -> String {
@@ -187,113 +192,314 @@ fn ident_text(s: &str, t: &Token) -> String {
     raw.to_string()
 }
 
+fn is_word(t: Option<&Token>, w: &str) -> bool {
+    matches!(t.map(|t| t.kind), Some(TokKind::Word(x)) if x.eq_ignore_ascii_case(w))
+}
+
 /// The object name after the leading keywords `skip` (`IF [NOT] EXISTS` skipped).
+/// PostgreSQL folds an unquoted name to lower case.
 fn name_after(s: &str, dialect: Dialect, skip: usize) -> Option<String> {
     let toks = tokenize(s, dialect);
     let mut i = skip;
-    let word = |t: Option<&Token>, w: &str| matches!(t.map(|t| t.kind), Some(TokKind::Word(x)) if x.eq_ignore_ascii_case(w));
-    if word(toks.get(i), "IF") {
+    if is_word(toks.get(i), "IF") {
         i += 1;
-        if word(toks.get(i), "NOT") {
+        if is_word(toks.get(i), "NOT") {
             i += 1;
         }
-        if word(toks.get(i), "EXISTS") {
+        if is_word(toks.get(i), "EXISTS") {
             i += 1;
         }
     }
     let t = toks.get(i)?;
     match t.kind {
+        TokKind::Word(w) if dialect == Dialect::Postgres => Some(w.to_lowercase()),
         TokKind::Word(_) | TokKind::Quoted => Some(ident_text(s, t)),
         _ => None,
     }
 }
 
-/// The app runner's refusal of one statement (R31): `CREATE` / `DROP DATABASE` (MySQL
-/// also `SCHEMA`, MariaDB `CREATE OR REPLACE`), `ALTER DATABASE` naming another database,
-/// `USE` naming another database; on MySQL a backslash outside quoted text (a mysql
-/// client command such as `\G`). Every reading of a MySQL executable comment is checked.
-pub fn statement_refusal(
-    text: &str,
-    dialect: Dialect,
-    kind: DbKind,
-    target_db: &str,
-) -> Option<Refusal> {
-    let mysql = kind == DbKind::MySql;
-    for r in readings(text, dialect) {
-        let words = leading_keywords(&r, dialect, 4);
-        let w: Vec<&str> = words.iter().map(String::as_str).collect();
-        let db_word = |x: &str| x == "DATABASE" || (mysql && x == "SCHEMA");
-        match w.as_slice() {
-            ["CREATE", x, ..] if db_word(x) => {
-                return Some(Refusal(format!(
-                    "The file creates a database (\"{}\"); restore runs into the chosen \
-                     database only.",
-                    name_after(&r, dialect, 2).unwrap_or_default()
-                )))
-            }
-            ["CREATE", "OR", "REPLACE", x, ..] if db_word(x) => {
-                return Some(Refusal(
-                    "The file creates a database; restore runs into the chosen database only."
-                        .into(),
-                ))
-            }
-            ["DROP", x, ..] if db_word(x) => {
-                return Some(Refusal(format!(
-                    "The file drops a database (\"{}\").",
-                    name_after(&r, dialect, 2).unwrap_or_default()
-                )))
-            }
-            ["ALTER", x, ..] if db_word(x) => {
-                let name = name_after(&r, dialect, 2);
-                // MySQL `ALTER DATABASE CHARACTER SET …` (no name) is the current one.
-                let current = mysql
-                    && name.as_deref().is_some_and(|n| {
-                        ["CHARACTER", "CHARSET", "COLLATE", "DEFAULT", "READ"]
-                            .iter()
-                            .any(|k| n.eq_ignore_ascii_case(k))
-                    });
-                if !current && name.as_deref() != Some(target_db) {
-                    return Some(Refusal(format!(
-                        "The file changes another database (\"{}\").",
-                        name.unwrap_or_default()
-                    )));
-                }
-            }
-            ["USE", ..] if mysql => {
-                let name = name_after(&r, dialect, 1).unwrap_or_default();
-                if name != target_db {
-                    return Some(Refusal(format!(
-                        "The file switches to another database (USE \"{name}\"); restore runs \
-                         into \"{target_db}\" only."
-                    )));
-                }
-            }
-            _ => {}
+/// `(MariaDB only, version)` of an executable comment token text: `/*!NNNNN` (5 digits
+/// `Mmmrr`), `/*M!NNNNNN` (6 digits `MMmmrr`); no or other digits: `None` (it runs).
+fn exec_gate(c: &str) -> (bool, Option<(u32, u32, u32)>) {
+    let body = c.strip_prefix("/*").unwrap_or(c);
+    let (maria, rest) = match body.strip_prefix("M!") {
+        Some(r) => (true, r),
+        None => (false, body.strip_prefix('!').unwrap_or(body)),
+    };
+    let digits: Vec<u32> = rest
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .filter_map(|c| c.to_digit(10))
+        .collect();
+    let num = |d: &[u32]| d.iter().fold(0, |a, x| a * 10 + x);
+    let version = match digits.len() {
+        5 => Some((digits[0], num(&digits[1..3]), num(&digits[3..5]))),
+        6 => Some((num(&digits[..2]), num(&digits[2..4]), num(&digits[4..6]))),
+        _ => None,
+    };
+    (maria, version)
+}
+
+fn exec_body(c: &str) -> &str {
+    let body = c.strip_prefix("/*").unwrap_or(c);
+    let body = body.strip_prefix('M').unwrap_or(body);
+    let body = body.strip_prefix('!').unwrap_or(body);
+    let body = body.trim_start_matches(|ch: char| ch.is_ascii_digit());
+    body.strip_suffix("*/").unwrap_or(body)
+}
+
+/// How `server` reads `text`: the bodies of the executable comments it runs spliced in,
+/// the others dropped (`/*M!` only runs on MariaDB; a version above the server's never).
+pub fn server_reading(text: &str, dialect: Dialect, server: MySqlServer) -> String {
+    let toks = tokenize(text, dialect);
+    let mut out = String::with_capacity(text.len());
+    let mut from = 0;
+    for t in toks.iter().filter(|t| t.kind == TokKind::ExecComment) {
+        let c = &text[t.start..t.end];
+        let (maria, version) = exec_gate(c);
+        let runs = (!maria || server.mariadb) && version.is_none_or(|v| v <= server.version);
+        out.push_str(&text[from..t.start]);
+        out.push(' ');
+        if runs {
+            out.push_str(exec_body(c));
+            out.push(' ');
         }
-        if mysql {
-            if let Some(t) = tokenize(&r, dialect)
-                .iter()
-                .find(|t| t.kind == TokKind::Punct(b'\\'))
-            {
-                let cmd: String = r[t.start..].chars().take(2).collect();
+        from = t.end;
+    }
+    out.push_str(&text[from..]);
+    out
+}
+
+/// The readings checked for refusals: every way a server may read the text, plus the
+/// target server's own reading.
+fn check_readings(text: &str, dialect: Dialect, target: &ScanTarget) -> Vec<String> {
+    let mut rs = readings(text, dialect);
+    if let (Dialect::MySql(_), Some(s)) = (dialect, target.server) {
+        let own = server_reading(text, dialect, s);
+        if !rs.contains(&own) {
+            rs.push(own);
+        }
+    }
+    rs
+}
+
+/// The readings that decide what the session does: the target server's own when it is
+/// known, else every reading.
+fn own_readings(text: &str, dialect: Dialect, server: Option<MySqlServer>) -> Vec<String> {
+    match (dialect, server) {
+        (Dialect::MySql(_), Some(s)) => vec![server_reading(text, dialect, s)],
+        _ => readings(text, dialect),
+    }
+}
+
+/// The refusals of one statement (or one piece of it) by its keywords.
+fn keyword_refusal(r: &str, dialect: Dialect, target: &ScanTarget) -> Option<Refusal> {
+    let mysql = target.kind == DbKind::MySql;
+    let target_db = target.database.as_str();
+    let words = leading_keywords(r, dialect, 4);
+    let w: Vec<&str> = words.iter().map(String::as_str).collect();
+    let db_word = |x: &str| x == "DATABASE" || (mysql && x == "SCHEMA");
+    match w.as_slice() {
+        ["CREATE", x, ..] if db_word(x) => {
+            return Some(Refusal(format!(
+                "The file creates a database (\"{}\"); restore runs into the chosen database \
+                 only.",
+                name_after(r, dialect, 2).unwrap_or_default()
+            )))
+        }
+        ["CREATE", "OR", "REPLACE", x, ..] if db_word(x) => {
+            return Some(Refusal(
+                "The file creates a database; restore runs into the chosen database only.".into(),
+            ))
+        }
+        ["DROP", x, ..] if db_word(x) => {
+            return Some(Refusal(format!(
+                "The file drops a database (\"{}\").",
+                name_after(r, dialect, 2).unwrap_or_default()
+            )))
+        }
+        ["ALTER", x, ..] if db_word(x) => {
+            let name = name_after(r, dialect, 2);
+            // MySQL `ALTER DATABASE CHARACTER SET …` (no name) is the current one.
+            let current = mysql
+                && name.as_deref().is_some_and(|n| {
+                    ["CHARACTER", "CHARSET", "COLLATE", "DEFAULT", "READ"]
+                        .iter()
+                        .any(|k| n.eq_ignore_ascii_case(k))
+                });
+            if !current && name.as_deref() != Some(target_db) {
                 return Some(Refusal(format!(
-                    "The file uses the mysql client command {cmd}, which the app does not run."
+                    "The file changes another database (\"{}\").",
+                    name.unwrap_or_default()
                 )));
             }
+        }
+        ["USE", ..] if mysql => {
+            let name = name_after(r, dialect, 1).unwrap_or_default();
+            if name != target_db {
+                return Some(Refusal(format!(
+                    "The file switches to another database (USE \"{name}\"); restore runs into \
+                     \"{target_db}\" only."
+                )));
+            }
+        }
+        ["PREPARE" | "EXECUTE" | "CALL", ..] | ["DEALLOCATE" | "DROP", "PREPARE", ..] if mysql => {
+            return Some(Refusal(format!(
+                "The file runs {} (prepared or stored code), whose statements the app cannot \
+                 check before they run.",
+                w.iter().take(2).copied().collect::<Vec<_>>().join(" ")
+            )))
+        }
+        _ => {}
+    }
+    if !mysql {
+        return pg_setting_refusal(r);
+    }
+    None
+}
+
+/// PostgreSQL settings that change how strings are lexed, and `set_config` other than
+/// `search_path`: the file would be split and judged in a way the server does not read
+/// it (R30).
+fn pg_setting_refusal(text: &str) -> Option<Refusal> {
+    let toks = tokenize(text, Dialect::Postgres);
+    let lexing = |t: &Token| {
+        let name = match t.kind {
+            TokKind::Word(w) => w.to_ascii_lowercase(),
+            TokKind::Quoted if text[t.start..].starts_with('"') => {
+                ident_text(text, t).to_ascii_lowercase()
+            }
+            _ => return false,
+        };
+        name == "standard_conforming_strings" || name == "backslash_quote"
+    };
+    if toks.iter().any(lexing) {
+        let mut i = 1;
+        if is_word(toks.get(1), "SESSION") || is_word(toks.get(1), "LOCAL") {
+            i = 2;
+        }
+        let on = toks.get(i + 2).is_some_and(|v| match v.kind {
+            TokKind::Word(w) => w.eq_ignore_ascii_case("on") || w.eq_ignore_ascii_case("true"),
+            TokKind::Quoted => ident_text(text, v).eq_ignore_ascii_case("on"),
+            _ => false,
+        });
+        let allowed = is_word(toks.first(), "SET")
+            && is_word(toks.get(i), "standard_conforming_strings")
+            && (toks.get(i + 1).map(|t| t.kind) == Some(TokKind::Punct(b'='))
+                || is_word(toks.get(i + 1), "TO"))
+            && on
+            && toks.len() == i + 3;
+        if !allowed {
+            return Some(Refusal(
+                "The file changes standard_conforming_strings or backslash_quote; only `SET \
+                 standard_conforming_strings = on` is restored."
+                    .into(),
+            ));
+        }
+    }
+    for (i, t) in toks.iter().enumerate() {
+        if !is_word(Some(t), "set_config") || toks.get(i + 1).map(|t| t.kind) != Some(TokKind::Open)
+        {
+            continue;
+        }
+        let ok = toks.get(i + 2).is_some_and(|a| {
+            a.kind == TokKind::Quoted
+                && text[a.start..].starts_with('\'')
+                && ident_text(text, a) == "search_path"
+        }) && toks.get(i + 3).map(|t| t.kind) == Some(TokKind::Punct(b','));
+        if !ok {
+            return Some(Refusal(
+                "The file calls set_config for a setting other than search_path.".into(),
+            ));
+        }
+    }
+    let w = leading_keywords(text, Dialect::Postgres, 2);
+    let w: Vec<&str> = w.iter().map(String::as_str).collect();
+    if matches!(w.as_slice(), ["RESET", "ALL"] | ["DISCARD", "ALL"]) {
+        return Some(Refusal(format!(
+            "The file runs {}, which may turn standard_conforming_strings off.",
+            w.join(" ")
+        )));
+    }
+    None
+}
+
+/// A backslash outside quoted text and comments: a client command (`\G`, `\!`, `\gexec`,
+/// `\set` …) that the server never sees as SQL and a client would run.
+fn backslash_refusal(r: &str, dialect: Dialect) -> Option<Refusal> {
+    let t = tokenize(r, dialect)
+        .into_iter()
+        .find(|t| t.kind == TokKind::Punct(b'\\'))?;
+    let cmd: String = r[t.start..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .take(12)
+        .collect();
+    Some(Refusal(format!(
+        "The file uses the client command {cmd}, which the app does not run."
+    )))
+}
+
+/// The refusal of one statement (R31, R30), checked at preview and again by the job
+/// before it is sent:
+///
+/// - `CREATE` / `DROP DATABASE` (MySQL also `SCHEMA`, MariaDB `CREATE OR REPLACE`),
+///   `ALTER DATABASE` / `USE` naming another database;
+/// - MySQL: `PREPARE`, `EXECUTE`, `DEALLOCATE` / `DROP PREPARE`, `CALL`; a statement that
+///   holds several statements for the server (a `DELIMITER` left on) unless it is a
+///   compound-body definition, every piece checked too;
+/// - a backslash outside quoted text and comments (a client command), on MySQL in the
+///   target server's own reading (an executable comment gated above its version, such
+///   as mariadb-dump's `/*M!999999\- enable the sandbox mode */`, is not run);
+/// - PostgreSQL: [`pg_setting_refusal`].
+///
+/// Every reading of a MySQL executable comment is checked.
+pub fn statement_refusal(text: &str, dialect: Dialect, target: &ScanTarget) -> Option<Refusal> {
+    let mysql = target.kind == DbKind::MySql;
+    for r in check_readings(text, dialect, target) {
+        if let Some(x) = keyword_refusal(&r, dialect, target) {
+            return Some(x);
+        }
+        if mysql {
+            let toks = tokenize(&r, dialect);
+            if let Some(pieces) = resplit_reading(&r, &toks, dialect) {
+                for p in &pieces {
+                    if let Some(x) = keyword_refusal(p, dialect, target) {
+                        return Some(x);
+                    }
+                }
+                return Some(Refusal(format!(
+                    "The file holds {} statements in one (a DELIMITER left on); the server \
+                     would run them without the app checking each.",
+                    pieces.len()
+                )));
+            }
+        }
+    }
+    for r in own_readings(text, dialect, if mysql { target.server } else { None }) {
+        if let Some(x) = backslash_refusal(&r, dialect) {
+            return Some(x);
         }
     }
     None
 }
 
 /// The psql path's check of one `\` command line: `\connect` / `\c` to the target (or
-/// `-`, or no database), pg_dump's `\restrict` / `\unrestrict`; anything else is refused.
+/// `-`, or no database); pg_dump's `\restrict` / `\unrestrict` with exactly one
+/// alphanumeric key; anything else is refused.
 pub fn psql_command_refusal(line: &str, target_db: &str) -> Option<Refusal> {
     let body = line.trim().trim_start_matches('\\');
     let mut parts = body.split_whitespace();
     let cmd = parts.next().unwrap_or("");
     let args: Vec<&str> = parts.collect();
     match cmd {
-        "restrict" | "unrestrict" => None,
+        "restrict" | "unrestrict" => match args.as_slice() {
+            [key] if key.chars().all(|c| c.is_ascii_alphanumeric()) => None,
+            _ => Some(Refusal(format!(
+                "The file runs the psql command \\{cmd} with unexpected arguments ({}).",
+                line.trim()
+            ))),
+        },
         "connect" | "c" => {
             let unquote = |a: &str| -> String {
                 for q in ['"', '\''] {
@@ -335,50 +541,195 @@ pub fn pg_outside_tx_block(text: &str) -> bool {
     }
 }
 
-/// The dialect after `text` ran, read lexically: a session `SET sql_mode = '<literal>'`
-/// (also inside `/*! */`) gives its flags; another session `sql_mode` assignment gives
-/// `fallback` (the mode the session started with); anything else `None` (unchanged).
-pub fn sql_mode_after(text: &str, dialect: Dialect, fallback: Dialect) -> Option<Dialect> {
-    let Dialect::MySql(_) = dialect else {
-        return None;
-    };
-    if !session_effect(text, dialect).is_some_and(|e| e.sql_mode) {
-        return None;
-    }
-    for r in readings(text, dialect) {
-        let toks = tokenize(&r, dialect);
-        for (i, t) in toks.iter().enumerate() {
-            let TokKind::Word(w) = t.kind else { continue };
-            let w = w.to_ascii_lowercase();
-            if !matches!(
-                w.as_str(),
-                "sql_mode" | "@@sql_mode" | "@@session.sql_mode" | "@@local.sql_mode"
-            ) {
-                continue;
-            }
-            if toks.get(i + 1).map(|t| t.kind) != Some(TokKind::Punct(b'=')) {
-                continue;
-            }
-            if let Some(v) = toks.get(i + 2).filter(|v| v.kind == TokKind::Quoted) {
-                let lit = ident_text(&r, v);
-                return Some(Dialect::MySql(parse_sql_mode(&lit)));
-            }
-        }
-    }
-    Some(fallback)
-}
-
-/// The lexing flags of a `sql_mode` value (as the MySQL driver reads them).
+/// The lexing flags of a `sql_mode` value: `ANSI_QUOTES`, or a combination mode that
+/// includes it (`ANSI`, `ORACLE`, `MSSQL`, `POSTGRESQL`, `DB2`, `MAXDB`), sets
+/// `ansi_quotes`; `NO_BACKSLASH_ESCAPES` sets `no_backslash_escapes`.
 pub fn parse_sql_mode(s: &str) -> MySqlMode {
     let mut mode = MySqlMode::default();
     for flag in s.split(',').map(str::trim) {
-        if flag.eq_ignore_ascii_case("ANSI_QUOTES") || flag.eq_ignore_ascii_case("ANSI") {
-            mode.ansi_quotes = true;
-        } else if flag.eq_ignore_ascii_case("NO_BACKSLASH_ESCAPES") {
-            mode.no_backslash_escapes = true;
+        let f = flag.to_ascii_uppercase();
+        match f.as_str() {
+            "ANSI_QUOTES" | "ANSI" | "ORACLE" | "MSSQL" | "POSTGRESQL" | "DB2" | "MAXDB" => {
+                mode.ansi_quotes = true
+            }
+            "NO_BACKSLASH_ESCAPES" => mode.no_backslash_escapes = true,
+            _ => {}
         }
     }
     mode
+}
+
+/// Follows the session `sql_mode` through a file without running it (R33), so the scan
+/// splits the file as the job will, and the job can stop when the session disagrees.
+///
+/// Understood: every assignment of a `SET` (left to right, the last wins), session
+/// `sql_mode` set to a string literal or to a user variable saved earlier from
+/// `@@sql_mode` (`SET @OLD_SQL_MODE=@@SQL_MODE` … `SET SQL_MODE=@OLD_SQL_MODE`, as
+/// mysqldump writes it); `GLOBAL` / `PERSIST` assignments leave the session alone.
+/// Anything else that changes the session `sql_mode` (`DEFAULT`, an expression, readings
+/// that disagree) is uncertain: a [`Refusal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeTracker {
+    current: Dialect,
+    saved: Vec<(String, MySqlMode)>,
+    server: Option<MySqlServer>,
+}
+
+fn is_mode_read(toks: &[Token], r: &str) -> bool {
+    let text: String = toks.iter().map(|t| &r[t.start..t.end]).collect();
+    matches!(
+        text.to_ascii_lowercase().as_str(),
+        "@@sql_mode" | "@@session.sql_mode" | "@@local.sql_mode"
+    )
+}
+
+impl ModeTracker {
+    pub fn new(dialect: Dialect, server: Option<MySqlServer>) -> ModeTracker {
+        ModeTracker {
+            current: dialect,
+            saved: Vec::new(),
+            server,
+        }
+    }
+
+    /// The dialect the session is in now.
+    pub fn current(&self) -> Dialect {
+        self.current
+    }
+
+    fn mode(&self) -> MySqlMode {
+        match self.current {
+            Dialect::MySql(m) => m,
+            Dialect::Postgres => MySqlMode::default(),
+        }
+    }
+
+    /// The session after `text` ran (it succeeded).
+    pub fn after(&mut self, text: &str) -> Result<(), Refusal> {
+        let Dialect::MySql(_) = self.current else {
+            return Ok(());
+        };
+        let uncertain = || {
+            let head: String = text.chars().take(80).collect();
+            Refusal(format!(
+                "The file changes sql_mode in a way the analysis cannot follow ({head}); the \
+                 rest of the file could be split differently from what was analyzed."
+            ))
+        };
+        let mut outcomes: Vec<(ModeTracker, bool)> = Vec::new();
+        for r in own_readings(text, self.current, self.server) {
+            let mut t = self.clone();
+            let found = t.apply(&r).map_err(|()| uncertain())?;
+            outcomes.push((t, found));
+        }
+        if outcomes.windows(2).any(|w| w[0].0 != w[1].0) {
+            return Err(uncertain());
+        }
+        let Some((next, found)) = outcomes.pop() else {
+            return Ok(());
+        };
+        // Safety net: the session effect says sql_mode changed but no assignment was read.
+        if !found && session_effect(text, self.current).is_some_and(|e| e.sql_mode) {
+            return Err(uncertain());
+        }
+        *self = next;
+        Ok(())
+    }
+
+    /// Applies one reading; `Ok(true)` when it assigned the session `sql_mode`.
+    fn apply(&mut self, r: &str) -> Result<bool, ()> {
+        let toks = tokenize(r, self.current);
+        if !is_word(toks.first(), "SET") || is_word(toks.get(1), "STATEMENT") {
+            return Ok(false);
+        }
+        let mut found = false;
+        let mut depth = 0i32;
+        let mut parts: Vec<&[Token]> = Vec::new();
+        let mut from = 1;
+        for (i, t) in toks.iter().enumerate().skip(1) {
+            match t.kind {
+                TokKind::Open => depth += 1,
+                TokKind::Close => depth -= 1,
+                TokKind::Punct(b',') if depth == 0 => {
+                    parts.push(&toks[from..i]);
+                    from = i + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&toks[from..]);
+        for part in parts {
+            let mut part = part;
+            let mut global = false;
+            if let Some(TokKind::Word(w)) = part.first().map(|t| t.kind) {
+                let w = w.to_ascii_uppercase();
+                if matches!(
+                    w.as_str(),
+                    "SESSION" | "LOCAL" | "GLOBAL" | "PERSIST" | "PERSIST_ONLY"
+                ) {
+                    global = !matches!(w.as_str(), "SESSION" | "LOCAL");
+                    part = &part[1..];
+                }
+            }
+            let Some(eq) = part.iter().position(|t| t.kind == TokKind::Punct(b'=')) else {
+                continue;
+            };
+            let mut target_toks = &part[..eq];
+            if target_toks.last().map(|t| t.kind) == Some(TokKind::Punct(b':')) {
+                target_toks = &target_toks[..target_toks.len() - 1];
+            }
+            let target: String = target_toks
+                .iter()
+                .map(|t| &r[t.start..t.end])
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let value = &part[eq + 1..];
+            let mode_target = target == "sql_mode"
+                || target.strip_prefix("@@").is_some_and(|v| {
+                    v == "sql_mode"
+                        || v.strip_suffix(".sql_mode").is_some_and(|s| {
+                            matches!(
+                                s,
+                                "session" | "local" | "global" | "persist" | "persist_only"
+                            )
+                        })
+                });
+            if mode_target {
+                let global =
+                    global || target.starts_with("@@global.") || target.starts_with("@@persist");
+                if global {
+                    continue;
+                }
+                found = true;
+                let mode = match value {
+                    [v] if v.kind == TokKind::Quoted
+                        && (r[v.start..].starts_with('\'')
+                            || (r[v.start..].starts_with('"') && !self.mode().ansi_quotes)) =>
+                    {
+                        parse_sql_mode(&ident_text(r, v))
+                    }
+                    [v] if matches!(v.kind, TokKind::Word(w) if w.starts_with('@') && !w.starts_with("@@")) =>
+                    {
+                        let name = r[v.start..v.end].to_ascii_lowercase();
+                        match self.saved.iter().find(|(n, _)| *n == name) {
+                            Some((_, m)) => *m,
+                            None => return Err(()),
+                        }
+                    }
+                    v if is_mode_read(v, r) => self.mode(),
+                    _ => return Err(()),
+                };
+                self.current = Dialect::MySql(mode);
+            } else if target.starts_with('@') && !target.starts_with("@@") {
+                self.saved.retain(|(n, _)| *n != target);
+                if is_mode_read(value, r) {
+                    let m = self.mode();
+                    self.saved.push((target, m));
+                }
+            }
+        }
+        Ok(found)
+    }
 }
 
 /// The text a statement is sent as: `split`'s text without its leading comments.
@@ -398,6 +749,8 @@ pub struct ScanTarget {
     pub database: String,
     /// The target session's dialect (its `sql_mode` on MySQL).
     pub dialect: Dialect,
+    /// MySQL family: the server (which executable comments it runs).
+    pub server: Option<MySqlServer>,
 }
 
 /// What [`scan`] found.
@@ -412,8 +765,13 @@ pub struct ScanResult {
     pub refused: u64,
     /// PostgreSQL: statements that cannot run inside a transaction block.
     pub outside_tx: u64,
+    /// `\connect` / `\c` lines (psql's `--single-transaction` covers the first connection
+    /// only).
+    pub connects: u64,
     /// The engine the header names.
     pub engine: Option<DbKind>,
+    /// The header says pg_dump wrote the file (`-- PostgreSQL database dump`).
+    pub pg_dump: bool,
 }
 
 impl ScanResult {
@@ -447,10 +805,6 @@ impl Scan<'_> {
     }
 
     fn statement(&mut self, text: &str, dialect: Dialect) {
-        let text = sent_text(text, dialect);
-        if text.is_empty() {
-            return;
-        }
         let s = &mut self.res.stats;
         s.statements += 1;
         match classify(text, dialect) {
@@ -467,17 +821,20 @@ impl Scan<'_> {
         {
             s.drops += 1;
         }
-        let pg = self.target.kind == DbKind::Postgres;
-        if pg && pg_outside_tx_block(text) {
+        if self.target.kind == DbKind::Postgres && pg_outside_tx_block(text) {
             self.res.outside_tx += 1;
         }
-        if let Some(r) = statement_refusal(text, dialect, self.target.kind, &self.target.database) {
+        if let Some(r) = statement_refusal(text, dialect, self.target) {
             self.refuse(r);
         }
     }
 
     fn client_command(&mut self, line: &str) {
         self.res.stats.client_commands += 1;
+        let cmd = line.split_whitespace().next().unwrap_or("");
+        if cmd == "\\c" || cmd == "\\connect" {
+            self.res.connects += 1;
+        }
         let r = match self.target.kind {
             DbKind::MySql => Some(Refusal(format!(
                 "The file uses the client command {}, which the app does not run.",
@@ -492,7 +849,8 @@ impl Scan<'_> {
 }
 
 /// Scans a SQL text (already decompressed): statement counts, the path (app runner or
-/// psql) and the refusals. A UTF-8 BOM at the start is skipped.
+/// psql) and the refusals. A UTF-8 BOM at the start is skipped. The session `sql_mode`
+/// is followed with [`ModeTracker`] (as the job follows it).
 pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, ScanError> {
     let mut splitter = StreamSplitter::new(
         target.dialect,
@@ -501,6 +859,7 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
             ..SplitOptions::default()
         },
     );
+    let mut mode = ModeTracker::new(target.dialect, target.server);
     let mut st = Scan {
         target,
         mysql_comments: false,
@@ -510,7 +869,9 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
             refusals: Vec::new(),
             refused: 0,
             outside_tx: 0,
+            connects: 0,
             engine: None,
+            pg_dump: false,
         },
     };
     let mut buf = vec![0u8; CHUNK];
@@ -520,10 +881,17 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
     loop {
         match splitter.next_event()? {
             Some(SplitEvent::Statement(s)) => {
-                let d = splitter.dialect();
-                st.statement(&s.text, d);
-                if let Some(next) = sql_mode_after(sent_text(&s.text, d), d, target.dialect) {
-                    splitter.set_dialect(next);
+                let d = mode.current();
+                let text = sent_text(&s.text, d);
+                if text.is_empty() {
+                    continue;
+                }
+                st.statement(text, d);
+                if let Err(r) = mode.after(text) {
+                    st.refuse(r);
+                }
+                if mode.current() != splitter.dialect() {
+                    splitter.set_dialect(mode.current());
                 }
             }
             Some(SplitEvent::CopyData { .. }) => st.res.stats.copy_blocks += 1,
@@ -556,6 +924,9 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
     st.res.stats.app_dump = head.starts_with(&format!("{DUMP_MAGIC}\n"))
         || head.starts_with(&format!("{DUMP_MAGIC}\r\n"));
     st.res.engine = header_engine(&head);
+    st.res.pg_dump = head
+        .lines()
+        .any(|l| l.trim().starts_with("-- PostgreSQL database dump"));
     // PostgreSQL lexes MySQL's `/*! … */` as comments and would skip them silently.
     st.mysql_comments |= head.lines().any(|l| l.trim_start().starts_with("/*!"));
     if st.mysql_comments && st.res.engine.is_none() {
@@ -572,6 +943,13 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
         && (st.res.stats.copy_blocks > 0 || st.res.stats.client_commands > 0)
     {
         st.res.path = RestorePath::Psql;
+        if !st.res.pg_dump {
+            st.refuse(Refusal(
+                "This file needs psql but was not written by pg_dump (no \"-- PostgreSQL \
+                 database dump\" header); the app runs psql for pg_dump files only."
+                    .into(),
+            ));
+        }
     }
     Ok(st.res)
 }

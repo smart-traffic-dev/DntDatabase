@@ -1263,16 +1263,47 @@ fn tool_output_plain_and_gzip() {
 
 #[test]
 fn restore_outcomes() {
-    assert_eq!(restore_outcome(Some(0), false, true), ToolOutcome::Done);
-    assert_eq!(restore_outcome(Some(0), false, false), ToolOutcome::Done);
+    use Tool::{PgRestore, Psql};
+    for t in [Psql, PgRestore] {
+        assert_eq!(restore_outcome(t, Some(0), false, true), ToolOutcome::Done);
+        assert_eq!(restore_outcome(t, Some(0), false, false), ToolOutcome::Done);
+        assert_eq!(
+            restore_outcome(t, Some(0), true, true),
+            ToolOutcome::Partial
+        );
+        assert_eq!(restore_outcome(t, None, false, true), ToolOutcome::Partial);
+        assert_eq!(restore_outcome(t, None, true, false), ToolOutcome::Partial);
+    }
+    // psql: only exit 3 (ON_ERROR_STOP) under --single-transaction rolled back.
     assert_eq!(
-        restore_outcome(Some(3), false, true),
+        restore_outcome(Psql, Some(3), false, true),
         ToolOutcome::FailedRolledBack
     );
-    assert_eq!(restore_outcome(Some(1), false, false), ToolOutcome::Partial);
-    assert_eq!(restore_outcome(Some(0), true, true), ToolOutcome::Partial);
-    assert_eq!(restore_outcome(None, false, true), ToolOutcome::Partial);
-    assert_eq!(restore_outcome(None, true, false), ToolOutcome::Partial);
+    assert_eq!(
+        restore_outcome(Psql, Some(3), false, false),
+        ToolOutcome::Partial
+    );
+    assert_eq!(
+        restore_outcome(Psql, Some(1), false, true),
+        ToolOutcome::Partial
+    );
+    assert_eq!(
+        restore_outcome(Psql, Some(2), false, true),
+        ToolOutcome::Partial
+    );
+    assert_eq!(
+        restore_outcome(Psql, Some(3), true, true),
+        ToolOutcome::Partial
+    );
+    // pg_restore: every failure may have left part of the restore.
+    assert_eq!(
+        restore_outcome(PgRestore, Some(1), false, true),
+        ToolOutcome::Partial
+    );
+    assert_eq!(
+        restore_outcome(PgRestore, Some(3), false, true),
+        ToolOutcome::Partial
+    );
 }
 
 #[test]

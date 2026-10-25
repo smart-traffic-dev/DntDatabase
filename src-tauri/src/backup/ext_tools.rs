@@ -581,6 +581,7 @@ async fn feed_stdin(mut pipe: WritePipe, feed: StdinFeed) -> StdinDone {
         }
     };
     let mut buf = vec![0u8; 256 * 1024];
+    let mut first = true;
     loop {
         let n = match block_outside_executor(|| input.read(&mut buf)) {
             Ok(0) => break,
@@ -590,7 +591,16 @@ async fn feed_stdin(mut pipe: WritePipe, feed: StdinFeed) -> StdinDone {
                 break;
             }
         };
-        if pipe.write_all(&buf[..n]).await.is_err() {
+        let mut data = &buf[..n];
+        if first {
+            first = false;
+            // A UTF-8 BOM is not SQL (psql would read it as part of the first statement).
+            // A first read shorter than the BOM is not expected from a file reader.
+            if let Some(rest) = data.strip_prefix(b"\xEF\xBB\xBF".as_slice()) {
+                data = rest;
+            }
+        }
+        if pipe.write_all(data).await.is_err() {
             break;
         }
         done.bytes += n as u64;

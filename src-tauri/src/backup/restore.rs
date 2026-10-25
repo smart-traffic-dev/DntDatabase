@@ -31,6 +31,12 @@
 //! cleanup `ROLLBACK` after a failure or Stop (it only undoes the job's own
 //! transaction), sent with a fresh stop signal.
 //!
+//! The job splits with the scan's prediction of the session dialect
+//! (`dnt_transfer::detect::ModeTracker`) and stops before sending a statement when the
+//! session's real dialect differs (`PlanStale`). Inside the job's PostgreSQL transaction a
+//! transaction-control statement or one that cannot run in a transaction block is refused
+//! before it is sent (a file swapped after the start's check).
+//!
 //! Known limits (documented): the splitter keeps events it had already decided when a
 //! statement changes the dialect (it rescans only what it had not returned); every such
 //! statement is still checked and judged under the new dialect. With an external tool,
@@ -57,8 +63,8 @@ use dnt_core::driver::{
     Canceller, ExecOptions, ResultSummary, RowSink, Session, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
-use dnt_core::server::DbKind;
-use dnt_core::sql::{Dialect, SplitEvent, SplitOptions, StreamSplitter};
+use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::sql::{classify, Dialect, SplitEvent, SplitOptions, StatementKind, StreamSplitter};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
@@ -67,8 +73,8 @@ use dnt_query::{
 use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::ConnectionRepo;
 use dnt_transfer::detect::{
-    analyze_file, sent_text, statement_refusal, Container, Content, RestorePath, ScanResult,
-    ScanStats, ScanTarget, CHUNK,
+    analyze_file, pg_outside_tx_block, sent_text, statement_refusal, Container, Content,
+    ModeTracker, MySqlServer, RestorePath, ScanResult, ScanStats, ScanTarget, CHUNK,
 };
 use dnt_transfer::tools::{
     find_tool, pg_restore_args, pg_restore_list_args, psql_args, restore_outcome, shown_command,
@@ -243,6 +249,19 @@ fn restore_invocation(
     .map_err(tool_error)
 }
 
+/// What the scan and the job check statements against.
+fn scan_target(database: &str, dialect: Dialect, server: &ServerInfo) -> ScanTarget {
+    ScanTarget {
+        kind: server.kind,
+        database: database.to_string(),
+        dialect,
+        server: (server.kind == DbKind::MySql).then_some(MySqlServer {
+            version: server.version,
+            mariadb: server.variant == ServerVariant::MariaDb,
+        }),
+    }
+}
+
 /// Collects a preview tool's stderr (never stopped).
 #[derive(Default)]
 struct ListCtx {
@@ -395,11 +414,7 @@ impl SessionManager {
         let dialect = session.dialect();
         close_quietly(session).await;
         let kind = cfg.kind;
-        let target = ScanTarget {
-            kind,
-            database: request.database.clone(),
-            dialect,
-        };
+        let target = scan_target(&request.database, dialect, rt.server_info());
         let path = PathBuf::from(&request.path);
         let analysis = {
             let path = path.clone();
@@ -453,13 +468,22 @@ impl SessionManager {
                     return Err(file_refused(&refusal_message(&scan)));
                 }
                 let transactional = match scan.path {
-                    RestorePath::Psql => request.single_transaction && scan.transaction_ok(),
+                    // psql's --single-transaction covers the first connection only.
+                    RestorePath::Psql => {
+                        request.single_transaction && scan.transaction_ok() && scan.connects == 0
+                    }
                     _ => pg && scan.transaction_ok(),
                 };
                 if !pg {
                     warnings.push(
                         "MySQL restores are not transactional (DDL commits at once): a failure \
                          leaves a partial restore."
+                            .into(),
+                    );
+                } else if scan.connects > 0 {
+                    warnings.push(
+                        "The file reconnects (\\connect): it does not run in one transaction, a \
+                         failure leaves a partial restore."
                             .into(),
                     );
                 } else if !scan.transaction_ok() {
@@ -1154,7 +1178,14 @@ impl AppRestoreJob {
             return Err(file_changed());
         }
         self.context.check()?;
-        let kind = self.context.cfg.kind;
+        let target = scan_target(
+            &self.request.database,
+            self.dialect,
+            self.context.rt.server_info(),
+        );
+        // The scan's prediction of the session dialect (R33): the job splits with it and
+        // stops before sending when the session disagrees.
+        let mut mode = ModeTracker::new(self.dialect, target.server);
         let ctx = w.ctx;
         if self.transactional {
             w.send("BEGIN", false).await?;
@@ -1162,7 +1193,7 @@ impl AppRestoreJob {
         }
         let mut rx = spawn_file_reader(PathBuf::from(&self.request.path));
         let mut splitter = StreamSplitter::new(
-            w.session.dialect(),
+            self.dialect,
             SplitOptions {
                 detect_client: true,
                 ..SplitOptions::default()
@@ -1180,19 +1211,37 @@ impl AppRestoreJob {
                 .map_err(|e| file_refused(&format!("The file is not a SQL script: {e}")))?;
             match event {
                 Some(SplitEvent::Statement(s)) => {
-                    let d = w.session.dialect();
+                    let d = mode.current();
                     let text = sent_text(&s.text, d);
                     if text.is_empty() {
                         continue;
                     }
-                    if let Some(r) = statement_refusal(text, d, kind, &self.request.database) {
+                    if w.session.dialect() != d {
+                        return Err(DbError::PlanStale {
+                            reason: "The session's sql_mode is not what the analysis predicted; \
+                                     nothing more was sent. Analyze the file again."
+                                .into(),
+                        });
+                    }
+                    if let Some(r) = statement_refusal(text, d, &target) {
                         return Err(file_refused(&r.0));
+                    }
+                    // The file may have been swapped after the start's check (R21): inside
+                    // the job's transaction nothing may end it or refuse to run in it.
+                    if self.transactional
+                        && (matches!(classify(text, d), StatementKind::Transaction(_))
+                            || pg_outside_tx_block(text))
+                    {
+                        return Err(file_refused(
+                            "The file controls its own transaction or holds a statement that \
+                             cannot run in one; it is not the file that was analyzed.",
+                        ));
                     }
                     w.send(text, false).await?;
                     // R33: a `SET sql_mode` changes how the rest is lexed.
-                    let now = w.session.dialect();
-                    if now != splitter.dialect() {
-                        splitter.set_dialect(now);
+                    mode.after(text).map_err(|r| file_refused(&r.0))?;
+                    if mode.current() != splitter.dialect() {
+                        splitter.set_dialect(mode.current());
                     }
                     ctx.progress("Restoring", raw, Some(total), ProgressUnit::Bytes);
                 }
@@ -1422,7 +1471,7 @@ impl ToolRestoreJob {
             // The tool saw a short input: it may have restored only part of the file.
             ToolOutcome::Partial
         } else {
-            restore_outcome(report.code, killed, self.transactional)
+            restore_outcome(self.info.tool, report.code, killed, self.transactional)
         };
         let code = report
             .code

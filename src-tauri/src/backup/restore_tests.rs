@@ -710,7 +710,9 @@ async fn copy_file_needs_psql() {
 
     let fx = fixture(DbKind::Postgres, None, false, &[Tool::Psql]).await;
     let content = copy_file();
-    let f = fx.file("copy.sql.gz", &gzip(&content));
+    // A BOM is not fed to psql.
+    let with_bom = [b"\xEF\xBB\xBF".as_slice(), &content].concat();
+    let f = fx.file("copy.sql.gz", &gzip(&with_bom));
     let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
     assert_eq!(preview.path, RestorePath::Psql);
     assert!(preview.compressed);
@@ -740,7 +742,7 @@ async fn copy_file_needs_psql() {
     assert_eq!(
         *fx.tools.stdin.lock().unwrap(),
         content,
-        "decompressed on stdin"
+        "decompressed on stdin, without the BOM"
     );
     let secret = fx.tools.secret_at_spawn.lock().unwrap().clone().unwrap();
     assert!(secret.contains("Sup3r$ecret!"), "the pgpass file holds it");
@@ -789,16 +791,23 @@ async fn pg_restore_archive_has_toc_and_runs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn tool_failure_outcomes() {
     let fx = fixture(DbKind::Postgres, None, false, &[Tool::Psql]).await;
-    *fx.sm.restore_plans.fixed_tools.lock().unwrap() = Some(Arc::new(FixedTools {
-        tools: vec![tool_info(Tool::Psql)],
-        spawner: Arc::new(FakeSpawner {
-            seen: Arc::clone(&fx.tools),
-            list: vec![],
-            code: 3,
-        }),
-    }));
     let f = fx.file("copy.sql", &copy_file());
-    for (single, unknown) in [(true, false), (false, true)] {
+    // psql exit 3 (ON_ERROR_STOP) under --single-transaction rolled back; every other
+    // failure may have left part of the restore (I3).
+    for (code, single, unknown) in [
+        (3, true, false),
+        (3, false, true),
+        (1, true, true),
+        (2, true, true),
+    ] {
+        *fx.sm.restore_plans.fixed_tools.lock().unwrap() = Some(Arc::new(FixedTools {
+            tools: vec![tool_info(Tool::Psql)],
+            spawner: Arc::new(FakeSpawner {
+                seen: Arc::clone(&fx.tools),
+                list: vec![],
+                code,
+            }),
+        }));
         let mut req = fx.request(&f);
         req.single_transaction = single;
         let preview = fx.sm.restore_preview(req).await.unwrap();
@@ -810,17 +819,109 @@ async fn tool_failure_outcomes() {
             .unwrap();
         let d = fx.wait(id).await;
         assert_eq!(d.job.state, JobState::Failed);
-        assert_eq!(d.job.outcome_unknown, unknown, "{:?}", d.job);
+        assert_eq!(
+            d.job.outcome_unknown, unknown,
+            "{code} {single}: {:?}",
+            d.job
+        );
         let s = d.job.summary.unwrap();
-        if single {
+        if !unknown {
             assert!(s.contains("rolled back"), "{s}");
         } else {
             assert!(s.contains("partially restored"), "{s}");
         }
     }
     let h = fx.restore_history();
-    assert_eq!(h.len(), 2);
-    assert!(h.iter().any(|e| e.outcome_unknown));
+    assert_eq!(h.len(), 4);
+    assert_eq!(h.iter().filter(|e| e.outcome_unknown).count(), 3);
+    // pg_restore exit 1 with --single-transaction: unknown too.
+    *fx.sm.restore_plans.fixed_tools.lock().unwrap() = Some(Arc::new(FixedTools {
+        tools: vec![tool_info(Tool::PgRestore)],
+        spawner: Arc::new(FakeSpawner {
+            seen: Arc::clone(&fx.tools),
+            list: b"1; 2 3 TABLE public t x\n".to_vec(),
+            code: 1,
+        }),
+    }));
+    let a = fx.file("a.dump", &archive());
+    let e = fx.sm.restore_preview(fx.request(&a)).await.unwrap_err();
+    // `--list` itself failed with exit 1: the preview refuses, nothing restored.
+    assert!(matches!(e, DbError::Config { .. }), "{e:?}");
+}
+
+/// I2: a file swapped after the start's check cannot end the job's transaction.
+#[tokio::test(flavor = "multi_thread")]
+async fn transactional_job_refuses_transaction_control_before_sending() {
+    let fx = fixture(DbKind::Postgres, None, false, &[]).await;
+    let f = fx.file("plain.sql", PG_SQL.as_bytes());
+    *fx.fake.delay.lock().unwrap() = Some(("BEGIN".into(), Duration::from_millis(300)));
+    let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
+    assert!(preview.transactional);
+    for swapped in [
+        "SET client_encoding = 'UTF8';\nCOMMIT;\nDROP TABLE important;\n",
+        "SET client_encoding = 'UTF8';\nVACUUM important;\n",
+    ] {
+        let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
+        let mark = fx.fake.mark();
+        let id = fx
+            .sm
+            .restore_start(preview.plan_id, true, None)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::write(&f, swapped).unwrap();
+        let d = fx.wait(id).await;
+        assert_eq!(d.job.state, JobState::Failed, "{:?}", d.job);
+        let sent = fx.fake.since(mark);
+        assert_eq!(
+            sent,
+            ["BEGIN", "SET client_encoding = 'UTF8'", "ROLLBACK"],
+            "{swapped}"
+        );
+        std::fs::write(&f, PG_SQL).unwrap();
+    }
+}
+
+/// I1: the job stops before sending when the session's sql_mode is not the one the
+/// analysis predicted (here the fake server does not apply the second assignment).
+#[tokio::test(flavor = "multi_thread")]
+async fn job_stops_when_the_session_mode_differs_from_the_prediction() {
+    let fx = fixture(DbKind::MySql, None, false, &[]).await;
+    let f = fx.file(
+        "mode.sql",
+        b"SET sql_mode='ANSI', sql_mode='NO_BACKSLASH_ESCAPES';\nINSERT INTO t VALUES ('a\\');\n\
+          INSERT INTO t VALUES ('b');\n",
+    );
+    let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
+    assert_eq!(preview.stats.as_ref().unwrap().statements, 3);
+    let mark = fx.fake.mark();
+    let id = fx
+        .sm
+        .restore_start(preview.plan_id, true, None)
+        .await
+        .unwrap();
+    let d = fx.wait(id).await;
+    assert_eq!(d.job.state, JobState::Failed);
+    assert_eq!(d.job.error.as_ref().unwrap().kind, "plan_stale");
+    assert_eq!(
+        fx.fake.since(mark),
+        ["SET sql_mode='ANSI', sql_mode='NO_BACKSLASH_ESCAPES'"]
+    );
+}
+
+/// psql's --single-transaction covers the first connection only: a file that
+/// reconnects is not transactional.
+#[tokio::test(flavor = "multi_thread")]
+async fn psql_file_with_connect_is_not_transactional() {
+    let fx = fixture(DbKind::Postgres, None, false, &[Tool::Psql]).await;
+    let text =
+        format!("--\n-- PostgreSQL database dump\n--\n\\connect {DB}\nCREATE TABLE t (id int);\n");
+    let f = fx.file("c.sql", text.as_bytes());
+    let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
+    assert_eq!(preview.path, RestorePath::Psql);
+    assert!(!preview.transactional);
+    assert!(!preview.command.unwrap().contains("--single-transaction"));
+    assert!(preview.warnings.iter().any(|w| w.contains("reconnects")));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -831,6 +932,10 @@ async fn database_statements_are_refused_at_preview() {
         "DROP DATABASE shop;\n",
         "USE other;\n",
         "SELECT 1\\G\n",
+        "DELIMITER $$\nSELECT 1; DROP DATABASE other; USE other $$\n",
+        "PREPARE s FROM 'SET sql_mode = ''ANSI_QUOTES''';\nEXECUTE s;\n",
+        "CALL p();\n",
+        "SET sql_mode = DEFAULT;\nSELECT 1;\n",
     ] {
         let f = fx.file("bad.sql", content.as_bytes());
         let mark = fx.fake.mark();

@@ -978,10 +978,19 @@ pub enum ToolOutcome {
     Partial,
 }
 
-pub fn restore_outcome(code: Option<i32>, killed: bool, transactional: bool) -> ToolOutcome {
+/// Only psql's exit code 3 (an SQL error stopped the script, `ON_ERROR_STOP`) under
+/// `--single-transaction` is known to have rolled back. psql 1 / 2 (fatal, connection
+/// lost), any pg_restore failure (`--exit-on-error` exits 1 for SQL and other errors
+/// alike), a kill or a missing exit code may have left part of the restore.
+pub fn restore_outcome(
+    tool: Tool,
+    code: Option<i32>,
+    killed: bool,
+    transactional: bool,
+) -> ToolOutcome {
     match (code, killed) {
         (Some(0), false) => ToolOutcome::Done,
-        (Some(_), false) if transactional => ToolOutcome::FailedRolledBack,
+        (Some(3), false) if transactional && tool == Tool::Psql => ToolOutcome::FailedRolledBack,
         _ => ToolOutcome::Partial,
     }
 }
