@@ -70,6 +70,8 @@ struct Fake {
     connect_fail_from: Mutex<Option<usize>>,
     /// `(n, hook)`: the hook runs in the `n`-th `object_ddl` call from now (0 = next).
     on_ddl: Mutex<Option<(usize, Hook)>>,
+    /// A statement containing the text is sent after a silent reconnect of its session.
+    reconnect_on: Mutex<Option<String>>,
 }
 
 type Hook = Box<dyn FnOnce() + Send>;
@@ -89,6 +91,7 @@ impl Fake {
             connects: AtomicUsize::new(0),
             connect_fail_from: Mutex::new(None),
             on_ddl: Mutex::new(None),
+            reconnect_on: Mutex::new(None),
         })
     }
 
@@ -158,6 +161,7 @@ impl Driver for FakeDriver {
         Ok(Box::new(FakeSession {
             fake: Arc::clone(&self.0),
             tx: Mutex::new(TxState::Idle),
+            reconnects: AtomicUsize::new(0),
         }))
     }
 }
@@ -165,6 +169,7 @@ impl Driver for FakeDriver {
 struct FakeSession {
     fake: Arc<Fake>,
     tx: Mutex<TxState>,
+    reconnects: AtomicUsize,
 }
 
 struct NoCancel;
@@ -193,6 +198,10 @@ impl Session for FakeSession {
             .lock()
             .unwrap()
             .push((stmt.to_string(), opts.params.clone()));
+        let reconnect = self.fake.reconnect_on.lock().unwrap().clone();
+        if reconnect.is_some_and(|text| stmt.contains(&text)) {
+            self.reconnects.fetch_add(1, AtomicOrdering::SeqCst);
+        }
         let fail = self.fake.fail.lock().unwrap().clone();
         if let Some((text, e)) = fail {
             if stmt.contains(&text) {
@@ -237,6 +246,9 @@ impl Session for FakeSession {
     }
     fn tx_state(&self) -> TxState {
         *self.tx.lock().unwrap()
+    }
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(AtomicOrdering::SeqCst) as u64
     }
     fn dialect(&self) -> Dialect {
         match self.fake.server.kind {
@@ -1429,6 +1441,79 @@ async fn mysql_rehearsal_failure_is_not_applied() {
 }
 
 #[tokio::test]
+async fn mysql_rehearsal_create_unknown_warns() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    f.fake
+        .objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::Procedure, vec!["p".into()]);
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    // The rehearsal CREATE was sent; the connection was lost before its result.
+    f.fake.fail_on(
+        &p.statements[0],
+        DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: "lost".into(),
+        },
+    );
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.statements_sent, 1);
+    assert!(r.executed.is_empty());
+    let rehearsal = p.statements[1]
+        .strip_prefix("DROP PROCEDURE `")
+        .unwrap()
+        .trim_end_matches('`');
+    assert!(
+        r.warnings.contains(&format!(
+            "A check routine `{rehearsal}` may have been left behind; drop it with: DROP PROCEDURE IF EXISTS `{rehearsal}`"
+        )),
+        "{:?}",
+        r.warnings
+    );
+}
+
+#[tokio::test]
+async fn mysql_reconnect_before_last_statement_is_applied() {
+    let fake = Fake::new(mysql8(), MYSQL_TRIGGER);
+    fake.answer(MYSQL_TRIGGER_SQL, vec![vec!["orders", "BEFORE", "INSERT"]]);
+    fake.answer(MYSQL_SAME_TIMING_SQL, vec![vec!["0"]]);
+    let f = fixture(fake, None, false).await;
+    let o = open(&f, ObjectKind::Trigger, Some("t")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap();
+    assert_eq!(p.statements.len(), 2);
+    // The last statement runs after a silent reconnect, and completes.
+    *f.fake.reconnect_on.lock().unwrap() = Some(p.statements[1].clone());
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    assert!(r.error.is_none(), "{:?}", r.error);
+    assert_eq!(r.executed, p.statements);
+    assert_eq!(
+        r.warnings,
+        ["The connection was re-established during the apply; every statement completed."]
+    );
+    assert_eq!(r.text.as_deref(), Some(MYSQL_TRIGGER));
+
+    // A reconnect before an earlier statement still stops the apply.
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap();
+    *f.fake.reconnect_on.lock().unwrap() = Some(p.statements[0].clone());
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_ne!(r.outcome, EditOutcome::Applied, "{r:?}");
+    assert_eq!(r.executed, p.statements[..1]);
+}
+
+#[tokio::test]
 async fn success_updates_base_and_turns_new_into_edit() {
     // A new view becomes an edit of the created view.
     const CREATED: &str = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `new_view` AS select 1 AS `id`";
@@ -1496,6 +1581,8 @@ async fn success_updates_base_and_turns_new_into_edit() {
         ["The definition could not be reloaded; reopen the editor."]
     );
     assert_eq!(r.text, None);
+    // The created object is still named, for the editor to reopen it.
+    assert_eq!(r.object.as_ref().map(|o| o.name.as_str()), Some("new_view"));
 }
 
 #[tokio::test]
@@ -1537,6 +1624,27 @@ async fn history_uses_object_action_and_delimiter_form() {
     assert_eq!(
         super::apply::history_sql(DbKind::Postgres, ObjectKind::Function, &statements),
         "DROP VIEW x;\nCREATE VIEW x AS SELECT 1"
+    );
+
+    // The delimiter is one that no statement contains.
+    let body = |s: &str| format!("CREATE PROCEDURE p() BEGIN SELECT '{s}'; END");
+    let history = |statements: &[String]| {
+        super::apply::history_sql(DbKind::MySql, ObjectKind::Procedure, statements)
+    };
+    let s = [body("$$")];
+    assert_eq!(
+        history(&s),
+        format!("DELIMITER //\n{}//\nDELIMITER ;", s[0])
+    );
+    let s = [body("$$ //"), body(";;")];
+    assert_eq!(
+        history(&s),
+        format!("DELIMITER $$1\n{}$$1\n{}$$1\nDELIMITER ;", s[0], s[1])
+    );
+    let s = [body("$$ // ;; $$1")];
+    assert_eq!(
+        history(&s),
+        format!("DELIMITER $$2\n{}$$2\nDELIMITER ;", s[0])
     );
 }
 

@@ -464,7 +464,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     list_schemas: () => [{ name: 'public' }],
 
     list_objects: ({ id, scope, kind }): ObjectSummary[] => {
-      if (kind !== 'Table') return ddl.listObjects(id as string, kind as ObjectKind);
+      if (kind !== 'Table') return ddl.listObjects(id as string, scope as Scope, kind as ObjectKind);
       if ((scope as Scope).database !== 'dnt_fixture') return [];
       return [{ name: 'orders', kind: kind as ObjectKind, comment: null, row_estimate: 3 }];
     },

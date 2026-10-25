@@ -46,8 +46,11 @@ interface DdlEditsStore {
   markStale(tabId: string): void;
   /** The backend edit is gone (connection closed); the text is kept. */
   markLost(tabId: string): void;
-  /** An apply succeeded: base = text = the server's DDL, the target (and tab title) is the object as created. */
-  applied(tabId: string, report: DdlEditReport): void;
+  /**
+   * An apply succeeded: base = text = the server's DDL, the target (and tab title) is the object as
+   * created. After a create, or when the DDL could not be re-read, the backend edit is reopened.
+   */
+  applied(tabId: string, report: DdlEditReport): Promise<void>;
   /** The object is missing after a failed apply: the edit becomes a create with `text` (not applied). */
   restore(tabId: string, text: string): void;
   /** Forgets the tab's edit and closes its backend edit. */
@@ -151,11 +154,16 @@ export const useDdlEdits = create<DdlEditsStore>()((set, get) => {
     },
     applied(tabId, report) {
       const state = entry(tabId);
-      if (!state) return;
+      if (!state) return Promise.resolve();
       const text = report.text ?? state.text;
       const name = report.object?.name ?? state.target.name;
       patch(tabId, { base: text, text, stale: false, target: { ...state.target, name } });
       if (name) useTabs.getState().rename(tabId, name);
+      // A create (its strategies, object and notes are a new object's) or a failed re-read: the
+      // backend edit of the object as it is now is authoritative. A clean server text stays.
+      const created = !state.open?.object;
+      if (name && (created || report.text === null)) return openInto(tabId, report.text !== null);
+      return Promise.resolve();
     },
     restore(tabId, text) {
       const state = entry(tabId);

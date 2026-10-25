@@ -1267,7 +1267,8 @@ failed: string | null; object_state: ObjectState;
  */
 restore_text: string | null; 
 /**
- * Applied: the object as it is now, and its DDL re-read from the server.
+ * Applied: the object as it is now, and its DDL re-read from the server (`text` is
+ * `None` when the re-read failed; `object` is still set).
  */
 object: ObjectRef | null; text: string | null }
 export type DefaultSpec = 

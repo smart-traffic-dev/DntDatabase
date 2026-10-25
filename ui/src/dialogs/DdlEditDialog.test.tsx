@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, expect, it, vi } from 'vitest';
-import type { DdlEditOpen, DdlEditPreview, DdlEditReport } from '../bindings';
+import type { DdlEditOpen, DdlEditPreview, DdlEditReport, ObjectKind, ServerInfo } from '../bindings';
 import { appError, callsOf, config, Failure, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
 import { useConnections } from '../store/connections';
 import { useDdlEdits } from '../store/ddlEdits';
@@ -59,15 +59,20 @@ const report = (over: Partial<DdlEditReport> = {}): DdlEditReport => ({
 
 const objectTab = objectTabId(ids.prod, object);
 
-async function setup(env: 'production' | null, handlers: Record<string, (a: Record<string, unknown>) => unknown>, plan: DdlEditPreview = preview) {
+async function setup(
+  env: 'production' | null,
+  handlers: Record<string, (a: Record<string, unknown>) => unknown>,
+  plan: DdlEditPreview = preview,
+  { kind = 'View', server = serverInfo('MySql8') }: { kind?: ObjectKind; server?: ServerInfo } = {},
+) {
   useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { env_tag: env })]);
-  useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
-  mockBackend({ ddl_edit_open: () => opened({ env }), ddl_edit_preview: () => plan, ddl_edit_close: () => null, ...handlers });
-  const tab: DdlTabRef = { id: TAB_ID, kind: 'ddl', connectionId: ids.prod, objectKind: 'View', title: 'v' };
+  useConnections.getState().setInfo(ids.prod, server);
+  mockBackend({ ddl_edit_open: () => opened({ env, server }), ddl_edit_preview: () => plan, ddl_edit_close: () => null, ...handlers });
+  const tab: DdlTabRef = { id: TAB_ID, kind: 'ddl', connectionId: ids.prod, objectKind: kind, title: 'v' };
   useTabs.getState().open({ kind: 'object', id: objectTab, objectRef: object, connectionId: ids.prod, title: 'v' });
   useTabs.getState().open(tab);
   await act(async () => {
-    await useDdlEdits.getState().load(TAB_ID, { connectionId: ids.prod, scope, kind: 'View', name: 'v', table: null });
+    await useDdlEdits.getState().load(TAB_ID, { connectionId: ids.prod, scope, kind, name: 'v', table: null });
   });
   useDdlEdits.getState().setText(TAB_ID, EDITED);
   const onClose = vi.fn();
@@ -249,4 +254,46 @@ it('an unsupported feature shows the feature and version', async () => {
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent('This feature is not supported by the server.');
   expect(alert).toHaveTextContent('BEGIN ATOMIC function bodies (server version PostgreSQL 14)');
+});
+
+it('the review shows no impacts aside', async () => {
+  await setup(null, {});
+  await screen.findByLabelText('SQL statements');
+  expect(screen.queryByLabelText('Impact')).not.toBeInTheDocument();
+  expect(screen.queryByText('None')).not.toBeInTheDocument();
+});
+
+it('Copy of a MySQL routine plan is a DELIMITER script', async () => {
+  const create = "CREATE PROCEDURE `p`() BEGIN SELECT '$$'; END";
+  const { user } = await setup(null, {}, { ...preview, statements: ['DROP PROCEDURE `shop`.`p`', create] }, { kind: 'Procedure' });
+  await user.click(await screen.findByRole('button', { name: 'Copy' }));
+  expect(await navigator.clipboard.readText()).toBe(`DELIMITER //\nDROP PROCEDURE \`shop\`.\`p\`//\n${create}//\nDELIMITER ;`);
+});
+
+it('Copy of a MySQL view plan ends statements with ;', async () => {
+  const { user } = await setup(null, {});
+  await user.click(await screen.findByRole('button', { name: 'Copy' }));
+  expect(await navigator.clipboard.readText()).toBe(`DROP VIEW \`shop\`.\`v\`;\n${EDITED};`);
+});
+
+it('Copy of a PostgreSQL plan has a header that is not the table designer one', async () => {
+  const { user } = await setup(null, {}, { ...preview, statements: ['CREATE OR REPLACE VIEW public.v AS SELECT 2'] }, { server: serverInfo('Postgres', [17, 2, 0]) });
+  await user.click(await screen.findByRole('button', { name: 'Copy' }));
+  const text = await navigator.clipboard.readText();
+  expect(text).not.toContain('table designer');
+  expect(text).toContain('-- These statements are applied in one transaction (BEGIN … COMMIT),');
+  expect(text.endsWith('\nCREATE OR REPLACE VIEW public.v AS SELECT 2;')).toBe(true);
+});
+
+it('a connection staleness shows its reason and offers Reopen', async () => {
+  const reason = 'The connection, policy, dialect or object changed; preview again.';
+  await setup(null, { ddl_edit_preview: () => { throw new Failure(appError('plan_stale', 'The table or connection changed since the preview; review the changes again.', { detail: reason })); } });
+  expect(await screen.findByRole('alert')).toHaveTextContent(reason);
+  expect(screen.getByRole('alert')).not.toHaveTextContent('The object changed since you opened it.');
+  expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+});
+
+it('an object staleness keeps the object-changed message', async () => {
+  await setup(null, { ddl_edit_preview: () => { throw new Failure(appError('plan_stale', 'x', { detail: 'The object changed since the editor opened it.' })); } });
+  expect(await screen.findByRole('alert')).toHaveTextContent('The object changed since you opened it.');
 });

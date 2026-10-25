@@ -27,6 +27,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const NOT_RELOADED: &str = "The definition could not be reloaded; reopen the editor.";
+const RECONNECTED: &str =
+    "The connection was re-established during the apply; every statement completed.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
@@ -65,7 +67,8 @@ pub struct DdlEditReport {
     pub object_state: ObjectState,
     /// `Missing`: the original DDL, offered for a create of the same name.
     pub restore_text: Option<String>,
-    /// Applied: the object as it is now, and its DDL re-read from the server.
+    /// Applied: the object as it is now, and its DDL re-read from the server (`text` is
+    /// `None` when the re-read failed; `object` is still set).
     pub object: Option<ObjectRef>,
     pub text: Option<String>,
 }
@@ -102,13 +105,29 @@ fn kind_word(kind: ObjectKind) -> &'static str {
     }
 }
 
+/// A `DELIMITER` for a MySQL script of the statements: the first of `$$`, `//`, `;;`,
+/// `$$1`, `$$2`, … that no statement contains.
+pub(crate) fn script_delimiter(statements: &[String]) -> String {
+    let free = |d: &str| !statements.iter().any(|s| s.contains(d));
+    ["$$", "//", ";;"]
+        .into_iter()
+        .map(String::from)
+        .chain((1u32..).map(|n| format!("$${n}")))
+        .find(|d| free(d))
+        .unwrap_or_default()
+}
+
 /// The History text of a plan: the statements joined with `;`, or for a MySQL
-/// compound statement (routine, trigger, event) a `DELIMITER $$` script that a query
-/// tab can run again.
+/// compound statement (routine, trigger, event) a `DELIMITER` script that a query tab
+/// can run again, its delimiter one that no statement contains.
 pub(crate) fn history_sql(engine: DbKind, kind: ObjectKind, statements: &[String]) -> String {
     let compound = engine == DbKind::MySql && kind != ObjectKind::View;
     if compound {
-        format!("DELIMITER $$\n{}$$\nDELIMITER ;", statements.join("$$\n"))
+        let d = script_delimiter(statements);
+        format!(
+            "DELIMITER {d}\n{}{d}\nDELIMITER ;",
+            statements.join(&format!("{d}\n"))
+        )
     } else {
         statements.join(";\n")
     }
@@ -263,6 +282,7 @@ impl SessionManager {
         let mut sent = 0u32;
         let mut done = 0usize;
         let mut commit_sent = false;
+        let mut reconnected = false;
         let result = async {
             macro_rules! send {
                 ($sql:expr) => {
@@ -292,7 +312,14 @@ impl SessionManager {
                 send!(sql).await?;
                 done += 1;
                 if session.reconnects() != 0 {
-                    return Err(stale());
+                    // MySQL: a reconnect before the last statement, which then
+                    // completed, leaves every statement done; only the session's
+                    // settings (the lock wait bound) were lost.
+                    if !pg && done == total {
+                        reconnected = true;
+                    } else {
+                        return Err(stale());
+                    }
                 }
             }
             if pg {
@@ -335,6 +362,9 @@ impl SessionManager {
         let mut reloaded = None;
         match result {
             Ok(()) => {
+                if reconnected {
+                    report.warnings.push(RECONNECTED.into());
+                }
                 let read = tokio::time::timeout(
                     METADATA_CALL_TIMEOUT,
                     read_object(session.as_ref(), &stored.target, &object_name),
@@ -389,11 +419,16 @@ impl SessionManager {
                         ObjectState::Unknown => EditOutcome::Unknown,
                     };
                     if let Some(r) = &stored.rehearsal {
-                        // The rehearsal routine was created; its DROP did not complete.
+                        let kind = kind_word(stored.kind);
                         if done == 1 {
-                            let kind = kind_word(stored.kind);
+                            // The rehearsal routine was created; its DROP did not complete.
                             report.warnings.push(format!(
                                 "A check routine `{r}` was left behind; drop it with: DROP {kind} `{r}`"
+                            ));
+                        } else if done == 0 && sent >= 1 && !matches!(e, DbError::Server { .. }) {
+                            // Its CREATE was sent but its result is not known.
+                            report.warnings.push(format!(
+                                "A check routine `{r}` may have been left behind; drop it with: DROP {kind} IF EXISTS `{r}`"
                             ));
                         }
                     }
@@ -453,6 +488,9 @@ impl SessionManager {
                 }
                 report.object = Some(object);
                 report.text = Some(state.text);
+            } else if report.outcome == EditOutcome::Applied {
+                // Not re-read: the object is still known by name, for the editor to reopen it.
+                report.object = Some(object_ref(&stored.target, &object_name));
             }
             if report.object_state == ObjectState::Missing && !stored.new {
                 // The restore is an ordinary create of the same name (spec §6.3).

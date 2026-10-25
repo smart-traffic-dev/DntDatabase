@@ -100,6 +100,61 @@ describe('ddl edits store', () => {
     expect(store().findTab({ ...target, name: 'fresh' })).toBe(id);
   });
 
+  it('applied after a create reopens the backend edit of the created object', async () => {
+    const CREATED = 'CREATE VIEW `shop`.`fresh` AS select 1 AS `1`';
+    mockBackend({
+      ddl_edit_open: (a) =>
+        a.name === null
+          ? { ...opened(), text: 'CREATE VIEW `shop`.`new_view` AS SELECT 1', object: null, strategies: [], strategy: null, notes: [] }
+          : { ...opened(), text: CREATED, object: { database: 'shop', schema: null, name: 'fresh', kind: 'View' }, strategies: ['replace', 'recreate'], strategy: 'replace', notes: ['A view note.'] },
+      ddl_edit_close: () => null,
+    });
+    await store().load(TAB, { ...target, name: null });
+    expect(state().open?.object).toBeNull();
+    store().setText(TAB, 'CREATE VIEW `shop`.`fresh` AS select 1');
+    const report = {
+      outcome: 'applied',
+      error: null,
+      warnings: [],
+      statements_sent: 1,
+      executed: [],
+      failed: null,
+      object_state: 'changed',
+      restore_text: null,
+      object: { database: 'shop', schema: null, name: 'fresh', kind: 'View' },
+      text: CREATED,
+    } as DdlEditReport;
+    await store().applied(TAB, report);
+    expect(callsOf('ddl_edit_open')[1]).toMatchObject({ name: 'fresh' });
+    expect(state().open).toMatchObject({ edit_id: 'e2', strategies: ['replace', 'recreate'], strategy: 'replace', notes: ['A view note.'] });
+    expect(state().open?.object?.name).toBe('fresh');
+    expect(state()).toMatchObject({ text: CREATED, base: CREATED, strategy: 'replace' });
+    expect(store().isDirty(TAB)).toBe(false);
+    expect(callsOf('ddl_edit_close')).toEqual([{ editId: 'e1' }]);
+  });
+
+  it('applied without a re-read reopens and takes the server text', async () => {
+    await store().load(TAB, target);
+    store().setText(TAB, `${VIEW}, 2 AS b`);
+    serverText = `${VIEW}, 2 AS \`b\``;
+    const report = {
+      outcome: 'applied',
+      error: null,
+      warnings: ['The definition could not be reloaded; reopen the editor.'],
+      statements_sent: 1,
+      executed: [],
+      failed: null,
+      object_state: 'changed',
+      restore_text: null,
+      object: { database: 'shop', schema: null, name: 'v', kind: 'View' },
+      text: null,
+    } as DdlEditReport;
+    await store().applied(TAB, report);
+    expect(state().open?.edit_id).toBe('e2');
+    expect(state()).toMatchObject({ text: serverText, base: serverText });
+    expect(store().isDirty(TAB)).toBe(false);
+  });
+
   it('restore_makes_new_and_dirty', async () => {
     await store().load(TAB, target);
     store().restore(TAB, VIEW);

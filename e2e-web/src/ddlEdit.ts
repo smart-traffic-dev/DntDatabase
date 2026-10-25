@@ -47,6 +47,9 @@ const strategyOf = (engine: Engine, kind: ObjectKind): Strategy => (engine === '
 const nameIn = (text: string): string | null =>
   /\b(?:VIEW|FUNCTION|PROCEDURE|TRIGGER|EVENT)\s+(?:IF NOT EXISTS\s+)?(?:[`"]?\w+[`"]?\.)?[`"]?(\w+)/i.exec(text)?.[1] ?? null;
 
+/** `ddl_edit::OBJECT_CHANGED`, the `plan_stale` reason of an object changed since the edit opened. */
+const OBJECT_CHANGED = 'The object changed since the editor opened it.';
+
 const lostEdit = () => new Failure(appError('config', 'unknown edit', { field: 'edit_id' }));
 
 interface Edit {
@@ -88,7 +91,9 @@ export function createDdlFake(requireOpen: (id: string) => ServerInfo, configOf:
   let seq = 0;
   const engineOf = (id: string): Engine => (requireOpen(id).variant === 'Postgres' ? 'postgres' : 'mysql');
 
-  const listObjects = (id: string, kind: ObjectKind): ObjectSummary[] => {
+  /** The canned objects live in `dnt_fixture` (as the tables in `backend.ts`). */
+  const listObjects = (id: string, scope: Scope, kind: ObjectKind): ObjectSummary[] => {
+    if (scope.database !== 'dnt_fixture') return [];
     const prefix = `${engineOf(id)}/${kind}/`;
     return [...state.objects.keys()].filter((k) => k.startsWith(prefix)).map((k) => ({ name: k.slice(prefix.length), kind, comment: null, row_estimate: null }));
   };
@@ -126,10 +131,11 @@ export function createDdlFake(requireOpen: (id: string) => ServerInfo, configOf:
     ddl_edit_preview: ({ editId, text }): DdlEditPreview => {
       const edit = edits.get(editId as string);
       if (!edit) throw lostEdit();
-      if (edit.name !== null && state.objects.get(keyOf(edit.engine, edit.kind, edit.name)) !== edit.base) throw fail('plan_stale');
+      if (edit.name !== null && state.objects.get(keyOf(edit.engine, edit.kind, edit.name)) !== edit.base) throw fail('plan_stale', { detail: OBJECT_CHANGED });
       const body = text as string;
       const recreate = edit.name !== null && strategyOf(edit.engine, edit.kind) === 'recreate';
-      const statements = recreate ? [`DROP ${edit.kind.toUpperCase()} IF EXISTS \`${edit.name}\``, body] : [body];
+      // As `build.rs`: a qualified DROP without IF EXISTS (the object was just checked to exist).
+      const statements = recreate ? [`DROP ${edit.kind.toUpperCase()} \`${edit.scope.database}\`.\`${edit.name}\``, body] : [body];
       const planId = `ddl-plan-${++seq}`;
       const confirmName = configOf(edit.connectionId)?.env_tag === 'production' ? (edit.name ?? nameIn(body)) : null;
       plans.set(planId, { edit, text: body, statements, confirmName });
@@ -146,12 +152,17 @@ export function createDdlFake(requireOpen: (id: string) => ServerInfo, configOf:
     },
     ddl_edit_apply: ({ planId, confirmed, name }): DdlEditReport => {
       const plan = plans.get(planId as string);
-      if (!plan) throw fail('plan_stale');
-      if (!confirmed || (plan.confirmName !== null && name !== plan.confirmName)) return report({ outcome: 'not_applied' });
+      // As `ddl_edit_apply`: a plan is used once, an unknown one has expired, a wrong name is refused.
+      if (!plan) throw fail('plan_expired');
       plans.delete(planId as string);
+      if (!confirmed || (plan.confirmName !== null && name !== plan.confirmName)) throw fail('confirmation_required', { detail: '1 statement' });
       const { edit } = plan;
       if (state.partial && plan.statements.length > 1 && edit.name !== null) {
         state.objects.delete(keyOf(edit.engine, edit.kind, edit.name));
+        const base = edit.base;
+        // The edit is now a new one of the same name (`apply.rs`).
+        edit.name = null;
+        edit.base = '';
         return report({
           outcome: 'partial',
           error: appError('query', 'You have an error in your SQL syntax'),
@@ -159,7 +170,7 @@ export function createDdlFake(requireOpen: (id: string) => ServerInfo, configOf:
           executed: plan.statements.slice(0, 1),
           failed: plan.statements[1]!,
           object_state: 'missing',
-          restore_text: edit.base,
+          restore_text: base,
         });
       }
       const created = edit.name ?? nameIn(plan.text) ?? 'new_object';

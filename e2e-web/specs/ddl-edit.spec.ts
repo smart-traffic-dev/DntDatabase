@@ -1,5 +1,5 @@
 import type { Locator, Page } from '@playwright/test';
-import type { ConnectionConfig } from '../../ui/src/bindings';
+import type { AppError, ConnectionConfig, DdlEditOpen, DdlEditPreview, DdlEditReport } from '../../ui/src/bindings';
 import { config, ids } from '../../ui/src/test/fixtures/data';
 import { byId, expandRow, treeRow } from '../src/app';
 import { createBackend, type FakeBackend } from '../src/backend';
@@ -123,7 +123,7 @@ test.describe('DDL editor (browser, fake IPC backend)', () => {
 
     await review(page).click();
     const dialog = dialogOf(page);
-    await expect(dialog).toContainText('DROP PROCEDURE IF EXISTS `p_restock`');
+    await expect(dialog).toContainText('DROP PROCEDURE `dnt_fixture`.`p_restock`');
     await expect(dialog).toContainText('Not transactional');
     await dialog.getByRole('button', { name: 'Apply', exact: true }).click();
 
@@ -150,6 +150,44 @@ test.describe('DDL editor (browser, fake IPC backend)', () => {
     await expect(editorText(page)).toContainText('CREATE FUNCTION');
     // A new object can be reviewed as it is.
     await expect(review(page)).toBeEnabled();
+  });
+
+  test('fake fidelity: confirmation, plan expiry, partial apply and database scope as the backend', async () => {
+    const backend = createBackend();
+    const h = backend.handlers;
+    await h.create_connection!({ cfg: config(ids.prod, 'shop-prod', { default_db: 'dnt_fixture', env_tag: 'production' }).config });
+    await h.open_connection!({ id: ids.prod });
+    const scope = { database: 'dnt_fixture', schema: null };
+    // The tree lists the canned objects in `dnt_fixture` only.
+    expect(await h.list_objects!({ id: ids.prod, scope, kind: 'View' })).toHaveLength(1);
+    expect(await h.list_objects!({ id: ids.prod, scope: { database: 'other', schema: null }, kind: 'View' })).toEqual([]);
+
+    const open = (await h.ddl_edit_open!({ connectionId: ids.prod, scope, kind: 'Procedure', name: 'p_restock', table: null })) as DdlEditOpen;
+    const preview = async () => (await h.ddl_edit_preview!({ editId: open.edit_id, text: open.text, strategy: open.strategy })) as DdlEditPreview;
+    const errorOf = async (f: () => unknown) => {
+      try {
+        await f();
+      } catch (e) {
+        // Handlers throw a `Failure`; the shim hands its `error` to the app.
+        return (e as { error: AppError }).error;
+      }
+      throw new Error('expected an error');
+    };
+    let p = await preview();
+    expect(p.statements[0]).toBe('DROP PROCEDURE `dnt_fixture`.`p_restock`');
+    // A wrong typed name is refused and consumes the plan, as `ddl_edit_apply`.
+    const refused = await errorOf(() => h.ddl_edit_apply!({ planId: p.plan_id, confirmed: true, name: 'p_restoc', operationId: 'op1' }));
+    expect(refused.kind).toBe('confirmation_required');
+    expect((await errorOf(() => h.ddl_edit_apply!({ planId: p.plan_id, confirmed: true, name: 'p_restock', operationId: 'op2' }))).kind).toBe('plan_expired');
+
+    // A partial apply turns the edit into a new one: its next preview is a plain create.
+    backend.ddl.partial = true;
+    p = await preview();
+    const r = (await h.ddl_edit_apply!({ planId: p.plan_id, confirmed: true, name: 'p_restock', operationId: 'op3' })) as DdlEditReport;
+    expect(r).toMatchObject({ outcome: 'partial', object_state: 'missing' });
+    backend.ddl.partial = false;
+    p = await preview();
+    expect(p.statements).toEqual([open.text]);
   });
 
   test('closing a dirty DDL tab asks; Cancel keeps the tab and its text', async ({ page }) => {

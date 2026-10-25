@@ -13,12 +13,14 @@ import { invalidateTableData } from '../store/tableData';
 import { useTabs, type ObjectTabRef } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
-import { SqlPreview } from '../tabs/designer/SqlPreview';
+import { DDL_EDIT_PG_HEADER, SqlPreview } from '../tabs/designer/SqlPreview';
 import { Modal } from './Modal';
 import './ddlEdit.css';
 
 export const DDL_LOST_MESSAGE = 'The connection to this object was lost. Your text is kept; reopen the edit to continue.';
 export const DDL_STALE_MESSAGE = 'The object changed since you opened it.';
+/** The backend's `plan_stale` reason when the object itself changed (`ddl_edit::OBJECT_CHANGED`). */
+const OBJECT_CHANGED_REASON = 'The object changed since the editor opened it.';
 const UNKNOWN_MESSAGE = 'The result is unknown; check the object before continuing.';
 /** The warning of a non-transactional DROP + CREATE (`build.rs`): shown in danger colour. */
 const GAP_PREFIX = 'Between the DROP and the CREATE';
@@ -102,6 +104,7 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
   const previewSeq = useRef(0);
   const busy = loading || applying;
   const env = edit?.open?.env ?? cfg?.env_tag ?? null;
+  const engine = edit?.open?.server.kind ?? 'mysql';
 
   const lost = () => {
     useDdlEdits.getState().markLost(tabId);
@@ -119,7 +122,8 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
     if (e.kind === 'plan_stale') {
       useDdlEdits.getState().markStale(tabId);
       setStale(true);
-      setError(DDL_STALE_MESSAGE);
+      // Another staleness (the connection, its policy, the dialect) says what changed.
+      setError(!e.detail || e.detail === OBJECT_CHANGED_REASON ? DDL_STALE_MESSAGE : e.detail);
       return;
     }
     setError(messageOf(e));
@@ -199,7 +203,7 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
       const name = result.object?.name ?? target.name;
       if (result.outcome === 'applied') {
         if (reportError) setError(messageOf(reportError));
-        useDdlEdits.getState().applied(tabId, result);
+        void useDdlEdits.getState().applied(tabId, result);
         const refreshError = await refreshAfterApply(target, name, false).catch((e) => toAppError(e).message);
         if (refreshError) setError(`Changes were applied; metadata refresh failed: ${refreshError}`);
       } else if (result.outcome === 'unknown' || result.outcome === 'partial') {
@@ -263,7 +267,13 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
         </p>
         {preview ? (
           <>
-            <SqlPreview statements={preview.statements} impacts={[]} />
+            <SqlPreview
+              statements={preview.statements}
+              impacts={[]}
+              showImpacts={false}
+              engine={engine}
+              script={{ pgHeader: DDL_EDIT_PG_HEADER, delimited: engine === 'mysql' && edit?.target.kind !== 'View' }}
+            />
             <p>{preview.transactional ? 'Runs in one transaction' : 'Not transactional: statements run one by one'}</p>
             {preview.warnings.length > 0 ? (
               <ul className="ddl-edit-list" aria-label="Warnings">
