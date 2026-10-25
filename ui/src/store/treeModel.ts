@@ -96,7 +96,7 @@ export function engineOf(variant: ServerVariant): Engine {
 export function folderKindsOf(variant: ServerVariant): ObjectKind[] {
   switch (variant) {
     case 'Postgres':
-      return ['Table', 'View', 'MaterializedView', 'Function', 'Procedure', 'Sequence', 'Type'];
+      return ['Table', 'View', 'MaterializedView', 'Function', 'Procedure', 'Trigger', 'Sequence', 'Type'];
     case 'MariaDb':
       return ['Table', 'View', 'Function', 'Procedure', 'Trigger', 'Event', 'Sequence'];
     default:

@@ -850,3 +850,48 @@ async fn partial_and_invalid_unique_indexes_are_reported() {
         );
     }
 }
+
+/// Trigger names are unique per table, not per schema: a name carried by two tables is
+/// listed once, with the comment of the first table by name.
+#[tokio::test]
+async fn pg_trigger_names_listed_once() {
+    require_db!();
+    for t in Target::pg() {
+        let s = connect(t).await;
+        let sch = format!("p4c_{}", uuid::Uuid::new_v4().simple());
+        let setup = exec(
+            &s,
+            &format!(
+                "CREATE SCHEMA {sch}; \
+                 CREATE FUNCTION {sch}.f() RETURNS trigger LANGUAGE plpgsql \
+                 AS $$BEGIN RETURN NEW; END$$; \
+                 CREATE TABLE {sch}.b (id int); \
+                 CREATE TRIGGER trg_same BEFORE INSERT ON {sch}.b \
+                 FOR EACH ROW EXECUTE FUNCTION {sch}.f(); \
+                 COMMENT ON TRIGGER trg_same ON {sch}.b IS 'on b'; \
+                 CREATE TABLE {sch}.a (id int); \
+                 CREATE TRIGGER trg_same BEFORE INSERT ON {sch}.a \
+                 FOR EACH ROW EXECUTE FUNCTION {sch}.f(); \
+                 COMMENT ON TRIGGER trg_same ON {sch}.a IS 'on a'"
+            ),
+        )
+        .await;
+        let listed = match setup {
+            Ok(()) => s.list_objects(&scope(&sch), ObjectKind::Trigger).await,
+            Err(e) => Err(e),
+        };
+        exec(&s, &format!("DROP SCHEMA IF EXISTS {sch} CASCADE"))
+            .await
+            .unwrap();
+        let got: Vec<(String, Option<String>)> = listed
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"))
+            .into_iter()
+            .map(|o| (o.name, o.comment))
+            .collect();
+        assert_eq!(
+            got,
+            [("trg_same".to_string(), Some("on a".to_string()))],
+            "{t:?}"
+        );
+    }
+}

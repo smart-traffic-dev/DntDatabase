@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ROOT, computeRows, emptyLabel, type TreeNode, type TreeRow } from './treeModel';
+import { ROOT, computeRows, emptyLabel, folderKindsOf, type TreeNode, type TreeRow } from './treeModel';
 
 const conn: TreeNode = { id: 'conn:abc', kind: 'connection', label: 'db' };
 const folder: TreeNode = { id: 'conn:abc/db:shop/folder:Table', kind: 'folder', label: 'Tables', folderKind: 'Table' };
@@ -42,5 +42,11 @@ describe('computeRows placeholders', () => {
     expect(emptyLabel(conn)).toBe('No databases');
     expect(emptyLabel({ id: 'group:x', kind: 'group', label: 'G' })).toBe('Empty group');
     expect(emptyLabel({ id: 'conn:abc/db:shop', kind: 'database', label: 'shop' })).toBe('No schemas');
+  });
+});
+
+describe('folderKindsOf', () => {
+  it('lists PostgreSQL triggers after procedures', () => {
+    expect(folderKindsOf('Postgres')).toEqual(['Table', 'View', 'MaterializedView', 'Function', 'Procedure', 'Trigger', 'Sequence', 'Type']);
   });
 });
