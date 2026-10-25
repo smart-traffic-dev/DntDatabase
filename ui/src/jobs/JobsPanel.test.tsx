@@ -57,7 +57,10 @@ describe('jobFormat', () => {
   it('names states and progress', () => {
     expect(stateLabel(jobSummary({ state: 'failed', outcome_unknown: true }))).toBe('Outcome unknown');
     expect(stateLabel(jobSummary({ state: 'cancelled' }))).toBe('Cancelled');
-    expect(progressText({ phase: 'Rows', done: 1200, total: 5000, unit: 'rows' })).toBe('Rows · 1,200 / 5,000 rows');
+    expect(progressText({ phase: 'Exporting', done: 1200, total: 5000, unit: 'rows' })).toBe('Exporting · 1,200 / 5,000 rows');
+    // A phase that only names the unit is not said twice.
+    expect(progressText({ phase: 'Rows', done: 1200, total: null, unit: 'rows' })).toBe('1,200 rows');
+    expect(progressText({ phase: 'statements', done: 3, total: 12, unit: 'statements' })).toBe('3 / 12 statements');
     expect(progressText({ phase: '', done: 1536, total: null, unit: 'bytes' })).toBe('1.5 KB');
     expect(progressText({ phase: 'Starting', done: 0, total: null, unit: 'none' })).toBe('Starting');
   });
@@ -85,6 +88,21 @@ describe('JobsPanel', () => {
 
     await userEvent.setup().click(within(live).getByRole('button', { name: 'Stop' }));
     expect(callsOf('job_cancel')).toEqual([{ id: 'run' }]);
+  });
+
+  it('a tracked export row reads its phase once, then the rows', () => {
+    const exporting = jobSummary({
+      id: 'exp',
+      title: 'Export orders to orders.csv',
+      kind: 'export',
+      state: 'running',
+      progress: { phase: 'Exporting', done: 1200, total: null, unit: 'rows' },
+    });
+    seed([exporting]);
+    render(<JobsPanel />);
+    const row = screen.getByTestId('job-row');
+    expect(row).toHaveTextContent('Exporting · 1,200 rows');
+    expect(row).not.toHaveTextContent(/Rows · /);
   });
 
   it('says so when there are no jobs', () => {

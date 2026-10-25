@@ -46,6 +46,8 @@ export interface WizardState {
   connectionId: string;
   table: ObjectRef | null;
   path: string | null;
+  /** Counts the file picks: picking the same file again reads it again. */
+  picks: number;
   source: SourceOptions;
   inspection: Inspection | null;
   /** XLSX sheet names of the last inspection (kept while another sheet is inspected). */
@@ -103,6 +105,7 @@ export function initialState(init: { connectionId: string; table?: ObjectRef | n
     connectionId: p?.connection_id ?? init.connectionId,
     table: p?.table ?? init.table ?? null,
     path: p?.path ?? null,
+    picks: 0,
     source: p?.source ?? { format: 'csv', delimiter: null, header: true, sheet: null },
     inspection: null,
     sheets: [],
@@ -159,11 +162,16 @@ export function reduce(s: WizardState, a: WizardAction): WizardState {
     case 'goto':
       return canOpen(s, a.step) ? { ...s, step: a.step } : s;
     case 'file': {
+      const picks = s.picks + 1;
+      // The same file picked again (a "Run again" after a restart: admissions last one app
+      // session) keeps its source options and mapping; it is only read again.
+      if (a.path === s.path) return { ...s, ...dropChecks, picks, inspection: null };
       const guess = formatFromPath(a.path);
       return {
         ...s,
         ...dropChecks,
         path: a.path,
+        picks,
         source: { format: guess.format, delimiter: guess.delimiter, header: true, sheet: null },
         inspection: null,
         sheets: [],

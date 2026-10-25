@@ -133,6 +133,22 @@ describe('invalidation', () => {
     expect(s.preview).toBeNull();
   });
 
+  it('the same file picked again keeps its options and mapping and is read again', () => {
+    const base = run(ready(), { type: 'source', patch: { delimiter: ';', header: false } }, { type: 'inspected', inspection });
+    const before = run(base, { type: 'mapping', mapping: [{ target: 'id', source: 1 }] }, { type: 'report', report: ok }, { type: 'prepared', preview: {} as never });
+    const s = reduce(before, { type: 'file', path: 'C:\\data\\orders.csv' });
+    expect(s.source).toEqual({ format: 'csv', delimiter: ';', header: false, sheet: null });
+    expect(s.mapping).toEqual([{ target: 'id', source: 1 }]);
+    expect(s.report).toEqual(ok);
+    expect(s.inspection).toBeNull();
+    expect(s.preview).toBeNull();
+    expect(s.picks).toBe(before.picks + 1);
+    // Another file starts from its own defaults.
+    const other = reduce(before, { type: 'file', path: 'C:\\data\\items.tsv' });
+    expect(other.source).toEqual({ format: 'csv', delimiter: '\t', header: true, sheet: null });
+    expect(other.mapping).toEqual([]);
+  });
+
   it('a new table drops the target and the mapping; options keep the mapping but drop the plan', () => {
     let s = reduce(ready(), { type: 'table', table: { ...table, name: 'items' } });
     expect(s.target).toBeNull();

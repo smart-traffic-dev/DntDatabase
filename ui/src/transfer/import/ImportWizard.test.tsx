@@ -7,7 +7,7 @@ import { useConnections } from '../../store/connections';
 import { useDialogs } from '../../store/dialogs';
 import { useJobs } from '../../store/jobs';
 import { useLayout } from '../../store/layout';
-import { callsOf, config, fail, ids, mockBackend, resetStores, serverInfo } from '../../test/backend';
+import { appError, callsOf, config, fail, ids, mockBackend, resetStores, serverInfo } from '../../test/backend';
 import { jobDetail, jobSummary } from '../../test/jobs';
 import { ImportWizard } from './ImportWizard';
 import './rerunImport';
@@ -177,10 +177,10 @@ describe('ImportWizard', () => {
     expect(callsOf('import_dry_run')[0]).toMatchObject({
       request: { server_check: false, request: { mode: { kind: 'upsert', key: ['id'] }, path: 'C:\\data\\orders.csv' } },
     });
-    const job = jobSummary({ id: 'dry-1', kind: 'import_dry_run', state: 'running', progress: { phase: 'Rows', done: 2, total: null, unit: 'rows' } });
+    const job = jobSummary({ id: 'dry-1', kind: 'import_dry_run', state: 'running', progress: { phase: 'Checking', done: 2, total: null, unit: 'rows' } });
     act(() => useJobs.getState().apply({ job, new_log: [] }));
     const status = await screen.findByTestId('import-dry-run');
-    expect(status).toHaveTextContent('Rows · 2 rows');
+    expect(status).toHaveTextContent('Checking · 2 rows');
 
     backend({
       job_detail: () =>
@@ -376,6 +376,36 @@ describe('ImportWizard', () => {
     expect(callsOf('import_prepare')).toHaveLength(2);
   });
 
+  it('a return to the Review with an unchanged request reuses the plan (the backend keeps a bounded number)', async () => {
+    let n = 0;
+    backend({ import_prepare: () => preview({ plan_id: `plan-${++n}` }) });
+    const u = user();
+    open();
+    await toMapping(u);
+    await u.click(next());
+    await u.click(next());
+    await u.click(next());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start import' })).toBeEnabled());
+    expect(callsOf('import_prepare')).toHaveLength(1);
+
+    // Changed and changed back: the same request, so the same plan.
+    await u.click(screen.getByRole('button', { name: /Options$/ }));
+    await u.click(screen.getByLabelText('Trim spaces around text'));
+    await u.click(screen.getByLabelText('Trim spaces around text'));
+    await u.click(screen.getByRole('button', { name: /Review$/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start import' })).toBeEnabled());
+    expect(callsOf('import_prepare')).toHaveLength(1);
+
+    // A changed request prepares a new plan.
+    await u.click(screen.getByRole('button', { name: /Options$/ }));
+    await u.click(screen.getByLabelText('Trim spaces around text'));
+    await u.click(screen.getByRole('button', { name: /Review$/ }));
+    await waitFor(() => expect(callsOf('import_prepare')).toHaveLength(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Start import' })).toBeEnabled());
+    await u.click(screen.getByRole('button', { name: 'Start import' }));
+    expect(callsOf('import_start')[0]?.planId).toBe('plan-2');
+  });
+
   it('read-only connections cannot validate on the server', async () => {
     backend({ import_target: () => target({ read_only: true }) });
     const u = user();
@@ -420,5 +450,74 @@ describe('Run again', () => {
     // The stored mapping is kept, not replaced by the auto mapping.
     expect(screen.getByLabelText('Source for total')).toHaveValue('2');
     expect(callsOf('import_auto_map')).toHaveLength(0);
+  });
+
+  it('after a restart the file must be chosen again; the same file keeps its options and mapping', async () => {
+    const request: ImportRequest = {
+      connection_id: ids.prod,
+      table,
+      path: 'C:\\data\\orders.csv',
+      source: { format: 'csv', delimiter: ';', header: false, sheet: null },
+      mapping: [{ target: 'id', source: 0 }, { target: 'customer', source: 1 }, { target: 'total', source: 2 }],
+      mode: { kind: 'append' },
+      errors: { kind: 'stop' },
+      convert: { empty: 'null', null_text: null, trim: false, binary: 'hex' },
+      batch_rows: 1000,
+      batch_bytes: 1024 * 1024,
+      override_identity: false,
+    };
+    // Admissions last one app session: the stored path is refused until it is picked again.
+    let admitted = false;
+    backend({
+      import_pick_file: () => {
+        admitted = true;
+        return 'C:\\data\\orders.csv';
+      },
+      import_inspect: () => {
+        if (!admitted) throw appError('config', 'Choose the file in the file dialog.', { field: 'path' });
+        return inspection;
+      },
+    });
+    const u = user();
+    open({ table, params: request });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Choose the file again (files picked before a restart must be chosen again).');
+    expect(next()).toBeDisabled();
+
+    await u.click(screen.getByRole('button', { name: 'Choose file…' }));
+    await screen.findByTestId('import-preview');
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(callsOf('import_inspect')).toHaveLength(2);
+    expect(callsOf('import_inspect')[1]?.source).toEqual(request.source);
+    expect(screen.getByLabelText('Delimiter')).toHaveValue(';');
+    expect(screen.getByLabelText('First row holds the column names')).not.toBeChecked();
+    await u.click(next());
+    await screen.findByTestId('import-target-columns');
+    await waitFor(() => expect(next()).toBeEnabled());
+    await u.click(next());
+    expect(screen.getByLabelText('Source for total')).toHaveValue('2');
+    expect(callsOf('import_auto_map')).toHaveLength(0);
+  });
+
+  it('another file picked on Run again starts from its own defaults', async () => {
+    const request = {
+      connection_id: ids.prod,
+      table,
+      path: 'C:\\data\\old.csv',
+      source: { format: 'csv', delimiter: ';', header: false, sheet: null },
+      mapping: [{ target: 'id', source: 0 }],
+      mode: { kind: 'append' },
+      errors: { kind: 'stop' },
+      convert: { empty: 'null', null_text: null, trim: false, binary: 'hex' },
+      batch_rows: 1000,
+      batch_bytes: 1024 * 1024,
+      override_identity: false,
+    } satisfies ImportRequest;
+    backend();
+    const u = user();
+    open({ table, params: request });
+    await screen.findByTestId('import-preview');
+    await u.click(screen.getByRole('button', { name: 'Choose file…' }));
+    await waitFor(() => expect(callsOf('import_inspect')).toHaveLength(2));
+    expect(callsOf('import_inspect')[1]).toEqual({ path: 'C:\\data\\orders.csv', source: { format: 'csv', delimiter: null, header: true, sheet: null } });
   });
 });

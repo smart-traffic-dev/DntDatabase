@@ -65,14 +65,17 @@ function amount(n: number, unit: JobProgress['unit']): string {
   return unit === 'bytes' ? formatBytes(n) : formatCount(n);
 }
 
-/** "Rows · 1,200 / 5,000 rows", "1.5 KB", "Starting": phase, then done (/ total) in its unit. */
+/**
+ * "Exporting · 1,200 / 5,000 rows", "1.5 KB", "Starting": phase, then done (/ total) in its unit.
+ * A phase that only names the unit ("Rows") is not repeated before it.
+ */
 export function progressText(p: JobProgress): string {
   const parts: string[] = [];
-  if (p.phase) parts.push(p.phase);
+  const word = p.unit === 'rows' ? 'rows' : p.unit === 'statements' ? 'statements' : '';
+  if (p.phase && !(word && p.phase.trim().toLowerCase() === word)) parts.push(p.phase);
   if (p.unit !== 'none') {
-    const word = p.unit === 'rows' ? ' rows' : p.unit === 'statements' ? ' statements' : '';
     const total = p.total !== null ? ` / ${amount(p.total, p.unit)}` : '';
-    parts.push(`${amount(p.done, p.unit)}${total}${word}`);
+    parts.push(`${amount(p.done, p.unit)}${total}${word ? ` ${word}` : ''}`);
   }
   return parts.join(' · ');
 }

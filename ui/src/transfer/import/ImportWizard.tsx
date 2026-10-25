@@ -1,10 +1,11 @@
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { api, toAppError } from '../../api';
-import type { AppError, ImportRequest, ObjectRef } from '../../bindings';
+import type { AppError, DataImportPreview, ImportRequest, ObjectRef } from '../../bindings';
 import { EnvTag } from '../../components/EnvTag';
 import { showJobs } from '../../components/windowActions';
 import { Modal } from '../../dialogs/Modal';
 import { useJobs } from '../../store/jobs';
+import { pickedFileMessage } from '../backup/backupFormat';
 import { buildRequest, canAdvance, canOpen, initialState, reduce, STEPS } from './importState';
 import { CheckStep } from './steps/CheckStep';
 import { MappingStep } from './steps/MappingStep';
@@ -47,21 +48,25 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
   const [starting, setStarting] = useState(false);
   const [confirmation, setConfirmation] = useState<Confirmation>(NO_CONFIRMATION);
 
-  const { path, source, inspection, target, mapping, mode, overrideIdentity, report, step, preview } = state;
+  const { path, picks, source, inspection, target, mapping, mode, overrideIdentity, report, step, preview } = state;
 
-  // The file's preview, read again whenever the file or its options change.
+  // The file's preview, read again whenever the file (picked again too) or its options change.
   useEffect(() => {
     if (!path || inspection) return;
     let live = true;
     setInspectError(null);
     api.importInspect(path, source).then(
       (result) => live && dispatch({ type: 'inspected', inspection: result }),
-      (e) => live && setInspectError(toAppError(e).message),
+      (e) => {
+        if (!live) return;
+        const err = toAppError(e);
+        setInspectError(pickedFileMessage(err) ?? err.message);
+      },
     );
     return () => {
       live = false;
     };
-  }, [path, source, inspection]);
+  }, [path, picks, source, inspection]);
 
   // The target's columns and keys, read when the table changes.
   useEffect(() => {
@@ -120,16 +125,30 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
     };
   }, [target, mapping, mode, overrideIdentity, report]);
 
+  // The last plan prepared and its request: the backend keeps a bounded number of plans, so a
+  // return to the Review with the same request reuses it instead of preparing another one.
+  const lastPrepared = useRef<{ key: string; preview: DataImportPreview; expiresAt: number } | null>(null);
+
   // The Review step prepares the plan (again after a failure only when asked).
   useEffect(() => {
     if (step !== 'review' || preview || reviewError) return;
     const request = buildRequest(state);
     if (!request) return;
+    // A file picked again (it may have changed) prepares a new plan.
+    const key = JSON.stringify([state.picks, request]);
+    const cached = lastPrepared.current;
+    // Reused only while it is well within its lifetime (a minute of margin for the review).
+    if (cached && cached.key === key && Date.now() < cached.expiresAt) {
+      setConfirmation(NO_CONFIRMATION);
+      dispatch({ type: 'prepared', preview: cached.preview });
+      return;
+    }
     let live = true;
     setPreparing(true);
     api.importPrepare(request).then(
       (result) => {
         if (!live) return;
+        lastPrepared.current = { key, preview: result, expiresAt: Date.now() + (result.expires_in_seconds - 60) * 1000 };
         setConfirmation(NO_CONFIRMATION);
         dispatch({ type: 'prepared', preview: result });
         setPreparing(false);
@@ -166,6 +185,7 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
       void useJobs.getState().load();
     } catch (e) {
       // The plan is single use: whatever failed, the review must be prepared again.
+      lastPrepared.current = null;
       dispatch({ type: 'unprepare' });
       setReviewError(reviewMessage(toAppError(e)));
       setStarting(false);
