@@ -7,13 +7,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 
-use super::{open_skipping_bom, Cell, Counting, ReadError, Record, RecordReader};
+use super::{open_skipping_bom, too_large, Cell, Counting, ReadError, Record, RecordReader};
 
 /// Objects scanned for column names before the first record is returned.
 pub(crate) const COLUMN_SCAN: usize = 1_000;
@@ -112,10 +112,11 @@ struct ArraySource {
     input: Input,
     index: u64,
     finished: bool,
+    limit: u64,
 }
 
 impl ArraySource {
-    fn new(mut input: Input) -> Result<Self, ReadError> {
+    fn new(mut input: Input, limit: u64) -> Result<Self, ReadError> {
         match skip_ws(&mut input)? {
             Some(b'[') => input.consume(1),
             _ => {
@@ -128,6 +129,7 @@ impl ArraySource {
             input,
             index: 0,
             finished: false,
+            limit,
         })
     }
 }
@@ -162,9 +164,19 @@ impl ObjectSource for ArraySource {
             None => return Err(ReadError::at(next, "The JSON ends unexpectedly")),
             Some(_) => return Err(ReadError::at(next, "The element is not an object")),
         }
-        // `{` starts the value and `}` ends it, so the deserializer reads no byte past it.
-        let mut de = serde_json::Deserializer::from_reader(&mut self.input);
-        let obj = RawObject::deserialize(&mut de).map_err(|e| ReadError::at(next, describe(&e)))?;
+        // `{` starts the value and `}` ends it, so the deserializer reads no byte past it. The
+        // `take` stops an object larger than the limit before it fills memory.
+        let mut limited = (&mut self.input).take(self.limit);
+        let mut de = serde_json::Deserializer::from_reader(&mut limited);
+        let parsed = RawObject::deserialize(&mut de);
+        let exhausted = limited.limit() == 0;
+        let obj = parsed.map_err(|e| {
+            if exhausted {
+                too_large(next, self.limit)
+            } else {
+                ReadError::at(next, describe(&e))
+            }
+        })?;
         self.index = next;
         Ok(Some((next, obj)))
     }
@@ -188,20 +200,25 @@ struct LineSource {
     input: Input,
     line: u64,
     buf: Vec<u8>,
+    limit: u64,
 }
 
 impl ObjectSource for LineSource {
     fn next_object(&mut self) -> Result<Option<(u64, RawObject)>, ReadError> {
         loop {
             self.buf.clear();
-            let n = self
-                .input
+            // At most `limit` bytes plus the newline are read into memory.
+            let n = (&mut self.input)
+                .take(self.limit + 1)
                 .read_until(b'\n', &mut self.buf)
                 .map_err(|e| ReadError::io(&e))?;
             if n == 0 {
                 return Ok(None);
             }
             self.line += 1;
+            if n as u64 > self.limit && self.buf.last() != Some(&b'\n') {
+                return Err(too_large(self.line, self.limit));
+            }
             let line = self.buf.trim_ascii();
             if line.is_empty() {
                 continue;
@@ -241,25 +258,29 @@ fn open_input(path: &Path) -> Result<(Input, u64), ReadError> {
     Ok((BufReader::new(Counting::new(file, skipped)), total))
 }
 
-pub(crate) fn open_array(path: &Path) -> Result<impl RecordReader, ReadError> {
+pub(crate) fn open_array(path: &Path, limit: u64) -> Result<impl RecordReader, ReadError> {
     let (input, total) = open_input(path)?;
-    ObjectReader::new(ArraySource::new(input)?, total)
+    ObjectReader::new(ArraySource::new(input, limit)?, total, limit)
 }
 
-pub(crate) fn open_lines(path: &Path) -> Result<impl RecordReader, ReadError> {
+pub(crate) fn open_lines(path: &Path, limit: u64) -> Result<impl RecordReader, ReadError> {
     let (input, total) = open_input(path)?;
     ObjectReader::new(
         LineSource {
             input,
             line: 0,
             buf: Vec::new(),
+            limit,
         },
         total,
+        limit,
     )
 }
 
 impl<S: ObjectSource> ObjectReader<S> {
-    fn new(mut source: S, total: u64) -> Result<Self, ReadError> {
+    /// Reads ahead up to [`COLUMN_SCAN`] objects, stopping early once `limit` bytes were read so
+    /// the read-ahead stays within one record's budget.
+    fn new(mut source: S, total: u64, limit: u64) -> Result<Self, ReadError> {
         let mut columns: Vec<String> = Vec::new();
         let mut index = HashMap::new();
         let mut buffered = VecDeque::new();
@@ -275,6 +296,9 @@ impl<S: ObjectSource> ObjectReader<S> {
                         }
                     }
                     buffered.push_back((n, obj));
+                    if source.bytes_read() > limit {
+                        break;
+                    }
                 }
                 Ok(None) => {
                     eof = true;

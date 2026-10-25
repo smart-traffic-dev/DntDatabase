@@ -3,7 +3,10 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use dnt_transfer::read::{inspect, open, Cell, ReadError, Record, SourceFormat, SourceOptions};
+use dnt_transfer::read::{
+    inspect, open, open_with_limit, Cell, ReadError, Record, SourceFormat, SourceOptions,
+    MAX_RECORD_BYTES,
+};
 use dnt_transfer::{file_facts, FileFacts};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -514,4 +517,112 @@ fn missing_file_is_an_error() {
     let err = open(&p, &csv_opts()).err().unwrap();
     assert_eq!(err.record, None);
     assert!(file_facts(&p).is_err());
+}
+
+// ---------------------------------------------------------------- record size limit
+
+fn read_all_limited(path: &Path, o: &SourceOptions, limit: u64) -> Result<Vec<Record>, ReadError> {
+    let mut r = open_with_limit(path, o, limit)?;
+    let mut rows = Vec::new();
+    while let Some(rec) = r.next_record()? {
+        rows.push(rec);
+    }
+    Ok(rows)
+}
+
+#[test]
+fn default_record_limit_is_256_mib() {
+    assert_eq!(MAX_RECORD_BYTES, 256 * 1024 * 1024);
+}
+
+#[test]
+fn csv_unterminated_quote_hits_the_record_limit() {
+    let dir = TempDir::new().unwrap();
+    let mut body = b"a,b\n1,2\n3,\"secret".to_vec();
+    body.extend(std::iter::repeat_n(b'x', 200_000));
+    body.extend(b"\n4,5\n");
+    let p = write_file(&dir, "big.csv", &body);
+    let err = read_all_limited(&p, &csv_opts(), 1024).unwrap_err();
+    assert_eq!(err.record, Some(3));
+    assert!(err.message.contains("limit"), "{}", err.message);
+    assert!(!err.message.contains("secret"), "{}", err.message);
+}
+
+#[test]
+fn csv_record_just_over_the_limit_inside_read_ahead_is_refused() {
+    let dir = TempDir::new().unwrap();
+    // 40-byte records with a 32-byte limit: the whole file fits in csv's buffer.
+    let line = format!("{},{}\n", "y".repeat(19), "z".repeat(19));
+    let p = write_file(&dir, "r.csv", format!("a,b\n{line}").as_bytes());
+    let err = read_all_limited(&p, &csv_opts(), 32).unwrap_err();
+    assert_eq!(err.record, Some(2));
+    // Records under the limit pass.
+    let rows = read_all_limited(&p, &csv_opts(), 64).unwrap();
+    assert_eq!(rows.len(), 1);
+}
+
+#[test]
+fn jsonl_long_line_hits_the_record_limit() {
+    let dir = TempDir::new().unwrap();
+    let mut body = b"{\"a\": 1}\n{\"a\": \"secret".to_vec();
+    body.extend(std::iter::repeat_n(b'x', 100_000));
+    body.extend(b"\"}\n{\"a\": 2}\n");
+    let p = write_file(&dir, "l.jsonl", &body);
+    let err = read_all_limited(&p, &opts(SourceFormat::Jsonl), 1024).unwrap_err();
+    assert_eq!(err.record, Some(2));
+    assert!(err.message.contains("limit"), "{}", err.message);
+    assert!(!err.message.contains("secret"));
+    // A line of exactly the limit (plus its newline) is fine.
+    let p = write_file(&dir, "e.jsonl", b"{\"a\": 12}\n");
+    assert_eq!(
+        read_all_limited(&p, &opts(SourceFormat::Jsonl), 9)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(read_all_limited(&p, &opts(SourceFormat::Jsonl), 8).is_err());
+}
+
+#[test]
+fn json_large_object_hits_the_record_limit() {
+    let dir = TempDir::new().unwrap();
+    let mut body = b"[{\"a\": 1}, {\"a\": \"secret".to_vec();
+    body.extend(std::iter::repeat_n(b'x', 100_000));
+    body.extend(b"\"}, {\"a\": 2}]");
+    let p = write_file(&dir, "o.json", &body);
+    let err = read_all_limited(&p, &opts(SourceFormat::Json), 1024).unwrap_err();
+    assert_eq!(err.record, Some(2));
+    assert!(err.message.contains("limit"), "{}", err.message);
+    assert!(!err.message.contains("secret"));
+    let rows = read_all_limited(&p, &opts(SourceFormat::Json), 200_000).unwrap();
+    assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn xlsx_duration_and_near_midnight_times() {
+    use rust_xlsxwriter::{Format, Workbook};
+    let dir = TempDir::new().unwrap();
+    let p = dir.path().join("t.xlsx");
+    let mut wb = Workbook::new();
+    let dur = Format::new().set_num_format("[h]:mm:ss");
+    let time = Format::new().set_num_format("hh:mm:ss");
+    let dt = Format::new().set_num_format("yyyy-mm-dd hh:mm:ss");
+    let ws = wb.add_worksheet();
+    ws.write_string(0, 0, "d").unwrap();
+    ws.write_string(0, 1, "t").unwrap();
+    ws.write_string(0, 2, "dt").unwrap();
+    ws.write_number_with_format(1, 0, 1.5 / 24.0, &dur).unwrap();
+    // 0.4 ms before midnight: must not become hour 24.
+    let near = 1.0 - 0.0004 / 86_400.0;
+    ws.write_number_with_format(1, 1, near, &time).unwrap();
+    ws.write_number_with_format(1, 2, 45_292.0 + near, &dt)
+        .unwrap();
+    wb.save(&p).unwrap();
+    let (_, rows) = read_all(&p, &opts(SourceFormat::Xlsx)).unwrap();
+    assert_eq!(rows[0].cells[0], text("01:30:00"));
+    assert_eq!(rows[0].cells[1], Cell::DateTime("23:59:59".into()));
+    assert_eq!(
+        rows[0].cells[2],
+        Cell::DateTime("2024-01-01T23:59:59".into())
+    );
 }

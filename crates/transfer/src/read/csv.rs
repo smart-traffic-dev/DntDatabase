@@ -9,8 +9,8 @@ use std::path::Path;
 use ::csv::{ByteRecord, ReaderBuilder};
 
 use super::{
-    numbered_columns, open_skipping_bom, unique_names, Cell, ReadError, Record, RecordReader,
-    SourceOptions, BOM,
+    numbered_columns, open_skipping_bom, too_large, unique_names, Cell, ReadError, Record,
+    RecordReader, SourceOptions, BOM,
 };
 
 /// Delimiters R12 allows, in tie-break order for the guess.
@@ -32,15 +32,24 @@ struct LineTrack<R> {
     eols: VecDeque<(u64, bool)>,
     /// `\n` bytes before the oldest queued offset.
     lf_before: u64,
+    /// Offset where the record being read starts.
+    record_start: u64,
+    /// Per-record byte limit.
+    limit: u64,
+    /// A read was refused because the current record passed `limit`.
+    over_limit: bool,
 }
 
 impl<R> LineTrack<R> {
-    fn new(inner: R) -> Self {
+    fn new(inner: R, limit: u64) -> Self {
         Self {
             inner,
             pos: 0,
             eols: VecDeque::new(),
             lf_before: 0,
+            record_start: 0,
+            limit,
+            over_limit: false,
         }
     }
 
@@ -68,6 +77,12 @@ impl<R> LineTrack<R> {
 
 impl<R: Read> Read for LineTrack<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // `csv` asks for more only while the current record is unfinished, so every byte from
+        // `record_start` to `pos` belongs to it: past the limit, stop feeding it.
+        if self.pos - self.record_start > self.limit {
+            self.over_limit = true;
+            return Err(std::io::Error::other("record size limit exceeded"));
+        }
         let n = self.inner.read(buf)?;
         for (i, &b) in buf[..n].iter().enumerate() {
             if b == b'\n' || b == b'\r' {
@@ -93,7 +108,7 @@ pub(crate) struct CsvReader {
 }
 
 impl CsvReader {
-    pub(crate) fn open(path: &Path, opts: &SourceOptions) -> Result<Self, ReadError> {
+    pub(crate) fn open(path: &Path, opts: &SourceOptions, limit: u64) -> Result<Self, ReadError> {
         let delimiter = match opts.delimiter {
             Some(d) if DELIMITERS.contains(&d) => d,
             Some(_) => {
@@ -108,7 +123,7 @@ impl CsvReader {
             .delimiter(delimiter as u8)
             .has_headers(false)
             .flexible(true)
-            .from_reader(LineTrack::new(file));
+            .from_reader(LineTrack::new(file, limit));
         let mut me = Self {
             rdr,
             skipped,
@@ -144,21 +159,39 @@ impl CsvReader {
         if self.done {
             return Ok(None);
         }
-        let more = self.rdr.read_byte_record(&mut self.record).map_err(|e| {
-            let line = e.position().map(|p| p.line());
-            match e.into_kind() {
-                ::csv::ErrorKind::Io(io) => {
-                    ReadError::new(line, format!("Could not read the file: {io}"))
+        let begin = self.rdr.position().byte();
+        self.rdr.get_mut().record_start = begin;
+        let read = self.rdr.read_byte_record(&mut self.record);
+        let more = match read {
+            Ok(more) => more,
+            Err(e) => {
+                self.done = true;
+                let track = self.rdr.get_mut();
+                if track.over_limit {
+                    let limit = track.limit;
+                    return Err(too_large(track.line_of(begin), limit));
                 }
-                _ => ReadError::new(line, "The CSV file could not be parsed"),
+                let line = e.position().map(|p| p.line());
+                return Err(match e.into_kind() {
+                    ::csv::ErrorKind::Io(io) => {
+                        ReadError::new(line, format!("Could not read the file: {io}"))
+                    }
+                    _ => ReadError::new(line, "The CSV file could not be parsed"),
+                });
             }
-        })?;
+        };
         if !more {
             self.done = true;
             return Ok(None);
         }
-        let start = self.record.position().map(|p| p.byte()).unwrap_or(0);
-        let number = self.rdr.get_mut().line_of(start);
+        let start = self.record.position().map(|p| p.byte()).unwrap_or(begin);
+        let end = self.rdr.position().byte();
+        let track = self.rdr.get_mut();
+        let number = track.line_of(start);
+        if end - begin > track.limit {
+            self.done = true;
+            return Err(too_large(number, track.limit));
+        }
         let mut cells = Vec::with_capacity(self.record.len());
         for (i, field) in self.record.iter().enumerate() {
             let text = std::str::from_utf8(field).map_err(|_| {

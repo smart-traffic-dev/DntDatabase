@@ -124,12 +124,36 @@ pub trait RecordReader: Send {
 }
 
 pub fn open(path: &Path, opts: &SourceOptions) -> Result<Box<dyn RecordReader>, ReadError> {
+    open_with_limit(path, opts, MAX_RECORD_BYTES)
+}
+
+/// [`open`] with another per-record byte limit (tests use small ones). CSV, JSON and JSONL count
+/// the bytes of each record as read from the file and refuse one larger than `max_record_bytes`,
+/// so a single record (an unterminated quote, a huge line or object) cannot fill memory. XLSX rows
+/// are bounded by calamine's cell parsing and are not checked.
+#[doc(hidden)]
+pub fn open_with_limit(
+    path: &Path,
+    opts: &SourceOptions,
+    max_record_bytes: u64,
+) -> Result<Box<dyn RecordReader>, ReadError> {
+    let limit = max_record_bytes.max(1);
     Ok(match opts.format {
-        SourceFormat::Csv => Box::new(csv::CsvReader::open(path, opts)?),
-        SourceFormat::Json => Box::new(json::open_array(path)?),
-        SourceFormat::Jsonl => Box::new(json::open_lines(path)?),
+        SourceFormat::Csv => Box::new(csv::CsvReader::open(path, opts, limit)?),
+        SourceFormat::Json => Box::new(json::open_array(path, limit)?),
+        SourceFormat::Jsonl => Box::new(json::open_lines(path, limit)?),
         SourceFormat::Xlsx => Box::new(xlsx::XlsxReader::open(path, opts)?),
     })
+}
+
+/// Largest record (bytes in the file) a reader accepts by default.
+pub const MAX_RECORD_BYTES: u64 = 256 * 1024 * 1024;
+
+pub(crate) fn too_large(record: u64, limit: u64) -> ReadError {
+    ReadError::at(
+        record,
+        format!("Is larger than the record size limit ({limit} bytes)"),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

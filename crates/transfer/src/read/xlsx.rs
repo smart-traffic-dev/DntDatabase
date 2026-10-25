@@ -93,12 +93,18 @@ fn datetime_text(dt: &ExcelDateTime) -> String {
         let secs = (v * 86_400.0).round() as i64;
         let sign = if secs < 0 { "-" } else { "" };
         let s = secs.unsigned_abs();
-        return format!("{sign}{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60);
+        return format!("{sign}{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60);
     }
-    let (y, mo, d, h, mi, s, _ms) = dt.to_ymd_hms_milli();
+    // The date comes from calamine (floor of the serial); the time of day is rounded to the
+    // second here and clamped to 23:59:59, so a value just under midnight never shows hour 24
+    // (calamine's own rounding can carry into it) nor moves to the next day.
+    let (y, mo, d, ..) = dt.to_ymd_hms_milli();
+    let frac = if v.is_finite() { v - v.floor() } else { 0.0 };
+    let secs = ((frac * 86_400.0).round() as u32).min(86_399);
+    let (h, mi, s) = (secs / 3600, (secs / 60) % 60, secs % 60);
     if (0.0..1.0).contains(&v) {
         format!("{h:02}:{mi:02}:{s:02}")
-    } else if v.fract() == 0.0 {
+    } else if secs == 0 {
         format!("{y:04}-{mo:02}-{d:02}")
     } else {
         format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}")
