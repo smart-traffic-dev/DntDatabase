@@ -11,6 +11,8 @@ use dnt_core::value::{ColumnMeta, Value};
 
 pub(crate) const PG_ROUTINE_SQL: &str = "SELECT count(*) OVER ()::text, p.prokind::text, pg_get_function_identity_arguments(p.oid), (obj_description(p.oid, 'pg_proc') IS NOT NULL)::text, (p.proacl IS NOT NULL)::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = $2";
 pub(crate) const PG_RELATION_SQL: &str = "SELECT c.oid::text, c.relkind::text, (obj_description(c.oid, 'pg_class') IS NOT NULL)::text, (c.relacl IS NOT NULL)::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2";
+pub(crate) const PG_RELOPTIONS_SQL: &str =
+    "SELECT o FROM pg_class c, unnest(c.reloptions) WITH ORDINALITY u(o, n) WHERE c.oid = $1::oid ORDER BY n";
 pub(crate) const PG_INDEX_SQL: &str = "SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i JOIN pg_class ic ON ic.oid = i.indexrelid WHERE i.indrelid = $1::oid ORDER BY ic.relname";
 pub(crate) const PG_TRIGGER_SQL: &str = "SELECT c.relname::text, c.oid::text, (obj_description(t.oid, 'pg_trigger') IS NOT NULL)::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND t.tgname = $2 AND NOT t.tgisinternal";
 pub(crate) const MYSQL_TRIGGER_SQL: &str = "SELECT EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = ?";
@@ -79,6 +81,15 @@ pub(crate) async fn rows_with(
         .execute_one(sql, classify(sql, session.dialect()), &options, &mut sink)
         .await?;
     Ok(sink.0)
+}
+
+/// The first column of every row of `sql` run with the one parameter `param`.
+async fn texts(session: &dyn Session, sql: &str, param: &str) -> Result<Vec<String>, DbError> {
+    Ok(rows(session, sql, &[param])
+        .await?
+        .iter()
+        .filter_map(|r| col(r, 0))
+        .collect())
 }
 
 fn col(row: &[Option<String>], i: usize) -> Option<String> {
@@ -152,12 +163,11 @@ pub(crate) async fn facts(
                 if let Some(r) = found.first() {
                     facts.has_comment = flag(r, 2);
                     facts.has_grants = flag(r, 3);
-                    if let (Some(oid), Some("m")) = (col(r, 0), col(r, 1).as_deref()) {
-                        facts.index_defs = rows(session, PG_INDEX_SQL, &[&oid])
-                            .await?
-                            .iter()
-                            .filter_map(|r| col(r, 0))
-                            .collect();
+                    if let Some(oid) = col(r, 0) {
+                        facts.reloptions = texts(session, PG_RELOPTIONS_SQL, &oid).await?;
+                        if col(r, 1).as_deref() == Some("m") {
+                            facts.index_defs = texts(session, PG_INDEX_SQL, &oid).await?;
+                        }
                     }
                 }
             }

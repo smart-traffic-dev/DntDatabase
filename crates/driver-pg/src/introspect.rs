@@ -298,6 +298,67 @@ fn qualify_reference(def: String, unqualified: &str, qualified: &str) -> String 
     }
 }
 
+/// A materialized view's storage, written in its DDL.
+struct MvStorage<'a> {
+    /// `pg_am.amname`; the default `heap` is not written.
+    access_method: Option<&'a str>,
+    tablespace: Option<&'a str>,
+}
+
+/// A reloption value as written in `WITH (…)`: bare when it is a plain word or number,
+/// else a string literal.
+fn reloption_value(v: &str) -> String {
+    let plain = !v.is_empty()
+        && v.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    if plain {
+        v.to_string()
+    } else {
+        format!("'{}'", v.replace('\'', "''"))
+    }
+}
+
+/// The DDL of a view (`storage` = `None`) or materialized view: `prefix name`, its
+/// options (`pg_class.reloptions`, `key=value`), the body, and a view's check option
+/// as the trailing `WITH … CHECK OPTION`.
+fn relation_text(
+    prefix: &str,
+    name: &str,
+    def: &str,
+    reloptions: &[String],
+    storage: Option<MvStorage>,
+) -> String {
+    let mut head = format!("{prefix} {name}");
+    let mut check = None;
+    let mut with = Vec::new();
+    for o in reloptions {
+        let (k, v) = o.split_once('=').unwrap_or((o.as_str(), "true"));
+        if storage.is_none() && k == "check_option" {
+            check = Some(v.to_ascii_uppercase());
+        } else {
+            with.push(format!("{k}={}", reloption_value(v)));
+        }
+    }
+    if let Some(am) = storage
+        .as_ref()
+        .and_then(|s| s.access_method)
+        .filter(|am| *am != "heap")
+    {
+        head.push_str(&format!(" USING {}", quote_ident(am)));
+    }
+    if !with.is_empty() {
+        head.push_str(&format!(" WITH ({})", with.join(", ")));
+    }
+    if let Some(ts) = storage.as_ref().and_then(|s| s.tablespace) {
+        head.push_str(&format!(" TABLESPACE {}", quote_ident(ts)));
+    }
+    let body = def.trim_end().trim_end_matches(';');
+    match check {
+        Some(c) => format!("{head} AS\n{body}\n  WITH {c} CHECK OPTION;"),
+        None => format!("{head} AS\n{body};"),
+    }
+}
+
 /// Joins definitions (functions, triggers) into one script, each ending with `;`.
 fn script(defs: impl IntoIterator<Item = String>) -> String {
     defs.into_iter()
@@ -354,21 +415,28 @@ impl PgSession {
             &[&schema, &obj.name, &kinds],
         )
         .await?;
-        let oid: u32 = get(rel.first().ok_or_else(|| not_found(obj))?, 0)?;
-        let def: Option<String> = get(
-            &conn
-                .client
-                .query_one(queries::VIEW_DEF, &[&oid])
-                .await
-                .map_err(map_err)?,
-            0,
-        )?;
+        let rel = rel.first().ok_or_else(|| not_found(obj))?;
+        let oid: u32 = get(rel, 0)?;
+        let tablespace: Option<String> = non_empty(rel, 5)?;
+        let row = conn
+            .client
+            .query_one(queries::VIEW_DEF, &[&oid])
+            .await
+            .map_err(map_err)?;
+        let def: Option<String> = get(&row, 0)?;
         let def = def.ok_or_else(|| not_found(obj))?;
-        Ok(format!(
-            "{prefix} {}.{} AS\n{};",
-            quote_ident(schema),
-            quote_ident(&obj.name),
-            def.trim_end().trim_end_matches(';')
+        let reloptions: Vec<String> = get(&row, 1)?;
+        let access_method: Option<String> = get(&row, 2)?;
+        let storage = (obj.kind == ObjectKind::MaterializedView).then_some(MvStorage {
+            access_method: access_method.as_deref(),
+            tablespace: tablespace.as_deref(),
+        });
+        Ok(relation_text(
+            prefix,
+            &format!("{}.{}", quote_ident(schema), quote_ident(&obj.name)),
+            &def,
+            &reloptions,
+            storage,
         ))
     }
 
@@ -681,6 +749,59 @@ mod tests {
         assert_eq!(fk_action("c"), "CASCADE");
         assert_eq!(fk_action("n"), "SET NULL");
         assert_eq!(fk_action("d"), "SET DEFAULT");
+    }
+
+    #[test]
+    fn relation_ddl_carries_options() {
+        // A plain view: unchanged.
+        assert_eq!(
+            relation_text("CREATE OR REPLACE VIEW", "s.v", " SELECT 1;", &[], None),
+            "CREATE OR REPLACE VIEW s.v AS\n SELECT 1;"
+        );
+        // View options, the check option as its trailing clause.
+        let opts = [
+            "security_barrier=true".to_string(),
+            "check_option=cascaded".to_string(),
+            "security_invoker=on".to_string(),
+        ];
+        assert_eq!(
+            relation_text("CREATE OR REPLACE VIEW", "s.v", " SELECT 1", &opts, None),
+            "CREATE OR REPLACE VIEW s.v WITH (security_barrier=true, security_invoker=on) AS\n SELECT 1\n  WITH CASCADED CHECK OPTION;"
+        );
+        let local = ["check_option=local".to_string()];
+        assert_eq!(
+            relation_text("CREATE OR REPLACE VIEW", "s.v", " SELECT 1", &local, None),
+            "CREATE OR REPLACE VIEW s.v AS\n SELECT 1\n  WITH LOCAL CHECK OPTION;"
+        );
+        // Materialized view: access method (not the default heap), storage options,
+        // tablespace.
+        let mv = ["fillfactor=70".to_string(), "odd=a b".to_string()];
+        assert_eq!(
+            relation_text(
+                "CREATE MATERIALIZED VIEW",
+                "s.mv",
+                " SELECT 1",
+                &mv,
+                Some(MvStorage {
+                    access_method: Some("columnar"),
+                    tablespace: Some("fast space"),
+                })
+            ),
+            "CREATE MATERIALIZED VIEW s.mv USING columnar WITH (fillfactor=70, odd='a b') TABLESPACE \"fast space\" AS\n SELECT 1;"
+        );
+        assert_eq!(
+            relation_text(
+                "CREATE MATERIALIZED VIEW",
+                "s.mv",
+                " SELECT 1",
+                &[],
+                Some(MvStorage {
+                    access_method: Some("heap"),
+                    tablespace: None,
+                })
+            ),
+            "CREATE MATERIALIZED VIEW s.mv AS\n SELECT 1;"
+        );
     }
 
     #[test]

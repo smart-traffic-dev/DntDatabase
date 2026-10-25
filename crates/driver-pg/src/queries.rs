@@ -198,8 +198,12 @@ pub(crate) const CHECKS: &str = "SELECT con.conname::text, pg_get_expr(con.conbi
 pub(crate) const TABLE_TRIGGERS: &str = "SELECT t.tgname::text, t.tgtype::int4 \
      FROM pg_trigger t WHERE t.tgrelid = $1 AND NOT t.tgisinternal";
 
-/// View / materialized view body (`$1` = oid).
-pub(crate) const VIEW_DEF: &str = "SELECT pg_get_viewdef($1::oid, true)";
+/// View / materialized view (`$1` = oid): body, options (`reloptions`, `key=value`)
+/// and table access method (NULL for a view).
+pub(crate) const VIEW_DEF: &str = "SELECT pg_get_viewdef(c.oid, true), \
+     coalesce(c.reloptions, '{}'::text[]), am.amname::text \
+     FROM pg_class c LEFT JOIN pg_am am ON am.oid = c.relam AND c.relkind = 'm' \
+     WHERE c.oid = $1::oid";
 
 /// Function or procedure definitions (`$1` = schema, `$2` = name, `$3` = `prokind`), one
 /// row per overload, ordered by argument list.

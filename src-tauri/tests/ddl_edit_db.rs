@@ -696,6 +696,71 @@ async fn pg_mv_indexes_recreated() {
     });
 }
 
+/// `pg_class.reloptions` of `ns.name`, comma-joined.
+async fn pg_reloptions(sc: &Scratch, name: &str) -> String {
+    sc.one(&format!(
+        "SELECT coalesce(array_to_string(reloptions, ','), '') FROM pg_class WHERE oid = '{}.{name}'::regclass",
+        sc.ns
+    ))
+    .await
+}
+
+#[tokio::test]
+async fn pg_view_options_survive_edits() {
+    require_db!();
+    each_target!(Target::pg(), |sc| {
+        let t = sc.t;
+        let ns = sc.ns.clone();
+        create_t(&sc).await;
+        // security_invoker exists from PostgreSQL 15.
+        let invoker = t == Target::Pg17;
+        let with = if invoker {
+            "security_barrier=true, security_invoker=true"
+        } else {
+            "security_barrier=true"
+        };
+        sc.exec(&format!(
+            "CREATE VIEW {ns}.v WITH ({with}) AS SELECT id, a FROM {ns}.t WHERE a >= 0 WITH LOCAL CHECK OPTION"
+        ))
+        .await;
+        let want = if invoker {
+            "security_barrier=true,security_invoker=true,check_option=local"
+        } else {
+            "security_barrier=true,check_option=local"
+        };
+        assert_eq!(pg_reloptions(&sc, "v").await, want, "{t:?}");
+        sc.exec(&format!(
+            "CREATE MATERIALIZED VIEW {ns}.mv WITH (fillfactor=70) AS SELECT id FROM {ns}.t"
+        ))
+        .await;
+        for (i, strategy) in [Strategy::Replace, Strategy::Recreate]
+            .into_iter()
+            .enumerate()
+        {
+            let o = sc.edit_open(ObjectKind::View, Some("v"), None).await;
+            assert!(
+                o.text.contains(&format!("WITH ({with})")),
+                "{t:?}: {}",
+                o.text
+            );
+            assert!(
+                o.text.contains("WITH LOCAL CHECK OPTION"),
+                "{t:?}: {}",
+                o.text
+            );
+            let text = swap(&o.text, &format!(">= {i}"), &format!(">= {}", i + 1));
+            sc.applied(o.edit_id, &text, Some(strategy)).await;
+            assert_eq!(pg_reloptions(&sc, "v").await, want, "{t:?} {strategy:?}");
+        }
+        let o = sc
+            .edit_open(ObjectKind::MaterializedView, Some("mv"), None)
+            .await;
+        assert!(o.text.contains("WITH (fillfactor=70)"), "{t:?}: {}", o.text);
+        sc.applied(o.edit_id, &o.text, o.strategy).await;
+        assert_eq!(pg_reloptions(&sc, "mv").await, "fillfactor=70", "{t:?}");
+    });
+}
+
 #[tokio::test]
 async fn mysql_trigger_gap_and_restore() {
     require_db!();

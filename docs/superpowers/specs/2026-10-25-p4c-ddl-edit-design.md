@@ -108,8 +108,8 @@ pub fn strategies(t: &EditTarget, server: &ServerInfo) -> Vec<Strategy>;
 
 - `catalog.rs`: parameterised catalog reads on the edit's session (`ExecOptions::params`, PostgreSQL `$n`,
   MySQL `?`): PostgreSQL routine rows by schema + name (count, `prokind`, identity arguments, has comment,
-  has ACL), relation facts (oid, `relkind`, has comment, has ACL, materialized-view index definitions via
-  `pg_get_indexdef`), trigger rows by schema + name (count, table name, table oid, has comment); MySQL trigger
+  has ACL), relation facts (oid, `relkind`, has comment, has ACL, `reloptions`, materialized-view index
+  definitions via `pg_get_indexdef`), trigger rows by schema + name (count, table name, table oid, has comment); MySQL trigger
   facts (table, timing, event, number of other triggers with the same timing and event on that table).
 - `mod.rs`: `DdlEditStore { edits, plans, operations: DdlOperations }`, `ddl_edit_open`, `ddl_edit_preview`,
   `ddl_edit_close`, `ddl_edit_cancel`, fingerprint, context checks.
@@ -223,7 +223,14 @@ exist; calls fail" / "writes to `orders` do not fire this trigger" / "a schedule
 trigger order ("other BEFORE INSERT triggers exist on `orders`; the re-created trigger fires after them");
 drop + create loses the comment and the grants it has (PostgreSQL; MySQL routines: "privileges granted on the
 routine may be revoked"); materialized view refill ("filled again WITH DATA; holds an exclusive lock while it
-runs"); dependants make a RESTRICT drop fail and roll back; each lock wait is limited to 5 seconds.
+runs"); dependants make a RESTRICT drop fail and roll back; a PostgreSQL view or materialized view with
+options lists them ("the text sets them, and an option it leaves out is reset"); each lock wait is limited to
+5 seconds.
+
+The PostgreSQL DDL of a view (the editor's text and the DDL section) carries its options from
+`pg_class.reloptions`: `WITH (security_barrier=…, security_invoker=…)` after the name and the check option as
+the trailing `WITH LOCAL | CASCADED CHECK OPTION`; a materialized view's carries `USING <access method>`
+(other than `heap`), `WITH (<storage parameters>)` and `TABLESPACE`.
 
 ### 5.3 Stale check, guard, confirmation, plan
 

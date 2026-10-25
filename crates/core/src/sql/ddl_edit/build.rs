@@ -25,6 +25,9 @@ pub struct CatalogFacts {
     pub timing_event: Option<String>,
     /// MySQL triggers: other triggers on the table with the same timing and event.
     pub same_timing_triggers: u32,
+    /// PostgreSQL views and materialized views: `pg_class.reloptions` (`key=value`).
+    #[serde(default)]
+    pub reloptions: Vec<String>,
 }
 
 /// A read run inside the PostgreSQL transaction before COMMIT: one text value that
@@ -215,6 +218,15 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
             _ => {}
         }
         // Warnings.
+        if matches!(t.kind, ObjectKind::View | ObjectKind::MaterializedView)
+            && !facts.reloptions.is_empty()
+        {
+            // CREATE OR REPLACE VIEW replaces the options too; a re-create starts empty.
+            out.warnings.push(format!(
+                "The {what}'s current options are {}; the text sets them, and an option it leaves out is reset.",
+                facts.reloptions.join(", ")
+            ));
+        }
         if dropped {
             if t.kind != ObjectKind::Trigger {
                 out.warnings.push(RESTRICT_WARNING.into());
@@ -1063,6 +1075,50 @@ mod tests {
             assert!(strategies(&my_target(k, None), &mysql8()).is_empty());
         }
         assert!(strategies(&pg_target(View, None), &pg17()).is_empty());
+    }
+
+    #[test]
+    fn pg_view_options_are_noted() {
+        let v = pg_target(ObjectKind::View, Some("v"));
+        let facts = CatalogFacts {
+            reloptions: strs(&["security_barrier=true", "check_option=local"]),
+            ..Default::default()
+        };
+        let note = "The view's current options are security_barrier=true, check_option=local; the text sets them, and an option it leaves out is reset.";
+        for strategy in [Strategy::Replace, Strategy::Recreate] {
+            let b = ok(
+                &v,
+                "CREATE VIEW public.v WITH (security_barrier=true) AS SELECT 1 WITH LOCAL CHECK OPTION",
+                Some(strategy),
+                &pg17(),
+                &facts,
+            );
+            assert!(b.warnings.contains(&note.to_string()), "{:?}", b.warnings);
+        }
+        let mv = pg_target(ObjectKind::MaterializedView, Some("mv"));
+        let facts = CatalogFacts {
+            reloptions: strs(&["fillfactor=70"]),
+            ..Default::default()
+        };
+        let b = ok(
+            &mv,
+            "CREATE MATERIALIZED VIEW public.mv WITH (fillfactor=70) AS SELECT 1",
+            Some(Strategy::Recreate),
+            &pg17(),
+            &facts,
+        );
+        assert!(b.warnings.contains(
+            &"The materialized view's current options are fillfactor=70; the text sets them, and an option it leaves out is reset.".to_string()
+        ));
+        // No options: no note.
+        let b = ok(
+            &v,
+            "CREATE VIEW public.v AS SELECT 1",
+            Some(Strategy::Replace),
+            &pg17(),
+            &CatalogFacts::default(),
+        );
+        assert_eq!(b.warnings, strs(&[LOCK]));
     }
 
     #[test]
