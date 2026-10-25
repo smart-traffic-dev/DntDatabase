@@ -1,0 +1,12 @@
+.ddl-edit-dialog label { display: flex; flex-direction: column; gap: var(--dnt-space-2); margin-block: var(--dnt-space-3); }
+.ddl-edit-dialog .ddl-edit-list { margin: 0; padding-inline-start: var(--dnt-space-4); }
+.ddl-edit-dialog .ddl-edit-list li { margin-block: var(--dnt-space-1); }
+.ddl-edit-dialog .ddl-edit-stmts code { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: var(--dnt-text-sm); }
+.ddl-edit-dialog .danger {
+  padding: var(--dnt-space-1_5) var(--dnt-space-2);
+  border: 1px solid var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+  list-style: none;
+}
