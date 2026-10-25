@@ -3,7 +3,8 @@
 //! reference, the MySQL view rewrite, the PostgreSQL statement helpers, multi-row inserts
 //! with dump literals and [`DumpWriter`].
 //!
-//! Every statement a dump holds ends with `;\n`, so `dnt_core::sql::split` with the
+//! Every statement a dump holds ends with `;\n` (`\n;\n` after a trailing comment), so
+//! `dnt_core::sql::split` with the
 //! default dialect gives back exactly the statements written (comments written between
 //! them lead the next statement's text).
 
@@ -13,7 +14,7 @@ use std::io::{self, Write};
 use dnt_core::server::DbKind;
 use dnt_core::sql::build::{dump_row_tuple, BuildError, ColumnTarget};
 use dnt_core::sql::ident::quote_ident;
-use dnt_core::sql::{split, tokenize, Dialect, TokKind, Token};
+use dnt_core::sql::{split, strip_comments, tokenize, Dialect, TokKind, Token};
 use dnt_core::value::FullValue;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -104,6 +105,17 @@ pub fn end_comment(statements: u64) -> String {
     format!("-- End of dump: {statements} statements\n")
 }
 
+/// Whether trimmed statement text `s` ends in a comment under `d` (a `;` after it on the
+/// same line might be commented out). Only a last line that holds a comment marker is
+/// lexed, so data `INSERT`s cost nothing extra.
+fn ends_in_comment(s: &str, d: Dialect) -> bool {
+    let last = &s[s.rfind('\n').map_or(0, |i| i + 1)..];
+    if !(last.contains("--") || last.contains('#') || last.contains("*/")) {
+        return false;
+    }
+    strip_comments(s, d).ends_with(' ')
+}
+
 /// `s` on one line (a comment must not run into the next line).
 fn one_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ")
@@ -154,16 +166,24 @@ pub struct ViewNode {
     pub ddl: String,
 }
 
-/// The order to create `views` in: a view whose DDL names another view (an identifier
-/// token outside strings and comments) comes after it; free views by name.
+/// The order to create `views` in when the server cannot say what a view uses: a view
+/// whose DDL names another view in a table position ([`view_references`]) comes after
+/// it; free views by name. Column aliases and strings never count.
 pub fn view_order(views: &[ViewNode], d: Dialect) -> Vec<usize> {
     let deps: Vec<BTreeSet<usize>> = views
         .iter()
         .enumerate()
         .map(|(i, v)| {
-            let toks = tokenize(&v.ddl, d);
+            let refs = view_references(&v.ddl, d);
             (0..views.len())
-                .filter(|&j| j != i && toks.iter().any(|t| names(&v.ddl, t, &views[j].name, d)))
+                .filter(|&j| {
+                    j != i
+                        && refs.iter().any(|(q, n)| {
+                            // MySQL (rewritten DDL): a qualifier names another database.
+                            (q.is_none() || d == Dialect::Postgres)
+                                && same_name(n, &views[j].name, d)
+                        })
+                })
                 .collect()
         })
         .collect();
@@ -172,29 +192,108 @@ pub fn view_order(views: &[ViewNode], d: Dialect) -> Vec<usize> {
     })
 }
 
-/// Whether token `t` of `sql` is the identifier `name` (quoted, or bare: PostgreSQL folds
-/// a bare name to lower case, MySQL compares it case-insensitively).
-fn names(sql: &str, t: &Token<'_>, name: &str, d: Dialect) -> bool {
-    match t.kind {
-        TokKind::Word(w) => match d {
-            Dialect::Postgres => w.to_lowercase() == name,
-            Dialect::MySql(_) => w.eq_ignore_ascii_case(name),
-        },
-        TokKind::Quoted => {
-            let text = &sql[t.start..t.end];
-            let quoted = match d {
-                Dialect::Postgres => quote_ident(DbKind::Postgres, name),
-                Dialect::MySql(m) => {
-                    if text.starts_with('"') && m.ansi_quotes {
-                        format!("\"{}\"", name.replace('"', "\"\""))
+/// Whether identifier text `a` (as [`view_references`] decodes it) names `b`: MySQL
+/// compares names case-insensitively.
+fn same_name(a: &str, b: &str, d: Dialect) -> bool {
+    match d {
+        Dialect::MySql(_) => a.eq_ignore_ascii_case(b),
+        Dialect::Postgres => a == b,
+    }
+}
+
+/// Words that end a `FROM` list at their parenthesis depth.
+const FROM_ENDS: &[&str] = &[
+    "WHERE",
+    "GROUP",
+    "ORDER",
+    "HAVING",
+    "LIMIT",
+    "UNION",
+    "EXCEPT",
+    "INTERSECT",
+    "WINDOW",
+    "SELECT",
+    "FOR",
+];
+
+/// The relations a view's DDL reads, as `(qualifier, name)`: the names in table positions
+/// (after `FROM`, `JOIN`, or a `,` of a `FROM` list), never a column, an alias or a string.
+/// Quoted names are unquoted; PostgreSQL folds bare names to lower case.
+pub fn view_references(ddl: &str, d: Dialect) -> Vec<(Option<String>, String)> {
+    let toks = tokenize(ddl, d);
+    let word =
+        |t: &Token<'_>, k: &str| matches!(t.kind, TokKind::Word(w) if w.eq_ignore_ascii_case(k));
+    let ident = |t: &Token<'_>| ident_text(ddl, t, d);
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut lists: Vec<usize> = Vec::new();
+    let mut expect = false;
+    let mut i = 0;
+    while i < toks.len() {
+        let t = toks[i];
+        match t.kind {
+            TokKind::Open => {
+                depth += 1;
+                // `FROM (a JOIN b …)`: a parenthesized list; a subquery's `SELECT` ends it.
+                if expect {
+                    lists.push(depth);
+                }
+            }
+            TokKind::Close => {
+                lists.retain(|&l| l < depth);
+                depth = depth.saturating_sub(1);
+                expect = false;
+            }
+            TokKind::Punct(b',') => expect = lists.contains(&depth),
+            _ if word(&t, "FROM") || word(&t, "JOIN") => {
+                expect = true;
+                if !lists.contains(&depth) {
+                    lists.push(depth);
+                }
+            }
+            _ if FROM_ENDS.iter().any(|k| word(&t, k)) => {
+                lists.retain(|&l| l != depth);
+                expect = false;
+            }
+            _ if expect && (word(&t, "ONLY") || word(&t, "LATERAL")) => {}
+            TokKind::Quoted | TokKind::Word(_) if expect => {
+                // A dotted name: its parts, the last one being the relation.
+                let mut parts = vec![ident(&t)];
+                while let (Some(dot), Some(next)) = (toks.get(i + 1), toks.get(i + 2)) {
+                    if dot.kind == TokKind::Punct(b'.')
+                        && matches!(next.kind, TokKind::Quoted | TokKind::Word(_))
+                    {
+                        parts.push(ident(next));
+                        i += 2;
                     } else {
-                        quote_ident(DbKind::MySql, name)
+                        break;
                     }
                 }
-            };
-            text == quoted
+                let name = parts.pop().unwrap_or_default();
+                out.push((parts.pop(), name));
+                expect = false;
+            }
+            _ => expect = false,
         }
-        _ => false,
+        i += 1;
+    }
+    out
+}
+
+/// The identifier a word or quoted token stands for.
+fn ident_text(sql: &str, t: &Token<'_>, d: Dialect) -> String {
+    let text = &sql[t.start..t.end];
+    match (t.kind, d) {
+        (TokKind::Word(w), Dialect::Postgres) => w.to_lowercase(),
+        (TokKind::Word(w), _) => w.to_string(),
+        _ => {
+            let q = text.chars().next().unwrap_or('"');
+            let inner = text
+                .strip_prefix(q)
+                .and_then(|s| s.strip_suffix(q))
+                .unwrap_or(text);
+            inner.replace(&format!("{q}{q}"), &q.to_string())
+        }
     }
 }
 
@@ -460,18 +559,21 @@ enum Out {
 /// with `;\n`; counts statements and (uncompressed) bytes. `compress`: gzip (`.sql.gz`).
 pub struct DumpWriter {
     out: Out,
+    /// The dialect a restore splits the dump with (the default one of its engine).
+    dialect: Dialect,
     statements: u64,
     bytes: u64,
 }
 
 impl DumpWriter {
-    pub fn new(inner: Box<dyn Write + Send>, compress: bool) -> DumpWriter {
+    pub fn new(inner: Box<dyn Write + Send>, compress: bool, dialect: Dialect) -> DumpWriter {
         DumpWriter {
             out: if compress {
                 Out::Gzip(GzEncoder::new(inner, Compression::default()))
             } else {
                 Out::Plain(inner)
             },
+            dialect,
             statements: 0,
             bytes: 0,
         }
@@ -496,8 +598,9 @@ impl DumpWriter {
         self.put(&format!("-- {}\n", one_line(text)))
     }
 
-    /// One statement (surrounding whitespace and trailing `;` removed) and `;\n`. A
-    /// statement that is blank afterwards is not written.
+    /// One statement (surrounding whitespace and trailing `;` removed) and `;\n`; a
+    /// statement ending in a comment gets its `;` on the next line (a `-- …` comment would
+    /// swallow it). A statement that is blank afterwards is not written.
     pub fn statement(&mut self, sql: &str) -> io::Result<()> {
         let mut s = sql.trim();
         while let Some(rest) = s.strip_suffix(';') {
@@ -507,7 +610,12 @@ impl DumpWriter {
             return Ok(());
         }
         self.put(s)?;
-        self.put(";\n")?;
+        let end = if ends_in_comment(s, self.dialect) {
+            "\n;\n"
+        } else {
+            ";\n"
+        };
+        self.put(end)?;
         self.statements += 1;
         Ok(())
     }

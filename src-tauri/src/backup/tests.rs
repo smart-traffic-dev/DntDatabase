@@ -29,6 +29,7 @@ use dnt_tunnel::KnownHosts;
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
@@ -65,6 +66,10 @@ struct Fake {
     fail: Mutex<Option<(String, DbError)>>,
     /// A statement containing the text takes this long.
     delay: Mutex<Option<(String, Duration)>>,
+    /// Cancels sent through a session's cancel handle.
+    cancels: AtomicUsize,
+    /// `batch_size` of every read of complete values.
+    full_batches: Mutex<Vec<usize>>,
 }
 
 impl Fake {
@@ -144,19 +149,25 @@ struct FakeSession {
     tx: Mutex<TxState>,
 }
 
-struct NoCancel;
+struct CountCancel(Arc<Fake>);
 
 #[async_trait]
-impl Canceller for NoCancel {
+impl Canceller for CountCancel {
     async fn cancel(&self) -> Result<(), DbError> {
+        self.0.cancels.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
 fn meta(name: &str, logical: LogicalType) -> ColumnMeta {
+    typed_meta(name, logical, "")
+}
+
+/// A column as the driver describes it, with its type name (`int4range[]`).
+fn typed_meta(name: &str, logical: LogicalType, db_type: &str) -> ColumnMeta {
     ColumnMeta {
         name: name.into(),
-        db_type: String::new(),
+        db_type: db_type.into(),
         logical,
         nullable: Some(true),
         origin_table: None,
@@ -183,6 +194,9 @@ impl Session for FakeSession {
             });
         }
         self.fake.seen.lock().unwrap().push(stmt.to_string());
+        if matches!(opts.cells, CellMode::Full { .. }) {
+            self.fake.full_batches.lock().unwrap().push(opts.batch_size);
+        }
         let delay = self.fake.delay.lock().unwrap().clone();
         if let Some((_, d)) = delay.filter(|(text, _)| stmt.contains(text.as_str())) {
             tokio::time::sleep(d).await;
@@ -209,9 +223,7 @@ impl Session for FakeSession {
                 .iter()
                 .find(|r| {
                     stmt.contains(&r.contains)
-                        && r.param
-                            .as_ref()
-                            .is_none_or(|p| opts.params.first() == Some(p))
+                        && r.param.as_ref().is_none_or(|p| opts.params.join(".") == *p)
                 })
                 .map(|r| (r.cols.clone(), r.rows.clone()))
         };
@@ -245,7 +257,7 @@ impl Session for FakeSession {
         Dialect::for_kind(self.fake.server.kind)
     }
     fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoCancel)
+        Arc::new(CountCancel(Arc::clone(&self.fake)))
     }
     fn introspector(&self) -> &dyn Introspector {
         self
@@ -403,6 +415,8 @@ async fn fixture(kind: DbKind, read_only: bool) -> Fx {
         seen: Mutex::new(Vec::new()),
         fail: Mutex::new(None),
         delay: Mutex::new(None),
+        cancels: AtomicUsize::new(0),
+        full_batches: Mutex::new(Vec::new()),
     });
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
     let repo = Arc::new(ConnectionRepo::new(
@@ -463,13 +477,16 @@ async fn mysql_shop(read_only: bool) -> Fx {
             },
         ],
     );
-    orders.foreign_keys = vec![fk(
-        "orders_customer",
-        "customer_id",
-        None,
-        "customers",
-        None,
-    )];
+    orders.foreign_keys = vec![
+        fk("orders_customer", "customer_id", None, "customers", None),
+        fk(
+            "orders_account",
+            "customer_id",
+            Some("billing"),
+            "accounts",
+            None,
+        ),
+    ];
     f.add_table(
         orders,
         Some(
@@ -483,11 +500,15 @@ async fn mysql_shop(read_only: bool) -> Fx {
         detail(
             None,
             "customers",
-            vec![column("id", 1, "int"), column("name", 2, "varchar(20)")],
+            vec![
+                column("id", 1, "int"),
+                column("name", 2, "varchar(20)"),
+                column("pt", 3, "point"),
+            ],
         ),
         Some(
             "CREATE TABLE `customers` (\n  `id` int NOT NULL,\n  `name` varchar(20),\n  \
-             PRIMARY KEY (`id`)\n) ENGINE=InnoDB",
+             `pt` point,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB",
         ),
     );
     f.add_ddl(
@@ -507,14 +528,46 @@ async fn mysql_shop(read_only: bool) -> Fx {
     f.add_object(None, ObjectKind::Trigger, "orders_bi");
     f.add_object(None, ObjectKind::Procedure, "refill");
     f.add_object(None, ObjectKind::Event, "nightly");
+    // The spatial column is read as its bytes.
+    f.respond(
+        "CAST(`pt` AS BINARY)",
+        None,
+        vec![
+            meta("id", LogicalType::Integer),
+            meta("name", LogicalType::Text),
+            meta("pt", LogicalType::Binary),
+        ],
+        vec![
+            vec![
+                int(1),
+                txt("Ann"),
+                Value::Bytes {
+                    len: 3,
+                    preview: vec![0, 1, 0xff],
+                },
+            ],
+            vec![int(2), txt("Bo'b; --"), Value::Null],
+        ],
+    );
     f.respond(
         "FROM `shop`.`customers`",
         None,
         vec![
             meta("id", LogicalType::Integer),
             meta("name", LogicalType::Text),
+            meta("pt", LogicalType::Other),
         ],
-        vec![vec![int(1), txt("Ann")], vec![int(2), txt("Bo'b; --")]],
+        vec![],
+    );
+    f.respond(
+        "VIEW_TABLE_USAGE",
+        Some("shop"),
+        vec![],
+        vec![
+            vec![txt("v_orders"), txt("shop"), txt("v_base")],
+            vec![txt("v_base"), txt("shop"), txt("orders")],
+            vec![txt("v_base"), txt("billing"), txt("accounts")],
+        ],
     );
     f.respond(
         "FROM `shop`.`orders`",
@@ -569,9 +622,71 @@ async fn pg_shop() -> Fx {
                 },
                 column("name", 2, "text"),
                 column("mood", 3, "public.mood"),
+                column("span", 4, "int4range"),
+                column("spans", 5, "int4range[]"),
             ],
         ),
         None,
+    );
+    // A domain (listed and defined by the dump's own catalog queries).
+    f.respond(
+        "t.typtype = 'd'",
+        Some("public"),
+        vec![],
+        vec![vec![txt("pos_int")]],
+    );
+    f.respond(
+        "pg_get_constraintdef(k.oid)",
+        Some("public.pos_int"),
+        vec![],
+        vec![vec![
+            txt("integer"),
+            Value::Null,
+            Value::Null,
+            txt("1"),
+            Value::Bool(true),
+            txt("CONSTRAINT pos CHECK ((VALUE > 0))"),
+        ]],
+    );
+    // The types the customers' columns use (one from a schema not dumped).
+    f.respond(
+        "WITH RECURSIVE u(oid)",
+        Some("\"public\".\"customers\""),
+        vec![],
+        vec![
+            vec![txt("ext"), txt("money2"), txt("d")],
+            vec![txt("public"), txt("mood"), txt("e")],
+            vec![txt("public"), txt("pos_int"), txt("d")],
+        ],
+    );
+    f.respond(
+        "a.attcollation <> t.typcollation",
+        Some("\"public\".\"customers\""),
+        vec![],
+        vec![vec![txt("name"), txt("pg_catalog"), txt("C")]],
+    );
+    // A descending identity.
+    f.respond(
+        "s.seqrelid = $1::regclass",
+        Some("\"public\".\"customers_id_seq\""),
+        vec![],
+        vec![vec![
+            int(-1),
+            int(-1),
+            int(-2147483648),
+            int(-1),
+            int(1),
+            Value::Bool(false),
+        ]],
+    );
+    f.respond(
+        "pg_rewrite",
+        Some("\"public\".\"v\""),
+        vec![],
+        vec![
+            vec![txt("public"), txt("customers")],
+            vec![txt("public"), txt("elsewhere")],
+        ],
     );
     let mut orders = detail(
         s,
@@ -697,10 +812,19 @@ async fn pg_shop() -> Fx {
             meta("id", LogicalType::Integer),
             meta("name", LogicalType::Text),
             meta("mood", LogicalType::Enum),
+            typed_meta("span", LogicalType::Other, "int4range"),
+            typed_meta("spans", LogicalType::Array, "int4range[]"),
         ],
+        // `span` and `spans` arrive as the server's text (`::text`).
         vec![
-            vec![int(1), txt("Ann"), txt("ok")],
-            vec![int(2), Value::Null, txt("sad")],
+            vec![
+                int(1),
+                txt("Ann"),
+                txt("ok"),
+                txt("[1,5)"),
+                txt("{\"[1,5)\",\"[7,9)\"}"),
+            ],
+            vec![int(2), Value::Null, txt("sad"), Value::Null, Value::Null],
         ],
     );
     f.respond(
@@ -887,7 +1011,7 @@ async fn mysql_dump_order_and_content() {
             "SET FOREIGN_KEY_CHECKS = 0",
             "CREATE TABLE `customers` (",
             "CREATE TABLE `orders` (",
-            "INSERT INTO `customers` (`id`, `name`) V",
+            "INSERT INTO `customers` (`id`, `name`, `",
             "INSERT INTO `orders` (`id`, `customer_id",
             "CREATE ALGORITHM=UNDEFINED SQL SECURITY ",
             "CREATE ALGORITHM=UNDEFINED SQL SECURITY ",
@@ -896,8 +1020,8 @@ async fn mysql_dump_order_and_content() {
     );
     assert_eq!(
         stmts[6],
-        "INSERT INTO `customers` (`id`, `name`) VALUES (1, _utf8mb4'Ann'), \
-         (2, _utf8mb4'Bo\\'b; --')"
+        "INSERT INTO `customers` (`id`, `name`, `pt`) VALUES (1, _utf8mb4'Ann', X'0001ff'), \
+         (2, _utf8mb4'Bo\\'b; --', NULL)"
     );
     assert_eq!(
         stmts[7],
@@ -930,11 +1054,26 @@ async fn mysql_dump_order_and_content() {
         at("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY"),
         3
     );
-    assert!(at("SELECT `id`, `name` FROM `shop`.`customers`") > 3);
+    // The driver's types first (`WHERE 1 = 0`), then the rows; spatial values as bytes,
+    // a few rows per batch.
+    let probe = at("SELECT `id`, `name`, `pt` FROM `shop`.`customers` WHERE 1 = 0");
+    assert!(probe > 3);
+    assert!(at("SELECT `id`, `name`, CAST(`pt` AS BINARY) FROM `shop`.`customers`") > probe);
     assert_eq!(sent.last().map(String::as_str), Some("COMMIT"));
     assert!(sent.iter().all(|s| !s.starts_with("INSERT")), "{sent:#?}");
-    // Skipped objects are listed in the log (R22).
+    // Skipped objects are listed in the log (R22), and what is outside the dump.
     let log = log_text(&d);
+    assert!(
+        log.contains("Foreign key orders_account of orders references billing.accounts"),
+        "{log}"
+    );
+    assert!(
+        log.contains("View v_base reads billing.accounts, which is not in the dump"),
+        "{log}"
+    );
+    assert!(!log.contains("View v_orders reads"), "{log}");
+    let batches = fx.fake.full_batches.lock().unwrap().clone();
+    assert_eq!(batches, [16, 16], "few rows per batch");
     assert!(log.contains("Skipped trigger orders_bi: Triggers"), "{log}");
     assert!(log.contains("Skipped event nightly"), "{log}");
     assert!(log.contains("Skipped procedure refill"), "{log}");
@@ -985,6 +1124,7 @@ async fn pg_objects_list_what_is_skipped() {
             "View public.v",
             "Sequence public.counter",
             "Type public.mood",
+            "Type public.pos_int",
             "Table sales.orders",
         ]
     );
@@ -1026,7 +1166,7 @@ async fn pg_dump_order_and_content() {
         "{DUMP_MAGIC}\n-- Source: PostgreSQL 17.0, database shop, schemas public, sales\n"
     )));
     assert!(
-        text.contains("\n-- Objects: 2 tables (2 with data), 1 views, 2 sequences, 1 types\n"),
+        text.contains("\n-- Objects: 2 tables (2 with data), 1 views, 2 sequences, 2 types\n"),
         "{text}"
     );
     let stmts = statements(&text, Dialect::Postgres);
@@ -1036,6 +1176,7 @@ async fn pg_dump_order_and_content() {
         "SET standard_conforming_strings = on",
         "CREATE SCHEMA IF NOT EXISTS \"sales\"",
         "CREATE TYPE public.mood AS ENUM ('ok', 'sad')",
+        "CREATE DOMAIN \"public\".\"pos_int\" AS integer DEFAULT 1 NOT NULL CONSTRAINT pos CHECK ((VALUE > 0))",
         "CREATE SEQUENCE public.counter AS bigint",
         "SELECT pg_catalog.setval('\"public\".\"counter\"', 5, TRUE)",
         "CREATE SEQUENCE sales.orders_id_seq AS integer",
@@ -1043,7 +1184,7 @@ async fn pg_dump_order_and_content() {
         "CREATE TABLE sales.orders (",
         "CREATE INDEX orders_customer_idx ON sales.orders USING btree (customer_id)",
         "ALTER SEQUENCE \"sales\".\"orders_id_seq\" OWNED BY \"sales\".\"orders\".\"id\"",
-        "INSERT INTO \"public\".\"customers\" (\"id\", \"name\", \"mood\") OVERRIDING SYSTEM VALUE VALUES ",
+        "INSERT INTO \"public\".\"customers\" (\"id\", \"name\", \"mood\", \"span\", \"spans\") OVERRIDING SYSTEM VALUE VALUES ",
         "INSERT INTO \"sales\".\"orders\" (\"id\", \"customer_id\") VALUES ",
         "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence('\"sales\".\"orders\"', 'id'), 11, TRUE)",
         "SELECT pg_catalog.setval(pg_catalog.pg_get_serial_sequence('\"public\".\"customers\"', 'id'), 2, FALSE)",
@@ -1054,33 +1195,68 @@ async fn pg_dump_order_and_content() {
     for (s, e) in stmts.iter().zip(expected) {
         assert!(s.starts_with(e), "{s}\n  should start with\n{e}");
     }
-    assert_eq!(
-        stmts[11],
-        "INSERT INTO \"public\".\"customers\" (\"id\", \"name\", \"mood\") OVERRIDING SYSTEM VALUE \
-         VALUES (1, 'Ann', 'ok'::public.mood), (2, NULL, 'sad'::public.mood)"
-    );
+    // Types the driver cannot decode are read as the server's text and cast back.
     assert_eq!(
         stmts[12],
+        "INSERT INTO \"public\".\"customers\" (\"id\", \"name\", \"mood\", \"span\", \"spans\") \
+         OVERRIDING SYSTEM VALUE VALUES (1, 'Ann', 'ok'::public.mood, '[1,5)'::int4range, \
+         '{\"[1,5)\",\"[7,9)\"}'::int4range[]), (2, NULL, 'sad'::public.mood, NULL, NULL)"
+    );
+    assert_eq!(
+        stmts[13],
         "INSERT INTO \"sales\".\"orders\" (\"id\", \"customer_id\") VALUES (10, 1), (11, 2)"
     );
-    // Tables carry no foreign key; the generated column keeps its expression.
-    assert!(!stmts[8].contains("FOREIGN KEY"), "{}", stmts[8]);
+    // The identity keeps its sequence's name and options; a collation is kept.
     assert!(
-        stmts[8].contains("GENERATED ALWAYS AS ((id * 2)) STORED"),
+        stmts[8].contains(
+            "id integer GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME \"public\".\"customers_id_seq\" \
+             START WITH -1 INCREMENT BY -1 MINVALUE -2147483648 MAXVALUE -1 CACHE 1 NO CYCLE) \
+             NOT NULL"
+        ),
         "{}",
         stmts[8]
     );
-    // The job's session: snapshot first; data read with ONLY; sequence values after data.
+    assert!(
+        stmts[8].contains("name text COLLATE \"pg_catalog\".\"C\""),
+        "{}",
+        stmts[8]
+    );
+    // Tables carry no foreign key; the generated column keeps its expression.
+    assert!(!stmts[9].contains("FOREIGN KEY"), "{}", stmts[9]);
+    assert!(
+        stmts[9].contains("GENERATED ALWAYS AS ((id * 2)) STORED"),
+        "{}",
+        stmts[9]
+    );
+    // The job's session: row security off and an empty search_path before the snapshot;
+    // data read with ONLY; sequence values after data.
     let sent = job_sent(&fx, mark);
-    assert_eq!(sent[0], "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    assert_eq!(sent[0], "SET row_security = off");
+    assert_eq!(
+        sent[1],
+        "SELECT pg_catalog.set_config('search_path', '', false)"
+    );
+    assert_eq!(sent[2], "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     assert!(sent.iter().any(|s| s == PG_TABLE_SEQUENCES));
     let at = |prefix: &str| index_of(&sent, prefix);
+    assert!(
+        at("SELECT \"id\", \"name\", \"mood\", \"span\"::text, \"spans\"::text FROM ONLY \"public\".\"customers\"")
+            > at("SELECT \"id\", \"name\", \"mood\", \"span\", \"spans\" FROM ONLY \"public\".\"customers\" WHERE 1 = 0")
+    );
+    let log = log_text(&d);
+    assert!(
+        log.contains("Table public.customers uses type ext.money2, whose schema is not dumped"),
+        "{log}"
+    );
+    assert!(
+        log.contains("View public.v reads public.elsewhere, which is not in the dump"),
+        "{log}"
+    );
     assert!(
         at("SELECT last_value, is_called FROM \"sales\".\"orders_id_seq\"")
             > at("SELECT \"id\", \"customer_id\" FROM ONLY \"sales\".\"orders\"")
     );
     assert_eq!(sent.last().map(String::as_str), Some("COMMIT"));
-    let log = log_text(&d);
     assert!(
         log.contains("Skipped table public.events: Partitioned"),
         "{log}"
@@ -1106,17 +1282,125 @@ async fn pg_compressed_dump_with_drops() {
     assert!(text.starts_with(DUMP_MAGIC));
     let stmts = statements(&text, Dialect::Postgres);
     assert_terminated(&text, &stmts);
+    // Sequences and types are dropped without CASCADE (a column of a table outside the
+    // dump must not go with them).
     assert_eq!(
-        &stmts[2..7],
+        &stmts[2..9],
         [
             "DROP VIEW IF EXISTS \"public\".\"v\" CASCADE",
             "DROP TABLE IF EXISTS \"sales\".\"orders\" CASCADE",
             "DROP TABLE IF EXISTS \"public\".\"customers\" CASCADE",
-            "DROP SEQUENCE IF EXISTS \"public\".\"counter\" CASCADE",
-            "DROP SEQUENCE IF EXISTS \"sales\".\"orders_id_seq\" CASCADE",
+            "DROP SEQUENCE IF EXISTS \"public\".\"counter\"",
+            "DROP SEQUENCE IF EXISTS \"sales\".\"orders_id_seq\"",
+            "DROP TYPE IF EXISTS \"public\".\"pos_int\"",
+            "DROP TYPE IF EXISTS \"public\".\"mood\"",
         ]
     );
-    assert_eq!(stmts[7], "DROP TYPE IF EXISTS \"public\".\"mood\" CASCADE");
+}
+
+/// Only the tables asked for: the types their columns use come along (log line), a
+/// sequence only a default uses is created if missing and never dropped.
+#[tokio::test]
+async fn pg_tables_bring_their_types_and_sequences() {
+    let fx = pg_shop().await;
+    fx.fake.respond(
+        "pg_attrdef",
+        Some("\"public\".\"customers\""),
+        vec![],
+        vec![vec![
+            txt("public"),
+            txt("counter"),
+            Value::Null,
+            Value::Null,
+        ]],
+    );
+    // The earlier, identity-only answer for customers must not win.
+    fx.fake.responses.lock().unwrap().retain(|r| {
+        !(r.contains == "pg_attrdef"
+            && r.param.as_deref() == Some("\"public\".\"customers\"")
+            && r.rows.len() == 1
+            && r.rows[0].get(3) == Some(&txt("i")))
+    });
+    let objects = vec![DumpObject {
+        schema: Some("public".into()),
+        name: "customers".into(),
+        kind: ObjectKind::Table,
+        data: false,
+    }];
+    let mut req = fx.request(objects, &["public"], "c.sql");
+    req.include_drop = true;
+    let d = fx.run(req).await;
+    assert_eq!(
+        d.job.state,
+        JobState::Done,
+        "{:?} {}",
+        d.job.error,
+        log_text(&d)
+    );
+    let log = log_text(&d);
+    assert!(
+        log.contains("Type public.mood is dumped too: table public.customers uses it."),
+        "{log}"
+    );
+    assert!(log.contains("Type public.pos_int is dumped too"), "{log}");
+    let text = std::fs::read_to_string(fx.path("c.sql")).unwrap();
+    assert!(
+        text.contains("-- Objects: 1 tables (0 with data), 0 views, 1 sequences, 2 types\n"),
+        "{text}"
+    );
+    let stmts = statements(&text, Dialect::Postgres);
+    assert!(
+        !stmts.iter().any(|s| s.starts_with("DROP SEQUENCE")),
+        "{stmts:#?}"
+    );
+    assert!(
+        stmts
+            .iter()
+            .any(|s| s.starts_with("CREATE SEQUENCE IF NOT EXISTS public.counter")),
+        "{stmts:#?}"
+    );
+    let mood = index_of(&stmts, "CREATE TYPE public.mood");
+    let domain = index_of(&stmts, "CREATE DOMAIN \"public\".\"pos_int\"");
+    assert!(mood < domain && domain < index_of(&stmts, "CREATE TABLE public.customers"));
+}
+
+/// A value that cannot be written fails the dump and cancels the running read.
+#[tokio::test]
+async fn an_unwritable_value_cancels_the_read() {
+    let fx = pg_shop().await;
+    fx.fake.responses.lock().unwrap().insert(
+        0,
+        Resp {
+            contains: "\"span\"::text".into(),
+            param: None,
+            cols: vec![
+                meta("id", LogicalType::Integer),
+                meta("name", LogicalType::Text),
+                meta("mood", LogicalType::Enum),
+                meta("span", LogicalType::Text),
+                meta("spans", LogicalType::Text),
+            ],
+            rows: vec![vec![
+                int(1),
+                txt("a"),
+                txt("ok"),
+                txt("nul\0here"),
+                Value::Null,
+            ]],
+        },
+    );
+    let listed = fx.all_objects(&["public", "sales"]).await;
+    let d = fx
+        .run(fx.request(listed.objects, &["public", "sales"], "shop.sql"))
+        .await;
+    assert_eq!(d.job.state, JobState::Failed);
+    assert!(d
+        .job
+        .summary
+        .unwrap_or_default()
+        .contains("public.customers cannot be dumped"),);
+    assert!(fx.fake.cancels.load(Ordering::SeqCst) >= 1);
+    assert!(fx.files().is_empty());
 }
 
 #[tokio::test]

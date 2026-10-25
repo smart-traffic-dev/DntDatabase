@@ -11,7 +11,7 @@ use dnt_core::value::{FullValue, LogicalType, Value};
 use dnt_transfer::dump::{
     add_fk_sql, create_schema_sql, end_comment, header, insert_head, mysql_view_ddl,
     session_epilogue, session_prologue, setval_column_sql, setval_sql, table_order, view_order,
-    DumpHeader, DumpInserts, DumpWriter, TableNode, ViewNode, DUMP_MAGIC,
+    view_references, DumpHeader, DumpInserts, DumpWriter, TableNode, ViewNode, DUMP_MAGIC,
 };
 
 fn mysql_header() -> DumpHeader {
@@ -196,6 +196,52 @@ fn views_follow_textual_references() {
     assert_eq!(order, ["base_v", "Report"]);
 }
 
+/// Only table positions count: a column alias named like a view is no dependency.
+#[test]
+fn view_order_ignores_aliases() {
+    let views = [
+        ViewNode {
+            name: "a".into(),
+            ddl: "CREATE VIEW `a` AS select `b`.`x` AS `x` from `b`".into(),
+        },
+        ViewNode {
+            name: "b".into(),
+            ddl: "CREATE VIEW `b` AS select `t`.`x` AS `a` from `t`".into(),
+        },
+    ];
+    let order: Vec<&str> = view_order(&views, Dialect::MYSQL)
+        .into_iter()
+        .map(|i| views[i].name.as_str())
+        .collect();
+    assert_eq!(order, ["b", "a"]);
+}
+
+#[test]
+fn view_references_are_table_positions() {
+    let q = |s: &str| Some(s.to_string());
+    assert_eq!(
+        view_references(
+            "CREATE VIEW `v` AS select `a`.`x` AS `b`, (select 1 from `c`) AS `d` \
+             from (`a` join `other`.`e` on (`a`.`x` = `e`.`y`)) , `f` where `x` in (select `g`.`y` from `g`)",
+            Dialect::MYSQL
+        ),
+        [
+            (None, "c".to_string()),
+            (None, "a".to_string()),
+            (q("other"), "e".to_string()),
+            (None, "f".to_string()),
+            (None, "g".to_string()),
+        ]
+    );
+    assert_eq!(
+        view_references(
+            "CREATE OR REPLACE VIEW s.v AS\n SELECT t.a AS x FROM ONLY s.\"T\" t, LATERAL (SELECT 1 FROM u) l",
+            Dialect::Postgres
+        ),
+        [(q("s"), "T".to_string()), (None, "u".to_string())]
+    );
+}
+
 #[test]
 fn mysql_view_loses_definer_and_source_database() {
     let ddl = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` AS \
@@ -363,6 +409,13 @@ fn write_sample(w: &mut DumpWriter) -> Vec<String> {
     let ins = "INSERT INTO `t` (`id`, `s`) VALUES (1, _utf8mb4'a;\\'b -- c'), (2, NULL)";
     w.statement(ins).unwrap();
     stmts.push(ins.to_string());
+    // A trailing line comment does not swallow the delimiter.
+    let commented = "CREATE VIEW `w` AS select 1 -- the end";
+    w.statement(commented).unwrap();
+    stmts.push(commented.to_string());
+    let hashed = "CREATE VIEW `h` AS select 2 # also a comment";
+    w.statement(hashed).unwrap();
+    stmts.push(hashed.to_string());
     // A script of several statements is written one by one.
     let n = w
         .script("CREATE VIEW `v` AS select 1;\n", Dialect::MYSQL)
@@ -381,7 +434,7 @@ fn write_sample(w: &mut DumpWriter) -> Vec<String> {
 #[test]
 fn every_statement_ends_with_a_semicolon_and_splits_back() {
     let buf = Shared::default();
-    let mut w = DumpWriter::new(Box::new(buf.clone()), false);
+    let mut w = DumpWriter::new(Box::new(buf.clone()), false, Dialect::MYSQL);
     let stmts = write_sample(&mut w);
     assert_eq!(w.statements(), stmts.len() as u64);
     w.finish().unwrap();
@@ -392,7 +445,12 @@ fn every_statement_ends_with_a_semicolon_and_splits_back() {
         "{out}"
     );
     for s in &stmts {
-        assert!(out.contains(&format!("{s};\n")), "{s}");
+        let end = if s.contains("comment") || s.contains("the end") {
+            "\n;\n"
+        } else {
+            ";\n"
+        };
+        assert!(out.contains(&format!("{s}{end}")), "{s}");
     }
     let back: Vec<String> = split(&out, Dialect::MYSQL)
         .into_iter()
@@ -404,7 +462,7 @@ fn every_statement_ends_with_a_semicolon_and_splits_back() {
 #[test]
 fn statement_text_is_normalised() {
     let buf = Shared::default();
-    let mut w = DumpWriter::new(Box::new(buf.clone()), false);
+    let mut w = DumpWriter::new(Box::new(buf.clone()), false, Dialect::MYSQL);
     w.statement("  SELECT 1;  \n").unwrap();
     w.statement("SELECT 2").unwrap();
     // Nothing but whitespace (or a lone delimiter) is not a statement.
@@ -420,12 +478,12 @@ fn statement_text_is_normalised() {
 #[test]
 fn gzip_output_equals_the_plain_output() {
     let plain = Shared::default();
-    let mut w = DumpWriter::new(Box::new(plain.clone()), false);
+    let mut w = DumpWriter::new(Box::new(plain.clone()), false, Dialect::MYSQL);
     write_sample(&mut w);
     w.finish().unwrap();
 
     let gz = Shared::default();
-    let mut w = DumpWriter::new(Box::new(gz.clone()), true);
+    let mut w = DumpWriter::new(Box::new(gz.clone()), true, Dialect::MYSQL);
     write_sample(&mut w);
     let written = w.finish().unwrap();
     let bytes = gz.bytes();

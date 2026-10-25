@@ -32,7 +32,9 @@ use crate::session_manager::{
     close_quietly, config_error, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
 };
 use async_trait::async_trait;
-use dnt_core::driver::{CellMode, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::{
+    CancelHandle, CellMode, ExecOptions, ResultSummary, RowSink, Session, StopSignal,
+};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ForeignKeyDetail, IdentityKind, ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
@@ -42,8 +44,9 @@ use dnt_core::sql::{classify, Dialect};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_transfer::dump::{
     add_fk_sql, create_schema_sql, end_comment, header, insert_head, mysql_view_ddl,
-    session_epilogue, session_prologue, setval_column_sql, setval_sql, table_order, view_order,
-    DumpHeader, DumpInserts, DumpWriter, TableNode, ViewNode, DUMP_BATCH_BYTES, DUMP_BATCH_ROWS,
+    session_epilogue, session_prologue, setval_column_sql, setval_sql, table_order,
+    view_references, DumpHeader, DumpInserts, DumpWriter, TableNode, ViewNode, DUMP_BATCH_BYTES,
+    DUMP_BATCH_ROWS,
 };
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -56,6 +59,8 @@ use uuid::Uuid;
 
 /// Largest cell a dump reads (`CellMode::Full`).
 pub const MAX_CELL_BYTES: usize = 256 * 1024 * 1024;
+/// Rows per batch the driver hands over while data is read (bounds memory with big cells).
+pub const DATA_BATCH_ROWS: usize = 16;
 /// Bound of a control statement (snapshot, `SET`, `COMMIT`).
 const CONTROL_TIMEOUT_S: u32 = 30;
 /// Bound of listing a database's objects for the dialog.
@@ -109,6 +114,128 @@ pub(crate) const PG_TABLE_SEQUENCES: &str = "SELECT sn.nspname::text, s.relname:
      WHERE ad.adrelid = $1::regclass \
      ORDER BY 1, 2, 3";
 
+/// Domains of schema `$1`: name.
+pub(crate) const PG_DOMAINS: &str = "SELECT t.typname::text FROM pg_catalog.pg_type t \
+     JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     WHERE n.nspname = $1 AND t.typtype = 'd' \
+     AND pg_catalog.has_type_privilege(t.oid, 'USAGE') ORDER BY 1";
+
+/// Domain `$1`.`$2`: base type, collation schema and name (when not the base type's),
+/// default, NOT NULL, its CHECK constraints (`CONSTRAINT <name> <definition>`, by name).
+pub(crate) const PG_DOMAIN: &str = "SELECT pg_catalog.format_type(t.typbasetype, t.typtypmod), \
+     cn.nspname::text, co.collname::text, t.typdefault, t.typnotnull, \
+     (SELECT pg_catalog.string_agg('CONSTRAINT ' || pg_catalog.quote_ident(k.conname) || ' ' \
+       || pg_catalog.pg_get_constraintdef(k.oid), ' ' ORDER BY k.conname) \
+      FROM pg_catalog.pg_constraint k WHERE k.contypid = t.oid AND k.contype = 'c') \
+     FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace \
+     JOIN pg_catalog.pg_type b ON b.oid = t.typbasetype \
+     LEFT JOIN pg_catalog.pg_collation co ON co.oid = t.typcollation \
+      AND t.typcollation <> b.typcollation \
+     LEFT JOIN pg_catalog.pg_namespace cn ON cn.oid = co.collnamespace \
+     WHERE n.nspname = $1 AND t.typname = $2 AND t.typtype = 'd'";
+
+/// The enum, domain and stand-alone composite types the columns of table `$1` use, also
+/// through arrays, domains and composite attributes: schema, name, `typtype`.
+pub(crate) const PG_TABLE_TYPES: &str = "WITH RECURSIVE u(oid) AS ( \
+     SELECT a.atttypid FROM pg_catalog.pg_attribute a \
+     WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped \
+     UNION \
+     SELECT x.next FROM u JOIN pg_catalog.pg_type ty ON ty.oid = u.oid, \
+     LATERAL (SELECT ty.typelem WHERE ty.typcategory = 'A' AND ty.typelem <> 0 \
+       UNION ALL SELECT ty.typbasetype WHERE ty.typtype = 'd' \
+       UNION ALL SELECT a2.atttypid FROM pg_catalog.pg_attribute a2 \
+       WHERE ty.typtype = 'c' AND a2.attrelid = ty.typrelid AND a2.attnum > 0 \
+       AND NOT a2.attisdropped) x(next)) \
+     SELECT n.nspname::text, ty.typname::text, ty.typtype::text \
+     FROM u JOIN pg_catalog.pg_type ty ON ty.oid = u.oid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = ty.typnamespace \
+     LEFT JOIN pg_catalog.pg_class c ON c.oid = ty.typrelid \
+     WHERE (ty.typtype IN ('e', 'd') OR (ty.typtype = 'c' AND c.relkind = 'c')) \
+     AND n.nspname NOT IN ('pg_catalog', 'information_schema') ORDER BY 1, 2";
+
+/// Columns of table `$1` with a collation other than their type's: column, collation
+/// schema, collation name.
+pub(crate) const PG_TABLE_COLLATIONS: &str = "SELECT a.attname::text, n.nspname::text, \
+     co.collname::text FROM pg_catalog.pg_attribute a \
+     JOIN pg_catalog.pg_type t ON t.oid = a.atttypid \
+     JOIN pg_catalog.pg_collation co ON co.oid = a.attcollation \
+     JOIN pg_catalog.pg_namespace n ON n.oid = co.collnamespace \
+     WHERE a.attrelid = $1::regclass AND a.attnum > 0 AND NOT a.attisdropped \
+     AND a.attcollation <> 0 AND a.attcollation <> t.typcollation";
+
+/// The options of sequence `$1`: start, increment, min, max, cache, cycle.
+pub(crate) const PG_SEQUENCE_OPTIONS: &str = "SELECT s.seqstart, s.seqincrement, s.seqmin, \
+     s.seqmax, s.seqcache, s.seqcycle FROM pg_catalog.pg_sequence s \
+     WHERE s.seqrelid = $1::regclass";
+
+/// The relations view `$1` reads (from its rewrite rule's dependencies): schema, name.
+pub(crate) const PG_VIEW_USES: &str = "SELECT DISTINCT n.nspname::text, c.relname::text \
+     FROM pg_catalog.pg_rewrite rw \
+     JOIN pg_catalog.pg_depend d ON d.classid = 'pg_catalog.pg_rewrite'::regclass \
+     AND d.objid = rw.oid AND d.refclassid = 'pg_catalog.pg_class'::regclass \
+     JOIN pg_catalog.pg_class c ON c.oid = d.refobjid \
+     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+     WHERE rw.ev_class = $1::regclass AND c.oid <> rw.ev_class ORDER BY 1, 2";
+
+/// MySQL 8.0.13+: the tables and views each view of database `?` reads: view, schema,
+/// table.
+pub(crate) const MYSQL_VIEW_USES: &str = "SELECT VIEW_NAME, TABLE_SCHEMA, TABLE_NAME \
+     FROM information_schema.VIEW_TABLE_USAGE WHERE VIEW_SCHEMA = ?";
+
+/// PostgreSQL types a driver decodes faithfully as array elements; arrays of any other
+/// element type are read as the server's text.
+const PG_FAITHFUL_ELEMENTS: &[&str] = &[
+    "bool",
+    "int2",
+    "int4",
+    "int8",
+    "oid",
+    "float4",
+    "float8",
+    "numeric",
+    "json",
+    "jsonb",
+    "uuid",
+    "bytea",
+    "date",
+    "time",
+    "timestamp",
+    "timestamptz",
+    "text",
+    "varchar",
+    "bpchar",
+    "name",
+    "citext",
+];
+
+/// How a column is read for its `INSERT`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadAs {
+    /// As the driver decodes it.
+    Value,
+    /// PostgreSQL `"c"::text`: the server's text, written as `'<text>'::<type>`.
+    Text,
+    /// MySQL `CAST(`c` AS BINARY)`: the stored bytes, written as `X'…'` (spatial types).
+    Binary,
+}
+
+/// How a column with the driver metadata `m` is read (the probe `WHERE 1 = 0`).
+fn read_as(kind: DbKind, m: &ColumnMeta) -> ReadAs {
+    match (kind, m.logical) {
+        (DbKind::MySql, LogicalType::Other) => ReadAs::Binary,
+        (DbKind::Postgres, LogicalType::Other) => ReadAs::Text,
+        (DbKind::Postgres, LogicalType::Array) => {
+            let elem = m.db_type.trim_end_matches("[]");
+            if PG_FAITHFUL_ELEMENTS.contains(&elem) {
+                ReadAs::Value
+            } else {
+                ReadAs::Text
+            }
+        }
+        _ => ReadAs::Value,
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Reading
 // ---------------------------------------------------------------------------------------
@@ -117,12 +244,16 @@ pub(crate) const PG_TABLE_SEQUENCES: &str = "SELECT sn.nspname::text, s.relname:
 #[derive(Default)]
 struct Collect {
     rows: Vec<Vec<Value>>,
+    metas: Option<Vec<ColumnMeta>>,
     results: usize,
 }
 
 impl RowSink for Collect {
-    fn result_start(&mut self, _cols: &[ColumnMeta]) {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
         self.results += 1;
+        if self.results == 1 {
+            self.metas = Some(cols.to_vec());
+        }
     }
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
         if self.results == 1 {
@@ -191,6 +322,15 @@ impl<'a> Reader<'a> {
 
     /// Every row of a metadata query with `params` bound to its placeholders.
     async fn rows(&self, sql: &str, params: Vec<String>) -> Result<Vec<Vec<Value>>, DbError> {
+        Ok(self.query(sql, params).await?.rows)
+    }
+
+    /// The column metadata of a statement's first result (`… WHERE 1 = 0`).
+    async fn metas(&self, sql: &str) -> Result<Vec<ColumnMeta>, DbError> {
+        Ok(self.query(sql, Vec::new()).await?.metas.unwrap_or_default())
+    }
+
+    async fn query(&self, sql: &str, params: Vec<String>) -> Result<Collect, DbError> {
         self.check()?;
         let opts = ExecOptions {
             max_rows: usize::MAX,
@@ -205,7 +345,7 @@ impl<'a> Reader<'a> {
             .execute_one(sql, classify(sql, self.session.dialect()), &opts, &mut sink)
             .await?;
         self.check()?;
-        Ok(sink.rows)
+        Ok(sink)
     }
 
     /// An introspection call, bounded by [`METADATA_CALL_TIMEOUT`].
@@ -341,6 +481,12 @@ pub(crate) async fn list_dump_objects(
                 }
                 for name in r.list(&scope, ObjectKind::Type).await? {
                     out.objects.push(object(s, name, ObjectKind::Type));
+                }
+                // Domains (the introspector lists enums and composites only).
+                for row in r.rows(PG_DOMAINS, vec![schema.clone()]).await? {
+                    if let Some(name) = text_of(row.first()) {
+                        out.objects.push(object(s, name, ObjectKind::Type));
+                    }
                 }
                 for (kind, reason) in [
                     (ObjectKind::MaterializedView, MATVIEWS),
@@ -539,6 +685,8 @@ impl SessionManager {
 /// The dump being written (`<file>.dntpart`); every write runs off the async executor.
 struct DumpFile {
     w: DumpWriter,
+    /// The same file, synced to disk before it is renamed.
+    sync: std::fs::File,
     shown: String,
 }
 
@@ -549,7 +697,7 @@ fn write_error(shown: &str, e: &std::io::Error) -> DbError {
 impl DumpFile {
     /// Creates the temp file: only a NEW file (a stale temp file or anything planted there,
     /// a symbolic link included, is refused and left as it is).
-    fn create(part: &Path, shown: &str, compress: bool) -> Result<DumpFile, DbError> {
+    fn create(part: &Path, shown: &str, compress: bool, kind: DbKind) -> Result<DumpFile, DbError> {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -568,11 +716,14 @@ impl DumpFile {
                     write_error(shown, &e)
                 }
             })?;
+        let sync = file.try_clone().map_err(|e| write_error(shown, &e))?;
         Ok(DumpFile {
             w: DumpWriter::new(
                 Box::new(BufWriter::with_capacity(256 * 1024, file)),
                 compress,
+                Dialect::for_kind(kind),
             ),
+            sync,
             shown: shown.to_string(),
         })
     }
@@ -605,10 +756,17 @@ impl DumpFile {
         self.w.statements()
     }
 
+    /// Completes and syncs the file (its rename must not publish unwritten data).
     fn finish(self) -> Result<u64, DbError> {
         let shown = self.shown;
         let w = self.w;
-        block_outside_executor(|| w.finish()).map_err(|e| write_error(&shown, &e))
+        let sync = self.sync;
+        block_outside_executor(|| -> std::io::Result<u64> {
+            let n = w.finish()?;
+            sync.sync_all()?;
+            Ok(n)
+        })
+        .map_err(|e| write_error(&shown, &e))
     }
 }
 
@@ -616,12 +774,21 @@ impl DumpFile {
 // Data
 // ---------------------------------------------------------------------------------------
 
-/// Turns the rows of one `SELECT` into `INSERT`s written to the file.
+/// One inserted column of a table's data.
+struct DataCol {
+    name: String,
+    /// As introspection reports it (the PostgreSQL cast target).
+    db_type: String,
+    read: ReadAs,
+}
+
+/// Turns the rows of one `SELECT` into `INSERT`s written to the file. The first error
+/// (a write failure, a value that cannot be written) is kept and cancels the statement.
 struct DataSink<'a> {
     file: &'a mut DumpFile,
     ctx: &'a JobCtx,
-    /// The inserted columns (name, `db_type`) in `SELECT` order.
-    cols: Vec<(String, String)>,
+    /// The inserted columns in `SELECT` order.
+    cols: Vec<DataCol>,
     kind: DbKind,
     relation: String,
     overriding: bool,
@@ -631,12 +798,19 @@ struct DataSink<'a> {
     results: usize,
     rows: u64,
     error: Option<DbError>,
+    /// Cancels the running `SELECT` once an error is kept.
+    abort: Option<CancelHandle>,
 }
 
 impl DataSink<'_> {
     fn fail(&mut self, e: DbError) {
         if self.error.is_none() {
             self.error = Some(e);
+            if let Some(handle) = self.abort.take() {
+                tokio::spawn(async move {
+                    let _ = handle.cancel().await;
+                });
+            }
         }
     }
 
@@ -662,10 +836,15 @@ impl RowSink for DataSink<'_> {
             .cols
             .iter()
             .zip(metas)
-            .map(|((name, db_type), m)| ColumnTarget {
-                name: name.clone(),
-                db_type: db_type.clone(),
-                logical: m.logical,
+            .map(|(c, m)| ColumnTarget {
+                name: c.name.clone(),
+                db_type: c.db_type.clone(),
+                // Server text is written as `'<text>'::<type>` (a dump literal of `Other`).
+                logical: if c.read == ReadAs::Text {
+                    LogicalType::Other
+                } else {
+                    m.logical
+                },
                 collation: None,
             })
             .collect();
@@ -685,13 +864,29 @@ impl RowSink for DataSink<'_> {
         });
     }
 
-    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+    fn full_rows(&mut self, mut batch: Vec<Vec<FullValue>>) {
         if self.error.is_some() || self.results != 1 {
             return;
         }
         let Some(mut inserts) = self.inserts.take() else {
             return;
         };
+        let as_text: Vec<usize> = (0..self.cols.len())
+            .filter(|&i| self.cols[i].read == ReadAs::Text)
+            .collect();
+        for row in &mut batch {
+            for &i in &as_text {
+                if let Some(Value::Text(text)) = row.get(i).and_then(FullValue::as_value) {
+                    let other = Value::Other {
+                        type_name: self.cols[i].db_type.clone(),
+                        text: text.clone(),
+                    };
+                    if let Ok(v) = FullValue::try_from_value(other) {
+                        row[i] = v;
+                    }
+                }
+            }
+        }
         for row in &batch {
             match inserts.push(row) {
                 Ok(Some(sql)) => {
@@ -752,6 +947,12 @@ struct Table {
     ddl: String,
     /// PostgreSQL: the sequences of its columns.
     sequences: Vec<SeqRow>,
+    /// PostgreSQL: the enum / domain / composite types its columns use (schema, name).
+    types: Vec<(String, String)>,
+    /// PostgreSQL: `(column, COLLATE clause)` of columns with a non-default collation.
+    collations: Vec<(String, String)>,
+    /// PostgreSQL: `(column, sequence options)` of identity columns.
+    identity_options: Vec<(String, String)>,
 }
 
 /// A row of [`PG_TABLE_SEQUENCES`].
@@ -769,6 +970,34 @@ struct SeqCreate {
     owner: Option<(String, String)>,
     /// Stand-alone: `(last_value, is_called)` literals read in the snapshot.
     value: Option<(String, String)>,
+    /// Neither asked for nor owned by a dumped column: only a column default uses it (the
+    /// target may share it with other tables, so it is never dropped).
+    needed_only: bool,
+}
+
+/// The detail `build_table_ddl` gets for a dumped table: no foreign keys (added after the
+/// data), and the column parts it does not render itself: a non-default `COLLATE`, and an
+/// identity column's sequence name and options.
+fn pg_table_ddl_detail(t: &Table) -> TableDetail {
+    let mut d = t.detail.clone();
+    d.foreign_keys.clear();
+    for c in &mut d.columns {
+        if let Some((_, clause)) = t.collations.iter().find(|(n, _)| *n == c.name) {
+            c.db_type = format!("{} {clause}", c.db_type);
+        }
+        if let Some((_, options)) = t.identity_options.iter().find(|(n, _)| *n == c.name) {
+            let mode = match (&c.identity_kind, c.identity.as_deref()) {
+                (Some(IdentityKind::Always), _) => "ALWAYS",
+                (Some(IdentityKind::ByDefault), _) => "BY DEFAULT",
+                (None, Some(m)) if m.eq_ignore_ascii_case("ALWAYS") => "ALWAYS",
+                _ => "BY DEFAULT",
+            };
+            c.db_type = format!("{} GENERATED {mode} AS IDENTITY ({options})", c.db_type);
+            c.identity = None;
+            c.default = None;
+        }
+    }
+    d
 }
 
 fn obj_ref(database: &str, o: &DumpObject) -> ObjectRef {
@@ -788,6 +1017,23 @@ fn pg_relation(schema: &str, name: &str) -> String {
         name: name.into(),
     }
     .relation()
+}
+
+/// A catalog integer (sequence options) as a literal, through `build::literal`.
+fn int_literal(v: Option<&Value>, what: &str) -> Result<String, DbError> {
+    let v = v.ok_or_else(|| table_changed(what))?;
+    let full = FullValue::try_from_value(v.clone()).map_err(|_| table_changed(what))?;
+    literal(
+        &full,
+        &ColumnTarget {
+            name: String::new(),
+            db_type: "bigint".into(),
+            logical: LogicalType::Integer,
+            collation: None,
+        },
+        Dialect::Postgres,
+    )
+    .map_err(|_| table_changed(what))
 }
 
 /// The `setval` literals of `SELECT last_value, is_called FROM <seq>`.
@@ -853,8 +1099,9 @@ impl JobRunner for DumpJob {
         let part: PathBuf = target.part.clone();
         let shown = self.request.path.clone();
         let compress = self.request.compress;
+        let kind = self.rt.cfg.kind;
         let mut file =
-            tokio::task::spawn_blocking(move || DumpFile::create(&part, &shown, compress))
+            tokio::task::spawn_blocking(move || DumpFile::create(&part, &shown, compress, kind))
                 .await
                 .map_err(|e| {
                     JobFailure::from(DbError::Internal {
@@ -935,6 +1182,13 @@ impl DumpJob {
                     .await?;
             }
             DbKind::Postgres => {
+                // Row security off: a table whose rows a policy would hide fails the dump
+                // instead of dumping only the visible rows.
+                r.exec("SET row_security = off").await?;
+                // An empty search_path: every pg_get_* / format_type text the dump writes
+                // is schema-qualified (R23).
+                r.exec("SELECT pg_catalog.set_config('search_path', '', false)")
+                    .await?;
                 r.exec("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
                     .await?;
             }
@@ -1024,12 +1278,31 @@ impl DumpJob {
                 detail,
                 ddl: String::new(),
                 sequences: Vec::new(),
+                types: Vec::new(),
+                collations: Vec::new(),
+                identity_options: Vec::new(),
             };
             match r.kind() {
                 DbKind::MySql => t.ddl = r.meta(intro.object_ddl(&oref)).await?,
                 DbKind::Postgres => {
                     let rel = pg_relation(o.schema.as_deref().unwrap_or("public"), &o.name);
-                    for row in r.rows(PG_TABLE_SEQUENCES, vec![rel]).await? {
+                    let q = |n: &str| quote_ident(DbKind::Postgres, n);
+                    for row in r.rows(PG_TABLE_TYPES, vec![rel.clone()]).await? {
+                        if let (Some(s), Some(n)) = (text_of(row.first()), text_of(row.get(1))) {
+                            t.types.push((s, n));
+                        }
+                    }
+                    for row in r.rows(PG_TABLE_COLLATIONS, vec![rel.clone()]).await? {
+                        if let (Some(c), Some(s), Some(n)) = (
+                            text_of(row.first()),
+                            text_of(row.get(1)),
+                            text_of(row.get(2)),
+                        ) {
+                            t.collations
+                                .push((c, format!("COLLATE {}.{}", q(&s), q(&n))));
+                        }
+                    }
+                    for row in r.rows(PG_TABLE_SEQUENCES, vec![rel.clone()]).await? {
                         let (Some(schema), Some(name)) =
                             (text_of(row.first()), text_of(row.get(1)))
                         else {
@@ -1041,6 +1314,31 @@ impl DumpJob {
                             owner: text_of(row.get(2)),
                             identity: text_of(row.get(3)).as_deref() == Some("i"),
                         });
+                    }
+                    // Identity columns keep their sequence's name and options.
+                    for s in t.sequences.iter().filter(|s| s.identity) {
+                        let Some(col) = &s.owner else { continue };
+                        let seq = pg_relation(&s.schema, &s.name);
+                        let rows = r.rows(PG_SEQUENCE_OPTIONS, vec![seq.clone()]).await?;
+                        if let Some(row) = rows.first() {
+                            let what = format!("Sequence {}.{}", s.schema, s.name);
+                            let n = |i: usize| int_literal(row.get(i), &what);
+                            let cycle = if bool_of(row.get(5)) {
+                                "CYCLE"
+                            } else {
+                                "NO CYCLE"
+                            };
+                            let options = format!(
+                                "SEQUENCE NAME {seq} START WITH {} INCREMENT BY {} MINVALUE {} \
+                                 MAXVALUE {} CACHE {} {cycle}",
+                                n(0)?,
+                                n(1)?,
+                                n(2)?,
+                                n(3)?,
+                                n(4)?
+                            );
+                            t.identity_options.push((col.clone(), options));
+                        }
                     }
                 }
             }
@@ -1102,13 +1400,42 @@ impl DumpJob {
                         .as_deref()
                         .is_some_and(|i| i.eq_ignore_ascii_case("ALWAYS"))
             });
-        let list: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+        let quoted: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+        // The driver's types first: they decide how each column is read.
+        let probe = format!(
+            "SELECT {} FROM {select_from} WHERE 1 = 0",
+            quoted.join(", ")
+        );
+        let metas = r.metas(&probe).await?;
+        if metas.len() != cols.len() {
+            return Err(table_changed(&format!("Table {label}")));
+        }
+        let data_cols: Vec<DataCol> = cols
+            .iter()
+            .zip(&metas)
+            .map(|(c, m)| DataCol {
+                name: c.name.clone(),
+                db_type: c.db_type.clone(),
+                read: read_as(kind, m),
+            })
+            .collect();
+        let list: Vec<String> = data_cols
+            .iter()
+            .zip(&quoted)
+            .map(|(c, q)| match c.read {
+                ReadAs::Value => q.clone(),
+                ReadAs::Text => format!("{q}::text"),
+                ReadAs::Binary => format!("CAST({q} AS BINARY)"),
+            })
+            .collect();
         let sql = format!("SELECT {} FROM {select_from}", list.join(", "));
         file.comment(&format!("Data of {label}"))?;
         let phase = format!("Table {label}");
         ctx.progress(&phase, 0, t.detail.row_estimate, ProgressUnit::Rows);
         let opts = ExecOptions {
             max_rows: usize::MAX,
+            // Few rows per batch: a batch of large values is held in memory whole.
+            batch_size: DATA_BATCH_ROWS,
             timeout: None,
             cancel_grace: self.grace,
             stop: ctx.stop(),
@@ -1122,10 +1449,7 @@ impl DumpJob {
         let mut sink = DataSink {
             file,
             ctx,
-            cols: cols
-                .iter()
-                .map(|c| (c.name.clone(), c.db_type.clone()))
-                .collect(),
+            cols: data_cols,
             kind,
             relation: insert_into,
             overriding,
@@ -1135,6 +1459,7 @@ impl DumpJob {
             results: 0,
             rows: 0,
             error: None,
+            abort: Some(r.session.cancel_handle()),
         };
         let sent = r
             .session
@@ -1183,6 +1508,90 @@ impl DumpJob {
         }
         let info = r.session.server_info().clone();
         let q = |n: &str| quote_ident(DbKind::MySql, n);
+        let has_table = |n: &str| tables.iter().any(|t| t.obj.name.eq_ignore_ascii_case(n));
+        let has_view = |n: &str| views.iter().any(|v| v.name.eq_ignore_ascii_case(n));
+        for t in &tables {
+            for fk in &t.detail.foreign_keys {
+                let outside = match &fk.ref_schema {
+                    Some(other) => Some(format!("{other}.{}", fk.ref_table)),
+                    None => (!has_table(&fk.ref_table)).then(|| fk.ref_table.clone()),
+                };
+                if let Some(to) = outside {
+                    ctx.log(
+                        JobLogLevel::Warn,
+                        format!(
+                            "Foreign key {} of {} references {to}, which is not in the dump; \
+                             restoring needs that table.",
+                            fk.name, t.obj.name
+                        ),
+                    );
+                }
+            }
+        }
+
+        // What each view reads: the server's own record where it keeps one (MySQL
+        // 8.0.13+), else the names in table positions of its DDL.
+        let mut uses: Vec<Vec<(Option<String>, String)>> = vec![Vec::new(); views.len()];
+        let recorded = match info.variant {
+            ServerVariant::MySql8 => match r.rows(MYSQL_VIEW_USES, vec![db.clone()]).await {
+                Ok(rows) => Some(rows),
+                Err(DbError::Server { .. }) => None,
+                Err(e) => return Err(e),
+            },
+            _ => None,
+        };
+        match recorded {
+            Some(rows) => {
+                for row in rows {
+                    let (Some(view), Some(schema), Some(name)) = (
+                        text_of(row.first()),
+                        text_of(row.get(1)),
+                        text_of(row.get(2)),
+                    ) else {
+                        continue;
+                    };
+                    if let Some(i) = views.iter().position(|v| v.name == view) {
+                        uses[i].push(((schema != *db).then_some(schema), name));
+                    }
+                }
+            }
+            None => {
+                for (i, v) in views.iter().enumerate() {
+                    uses[i] = view_references(&v.ddl, Dialect::MYSQL);
+                }
+            }
+        }
+        for (i, v) in views.iter().enumerate() {
+            for (schema, name) in &uses[i] {
+                let outside = match schema {
+                    Some(other) => Some(format!("{other}.{name}")),
+                    None => (!has_table(name) && !has_view(name)).then(|| name.clone()),
+                };
+                if let Some(what) = outside {
+                    ctx.log(
+                        JobLogLevel::Warn,
+                        format!(
+                            "View {} reads {what}, which is not in the dump; restoring needs it.",
+                            v.name
+                        ),
+                    );
+                }
+            }
+        }
+        let view_nodes: Vec<TableNode> = views
+            .iter()
+            .zip(&uses)
+            .map(|(v, u)| TableNode {
+                schema: None,
+                name: v.name.clone(),
+                references: u
+                    .iter()
+                    .filter(|(s, _)| s.is_none())
+                    .map(|(_, n)| (None, n.clone()))
+                    .collect(),
+            })
+            .collect();
+        let view_seq = table_order(&view_nodes);
 
         file.raw(&header(&self.header(&info, objects, None)))?;
         for s in session_prologue(DbKind::MySql) {
@@ -1206,7 +1615,7 @@ impl DumpJob {
             .relation();
             rows += self.data(ctx, r, file, t, from, q(&t.obj.name)).await?;
         }
-        for i in view_order(&views, Dialect::MYSQL) {
+        for i in view_seq {
             let v = &views[i];
             file.comment(&format!("View {}", q(&v.name)))?;
             if self.request.include_drop {
@@ -1239,14 +1648,56 @@ impl DumpJob {
         let intro = r.session.introspector();
         let pg = Dialect::Postgres;
         let schema_of = |o: &DumpObject| o.schema.clone().unwrap_or_else(|| "public".into());
+        let mut objects = objects.to_vec();
+        let tables = Self::ordered(self.read_tables(r, &objects).await?);
 
-        // Types: enums first (a composite may use one), then by name.
-        let mut types = Vec::new();
-        for o in objects.iter().filter(|o| o.kind == ObjectKind::Type) {
-            let ddl = r.meta(intro.object_ddl(&obj_ref(db, o))).await?;
-            types.push((o.clone(), ddl));
+        // The types the columns use: those of the dumped schemas are dumped too.
+        for t in &tables {
+            let label = shown_name(t.obj.schema.as_deref(), &t.obj.name);
+            for (schema, name) in &t.types {
+                let present = objects.iter().any(|o| {
+                    o.kind == ObjectKind::Type
+                        && o.schema.as_deref() == Some(schema.as_str())
+                        && &o.name == name
+                });
+                if present {
+                    continue;
+                }
+                if self.request.schemas.contains(schema) {
+                    ctx.log(
+                        JobLogLevel::Info,
+                        format!("Type {schema}.{name} is dumped too: table {label} uses it."),
+                    );
+                    objects.push(DumpObject {
+                        schema: Some(schema.clone()),
+                        name: name.clone(),
+                        kind: ObjectKind::Type,
+                        data: false,
+                    });
+                } else {
+                    ctx.log(
+                        JobLogLevel::Warn,
+                        format!(
+                            "Table {label} uses type {schema}.{name}, whose schema is not \
+                             dumped; restoring needs it."
+                        ),
+                    );
+                }
+            }
         }
-        types.sort_by_key(|(o, ddl)| (!ddl.contains(" AS ENUM ("), schema_of(o), o.name.clone()));
+        // Types: enums, then domains (an enum may be their base), then composites.
+        let mut types: Vec<(DumpObject, u8, String)> = Vec::new();
+        for o in objects.iter().filter(|o| o.kind == ObjectKind::Type) {
+            let (rank, ddl) = match self.domain_ddl(r, &schema_of(o), &o.name).await? {
+                Some(ddl) => (1, ddl),
+                None => {
+                    let ddl = r.meta(intro.object_ddl(&obj_ref(db, o))).await?;
+                    (if ddl.contains(" AS ENUM (") { 0 } else { 2 }, ddl)
+                }
+            };
+            types.push((o.clone(), rank, ddl));
+        }
+        types.sort_by_key(|(o, rank, _)| (*rank, schema_of(o), o.name.clone()));
 
         // Sequences: the stand-alone ones asked for, then those the tables need.
         let mut creates: BTreeMap<(String, String), SeqCreate> = BTreeMap::new();
@@ -1258,10 +1709,10 @@ impl DumpJob {
                     ddl,
                     owner: None,
                     value: None,
+                    needed_only: false,
                 },
             );
         }
-        let tables = Self::ordered(self.read_tables(r, objects).await?);
         for t in &tables {
             let rel = pg_relation(&schema_of(&t.obj), &t.obj.name);
             for s in &t.sequences {
@@ -1280,9 +1731,11 @@ impl DumpJob {
                                 ddl,
                                 owner: Some((rel.clone(), col.clone())),
                                 value: None,
+                                needed_only: false,
                             },
                         );
                     }
+                    // Only a column default uses it.
                     (None, _) => {
                         if let Entry::Vacant(slot) = creates.entry(key) {
                             let ddl = self.sequence_ddl(r, slot.key()).await?;
@@ -1290,6 +1743,7 @@ impl DumpJob {
                                 ddl,
                                 owner: None,
                                 value: None,
+                                needed_only: true,
                             });
                         }
                     }
@@ -1302,31 +1756,63 @@ impl DumpJob {
             }
         }
 
+        // Views, in the order of what each reads (its rewrite rule's dependencies).
         let mut views = Vec::new();
         for o in objects.iter().filter(|o| o.kind == ObjectKind::View) {
             let ddl = r.meta(intro.object_ddl(&obj_ref(db, o))).await?;
-            views.push((
-                o.clone(),
-                ViewNode {
-                    name: o.name.clone(),
-                    ddl,
-                },
-            ));
+            let rel = pg_relation(&schema_of(o), &o.name);
+            let mut uses = Vec::new();
+            for row in r.rows(PG_VIEW_USES, vec![rel]).await? {
+                if let (Some(s), Some(n)) = (text_of(row.first()), text_of(row.get(1))) {
+                    uses.push((s, n));
+                }
+            }
+            views.push((o.clone(), ddl, uses));
         }
-        let nodes: Vec<ViewNode> = views.iter().map(|(_, v)| v.clone()).collect();
-        let view_seq = view_order(&nodes, pg);
-
-        let dumped: HashSet<(String, String)> = tables
+        let dumped_tables: HashSet<(String, String)> = tables
             .iter()
             .map(|t| (schema_of(&t.obj), t.obj.name.clone()))
             .collect();
+        let dumped_views: HashSet<(String, String)> = views
+            .iter()
+            .map(|(o, _, _)| (schema_of(o), o.name.clone()))
+            .collect();
+        for (o, _, uses) in &views {
+            for used in uses {
+                if !dumped_tables.contains(used) && !dumped_views.contains(used) {
+                    ctx.log(
+                        JobLogLevel::Warn,
+                        format!(
+                            "View {} reads {}.{}, which is not in the dump; restoring needs it.",
+                            shown_name(o.schema.as_deref(), &o.name),
+                            used.0,
+                            used.1
+                        ),
+                    );
+                }
+            }
+        }
+        let view_nodes: Vec<TableNode> = views
+            .iter()
+            .map(|(o, _, uses)| TableNode {
+                schema: o.schema.clone(),
+                name: o.name.clone(),
+                references: uses
+                    .iter()
+                    .filter(|u| dumped_views.contains(*u))
+                    .map(|(s, n)| (Some(s.clone()), n.clone()))
+                    .collect(),
+            })
+            .collect();
+        let view_seq = table_order(&view_nodes);
+
         for t in &tables {
             for fk in &t.detail.foreign_keys {
                 let to = (
                     fk.ref_schema.clone().unwrap_or_else(|| schema_of(&t.obj)),
                     fk.ref_table.clone(),
                 );
-                if !dumped.contains(&to) {
+                if !dumped_tables.contains(&to) {
                     ctx.log(
                         JobLogLevel::Warn,
                         format!(
@@ -1345,15 +1831,18 @@ impl DumpJob {
         let info = r.session.server_info().clone();
         file.raw(&header(&self.header(
             &info,
-            objects,
+            &objects,
             Some(creates.len() as u32),
         )))?;
         for s in session_prologue(DbKind::Postgres) {
             file.statement(s)?;
         }
-        if self.request.include_drop {
+        let include_drop = self.request.include_drop;
+        if include_drop {
+            // Views and tables take their dependents in the target with them; sequences
+            // and types never do (a column of another table would go).
             for &i in view_seq.iter().rev() {
-                let (o, _) = &views[i];
+                let (o, _, _) = &views[i];
                 file.statement(&format!(
                     "DROP VIEW IF EXISTS {} CASCADE",
                     pg_relation(&schema_of(o), &o.name)
@@ -1365,15 +1854,17 @@ impl DumpJob {
                     pg_relation(&schema_of(&t.obj), &t.obj.name)
                 ))?;
             }
-            for (schema, name) in creates.keys() {
-                file.statement(&format!(
-                    "DROP SEQUENCE IF EXISTS {} CASCADE",
-                    pg_relation(schema, name)
-                ))?;
+            for ((schema, name), c) in &creates {
+                if !c.needed_only {
+                    file.statement(&format!(
+                        "DROP SEQUENCE IF EXISTS {}",
+                        pg_relation(schema, name)
+                    ))?;
+                }
             }
-            for (o, _) in types.iter().rev() {
+            for (o, _, _) in types.iter().rev() {
                 file.statement(&format!(
-                    "DROP TYPE IF EXISTS {} CASCADE",
+                    "DROP TYPE IF EXISTS {}",
                     pg_relation(&schema_of(o), &o.name)
                 ))?;
             }
@@ -1387,7 +1878,7 @@ impl DumpJob {
         for s in &schemas {
             file.statement(&create_schema_sql(s))?;
         }
-        for (o, ddl) in &types {
+        for (o, _, ddl) in &types {
             file.comment(&format!(
                 "Type {}",
                 shown_name(o.schema.as_deref(), &o.name)
@@ -1396,7 +1887,14 @@ impl DumpJob {
         }
         for ((schema, name), c) in &creates {
             file.comment(&format!("Sequence {schema}.{name}"))?;
-            file.script(&c.ddl, pg)?;
+            // A sequence other tables of the target may share is kept when it exists.
+            let ddl = if c.needed_only && include_drop {
+                c.ddl
+                    .replacen("CREATE SEQUENCE ", "CREATE SEQUENCE IF NOT EXISTS ", 1)
+            } else {
+                c.ddl.clone()
+            };
+            file.script(&ddl, pg)?;
             if let Some((last, called)) = &c.value {
                 file.statement(&setval_sql(&pg_relation(schema, name), last, called))?;
             }
@@ -1406,9 +1904,10 @@ impl DumpJob {
                 "Table {}",
                 shown_name(t.obj.schema.as_deref(), &t.obj.name)
             ))?;
-            let mut d = t.detail.clone();
-            d.foreign_keys.clear();
-            file.script(&dnt_driver_pg::ddl::build_table_ddl(&d), pg)?;
+            file.script(
+                &dnt_driver_pg::ddl::build_table_ddl(&pg_table_ddl_detail(t)),
+                pg,
+            )?;
         }
         for ((schema, name), c) in &creates {
             if let Some((rel, col)) = &c.owner {
@@ -1459,12 +1958,12 @@ impl DumpJob {
             }
         }
         for &i in &view_seq {
-            let (o, v) = &views[i];
+            let (o, ddl, _) = &views[i];
             file.comment(&format!(
                 "View {}",
                 shown_name(o.schema.as_deref(), &o.name)
             ))?;
-            file.script(&v.ddl, pg)?;
+            file.script(ddl, pg)?;
         }
         for s in session_epilogue(DbKind::Postgres) {
             file.statement(s)?;
@@ -1478,6 +1977,38 @@ impl DumpJob {
             rows,
             statements,
         })
+    }
+
+    /// `CREATE DOMAIN` of domain `schema`.`name` from the catalog; `None`: not a domain.
+    async fn domain_ddl(
+        &self,
+        r: &Reader<'_>,
+        schema: &str,
+        name: &str,
+    ) -> Result<Option<String>, DbError> {
+        let rows = r
+            .rows(PG_DOMAIN, vec![schema.to_string(), name.to_string()])
+            .await?;
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        let base = text_of(row.first()).ok_or_else(|| table_changed(&format!("Type {name}")))?;
+        let q = |n: &str| quote_ident(DbKind::Postgres, n);
+        let mut ddl = format!("CREATE DOMAIN {} AS {base}", pg_relation(schema, name));
+        if let (Some(cs), Some(cn)) = (text_of(row.get(1)), text_of(row.get(2))) {
+            ddl.push_str(&format!(" COLLATE {}.{}", q(&cs), q(&cn)));
+        }
+        if let Some(default) = text_of(row.get(3)) {
+            ddl.push_str(&format!(" DEFAULT {default}"));
+        }
+        if bool_of(row.get(4)) {
+            ddl.push_str(" NOT NULL");
+        }
+        if let Some(checks) = text_of(row.get(5)) {
+            ddl.push(' ');
+            ddl.push_str(&checks);
+        }
+        Ok(Some(ddl))
     }
 
     async fn sequence_ddl(
