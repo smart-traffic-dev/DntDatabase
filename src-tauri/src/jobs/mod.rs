@@ -7,7 +7,9 @@
 //!   the import/backup modules; the UI casts the payload per kind.
 //! - [`manager`]: [`JobManager`] (per-connection run limit, FIFO queue, Stop, events).
 //! - `persist`: `JobRecord` ↔ model and the R6 log trimming.
+//! - [`events`]: the Tauri sink emitting `job://progress`.
 
+pub mod events;
 pub mod manager;
 pub mod model;
 mod persist;
@@ -15,6 +17,7 @@ mod persist;
 #[cfg(test)]
 mod tests;
 
+pub use events::{TauriJobEvents, JOB_PROGRESS_EVENT};
 pub use manager::{
     jobs_per_connection, JobCtx, JobDone, JobEvents, JobFailure, JobManager, JobRunner, JobSpec,
     TrackedJob, DEFAULT_JOBS_PER_CONNECTION, EVENT_INTERVAL, INTERRUPTED_SUMMARY,

@@ -1827,6 +1827,11 @@ pub struct ExportRun {
 }
 
 impl ExportRun {
+    /// The connection the export runs on (its tracked job's connection).
+    pub fn connection_id(&self) -> Uuid {
+        self.rt.cfg.id
+    }
+
     /// Sends the statement, streaming its rows into `sink` (see
     /// [`SessionManager::query_export`]). As a run's task does, a panic while it runs
     /// (driver or sink) is caught: the session, in an unknown state, is dropped and an

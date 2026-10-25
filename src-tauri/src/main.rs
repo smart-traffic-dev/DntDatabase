@@ -4,10 +4,12 @@
 use dnt_store::keyring_store::KeyringSecretStore;
 use dntdatabase::commands;
 use dntdatabase::desktop;
+use dntdatabase::jobs::TauriJobEvents;
 use dntdatabase::logging;
 use dntdatabase::state::{AppPaths, AppState};
 use std::error::Error;
 use std::sync::Arc;
+use tauri::Manager;
 
 fn main() {
     if let Err(e) = run() {
@@ -46,6 +48,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {
             builder.mount_events(app);
+            // Job events reach the UI as `job://progress`.
+            app.state::<AppState>()
+                .sessions
+                .jobs
+                .set_events(Arc::new(TauriJobEvents(app.handle().clone())));
             desktop::create_main_window(app)?;
             desktop::harden_main_webview(app);
             Ok(())

@@ -15,6 +15,11 @@
 //!
 //! Reading again streams straight to the file: no page cap, no row limit, no statement
 //! timeout; progress goes through the channel; a cancel removes the half-written file.
+//!
+//! The three streaming exports are tracked jobs (P5 R3): they keep this execution path,
+//! session and dialog, and also appear in the Jobs panel with their progress and
+//! outcome; the panel's Stop takes each one's own cancel path (`table_data_cancel`,
+//! `query_cancel(run_id)`, `export_query_result_cancel`).
 
 use super::data::{data_query, DataFilter, SortSpec};
 use super::{blocking, guard};
@@ -23,6 +28,7 @@ use crate::export_format::{
     check_options, open_writer, write_rows, ExportFormat, ExportOptions, ExportProgress,
     ExportSink, ExportSummary, Target, Written,
 };
+use crate::jobs::{JobDone, JobKind, JobSpec, TrackedJob};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::ObjectRef;
@@ -53,6 +59,83 @@ fn summary(w: Written, path: String, started: Instant) -> ExportSummary {
         cut_cells: w.cut_cells,
         partial_binaries: w.partial_binaries,
         elapsed_ms: elapsed_ms(started),
+    }
+}
+
+/// Title of a tracked export job: `Export <name> to <file name>`.
+pub fn export_job_title(name: &str, path: &str) -> String {
+    let file = std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |f| f.to_string_lossy().into_owned());
+    format!("Export {name} to {file}")
+}
+
+/// Registers a streaming export as a tracked job (R3): shown in the Jobs panel, not
+/// re-runnable, no run slot. Its Stop runs `cancel` (the export's own cancel path).
+fn track_export(
+    state: &AppState,
+    connection_id: Option<Uuid>,
+    name: &str,
+    path: &str,
+    cancel: Box<dyn Fn() + Send + Sync>,
+) -> Arc<TrackedJob> {
+    let spec = JobSpec {
+        kind: JobKind::Export,
+        connection_id,
+        title: export_job_title(name, path),
+        params: None,
+        rerunnable: false,
+    };
+    Arc::new(state.sessions.jobs.track(spec, cancel))
+}
+
+/// A Stop closure that wakes `stop` (a permit is kept when nothing waits yet).
+fn notify_on_stop(stop: &Arc<Notify>) -> Box<dyn Fn() + Send + Sync> {
+    let stop = Arc::clone(stop);
+    Box::new(move || stop.notify_one())
+}
+
+/// `progress`, also reported to the tracked job.
+fn tracked_progress(mut progress: Progress, job: &Arc<TrackedJob>) -> Progress {
+    let job = Arc::clone(job);
+    Box::new(move |rows| {
+        progress(rows);
+        job.progress(rows);
+    })
+}
+
+/// Records the export's outcome on its tracked job.
+async fn finish_job(job: &TrackedJob, result: &Result<ExportSummary, DbError>) {
+    let outcome = match result {
+        Ok(s) => Ok(JobDone {
+            summary: if s.rows == 1 {
+                "1 row exported".to_owned()
+            } else {
+                format!("{} rows exported", s.rows)
+            },
+            result_path: Some(s.path.clone()),
+        }),
+        Err(e) => Err(e.clone()),
+    };
+    job.finish(outcome).await;
+}
+
+/// Runs `work`; once `stop` is woken, `cancel` runs (once) while `work` keeps going to
+/// its end, which the cancel makes come early.
+async fn stoppable<T>(
+    work: impl std::future::Future<Output = T>,
+    stop: &Notify,
+    cancel: impl std::future::Future<Output = ()>,
+) -> T {
+    let work = std::pin::pin!(work);
+    let watch = std::pin::pin!(async {
+        stop.notified().await;
+        cancel.await;
+        std::future::pending::<()>().await
+    });
+    match select(work, watch).await {
+        Either::Left((out, _)) => out,
+        Either::Right(((), _)) => unreachable!("the watcher never completes"),
     }
 }
 
@@ -143,7 +226,8 @@ impl Stream {
 }
 
 /// Runs `request` on a data session of `id` / `db` under `key`, streaming its first
-/// result into a writer of `opts` at `path`.
+/// result into a writer of `opts` at `path`. Waking `stop` (the tracked job's Stop)
+/// cancels it like `table_data_cancel(id, key)`.
 #[allow(clippy::too_many_arguments)]
 async fn stream_to_file(
     state: &AppState,
@@ -155,14 +239,17 @@ async fn stream_to_file(
     opts: ExportOptions,
     path: String,
     progress: Progress,
+    stop: &Notify,
 ) -> Result<ExportSummary, DbError> {
     let mut s = Stream::open(&opts, kind, &path, progress)?;
     let outcome = {
         let exec = std::pin::pin!(state.sessions.data_exec(id, db, key, &request, &mut s.sink));
-        // A write error (disk full…) stops the statement through its key.
+        // A write error (disk fullâ€¦) or a Stop stops the statement through its key.
         let failed = Arc::clone(&s.failed);
         let watch = std::pin::pin!(async {
-            failed.notified().await;
+            let failed = std::pin::pin!(failed.notified());
+            let stopped = std::pin::pin!(stop.notified());
+            let _ = select(failed, stopped).await;
             state.sessions.data_cancel(id, key);
             std::future::pending::<()>().await
         });
@@ -176,7 +263,7 @@ async fn stream_to_file(
 
 /// Writes the exact rows retained for a query result without running its SQL again; a
 /// result still running is followed until it ends. `operation` cancels it
-/// ([`export_query_result_cancel`]).
+/// ([`export_query_result_cancel`]); it is a tracked job whose Stop does the same.
 #[allow(clippy::too_many_arguments)]
 pub async fn export_query_result_impl(
     state: &AppState,
@@ -190,9 +277,20 @@ pub async fn export_query_result_impl(
     check_options(&opts)?;
     let store = state.sessions.results.clone();
     let cancel = store.begin_export(operation);
+    let stopper = store.clone();
+    let job = track_export(
+        state,
+        None,
+        "query result",
+        &path,
+        Box::new(move || {
+            stopper.cancel_export(operation);
+        }),
+    );
+    let progress = tracked_progress(progress, &job);
     let result = async {
         let stream = Stream::open(&opts, kind, &path, progress)?;
-        // A write error (disk full…) stops reading the stored rows.
+        // A write error (disk fullâ€¦) stops reading the stored rows.
         let failed = Arc::clone(&stream.failed);
         let stop = Arc::clone(&cancel);
         let watcher = tokio::spawn(async move {
@@ -215,6 +313,7 @@ pub async fn export_query_result_impl(
     }
     .await;
     store.finish_export(operation);
+    finish_job(&job, &result).await;
     result
 }
 
@@ -238,7 +337,11 @@ pub async fn export_table_impl(
         no_timeout: true,
         ..query.request(&[], None, usize::MAX)
     };
-    stream_to_file(
+    // A tracked job (R3): its Stop cancels the read like `table_data_cancel`.
+    let stop = Arc::new(Notify::new());
+    let job = track_export(state, Some(id), &obj.name, &path, notify_on_stop(&stop));
+    let progress = tracked_progress(progress, &job);
+    let result = stream_to_file(
         state,
         id,
         Some(&obj.database),
@@ -248,8 +351,11 @@ pub async fn export_table_impl(
         opts,
         path,
         progress,
+        &stop,
     )
-    .await
+    .await;
+    finish_job(&job, &result).await;
+    result
 }
 
 /// [`export_query_impl`], a failure with the tab session's transaction state after it.
@@ -270,13 +376,35 @@ async fn export_query_reported(
         .sessions
         .query_export_begin(plan_id, index, run_id)
         .await?;
-    let mut s = Stream::open(&opts, kind, &path, progress).map_err(early)?;
-    let failed = Arc::clone(&s.failed);
-    let (outcome, tx) = match run.execute(&mut s.sink, &failed).await {
-        Ok(()) => (Ok(()), None),
-        Err((e, tx)) => (Err(e), tx),
-    };
-    s.close(outcome, path).await.map_err(|e| (e, tx))
+    // A tracked job (R3): its Stop is `query_cancel(run_id)`.
+    let stop = Arc::new(Notify::new());
+    let job = track_export(
+        state,
+        Some(run.connection_id()),
+        "query result",
+        &path,
+        notify_on_stop(&stop),
+    );
+    let progress = tracked_progress(progress, &job);
+    let result = async {
+        let mut s = Stream::open(&opts, kind, &path, progress).map_err(early)?;
+        let failed = Arc::clone(&s.failed);
+        let executed = stoppable(run.execute(&mut s.sink, &failed), &stop, async {
+            if let Err(e) = state.sessions.query_cancel(run_id).await {
+                tracing::warn!(error = %e, "could not stop an export");
+            }
+        })
+        .await;
+        let (outcome, tx) = match executed {
+            Ok(()) => (Ok(()), None),
+            Err((e, tx)) => (Err(e), tx),
+        };
+        s.close(outcome, path).await.map_err(|e| (e, tx))
+    }
+    .await;
+    let plain = result.clone().map_err(|(e, _)| e);
+    finish_job(&job, &plain).await;
+    result
 }
 
 /// Every row of statement `index` of plan `plan_id` (a read), run again on its tab's
@@ -523,7 +651,160 @@ pub fn export_query_result_cancel(state: State<'_, AppState>, operation: Uuid) -
 
 #[cfg(test)]
 mod tests {
-    use super::file_stem;
+    use super::*;
+    use crate::export_format::ExportFormat;
+    use crate::jobs::JobState;
+    use crate::state::AppPaths;
+    use dnt_core::secret::MemorySecretStore;
+    use dnt_core::value::LogicalType;
+    use std::time::Duration;
+
+    fn app_state(dir: &std::path::Path) -> AppState {
+        AppState::open(
+            AppPaths::in_dir(dir.join("data")),
+            Arc::new(MemorySecretStore::default()),
+        )
+        .unwrap()
+    }
+
+    fn csv() -> ExportOptions {
+        ExportOptions {
+            format: ExportFormat::Csv,
+            delimiter: ",".into(),
+            header: true,
+            quote_all: false,
+            bom: false,
+            table_name: String::new(),
+            formula_guard: false,
+        }
+    }
+
+    fn col(name: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.into(),
+            db_type: "text".into(),
+            logical: LogicalType::Text,
+            nullable: None,
+            origin_table: None,
+            origin_column: None,
+        }
+    }
+
+    fn no_progress() -> Progress {
+        Box::new(|_| {})
+    }
+
+    #[test]
+    fn export_job_titles_name_the_file() {
+        assert_eq!(
+            export_job_title("orders", r"C:\exports\orders.csv"),
+            "Export orders to orders.csv"
+        );
+        assert_eq!(export_job_title("q", "x.json"), "Export q to x.json");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tracked_result_export_appears_and_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let store = state.sessions.results.clone();
+        let token = store.create_result(Uuid::nil(), "tab", Uuid::new_v4(), 0, vec![col("a")]);
+        store.append(
+            token,
+            vec![vec![Value::Int(1)], vec![Value::Int(2)]],
+            Arc::new(|_, _, _| {}),
+            Arc::new(|e| panic!("{e}")),
+        );
+        store.finish(token).unwrap();
+        let path = dir.path().join("rows.csv").to_string_lossy().into_owned();
+        let summary = export_query_result_impl(
+            &state,
+            token.0,
+            DbKind::MySql,
+            csv(),
+            path.clone(),
+            Uuid::new_v4(),
+            no_progress(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.rows, 2);
+
+        let jobs = state.sessions.jobs.list(10).unwrap();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.kind, JobKind::Export);
+        assert_eq!(job.title, "Export query result to rows.csv");
+        assert!(!job.rerunnable);
+        assert!(
+            state
+                .sessions
+                .jobs
+                .wait(job.id, Duration::from_secs(5))
+                .await
+        );
+        let detail = state.sessions.jobs.detail(job.id).unwrap();
+        assert_eq!(detail.job.state, JobState::Done);
+        assert_eq!(detail.job.result_path.as_deref(), Some(path.as_str()));
+        assert_eq!(detail.job.summary.as_deref(), Some("2 rows exported"));
+        assert_eq!(state.sessions.jobs.active_count(), 0);
+    }
+
+    /// Stop from the Jobs panel reaches `cancel_export`: a result still running is
+    /// followed until the Stop, then the export ends cancelled without its file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn job_stop_cancels_result_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(app_state(dir.path()));
+        let store = state.sessions.results.clone();
+        // Never finished: the export waits for more rows.
+        let token = store.create_result(Uuid::nil(), "tab", Uuid::new_v4(), 0, vec![col("a")]);
+        store.append(
+            token,
+            vec![vec![Value::Int(1)]],
+            Arc::new(|_, _, _| {}),
+            Arc::new(|e| panic!("{e}")),
+        );
+        let path = dir.path().join("rows.csv");
+        let export = {
+            let state = Arc::clone(&state);
+            let path = path.to_string_lossy().into_owned();
+            tokio::spawn(async move {
+                export_query_result_impl(
+                    &state,
+                    token.0,
+                    DbKind::MySql,
+                    csv(),
+                    path,
+                    Uuid::new_v4(),
+                    no_progress(),
+                )
+                .await
+            })
+        };
+        let mut id = None;
+        for _ in 0..400 {
+            if let Some(j) = state.sessions.jobs.list(10).unwrap().first() {
+                id = Some(j.id);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let id = id.expect("the export is tracked");
+        assert_eq!(state.sessions.jobs.active_count(), 1);
+        assert!(state.sessions.jobs.cancel(id).await);
+        let err = tokio::time::timeout(Duration::from_secs(5), export)
+            .await
+            .expect("the export stops")
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(err, DbError::Cancelled { .. }), "{err:?}");
+        assert!(state.sessions.jobs.wait(id, Duration::from_secs(5)).await);
+        let detail = state.sessions.jobs.detail(id).unwrap();
+        assert_eq!(detail.job.state, JobState::Cancelled);
+        assert_eq!(detail.job.result_path, None);
+        assert!(!path.exists());
+    }
 
     #[test]
     fn file_stems_are_safe_names() {
@@ -533,6 +814,6 @@ mod tests {
         assert_eq!(file_stem("x\u{0}y\n"), "x_y_");
         assert_eq!(file_stem("  "), "export");
         assert_eq!(file_stem("name."), "name");
-        assert_eq!(file_stem(&"é".repeat(300)).chars().count(), 100);
+        assert_eq!(file_stem(&"Ã©".repeat(300)).chars().count(), 100);
     }
 }

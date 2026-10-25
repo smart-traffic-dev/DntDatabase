@@ -970,6 +970,130 @@ async snippetsDelete(id: string) : Promise<Result<null, AppError>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Live jobs first, then finished ones; `limit` default 200, at most 500.
+ */
+async jobList(limit: number | null) : Promise<Result<JobSummary[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_list", { limit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * A job with its log and the parameters it was started with.
+ */
+async jobDetail(id: string) : Promise<Result<JobDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_detail", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops a job; `false` when it is not queued or running.
+ */
+async jobCancel(id: string) : Promise<Result<boolean, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_cancel", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Queued and running jobs (status bar, close guard).
+ */
+async jobActiveCount() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_active_count") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stops every job and waits up to 5 seconds for them to end (close guard).
+ */
+async jobStopAll() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_stop_all") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Shows a job's result file in the system file manager, only when the job recorded it
+ * and the file exists; nothing is opened or run.
+ */
+async jobRevealResult(id: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_reveal_result", { id }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes the finished jobs; queued and running ones stay.
+ */
+async jobClearHistory() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("job_clear_history") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Background jobs that may run at the same time on one connection (default 2).
+ */
+async getJobsPerConnection() : Promise<Result<number, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_jobs_per_connection") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the per-connection job limit: 1 to 8, else `config` (field `n`).
+ */
+async setJobsPerConnection(n: number) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_jobs_per_connection", { n }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The folder searched first for `mysqldump`, `pg_dump` and the other external tools;
+ * `None`: only `PATH`.
+ */
+async getExternalToolsDir() : Promise<Result<string | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_external_tools_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the external tools folder (absolute, existing; `None` clears it), else
+ * `config` (field `dir`).
+ */
+async setExternalToolsDir(dir: string | null) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_external_tools_dir", { dir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -1539,12 +1663,47 @@ export type IndexPartDef = { column: string | null; expression: string | null;
  * MySQL prefix length.
  */
 prefix: number | null; descending: boolean }
+export type JobDetail = { job: JobSummary; log: JobLogLine[]; 
+/**
+ * Log lines not kept (memory keeps the first and last 1,000; the store 250 + 250).
+ */
+dropped_lines: number; params: JobParams | null }
+/**
+ * Payload of the `job://progress` app event.
+ */
+export type JobEvent = { job: JobSummary; 
+/**
+ * Log lines added since the previous event of this job.
+ */
+new_log: JobLogLine[] }
+export type JobKind = "import" | "import_dry_run" | "dump" | "tool_dump" | "restore" | "tool_restore" | "export"
+export type JobLogLevel = "info" | "warn" | "error"
+export type JobLogLine = { 
+/**
+ * RFC 3339 UTC with milliseconds.
+ */
+at: string; level: JobLogLevel; message: string }
+/**
+ * The request a job was started with, for "Run again". The payload is the request type
+ * of the kind (ImportRequest, DryRunRequest, DumpRequest, ToolDumpRequest,
+ * RestoreRequest) carried as a JSON value, so the job framework does not depend on the
+ * import/backup modules.
+ */
+export type JobParams = { kind: "import"; request: JsonValue } | { kind: "import_dry_run"; request: JsonValue } | { kind: "dump"; request: JsonValue } | { kind: "tool_dump"; request: JsonValue } | { kind: "restore"; request: JsonValue } | { kind: "tool_restore"; request: JsonValue }
+export type JobProgress = { 
+/**
+ * What the job is doing ("Reading file", "Rows", …); empty before it reports.
+ */
+phase: string; done: number; total: number | null; unit: ProgressUnit }
+export type JobState = "queued" | "running" | "done" | "failed" | "cancelled"
+export type JobSummary = { id: string; kind: JobKind; connection_id: string | null; title: string; state: JobState; progress: JobProgress; created_at: string; started_at: string | null; finished_at: string | null; result_path: string | null; summary: string | null; error: AppError | null; outcome_unknown: boolean; rerunnable: boolean }
 /**
  * TypeScript type of `Value::Int` / `Value::UInt`: a number when |x| ≤ 2^53, else a string.
  * Only used for the bindings (`#[specta(type = …)]`, exported as
  * `type JsInteger = number | string`), never constructed.
  */
 export type JsInteger = number | string
+export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
 /**
  * The primary key.
  */
@@ -1664,6 +1823,7 @@ export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialec
  * The tab session's transaction state when the plan was made.
  */
 tx_state: TxState }
+export type ProgressUnit = "rows" | "bytes" | "statements" | "none"
 /**
  * How much of a row a statement's guard checks (spec §5.2).
  */

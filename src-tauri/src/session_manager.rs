@@ -371,8 +371,8 @@ pub struct SessionManager {
     pub(crate) data_page_cap: usize,
     /// How long `close` waits for a running edit apply before it cancels it.
     pub(crate) apply_close_wait: Duration,
-    /// Background jobs (see `jobs`).
-    pub(crate) jobs: crate::jobs::JobManager,
+    /// Background jobs (see `jobs`). Public: `main.rs` installs the event sink.
+    pub jobs: crate::jobs::JobManager,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
