@@ -89,16 +89,6 @@ impl BatchBuilder {
         })
     }
 
-    /// The statement template `(head, tail)` for the preview: a batch is head + tuples + tail.
-    pub fn template(&self) -> (&str, &str) {
-        (&self.head, &self.tail)
-    }
-
-    /// Rows waiting in the current batch.
-    pub fn pending_rows(&self) -> u32 {
-        self.rows
-    }
-
     /// Adds `row` (source record `record`). Returns the previous batch when this row does not
     /// fit in it. A row whose literals do not build is refused and leaves the batch unchanged.
     pub fn push(&mut self, row: Vec<FullValue>, record: u64) -> Result<Option<Batch>, BuildError> {

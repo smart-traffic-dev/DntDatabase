@@ -4,8 +4,8 @@
 
 use super::{blocking, guard};
 use crate::jobs::{
-    jobs_per_connection, DEFAULT_JOBS_PER_CONNECTION, JOBS_PER_CONNECTION_KEY,
-    MAX_JOBS_PER_CONNECTION, MIN_JOBS_PER_CONNECTION,
+    saved_jobs_per_connection, JOBS_PER_CONNECTION_KEY, MAX_JOBS_PER_CONNECTION,
+    MIN_JOBS_PER_CONNECTION,
 };
 use crate::logging::{LogHandle, LogLevel};
 use crate::state::AppState;
@@ -232,18 +232,6 @@ pub async fn set_idle_tx_warn_minutes(
     minutes: u32,
 ) -> Result<(), AppError> {
     guard(set_idle_tx_warn_minutes_impl(&state, minutes)).await
-}
-
-/// The stored per-connection job limit (R2): the default when none is stored or it is
-/// not a number, clamped to 1–8; the default when it cannot be read.
-pub fn saved_jobs_per_connection(repo: &ConnectionRepo) -> u32 {
-    match repo.app_setting(JOBS_PER_CONNECTION_KEY) {
-        Ok(raw) => jobs_per_connection(raw.as_deref()),
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot read the jobs per connection setting");
-            DEFAULT_JOBS_PER_CONNECTION
-        }
-    }
 }
 
 pub async fn get_jobs_per_connection_impl(state: &AppState) -> Result<u32, DbError> {

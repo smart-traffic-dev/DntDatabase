@@ -40,7 +40,7 @@
 
 use dnt_core::config::{ResolvedConfig, SslConfig, SslMode};
 use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde::{Deserialize, Serialize};
@@ -960,7 +960,7 @@ impl ToolOutput {
 pub fn open_input(path: &Path, gzip: bool) -> io::Result<Box<dyn Read + Send>> {
     let file = BufReader::with_capacity(256 * 1024, std::fs::File::open(path)?);
     Ok(if gzip {
-        Box::new(GzDecoder::new(file))
+        Box::new(MultiGzDecoder::new(file))
     } else {
         Box::new(file)
     })

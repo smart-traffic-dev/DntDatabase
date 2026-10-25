@@ -61,6 +61,8 @@ const FINISHED_IN_MEMORY: usize = 100;
 pub const INTERRUPTED_SUMMARY: &str = "The app closed while the job ran; its outcome is unknown.";
 const STOPPED_BEFORE_START: &str = "Stopped before it started.";
 const PANIC_SUMMARY: &str = "The job failed unexpectedly.";
+/// The progress phase of a tracked export (the unit says the count is rows).
+pub const TRACKED_EXPORT_PHASE: &str = "Exporting";
 
 /// The per-connection limit stored under [`JOBS_PER_CONNECTION_KEY`]: the default when
 /// missing or not a number, clamped to 1–8.
@@ -68,6 +70,18 @@ pub fn jobs_per_connection(raw: Option<&str>) -> u32 {
     raw.and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(DEFAULT_JOBS_PER_CONNECTION)
         .clamp(MIN_JOBS_PER_CONNECTION, MAX_JOBS_PER_CONNECTION)
+}
+
+/// The stored per-connection job limit (R2): [`jobs_per_connection`] of the setting,
+/// the default when it cannot be read. Reads SQLite synchronously.
+pub fn saved_jobs_per_connection(repo: &ConnectionRepo) -> u32 {
+    match repo.app_setting(JOBS_PER_CONNECTION_KEY) {
+        Ok(raw) => jobs_per_connection(raw.as_deref()),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the jobs per connection setting");
+            DEFAULT_JOBS_PER_CONNECTION
+        }
+    }
 }
 
 /// What a job is (fixed when it is submitted or tracked).
@@ -254,6 +268,71 @@ impl State {
 
 type LimitReader = Arc<dyn Fn() -> u32 + Send + Sync>;
 
+/// The lock file of an instance's job folder, locked while that instance runs.
+const OWNER_LOCK: &str = "owner.lock";
+/// A folder without a lock file younger than this may be an instance that is starting.
+const STALE_TMP_AFTER: Duration = Duration::from_secs(60);
+
+/// Where job temporary directories go.
+struct TmpRoot {
+    /// `<data_dir>/job-tmp`, shared by every app instance.
+    base: PathBuf,
+    /// `<base>/<instance>`: this instance's.
+    dir: PathBuf,
+    /// Holds the lock of `<dir>/owner.lock` for the life of the manager.
+    _owner: Option<std::fs::File>,
+}
+
+fn lock_read<T>(l: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    l.read().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Removes what instances that are gone left under `base` (never `own`): a folder whose
+/// lock file is not locked, one without a lock file once older than `min_age`, and loose
+/// files. Returns whether another instance holds its folder's lock.
+fn remove_stale_tmp(base: &std::path::Path, own: &std::path::Path, min_age: Duration) -> bool {
+    let mut other_alive = false;
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == own {
+            continue;
+        }
+        let removed = if !path.is_dir() {
+            std::fs::remove_file(&path)
+        } else {
+            match std::fs::File::open(path.join(OWNER_LOCK)) {
+                Ok(f) if f.try_lock().is_err() => {
+                    other_alive = true;
+                    continue;
+                }
+                Ok(f) => {
+                    drop(f);
+                    std::fs::remove_dir_all(&path)
+                }
+                Err(_) => {
+                    let young = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_none_or(|age| age < min_age);
+                    if young {
+                        continue;
+                    }
+                    std::fs::remove_dir_all(&path)
+                }
+            }
+        };
+        if let Err(e) = removed {
+            tracing::warn!(error = %e, "could not delete a leftover job file");
+        }
+    }
+    other_alive
+}
+
 struct Inner {
     repo: Arc<ConnectionRepo>,
     state: Mutex<State>,
@@ -262,7 +341,7 @@ struct Inner {
     events: RwLock<Option<Arc<dyn JobEvents>>>,
     /// Serialises building and sending events, so a job's events arrive in order.
     emit_lock: Mutex<()>,
-    tmp_root: RwLock<Option<PathBuf>>,
+    tmp_root: RwLock<Option<TmpRoot>>,
     limit: RwLock<LimitReader>,
 }
 
@@ -341,15 +420,7 @@ impl JobManager {
     /// head of its queue waits for a slot.
     pub fn new(repo: Arc<ConnectionRepo>) -> Self {
         let reader_repo = Arc::clone(&repo);
-        let limit: LimitReader = Arc::new(move || {
-            match reader_repo.app_setting(JOBS_PER_CONNECTION_KEY) {
-                Ok(raw) => jobs_per_connection(raw.as_deref()),
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not read the jobs per connection setting");
-                    DEFAULT_JOBS_PER_CONNECTION
-                }
-            }
-        });
+        let limit: LimitReader = Arc::new(move || saved_jobs_per_connection(&reader_repo));
         JobManager {
             inner: Arc::new(Inner {
                 repo,
@@ -383,21 +454,43 @@ impl JobManager {
             .unwrap_or_else(PoisonError::into_inner) = Some(sink);
     }
 
-    /// Where jobs get their temporary directories (`<data_dir>/job-tmp`).
-    pub fn set_tmp_root(&self, dir: PathBuf) {
+    /// Where jobs get their temporary directories: `<base>/<instance>/<job>`, `base`
+    /// being `<data_dir>/job-tmp`. The instance folder holds an [`OWNER_LOCK`] file
+    /// locked for the life of this manager, so another app instance's [`recover`]
+    /// leaves it alone.
+    ///
+    /// [`recover`]: JobManager::recover
+    pub fn set_tmp_root(&self, base: PathBuf) {
+        let dir = base.join(Uuid::new_v4().to_string());
+        let owner = std::fs::create_dir_all(&dir)
+            .and_then(|()| std::fs::File::create(dir.join(OWNER_LOCK)))
+            .and_then(|f| f.try_lock().map(|()| f).map_err(std::io::Error::other));
+        let owner = match owner {
+            Ok(f) => Some(f),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not lock this instance's job folder");
+                None
+            }
+        };
         *self
             .inner
             .tmp_root
             .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(dir);
+            .unwrap_or_else(PoisonError::into_inner) = Some(TmpRoot {
+            base,
+            dir,
+            _owner: owner,
+        });
     }
 
-    fn tmp_root(&self) -> Option<PathBuf> {
+    /// This instance's folder of job temporary directories.
+    fn instance_tmp(&self) -> Option<PathBuf> {
         self.inner
             .tmp_root
             .read()
             .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .as_ref()
+            .map(|t| t.dir.clone())
     }
 
     /// The per-connection limit setting changed: queued jobs re-check it now.
@@ -407,24 +500,21 @@ impl JobManager {
         }
     }
 
-    /// Startup recovery (R7): deletes every leftover temporary job file and marks jobs
-    /// left queued/running as failed with an unknown outcome. Synchronous (file system
-    /// and SQLite).
+    /// Startup recovery (R7): deletes the temporary job files of app instances that are
+    /// gone and marks jobs left queued/running as failed with an unknown outcome — unless
+    /// another instance is running (its folder's lock is held): its live jobs are in the
+    /// store too, so nothing is marked then (a later start marks them). Synchronous (file
+    /// system and SQLite).
     pub fn recover(&self) -> Result<(), DbError> {
-        if let Some(root) = self.tmp_root() {
-            if let Ok(entries) = std::fs::read_dir(&root) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    let removed = if path.is_dir() {
-                        std::fs::remove_dir_all(&path)
-                    } else {
-                        std::fs::remove_file(&path)
-                    };
-                    if let Err(e) = removed {
-                        tracing::warn!(error = %e, "could not delete a leftover job file");
-                    }
-                }
-            }
+        let other_alive = match lock_read(&self.inner.tmp_root).as_ref() {
+            Some(t) => remove_stale_tmp(&t.base, &t.dir, STALE_TMP_AFTER),
+            None => false,
+        };
+        if other_alive {
+            tracing::info!(
+                "another app instance is running: jobs left running are not marked interrupted"
+            );
+            return Ok(());
         }
         let n = self
             .inner
@@ -1062,29 +1152,46 @@ impl JobManager {
             })
     }
 
-    /// Deletes every finished job (store and memory); live jobs stay. Writes SQLite
-    /// synchronously.
+    /// Deletes every finished job (store and memory); live jobs stay, and so do jobs
+    /// still settling (their final row may be written after the delete, so neither the
+    /// store nor memory drops them). Writes SQLite synchronously.
     pub fn clear_finished(&self) -> Result<(), DbError> {
-        self.inner.repo.job_clear_finished()?;
+        let settling: Vec<Uuid> = lock(&self.inner.state)
+            .jobs
+            .iter()
+            .filter(|(_, l)| !l.settled)
+            .map(|(id, _)| *id)
+            .collect();
+        self.inner.repo.job_clear_finished(&settling)?;
         let mut st = lock(&self.inner.state);
         st.jobs
-            .retain(|_, l| l.summary.state.is_live() || !l.settled);
-        st.finished.clear();
+            .retain(|id, l| l.summary.state.is_live() || !l.settled || settling.contains(id));
+        let State { finished, jobs, .. } = &mut *st;
+        finished.retain(|id| jobs.contains_key(id));
         Ok(())
     }
 
+    /// Creates the job's temporary directory under this instance's folder. Refused once
+    /// the job returned: the settle that removes it may already have run. The state lock
+    /// is held across the create so a settle cannot run between it and the record.
     fn create_tmp_dir(&self, id: Uuid) -> Result<PathBuf, DbError> {
-        let root = self.tmp_root().ok_or_else(|| DbError::Internal {
+        let root = self.instance_tmp().ok_or_else(|| DbError::Internal {
             message: "the job temporary directory is not set".into(),
         })?;
         let dir = root.join(id.to_string());
-        std::fs::create_dir_all(&dir).map_err(|e| DbError::Internal {
-            message: format!("could not create the job's temporary directory: {e}"),
-        })?;
-        if let Some(live) = lock(&self.inner.state).jobs.get_mut(&id) {
-            live.tmp_dir = Some(dir.clone());
+        let mut st = lock(&self.inner.state);
+        match st.jobs.get_mut(&id) {
+            Some(live) if !live.returned => {
+                std::fs::create_dir_all(&dir).map_err(|e| DbError::Internal {
+                    message: format!("could not create the job's temporary directory: {e}"),
+                })?;
+                live.tmp_dir = Some(dir.clone());
+                Ok(dir)
+            }
+            _ => Err(DbError::Internal {
+                message: "the job has ended; it gets no temporary directory".into(),
+            }),
         }
-        Ok(dir)
     }
 }
 
@@ -1200,16 +1307,12 @@ impl TrackedJob {
         self.mgr.set_progress(
             self.id,
             JobProgress {
-                phase: "Rows".into(),
+                phase: TRACKED_EXPORT_PHASE.into(),
                 done: rows as f64,
                 total: None,
                 unit: ProgressUnit::Rows,
             },
         );
-    }
-
-    pub fn log(&self, level: JobLogLevel, message: impl Into<String>) {
-        self.mgr.push_log(self.id, line(level, message.into()));
     }
 
     /// Records the outcome (the first call wins): `Ok` → done; an error after a Stop or

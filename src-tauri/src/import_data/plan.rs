@@ -3,8 +3,8 @@
 //! re-checks everything the plan depends on and submits the import job. `import_dry_run`
 //! submits a dry-run job (R18).
 use super::run::{
-    check_sources, create_temp_sql, file_changed_before, file_columns, hash_file, temp_table,
-    Context, DryRunJob, ImportJob,
+    check_sources, create_temp_sql, file_changed_before, file_columns, hash_file,
+    rows_per_statement, temp_table, Context, DryRunJob, ImportJob,
 };
 use super::target::{read_target_bounded, statement_atomic, table_changed, TargetRead};
 use super::{
@@ -166,18 +166,20 @@ fn warnings(
     out
 }
 
-/// The first rows of the file (at most [`SAMPLE_ROWS`]) as one `INSERT`, built exactly as
-/// the job builds its batches; `None` when no row of the first ones converts.
+/// The first rows of the file as one `INSERT`, built exactly as the job builds its
+/// first batch: at most `max_rows` (the job's rows per statement) and [`SAMPLE_ROWS`]
+/// rows. `None` when no row of the first ones converts.
 async fn sample(
     path: PathBuf,
     source: SourceOptions,
     layout: Layout,
+    max_rows: u32,
     max_bytes: u32,
 ) -> Result<Option<String>, DbError> {
     tokio::task::spawn_blocking(move || {
         let mut reader = dnt_transfer::read::open(&path, &source)
             .map_err(|e| config_error("file", &e.to_string()))?;
-        let mut builder = layout.builder(SAMPLE_ROWS, max_bytes)?;
+        let mut builder = layout.builder(max_rows.clamp(1, SAMPLE_ROWS), max_bytes)?;
         let mut seen = 0u32;
         while seen < SAMPLE_ROWS * 10 {
             let Some(rec) = reader
@@ -289,6 +291,7 @@ impl SessionManager {
             path,
             request.source.clone(),
             layout.clone(),
+            rows_per_statement(&request, transactional),
             request.batch_bytes,
         )
         .await?;

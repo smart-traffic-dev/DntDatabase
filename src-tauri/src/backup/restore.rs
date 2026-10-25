@@ -109,6 +109,15 @@ pub const PSQL_MISSING: &str = "This file needs psql (it uses COPY … FROM stdi
 pub const PG_RESTORE_MISSING: &str = "This file is a pg_dump archive (custom or tar format) and \
      needs pg_restore, which was not found. Install the PostgreSQL client tools or set the \
      External tools folder.";
+/// The preview's warning for `pg_restore --single-transaction`: its exit code does not
+/// tell a rolled-back failure from a partial one, so a failure is reported as possibly
+/// partial (`outcome_unknown`).
+pub const PG_RESTORE_FAILURE_UNKNOWN: &str = "pg_restore runs in one transaction, but its exit \
+     code does not tell whether a failure rolled back: a failed restore is reported as possibly \
+     partial.";
+/// The secret file as the preview's command shows it (the job's temporary folder does
+/// not exist yet).
+const PREVIEW_PGPASS: &str = r"<job temp>\pgpass.conf";
 
 /// What the user asked to restore (also the stored parameters of "Run again").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -444,6 +453,10 @@ impl SessionManager {
                 }
                 if !request.single_transaction {
                     warnings.push(partial.clone());
+                } else {
+                    // restore_outcome: pg_restore's exit code does not tell a rolled-back
+                    // failure from one that stopped part-way.
+                    warnings.push(PG_RESTORE_FAILURE_UNKNOWN.into());
                 }
                 if request.clean {
                     warnings.push(
@@ -525,7 +538,7 @@ impl SessionManager {
                 &ToolConn::from_resolved(&resolved, tunnelled),
                 &request,
                 transactional,
-                Path::new(PGPASS_FILE),
+                Path::new(PREVIEW_PGPASS),
             )?;
             drop(resolved);
             command = Some(shown_command(&inv));
@@ -1237,9 +1250,12 @@ impl AppRestoreJob {
                              cannot run in one; it is not the file that was analyzed.",
                         ));
                     }
+                    // R33: a `SET sql_mode` changes how the rest is lexed. Judged before
+                    // the send, so an unpredictable one is refused without running.
+                    let mut next = mode.clone();
+                    next.after(text).map_err(|r| file_refused(&r.0))?;
                     w.send(text, false).await?;
-                    // R33: a `SET sql_mode` changes how the rest is lexed.
-                    mode.after(text).map_err(|r| file_refused(&r.0))?;
+                    mode = next;
                     if mode.current() != splitter.dialect() {
                         splitter.set_dialect(mode.current());
                     }
@@ -1455,20 +1471,34 @@ impl ToolRestoreJob {
         let report = match ran {
             Ok(r) => r,
             Err(e) => {
-                // Nothing was started (the secret file or the spawn failed).
+                // Nothing was started (the secret file or the spawn failed); a failure
+                // after the spawn comes back in the report instead.
                 *spawned = false;
                 return Err(JobFailure::from(e));
             }
         };
+        if let Some(e) = &report.wait_error {
+            ctx.log(JobLogLevel::Error, e.clone());
+        }
         if let Some(e) = &report.in_error {
             ctx.log(
                 JobLogLevel::Error,
                 format!("Reading the file for {name} failed: {e}"),
             );
+            // The tool was killed before its stdin closed, so it never took the short
+            // input as complete; whether it had already committed anything is unknown.
+            let summary = format!(
+                "{name}: the input could not be read; the tool was stopped. The target may \
+                 be partially restored. The job log has its messages."
+            );
+            return Err(JobFailure {
+                error: config_error("tool", &summary),
+                outcome_unknown: true,
+                summary,
+            });
         }
         let killed = report.killed || ctx.is_stopped();
-        let outcome = if report.in_error.is_some() && report.code == Some(0) {
-            // The tool saw a short input: it may have restored only part of the file.
+        let outcome = if report.wait_error.is_some() {
             ToolOutcome::Partial
         } else {
             restore_outcome(self.info.tool, report.code, killed, self.transactional)

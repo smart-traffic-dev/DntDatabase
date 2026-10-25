@@ -334,8 +334,11 @@ pub struct RunReport {
     /// Writing the output file failed (the tool was killed then).
     pub out_error: Option<String>,
     pub in_bytes: u64,
-    /// Reading the input file failed (stdin was closed then).
+    /// Reading the input file failed (the tool was killed then, before its stdin was
+    /// closed, so it never saw a short input as complete).
     pub in_error: Option<String>,
+    /// Waiting for the spawned tool failed: it ran, how it ended is unknown.
+    pub wait_error: Option<String>,
 }
 
 /// The secret file of one run, removed when dropped.
@@ -564,10 +567,18 @@ struct StdinDone {
     error: Option<String>,
 }
 
-/// Feeds the file (decompressed when gzip) to the tool's stdin, then closes it. A read
-/// error closes stdin early and is reported; a write error means the tool stopped
-/// reading (it exited), which its exit code reports.
-async fn feed_stdin(mut pipe: WritePipe, feed: StdinFeed) -> StdinDone {
+/// Feeds the file (decompressed when gzip) to the tool's stdin, then closes it. A write
+/// error means the tool stopped reading (it exited), which its exit code reports.
+///
+/// A read error must not look like the end of the input: psql would then commit what
+/// it was given (a partial single-transaction restore). So on a read error the tool is
+/// killed (`kill`) and stdin is handed back still open, to be closed only after the
+/// tool has exited.
+async fn feed_stdin(
+    mut pipe: WritePipe,
+    feed: StdinFeed,
+    kill: &(dyn Fn() + Sync),
+) -> (StdinDone, Option<WritePipe>) {
     let mut done = StdinDone {
         bytes: 0,
         error: None,
@@ -577,7 +588,8 @@ async fn feed_stdin(mut pipe: WritePipe, feed: StdinFeed) -> StdinDone {
         Ok(r) => r,
         Err(e) => {
             done.error = Some(e.to_string());
-            return done;
+            kill();
+            return (done, Some(pipe));
         }
     };
     let mut buf = vec![0u8; 256 * 1024];
@@ -588,7 +600,8 @@ async fn feed_stdin(mut pipe: WritePipe, feed: StdinFeed) -> StdinDone {
             Ok(n) => n,
             Err(e) => {
                 done.error = Some(e.to_string());
-                break;
+                kill();
+                return (done, Some(pipe));
             }
         };
         let mut data = &buf[..n];
@@ -606,7 +619,7 @@ async fn feed_stdin(mut pipe: WritePipe, feed: StdinFeed) -> StdinDone {
         done.bytes += n as u64;
     }
     let _ = pipe.shutdown().await;
-    done
+    (done, None)
 }
 
 /// Runs one invocation: writes its secret file, spawns it, plumbs its pipes until it
@@ -649,9 +662,10 @@ pub async fn run_tool(
     let stdout_pipe = child.take_stdout();
     let stderr_pipe = child.take_stderr();
     let abort: &Notify = &wake;
-    let stdin_fut = async move {
+    let kill_on_input_error = || abort.notify_one();
+    let stdin_fut = async {
         match (stdin_pipe, stdin) {
-            (Some(pipe), Some(feed)) => Some(feed_stdin(pipe, feed).await),
+            (Some(pipe), Some(feed)) => Some(feed_stdin(pipe, feed, &kill_on_input_error).await),
             // No input: stdin is closed at once.
             (Some(mut pipe), None) => {
                 let _ = pipe.shutdown().await;
@@ -684,14 +698,18 @@ pub async fn run_tool(
     };
     let (status, stdin_done, stdout_done, ()) =
         tokio::join!(wait_fut, stdin_fut, stdout_fut, stderr_fut);
+    // A stdin left open after an input error is closed only now, the tool gone.
+    let stdin_done = stdin_done.map(|(done, _open_pipe)| done);
     drop(secret);
-    let code =
-        status.map_err(|e| config_error("tool", &format!("Waiting for {program} failed: {e}.")))?;
     let mut report = RunReport {
-        code,
         killed: stop_flag.load(Ordering::SeqCst),
         ..RunReport::default()
     };
+    match status {
+        Ok(code) => report.code = code,
+        // The tool ran: how it ended is unknown (never "nothing was started").
+        Err(e) => report.wait_error = Some(format!("Waiting for {program} failed: {e}.")),
+    }
     if let Some(d) = stdout_done {
         report.captured = d.captured;
         report.captured_truncated = d.truncated;

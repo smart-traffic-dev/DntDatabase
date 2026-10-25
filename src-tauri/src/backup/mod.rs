@@ -1,11 +1,12 @@
-//! Backup (spec §7): the integrated dump ("DntDatabase dump v1", §7.1, R22–R24, R29).
-//! Later tasks add restore.
+//! Backup and restore (spec §7): the integrated dump ("DntDatabase dump v1", §7.1,
+//! R22–R24, R29), dumps through external tools (§7.2) and restore (§7.3, R30–R34).
 //!
 //! - `dump`: the selectable objects of a database (with the skipped ones and why, R22),
 //!   `dump_start` and the dump job ([`dump::DumpJob`]).
 //! - `ext_tools`: N7, the external tool runner (discovery, secret files, process
 //!   plumbing, Stop = kill; §7.2, R25–R29); `tool_dump`: dumps through `mysqldump`,
 //!   `mariadb-dump` or `pg_dump`.
+//! - `restore`: three guarded paths (app runner, psql, pg_restore).
 //!
 //! A dump only reads: it runs on its own session inside one read-only snapshot (R24), is
 //! allowed on read-only connections and needs no confirmation. Its file is written as
@@ -13,11 +14,10 @@
 //! Values become SQL only through `dnt_core::sql::build::dump_row_tuple`.
 pub mod dump;
 pub mod ext_tools;
+pub mod restore;
 #[cfg(test)]
 mod tests;
 pub mod tool_dump;
-// Restore: three guarded paths (app runner, psql, pg_restore; §7.3, R30–R34).
-pub mod restore;
 
 pub use ext_tools::ToolsList;
 pub use restore::{RestorePlanStore, RestorePreview, RestoreRequest};

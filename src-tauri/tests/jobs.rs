@@ -264,32 +264,54 @@ fn job_count(state: &AppState) -> u32 {
 #[tokio::test]
 async fn startup_recovers_interrupted_jobs_and_cleans_tmp() {
     let dir = tempfile::tempdir().unwrap();
-    let id = {
-        let state = app_state(dir.path());
-        let id = state
-            .sessions
-            .jobs
-            .submit(spec("Interrupted"), Box::new(UntilStopped))
+    // The first app instance "crashes": its runtime is dropped with the job running, so
+    // the job never settles and its folder's lock is released.
+    let path = dir.path().to_path_buf();
+    let id = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
             .unwrap();
-        state.sessions.jobs.stored(id).await;
-        wait_for(|| {
-            state
+        let id = rt.block_on(async {
+            let state = app_state(&path);
+            let id = state
                 .sessions
                 .jobs
-                .detail(id)
-                .is_ok_and(|d| d.job.state == JobState::Running)
-        })
-        .await;
-        // Give the "running" row time to reach the store.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+                .submit(spec("Interrupted"), Box::new(UntilStopped))
+                .unwrap();
+            state.sessions.jobs.stored(id).await;
+            wait_for(|| {
+                state
+                    .sessions
+                    .jobs
+                    .detail(id)
+                    .is_ok_and(|d| d.job.state == JobState::Running)
+            })
+            .await;
+            // Give the "running" row time to reach the store.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            id
+        });
+        drop(rt);
         id
-    };
-    let leftover = dir.path().join("data").join("job-tmp").join("old");
+    })
+    .join()
+    .unwrap();
+    let job_tmp = dir.path().join("data").join("job-tmp");
+    let crashed: Vec<_> = std::fs::read_dir(&job_tmp)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(crashed.len(), 1, "the crashed instance's folder");
+    // An older instance's folder whose lock is not held.
+    let leftover = job_tmp.join("old");
     std::fs::create_dir_all(&leftover).unwrap();
+    std::fs::write(leftover.join("owner.lock"), b"").unwrap();
     std::fs::write(leftover.join("secret.cnf"), b"x").unwrap();
 
     let state = app_state(dir.path());
     assert!(!leftover.exists());
+    assert!(!crashed[0].exists());
     let detail = job_detail_impl(&state, id).await.unwrap();
     assert_eq!(detail.job.state, JobState::Failed);
     assert!(detail.job.outcome_unknown);

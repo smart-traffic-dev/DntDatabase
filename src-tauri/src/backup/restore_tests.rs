@@ -206,6 +206,8 @@ struct FakeSpawner {
     /// stdout of `--list`.
     list: Vec<u8>,
     code: i32,
+    /// Waiting for the restore (not `--list`) fails after the spawn.
+    wait_fails: bool,
 }
 
 struct FakeChild {
@@ -214,6 +216,7 @@ struct FakeChild {
     stderr: Option<DuplexStream>,
     exit: watch::Receiver<Option<i32>>,
     kill: Arc<Notify>,
+    wait_fails: bool,
 }
 
 impl Spawner for FakeSpawner {
@@ -267,6 +270,7 @@ impl Spawner for FakeSpawner {
             stderr: Some(stderr_parent),
             exit: exit_rx,
             kill,
+            wait_fails: self.wait_fails && !listing,
         }))
     }
 }
@@ -283,7 +287,11 @@ impl ToolChild for FakeChild {
         self.stderr.take().map(|p| Box::pin(p) as ReadPipe)
     }
     async fn wait(&mut self) -> std::io::Result<Option<i32>> {
-        Ok(*self.exit.wait_for(Option::is_some).await.unwrap())
+        let code = *self.exit.wait_for(Option::is_some).await.unwrap();
+        if self.wait_fails {
+            return Err(std::io::Error::other("lost the process"));
+        }
+        Ok(code)
     }
     async fn kill(&mut self) -> std::io::Result<()> {
         self.kill.notify_one();
@@ -382,6 +390,7 @@ async fn fixture(kind: DbKind, env: Option<EnvTag>, read_only: bool, tools: &[To
                 b";\n; Archive created at 2026-10-25\n;\n215; 1259 16390 TABLE public t postgres\n"
                     .to_vec(),
             code: 0,
+            wait_fails: false,
         }),
     }));
     let sm = Arc::new(sm);
@@ -723,6 +732,8 @@ async fn copy_file_needs_psql() {
         "{cmd}"
     );
     assert!(cmd.contains("ON_ERROR_STOP=1"), "{cmd}");
+    assert!(cmd.contains(r"PGPASSFILE="), "{cmd}");
+    assert!(cmd.contains(r"<job temp>\pgpass.conf"), "{cmd}");
     assert!(!cmd.contains(PASSWORD), "{cmd}");
     assert_eq!(preview.stats.as_ref().unwrap().copy_blocks, 1);
     let mark = fx.fake.mark();
@@ -769,6 +780,10 @@ async fn pg_restore_archive_has_toc_and_runs() {
         "{cmd}"
     );
     assert!(preview.warnings.iter().any(|w| w.contains("--clean")));
+    assert!(preview
+        .warnings
+        .iter()
+        .any(|w| w == PG_RESTORE_FAILURE_UNKNOWN));
     let id = fx
         .sm
         .restore_start(preview.plan_id, true, None)
@@ -806,6 +821,7 @@ async fn tool_failure_outcomes() {
                 seen: Arc::clone(&fx.tools),
                 list: vec![],
                 code,
+                wait_fails: false,
             }),
         }));
         let mut req = fx.request(&f);
@@ -841,12 +857,47 @@ async fn tool_failure_outcomes() {
             seen: Arc::clone(&fx.tools),
             list: b"1; 2 3 TABLE public t x\n".to_vec(),
             code: 1,
+            wait_fails: false,
         }),
     }));
     let a = fx.file("a.dump", &archive());
     let e = fx.sm.restore_preview(fx.request(&a)).await.unwrap_err();
     // `--list` itself failed with exit 1: the preview refuses, nothing restored.
     assert!(matches!(e, DbError::Config { .. }), "{e:?}");
+}
+
+/// Waiting for a spawned tool fails: it ran, so the job is not "nothing was started" —
+/// History is written and the outcome is unknown.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_tool_after_spawn_is_unknown_and_in_history() {
+    let fx = fixture(DbKind::Postgres, None, false, &[Tool::Psql]).await;
+    *fx.sm.restore_plans.fixed_tools.lock().unwrap() = Some(Arc::new(FixedTools {
+        tools: vec![tool_info(Tool::Psql)],
+        spawner: Arc::new(FakeSpawner {
+            seen: Arc::clone(&fx.tools),
+            list: vec![],
+            code: 0,
+            wait_fails: true,
+        }),
+    }));
+    let f = fx.file("copy.sql", &copy_file());
+    let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
+    let id = fx
+        .sm
+        .restore_start(preview.plan_id, true, None)
+        .await
+        .unwrap();
+    let d = fx.wait(id).await;
+    assert_eq!(d.job.state, JobState::Failed, "{:?}", d.job);
+    assert!(d.job.outcome_unknown, "{:?}", d.job);
+    assert!(
+        log_text(&d).contains("lost the process"),
+        "{}",
+        log_text(&d)
+    );
+    let h = fx.restore_history();
+    assert_eq!(h.len(), 1);
+    assert!(h[0].outcome_unknown);
 }
 
 /// I2: a file swapped after the start's check cannot end the job's transaction.
@@ -906,6 +957,50 @@ async fn job_stops_when_the_session_mode_differs_from_the_prediction() {
     assert_eq!(
         fx.fake.since(mark),
         ["SET sql_mode='ANSI', sql_mode='NO_BACKSLASH_ESCAPES'"]
+    );
+}
+
+/// R33: a `SET sql_mode` the tracker cannot predict is refused before it is sent (here
+/// the file's tail is swapped in place while the job streams it).
+#[tokio::test(flavor = "multi_thread")]
+async fn unpredictable_sql_mode_is_refused_before_sending() {
+    let fx = fixture(DbKind::MySql, None, false, &[]).await;
+    let swapped = "SET sql_mode = DEFAULT;\n";
+    let tail = format!("SELECT '{}';\n", "a".repeat(swapped.len() - 11));
+    assert_eq!(tail.len(), swapped.len());
+    // Far more than the reader buffers ahead, so the tail is read after the swap.
+    let filler = format!("INSERT INTO t VALUES ('{}');\n", "x".repeat(1000)).repeat(6000);
+    let content = format!("SELECT 'first';\n{filler}{tail}");
+    let f = fx.file("mode.sql", content.as_bytes());
+    let preview = fx.sm.restore_preview(fx.request(&f)).await.unwrap();
+    *fx.fake.delay.lock().unwrap() = Some(("'first'".into(), Duration::from_millis(600)));
+    let mark = fx.fake.mark();
+    let id = fx
+        .sm
+        .restore_start(preview.plan_id, true, None)
+        .await
+        .unwrap();
+    // Swapped while the first statement is in flight (after the job's hash check).
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while fx.fake.since(mark).is_empty() {
+        assert!(std::time::Instant::now() < deadline, "the job never sent");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
+        file.seek(SeekFrom::Start((content.len() - tail.len()) as u64))
+            .unwrap();
+        file.write_all(swapped.as_bytes()).unwrap();
+    }
+    let d = fx.wait(id).await;
+    *fx.fake.delay.lock().unwrap() = None;
+    assert_eq!(d.job.state, JobState::Failed, "{:?}", d.job);
+    let sent = fx.fake.since(mark);
+    assert_eq!(sent.first().map(String::as_str), Some("SELECT 'first'"));
+    assert!(
+        !sent.iter().any(|s| s.contains("sql_mode")),
+        "an unpredictable sql_mode was sent"
     );
 }
 

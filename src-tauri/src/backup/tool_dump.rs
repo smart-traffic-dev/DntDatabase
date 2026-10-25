@@ -24,8 +24,8 @@ use async_trait::async_trait;
 use dnt_core::error::DbError;
 use dnt_core::server::{DbKind, ServerInfo};
 use dnt_transfer::tools::{
-    mysql_dump_args, pg_dump_args, shown_command, Invocation, MysqlDumpOptions, PgDumpOptions,
-    Tool, ToolConn, ToolInfo, ToolOutput,
+    mysql_dump_args, pg_dump_args, shown_command, Invocation, MysqlDumpOptions, PgDumpFormat,
+    PgDumpOptions, Tool, ToolConn, ToolInfo, ToolOutput,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -72,8 +72,13 @@ pub(crate) fn normalise_tool_request(
         }
         (DbKind::Postgres, Tool::PgDump) => {
             req.mysql = None;
-            if req.pg.is_none() {
+            let Some(pg) = &req.pg else {
                 return Err(config_error("pg", "The pg_dump options are missing."));
+            };
+            // A custom or tar archive is never gzipped: pg_restore reads the archive
+            // itself, so a gzip-wrapped one could not be restored (R30).
+            if pg.format != PgDumpFormat::Plain {
+                req.compress = false;
             }
         }
         (_, tool) => {
@@ -187,7 +192,12 @@ pub(crate) struct ToolDumpJob {
     pub(crate) spawner: Arc<dyn Spawner>,
 }
 
-fn create_part(part: &Path, shown: &str, compress: bool) -> Result<ToolOutput, DbError> {
+/// Creates the temp file; returns its writer and a handle to sync it before the rename.
+fn create_part(
+    part: &Path,
+    shown: &str,
+    compress: bool,
+) -> Result<(ToolOutput, std::fs::File), DbError> {
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -206,9 +216,16 @@ fn create_part(part: &Path, shown: &str, compress: bool) -> Result<ToolOutput, D
                 config_error("path", &format!("Could not write {shown}: {e}."))
             }
         })?;
-    Ok(ToolOutput::new(
-        Box::new(BufWriter::with_capacity(256 * 1024, file)),
-        compress,
+    let sync = file.try_clone().map_err(|e| {
+        let _ = std::fs::remove_file(part);
+        config_error("path", &format!("Could not write {shown}: {e}."))
+    })?;
+    Ok((
+        ToolOutput::new(
+            Box::new(BufWriter::with_capacity(256 * 1024, file)),
+            compress,
+        ),
+        sync,
     ))
 }
 
@@ -241,7 +258,7 @@ impl JobRunner for ToolDumpJob {
         let part = target.part.clone();
         let shown = req.path.clone();
         let compress = req.compress;
-        let out = tokio::task::spawn_blocking(move || create_part(&part, &shown, compress))
+        let (out, sync) = tokio::task::spawn_blocking(move || create_part(&part, &shown, compress))
             .await
             .map_err(|e| {
                 JobFailure::from(DbError::Internal {
@@ -249,6 +266,8 @@ impl JobRunner for ToolDumpJob {
                 })
             })?
             .map_err(JobFailure::from)?;
+        // The temp file is ours from here: removed on any way out but the commit.
+        let guard = target.guard();
         let ran = run_tool(
             self.spawner.as_ref(),
             &ctx,
@@ -261,26 +280,21 @@ impl JobRunner for ToolDumpJob {
         )
         .await;
         drop(resolved);
-        let report = match ran {
-            Ok(r) => r,
-            Err(e) => {
-                target.discard();
-                return Err(JobFailure::from(e));
-            }
-        };
+        // Every early return below drops the guard, which removes the temp file.
+        let report = ran.map_err(JobFailure::from)?;
+        if let Some(e) = &report.wait_error {
+            ctx.log(JobLogLevel::Error, e.clone());
+        }
         if report.killed || ctx.is_stopped() {
-            target.discard();
             return Err(JobFailure::from(stopped()));
         }
         if let Some(e) = &report.out_error {
-            target.discard();
             return Err(JobFailure::from(config_error(
                 "path",
                 &format!("Could not write {}: {e}.", req.path),
             )));
         }
         if report.code != Some(0) {
-            target.discard();
             let code = report
                 .code
                 .map(|c| format!("exit code {c}"))
@@ -292,9 +306,18 @@ impl JobRunner for ToolDumpJob {
                 summary: message,
             });
         }
-        if let Err(e) = target.commit() {
-            return Err(JobFailure::from(e));
+        // Synced first: the rename must not publish unwritten data.
+        let synced = tokio::task::spawn_blocking(move || sync.sync_all())
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))
+            .and_then(|r| r);
+        if let Err(e) = synced {
+            return Err(JobFailure::from(config_error(
+                "path",
+                &format!("Could not write {}: {e}.", req.path),
+            )));
         }
+        guard.commit().map_err(JobFailure::from)?;
         Ok(JobDone {
             summary: format!("{name} wrote {}.", size_label(report.out_bytes)),
             result_path: Some(req.path.clone()),
@@ -359,6 +382,21 @@ mod tests {
         let mut no_path = req(Tool::MysqlDump);
         no_path.path = String::new();
         assert!(normalise_tool_request(no_path, DbKind::MySql).is_err());
+    }
+
+    #[test]
+    fn pg_archives_are_never_gzipped() {
+        for (format, kept) in [
+            (PgDumpFormat::Plain, true),
+            (PgDumpFormat::Custom, false),
+            (PgDumpFormat::Tar, false),
+        ] {
+            let mut r = req(Tool::PgDump);
+            r.compress = true;
+            r.pg.as_mut().unwrap().format = format;
+            let r = normalise_tool_request(r, DbKind::Postgres).unwrap();
+            assert_eq!(r.compress, kept, "{format:?}");
+        }
     }
 
     #[test]

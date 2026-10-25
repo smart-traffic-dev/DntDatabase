@@ -490,7 +490,7 @@ fn gzip_output_equals_the_plain_output() {
     assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip magic");
     assert_eq!(written, plain.bytes().len() as u64, "uncompressed bytes");
     let mut decoded = Vec::new();
-    flate2::read::GzDecoder::new(&bytes[..])
+    flate2::read::MultiGzDecoder::new(&bytes[..])
         .read_to_end(&mut decoded)
         .unwrap();
     assert_eq!(decoded, plain.bytes());

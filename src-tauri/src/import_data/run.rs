@@ -271,12 +271,31 @@ fn fatal_server(code: Option<&str>, sqlstate: Option<&str>) -> bool {
             .is_some_and(|s| s.starts_with("08") || s.starts_with("57P") || s.starts_with("53"))
 }
 
-/// The server refused this statement's rows (a duplicate key, a constraint, a bad
-/// value): skip mode skips them. Anything else stops the job.
+/// MySQL / MariaDB errors about the rows' data: NOT NULL (1048), duplicate key (1062),
+/// out of range (1264), truncated (1265), bad date/time (1292), bad value (1366), too
+/// long (1406), foreign key (1451, 1452), CHECK (MySQL 3819, MariaDB 4025).
+const MYSQL_DATA_ERRORS: [&str; 11] = [
+    "1048", "1062", "1264", "1265", "1292", "1366", "1406", "1451", "1452", "3819", "4025",
+];
+
+/// The server refused this statement's rows for their data (a duplicate key, a
+/// constraint, a bad value): skip mode skips them. Anything else — a missing privilege
+/// or object, a syntax error, a resource limit — would refuse every row the same way,
+/// so it stops the job (R16). MySQL errors carry their number (their SQLSTATE is often
+/// the generic `HY000`); PostgreSQL ones only a SQLSTATE: classes 22 (data exception)
+/// and 23 (integrity constraint violation).
 fn row_level(e: &DbError) -> bool {
     match e {
         DbError::Server { code, sqlstate, .. } => {
-            !fatal_server(code.as_deref(), sqlstate.as_deref())
+            if fatal_server(code.as_deref(), sqlstate.as_deref()) {
+                return false;
+            }
+            match code.as_deref() {
+                Some(c) => MYSQL_DATA_ERRORS.contains(&c),
+                None => sqlstate
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("22") || s.starts_with("23")),
+            }
         }
         _ => false,
     }
@@ -671,6 +690,26 @@ impl<'a> Writer<'a> {
 // Import job
 // ---------------------------------------------------------------------------------------
 
+/// Rows per `INSERT` of an import job: one outside a transaction in skip mode (a
+/// failing multi-row statement may have written part of its rows, R16), else the
+/// request's batch size. The preview's sample follows the same rule.
+pub(crate) fn rows_per_statement(request: &ImportRequest, transactional: bool) -> u32 {
+    if matches!(request.errors, ErrorPolicy::Skip { .. }) && !transactional {
+        1
+    } else {
+        request.batch_rows
+    }
+}
+
+/// Where the irreversible pre-step (committed on its own) stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreStepState {
+    NotSent,
+    /// Sent; no answer yet (or the error that ended the job is its own).
+    Sent,
+    Done,
+}
+
 /// Everything a started import needs (copied from its plan).
 pub(crate) struct ImportJob {
     pub(crate) request: ImportRequest,
@@ -715,8 +754,8 @@ impl JobRunner for ImportJob {
         w.skip = matches!(self.request.errors, ErrorPolicy::Skip { .. });
         w.max_errors = max_errors(&self.request.errors);
         w.savepoints = w.skip && self.transactional;
-        let mut pre_done = false;
-        let result = self.body(&mut w, generation, &mut pre_done).await;
+        let mut pre = PreStepState::NotSent;
+        let result = self.body(&mut w, generation, &mut pre).await;
         // Rows the server kept: `None` when the outcome is unknown.
         let (outcome, committed) = match result {
             Ok(()) => (
@@ -730,7 +769,7 @@ impl JobRunner for ImportJob {
                 Some(w.imported),
             ),
             Err(e) => {
-                let (f, committed) = self.failure(&w, e, pre_done).await;
+                let (f, committed) = self.failure(&w, e, pre).await;
                 (Err(f), committed)
             }
         };
@@ -765,7 +804,7 @@ impl ImportJob {
         &self,
         w: &mut Writer<'_>,
         generation: u64,
-        pre_done: &mut bool,
+        pre: &mut PreStepState,
     ) -> Result<(), DbError> {
         if generation != self.context.generation || w.session.dialect() != self.dialect {
             return Err(stale());
@@ -792,11 +831,7 @@ impl ImportJob {
         }
         self.context.check()?;
         super::judge_all(&self.templates, self.dialect, w.guard, true)?;
-        let max_rows = if w.skip && !self.transactional {
-            1
-        } else {
-            self.request.batch_rows
-        };
+        let max_rows = rows_per_statement(&self.request, self.transactional);
         let mut builder = self.layout.builder(max_rows, self.request.batch_bytes)?;
         let mut rx = spawn_reader(
             PathBuf::from(&self.request.path),
@@ -806,8 +841,9 @@ impl ImportJob {
         );
         let ctx = w.ctx;
         if let Some(p) = self.pre_step.as_ref().filter(|p| p.irreversible) {
+            *pre = PreStepState::Sent;
             w.send(&p.sql, Some(0)).await?;
-            *pre_done = true;
+            *pre = PreStepState::Done;
             ctx.log(
                 JobLogLevel::Info,
                 "Existing rows deleted (irreversible pre-step, committed).",
@@ -851,7 +887,7 @@ impl ImportJob {
         &self,
         w: &Writer<'_>,
         e: DbError,
-        pre_done: bool,
+        pre: PreStepState,
     ) -> (JobFailure, Option<u64>) {
         // A stale plan says why in its own words (the file or the table changed).
         let base = match &e {
@@ -905,8 +941,15 @@ impl ImportJob {
             }
             (unknown, note)
         };
-        if pre_done {
-            note.push_str(" The existing rows were already deleted by the pre-step.");
+        match pre {
+            PreStepState::Done => {
+                note.push_str(" The existing rows were already deleted by the pre-step.")
+            }
+            // Its answer was lost (the unknown outcome above): it may have run.
+            PreStepState::Sent if unknown => note.push_str(
+                " The pre-step's answer was lost: the existing rows may already be deleted.",
+            ),
+            _ => {}
         }
         let committed = if unknown {
             None

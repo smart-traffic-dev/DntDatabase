@@ -226,19 +226,16 @@ fn repeated_keys_stay_together_without_pg_upsert() {
 }
 
 #[test]
-fn template_is_head_and_tail() {
+fn batch_is_head_tuples_and_tail() {
     let (kind, d) = dialects()[1];
-    let b = BatchBuilder::new(table(kind), cols(), upsert(), d, 10, 1 << 20).unwrap();
-    let (head, tail) = b.template();
+    let mut b = BatchBuilder::new(table(kind), cols(), upsert(), d, 10, 1 << 20).unwrap();
+    assert!(b.flush().is_none(), "nothing pending");
+    assert!(b.push(row(1, "a"), 1).unwrap().is_none());
     assert_eq!(
-        head,
-        "INSERT INTO \"public\".\"t\" (\"id\", \"name\") VALUES "
+        b.flush().unwrap().sql,
+        "INSERT INTO \"public\".\"t\" (\"id\", \"name\") VALUES (1, 'a') \
+         ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""
     );
-    assert_eq!(
-        tail,
-        " ON CONFLICT (\"id\") DO UPDATE SET \"name\" = EXCLUDED.\"name\""
-    );
-    assert_eq!(b.pending_rows(), 0);
 }
 
 #[test]
@@ -295,9 +292,6 @@ fn generated_batches_classify_like_the_template() {
     for (kind, d) in dialects() {
         for opts in [InsertOptions::default(), upsert()] {
             let mut b = BatchBuilder::new(table(kind), cols(), opts, d, 2, 1 << 20).unwrap();
-            let (head, tail) = b.template();
-            let template = format!("{head}(1, 'sample'){tail}");
-            assert_eq!(classify(&template, d), StatementKind::Write);
             let rows: Vec<_> = (0..5)
                 .map(|i| row(i, "it's; a -- tricky /* value */"))
                 .collect();

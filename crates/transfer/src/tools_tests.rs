@@ -1262,6 +1262,29 @@ fn tool_output_plain_and_gzip() {
 }
 
 #[test]
+fn tool_input_reads_every_gzip_member() {
+    // `cat a.gz b.gz > all.gz` is a valid gzip file; every member is restored.
+    use flate2::write::GzEncoder;
+    use std::io::Write;
+    let member = |s: &str| {
+        let mut e = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(s.as_bytes()).unwrap();
+        e.finish().unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two.sql.gz");
+    let mut bytes = member("CREATE TABLE a (id int);\n");
+    bytes.extend(member("CREATE TABLE b (id int);\n"));
+    std::fs::write(&path, bytes).unwrap();
+    let mut text = String::new();
+    open_input(&path, true)
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    assert_eq!(text, "CREATE TABLE a (id int);\nCREATE TABLE b (id int);\n");
+}
+
+#[test]
 fn restore_outcomes() {
     use Tool::{PgRestore, Psql};
     for t in [Psql, PgRestore] {

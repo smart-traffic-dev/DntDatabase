@@ -934,6 +934,38 @@ impl Target {
     pub fn discard(&self) {
         let _ = std::fs::remove_file(&self.part);
     }
+
+    /// A guard that removes the temp file when dropped unless [`PartGuard::commit`]
+    /// ran (an early return or a panic leaves no `.dntpart` behind). Take it only once
+    /// this job created the temp file (never over another writer's).
+    pub fn guard(&self) -> PartGuard<'_> {
+        PartGuard {
+            target: self,
+            armed: true,
+        }
+    }
+}
+
+/// See [`Target::guard`].
+pub struct PartGuard<'a> {
+    target: &'a Target,
+    armed: bool,
+}
+
+impl PartGuard<'_> {
+    /// Moves the complete temp file onto the target (removed when that fails).
+    pub fn commit(mut self) -> Result<(), DbError> {
+        self.armed = false;
+        self.target.commit()
+    }
+}
+
+impl Drop for PartGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.target.discard();
+        }
+    }
 }
 
 /// How often progress is reported while streaming.
@@ -1730,6 +1762,27 @@ mod tests {
         assert!(write_rows(&bad, DbKind::MySql, &target, &[col("a")], &[]).is_err());
         assert!(!path.exists() && !target.part.exists());
         assert!(Target::new(" ").is_err());
+    }
+
+    #[test]
+    fn part_guard_discards_unless_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.sql");
+        let target = Target::new(path.to_str().unwrap()).unwrap();
+        std::fs::write(&target.part, b"half").unwrap();
+        // Dropped without a commit (an early return, or unwinding from a panic): the
+        // temp file is removed. (No real panic here: it would race the panic-location
+        // capture of `commands::guard`'s tests.)
+        let early_return = |t: &Target| -> Result<(), ()> {
+            let _g = t.guard();
+            Err(())
+        };
+        assert!(early_return(&target).is_err());
+        assert!(!target.part.exists() && !path.exists());
+        std::fs::write(&target.part, b"whole").unwrap();
+        target.guard().commit().unwrap();
+        assert!(!target.part.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"whole");
     }
 
     #[test]

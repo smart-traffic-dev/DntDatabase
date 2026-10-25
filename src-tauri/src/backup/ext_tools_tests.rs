@@ -35,6 +35,8 @@ struct Seen {
     /// The secret file's contents at spawn time.
     secret_at_spawn: Mutex<Option<String>>,
     stdin: Mutex<Vec<u8>>,
+    /// The fake read its stdin to the end (saw it closed).
+    stdin_eof: AtomicBool,
     killed: AtomicBool,
 }
 
@@ -80,9 +82,15 @@ impl Spawner for FakeSpawner {
                 }
                 stderr_child.write_all(&script.stderr).await.unwrap();
                 if script.read_stdin {
-                    let mut buf = Vec::new();
-                    stdin_child.read_to_end(&mut buf).await.unwrap();
-                    seen.stdin.lock().unwrap().extend(buf);
+                    let mut buf = vec![0u8; 4096];
+                    loop {
+                        let n = stdin_child.read(&mut buf).await.unwrap();
+                        if n == 0 {
+                            break;
+                        }
+                        seen.stdin.lock().unwrap().extend_from_slice(&buf[..n]);
+                    }
+                    seen.stdin_eof.store(true, Ordering::SeqCst);
                 }
                 if script.hang {
                     std::future::pending::<()>().await;
@@ -520,6 +528,55 @@ async fn stdin_is_fed_decompressed() {
             text.as_bytes(),
             "gzip {gzip}"
         );
+    }
+}
+
+/// A file that stops decompressing part-way must not reach the tool as a complete
+/// input (psql would commit a partial single-transaction restore at EOF): the tool is
+/// killed while its stdin is still open.
+#[tokio::test(flavor = "multi_thread")]
+async fn unreadable_input_kills_the_tool_before_closing_stdin() {
+    let dir = tempfile::tempdir().unwrap();
+    let text: String = (0..200_000)
+        .map(|i| format!("INSERT INTO t VALUES ({i}, 'row {i}');\n"))
+        .collect();
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    e.write_all(text.as_bytes()).unwrap();
+    let mut gz = e.finish().unwrap();
+    gz.truncate(gz.len() / 2);
+    let input = dir.path().join("cut.sql.gz");
+    std::fs::write(&input, &gz).unwrap();
+    // The input fails to read at the start too (a missing file).
+    for (path, gzip) in [(input, true), (dir.path().join("missing.sql"), false)] {
+        let seen = Arc::new(Seen::default());
+        let spawner = FakeSpawner {
+            script: Script {
+                read_stdin: true,
+                ..Script::default()
+            },
+            seen: Arc::clone(&seen),
+        };
+        let inv = invocation(SecretFileSpec::None, StdoutUse::Discard, true);
+        let report = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_tool(
+                &spawner,
+                &FakeCtx::default(),
+                ToolRun {
+                    inv: &inv,
+                    password: None,
+                    stdin: Some(StdinFeed { path, gzip }),
+                    stdout: StdoutSink::Discard,
+                },
+            ),
+        )
+        .await
+        .expect("the runner must end")
+        .unwrap();
+        assert!(report.in_error.is_some(), "gzip {gzip}");
+        assert!(seen.killed.load(Ordering::SeqCst), "gzip {gzip}");
+        assert!(!seen.stdin_eof.load(Ordering::SeqCst), "gzip {gzip}");
+        assert_ne!(report.code, Some(0));
     }
 }
 

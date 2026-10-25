@@ -278,9 +278,10 @@ pub async fn export_query_result_impl(
     let store = state.sessions.results.clone();
     let cancel = store.begin_export(operation);
     let stopper = store.clone();
+    // Tracked under its connection, so closing or deleting it (R9) stops the export.
     let job = track_export(
         state,
-        None,
+        store.connection_of(token),
         "query result",
         &path,
         Box::new(move || {
@@ -750,15 +751,23 @@ mod tests {
         assert_eq!(state.sessions.jobs.active_count(), 0);
     }
 
-    /// Stop from the Jobs panel reaches `cancel_export`: a result still running is
-    /// followed until the Stop, then the export ends cancelled without its file.
+    /// Stop from the Jobs panel, or closing the result's connection (R9), reaches
+    /// `cancel_export`: a result still running is followed until the Stop, then the
+    /// export ends cancelled without its file.
     #[tokio::test(flavor = "multi_thread")]
     async fn job_stop_cancels_result_export() {
+        for by_connection in [false, true] {
+            job_stop_cancels_result_export_by(by_connection).await;
+        }
+    }
+
+    async fn job_stop_cancels_result_export_by(by_connection: bool) {
+        let conn = Uuid::new_v4();
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(app_state(dir.path()));
         let store = state.sessions.results.clone();
         // Never finished: the export waits for more rows.
-        let token = store.create_result(Uuid::nil(), "tab", Uuid::new_v4(), 0, vec![col("a")]);
+        let token = store.create_result(conn, "tab", Uuid::new_v4(), 0, vec![col("a")]);
         store.append(
             token,
             vec![vec![Value::Int(1)]],
@@ -792,7 +801,13 @@ mod tests {
         }
         let id = id.expect("the export is tracked");
         assert_eq!(state.sessions.jobs.active_count(), 1);
-        assert!(state.sessions.jobs.cancel(id).await);
+        let job = state.sessions.jobs.detail(id).unwrap().job;
+        assert_eq!(job.connection_id, Some(conn));
+        if by_connection {
+            state.sessions.jobs.cancel_connection(conn).await;
+        } else {
+            assert!(state.sessions.jobs.cancel(id).await);
+        }
         let err = tokio::time::timeout(Duration::from_secs(5), export)
             .await
             .expect("the export stops")

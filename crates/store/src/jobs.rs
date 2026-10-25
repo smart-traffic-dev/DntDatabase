@@ -221,11 +221,20 @@ impl ConnectionRepo {
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }
 
-    /// Deletes every finished job; queued and running ones stay. Returns how many went.
-    pub fn job_clear_finished(&self) -> Result<u32, DbError> {
+    /// Deletes every finished job but those in `keep` (jobs the app is still settling,
+    /// whose row it may be writing); queued and running ones stay. Returns how many went.
+    pub fn job_clear_finished(&self, keep: &[Uuid]) -> Result<u32, DbError> {
         let conn = self.lock()?;
+        let kept = if keep.is_empty() {
+            String::new()
+        } else {
+            format!(" AND id NOT IN ({})", vec!["?"; keep.len()].join(","))
+        };
         let n = conn
-            .execute(&format!("DELETE FROM jobs WHERE {FINISHED}"), [])
+            .execute(
+                &format!("DELETE FROM jobs WHERE {FINISHED}{kept}"),
+                rusqlite::params_from_iter(keep.iter().map(Uuid::to_string)),
+            )
             .map_err(|e| internal("clear finished jobs", e))?;
         Ok(u32::try_from(n).unwrap_or(u32::MAX))
     }

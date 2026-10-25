@@ -124,7 +124,7 @@ async fn dump(state: &AppState, req: DumpRequest) -> (String, String) {
     let mut text = String::new();
     let file = std::fs::File::open(&path).unwrap();
     if compress {
-        flate2::read::GzDecoder::new(file)
+        flate2::read::MultiGzDecoder::new(file)
             .read_to_string(&mut text)
             .unwrap();
     } else {

@@ -19,10 +19,10 @@ mod tests;
 
 pub use events::{TauriJobEvents, JOB_PROGRESS_EVENT};
 pub use manager::{
-    jobs_per_connection, JobCtx, JobDone, JobEvents, JobFailure, JobManager, JobRunner, JobSpec,
-    TrackedJob, DEFAULT_JOBS_PER_CONNECTION, EVENT_INTERVAL, INTERRUPTED_SUMMARY,
-    JOBS_PER_CONNECTION_KEY, KEEP_FINISHED, MAX_JOBS_PER_CONNECTION, MAX_LIVE_LOG_LINES,
-    MIN_JOBS_PER_CONNECTION, PERSIST_LOG_BYTES, PERSIST_LOG_LINES,
+    jobs_per_connection, saved_jobs_per_connection, JobCtx, JobDone, JobEvents, JobFailure,
+    JobManager, JobRunner, JobSpec, TrackedJob, DEFAULT_JOBS_PER_CONNECTION, EVENT_INTERVAL,
+    INTERRUPTED_SUMMARY, JOBS_PER_CONNECTION_KEY, KEEP_FINISHED, MAX_JOBS_PER_CONNECTION,
+    MAX_LIVE_LOG_LINES, MIN_JOBS_PER_CONNECTION, PERSIST_LOG_BYTES, PERSIST_LOG_LINES,
 };
 pub use model::{
     JobDetail, JobEvent, JobKind, JobLogLevel, JobLogLine, JobParams, JobProgress, JobState,

@@ -126,7 +126,7 @@ fn read_dump(path: &Path, gzip: bool) -> String {
     if gzip {
         assert_eq!(&bytes[..2], &[0x1f, 0x8b], "gzip magic");
         let mut s = String::new();
-        flate2::read::GzDecoder::new(bytes.as_slice())
+        flate2::read::MultiGzDecoder::new(bytes.as_slice())
             .read_to_string(&mut s)
             .unwrap();
         s

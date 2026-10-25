@@ -594,6 +594,14 @@ fn analyze_hashes_raw_bytes_and_reads_gzip() {
         assert_eq!(s.stats.statements, 40_000);
         assert_eq!(s.path, RestorePath::AppRunner);
     }
+    // Concatenated gzip members (`cat a.gz b.gz`): every member is scanned.
+    let multi = dir.path().join("multi.sql.gz");
+    let mut two = gzip(text.as_bytes());
+    two.extend(gzip(text.as_bytes()));
+    std::fs::write(&multi, two).unwrap();
+    let a = analyze_file(&multi, &t).unwrap();
+    assert!(a.gzip);
+    assert_eq!(a.scan.unwrap().unwrap().stats.statements, 80_000);
     // An archive is hashed but not scanned.
     let arch = dir.path().join("a.dump");
     let mut bytes = b"PGDMP\x01\x0e\x00".to_vec();

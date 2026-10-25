@@ -10,6 +10,7 @@ use dnt_store::jobs::JobRecord;
 use dnt_store::repo::ConnectionRepo;
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -636,8 +637,14 @@ async fn recover_marks_interrupted_and_cleans_tmp() {
         f.repo.job_insert(r).unwrap();
     }
     let root = f.tmp.path().join("job-tmp");
-    std::fs::create_dir_all(root.join(Uuid::new_v4().to_string())).unwrap();
+    // An instance that is gone: its lock file is not locked.
+    let gone = root.join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(gone.join(Uuid::new_v4().to_string())).unwrap();
+    std::fs::write(gone.join("owner.lock"), b"").unwrap();
     std::fs::write(root.join("stray.cnf"), b"secret").unwrap();
+    // A young folder without a lock file may be an instance that is starting: kept.
+    let young = root.join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&young).unwrap();
 
     f.mgr.recover().unwrap();
 
@@ -652,14 +659,99 @@ async fn recover_marks_interrupted_and_cleans_tmp() {
         assert!(r.finished_at.is_some());
     }
     assert_eq!(record(&f, finished.id).state, "done");
+    assert!(!gone.exists() && !root.join("stray.cnf").exists());
+    assert!(young.exists());
+    // Left: this instance's own folder and the young one.
     let left = std::fs::read_dir(&root).map(|d| d.count()).unwrap_or(0);
-    assert_eq!(left, 0);
+    assert_eq!(left, 2);
     // The recovered job shows in the list as failed with an unknown outcome.
     let listed = f.mgr.list(10).unwrap();
     let r = listed.iter().find(|s| s.id == running.id).unwrap();
     assert_eq!(r.state, JobState::Failed);
     assert!(r.outcome_unknown);
     assert_eq!(r.kind, JobKind::Restore);
+}
+
+/// Two app instances share the data folder: a starting one never deletes the running
+/// one's temporary files nor marks its live jobs interrupted.
+#[tokio::test]
+async fn recover_leaves_a_running_instance_alone() {
+    let f = fixture();
+    // The other instance: same store and base folder, its own locked folder and a job
+    // with a temporary directory.
+    let other = JobManager::new(Arc::clone(&f.repo));
+    other.set_tmp_root(f.tmp.path().join("job-tmp"));
+    let (tx, mut rx) = mpsc::unbounded_channel::<PathBuf>();
+    let gate = Arc::new(Notify::new());
+    let release = Arc::clone(&gate);
+    let id = other
+        .submit(
+            spec(None),
+            Box::new(FnRunner(Box::new(move |ctx: JobCtx| {
+                Box::pin(async move {
+                    let dir = ctx.tmp_dir().unwrap();
+                    std::fs::write(dir.join("pgpass.conf"), b"x").unwrap();
+                    tx.send(dir).unwrap();
+                    release.notified().await;
+                    Ok(done("ok"))
+                })
+            }))),
+        )
+        .unwrap();
+    let dir = rx.recv().await.unwrap();
+    other.stored(id).await;
+    assert_eq!(record(&f, id).state, "running");
+
+    f.mgr.recover().unwrap();
+
+    assert!(
+        dir.join("pgpass.conf").exists(),
+        "the other instance's files stay"
+    );
+    assert_eq!(
+        record(&f, id).state,
+        "running",
+        "its live job is not marked"
+    );
+    gate.notify_one();
+    // Once it is gone (lock released), a later start cleans up after it.
+    let other_root = dir.parent().unwrap().to_path_buf();
+    assert!(other.wait(id, WAIT).await);
+    drop(other);
+    // A coalesced event flush may hold the manager a moment longer.
+    tokio::time::sleep(EVENT_INTERVAL + Duration::from_millis(100)).await;
+    let again = JobManager::new(Arc::clone(&f.repo));
+    again.set_tmp_root(f.tmp.path().join("job-tmp"));
+    again.recover().unwrap();
+    assert!(!other_root.exists());
+}
+
+#[tokio::test]
+async fn tmp_dir_is_refused_after_the_job_returned() {
+    let f = fixture();
+    let (tx, mut rx) = mpsc::unbounded_channel::<JobCtx>();
+    let id = f
+        .mgr
+        .submit(
+            spec(None),
+            Box::new(FnRunner(Box::new(move |ctx: JobCtx| {
+                Box::pin(async move {
+                    tx.send(ctx).unwrap();
+                    Ok(done("ok"))
+                })
+            }))),
+        )
+        .unwrap();
+    let ctx = rx.recv().await.unwrap();
+    finish(&f, id).await;
+    assert!(ctx.tmp_dir().is_err());
+    let own = std::fs::read_dir(f.tmp.path().join("job-tmp"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert!(!own.join(id.to_string()).exists());
 }
 
 #[tokio::test]
@@ -780,6 +872,11 @@ async fn tracked_job_progress_finish_and_cancel_closure() {
 
     let ok = f.mgr.track(s.clone(), Box::new(|| {}));
     ok.progress(10);
+    let p = f.mgr.detail(ok.id()).unwrap().job.progress;
+    assert_eq!(
+        (p.phase.as_str(), p.done, p.unit),
+        ("Exporting", 10.0, ProgressUnit::Rows)
+    );
     ok.finish(Ok(JobDone {
         summary: "10 rows exported".into(),
         result_path: Some("C:\\out\\orders.csv".into()),

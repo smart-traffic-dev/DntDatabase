@@ -37,7 +37,7 @@ use dnt_core::sql::{
     tokenize, Dialect, MySqlMode, SplitError, SplitEvent, SplitOptions, StatementKind,
     StreamSplitter, TokKind, Token,
 };
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use specta::Type;
@@ -1042,7 +1042,7 @@ impl<R: Read + Send + 'static> Content<R> {
         let gzip = is_gzip(&magic[..n]);
         let prefix = Cursor::new(magic[..n].to_vec());
         let mut inner: Box<dyn Read + Send> = if gzip {
-            Box::new(GzDecoder::new(prefix.chain(src)))
+            Box::new(MultiGzDecoder::new(prefix.chain(src)))
         } else {
             Box::new(prefix.chain(src))
         };

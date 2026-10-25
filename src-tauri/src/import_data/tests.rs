@@ -571,10 +571,13 @@ fn log_text(d: &JobDetail) -> String {
         .join("\n")
 }
 
+/// A server error as the drivers report it: a 5-character PostgreSQL SQLSTATE (no
+/// code), or a MySQL error number (with the generic SQLSTATE many of them carry).
 fn server_error(code: &str) -> DbError {
+    let pg = code.len() == 5;
     DbError::Server {
-        code: Some(code.into()),
-        sqlstate: Some(code.into()),
+        code: (!pg).then(|| code.into()),
+        sqlstate: Some(if pg { code.into() } else { "HY000".into() }),
         message: "rejected".into(),
         position: None,
     }
@@ -1138,6 +1141,50 @@ async fn skip_mode_non_transactional_sends_single_rows() {
     );
 }
 
+/// The preview's sample statement holds as many rows as the job's statements will.
+#[tokio::test]
+async fn preview_sample_follows_rows_per_statement() {
+    let fx = mysql("MyISAM").await;
+    for (errors, rows) in [
+        (ErrorPolicy::Stop, 3),
+        (ErrorPolicy::Skip { max_errors: 10 }, 1),
+    ] {
+        let preview = fx
+            .sm
+            .import_prepare(fx.request(ImportMode::Append, errors))
+            .await
+            .unwrap();
+        let sample = preview.sample.unwrap();
+        assert_eq!(sample.matches("), (").count() + 1, rows, "{sample}");
+    }
+}
+
+/// Only data errors are row errors in skip mode: a missing privilege refuses every row
+/// alike, so it stops the job instead of skipping the whole file row by row.
+#[tokio::test]
+async fn skip_mode_stops_on_a_non_data_server_error() {
+    for (fx, code) in [(pg().await, "42501"), (mysql("MyISAM").await, "1142")] {
+        fx.write_csv("id,name,note\n1,a,x\n2,b,\n3,c,z\n");
+        fx.fake.fail("INSERT", server_error(code));
+        let mark = fx.fake.mark();
+        let (_, d) = fx
+            .import(fx.request(ImportMode::Append, ErrorPolicy::Skip { max_errors: 10 }))
+            .await;
+        assert_eq!(d.job.state, JobState::Failed, "{code}: {:?}", d.job);
+        let inserts = fx
+            .fake
+            .since(mark)
+            .iter()
+            .filter(|s| s.starts_with("INSERT"))
+            .count();
+        assert_eq!(inserts, 1, "{code}: stopped at the first refusal");
+        assert!(
+            !log_text(&d).contains("Row 2"),
+            "{code}: no row was skipped"
+        );
+    }
+}
+
 #[tokio::test]
 async fn max_errors_stops() {
     let fx = pg().await;
@@ -1174,6 +1221,34 @@ async fn commit_lost_is_unknown() {
     assert_eq!(d.job.state, JobState::Failed);
     assert!(d.job.outcome_unknown);
     assert!(d.job.error.as_ref().unwrap().outcome_unknown);
+    let h = fx.history();
+    assert_eq!(h.len(), 1);
+    assert!(h[0].outcome_unknown);
+}
+
+/// The irreversible pre-step's answer is lost: it may have run, and the summary says
+/// the existing rows may already be gone.
+#[tokio::test]
+async fn lost_pre_step_answer_says_rows_may_be_deleted() {
+    let fx = mysql("InnoDB").await;
+    fx.fake.kill_on(
+        "TRUNCATE",
+        DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: "gone".into(),
+        },
+    );
+    let (_, d) = fx
+        .import(fx.request(ImportMode::Replace { truncate: true }, ErrorPolicy::Stop))
+        .await;
+    assert_eq!(d.job.state, JobState::Failed);
+    assert!(d.job.outcome_unknown);
+    let s = d.job.summary.as_deref().unwrap();
+    assert!(
+        s.contains("the existing rows may already be deleted"),
+        "{s}"
+    );
     let h = fx.history();
     assert_eq!(h.len(), 1);
     assert!(h[0].outcome_unknown);

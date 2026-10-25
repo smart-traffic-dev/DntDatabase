@@ -1109,6 +1109,8 @@ impl JobRunner for DumpJob {
                     })
                 })?
                 .map_err(JobFailure::from)?;
+        // The temp file is ours from here: removed on any way out but the commit.
+        let guard = target.guard();
         let outcome = async {
             let (session, _) = self
                 .rt
@@ -1138,8 +1140,9 @@ impl JobRunner for DumpJob {
                 Err(e)
             }
         };
+        // Dropping the guard on an error removes the temp file.
         let committed = finished.and_then(|w| {
-            target.commit()?;
+            guard.commit()?;
             Ok(w)
         });
         match committed {
@@ -1150,10 +1153,7 @@ impl JobRunner for DumpJob {
                 ),
                 result_path: Some(self.request.path.clone()),
             }),
-            Err(e) => {
-                target.discard();
-                Err(JobFailure::from(e))
-            }
+            Err(e) => Err(JobFailure::from(e)),
         }
     }
 }

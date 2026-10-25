@@ -1276,7 +1276,7 @@ async fn pg_compressed_dump_with_drops() {
     assert_eq!(fx.files(), ["shop.sql.gz"]);
     let bytes = std::fs::read(fx.path("shop.sql.gz")).unwrap();
     let mut text = String::new();
-    flate2::read::GzDecoder::new(&bytes[..])
+    flate2::read::MultiGzDecoder::new(&bytes[..])
         .read_to_string(&mut text)
         .unwrap();
     assert!(text.starts_with(DUMP_MAGIC));

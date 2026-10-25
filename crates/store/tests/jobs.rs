@@ -161,10 +161,14 @@ fn mark_interrupted_only_touches_live_jobs() {
 fn clear_finished_keeps_live_jobs() {
     let repo = repo();
     let states = ["queued", "running", "done", "failed", "cancelled"];
+    let mut jobs = Vec::new();
     for (i, s) in states.iter().enumerate() {
-        repo.job_insert(&job(s, &ts(i as u32))).unwrap();
+        let j = job(s, &ts(i as u32));
+        repo.job_insert(&j).unwrap();
+        jobs.push(j);
     }
-    assert_eq!(repo.job_clear_finished().unwrap(), 3);
+    // A finished job the app is still settling is kept.
+    assert_eq!(repo.job_clear_finished(&[jobs[3].id]).unwrap(), 2);
     let mut left: Vec<String> = repo
         .job_list(100)
         .unwrap()
@@ -172,7 +176,9 @@ fn clear_finished_keeps_live_jobs() {
         .map(|j| j.state)
         .collect();
     left.sort();
-    assert_eq!(left, vec!["queued", "running"]);
+    assert_eq!(left, vec!["failed", "queued", "running"]);
+    assert_eq!(repo.job_clear_finished(&[]).unwrap(), 1);
+    assert_eq!(repo.job_list(100).unwrap().len(), 2);
 }
 
 #[test]
