@@ -1252,11 +1252,14 @@ export type DdlEditPreview = { plan_id: string; statements: string[]; warnings: 
 checks: string[]; transactional: boolean; gap: boolean; confirm_name: string | null; expires_in_seconds: number }
 export type DdlEditReport = { outcome: EditOutcome; error: AppError | null; warnings: string[]; statements_sent: number; 
 /**
- * The plan statements that completed.
+ * MySQL / MariaDB: the plan statements that completed. Empty on PostgreSQL, where
+ * the plan runs in one transaction and no statement takes effect on its own (only
+ * a `Partial` outcome keeps it, which PostgreSQL never reports).
  */
 executed: string[]; 
 /**
- * The plan statement that failed.
+ * MySQL / MariaDB: the plan statement that failed. `None` on PostgreSQL, as
+ * `executed`.
  */
 failed: string | null; object_state: ObjectState; 
 /**

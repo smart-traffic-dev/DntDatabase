@@ -66,7 +66,13 @@ struct Fake {
     on_list: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     /// Sessions opened.
     connects: AtomicUsize,
+    /// Connects from this ordinal on (0-based, counting every attempt) fail.
+    connect_fail_from: Mutex<Option<usize>>,
+    /// `(n, hook)`: the hook runs in the `n`-th `object_ddl` call from now (0 = next).
+    on_ddl: Mutex<Option<(usize, Hook)>>,
 }
+
+type Hook = Box<dyn FnOnce() + Send>;
 
 impl Fake {
     fn new(server: ServerInfo, ddl: &str) -> Arc<Fake> {
@@ -81,6 +87,8 @@ impl Fake {
             sets_ddl: Mutex::new(None),
             on_list: Mutex::new(None),
             connects: AtomicUsize::new(0),
+            connect_fail_from: Mutex::new(None),
+            on_ddl: Mutex::new(None),
         })
     }
 
@@ -133,7 +141,20 @@ impl Driver for FakeDriver {
         &self,
         _cfg: &dnt_core::config::ResolvedConfig,
     ) -> Result<Box<dyn Session>, DbError> {
-        self.0.connects.fetch_add(1, AtomicOrdering::SeqCst);
+        let n = self.0.connects.fetch_add(1, AtomicOrdering::SeqCst);
+        if self
+            .0
+            .connect_fail_from
+            .lock()
+            .unwrap()
+            .is_some_and(|from| n >= from)
+        {
+            return Err(DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: false,
+                message: "unreachable".into(),
+            });
+        }
         Ok(Box::new(FakeSession {
             fake: Arc::clone(&self.0),
             tx: Mutex::new(TxState::Idle),
@@ -278,6 +299,20 @@ impl Introspector for FakeSession {
         })
     }
     async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
+        let hook = {
+            let mut slot = self.fake.on_ddl.lock().unwrap();
+            match slot.take() {
+                Some((0, hook)) => Some(hook),
+                Some((n, hook)) => {
+                    *slot = Some((n - 1, hook));
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
         if let Some(e) = self.fake.ddl_error.lock().unwrap().clone() {
             return Err(e);
         }
@@ -1068,7 +1103,8 @@ async fn apply_sends_exact_plan_statements() {
     assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
     assert_eq!(r.object_state, ObjectState::Changed);
     assert_eq!(r.statements_sent, 1);
-    assert_eq!(r.executed, p.statements);
+    // PostgreSQL reports no per-statement progress: the transaction is all or nothing.
+    assert!(r.executed.is_empty());
     assert_eq!(r.failed, None);
     assert!(r.error.is_none());
     let mut expected = vec![
@@ -1233,8 +1269,9 @@ async fn pg_failure_rolls_back() {
     assert_eq!(r.outcome, EditOutcome::RolledBack, "{r:?}");
     assert_eq!(r.object_state, ObjectState::Unchanged);
     assert_eq!(r.statements_sent, 2);
-    assert_eq!(r.executed, p.statements[..1]);
-    assert_eq!(r.failed.as_deref(), Some(p.statements[1].as_str()));
+    // The DROP was rolled back with the rest: nothing is reported as executed.
+    assert!(r.executed.is_empty(), "{:?}", r.executed);
+    assert_eq!(r.failed, None);
     assert!(!r.error.as_ref().unwrap().outcome_unknown);
     assert_eq!(r.restore_text, None);
     let sent = f.fake.sent();
@@ -1551,4 +1588,226 @@ async fn apply_blocks_read_only() {
     let e = apply(&f, p.plan_id, None).await.unwrap_err();
     assert!(matches!(e, DbError::Blocked { .. }), "{e:?}");
     assert_eq!(f.fake.sent().len(), mark);
+}
+
+// ---- Task 5 review fixes ----
+
+fn is_object_changed(e: &DbError) -> bool {
+    matches!(e, DbError::PlanStale { reason } if reason == "The object changed since the editor opened it.")
+}
+
+/// A MySQL trigger `t` on `orders`, listed, with its catalog facts.
+async fn mysql_trigger() -> Fixture {
+    let fake = Fake::new(mysql8(), MYSQL_TRIGGER);
+    fake.answer(MYSQL_TRIGGER_SQL, vec![vec!["orders", "BEFORE", "INSERT"]]);
+    fake.answer(MYSQL_SAME_TIMING_SQL, vec![vec!["0"]]);
+    fake.objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::Trigger, vec!["t".into()]);
+    fixture(fake, None, false).await
+}
+
+#[tokio::test]
+async fn object_dropped_elsewhere_is_stale() {
+    let f = fixture(Fake::new(mysql8(), MYSQL_PROC), None, false).await;
+    f.fake
+        .objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::Procedure, vec!["p".into()]);
+    let o = open(&f, ObjectKind::Procedure, Some("p")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap();
+    // Another session drops the procedure: SHOW CREATE answers 1305 and it is no
+    // longer listed.
+    *f.fake.ddl_error.lock().unwrap() = Some(server_error("1305"));
+    f.fake.objects.lock().unwrap().clear();
+    let mark = f.fake.sent().len();
+    let e = apply(&f, p.plan_id, None).await.unwrap_err();
+    assert!(is_object_changed(&e), "{e:?}");
+    let sent = f.fake.sent()[mark..].to_vec();
+    assert!(sent.iter().all(|s| !p.statements.contains(s)), "{sent:?}");
+    assert!(history(&f).is_empty());
+    let e =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap_err();
+    assert!(is_object_changed(&e), "{e:?}");
+    // A failed read of an object that is still listed stays the server's error.
+    f.fake
+        .objects
+        .lock()
+        .unwrap()
+        .insert(ObjectKind::Procedure, vec!["p".into()]);
+    *f.fake.ddl_error.lock().unwrap() = Some(server_error("1205"));
+    let e =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_PROC.into(), o.strategy)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(&e, DbError::Server { code: Some(c), .. } if c == "1205"),
+        "{e:?}"
+    );
+}
+
+#[tokio::test]
+async fn pg_failure_before_first_statement_is_not_applied() {
+    let f = pg_function(pg17()).await;
+    let o = open(&f, ObjectKind::Function, Some("f")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, PG_FUNC.into(), Some(Strategy::Replace))
+            .await
+            .unwrap();
+    f.fake.fail_on("SET LOCAL", server_error("25P02"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::NotApplied, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unchanged);
+    assert_eq!(r.statements_sent, 0);
+    assert!(r.executed.is_empty() && r.failed.is_none());
+    assert!(!r.error.as_ref().unwrap().outcome_unknown);
+    let sent = f.fake.sent();
+    assert!(!sent.contains(&p.statements[0]), "{sent:?}");
+    // The open transaction is still closed.
+    assert!(sent.contains(&"ROLLBACK".to_string()), "{sent:?}");
+    assert!(history(&f).is_empty());
+}
+
+#[tokio::test]
+async fn apply_updates_edit_before_dropping_its_plans() {
+    const AFTER: &str = "CREATE ALGORITHM=UNDEFINED DEFINER=`root`@`%` SQL SECURITY DEFINER VIEW `v` AS select 2 AS `id`";
+    let f = fixture(Fake::new(mysql8(), MYSQL_VIEW), None, false).await;
+    let o = open(&f, ObjectKind::View, Some("v")).await;
+    let before = f.sm.ddl_edits.get(o.edit_id).unwrap().fingerprint;
+    let applied =
+        f.sm.ddl_edit_preview(o.edit_id, AFTER.into(), o.strategy)
+            .await
+            .unwrap();
+    let other =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_VIEW.into(), o.strategy)
+            .await
+            .unwrap();
+    *f.fake.sets_ddl.lock().unwrap() = Some(("CREATE OR REPLACE".into(), AFTER.into()));
+    // During the re-read after the change, a watcher waits for the other plan to be
+    // dropped and then reads the edit: by then it must already be the new one.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let sm = Arc::clone(&f.sm);
+    let (edit_id, other_id) = (o.edit_id, other.plan_id);
+    *f.fake.on_ddl.lock().unwrap() = Some((
+        1,
+        Box::new(move || {
+            std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while lock(&sm.ddl_edits.plans).contains_key(&other_id) {
+                    if Instant::now() > deadline {
+                        return;
+                    }
+                    std::thread::yield_now();
+                }
+                let _ = tx.send(sm.ddl_edits.get(edit_id).unwrap().fingerprint);
+            });
+        }),
+    ));
+    let r = apply(&f, applied.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Applied, "{r:?}");
+    let seen = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let now = f.sm.ddl_edits.get(o.edit_id).unwrap().fingerprint;
+    assert_ne!(now, before);
+    assert_eq!(seen, now);
+    assert!(lock(&f.sm.ddl_edits.plans).is_empty());
+}
+
+#[tokio::test]
+async fn mysql_failure_with_object_changed_is_partial() {
+    let f = mysql_trigger().await;
+    let o = open(&f, ObjectKind::Trigger, Some("t")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap();
+    // The DROP completes but leaves a different trigger of that name behind (another
+    // session re-created it); the CREATE then fails.
+    *f.fake.sets_ddl.lock().unwrap() = Some((
+        "DROP TRIGGER".into(),
+        MYSQL_TRIGGER.replace("NEW.a = 1", "NEW.a = 2"),
+    ));
+    f.fake.fail_on("CREATE DEFINER", server_error("1359"));
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Partial, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Changed);
+    assert_eq!(r.executed, ["DROP TRIGGER `shop`.`t`"]);
+    assert_eq!(r.failed.as_deref(), Some(MYSQL_TRIGGER));
+    assert_eq!(r.restore_text, None);
+    assert!(!r.error.as_ref().unwrap().outcome_unknown);
+    let h = history(&f);
+    assert_eq!(h.len(), 1);
+    assert!(!h[0].outcome_unknown);
+    // The edit keeps the object; its next preview finds it changed.
+    let edit = f.sm.ddl_edits.get(o.edit_id).unwrap();
+    assert!(edit.object.is_some());
+    *f.fake.fail.lock().unwrap() = None;
+    let e =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap_err();
+    assert!(is_object_changed(&e), "{e:?}");
+}
+
+fn transport_lost() -> DbError {
+    DbError::ConnectionLost {
+        was_in_tx: false,
+        outcome_unknown: true,
+        message: "lost".into(),
+    }
+}
+
+#[tokio::test]
+async fn mysql_transport_loss_rereads_on_fresh_session() {
+    let f = mysql_trigger().await;
+    let o = open(&f, ObjectKind::Trigger, Some("t")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap();
+    // The DROP ran; the link drops during the CREATE; the trigger is gone.
+    f.fake.objects.lock().unwrap().clear();
+    f.fake.fail_on("CREATE DEFINER", transport_lost());
+    let before = f.fake.connects.load(AtomicOrdering::SeqCst);
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert!(f.fake.connects.load(AtomicOrdering::SeqCst) >= before + 2);
+    assert_eq!(r.outcome, EditOutcome::Partial, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Missing);
+    assert_eq!(r.restore_text.as_deref(), Some(MYSQL_TRIGGER));
+    assert_eq!(r.executed, ["DROP TRIGGER `shop`.`t`"]);
+    assert_eq!(r.failed.as_deref(), Some(MYSQL_TRIGGER));
+}
+
+#[tokio::test]
+async fn mysql_fresh_reread_failure_is_unknown() {
+    let f = mysql_trigger().await;
+    let o = open(&f, ObjectKind::Trigger, Some("t")).await;
+    let p =
+        f.sm.ddl_edit_preview(o.edit_id, MYSQL_TRIGGER.into(), o.strategy)
+            .await
+            .unwrap();
+    f.fake.fail_on("CREATE DEFINER", transport_lost());
+    // The apply's own session connects; the fresh one for the re-read cannot. (The
+    // apply's session would still answer: the state must not come from it.)
+    let n = f.fake.connects.load(AtomicOrdering::SeqCst);
+    *f.fake.connect_fail_from.lock().unwrap() = Some(n + 1);
+    let r = apply(&f, p.plan_id, None).await.unwrap();
+    assert_eq!(r.outcome, EditOutcome::Unknown, "{r:?}");
+    assert_eq!(r.object_state, ObjectState::Unknown);
+    assert_eq!(r.restore_text, None);
+    assert!(r.error.as_ref().unwrap().outcome_unknown);
+    assert_eq!(r.executed, ["DROP TRIGGER `shop`.`t`"]);
+    let h = history(&f);
+    assert_eq!(h.len(), 1);
+    assert!(h[0].outcome_unknown);
+    // The edit is left as it was opened.
+    let edit = f.sm.ddl_edits.get(o.edit_id).unwrap();
+    assert!(edit.object.is_some());
+    assert_eq!(edit.base_text, MYSQL_TRIGGER);
 }

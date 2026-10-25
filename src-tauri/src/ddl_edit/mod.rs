@@ -220,14 +220,22 @@ pub(crate) async fn read_object(
 }
 
 /// The fingerprint of the edited object read on `session` now (`"absent"` for a new one).
+/// An object that is no longer listed (dropped by another session) changed: the
+/// server's "does not exist" error of the DDL read is [`object_changed`].
 pub(crate) async fn current_fingerprint(
     session: &dyn Session,
     t: &EditTarget,
     object: Option<&ObjectRef>,
 ) -> Result<String, DbError> {
-    match object {
-        None => Ok(ABSENT.into()),
-        Some(o) => Ok(read_object(session, t, &o.name).await?.fingerprint),
+    let Some(o) = object else {
+        return Ok(ABSENT.into());
+    };
+    match read_object(session, t, &o.name).await {
+        Ok(read) => Ok(read.fingerprint),
+        Err(e) => match object_listed(session, t, &o.name).await {
+            Ok(false) => Err(object_changed()),
+            _ => Err(e),
+        },
     }
 }
 

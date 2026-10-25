@@ -55,9 +55,12 @@ pub struct DdlEditReport {
     pub error: Option<AppError>,
     pub warnings: Vec<String>,
     pub statements_sent: u32,
-    /// The plan statements that completed.
+    /// MySQL / MariaDB: the plan statements that completed. Empty on PostgreSQL, where
+    /// the plan runs in one transaction and no statement takes effect on its own (only
+    /// a `Partial` outcome keeps it, which PostgreSQL never reports).
     pub executed: Vec<String>,
-    /// The plan statement that failed.
+    /// MySQL / MariaDB: the plan statement that failed. `None` on PostgreSQL, as
+    /// `executed`.
     pub failed: Option<String>,
     pub object_state: ObjectState,
     /// `Missing`: the original DDL, offered for a create of the same name.
@@ -356,6 +359,14 @@ impl SessionManager {
                         self.cancel_grace,
                     )
                     .await;
+                    // A failure after BEGIN but before the first plan statement (the
+                    // SET LOCAL, a context re-check) changed nothing, whatever the
+                    // ROLLBACK did.
+                    let action = if sent == 0 {
+                        ActionOutcome::NotApplied
+                    } else {
+                        action
+                    };
                     report.outcome = edit_outcome(action);
                     report.object_state = match action {
                         ActionOutcome::RolledBack | ActionOutcome::NotApplied => {
@@ -391,6 +402,11 @@ impl SessionManager {
                 report.error = Some(failure_error(e, action));
             }
         }
+        if pg && report.outcome != EditOutcome::Partial {
+            // One transaction: no statement took effect on its own.
+            report.executed.clear();
+            report.failed = None;
+        }
         // No cancellation can reach a later statement or a pooled session: this session is closed.
         ops.set_cancel(operation, None);
         close_quietly(session).await;
@@ -415,36 +431,44 @@ impl SessionManager {
                 report.warnings.push(HISTORY_FAILED.into());
             }
             self.after_ddl(conn, &stored.scope.database);
-            // Other plans of this edit were judged against the object as it was.
-            lock(&self.ddl_edits.plans).retain(|_, p| p.edit_id != stored.edit_id);
         }
-        if let Some(state) = reloaded {
-            let mut target = stored.target.clone();
-            if target.kind == ObjectKind::Trigger && state.facts.table.is_some() {
-                target.table = state.facts.table.clone();
+        // The edit is updated and its other plans dropped under the edits lock (order
+        // edits → plans, as the preview's insert): a preview running meanwhile either
+        // stores its plan before (and it is dropped here) or sees the new fingerprint.
+        {
+            let mut edits = lock(&self.ddl_edits.edits);
+            if let Some(state) = reloaded {
+                let mut target = stored.target.clone();
+                if target.kind == ObjectKind::Trigger && state.facts.table.is_some() {
+                    target.table = state.facts.table.clone();
+                }
+                let object = object_ref(&target, &object_name);
+                if let Some(edit) = edits.get_mut(&stored.edit_id) {
+                    edit.target = target;
+                    edit.object = Some(object.clone());
+                    edit.base_text = state.text.clone();
+                    edit.fingerprint = state.fingerprint;
+                    edit.facts = state.facts;
+                    edit.blocked = state.blocked;
+                }
+                report.object = Some(object);
+                report.text = Some(state.text);
             }
-            let object = object_ref(&target, &object_name);
-            if let Some(edit) = lock(&self.ddl_edits.edits).get_mut(&stored.edit_id) {
-                edit.target = target;
-                edit.object = Some(object.clone());
-                edit.base_text = state.text.clone();
-                edit.fingerprint = state.fingerprint;
-                edit.facts = state.facts;
-                edit.blocked = state.blocked;
+            if report.object_state == ObjectState::Missing && !stored.new {
+                // The restore is an ordinary create of the same name (spec §6.3).
+                report.restore_text = Some(stored.base_text.clone());
+                if let Some(edit) = edits.get_mut(&stored.edit_id) {
+                    edit.target.name = None;
+                    edit.object = None;
+                    edit.base_text = String::new();
+                    edit.fingerprint = ABSENT.into();
+                    edit.facts = CatalogFacts::default();
+                    edit.blocked = None;
+                }
             }
-            report.object = Some(object);
-            report.text = Some(state.text);
-        }
-        if report.object_state == ObjectState::Missing && !stored.new {
-            // The restore is an ordinary create of the same name (spec §6.3).
-            report.restore_text = Some(stored.base_text.clone());
-            if let Some(edit) = lock(&self.ddl_edits.edits).get_mut(&stored.edit_id) {
-                edit.target.name = None;
-                edit.object = None;
-                edit.base_text = String::new();
-                edit.fingerprint = ABSENT.into();
-                edit.facts = CatalogFacts::default();
-                edit.blocked = None;
+            if sent > 0 {
+                // Other plans of this edit were judged against the object as it was.
+                lock(&self.ddl_edits.plans).retain(|_, p| p.edit_id != stored.edit_id);
             }
         }
         progress("finished");
