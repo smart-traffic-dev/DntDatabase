@@ -117,29 +117,40 @@ fn has_delimiter_directive(text: &str, toks: &[Token]) -> bool {
 }
 
 /// What opened a block the body scanner tracks.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Block {
     Begin,
+    If,
     /// A `CASE` statement (closed by `END CASE`).
     CaseStmt,
     /// A `CASE` expression (closed by `END`).
     CaseExpr,
+    Loop,
+    /// A `WHILE` before its `DO`.
+    WhileCond,
+    While,
+    Repeat,
 }
 
 const QUOTE_BEGIN: &str =
     "BEGIN can only open a block at the start of a statement; quote it (`begin`) if it is a name.";
+const MISMATCH: &str =
+    "BEGIN … END does not match; check the blocks, and quote names such as `end`.";
+
+/// Words that open or close blocks: as an unquoted label they are refused.
+const BLOCK_WORDS: [&str; 7] = ["BEGIN", "END", "IF", "CASE", "LOOP", "WHILE", "REPEAT"];
 
 /// The MySQL body scanner: the byte offset where the one compound statement of
-/// `stmt` ends (its first `;` at paren and block depth 0, or the end of the text),
-/// refusing the text when anything but `;` follows, or when its blocks or
-/// parentheses do not balance.
+/// `stmt` ends (its first `;` at paren depth 0 with no block open, or the end of the
+/// text), refusing the text when anything but `;` follows, or when its blocks or
+/// parentheses do not match.
 ///
-/// Refuses rather than guesses (spec R6): when unsure it under-counts blocks, since
-/// an under-count can only end the statement early, which then refuses the rest. So
-/// `BEGIN` opens a block only at the start of a statement (the body's first token,
-/// after `;`, a label, a block's `BEGIN`, `LOOP`, `REPEAT`, a `WHILE`'s `DO`, `THEN` /
-/// `ELSE` outside a CASE expression, or a handler's condition list); after `.` it is
-/// a name, and anywhere else the text is refused. `CASE` after `.` is a name.
+/// Exact block matching, no name guessing (spec R6, controller ruling): a word right
+/// after `.` is a name; otherwise `BEGIN`, `IF`, `CASE`, `LOOP`, `WHILE` and `REPEAT`
+/// open blocks at the start of a statement, `CASE` elsewhere opens a CASE expression,
+/// `BEGIN` elsewhere is refused, and every `END [IF|CASE|LOOP|WHILE|REPEAT]` must close
+/// the innermost block of its kind. An unquoted `end` used as a name therefore always
+/// leads to a refusal (quote it).
 fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
     let toks = tokenize(stmt, dialect);
     let header = parse_header(stmt, dialect)?;
@@ -152,8 +163,6 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
     let mut blocks: Vec<Block> = Vec::new();
     // Token indexes known to start a statement (the body, handler statements).
     let mut starts: Vec<usize> = body.into_iter().collect();
-    // `WHILE`s whose `DO` has not been seen yet.
-    let mut whiles = 0usize;
     let mut at_start = false;
     let mut i = 0;
     while i < toks.len() {
@@ -171,71 +180,111 @@ fn body_end(stmt: &str, dialect: Dialect) -> Result<usize, DbError> {
                     ));
                 }
             }
+            TokKind::Punct(b';') if paren != 0 => {
+                return Err(text_error(
+                    "The text has an unclosed parenthesis before `;`; check the parentheses.",
+                ));
+            }
             TokKind::Punct(b';') if blocks.is_empty() => {
-                if paren != 0 {
-                    return Err(text_error(
-                        "The text has an unclosed parenthesis before `;`; check the parentheses.",
-                    ));
-                }
                 if toks[i + 1..].iter().any(|t| t.kind != TokKind::Punct(b';')) {
                     return Err(text_error(AFTER_BODY));
                 }
                 return Ok(t.start);
             }
-            TokKind::Punct(b';') | TokKind::Punct(b':') if paren == 0 => next_start = true,
+            TokKind::Punct(b';') => next_start = true,
+            TokKind::Word(_) | TokKind::Quoted
+                if paren == 0
+                    && start
+                    && !prev_dot
+                    && toks
+                        .get(i + 1)
+                        .is_some_and(|n| n.kind == TokKind::Punct(b':')) =>
+            {
+                // `label: BEGIN | LOOP | WHILE | REPEAT`.
+                if let TokKind::Word(w) = t.kind {
+                    if BLOCK_WORDS.iter().any(|k| w.eq_ignore_ascii_case(k)) {
+                        return Err(text_error(format!(
+                            "The label {w} is a block keyword; quote it (`{w}`)."
+                        )));
+                    }
+                }
+                let opener = word_at(&toks, i + 2);
+                if !["BEGIN", "LOOP", "WHILE", "REPEAT"]
+                    .iter()
+                    .any(|k| is_kw(opener, k))
+                {
+                    return Err(text_error(
+                        "A label must be followed by BEGIN, LOOP, WHILE or REPEAT.",
+                    ));
+                }
+                i += 1;
+                next_start = true;
+            }
             TokKind::Word(w) if paren == 0 && !prev_dot => {
                 let kw = |k: &str| w.eq_ignore_ascii_case(k);
-                if kw("BEGIN") {
-                    let label = toks
-                        .get(i + 1)
-                        .is_some_and(|n| n.kind == TokKind::Punct(b':'));
-                    if !start || label {
-                        return Err(text_error(QUOTE_BEGIN));
+                let inner = blocks.last().copied();
+                if kw("END") {
+                    let next = word_at(&toks, i + 1);
+                    let closes = [
+                        ("IF", Block::If),
+                        ("CASE", Block::CaseStmt),
+                        ("LOOP", Block::Loop),
+                        ("WHILE", Block::While),
+                        ("REPEAT", Block::Repeat),
+                    ]
+                    .iter()
+                    .find(|(k, _)| is_kw(next, k))
+                    .map(|&(_, b)| b);
+                    let Some(open) = blocks.pop() else {
+                        return Err(text_error(
+                            "The text has an unbalanced END; check the BEGIN … END blocks.",
+                        ));
+                    };
+                    match closes {
+                        Some(b) if b == open => i += 1,
+                        None if matches!(open, Block::Begin | Block::CaseExpr) => {}
+                        _ => return Err(text_error(MISMATCH)),
                     }
+                    // An optional end label.
+                    if open != Block::CaseExpr
+                        && open != Block::If
+                        && open != Block::CaseStmt
+                        && toks
+                            .get(i + 1)
+                            .is_some_and(|n| matches!(n.kind, TokKind::Word(_) | TokKind::Quoted))
+                    {
+                        i += 1;
+                    }
+                } else if start && kw("BEGIN") {
                     blocks.push(Block::Begin);
                     next_start = true;
+                } else if kw("BEGIN") {
+                    return Err(text_error(QUOTE_BEGIN));
                 } else if kw("CASE") {
                     blocks.push(if start {
                         Block::CaseStmt
                     } else {
                         Block::CaseExpr
                     });
-                } else if kw("END") {
-                    // Ending a CASE expression early only under-counts; a name END is
-                    // recognised by the tokens around it otherwise.
-                    let name = if blocks.last() == Some(&Block::CaseExpr) {
-                        is_name_by_prev(&toks, i)
-                    } else {
-                        is_name(&toks, i)
-                    };
-                    if !name {
-                        let next = word_at(&toks, i + 1);
-                        if ["IF", "LOOP", "WHILE", "REPEAT"]
-                            .iter()
-                            .any(|k| is_kw(next, k))
-                        {
-                            i += 1;
-                        } else {
-                            if is_kw(next, "CASE") {
-                                i += 1;
-                            }
-                            if blocks.pop().is_none() {
-                                return Err(text_error(
-                                    "The text has an unbalanced END; check the BEGIN … END blocks.",
-                                ));
-                            }
-                        }
-                    }
-                } else if (kw("LOOP") || kw("REPEAT")) && start {
+                } else if start && kw("IF") {
+                    blocks.push(Block::If);
+                } else if start && kw("LOOP") {
+                    blocks.push(Block::Loop);
                     next_start = true;
-                } else if kw("WHILE") && start {
-                    whiles += 1;
-                } else if kw("DO") && whiles > 0 {
-                    whiles -= 1;
+                } else if start && kw("REPEAT") {
+                    blocks.push(Block::Repeat);
                     next_start = true;
-                } else if (kw("THEN") || kw("ELSE")) && blocks.last() != Some(&Block::CaseExpr) {
+                } else if start && kw("WHILE") {
+                    blocks.push(Block::WhileCond);
+                } else if kw("DO") && inner == Some(Block::WhileCond) {
+                    blocks.pop();
+                    blocks.push(Block::While);
                     next_start = true;
-                } else if kw("DECLARE") && start {
+                } else if (kw("THEN") || kw("ELSE"))
+                    && matches!(inner, Some(Block::If | Block::CaseStmt))
+                {
+                    next_start = true;
+                } else if start && kw("DECLARE") {
                     if let Some(k) = handler_start(&toks, i) {
                         starts.push(k);
                     }
@@ -432,30 +481,6 @@ fn handler_start(toks: &[Token], i: usize) -> Option<usize> {
     }
 }
 
-/// Whether the `END` at token `i` stands where a name would (spec §5.1).
-fn is_name(toks: &[Token], i: usize) -> bool {
-    is_name_by_prev(toks, i)
-        || toks.get(i + 1).is_some_and(|n| {
-            matches!(
-                n.kind,
-                TokKind::Punct(b',') | TokKind::Close | TokKind::Punct(b'.') | TokKind::Punct(b'=')
-            )
-        })
-        || is_kw(word_at(toks, i + 1), "FROM")
-        || is_kw(word_at(toks, i + 1), "AS")
-}
-
-fn is_name_by_prev(toks: &[Token], i: usize) -> bool {
-    let Some(p) = i.checked_sub(1).and_then(|j| toks.get(j)) else {
-        return false;
-    };
-    matches!(
-        p.kind,
-        TokKind::Punct(b'.') | TokKind::Punct(b',') | TokKind::Open | TokKind::Punct(b'=')
-    ) || is_kw(word_at(toks, i - 1), "SELECT")
-        || is_kw(word_at(toks, i - 1), "AS")
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::test_servers::*;
@@ -520,7 +545,12 @@ mod tests {
             "CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION BEGIN SELECT 'err'; END; SELECT 1; END",
             "CREATE PROCEDURE p() BEGIN SELECT `begin`, `end` FROM t; END",
             "CREATE PROCEDURE p() BEGIN SELECT t.end FROM t; SELECT t.begin, a FROM t; END",
-            "CREATE PROCEDURE p() BEGIN SELECT end FROM t; SELECT a AS `begin` FROM t; SELECT t.case FROM t; END",
+            "CREATE PROCEDURE p() BEGIN SELECT `end` FROM t; SELECT a AS `begin` FROM t; SELECT t.case, t.select, t.as, t.if, t.loop FROM t; END",
+            "CREATE PROCEDURE p(a INT) IF a > 1 THEN SELECT 1; ELSEIF a = 0 THEN BEGIN SELECT 0; END; ELSE SELECT 2; END IF",
+            "CREATE PROCEDURE p(a INT) CASE a WHEN 1 THEN SELECT 1; ELSE CASE WHEN a > 2 THEN SELECT 2; ELSE BEGIN END; END CASE; END CASE",
+            "CREATE PROCEDURE p() l: LOOP LEAVE l; END LOOP l",
+            "CREATE PROCEDURE p() BEGIN DECLARE done INT DEFAULT 0; DECLARE x INT; DECLARE c CURSOR FOR SELECT a FROM t WHERE IF(a, 1, 0) = 1; DECLARE CONTINUE HANDLER FOR NOT FOUND SET done = 1; OPEN c; rd: LOOP FETCH c INTO x; IF done THEN LEAVE rd; END IF; ITERATE rd; END LOOP rd; CLOSE c; SELECT REPEAT('a', 2), CASE WHEN x THEN 1 END AS y FROM t WHERE CASE x WHEN 1 THEN 1 ELSE 0 END = 1; END",
+            "CREATE PROCEDURE p(a INT) BEGIN IF CASE WHEN a THEN 1 END = 1 THEN SET a = 1; END IF; WHILE CASE WHEN a > 0 THEN 1 ELSE 0 END DO SET a = a - 1; END WHILE; REPEAT SET a = a + 1; UNTIL CASE WHEN a > 2 THEN 1 END END REPEAT; END",
             "CREATE PROCEDURE p(a INT) BEGIN IF a THEN BEGIN SELECT 1; END; ELSEIF a > 2 THEN BEGIN END; ELSE BEGIN SELECT 2; END; END IF; END",
             "CREATE PROCEDURE p(a INT) BEGIN CASE WHEN a = 1 THEN BEGIN SELECT 1; END; ELSE BEGIN END; END CASE; END",
             "CREATE PROCEDURE p(a INT) BEGIN WHILE a > 0 DO BEGIN SET a = a - 1; END; END WHILE; l: REPEAT BEGIN SET a = a + 1; END; UNTIL a > 3 END REPEAT l; LOOP BEGIN LEAVE l; END; END LOOP; END",
@@ -602,6 +632,18 @@ mod tests {
             "CREATE FUNCTION f() RETURNS INT RETURN a AND begin; DROP TABLE x; END",
             "CREATE PROCEDURE p() SELECT CASE WHEN a THEN begin END; DROP TABLE x; END",
             "CREATE PROCEDURE p() BEGIN SELECT CASE WHEN a THEN begin END; END; DROP TABLE x; END",
+            // Re-review: name `end` / keywords after `.` must not unbalance the count.
+            "CREATE PROCEDURE p() SELECT CASE WHEN end THEN begin END FROM t; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN SELECT CASE WHEN end THEN begin END FROM t; END; DROP TABLE x; END",
+            "CREATE EVENT e ON SCHEDULE EVERY 1 DAY DO SELECT CASE WHEN end THEN begin END FROM t; DELETE FROM t; END",
+            "CREATE PROCEDURE p() SELECT CASE WHEN a THEN 1 ELSE t.select END FROM t; DROP TABLE x; END",
+            "CREATE PROCEDURE p() BEGIN SET @v = CASE WHEN a THEN 1 ELSE t.as END; END; DROP TABLE x; END",
+            "CREATE TRIGGER trg BEFORE INSERT ON t FOR EACH ROW SET NEW.a = CASE WHEN NEW.b THEN 1 ELSE t.select END; DELETE FROM t; END",
+            "CREATE PROCEDURE p() BEGIN SELECT end FROM t; END; DROP TABLE x",
+            "CREATE PROCEDURE p() BEGIN IF a THEN SELECT 1; END; END IF; END; DROP TABLE x",
+            "CREATE PROCEDURE p() BEGIN CASE a WHEN 1 THEN SELECT 1; END; END; DROP TABLE x",
+            "CREATE PROCEDURE p() l: LOOP SELECT 1; END l; DROP TABLE x",
+            "CREATE PROCEDURE p() x: SELECT 1; DROP TABLE x",
         ] {
             let msg = refused(isolate(text, ObjectKind::Procedure, MY, &mysql8()));
             assert!(!msg.is_empty(), "{text}");
