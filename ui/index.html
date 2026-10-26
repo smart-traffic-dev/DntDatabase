@@ -8,5 +8,7 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <!-- Glide Data Grid opens its cell editor here; without it no cell can be edited in place. -->
+    <div id="portal" style="position: fixed; left: 0; top: 0; z-index: 9999"></div>
   </body>
 </html>
