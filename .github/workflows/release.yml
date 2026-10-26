@@ -1,0 +1,74 @@
+name: Release
+
+# Pushing a tag `vX.Y.Z` (equal to the workspace version in Cargo.toml) builds the signed Windows
+# installer and publishes it as a GitHub release with `latest.json`, the file installed apps read
+# for updates (Help > Check for updates). See README "Releases".
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The notes list the commits since the previous tag.
+          fetch-depth: 0
+      - name: Check the tag matches the version
+        shell: pwsh
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq 'dntdatabase').version
+          if ("v$version" -ne '${{ github.ref_name }}') {
+            throw "Tag ${{ github.ref_name }} does not match the version $version in Cargo.toml"
+          }
+      - name: Release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $previous = git describe --tags --abbrev=0 '${{ github.ref_name }}^' 2>$null
+          $range = if ($previous) { "$previous..${{ github.ref_name }}" } else { '${{ github.ref_name }}' }
+          $lines = git log --no-merges --pretty='- %s' $range
+          "body<<NOTES_END" >> $env:GITHUB_OUTPUT
+          ($lines -join "`n") >> $env:GITHUB_OUTPUT
+          "NOTES_END" >> $env:GITHUB_OUTPUT
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            ui/pnpm-lock.yaml
+      - name: Install dependencies
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --dir ui install --frozen-lockfile
+      - name: Build, sign and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: pnpm tauri
+          # The release overlay turns on the signed updater artifacts (the plain config builds without the key).
+          args: --config src-tauri/tauri.release.conf.json
+          tagName: ${{ github.ref_name }}
+          releaseName: DntDatabase ${{ github.ref_name }}
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true

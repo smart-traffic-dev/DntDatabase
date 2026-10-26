@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppError, DumpRequest, EnvTag, ImportRequest, NodeId, ObjectRef, RestoreRequest, ToolDumpRequest, TxAction } from '../bindings';
+import type { AppError, DumpRequest, EnvTag, ImportRequest, NodeId, ObjectRef, RestoreRequest, ToolDumpRequest, TxAction, UpdateInfo } from '../bindings';
 import type { ObjectActionRequest } from '../dialogs/ObjectActionDialog';
 import type { ExportRequest } from '../dialogs/resultExport';
 import type { SettingsTab } from '../dialogs/SettingsDialog';
@@ -41,6 +41,8 @@ export type UiRequest =
   /** The user snippets manager. */
   | { kind: 'snippets' }
   | { kind: 'about' }
+  /** Help > Check for updates; `found` when the startup check already found a newer release. */
+  | { kind: 'update'; found?: UpdateInfo }
   /** Review and apply the text of a DDL editor tab. */
   | { kind: 'ddlEdit'; tabId: string }
   /** The data import wizard; `table` from the tree, `params` from "Run again" (R5). */

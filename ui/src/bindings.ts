@@ -793,6 +793,29 @@ async exportPickPath(baseName: string, format: ExportFormat) : Promise<Result<st
 async openDevtools() : Promise<void> {
     await TAURI_INVOKE("open_devtools");
 },
+/**
+ * The newer version, if any; it is kept for `update_install`.
+ */
+async updateCheck() : Promise<Result<UpdateInfo | null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_check") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Downloads and installs the update the last `update_check` found, then restarts.
+ * Refused while a background job runs; download progress goes through `channel`.
+ */
+async updateInstall(channel: TAURI_CHANNEL<UpdateProgress>) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_install", { channel }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async tabsLoad() : Promise<Result<QueryTabRecord[], AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("tabs_load") };
@@ -2938,6 +2961,22 @@ export type UnboundedWrite = { op: WriteOp; reason: UnboundedReason;
  * statement names none.
  */
 table: string }
+/**
+ * A newer version than the running one.
+ */
+export type UpdateInfo = { version: string; current_version: string; 
+/**
+ * The release notes, as written in the release.
+ */
+notes: string | null; 
+/**
+ * RFC 3339 publication date.
+ */
+date: string | null }
+/**
+ * Bytes of the installer downloaded so far, and its size when the server sends it.
+ */
+export type UpdateProgress = { downloaded: number; total: number | null }
 export type Value = { t: "Null" } | { t: "Bool"; v: boolean } | { t: "Int"; v: JsInteger } | { t: "UInt"; v: JsInteger } | { t: "Float"; v: number } | { t: "Decimal"; v: string } | { t: "Text"; v: string } | { t: "Json"; v: string } | { t: "Uuid"; v: string } | { t: "Bytes"; v: { 
 /**
  * A byte length; far below 2^53 in practice, so a plain number.

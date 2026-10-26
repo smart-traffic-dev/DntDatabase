@@ -18,6 +18,7 @@ pub mod query;
 pub mod settings;
 pub mod table_design;
 pub mod transfer;
+pub mod update;
 pub mod window;
 pub mod workspace;
 
@@ -192,6 +193,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             export::reveal_export,
             export::export_pick_path,
             window::open_devtools,
+            update::update_check,
+            update::update_install,
             workspace::tabs_load,
             workspace::tabs_save,
             workspace::tabs_delete,

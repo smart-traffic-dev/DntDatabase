@@ -136,6 +136,36 @@ and fails the test when it ends (the `test` of `e2e-web/src/test.ts` checks it):
 `e2e-web/src/backend.ts`. Error payloads come from `ui/src/test/fixtures/app-errors.json` (the fixtures the Rust
 `app_error_fixtures` test generates), shared with the unit tests through `ui/src/test/fixtures/data.ts`.
 
+## Releases
+
+Installed apps update themselves from the GitHub releases of this repository: release builds look for a
+newer version shortly after startup, and Help > Check for updates asks on demand. Installing goes through the
+same checks as quitting (running jobs, staged edits, open transactions), then downloads the installer, checks
+its signature against `plugins.updater.pubkey` in `src-tauri/tauri.conf.json` and runs it; the app restarts on
+the new version.
+
+Signing keys live in `.env` (git-ignored, see `.env.example`) and in the repository's Actions secrets
+`TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Keep a backup of `.env`: without the private
+key no update can reach installed apps. To push the secrets again (after a new key, or for a fork):
+
+```powershell
+Get-Content .env | Where-Object { $_ -match '^TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)?=' } | ForEach-Object { $k, $v = $_ -split '=', 2; gh secret set $k --body $v }
+```
+
+To publish version `X.Y.Z`:
+
+1. Set `version = "X.Y.Z"` under `[workspace.package]` in `Cargo.toml` and run `cargo check` (updates `Cargo.lock`).
+2. Commit, then tag and push: `git tag vX.Y.Z; git push origin main vX.Y.Z`.
+3. The `Release` workflow checks the tag matches the version, builds the signed installer, and publishes the
+   release with `latest.json` and the commit list since the previous tag as notes.
+
+A signed build on this machine (the plain `pnpm tauri build` stays unsigned and needs no key):
+
+```powershell
+Get-Content .env | Where-Object { $_ -match '^TAURI_SIGNING_PRIVATE_KEY(_PASSWORD)?=' } | ForEach-Object { $k, $v = $_ -split '=', 2; Set-Item "env:$k" $v }
+pnpm tauri build --config src-tauri/tauri.release.conf.json
+```
+
 ## Fixtures
 
 `cargo run -p dnt-testkit --features gen-fixtures --bin gen_fixtures` generates the TLS certificates

@@ -31,6 +31,13 @@
       "devCsp": "default-src 'self' http://localhost:5173; script-src 'self' 'unsafe-inline' http://localhost:5173; connect-src ipc: http://ipc.localhost http://localhost:5173 ws://localhost:5173; img-src 'self' data: http://localhost:5173; style-src 'self' 'unsafe-inline' http://localhost:5173; font-src 'self' data: http://localhost:5173; worker-src 'self' blob:"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDgwNzc4NDk5RTRGRTI4QzQKUldURUtQN2ttWVIzZ08wTVZkRkg3bE5zYU81cFc3ZXdDaGwzZkFYUlBhMU1JSHRwcjVzbnJQNHIK",
+      "endpoints": ["https://github.com/smart-traffic-dev/DntDatabase/releases/latest/download/latest.json"],
+      "windows": { "installMode": "passive" }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

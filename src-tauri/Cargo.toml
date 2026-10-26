@@ -43,6 +43,8 @@ specta-typescript.workspace = true
 tauri = { workspace = true, features = ["devtools"] }
 tauri-plugin-dialog.workspace = true
 tauri-plugin-opener.workspace = true
+# In-app updates from the GitHub releases (commands/update.rs).
+tauri-plugin-updater.workspace = true
 tauri-specta.workspace = true
 time.workspace = true
 # `process` + `io-util`: the external tool runner (N7, backup/ext_tools.rs).

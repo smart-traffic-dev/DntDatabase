@@ -494,6 +494,9 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     object_ddl: ({ id, obj }) =>
       (obj as ObjectRef).kind === 'Table' ? (DDL[requireOpen(id as string).variant] ?? '') : ddl.objectDdl(id as string, obj as ObjectRef),
 
+    // Help > Check for updates: no newer release.
+    update_check: () => null,
+
     // The Data sub-tab.
     get_table_page_size: () => 100,
     data_editable: ({ id }) => {

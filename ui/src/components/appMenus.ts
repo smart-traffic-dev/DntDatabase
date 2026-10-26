@@ -248,6 +248,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
       mnemonic: 'H',
       items: [
         { label: 'Keyboard shortcuts', hint: 'F1', run: () => dialog({ kind: 'settings', tab: 'shortcuts' }) },
+        { label: 'Check for updates…', run: () => dialog({ kind: 'update' }) },
         { label: 'About DntDatabase', run: () => dialog({ kind: 'about' }) },
       ],
     },

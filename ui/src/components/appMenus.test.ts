@@ -162,6 +162,6 @@ describe('buildMenus', () => {
       ['Zoom out', 'Ctrl+-'],
       ['Reset zoom', 'Ctrl+0'],
     ]);
-    expect(items('Help').map((i) => i.label)).toEqual(['Keyboard shortcuts', 'About DntDatabase']);
+    expect(items('Help').map((i) => i.label)).toEqual(['Keyboard shortcuts', 'Check for updates…', 'About DntDatabase']);
   });
 });

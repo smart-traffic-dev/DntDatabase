@@ -13,6 +13,7 @@ import { ObjectActionDialog } from './ObjectActionDialog';
 import { TableDesignDialog } from './TableDesignDialog';
 import { DdlEditDialog } from './DdlEditDialog';
 import { AboutDialog } from './AboutDialog';
+import { UpdateDialog } from './UpdateDialog';
 import { ConnectionDialog } from './ConnectionDialog';
 import { ExportDialog } from './ExportDialog';
 import { ResultExportDialog } from './ResultExportDialog';
@@ -343,6 +344,8 @@ export function DialogHost() {
     dialog = <SnippetsDialog onClose={closeRequest} />;
   } else if (request?.kind === 'about') {
     dialog = <AboutDialog onClose={closeRequest} />;
+  } else if (request?.kind === 'update') {
+    dialog = <UpdateDialog found={request.found} onClose={closeRequest} />;
   } else if (request?.kind === 'importData') {
     dialog = (
       <ImportWizard

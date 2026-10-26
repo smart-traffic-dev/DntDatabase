@@ -43,7 +43,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
+        .manage(commands::update::PendingUpdate::default())
         .manage(log)
         .invoke_handler(builder.invoke_handler())
         .setup(move |app| {

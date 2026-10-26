@@ -20,8 +20,13 @@ import { installRunMarks } from './store/runMarks';
 import { useJobs } from './store/jobs';
 import { useTabs } from './store/tabs';
 import { useTree } from './store/tree';
+import { useDialogs } from './store/dialogs';
+import { api } from './api';
 
 export { EmptyWorkspace } from './components/EmptyWorkspace';
+
+/** How long after startup a release build looks for an update. */
+const UPDATE_CHECK_DELAY_MS = 5000;
 
 export default function App() {
   const sidebarWidth = useLayout((s) => s.sidebarWidth);
@@ -88,6 +93,26 @@ export default function App() {
     }
     return () => {
       void unlisten.then((f) => f()).catch(() => {});
+    };
+  }, []);
+
+  // Release builds look for a newer release once, shortly after startup. Nothing shows when there
+  // is none or the server cannot be reached, and an open dialog is never replaced.
+  useEffect(() => {
+    if (import.meta.env.DEV) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      api.updateCheck().then(
+        (found) => {
+          const dialogs = useDialogs.getState();
+          if (live && found && !dialogs.request) dialogs.requestDialog({ kind: 'update', found });
+        },
+        () => {},
+      );
+    }, UPDATE_CHECK_DELAY_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
     };
   }, []);
 

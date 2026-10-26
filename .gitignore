@@ -1,4 +1,6 @@
 target/
+# Release signing secrets (see README "Releases"); never committed.
+.env
 node_modules/
 ui/node_modules/
 ui/dist/

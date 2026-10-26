@@ -625,59 +625,85 @@ async function confirmStopJobs(): Promise<boolean> {
   });
 }
 
+let quitting = false;
+
 /**
- * App close (spec §7.2): live background jobs are stopped first (after asking, P5 R8), then saves every tab (a failed save asks "Quit anyway / Cancel"), then
- * quits, unless tabs have an open transaction or a running statement: `AppCloseDialog` lists
- * them with "Rollback all & quit" / "Cancel".
+ * Quitting (spec §7.2), shared by the window close and installing an update (whose installer
+ * closes the app): live background jobs are stopped first (after asking, P5 R8), then saves every
+ * tab (a failed save asks "Quit anyway / Cancel"), then runs `finish`, unless tabs have an open
+ * transaction or a running statement: `AppCloseDialog` lists them with "Rollback all & quit" /
+ * "Cancel" (an error of `finish` there keeps it open with the error). Returns once `finish` ran,
+ * the user kept the app open, or `AppCloseDialog` is shown; `settle` gets the final answer.
  */
+async function runQuit(finish: () => Promise<void>, settle: (quit: boolean) => void): Promise<void> {
+  const keep = (message?: string) => {
+    if (message) notice(message);
+    settle(false);
+  };
+  if (useDialogs.getState().objectActionRunning) {
+    return keep('An object action is running. Wait for its result, or use Stop and verify the outcome before quitting.');
+  }
+  if (useDialogs.getState().tableDesignRunning) {
+    return keep('A table design is being applied. Wait for its result, or use Stop and verify the outcome before quitting.');
+  }
+  if (useDialogs.getState().ddlEditRunning) {
+    return keep('A DDL change is being applied. Wait for its result, or use Stop and verify the outcome before quitting.');
+  }
+  const asking = useDialogs.getState().question?.kind;
+  if (quitting || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits' || asking === 'jobsRunning') return keep();
+  quitting = true;
+  try {
+    // Background jobs first (R8): quitting stops them all (bounded wait) before the rest of the flow.
+    if (!(await confirmStopJobs())) return keep();
+    // Staged data edits are not saved anywhere: quitting throws them away, so ask first.
+    if (!(await stagedEdits.confirm())) return keep();
+    if (!(await designDrafts.confirm())) return keep();
+    if (!(await ddlDrafts.confirm())) return keep();
+    const failed = await useQueryDocs.getState().flush();
+    if (failed.length && !(await confirmQuitUnsaved(failed.length))) return keep();
+    const open = await openTransactions();
+    if (!open.length) {
+      await finish();
+      settle(true);
+      return;
+    }
+    useDialogs.getState().ask({
+      kind: 'appClose',
+      tabs: open.map(({ doc, running }) => (running ? `${doc.title} (running)` : doc.title)),
+      quit: async () => {
+        // Running tabs are stopped first (bounded wait), so their transaction can be rolled back.
+        // A run that does not stop, or a failed rollback, does not hold the app: the server
+        // rolls back when the session drops.
+        await Promise.allSettled(open.filter((t) => runningOf(t.doc.id)).map(({ doc }) => stopRunOf(doc.id)));
+        await Promise.allSettled(open.map(({ doc }) => api.queryTx(doc.id, 'Rollback')));
+        await finish();
+        settle(true);
+      },
+      done: () => {
+        useDialogs.getState().answer();
+        settle(false);
+      },
+    });
+  } finally {
+    quitting = false;
+  }
+}
+
+/**
+ * Quits through the same checks as closing the window, then runs `finish` (installing an update).
+ * Resolves `true` once `finish` has run, `false` when the user kept the app open; an error of
+ * `finish` rejects, except under "Rollback all & quit", which shows it and stays open.
+ */
+export function quitThen(finish: () => Promise<void>): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    runQuit(finish, resolve).catch(reject);
+  });
+}
+
+/** App close: the window's close request runs the quit flow with the window's destroy. */
 export function installCloseGuard(win: CloseGuardWindow): Promise<() => void> {
-  let busy = false;
   return win.onCloseRequested(async (event) => {
     event.preventDefault();
-    if (useDialogs.getState().objectActionRunning) {
-      notice('An object action is running. Wait for its result, or use Stop and verify the outcome before quitting.');
-      return;
-    }
-    if (useDialogs.getState().tableDesignRunning) {
-      notice('A table design is being applied. Wait for its result, or use Stop and verify the outcome before quitting.');
-      return;
-    }
-    if (useDialogs.getState().ddlEditRunning) {
-      notice('A DDL change is being applied. Wait for its result, or use Stop and verify the outcome before quitting.');
-      return;
-    }
-    const asking = useDialogs.getState().question?.kind;
-    if (busy || asking === 'appClose' || asking === 'saveFailed' || asking === 'discardEdits' || asking === 'jobsRunning') return;
-    busy = true;
-    try {
-      // Background jobs first (R8): quitting stops them all (bounded wait) before the rest of the flow.
-      if (!(await confirmStopJobs())) return;
-      // Staged data edits are not saved anywhere: quitting throws them away, so ask first.
-      if (!(await stagedEdits.confirm())) return;
-      if (!(await designDrafts.confirm())) return;
-      if (!(await ddlDrafts.confirm())) return;
-      const failed = await useQueryDocs.getState().flush();
-      if (failed.length && !(await confirmQuitUnsaved(failed.length))) return;
-      const open = await openTransactions();
-      if (!open.length) {
-        await win.destroy();
-        return;
-      }
-      useDialogs.getState().ask({
-        kind: 'appClose',
-        tabs: open.map(({ doc, running }) => (running ? `${doc.title} (running)` : doc.title)),
-        quit: async () => {
-          // Running tabs are stopped first (bounded wait), so their transaction can be rolled back.
-          // A run that does not stop, or a failed rollback, does not hold the app: the server
-          // rolls back when the session drops.
-          await Promise.allSettled(open.filter((t) => runningOf(t.doc.id)).map(({ doc }) => stopRunOf(doc.id)));
-          await Promise.allSettled(open.map(({ doc }) => api.queryTx(doc.id, 'Rollback')));
-          await win.destroy();
-        },
-        done: () => useDialogs.getState().answer(),
-      });
-    } finally {
-      busy = false;
-    }
+    await runQuit(() => win.destroy(), () => {});
   });
 }

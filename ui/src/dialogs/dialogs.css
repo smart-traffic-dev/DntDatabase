@@ -1280,3 +1280,18 @@ input::-ms-clear {
   display: flex;
   gap: 6px;
 }
+
+/* Software update: the release notes as written (scrolls when long). */
+.update-notes {
+  max-height: 220px;
+  margin: 0;
+  padding: var(--dnt-space-2);
+  overflow: auto;
+  font: inherit;
+  font-size: var(--dnt-text-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--dnt-bg-sunken);
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-md);
+}
