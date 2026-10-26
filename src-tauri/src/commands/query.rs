@@ -224,6 +224,10 @@ pub async fn query_close_tab_impl(
     state.sessions.query_close_tab(&tab_id, force).await
 }
 
+pub async fn query_probe_tab_impl(state: &AppState, tab_id: String) -> Result<(), DbError> {
+    state.sessions.query_probe_tab(&tab_id).await
+}
+
 /// [`guard`] for the calls that open or move a tab's session: an error that dropped
 /// the tab's transaction reports the tab's state after it in `AppError::tx_state`
 /// (see [`with_tx_state`]).
@@ -417,6 +421,15 @@ pub async fn query_close_tab(
     force: bool,
 ) -> Result<(), AppError> {
     guard(query_close_tab_impl(&state, tab_id, force)).await
+}
+
+/// Asks whether the tab could close now without closing it: `transaction_open` when its
+/// session holds a transaction, `busy` while a run holds the session. Stops nothing and
+/// keeps the session, the commit mode and the results (the quit check uses it).
+#[tauri::command]
+#[specta::specta]
+pub async fn query_probe_tab(state: State<'_, AppState>, tab_id: String) -> Result<(), AppError> {
+    guard(query_probe_tab_impl(&state, tab_id)).await
 }
 
 #[cfg(test)]

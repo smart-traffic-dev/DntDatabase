@@ -38,16 +38,21 @@ function fakeWindow() {
 
 function backend(
   order: string[],
-  over: { closeTab?: (id: string) => unknown; tabsSave?: () => unknown } = {},
+  over: { probeTab?: (id: string) => unknown; tabsSave?: () => unknown } = {},
 ) {
   return mockBackend({
     tabs_save: () => {
       order.push('tabs_save');
       return over.tabsSave ? over.tabsSave() : null;
     },
+    query_probe_tab: (a) => {
+      order.push(`query_probe_tab:${String(a.tabId)}`);
+      return over.probeTab ? over.probeTab(String(a.tabId)) : null;
+    },
+    // The quit check must never close a tab's session (that drops its Manual mode).
     query_close_tab: (a) => {
-      order.push(`query_close_tab:${String(a.tabId)}:${String(a.force)}`);
-      return over.closeTab ? over.closeTab(String(a.tabId)) : null;
+      order.push(`query_close_tab:${String(a.tabId)}`);
+      return null;
     },
     query_tx: (a) => {
       order.push(`query_tx:${String(a.tabId)}:${String(a.action)}`);
@@ -99,6 +104,9 @@ describe('app close guard', () => {
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(win.destroy).not.toHaveBeenCalled();
     expect(callsOf('query_tx')).toHaveLength(0);
+    // Cancelling leaves every tab's session (and so its commit mode) alone.
+    expect(callsOf('query_close_tab')).toHaveLength(0);
+    expect(callsOf('query_probe_tab').map((x) => x.tabId)).toEqual([a, b, c]);
 
     // Rollback all & quit rolls back each open transaction, then quits.
     await requestClose();
@@ -121,7 +129,7 @@ describe('app close guard', () => {
     await installCloseGuard(win);
     await requestClose();
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
-    expect(win.order).toEqual(['preventDefault', 'tabs_save', `query_close_tab:${id}:false`, 'destroy']);
+    expect(win.order).toEqual(['preventDefault', 'tabs_save', `query_probe_tab:${id}`, 'destroy']);
     expect(callsOf('tabs_save')[0]!.tab).toMatchObject({ id, sql_text: 'SELECT 1' });
     expect(calls()).not.toContain('query_tx');
     expect(screen.queryByRole('alertdialog')).toBeNull();
@@ -133,7 +141,7 @@ describe('app close guard', () => {
     const b = useQueryDocs.getState().newQuery(null, null);
     const c = useQueryDocs.getState().newQuery(null, null);
     backend(win.order, {
-      closeTab: (id) => {
+      probeTab: (id) => {
         if (id === a) throw fail('transaction_open');
         if (id === c) throw fail('busy');
         return null;
@@ -144,7 +152,7 @@ describe('app close guard', () => {
     await requestClose();
     await screen.findByRole('alertdialog');
     expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Query 1', 'Query 3 (running)']);
-    expect(callsOf('query_close_tab')).toEqual([a, b, c].map((tabId) => ({ tabId, force: false })));
+    expect(callsOf('query_probe_tab')).toEqual([a, b, c].map((tabId) => ({ tabId })));
     expect(win.destroy).not.toHaveBeenCalled();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Rollback all & quit' }));
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
@@ -160,7 +168,7 @@ describe('app close guard', () => {
     await installCloseGuard(win);
     await requestClose();
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
-    expect(callsOf('query_close_tab')).toHaveLength(2);
+    expect(callsOf('query_probe_tab')).toHaveLength(2);
     expect(screen.queryByRole('alertdialog')).toBeNull();
   });
 
@@ -181,8 +189,8 @@ describe('app close guard', () => {
     await requestClose();
     await screen.findByRole('alertdialog');
     expect(screen.getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Query 1 (running)']);
-    // query_close_tab stops a run before closing: the running tab is never sent one.
-    expect(callsOf('query_close_tab')).toEqual([{ tabId: b, force: false }]);
+    // A running tab is never probed.
+    expect(callsOf('query_probe_tab')).toEqual([{ tabId: b }]);
     expect(stop).not.toHaveBeenCalled();
     expect(win.destroy).not.toHaveBeenCalled();
 
@@ -198,7 +206,7 @@ describe('app close guard', () => {
       `query_tx:${a}:Rollback`,
       'destroy',
     ]);
-    expect(callsOf('query_close_tab').map((c) => c.tabId)).not.toContain(a);
+    expect(callsOf('query_probe_tab').map((c) => c.tabId)).not.toContain(a);
   });
 
   it('a run that does not stop in time does not hold the quit', async () => {
@@ -211,7 +219,7 @@ describe('app close guard', () => {
     await requestClose();
     await userEvent.setup().click(await screen.findByRole('button', { name: 'Rollback all & quit' }));
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
-    expect(callsOf('query_close_tab')).toEqual([]);
+    expect(callsOf('query_probe_tab')).toEqual([]);
   });
 
   it('a failed save asks; Cancel keeps the app open', async () => {
@@ -226,7 +234,7 @@ describe('app close guard', () => {
     await userEvent.setup().click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(win.destroy).not.toHaveBeenCalled();
-    expect(callsOf('query_close_tab')).toHaveLength(0);
+    expect(callsOf('query_probe_tab')).toHaveLength(0);
   });
 
   it('a failed save asks; Quit anyway goes on and quits', async () => {
@@ -240,6 +248,6 @@ describe('app close guard', () => {
     expect(await screen.findByText('Could not save 2 tab(s).')).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Quit anyway' }));
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
-    expect(callsOf('query_close_tab')).toHaveLength(2);
+    expect(callsOf('query_probe_tab')).toHaveLength(2);
   });
 });

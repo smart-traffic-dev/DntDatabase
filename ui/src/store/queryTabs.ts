@@ -557,11 +557,11 @@ function confirmQuitUnsaved(count: number): Promise<boolean> {
 
 /**
  * The tabs to list before quitting: those with a run in progress (listed as running, and never
- * probed: `query_close_tab` stops a run before closing, which would cancel it before the user
- * decides), those the tx source reports non-idle, plus every idle tab whose session answers the
- * probe `query_close_tab(id, false)` with `transaction_open`, or `busy` (listed as running). The
- * probe stays as a backstop even with a source registered. It closes idle sessions on the way;
- * if the quit is cancelled they reopen on the next plan.
+ * probed), those the tx source reports non-idle, plus every idle tab whose session answers the
+ * probe `query_probe_tab(id)` with `transaction_open`, or `busy` (listed as running). The
+ * probe stays as a backstop even with a source registered. It closes nothing: a cancelled quit
+ * must leave every tab's session, commit mode and results as they were (closing an idle tab
+ * would drop its Manual mode, and its next write would autocommit).
  *
  * Why ask at all, when both engines roll back on disconnect: a statement still running
  * holds its locks until it finishes on the server, and XA-prepared transactions survive
@@ -573,7 +573,7 @@ async function openTransactions(): Promise<{ doc: QueryDoc; running: boolean }[]
     docs.map(async (doc) => {
       if (runningOf(doc.id)) return { doc, open: true, running: true };
       try {
-        await api.queryCloseTab(doc.id, false);
+        await api.queryProbeTab(doc.id);
         return { doc, open: txStateOf(doc.id) !== 'idle', running: false };
       } catch (e) {
         const kind = toAppError(e).kind;

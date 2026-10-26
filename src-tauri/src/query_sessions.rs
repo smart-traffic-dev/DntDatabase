@@ -1562,6 +1562,26 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Whether `tab` could close without asking, closing nothing: `TransactionOpen` when
+    /// its session holds an open transaction, `Busy` when the session stays locked for
+    /// [`SLOT_CLOSE_WAIT`] (a run). Unlike [`Self::query_close_tab`] it stops no run and
+    /// keeps the session, the tab's commit mode and its results, so a quit the user
+    /// cancels leaves every tab as it was.
+    pub async fn query_probe_tab(&self, tab: &str) -> Result<(), DbError> {
+        validate_tab(tab)?;
+        for (_, rt) in self.runtimes_snapshot() {
+            let Some(slot) = rt.queries.get(tab) else {
+                continue;
+            };
+            match tokio::time::timeout(SLOT_CLOSE_WAIT, Arc::clone(&slot).lock_owned()).await {
+                Ok(ts) if ts.tx_open() => return Err(DbError::TransactionOpen),
+                Ok(_) => {}
+                Err(_) => return Err(DbError::Busy),
+            }
+        }
+        Ok(())
+    }
+
     /// Takes plan `plan_id` for `query_run`: `(tab, connection, plan)`. A plan runs once;
     /// unknown, expired, replaced or already taken plans are `PlanExpired`, and so is a
     /// plan whose tab has since moved to another connection or database, or whose

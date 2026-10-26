@@ -165,6 +165,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             query::query_tx_mode,
             query::query_tx_info,
             query::query_close_tab,
+            query::query_probe_tab,
             query::query_run,
             query::query_cancel,
             query::query_result_page,

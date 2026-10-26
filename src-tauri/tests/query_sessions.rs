@@ -3158,6 +3158,39 @@ async fn switching_to_auto_with_open_tx_fails() {
     assert_eq!(kind(err), "config");
 }
 
+/// The quit check probes every idle tab: a probe closes nothing, so a Manual tab stays
+/// Manual (its next write still begins a transaction) when the user cancels the quit.
+#[tokio::test]
+async fn probe_tab_keeps_session_and_manual_mode() {
+    let f = fixture(DbKind::MySql);
+    let id = open(&f, config(DbKind::MySql)).await;
+    manual(&f, "t1").await;
+    run_text(&f, id, "SELECT 1", opts()).await;
+    f.sm.query_probe_tab("t1").await.unwrap();
+    assert_eq!(f.log.closes(), 0, "the probe keeps the session");
+    run_text(&f, id, "UPDATE t SET a = 1 WHERE id = 1", opts()).await;
+    assert_eq!(
+        sent(&f),
+        [
+            "SELECT 1",
+            "START TRANSACTION",
+            "UPDATE t SET a = 1 WHERE id = 1"
+        ],
+        "still Manual after the probe"
+    );
+    // With the transaction open the probe says so, and still closes nothing.
+    let err = f.sm.query_probe_tab("t1").await.unwrap_err();
+    assert!(matches!(err, DbError::TransactionOpen), "{err:?}");
+    assert_eq!(f.log.closes(), 0);
+    assert_eq!(
+        f.sm.query_tx_info("t1").await.unwrap().state,
+        TxState::Active
+    );
+    // A tab without a session has nothing to ask about; bad ids are refused.
+    f.sm.query_probe_tab("nope").await.unwrap();
+    assert_eq!(kind(f.sm.query_probe_tab("").await.unwrap_err()), "config");
+}
+
 #[tokio::test]
 async fn mysql_ddl_in_manual_tx_is_flagged_implicit_commit() {
     let text = "UPDATE t SET a = 1 WHERE id = 1; CREATE TABLE u (a INT); SELECT 1";

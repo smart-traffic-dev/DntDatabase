@@ -364,6 +364,19 @@ async queryCloseTab(tabId: string, force: boolean) : Promise<Result<null, AppErr
 }
 },
 /**
+ * Asks whether the tab could close now without closing it: `transaction_open` when its
+ * session holds a transaction, `busy` while a run holds the session. Stops nothing and
+ * keeps the session, the commit mode and the results (the quit check uses it).
+ */
+async queryProbeTab(tabId: string) : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("query_probe_tab", { tabId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Runs plan `plan_id` (from `query_plan`, `query_explain` or `query_plan_statement`)
  * and returns the run id at once; every result streams through `channel` (see
  * `RunEvent`), ending with `done`. The guard is applied again: `blocked` when any
