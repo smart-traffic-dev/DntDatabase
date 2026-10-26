@@ -227,12 +227,12 @@ pub async fn query_close_tab_impl(
 /// [`guard`] for the calls that open or move a tab's session: an error that dropped
 /// the tab's transaction reports the tab's state after it in `AppError::tx_state`
 /// (see [`with_tx_state`]).
-async fn guard_tab<T>(
-    fut: impl std::future::Future<Output = Result<T, DbError>>,
-) -> Result<T, AppError> {
-    guard(async { Ok(fut.await.map_err(with_tx_state)) })
-        .await
-        .and_then(|r| r)
+/// Not an `async fn`: that would hold `fut` inline; [`guard`] boxes it (see there why).
+fn guard_tab<'a, T: 'a>(
+    fut: impl std::future::Future<Output = Result<T, DbError>> + 'a,
+) -> impl std::future::Future<Output = Result<T, AppError>> + 'a {
+    let guarded = guard(async move { Ok(fut.await.map_err(with_tx_state)) });
+    async move { guarded.await.and_then(|r| r) }
 }
 
 /// UTF-16 ranges (end-exclusive) of every statement of `text`, as `query_plan` would
@@ -422,6 +422,15 @@ pub async fn query_close_tab(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `query_plan` / `query_run` go through `guard_tab`: it must box the body like `guard`.
+    #[tokio::test]
+    async fn guard_tab_boxes_the_body() {
+        let guarded = guard_tab(crate::commands::tests::big_body());
+        let size = std::mem::size_of_val(&guarded);
+        assert!(size < 256, "guard_tab's future is {size} bytes");
+        assert_eq!(guarded.await.unwrap(), 7);
+    }
 
     #[test]
     fn statement_ranges_command() {

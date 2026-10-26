@@ -27,6 +27,11 @@ fn main() {
         println!("cargo:rerun-if-changed={}", manifest.display());
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+        // The main thread runs the event loop, WebView2's callbacks and the IPC handler, which
+        // builds every async command's future before spawning it. The default 1 MB reserve
+        // left no margin in release builds (a query overflowed it); `commands::guard` keeps
+        // those futures small, and 8 MB of reserve (committed only as used) is the backstop.
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
     }
     tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows))
         .expect("tauri build");

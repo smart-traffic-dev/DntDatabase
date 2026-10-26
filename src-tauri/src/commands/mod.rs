@@ -81,16 +81,26 @@ fn panicked() -> DbError {
 
 /// Runs a command body: errors become `AppError`, and a panic becomes
 /// `AppError { kind: "internal" }` (logged) instead of tearing down the IPC call.
-pub async fn guard<T, F>(fut: F) -> Result<T, AppError>
+///
+/// The body is boxed at once, so a command's future holds a pointer rather than the body's
+/// whole state machine. Tauri builds every async command's future on the main thread (1 MB
+/// stack on Windows) before handing it to the runtime, and release builds inline that into
+/// frames holding several copies of it: with the bodies inline, running a query overflowed
+/// the main thread's stack and the app died (`thread 'main' has overflowed its stack`).
+pub fn guard<'a, T, F>(fut: F) -> impl Future<Output = Result<T, AppError>> + 'a
 where
-    F: Future<Output = Result<T, DbError>>,
+    F: Future<Output = Result<T, DbError>> + 'a,
+    T: 'a,
 {
-    install_panic_hook();
-    clear_panic_location();
-    match AssertUnwindSafe(fut).catch_unwind().await {
-        Ok(result) => result.map_err(AppError::from),
-        // The payload is dropped unread: panic messages can contain user data.
-        Err(_payload) => Err(AppError::from(panicked())),
+    let fut = Box::pin(fut);
+    async move {
+        install_panic_hook();
+        clear_panic_location();
+        match AssertUnwindSafe(fut).catch_unwind().await {
+            Ok(result) => result.map_err(AppError::from),
+            // The payload is dropped unread: panic messages can contain user data.
+            Err(_payload) => Err(AppError::from(panicked())),
+        }
     }
 }
 
@@ -345,6 +355,24 @@ mod tests {
             .unwrap_err();
         assert!(matches!(&err, DbError::Internal { message } if !message.contains("boom")));
         assert_eq!(blocking(|| Ok::<_, DbError>(5)).await.unwrap(), 5);
+    }
+
+    /// A body holding 256 KB across an await: what `guard` returns (and so every command's
+    /// future, built on the main thread) stays pointer-sized.
+    pub(crate) async fn big_body() -> Result<u8, DbError> {
+        let buf = [7u8; 256 * 1024];
+        tokio::task::yield_now().await;
+        Ok(std::hint::black_box(&buf)[1000])
+    }
+
+    #[tokio::test]
+    async fn guard_boxes_the_body() {
+        let body = big_body();
+        assert!(std::mem::size_of_val(&body) >= 256 * 1024);
+        let guarded = guard(body);
+        let size = std::mem::size_of_val(&guarded);
+        assert!(size < 256, "guard's future is {size} bytes");
+        assert_eq!(guarded.await.unwrap(), 7);
     }
 
     #[tokio::test]
