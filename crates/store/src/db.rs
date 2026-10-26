@@ -128,6 +128,15 @@ ALTER TABLE query_history_next RENAME TO query_history;
 CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
 ";
 
+/// The connection dialog used to save its default SSL mode, Prefer, as no SSL config at
+/// all, which every driver reads as plaintext. Connections saved that way get the Prefer
+/// their dialog showed (it falls back to plaintext only when the server has no TLS).
+const MIGRATION_8: &str = r#"
+UPDATE connections
+SET ssl_json = '{"version":1,"mode":"prefer","ca_path":null,"cert_path":null,"key_path":null}'
+WHERE ssl_json IS NULL;
+"#;
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -137,6 +146,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_5),
         M::up(MIGRATION_6),
         M::up(MIGRATION_7),
+        M::up(MIGRATION_8),
     ])
 }
 
@@ -213,7 +223,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -346,7 +356,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 7);
+        assert_eq!(v, 8);
         let row: (i64, String, i64) = conn
             .query_row(
                 "SELECT id,origin,outcome_unknown FROM query_history",
@@ -395,6 +405,43 @@ mod tests {
             .query_row("SELECT connection_id FROM jobs", [], |r| r.get(0))
             .unwrap();
         assert_eq!(conn_id, None);
+    }
+    /// Connections saved without an SSL config (the dialog's old way of saving Prefer)
+    /// become Prefer; explicit configs are kept.
+    #[test]
+    fn migration_8_turns_missing_ssl_into_prefer() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(MIGRATION_1),
+            M::up(MIGRATION_2),
+            M::up(MIGRATION_3),
+            M::up(MIGRATION_4),
+            M::up(MIGRATION_5),
+            M::up(MIGRATION_6),
+            M::up(MIGRATION_7),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        let disable =
+            r#"{"version":1,"mode":"disable","ca_path":null,"cert_path":null,"key_path":null}"#;
+        conn.execute_batch(&format!(
+            "INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,ssl_json,created_at,updated_at) \
+             VALUES ('a','a',0,'mysql','h',3306,'u','ask',NULL,'now','now'), \
+                    ('b','b',1,'postgres','h',5432,'u','ask','{disable}','now','now');"
+        ))
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let ssl = |id: &str| -> dnt_core::config::SslConfig {
+            let json: String = conn
+                .query_row("SELECT ssl_json FROM connections WHERE id=?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            serde_json::from_str(&json).unwrap()
+        };
+        assert_eq!(ssl("a").mode, dnt_core::config::SslMode::Prefer);
+        assert_eq!(ssl("a").ca_path, None);
+        assert_eq!(ssl("b").mode, dnt_core::config::SslMode::Disable);
     }
     #[test]
     fn foreign_keys_enabled() {

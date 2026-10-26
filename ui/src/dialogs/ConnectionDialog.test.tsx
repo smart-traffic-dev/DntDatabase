@@ -550,10 +550,23 @@ describe('ConnectionDialog', () => {
         kind: 'mysql',
         secret_mode: 'saved',
         ssh: null,
-        ssl: null,
+        // The default Prefer is saved as such: a missing SSL config means plaintext.
+        ssl: { version: 1, mode: 'prefer', ca_path: null, cert_path: null, key_path: null },
       },
       secrets: { db_password: 'secret' },
     });
+  });
+
+  it('a stored connection without an SSL config shows Disable and saves it explicitly', async () => {
+    mockBackend({ update_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const stored = config(ids.prod, 'shop', { ssl: null });
+    render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
+    expect(foldRow('ssl')).toHaveTextContent('SSL / TLSDisable');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('update_connection')[0]).toMatchObject({ cfg: { ssl: { mode: 'disable' } } });
   });
 
   it('read_only_flag_round_trips', async () => {

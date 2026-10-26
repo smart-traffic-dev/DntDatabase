@@ -177,7 +177,8 @@ function initialForm(initial: ConnectionConfig | undefined): Form {
     sshPasswordTouched: false,
     passphrase: '',
     passphraseTouched: false,
-    sslMode: initial?.ssl?.mode ?? 'prefer',
+    // A stored connection without an SSL config connects in plaintext: show it as such.
+    sslMode: initial ? (initial.ssl?.mode ?? 'disable') : 'prefer',
     sslCa: initial?.ssl?.ca_path ?? '',
     sslCert: initial?.ssl?.cert_path ?? '',
     sslKey: initial?.ssl?.key_path ?? '',
@@ -383,16 +384,14 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           key_path: form.sshAuth === 'key' ? orNull(form.sshKeyPath) : null,
         }
       : null,
-    ssl:
-      !initial?.ssl && form.sslMode === 'prefer' && !form.sslCa && !form.sslCert && !form.sslKey
-        ? null
-        : {
-            version: initial?.ssl?.version ?? 1,
-            mode: form.sslMode,
-            ca_path: orNull(form.sslCa),
-            cert_path: orNull(form.sslCert),
-            key_path: orNull(form.sslKey),
-          },
+    // Always explicit: the backend reads a missing SSL config as plaintext.
+    ssl: {
+      version: initial?.ssl?.version ?? 1,
+      mode: form.sslMode,
+      ca_path: orNull(form.sslCa),
+      cert_path: orNull(form.sslCert),
+      key_path: orNull(form.sslKey),
+    },
     options: {
       version: initial?.options.version ?? 1,
       connect_timeout_s: num(form.connectTimeout, 10),
