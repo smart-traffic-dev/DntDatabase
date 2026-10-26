@@ -61,6 +61,25 @@ fn header_lines_are_exact() {
     assert_eq!(end_comment(12), "-- End of dump: 12 statements\n");
 }
 
+/// Names come from the database: a schema (or database) named with a line break must
+/// not end its comment line, or a restore would run the rest as SQL.
+#[test]
+fn header_keeps_hostile_names_inside_comments() {
+    let evil = "x\nGRANT pg_write_server_files TO evil; --";
+    let h = DumpHeader {
+        engine: "PostgreSQL".into(),
+        database: "db\r\nDROP TABLE t;".into(),
+        schemas: vec!["public".into(), evil.into(), "a\u{b}b\u{c}c\u{85}d".into()],
+        ..mysql_header()
+    };
+    let text = header(&h);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text:?}");
+    assert!(lines.iter().all(|l| l.starts_with("-- ")), "{text:?}");
+    assert!(lines.iter().all(|l| !l.contains(|c: char| c.is_control())));
+    assert!(lines[1].contains("schemas public, x GRANT pg_write_server_files TO evil; --"));
+}
+
 #[test]
 fn session_statements_follow_r23() {
     assert_eq!(

@@ -767,7 +767,9 @@ async fn write_history(h: HistoryLine<'_>) -> bool {
         &h.file.sha256[..h.file.sha256.len().min(12)],
         h.request.database,
         h.summary
-    );
+    )
+    // One comment line: a database name with a line break must not end it early.
+    .replace(['\r', '\n'], " ");
     let d = match h.context.cfg.kind {
         DbKind::MySql => Dialect::MySql(Default::default()),
         DbKind::Postgres => Dialect::Postgres,

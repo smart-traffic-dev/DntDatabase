@@ -55,7 +55,8 @@ pub fn header(h: &DumpHeader) -> String {
     let schemas = if h.schemas.is_empty() {
         String::new()
     } else {
-        format!(", schemas {}", h.schemas.join(", "))
+        // Schema names come from the database and may hold line breaks.
+        format!(", schemas {}", one_line(&h.schemas.join(", ")))
     };
     let mut objects = format!(
         "{} tables ({} with data), {} views",
@@ -116,9 +117,12 @@ fn ends_in_comment(s: &str, d: Dialect) -> bool {
     strip_comments(s, d).ends_with(' ')
 }
 
-/// `s` on one line (a comment must not run into the next line).
+/// `s` on one line (a comment must not run into the next line): every control
+/// character, line breaks included, becomes a space.
 fn one_line(s: &str) -> String {
-    s.replace(['\r', '\n'], " ")
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------------------
