@@ -196,7 +196,7 @@ fn dates_and_times_are_normalised() {
         ok(Cell::DateTime("2024-01-02".into()), &d, MY),
         Value::Date("2024-01-02".into())
     );
-    for bad in ["2024-1-2", "02/01/2024", "2024-01-02 03:04:05", "x"] {
+    for bad in ["2024-1-2", "02/01/2024", "2024-01-02X03:04:05", "x"] {
         assert!(
             matches!(err(text(bad), &d, MY), CellReason::Invalid { .. }),
             "{bad}"
@@ -252,6 +252,93 @@ fn dates_and_times_are_normalised() {
         ok(text("2024-01-02 03:04:05"), &tz, PG),
         Value::TimestampTz("2024-01-02 03:04:05".into())
     );
+}
+
+#[test]
+fn date_column_keeps_the_date_of_a_datetime() {
+    let d = col(LogicalType::Date, "date");
+    for (kind, cell) in [
+        (MY, text("2024-01-02 03:04:05")),
+        (MY, text("2024-01-02T00:00:00")),
+        (MY, Cell::DateTime("2024-01-02T03:04:05".into())),
+        (MY, text("2024-01-02 03:04:05.5+07:00")),
+        (PG, text("2024-01-02T03:04:05Z")),
+    ] {
+        assert_eq!(
+            ok(cell, &d, kind),
+            Value::Date("2024-01-02".into()),
+            "{kind:?}"
+        );
+    }
+    for bad in ["2024-01-02 25:00:00", "2024-01-02 03:04:05 junk"] {
+        assert!(
+            matches!(err(text(bad), &d, MY), CellReason::Invalid { .. }),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn mysql_zero_dates_are_left_to_the_server() {
+    let d = col(LogicalType::Date, "date");
+    let dt = col(LogicalType::DateTime, "datetime");
+    assert_eq!(
+        ok(text("0000-00-00"), &d, MY),
+        Value::Date("0000-00-00".into())
+    );
+    assert_eq!(
+        ok(text("2024-02-00"), &d, MY),
+        Value::Date("2024-02-00".into())
+    );
+    assert_eq!(
+        ok(text("0000-00-00 00:00:00"), &dt, MY),
+        Value::DateTime("0000-00-00 00:00:00".into())
+    );
+    // An export writes the `T` form.
+    assert_eq!(
+        ok(text("0000-00-00T00:00:00"), &dt, MY),
+        Value::DateTime("0000-00-00 00:00:00".into())
+    );
+    // PostgreSQL has no zero dates; month 13 is wrong everywhere.
+    for (kind, bad) in [(PG, "0000-00-00"), (MY, "2024-13-01"), (MY, "2024-01-32")] {
+        assert!(
+            matches!(err(text(bad), &d, kind), CellReason::Invalid { .. }),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn mysql_datetime_takes_an_offset_in_its_own_form() {
+    for ty in ["datetime", "timestamp"] {
+        let dt = col(LogicalType::DateTime, ty);
+        for (input, sent) in [
+            ("2024-01-02T03:04:05+07:00", "2024-01-02 03:04:05+07:00"),
+            ("2024-01-02T03:04:05.123+0700", "2024-01-02 03:04:05.123+07:00"),
+            ("2024-01-02 03:04:05-05", "2024-01-02 03:04:05-05:00"),
+            ("2024-01-02T03:04:05Z", "2024-01-02 03:04:05+00:00"),
+            ("2024-01-02T03:04:05-00:00", "2024-01-02 03:04:05+00:00"),
+            ("2024-01-02 03:04:05+14:00", "2024-01-02 03:04:05+14:00"),
+            ("2024-01-02 03:04:05-13:59", "2024-01-02 03:04:05-13:59"),
+        ] {
+            assert_eq!(
+                ok(text(input), &dt, MY),
+                Value::DateTime(sent.into()),
+                "{input} into {ty}"
+            );
+        }
+        // MySQL's range is -13:59 to +14:00.
+        for bad in [
+            "2024-01-02 03:04:05+14:01",
+            "2024-01-02 03:04:05-14:00",
+            "2024-01-02 03:04:05+0760",
+        ] {
+            assert!(
+                matches!(err(text(bad), &dt, MY), CellReason::Invalid { .. }),
+                "{bad} into {ty}"
+            );
+        }
+    }
 }
 
 #[test]

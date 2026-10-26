@@ -256,6 +256,7 @@ fn from_text(
 ) -> Result<FullValue, CellReason> {
     use LogicalType as L;
     let pg = kind == DbKind::Postgres;
+    let mysql = kind == DbKind::MySql;
     let invalid = |expected| Err(CellReason::Invalid { expected });
     let v = match col.logical {
         L::Text => {
@@ -292,7 +293,9 @@ fn from_text(
             "false" | "f" | "no" | "n" | "0" => Value::Bool(false),
             _ => return invalid("true or false"),
         },
-        L::Date if is_date(s) || (pg && is_pg_infinity(s)) => Value::Date(s.into()),
+        L::Date if is_date(s, mysql) || (pg && is_pg_infinity(s)) => Value::Date(s.into()),
+        // A date and time keeps its date, as both servers do with such a literal.
+        L::Date if datetime(s, true, mysql).is_some() => Value::Date(s[..10].into()),
         L::Date => return invalid("a date (YYYY-MM-DD)"),
         L::Time => {
             let body = if col.has_zone() { strip_zone(s) } else { s };
@@ -311,7 +314,8 @@ fn from_text(
             let normal = if pg && is_pg_infinity(s) {
                 s.to_string()
             } else {
-                datetime(s, zone).ok_or(CellReason::Invalid {
+                // MySQL 8.0.19+ takes an offset on `datetime` and `timestamp` literals.
+                datetime(s, zone || mysql, mysql).ok_or(CellReason::Invalid {
                     expected: "a date and time (YYYY-MM-DD HH:MM:SS)",
                 })?
             };
@@ -405,15 +409,17 @@ fn two_digits_in(s: &str, lo: u32, hi: u32) -> bool {
     s.len() == 2 && digits(s) && s.parse::<u32>().is_ok_and(|n| (lo..=hi).contains(&n))
 }
 
-/// `YYYY-MM-DD` (month 01–12, day 01–31; the server checks the calendar).
-fn is_date(s: &str) -> bool {
+/// `YYYY-MM-DD` (month 01–12, day 01–31; the server checks the calendar). `zero_ok`: MySQL
+/// zero dates and parts (`0000-00-00`, `2024-02-00`), which its `sql_mode` accepts or refuses.
+fn is_date(s: &str, zero_ok: bool) -> bool {
     let b = s.as_bytes();
+    let lo = u32::from(!zero_ok);
     b.len() == 10
         && b[4] == b'-'
         && b[7] == b'-'
         && digits(&s[..4])
-        && two_digits_in(&s[5..7], 1, 12)
-        && two_digits_in(&s[8..10], 1, 31)
+        && two_digits_in(&s[5..7], lo, 12)
+        && two_digits_in(&s[8..10], lo, 31)
 }
 
 /// `HH:MM[:SS[.f{1,6}]]` (HH 00–23).
@@ -463,20 +469,55 @@ fn strip_zone(s: &str) -> &str {
 }
 
 /// `YYYY-MM-DD[( |T)HH:MM[:SS[.f{1,6}]]]` with `T` written as a space; an offset only when
-/// `zone` (kept verbatim).
-fn datetime(s: &str, zone: bool) -> Option<String> {
+/// `zone`. `mysql`: zero dates are allowed and the offset is written `±HH:MM` (see
+/// [`mysql_offset`]); otherwise it is kept verbatim.
+fn datetime(s: &str, zone: bool, mysql: bool) -> Option<String> {
     if s.len() == 10 {
-        return is_date(s).then(|| s.to_string());
+        return is_date(s, mysql).then(|| s.to_string());
     }
     let date = s.get(..10)?;
     let sep = s.as_bytes().get(10)?;
-    if !is_date(date) || !matches!(sep, b' ' | b'T' | b't') {
+    if !is_date(date, mysql) || !matches!(sep, b' ' | b'T' | b't') {
         return None;
     }
     // Byte 10 is ASCII, so 11 is a char boundary.
     let time = &s[11..];
     let body = if zone { strip_zone(time) } else { time };
-    is_time(body).then(|| format!("{date} {time}"))
+    if !is_time(body) {
+        return None;
+    }
+    let offset = &time[body.len()..];
+    if mysql && !offset.is_empty() {
+        return Some(format!("{date} {body}{}", mysql_offset(offset)?));
+    }
+    Some(format!("{date} {time}"))
+}
+
+/// A `Z` / `±HH[:MM]` / `±HHMM` offset (as [`strip_zone`] accepts it) the way MySQL reads it:
+/// `±HH:MM` within -13:59 … +14:00, and `+00:00` for UTC (MySQL refuses `-00:00`).
+fn mysql_offset(zone: &str) -> Option<String> {
+    if zone.eq_ignore_ascii_case("z") {
+        return Some("+00:00".into());
+    }
+    let (sign, rest) = zone.split_at_checked(1)?;
+    let (h, m) = match rest.split_once(':') {
+        Some(hm) => hm,
+        None if rest.len() == 4 => rest.split_at(2),
+        None => (rest, "00"),
+    };
+    let (h, m): (u32, u32) = (h.parse().ok()?, m.parse().ok()?);
+    let minutes = h * 60 + m;
+    let in_range = m <= 59
+        && match sign {
+            "+" => minutes <= 14 * 60,
+            "-" => minutes < 14 * 60,
+            _ => false,
+        };
+    if !in_range {
+        return None;
+    }
+    let sign = if minutes == 0 { "+" } else { sign };
+    Some(format!("{sign}{h:02}:{m:02}"))
 }
 
 /// `8-4-4-4-12` hex digits.
@@ -540,9 +581,30 @@ mod tests {
 
     #[test]
     fn datetime_shapes() {
-        assert_eq!(datetime("2024-01-02", false).as_deref(), Some("2024-01-02"));
-        assert_eq!(datetime("2024-01-02X03:04", false), None);
-        assert_eq!(datetime("2024-01-02 ", false), None);
-        assert_eq!(datetime("2024-13-02 03:04", false), None);
+        assert_eq!(
+            datetime("2024-01-02", false, false).as_deref(),
+            Some("2024-01-02")
+        );
+        assert_eq!(datetime("2024-01-02X03:04", false, false), None);
+        assert_eq!(datetime("2024-01-02 ", false, false), None);
+        assert_eq!(datetime("2024-13-02 03:04", false, false), None);
+        assert_eq!(datetime("0000-00-00 00:00", false, false), None);
+        assert_eq!(
+            datetime("0000-00-00 00:00", false, true).as_deref(),
+            Some("0000-00-00 00:00")
+        );
+    }
+
+    #[test]
+    fn mysql_offsets() {
+        assert_eq!(mysql_offset("Z").as_deref(), Some("+00:00"));
+        assert_eq!(mysql_offset("+0530").as_deref(), Some("+05:30"));
+        assert_eq!(mysql_offset("-07").as_deref(), Some("-07:00"));
+        assert_eq!(mysql_offset("-00:00").as_deref(), Some("+00:00"));
+        assert_eq!(mysql_offset("+14:00").as_deref(), Some("+14:00"));
+        assert_eq!(mysql_offset("-13:59").as_deref(), Some("-13:59"));
+        assert_eq!(mysql_offset("+14:01"), None);
+        assert_eq!(mysql_offset("-14:00"), None);
+        assert_eq!(mysql_offset("+0060"), None);
     }
 }
