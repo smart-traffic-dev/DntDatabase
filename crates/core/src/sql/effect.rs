@@ -28,9 +28,9 @@ pub struct SessionEffect {
 ///   any depth, depth-0 `INTO @v`) are `custom`; an assignment to the session `sql_mode` also
 ///   sets `sql_mode`; a plain `USE db` sets `use_db`. The `autocommit` assignment
 ///   is transaction control, tracked by the drivers, and is skipped (the other
-///   assignments of the same `SET` still count). Not detected: a `SET sql_mode`
-///   run through `PREPARE` / `EXECUTE` (only the `PREPARE` is `custom`), and MariaDB
-///   `SET STATEMENT sql_mode=… FOR …`, which only lasts for its own statement.
+///   assignments of the same `SET` still count). Every `EXECUTE` sets `sql_mode`: the
+///   prepared statement may be a `SET sql_mode` this check cannot see. Not detected:
+///   MariaDB `SET STATEMENT sql_mode=… FOR …`, which only lasts for its own statement.
 /// - PG: session-level `SET` other than `search_path` (not `SET LOCAL`, `SET
 ///   TRANSACTION`, `SET CONSTRAINTS`; quoted and dotted names included),
 ///   temporary tables / views / sequences, `PREPARE` (not `PREPARE TRANSACTION`),
@@ -62,6 +62,12 @@ fn mysql_effect(stmt: &str, dialect: Dialect, effect: &mut SessionEffect) {
         | ["CREATE", "OR", "REPLACE", "TEMPORARY"]
         | ["PREPARE", ..]
         | ["LOCK", "TABLES" | "TABLE", ..] => effect.custom = true,
+        // A prepared statement (or MariaDB `EXECUTE IMMEDIATE`) may run `SET sql_mode`,
+        // which this lexical check cannot see: read the mode again after it.
+        ["EXECUTE", ..] => {
+            effect.sql_mode = true;
+            effect.custom |= assigns_user_variable(&toks);
+        }
         _ => effect.custom |= assigns_user_variable(&toks),
     }
 }
@@ -309,9 +315,16 @@ mod tests {
             "SET SESSION sql_mode = ''",
             "SET @x = 1, LOCAL sql_mode := ''",
             "SET GLOBAL max_connections = 10, SESSION sql_mode = ''",
+            // The prepared statement may be `SET sql_mode = 'NO_BACKSLASH_ESCAPES'`.
+            "EXECUTE s",
+            "execute s USING @a",
+            "EXECUTE IMMEDIATE 'SET sql_mode = ''ANSI_QUOTES'''",
+            "/*!50000 EXECUTE s */",
         ] {
             assert!(session_effect(sql, MYSQL).unwrap().sql_mode, "{sql}");
         }
+        // PostgreSQL's EXECUTE has no sql_mode.
+        assert!(session_effect("EXECUTE s", Dialect::Postgres).is_none_or(|e| !e.sql_mode));
         for sql in [
             "SET @OLD_SQL_MODE = @@SQL_MODE",
             "SET @@global.sql_mode = ''",

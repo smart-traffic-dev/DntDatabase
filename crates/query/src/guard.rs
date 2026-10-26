@@ -34,7 +34,8 @@
 
 use dnt_core::config::EnvTag;
 use dnt_core::sql::{
-    classify, readings, resplit_reading, tokenize, Dialect, StatementKind, TokKind, Token,
+    classify, pg_backslash_reading, readings, resplit_reading, tokenize, Dialect, StatementKind,
+    TokKind, Token,
 };
 
 use crate::plan::{ScriptPlan, Verdict};
@@ -199,7 +200,7 @@ pub fn verdict(
         rv
     };
     let mut any = false;
-    for r in readings(stmt, dialect) {
+    for r in guard_readings(stmt, dialect) {
         let toks = tokenize(&r, dialect);
         // A reading with no tokens sends nothing (an executable comment the
         // server ignores).
@@ -236,7 +237,7 @@ pub fn verdict(
 ///   `FETCH`, `MOVE`, `CLOSE`.
 pub fn other_whitelisted(stmt: &str, dialect: Dialect) -> bool {
     let mut any = false;
-    for r in readings(stmt, dialect) {
+    for r in guard_readings(stmt, dialect) {
         let toks = tokenize(&r, dialect);
         if toks.is_empty() {
             continue;
@@ -268,9 +269,24 @@ pub fn other_whitelisted(stmt: &str, dialect: Dialect) -> bool {
 /// Read-only names are matched case-insensitively, quoted or not; a `SET`
 /// assignment whose name is neither a word nor a quoted name also counts.
 pub fn lifts_read_only(stmt: &str, dialect: Dialect) -> bool {
-    readings(stmt, dialect)
+    guard_readings(stmt, dialect)
         .iter()
         .any(|r| lifts_toks(r, &tokenize(r, dialect), dialect))
+}
+
+/// Every way the server may read `stmt` that the guard judges: its [`readings`]
+/// (MySQL executable comments) and, on PostgreSQL, the reading of a server with
+/// `standard_conforming_strings = off` ([`pg_backslash_reading`]) when it differs.
+/// The setting may be off on the server or turned off by the session, and the
+/// lexer cannot know which, so a statement must pass under both: otherwise
+/// `WITH a AS (SELECT 'x\''), d AS (DELETE …) SELECT 1 /* ' */` would hide its
+/// `DELETE` inside what the standard reading takes for a string.
+fn guard_readings(stmt: &str, dialect: Dialect) -> Vec<String> {
+    let mut out = readings(stmt, dialect);
+    if !dialect.is_mysql() {
+        out.extend(pg_backslash_reading(stmt));
+    }
+    out
 }
 
 /// Whether `stmt` (one planned statement) holds more than one statement for the
@@ -405,8 +421,8 @@ const READ_ONLY_VARS: [&str; 3] = [
 ];
 
 /// The body of a quoted token, or `None` when it is unterminated or not quoted:
-/// `'…'`, `"…"`, `` `…` `` (a doubled quote stands for one), `E'…'` (backslashes
-/// dropped) and `$tag$…$tag$`.
+/// `'…'`, `"…"`, `` `…` `` (a doubled quote stands for one), `E'…'` (its escapes
+/// decoded as the server does, see [`decode_e_string`]) and `$tag$…$tag$`.
 pub(crate) fn unquote(q: &str) -> Option<String> {
     let b = q.as_bytes();
     match *b.first()? {
@@ -414,7 +430,7 @@ pub(crate) fn unquote(q: &str) -> Option<String> {
             let c = char::from(c);
             q[1..q.len() - 1].replace(&format!("{c}{c}"), &c.to_string())
         }),
-        b'E' | b'e' => Some(unquote(&q[1..])?.replace('\\', "")),
+        b'E' | b'e' => decode_e_string(&q[1..]),
         b'$' => {
             let tag_len = q[1..].find('$')? + 2;
             let tag = &q[..tag_len];
@@ -423,6 +439,89 @@ pub(crate) fn unquote(q: &str) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// The value of a PostgreSQL escape string `'…'` (the token after its `E`), as the
+/// server reads it: `\b` `\f` `\n` `\r` `\t`, `\ooo` (1–3 octal digits), `\xhh` (1–2
+/// hex digits), `\uXXXX`, `\UXXXXXXXX`, any other `\c` is `c`, and `''` is `'`.
+/// `None` when it is unterminated, ends in a lone `\`, or decodes to invalid UTF-8 or
+/// a bad code point; callers treat that as a name they cannot prove harmless.
+fn decode_e_string(q: &str) -> Option<String> {
+    let body = q.strip_prefix('\'')?.strip_suffix('\'')?;
+    let b = body.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let digits = |from: usize, max: usize, radix: u32| -> (u32, usize) {
+        let mut v = 0u32;
+        let mut n = 0;
+        while n < max {
+            match b.get(from + n).and_then(|&c| char::from(c).to_digit(radix)) {
+                Some(d) => v = v * radix + d,
+                None => break,
+            }
+            n += 1;
+        }
+        (v, n)
+    };
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => {
+                let c = *b.get(i + 1)?;
+                i += 2;
+                match c {
+                    b'b' => out.push(0x08),
+                    b'f' => out.push(0x0c),
+                    b'n' => out.push(b'\n'),
+                    b'r' => out.push(b'\r'),
+                    b't' => out.push(b'\t'),
+                    b'0'..=b'7' => {
+                        let (v, n) = digits(i - 1, 3, 8);
+                        out.push(v as u8);
+                        i += n - 1;
+                    }
+                    b'x' => match digits(i, 2, 16) {
+                        (_, 0) => out.push(b'x'),
+                        (v, n) => {
+                            out.push(v as u8);
+                            i += n;
+                        }
+                    },
+                    b'u' | b'U' => {
+                        let len = if c == b'u' { 4 } else { 8 };
+                        let (v, n) = digits(i, len, 16);
+                        if n != len {
+                            return None;
+                        }
+                        let ch = char::from_u32(v)?;
+                        out.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
+                        i += n;
+                    }
+                    other => out.push(other),
+                }
+            }
+            // A doubled quote stands for one (a lone one cannot occur in the token).
+            b'\'' => {
+                out.push(b'\'');
+                i += if b.get(i + 1) == Some(&b'\'') { 2 } else { 1 };
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// PG: whether token `i` is a `U&'…'` / `U&"…"` literal or name, whose `\XXXX`
+/// escapes (and `UESCAPE` character) this guard does not decode.
+fn unicode_escaped(toks: &[Token], i: usize) -> bool {
+    i >= 2
+        && toks[i].kind == TokKind::Quoted
+        && toks[i - 1].kind == TokKind::Punct(b'&')
+        && word(toks, i - 2).is_some_and(|w| w.eq_ignore_ascii_case("U"))
+        && toks[i - 2].end == toks[i - 1].start
+        && toks[i - 1].end == toks[i].start
 }
 
 /// The name at token `i`, lowercased: a word, or a quoted name unquoted.
@@ -471,8 +570,10 @@ fn calls_set_config_read_only(src: &str, toks: &[Token]) -> bool {
             TokKind::Word(w) => w.eq_ignore_ascii_case("set_config"),
             TokKind::Quoted => {
                 let q = &src[t.start..t.end];
+                // `U&"set\005Fconfig"`: not decoded, so it may be `set_config`.
                 q.starts_with('"')
-                    && unquote(q).is_some_and(|n| n.eq_ignore_ascii_case("set_config"))
+                    && (unicode_escaped(toks, i)
+                        || unquote(q).is_some_and(|n| n.eq_ignore_ascii_case("set_config")))
             }
             _ => false,
         };
@@ -545,6 +646,10 @@ fn lifts_toks(src: &str, toks: &[Token], dialect: Dialect) -> bool {
 fn sets_read_only_off(src: &str, a: &[Token]) -> bool {
     const SCOPES: [&str; 5] = ["SESSION", "LOCAL", "GLOBAL", "PERSIST", "PERSIST_ONLY"];
     let mut i = usize::from(SCOPES.iter().any(|s| is_word(a, 0, s)));
+    // PG `U&"…"`: a name this guard does not decode may be a read-only switch.
+    if is_word(a, i, "U") && is_punct(a, i + 1, b'&') {
+        return true;
+    }
     let Some(name) = name_at(src, a, i) else {
         return true;
     };
@@ -940,6 +1045,89 @@ mod tests {
         // Not read-only: an ordinary read.
         let p = verdict(s, classify(s, PG), PG, Some(EnvTag::Production), false);
         assert_eq!(p, A);
+    }
+
+    /// Escapes the server decodes must not hide a read-only switch: `E'…'` is decoded
+    /// as PostgreSQL does, and `U&` names / literals (not decoded) count as lifting.
+    #[test]
+    fn escaped_read_only_names_still_lift() {
+        for s in [
+            r"SELECT set_config(E'default\x5ftransaction_read_only','off',false)",
+            r"SELECT set_config(E'default\137transaction\137read\137only','off',false)",
+            r"SELECT set_config(E'\u0074ransaction_read_only','off',false)",
+            r"SELECT set_config(E'transaction\_read\_only','off',false)",
+            r"SELECT set_config(e'TRANSACTION_READ_ONLY','off',false)",
+            // Not decodable: an invalid code point.
+            r"SELECT set_config(E'\uD800', 'off', false)",
+            r#"SELECT U&"set\005Fconfig"('default_transaction_read_only','off',false)"#,
+            r"SELECT set_config(U&'transaction\005Fread\005Fonly','off',false)",
+            r#"SET U&"default\005Ftransaction_read_only" = off"#,
+            r#"SET SESSION U&"transaction\005Fread\005Fonly" TO off"#,
+        ] {
+            assert!(lifts_read_only(s, PG), "{s}");
+            assert_eq!(ro(s, PG), B, "{s}");
+        }
+        for s in [
+            r"SELECT set_config(E'application\x5fname','x',false)",
+            r"SELECT E'default\x5ftransaction_read_only'",
+            r#"SELECT U&"d\0061ta" FROM t"#,
+        ] {
+            assert!(!lifts_read_only(s, PG), "{s}");
+            assert_eq!(ro(s, PG), A, "{s}");
+        }
+    }
+
+    #[test]
+    fn e_strings_decode_like_the_server() {
+        for (q, want) in [
+            (r"'a\x5fb'", Some("a_b")),
+            (r"'\137'", Some("_")),
+            (r"'\1a'", Some("\u{1}a")),
+            (r"'\xg'", Some("xg")),
+            (r"'\b\f\n\r\t'", Some("\u{8}\u{c}\n\r\t")),
+            (r"'\u00e9\U0001F600'", Some("é😀")),
+            (r"'it''s \' \\ \q'", Some(r"it's ' \ q")),
+            (r"'\xc3\xa9'", Some("é")),
+            (r"'\xff'", None),
+            (r"'\u12'", None),
+            (r"'a\", None),
+            (r"'a", None),
+        ] {
+            assert_eq!(decode_e_string(q).as_deref(), want, "{q}");
+        }
+    }
+
+    /// `standard_conforming_strings` can be off on the server or turned off by the
+    /// session (`SET` is whitelisted), and then `'x\''` ends after `x'`. A statement
+    /// must pass under that reading too, or a write hides in what looks like a string.
+    #[test]
+    fn writes_hidden_by_backslash_strings_are_judged() {
+        let prod = |s: &str| verdict(s, classify(s, PG), PG, Some(EnvTag::Production), false);
+        for s in [
+            r"WITH a AS (SELECT 'x\''), d AS (DELETE FROM t RETURNING 1) SELECT 1 /* ' ) SELECT 1 */",
+            r"SELECT 'a\''; DELETE FROM t; SELECT '''",
+        ] {
+            // The standard reading alone sees only a read.
+            assert_eq!(classify(s, PG), StatementKind::Read, "{s}");
+            assert_eq!(ro(s, PG), B, "{s}");
+            assert_eq!(prod(s), C, "{s}");
+        }
+        // The read-only switch hidden the same way.
+        let s = r"SELECT 'x\'', set_config('transaction_read_only', 'off', false), '";
+        assert!(lifts_read_only(s, PG), "{s}");
+        assert_eq!(ro(s, PG), B, "{s}");
+        // Backslashes that change nothing keep reads allowed.
+        for s in [
+            r"SELECT 'C:\temp\new' AS path",
+            r"SELECT 'a\b', E'\n', $$x\'$$ FROM t",
+            r"SELECT 'it''s'",
+        ] {
+            assert_eq!(ro(s, PG), A, "{s}");
+            assert_eq!(prod(s), A, "{s}");
+        }
+        // MySQL is lexed with the session's tracked sql_mode, not twice.
+        let s = r"SELECT 'it\'s; DELETE x'";
+        assert_eq!(ro(s, MY), A);
     }
 
     #[test]

@@ -271,6 +271,40 @@ pub fn readings(stmt: &str, dialect: Dialect) -> Vec<String> {
     vec![inlined, ignored]
 }
 
+/// PostgreSQL: how a server with `standard_conforming_strings = off` reads `stmt`,
+/// when that differs from the standard reading: every plain `'…'` string (not a
+/// `B'…'` / `X'…'` bit string) honours backslash escapes there, so `'a\''` ends after
+/// `a'`. Returned as the same text with those strings turned into `E'…'` (after a
+/// space, so a preceding word stays apart), which [`tokenize`] reads the same way;
+/// `None` when no such string holds a backslash (both readings agree).
+///
+/// The setting can be off on the server (`ALTER DATABASE … SET`, `postgresql.conf`)
+/// or turned off by the session itself, so a guard judging `stmt` must accept both
+/// readings.
+pub fn pg_backslash_reading(stmt: &str) -> Option<String> {
+    let b = stmt.as_bytes();
+    let bit_string = |i: usize| {
+        i >= 1 && matches!(b[i - 1], b'b' | b'B' | b'x' | b'X') && !prev_is_ident(b, i - 1)
+    };
+    let (mut out, mut from, mut i, mut differs) = (String::new(), 0, 0, false);
+    while i < b.len() {
+        if b[i] == b'\'' && !bit_string(i) {
+            let end = quote_end(b, i, b'\'', true);
+            differs |= b[i..end].contains(&b'\\');
+            out.push_str(&stmt[from..i]);
+            out.push_str(" E");
+            from = i;
+            i = end;
+        } else if let Some((_, end)) = skip_at(b, i, Dialect::Postgres) {
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&stmt[from..]);
+    differs.then_some(out)
+}
+
 /// The first `n` words of `stmt`, ASCII-uppercased. Comments, strings, quoted
 /// identifiers, executable comments and punctuation are skipped (use
 /// [`readings`] first to look inside executable comments).
@@ -328,6 +362,39 @@ mod tests {
         assert_eq!(
             leading_keywords("-- c\nset search_path = x", Dialect::Postgres, 2),
             ["SET", "SEARCH_PATH"]
+        );
+    }
+
+    #[test]
+    fn pg_backslash_reading_reads_plain_strings_with_escapes() {
+        // No backslash in a plain string: both readings agree.
+        assert_eq!(pg_backslash_reading("SELECT 'a', E'\\n', $$\\$$"), None);
+        // `'x\''` ends after `x'` with the setting off: what follows is code.
+        let r = pg_backslash_reading("SELECT 'x\\'' , 1 /* ' */").unwrap();
+        assert_eq!(r, "SELECT  E'x\\'' , 1 /* ' */");
+        let words: Vec<_> = tokenize(&r, Dialect::Postgres)
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(
+            words,
+            [
+                TokKind::Word("SELECT"),
+                TokKind::Quoted,
+                TokKind::Punct(b','),
+                TokKind::Word("1")
+            ]
+        );
+        // Bit strings, quoted names, comments and dollar bodies keep their reading;
+        // a word right before a string stays apart.
+        assert_eq!(pg_backslash_reading("SELECT B'1\\', X'f\\'"), None);
+        assert_eq!(
+            pg_backslash_reading("SELECT \"a\\\" -- '\\'\n, $q$'\\'$q$"),
+            None
+        );
+        assert_eq!(
+            pg_backslash_reading("SELECT n'\\'").as_deref(),
+            Some("SELECT n E'\\'")
         );
     }
 
