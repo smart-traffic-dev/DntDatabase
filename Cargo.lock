@@ -1517,7 +1517,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "proptest",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-driver-mysql"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "dnt-core",
@@ -1550,7 +1550,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-driver-pg"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "dnt-core",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-query"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "dnt-core",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-schema"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dnt-core",
  "dnt-driver-mysql",
@@ -1599,7 +1599,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-store"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes 0.8.4",
  "argon2 0.5.3",
@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-testkit"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dirs 6.0.0",
  "dnt-core",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-transfer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64 0.22.1",
  "calamine",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "dnt-tunnel"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "dnt-core",
  "dnt-driver-mysql",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "dntdatabase"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
