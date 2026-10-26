@@ -131,7 +131,7 @@ pub enum RowKey {                           // cách xác định một dòng
 
 pub enum RowGuard {                         // điều kiện chống xung đột (§5.2)
     PgXmin(String),                         // PG: phiên bản dòng
-    Snapshot(Vec<(ColumnTarget, FullValue)>),// các cột so sánh được, giá trị lúc tải
+    Snapshot(Vec<(ColumnTarget, FullValue)>),// cột so sánh được (UPDATE: cột được SET; DELETE: mọi cột), giá trị lúc tải
 }
 
 pub fn insert_sql(t: &TableRef, cols: &[ColumnTarget], rows: &[Vec<FullValue>], d: &Dialect) -> Result<String, BuildError>;
@@ -299,15 +299,20 @@ mang theo một `RowGuard` (N1):
 | Engine | `RowGuard` | Mức bảo vệ |
 |---|---|---|
 | PG | `xmin` (đọc kèm trang dưới dạng `xmin::text`, ẩn khỏi lưới). Mọi `UPDATE` vào dòng đều đổi `xmin` | **Đầy đủ**: mọi thay đổi trên dòng từ lúc tải đều bị phát hiện |
-| MySQL | `Snapshot`: giá trị lúc tải của **mọi cột so sánh được** trong dòng (không chỉ cột đã sửa), so sánh null-safe `<=>` | **Theo cột**: thay đổi chỉ nằm ở cột không so sánh được sẽ không bị phát hiện |
+| MySQL | `Snapshot`, so sánh null-safe `<=>`, giá trị lúc tải của: **UPDATE** — chỉ các cột được `SET` (cột so sánh được); **DELETE** — mọi cột so sánh được trong dòng | **Theo cột**: UPDATE không phát hiện thay đổi ở cột nó không ghi (cũng không ghi đè chúng); thay đổi ở cột không so sánh được không bị phát hiện |
 
+- UPDATE chỉ kiểm tra cột nó `SET`: các cột khác không bị ghi đè nên thay đổi của session khác trên chúng
+  không phải xung đột (tránh xung đột giả, preview gọn, không đưa cả dòng vào SQL/log). Cột khóa được `SET`
+  coi như đã kiểm tra (điều kiện khóa so đúng giá trị cũ). DELETE vẫn so cả dòng: xóa một dòng vừa bị sửa ở
+  chỗ khác là xung đột. PG có `xmin` thì vẫn bảo vệ cả dòng cho cả hai.
 - Cột **không so sánh được** (bị loại khỏi `Snapshot`): float/double (làm tròn), ô đang bị cắt (text > 64 KB,
   `Bytes` mới có preview) trừ khi đã tải đầy đủ, JSON của MySQL (so sánh theo ngữ nghĩa), spatial, kiểu chưa
   hỗ trợ.
-- Preview và UI ghi rõ mức bảo vệ của từng dòng. Với MySQL thì liệt kê các cột không được kiểm tra, ví dụ
-  "Không kiểm tra xung đột trên: `price` (double), `payload` (đã cắt)".
-- Không còn cột nào so sánh được ngoài khóa (MySQL): DELETE/UPDATE vẫn chạy được nhưng preview cảnh báo
-  "chỉ kiểm tra theo khóa". Trên `Production` phải xác nhận riêng.
+- Preview và UI ghi rõ mức bảo vệ của từng dòng. Với MySQL thì liệt kê các cột (trong phạm vi được kiểm tra)
+  không so được, ví dụ "Không kiểm tra xung đột trên: `price` (double), `payload` (đã cắt)".
+- Không còn cột nào được kiểm tra ngoài khóa (MySQL: DELETE không có cột so sánh được, UPDATE chỉ `SET` cột
+  không so sánh được): vẫn chạy được nhưng preview cảnh báo "chỉ kiểm tra theo khóa". Trên `Production` phải
+  xác nhận riêng.
 - Affected ≠ 1 → rollback cả gói (nếu `atomic = Có`) hoặc dừng ở câu đó (nếu không), đánh dấu dòng xung đột,
   cho "Tải lại dòng" hoặc "Ghi đè". Ghi đè là một preview mới bỏ `RowGuard`, phải xác nhận.
 
@@ -610,7 +615,7 @@ kiểm soát) và History có `origin`. Không thiết kế gì riêng cho AI �
 | 2 | N2 hứa rollback cả gói nhưng không kiểm tra engine/trigger | §4.2a: capability `atomic`, Apply từng câu khi không atomic, Production chặn |
 | 3 | `Value` đã bị cắt nên không đủ để ghi/export | §4.0 N0: `FullValue`, `CellMode`, API ghi chỉ nhận `FullValue` |
 | 4 | Preview và Apply có thể khác nhau | §4.2c: plan bất biến `plan_id`, tiêu thụ một lần, `PlanStale` |
-| 5 | DELETE không có giá trị gốc để so xung đột | §5.2: `RowGuard` (PG `xmin`, MySQL snapshot mọi cột so sánh được), báo mức bảo vệ |
+| 5 | DELETE không có giá trị gốc để so xung đột | §5.2: `RowGuard` (PG `xmin`, MySQL snapshot: DELETE mọi cột so sánh được, UPDATE cột được SET), báo mức bảo vệ |
 | 6 | Mất kết nối không đồng nghĩa rollback | §4.2d: phân biệt trước/trong `COMMIT`, giữ `outcome_unknown`, không retry |
 | 7 | Restore qua công cụ ngoài không đi qua guard | §7.6 N7: đường chạy riêng, policy trước khi spawn, plan gắn file hash |
 | 8 | N6 không chạy được output plain của `pg_dump` | §7.4–7.5: N6 nhận diện `COPY … FROM stdin`/lệnh `\`, chuyển sang `psql` qua N7 hoặc từ chối |

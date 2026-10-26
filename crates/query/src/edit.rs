@@ -103,7 +103,8 @@ pub enum Atomicity {
 pub enum Protection {
     /// Any change to the row since it was loaded is a conflict.
     Full,
-    /// Changes only in `unchecked` columns go unnoticed.
+    /// The loaded values of the columns an UPDATE sets, or of every column of a row a
+    /// DELETE removes, are compared; a change in an `unchecked` one goes unnoticed.
     Columns { unchecked: Vec<String> },
     /// The key only.
     KeyOnly,
@@ -417,8 +418,9 @@ impl Fnv {
 /// - `metas`: the loaded columns' types (by name); a column the set touches, or a key
 ///   column, without one is [`NotEditable::Unsupported`].
 /// - Row guard: PostgreSQL `xmin` when the row carries one ([`Protection::Full`]);
-///   otherwise a snapshot of every comparable loaded column but the key
-///   ([`Protection::Columns`]); no comparable column, or `set.overwrite`, the key only.
+///   otherwise a snapshot of the comparable loaded columns ([`Protection::Columns`]):
+///   those an UPDATE sets, every one but the key for a DELETE; none to check, or
+///   `set.overwrite`, the key only.
 /// - Verdict: the guard's verdict for a write; Block on Production when the table is
 ///   not atomic; at least Confirm on Production for a key-only statement.
 /// - A table that is not atomic takes one edit at a time ([`EditError::OneAtATime`]).
@@ -644,7 +646,8 @@ impl Builder<'_> {
                     assignments.push((target, v));
                 }
                 let key = self.row_key(row)?;
-                let (guard, protection) = self.row_guard(row)?;
+                let cols: Vec<String> = assignments.iter().map(|(c, _)| c.name.clone()).collect();
+                let (guard, protection) = self.row_guard(row, Some(&cols))?;
                 let sql = update_sql(&self.table, &key, &assignments, &guard, d)?;
                 if mysql {
                     // A locking read sees the latest committed row, as the UPDATE did;
@@ -656,7 +659,7 @@ impl Builder<'_> {
             }
             RowEdit::Delete { row } => {
                 let key = self.row_key(row)?;
-                let (guard, protection) = self.row_guard(row)?;
+                let (guard, protection) = self.row_guard(row, None)?;
                 (delete_sql(&self.table, &key, &guard, d)?, protection, false)
             }
             RowEdit::Insert { values } => {
@@ -853,7 +856,15 @@ impl Builder<'_> {
         Ok(RowKey::new(parts)?)
     }
 
-    fn row_guard(&self, row: &RowRef) -> Result<(RowGuard, Protection), EditError> {
+    /// The row's guard (spec §5.2): PostgreSQL `xmin` when the row carries one; otherwise
+    /// a snapshot of its loaded values: of the columns an UPDATE sets (`set`), so a
+    /// change elsewhere in the row (which the UPDATE does not overwrite) is no conflict,
+    /// or of every column but the key for a DELETE (`None`).
+    fn row_guard(
+        &self,
+        row: &RowRef,
+        set: Option<&[String]>,
+    ) -> Result<(RowGuard, Protection), EditError> {
         if self.overwrite {
             return Ok((RowGuard::KeyOnly, Protection::KeyOnly));
         }
@@ -863,7 +874,8 @@ impl Builder<'_> {
         let mut snapshot = Vec::new();
         let mut unchecked = Vec::new();
         for cd in &self.detail.columns {
-            if self.key.contains(&cd.name) {
+            // A key column is checked by the key itself.
+            if self.key.contains(&cd.name) || set.is_some_and(|s| !s.contains(&cd.name)) {
                 continue;
             }
             match self.snapshot_value(cd, row)? {
@@ -871,13 +883,21 @@ impl Builder<'_> {
                 None => unchecked.push(cd.name.clone()),
             }
         }
-        Ok(if snapshot.is_empty() {
-            (RowGuard::KeyOnly, Protection::KeyOnly)
+        // Nothing checked but the key: a DELETE without a comparable column, an UPDATE
+        // that sets none (a key column it sets counts as checked).
+        let key_only = match set {
+            None => snapshot.is_empty(),
+            Some(s) => s.iter().all(|c| unchecked.contains(c)),
+        };
+        let guard = if snapshot.is_empty() {
+            RowGuard::KeyOnly
         } else {
-            (
-                RowGuard::Snapshot(snapshot),
-                Protection::Columns { unchecked },
-            )
+            RowGuard::Snapshot(snapshot)
+        };
+        Ok(if key_only {
+            (guard, Protection::KeyOnly)
+        } else {
+            (guard, Protection::Columns { unchecked })
         })
     }
 
@@ -1720,13 +1740,92 @@ mod tests {
                 unchecked: vec!["price".into()]
             }
         );
-        // An UPDATE of one column checks every comparable column too.
-        let p = plan_my(INNODB, &set(vec![update(r, &[("qty", typed("4"))])]), None).unwrap();
+    }
+
+    /// An UPDATE checks only the columns it sets: it never overwrites the others, so a
+    /// change to them is no conflict.
+    #[test]
+    fn update_checks_only_the_columns_it_sets() {
+        let p = plan_my(
+            INNODB,
+            &set(vec![update(my_row(), &[("qty", typed("4"))])]),
+            None,
+        )
+        .unwrap();
+        let s = &p.stmts[0];
+        assert_eq!(
+            s.sql,
+            "UPDATE `shop`.`items` SET `qty` = 4 WHERE `id` = 1 AND `qty` <=> 3"
+        );
+        assert_eq!(s.protection, Protection::Columns { unchecked: vec![] });
+        // Several columns: each compared, in table order.
+        let p = plan_my(
+            INNODB,
+            &set(vec![update(
+                my_row(),
+                &[("qty", typed("4")), ("name", typed("Bo"))],
+            )]),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             p.stmts[0].sql,
-            "UPDATE `shop`.`items` SET `qty` = 4 WHERE `id` = 1 \
+            "UPDATE `shop`.`items` SET `qty` = 4, `name` = _utf8mb4'Bo' WHERE `id` = 1 \
              AND `name` <=> CONVERT(_utf8mb4'Anna' USING utf8mb4) COLLATE utf8mb4_bin \
-             AND `qty` <=> 3 AND `payload` <=> NULL"
+             AND `qty` <=> 3"
+        );
+        // A column that cannot be compared is unchecked; with no other, the key only
+        // (to be confirmed on Production).
+        let p = plan_my(
+            INNODB,
+            &set(vec![update(
+                my_row(),
+                &[("price", typed("2")), ("qty", typed("4"))],
+            )]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            p.stmts[0].protection,
+            Protection::Columns {
+                unchecked: vec!["price".into()]
+            }
+        );
+        let one = set(vec![update(my_row(), &[("price", typed("2"))])]);
+        let p = plan_my(INNODB, &one, None).unwrap();
+        assert_eq!(
+            p.stmts[0].sql,
+            "UPDATE `shop`.`items` SET `price` = 2.0 WHERE `id` = 1"
+        );
+        assert_eq!(p.stmts[0].protection, Protection::KeyOnly);
+        let p = plan_my(INNODB, &one, Some(EnvTag::Production)).unwrap();
+        assert_eq!(p.verdict, Verdict::Confirm);
+    }
+
+    /// A key column an UPDATE sets is checked by the key itself.
+    #[test]
+    fn update_of_a_key_column_is_checked_by_the_key() {
+        let (mut d, m) = my_items(INNODB);
+        d.primary_key = Some(index("PRIMARY", &["name"], true, true));
+        d.columns[1].nullable = false;
+        let mut r = my_row();
+        r.key = pairs(&[("name", text("Anna"))]);
+        let p = build_edit_plan(
+            &set(vec![update(r, &[("name", typed("Bo"))])]),
+            &d,
+            &m,
+            Dialect::MYSQL,
+            ctx(None),
+            &none,
+        )
+        .unwrap();
+        assert_eq!(
+            p.stmts[0].sql,
+            "UPDATE `shop`.`items` SET `name` = _utf8mb4'Bo' WHERE `name` = _utf8mb4'Anna'"
+        );
+        assert_eq!(
+            p.stmts[0].protection,
+            Protection::Columns { unchecked: vec![] }
         );
     }
 
@@ -1735,7 +1834,7 @@ mod tests {
         let long = "x".repeat(PAGE_CELL_CAP - 3);
         let mut r = my_row();
         r.original[4].1 = text(&long);
-        let p = plan_my(INNODB, &set(vec![update(r, &[("qty", typed("4"))])]), None).unwrap();
+        let p = plan_my(INNODB, &set(vec![RowEdit::Delete { row: r.clone() }]), None).unwrap();
         let s = &p.stmts[0];
         assert_eq!(
             s.protection,
@@ -1746,6 +1845,15 @@ mod tests {
         assert!(!s.sql.contains("`price` <=>"), "{}", s.sql);
         assert!(!s.sql.contains("`payload` <=>"), "{}", s.sql);
         assert!(s.sql.contains("`qty` <=> 3"), "{}", s.sql);
+        // An UPDATE of the cut cell: nothing it sets can be compared.
+        let p = plan_my(
+            INNODB,
+            &set(vec![update(r, &[("payload", typed("y"))])]),
+            None,
+        )
+        .unwrap();
+        assert_eq!(p.stmts[0].protection, Protection::KeyOnly);
+        assert!(!p.stmts[0].sql.contains("<=>"), "{}", p.stmts[0].sql);
 
         // Cut binary data is not compared either; JSON on MySQL compares semantically.
         let mut d = table(
@@ -2206,7 +2314,7 @@ mod tests {
         r.original[4].1 = text(&cut);
         r.loaded = vec![("payload".into(), token)];
         let (d, m) = my_items(INNODB);
-        let s = set(vec![update(r.clone(), &[("qty", typed("4"))])]);
+        let s = set(vec![update(r.clone(), &[("payload", typed("new"))])]);
         let full = FullValue::try_from_value(text(&full_text)).unwrap();
         let loaded = store(token, "payload", full);
         let p = build_edit_plan(&s, &d, &m, Dialect::MYSQL, ctx(None), &loaded).unwrap();
@@ -2218,27 +2326,17 @@ mod tests {
             "{}",
             &st.sql[st.sql.len().saturating_sub(200)..]
         );
-        assert_eq!(
-            st.protection,
-            Protection::Columns {
-                unchecked: vec!["price".into()]
-            }
-        );
+        assert_eq!(st.protection, Protection::Columns { unchecked: vec![] });
         // Without a token the cut value stays unchecked (as before).
         let mut plain = r.clone();
         plain.loaded.clear();
         let p = plan_my(
             INNODB,
-            &set(vec![update(plain, &[("qty", typed("4"))])]),
+            &set(vec![update(plain, &[("payload", typed("new"))])]),
             None,
         )
         .unwrap();
-        assert_eq!(
-            p.stmts[0].protection,
-            Protection::Columns {
-                unchecked: vec!["price".into(), "payload".into()]
-            }
-        );
+        assert_eq!(p.stmts[0].protection, Protection::KeyOnly);
         // A loaded value that does not continue what the page showed: the row changed
         // between the page and the fetch.
         let other = FullValue::try_from_value(text(&format!("z{full_text}"))).unwrap();
@@ -2257,7 +2355,7 @@ mod tests {
         whole.loaded = vec![("payload".into(), token)];
         let p = plan_my(
             INNODB,
-            &set(vec![update(whole, &[("qty", typed("4"))])]),
+            &set(vec![update(whole, &[("payload", typed("new"))])]),
             None,
         )
         .unwrap();
@@ -2448,6 +2546,11 @@ mod tests {
         ));
         // Not touched: only left out of the snapshot.
         let p = go(&set(vec![update(my_row(), &[("name", typed("b"))])])).unwrap();
+        assert_eq!(
+            p.stmts[0].protection,
+            Protection::Columns { unchecked: vec![] }
+        );
+        let p = go(&set(vec![RowEdit::Delete { row: my_row() }])).unwrap();
         assert_eq!(
             p.stmts[0].protection,
             Protection::Columns {

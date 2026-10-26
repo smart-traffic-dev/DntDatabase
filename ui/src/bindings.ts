@@ -2412,7 +2412,8 @@ export type Protection =
  */
 { level: "full" } | 
 /**
- * Changes only in `unchecked` columns go unnoticed.
+ * The loaded values of the columns an UPDATE sets, or of every column of a row a
+ * DELETE removes, are compared; a change in an `unchecked` one goes unnoticed.
  */
 { level: "columns"; unchecked: string[] } | 
 /**

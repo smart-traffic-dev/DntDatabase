@@ -317,8 +317,8 @@ async fn update_insert_delete_round_trip() {
     }
 }
 
-/// Another session changes the row after the page was read: the update is a conflict
-/// and the whole batch is rolled back.
+/// Another session changes a value the update sets after the page was read: the update
+/// is a conflict and the whole batch is rolled back.
 #[tokio::test]
 async fn concurrent_update_is_a_conflict() {
     require_db!();
@@ -332,7 +332,10 @@ async fn concurrent_update_is_a_conflict() {
         let p = page(&state, id, o.clone()).await;
         admin(
             t,
-            &format!("UPDATE {} SET qty = 10 WHERE id = 2", scratch(t, &name)),
+            &format!(
+                "UPDATE {} SET name = 'theirs' WHERE id = 2",
+                scratch(t, &name)
+            ),
         )
         .await;
         let r = apply(
@@ -364,9 +367,64 @@ async fn concurrent_update_is_a_conflict() {
         // Statement 1 was undone with the rest.
         assert_eq!(
             contents(t, &name).await,
-            [(1, "a".into(), 1), (2, "b".into(), 10)],
+            [(1, "a".into(), 1), (2, "theirs".into(), 2)],
             "{t:?}"
         );
+        drop_table(t, &name).await;
+    }
+}
+
+/// Another session changes a column the update does not set: MySQL checks only the
+/// columns an UPDATE sets, so it applies and keeps the other change; PostgreSQL's
+/// `xmin` covers the whole row, so it is a conflict there.
+#[tokio::test]
+async fn concurrent_change_to_another_column() {
+    require_db!();
+    let _serial = DB_LOCK.lock().await;
+    for t in Target::all() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, t).await;
+        let name = items(t, "oc").await;
+        let o = obj(t, &name);
+        let p = page(&state, id, o.clone()).await;
+        admin(
+            t,
+            &format!("UPDATE {} SET qty = 10 WHERE id = 2", scratch(t, &name)),
+        )
+        .await;
+        let r = apply(
+            &state,
+            id,
+            set(
+                o,
+                vec![RowEdit::Update {
+                    row: row_ref(&p, 1, &["id"]),
+                    set: cells(&[("name", text("mine"))]),
+                }],
+            ),
+        )
+        .await
+        .unwrap();
+        match t.kind() {
+            DbKind::MySql => {
+                assert_eq!(r.outcome, ApplyOutcome::Committed, "{t:?}: {r:?}");
+                assert_eq!(
+                    contents(t, &name).await,
+                    [(1, "a".into(), 1), (2, "mine".into(), 10)],
+                    "{t:?}"
+                );
+            }
+            DbKind::Postgres => {
+                assert_eq!(r.outcome, ApplyOutcome::RolledBack, "{t:?}: {r:?}");
+                assert!(r.statements[0].conflict, "{t:?}");
+                assert_eq!(
+                    contents(t, &name).await,
+                    [(1, "a".into(), 1), (2, "b".into(), 10)],
+                    "{t:?}"
+                );
+            }
+        }
         drop_table(t, &name).await;
     }
 }
@@ -443,7 +501,7 @@ async fn case_only_change_is_a_conflict_on_ci_column() {
                 o,
                 vec![RowEdit::Update {
                     row: row_ref(&p, 0, &["id"]),
-                    set: cells(&[("qty", text("5"))]),
+                    set: cells(&[("name", text("bob"))]),
                 }],
             ),
         )
@@ -617,7 +675,7 @@ async fn recheck_sees_a_commit_made_during_the_batch() {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             assert!(blocked, "{t:?}: statement 2 never waited for the lock");
-            run(format!("UPDATE {q} SET qty = 99 WHERE id = 2")).await;
+            run(format!("UPDATE {q} SET name = 'theirs' WHERE id = 2")).await;
             run("COMMIT".into()).await;
         });
         other.close().await;
@@ -629,7 +687,7 @@ async fn recheck_sees_a_commit_made_during_the_batch() {
         );
         assert_eq!(
             contents(t, &name).await,
-            [(1, "a".into(), 1), (2, "b".into(), 99)],
+            [(1, "a".into(), 1), (2, "theirs".into(), 2)],
             "{t:?}"
         );
         drop_table(t, &name).await;
@@ -695,7 +753,7 @@ async fn myisam_apply_is_one_statement_and_partial_is_reported() {
         // Changed meanwhile: nothing applied, reported as a conflict.
         admin(
             t,
-            &format!("UPDATE {} SET qty = 20 WHERE id = 2", scratch(t, &name)),
+            &format!("UPDATE {} SET name = 'z' WHERE id = 2", scratch(t, &name)),
         )
         .await;
         let r = apply(
@@ -739,7 +797,7 @@ async fn myisam_apply_is_one_statement_and_partial_is_reported() {
         assert_eq!(err.kind, "server", "{t:?}");
         assert_eq!(
             contents(t, &name).await,
-            [(1, "a".into(), 9), (2, "b".into(), 20)],
+            [(1, "a".into(), 9), (2, "z".into(), 2)],
             "{t:?}"
         );
         drop_table(t, &name).await;
@@ -1102,8 +1160,8 @@ async fn token_for_other_column_rejected() {
     }
 }
 
-/// MySQL compares a snapshot of the row: cut cells fetched in full join it, so a
-/// change to them is a conflict like any other.
+/// MySQL compares a snapshot of the columns an UPDATE sets: a cut cell fetched in full
+/// joins it with its complete value, so a change to it is a conflict like any other.
 #[tokio::test]
 async fn original_snapshot_uses_loaded_full_value() {
     require_db!();
@@ -1120,30 +1178,22 @@ async fn original_snapshot_uses_loaded_full_value() {
             let cell = fetch(&state, id, &o, &r, col).await;
             r.loaded.push((col.into(), cell.token));
         }
-        let edit = |r: RowRef, qty: &str| {
+        let edit = |r: RowRef, col: &str, v: &str| {
             set(
                 o.clone(),
                 vec![RowEdit::Update {
                     row: r,
-                    set: cells(&[("qty", text(qty))]),
+                    set: cells(&[(col, text(v))]),
                 }],
             )
         };
-        let preview = data_preview_impl(&state, id, edit(r.clone(), "5"))
+        let preview = data_preview_impl(&state, id, edit(r.clone(), "note", "mine"))
             .await
             .unwrap();
         assert_eq!(
             preview.protections[0],
             Protection::Columns { unchecked: vec![] },
             "{t:?}"
-        );
-        let applied = data_apply_impl(&state, preview.plan_id, false)
-            .await
-            .unwrap();
-        assert_eq!(
-            applied.outcome,
-            ApplyOutcome::Committed,
-            "{t:?}: {applied:?}"
         );
         // The cut text changes after it was fetched: a conflict, nothing applied.
         admin(
@@ -1154,10 +1204,23 @@ async fn original_snapshot_uses_loaded_full_value() {
             ),
         )
         .await;
-        r.original[3].1 = Value::Int(5);
-        let res = apply(&state, id, edit(r, "6")).await.unwrap();
+        let res = data_apply_impl(&state, preview.plan_id, false)
+            .await
+            .unwrap();
         assert_eq!(res.outcome, ApplyOutcome::RolledBack, "{t:?}: {res:?}");
         assert!(res.statements[0].conflict, "{t:?}");
+        let len = admin(
+            t,
+            &format!(
+                "SELECT LENGTH(note) FROM {} WHERE id = 1",
+                scratch(t, &name)
+            ),
+        )
+        .await;
+        assert_eq!(int(&len[0][0]), 100_001, "{t:?}");
+        // An UPDATE of another column does not check the note: it applies.
+        let res = apply(&state, id, edit(r, "qty", "5")).await.unwrap();
+        assert_eq!(res.outcome, ApplyOutcome::Committed, "{t:?}: {res:?}");
         let qty = admin(
             t,
             &format!("SELECT qty FROM {} WHERE id = 1", scratch(t, &name)),
