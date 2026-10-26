@@ -79,7 +79,7 @@ describe('staged data edits are not lost silently', () => {
     stagedTab();
     useDialogs.setState({ request: { kind: 'deleteNode', node: { type: 'connection', id: ids.prod }, label: 'shop-prod' } });
     render(<DialogHost />);
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await user.click(screen.getByRole('button', { name: 'Delete connection' }));
     await waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
     question().done(false);
     expect(callsOf('delete_connection')).toEqual([]);
@@ -89,7 +89,7 @@ describe('staged data edits are not lost silently', () => {
     expect(useDataEdits.getState().hasStaged(tabId)).toBe(true);
 
     act(() => useDialogs.setState({ request: { kind: 'deleteNode', node: { type: 'connection', id: ids.prod }, label: 'shop-prod' } }));
-    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await user.click(await screen.findByRole('button', { name: 'Delete connection' }));
     await waitFor(() => expect(useDialogs.getState().question?.kind).toBe('discardEdits'));
     question().done(true);
     await waitFor(() => expect(callsOf('delete_connection')).toHaveLength(1));

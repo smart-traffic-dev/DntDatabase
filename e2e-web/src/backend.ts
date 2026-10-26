@@ -414,6 +414,8 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   // Dump and restore: analyzed restore plans (id -> request); one counter for plans and jobs.
   let backupSeq = 0;
   const restorePlans = new Map<string, RestoreRequest>();
+  // Connection groups (`create_group`): flat, in creation order.
+  const groups: Tree['groups'] = [];
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -431,7 +433,12 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
   const handlers: Record<string, Handler> = {
     // Startup: the stored connections, the restored query tabs, favorites and snippets.
-    list_tree: (): Tree => ({ groups: [], connections: connections.map(summary) }),
+    list_tree: (): Tree => ({ groups: [...groups], connections: connections.map(summary) }),
+    create_group: ({ name, parentId }) => {
+      const group = { id: crypto.randomUUID(), parent_id: (parentId as string | null) ?? null, name: name as string, sort_order: groups.length };
+      groups.push(group);
+      return group;
+    },
     tabs_load: () => [],
     tabs_save: () => null,
     tabs_delete: () => null,

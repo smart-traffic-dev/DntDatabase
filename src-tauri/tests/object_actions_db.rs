@@ -32,6 +32,10 @@ fn app_state(dir: &std::path::Path) -> AppState {
 }
 
 async fn open(state: &AppState, t: Target) -> Uuid {
+    open_on(state, t, Some(FIXTURE_DB)).await
+}
+
+async fn open_on(state: &AppState, t: Target, default_db: Option<&str>) -> Uuid {
     let cfg = ConnectionConfig {
         id: Uuid::nil(),
         group_id: None,
@@ -41,7 +45,7 @@ async fn open(state: &AppState, t: Target) -> Uuid {
         host: "127.0.0.1".into(),
         port: t.host_port(),
         username: t.admin_user().into(),
-        default_db: Some(FIXTURE_DB.into()),
+        default_db: default_db.map(str::to_string),
         env_tag: None,
         read_only: false,
         secret_mode: SecretMode::Saved,
@@ -143,7 +147,10 @@ async fn namespace_relation_lifecycle_and_dependencies_on_every_server() {
                     id,
                     ObjectAction::CreateNamespace {
                         database: FIXTURE_DB.into(),
-                        name: ns.clone()
+                        name: ns.clone(),
+                        charset: None,
+                        collation: None,
+                        owner: None,
                     }
                 )
                 .await
@@ -343,6 +350,155 @@ async fn namespace_relation_lifecycle_and_dependencies_on_every_server() {
     }
 }
 
+/// The tree's "Create database…" sends an empty `database` on MySQL; a hyphenated
+/// name must be created without any error or warning.
+#[tokio::test]
+async fn mysql_create_database_from_the_tree_reports_no_error() {
+    require_db!();
+    for target in Target::all()
+        .into_iter()
+        .filter(|t| t.kind() == DbKind::MySql)
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open_on(&state, target, None).await;
+        let name = format!("p4a-{}", Uuid::new_v4().simple());
+        let report = state
+            .sessions
+            .object_action_preview(
+                id,
+                ObjectAction::CreateNamespace {
+                    database: String::new(),
+                    name: name.clone(),
+                    charset: None,
+                    collation: None,
+                    owner: None,
+                },
+            )
+            .await;
+        let report = match report {
+            Ok(p) => {
+                state
+                    .sessions
+                    .object_action_apply(p.plan_id, true, None, Uuid::new_v4(), &|_| {})
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        // Fill it like a restored dump and browse it in the tree.
+        let filler = MySqlDriver
+            .connect(&target.resolved(Some(FIXTURE_DB)))
+            .await
+            .unwrap();
+        let q = quote_ident(DbKind::MySql, &name);
+        for stmt in [
+            format!("CREATE TABLE {q}.t (id INT PRIMARY KEY, v INT)"),
+            format!("CREATE TABLE {q}.u (id INT PRIMARY KEY)"),
+            format!("CREATE VIEW {q}.v AS SELECT id FROM {q}.t"),
+            format!("CREATE TRIGGER {q}.tr BEFORE INSERT ON {q}.t FOR EACH ROW SET NEW.v = 1"),
+            format!("CREATE PROCEDURE {q}.p() SELECT 1"),
+            format!("CREATE FUNCTION {q}.f() RETURNS INT DETERMINISTIC RETURN 1"),
+            format!("CREATE EVENT {q}.e ON SCHEDULE EVERY 1 DAY DISABLE DO SELECT 1"),
+        ] {
+            if let Err(e) = sql(filler.as_ref(), &stmt).await {
+                panic!("{target:?} setup {stmt}: {e:?}");
+            }
+        }
+        filler.close().await;
+        use dntdatabase::commands::browse::{
+            list_databases_impl, list_objects_impl, table_detail_impl,
+        };
+        list_databases_impl(&state, id, false).await.unwrap();
+        for kind in [
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::Trigger,
+            ObjectKind::Procedure,
+            ObjectKind::Function,
+            ObjectKind::Event,
+        ] {
+            list_objects_impl(
+                &state,
+                id,
+                dnt_core::meta::Scope {
+                    database: name.clone(),
+                    schema: None,
+                },
+                kind,
+            )
+            .await
+            .unwrap();
+        }
+        table_detail_impl(
+            &state,
+            id,
+            ObjectRef {
+                database: name.clone(),
+                schema: None,
+                name: "t".into(),
+                kind: ObjectKind::Table,
+            },
+        )
+        .await
+        .unwrap();
+        state.sessions.schema_cache_for(id, &name).await.unwrap();
+        // The tree's "Drop database…" on the new database.
+        let dropped = match state
+            .sessions
+            .object_action_preview(
+                id,
+                ObjectAction::DropNamespace {
+                    database: name.clone(),
+                    name: name.clone(),
+                },
+            )
+            .await
+        {
+            Ok(p) => {
+                state
+                    .sessions
+                    .object_action_apply(p.plan_id, true, p.confirm_name, Uuid::new_v4(), &|_| {})
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        let listed = list_databases_impl(&state, id, false)
+            .await
+            .map(|d| d.iter().any(|d| d.name == name));
+        let session = MySqlDriver
+            .connect(&target.resolved(Some(FIXTURE_DB)))
+            .await
+            .unwrap();
+        let cleaned = sql(
+            session.as_ref(),
+            &format!(
+                "DROP DATABASE IF EXISTS {}",
+                quote_ident(DbKind::MySql, &name)
+            ),
+        )
+        .await;
+        session.close().await;
+        state.sessions.close(id).await;
+        let report = report.unwrap();
+        assert_eq!(report.outcome, ActionOutcome::Applied, "{target:?}");
+        assert!(report.error.is_none(), "{target:?}: {:?}", report.error);
+        assert!(
+            report.warnings.is_empty(),
+            "{target:?}: {:?}",
+            report.warnings
+        );
+        let dropped = dropped.unwrap();
+        assert_eq!(
+            dropped.outcome,
+            ActionOutcome::Applied,
+            "{target:?}: {dropped:?}"
+        );
+        assert!(dropped.error.is_none(), "{target:?}: {:?}", dropped.error);
+        assert!(!listed.unwrap(), "{target:?}: still listed after the drop");
+        assert!(cleaned.is_ok(), "cleanup {target:?}");
+    }
+}
+
 #[tokio::test]
 async fn stop_cancels_a_real_metadata_lock_wait_without_replaying_ddl() {
     require_db!();
@@ -496,4 +652,89 @@ async fn review_probe_result_budget() {
     );
     assert_eq!(bytes, 65_536_000);
     session.close().await;
+}
+
+#[tokio::test]
+async fn a_dropped_target_is_reported_missing_at_preview_and_apply() {
+    require_db!();
+    for target in [Target::MySql8, Target::Pg17] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let id = open(&state, target).await;
+        let driver: Box<dyn Driver> = if target.kind() == DbKind::MySql {
+            Box::new(MySqlDriver)
+        } else {
+            Box::new(PgDriver)
+        };
+        let session = driver
+            .connect(&target.resolved(Some(FIXTURE_DB)))
+            .await
+            .unwrap();
+        let pg = target.kind() == DbKind::Postgres;
+        let schema = pg.then(|| "public".to_string());
+        let table = format!("gone_{}", &Uuid::new_v4().simple().to_string()[..8]);
+        let rel = qualified_name(target.kind(), FIXTURE_DB, schema.as_deref(), &table);
+        let object = ObjectRef {
+            database: FIXTURE_DB.into(),
+            schema,
+            name: table.clone(),
+            kind: ObjectKind::Table,
+        };
+        let missing = |e: dnt_core::error::DbError| {
+            let e = dnt_core::error::AppError::from(e);
+            assert_eq!(e.kind, "config", "{target:?}: {e:?}");
+            assert_eq!(e.field.as_deref(), Some("object_missing"), "{target:?}");
+            assert!(e.message.contains("no longer exists"), "{}", e.message);
+        };
+        sql(session.as_ref(), &format!("CREATE TABLE {rel} (id INT)"))
+            .await
+            .unwrap();
+        for a in [
+            ObjectAction::DropObject {
+                object: object.clone(),
+            },
+            ObjectAction::RenameTable {
+                object: object.clone(),
+                name: format!("{table}_x"),
+            },
+            ObjectAction::TruncateTable {
+                object: object.clone(),
+            },
+        ] {
+            // Dropped between Preview and Apply: nothing is sent, the error says why.
+            let p = state
+                .sessions
+                .object_action_preview(id, a.clone())
+                .await
+                .unwrap();
+            sql(session.as_ref(), &format!("DROP TABLE {rel}"))
+                .await
+                .unwrap();
+            let applied = state
+                .sessions
+                .object_action_apply(
+                    p.plan_id,
+                    true,
+                    p.confirm_name.clone(),
+                    Uuid::new_v4(),
+                    &|_| {},
+                )
+                .await;
+            missing(applied.unwrap_err());
+            // Already gone at Preview.
+            missing(
+                state
+                    .sessions
+                    .object_action_preview(id, a)
+                    .await
+                    .unwrap_err(),
+            );
+            sql(session.as_ref(), &format!("CREATE TABLE {rel} (id INT)"))
+                .await
+                .unwrap();
+        }
+        let _ = sql(session.as_ref(), &format!("DROP TABLE IF EXISTS {rel}")).await;
+        session.close().await;
+        state.sessions.close(id).await;
+    }
 }

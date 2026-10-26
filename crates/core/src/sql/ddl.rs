@@ -9,11 +9,31 @@ use specta::Type;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ObjectAction {
-    CreateNamespace { database: String, name: String },
-    DropNamespace { database: String, name: String },
-    RenameTable { object: ObjectRef, name: String },
-    DropObject { object: ObjectRef },
-    TruncateTable { object: ObjectRef },
+    /// `charset`/`collation`: MySQL only (`None`: the server default). `owner`: PostgreSQL only.
+    CreateNamespace {
+        database: String,
+        name: String,
+        #[serde(default)]
+        charset: Option<String>,
+        #[serde(default)]
+        collation: Option<String>,
+        #[serde(default)]
+        owner: Option<String>,
+    },
+    DropNamespace {
+        database: String,
+        name: String,
+    },
+    RenameTable {
+        object: ObjectRef,
+        name: String,
+    },
+    DropObject {
+        object: ObjectRef,
+    },
+    TruncateTable {
+        object: ObjectRef,
+    },
 }
 
 impl ObjectAction {
@@ -76,6 +96,18 @@ pub fn validate_identifier(kind: DbKind, name: &str) -> Result<(), DbError> {
     Ok(())
 }
 
+/// A MySQL character set or collation name, written unquoted: ASCII word characters only.
+fn charset_word<'a>(field: &str, s: &'a str) -> Result<&'a str, DbError> {
+    if s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        Ok(s)
+    } else {
+        Err(DbError::Config {
+            field: Some(field.into()),
+            message: format!("This is not a valid MySQL {field} name."),
+        })
+    }
+}
+
 pub fn action_sql(kind: DbKind, action: &ObjectAction) -> Result<String, DbError> {
     validate_identifier(kind, action.name())?;
     if kind == DbKind::Postgres || action.object().is_some() {
@@ -83,19 +115,51 @@ pub fn action_sql(kind: DbKind, action: &ObjectAction) -> Result<String, DbError
     }
     let q = |s: &str| quote_ident(kind, s);
     match action {
-        ObjectAction::CreateNamespace { name, .. } => {
-            if kind == DbKind::MySql && name.contains(['/', '\\']) {
-                return Err(invalid("Database names cannot contain path separators."));
+        ObjectAction::CreateNamespace {
+            name,
+            charset,
+            collation,
+            owner,
+            ..
+        } => {
+            fn set(o: &Option<String>) -> Option<&str> {
+                o.as_deref().filter(|s| !s.is_empty())
             }
-            Ok(format!(
-                "CREATE {} {}",
-                if kind == DbKind::MySql {
-                    "DATABASE"
-                } else {
-                    "SCHEMA"
-                },
-                q(name)
-            ))
+            let (charset, collation, owner) = (set(charset), set(collation), set(owner));
+            if kind == DbKind::MySql {
+                if name.contains(['/', '\\']) {
+                    return Err(invalid("Database names cannot contain path separators."));
+                }
+                if owner.is_some() {
+                    return Err(invalid("MySQL databases have no owner."));
+                }
+                let mut sql = format!("CREATE DATABASE {}", q(name));
+                if let Some(cs) = charset {
+                    sql.push_str(&format!(" CHARACTER SET {}", charset_word("charset", cs)?));
+                }
+                if let Some(co) = collation {
+                    sql.push_str(&format!(" COLLATE {}", charset_word("collation", co)?));
+                }
+                Ok(sql)
+            } else {
+                if charset.is_some() || collation.is_some() {
+                    return Err(invalid(
+                        "PostgreSQL schemas have no character set or collation.",
+                    ));
+                }
+                let mut sql = format!("CREATE SCHEMA {}", q(name));
+                if let Some(role) = owner {
+                    // A role name is never qualified, so a dot is part of it (`john.doe`).
+                    if role.trim().is_empty() || role.contains('\0') || role.len() > 63 {
+                        return Err(DbError::Config {
+                            field: Some("owner".into()),
+                            message: "This owner is not a valid role name.".into(),
+                        });
+                    }
+                    sql.push_str(&format!(" AUTHORIZATION {}", q(role)));
+                }
+                Ok(sql)
+            }
         }
         ObjectAction::DropNamespace { name, .. } => Ok(format!(
             "DROP {} {}{}",
@@ -228,6 +292,52 @@ mod tests {
             assert!(validate_identifier(DbKind::Postgres, bad).is_err());
         }
         assert!(validate_identifier(DbKind::MySql, "x😀").is_err());
+    }
+    fn create(charset: Option<&str>, collation: Option<&str>, owner: Option<&str>) -> ObjectAction {
+        ObjectAction::CreateNamespace {
+            database: "db".into(),
+            name: "n`\"s".into(),
+            charset: charset.map(Into::into),
+            collation: collation.map(Into::into),
+            owner: owner.map(Into::into),
+        }
+    }
+    #[test]
+    fn create_namespace_options() {
+        assert_eq!(
+            action_sql(DbKind::MySql, &create(None, None, None)).unwrap(),
+            "CREATE DATABASE `n``\"s`"
+        );
+        assert_eq!(
+            action_sql(
+                DbKind::MySql,
+                &create(Some("utf8mb4"), Some("utf8mb4_bin"), None)
+            )
+            .unwrap(),
+            "CREATE DATABASE `n``\"s` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+        );
+        // Empty strings mean the server default.
+        assert_eq!(
+            action_sql(
+                DbKind::MySql,
+                &create(Some(""), Some("latin1_bin"), Some(""))
+            )
+            .unwrap(),
+            "CREATE DATABASE `n``\"s` COLLATE latin1_bin"
+        );
+        assert!(action_sql(DbKind::MySql, &create(Some("utf8; DROP"), None, None)).is_err());
+        assert!(action_sql(DbKind::MySql, &create(None, None, Some("root"))).is_err());
+        assert_eq!(
+            action_sql(DbKind::Postgres, &create(None, None, Some("app\"owner"))).unwrap(),
+            "CREATE SCHEMA \"n`\"\"s\" AUTHORIZATION \"app\"\"owner\""
+        );
+        assert_eq!(
+            action_sql(DbKind::Postgres, &create(None, None, Some("john.doe"))).unwrap(),
+            "CREATE SCHEMA \"n`\"\"s\" AUTHORIZATION \"john.doe\""
+        );
+        assert!(action_sql(DbKind::Postgres, &create(None, None, Some(" "))).is_err());
+        assert!(action_sql(DbKind::Postgres, &create(None, None, Some(&"r".repeat(64)))).is_err());
+        assert!(action_sql(DbKind::Postgres, &create(Some("UTF8"), None, None)).is_err());
     }
     #[test]
     fn rename_is_explicit_and_qualified() {

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import { CloseIcon } from '../components/icons';
 import './dialogs.css';
+import './parts.css';
 
 /** The Tab stops of a dialog (an element taken out with `tabindex=-1`, like the header ×, is not one). */
 const FOCUSABLE = [
@@ -14,10 +15,19 @@ const FOCUSABLE = [
   .map((s) => `${s}:not([tabindex="-1"])`)
   .join(', ');
 
+export type ModalTone = 'neutral' | 'accent' | 'warning' | 'danger' | 'success';
+
 interface Props {
   title: ReactNode;
   /** Header content before the title (e.g. the Production chip). */
   badge?: ReactNode;
+  /** Icon tile before the title; `tone` colours it (danger for destructive actions). */
+  icon?: ReactNode;
+  tone?: ModalTone;
+  /** One line under the title: the consequence of the action, or where it runs. */
+  subtitle?: ReactNode;
+  /** A strip under the header (`ContextBar`: environment, connection › object). */
+  context?: ReactNode;
   onClose(): void;
   children: ReactNode;
   className?: string;
@@ -34,7 +44,7 @@ interface Props {
  * Esc closes, focus returns to the opener. In an `alertdialog` (destructive) Enter outside a
  * button presses the safe default, the `[data-cancel]` button.
  */
-export function Modal({ title, badge, onClose, children, className, initialFocus, role = 'dialog', testId, closable = true }: Props) {
+export function Modal({ title, badge, icon, tone = 'neutral', subtitle, context, onClose, children, className, initialFocus, role = 'dialog', testId, closable = true }: Props) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
@@ -52,6 +62,35 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
     };
     // Focus handling happens once, on mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+  // A focused control that gets disabled (a busy dialog's Confirm) drops focus to <body>, out of
+  // the dialog's own key handling: the next key brings it back to the topmost dialog.
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      const root = ref.current;
+      const active = document.activeElement as HTMLElement | null;
+      const lost = !active || active === document.body || (root?.contains(active) && active.matches(':disabled'));
+      if (!root || !lost) return;
+      const modals = document.querySelectorAll('[aria-modal="true"]');
+      if (modals[modals.length - 1] !== root) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        root.focus();
+        closeRef.current();
+      } else if (e.key === 'Tab') {
+        e.preventDefault();
+        e.stopPropagation();
+        (root.querySelector<HTMLElement>(FOCUSABLE) ?? root).focus();
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+    return () => document.removeEventListener('keydown', onKey, true);
   }, []);
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -108,8 +147,20 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
         onKeyDown={onKeyDown}
       >
         <header className="modal-head">
+          {icon && (
+            <span className={`modal-icon tone-${tone}`} aria-hidden="true">
+              {icon}
+            </span>
+          )}
           {badge}
-          <h2 id={titleId}>{title}</h2>
+          {subtitle ? (
+            <div className="modal-title">
+              <h2 id={titleId}>{title}</h2>
+              <p className="modal-sub">{subtitle}</p>
+            </div>
+          ) : (
+            <h2 id={titleId}>{title}</h2>
+          )}
           {closable && (
             // Out of the Tab order: Esc is the keyboard way out, so Tab cycles only the dialog's own controls.
             <button type="button" className="modal-close" aria-label="Close dialog" title="Close (Esc)" tabIndex={-1} onClick={onClose}>
@@ -117,6 +168,7 @@ export function Modal({ title, badge, onClose, children, className, initialFocus
             </button>
           )}
         </header>
+        {context}
         {children}
       </div>
     </div>

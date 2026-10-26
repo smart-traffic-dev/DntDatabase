@@ -23,7 +23,7 @@ import { closeValueEditor, openValueEditor, useValueEditors } from './data/openV
 import { ValueEditor } from './data/ValueEditor';
 import { FilterBar, type FilterBarHandle } from './FilterBar';
 import { editText } from './query/format';
-import { ResultGrid, writeClipboard, type GridEditing } from './query/ResultGrid';
+import { GRID_HEADER_HEIGHT, ResultGrid, writeClipboard, type GridEditing } from './query/ResultGrid';
 import './query/query.css';
 import './data/dataEdit.css';
 import './dataView.css';
@@ -179,6 +179,25 @@ function guardedAction(tabId: string, action: () => void) {
   });
 }
 
+/** Reloads the rows and the table's metadata (the Refresh button, F5); staged changes are asked about first. */
+export function refreshData(tab: Tab) {
+  guardedAction(tab.id, () => {
+    void useTableData.getState().load(tab);
+    // The metadata too (columns, row estimate): the one Refresh of the Data section.
+    void useObjectData.getState().refresh(tab, 'detail');
+  });
+}
+
+/** The previous / next page (Alt+PgUp / Alt+PgDn); false when there is none to go to (first page, last page, still loading). */
+export function turnPage(tab: Tab, direction: 'prev' | 'next'): boolean {
+  const store = useTableData.getState();
+  const state = store.byTab[tab.id];
+  if (!state || state.page?.status === 'loading') return false;
+  if (direction === 'prev' ? state.offset === 0 : !(state.page?.status === 'ok' && state.page.data.has_more)) return false;
+  guardedAction(tab.id, () => store[direction](tab));
+  return true;
+}
+
 /** Opens this page's SELECT (sort, offset and size; not the filter) in a new query tab. */
 function openPageInQuery(tab: Tab) {
   const state = useTableData.getState().byTab[tab.id];
@@ -202,12 +221,7 @@ export function DataActions({ tab }: { tab: Tab }) {
   const hasData = state?.page?.status === 'ok';
   const guarded = (action: () => void) => guardedAction(tab.id, action);
 
-  const refresh = () =>
-    guarded(() => {
-      void store.load(tab);
-      // The metadata too (columns, row estimate): the one Refresh of the Data section.
-      void useObjectData.getState().refresh(tab, 'detail');
-    });
+  const refresh = () => refreshData(tab);
 
   const moreItems = (): MenuEntry[] => {
     if (!state) return [];
@@ -852,11 +866,13 @@ export function DataView({ tab }: { tab: Tab }) {
         ) : page?.status === 'error' ? (
           <DataError error={page.error} onRetry={() => void store.load(tab)} onReconnect={() => void store.reconnect(tab)} />
         ) : result ? (
-          result.rowCount === 0 && state.offset === 0 && !editable ? (
-            <p className="dv-empty muted">
-              {filtered ? 'No rows match the filter.' : `This ${tab.objectRef.kind === 'Table' ? 'table' : 'view'} has no rows.`}
-            </p>
-          ) : (
+          <>
+            {/* No rows: the header still shows the columns, the message sits under it. */}
+            {result.rowCount === 0 && state.offset === 0 && !editable ? (
+              <p className="dv-empty dv-empty-rows muted" style={{ top: GRID_HEADER_HEIGHT }}>
+                {filtered ? 'No rows match the filter.' : `This ${tab.objectRef.kind === 'Table' ? 'table' : 'view'} has no rows.`}
+              </p>
+            ) : null}
             <ResultGrid
               result={result}
               onHeaderClicked={onHeaderClicked}
@@ -897,7 +913,7 @@ export function DataView({ tab }: { tab: Tab }) {
                 return filters.length > 0 ? [...head, { separator: true }, ...filters] : head;
               }}
             />
-          )
+          </>
         ) : (
           <p className="dv-loading muted">Loading…</p>
         )}

@@ -1,4 +1,4 @@
-import { useId, useRef, useState, type InputHTMLAttributes } from 'react';
+import { useId, useRef, useState, type InputHTMLAttributes, type Ref } from 'react';
 
 type Props = Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'defaultValue'> & {
   /** The draft's value, as text. */
@@ -9,6 +9,7 @@ type Props = Omit<InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 
   normalize?(text: string): string;
   /** A draft error of this field: marks it invalid and describes it. */
   error?: string;
+  ref?: Ref<HTMLInputElement>;
 };
 
 let focusCount = 0;

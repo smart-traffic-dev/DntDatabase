@@ -140,10 +140,10 @@ describe('editor group shortcuts', () => {
     key({ key: 'k', ctrlKey: true });
     expect(key({ key: 'w' }).handled).toBe(false);
     expect(s().tabs).toHaveLength(3);
-    // Ctrl still held: not the chord either.
+    // Ctrl still held is another chord: Ctrl+K Ctrl+W closes all tabs of the group, not the group.
     s().splitTab('c', 'right');
     key({ key: 'k', ctrlKey: true });
-    expect(key({ key: 'w', ctrlKey: true }).handled).toBe(false);
+    expect(key({ key: 'w', ctrlKey: true }).handled).toBe(true);
   });
 
   it('Ctrl+Alt+1..4 focuses a group, Ctrl+Alt+→ moves the tab, Ctrl+K → focuses the next group', () => {

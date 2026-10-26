@@ -25,22 +25,19 @@ async function menu(label: string, action: string) {
 
 }
 
-async function apply(typed?: string) {
+/** The dialog shows its SQL on open (drop / truncate) or as the name is typed (rename); a clean apply closes it. */
+async function apply(verb: string, typed?: string) {
 
-  await $('button=Preview SQL').click();
-
-  await $('[aria-label="SQL preview"]').waitForDisplayed({ timeout: 20_000 });
+  await $('[aria-label="SQL preview"]').waitUntil(async function () {
+    return /^(DROP|TRUNCATE|RENAME|ALTER)/m.test(await this.getText());
+  }, { timeout: 20_000 });
 
   if (typed) await $('[aria-label="Confirmation name"]').setValue(typed);
   await evidence(`p4a-preview-${typed ?? 'ordinary'}`);
 
-  await $('button=Apply').click();
+  await $(`button=${verb}`).click();
 
-  await $('p=Operation applied.').waitForDisplayed({ timeout: 30_000 });
-
-  await $('button=Close').waitForClickable({ timeout: 20_000 });
-  await $('button=Close').click();
-  await $('.object-action-dialog').waitForDisplayed({ reverse: true, timeout: 20_000 });
+  await $('.object-action-dialog').waitForDisplayed({ reverse: true, timeout: 30_000 });
 
 }
 
@@ -82,7 +79,10 @@ for (const pg of [false, true]) {
 
       await $('[aria-label="Name"]').setValue(ns);
 
-      await apply();
+      await $('[aria-label="SQL preview"]').waitUntil(async function () { return (await this.getText()).includes(ns); }, { timeout: 20_000 });
+      await evidence('p4a-create-namespace');
+      await $(`button=${pg ? 'Create schema' : 'Create database'}`).click();
+      await $('.create-ns-dialog').waitForDisplayed({ reverse: true, timeout: 30_000 });
 
       await expandRow(conn);
 
@@ -114,7 +114,7 @@ for (const pg of [false, true]) {
 
       await $('[aria-label="Name"]').setValue('renamed');
 
-      await apply();
+      await apply('Rename table');
 
       await expandRow(conn);
 
@@ -124,7 +124,7 @@ for (const pg of [false, true]) {
 
       await menu('renamed', 'Truncate table…');
 
-      await apply('renamed');
+      await apply('Truncate table', 'renamed');
 
       await expandRow(conn);
 
@@ -134,7 +134,7 @@ for (const pg of [false, true]) {
 
       await menu('renamed', 'Drop table…');
 
-      await apply('renamed');
+      await apply('Drop table', 'renamed');
 
       await expandRow(conn);
 
@@ -142,7 +142,7 @@ for (const pg of [false, true]) {
 
       await menu(ns, pg ? 'Drop schema…' : 'Drop database…');
 
-      await apply(ns);
+      await apply(pg ? 'Drop schema' : 'Drop database', ns);
 
       await expect($('[aria-label="SQL preview"]')).not.toExist();
 

@@ -21,10 +21,10 @@ import {
   TriggerIcon,
 } from './icons';
 import { useDialogs } from '../store/dialogs';
-import { openNewQuery } from './newQuery';
+import { openQueryOnNode } from './newQuery';
 import { openObjectTab } from './openObject';
-import { ActionMenu, transferItems } from './ActionMenu';
-import { TreeContextMenu } from './TreeContextMenu';
+import { ActionMenu, transferItems, type MenuEntry } from './ActionMenu';
+import { designActionItems, TreeContextMenu } from './TreeContextMenu';
 import { useTokenPx } from '../theme/useTokenPx';
 import { OBJECT_DRAG_TYPE, setDraggedObject } from './tabDrag';
 import './tree.css';
@@ -37,6 +37,14 @@ const heightOf = (row: TreeRow | undefined, rowHeight: number) =>
   row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : rowHeight;
 
 const domId = (key: string) => `tn-${encodeURIComponent(key)}`;
+
+/** Right-click on the tree's empty area: create at the top level, or move connections in and out. */
+export const emptyAreaItems = (): MenuEntry[] => [
+  { label: 'New connection…', hint: 'Ctrl+Shift+N', run: () => useDialogs.getState().requestDialog({ kind: 'newConnection' }) },
+  { label: 'New group', run: () => useDialogs.getState().requestDialog({ kind: 'newGroup', parentId: null }) },
+  { separator: true },
+  ...transferItems(),
+];
 
 /** One glyph per object kind, shared by a folder and the objects in it. */
 function KindIcon({ kind }: { kind: ObjectKind | undefined }) {
@@ -278,9 +286,9 @@ export function ConnectionTree() {
     const go = (r?: TreeRow) => r && tree.select(r.key);
     if (e.ctrlKey || e.metaKey) {
       if (e.altKey) return;
-      // Ctrl+Enter: the object's tab on DDL. Ctrl+Q: a new query bound to the node. Other Ctrl keys are not ours.
+      // Ctrl+Enter: the object's tab on DDL. Ctrl+Q: a new query bound to the node (a table or view: with its first rows selected). Other Ctrl keys are not ours.
       if (e.key === 'Enter' && current?.node.kind === 'object') openObjectTab(current.node, { ddl: true });
-      else if (e.key.toLowerCase() === 'q' && current) openNewQuery(current.node);
+      else if (e.key.toLowerCase() === 'q' && current) openQueryOnNode(current.node);
       else return;
       e.preventDefault();
       return;
@@ -320,6 +328,13 @@ export function ConnectionTree() {
         if (current?.node.kind === 'connection' && connectionId) dialogs.requestDialog({ kind: 'editConnection', id: connectionId });
         else if (current?.node.kind === 'group') dialogs.requestDialog({ kind: 'renameGroup', id: current.key.slice('group:'.length) });
         else return;
+        break;
+      }
+      case 'F4': {
+        // Design the selected table (the context menu's "Design table").
+        const design = current?.node.kind === 'object' ? designActionItems(current.node)[0] : undefined;
+        if (!design || !('run' in design) || design.disabled) return;
+        design.run();
         break;
       }
       case 'F5':
@@ -420,7 +435,7 @@ export function ConnectionTree() {
       </div>
     </div>
       {emptyMenu && (
-        <ActionMenu label="Connections actions" x={emptyMenu.x} y={emptyMenu.y} items={transferItems()} onClose={() => setEmptyMenu(null)} />
+        <ActionMenu label="Connections actions" x={emptyMenu.x} y={emptyMenu.y} items={emptyAreaItems()} onClose={() => setEmptyMenu(null)} />
       )}
       {menu && <TreeContextMenu node={menu.node} x={menu.x} y={menu.y} onClose={() => setMenu(null)} />}
     </>

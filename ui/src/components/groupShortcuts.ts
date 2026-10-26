@@ -1,7 +1,7 @@
 import type { LayoutPreset } from '../store/layoutTree';
 import { useTabs } from '../store/tabs';
 import { focusFocusedGroup } from './focusGroup';
-import { closeGroup } from './tabActions';
+import { closeAllTabs, closeGroup, closeOtherTabs, togglePin } from './tabActions';
 
 /** How long a `Ctrl+K` waits for its second key. */
 const CHORD_MS = 1500;
@@ -45,8 +45,12 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
 
   const target = e.target instanceof Element ? e.target : null;
   const inEditor = !!target?.closest('.sql-editor');
-  if (chordAt && Date.now() - chordAt <= CHORD_MS && !e.altKey && !e.shiftKey) {
-    if (key === 'control' || key === 'meta') return false;
+  // `Ctrl+K Shift+Enter` pins; every other second key is unshifted.
+  const pinChord = e.shiftKey && !ctrl && key === 'enter';
+  const chordLive = chordPending();
+  // A modifier pressed on the way to the second key (the Shift of Shift+Enter) keeps the chord.
+  if (chordLive && (key === 'shift' || key === 'control' || key === 'meta' || key === 'alt')) return false;
+  if (chordLive && !e.altKey && (!e.shiftKey || pinChord)) {
     chordAt = 0;
     const run = (action: () => void) => {
       // In the SQL editor Monaco saw the Ctrl+K too: let the key reach it (prevented, so it is
@@ -56,10 +60,20 @@ export function onGroupShortcut(e: KeyboardEvent): boolean {
       action();
       return true;
     };
-    // Exact modifiers: Ctrl+K Ctrl+1..7 are Monaco's fold levels, Ctrl+K Ctrl+W is not ours.
+    // Exact modifiers: Ctrl+K Ctrl+1..7 are Monaco's fold levels.
     if (key === '\\' && ctrl) return run(() => splitActive('down'));
     if (key === 'm' && ctrl) return run(() => tabs.toggleMaximize());
+    // Ctrl+K Ctrl+W closes the group's unpinned tabs, Ctrl+K Ctrl+O all but the active one.
+    if (key === 'w' && ctrl) return run(() => void closeAllTabs());
+    if (key === 'o' && ctrl) {
+      const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+      return active ? run(() => void closeOtherTabs(active)) : false;
+    }
     if (ctrl) return false;
+    if (pinChord) {
+      const active = tabs.tabs.find((t) => t.id === tabs.activeId);
+      return active ? run(() => togglePin(active)) : false;
+    }
     if (key === 'arrowright') return run(() => {
       tabs.focusNeighbour(1);
       focusFocusedGroup();

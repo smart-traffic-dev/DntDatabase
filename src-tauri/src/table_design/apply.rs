@@ -4,8 +4,8 @@ use super::{
     compute, current_fingerprint, current_state, session_db, table_changed, timed_out, Design,
 };
 use crate::ddl_exec::{
-    execute, failure_error, failure_outcome, stopped, write_history, ActionOutcome, DdlHistory,
-    HISTORY_FAILED,
+    execute, failure_error, failure_outcome, mysql_statement_refused, stopped, write_history,
+    ActionOutcome, DdlHistory, HISTORY_FAILED,
 };
 use crate::object_actions::{stale, MAX_PLANS};
 use crate::session_manager::{
@@ -494,15 +494,24 @@ impl SessionManager {
             statements_sent: sent,
         };
         if let Err(e) = result {
-            report.outcome = failure_outcome(
-                session.as_ref(),
-                &e,
-                pg,
-                sent > 0,
-                commit_sent,
-                self.cancel_grace,
-            )
-            .await;
+            // MySQL / MariaDB run each DDL statement on its own (no transaction), so a later
+            // statement's failure would leave the earlier ones applied: unknown. A server error
+            // on the first statement (a refused CREATE TABLE, an invalid default) changed
+            // nothing, unless it was a Stop or failed partway (see `mysql_statement_refused`).
+            // A MySQL design renders as one statement.
+            report.outcome = if sent == 1 && mysql_statement_refused(pg, &e) && !stop.is_stopped() {
+                ActionOutcome::NotApplied
+            } else {
+                failure_outcome(
+                    session.as_ref(),
+                    &e,
+                    pg,
+                    sent > 0,
+                    commit_sent,
+                    self.cancel_grace,
+                )
+                .await
+            };
             report.error = Some(failure_error(e, report.outcome));
         }
         // No cancellation can reach a later statement or a pooled session: this session is closed.

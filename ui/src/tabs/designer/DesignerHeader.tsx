@@ -1,5 +1,6 @@
 import { useRef, type KeyboardEvent } from 'react';
 import type { DesignSubTab } from '../../store/tableDesigns';
+import { DraftInput } from './DraftInput';
 
 export const SUB_TABS: { id: DesignSubTab; label: string }[] = [
   { id: 'columns', label: 'Columns' },
@@ -16,6 +17,12 @@ export const subPanelId = (uid: string) => `${uid}-panel`;
 export interface DesignerHeaderProps {
   uid: string;
   name: string;
+  /** The draft error of the table name. */
+  nameError?: string;
+  nameEditable: boolean;
+  /** A new table: the name field takes the focus (and its text is selected) once. */
+  focusName?: boolean;
+  onRename(text: string, coalesce: string): void;
   /** `connection › database · engine` */
   context: string;
   counts: Partial<Record<DesignSubTab, number>>;
@@ -34,6 +41,7 @@ export interface DesignerHeaderProps {
 /** One row: the table's name and where it lives, the section switch, the unsaved chip, Discard and Review. */
 export function DesignerHeader(p: DesignerHeaderProps) {
   const refs = useRef<Partial<Record<DesignSubTab, HTMLButtonElement | null>>>({});
+  const focused = useRef(false);
   const select = (sub: DesignSubTab) => {
     p.onSubTab(sub);
     refs.current[sub]?.focus();
@@ -54,7 +62,23 @@ export function DesignerHeader(p: DesignerHeaderProps) {
 
   return (
     <div className="dz-header">
-      <strong className="dz-title">{p.name}</strong>
+      <DraftInput
+        aria-label="Table name"
+        className="mono dz-title-input"
+        value={p.name}
+        disabled={!p.nameEditable}
+        error={p.nameError}
+        spellCheck={false}
+        autoComplete="off"
+        ref={(el: HTMLInputElement | null) => {
+          if (el && p.focusName && !focused.current) {
+            focused.current = true;
+            el.focus();
+            el.select();
+          }
+        }}
+        onCommit={p.onRename}
+      />
       {p.context ? <span className="dz-subtle">{p.context}</span> : null}
       <div role="tablist" aria-label="Table design sections" className="segmented dz-sections" onKeyDown={onKeyDown}>
         {SUB_TABS.map((s) => {
@@ -91,7 +115,7 @@ export function DesignerHeader(p: DesignerHeaderProps) {
       <button type="button" className="btn dz-btn" disabled={!p.canDiscard} onClick={p.onDiscard}>
         Discard
       </button>
-      <button type="button" className="btn primary dz-btn" disabled={!p.canReview} onClick={p.onReview}>
+      <button type="button" className="btn primary dz-btn" disabled={!p.canReview} aria-keyshortcuts="Control+S" title="Review & apply (Ctrl+S)" onClick={p.onReview}>
         Review &amp; apply…
       </button>
     </div>

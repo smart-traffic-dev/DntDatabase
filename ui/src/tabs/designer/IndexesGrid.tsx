@@ -1,6 +1,7 @@
 import type { IndexDef } from '../../bindings';
 import { DraftInput } from './DraftInput';
 import { ElementGrid, type ElementGridProps } from './ElementGrid';
+import { GridSelect } from './GridSelect';
 import { addPart, parseList, removePart, updatePart } from './elementModel';
 
 const PG_METHODS = ['btree', 'hash', 'gist', 'spgist', 'gin', 'brin'];
@@ -10,7 +11,7 @@ export function IndexesGrid(p: ElementGridProps) {
   const pg = p.open.server.kind === 'postgres';
   const mysql8 = p.open.server.variant === 'MySql8';
   const columns = p.draft.columns.map((c) => c.name);
-  const cols = ['minmax(0, 1.2fr)', '56px', 'minmax(0, 2.4fr)', ...(pg ? ['110px', 'minmax(0, 1fr)'] : []), ...(mysql8 ? ['64px'] : []), 'minmax(0, 1.2fr)'].join(' ');
+  const cols = ['minmax(0, 1.5fr)', '56px', 'minmax(0, 2.4fr)', ...(pg ? ['110px', 'minmax(0, 1fr)'] : []), ...(mysql8 ? ['64px'] : []), 'minmax(0, 1.2fr)'].join(' ');
   const headers = ['Name', 'Unique', 'Columns', ...(pg ? ['Method', 'Include'] : []), ...(mysql8 ? ['Visible'] : []), 'Comment'];
 
   return (
@@ -40,17 +41,17 @@ export function IndexesGrid(p: ElementGridProps) {
             <div role="cell" className="dz-center">
               <input type="checkbox" aria-label="Unique" checked={idx.unique} disabled={disabled} onChange={(e) => set({ unique: e.target.checked })} />
             </div>
+            {/* The parts as chips on one line (they wrap): column, prefix (MySQL), DESC, remove; then "+ Column". */}
             <div role="cell" className="dz-parts" title={partsError}>
               {idx.parts.map((part, i) => (
-                <div key={i} className="dz-part">
+                <div key={i} className={`dz-part${partsError ? ' dz-invalid' : ''}`}>
                   {part.expression !== null ? (
                     <span className="mono dz-part-expr" title="Expression part (read-only)">
                       {part.expression}
                     </span>
                   ) : (
-                    <select
+                    <GridSelect
                       aria-label="Column"
-                      className={`dz-input mono${partsError ? ' dz-invalid' : ''}`}
                       value={part.column ?? ''}
                       disabled={disabled}
                       onChange={(e) => editParts((d, n) => updatePart(d, n, i, { column: e.target.value }))}
@@ -61,14 +62,15 @@ export function IndexesGrid(p: ElementGridProps) {
                           {c}
                         </option>
                       ))}
-                    </select>
+                    </GridSelect>
                   )}
                   {pg ? null : (
                     <input
                       type="number"
                       min={1}
                       aria-label="Prefix length"
-                      placeholder="Prefix"
+                      placeholder="len"
+                      title="Prefix length (characters of the column indexed)"
                       className="dz-input mono dz-prefix"
                       value={part.prefix ?? ''}
                       disabled={disabled || part.expression !== null}
@@ -88,27 +90,36 @@ export function IndexesGrid(p: ElementGridProps) {
                     />
                     DESC
                   </label>
-                  <button
-                    type="button"
-                    className="dz-link"
-                    aria-label="Remove column"
-                    disabled={disabled || idx.parts.length < 2}
-                    onClick={() => editParts((d, at) => removePart(d, at, i))}
-                  >
-                    ×
-                  </button>
+                  {idx.parts.length > 1 ? (
+                    <button
+                      type="button"
+                      className="dz-part-remove"
+                      aria-label="Remove column"
+                      title="Remove this column from the index"
+                      disabled={disabled}
+                      onClick={() => editParts((d, at) => removePart(d, at, i))}
+                    >
+                      ×
+                    </button>
+                  ) : null}
                 </div>
               ))}
-              <button type="button" className="dz-link dz-add-part" disabled={disabled} onClick={() => editParts((d, at) => addPart(d, at))}>
-                Add column
+              <button
+                type="button"
+                className="dz-part-add"
+                aria-label="Add column"
+                title="Add a column to the index"
+                disabled={disabled}
+                onClick={() => editParts((d, at) => addPart(d, at))}
+              >
+                + Column
               </button>
             </div>
             {pg ? (
               <>
                 <div role="cell">
-                  <select
+                  <GridSelect
                     aria-label="Method"
-                    className="dz-input mono"
                     value={idx.method ?? ''}
                     disabled={disabled}
                     onChange={(e) => set({ method: e.target.value === '' ? null : e.target.value })}
@@ -120,7 +131,7 @@ export function IndexesGrid(p: ElementGridProps) {
                         {m}
                       </option>
                     ))}
-                  </select>
+                  </GridSelect>
                 </div>
                 <div role="cell">
                   <DraftInput

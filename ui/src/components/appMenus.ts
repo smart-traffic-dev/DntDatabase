@@ -121,7 +121,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
         { label: 'Open SQL file…', hint: 'Ctrl+O', run: () => void useQueryDocs.getState().openFile() },
         { label: 'Save', hint: 'Ctrl+S', disabled: !q, run: () => q && void useQueryDocs.getState().saveFile(q, false) },
         { label: 'Save as…', hint: 'Ctrl+Shift+S', disabled: !q, run: () => q && void useQueryDocs.getState().saveFile(q, true) },
-        { label: 'Export results…', disabled: !s.hasTab, run: openExportDialog },
+        { label: 'Export results…', hint: 'Ctrl+Alt+E', disabled: !s.hasTab, run: openExportDialog },
         sep,
         ...transferItems(),
         sep,

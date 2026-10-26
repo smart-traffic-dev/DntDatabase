@@ -2,7 +2,9 @@ import { useState } from 'react';
 import { toAppError } from '../api';
 import type { TxAction } from '../bindings';
 import { EnvTag } from '../components/EnvTag';
+import { HistoryIcon } from '../components/icons';
 import { Modal } from './Modal';
+import { Callout } from './parts';
 
 interface Props {
   /** Title of the tab being closed. */
@@ -34,42 +36,55 @@ export function TxCloseDialog({ title, connectionName, production = false, onSet
     onDone(true);
   };
 
+  const cancel = () => !busy && onDone(false);
+  // On Production the safe answer (Rollback) is the primary one; Commit moves to the left.
+  const commit = (
+    <button type="button" className={`btn${production ? '' : ' primary'}`} disabled={busy} onClick={() => void settle('Commit')}>
+      Commit
+    </button>
+  );
+  const rollback = (
+    <button type="button" className={`btn${production ? ' primary' : ''}`} disabled={busy} onClick={() => void settle('Rollback')}>
+      Rollback
+    </button>
+  );
+
   return (
     <Modal
       title={`Close ${title}`}
+      subtitle="The transaction is still open"
+      icon={<HistoryIcon />}
+      tone="warning"
       badge={production ? <EnvTag env="production" variant="chip" testId="env-chip" /> : undefined}
-      onClose={() => onDone(false)}
-      className="narrow"
+      onClose={cancel}
+      closable={!busy}
+      className="size-s"
       role="alertdialog"
       initialFocus="[data-cancel]"
     >
-      <div className="modal-body stack">
+      <div className="modal-body flow">
         <p>
           {connectionName ? (
             <>
-              This tab has an open transaction on <strong>{connectionName}</strong>
-              {production ? ' (PRODUCTION)' : ''}.
+              This tab has an open transaction on <strong>{connectionName}</strong>. Commit or roll it back before the tab closes.
             </>
           ) : (
-            'This tab has an open transaction.'
+            'This tab has an open transaction. Commit or roll it back before the tab closes.'
           )}
         </p>
         {error && (
-          <p role="alert" className="field-error">
+          <Callout tone="danger" role="alert">
             {error}
-          </p>
+          </Callout>
         )}
       </div>
       <footer className="modal-foot">
-        <button type="button" className="btn" data-cancel onClick={() => onDone(false)}>
+        {production && commit}
+        <span className="spacer" />
+        <button type="button" className="btn" data-cancel disabled={busy} onClick={cancel}>
           Cancel
         </button>
-        <button type="button" className="btn" disabled={busy} onClick={() => void settle('Rollback')}>
-          Rollback
-        </button>
-        <button type="button" className="btn primary" disabled={busy} onClick={() => void settle('Commit')}>
-          Commit
-        </button>
+        {production ? rollback : <>{rollback}{commit}</>}
       </footer>
     </Modal>
   );

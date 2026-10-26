@@ -181,6 +181,18 @@ fn mysql_lock_wait_refused(pg: bool, error: &DbError) -> bool {
     !pg && matches!(error, DbError::Server { code: Some(c), .. } if c == "1205")
 }
 
+/// MySQL refused one DDL statement as a whole (a bad charset, a name that exists, an
+/// invalid default): a server error other than an interrupted query or a storage-engine
+/// failure partway through (a failed rename, engine error, commit or rollback), which on a
+/// server without atomic DDL may leave part of the change behind.
+pub(crate) fn mysql_statement_refused(pg: bool, error: &DbError) -> bool {
+    !pg && matches!(
+        error,
+        DbError::Server { code, .. }
+            if !matches!(code.as_deref(), Some("1025" | "1030" | "1180" | "1181" | "1317"))
+    )
+}
+
 /// What a failed apply did: `sent` = a change statement was sent, `commit_sent` = a
 /// PostgreSQL `COMMIT` was. An open PostgreSQL transaction is rolled back here; it only
 /// counts as rolled back when the server confirms the `ROLLBACK`.

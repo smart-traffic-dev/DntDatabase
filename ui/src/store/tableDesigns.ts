@@ -292,6 +292,8 @@ export const useTableDesigns = create<DesignsStore>()((set, get) => {
         loading: false,
         error: null,
       });
+      // A new table is a CREATE TABLE as it opens: its SQL shows (and it can be reviewed) at once.
+      if (open.def.original_name === null) scheduleRender(tabId);
       if (had && had.design_id !== open.design_id) closeSession(had.design_id);
     } catch (e) {
       if (!entry(tabId) || openSeq.get(tabId) !== seq) return;

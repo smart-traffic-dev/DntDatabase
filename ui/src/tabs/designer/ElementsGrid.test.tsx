@@ -126,7 +126,9 @@ describe('element editors', () => {
     await goTo(user, /Indexes/);
     const row = elRow('ft_total');
     expect(within(row).getByRole('textbox', { name: 'Name' })).toBeDisabled();
-    expect(within(row).getByRole('button', { name: 'Remove index' })).toBeDisabled();
+    await user.click(within(row).getByRole('cell', { name: 'State' }));
+    expect(screen.getByRole('button', { name: 'Delete index' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Delete index' })).toHaveAttribute('title', 'This index is locked.');
     expect(within(row).getByRole('img', { name: 'Locked' })).toHaveAttribute('title', 'Fulltext index\nFULLTEXT KEY `ft_total` (`total`)');
   });
 
@@ -134,7 +136,9 @@ describe('element editors', () => {
     const user = userEvent.setup();
     setup(withDef({ foreign_keys: [fk('fk_a')] }));
     await goTo(user, /Foreign keys/);
-    await user.click(screen.getByRole('button', { name: 'Remove foreign key' }));
+    expect(screen.getByRole('button', { name: 'Delete foreign key' })).toBeDisabled();
+    await user.click(within(elRow('fk_a')).getByRole('textbox', { name: 'Name' }));
+    await user.click(screen.getByRole('button', { name: 'Delete foreign key' }));
     expect(draftOf().foreign_keys).toEqual([]);
     const row = elRow('fk_a');
     expect(within(row).getByTitle('To drop')).toBeInTheDocument();

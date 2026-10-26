@@ -136,6 +136,22 @@ async objectActionPreview(connectionId: string, action: ObjectAction) : Promise<
     else return { status: "error", error: e  as any };
 }
 },
+async objectActionRender(connectionId: string, action: ObjectAction) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("object_action_render", { connectionId, action }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async namespaceOptions(connectionId: string, database: string) : Promise<Result<NamespaceOptions, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("namespace_options", { connectionId, database }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async objectActionApply(planId: string, confirmed: boolean, name: string | null, operationId: string, channel: TAURI_CHANNEL<string>) : Promise<Result<ActionReport, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("object_action_apply", { planId, confirmed, name, operationId, channel }) };
@@ -1500,6 +1516,7 @@ export type CellPayload = { kind: "null" } |
  * `CellInput::Base64`.
  */
 { kind: "base64"; data: string; len: number }
+export type CharsetOption = { name: string; default_collation: string }
 export type CheckDef = { original: string | null; name: string; expression: string; locked: boolean }
 export type CheckDetail = { name: string; expression: string; 
 /**
@@ -1507,6 +1524,7 @@ export type CheckDetail = { name: string; expression: string;
  * (e.g. `CHECK ((total >= 0)) NOT VALID`).
  */
 definition: string | null }
+export type CollationOption = { name: string; charset: string }
 /**
  * A column's name and its type as the server spells it: MySQL `COLUMNS.COLUMN_TYPE`
  * (e.g. `enum('a','b')`, `decimal(12,2)`), PostgreSQL `format_type(atttypid, atttypmod)`
@@ -2288,8 +2306,17 @@ export type MysqlDumpOptions = {
  * Empty: every table of the database.
  */
 tables: string[]; structure: boolean; data: boolean; routines: boolean; events: boolean; triggers: boolean; single_transaction: boolean }
+/**
+ * What a "Create database/schema" form can offer: MySQL character sets and collations,
+ * PostgreSQL roles (each list sorted; empty on the other engine).
+ */
+export type NamespaceOptions = { charsets: CharsetOption[]; collations: CollationOption[]; default_charset: string | null; default_collation: string | null; roles: string[]; current_role: string | null }
 export type NodeId = { type: "group"; id: string } | { type: "connection"; id: string }
-export type ObjectAction = { kind: "create_namespace"; database: string; name: string } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
+export type ObjectAction = 
+/**
+ * `charset`/`collation`: MySQL only (`None`: the server default). `owner`: PostgreSQL only.
+ */
+{ kind: "create_namespace"; database: string; name: string; charset?: string | null; collation?: string | null; owner?: string | null } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
 export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
 /**

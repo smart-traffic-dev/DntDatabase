@@ -1691,6 +1691,9 @@ mod object_actions {
         ObjectAction::CreateNamespace {
             database: "shop".into(),
             name: "p4_test".into(),
+            charset: None,
+            collation: None,
+            owner: None,
         }
     }
     fn drop_table(pg: bool) -> ObjectAction {

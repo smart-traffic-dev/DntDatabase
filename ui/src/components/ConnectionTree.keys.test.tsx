@@ -109,7 +109,8 @@ describe('ConnectionTree keys', () => {
     select(ordersNode);
     key('q', { ctrlKey: true });
     const id = useTabs.getState().activeId!;
-    expect(useQueryDocs.getState().docs.get(id)).toMatchObject({ connectionId: ids.prod, database: 'shop' });
+    // On a table the query already selects its rows.
+    expect(useQueryDocs.getState().docs.get(id)).toMatchObject({ connectionId: ids.prod, database: 'shop', sql: 'SELECT * FROM `shop`.`orders` LIMIT 1000;' });
     select(prodNode);
     key('q', { ctrlKey: true });
     expect(useQueryDocs.getState().docs.get(useTabs.getState().activeId!)?.connectionId).toBe(ids.prod);

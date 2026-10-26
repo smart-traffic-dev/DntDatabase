@@ -1,0 +1,177 @@
+/* Shared dialog parts (modal redesign v2, board 02): header icon, context bar, typed confirm, callouts, impact, SQL. */
+
+/* Sizes (board 01): S 420 · M 560 · L 760 · XL 960. */
+.modal.size-s { width: 420px; }
+.modal.size-m { width: 560px; }
+.modal.size-l { width: 760px; }
+.modal.size-xl { width: 960px; }
+
+.modal-icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
+}
+.modal-icon svg { width: 16px; height: 16px; }
+.modal-icon.tone-accent { background: var(--dnt-accent-subtle); color: var(--dnt-accent); }
+.modal-icon.tone-warning { background: var(--dnt-status-warning-bg); color: var(--dnt-status-warning-fg); }
+.modal-icon.tone-danger { background: var(--dnt-status-danger-bg); color: var(--dnt-status-danger-fg); }
+.modal-icon.tone-success { background: var(--dnt-status-success-bg); color: var(--dnt-status-success-fg); }
+
+.modal-title { flex: 1; min-width: 0; }
+.modal-title h2 { margin: 0; font-size: var(--dnt-text-lg); line-height: 20px; font-weight: 600; }
+.modal-sub {
+  margin: 0;
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  color: var(--dnt-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Context bar: env chip · connection › db › object · server. */
+.ctx-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 4px var(--dnt-space-4);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
+  font-size: var(--dnt-text-sm);
+  color: var(--dnt-fg-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ctx-bar.ctx-prod { background: var(--dnt-status-danger-bg); border-bottom-color: var(--dnt-status-danger-border); }
+.ctx-conn { color: var(--dnt-fg); font-weight: 600; }
+.ctx-sep { color: var(--dnt-fg-disabled); }
+.ctx-seg { overflow: hidden; text-overflow: ellipsis; }
+.ctx-grow { flex: 1; }
+.ctx-meta { color: var(--dnt-fg-subtle); }
+.ctx-ro { display: inline-flex; align-items: center; gap: 4px; color: var(--dnt-fg-muted); }
+.ctx-ro svg { width: 12px; height: 12px; }
+
+/* Body layout of the redesigned dialogs. */
+.modal-body.flow { display: flex; flex-direction: column; gap: var(--dnt-space-3); }
+.modal-body.flow > p { margin: 0; }
+
+/* Typed confirmation. */
+.typed-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--dnt-space-3);
+  border: 1px dashed var(--dnt-status-danger-border);
+  border-radius: var(--dnt-radius-md);
+}
+.typed-confirm label { font-size: var(--dnt-text-sm); color: var(--dnt-fg-muted); }
+.typed-confirm code {
+  padding: 1px 5px;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-status-danger-bg);
+  color: var(--dnt-status-danger-fg);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.typed-confirm-row { position: relative; display: flex; align-items: center; }
+.typed-confirm-row input {
+  flex: 1;
+  height: 30px;
+  padding: 0 64px 0 8px;
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  font: 12px var(--font-mono);
+  color: inherit;
+  min-width: 0;
+}
+.typed-confirm-row input:focus { outline: none; border-color: var(--dnt-focus); }
+.typed-confirm-left { position: absolute; right: 8px; font-size: var(--dnt-text-xs); color: var(--dnt-fg-subtle); }
+.typed-confirm-ok { position: absolute; right: 8px; display: inline-flex; color: var(--dnt-status-success-fg); }
+
+/* Callouts. */
+.callout {
+  display: flex;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+  font-size: var(--dnt-text-sm);
+  line-height: 18px;
+  color: var(--dnt-fg-muted);
+}
+.callout-icon { flex: none; display: inline-flex; padding-top: 1px; }
+.callout-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow-wrap: anywhere; }
+.callout-body p { margin: 0; }
+.callout-title { font-weight: 600; }
+.callout-info { background: var(--dnt-status-info-bg); border-color: var(--dnt-status-info-border); color: var(--dnt-status-info-fg); }
+.callout-warning { background: var(--dnt-status-warning-bg); border-color: var(--dnt-status-warning-border); color: var(--dnt-status-warning-fg); }
+.callout-danger { background: var(--dnt-status-danger-bg); border-color: var(--dnt-status-danger-border); color: var(--dnt-status-danger-fg); }
+.callout-success { background: var(--dnt-status-success-bg); border-color: var(--dnt-status-success-border); color: var(--dnt-status-success-fg); }
+
+/* Impact tiles. */
+.impact-tiles {
+  display: grid;
+  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-flow: column;
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-md);
+  overflow: hidden;
+}
+.impact-tile { display: flex; flex-direction: column; gap: 2px; padding: 8px 12px; border-right: 1px solid var(--dnt-border-subtle); min-width: 0; }
+.impact-tile:last-child { border-right: 0; }
+.impact-tile strong { font-size: var(--dnt-text-lg); line-height: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.impact-tile span { font-size: var(--dnt-text-xs); color: var(--dnt-fg-subtle); }
+.impact-tile.impact-danger strong { color: var(--dnt-status-danger-fg); }
+.impact-tile.impact-warning strong { color: var(--dnt-status-warning-fg); }
+.impact-skeleton span { display: block; height: 10px; border-radius: var(--dnt-radius-xs); background: var(--dnt-bg-sunken); }
+.impact-skeleton span:first-child { height: 18px; width: 60%; }
+
+/* SQL block. */
+.sql-block { border: 1px solid var(--dlg-line); border-radius: var(--dnt-radius-md); overflow: hidden; background: var(--dnt-bg-sunken); }
+.sql-block-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 6px 0 10px;
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-raised);
+  font-size: var(--dnt-text-sm);
+}
+.sql-block-caption { color: var(--dnt-fg-muted); }
+.sql-block-text {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 200px;
+  overflow: auto;
+  font: 12px/19px var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.sql-block-empty { color: var(--dnt-fg-subtle); font-style: italic; }
+.sql-block-error { padding: 0 10px 8px; }
+
+.btn.ghost { border-color: transparent; background: transparent; color: var(--dnt-fg-muted); }
+.btn.ghost:hover:not(:disabled) { background: var(--dnt-bg-hover); color: var(--dnt-fg); }
+.btn.ghost:disabled { background: transparent; border-color: transparent; }
+
+/* Footer note (why the primary is disabled, progress). */
+.foot-note { font-size: var(--dnt-text-sm); color: var(--dnt-fg-subtle); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.caps-hint { display: flex; align-items: center; gap: 6px; color: var(--dnt-status-warning-fg); }
+
+/* Plain list of consequences in a confirm. */
+.confirm-details { margin: 0; padding-left: 18px; font-size: var(--dnt-text-sm); line-height: 20px; color: var(--dnt-fg-muted); }
+.confirm-details .bad { color: var(--dnt-status-danger-fg); }
+.kv-list { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 4px 12px; margin: 0; font-size: var(--dnt-text-sm); }
+.kv-list dt { color: var(--dnt-fg-subtle); }
+.kv-list dd { margin: 0; }

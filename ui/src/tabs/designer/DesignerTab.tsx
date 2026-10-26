@@ -5,12 +5,17 @@ import { useDialogs } from '../../store/dialogs';
 import { useQueryDocs } from '../../store/queryTabs';
 import { confirmDiscardDesign, describeChanges, useTableDesigns } from '../../store/tableDesigns';
 import type { DesignTabRef } from '../../store/tabs';
-import { addColumn } from './columnModel';
+import { addColumn, dropColumn, moveColumn, togglePrimaryKey } from './columnModel';
+import { DesignerToolbar, ICONS, type ToolAction } from './DesignerToolbar';
 import { ColumnInspector } from './ColumnInspector';
 import { ChecksGrid } from './ChecksGrid';
 import { ColumnsGrid } from './ColumnsGrid';
 import { CommentPanel } from './CommentPanel';
-import { checksUnsupported, CHECKS_UNSUPPORTED } from './elementModel';
+import { ADD, checksUnsupported, CHECKS_UNSUPPORTED, KIND_OF, removeElement, type ElementKey } from './elementModel';
+import type { DesignSubTab } from '../../store/tableDesigns';
+
+const ELEMENT_KEY: Partial<Record<DesignSubTab, ElementKey>> = { indexes: 'indexes', foreign_keys: 'foreign_keys', checks: 'checks' };
+const NOUNS: Record<ElementKey, string> = { indexes: 'index', foreign_keys: 'foreign key', checks: 'check' };
 import { ForeignKeysGrid } from './ForeignKeysGrid';
 import { IndexesGrid } from './IndexesGrid';
 import { OptionsPanel } from './OptionsPanel';
@@ -74,20 +79,25 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
   const readOnlyReason = open.def.read_only_reason ?? (open.read_only ? 'the connection is read-only.' : null);
   const editable = !readOnlyReason && !lost && !loading;
   const errors = render?.errors ?? [];
+  // A new table can be created as it opens (its starter `id` column is already a table).
+  const isNew = open.def.original_name === null;
   const canReview =
-    !!render && errors.length === 0 && !render.error && dirty && !open.read_only && !open.def.read_only_reason && !lost && !loading;
+    !!render && errors.length === 0 && !render.error && (dirty || isNew) && !open.read_only && !open.def.read_only_reason && !lost && !loading;
 
   const edit = (recipe: (d: TableDef) => TableDef, coalesce?: string) => designs.edit(tab.id, recipe, coalesce);
   const select = (el: ElementRef | null) => designs.select(tab.id, el);
-  const add = () => {
+  /** Adds a column at `at` (the end by default) and selects it. */
+  const add = (at?: number) => {
     let name: string | null = null;
     designs.edit(tab.id, (d) => {
-      const next = addColumn(d, open.catalog);
-      name = next.columns[next.columns.length - 1]!.name;
+      const pos = at ?? d.columns.length;
+      const next = addColumn(d, open.catalog, pos);
+      name = next.columns[pos]!.name;
       return next;
     });
     if (name !== null) select({ kind: 'column', name });
   };
+  const review = () => useDialogs.getState().requestDialog({ kind: 'tableDesign', tabId: tab.id });
   const openInQuery = (sql: string) => {
     const docs = useQueryDocs.getState();
     const id = docs.newQuery(tab.connectionId, tab.scope.database);
@@ -104,13 +114,78 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
     } else if (e.key === 'Enter' && subTab === 'columns' && editable) {
       e.preventDefault();
       add();
+    } else if (e.key.toLowerCase() === 's' && !e.shiftKey) {
+      e.preventDefault();
+      if (canReview) review();
     }
   };
 
   const where = [connectionName, tab.scope.schema ? `${tab.scope.database} › ${tab.scope.schema}` : tab.scope.database].filter(Boolean).join(' › ');
   const engine = draft.options.engine;
   const grid = { open, draft, errors, editable, selection, onSelect: select, edit };
-  const tableProblems =errors.filter((e) => e.element.kind === 'table' || e.element.kind === 'primary_key');
+  // The name error also marks the header's name field, whose message is only a tooltip: listed
+  // here too (but on Options, which shows it), so a disabled "Review & apply" always shows why.
+  const tableProblems = errors.filter(
+    (e) => (e.element.kind === 'table' && (e.field !== 'name' || subTab !== 'options')) || e.element.kind === 'primary_key',
+  );
+  const nameError = errors.find((e) => e.element.kind === 'table' && e.field === 'name')?.message;
+
+  // Toolbar: the selected column's actions (Columns), undo / redo everywhere.
+  const pg = open.server.kind === 'postgres';
+  const at = selection?.kind === 'column' ? draft.columns.findIndex((c) => c.name === selection.name) : -1;
+  const current = at >= 0 ? draft.columns[at] : undefined;
+  const pk = draft.primary_key;
+  const noColumn = !current ? 'Select a column first.' : current.locked ? 'This column is locked.' : false;
+  const columnTools: ToolAction[] = subTab !== 'columns' ? [] : [
+    { label: 'Add column', icon: ICONS.add, shortcut: 'Ctrl+Enter', disabled: !editable, onClick: () => add() },
+    // PostgreSQL appends a column added to an existing table, wherever the draft put it.
+    { label: 'Insert column', icon: ICONS.insert, disabled: !editable || (pg && !isNew && 'PostgreSQL adds new columns at the end.') || (!current && 'Select the column to insert before.'), onClick: () => add(at) },
+    { label: 'Delete column', icon: ICONS.delete, shortcut: 'Delete', disabled: !editable || noColumn, onClick: () => { edit((d) => dropColumn(d, at)); select(null); } },
+  ];
+  const keyTools: ToolAction[] = subTab !== 'columns' ? [] : [
+    { label: 'Primary key', icon: ICONS.key, pressed: !!current && !!pk?.columns.includes(current.name), disabled: !editable || noColumn || (!!pk?.locked && 'The primary key is locked.'), onClick: () => current && edit((d) => togglePrimaryKey(d, current.name)) },
+  ];
+  const cannotMove = pg ? 'PostgreSQL cannot reorder columns.' : noColumn;
+  const moveTools: ToolAction[] = subTab !== 'columns' ? [] : [
+    { label: 'Move up', icon: ICONS.up, shortcut: 'Ctrl+↑', disabled: !editable || cannotMove || at <= 0, onClick: () => edit((d) => moveColumn(d, at, at - 1)) },
+    { label: 'Move down', icon: ICONS.down, shortcut: 'Ctrl+↓', disabled: !editable || cannotMove || at >= draft.columns.length - 1, onClick: () => edit((d) => moveColumn(d, at, at + 1)) },
+  ];
+  // Indexes, Foreign keys, Checks: Add / Delete of the selected element, as Columns has.
+  const listKey = ELEMENT_KEY[subTab];
+  const elementTools: ToolAction[] = [];
+  if (listKey) {
+    const kind = KIND_OF[listKey];
+    const noun = NOUNS[listKey];
+    const list = draft[listKey] as { name: string; locked: boolean }[];
+    const index = selection?.kind === kind ? list.findIndex((e) => e.name === selection.name) : -1;
+    const item = index >= 0 ? list[index] : undefined;
+    elementTools.push(
+      {
+        label: `Add ${noun}`,
+        icon: ICONS.add,
+        disabled: !editable,
+        onClick: () => {
+          const next = (ADD[listKey](draft)[listKey] as { name: string }[]).at(-1);
+          edit((d) => ADD[listKey](d));
+          if (next) select({ kind, name: next.name } as ElementRef);
+        },
+      },
+      {
+        label: `Delete ${noun}`,
+        icon: ICONS.delete,
+        shortcut: 'Delete',
+        disabled: !editable || (!item ? `Select the ${noun} to delete.` : item.locked ? `This ${noun} is locked.` : false),
+        onClick: () => {
+          edit((d) => removeElement(d, listKey, index));
+          select(null);
+        },
+      },
+    );
+  }
+  const historyTools: ToolAction[] = [
+    { label: 'Undo', icon: ICONS.undo, shortcut: 'Ctrl+Z', disabled: lost || state.past.length === 0, onClick: () => designs.undo(tab.id) },
+    { label: 'Redo', icon: ICONS.redo, shortcut: 'Ctrl+Shift+Z', disabled: lost || state.future.length === 0, onClick: () => designs.redo(tab.id) },
+  ];
 
   return (
     <div className="designer" data-testid="designer-tab" onKeyDown={onKeyDown}>
@@ -160,6 +235,10 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
       <DesignerHeader
         uid={uid}
         name={draft.name}
+        nameError={nameError}
+        nameEditable={editable}
+        focusName={isNew}
+        onRename={(text, key) => edit((d) => ({ ...d, name: text }), key)}
         context={engine ? `${where} · ${engine}` : where}
         counts={{ columns: draft.columns.length, indexes: draft.indexes.length, foreign_keys: draft.foreign_keys.length, checks: draft.checks.length }}
         unavailable={checksUnsupported(open.server) ? { checks: CHECKS_UNSUPPORTED } : undefined}
@@ -171,8 +250,9 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
         canDiscard={dirty && !loading && (!lost || reopened)}
         canReview={canReview}
         onDiscard={() => void confirmDiscardDesign(tab.id).then((ok) => ok && useTableDesigns.getState().discard(tab.id))}
-        onReview={() => useDialogs.getState().requestDialog({ kind: 'tableDesign', tabId: tab.id })}
+        onReview={review}
       />
+      <DesignerToolbar groups={[columnTools, keyTools, moveTools, elementTools, historyTools]} />
       <div className="dz-main">
         <div className="dz-left">
           <div role="tabpanel" id={subPanelId(uid)} aria-labelledby={subTabId(uid, subTab)} className="dz-panel">
@@ -184,9 +264,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
                 editable={editable}
                 selection={selection}
                 onSelect={select}
-                edit={edit}
-                onAdd={add}
-              />
+                edit={edit}              />
             ) : null}
             {subTab === 'indexes' ? <IndexesGrid {...grid} /> : null}
             {subTab === 'foreign_keys' ? <ForeignKeysGrid {...grid} connectionId={tab.connectionId} scope={tab.scope} /> : null}

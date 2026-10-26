@@ -230,7 +230,7 @@ describe('app close guard', () => {
     await installCloseGuard(win);
     // The handler waits for the answer, as Tauri awaits it.
     void requestClose();
-    expect(await screen.findByText('Could not save 1 tab(s).')).toBeInTheDocument();
+    expect(await screen.findByText('Could not save 1 tab. Their changes are lost if you quit.')).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('alertdialog')).toBeNull();
     expect(win.destroy).not.toHaveBeenCalled();
@@ -245,7 +245,7 @@ describe('app close guard', () => {
     render(<DialogHost />);
     await installCloseGuard(win);
     void requestClose();
-    expect(await screen.findByText('Could not save 2 tab(s).')).toBeInTheDocument();
+    expect(await screen.findByText('Could not save 2 tabs. Their changes are lost if you quit.')).toBeInTheDocument();
     await userEvent.setup().click(screen.getByRole('button', { name: 'Quit anyway' }));
     await waitFor(() => expect(win.destroy).toHaveBeenCalled());
     expect(callsOf('query_probe_tab')).toHaveLength(2);

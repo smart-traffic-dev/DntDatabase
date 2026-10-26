@@ -1,9 +1,11 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FkDef, Scope } from '../../bindings';
 import type { CompletionScope } from '../../query/completion/provider';
 import { useCompletion } from '../../store/completion';
 import { DraftInput } from './DraftInput';
+import { ComboInput } from './ComboInput';
 import { ElementGrid, type ElementGridProps } from './ElementGrid';
+import { GridSelect } from './GridSelect';
 import { parseList } from './elementModel';
 
 const ACTIONS = ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'];
@@ -26,7 +28,6 @@ function tablesOf(cache: CompletionScope | null, pg: boolean, scope: Scope, refS
 
 /** The Foreign keys grid: columns, the referenced table and columns, the actions, and PostgreSQL's deferral. */
 export function ForeignKeysGrid(p: ForeignKeysGridProps) {
-  const uid = useId();
   const pg = p.open.server.kind === 'postgres';
   const [cache, setCache] = useState<CompletionScope | null>(null);
   useEffect(() => {
@@ -51,14 +52,14 @@ export function ForeignKeysGrid(p: ForeignKeysGridProps) {
 
   const action = (label: string, value: string, disabled: boolean, onChange: (v: string) => void) => (
     <div role="cell">
-      <select aria-label={label} className="dz-input mono" value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
+      <GridSelect aria-label={label} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
         {ACTIONS.includes(value) ? null : <option value={value}>{value}</option>}
         {ACTIONS.map((a) => (
           <option key={a} value={a}>
             {a}
           </option>
         ))}
-      </select>
+      </GridSelect>
     </div>
   );
 
@@ -73,7 +74,6 @@ export function ForeignKeysGrid(p: ForeignKeysGridProps) {
       fields={['name', 'columns', 'ref_schema', 'ref_table', 'ref_columns', 'on_update', 'on_delete', 'deferrable', 'initially_deferred']}
       cells={({ row, disabled, errorOf, set }) => {
         const fk = row.item as FkDef;
-        const listId = `${uid}-${row.key}`;
         const tables = tablesOf(cache, pg, p.scope, fk.ref_schema);
         return (
           <>
@@ -102,21 +102,16 @@ export function ForeignKeysGrid(p: ForeignKeysGridProps) {
                 error={errorOf('ref_schema')}
                 onCommit={(text, key) => set({ ref_schema: text === '' ? null : text }, key)}
               />
-              <DraftInput
-                aria-label="Referenced table"
-                className="mono"
-                list={listId}
+              <ComboInput
+                label="Referenced table"
                 placeholder="table"
                 value={fk.ref_table}
+                options={tables.map((t) => ({ value: t }))}
                 disabled={disabled}
                 error={errorOf('ref_table')}
+                emptyText="No table of that name here. The text is used as typed."
                 onCommit={(text, key) => set({ ref_table: text }, key)}
               />
-              <datalist id={listId}>
-                {tables.map((t) => (
-                  <option key={t} value={t} />
-                ))}
-              </datalist>
             </div>
             <div role="cell">
               <DraftInput

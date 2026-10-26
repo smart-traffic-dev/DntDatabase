@@ -40,44 +40,91 @@
   line-height: 18px;
 }
 
+/* Index parts: chips on one line that wrap, then "+ Column". */
 .dz-parts {
-  flex-direction: column;
-  align-items: stretch;
-  justify-content: center;
+  flex-wrap: wrap;
+  align-items: center;
   gap: var(--dnt-space-1);
-  padding-top: var(--dnt-space-1);
-  padding-bottom: var(--dnt-space-1);
+  padding-top: 3px;
+  padding-bottom: 3px;
 }
 
 .dz-part {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: var(--dnt-space-1);
+  gap: 2px;
+  height: 24px;
+  padding: 0 2px 0 0;
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
 }
 
-.dz-part .dz-input {
-  flex: 1;
+.dz-part.dz-invalid {
+  border-color: var(--dnt-status-danger-solid);
+}
+
+.dz-part .dz-select select.dz-input {
+  width: auto;
+  min-width: 10ch;
+  max-width: 22ch;
+  height: 22px;
+  border: 0;
 }
 
 .dz-part .dz-prefix {
   flex: none;
   width: 64px;
+  height: 22px;
 }
 
 .dz-part .dz-desc {
   flex: none;
+  gap: 3px;
+  padding: 0 var(--dnt-space-1);
   font-size: var(--dnt-text-xs);
   color: var(--dnt-fg-muted);
 }
 
 .dz-part-expr {
-  flex: 1;
+  padding: 0 var(--dnt-space-1_5);
   color: var(--dnt-fg-muted);
   font-style: italic;
 }
 
-.dz-add-part {
-  align-self: flex-start;
+.dz-part-remove,
+.dz-part-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  padding: 0 var(--dnt-space-1);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-xs);
+  background: transparent;
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+}
+
+.dz-part-add {
+  height: 24px;
+  border-style: dashed;
+  border-color: var(--dnt-border);
+}
+
+.dz-part-remove:hover:not(:disabled),
+.dz-part-add:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.dz-part-add:disabled {
+  display: none;
+}
+
+.dz-actions .dz-drop-note {
+  padding: 0;
+  white-space: nowrap;
 }
 
 .dz-ref {
@@ -87,6 +134,10 @@
 .dz-ref .dz-ref-schema {
   flex: none;
   width: 40%;
+}
+
+.dz-ref .dz-combo {
+  flex: 1;
 }
 
 .dz-row-hint {

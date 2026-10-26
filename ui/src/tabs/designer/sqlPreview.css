@@ -29,6 +29,13 @@
   background: var(--dnt-bg-chrome);
 }
 
+/* In the designer tab: 260px when there is room, in a short editor it shrinks down to its bar. */
+.dz-left > .dz-preview {
+  flex: 0 1 260px;
+  min-height: 36px;
+  overflow: hidden;
+}
+
 .dz-preview-bar {
   flex: none;
   display: flex;

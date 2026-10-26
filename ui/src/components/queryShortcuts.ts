@@ -4,7 +4,8 @@ import { useTabs } from '../store/tabs';
 import { openDevtools } from './appMenus';
 import { addActiveQueryToFavorites } from './favoritesActions';
 import { chordPending, onGroupShortcut } from './groupShortcuts';
-import { openNewQuery } from './newQuery';
+import { openNewQuery, openQueryFromActiveTab } from './newQuery';
+import { onObjectShortcut } from './objectShortcuts';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
 import { closeTab, cycleTab, goToTab, reopenClosedTab } from './tabActions';
 import {
@@ -60,11 +61,12 @@ function windowShortcut(e: KeyboardEvent, key: string): boolean {
 
 /**
  * Window-level query shortcuts (spec §7.1): `Ctrl+S` save (`Ctrl+Shift+S` save as),
- * `Ctrl+O` open a .sql file, `Ctrl+T` new query, `Ctrl+Shift+D` add to favorites,
+ * `Ctrl+O` open a .sql file, `Ctrl+T` new query, `Ctrl+Q` new query on the active tab's table / connection, `Ctrl+Shift+D` add to favorites,
  * `Ctrl+W` close tab, `Ctrl+B` show / hide the sidebar, `Ctrl+Alt+B` the right sidebar, `Ctrl+Shift+H` History, `Ctrl+Shift+I` developer tools, `Ctrl+Tab` / `Ctrl+Shift+Tab` / `Ctrl+PgDn` / `Ctrl+PgUp` next / previous tab.
  * Ignored while a modal dialog is open.
  */
 export function onQueryShortcut(e: KeyboardEvent) {
+  if (onObjectShortcut(e)) return;
   const ctrl = e.ctrlKey || e.metaKey;
   // Plain typing is no shortcut (only F1, or the second key of a Ctrl+K chord): it never
   // reaches the modal lookup below, a query over the whole document on every keystroke.
@@ -118,6 +120,11 @@ export function onQueryShortcut(e: KeyboardEvent) {
   } else if (key === 't' && !e.shiftKey) {
     e.preventDefault();
     openNewQuery();
+  } else if (key === 'q' && !e.shiftKey) {
+    // In the Connections tree Ctrl+Q means "on the selected node": the tree handles it.
+    if (target?.closest('[role="tree"][aria-label="Connections"]')) return;
+    e.preventDefault();
+    openQueryFromActiveTab();
   } else if (key === 't' && e.shiftKey) {
     e.preventDefault();
     reopenClosedTab();

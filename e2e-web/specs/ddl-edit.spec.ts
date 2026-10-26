@@ -199,8 +199,8 @@ test.describe('DDL editor (browser, fake IPC backend)', () => {
     await appendText(page, ' where 3 = 3');
 
     await page.getByRole('button', { name: 'Close v_orders' }).click();
-    const ask = page.getByRole('alertdialog', { name: 'Unsaved changes' });
-    await expect(ask).toContainText('Discard 1 unsaved changes?');
+    const ask = page.getByRole('alertdialog', { name: 'Discard 1 unsaved change?' });
+    await expect(ask).toBeVisible();
     await ask.getByRole('button', { name: 'Cancel' }).click();
     await expect(ask).toBeHidden();
 

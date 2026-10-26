@@ -1,6 +1,8 @@
-import type { ObjectRef } from '../bindings';
+import type { ObjectKind, ObjectRef } from '../bindings';
 import { useConnections } from '../store/connections';
+import { useDdlEdits } from '../store/ddlEdits';
 import { useQueryDocs } from '../store/queryTabs';
+import { useTabs } from '../store/tabs';
 import { useTree, type TreeNode } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 
@@ -54,11 +56,58 @@ export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 
   return `SELECT * FROM ${table}${order} LIMIT ${Math.trunc(opts.limit ?? 1000)}${offset};`;
 }
 
+/** Whether `SELECT * FROM` makes sense on an object of this kind. */
+export const isQueryable = (kind: ObjectKind | undefined) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
+
+const engineOf = (connectionId: string | null | undefined) =>
+  (connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined) ?? 'mysql';
+
 /** Opens a new query tab on a table / view node, with its first 1000 rows selected. */
 export function openSelectTop(node: TreeNode): string {
   const id = openNewQuery(node);
-  const connectionId = connectionIdOf(node.id);
-  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
-  useQueryDocs.getState().update(id, { sql: selectTopSql(node, kind ?? 'mysql') });
+  useQueryDocs.getState().update(id, { sql: selectTopSql(node, engineOf(connectionIdOf(node.id))) });
   return id;
+}
+
+/** Ctrl+Q from the tree: on a table / view its first 1000 rows are selected, anything else just opens a query. */
+export function openQueryOnNode(node: TreeNode): string {
+  return node.kind === 'object' && isQueryable(node.objectRef?.kind) ? openSelectTop(node) : openNewQuery(node);
+}
+
+/** Opens a query bound to `connectionId` / `database`, with the first 1000 rows of `ref` selected when it is a table or view. */
+function openQueryOn(connectionId: string, database: string | null, ref?: ObjectRef): string {
+  const id = useQueryDocs.getState().newQuery(connectionId, database);
+  if (ref && isQueryable(ref.kind)) useQueryDocs.getState().update(id, { sql: selectTopSql({ objectRef: ref }, engineOf(connectionId)) });
+  return id;
+}
+
+/**
+ * Ctrl+Q anywhere outside the tree: a new query on what the active tab is about — an open table or
+ * view gets `SELECT * FROM it LIMIT 1000`, a query tab's connection and database carry over.
+ */
+export function openQueryFromActiveTab(): string {
+  const { tabs, activeId } = useTabs.getState();
+  const tab = tabs.find((t) => t.id === activeId);
+  switch (tab?.kind) {
+    case 'object':
+      return openQueryOn(tab.connectionId, tab.objectRef.database, tab.objectRef);
+    case 'design':
+      return openQueryOn(
+        tab.connectionId,
+        tab.scope.database,
+        tab.table ? { database: tab.scope.database, schema: tab.scope.schema, name: tab.table, kind: 'Table' } : undefined,
+      );
+    case 'ddl': {
+      const target = useDdlEdits.getState().byTab[tab.id]?.target;
+      if (!target) return openQueryOn(tab.connectionId, null);
+      const ref = target.name ? { database: target.scope.database, schema: target.scope.schema, name: target.name, kind: target.kind } : undefined;
+      return openQueryOn(tab.connectionId, target.scope.database, ref);
+    }
+    case 'query': {
+      const doc = useQueryDocs.getState().docs.get(tab.id);
+      return useQueryDocs.getState().newQuery(doc?.connectionId ?? tab.connectionId, doc?.database ?? null);
+    }
+    default:
+      return openNewQuery();
+  }
 }

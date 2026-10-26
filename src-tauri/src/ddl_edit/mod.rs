@@ -6,7 +6,7 @@
 //! after `isolate` + `parse_header` + `check_target` accepted it, and the statements
 //! previewed are exactly the ones a plan stores (and the apply sends).
 mod apply;
-mod catalog;
+pub(crate) mod catalog;
 #[cfg(test)]
 mod tests;
 

@@ -1,4 +1,4 @@
-import type { ColumnDef, DraftError, ElementRef, Locked, TableDef, TypeInfo, TypeSpec } from '../../bindings';
+import type { ColumnDef, DefaultSpec, DraftError, ElementRef, Locked, TableDef, TypeInfo, TypeSpec } from '../../bindings';
 import { deepEqual } from '../../store/tableDesigns';
 
 export type RowState = 'unchanged' | 'modified' | 'new' | 'drop';
@@ -50,7 +50,8 @@ export function columnRows(base: TableDef, draft: TableDef): ColumnRow[] {
   });
   const kept = new Set(draft.columns.map((c) => c.original).filter((o): o is string => o !== null));
   base.columns.forEach((b, i) => {
-    if (kept.has(b.name)) return;
+    // A column not on the server (a new table's starter `id`) has nothing to drop.
+    if (b.original === null || kept.has(b.name)) return;
     // After the nearest earlier column that is still there (or a dropped one placed already).
     let at = 0;
     for (let j = i - 1; j >= 0; j--) {
@@ -71,7 +72,7 @@ export const typeInfoOf = (catalog: TypeInfo[], spec: TypeSpec): TypeInfo | unde
 
 const quoteValue = (v: string) => `'${v.replaceAll("'", "''")}'`;
 
-/** The parameters as the grid's Length cell shows them: `16`, `14,2`, `'a','b'`. */
+/** The parameters as one text: `16`, `14,2`, `'a','b'`. */
 export function paramsText(spec: TypeSpec): string {
   if (spec.kind === 'custom') return '';
   if (spec.values.length > 0) return spec.values.map(quoteValue).join(',');
@@ -93,15 +94,35 @@ const toInt = (s: string | undefined): number | null => {
   return /^\d+$/.test(t) ? Number(t) : null;
 };
 
-/** The type with its parameters taken from the Length cell's text (`16` or `14,2`). */
-export function withParamsText(spec: TypeSpec, info: TypeInfo | undefined, text: string): TypeSpec {
+/** The grid's Length cell: the length, the precision (`decimal(14,2)` -> `14`) or the values. */
+export function lengthText(spec: TypeSpec): string {
+  if (spec.kind === 'custom') return '';
+  if (spec.values.length > 0) return spec.values.map(quoteValue).join(',');
+  if (spec.precision !== null) return String(spec.precision);
+  return spec.length !== null ? String(spec.length) : '';
+}
+
+/** The grid's Decimals cell: the scale (`decimal(14,2)` -> `2`). */
+export const scaleText = (spec: TypeSpec) => (spec.kind === 'known' && spec.scale !== null ? String(spec.scale) : '');
+
+/** The type with the Length cell's number as its precision (types with one) or its length. */
+export function withLengthText(spec: TypeSpec, info: TypeInfo | undefined, text: string): TypeSpec {
   if (spec.kind === 'custom' || !info) return spec;
   if (info.precision !== 'None') {
+    // `14,2` typed out in full still sets both; no precision leaves no scale behind.
     const [p, s] = text.split(',');
-    return { ...spec, precision: toInt(p), scale: info.scale !== 'None' ? toInt(s) : null };
+    const precision = toInt(p);
+    const scale = info.scale === 'None' || precision === null ? null : s === undefined ? spec.scale : toInt(s);
+    return { ...spec, precision, scale };
   }
   if (info.length !== 'None') return { ...spec, length: toInt(text) };
   return spec;
+}
+
+/** The type with the Decimals cell's number as its scale. */
+export function withScaleText(spec: TypeSpec, info: TypeInfo | undefined, text: string): TypeSpec {
+  if (spec.kind === 'custom' || !info || info.scale === 'None') return spec;
+  return { ...spec, scale: toInt(text) };
 }
 
 /** A number field's text as a parameter value. */
@@ -167,7 +188,29 @@ export function withType(c: ColumnDef, spec: TypeSpec, catalog: TypeInfo[], engi
   };
 }
 
-export const baseText = (spec: TypeSpec) => (spec.kind === 'known' ? spec.base : spec.text);
+/** SQL keywords that are values the server computes (they take no parentheses, or optional ones). */
+const SQL_EXPRESSION_KEYWORDS = /^(current_timestamp|current_date|current_time|current_user|session_user|localtime|localtimestamp)(\s*\(\s*\d*\s*\))?$/i;
+/**
+ * A function call (`now()`, `uuid()`, `nextval('s')`, the name right before its parenthesis, so a
+ * phrase like `Untitled (1)` stays text) or a parenthesised expression.
+ */
+const SQL_CALL = /^([a-z_][a-z0-9_.]*\(.*\)|\(.*\))$/is;
+
+/** Text typed as a default that is an expression, not a literal (`CURRENT_TIMESTAMP`, `now()`, `(a + 1)`). */
+export const looksLikeExpression = (text: string) => SQL_EXPRESSION_KEYWORDS.test(text.trim()) || SQL_CALL.test(text.trim());
+
+/**
+ * The default for text typed in a Default field: empty or `NULL` is no default (a nullable column
+ * defaults to NULL), an expression-like text is an expression, anything else a value of `kind`
+ * (an `expression` stays one: `ARRAY['a']::text[]` does not look like one but is).
+ */
+export function defaultFromText(text: string, kind: DefaultSpec['kind'] = 'value'): DefaultSpec | null {
+  const t = text.trim();
+  if (t === '' || /^null$/i.test(t)) return null;
+  return { kind: kind === 'value' && looksLikeExpression(t) ? 'expression' : kind, text };
+}
+
+export const baseText =(spec: TypeSpec) => (spec.kind === 'known' ? spec.base : spec.text);
 
 export const columnErrors = (errors: DraftError[], name: string) =>
   errors.filter((e) => e.element.kind === 'column' && e.element.name === name);
@@ -230,8 +273,8 @@ export function restoreColumn(base: TableDef, d: TableDef, name: string): TableD
   return { ...d, columns };
 }
 
-/** A new nullable column at the end, named `column_N`, of the catalog's integer type. */
-export function addColumn(d: TableDef, catalog: TypeInfo[]): TableDef {
+/** A new nullable column named `column_N`, of the catalog's integer type: at `at`, or at the end. */
+export function addColumn(d: TableDef, catalog: TypeInfo[], at = d.columns.length): TableDef {
   const taken = new Set(d.columns.map((c) => c.name.toLowerCase()));
   let n = d.columns.length + 1;
   while (taken.has(`column_${n}`)) n++;
@@ -252,7 +295,9 @@ export function addColumn(d: TableDef, catalog: TypeInfo[]): TableDef {
     generated: null,
     locked: false,
   };
-  return { ...d, columns: [...d.columns, column] };
+  const columns = [...d.columns];
+  columns.splice(Math.max(0, Math.min(at, columns.length)), 0, column);
+  return { ...d, columns };
 }
 
 /** Adds the column to the primary key, or takes it out (an empty key is no key). */

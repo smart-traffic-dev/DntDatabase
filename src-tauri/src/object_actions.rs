@@ -1,8 +1,8 @@
 //! Single-use DDL plans and dedicated, cancellable object-action sessions.
 pub use crate::ddl_exec::ActionOutcome;
 use crate::ddl_exec::{
-    execute, failure_error, failure_outcome, stopped, write_history, DdlHistory, DdlOperations,
-    HISTORY_FAILED,
+    execute, failure_error, failure_outcome, mysql_statement_refused, stopped, write_history,
+    DdlHistory, DdlOperations, HISTORY_FAILED,
 };
 use crate::session_manager::{
     close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
@@ -10,8 +10,8 @@ use crate::session_manager::{
 use dnt_core::config::EnvTag;
 use dnt_core::driver::Session;
 use dnt_core::error::{AppError, DbError};
-use dnt_core::meta::{ObjectKind, Scope};
-use dnt_core::server::DbKind;
+use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
+use dnt_core::server::{DbKind, ServerVariant};
 use dnt_core::sql::ddl::{action_sql, ObjectAction};
 use dnt_core::sql::Dialect;
 use dnt_store::history::HistoryOrigin;
@@ -60,6 +60,26 @@ pub(crate) fn stale() -> DbError {
     }
 }
 
+/// `AppError.field` of an object that is no longer on the server (the UI then refreshes
+/// the tree and closes the object's tabs).
+pub const OBJECT_MISSING_FIELD: &str = "object_missing";
+
+fn object_missing(obj: &ObjectRef) -> DbError {
+    let what = match obj.kind {
+        ObjectKind::Table => "Table",
+        ObjectKind::View => "View",
+        ObjectKind::MaterializedView => "Materialized view",
+        _ => "Object",
+    };
+    DbError::Config {
+        field: Some(OBJECT_MISSING_FIELD.into()),
+        message: format!(
+            "{what} {} no longer exists on the server; it may have been dropped or renamed elsewhere. Nothing was changed.",
+            obj.name
+        ),
+    }
+}
+
 /// Metadata is read on this operation's session, never from tree caches.
 async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<String, DbError> {
     let i = session.introspector();
@@ -71,7 +91,7 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
         };
         let objects = i.list_objects(&scope, obj.kind).await?;
         if !objects.iter().any(|o| o.name == obj.name) {
-            return Err(stale());
+            return Err(object_missing(obj));
         }
         if let ObjectAction::RenameTable { name, .. } = action {
             // Names share a namespace with views (and materialized views on PG).
@@ -105,7 +125,19 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
             .collect()
     };
     let exists = names.iter().any(|n| n == action.name());
-    if exists == matches!(action, ObjectAction::CreateNamespace { .. }) {
+    let creating = matches!(action, ObjectAction::CreateNamespace { .. });
+    if exists && creating {
+        let what = if kind == DbKind::MySql {
+            "database"
+        } else {
+            "schema"
+        };
+        return Err(DbError::Config {
+            field: Some("name".into()),
+            message: format!("A {what} named {} already exists.", action.name()),
+        });
+    }
+    if exists == creating {
         return Err(stale());
     }
     if !exists {
@@ -149,7 +181,112 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
     Ok(entries.join("\0"))
 }
 
+/// What a "Create database/schema" form can offer: MySQL character sets and collations,
+/// PostgreSQL roles (each list sorted; empty on the other engine).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Type)]
+pub struct NamespaceOptions {
+    pub charsets: Vec<CharsetOption>,
+    pub collations: Vec<CollationOption>,
+    pub default_charset: Option<String>,
+    pub default_collation: Option<String>,
+    pub roles: Vec<String>,
+    pub current_role: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct CharsetOption {
+    pub name: String,
+    pub default_collation: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct CollationOption {
+    pub name: String,
+    pub charset: String,
+}
+
+const MYSQL_CHARSETS_SQL: &str = "SELECT CHARACTER_SET_NAME, DEFAULT_COLLATE_NAME FROM information_schema.CHARACTER_SETS ORDER BY CHARACTER_SET_NAME";
+const MYSQL_COLLATIONS_SQL: &str = "SELECT COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.COLLATIONS WHERE CHARACTER_SET_NAME IS NOT NULL ORDER BY COLLATION_NAME";
+/// MariaDB ≥ 10.10 lists its UCA 14.0 collations in `COLLATIONS` once, without a character
+/// set (`uca1400_ai_ci`); their usable names (`utf8mb4_uca1400_ai_ci`, the default of
+/// utf8mb4 on 11.x) are only in the applicability table.
+const MARIADB_COLLATIONS_SQL: &str = "SELECT FULL_COLLATION_NAME, CHARACTER_SET_NAME FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY ORDER BY FULL_COLLATION_NAME";
+const MYSQL_DEFAULTS_SQL: &str = "SELECT @@character_set_server, @@collation_server";
+const PG_ROLES_SQL: &str =
+    "SELECT rolname::text FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname";
+const PG_CURRENT_ROLE_SQL: &str = "SELECT current_user::text";
+
+async fn namespace_options(session: &dyn Session) -> Result<NamespaceOptions, DbError> {
+    use crate::ddl_edit::catalog::rows_with;
+    use dnt_core::driver::ExecOptions;
+    let rows = |sql| rows_with(session, sql, ExecOptions::default());
+    let pair = |r: &Vec<Option<String>>| Some((r.first()?.clone()?, r.get(1)?.clone()?));
+    let mut out = NamespaceOptions::default();
+    if session.server_info().kind == DbKind::MySql {
+        out.charsets = rows(MYSQL_CHARSETS_SQL)
+            .await?
+            .iter()
+            .filter_map(pair)
+            .map(|(name, default_collation)| CharsetOption {
+                name,
+                default_collation,
+            })
+            .collect();
+        let info = session.server_info();
+        let full_names = info.variant == ServerVariant::MariaDb && info.version >= (10, 10, 0);
+        out.collations = rows(if full_names {
+            MARIADB_COLLATIONS_SQL
+        } else {
+            MYSQL_COLLATIONS_SQL
+        })
+        .await?
+        .iter()
+        .filter_map(pair)
+        .map(|(name, charset)| CollationOption { name, charset })
+        .collect();
+        if let Some(r) = rows(MYSQL_DEFAULTS_SQL).await?.first() {
+            out.default_charset = r.first().cloned().flatten();
+            out.default_collation = r.get(1).cloned().flatten();
+        }
+    } else {
+        out.roles = rows(PG_ROLES_SQL)
+            .await?
+            .into_iter()
+            .filter_map(|r| r.into_iter().next().flatten())
+            .collect();
+        out.current_role = rows(PG_CURRENT_ROLE_SQL)
+            .await?
+            .into_iter()
+            .next()
+            .and_then(|r| r.into_iter().next().flatten());
+    }
+    Ok(out)
+}
+
 impl SessionManager {
+    /// The SQL `action` would run on this connection, without a session or a plan (live preview).
+    pub fn object_action_render(
+        &self,
+        conn: Uuid,
+        action: &ObjectAction,
+    ) -> Result<String, DbError> {
+        action_sql(self.repo.get(conn)?.kind, action)
+    }
+
+    /// Choices for the "Create database/schema" form, read on a dedicated session.
+    pub async fn namespace_options(
+        &self,
+        conn: Uuid,
+        database: String,
+    ) -> Result<NamespaceOptions, DbError> {
+        let cfg = self.repo.get(conn)?;
+        let rt = self.runtime(conn)?;
+        let db = (cfg.kind == DbKind::Postgres && !database.is_empty()).then_some(database);
+        let (session, _) = rt.open_query_session(db).await?;
+        let out =
+            tokio::time::timeout(METADATA_CALL_TIMEOUT, namespace_options(session.as_ref())).await;
+        close_quietly(session).await;
+        out.map_err(|_| config_error("object", "Metadata timed out."))?
+    }
+
     pub async fn object_action_preview(
         &self,
         conn: Uuid,
@@ -369,15 +506,23 @@ impl SessionManager {
             warnings: Vec::new(),
         };
         if let Err(e) = result {
-            report.outcome = failure_outcome(
-                session.as_ref(),
-                &e,
-                pg,
-                sent,
-                commit_sent,
-                self.cancel_grace,
-            )
-            .await;
+            // A MySQL CREATE DATABASE the server refuses (a name that exists, a collation
+            // of another charset) created nothing. Other MySQL actions stay as they were:
+            // DROP DATABASE without atomic DDL drops table by table.
+            let create = matches!(stored.preview.action, ObjectAction::CreateNamespace { .. });
+            report.outcome = if create && mysql_statement_refused(pg, &e) && !stop.is_stopped() {
+                ActionOutcome::NotApplied
+            } else {
+                failure_outcome(
+                    session.as_ref(),
+                    &e,
+                    pg,
+                    sent,
+                    commit_sent,
+                    self.cancel_grace,
+                )
+                .await
+            };
             report.error = Some(failure_error(e, report.outcome));
         }
         // No cancellation can reach a later statement or a pooled session: this session is closed.

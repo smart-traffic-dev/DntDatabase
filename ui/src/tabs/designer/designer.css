@@ -2,10 +2,13 @@
 .designer {
   height: 100%;
   min-height: 0;
+  /* In an editor too short for header + grid + preview, the tab scrolls instead of clipping the grid. */
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   font-size: var(--dnt-text-base);
   line-height: var(--dnt-text-base-lh);
+  container: designer / inline-size;
 }
 
 .designer.dz-empty-state {
@@ -69,19 +72,22 @@
   border-radius: var(--dnt-radius-md);
 }
 
-/* Header: one 44 px row. */
+/* Header: one 44 px row; in a narrow editor its parts wrap onto further rows instead of running off. */
 .dz-header {
   flex: none;
   display: flex;
+  /* One row: the context ellipsizes and the sections scroll first; only a narrow editor wraps. */
+  flex-wrap: nowrap;
   align-items: center;
-  gap: var(--dnt-space-3);
-  height: 44px;
+  gap: var(--dnt-space-1_5) var(--dnt-space-3);
+  min-height: 44px;
   min-width: 0;
-  padding: 0 var(--dnt-space-4);
+  padding: var(--dnt-space-1_5) var(--dnt-space-4);
   border-bottom: 1px solid var(--dnt-border-subtle);
 }
 
 .dz-title {
+  min-width: 0;
   font-size: var(--dnt-text-md);
   font-weight: 600;
   white-space: nowrap;
@@ -90,12 +96,24 @@
 }
 
 .dz-header .dz-subtle {
+  flex: 0 1 auto;
+  min-width: 0;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .dz-header .dz-sections {
-  flex: none;
+  flex: 0 1 auto;
+  max-width: 100%;
   margin-left: var(--dnt-space-2);
+  /* Narrower than the six sections: they scroll sideways inside their own pill. */
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.dz-header .dz-sections::-webkit-scrollbar {
+  display: none;
 }
 
 .dz-sections .segment,
@@ -147,10 +165,91 @@
   color: var(--dnt-fg-disabled);
 }
 
+/* Toolbar under the header (Navicat-style): icon + label buttons in groups split by dividers. */
+.dz-toolbar {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  min-height: 36px;
+  padding: var(--dnt-space-1) var(--dnt-space-3);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  background: var(--dnt-bg-chrome);
+}
+
+.dz-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dz-tool-group + .dz-tool-group {
+  padding-left: var(--dnt-space-1);
+  border-left: 1px solid var(--dnt-border-subtle);
+}
+
+.dz-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  white-space: nowrap;
+}
+
+.dz-tool:hover:not(:disabled) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.dz-tool.on {
+  color: var(--dnt-status-warning-solid);
+}
+
+.dz-tool:disabled {
+  color: var(--dnt-fg-disabled);
+}
+
+/* Narrow editor: icons only, and the header may wrap. */
+@container designer (max-width: 720px) {
+  .dz-tool span {
+    display: none;
+  }
+
+  .dz-header {
+    flex-wrap: wrap;
+  }
+}
+
+.dz-header .dz-spacer {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* The table name, editable in the header (a new table is named here first). */
+.dz-header .dz-title-input {
+  /* Gives way before the header wraps (Review & apply stays on the first row). */
+  flex: 0 1 20ch;
+  width: 20ch;
+  min-width: 10ch;
+  height: var(--dnt-ctl-h-md);
+  border-color: var(--dnt-border-subtle);
+  font-size: var(--dnt-text-md);
+  font-weight: 600;
+}
+
 .dz-main {
   flex: 1;
-  min-height: 0;
+  /* Below this the whole tab scrolls (.designer) rather than squeezing the grid away. */
+  min-height: 200px;
   display: flex;
+  container-type: inline-size;
 }
 
 .dz-left {
@@ -162,8 +261,29 @@
 
 .dz-panel {
   flex: 1;
-  min-height: 0;
+  /* The grid keeps a usable height; the SQL preview below gives way first. */
+  min-height: 120px;
   overflow: auto;
+}
+
+/* Narrow editor: the inspector goes under the grid instead of leaving it a sliver. */
+@container (max-width: 640px) {
+  .dz-main {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .dz-left {
+    flex: none;
+    min-height: 320px;
+  }
+
+  .dz-main > .dz-inspector {
+    width: auto;
+    border-left: 0;
+    border-top: 1px solid var(--dnt-border-subtle);
+    overflow: visible;
+  }
 }
 
 .dz-problems {

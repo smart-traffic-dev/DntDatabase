@@ -20,6 +20,7 @@ import { DataActions, DataPager, DataView, dataCellMenu, filterValueText, pageSi
 // The grid draws on a canvas: a stand-in with one header button per column (calls
 // `onHeaderClicked` like Glide's header click, shows the header mark) and the row numbering.
 vi.mock('./query/ResultGrid', () => ({
+  GRID_HEADER_HEIGHT: 36,
   ResultGrid: ({
     result,
     onHeaderClicked,
@@ -403,7 +404,8 @@ describe('DataView', () => {
     setup({ table_data: () => page(0) });
     expect(await screen.findByText('This table has no rows.')).toBeInTheDocument();
     expect(screen.getByText('No rows')).toBeInTheDocument();
-    expect(screen.queryByTestId('grid')).not.toBeInTheDocument();
+    // The grid stays, so the column headers still show.
+    expect(screen.getByTestId('grid')).toBeInTheDocument();
   });
 
   it('truncated values and a size-capped page are reported; Next continues after the last row', async () => {
@@ -1039,7 +1041,7 @@ describe('DataView editing', () => {
       },
     });
     expect(within(dialog).getByText(/UPDATE `orders` SET/)).toBeInTheDocument();
-    expect(within(dialog).getByText('allow')).toBeInTheDocument();
+    expect(within(dialog).queryByText('allow')).not.toBeInTheDocument();
     expect(callsOf('data_apply')).toEqual([]);
     await user.click(within(dialog).getByRole('button', { name: 'Confirm' }));
     await waitFor(() => expect(callsOf('table_data')).toHaveLength(2));
@@ -1389,11 +1391,11 @@ describe('DataView editing', () => {
     expect(useTabs.getState().tabs.some((t) => t.id === tab.id)).toBe(false);
   });
 
-  it('changing the page with staged edits asks first; the question reads "Discard N unsaved changes?"', async () => {
+  it('changing the page with staged edits asks first; the question reads "Discard N unsaved changes?" (plural-aware)', async () => {
     const { user } = await editable({ table_data: () => rows3({ has_more: true }) });
     render(<DialogHost />);
     await user.click(screen.getByRole('button', { name: 'Next page' }));
-    expect(await screen.findByText('Discard 1 unsaved changes?')).toBeInTheDocument();
+    expect(await screen.findByText('Discard 1 unsaved change?')).toBeInTheDocument();
     expect(callsOf('table_data')).toHaveLength(1);
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(callsOf('table_data')).toHaveLength(1);

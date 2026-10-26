@@ -1,7 +1,6 @@
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import type { DesignOpen, DraftError, ElementRef, TableDef } from '../../bindings';
 import {
-  ADD,
   elementErrors,
   elementRows,
   KIND_OF,
@@ -59,7 +58,7 @@ interface FrameProps<K extends ElementKey> extends ElementGridProps {
 
 /**
  * The frame the Indexes, Foreign keys and Checks grids share: header, rows with the same state
- * styling, lock mark and Delete key as Columns, the Remove / Undo actions and the Add button.
+ * styling, lock mark, Delete key and "To drop · Undo" as Columns (adding and deleting are the toolbar's).
  */
 export function ElementGrid<K extends ElementKey>(p: FrameProps<K>) {
   const { open, draft, errors, editable, selection, onSelect, edit, listKey } = p;
@@ -87,15 +86,10 @@ export function ElementGrid<K extends ElementKey>(p: FrameProps<K>) {
     edit((d) => removeElement(d, listKey, index));
     onSelect(null);
   };
-  const add = () => {
-    edit((d) => ADD[listKey](d));
-    const next = ADD[listKey](draft)[listKey].at(-1);
-    if (next) onSelect({ kind, name: next.name } as ElementRef);
-  };
 
   return (
     <div className="dz-columns">
-      <div className="dz-grid dz-egrid" style={{ ['--dz-cols' as string]: `28px ${p.cols} 76px` }} role="table" aria-label={p.label} aria-rowcount={rows.length + 1}>
+      <div className="dz-grid dz-egrid" style={{ ['--dz-cols' as string]: `28px ${p.cols} 112px` }} role="table" aria-label={p.label} aria-rowcount={rows.length + 1}>
         <div role="row" className="dz-row dz-head">
           <div role="columnheader" aria-label="State" />
           {p.headers.map((h) => (
@@ -140,39 +134,28 @@ export function ElementGrid<K extends ElementKey>(p: FrameProps<K>) {
                 errorOf: (field) => errs.find((e) => e.field === field)?.message,
                 set,
               })}
+              {/* Adding and deleting are the toolbar's; a dropped row offers its Undo here, as on Columns. */}
               <div role="cell" className="dz-actions">
                 {dropped ? (
-                  <button
-                    type="button"
-                    className="dz-link"
-                    disabled={!editable}
-                    onClick={() => edit((d) => restoreElement(open.def, d, listKey, item.name))}
-                  >
-                    Undo
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    className="dz-link"
-                    aria-label={`Remove ${p.noun}`}
-                    disabled={disabled}
-                    onClick={() => index !== null && remove(index)}
-                  >
-                    Remove
-                  </button>
-                )}
+                  <span className="dz-drop-note">
+                    To drop ·{' '}
+                    <button
+                      type="button"
+                      className="dz-link"
+                      disabled={!editable}
+                      onClick={() => edit((d) => restoreElement(open.def, d, listKey, item.name))}
+                    >
+                      Undo
+                    </button>
+                  </span>
+                ) : null}
               </div>
             </div>
           );
         })}
       </div>
+      {rows.length === 0 ? <p className="dz-subtle dz-grid-empty">No {p.label.toLowerCase()} yet. Use Add {p.noun} in the toolbar.</p> : null}
       {p.children}
-      <button type="button" className="dz-add" disabled={!editable} onClick={add}>
-        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-          <path d="M8 3v10M3 8h10" />
-        </svg>
-        Add {p.noun}
-      </button>
     </div>
   );
 }

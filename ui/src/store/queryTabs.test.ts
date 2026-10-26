@@ -372,7 +372,7 @@ describe('closing a tab', () => {
     const user = userEvent.setup();
 
     let closing = useQueryDocs.getState().closeTab(id);
-    expect(await screen.findByText('Discard unsaved changes to daily.sql?')).toBeInTheDocument();
+    expect(await screen.findByText('Discard changes to daily.sql?')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(await closing).toBe(false);
     expect(useTabs.getState().tabs).toHaveLength(1);
@@ -409,7 +409,7 @@ describe('closing a tab', () => {
 
     // Cancelling the discard leaves the transaction alone.
     let closing = useQueryDocs.getState().closeTab(id);
-    expect(await screen.findByText('Discard unsaved changes to daily.sql?')).toBeInTheDocument();
+    expect(await screen.findByText('Discard changes to daily.sql?')).toBeInTheDocument();
     expect(screen.queryByText('This tab has an open transaction.')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(await closing).toBe(false);

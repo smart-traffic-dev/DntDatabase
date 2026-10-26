@@ -443,6 +443,13 @@ textarea:focus-visible,
   border-color: var(--dnt-accent-hover);
 }
 
+/* As specific as `.btn.primary`, so a disabled primary never looks pressable (whatever the CSS order). */
+.btn.primary:disabled {
+  background: var(--dnt-bg-sunken);
+  border-color: var(--dnt-border-subtle);
+  color: var(--dnt-fg-disabled);
+}
+
 .btn.small {
   height: 20px;
   padding: 0 8px;
@@ -657,8 +664,9 @@ textarea:focus-visible,
 }
 
 /*
- * Scrolls sideways inside itself. A 3px scrollbar is always reserved (so it never shifts the
- * layout) and only painted while the pointer is over the strip, as in VS Code.
+ * Scrolls sideways inside itself. The scrollbar is not drawn at all: any scrollbar (even a thin one)
+ * takes height from the tabs and pushes them off the strip's centre line, away from the + and
+ * chevron beside it. The wheel, a drag near an end and the "List all tabs" menu scroll it instead.
  */
 .tabbar {
   flex: 0 1 auto;
@@ -667,12 +675,11 @@ textarea:focus-visible,
   align-items: stretch;
   overflow-x: auto;
   overflow-y: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: transparent transparent;
+  scrollbar-width: none;
 }
 
-.tabbar:hover {
-  scrollbar-color: var(--dnt-border-strong) transparent;
+.tabbar::-webkit-scrollbar {
+  display: none;
 }
 
 /* New query: right after the last tab. */
@@ -684,18 +691,6 @@ textarea:focus-visible,
 
 .tabstrip-fill {
   flex: 1;
-}
-
-.tabbar::-webkit-scrollbar {
-  height: 3px;
-}
-
-.tabbar::-webkit-scrollbar-thumb {
-  background: transparent;
-}
-
-.tabbar:hover::-webkit-scrollbar-thumb {
-  background: var(--dnt-border-strong);
 }
 
 .tab-overflow {

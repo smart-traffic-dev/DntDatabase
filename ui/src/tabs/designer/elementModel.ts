@@ -30,7 +30,8 @@ export function elementRows<T extends Named>(base: T[], draft: T[]): ElementRow<
   });
   const kept = new Set(draft.map((c) => c.original).filter((o): o is string => o !== null));
   base.forEach((b, i) => {
-    if (kept.has(b.name)) return;
+    // An element not on the server (part of a new table's starter) has nothing to drop.
+    if (b.original === null || kept.has(b.name)) return;
     let at = 0;
     for (let j = i - 1; j >= 0; j--) {
       const prev = base[j]!.name;

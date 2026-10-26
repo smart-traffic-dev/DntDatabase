@@ -255,3 +255,121 @@ describe('guards', () => {
     expect(usePalette.getState().open).toBe(false);
   });
 });
+
+describe('Ctrl+Q', () => {
+  it('on an open table: a new query on its connection and database selects its rows', () => {
+    useTabs.getState().open(objectTab('orders'));
+    expect(ctrl('q')).toBe(true);
+    const id = useTabs.getState().activeId!;
+    expect(useQueryDocs.getState().docs.get(id)).toMatchObject({
+      connectionId: 'c1',
+      database: 'shop',
+      sql: 'SELECT * FROM `shop`.`orders` LIMIT 1000;',
+    });
+    expect(useTabs.getState().tabs).toHaveLength(2);
+  });
+
+  it('on a query tab: a blank query on the same connection and database', () => {
+    const first = useQueryDocs.getState().newQuery('c1', 'shop');
+    ctrl('q');
+    const next = useTabs.getState().activeId!;
+    expect(next).not.toBe(first);
+    expect(useQueryDocs.getState().docs.get(next)).toMatchObject({ connectionId: 'c1', database: 'shop', sql: '' });
+  });
+
+  it('with no tab open it still opens a query; inside the connection tree the tree handles it', () => {
+    const tree = document.createElement('div');
+    tree.setAttribute('role', 'tree');
+    tree.setAttribute('aria-label', 'Connections');
+    document.body.append(tree);
+    expect(ctrl('q', {}, tree)).toBe(false);
+    expect(useTabs.getState().tabs).toHaveLength(0);
+    expect(ctrl('q')).toBe(true);
+    expect(useTabs.getState().tabs).toHaveLength(1);
+  });
+});
+
+describe('table tab shortcuts', () => {
+  const alt = (key: string, extra: KeyboardEventInit = {}) => press({ key, altKey: true, ...extra });
+
+  beforeEach(async () => {
+    const { useObjectData } = await import('../store/objectData');
+    useObjectData.setState({ byTab: {} });
+    useTabs.getState().open(objectTab('orders'));
+  });
+
+  it('Alt+1..4 switch Data / Info / DDL / Structure; a section that does not exist is ignored', async () => {
+    const { useObjectData } = await import('../store/objectData');
+    const id = useTabs.getState().activeId!;
+    expect(alt('3')).toBe(true);
+    expect(useObjectData.getState().byTab[id]?.sub).toBe('ddl');
+    alt('2');
+    expect(useObjectData.getState().byTab[id]?.sub).toBe('info');
+    alt('4');
+    expect(useObjectData.getState().byTab[id]?.sub).toBe('structure');
+    expect(alt('5')).toBe(false);
+  });
+
+  it('F4 opens the designer of the table', () => {
+    expect(press({ key: 'F4' })).toBe(true);
+    expect(useTabs.getState().tabs.find((t) => t.id === useTabs.getState().activeId)).toMatchObject({ kind: 'design', table: 'orders' });
+  });
+
+  it('F5 reloads the visible section of Info', async () => {
+    const { useObjectData } = await import('../store/objectData');
+    const refresh = vi.fn(() => Promise.resolve());
+    useObjectData.setState({ refresh });
+    alt('2');
+    expect(press({ key: 'F5' })).toBe(true);
+    expect(refresh).toHaveBeenCalledWith(expect.objectContaining({ kind: 'object' }), 'detail');
+  });
+
+  it('is ignored in text fields and inside the connection tree', () => {
+    const input = document.createElement('input');
+    document.body.append(input);
+    expect(press({ key: 'F4' }, input)).toBe(false);
+    const tree = document.createElement('div');
+    tree.setAttribute('role', 'tree');
+    tree.setAttribute('aria-label', 'Connections');
+    document.body.append(tree);
+    // (The browser guard itself prevents F5's reload, so look at what the shortcut did.)
+    const before = useTabs.getState().tabs.length;
+    press({ key: 'F4' }, tree);
+    expect(useTabs.getState().tabs).toHaveLength(before);
+  });
+
+  it('does nothing on a query tab', () => {
+    useQueryDocs.getState().newQuery(null, null);
+    expect(press({ key: 'F4' })).toBe(false);
+    expect(alt('2')).toBe(false);
+  });
+});
+
+describe('Ctrl+K tab chords', () => {
+  beforeEach(() => {
+    for (const n of ['a', 'b', 'c']) useTabs.getState().open(objectTab(n));
+  });
+
+  it('Ctrl+K Shift+Enter pins and unpins the active tab', () => {
+    const id = useTabs.getState().activeId!;
+    ctrl('k');
+    expect(press({ key: 'Enter', shiftKey: true })).toBe(true);
+    expect(useTabs.getState().tabs.find((t) => t.id === id)?.pinned).toBe(true);
+    // A real keyboard sends the Shift keydown before Enter: it keeps the chord.
+    ctrl('k');
+    press({ key: 'Shift', shiftKey: true });
+    expect(press({ key: 'Enter', shiftKey: true })).toBe(true);
+    expect(useTabs.getState().tabs.find((t) => t.id === id)?.pinned).toBeFalsy();
+  });
+
+  it('Ctrl+K Ctrl+O closes the other tabs, Ctrl+K Ctrl+W all of them', async () => {
+    const keep = useTabs.getState().tabs[1]!;
+    useTabs.getState().activate(keep.id);
+    ctrl('k');
+    expect(ctrl('o')).toBe(true);
+    await vi.waitFor(() => expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([keep.id]));
+    ctrl('k');
+    ctrl('w');
+    await vi.waitFor(() => expect(useTabs.getState().tabs).toHaveLength(0));
+  });
+});

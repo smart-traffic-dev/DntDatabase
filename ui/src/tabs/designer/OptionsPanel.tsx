@@ -61,17 +61,9 @@ export function OptionsPanel({ open, draft, errors, editable, edit }: OptionsPan
 
   return (
     <div className="dz-options">
-      <label className="dz-field">
-        <span>Table name</span>
-        <DraftInput
-          aria-label="Table name"
-          className="mono"
-          value={draft.name}
-          disabled={!editable}
-          error={nameError}
-          onCommit={(text, key) => edit((d) => ({ ...d, name: text }), key)}
-        />
-      </label>
+      {/* The table's name is edited in the designer's header. */}
+      {nameError ? <p className="dz-alert">{nameError}</p> : null}
+      {mysql ? null : <p className="dz-subtle">PostgreSQL tables have no storage options here. Rename the table in the header above.</p>}
       {mysql ? (
         <>
           <Choice label="Engine" value={opts.engine} values={engines} disabled={frozen} error={errorOf('engine')} onChange={(v) => setOption({ engine: v })} />

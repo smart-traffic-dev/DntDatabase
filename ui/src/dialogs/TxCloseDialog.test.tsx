@@ -19,10 +19,13 @@ describe('TxCloseDialog', () => {
   it('names the connection and Production, and defaults to Cancel with a non-destructive Rollback', async () => {
     const onDone = vi.fn();
     render(<TxCloseDialog title="Query 1" connectionName="shop-prod" production onSettle={vi.fn()} onDone={onDone} />);
-    expect(screen.getByRole('alertdialog')).toHaveTextContent('open transaction on shop-prod (PRODUCTION)');
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('open transaction on shop-prod.');
     expect(screen.getByTestId('env-chip')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
     expect(screen.getByRole('button', { name: 'Rollback' })).not.toHaveClass('danger');
+  // On Production the safe answer is the primary one.
+  expect(screen.getByRole('button', { name: 'Rollback' })).toHaveClass('primary');
+  expect(screen.getByRole('button', { name: 'Commit' })).not.toHaveClass('primary');
     await userEvent.setup().keyboard('{Enter}');
     expect(onDone).toHaveBeenCalledWith(false);
   });

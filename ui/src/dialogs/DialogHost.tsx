@@ -9,7 +9,7 @@ import { useRunPrompt } from '../store/runPrompt';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId, groupNodeId } from '../store/treeModel';
-import { ObjectActionDialog } from './ObjectActionDialog';
+import { ObjectActionDialog, stagedOnConnection } from './ObjectActionDialog';
 import { TableDesignDialog } from './TableDesignDialog';
 import { DdlEditDialog } from './DdlEditDialog';
 import { AboutDialog } from './AboutDialog';
@@ -63,10 +63,12 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
   const { showPrompt, closePrompt } = useDialogs.getState();
   const stored = useConnections((s) => s.summaries.get(prompt.connectionId));
   const [error, setError] = useState<{ message: string; hint: string | null } | null>(null);
+  const [busy, setBusy] = useState(false);
   const id = prompt.connectionId;
 
   /** Opens the connection; routes a failure to the right prompt again. */
   const attempt = async (secrets: SecretsInput | null) => {
+    setBusy(true);
     try {
       const opened = await api.openConnection(id, secrets);
       closePrompt();
@@ -86,6 +88,8 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
         closePrompt();
         useTree.setState({ error: err });
       }
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -107,9 +111,13 @@ function PromptHost({ prompt }: { prompt: PendingPrompt }) {
     );
   }
 
+  const cfg = stored?.config;
+  const target = cfg ? `${cfg.username ? `${cfg.username}@` : ''}${cfg.host}:${cfg.port}${cfg.ssh ? ` · via ${cfg.ssh.host}` : ''}` : null;
   return (
     <PasswordPrompt
       connectionName={stored?.config.name ?? 'connection'}
+      target={target}
+      busy={busy}
       needs={neededSecrets(stored?.config, !!stored?.has_db_password, !!stored?.has_ssh_secret, prompt.error)}
       error={error?.message ?? null}
       errorHint={error?.hint ?? null}
@@ -138,8 +146,8 @@ function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'discard') {
     return (
       <ConfirmDialog
-        title="Unsaved changes"
-        message={`Discard unsaved changes to ${question.file}?`}
+        title={`Discard changes to ${question.file}?`}
+        message="Your changes are lost if you discard them."
         confirmLabel="Discard"
         onClose={() => question.done(false)}
         onConfirm={async () => question.done(true)}
@@ -149,8 +157,8 @@ function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'discardEdits') {
     return (
       <ConfirmDialog
-        title="Unsaved changes"
-        message={`Discard ${question.count} unsaved changes?`}
+        title={`Discard ${plural(question.count, 'unsaved change')}?`}
+        message="The staged edits in the grid are dropped; nothing was sent to the server."
         confirmLabel="Discard"
         onClose={() => question.done(false)}
         onConfirm={async () => question.done(true)}
@@ -160,8 +168,8 @@ function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'discardForImport') {
     return (
       <ConfirmDialog
-        title="Unsaved changes"
-        message={`The import replaces connections that have ${question.count} unsaved changes in open tabs. Discard them and import?`}
+        title="Discard unsaved changes and import?"
+        message={`The import replaces connections that have ${plural(question.count, 'unsaved change')} in open tabs.`}
         confirmLabel="Discard and import"
         cancelLabel="Cancel import"
         onClose={() => question.done(false)}
@@ -172,9 +180,10 @@ function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'stopRun') {
     return (
       <ConfirmDialog
-        title="Query is running"
+        title="Stop the running query?"
         message={`${question.title} is still running. Closing the tab stops the query.`}
         confirmLabel="Stop and close"
+        cancelLabel="Keep running"
         onClose={() => question.done(false)}
         onConfirm={async () => question.done(true)}
       />
@@ -183,8 +192,8 @@ function QuestionHost({ question }: { question: Question }) {
   if (question.kind === 'saveFailed') {
     return (
       <ConfirmDialog
-        title="Unsaved tabs"
-        message={`Could not save ${question.count} tab(s).`}
+        title="Quit without saving?"
+        message={`Could not save ${plural(question.count, 'tab')}. Their changes are lost if you quit.`}
         confirmLabel="Quit anyway"
         onClose={() => question.done(false)}
         onConfirm={async () => question.done(true)}
@@ -195,9 +204,10 @@ function QuestionHost({ question }: { question: Question }) {
     const one = question.count === 1;
     return (
       <ConfirmDialog
-        title="Background jobs are running"
+        title="Stop background jobs and quit?"
         message={`${plural(question.count, 'background job')} ${one ? 'is' : 'are'} running. Quitting stops ${one ? 'it' : 'them'}.`}
         confirmLabel="Stop jobs and quit"
+        busyLabel="Stopping…"
         onClose={question.done}
         onConfirm={question.quit}
       />
@@ -381,15 +391,28 @@ export function DialogHost() {
   } else if (request?.kind === 'deleteNode') {
     const { node, label } = request;
     const isGroup = node.type === 'group';
+    const openTabs = isGroup ? 0 : useTabs.getState().tabs.filter((t) => t.kind === 'object' && t.connectionId === node.id).length;
     dialog = (
       <ConfirmDialog
-        title={isGroup ? 'Delete group' : 'Delete connection'}
-        message={
-          isGroup
-            ? `Delete the group "${label}"? Its subgroups are deleted; their connections are kept and move to the top level.`
-            : `Delete the connection "${label}"? Its saved passwords are removed too.`
+        title={isGroup ? `Delete group ${label}?` : `Delete connection ${label}?`}
+        details={
+          <ul className="confirm-details">
+            {isGroup ? (
+              <>
+                <li>Its subgroups are deleted too</li>
+                <li>Their connections are kept and move to the top level</li>
+              </>
+            ) : (
+              <>
+                <li>Its saved passwords are removed from the keychain</li>
+                {openTabs > 0 && <li>{plural(openTabs, 'open object tab')} will close</li>}
+                {stagedOnConnection(node.id) && <li className="bad">Unsaved data edits in its tabs are lost</li>}
+              </>
+            )}
+          </ul>
         }
-        confirmLabel="Delete"
+        confirmLabel={isGroup ? 'Delete group' : 'Delete connection'}
+        busyLabel="Deleting…"
         onClose={closeRequest}
         onConfirm={async () => {
           if (node.type === 'group') {

@@ -51,7 +51,8 @@ export function objectActionItems(node: TreeNode): Item[] {
 
 /**
  * The table designer's entries: "Design table" on a table (it also opens on a read-only connection,
- * view-only) and "New table…" on a MySQL database / PostgreSQL schema (disabled when read-only).
+ * view-only) and "New table…" on a MySQL database / PostgreSQL schema and on its Tables folder
+ * (disabled when read-only).
  * Nothing while the connection is closed.
  */
 export function designActionItems(node: TreeNode): Item[] {
@@ -62,10 +63,14 @@ export function designActionItems(node: TreeNode): Item[] {
   if (!cfg || !stored.info.has(connectionId)) return [];
   const object = node.objectRef;
   if (node.kind === 'object' && object?.kind === 'Table') {
-    return [{ label: 'Design table', run: () => void openDesignTab(connectionId, { database: object.database, schema: object.schema }, object.name) }];
+    return [{ label: 'Design table', hint: 'F4', run: () => void openDesignTab(connectionId, { database: object.database, schema: object.schema }, object.name) }];
   }
   const scope = node.scope;
-  const holdsTables = scope && (cfg.kind === 'postgres' ? node.kind === 'schema' && !!scope.schema : node.kind === 'database');
+  // The Tables folder is where a new table is looked for first; its scope is its database / schema.
+  const tablesFolder = node.kind === 'folder' && node.folderKind === 'Table';
+  const holdsTables = scope && (tablesFolder
+    ? cfg.kind !== 'postgres' || !!scope.schema
+    : cfg.kind === 'postgres' ? node.kind === 'schema' && !!scope.schema : node.kind === 'database');
   if (!scope || !holdsTables) return [];
   return [{ label: 'New table…', disabled: cfg.read_only, run: () => void openDesignTab(connectionId, scope, null) }];
 }

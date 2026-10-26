@@ -1,6 +1,6 @@
 //! IPC boundary for typed connection-tree actions.
 use super::guard;
-use crate::object_actions::{ActionPreview, ActionReport};
+use crate::object_actions::{ActionPreview, ActionReport, NamespaceOptions};
 use crate::state::AppState;
 use dnt_core::error::AppError;
 use dnt_core::sql::ddl::ObjectAction;
@@ -15,6 +15,24 @@ pub async fn object_action_preview(
     action: ObjectAction,
 ) -> Result<ActionPreview, AppError> {
     guard(state.sessions.object_action_preview(connection_id, action)).await
+}
+#[tauri::command]
+#[specta::specta]
+pub async fn object_action_render(
+    state: State<'_, AppState>,
+    connection_id: Uuid,
+    action: ObjectAction,
+) -> Result<String, AppError> {
+    guard(async { state.sessions.object_action_render(connection_id, &action) }).await
+}
+#[tauri::command]
+#[specta::specta]
+pub async fn namespace_options(
+    state: State<'_, AppState>,
+    connection_id: Uuid,
+    database: String,
+) -> Result<NamespaceOptions, AppError> {
+    guard(state.sessions.namespace_options(connection_id, database)).await
 }
 #[tauri::command]
 #[specta::specta]

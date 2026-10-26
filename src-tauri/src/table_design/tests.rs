@@ -860,14 +860,13 @@ async fn lock_wait_bound_covers_the_recheck() {
     }
 }
 
-/// MySQL / MariaDB refuse a statement that could not get its lock within
-/// `lock_wait_timeout` with error 1205 before changing anything: not applied. Any other
-/// server error of a sent MySQL DDL stays unknown (DDL is not transactional there).
+/// MySQL / MariaDB run each DDL statement on its own: a server error on the first statement
+/// (a lock wait refused with 1205, a duplicate, …) changed nothing, so it is not applied.
 #[tokio::test]
-async fn mysql_lock_wait_timeout_is_not_applied() {
+async fn mysql_first_statement_refused_is_not_applied() {
     for (code, expected) in [
         ("1205", ActionOutcome::NotApplied),
-        ("1062", ActionOutcome::Unknown),
+        ("1062", ActionOutcome::NotApplied),
     ] {
         let f = mysql(None, false).await;
         let o = open(&f).await;
@@ -896,6 +895,68 @@ async fn mysql_lock_wait_timeout_is_not_applied() {
         );
         assert_eq!(report.statements_sent, 1);
     }
+}
+
+/// A new table's CREATE TABLE the server refuses (an invalid default: 1067) created
+/// nothing: not applied, and the error does not claim an unknown outcome.
+#[tokio::test]
+async fn mysql_refused_create_table_is_not_applied() {
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    let n =
+        f.sm.table_design_open(f.conn, scope(&f), None)
+            .await
+            .unwrap();
+    let mut d = n.def.clone();
+    d.name = "fresh".into();
+    d.columns = o.def.columns.clone();
+    for c in &mut d.columns {
+        c.original = None;
+    }
+    let p = f.sm.table_design_preview(n.design_id, d).await.unwrap();
+    assert!(
+        p.statements[0].starts_with("CREATE TABLE"),
+        "{:?}",
+        p.statements
+    );
+    *f.fake.fail.lock().unwrap() = Some((
+        "CREATE TABLE".into(),
+        server_error(Some("1067"), Some("42000")),
+    ));
+    let report =
+        f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+            .await
+            .unwrap();
+    assert_eq!(report.outcome, ActionOutcome::NotApplied, "{report:?}");
+    assert!(!report.error.as_ref().unwrap().outcome_unknown);
+    assert_eq!(report.statements_sent, 1);
+}
+
+/// A MySQL design is one ALTER TABLE: a rename and a new column share it, so the
+/// first-statement rule covers every MySQL server refusal of the designer. A lost
+/// connection (no answer from the server) stays unknown.
+#[tokio::test]
+async fn mysql_design_is_one_statement_and_a_lost_connection_stays_unknown() {
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    let mut d = add_note(&o.def);
+    d.name = "orders_renamed".into();
+    let p = f.sm.table_design_preview(o.design_id, d).await.unwrap();
+    assert_eq!(p.statements.len(), 1, "{:?}", p.statements);
+    *f.fake.fail.lock().unwrap() = Some((
+        "ALTER TABLE".into(),
+        DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: "lost".into(),
+        },
+    ));
+    let report =
+        f.sm.table_design_apply(p.plan_id, true, None, Uuid::new_v4(), &no_progress)
+            .await
+            .unwrap();
+    assert_eq!(report.outcome, ActionOutcome::Unknown, "{report:?}");
+    assert!(report.error.as_ref().unwrap().outcome_unknown);
 }
 
 #[tokio::test]

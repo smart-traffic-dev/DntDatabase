@@ -5,6 +5,7 @@ import { DraftInput } from './DraftInput';
 import {
   baseText,
   columnErrors,
+  defaultFromText,
   columnKey,
   isInteger,
   lockOf,
@@ -19,6 +20,7 @@ import {
   withBase,
   withType,
 } from './columnModel';
+import { TypePicker } from './TypePicker';
 import './columnInspector.css';
 
 type Edit = (recipe: (d: TableDef) => TableDef, coalesce?: string) => void;
@@ -60,7 +62,7 @@ export function ColumnInspector({ open, draft, errors, editable, selection, onSe
       )}
       <span className="dz-spacer" />
       <div className="dz-hint">
-        {pg ? '' : 'Ctrl+↑/↓ reorders columns · '}Delete marks a column for drop · Ctrl+Z undoes in the designer
+{pg ? '' : 'Ctrl+↑/↓ reorders columns · '}Delete marks a column for drop · Ctrl+Z undoes · Ctrl+S reviews and applies
       </div>
     </aside>
   );
@@ -94,7 +96,11 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
   const set = (patch: Partial<ColumnDef>, key?: string) => edit((d) => updateColumn(d, index, patch), key);
   const retype = (next: TypeSpec, key?: string) => set(withType(column, next, open.catalog, engine, base), key);
   const setType = (patch: Partial<NonNullable<typeof spec>>, key?: string) => spec && retype({ ...spec, ...patch }, key);
-  const setDefault = (kind: DefaultSpec['kind'], text: string, key?: string) => set({ default: text === '' ? null : { kind, text } }, key);
+  // Unless Value / Expression was picked here, `CURRENT_TIMESTAMP` or `now()` typed as a value is an expression.
+  const [chosenMode, setChosenMode] = useState(false);
+  // `chosen`: the click that picks the mode cannot wait for `chosenMode` to update.
+  const setDefault = (kind: DefaultSpec['kind'], text: string, key?: string, chosen = chosenMode) =>
+    set({ default: chosen ? (text === '' ? null : { kind, text }) : defaultFromText(text, kind) }, key);
   const state = column.original === null ? 'New' : base && !deepEqual(base, column) ? 'Modified' : null;
 
   const shows = {
@@ -167,23 +173,16 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
         />
       </label>
       <div className="dz-type-row">
-        <label className="dz-field">
+        <div className="dz-field">
           <span>Type</span>
-          <DraftInput
-            aria-label="Type"
-            className="mono"
-            list={`${uid}-types`}
+          <TypePicker
             value={baseText(column.data_type)}
+            catalog={open.catalog}
             disabled={disabled}
             error={errorOf('data_type')}
             onCommit={(text, key) => retype(withBase(column.data_type, text, open.catalog), key)}
           />
-          <datalist id={`${uid}-types`}>
-            {open.catalog.map((t) => (
-              <option key={t.base} value={t.base} />
-            ))}
-          </datalist>
-        </label>
+        </div>
         {param('length', 'Length')}
         {param('precision', 'Precision')}
         {param('scale', 'Scale')}
@@ -262,8 +261,9 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
               aria-pressed={mode === k}
               disabled={disabled}
               onClick={() => {
+                setChosenMode(true);
                 setPendingMode(k);
-                if (column.default && column.default.kind !== k) setDefault(k, column.default.text);
+                if (column.default && column.default.kind !== k) setDefault(k, column.default.text, undefined, true);
               }}
             >
               {k === 'value' ? 'Value' : 'Expression'}
@@ -277,6 +277,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
           placeholder={column.nullable ? 'NULL' : undefined}
           disabled={disabled}
           error={errorOf('default')}
+          normalize={(text) => (chosenMode ? text : (defaultFromText(text, mode)?.text ?? ''))}
           onCommit={(text, key) => setDefault(mode, text, key)}
         />
       </div>

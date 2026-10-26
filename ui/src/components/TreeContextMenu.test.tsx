@@ -53,6 +53,24 @@ describe('table designer tree entries', () => {
     expect(entry(tableNode, 'Design table')).not.toHaveProperty('disabled', true);
   });
 
+  it('New table… on the Tables folder opens a design tab in its scope (MySQL and PostgreSQL)', () => {
+    const mysqlFolder: TreeNode = { id: `conn:${ids.prod}/db:shop/folder:Table`, kind: 'folder', label: 'Tables', folderKind: 'Table', scope: { database: 'shop', schema: null } };
+    entry(mysqlFolder, 'New table…').run();
+    expect(useTabs.getState().tabs[0]).toMatchObject({ kind: 'design', table: null, scope: { database: 'shop', schema: null }, title: 'New table' });
+    // Other folders have no designer entry.
+    expect(designActionItems({ ...mysqlFolder, folderKind: 'View', label: 'Views' })).toEqual([]);
+    useConnections.getState().setStored([], [config(ids.prod, 'ro', { read_only: true })]);
+    expect(entry(mysqlFolder, 'New table…')).toMatchObject({ disabled: true });
+
+    resetStores();
+    useConnections.getState().setStored([], [config(ids.prod, 'pg', { kind: 'postgres' })]);
+    useConnections.getState().setInfo(ids.prod, serverInfo('Postgres'));
+    const pgFolder: TreeNode = { ...mysqlFolder, id: `conn:${ids.prod}/db:shop/schema:sales/folder:Table`, scope: { database: 'shop', schema: 'sales' } };
+    entry(pgFolder, 'New table…').run();
+    expect(useTabs.getState().tabs[0]).toMatchObject({ kind: 'design', table: null, scope: { database: 'shop', schema: 'sales' } });
+    expect(designActionItems({ ...pgFolder, scope: { database: 'shop', schema: null } })).toEqual([]);
+  });
+
   it('Import data… on a table opens the import wizard pre-filled (also read-only); not on a view', () => {
     const found = importActionItems(tableNode).find((e) => 'label' in e && e.label === 'Import data…');
     if (!found || !('run' in found)) throw new Error('no "Import data…" item');

@@ -37,7 +37,7 @@ describe('DialogHost', () => {
     });
     render(<DialogHost />);
     const dlg = screen.getByRole('alertdialog');
-    expect(dlg).toHaveTextContent('open transaction on shop-prod (PRODUCTION)');
+    expect(dlg).toHaveTextContent('open transaction on shop-prod');
     expect(within(dlg).getByTestId('env-chip')).toBeInTheDocument();
   });
 
@@ -340,7 +340,7 @@ describe('DialogHost', () => {
     useDialogs.getState().requestDialog({ kind: 'deleteNode', node: { type: 'connection', id: ids.prod }, label: 'shop-prod' });
     const user = userEvent.setup();
     render(<DialogHost />);
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await user.click(screen.getByRole('button', { name: 'Delete connection' }));
     await waitFor(() => expect(useDialogs.getState().request).toBeNull());
     expect(useTabs.getState().tabs.map((t) => t.connectionId)).toEqual([ids.analytics]);
   });
@@ -370,7 +370,7 @@ describe('DialogHost', () => {
     const user = userEvent.setup();
     render(<DialogHost />);
     expect(screen.getByRole('alertdialog')).toHaveTextContent('shop-prod');
-    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    await user.click(screen.getByRole('button', { name: 'Delete connection' }));
     await waitFor(() => expect(useDialogs.getState().request).toBeNull());
     expect(callsOf('delete_connection')[0]).toEqual({ id: ids.prod });
   });
