@@ -181,13 +181,13 @@ describe('QueryToolbar', () => {
   });
 
   describe('context chip', () => {
-    it('shows the environment and database (connection and server in the tooltip) and opens the picker', async () => {
+    it('shows the environment, connection and database (server in the tooltip) and opens the picker', async () => {
       useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { env_tag: 'production' })]);
       const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
       render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
       const pill = screen.getByTestId('query-context');
       expect(within(pill).getByTestId('query-context-env')).toHaveTextContent('PROD');
-      expect(pill).toHaveTextContent(/^PRODshop$/);
+      expect(pill).toHaveTextContent(/^PRODshop-prod›shop$/);
       expect(pill).toHaveAttribute('title', expect.stringMatching(/^shop-prod \(.+:\d+\) › shop · production\./));
       expect(pill).toHaveAttribute('aria-haspopup', 'dialog');
       expect(screen.queryByTestId('query-connection')).toBeNull();
@@ -200,6 +200,18 @@ describe('QueryToolbar', () => {
       await user.keyboard('{Escape}');
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(pill).toHaveFocus();
+    });
+
+    it('no database picked: names the connection default, else says Default database', () => {
+      useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { default_db: 'dnt_fixture' }), config(ids.analytics, 'stats')]);
+      const a = useQueryDocs.getState().newQuery(ids.prod, null);
+      const { unmount } = render(<QueryToolbar doc={useQueryDocs.getState().docs.get(a)!} />);
+      expect(screen.getByTestId('query-context')).toHaveTextContent(/^shop-prod›dnt_fixture$/);
+      expect(screen.getByTestId('query-context')).toHaveAttribute('title', expect.stringContaining('dnt_fixture (connection default)'));
+      unmount();
+      const b = useQueryDocs.getState().newQuery(ids.analytics, null);
+      render(<QueryToolbar doc={useQueryDocs.getState().docs.get(b)!} />);
+      expect(screen.getByTestId('query-context')).toHaveTextContent(/^stats›Default database$/);
     });
 
     it('without a connection it asks for one', () => {

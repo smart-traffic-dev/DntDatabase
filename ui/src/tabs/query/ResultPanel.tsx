@@ -34,6 +34,24 @@ function cancelledText(run: TabRun): string | null {
   return ms === null ? 'Cancelled by user' : `Cancelled by user after ${(ms / 1000).toFixed(1)} s`;
 }
 
+/** `FROM [db.]table`: the table a statement reads first (its last name part, quotes dropped). */
+const NAME_PART = '(?:`[^`]+`|"[^"]+"|\\[[^\\]]+\\]|[\\w$]+)';
+const FROM_TABLE = new RegExp(`\\bfrom\\s+(?:${NAME_PART}\\s*\\.\\s*)*(${NAME_PART})`, 'i');
+
+/** What a result tab is called: the one table its columns come from, else the table its statement reads; else `Result n`. */
+export function resultLabel(result: ResultSet, preview: string | undefined, n: number): string {
+  const origins = new Set(result.columns.flatMap((c) => (c.origin_table ? [c.origin_table.name] : [])));
+  if (origins.size === 1) return [...origins][0]!;
+  const table = preview?.match(FROM_TABLE)?.[1];
+  return table ? table.replace(/^[`"[]|[`"\]]$/g, '') : `Result ${n}`;
+}
+
+/** The run's result tab names; a name used twice gets its position (`orders (2)`). */
+function resultLabels(run: TabRun): string[] {
+  const names = run.results.map((r, i) => resultLabel(r, run.plan?.stmts.find((s) => s.index === r.index)?.preview, i + 1));
+  return names.map((name, i) => (names.indexOf(name) !== names.lastIndexOf(name) ? `${name} (${i + 1})` : name));
+}
+
 /**
  * The bottom half of a query tab: result tabs and Messages. Memo: typing re-renders its parent.
  * `collapsed`: folded to its tab bar by the user; choosing one of its tabs calls `onOpen`.
@@ -78,6 +96,7 @@ function ResultPanelView({
   const readStatement = result ? run.plan?.stmts.find((s) => s.index === result.index)?.kind === 'read' : false;
   const errors = errorCount(run);
   const cancelled = cancelledText(run);
+  const labels = resultLabels(run);
 
   // A run that ends on an error after a result moves to Messages: the squiggle alone is too quiet (F16).
   const wasActive = useRef(run.phase.kind !== 'idle');
@@ -110,12 +129,13 @@ function ResultPanelView({
               aria-selected={showResult && i === at}
               className={`qr-tab${showResult && i === at ? ' active' : ''}`}
               data-testid={`result-tab-${i + 1}`}
+              title={run.plan?.stmts.find((s) => s.index === r.index)?.preview}
               onClick={() => {
                 setPicked({ runId: run.runId, at: i });
                 setPanel(tabId, 'result');
               }}
             >
-              Result {i + 1}
+              {labels[i]}
             </button>
           ))}
         </div>

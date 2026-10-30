@@ -149,7 +149,7 @@ describe('ObjectTab', () => {
     // What the tree's double-click (and Enter / "Open") does.
     openObjectTab({ id: `conn:${ids.prod}/db:shop/obj`, kind: 'object', label: 'orders', objectRef });
     const tab = useTabs.getState().tabs.at(-1) as Tab;
-    render(<ObjectTab tab={tab} />);
+    render(withActions(tab));
     expect(screen.getAllByRole('tab')[0]).toHaveTextContent('Data');
     expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
     expect(await screen.findByText('1–1')).toBeInTheDocument();
@@ -190,15 +190,17 @@ describe('ObjectTab', () => {
     expect(callsOf('object_ddl')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
   });
 
-  it('no header row: the sections lead the sub-tab row; the chip names the connection and path', async () => {
+  it('no header row: the sections sit in the toolbar after the chip, which names the connection and database', async () => {
     useConnections.getState().setStored([], [config(ids.prod, 'shop-prod')]);
     const { container } = setup(makeTab('Table'));
     expect(screen.queryByRole('banner')).toBeNull();
+    // The content starts right away: no sub-tab row of its own.
     const tab = container.querySelector('.object-tab')!;
-    expect(tab.firstElementChild).toHaveClass('ot-subbar');
-    expect(within(tab as HTMLElement).getByRole('tablist', { name: 'Object sections' })).toBeInTheDocument();
+    expect(tab.firstElementChild).toHaveAttribute('role', 'tabpanel');
+    const toolbar = screen.getByRole('toolbar', { name: 'Object' });
+    expect(within(toolbar).getByRole('tablist', { name: 'Object sections' })).toBeInTheDocument();
     const chip = screen.getByTestId('object-context');
-    expect(chip).toHaveTextContent('shop');
+    expect(chip).toHaveTextContent('shop-prod›shop');
     expect(chip).toHaveAttribute('title', expect.stringContaining('shop-prod'));
     expect(chip).toHaveAttribute('title', expect.stringContaining('shop › orders'));
     expect(within(chip).queryByRole('img', { name: 'Read-only' })).toBeNull();

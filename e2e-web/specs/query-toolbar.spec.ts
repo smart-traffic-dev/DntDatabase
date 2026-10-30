@@ -105,7 +105,8 @@ test.describe('query toolbar row', () => {
     await openQuery(page);
     await bindProd(page);
     await expect(byId(page, 'query-explain')).toBeVisible();
-    await expect(byId(page, 'query-context')).toHaveText('PRODDefault database');
+    // No database picked: the chip names the connection's default one.
+    await expect(byId(page, 'query-context')).toHaveText('PRODshop-prod›dnt_fixture');
 
     // The sidebar is 280 px by default: a 620 px window leaves the group under 360 px.
     await page.setViewportSize({ width: 620, height: 800 });

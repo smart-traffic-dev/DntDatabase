@@ -5,21 +5,7 @@ import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { useConnections } from '../store/connections';
 import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
-import type { ObjectKind } from '../bindings';
-import {
-  ChevronIcon,
-  DatabaseIcon,
-  EventIcon,
-  EyeIcon,
-  FolderIcon,
-  FunctionIcon,
-  ListIcon,
-  ObjectIcon,
-  ProcedureIcon,
-  SchemaIcon,
-  TableIcon,
-  TriggerIcon,
-} from './icons';
+import { ChevronIcon, DatabaseIcon, FolderIcon, KindIcon, ListIcon, SchemaIcon } from './icons';
 import { useDialogs } from '../store/dialogs';
 import { openQueryOnNode } from './newQuery';
 import { openObjectTab } from './openObject';
@@ -45,27 +31,6 @@ export const emptyAreaItems = (): MenuEntry[] => [
   { separator: true },
   ...transferItems(),
 ];
-
-/** One glyph per object kind, shared by a folder and the objects in it. */
-function KindIcon({ kind }: { kind: ObjectKind | undefined }) {
-  switch (kind) {
-    case 'Table':
-      return <TableIcon />;
-    case 'View':
-    case 'MaterializedView':
-      return <EyeIcon />;
-    case 'Function':
-      return <FunctionIcon />;
-    case 'Procedure':
-      return <ProcedureIcon />;
-    case 'Trigger':
-      return <TriggerIcon />;
-    case 'Event':
-      return <EventIcon />;
-    default:
-      return <ObjectIcon />;
-  }
-}
 
 export function NodeIcon({ node }: { node: TreeNode }) {
   switch (node.kind) {

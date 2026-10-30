@@ -125,7 +125,7 @@ describe('TabBar', () => {
     expect(callsOf('tabs_delete')).toEqual([]);
   });
 
-  it('query_tab_shows_sql_label', () => {
+  it('query_tab_shows_query_glyph', () => {
     act(() => {
       useConnections.getState().setStored([], [config(ids.prod, 'prod', { env_tag: 'production' })]);
       useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: ids.prod, title: 'Query 1' });
@@ -133,9 +133,23 @@ describe('TabBar', () => {
     });
     render(<TabBar />);
     const q1 = screen.getByRole('tab', { name: /Query 1/ });
-    expect(q1).toHaveTextContent('SQL');
+    expect(q1.querySelector('.tab-kind')).toHaveAttribute('data-kind', 'Query');
     expect(q1.closest('.tab')).toHaveClass('env-production');
-    expect(screen.getByRole('tab', { name: /Query 2/ })).toHaveTextContent('SQL');
+    expect(q1.closest('.tab')).toHaveAttribute('title', expect.stringMatching(/^Query: Query 1/));
+    expect(screen.getByRole('tab', { name: /Query 2/ }).querySelector('.tab-kind')).toHaveAttribute('data-kind', 'Query');
+  });
+
+  it('a title open on two connections shows each tab its connection', () => {
+    act(() => {
+      useConnections.getState().setStored([], [config(ids.prod, 'shop-prod'), config(ids.analytics, 'shop-dev')]);
+      for (const [id, conn] of [['o1', ids.prod], ['o2', ids.analytics]] as const) {
+        const objectRef = { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const };
+        useTabs.getState().open({ id, kind: 'object', connectionId: conn, objectRef, title: 'orders' });
+      }
+      useTabs.getState().open({ id: 'q1', kind: 'query', connectionId: ids.prod, title: 'Query 1' });
+    });
+    const { container } = render(<TabBar />);
+    expect([...container.querySelectorAll('.tab-conn')].map((e) => e.textContent)).toEqual(['shop-prod', 'shop-dev']);
   });
   it('marks read-only connections and tabs with an open transaction', () => {
     act(() => {

@@ -4,7 +4,8 @@ import { useTabs } from './tabs';
 export const SIDEBAR_DEFAULT = 280;
 export const SIDEBAR_MIN = 180;
 export const SIDEBAR_MAX = 600;
-export const EDITOR_RATIO_DEFAULT = 0.6;
+/** The editor's share of a query tab: under half, so a first run shows a useful page of rows. */
+export const EDITOR_RATIO_DEFAULT = 0.42;
 /** Smallest sensible editor share; the pixel minimums are applied against the real height (`editorPixels`). */
 export const EDITOR_RATIO_MIN = 0.05;
 export const EDITOR_RATIO_MAX = 0.95;

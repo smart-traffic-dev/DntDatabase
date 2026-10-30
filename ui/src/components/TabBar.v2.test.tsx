@@ -147,14 +147,14 @@ describe('TabBar (editor v2)', () => {
     const { container } = render(<TabBar />);
     fireEvent.doubleClick(container.querySelector('.tabstrip-fill')!);
     expect(s().tabs.filter((t) => t.kind === 'query')).toHaveLength(1);
-    fireEvent.doubleClick(screen.getByRole('tab', { name: /a/ }));
+    fireEvent.doubleClick(screen.getByRole('tab', { name: 'a' }));
     expect(s().tabs.filter((t) => t.kind === 'query')).toHaveLength(1);
   });
 
   it('the tab menu splits on all four sides', async () => {
     act(() => ['a', 'b'].forEach((id) => s().open(obj(id))));
     render(<TabBar />);
-    fireEvent.contextMenu(screen.getByRole('tab', { name: /b/ }));
+    fireEvent.contextMenu(screen.getByRole('tab', { name: 'b' }));
     for (const side of ['right', 'down', 'left', 'up']) expect(screen.getByRole('menuitem', { name: new RegExp(`^Split ${side}`) })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: /^Split left/ }));
     expect(s().groups).toHaveLength(2);

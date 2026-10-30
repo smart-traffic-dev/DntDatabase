@@ -91,7 +91,7 @@ describe('editor / results split', () => {
     ran(id);
     render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
     const pane = document.querySelector<HTMLElement>('.query-editor-pane')!;
-    expect(pane).toHaveStyle({ flex: '0 0 360px' });
+    expect(pane).toHaveStyle({ flex: '0 0 252px' });
     const toggle = screen.getByTestId('result-maximize');
     expect(toggle).toHaveAccessibleName('Maximize results');
     expect(toggle).toHaveAttribute('title', expect.stringContaining('Ctrl+Shift+J'));
@@ -101,7 +101,7 @@ describe('editor / results split', () => {
     expect(screen.getByTestId('result-maximize')).toHaveAccessibleName('Restore results');
     await user.click(screen.getByTestId('result-maximize'));
     expect(pane).not.toHaveAttribute('hidden');
-    expect(pane).toHaveStyle({ flex: '0 0 360px' });
+    expect(pane).toHaveStyle({ flex: '0 0 252px' });
     expect(separator()).toBeInTheDocument();
   });
 
@@ -118,12 +118,12 @@ describe('editor / results split', () => {
     ran(id);
     render(<QueryTab tab={{ id, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />);
     const bar = screen.getByRole('separator', { name: 'Resize editor and results' });
-    // jsdom reports a 600 px body: 60 % is 360 px.
-    expect(bar).toHaveAttribute('aria-valuenow', '360');
-    expect(bar.previousElementSibling).toHaveStyle({ flex: '0 0 360px' });
+    // jsdom reports a 600 px body: 42 % is 252 px.
+    expect(bar).toHaveAttribute('aria-valuenow', '252');
+    expect(bar.previousElementSibling).toHaveStyle({ flex: '0 0 252px' });
     fireEvent.keyDown(bar, { key: 'ArrowDown' });
-    expect(bar).toHaveAttribute('aria-valuenow', '376');
-    expect(useLayout.getState().editorRatio).toBeCloseTo(376 / 600);
+    expect(bar).toHaveAttribute('aria-valuenow', '268');
+    expect(useLayout.getState().editorRatio).toBeCloseTo(268 / 600);
     fireEvent.keyDown(bar, { key: 'End' });
     // The result panel keeps at least 120 px.
     expect(bar).toHaveAttribute('aria-valuenow', '480');

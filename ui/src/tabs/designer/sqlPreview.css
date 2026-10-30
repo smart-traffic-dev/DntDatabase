@@ -27,6 +27,27 @@
   flex-direction: column;
   border-top: 1px solid var(--dnt-border);
   background: var(--dnt-bg-chrome);
+  container: dz-preview / inline-size;
+}
+
+/* Narrow preview: the impacts go under the SQL instead of squeezing it to a word per line. */
+@container dz-preview (max-width: 640px) {
+  .dz-preview-body {
+    flex-direction: column;
+    overflow: auto;
+  }
+
+  .dz-sql-pane {
+    flex: 1 0 auto;
+  }
+
+  .dz-impacts {
+    flex: none;
+    width: auto;
+    border-left: 0;
+    border-top: 1px solid var(--dnt-border-subtle);
+    overflow: visible;
+  }
 }
 
 /* In the designer tab: 260px when there is room, in a short editor it shrinks down to its bar. */

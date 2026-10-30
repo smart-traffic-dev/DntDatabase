@@ -3,25 +3,21 @@ import { JobsPanel } from '../jobs/JobsPanel';
 import { RIGHT_DEFAULT, RIGHT_MAX, RIGHT_MIN, useLayout, type RightActivity } from '../store/layout';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HistoryPanel } from './HistoryPanel';
-import { AssistantIcon, HistoryIcon, JobsIcon, ObjectInfoIcon, SnippetsIcon } from './icons';
+import { HistoryIcon, JobsIcon } from './icons';
 import { Splitter } from './Splitter';
 import './rightSidebar.css';
 
 interface Activity {
-  id: string;
+  id: RightActivity;
   label: string;
   icon: ReactNode;
-  /** A panel that exists yet; the others are listed so the bar shows where they will live. */
-  enabled: boolean;
   hint?: string;
 }
 
+/** Only panels that exist: a disabled "coming soon" icon is noise on a bar that never goes away. */
 const ACTIVITIES: Activity[] = [
-  { id: 'history', label: 'History', icon: <HistoryIcon />, enabled: true, hint: 'Ctrl+Shift+H' },
-  { id: 'jobs', label: 'Jobs', icon: <JobsIcon />, enabled: true },
-  { id: 'snippets', label: 'Snippets', icon: <SnippetsIcon />, enabled: false },
-  { id: 'object-info', label: 'Object info', icon: <ObjectInfoIcon />, enabled: false },
-  { id: 'assistant', label: 'AI assistant', icon: <AssistantIcon />, enabled: false },
+  { id: 'history', label: 'History', icon: <HistoryIcon />, hint: 'Ctrl+Shift+H' },
+  { id: 'jobs', label: 'Jobs', icon: <JobsIcon /> },
 ];
 
 /**
@@ -65,19 +61,17 @@ export function RightSidebar() {
       )}
       <nav className="rs-activity" aria-label="Right sidebar" data-testid="right-sidebar-bar">
         {ACTIVITIES.map((a) => {
-          const on = a.enabled && visible && a.id === activity;
-          const label = a.enabled ? a.label : `${a.label} (coming soon)`;
+          const on = visible && a.id === activity;
           return (
             <button
               key={a.id}
               type="button"
               className={`rs-act${on ? ' on' : ''}`}
               data-testid={`right-sidebar-${a.id}`}
-              aria-label={label}
-              aria-pressed={a.enabled ? on : undefined}
-              title={a.hint ? `${a.label} (${a.hint})` : label}
-              disabled={!a.enabled}
-              onClick={() => show(a.id as RightActivity)}
+              aria-label={a.label}
+              aria-pressed={on}
+              title={a.hint ? `${a.label} (${a.hint})` : a.label}
+              onClick={() => show(a.id)}
             >
               {a.icon}
             </button>

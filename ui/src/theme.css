@@ -777,14 +777,27 @@ textarea:focus-visible,
 }
 
 .tab-kind {
-  font-family: var(--font-mono);
-  font-size: var(--dnt-text-xs);
+  display: inline-flex;
+  flex: none;
   color: var(--dnt-fg-muted);
+}
+
+.tab-kind svg {
+  width: 14px;
+  height: 14px;
 }
 
 .tab-title {
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The connection of a title open on several connections. */
+.tab-conn {
+  flex: none;
+  color: var(--dnt-fg-muted);
+  font-weight: 400;
+  font-size: var(--dnt-text-xs);
 }
 
 .tab-dirty {

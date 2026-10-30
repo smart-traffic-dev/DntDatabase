@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import type { ObjectKind } from '../bindings';
 
 interface IconProps {
   size?: number;
@@ -170,6 +171,50 @@ export const EventIcon = () => (
     <path d="M12 8v4l3 2" />
   </Icon>
 );
+
+/** A page with a play mark: query tabs. */
+export const QueryIcon = () => (
+  <Icon>
+    <path d="M6 3h9l4 4v14H6zM14 3v5h5" />
+    <path d="M10 11l5 3-5 3z" />
+  </Icon>
+);
+
+/** A table with a pencil: table designer tabs. */
+export const DesignIcon = () => (
+  <Icon>
+    <path d="M12 20H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v5M3 10h18M9 10v10" />
+    <path d="M19.5 13.5l2 2L16 21h-2v-2z" />
+  </Icon>
+);
+
+/** Angle brackets: DDL editor tabs. */
+export const CodeIcon = () => (
+  <Icon>
+    <path d="M8 7l-5 5 5 5M16 7l5 5-5 5" />
+  </Icon>
+);
+
+/** One glyph per object kind, shared by the tree, the tab strip and quick open. */
+export function KindIcon({ kind }: { kind: ObjectKind | undefined }) {
+  switch (kind) {
+    case 'Table':
+      return <TableIcon />;
+    case 'View':
+    case 'MaterializedView':
+      return <EyeIcon />;
+    case 'Function':
+      return <FunctionIcon />;
+    case 'Procedure':
+      return <ProcedureIcon />;
+    case 'Trigger':
+      return <TriggerIcon />;
+    case 'Event':
+      return <EventIcon />;
+    default:
+      return <ObjectIcon />;
+  }
+}
 
 /** The editor layout as a small diagram: one pane, two columns, two rows or a 2 × 2 grid. */
 export const LayoutIcon = ({ layout }: { layout: 'single' | 'columns' | 'rows' | 'grid' | 'custom' }) => (

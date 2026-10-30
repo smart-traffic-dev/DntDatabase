@@ -538,7 +538,7 @@ function ContextFields({ doc }: { doc: ToolbarDoc }) {
 const POPOVER_GAP = 8;
 
 /**
- * Context chip `[ENV] database` (connection, server and environment in the tooltip): one control
+ * Context chip `[ENV] connection › database` (server and environment in the tooltip): one control
  * that opens a picker with the connection and database selects. Esc closes it and gives the focus
  * back to the chip; an outside click or the focus leaving it closes it too. In a narrow group the
  * chip is the badge only.
@@ -573,12 +573,12 @@ function ContextChip({ doc, env, narrow }: { doc: ToolbarDoc; env: EnvTag | null
     if (under > 0) el.style.transform = `translateX(${under}px)`;
   }, [open]);
 
-  const database = doc.database ?? 'Default database';
+  // No database picked: the session opens on the connection's default one, named when it has one.
+  const database = doc.database ?? conn?.default_db ?? 'Default database';
   const server = conn ? ` (${conn.host}:${conn.port})` : '';
   const tip = name
-    ? `${name}${server} › ${database}${env ? ` · ${env}` : ''}. Change the connection or database`
+    ? `${name}${server} › ${database}${doc.database ? '' : ' (connection default)'}${env ? ` · ${env}` : ''}. Change the connection or database`
     : 'Choose a connection to run queries';
-  const text = name ? database : 'Choose a connection';
   return (
     <span
       className="qt-context"
@@ -607,7 +607,17 @@ function ContextChip({ doc, env, narrow }: { doc: ToolbarDoc; env: EnvTag | null
           !env && <DatabaseIcon />
         ) : (
           <>
-            <span className={`ta-chip-text${doc.database ? '' : ' ta-chip-default'}`}>{text}</span>
+            {name ? (
+              <>
+                <span className="ta-chip-conn">{name}</span>
+                <span className="ta-chip-sep" aria-hidden="true">
+                  ›
+                </span>
+                <span className={`ta-chip-text${doc.database ? '' : ' ta-chip-default'}`}>{database}</span>
+              </>
+            ) : (
+              <span className="ta-chip-text ta-chip-default">Choose a connection</span>
+            )}
             <span className="ta-chip-caret" aria-hidden="true">
               <ChevronDownIcon />
             </span>

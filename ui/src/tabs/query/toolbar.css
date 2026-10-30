@@ -139,7 +139,7 @@
   align-items: center;
   gap: var(--dnt-space-1_5);
   min-width: 0;
-  max-width: 260px;
+  max-width: 360px;
   height: var(--dnt-ctl-h-md);
   padding: 0 var(--dnt-space-2);
   border: 1px solid var(--dnt-border);
@@ -176,11 +176,23 @@ button.ta-chip:hover {
   cursor: default;
 }
 
-.ta-chip-text {
+.ta-chip-text,
+.ta-chip-conn {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* `connection › database`: the connection gives way first when the chip runs out of room. */
+.ta-chip-conn {
+  flex: 0 10 auto;
+  font-weight: 500;
+}
+
+.ta-chip-sep {
+  flex: none;
+  color: var(--dnt-fg-muted);
 }
 
 .ta-chip > svg,

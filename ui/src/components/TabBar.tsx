@@ -19,14 +19,14 @@ import { useDdlEdits } from '../store/ddlEdits';
 import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
-import { ChevronDownIcon, CloseIcon, LockIcon, PinIcon, PlusIcon, RestoreIcon } from './icons';
+import { ChevronDownIcon, CloseIcon, CodeIcon, DesignIcon, KindIcon, LockIcon, PinIcon, PlusIcon, QueryIcon, RestoreIcon } from './icons';
 import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
 import { openObjectTab } from './openObject';
 import { draggedItem, openTabOfNode, setDraggedTab, TAB_DRAG_TYPE, useDrag } from './tabDrag';
 import { useRunMarks } from '../store/runMarks';
 import { useTree } from '../store/tree';
-import { TabStripActions } from '../tabs/TabStripActions';
+import { hasStripActions, TabStripActions } from '../tabs/TabStripActions';
 import { closeAllTabs, closeOtherTabs, closeSavedTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
 /** While dragging, this close to an end of an overflowing strip scrolls it by a step per move. */
@@ -41,16 +41,48 @@ export const tabContentId = (groupId: string) => `tab-content-${groupId}`;
 export { TAB_DRAG_TYPE } from './tabDrag';
 
 const KIND_LABEL: Record<ObjectKind, string> = {
-  Table: 'TBL',
-  View: 'VIEW',
-  MaterializedView: 'MV',
-  Function: 'FN',
-  Procedure: 'PROC',
-  Trigger: 'TRG',
-  Event: 'EVT',
-  Sequence: 'SEQ',
-  Type: 'TYPE',
+  Table: 'Table',
+  View: 'View',
+  MaterializedView: 'Materialized view',
+  Function: 'Function',
+  Procedure: 'Procedure',
+  Trigger: 'Trigger',
+  Event: 'Event',
+  Sequence: 'Sequence',
+  Type: 'Type',
 };
+
+/** What a tab holds, in words (the tab's tooltip; its glyph is `TabKind`). */
+const kindLabel = (tab: Tab): string =>
+  tab.kind === 'query' ? 'Query' : tab.kind === 'design' ? 'Table design' : tab.kind === 'ddl' ? 'DDL' : KIND_LABEL[tab.objectRef.kind];
+
+/**
+ * The tab's kind as the glyph the tree shows for it (a query, a designer and a DDL editor have
+ * their own). Decorative: the tab's name stays its title, the kind is in the tooltip.
+ */
+function TabKind({ tab }: { tab: Tab }) {
+  const icon =
+    tab.kind === 'query' ? <QueryIcon /> : tab.kind === 'design' ? <DesignIcon /> : tab.kind === 'ddl' ? <CodeIcon /> : <KindIcon kind={tab.objectRef.kind} />;
+  return (
+    <span className="tab-kind" aria-hidden="true" data-kind={kindLabel(tab)}>
+      {icon}
+    </span>
+  );
+}
+
+/**
+ * Titles open on more than one connection (`orders` of shop-dev and of shop-prod): those tabs
+ * show their connection's name after the title, so they can be told apart.
+ */
+function ambiguousTitles(tabs: Tab[]): Set<string> {
+  const conns = new Map<string, Set<string | null>>();
+  for (const t of tabs) {
+    const set = conns.get(t.title) ?? new Set();
+    set.add(t.connectionId ?? null);
+    conns.set(t.title, set);
+  }
+  return new Set([...conns].filter(([, set]) => set.size > 1).map(([title]) => title));
+}
 
 /** What the `●` of an unsaved tab says, per tab kind. */
 const DIRTY_LABEL: Record<Tab['kind'], string> = {
@@ -237,6 +269,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
   };
 
   const activeTab = tabs.find((t) => t.id === activeId);
+  const ambiguous = useMemo(() => ambiguousTitles(allTabs), [allTabs]);
   return (
     <>
     <div
@@ -293,7 +326,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
           const running = runningIds.includes(tab.id);
           const mark = marks.get(tab.id);
           const inTx = tab.kind === 'query' && txIds.includes(tab.id);
-          const tip = [tab.title, conn ? `Connection: ${conn.name}` : null, readOnly ? 'Read-only' : null, inTx ? 'Open transaction' : null]
+          const tip = [`${kindLabel(tab)}: ${tab.title}`, conn ? `Connection: ${conn.name}` : null, readOnly ? 'Read-only' : null, inTx ? 'Open transaction' : null]
             .filter(Boolean)
             .join(' · ');
           return (
@@ -338,8 +371,9 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                   </span>
                 )}
                 {env && <EnvTag env={env} />}
-                <span className="tab-kind">{tab.kind === 'query' ? 'SQL' : tab.kind === 'design' ? 'Design' : tab.kind === 'ddl' ? 'DDL' : KIND_LABEL[tab.objectRef.kind]}</span>
+                <TabKind tab={tab} />
                 <span className="tab-title">{tab.title}</span>
+                {conn && ambiguous.has(tab.title) && <span className="tab-conn">{conn.name}</span>}
                 {readOnly && (
                   <span className="tab-ro" title="Read-only connection" aria-label="Read-only connection">
                     <LockIcon />
@@ -424,7 +458,7 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
       {menu && <ActionMenu label="Tabs" checkRole="radio" x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
     </div>
     {/* The active tab's controls sit on their own row under the tabs, as in Navicat's toolbar. */}
-    {activeTab && (
+    {activeTab && hasStripActions(activeTab) && (
       <div className="tabstrip-toolbar">
         <TabStripActions groupId={groupId} tab={activeTab} />
       </div>

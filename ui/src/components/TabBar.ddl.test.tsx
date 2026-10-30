@@ -34,7 +34,7 @@ it('a DDL tab shows the "DDL" label and a dirty dot only while its text differs'
   });
   render(<TabBar />);
   const tab = () => screen.getByRole('tab', { name: /sales_v/ }).closest('.tab')!;
-  expect(tab().querySelector('.tab-kind')?.textContent).toBe('DDL');
+  expect(tab().querySelector('.tab-kind')?.getAttribute('data-kind')).toBe('DDL');
   expect(tab()).not.toHaveClass('dirty');
 
   act(() => useDdlEdits.getState().setText(id, 'CREATE VIEW v AS select 2'));

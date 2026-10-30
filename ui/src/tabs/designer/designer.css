@@ -216,12 +216,22 @@
   color: var(--dnt-fg-disabled);
 }
 
-/* Narrow editor: icons only, and the header may wrap. */
-@container designer (max-width: 720px) {
+/*
+ * Narrow editor: icons only, and the header drops `connection › database` (the tab's tooltip and
+ * the status bar still say it) so Discard / Review & apply stay on its one row.
+ */
+@container designer (max-width: 860px) {
   .dz-tool span {
     display: none;
   }
 
+  .dz-header > .dz-subtle {
+    display: none;
+  }
+}
+
+/* Very narrow: only now does the header wrap. */
+@container designer (max-width: 520px) {
   .dz-header {
     flex-wrap: wrap;
   }
@@ -266,8 +276,15 @@
   overflow: auto;
 }
 
-/* Narrow editor: the inspector goes under the grid instead of leaving it a sliver. */
-@container (max-width: 640px) {
+/* Medium editor: a narrower inspector leaves the grid its columns. */
+@container (max-width: 1100px) {
+  .dz-main > .dz-inspector {
+    width: 260px;
+  }
+}
+
+/* Narrow editor: the inspector goes under the grid instead of leaving it (and the SQL preview) a sliver. */
+@container (max-width: 860px) {
   .dz-main {
     flex-direction: column;
     overflow-y: auto;

@@ -40,11 +40,11 @@ describe('TabBar of an editor group', () => {
     const [g1, g2] = twoGroups();
     const user = userEvent.setup();
     render(<TabBar groupId={g1} />);
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /a/ }) });
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: 'a' }) });
     await user.click(screen.getByRole('menuitem', { name: 'Move to group 2' }));
     expect(titles(g2)).toEqual(['c', 'a']);
 
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /b/ }) });
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: 'b' }) });
     expect(screen.getByRole('menuitem', { name: /^Split right/ })).toBeInTheDocument();
     await user.click(screen.getByRole('menuitem', { name: /^Split down/ }));
     // b was alone in group 1: an empty group opened beside it.
@@ -55,7 +55,7 @@ describe('TabBar of an editor group', () => {
     const [g1, g2] = twoGroups();
     const user = userEvent.setup();
     render(<TabBar groupId={g1} />);
-    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: /b/ }) });
+    await user.pointer({ keys: '[MouseRight]', target: screen.getByRole('tab', { name: 'b' }) });
     await user.click(screen.getByRole('menuitem', { name: 'Close others' }));
     await waitFor(() => expect(titles(g1)).toEqual(['b']));
     expect(titles(g2)).toEqual(['c']);
@@ -83,7 +83,7 @@ describe('TabBar of an editor group', () => {
   it('clicking a strip focuses its group', async () => {
     const [g1] = twoGroups();
     render(<TabBar groupId={g1} />);
-    await userEvent.setup().click(screen.getByRole('tab', { name: /b/ }));
+    await userEvent.setup().click(screen.getByRole('tab', { name: 'b' }));
     expect(s().focusedGroupId).toBe(g1);
     expect(s().activeId).toContain('b');
   });

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboa
 import type { ObjectKind } from '../bindings';
 import { usePalette, type PaletteMode } from '../store/palette';
 import { buildMenus, type MenuState } from './appMenus';
-import { EyeIcon, FunctionIcon, ObjectIcon, TableIcon } from './icons';
+import { KindIcon } from './icons';
 import { rankItems, type Ranked } from './paletteMatch';
 import { paletteCommands } from './paletteCommands';
 import { recentCommands, rememberCommand } from './paletteRecent';
@@ -147,13 +147,6 @@ function commandSections(entries: PaletteEntry[], query: string, recent: string[
       return { ...s, rows };
     })
     .filter((s) => s.rows.length > 0);
-}
-
-function KindIcon({ kind }: { kind: ObjectKind }) {
-  if (kind === 'Table') return <TableIcon />;
-  if (kind === 'View' || kind === 'MaterializedView') return <EyeIcon />;
-  if (kind === 'Function' || kind === 'Procedure') return <FunctionIcon />;
-  return <ObjectIcon />;
 }
 
 /** `text` with the characters at `indices` emphasised. */

@@ -851,9 +851,10 @@ fieldset.contents {
   background: var(--dnt-bg-hover);
 }
 
+/* Chosen: the accent tint and 1px accent border of the other selections (Settings nav, Environment), not a 2px ring that reads as focus. */
 .theme-option[aria-checked='true'] {
-  border-color: var(--dnt-fg);
-  box-shadow: inset 0 0 0 1px var(--dnt-fg);
+  border-color: var(--dnt-accent);
+  background: var(--dnt-accent-subtle);
   color: var(--dnt-fg);
   font-weight: 500;
 }

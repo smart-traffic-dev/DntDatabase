@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { needsReconnect } from '../api';
 import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
-import { useObjectData, type Loadable, type SubTab } from '../store/objectData';
-import { DataPager, DataView } from './DataView';
-import { resourceOf, subTabsOf, useSubTab } from './objectSections';
+import { useObjectData, type Loadable } from '../store/objectData';
+import { DataView } from './DataView';
+import { resourceOf, sectionPanelId, sectionTabId, useSubTab } from './objectSections';
 import { DDL_EDITABLE_KINDS, openDdlEditTab } from '../components/openDdlEdit';
 import { useConnections } from '../store/connections';
 import { useDntMonacoTheme } from '../monaco/dntTheme';
@@ -14,8 +14,6 @@ import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
 
 const DASH = '—';
-
-const SUB_LABEL: Record<SubTab, string> = { data: 'Data', info: 'Info', ddl: 'DDL', structure: 'Structure' };
 
 /** Base-1024 size with one decimal: 1536 -> "1.5 KB". */
 export function formatBytes(bytes: number): string {
@@ -119,10 +117,6 @@ function openQuery(tab: Tab, sql: string) {
   const id = docs.newQuery(tab.connectionId, tab.objectRef.database);
   docs.update(id, { sql });
 }
-
-/** The row estimate of a loaded detail (views have none). */
-const estimateOf = (detail: Loadable<TableDetail> | undefined): number | null =>
-  detail?.status === 'ok' ? detail.data.row_estimate : null;
 
 function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const monacoTheme = useDntMonacoTheme();
@@ -352,82 +346,33 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
 }
 
 export function ObjectTab({ tab }: { tab: Tab }) {
-  const uid = useId();
-  const subs = subTabsOf(tab.objectRef.kind);
   const stored = useObjectData((s) => s.byTab[tab.id]);
   const sub = useSubTab(tab);
   const resource = resourceOf(sub);
-  const tabRefs = useRef<Partial<Record<SubTab, HTMLButtonElement | null>>>({});
 
   // Lazy: fetch the data of the visible sub-tab once; the result is cached for the tab's lifetime.
   useEffect(() => {
     if (!tab.needsVerification) void useObjectData.getState().load(tab, resource);
   }, [tab, resource]);
 
-  const select = useCallback(
-    (next: SubTab) => {
-      useObjectData.getState().setSub(tab.id, next);
-      tabRefs.current[next]?.focus();
-    },
-    [tab.id],
-  );
-
-  const onKeyDown = (e: KeyboardEvent) => {
-    const at = subs.indexOf(sub);
-    const target =
-      e.key === 'ArrowRight' ? subs[(at + 1) % subs.length]
-      : e.key === 'ArrowLeft' ? subs[(at - 1 + subs.length) % subs.length]
-      : e.key === 'Home' ? subs[0]
-      : e.key === 'End' ? subs[subs.length - 1]
-      : undefined;
-    if (!target) return;
-    e.preventDefault();
-    select(target);
-  };
-
   const retry = () => void useObjectData.getState().load(tab, resource, true);
   const reconnect = () => void useObjectData.getState().reconnect(tab, resource);
   const { objectRef } = tab;
   const state = stored?.[resource];
-  const estimate = estimateOf(sub === 'data' ? (state as Loadable<TableDetail> | undefined) : undefined);
 
   if (tab.needsVerification) return <div role="alert" className="ot-error">
     <p>Object action outcome unknown. Cached data is hidden. Reload to verify the object before continuing.</p>
     <button className="btn" onClick={() => useTabs.setState((s) => ({ tabs: s.tabs.map((t) => t.id === tab.id ? { ...t, needsVerification: false } : t) }))}>Reload object</button>
   </div>;
 
-  // No header row (editor v2 §2): the name is the tab's title, the connection and actions are in
-  // the strip's cluster. The sections and the Data pager share one 28 px row.
+  // No header row (editor v2 §2): the name is the tab's title; the connection, the sections
+  // (ObjectSections), the Data pager and the actions share the toolbar row under the strip.
   return (
     <div className="object-tab">
-      <div className="ot-subbar">
-        <div role="tablist" aria-label="Object sections" className="ot-tabs" onKeyDown={onKeyDown}>
-          {subs.map((s) => (
-            <button
-              key={s}
-              type="button"
-              role="tab"
-              id={`${uid}-tab-${s}`}
-              aria-selected={s === sub}
-              aria-controls={`${uid}-panel`}
-              tabIndex={s === sub ? 0 : -1}
-              className={`ot-subtab${s === sub ? ' on' : ''}`}
-              data-testid={s === 'ddl' ? 'object-tab-ddl' : undefined}
-              ref={(el) => {
-                tabRefs.current[s] = el;
-              }}
-              onClick={() => select(s)}
-            >
-              {SUB_LABEL[s]}
-            </button>
-          ))}
-        </div>
-        {sub === 'data' ? <DataPager tab={tab} estimate={estimate} /> : null}
-      </div>
       <div
         role="tabpanel"
-        id={`${uid}-panel`}
-        aria-labelledby={`${uid}-tab-${sub}`}
+        id={sectionPanelId(tab.id)}
+        aria-labelledby={sectionTabId(tab.id, sub)}
         className={sub === 'data' ? 'ot-panel ot-panel-data' : 'ot-panel'}
       >
         {sub === 'data' ? (

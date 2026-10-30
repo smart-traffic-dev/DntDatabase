@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanStmtView, RunEvent, Value } from '../../bindings';
 import { emptyRun, reduceRun, startRun, useQueryRun, type TabRun } from '../../store/queryRun';
 import { appError, resetStores } from '../../test/backend';
-import { ResultPanel } from './ResultPanel';
+import { ResultPanel, resultLabel } from './ResultPanel';
 import { PLAN_GONE, rerunStatement } from './rerun';
 
 vi.mock('./rerun', async (importOriginal) => ({
@@ -57,6 +57,16 @@ describe('ResultPanel', () => {
   beforeEach(() => {
     resetStores();
     vi.mocked(rerunStatement).mockClear();
+  });
+
+  it('result_tabs_named_after_their_table', () => {
+    const r = (columns: { origin_table: { name: string } | null }[]) =>
+      ({ columns: columns.map((c) => ({ ...col, ...c })) }) as unknown as Parameters<typeof resultLabel>[0];
+    const orders = { origin_table: { database: 'shop', schema: null, name: 'orders', kind: 'Table' as const } };
+    expect(resultLabel(r([orders, orders]), 'SELECT a, b FROM x', 1)).toBe('orders');
+    expect(resultLabel(r([{ origin_table: null }]), 'SELECT * FROM `shop`.`orders` o JOIN items i', 2)).toBe('orders');
+    expect(resultLabel(r([{ origin_table: null }]), 'select * from public."Order Lines"', 3)).toBe('Order Lines');
+    expect(resultLabel(r([{ origin_table: null }]), 'SELECT 1', 4)).toBe('Result 4');
   });
 
   it('result_tabs_named_result_n', async () => {

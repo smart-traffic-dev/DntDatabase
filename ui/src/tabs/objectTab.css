@@ -6,24 +6,22 @@
 }
 
 /* One 28 px row under the tab strip (editor v2 §2): the sections on the left, the Data pager on the right. */
-.ot-subbar {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--dnt-space-2);
-  height: 28px;
-  min-width: 0;
-  padding: 0 var(--dnt-space-2);
-  border-bottom: 1px solid var(--dnt-border-subtle);
-  font-size: var(--dnt-text-sm);
-}
-
-/* Flat text tabs: the selected one in the full text colour and weight, no bar. */
+/*
+ * The sections, in the tab's toolbar row after the context chip (ObjectSections). Flat text tabs:
+ * the selected one on the active fill in the full text colour and weight, no bar.
+ */
 .ot-tabs {
   flex: none;
   display: flex;
   align-items: center;
   gap: 2px;
+  margin-left: var(--dnt-space-1);
+  padding-left: var(--dnt-space-2);
+  border-left: 1px solid var(--dnt-border);
+}
+
+.tab-actions.w-narrow .dv-key-order {
+  display: none;
 }
 
 .ot-subtab {
@@ -42,6 +40,7 @@
 }
 
 .ot-subtab.on {
+  background: var(--dnt-bg-active);
   color: var(--dnt-fg);
   font-weight: 500;
 }

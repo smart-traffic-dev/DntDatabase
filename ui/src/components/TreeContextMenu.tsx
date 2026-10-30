@@ -184,24 +184,31 @@ function itemsFor(node: TreeNode): Item[] {
       },
     ];
   }
+  // Rename / Create stay with the structure entries; Truncate / Drop get a group of their own.
+  const objectActions = objectActionItems(node);
+  const structure = objectActions.filter((i) => !('danger' in i && i.danger));
+  const destructive = objectActions.filter((i) => 'danger' in i && i.danger);
   if (node.kind === 'object') {
     const kind = node.objectRef?.kind;
     const queryable = kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
-    return [
-      { label: 'Open', hint: 'Enter', run: () => openObjectTab(node) },
-      ...(queryable ? [{ label: 'Select top 1000', run: () => void openSelectTop(node) }] : []),
-      newQuery,
-      ...designActionItems(node),
-      ...ddlActionItems(node),
-      ...importActionItems(node),
-      ...backupActionItems(node),
-      ...objectActionItems(node),
-      SEP,
-      refresh,
-      copy,
-    ];
+    return grouped(
+      [
+        { label: 'Open', hint: 'Enter', run: () => openObjectTab(node) },
+        ...(queryable ? [{ label: 'Select top 1000', run: () => void openSelectTop(node) }] : []),
+        newQuery,
+      ],
+      [...designActionItems(node), ...ddlActionItems(node), ...structure],
+      [...importActionItems(node), ...backupActionItems(node)],
+      destructive,
+      [refresh, copy],
+    );
   }
-  return [newQuery, ...designActionItems(node), ...ddlActionItems(node), ...backupActionItems(node), ...objectActionItems(node), SEP, refresh, copy];
+  return grouped([newQuery], [...designActionItems(node), ...ddlActionItems(node), ...structure], backupActionItems(node), destructive, [refresh, copy]);
+}
+
+/** The non-empty groups, a separator between each two. */
+function grouped(...groups: Item[][]): Item[] {
+  return groups.filter((g) => g.length > 0).flatMap((g, i) => (i === 0 ? g : [SEP, ...g]));
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {

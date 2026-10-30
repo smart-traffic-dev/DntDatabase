@@ -164,7 +164,7 @@ describe('tab strip actions: object tab', () => {
     expect(await screen.findByText('1–1')).toBeInTheDocument();
     const bar = cluster();
     expect(bar).toHaveAttribute('aria-label', 'Object');
-    expect(within(bar).getByTestId('object-context')).toHaveTextContent('PRODshop');
+    expect(within(bar).getByTestId('object-context')).toHaveTextContent(/^PROD.+›shop$/);
     expect(within(bar).getByRole('button', { name: 'Filter' })).toHaveAttribute('title', 'Filter rows (F3)');
     expect(within(bar).getByRole('button', { name: 'Refresh' })).toHaveAttribute('title');
     const user = userEvent.setup();
@@ -176,12 +176,21 @@ describe('tab strip actions: object tab', () => {
     await waitFor(() => expect(callsOf('table_row_count')).toHaveLength(1));
   });
 
-  it('the sub-tabs and the pager share one row; the tab has no header row', async () => {
-    render(<ObjectTab tab={tab} />);
+  it('the sub-tabs, the pager and the actions share the toolbar row; the tab has no header row', async () => {
+    render(
+      <>
+        <TabBar />
+        <ObjectTab tab={tab} />
+      </>,
+    );
     expect(await screen.findByText('1–1')).toBeInTheDocument();
     expect(screen.queryByRole('banner')).toBeNull();
-    const row = screen.getByRole('tablist', { name: 'Object sections' }).closest('.ot-subbar')!;
-    expect(row).toContainElement(screen.getByTestId('data-pager'));
-    expect(row).toContainElement(screen.getByRole('button', { name: 'Next page' }));
+    expect(row()).toContainElement(screen.getByRole('tablist', { name: 'Object sections' }));
+    expect(row()).toContainElement(screen.getByTestId('data-pager'));
+    expect(row()).toContainElement(screen.getByRole('button', { name: 'Next page' }));
+    // Each section tab names the panel it shows.
+    const panel = screen.getByRole('tabpanel');
+    expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-controls', panel.id);
+    expect(panel).toHaveAttribute('aria-labelledby', screen.getByRole('tab', { name: 'Data' }).id);
   });
 });

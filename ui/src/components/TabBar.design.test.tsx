@@ -35,7 +35,7 @@ it('a design tab shows the "Design" label and a dirty dot only while its draft d
   });
   render(<TabBar />);
   const tab = () => screen.getByRole('tab', { name: /orders/ }).closest('.tab')!;
-  expect(tab().querySelector('.tab-kind')?.textContent).toBe('Design');
+  expect(tab().querySelector('.tab-kind')?.getAttribute('data-kind')).toBe('Table design');
   expect(tab()).not.toHaveClass('dirty');
   expect(screen.queryByLabelText('Unsaved design changes')).toBeNull();
 

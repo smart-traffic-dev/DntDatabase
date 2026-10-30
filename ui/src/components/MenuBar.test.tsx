@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDialogs } from '../store/dialogs';
-import { useLayout } from '../store/layout';
+import { EDITOR_RATIO_DEFAULT, useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
 import { setActiveEditor } from '../tabs/query/activeEditor';
@@ -248,7 +248,7 @@ describe('MenuBar', () => {
     expect(screen.getByRole('menuitemcheckbox', { name: /Show sidebar/ })).toHaveAttribute('aria-checked', 'false');
     fireEvent.click(screen.getByRole('menuitem', { name: 'Reset layout' }));
     const s = useLayout.getState();
-    expect([s.sidebarWidth, s.sidebarVisible, s.editorRatio]).toEqual([280, true, 0.6]);
+    expect([s.sidebarWidth, s.sidebarVisible, s.editorRatio]).toEqual([280, true, EDITOR_RATIO_DEFAULT]);
   });
 
   it('Edit items run on the active query tab editor', () => {

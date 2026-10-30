@@ -1,6 +1,6 @@
 // Typing must stay cheap: a keystroke replaces the query docs Map, and the tab strip must not
 // re-render for it (it only needs to know which tabs show the unsaved dot / open transaction).
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { Profiler } from 'react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { emptyRun, useQueryRun } from '../store/queryRun';
@@ -66,7 +66,7 @@ const objectTab = (name: string): ObjectTabRef => {
   return { id: objectTabId('c1', objectRef), kind: 'object', connectionId: 'c1', objectRef, title: name };
 };
 const menu = (name: string) => {
-  fireEvent.contextMenu(screen.getByRole('tab', { name: new RegExp(`TBL${name}$`) }));
+  fireEvent.contextMenu(within(screen.getByRole('tablist', { name: 'Open tabs' })).getByRole('tab', { name: new RegExp(`${name}$`) }));
   return screen.getByRole('menu', { name: 'Tabs' });
 };
 
@@ -94,12 +94,13 @@ describe('TabBar context menu', () => {
     render(<TabBar />);
     menu('c');
     fireEvent.click(screen.getByRole('menuitem', { name: /^Pin/ }));
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['TBLc', 'TBLa', 'TBLb'].map((s) => expect.stringContaining(s)));
-    expect(screen.getByRole('tab', { name: /TBLc$/ }).querySelector('.tab-pin')).not.toBeNull();
+    const strip = screen.getByRole('tablist', { name: 'Open tabs' });
+    expect(within(strip).getAllByRole('tab').map((t) => t.textContent)).toEqual(['c', 'a', 'b']);
+    expect(screen.getByRole('tab', { name: /c$/ }).querySelector('.tab-pin')).not.toBeNull();
     menu('c');
     expect(screen.getByRole('menuitem', { name: /^Unpin/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: /^Unpin/ }));
-    expect(screen.getByRole('tab', { name: /TBLc$/ }).querySelector('.tab-pin')).toBeNull();
+    expect(screen.getByRole('tab', { name: /c$/ }).querySelector('.tab-pin')).toBeNull();
   });
 
   it('Close others leaves pinned tabs; Reopen closed tab brings one back', async () => {
