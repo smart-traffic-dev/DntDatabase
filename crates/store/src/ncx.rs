@@ -127,8 +127,8 @@ pub fn parse_ncx(xml: &str) -> Result<ImportBundle, DbError> {
         let conn_type = attrs.get("ConnType").unwrap_or_default();
         let Some(kind) = db_kind(conn_type) else {
             bundle.skipped.push(SkippedItem {
+                reason: skip_reason(&name, conn_type),
                 name,
-                reason: format!("Unsupported type {conn_type}"),
             });
             continue;
         };
@@ -206,6 +206,16 @@ fn db_kind(conn_type: &str) -> Option<DbKind> {
         "MYSQL" | "MARIADB" => Some(DbKind::MySql),
         "POSTGRESQL" => Some(DbKind::Postgres),
         _ => None,
+    }
+}
+
+/// Why an entry with an unmapped `ConnType` is skipped. Mongo/Redis get a named reason (spec §6.5);
+/// every other type keeps the generic one.
+fn skip_reason(name: &str, conn_type: &str) -> String {
+    match conn_type.to_ascii_uppercase().as_str() {
+        "MONGODB" => format!("{name}: MongoDB connections are not imported from Navicat yet"),
+        "REDIS" => format!("{name}: Redis connections are not imported from Navicat yet"),
+        _ => format!("Unsupported type {conn_type}"),
     }
 }
 

@@ -2,7 +2,7 @@ use dnt_core::config::{SecretMode, SshAuth, SslMode};
 use dnt_core::error::DbError;
 use dnt_core::server::DbKind;
 use dnt_store::ncx::parse_ncx;
-use dnt_store::transfer::ImportSource;
+use dnt_store::transfer::{ImportSource, SkippedItem};
 use secrecy::ExposeSecret;
 
 const SAMPLE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/ncx/sample.ncx");
@@ -67,6 +67,40 @@ fn parse_sample() {
     );
     assert_eq!(broken.secret_mode, SecretMode::Ask);
     assert!(b.warnings.len() == 1);
+}
+
+#[test]
+fn ncx_skips_mongo_and_redis_with_reason() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Connections Ver="1.5">
+  <Connection ConnectionName="Docs Mongo" ConnType="MONGODB" Host="mongo.example.com" Port="27017" UserName="admin" Password="" />
+  <Connection ConnectionName="Cache" ConnType="REDIS" Host="redis.example.com" Port="6379" UserName="" Password="" />
+  <Connection ConnectionName="lower mongo" ConnType="MongoDB" Host="m.example.com" Port="27017" UserName="" Password="" />
+  <Connection ConnectionName="Ora" ConnType="ORACLE" Host="ora.example.com" Port="1521" UserName="sys" Password="" />
+</Connections>"#;
+    let b = parse_ncx(xml).unwrap();
+    assert!(b.connections.is_empty());
+    assert_eq!(
+        b.skipped,
+        vec![
+            SkippedItem {
+                name: "Docs Mongo".into(),
+                reason: "Docs Mongo: MongoDB connections are not imported from Navicat yet".into(),
+            },
+            SkippedItem {
+                name: "Cache".into(),
+                reason: "Cache: Redis connections are not imported from Navicat yet".into(),
+            },
+            SkippedItem {
+                name: "lower mongo".into(),
+                reason: "lower mongo: MongoDB connections are not imported from Navicat yet".into(),
+            },
+            SkippedItem {
+                name: "Ora".into(),
+                reason: "Unsupported type ORACLE".into(),
+            },
+        ]
+    );
 }
 
 #[test]

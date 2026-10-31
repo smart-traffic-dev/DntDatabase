@@ -1,4 +1,4 @@
-use dnt_core::config::{ConnectionConfig, DriverOptions, SecretMode, SshAuth, SshConfig};
+use dnt_core::config::{ConnectionConfig, DriverOptions, HostPort, SecretMode, SshAuth, SshConfig};
 use dnt_core::error::DbError;
 use dnt_core::secret::{MemorySecretStore, SecretKind, SecretStore};
 use dnt_core::server::DbKind;
@@ -715,4 +715,102 @@ fn exported_file_never_contains_plaintext_secret() {
             assert!(!json.contains(s), "{s} leaked");
         }
     }
+}
+
+#[test]
+fn dntconn_round_trips_mongo_and_redis() {
+    let (src, _src_secrets) = setup();
+    let mut mongo = ConnectionConfig {
+        kind: DbKind::Mongo,
+        port: 27017,
+        ..cfg("mongo")
+    };
+    mongo.options.driver = DriverOptions::Mongo {
+        srv: false,
+        auth_source: Some("admin".into()),
+        replica_set: Some("rs0".into()),
+        direct_connection: false,
+        extra_hosts: vec![HostPort {
+            host: "mongo-2.example.com".into(),
+            port: 27018,
+        }],
+    };
+    let mut redis = ConnectionConfig {
+        kind: DbKind::Redis,
+        port: 6379,
+        default_db: None,
+        ..cfg("redis")
+    };
+    redis.options.driver = DriverOptions::Redis { db: 3 };
+    let mongo = src.create(mongo, db_pw("mongo-pw-1")).unwrap();
+    let redis = src.create(redis, db_pw("redis-pw-2")).unwrap();
+    let json = export_dntconn(
+        &src,
+        &[NodeId::Connection(mongo.id), NodeId::Connection(redis.id)],
+        Some(&pass(PASSPHRASE)),
+    )
+    .unwrap();
+
+    let bundle = parse_dntconn(&json, Some(&pass(PASSPHRASE))).unwrap();
+    assert!(bundle.skipped.is_empty(), "{:?}", bundle.skipped);
+    let (dst, dst_secrets) = setup();
+    apply(&dst, bundle, ConflictPolicy::Skip).unwrap();
+    for c in [&mongo, &redis] {
+        let got = dst.get(c.id).unwrap();
+        assert_eq!(&got, c);
+        assert_eq!(got.options.driver, c.options.driver);
+    }
+    assert_eq!(
+        secret(&dst_secrets, redis.id, SecretKind::DbPassword).as_deref(),
+        Some("redis-pw-2")
+    );
+}
+
+/// A `.dntconn` written before `options.driver` existed.
+const OLDER_DNTCONN: &str = r#"{
+  "format": "dntdatabase-connections",
+  "version": 1,
+  "exported_at": "2026-06-01T10:00:00Z",
+  "groups": [],
+  "connections": [
+    {
+      "id": "0b7c6f1e-4a43-4d0e-9a51-6a8c2f1d3e01",
+      "group_id": null,
+      "name": "legacy-mysql",
+      "sort_order": 0,
+      "kind": "mysql",
+      "host": "db.example.com",
+      "port": 3306,
+      "username": "root",
+      "default_db": "app",
+      "env_tag": null,
+      "read_only": false,
+      "secret_mode": "ask",
+      "ssh": null,
+      "ssl": null,
+      "options": {
+        "version": 1,
+        "connect_timeout_s": 10,
+        "ssh_timeout_s": 10,
+        "charset": null,
+        "application_name": null,
+        "query_timeout_s": 0
+      }
+    }
+  ],
+  "secrets": null
+}"#;
+
+#[test]
+fn dntconn_from_older_version_still_imports() {
+    let bundle = parse_dntconn(OLDER_DNTCONN, None).unwrap();
+    assert!(bundle.skipped.is_empty(), "{:?}", bundle.skipped);
+    assert_eq!(bundle.connections.len(), 1);
+    let c = bundle.connections[0].clone();
+    assert_eq!(c.kind, DbKind::MySql);
+    assert_eq!(c.options.driver, DriverOptions::None);
+
+    let (repo, _secrets) = setup();
+    apply(&repo, bundle, ConflictPolicy::Skip).unwrap();
+    assert_eq!(repo.get(c.id).unwrap(), c);
 }
