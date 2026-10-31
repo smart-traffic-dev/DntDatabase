@@ -26,7 +26,8 @@ use dnt_store::repo::{ConnectionRepo, NewSecrets, SecretChange, SecretUpdate};
 use dnt_tunnel::KnownHosts;
 use dntdatabase::commands::data::{data_cell_load_file_impl, data_cell_save_file_impl};
 use dntdatabase::edit_plans::{ApplyOutcome, ApplyReport, CellPayload};
-use dntdatabase::file_picks::FileAccess;
+use dntdatabase::export_paths::ExportPaths;
+use dntdatabase::file_picks::{FileAccess, FilePicks};
 use dntdatabase::session_manager::SessionManager;
 use dntdatabase::state::{AppPaths, AppState};
 use secrecy::SecretString;
@@ -71,6 +72,8 @@ struct Server {
     hang_entered: Notify,
     /// Session numbers in the order they were closed.
     closed: Mutex<Vec<usize>>,
+    /// `capabilities.data_edit` of the sessions opened from now on.
+    data_edit: AtomicBool,
 }
 
 /// A write that reports no affected count.
@@ -98,6 +101,7 @@ impl Server {
             commit: Mutex::default(),
             rollback: Mutex::default(),
             recheck_found: AtomicBool::new(false),
+            data_edit: AtomicBool::new(true),
         })
     }
 
@@ -202,13 +206,15 @@ impl Driver for FakeDriver {
     }
     async fn connect(&self, _cfg: &ResolvedConfig) -> Result<Box<dyn Session>, DbError> {
         let number = self.server.sessions.fetch_add(1, Ordering::SeqCst);
+        let mut info = if _cfg.kind == DbKind::Postgres {
+            dnt_core::server::detect_pg(170000, "17.0")
+        } else {
+            detect_mysql("8.0.36").unwrap()
+        };
+        info.capabilities.data_edit = self.server.data_edit.load(Ordering::SeqCst);
         Ok(Box::new(FakeSession {
             number,
-            info: if _cfg.kind == DbKind::Postgres {
-                dnt_core::server::detect_pg(170000, "17.0")
-            } else {
-                detect_mysql("8.0.36").unwrap()
-            },
+            info,
             server: Arc::clone(&self.server),
             tx: Mutex::new(TxState::Idle),
         }))
@@ -1516,6 +1522,41 @@ async fn cell_files_only_through_the_dialog() {
         .unwrap_err();
     assert_eq!(field(&e), "token", "{e:?}");
     assert!(!file.exists());
+}
+
+/// Loading a cell value from a file is data editing: an open server without it refuses
+/// before the file is read or anything is sent.
+#[tokio::test]
+async fn cell_load_file_needs_data_edit() {
+    let f = fixture().await;
+    f.sm.close(f.id).await;
+    f.server.data_edit.store(false, Ordering::SeqCst);
+    f.sm.open(f.id, None).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let state = AppState {
+        repo: Arc::clone(&f.repo),
+        secrets: Arc::new(MemorySecretStore::default()),
+        sessions: f.sm,
+        paths: AppPaths::in_dir(dir.path().join("data")),
+        export_paths: ExportPaths::default(),
+        file_picks: FilePicks::default(),
+    };
+    let file = dir.path().join("x.bin");
+    std::fs::write(&file, b"12").unwrap();
+    let path = file.to_string_lossy().into_owned();
+    state
+        .file_picks
+        .admit(FileAccess::CellValueRead, file.clone())
+        .unwrap();
+    let before = f.server.executed().len();
+    let e = data_cell_load_file_impl(&state, f.id, object(), "qty".into(), path)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, DbError::Unsupported { feature, .. } if feature == "data editing"),
+        "{e:?}"
+    );
+    assert_eq!(f.server.since(before), Vec::<String>::new());
 }
 
 /// The history rows of data edits on `f`'s connection, oldest first.

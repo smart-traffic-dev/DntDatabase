@@ -801,6 +801,7 @@ pub async fn data_cell_load_file_impl(
     path: String,
 ) -> Result<LoadedCell, DbError> {
     admitted(state, FileAccess::CellValueRead, &path)?;
+    require_cap(state, id, Cap::DataEdit)?;
     let cap = state.sessions.cell_fetch_cap;
     let bytes = blocking(move || read_capped(&path, cap)).await?;
     state.sessions.cell_load(id, obj, column, bytes).await

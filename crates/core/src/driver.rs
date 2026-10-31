@@ -230,9 +230,6 @@ pub trait Driver: Send + Sync {
 #[async_trait]
 pub trait Session: Send + Sync {
     fn server_info(&self) -> &ServerInfo;
-    fn capabilities(&self) -> &Capabilities {
-        &self.server_info().capabilities
-    }
     /// The engine-specific face of this session.
     fn engine(&self) -> Engine<'_>;
     /// Session types implement `Introspector` themselves and return `self`.
@@ -260,6 +257,14 @@ impl dyn Session + '_ {
     pub fn sql(&self) -> Result<&dyn SqlSession, DbError> {
         let Engine::Sql(s) = self.engine();
         Ok(s)
+    }
+
+    /// What this session supports. `ServerInfo.capabilities` is the single source of
+    /// truth: drivers set capabilities on the `ServerInfo` they return (e.g. via
+    /// `ServerInfo::new`, then mutating `capabilities`); the trait offers no override
+    /// point.
+    pub fn capabilities(&self) -> &Capabilities {
+        &self.server_info().capabilities
     }
 }
 
