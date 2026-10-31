@@ -42,11 +42,7 @@ use dnt_core::sql::{tokenize, Dialect, TokKind, Token};
 /// What every redacted literal becomes.
 pub const REDACTED: &str = "'[REDACTED]'";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Redacted {
-    pub text: String,
-    pub changed: bool,
-}
+pub use dnt_core::redact::Redacted;
 
 /// Replaces every possible secret literal of `stmt` with [`REDACTED`]. Never
 /// panics; linear in the length of `stmt`.

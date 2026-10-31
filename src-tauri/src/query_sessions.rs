@@ -313,7 +313,6 @@ impl TabSession {
     fn tx_open(&self) -> bool {
         self.session
             .as_deref()
-            .and_then(|s| s.sql().ok())
             .is_some_and(|s| s.tx_state() != TxState::Idle)
     }
 
@@ -347,7 +346,6 @@ impl TabSession {
         let state = self
             .session
             .as_deref()
-            .and_then(|s| s.sql().ok())
             .map_or(TxState::Idle, |s| s.tx_state());
         if state == TxState::Idle {
             return TabTxInfo::IDLE;
@@ -443,8 +441,7 @@ impl QuerySessions {
             let in_tx = ts
                 .session
                 .as_deref()
-                .and_then(|s| s.sql().ok())
-                .is_some_and(|s| s.in_transaction());
+                .is_some_and(|s| s.tx_state() != TxState::Idle);
             if ts.lost_tx || in_tx {
                 return Err(DbError::TransactionOpen);
             }
@@ -2340,7 +2337,6 @@ impl RunTask {
             .ts
             .session
             .as_deref()
-            .and_then(|s| s.sql().ok())
             .map_or(TxState::Idle, |s| s.tx_state());
         let rows = sink.rows();
         let index = sink.index();

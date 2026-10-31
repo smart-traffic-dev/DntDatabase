@@ -1,3 +1,4 @@
+use crate::command::CommandSession;
 use crate::config::ResolvedConfig;
 use crate::error::DbError;
 use crate::meta::{
@@ -249,14 +250,41 @@ pub trait Session: Send + Sync {
 /// A session seen through its engine.
 pub enum Engine<'a> {
     Sql(&'a dyn SqlSession),
+    Command(&'a dyn CommandSession),
 }
 
 impl dyn Session + '_ {
-    /// This session as a SQL session. Every R1 session is one; R2 adds the `Command`
-    /// arm, which returns `DbError::Unsupported { feature: "SQL", .. }`.
+    /// This session as a SQL session; a Command session is
+    /// `DbError::Unsupported { feature: "SQL on <kind>", .. }`.
     pub fn sql(&self) -> Result<&dyn SqlSession, DbError> {
-        let Engine::Sql(s) = self.engine();
-        Ok(s)
+        match self.engine() {
+            Engine::Sql(s) => Ok(s),
+            Engine::Command(_) => Err(self.unsupported("SQL")),
+        }
+    }
+
+    /// This session as a Command session; a SQL session is
+    /// `DbError::Unsupported { feature: "commands on <kind>", .. }`.
+    pub fn command(&self) -> Result<&dyn CommandSession, DbError> {
+        match self.engine() {
+            Engine::Command(c) => Ok(c),
+            Engine::Sql(_) => Err(self.unsupported("commands")),
+        }
+    }
+
+    /// The transaction state of this session, whatever its engine.
+    pub fn tx_state(&self) -> TxState {
+        match self.engine() {
+            Engine::Sql(s) => s.tx_state(),
+            Engine::Command(c) => c.tx_state(),
+        }
+    }
+
+    fn unsupported(&self, what: &str) -> DbError {
+        DbError::Unsupported {
+            feature: format!("{what} on {}", self.server_info().kind.label()),
+            version: String::new(),
+        }
     }
 
     /// What this session supports. `ServerInfo.capabilities` is the single source of
@@ -408,6 +436,9 @@ pub trait Introspector: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::{CommandLanguage, CommandParseError, CommandSpan, ParsedCommand};
+    use crate::data_access::DataAccess;
+    use crate::redact::Redacted;
     use crate::server::{detect_pg, EngineFamily};
 
     #[test]
@@ -811,6 +842,95 @@ mod tests {
         assert_eq!(sql.dialect(), Dialect::Postgres);
         assert!(!sql.in_transaction());
         assert_eq!(s.capabilities().family, EngineFamily::Sql);
+    }
+
+    /// A minimal Command session: its own introspector, every call but `tx_state`
+    /// unused.
+    struct FakeCommand {
+        inner: FakeSession,
+        tx: TxState,
+    }
+
+    fn fake_command(tx: TxState) -> FakeCommand {
+        FakeCommand { inner: fake(), tx }
+    }
+
+    struct NoLanguage;
+
+    impl CommandLanguage for NoLanguage {
+        fn split(&self, _text: &str) -> Vec<CommandSpan> {
+            vec![]
+        }
+        fn parse(&self, _text: &str) -> Result<ParsedCommand, CommandParseError> {
+            Err(CommandParseError {
+                message: "n/a".into(),
+                offset: None,
+            })
+        }
+        fn redact(&self, text: &str) -> Redacted {
+            Redacted {
+                text: text.into(),
+                changed: false,
+            }
+        }
+    }
+
+    struct NoDataAccess;
+
+    impl DataAccess for NoDataAccess {}
+
+    #[async_trait]
+    impl Session for FakeCommand {
+        fn server_info(&self) -> &ServerInfo {
+            &self.inner.info
+        }
+        fn engine(&self) -> Engine<'_> {
+            Engine::Command(self)
+        }
+        fn cancel_handle(&self) -> CancelHandle {
+            Arc::new(NoopCancel)
+        }
+        fn introspector(&self) -> &dyn Introspector {
+            &self.inner
+        }
+        async fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn close(self: Box<Self>) {}
+    }
+
+    #[async_trait]
+    impl CommandSession for FakeCommand {
+        fn language(&self) -> &dyn CommandLanguage {
+            &NoLanguage
+        }
+        fn tx_state(&self) -> TxState {
+            self.tx
+        }
+        fn data_access(&self) -> &dyn DataAccess {
+            &NoDataAccess
+        }
+        async fn execute_command(
+            &self,
+            _cmd: &ParsedCommand,
+            _opts: &ExecOptions,
+            _sink: &mut dyn RowSink,
+        ) -> Result<StmtOutcome, DbError> {
+            Ok(StmtOutcome::default())
+        }
+    }
+
+    #[test]
+    fn engines_answer_for_themselves() {
+        let c: Box<dyn Session> = Box::new(fake_command(TxState::Active));
+        assert!(
+            matches!(c.sql(), Err(DbError::Unsupported { feature, .. }) if feature == "SQL on PostgreSQL")
+        );
+        assert!(c.command().is_ok());
+        assert_eq!(c.tx_state(), TxState::Active);
+        let s: Box<dyn Session> = Box::new(fake());
+        assert!(matches!(s.command(), Err(DbError::Unsupported { .. })));
+        assert_eq!(s.tx_state(), TxState::Idle);
     }
 
     #[test]

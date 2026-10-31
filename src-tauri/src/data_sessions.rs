@@ -34,6 +34,7 @@ use dnt_core::driver::{
 };
 use dnt_core::error::DbError;
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
+use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use std::collections::HashMap;
 use std::fmt;
@@ -637,7 +638,7 @@ impl SessionManager {
                 && current
                 && request.raw.is_none()
                 && reusable(&rt)
-                && !session.sql().is_ok_and(|s| s.in_transaction())
+                && session.tx_state() == TxState::Idle
             {
                 give_back(
                     &rt,
@@ -694,7 +695,7 @@ impl SessionManager {
         clean: bool,
     ) {
         let reusable = clean
-            && !taken.session.sql().is_ok_and(|s| s.in_transaction())
+            && taken.session.tx_state() == TxState::Idle
             && !rt.closed.load(Ordering::SeqCst)
             && !rt.tunnel_dead()
             && taken.tunnel_gen == rt.tunnel_gen.load(Ordering::SeqCst);
