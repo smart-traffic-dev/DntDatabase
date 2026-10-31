@@ -360,10 +360,91 @@ async fn flushdb_after_select_confirms_the_selected_db() {
     assert!(store.get("0", b"k").is_some());
 
     // The session is in db 2 now, but the language does not read it: the plan names
-    // the db it is given.
+    // the db it is given. A plan given a stale db is not run: the run checks the
+    // session's db first (see `db_changed_under_the_plan_stops`).
     let mut plan = plan_commands("FLUSHDB", Target::All, c.language(), Some("0"));
     guard_commands(&mut plan, &prod);
     assert_eq!(plan.stmts[0].confirm_name.as_deref(), Some("0"));
+    let report = run_commands(
+        c,
+        &plan,
+        &ExecOptions::default(),
+        run_cfg(),
+        &cancel,
+        &mut Rec::default(),
+    )
+    .await;
+    assert!(matches!(
+        report.stop,
+        Some(StopReason::DatabaseChanged { .. })
+    ));
+    assert!(store.get("0", b"k").is_some());
+}
+
+#[tokio::test]
+async fn db_changed_under_the_plan_stops() {
+    let (s, store) = connect().await;
+    let c = s.command().unwrap();
+    let mut plan = plan_commands("FLUSHDB", Target::All, c.language(), Some("0"));
+    guard_commands(&mut plan, &local());
+    assert_eq!(plan.assumed_db.as_deref(), Some("0"));
+    store.set("0", b"k", FakeValue::Str("v".into()));
+    store.set("3", b"k", FakeValue::Str("v".into()));
+
+    // A reconnect lands in db 3.
+    store.force_db("3");
+    let cancel = RunCancel::new(s.cancel_handle());
+    let mut rec = Rec::default();
+    let report = run_commands(
+        c,
+        &plan,
+        &ExecOptions::default(),
+        run_cfg(),
+        &cancel,
+        &mut rec,
+    )
+    .await;
+    assert_eq!(
+        report.stop,
+        Some(StopReason::DatabaseChanged {
+            index: 0,
+            expected: Some("0".into()),
+            actual: Some("3".into()),
+        })
+    );
+    assert!(report.stmts.is_empty() && rec.ends.is_empty());
+    assert!(store.executed().is_empty(), "nothing is sent");
+    assert!(store.get("0", b"k").is_some() && store.get("3", b"k").is_some());
+}
+
+#[tokio::test]
+async fn select_inside_multi_leaves_db_unknown() {
+    let (s, store) = connect().await;
+    let c = s.command().unwrap();
+    // The `SELECT 2` is queued, then discarded: the session stays in db 0.
+    let text = "MULTI\nSELECT 2\nDISCARD\nFLUSHDB";
+    let mut plan = plan_commands(text, Target::All, c.language(), Some("0"));
+    guard_commands(&mut plan, &ctx(Some(EnvTag::Production), false));
+    assert_eq!(plan.stmts[3].verdict, Verdict::Confirm);
+    assert_eq!(plan.stmts[3].confirm_name.as_deref(), Some("cache"));
+
+    store.set("0", b"k", FakeValue::Str("v".into()));
+    store.set("2", b"k", FakeValue::Str("v".into()));
+    let cancel = RunCancel::new(s.cancel_handle());
+    let mut rec = Rec::default();
+    let report = run_commands(
+        c,
+        &plan,
+        &ExecOptions::default(),
+        run_cfg(),
+        &cancel,
+        &mut rec,
+    )
+    .await;
+    assert_eq!(report.stop, None);
+    assert!(rec.databases.is_empty(), "a queued SELECT is not reported");
+    assert_eq!(store.get("0", b"k"), None, "db 0 is flushed");
+    assert!(store.get("2", b"k").is_some());
 }
 
 #[tokio::test]

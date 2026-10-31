@@ -83,6 +83,13 @@ pub enum StopReason {
     /// The session's `sql_mode` now splits the rest differently, starting at statement
     /// `index`: "sql_mode changed; run the remaining statements again".
     DialectChanged { index: u32 },
+    /// Command `index` was planned (and confirmed) against database `expected`, but
+    /// the session is in `actual` (a reconnect landed elsewhere): it was not sent.
+    DatabaseChanged {
+        index: u32,
+        expected: Option<String>,
+        actual: Option<String>,
+    },
 }
 
 /// One statement that was handed to the session.

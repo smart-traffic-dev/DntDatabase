@@ -3,7 +3,7 @@
 use crate::command::{CommandClass, ParsedCommand};
 use crate::edit::EditSet;
 use crate::error::DbError;
-use crate::keyspace::KeyName;
+use crate::keyspace::{KeyBytes, KeyName};
 use crate::meta::{ObjectRef, TableDetail};
 use crate::sql::filter::{DataFilter, SortSpec};
 use serde::{Deserialize, Serialize};
@@ -43,49 +43,49 @@ pub struct PageSpec {
 pub enum KeyEdit {
     SetString {
         key: KeyName,
-        value: String,
+        value: KeyBytes,
     },
     HashSet {
         key: KeyName,
-        field: String,
-        value: String,
+        field: KeyBytes,
+        value: KeyBytes,
     },
     HashDelete {
         key: KeyName,
-        field: String,
+        field: KeyBytes,
     },
     /// `head`: push at the head (`LPUSH`), else at the tail.
     ListPush {
         key: KeyName,
-        value: String,
+        value: KeyBytes,
         head: bool,
     },
     ListSet {
         key: KeyName,
         index: i64,
-        value: String,
+        value: KeyBytes,
     },
     ListRemove {
         key: KeyName,
-        value: String,
+        value: KeyBytes,
         count: i64,
     },
     SetAdd {
         key: KeyName,
-        member: String,
+        member: KeyBytes,
     },
     SetRemove {
         key: KeyName,
-        member: String,
+        member: KeyBytes,
     },
     ZSetAdd {
         key: KeyName,
-        member: String,
+        member: KeyBytes,
         score: f64,
     },
     ZSetRemove {
         key: KeyName,
-        member: String,
+        member: KeyBytes,
     },
     /// `None` removes the expiry (persist).
     Expire {
@@ -101,10 +101,15 @@ pub enum KeyEdit {
     },
 }
 
-/// Refuses a command the driver built for a read (`page`, `count`) whose class is not
-/// `Read`: a driver bug, never let through.
+/// Refuses a command the driver built for a read (`page`, `count`) that is not a plain
+/// read: its class is not `Read`, or it drops something, is `unbounded` or changes the
+/// session. A driver bug, never let through.
 pub fn check_read(cmd: &ParsedCommand) -> Result<(), DbError> {
-    if cmd.class == CommandClass::Read {
+    if cmd.class == CommandClass::Read
+        && cmd.drops.is_empty()
+        && !cmd.unbounded
+        && cmd.session_effect.is_none()
+    {
         Ok(())
     } else {
         Err(DbError::Internal {
@@ -119,6 +124,7 @@ pub fn check_read(cmd: &ParsedCommand) -> Result<(), DbError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::{CommandDrop, CommandDropKind, CommandSessionEffect, CommandTarget};
     use std::sync::Arc;
 
     fn cmd(name: &str, class: CommandClass) -> ParsedCommand {
@@ -134,6 +140,78 @@ mod tests {
     }
 
     #[test]
+    fn key_edit_serde_round_trip() {
+        let key = || KeyName::from_bytes(b"k".to_vec());
+        let bin = || KeyBytes(vec![0xff, 0x00, b'a']);
+        let edits = [
+            KeyEdit::SetString {
+                key: key(),
+                value: bin(),
+            },
+            KeyEdit::HashSet {
+                key: key(),
+                field: bin(),
+                value: "v".into(),
+            },
+            KeyEdit::HashDelete {
+                key: key(),
+                field: bin(),
+            },
+            KeyEdit::ListPush {
+                key: key(),
+                value: bin(),
+                head: true,
+            },
+            KeyEdit::ListSet {
+                key: key(),
+                index: -1,
+                value: bin(),
+            },
+            KeyEdit::ListRemove {
+                key: key(),
+                value: bin(),
+                count: 2,
+            },
+            KeyEdit::SetAdd {
+                key: key(),
+                member: bin(),
+            },
+            KeyEdit::SetRemove {
+                key: key(),
+                member: bin(),
+            },
+            KeyEdit::ZSetAdd {
+                key: key(),
+                member: bin(),
+                score: 1.5,
+            },
+            KeyEdit::ZSetRemove {
+                key: key(),
+                member: bin(),
+            },
+            KeyEdit::Expire {
+                key: key(),
+                ttl_ms: Some(1000),
+            },
+            KeyEdit::Rename {
+                key: key(),
+                to: KeyName::from_bytes(vec![0xfe]),
+            },
+            KeyEdit::Delete { key: key() },
+        ];
+        for edit in &edits {
+            let json = serde_json::to_value(edit).unwrap();
+            let back: KeyEdit = serde_json::from_value(json.clone()).unwrap();
+            assert_eq!(&back, edit, "{json}");
+        }
+        let zadd = serde_json::to_value(&edits[8]).unwrap();
+        assert_eq!(zadd["op"], "z_set_add");
+        // Binary members travel as standard base64.
+        assert_eq!(zadd["member"], "/wBh");
+        assert_eq!(KeyBytes::from("hi"), KeyBytes(b"hi".to_vec()));
+    }
+
+    #[test]
     fn check_read_refuses_writes() {
         match check_read(&cmd("updateOne", CommandClass::Write)) {
             Err(DbError::Internal { message }) => assert_eq!(
@@ -143,5 +221,31 @@ mod tests {
             other => panic!("expected Internal, got {other:?}"),
         }
         assert!(check_read(&cmd("find", CommandClass::Read)).is_ok());
+
+        // A "read" that drops, acts on everything or changes the session is not one.
+        let dropping = ParsedCommand {
+            drops: vec![CommandDrop {
+                kind: CommandDropKind::Database,
+                target: CommandTarget {
+                    database: None,
+                    name: String::new(),
+                },
+            }],
+            ..cmd("flush", CommandClass::Read)
+        };
+        let unbounded = ParsedCommand {
+            unbounded: true,
+            ..cmd("wipe", CommandClass::Read)
+        };
+        let session = ParsedCommand {
+            session_effect: Some(CommandSessionEffect::UseDatabase("x".into())),
+            ..cmd("use", CommandClass::Read)
+        };
+        for c in [dropping, unbounded, session] {
+            assert!(
+                matches!(check_read(&c), Err(DbError::Internal { .. })),
+                "{c:?}"
+            );
+        }
     }
 }

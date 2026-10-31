@@ -66,6 +66,22 @@ impl KeyName {
     }
 }
 
+/// Binary data of a key's value (a string value, a field, a member), serialized as
+/// standard base64 like [`KeyName::raw`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(transparent)]
+pub struct KeyBytes(
+    #[serde(with = "raw_base64")]
+    #[specta(type = String)]
+    pub Vec<u8>,
+);
+
+impl From<&str> for KeyBytes {
+    fn from(text: &str) -> Self {
+        KeyBytes(text.as_bytes().to_vec())
+    }
+}
+
 mod raw_base64 {
     use base64::engine::general_purpose::STANDARD;
     use base64::Engine;

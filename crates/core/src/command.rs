@@ -103,8 +103,10 @@ pub struct CommandDrop {
 pub enum CommandDropKind {
     /// A collection (like `DROP TABLE`).
     Object,
-    /// A database: `dropDatabase`, `FLUSHDB`, `FLUSHALL` (like `DROP DATABASE`).
+    /// A database: `dropDatabase`, `FLUSHDB` (like `DROP DATABASE`).
     Database,
+    /// Every database of the server: `FLUSHALL`-like. `target` is not read.
+    AllDatabases,
 }
 
 /// How a command changes its session.
@@ -126,6 +128,10 @@ pub struct CommandParseError {
 pub trait CommandSession: Session {
     fn language(&self) -> &dyn CommandLanguage;
     fn tx_state(&self) -> TxState;
+    /// The database the session's connection is in now (`None`: unknown). A driver
+    /// reports the db its connection is actually in, and re-applies it on a reconnect;
+    /// a run checks it before every command whose targets were planned against a db.
+    fn current_database(&self) -> Option<String>;
     fn data_access(&self) -> &dyn DataAccess;
     /// Runs ONE parsed command, with the same contract as
     /// [`crate::driver::SqlSession::execute_one`] for the sink, stop, timeout, cancel

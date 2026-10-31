@@ -12,15 +12,19 @@
 //! Risk rules, applied to an `Allow` from the table (as `guard::stmt_verdict`; a
 //! read-only Block stays Block):
 //!
+//! - read-only: a command that is `unbounded` or drops anything → Block, whatever its
+//!   class.
 //! - `unbounded` → Confirm on Production / Staging; on Local / no tag only when
 //!   `confirm_unbounded`.
 //! - a drop of an `Object` → Confirm on Staging (Production confirms it as Ddl).
-//! - a drop of a `Database` → Confirm on every connection.
+//! - a drop of a `Database` or of `AllDatabases` → Confirm on every connection.
 //!
-//! `confirm_name` (Production, verdict Confirm only): a command that is `unbounded` or
-//! drops something gives its target's name (like [`crate::risk::confirm_name`]: a
-//! dropped database first, else the first target, else a dropped object); an `Unknown`
-//! command gives its first target's name, or the connection's name when it has none.
+//! `confirm_name` (Production, verdict Confirm only): a command that drops
+//! `AllDatabases`, or a `Database` whose name is empty (unknown when planned), gives the
+//! connection's name; else a command that is `unbounded` or drops something gives its
+//! target's name (like [`crate::risk::confirm_name`]: a dropped database first, else the
+//! first target, else a dropped object); an `Unknown` command gives its first target's
+//! name, or the connection's name when it has none.
 
 use dnt_core::command::{CommandClass, CommandDrop, CommandDropKind, CommandTarget, ParsedCommand};
 use dnt_core::config::EnvTag;
@@ -124,6 +128,9 @@ fn verdict(facts: &RiskFacts, ctx: &PolicyCtx) -> Verdict {
     if v != Verdict::Allow {
         return v;
     }
+    if ctx.read_only && (facts.unbounded || !facts.drops.is_empty()) {
+        return Verdict::Block;
+    }
     let tagged = matches!(ctx.env, Some(EnvTag::Production | EnvTag::Staging));
     if facts.unbounded && (ctx.confirm_unbounded || tagged) {
         return Verdict::Confirm;
@@ -133,10 +140,12 @@ fn verdict(facts: &RiskFacts, ctx: &PolicyCtx) -> Verdict {
             .drops
             .iter()
             .any(|d| d.kind == CommandDropKind::Object);
-    let database = facts
-        .drops
-        .iter()
-        .any(|d| d.kind == CommandDropKind::Database);
+    let database = facts.drops.iter().any(|d| {
+        matches!(
+            d.kind,
+            CommandDropKind::Database | CommandDropKind::AllDatabases
+        )
+    });
     if staging_object || database {
         return Verdict::Confirm;
     }
@@ -152,9 +161,17 @@ fn confirm_name(facts: &RiskFacts, ctx: &PolicyCtx) -> Option<String> {
             .filter(|d| d.kind == kind)
             .find_map(|d| named(&d.target.name))
     };
+    // Every database, or one whose name stayed unknown: the connection's name.
+    let connection_wide = facts.drops.iter().any(|d| match d.kind {
+        CommandDropKind::AllDatabases => true,
+        CommandDropKind::Database => d.target.name.is_empty(),
+        CommandDropKind::Object => false,
+    });
     let first_target = || facts.targets.iter().find_map(|t| named(&t.name));
     let risky = || {
-        dropped(CommandDropKind::Database)
+        connection_wide
+            .then(|| ctx.connection_name.clone())
+            .or_else(|| dropped(CommandDropKind::Database))
             .or_else(|| facts.unbounded.then(first_target).flatten())
             .or_else(|| dropped(CommandDropKind::Object))
     };
@@ -337,6 +354,75 @@ mod tests {
         }
         for env in ENVS {
             assert_eq!(run(&f, env, true, true).verdict, Verdict::Block);
+        }
+    }
+
+    #[test]
+    fn nameless_database_drop_needs_connection_name() {
+        // FLUSHDB whose database stayed unknown at planning.
+        let f = RiskFacts {
+            drops: vec![CommandDrop {
+                kind: CommandDropKind::Database,
+                target: target(""),
+            }],
+            ..facts(RiskClass::Admin)
+        };
+        assert_eq!(
+            run(&f, Some(EnvTag::Production), false, false),
+            outcome(Verdict::Confirm, Some("conn"))
+        );
+    }
+
+    #[test]
+    fn all_databases_drop_needs_connection_name() {
+        // FLUSHALL-like.
+        let f = dropping(RiskClass::Admin, CommandDropKind::AllDatabases, "db0");
+        assert_eq!(
+            run(&f, Some(EnvTag::Production), false, false),
+            outcome(Verdict::Confirm, Some("conn"))
+        );
+        for env in [Some(EnvTag::Staging), Some(EnvTag::Local), None] {
+            assert_eq!(
+                run(&f, env, false, false),
+                outcome(Verdict::Confirm, None),
+                "{env:?}"
+            );
+        }
+        for env in ENVS {
+            assert_eq!(run(&f, env, true, false).verdict, Verdict::Block);
+        }
+    }
+
+    #[test]
+    fn read_only_blocks_any_drop_or_unbounded() {
+        let drop_db = CommandDrop {
+            kind: CommandDropKind::Database,
+            target: target("d"),
+        };
+        for class in [
+            RiskClass::Read,
+            RiskClass::SessionChange,
+            RiskClass::Transaction,
+        ] {
+            let dropping = RiskFacts {
+                drops: vec![drop_db.clone()],
+                ..facts(class)
+            };
+            let unbounded = RiskFacts {
+                unbounded: true,
+                ..facts(class)
+            };
+            for env in ENVS {
+                for unb in [false, true] {
+                    for f in [&dropping, &unbounded] {
+                        assert_eq!(
+                            run(f, env, true, unb),
+                            outcome(Verdict::Block, None),
+                            "{f:?} {env:?} {unb}"
+                        );
+                    }
+                }
+            }
         }
     }
 

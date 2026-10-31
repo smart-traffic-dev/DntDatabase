@@ -949,6 +949,9 @@ mod tests {
         fn tx_state(&self) -> TxState {
             self.tx
         }
+        fn current_database(&self) -> Option<String> {
+            None
+        }
         fn data_access(&self) -> &dyn DataAccess {
             &NoDataAccess
         }

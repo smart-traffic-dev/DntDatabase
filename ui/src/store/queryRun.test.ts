@@ -436,6 +436,15 @@ describe('reduceRun', () => {
     );
   });
 
+  it('database_changed text names both databases', () => {
+    expect(stopReasonText({ kind: 'database_changed', index: 0, expected: '0', actual: '3' }, 1, 10)).toBe(
+      "The connection's database changed to 3 (expected 0); run again.",
+    );
+    expect(stopReasonText({ kind: 'database_changed', index: 0, expected: '0', actual: null }, 1, 10)).toBe(
+      "The connection's database changed to unknown (expected 0); run again.",
+    );
+  });
+
   it('other stop texts match the spec', () => {
     expect(stopReasonText(null, 3, 120)).toBe('Done: 3 statements in 120 ms.');
     expect(stopReasonText(null, 1, 1500)).toBe('Done: 1 statement in 1,500 ms.');

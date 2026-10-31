@@ -269,6 +269,8 @@ export function stopReasonText(stop: StopReason | null, statements: number, elap
       return 'Statement finished after the timeout; the remaining statements were not run.';
     case 'dialect_changed':
       return 'sql_mode changed; run the remaining statements again';
+    case 'database_changed':
+      return `The connection's database changed to ${stop.actual ?? 'unknown'} (expected ${stop.expected ?? 'unknown'}); run again.`;
   }
 }
 

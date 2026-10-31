@@ -28,7 +28,7 @@ use dnt_core::driver::{
 use dnt_core::edit::EditSet;
 use dnt_core::error::DbError;
 use dnt_core::keyspace::{
-    KeyName, KeyPage, KeySummary, KeyType, KeyValue, KeyValueView, Keyspace, ScanRequest,
+    KeyBytes, KeyName, KeyPage, KeySummary, KeyType, KeyValue, KeyValueView, Keyspace, ScanRequest,
     ValueRange,
 };
 use dnt_core::meta::{
@@ -75,8 +75,13 @@ struct StoreState {
     executed: Vec<String>,
 }
 
+/// No db forced by [`FakeStore::force_db`].
+const NO_FORCED_DB: usize = usize::MAX;
+
 struct StoreInner {
     state: Mutex<StoreState>,
+    /// The db the next session to look at its db finds itself in (a reconnect).
+    forced_db: AtomicUsize,
     block_next: AtomicBool,
     blocked: AtomicBool,
     blocked_changed: Notify,
@@ -94,6 +99,7 @@ impl FakeStore {
                 dbs: vec![Db::new(); DB_COUNT],
                 executed: Vec::new(),
             }),
+            forced_db: AtomicUsize::new(NO_FORCED_DB),
             block_next: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             blocked_changed: Notify::new(),
@@ -120,6 +126,14 @@ impl FakeStore {
     /// it started (stop) is not in it.
     pub fn executed(&self) -> Vec<String> {
         self.lock().executed.clone()
+    }
+
+    /// Simulates a reconnect that lands in database `db` (`"0"` … `"15"`): the next
+    /// session to look at its current db (to report it or to run a command) is in `db`
+    /// from then on. Panics on a db name outside 0–15.
+    pub fn force_db(&self, db: &str) {
+        let index = db_index(db).expect("a database 0-15");
+        self.0.forced_db.store(index, Ordering::SeqCst);
     }
 
     /// The next executed command waits, before doing anything, until its session's
@@ -601,6 +615,15 @@ impl FakeCommandSession {
         self.queue().is_some()
     }
 
+    /// The current db, after a reconnect [`FakeStore::force_db`] set up.
+    fn current_db(&self) -> usize {
+        let forced = self.store.0.forced_db.swap(NO_FORCED_DB, Ordering::SeqCst);
+        if forced != NO_FORCED_DB {
+            self.db.store(forced, Ordering::SeqCst);
+        }
+        self.db.load(Ordering::SeqCst)
+    }
+
     /// Waits until the canceller has fired more than `start` times.
     async fn wait_cancelled(&self, start: u64) {
         loop {
@@ -620,7 +643,7 @@ impl FakeCommandSession {
         opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<ResultSummary, DbError> {
-        let db = payload.db.unwrap_or_else(|| self.db.load(Ordering::SeqCst));
+        let db = payload.db.unwrap_or_else(|| self.current_db());
         let mut state = self.store.lock();
         let data = &mut state.dbs[db];
         let mut rows: Option<(Vec<ColumnMeta>, Vec<Vec<Value>>)> = None;
@@ -744,6 +767,11 @@ impl CommandSession for FakeCommandSession {
         } else {
             TxState::Idle
         }
+    }
+
+    /// The current db; a `SELECT` queued inside `MULTI` changes it only on `EXEC`.
+    fn current_database(&self) -> Option<String> {
+        Some(self.current_db().to_string())
     }
 
     fn data_access(&self) -> &dyn DataAccess {
@@ -930,20 +958,25 @@ impl DataAccess for FakeCommandSession {
     }
 
     /// `SetString`, `HashSet`, `HashDelete` and `Delete`; the others are `Unsupported`.
+    /// The store holds text: a value or field that is not UTF-8 is a server error.
     fn build_key_edit(&self, db: &str, edit: &KeyEdit) -> Result<Vec<ParsedCommand>, DbError> {
         let index = db_index(db)?;
         let write =
             |name: &str, op: Op| vec![build_command(Some(index), name, CommandClass::Write, op)];
+        let text = |b: &KeyBytes| {
+            String::from_utf8(b.0.clone())
+                .map_err(|_| server_err("ERR the fake store holds UTF-8 text only"))
+        };
         Ok(match edit {
             KeyEdit::SetString { key, value } => {
-                write("SET", Op::Set(key.raw.clone(), value.clone()))
+                write("SET", Op::Set(key.raw.clone(), text(value)?))
             }
             KeyEdit::HashSet { key, field, value } => write(
                 "HSET",
-                Op::HSet(key.raw.clone(), field.clone(), value.clone()),
+                Op::HSet(key.raw.clone(), text(field)?, text(value)?),
             ),
             KeyEdit::HashDelete { key, field } => {
-                write("HDEL", Op::HDel(key.raw.clone(), field.clone()))
+                write("HDEL", Op::HDel(key.raw.clone(), text(field)?))
             }
             KeyEdit::Delete { key } => write("DEL", Op::Del(vec![key.raw.clone()])),
             _ => return Err(unsupported("this key edit")),
@@ -955,7 +988,7 @@ impl DataAccess for FakeCommandSession {
 impl Introspector for FakeCommandSession {
     /// The databases that have keys, plus the current one, in numeric order.
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
-        let current = self.db.load(Ordering::SeqCst);
+        let current = self.current_db();
         let state = self.store.lock();
         Ok((0..DB_COUNT)
             .filter(|i| *i == current || !state.dbs[*i].is_empty())

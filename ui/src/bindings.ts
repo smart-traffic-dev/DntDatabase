@@ -3015,7 +3015,12 @@ export type StopReason =
  * The session's `sql_mode` now splits the rest differently, starting at statement
  * `index`: "sql_mode changed; run the remaining statements again".
  */
-{ kind: "dialect_changed"; index: number }
+{ kind: "dialect_changed"; index: number } | 
+/**
+ * Command `index` was planned (and confirmed) against database `expected`, but
+ * the session is in `actual` (a reconnect landed elsewhere): it was not sent.
+ */
+{ kind: "database_changed"; index: number; expected: string | null; actual: string | null }
 /**
  * How an existing object is changed: `CREATE OR REPLACE`, or drop and re-create.
  */

@@ -9,6 +9,7 @@ use dnt_core::driver::{
     ExecOptions, ExecProgress, ResultSummary, RowSink, ServerNotices, StmtOutcome,
 };
 use dnt_core::error::{AppError, DbError};
+use dnt_core::sql::TxControl;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 
@@ -34,6 +35,10 @@ pub struct PlannedCommand {
     /// Set by [`guard_commands`] on Production for a Confirm command that needs its
     /// target's (or the connection's) name typed.
     pub confirm_name: Option<String>,
+    /// `Some(db)`: the command has db-relative targets or drops, and they were
+    /// resolved to `db`; [`run_commands`] does not send it unless the session is in
+    /// `db`. `None`: it has none, or the db in effect was unknown.
+    pub assumed_db: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +48,9 @@ pub struct CommandPlan {
     /// UTF-16 offset of `source` in the editor text.
     pub base: u32,
     pub stmts: Vec<PlannedCommand>,
+    /// The session's database the plan started from (`current_db` of
+    /// [`plan_commands`]).
+    pub assumed_db: Option<String>,
     /// Set by [`guard_commands`]: what the verdicts were judged with (`None`: not
     /// guarded; only parse errors are `Block`).
     pub guard: Option<PolicyCtx>,
@@ -89,8 +97,11 @@ pub fn label_of(class: &CommandClass) -> StmtKindLabel {
 /// every earlier PLANNED command that parses with a `UseDatabase` effect. Commands
 /// outside a Cursor or Selection target are not sent, so they change nothing. A
 /// target with `database: None` gets that database, and a `Database` drop with an
-/// empty name gets it as its name. While it is unknown (`current_db` is `None` and
-/// nothing changed it) they stay as they are.
+/// empty name gets it as its name. While it is unknown they stay as they are (the
+/// guard then asks for the connection's name). It is unknown when `current_db` is
+/// `None` and nothing changed it, and from a `SessionChange` inside a planned
+/// transaction (after a `Transaction(Begin)`, before its `Commit` / `Rollback`) to the
+/// end of the plan: whether it takes effect depends on how the transaction ends.
 pub fn plan_commands(
     text: &str,
     target: Target,
@@ -121,15 +132,22 @@ pub fn plan_commands(
         found = pick.map(|i| found.swap_remove(i)).into_iter().collect();
     }
 
-    let mut db = current_db.map(str::to_string);
+    let mut db = DbTracker {
+        db: current_db.map(str::to_string),
+        in_tx: false,
+        lost: false,
+    };
     let stmts = found
         .into_iter()
         .enumerate()
         .map(|(index, s)| {
             let mut parsed = lang.parse(&s.text);
+            let mut assumed_db = None;
             if let Ok(cmd) = &mut parsed {
-                resolve_database(cmd, db.as_deref());
-                track_database(&mut db, cmd);
+                if resolve_database(cmd, db.db.as_deref()) {
+                    assumed_db = db.db.clone();
+                }
+                db.track(cmd);
             }
             let (label, verdict) = match &parsed {
                 Ok(cmd) => (label_of(&cmd.class), Verdict::Allow),
@@ -144,6 +162,7 @@ pub fn plan_commands(
                 label,
                 verdict,
                 confirm_name: None,
+                assumed_db,
             }
         })
         .collect();
@@ -153,40 +172,67 @@ pub fn plan_commands(
         base: map.to_u16(from),
         stmts,
         guard: None,
+        assumed_db: current_db.map(str::to_string),
     }
 }
 
-/// The database in effect after `cmd`.
-fn track_database(db: &mut Option<String>, cmd: &ParsedCommand) {
-    if let Some(CommandSessionEffect::UseDatabase(name)) = &cmd.session_effect {
-        *db = Some(name.clone());
+/// The database in effect while planning (see [`plan_commands`]).
+struct DbTracker {
+    /// `None`: unknown.
+    db: Option<String>,
+    /// Inside a planned transaction.
+    in_tx: bool,
+    /// A `SessionChange` inside a transaction made the db unknown for the rest.
+    lost: bool,
+}
+
+impl DbTracker {
+    /// The database in effect after `cmd`.
+    fn track(&mut self, cmd: &ParsedCommand) {
+        match &cmd.class {
+            CommandClass::Transaction(TxControl::Begin) => self.in_tx = true,
+            CommandClass::Transaction(TxControl::Commit | TxControl::Rollback) => {
+                self.in_tx = false
+            }
+            _ => {}
+        }
+        if let Some(CommandSessionEffect::UseDatabase(name)) = &cmd.session_effect {
+            if self.in_tx {
+                self.lost = true;
+            }
+            self.db = (!self.lost).then(|| name.clone());
+        }
     }
 }
 
 /// Names `db` in `cmd`'s db-relative targets and drops (see [`plan_commands`]).
-fn resolve_database(cmd: &mut ParsedCommand, db: Option<&str>) {
-    let Some(db) = db else {
-        return;
-    };
+/// Whether `cmd` has any (named or not: `db` may be `None`).
+fn resolve_database(cmd: &mut ParsedCommand, db: Option<&str>) -> bool {
+    let mut relative = false;
     for t in &mut cmd.targets {
         if t.database.is_none() {
-            t.database = Some(db.to_string());
+            relative = true;
+            t.database = db.map(str::to_string);
         }
     }
     for d in &mut cmd.drops {
         match d.kind {
             CommandDropKind::Database => {
                 if d.target.name.is_empty() {
-                    d.target.name = db.to_string();
+                    relative = true;
+                    d.target.name = db.unwrap_or_default().to_string();
                 }
             }
             CommandDropKind::Object => {
                 if d.target.database.is_none() {
-                    d.target.database = Some(db.to_string());
+                    relative = true;
+                    d.target.database = db.map(str::to_string);
                 }
             }
+            CommandDropKind::AllDatabases => {}
         }
     }
+    relative
 }
 
 /// Sets every command's verdict and `confirm_name` from [`policy`] for the connection
@@ -219,25 +265,32 @@ pub trait CommandRunSink: RowSink {
     fn notice(&mut self, index: u32, message: &str);
     /// The session's transaction state changed.
     fn tx_state(&mut self, state: TxState);
-    /// A `SessionChange` command succeeded: the session's database is now `name`.
+    /// A `SessionChange` command succeeded outside a transaction: the session's
+    /// database is now `name`. (One sent inside a transaction is not reported: whether
+    /// it took effect depends on how the transaction ended.)
     fn database(&mut self, name: &str);
 }
 
 /// Runs a guarded command `plan` on `session`, command by command, streaming into
 /// `sink` (spec §4.4): the Command counterpart of [`crate::run::run_with`].
 ///
+/// - A plan that was not guarded ([`guard_commands`]) sends nothing: `stop` is
+///   `Error { index }` of its first command (0 when it has none).
 /// - A plan that is not [`CommandPlan::runnable`] sends nothing: `stop` is
 ///   `Error { index }` of its first blocked command, `stmts` is empty.
 /// - Every `execute_command` gets `opts` with `stop` replaced by `cancel.signal()`.
-/// - Before each command the run stops on a cancel (that command is not sent).
+/// - Before each command the run stops on a cancel (that command is not sent), and
+///   before a command with a [`PlannedCommand::assumed_db`] on a session whose
+///   `current_database` is another one (`DatabaseChanged`, that command not sent).
 /// - After a failure it stops as `run_with` does: on a cancel, a lost connection, an
 ///   unknown outcome, a command sent inside a transaction or a transaction left open;
 ///   otherwise only without `continue_on_error`. A failed `UseDatabase` command stops
 ///   it even with `continue_on_error` (`Error { index }`): the later commands were
 ///   planned and confirmed against the db it did not select. A late completion stops
 ///   it too.
-/// - A changed `tx_state` goes to `sink.tx_state`; a `SessionChange` that succeeded
-///   to `sink.database`. Reconnects are counted and noticed as in `run_with`.
+/// - A changed `tx_state` goes to `sink.tx_state`; a `SessionChange` that succeeded,
+///   sent while the session was `Idle`, to `sink.database`. Reconnects are counted and
+///   noticed as in `run_with`.
 /// - `cfg.manual_tx` is ignored: the Command family has no manual-commit mode.
 pub async fn run_commands(
     session: &dyn CommandSession,
@@ -253,6 +306,12 @@ pub async fn run_commands(
         reconnects: 0,
         began_unused: false,
     };
+    if plan.guard.is_none() {
+        report.stop = Some(StopReason::Error {
+            index: plan.stmts.first().map_or(0, |s| s.index),
+        });
+        return report;
+    }
     if let Some(blocked) = plan
         .stmts
         .iter()
@@ -280,6 +339,17 @@ pub async fn run_commands(
             report.stop = Some(StopReason::Error { index: stmt.index });
             break;
         };
+        if let Some(expected) = &stmt.assumed_db {
+            let actual = session.current_database();
+            if actual.as_ref() != Some(expected) {
+                report.stop = Some(StopReason::DatabaseChanged {
+                    index: stmt.index,
+                    expected: Some(expected.clone()),
+                    actual,
+                });
+                break;
+            }
+        }
         let before = session.tx_state();
         if before != shown_tx {
             shown_tx = before;
@@ -335,8 +405,8 @@ pub async fn run_commands(
             shown_tx = after;
             sink.tx_state(after);
         }
-        if let (Ok(_), Some(CommandSessionEffect::UseDatabase(name))) =
-            (&result, &cmd.session_effect)
+        if let (Ok(_), Some(CommandSessionEffect::UseDatabase(name)), TxState::Idle) =
+            (&result, &cmd.session_effect, before)
         {
             sink.database(name);
         }
@@ -829,6 +899,8 @@ mod run_tests {
         run_signal: Mutex<Option<dnt_core::driver::StopSignal>>,
         tx: Mutex<TxState>,
         reconnects: AtomicU64,
+        /// The current db: set by a successful `USE`.
+        db: Mutex<Option<String>>,
     }
 
     impl FakeCmd {
@@ -841,6 +913,7 @@ mod run_tests {
                 run_signal: Mutex::new(None),
                 tx: Mutex::new(TxState::Idle),
                 reconnects: AtomicU64::new(0),
+                db: Mutex::new(None),
             }
         }
 
@@ -880,6 +953,9 @@ mod run_tests {
         fn tx_state(&self) -> TxState {
             *self.tx.lock().unwrap()
         }
+        fn current_database(&self) -> Option<String> {
+            self.db.lock().unwrap().clone()
+        }
         fn data_access(&self) -> &dyn DataAccess {
             self
         }
@@ -910,6 +986,11 @@ mod run_tests {
                 *self.tx.lock().unwrap() = state;
             }
             self.reconnects.fetch_add(step.reconnects, Ordering::SeqCst);
+            if let (Ok(_), Some(CommandSessionEffect::UseDatabase(db))) =
+                (&step.result, &cmd.session_effect)
+            {
+                *self.db.lock().unwrap() = Some(db.clone());
+            }
             if let Ok(outcome) = &step.result {
                 for r in &outcome.results {
                     sink.result_start(&[]);
@@ -1048,8 +1129,18 @@ mod run_tests {
         cancel: &RunCancel,
         rec: &mut Rec,
     ) -> RunReport {
-        let plan = plan_commands(text, Target::All, &Lines, None);
+        let mut plan = plan_commands(text, Target::All, &Lines, None);
+        guard_commands(&mut plan, &local());
         run_commands(session, &plan, &ExecOptions::default(), cfg, cancel, rec).await
+    }
+
+    fn local() -> PolicyCtx {
+        PolicyCtx {
+            env: Some(EnvTag::Local),
+            read_only: false,
+            confirm_unbounded: false,
+            connection_name: "conn".into(),
+        }
     }
 
     #[tokio::test]
@@ -1086,6 +1177,27 @@ mod run_tests {
         )
         .await;
         assert_eq!(report.stop, Some(StopReason::Error { index: 2 }));
+        assert!(report.stmts.is_empty());
+        assert!(s.received().is_empty());
+        assert!(rec.events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unguarded_plan_sends_nothing() {
+        let s = FakeCmd::new(vec![]);
+        let plan = plan_commands("GET a\nSET b", Target::All, &Lines, None);
+        assert!(plan.guard.is_none() && plan.runnable());
+        let mut rec = Rec::default();
+        let report = run_commands(
+            &s,
+            &plan,
+            &ExecOptions::default(),
+            cfg(true),
+            &cancel(),
+            &mut rec,
+        )
+        .await;
+        assert_eq!(report.stop, Some(StopReason::Error { index: 0 }));
         assert!(report.stmts.is_empty());
         assert!(s.received().is_empty());
         assert!(rec.events.is_empty());
