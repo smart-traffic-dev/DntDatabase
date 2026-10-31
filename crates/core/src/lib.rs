@@ -13,5 +13,6 @@ pub mod server;
 pub mod sql;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
+pub mod tls;
 pub mod tx;
 pub mod value;

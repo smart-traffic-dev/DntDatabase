@@ -162,12 +162,116 @@ impl ConnectionConfig {
     /// Checks required fields; the error names the offending field (e.g. `ssh.key_path`).
     pub fn validate(&self) -> Result<(), DbError> {
         match self.kind {
-            DbKind::MySql | DbKind::Postgres => self.validate_sql(),
-            DbKind::Mongo | DbKind::Redis => Err(DbError::Config {
-                field: Some("kind".into()),
-                message: format!("{} connections are not supported yet", self.kind.label()),
-            }),
+            DbKind::MySql | DbKind::Postgres => {
+                self.validate_sql()?;
+                self.require_driver_match()
+            }
+            DbKind::Mongo => self.validate_mongo(),
+            DbKind::Redis => self.validate_redis(),
         }
+    }
+
+    /// `options.driver` must belong to `kind` (SQL engines carry `None`).
+    fn require_driver_match(&self) -> Result<(), DbError> {
+        let matches = match (self.kind, &self.options.driver) {
+            (DbKind::MySql | DbKind::Postgres, DriverOptions::None) => true,
+            (DbKind::Mongo, DriverOptions::Mongo { .. }) => true,
+            (DbKind::Redis, DriverOptions::Redis { .. }) => true,
+            (DbKind::MySql | DbKind::Postgres | DbKind::Mongo | DbKind::Redis, _) => false,
+        };
+        require(
+            matches,
+            "options.driver",
+            "Driver options do not match the engine",
+        )
+    }
+
+    /// Spec §6.2, MongoDB: port optional with SRV, SSH only for a single host.
+    fn validate_mongo(&self) -> Result<(), DbError> {
+        self.require_name()?;
+        self.require_driver_match()?;
+        let (srv, extra_hosts) = match &self.options.driver {
+            DriverOptions::Mongo {
+                srv, extra_hosts, ..
+            } => (srv, extra_hosts),
+            // Already refused by `require_driver_match`; kept fail-closed.
+            DriverOptions::None | DriverOptions::Redis { .. } => {
+                return require(
+                    false,
+                    "options.driver",
+                    "Driver options do not match the engine",
+                )
+            }
+        };
+        self.require_host()?;
+        if !srv {
+            self.require_port()?;
+        }
+        require(
+            !(*srv && !extra_hosts.is_empty()),
+            "options.driver",
+            "An SRV connection string cannot list extra hosts",
+        )?;
+        require(
+            extra_hosts
+                .iter()
+                .all(|h| !h.host.trim().is_empty() && h.port != 0),
+            "options.driver.extra_hosts",
+            "Every additional host needs a host and a port",
+        )?;
+        if let Some(ssh) = &self.ssh {
+            require(
+                !*srv && extra_hosts.is_empty(),
+                "ssh",
+                "SSH tunnel needs a single host",
+            )?;
+            validate_ssh(ssh)?;
+        }
+        self.validate_ssl()
+    }
+
+    /// Spec §6.2, Redis: `db` is left to the server.
+    fn validate_redis(&self) -> Result<(), DbError> {
+        self.require_name()?;
+        self.require_driver_match()?;
+        self.require_host()?;
+        self.require_port()?;
+        if let Some(ssh) = &self.ssh {
+            validate_ssh(ssh)?;
+        }
+        self.validate_ssl()
+    }
+
+    fn require_name(&self) -> Result<(), DbError> {
+        require(
+            !self.name.trim().is_empty(),
+            "name",
+            "name must not be empty",
+        )
+    }
+
+    fn require_host(&self) -> Result<(), DbError> {
+        require(
+            !self.host.trim().is_empty(),
+            "host",
+            "host must not be empty",
+        )
+    }
+
+    fn require_port(&self) -> Result<(), DbError> {
+        require(self.port != 0, "port", "port must be between 1 and 65535")
+    }
+
+    fn validate_ssl(&self) -> Result<(), DbError> {
+        if let Some(ssl) = &self.ssl {
+            let verifies = matches!(ssl.mode, SslMode::VerifyCa | SslMode::VerifyFull);
+            require(
+                !verifies || ssl.ca_path.is_some(),
+                "ssl.ca_path",
+                "SSL verification requires a CA certificate file",
+            )?;
+        }
+        Ok(())
     }
 
     fn validate_sql(&self) -> Result<(), DbError> {
@@ -209,6 +313,25 @@ impl ConnectionConfig {
         }
         Ok(())
     }
+}
+
+/// The `ssh.*` field checks, same texts as the SQL rules.
+fn validate_ssh(ssh: &SshConfig) -> Result<(), DbError> {
+    require(
+        !ssh.host.trim().is_empty(),
+        "ssh.host",
+        "SSH host must not be empty",
+    )?;
+    require(
+        !ssh.user.trim().is_empty(),
+        "ssh.user",
+        "SSH user must not be empty",
+    )?;
+    require(
+        ssh.auth != SshAuth::Key || ssh.key_path.is_some(),
+        "ssh.key_path",
+        "SSH key authentication requires a private key file",
+    )
 }
 
 fn require(ok: bool, field: &str, message: &str) -> Result<(), DbError> {
@@ -290,14 +413,237 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_rejects_unsupported_kinds() {
+    fn mongo_options(srv: bool, extra_hosts: Vec<HostPort>) -> DriverOptions {
+        DriverOptions::Mongo {
+            srv,
+            auth_source: None,
+            replica_set: None,
+            direct_connection: false,
+            extra_hosts,
+        }
+    }
+
+    fn mongo_config() -> ConnectionConfig {
+        let mut c = sample_config();
+        c.kind = DbKind::Mongo;
+        c.name = "Local Mongo".into();
+        c.port = 27017;
+        c.options.driver = mongo_options(false, vec![]);
+        c
+    }
+
+    fn redis_config() -> ConnectionConfig {
         let mut c = sample_config();
         c.kind = DbKind::Redis;
-        assert!(
-            matches!(c.validate(), Err(DbError::Config { field: Some(f), message })
-            if f == "kind" && message == "Redis connections are not supported yet")
+        c.name = "Local Redis".into();
+        c.port = 6379;
+        c.options.driver = DriverOptions::Redis { db: 0 };
+        c
+    }
+
+    fn error_of(c: &ConnectionConfig) -> (Option<String>, String) {
+        match c.validate() {
+            Err(DbError::Config { field, message }) => (field, message),
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    fn err(field: &str, message: &str) -> (Option<String>, String) {
+        (Some(field.into()), message.into())
+    }
+
+    const MISMATCH: &str = "Driver options do not match the engine";
+
+    #[test]
+    fn mongo_and_redis_validate_now() {
+        assert!(mongo_config().validate().is_ok());
+        assert!(redis_config().validate().is_ok());
+    }
+
+    #[test]
+    fn mongo_rules() {
+        let mut c = mongo_config();
+        c.port = 0;
+        assert_eq!(
+            error_of(&c),
+            err("port", "port must be between 1 and 65535")
         );
+        c.options.driver = mongo_options(true, vec![]);
+        assert!(c.validate().is_ok(), "SRV needs no port");
+
+        let mut c = mongo_config();
+        c.username = String::new();
+        assert!(c.validate().is_ok(), "username is optional");
+
+        let mut c = mongo_config();
+        c.name = " ".into();
+        assert_eq!(error_of(&c), err("name", "name must not be empty"));
+        let mut c = mongo_config();
+        c.host = String::new();
+        assert_eq!(error_of(&c), err("host", "host must not be empty"));
+
+        for driver in [DriverOptions::None, DriverOptions::Redis { db: 0 }] {
+            let mut c = mongo_config();
+            c.options.driver = driver;
+            assert_eq!(error_of(&c), err("options.driver", MISMATCH));
+        }
+
+        let mut c = mongo_config();
+        c.ssl = Some(SslConfig {
+            version: 1,
+            mode: SslMode::VerifyFull,
+            ca_path: None,
+            cert_path: None,
+            key_path: None,
+        });
+        assert_eq!(
+            error_of(&c),
+            err(
+                "ssl.ca_path",
+                "SSL verification requires a CA certificate file"
+            )
+        );
+        let mut c = mongo_config();
+        c.ssh = Some(SshConfig {
+            user: String::new(),
+            ..sample_ssh()
+        });
+        assert_eq!(error_of(&c), err("ssh.user", "SSH user must not be empty"));
+        let mut c = mongo_config();
+        c.ssh = Some(sample_ssh());
+        assert!(c.validate().is_ok(), "single host over SSH is fine");
+    }
+
+    #[test]
+    fn redis_rules() {
+        let mut c = redis_config();
+        c.username = String::new();
+        assert!(c.validate().is_ok(), "username is optional");
+        c.options.driver = DriverOptions::Redis { db: 999 };
+        assert!(c.validate().is_ok(), "db index is checked by the server");
+
+        let mut c = redis_config();
+        c.port = 0;
+        assert_eq!(
+            error_of(&c),
+            err("port", "port must be between 1 and 65535")
+        );
+        let mut c = redis_config();
+        c.host = "  ".into();
+        assert_eq!(error_of(&c), err("host", "host must not be empty"));
+        let mut c = redis_config();
+        c.name = String::new();
+        assert_eq!(error_of(&c), err("name", "name must not be empty"));
+
+        for driver in [DriverOptions::None, mongo_options(false, vec![])] {
+            let mut c = redis_config();
+            c.options.driver = driver;
+            assert_eq!(error_of(&c), err("options.driver", MISMATCH));
+        }
+
+        let mut c = redis_config();
+        c.ssl = Some(SslConfig {
+            version: 1,
+            mode: SslMode::VerifyCa,
+            ca_path: None,
+            cert_path: None,
+            key_path: None,
+        });
+        assert_eq!(
+            error_of(&c),
+            err(
+                "ssl.ca_path",
+                "SSL verification requires a CA certificate file"
+            )
+        );
+        let mut c = redis_config();
+        c.ssh = Some(sample_ssh());
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn ssh_needs_a_single_host() {
+        let extra = || HostPort {
+            host: "db2".into(),
+            port: 27018,
+        };
+        let mut c = mongo_config();
+        c.ssh = Some(sample_ssh());
+        c.options.driver = mongo_options(true, vec![]);
+        assert_eq!(error_of(&c), err("ssh", "SSH tunnel needs a single host"));
+        c.options.driver = mongo_options(false, vec![extra()]);
+        assert_eq!(error_of(&c), err("ssh", "SSH tunnel needs a single host"));
+    }
+
+    #[test]
+    fn srv_with_extra_hosts_is_refused() {
+        let mut c = mongo_config();
+        c.options.driver = mongo_options(
+            true,
+            vec![HostPort {
+                host: "db2".into(),
+                port: 27018,
+            }],
+        );
+        assert_eq!(
+            error_of(&c),
+            err(
+                "options.driver",
+                "An SRV connection string cannot list extra hosts"
+            )
+        );
+    }
+
+    #[test]
+    fn extra_host_needs_host_and_port() {
+        let ok = HostPort {
+            host: "db2".into(),
+            port: 27018,
+        };
+        let mut c = mongo_config();
+        c.options.driver = mongo_options(false, vec![ok.clone()]);
+        assert!(c.validate().is_ok());
+        for bad in [
+            HostPort {
+                host: " ".into(),
+                port: 27018,
+            },
+            HostPort {
+                host: "db3".into(),
+                port: 0,
+            },
+        ] {
+            c.options.driver = mongo_options(false, vec![ok.clone(), bad]);
+            assert_eq!(
+                error_of(&c),
+                err(
+                    "options.driver.extra_hosts",
+                    "Every additional host needs a host and a port"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn mysql_and_pg_rules_unchanged() {
+        for kind in [DbKind::MySql, DbKind::Postgres] {
+            let mut c = sample_config();
+            c.kind = kind;
+            assert!(c.validate().is_ok());
+            c.name = String::new();
+            assert_eq!(error_of(&c), err("name", "name must not be empty"));
+            c.name = "x".into();
+            c.port = 0;
+            assert_eq!(
+                error_of(&c),
+                err("port", "port must be between 1 and 65535")
+            );
+            c.port = 3306;
+            c.options.driver = DriverOptions::Redis { db: 0 };
+            assert_eq!(error_of(&c), err("options.driver", MISMATCH));
+        }
+        // The R1 field-by-field cases still hold.
+        validate_checks_every_field();
     }
 
     fn field_of(c: &ConnectionConfig) -> Option<String> {

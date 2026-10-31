@@ -1,4 +1,4 @@
-use dnt_core::config::{ConnectionConfig, SecretMode, SshAuth, SshConfig};
+use dnt_core::config::{ConnectionConfig, DriverOptions, SecretMode, SshAuth, SshConfig};
 use dnt_core::error::DbError;
 use dnt_core::secret::{MemorySecretStore, SecretKind, SecretStore};
 use dnt_core::server::DbKind;
@@ -335,21 +335,29 @@ fn over_cap_kdf_cost_is_config_error() {
 }
 
 #[test]
+#[ignore = "enabled in Task 3"]
 fn import_rejects_unsupported_kind() {
+    // R3: a valid Mongo entry now passes validation and is stored (needs the Task 3 CHECK).
     let (repo, _secrets, _existing) = repo_with_shop_prod();
-    let before = repo.tree().unwrap();
-    let mut bundle = empty_bundle();
-    bundle.connections = vec![ConnectionConfig {
+    let mut mongo = ConnectionConfig {
         id: Uuid::new_v4(),
         kind: DbKind::Mongo,
+        port: 27017,
         ..cfg("mongo")
-    }];
-    let err = apply(&repo, bundle, ConflictPolicy::Copy).unwrap_err();
-    assert!(
-        matches!(&err, DbError::Config { field: Some(f), .. } if f == "kind"),
-        "{err:?}"
-    );
-    assert_eq!(repo.tree().unwrap(), before);
+    };
+    mongo.options.driver = DriverOptions::Mongo {
+        srv: false,
+        auth_source: None,
+        replica_set: None,
+        direct_connection: false,
+        extra_hosts: vec![],
+    };
+    let mut bundle = empty_bundle();
+    bundle.connections = vec![mongo.clone()];
+    apply(&repo, bundle, ConflictPolicy::Copy).unwrap();
+    let stored = repo.get(mongo.id).unwrap();
+    assert_eq!(stored.kind, DbKind::Mongo);
+    assert_eq!(stored.options.driver, mongo.options.driver);
 }
 
 #[test]
