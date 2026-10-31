@@ -169,6 +169,25 @@ ALTER TABLE query_history_next RENAME TO query_history;
 CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
 ";
 
+/// R3: `connections` rebuilt so its kind CHECK accepts MongoDB and Redis. The table is
+/// otherwise MIGRATION_1's, column for column (no later migration changed its schema, and it
+/// has no index besides its primary key's). Runs with foreign keys off (see `prepare`): with
+/// them on, `DROP TABLE connections` would delete its children's rows or null their links.
+const MIGRATION_10: &str = "
+CREATE TABLE connections_next (
+  id TEXT PRIMARY KEY, group_id TEXT NULL REFERENCES groups(id) ON DELETE SET NULL,
+  name TEXT NOT NULL, sort_order INTEGER NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('mysql','postgres','mongo','redis')),
+  host TEXT NOT NULL, port INTEGER NOT NULL, username TEXT NOT NULL,
+  default_db TEXT NULL, env_tag TEXT NULL, read_only INTEGER NOT NULL DEFAULT 0,
+  secret_mode TEXT NOT NULL CHECK (secret_mode IN ('saved','ask')),
+  ssh_json TEXT NULL, ssl_json TEXT NULL, options_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, last_connected_at TEXT NULL);
+INSERT INTO connections_next SELECT * FROM connections;
+DROP TABLE connections;
+ALTER TABLE connections_next RENAME TO connections;
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -180,10 +199,11 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_7),
         M::up(MIGRATION_8),
         M::up(MIGRATION_9),
+        M::up(MIGRATION_10).foreign_key_check(),
     ])
 }
 
-/// Opens (creating if needed) the database file, enables foreign keys and migrates to latest.
+/// Opens (creating if needed) the database file, migrates to latest and enables foreign keys.
 ///
 /// The file is in WAL mode with `synchronous = NORMAL`: a commit is one append to the
 /// `-wal` file next to it (no fsync per commit), so the query history of a long run
@@ -205,14 +225,30 @@ pub fn open_in_memory() -> Result<Connection, DbError> {
     prepare(conn)
 }
 
+/// Migrates with foreign keys off, then turns them on for the app.
+///
+/// Off while migrating, because a migration that rebuilds a parent table (`DROP TABLE`) would
+/// otherwise run its children's ON DELETE actions; the pragma is a no-op inside a transaction,
+/// so it is set here, around `to_latest`. Migrations that rebuild a parent carry
+/// `.foreign_key_check()`, so they roll back rather than leave a dangling reference.
 fn prepare(mut conn: Connection) -> Result<Connection, DbError> {
-    conn.pragma_update(None, "foreign_keys", true)
-        .map_err(|e| internal("enable foreign keys", e))?;
     conn.pragma_update(None, "synchronous", "NORMAL")
         .map_err(|e| internal("set synchronous", e))?;
+    conn.pragma_update(None, "foreign_keys", false)
+        .map_err(|e| internal("disable foreign keys", e))?;
     migrations()
         .to_latest(&mut conn)
         .map_err(|e| internal("migrate database", e))?;
+    conn.pragma_update(None, "foreign_keys", true)
+        .map_err(|e| internal("enable foreign keys", e))?;
+    let on: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .map_err(|e| internal("read foreign keys", e))?;
+    if on != 1 {
+        return Err(DbError::Internal {
+            message: "enable foreign keys: still off".into(),
+        });
+    }
     Ok(conn)
 }
 
@@ -256,7 +292,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -320,7 +356,7 @@ mod tests {
         .to_latest(&mut conn)
         .unwrap();
         conn.execute_batch("INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) VALUES ('c','c',0,'mysql','h',3306,'u','ask','now','now'); INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin,outcome_unknown) VALUES (42,'c','UPDATE t SET a=1',0,'write','now','error','data_edit',1);").unwrap();
-        migrations().to_latest(&mut conn).unwrap();
+        let conn = prepare(conn).unwrap();
         let row: (i64, String, i64) = conn
             .query_row(
                 "SELECT id,origin,outcome_unknown FROM query_history",
@@ -351,7 +387,7 @@ mod tests {
         .to_latest(&mut conn)
         .unwrap();
         conn.execute_batch("INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) VALUES ('c','c',0,'mysql','h',3306,'u','ask','now','now'); INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin,outcome_unknown) VALUES (7,'c','ALTER TABLE t ADD c INT',0,'ddl','now','ok','object_action',1);").unwrap();
-        migrations().to_latest(&mut conn).unwrap();
+        let conn = prepare(conn).unwrap();
         let row: (i64, String, i64) = conn
             .query_row(
                 "SELECT id,origin,outcome_unknown FROM query_history",
@@ -385,11 +421,11 @@ mod tests {
         .to_latest(&mut conn)
         .unwrap();
         conn.execute_batch("INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) VALUES ('c','c',0,'mysql','h',3306,'u','ask','now','now'); INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin,outcome_unknown) VALUES (9,'c','ALTER TABLE t ADD c INT',0,'ddl','now','ok','table_design',1);").unwrap();
-        migrations().to_latest(&mut conn).unwrap();
+        let conn = prepare(conn).unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 9);
+        assert_eq!(v, 10);
         let row: (i64, String, i64) = conn
             .query_row(
                 "SELECT id,origin,outcome_unknown FROM query_history",
@@ -463,7 +499,7 @@ mod tests {
                     ('b','b',1,'postgres','h',5432,'u','ask','{disable}','now','now');"
         ))
         .unwrap();
-        migrations().to_latest(&mut conn).unwrap();
+        let conn = prepare(conn).unwrap();
         let ssl = |id: &str| -> dnt_core::config::SslConfig {
             let json: String = conn
                 .query_row("SELECT ssl_json FROM connections WHERE id=?1", [id], |r| {
@@ -501,7 +537,7 @@ mod tests {
              VALUES (41,'c','SELECT 1',0,'read','now','ok','import');",
         )
         .unwrap();
-        migrations().to_latest(&mut conn).unwrap();
+        let conn = prepare(conn).unwrap();
         let kind: String = conn
             .query_row("SELECT kind FROM jobs WHERE id='j1'", [], |r| r.get(0))
             .unwrap();
@@ -548,6 +584,192 @@ mod tests {
             .unwrap();
         assert_eq!(indexes, 2);
     }
+    /// Every row of `table`, every column, in rowid order.
+    fn dump(conn: &Connection, table: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn
+            .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+            .unwrap();
+        let n = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..n)
+                .map(|i| r.get::<_, rusqlite::types::Value>(i))
+                .collect()
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    /// `(type, name, tbl_name, sql)` of every schema object, ordered by name.
+    fn schema(conn: &Connection) -> Vec<(String, String, String, Option<String>)> {
+        let mut stmt = conn
+            .prepare("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    }
+
+    const ALL_TABLES: [&str; 8] = [
+        "groups",
+        "connections",
+        "app_settings",
+        "query_tabs",
+        "query_history",
+        "favorites",
+        "snippets",
+        "jobs",
+    ];
+
+    /// Rebuilding `connections` with foreign keys on would cascade into its children (history
+    /// deleted, job/tab/favorite links nulled). Migration 10 keeps every row and every link,
+    /// and only the kind CHECK of the schema changes.
+    #[test]
+    fn migration_10_keeps_child_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        // As today: foreign keys are on when the app opens its database.
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        Migrations::new(vec![
+            M::up(MIGRATION_1),
+            M::up(MIGRATION_2),
+            M::up(MIGRATION_3),
+            M::up(MIGRATION_4),
+            M::up(MIGRATION_5),
+            M::up(MIGRATION_6),
+            M::up(MIGRATION_7),
+            M::up(MIGRATION_8),
+            M::up(MIGRATION_9),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO groups (id,parent_id,name,sort_order) VALUES ('g',NULL,'G',0); \
+             INSERT INTO connections (id,group_id,name,sort_order,kind,host,port,username,secret_mode,ssl_json,options_json,created_at,updated_at,last_connected_at) \
+             VALUES ('a',NULL,'A',0,'mysql','h',3306,'u','saved',NULL,'{\"x\":1}','c1','u1','l1'), \
+                    ('b','g','B',0,'postgres','h2',5432,'u2','ask','{}','{}','c2','u2',NULL); \
+             INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin) \
+             VALUES (1,'a','SELECT 1',0,'read','t1','ok','query'), \
+                    (2,'a','SELECT 2',0,'read','t2','error','data_edit'), \
+                    (3,'a','SELECT 3',1,'write','t3','cancelled','seed'); \
+             INSERT INTO jobs (id,kind,connection_id,title,state,created_at) \
+             VALUES ('j1','import','a','Import','done','now'); \
+             INSERT INTO query_tabs (id,title,sort_order,connection_id,sql_text,updated_at) \
+             VALUES ('t1','Query',0,'a','SELECT 1','now'); \
+             INSERT INTO favorites (id,name,folder,sql,connection_id,created_at,updated_at,sort) \
+             VALUES ('f1','Fav',NULL,'SELECT 1','a','now','now',0); \
+             INSERT INTO snippets (id,prefix,label,body,created_at,updated_at) \
+             VALUES ('s1','sel','Select','SELECT','now','now'); \
+             INSERT INTO app_settings (key,value) VALUES ('k','v');",
+        )
+        .unwrap();
+        let rows_before: Vec<_> = ALL_TABLES.iter().map(|t| dump(&conn, t)).collect();
+        let schema_before = schema(&conn);
+
+        let conn = prepare(conn).unwrap();
+
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 10);
+        // Every row of every table is still there, byte for byte (links included).
+        for (table, before) in ALL_TABLES.iter().zip(&rows_before) {
+            assert_eq!(&dump(&conn, table), before, "{table}");
+        }
+        let job_conn: Option<String> = conn
+            .query_row("SELECT connection_id FROM jobs WHERE id='j1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(job_conn.as_deref(), Some("a"));
+        let history: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM query_history WHERE connection_id='a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(history, 3);
+
+        // The schema is unchanged apart from the kind CHECK (SQLite quotes a renamed table's
+        // name in its stored CREATE statement).
+        let expected: Vec<_> = schema_before
+            .into_iter()
+            .map(|(ty, name, tbl, sql)| {
+                let sql = sql.map(|s| {
+                    if name == "connections" {
+                        s.replace(
+                            "CHECK (kind IN ('mysql','postgres'))",
+                            "CHECK (kind IN ('mysql','postgres','mongo','redis'))",
+                        )
+                    } else {
+                        s
+                    }
+                });
+                (ty, name, tbl, sql)
+            })
+            .collect();
+        let actual: Vec<_> = schema(&conn)
+            .into_iter()
+            .map(|(ty, name, tbl, sql)| {
+                let sql = sql.map(|s| {
+                    s.replace(
+                        "CREATE TABLE \"connections\" (",
+                        "CREATE TABLE connections (",
+                    )
+                });
+                (ty, name, tbl, sql)
+            })
+            .collect();
+        assert_eq!(actual, expected);
+
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        let on: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(on, 1);
+
+        let insert = |id: &str, kind: &str| {
+            conn.execute(
+                "INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) \
+                 VALUES (?1,?1,1,?2,'h',1,'u','ask','now','now')",
+                [id, kind],
+            )
+        };
+        insert("m", "mongo").unwrap();
+        insert("r", "redis").unwrap();
+        assert!(insert("o", "oracle").is_err());
+
+        // The children's foreign keys point at the rebuilt table.
+        conn.execute("DELETE FROM connections WHERE id='a'", [])
+            .unwrap();
+        let history: i64 = conn
+            .query_row("SELECT COUNT(*) FROM query_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(history, 0);
+        let links: (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT (SELECT connection_id FROM jobs), (SELECT connection_id FROM query_tabs), \
+                 (SELECT connection_id FROM favorites)",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(links, (None, None, None));
+        conn.execute("DELETE FROM groups WHERE id='g'", []).unwrap();
+        let group: Option<String> = conn
+            .query_row("SELECT group_id FROM connections WHERE id='b'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(group, None);
+    }
+
     #[test]
     fn foreign_keys_enabled() {
         let conn = open_in_memory().unwrap();

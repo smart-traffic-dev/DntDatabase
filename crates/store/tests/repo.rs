@@ -1,6 +1,9 @@
-use dnt_core::config::{ConnectionConfig, EnvTag, SecretMode, SslConfig, SslMode};
+use dnt_core::config::{
+    ConnectionConfig, DriverOptions, EnvTag, HostPort, SecretMode, SslConfig, SslMode,
+};
 use dnt_core::error::DbError;
 use dnt_core::secret::{MemorySecretStore, SecretKind, SecretStore};
+use dnt_core::server::DbKind;
 use dnt_core::test_util::{sample_config, sample_ssh};
 use dnt_store::db::{open, open_in_memory};
 use dnt_store::repo::{ConnectionRepo, NewSecrets, NodeId, SecretChange, SecretUpdate};
@@ -48,6 +51,48 @@ fn secret(store: &MemorySecretStore, id: Uuid, kind: SecretKind) -> Option<Strin
         .get(id, kind)
         .unwrap()
         .map(|s| s.expose_secret().to_string())
+}
+
+/// R3: Mongo and Redis connections are stored and read back field for field.
+#[test]
+fn repo_round_trips_mongo_and_redis() {
+    let (repo, _secrets) = setup();
+    let mut mongo = ConnectionConfig {
+        id: Uuid::new_v4(),
+        kind: DbKind::Mongo,
+        port: 27017,
+        default_db: Some("shop".into()),
+        ..cfg("mongo")
+    };
+    mongo.options.driver = DriverOptions::Mongo {
+        srv: false,
+        auth_source: Some("admin".into()),
+        replica_set: Some("rs0".into()),
+        direct_connection: true,
+        extra_hosts: vec![HostPort {
+            host: "db2.example.com".into(),
+            port: 27018,
+        }],
+    };
+    let mut redis = ConnectionConfig {
+        id: Uuid::new_v4(),
+        kind: DbKind::Redis,
+        port: 6379,
+        default_db: None,
+        ..cfg("redis")
+    };
+    redis.options.driver = DriverOptions::Redis { db: 3 };
+    for input in [mongo, redis] {
+        let created = repo.create(input.clone(), no_secrets()).unwrap();
+        assert_eq!(
+            created,
+            ConnectionConfig {
+                sort_order: created.sort_order,
+                ..input
+            }
+        );
+        assert_eq!(repo.get(input.id).unwrap(), created);
+    }
 }
 
 #[test]

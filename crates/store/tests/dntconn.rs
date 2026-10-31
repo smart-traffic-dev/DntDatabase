@@ -335,8 +335,7 @@ fn over_cap_kdf_cost_is_config_error() {
 }
 
 #[test]
-#[ignore = "enabled in Task 3"]
-fn import_rejects_unsupported_kind() {
+fn import_accepts_mongo() {
     // R3: a valid Mongo entry now passes validation and is stored (needs the Task 3 CHECK).
     let (repo, _secrets, _existing) = repo_with_shop_prod();
     let mut mongo = ConnectionConfig {
