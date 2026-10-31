@@ -114,6 +114,8 @@ const FOLDER_LABELS: Record<ObjectKind, string> = {
   Event: 'Events',
   Sequence: 'Sequences',
   Type: 'Types',
+  Collection: 'Collections',
+  Key: 'Keys',
 };
 
 export const folderLabel = (kind: ObjectKind) => FOLDER_LABELS[kind];

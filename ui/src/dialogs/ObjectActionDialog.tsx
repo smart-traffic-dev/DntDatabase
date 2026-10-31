@@ -35,6 +35,8 @@ const KIND_WORD: Record<ObjectKind, string> = {
   Event: 'event',
   Sequence: 'sequence',
   Type: 'type',
+  Collection: 'collection',
+  Key: 'key',
 };
 
 /** The words the tree menu uses: "Drop table orders", "Drop database shop", "Rename table orders". */

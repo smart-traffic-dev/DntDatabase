@@ -379,9 +379,11 @@ impl Introspector for MySqlSession {
             ObjectKind::Sequence if self.capabilities().sequences => {
                 self.list_named(queries::SEQUENCES, params1(db), kind).await
             }
-            ObjectKind::Sequence | ObjectKind::MaterializedView | ObjectKind::Type => {
-                Ok(Vec::new())
-            }
+            ObjectKind::Sequence
+            | ObjectKind::MaterializedView
+            | ObjectKind::Type
+            | ObjectKind::Collection
+            | ObjectKind::Key => Ok(Vec::new()),
         }
     }
 

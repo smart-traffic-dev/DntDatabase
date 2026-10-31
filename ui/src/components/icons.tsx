@@ -199,6 +199,8 @@ export const CodeIcon = () => (
 export function KindIcon({ kind }: { kind: ObjectKind | undefined }) {
   switch (kind) {
     case 'Table':
+    case 'Collection':
+    case 'Key':
       return <TableIcon />;
     case 'View':
     case 'MaterializedView':

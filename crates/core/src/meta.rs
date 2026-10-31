@@ -12,6 +12,11 @@ pub enum ObjectKind {
     Event,
     Sequence,
     Type,
+    // A MongoDB collection (a Mongo view is `View`).
+    Collection,
+    // A key-value key: only names a key tab in an `ObjectRef`; `list_objects` never
+    // returns it.
+    Key,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]

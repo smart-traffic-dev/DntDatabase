@@ -1,6 +1,7 @@
 use crate::command::CommandSession;
 use crate::config::ResolvedConfig;
 use crate::error::DbError;
+use crate::keyspace::Keyspace;
 use crate::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
     TableDetail,
@@ -235,6 +236,11 @@ pub trait Session: Send + Sync {
     fn engine(&self) -> Engine<'_>;
     /// Session types implement `Introspector` themselves and return `self`.
     fn introspector(&self) -> &dyn Introspector;
+    /// The keyspace browser of a session with `capabilities.paged_objects`. Default:
+    /// `None` (the session has no keyspace).
+    fn keyspace(&self) -> Option<&dyn Keyspace> {
+        None
+    }
     fn cancel_handle(&self) -> CancelHandle;
     /// How many times this session replaced its connection with a fresh one, in all.
     /// The query layer compares it around each statement to tell the user about
@@ -931,6 +937,14 @@ mod tests {
         let s: Box<dyn Session> = Box::new(fake());
         assert!(matches!(s.command(), Err(DbError::Unsupported { .. })));
         assert_eq!(s.tx_state(), TxState::Idle);
+    }
+
+    #[test]
+    fn sessions_have_no_keyspace_by_default() {
+        let s: Box<dyn Session> = Box::new(fake());
+        assert!(s.keyspace().is_none());
+        let c: Box<dyn Session> = Box::new(fake_command(TxState::Idle));
+        assert!(c.keyspace().is_none());
     }
 
     #[test]

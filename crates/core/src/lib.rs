@@ -4,6 +4,7 @@ pub mod conn_string;
 pub mod data_access;
 pub mod driver;
 pub mod error;
+pub mod keyspace;
 pub mod meta;
 pub mod redact;
 pub mod secret;

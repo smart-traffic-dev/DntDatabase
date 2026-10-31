@@ -2469,7 +2469,7 @@ export type ObjectAction =
  * `charset`/`collation`: MySQL only (`None`: the server default). `owner`: PostgreSQL only.
  */
 { kind: "create_namespace"; database: string; name: string; charset?: string | null; collation?: string | null; owner?: string | null } | { kind: "drop_namespace"; database: string; name: string } | { kind: "rename_table"; object: ObjectRef; name: string } | { kind: "drop_object"; object: ObjectRef } | { kind: "truncate_table"; object: ObjectRef }
-export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type"
+export type ObjectKind = "Table" | "View" | "MaterializedView" | "Function" | "Procedure" | "Trigger" | "Event" | "Sequence" | "Type" | "Collection" | "Key"
 export type ObjectRef = { database: string; schema: string | null; name: string; kind: ObjectKind }
 /**
  * The edited object after the apply, as far as the app knows.

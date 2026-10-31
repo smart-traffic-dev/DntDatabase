@@ -50,6 +50,8 @@ const KIND_LABEL: Record<ObjectKind, string> = {
   Event: 'Event',
   Sequence: 'Sequence',
   Type: 'Type',
+  Collection: 'Collection',
+  Key: 'Key',
 };
 
 /** What a tab holds, in words (the tab's tooltip; its glyph is `TabKind`). */

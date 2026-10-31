@@ -585,7 +585,7 @@ impl Introspector for PgSession {
                 self.list_with(db, queries::LIST_TYPES, &[&schema], kind, false)
                     .await
             }
-            ObjectKind::Event => {
+            ObjectKind::Event | ObjectKind::Collection | ObjectKind::Key => {
                 drop(self.conn_for(db).await?);
                 Ok(Vec::new())
             }
@@ -705,7 +705,9 @@ impl Introspector for PgSession {
             }
             ObjectKind::Sequence => self.sequence_ddl(obj).await,
             ObjectKind::Type => self.type_ddl(obj).await,
-            ObjectKind::Event => Err(self.unsupported("DDL for Event")),
+            ObjectKind::Event | ObjectKind::Collection | ObjectKind::Key => {
+                Err(self.unsupported(&format!("DDL for {:?}", obj.kind)))
+            }
         }
     }
 }

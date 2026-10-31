@@ -601,6 +601,8 @@ fn kind_label(kind: ObjectKind) -> &'static str {
         ObjectKind::Event => "event",
         ObjectKind::Sequence => "sequence",
         ObjectKind::Type => "type",
+        ObjectKind::Collection => "collection",
+        ObjectKind::Key => "key",
     }
 }
 
