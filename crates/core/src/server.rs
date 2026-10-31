@@ -9,6 +9,35 @@ pub enum DbKind {
     Postgres,
 }
 
+impl DbKind {
+    /// The SQL dialect of this kind. Infallible only while every `DbKind` is a
+    /// SQL engine; removed when `DbKind` gains non-SQL variants (R1 Task 10).
+    pub fn as_sql(self) -> SqlKind {
+        match self {
+            DbKind::MySql => SqlKind::MySql,
+            DbKind::Postgres => SqlKind::Postgres,
+        }
+    }
+}
+
+/// The SQL engines, for code that only makes sense for SQL drivers.
+/// Serializes exactly like the matching `DbKind` variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum SqlKind {
+    MySql,
+    Postgres,
+}
+
+impl From<SqlKind> for DbKind {
+    fn from(kind: SqlKind) -> Self {
+        match kind {
+            SqlKind::MySql => DbKind::MySql,
+            SqlKind::Postgres => DbKind::Postgres,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 pub enum ServerVariant {
     MySql57,
@@ -204,5 +233,14 @@ mod tests {
             detect_mysql("10.2.44-MariaDB"),
             Err(DbError::Unsupported { .. })
         ));
+    }
+
+    #[test]
+    fn sql_kind_serializes_like_db_kind() {
+        assert_eq!(serde_json::to_value(SqlKind::MySql).unwrap(), "mysql");
+        assert_eq!(serde_json::to_value(SqlKind::Postgres).unwrap(), "postgres");
+        assert_eq!(DbKind::from(SqlKind::Postgres), DbKind::Postgres);
+        assert_eq!(DbKind::MySql.as_sql(), SqlKind::MySql);
+        assert_eq!(DbKind::Postgres.as_sql(), SqlKind::Postgres);
     }
 }
