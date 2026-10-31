@@ -13,7 +13,7 @@ pub struct PlannedCommand {
     pub index: u32,
     /// UTF-16 range in the editor text.
     pub range: (u32, u32),
-    /// Byte range in the editor text.
+    /// Byte range in [`CommandPlan::source`] (as `PlannedStmt::source_range`).
     pub source_range: (usize, usize),
     pub text: String,
     pub parsed: Result<ParsedCommand, CommandParseError>,
@@ -67,7 +67,8 @@ pub fn label_of(class: &CommandClass) -> StmtKindLabel {
 ///   the first.
 /// - `Selection(a, b)` is normalized and clamped, and only that slice is split.
 ///
-/// Ranges are relative to the editor text. Empty or whitespace-only input gives an
+/// `range` (UTF-16) is relative to the editor text; `source_range` (bytes) to the
+/// planned slice, `CommandPlan::source`. Empty or whitespace-only input gives an
 /// empty plan. A command that does not parse is `Block` (label `Other`); every other
 /// verdict is `Allow` until [`guard_commands`] sets them.
 pub fn plan_commands(text: &str, target: Target, lang: &dyn CommandLanguage) -> CommandPlan {
@@ -106,7 +107,7 @@ pub fn plan_commands(text: &str, target: Target, lang: &dyn CommandLanguage) -> 
             PlannedCommand {
                 index: index as u32,
                 range: range(s.range),
-                source_range: (from + s.range.0, from + s.range.1),
+                source_range: s.range,
                 text: s.text,
                 parsed,
                 label,
@@ -267,8 +268,10 @@ mod tests {
         let ranges: Vec<_> = p.stmts.iter().map(|s| s.range).collect();
         assert_eq!(ranges, [(6, 11), (13, 18)]);
         for s in &p.stmts {
-            assert_eq!(&T[s.source_range.0..s.source_range.1], s.text);
+            assert_eq!(&p.source[s.source_range.0..s.source_range.1], s.text);
         }
+        assert_eq!(p.stmts[0].source_range, (0, 5));
+        assert_eq!(p.stmts[1].source_range, (7, 12));
         assert_eq!(p.stmts[1].index, 1);
         assert_eq!(p.stmts[0].label, StmtKindLabel::Write);
         assert_eq!(p.stmts[1].label, StmtKindLabel::Read);
@@ -306,7 +309,9 @@ mod tests {
         assert_eq!(texts(&p), ["GET k"]);
         assert_eq!(p.base, 16);
         assert_eq!(p.stmts[0].range, (16, 21));
-        assert_eq!(p.stmts[0].source_range, (19, 24));
+        // Bytes in the slice `p.source` ("GET k"), not in the editor text.
+        assert_eq!(p.source, "GET k");
+        assert_eq!(p.stmts[0].source_range, (0, 5));
     }
 
     #[test]
