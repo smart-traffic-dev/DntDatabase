@@ -27,7 +27,9 @@ pub mod ddl_edit;
 
 pub mod backup;
 
+use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
+use dnt_core::server::{Cap, SqlKind};
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::FutureExt;
 use specta_typescript::Typescript;
@@ -36,6 +38,7 @@ use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Once;
+use uuid::Uuid;
 
 /// Where debug builds write the bindings (relative to `src-tauri`).
 pub const BINDINGS_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../ui/src/bindings.ts");
@@ -121,6 +124,18 @@ where
     .map_err(|e| DbError::Internal {
         message: format!("a background task failed: {e}"),
     })?
+}
+
+/// The SQL engine of connection `id`: the entry check of every SQL-only command
+/// (`Unsupported` for a non-SQL connection).
+pub(crate) fn require_sql(state: &AppState, id: Uuid) -> Result<SqlKind, DbError> {
+    state.sessions.require_sql(id)
+}
+
+/// [`require_sql`], then `Unsupported` unless connection `id` (its open server, else its
+/// kind's defaults) supports `cap`.
+pub(crate) fn require_cap(state: &AppState, id: Uuid, cap: Cap) -> Result<SqlKind, DbError> {
+    state.sessions.require_cap(id, cap)
 }
 
 /// Every command, plus the result types the UI needs that no command returns yet.

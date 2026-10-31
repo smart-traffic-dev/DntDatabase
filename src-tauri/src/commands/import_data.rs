@@ -2,7 +2,7 @@
 //! target read, the pure mapping helpers, the dry run, the plan and the start. Every
 //! command that reads the file accepts only a path picked in `import_pick_file`.
 
-use super::{blocking, guard};
+use super::{blocking, guard, require_cap};
 use crate::file_picks::FileAccess;
 use crate::import_data::{
     DryRunRequest, ImportConfirm, ImportPreview, ImportRequest, ImportTarget,
@@ -10,6 +10,7 @@ use crate::import_data::{
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::ObjectRef;
+use dnt_core::server::Cap;
 use dnt_transfer::convert::TargetColumn;
 use dnt_transfer::mapping::{
     auto_map, check_mapping, ImportMode, KeyChoice, Mapping, MappingReport,
@@ -43,6 +44,7 @@ pub async fn import_target_impl(
     connection_id: Uuid,
     table: ObjectRef,
 ) -> Result<ImportTarget, DbError> {
+    require_cap(state, connection_id, Cap::Import)?;
     state.sessions.import_target(connection_id, table).await
 }
 
@@ -53,6 +55,7 @@ pub async fn import_dry_run_impl(
     state
         .file_picks
         .check(FileAccess::ImportRead, &request.request.path)?;
+    require_cap(state, request.request.connection_id, Cap::Import)?;
     state.sessions.import_dry_run(request).await
 }
 
@@ -63,6 +66,7 @@ pub async fn import_prepare_impl(
     state
         .file_picks
         .check(FileAccess::ImportRead, &request.path)?;
+    require_cap(state, request.connection_id, Cap::Import)?;
     state.sessions.import_prepare(request).await
 }
 

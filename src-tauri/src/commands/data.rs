@@ -35,7 +35,7 @@
 use super::browse::table_detail_impl;
 use super::transfer::path_error;
 use super::workspace::write_atomic;
-use super::{blocking, guard};
+use super::{blocking, guard, require_cap, require_sql};
 use crate::data_sessions::{BoundedPage, DataRequest, RawRead};
 use crate::edit_plans::size_text;
 pub use crate::edit_plans::{
@@ -46,7 +46,7 @@ use crate::session_manager::config_error;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
-use dnt_core::server::SqlKind;
+use dnt_core::server::{Cap, SqlKind};
 use dnt_core::sql::build::{
     insert_sql, raw_where_clause, update_sql, BuildError, ColumnTarget, RowGuard, RowKey, TableRef,
 };
@@ -586,6 +586,7 @@ pub async fn table_data_impl(
     filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableDataPage, DbError> {
+    require_sql(state, id)?;
     check_limit(limit)?;
     let query = data_query(state, id, &obj, &sort, filter.as_ref()).await?;
     let read_only = state.repo.get(id)?.read_only;
@@ -632,8 +633,8 @@ pub async fn table_row_count_impl(
     filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableRowCount, DbError> {
+    let kind = require_sql(state, id)?;
     check_request_size(&[], filter.as_ref())?;
-    let kind = state.repo.get(id)?.kind.require_sql()?;
     check_object(kind, &obj)?;
     let rel = relation(kind, &obj);
     let request = match raw_text(filter.as_ref()) {
@@ -731,8 +732,8 @@ pub async fn data_editable_impl(
     id: Uuid,
     obj: ObjectRef,
 ) -> Result<EditableInfo, DbError> {
+    let kind = require_cap(state, id, Cap::DataEdit)?;
     let cfg = state.repo.get(id)?;
-    let kind = cfg.kind.require_sql()?;
     check_object(kind, &obj)?;
     let detail = table_detail_impl(state, id, obj).await?;
     Ok(editable_info(&detail, kind, cfg.read_only))
@@ -743,6 +744,7 @@ pub async fn data_preview_impl(
     id: Uuid,
     set: EditSet,
 ) -> Result<EditPreview, DbError> {
+    require_cap(state, id, Cap::DataEdit)?;
     state.sessions.edit_preview(id, set).await
 }
 
@@ -761,6 +763,7 @@ pub async fn data_cell_fetch_impl(
     key: Vec<(String, Value)>,
     column: String,
 ) -> Result<LoadedCell, DbError> {
+    require_cap(state, id, Cap::DataEdit)?;
     state.sessions.cell_fetch(id, obj, key, column).await
 }
 
@@ -1083,6 +1086,7 @@ pub async fn data_copy_sql_impl(
     rows: Vec<RowRef>,
     format: CopySqlFormat,
 ) -> Result<String, DbError> {
+    require_sql(state, id)?;
     let (detail, metas, dialect) = state.sessions.copy_context(id, &obj).await?;
     copy_sql(&detail, &metas, dialect, &rows, format)
 }

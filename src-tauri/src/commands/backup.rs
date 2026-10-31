@@ -4,13 +4,14 @@
 //! `dump_pick_path`.
 
 use super::export::file_stem;
-use super::guard;
+use super::{guard, require_cap};
 use crate::backup::{
     DumpObjects, DumpRequest, RestorePreview, RestoreRequest, ToolDumpRequest, ToolsList,
 };
 use crate::file_picks::FileAccess;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
+use dnt_core::server::Cap;
 use dnt_transfer::tools::PgDumpFormat;
 use tauri::State;
 use tauri_plugin_dialog::DialogExt;
@@ -22,6 +23,7 @@ pub async fn dump_objects_impl(
     database: String,
     schemas: Vec<String>,
 ) -> Result<DumpObjects, DbError> {
+    require_cap(state, connection_id, Cap::Dump)?;
     state
         .sessions
         .dump_objects(connection_id, database, schemas)
@@ -32,6 +34,7 @@ pub async fn dump_start_impl(state: &AppState, request: DumpRequest) -> Result<U
     state
         .file_picks
         .check(FileAccess::DumpWrite, &request.path)?;
+    require_cap(state, request.connection_id, Cap::Dump)?;
     state.sessions.dump_start(request).await
 }
 
@@ -150,6 +153,7 @@ pub async fn tool_dump_start_impl(
     state
         .file_picks
         .check(FileAccess::DumpWrite, &request.path)?;
+    require_cap(state, request.connection_id, Cap::Dump)?;
     state.sessions.tool_dump_start(request).await
 }
 
@@ -180,6 +184,7 @@ pub async fn restore_preview_impl(
     state
         .file_picks
         .check(FileAccess::RestoreRead, &request.path)?;
+    require_cap(state, request.connection_id, Cap::Dump)?;
     state.sessions.restore_preview(request).await
 }
 

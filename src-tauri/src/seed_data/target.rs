@@ -6,7 +6,7 @@ use crate::import_data::target::{read_target_bounded, TargetRead};
 use crate::session_manager::{close_quietly, SessionManager};
 use dnt_core::error::DbError;
 use dnt_core::meta::ObjectRef;
-use dnt_core::server::SqlKind;
+use dnt_core::server::{Cap, SqlKind};
 use dnt_query::Atomicity;
 use dnt_transfer::seed::infer::{check_values, fk_of, infer_plan, unique_single};
 use uuid::Uuid;
@@ -48,9 +48,9 @@ pub(crate) fn transactional(kind: SqlKind, read: &TargetRead) -> bool {
 impl SessionManager {
     /// The table's columns with their inferred generators, read on a short-lived session.
     pub async fn seed_target(&self, conn: Uuid, table: ObjectRef) -> Result<SeedTarget, DbError> {
+        let kind = self.require_cap(conn, Cap::Seed)?;
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let kind = cfg.kind.require_sql()?;
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.sql()?, &table).await;

@@ -22,7 +22,7 @@
 //! `query_cancel(run_id)`, `export_query_result_cancel`).
 
 use super::data::{data_query, DataFilter, SortSpec};
-use super::{blocking, guard};
+use super::{blocking, guard, require_sql};
 use crate::data_sessions::DataRequest;
 use crate::export_format::{
     check_options, open_writer, write_rows, ExportFormat, ExportOptions, ExportProgress,
@@ -331,6 +331,7 @@ pub async fn export_table_impl(
     request_key: String,
     progress: Progress,
 ) -> Result<ExportSummary, DbError> {
+    require_sql(state, id)?;
     check_options(&opts)?;
     let query = data_query(state, id, &obj, &sort, filter.as_ref()).await?;
     let request = DataRequest {

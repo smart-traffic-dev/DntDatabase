@@ -25,7 +25,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope, TableDetail};
-use dnt_core::server::{ServerInfo, SqlKind};
+use dnt_core::server::{Cap, ServerInfo, SqlKind};
 use dnt_core::sql::build::TableRef;
 use dnt_core::sql::Dialect;
 use dnt_core::value::{ColumnMeta, Value};
@@ -545,8 +545,8 @@ impl SessionManager {
         scope: Scope,
         table: Option<String>,
     ) -> Result<DesignOpen, DbError> {
+        let kind = self.require_cap(conn, Cap::Designer)?;
         let cfg = self.repo.get(conn)?;
-        let kind = cfg.kind.require_sql()?;
         match (kind, &scope.schema) {
             (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(
@@ -576,6 +576,7 @@ impl SessionManager {
         let loaded = tokio::time::timeout(METADATA_CALL_TIMEOUT, load(sql, object.as_ref())).await;
         close_quietly(session).await;
         let loaded = loaded.map_err(|_| timed_out())??;
+        let server_kind = server.kind.require_sql()?;
         let design_id = Uuid::new_v4();
         {
             let mut designs = lock(&self.table_designs.designs);
@@ -590,7 +591,7 @@ impl SessionManager {
                     object,
                     base: loaded.base.clone(),
                     server: server.clone(),
-                    kind,
+                    kind: server_kind,
                     dialect,
                     fingerprint: loaded.fingerprint,
                 },

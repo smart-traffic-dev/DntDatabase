@@ -11,7 +11,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::{Session, SqlSession};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::{ServerVariant, SqlKind};
+use dnt_core::server::{Cap, ServerVariant, SqlKind};
 use dnt_core::sql::ddl::{action_sql, ObjectAction};
 use dnt_core::sql::Dialect;
 use dnt_store::history::HistoryOrigin;
@@ -334,7 +334,7 @@ impl SessionManager {
         conn: Uuid,
         action: &ObjectAction,
     ) -> Result<String, DbError> {
-        action_sql(self.repo.get(conn)?.kind.require_sql()?, action)
+        action_sql(self.require_cap(conn, Cap::ObjectActions)?, action)
     }
 
     /// Choices for the "Create database/schema" form, read on a dedicated session.
@@ -343,9 +343,9 @@ impl SessionManager {
         conn: Uuid,
         database: String,
     ) -> Result<NamespaceOptions, DbError> {
-        let cfg = self.repo.get(conn)?;
+        let kind = self.require_cap(conn, Cap::ObjectActions)?;
         let rt = self.runtime(conn)?;
-        let db = namespace_options_db(cfg.kind.require_sql()?, database);
+        let db = namespace_options_db(kind, database);
         let (session, _) = rt.open_query_session(db).await?;
         let out = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
             namespace_options(session.sql()?).await
@@ -360,11 +360,11 @@ impl SessionManager {
         conn: Uuid,
         action: ObjectAction,
     ) -> Result<ActionPreview, DbError> {
+        let kind = self.require_cap(conn, Cap::ObjectActions)?;
         let cfg = self.repo.get(conn)?;
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
-        let kind = cfg.kind.require_sql()?;
         let sql = action_sql(kind, &action)?;
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;

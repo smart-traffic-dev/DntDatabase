@@ -2568,9 +2568,10 @@ impl SessionManager {
             rt.queries.sync_bound(&tab, &ts);
             ensured?;
         }
+        // A session that cannot run SQL is refused before the plan is used up.
+        let session = ts.session.as_deref().ok_or(DbError::PlanExpired)?.sql()?;
         self.plans.take(self.plan_ttl, plan_id, &current)?;
         let tx_open_before = ts.tx_open();
-        let session = ts.session.as_deref().ok_or(DbError::PlanExpired)?;
 
         let exec = ExecOptions {
             max_rows: opts.max_rows.clamp(1, MAX_ROWS_LIMIT) as usize,

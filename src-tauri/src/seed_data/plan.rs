@@ -20,7 +20,7 @@ use crate::session_manager::{
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ForeignKeyDetail, TableDetail};
-use dnt_core::server::SqlKind;
+use dnt_core::server::{Cap, SqlKind};
 use dnt_core::sql::Dialect;
 use dnt_query::Atomicity;
 use dnt_transfer::batch::DEFAULT_BATCH_BYTES;
@@ -175,10 +175,9 @@ struct Read {
 
 impl SessionManager {
     /// Reads the table and the keys of its foreign keys (through the key cache) and checks
-    /// the request's plans.
-    async fn seed_read(&self, req: SeedRequest) -> Result<Read, DbError> {
+    /// the request's plans. `kind`: the connection's engine, from the caller's gate.
+    async fn seed_read(&self, req: SeedRequest, kind: SqlKind) -> Result<Read, DbError> {
         let cfg = self.repo.get(req.connection_id)?;
-        let kind = cfg.kind.require_sql()?;
         let request = normalise(req, kind)?;
         let rt = self.runtime(request.connection_id)?;
         let (session, generation) = rt
@@ -226,7 +225,8 @@ impl SessionManager {
     /// The live preview (spec §5.1): the first rows exactly as the job generates them, or
     /// the column issues. No plan is stored.
     pub async fn seed_preview(&self, req: SeedRequest) -> Result<SeedSample, DbError> {
-        let r = self.seed_read(req).await?;
+        let kind = self.require_cap(req.connection_id, Cap::Seed)?;
+        let r = self.seed_read(req, kind).await?;
         let mut out = SeedSample {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -261,17 +261,17 @@ impl SessionManager {
     /// Reads the table and the keys, checks the plans, builds and judges the statement
     /// templates and stores a single-use plan (spec §5.5). Read-only connections are refused.
     pub async fn seed_prepare(&self, req: SeedRequest) -> Result<SeedPreview, DbError> {
+        let kind = self.require_cap(req.connection_id, Cap::Seed)?;
         if self.repo.get(req.connection_id)?.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
-        let r = self.seed_read(req).await?;
+        let r = self.seed_read(req, kind).await?;
         if let Some(i) = r.issues.first() {
             return Err(config_error(
                 "columns",
                 &format!("{}: {}", i.column, i.message),
             ));
         }
-        let kind = r.kind;
         let request = r.request;
         let mut seeder =
             Seeder::new(r.specs.clone(), request.seed, request.rows, kind).map_err(|issues| {

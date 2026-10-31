@@ -22,7 +22,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::{Session, SqlSession};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::{ServerInfo, SqlKind};
+use dnt_core::server::{Cap, ServerInfo, SqlKind};
 use dnt_core::sql::ddl_edit::{
     build, check_target, editable_kind, isolate, notes, parse_header, strategies, template,
     BuildInput, CatalogFacts, EditTarget, PostCheck, Strategy,
@@ -361,8 +361,8 @@ impl SessionManager {
         name: Option<String>,
         table: Option<String>,
     ) -> Result<DdlEditOpen, DbError> {
+        let engine = self.require_cap(conn, Cap::DdlEdit)?;
         let cfg = self.repo.get(conn)?;
-        let engine = cfg.kind.require_sql()?;
         match (engine, &scope.schema) {
             (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(

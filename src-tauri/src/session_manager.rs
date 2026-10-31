@@ -26,7 +26,7 @@ pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ColumnBrief, ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::secret::{SecretKind, SecretStore};
-use dnt_core::server::{Capabilities, DbKind, NamespaceModel, ServerInfo};
+use dnt_core::server::{check_cap, Cap, Capabilities, DbKind, NamespaceModel, ServerInfo, SqlKind};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::{KnownHosts, SshSecrets, Tunnel};
@@ -788,6 +788,27 @@ impl SessionManager {
 
     pub(crate) fn runtime(&self, id: Uuid) -> Result<Arc<ConnectionRuntime>, DbError> {
         self.runtime_opt(id).ok_or(DbError::NotOpen)
+    }
+
+    /// What connection `id` supports: the open server's capabilities, or (not open) the
+    /// defaults of its kind.
+    pub fn capabilities(&self, id: Uuid) -> Result<Capabilities, DbError> {
+        match self.runtime_opt(id) {
+            Some(rt) => Ok(rt.server_info().capabilities),
+            None => Ok(Capabilities::for_kind(self.repo.get(id)?.kind)),
+        }
+    }
+
+    /// The SQL engine of connection `id`; `Unsupported` for a non-SQL connection.
+    pub(crate) fn require_sql(&self, id: Uuid) -> Result<SqlKind, DbError> {
+        self.repo.get(id)?.kind.require_sql()
+    }
+
+    /// [`Self::require_sql`], then `Unsupported` unless connection `id` supports `cap`.
+    pub(crate) fn require_cap(&self, id: Uuid, cap: Cap) -> Result<SqlKind, DbError> {
+        let kind = self.require_sql(id)?;
+        check_cap(&self.capabilities(id)?, cap)?;
+        Ok(kind)
     }
 
     /// Closes the tunnel and every metadata session and forgets the connection. An `open`

@@ -1199,3 +1199,56 @@ async fn non_read_counts_never_run() {
     assert!(!out[0].counted);
     assert!(!fake.sent().iter().any(|s| s.starts_with("DELETE")));
 }
+
+/// The gate reads the open server's capabilities, not only its kind's defaults.
+#[tokio::test]
+async fn gating_uses_live_capabilities() {
+    let mut fake = Fake::new(MYSQL_ORDERS, MYSQL_ORDERS_DDL);
+    Arc::get_mut(&mut fake)
+        .unwrap()
+        .server
+        .capabilities
+        .designer = false;
+    let f = fixture(fake, None, false).await;
+    let e =
+        f.sm.table_design_open(f.conn, scope(&f), Some("orders".into()))
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(&e, DbError::Unsupported { feature, .. } if feature == "table designer"),
+        "{e:?}"
+    );
+    assert!(lock(&f.sm.table_designs.designs).is_empty());
+
+    // The same harness with the designer on gets past the gate and opens as before.
+    let f = mysql(None, false).await;
+    let o = open(&f).await;
+    assert!(o.locked.is_empty(), "{:?}", o.locked);
+}
+
+/// A connection that is not open is gated on its kind's default capabilities.
+#[tokio::test]
+async fn gating_falls_back_to_kind_defaults_when_disconnected() {
+    let f = mysql(None, false).await;
+    let closed =
+        f.sm.repo
+            .create(
+                ConnectionConfig {
+                    id: Uuid::nil(),
+                    kind: DbKind::MySql,
+                    ..sample_config()
+                },
+                NewSecrets {
+                    db_password: None,
+                    ssh_password: None,
+                    ssh_key_passphrase: None,
+                },
+            )
+            .unwrap()
+            .id;
+    assert!(f.sm.runtime_opt(closed).is_none());
+    assert_eq!(
+        f.sm.capabilities(closed).unwrap(),
+        dnt_core::server::Capabilities::sql_full(dnt_core::server::NamespaceModel::Db)
+    );
+}

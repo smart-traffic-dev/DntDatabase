@@ -5,13 +5,14 @@
 //! first use, one load per database at a time). `completion_objects` lists the tables and
 //! views after `db.` (MySQL) / `schema.` (PostgreSQL) through the tree's browse cache.
 
-use super::{blocking, guard};
+use super::{blocking, guard, require_cap, require_sql};
 use crate::cache::{CompletionObject, SchemaCache};
 use crate::query_sessions::{with_tx_state, PlanView, TabTxInfo, TxAction, TxMode};
 use crate::result_store::{ResultPage, ResultSearch};
 use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
+use dnt_core::server::Cap;
 use dnt_core::sql::Dialect;
 use dnt_core::tx::TxState;
 use dnt_core::value::Value;
@@ -110,6 +111,7 @@ pub async fn completion_scope_impl(
     conn_id: Uuid,
     database: String,
 ) -> Result<SchemaCache, DbError> {
+    require_sql(state, conn_id)?;
     state.sessions.schema_cache_for(conn_id, &database).await
 }
 
@@ -119,6 +121,7 @@ pub async fn completion_objects_impl(
     database: String,
     schema: Option<String>,
 ) -> Result<Vec<CompletionObject>, DbError> {
+    require_sql(state, conn_id)?;
     state
         .sessions
         .completion_objects(conn_id, &database, schema.as_deref())
@@ -161,6 +164,7 @@ pub async fn query_plan_impl(
     text: String,
     target: Target,
 ) -> Result<PlanView, DbError> {
+    require_sql(state, conn_id)?;
     state
         .sessions
         .query_plan(&tab_id, conn_id, database, &text, target)
@@ -202,6 +206,7 @@ pub async fn query_explain_impl(
     cursor: u32,
     analyze: bool,
 ) -> Result<PlanView, DbError> {
+    require_cap(state, conn_id, Cap::Explain)?;
     state
         .sessions
         .query_explain(&tab_id, conn_id, database, &text, cursor, analyze)
