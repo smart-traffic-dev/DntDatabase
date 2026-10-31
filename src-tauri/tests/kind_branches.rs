@@ -94,10 +94,9 @@ fn workspace_root() -> PathBuf {
 }
 
 fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+    let entries = fs::read_dir(dir).unwrap_or_else(|err| panic!("cannot read {dir:?}: {err}"));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("cannot read entry in {dir:?}: {err}"));
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if path.is_dir() {
@@ -117,21 +116,48 @@ fn relative(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
-fn file_offends(text: &str) -> bool {
-    text.lines()
-        .take_while(|line| line.trim() != "#[cfg(test)]")
-        .any(offends)
+/// True when the `#[cfg(test)]` at `lines[at]` gates a module (possibly after
+/// further attributes), which means the rest of the file is test code.
+fn gates_test_module(lines: &[&str], at: usize) -> bool {
+    lines[at + 1..]
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| !line.starts_with("#["))
+        .is_some_and(|line| {
+            ["mod ", "pub mod ", "pub(crate) mod "]
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        })
+}
+
+/// Number of offending lines in a file's text, stopping at the first
+/// `#[cfg(test)]` that gates a module.
+fn offending_lines(text: &str) -> usize {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut count = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "#[cfg(test)]" && gates_test_module(&lines, i) {
+            break;
+        }
+        if offends(line) {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn scan() -> BTreeSet<String> {
     let root = workspace_root();
     let mut src_dirs = vec![root.join("src-tauri").join("src")];
-    if let Ok(crates) = fs::read_dir(root.join("crates")) {
-        for entry in crates.flatten() {
-            let src = entry.path().join("src");
-            if src.is_dir() {
-                src_dirs.push(src);
-            }
+    let crates_dir = root.join("crates");
+    let crates =
+        fs::read_dir(&crates_dir).unwrap_or_else(|err| panic!("cannot read {crates_dir:?}: {err}"));
+    for entry in crates {
+        let entry =
+            entry.unwrap_or_else(|err| panic!("cannot read entry in {crates_dir:?}: {err}"));
+        let src = entry.path().join("src");
+        if src.is_dir() {
+            src_dirs.push(src);
         }
     }
     let mut files = Vec::new();
@@ -144,7 +170,7 @@ fn scan() -> BTreeSet<String> {
         .filter(|path| {
             let text = fs::read_to_string(path)
                 .unwrap_or_else(|err| panic!("cannot read {path:?}: {err}"));
-            file_offends(&text)
+            offending_lines(&text) > 0
         })
         .map(|path| relative(&root, path))
         .collect()
@@ -168,6 +194,24 @@ fn offends_detects_two_way_branches() {
     ] {
         assert!(!offends(line), "{line}");
     }
+}
+
+#[test]
+fn single_item_cfg_test_does_not_stop_scan() {
+    let text = "#[cfg(test)] use x;\nif kind == DbKind::MySql {\n}\n";
+    assert_eq!(offending_lines(text), 1);
+    let text = "#[cfg(test)]\nuse x;\nif kind == DbKind::MySql {\n}\n";
+    assert_eq!(offending_lines(text), 1);
+}
+
+#[test]
+fn cfg_test_module_stops_scan() {
+    let text = "#[cfg(test)]\nmod tests {\n    if kind == DbKind::MySql {}\n}\n";
+    assert_eq!(offending_lines(text), 0);
+    let text = "#[cfg(test)]\n#[path = \"x.rs\"]\nmod t;\nif kind == DbKind::MySql {\n";
+    assert_eq!(offending_lines(text), 0);
+    let text = "if kind == DbKind::MySql {}\n#[cfg(test)]\npub(crate) mod t {\n    a == DbKind::MySql\n}\n";
+    assert_eq!(offending_lines(text), 1);
 }
 
 #[test]
