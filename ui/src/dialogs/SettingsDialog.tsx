@@ -2,7 +2,6 @@ import { useEffect, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { api, toAppError } from '../api';
 import { commands, type LogLevel } from '../bindings';
 import { toggleResults, toggleRightSidebar, zoomIn, zoomOut, zoomReset } from '../components/windowActions';
-import { open as pickFolder } from '@tauri-apps/plugin-dialog';
 import {
   DEFAULT_IDLE_TX_WARN_MINUTES,
   DEFAULT_JOBS_PER_CONNECTION,
@@ -434,10 +433,12 @@ function JobsPerConnectionField() {
   );
 }
 
-/** "External tools folder" (P5 R25): searched first for mysqldump, pg_dump and the other tools; empty = PATH only. */
+/**
+ * "External tools folder" (P5 R25): searched first for mysqldump, pg_dump and the other tools; none = PATH only.
+ * Chosen only in the backend's folder dialog (the app runs programs from it), so the field is read-only.
+ */
 function ExternalToolsDirField() {
   const stored = useAppSettings((s) => s.externalToolsDir);
-  const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -445,34 +446,21 @@ function ExternalToolsDirField() {
     void useAppSettings.getState().loadExternalToolsDir();
   }, []);
 
-  const value = text ?? stored ?? '';
-  const save = async (raw: string) => {
-    const dir = raw.trim() === '' ? null : raw.trim();
+  const change = async (action: () => Promise<boolean>) => {
     setError(null);
-    if (dir === stored) {
-      setText(null);
-      return;
-    }
+    setSaved(false);
     try {
-      await useAppSettings.getState().setExternalToolsDir(dir);
-      setText(null);
-      setSaved(true);
+      setSaved(await action());
     } catch (e) {
-      setText(raw);
       setError(toAppError(e).message);
     }
   };
-  const browse = async () => {
-    try {
-      const picked = await pickFolder({ directory: true, multiple: false, defaultPath: stored ?? undefined });
-      if (typeof picked === 'string') {
-        setSaved(false);
-        await save(picked);
-      }
-    } catch {
-      // The picker is unavailable (or cancelled): the path can still be typed.
-    }
-  };
+  const browse = () => change(async () => (await useAppSettings.getState().pickExternalToolsDir()) !== null);
+  const clear = () =>
+    change(async () => {
+      await useAppSettings.getState().clearExternalToolsDir();
+      return true;
+    });
 
   return (
     <div className="field">
@@ -483,31 +471,22 @@ function ExternalToolsDirField() {
         <input
           id="settings-external-tools"
           type="text"
+          readOnly
           spellCheck={false}
           placeholder="PATH only"
-          value={value}
+          value={stored ?? ''}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? 'settings-external-tools-hint settings-external-tools-error' : 'settings-external-tools-hint'}
-          onChange={(e) => {
-            setSaved(false);
-            setText(e.target.value);
-          }}
-          onBlur={() => {
-            if (text !== null) void save(text);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && text !== null) {
-              e.preventDefault();
-              void save(text);
-            }
-          }}
         />
         <button type="button" className="btn" onClick={() => void browse()}>
           Browse…
         </button>
+        <button type="button" className="btn" disabled={stored === null} onClick={() => void clear()}>
+          Clear
+        </button>
       </div>
       <p id="settings-external-tools-hint" className="hint">
-        Searched first for mysqldump, mariadb-dump, pg_dump, pg_restore and psql; then every folder on PATH. Leave empty to
+        Searched first for mysqldump, mariadb-dump, pg_dump, pg_restore and psql; then every folder on PATH. Clear it to
         use PATH only.{saved ? ' Saved.' : ''}
       </p>
       {error && (

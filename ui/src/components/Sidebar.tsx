@@ -46,11 +46,15 @@ export function Sidebar() {
     setViewState(next);
   };
 
-  // Roving focus between the two segments (WAI-ARIA tabs, automatic activation).
+  // Roving focus between the views (WAI-ARIA tabs, automatic activation).
   const onTabKey = (e: KeyboardEvent, i: number) => {
-    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+    let next: number;
+    if (e.key === 'ArrowRight') next = (i + 1) % VIEWS.length;
+    else if (e.key === 'ArrowLeft') next = (i - 1 + VIEWS.length) % VIEWS.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = VIEWS.length - 1;
+    else return;
     e.preventDefault();
-    const next = (i + (e.key === 'ArrowRight' ? 1 : -1) + VIEWS.length) % VIEWS.length;
     const target = VIEWS[next];
     if (!target) return;
     setView(target.id);
@@ -59,8 +63,9 @@ export function Sidebar() {
 
   return (
     <aside className="sidebar">
+      {/* Header row: only the view switcher. Each view's actions sit in its own filter row below. */}
       <div className="sidebar-bar">
-        <div className="segmented" role="tablist" aria-label="Sidebar view">
+        <div className="sidebar-tabs" role="tablist" aria-label="Sidebar view">
           {VIEWS.map((v, i) => (
             <button
               key={v.id}
@@ -69,7 +74,7 @@ export function Sidebar() {
               }}
               type="button"
               role="tab"
-              className={`segment${view === v.id ? ' on' : ''}`}
+              className={`sidebar-tab${view === v.id ? ' on' : ''}`}
               aria-selected={view === v.id}
               tabIndex={view === v.id ? 0 : -1}
               onClick={() => setView(v.id)}
@@ -79,34 +84,10 @@ export function Sidebar() {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          className="icon-btn"
-          data-testid="new-connection"
-          aria-label="New connection"
-          title="New connection (Ctrl+Shift+N)"
-          onClick={() => requestDialog({ kind: 'newConnection' })}
-        >
-          <PlusIcon />
-        </button>
-        <button
-          type="button"
-          className="icon-btn"
-          aria-label="Sidebar options"
-          title="Sidebar options"
-          aria-haspopup="menu"
-          aria-expanded={menu !== null}
-          onClick={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            setMenu({ x: r.left, y: r.bottom });
-          }}
-        >
-          <MoreIcon />
-        </button>
       </div>
       {menu && (
         <ActionMenu
-          label="Sidebar options"
+          label="Objects options"
           x={menu.x}
           y={menu.y}
           items={[
@@ -130,6 +111,30 @@ export function Sidebar() {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
+            <button
+              type="button"
+              className="icon-btn"
+              data-testid="new-connection"
+              aria-label="New connection"
+              title="New connection (Ctrl+Shift+N)"
+              onClick={() => requestDialog({ kind: 'newConnection' })}
+            >
+              <PlusIcon />
+            </button>
+            <button
+              type="button"
+              className="icon-btn"
+              aria-label="Objects options"
+              title="Objects options"
+              aria-haspopup="menu"
+              aria-expanded={menu !== null}
+              onClick={(e) => {
+                const r = e.currentTarget.getBoundingClientRect();
+                setMenu({ x: r.left, y: r.bottom });
+              }}
+            >
+              <MoreIcon />
+            </button>
           </div>
           {error && (
             <div className="banner error" role="alert">

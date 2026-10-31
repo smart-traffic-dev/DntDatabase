@@ -125,9 +125,45 @@ pub(crate) enum Item {
 }
 
 pub(crate) struct Msg {
-    item: Item,
-    bytes: u64,
-    total: u64,
+    pub(crate) item: Item,
+    pub(crate) bytes: u64,
+    pub(crate) total: u64,
+}
+
+impl Msg {
+    /// A converted row; `done` / `total` are the progress counters (bytes or rows).
+    pub(crate) fn row(record: u64, values: Vec<FullValue>, done: u64, total: u64) -> Msg {
+        Msg {
+            item: Item::Row { record, values },
+            bytes: done,
+            total,
+        }
+    }
+
+    /// The source cannot go on (`message` names why, never a value).
+    pub(crate) fn failed(message: String) -> Msg {
+        Msg {
+            item: Item::Failed(message),
+            bytes: 0,
+            total: 0,
+        }
+    }
+
+    pub(crate) fn is_failed(&self) -> bool {
+        matches!(self.item, Item::Failed(_))
+    }
+
+    /// The source ended (no warnings, no file hash).
+    pub(crate) fn end(done: u64) -> Msg {
+        Msg {
+            item: Item::End {
+                warnings: Vec::new(),
+                sha256: None,
+            },
+            bytes: done,
+            total: done,
+        }
+    }
 }
 
 /// Reads and converts every record of the file on a blocking thread. The thread ends
@@ -372,11 +408,11 @@ fn plural(n: u64, one: &str, many: &str) -> String {
 
 /// Sends the statements of one job and keeps its counters.
 pub(crate) struct Writer<'a> {
-    ctx: &'a JobCtx,
-    session: &'a dyn Session,
+    pub(crate) ctx: &'a JobCtx,
+    pub(crate) session: &'a dyn Session,
     context: &'a Context,
     dialect: Dialect,
-    guard: GuardCtx,
+    pub(crate) guard: GuardCtx,
     /// The job's confirmation covers `Confirm` verdicts.
     confirmed: bool,
     grace: Duration,
@@ -400,11 +436,13 @@ pub(crate) struct Writer<'a> {
     pub(crate) written: u64,
     records: u64,
     phase: &'static str,
+    /// What `progress` counts: bytes of the file (import), rows (seeder).
+    unit: ProgressUnit,
 }
 
 impl<'a> Writer<'a> {
     #[allow(clippy::too_many_arguments)]
-    fn new(
+    pub(crate) fn new(
         ctx: &'a JobCtx,
         session: &'a dyn Session,
         context: &'a Context,
@@ -414,6 +452,7 @@ impl<'a> Writer<'a> {
         grace: Duration,
         timeout_s: u32,
         phase: &'static str,
+        unit: ProgressUnit,
     ) -> Writer<'a> {
         Writer {
             ctx,
@@ -439,19 +478,20 @@ impl<'a> Writer<'a> {
             written: 0,
             records: 0,
             phase,
+            unit,
         }
     }
 
     /// Sends one statement: never after Stop, never on a session that reconnected or
     /// changed its dialect, never when the guard blocks it. A write (`rows` > 0 or a
     /// pre-step) re-checks the connection first.
-    async fn send(&mut self, sql: &str, write: Option<u32>) -> Result<(), DbError> {
+    pub(crate) async fn send(&mut self, sql: &str, write: Option<u32>) -> Result<(), DbError> {
         self.send_as(sql, write, false).await
     }
 
     /// Sends `COMMIT`; `commit_sent` is set only once it passed every check and is
     /// handed to the driver.
-    async fn send_commit(&mut self) -> Result<(), DbError> {
+    pub(crate) async fn send_commit(&mut self) -> Result<(), DbError> {
         self.send_as("COMMIT", None, true).await
     }
 
@@ -498,7 +538,7 @@ impl<'a> Writer<'a> {
     }
 
     /// Sends `sql` even after Stop (`ROLLBACK`, dropping the temporary table).
-    async fn cleanup(&self, sql: &str) -> Result<(), DbError> {
+    pub(crate) async fn cleanup(&self, sql: &str) -> Result<(), DbError> {
         execute(
             self.session,
             sql,
@@ -509,9 +549,8 @@ impl<'a> Writer<'a> {
         .await
     }
 
-    fn progress(&self, bytes: u64, total: u64) {
-        self.ctx
-            .progress(self.phase, bytes, Some(total), ProgressUnit::Bytes);
+    fn progress(&self, done: u64, total: u64) {
+        self.ctx.progress(self.phase, done, Some(total), self.unit);
     }
 
     /// One refused row: an error in stop mode; else logged, counted, and the job stops
@@ -625,7 +664,7 @@ impl<'a> Writer<'a> {
 
     /// Reads every record from `rx` into batches of `builder` and sends them; returns the
     /// reader's end (warnings, hash).
-    async fn pump(
+    pub(crate) async fn pump(
         &mut self,
         rx: &mut mpsc::Receiver<Msg>,
         builder: &mut BatchBuilder,
@@ -701,9 +740,103 @@ pub(crate) fn rows_per_statement(request: &ImportRequest, transactional: bool) -
     }
 }
 
+/// The notes of a failed write job that name what it writes.
+pub(crate) struct FailureWords {
+    pub(crate) rolled_back: &'static str,
+    pub(crate) refused_commit: &'static str,
+}
+
+const IMPORT_WORDS: FailureWords = FailureWords {
+    rolled_back: "The import was rolled back; no row was imported.",
+    refused_commit: "The server refused the COMMIT; no row was imported.",
+};
+
+/// What a failed write job did (spec §6.6 step 6). An open transaction is rolled back.
+/// Also returns the rows the server kept (`None`: unknown).
+pub(crate) async fn describe_failure(
+    w: &Writer<'_>,
+    e: DbError,
+    pre: PreStepState,
+    statement_atomic: bool,
+    words: &FailureWords,
+) -> (JobFailure, Option<u64>) {
+    // A stale plan says why in its own words (the file or the table changed).
+    let base = match &e {
+        DbError::PlanStale { reason } => reason.clone(),
+        e => JobFailure::from(e.clone()).summary,
+    };
+    let mut base = base.trim_end().to_string();
+    if !base.ends_with('.') {
+        base.push('.');
+    }
+    let refused_commit = w.commit_sent && matches!(e, DbError::Server { .. });
+    let (unknown, mut note) = if refused_commit {
+        // The server answered COMMIT with an error: nothing was committed.
+        if w.session.in_transaction() {
+            let _ = w.cleanup("ROLLBACK").await;
+        }
+        (false, words.refused_commit.to_string())
+    } else if w.commit_sent {
+        (
+            true,
+            "COMMIT was sent but not answered; the outcome is unknown.".to_string(),
+        )
+    } else if w.in_tx {
+        let rolled_back = w.session.in_transaction() && w.cleanup("ROLLBACK").await.is_ok();
+        (
+            false,
+            if rolled_back {
+                words.rolled_back.to_string()
+            } else {
+                "Not committed; the server rolls the transaction back when it notices the \
+                 lost connection."
+                    .to_string()
+            },
+        )
+    } else {
+        let multi = w.inflight_rows > 1 && !statement_atomic;
+        let unknown = w.inflight && may_have_applied(&e, multi);
+        let mut note = format!(
+            "{} before the error.",
+            if w.written == 1 {
+                "1 batch was written".to_string()
+            } else {
+                format!("{} batches were written", w.written)
+            }
+        );
+        if unknown {
+            note.push_str(" The last statement may or may not have been applied.");
+        }
+        (unknown, note)
+    };
+    match pre {
+        PreStepState::Done => {
+            note.push_str(" The existing rows were already deleted by the pre-step.")
+        }
+        // Its answer was lost (the unknown outcome above): it may have run.
+        PreStepState::Sent if unknown => note
+            .push_str(" The pre-step's answer was lost: the existing rows may already be deleted."),
+        _ => {}
+    }
+    let committed = if unknown {
+        None
+    } else if w.in_tx || w.commit_sent {
+        Some(0)
+    } else {
+        // Autocommit: the batches that succeeded stay.
+        Some(w.imported)
+    };
+    let failure = JobFailure {
+        error: with_outcome(e, unknown),
+        outcome_unknown: unknown,
+        summary: format!("{base} {note}"),
+    };
+    (failure, committed)
+}
+
 /// Where the irreversible pre-step (committed on its own) stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreStepState {
+pub(crate) enum PreStepState {
     NotSent,
     /// Sent; no answer yet (or the error that ended the job is its own).
     Sent,
@@ -750,6 +883,7 @@ impl JobRunner for ImportJob {
             self.grace,
             cfg_timeout,
             "Importing",
+            ProgressUnit::Bytes,
         );
         w.skip = matches!(self.request.errors, ErrorPolicy::Skip { .. });
         w.max_errors = max_errors(&self.request.errors);
@@ -881,90 +1015,14 @@ impl ImportJob {
         Ok(())
     }
 
-    /// What a failed import did (spec §6.6 step 6). An open transaction is rolled back.
-    /// Also returns the rows the server kept (`None`: unknown).
+    /// What a failed import did (spec §6.6 step 6), in the import's words.
     async fn failure(
         &self,
         w: &Writer<'_>,
         e: DbError,
         pre: PreStepState,
     ) -> (JobFailure, Option<u64>) {
-        // A stale plan says why in its own words (the file or the table changed).
-        let base = match &e {
-            DbError::PlanStale { reason } => reason.clone(),
-            e => JobFailure::from(e.clone()).summary,
-        };
-        let mut base = base.trim_end().to_string();
-        if !base.ends_with('.') {
-            base.push('.');
-        }
-        let refused_commit = w.commit_sent && matches!(e, DbError::Server { .. });
-        let (unknown, mut note) = if refused_commit {
-            // The server answered COMMIT with an error: nothing was committed.
-            if w.session.in_transaction() {
-                let _ = w.cleanup("ROLLBACK").await;
-            }
-            (
-                false,
-                "The server refused the COMMIT; no row was imported.".to_string(),
-            )
-        } else if w.commit_sent {
-            (
-                true,
-                "COMMIT was sent but not answered; the outcome is unknown.".to_string(),
-            )
-        } else if w.in_tx {
-            let rolled_back = w.session.in_transaction() && w.cleanup("ROLLBACK").await.is_ok();
-            (
-                false,
-                if rolled_back {
-                    "The import was rolled back; no row was imported.".to_string()
-                } else {
-                    "Not committed; the server rolls the transaction back when it notices the \
-                     lost connection."
-                        .to_string()
-                },
-            )
-        } else {
-            let multi = w.inflight_rows > 1 && !self.statement_atomic;
-            let unknown = w.inflight && may_have_applied(&e, multi);
-            let mut note = format!(
-                "{} before the error.",
-                if w.written == 1 {
-                    "1 batch was written".to_string()
-                } else {
-                    format!("{} batches were written", w.written)
-                }
-            );
-            if unknown {
-                note.push_str(" The last statement may or may not have been applied.");
-            }
-            (unknown, note)
-        };
-        match pre {
-            PreStepState::Done => {
-                note.push_str(" The existing rows were already deleted by the pre-step.")
-            }
-            // Its answer was lost (the unknown outcome above): it may have run.
-            PreStepState::Sent if unknown => note.push_str(
-                " The pre-step's answer was lost: the existing rows may already be deleted.",
-            ),
-            _ => {}
-        }
-        let committed = if unknown {
-            None
-        } else if w.in_tx || w.commit_sent {
-            Some(0)
-        } else {
-            // Autocommit: the batches that succeeded stay.
-            Some(w.imported)
-        };
-        let failure = JobFailure {
-            error: with_outcome(e, unknown),
-            outcome_unknown: unknown,
-            summary: format!("{base} {note}"),
-        };
-        (failure, committed)
+        describe_failure(w, e, pre, self.statement_atomic, &IMPORT_WORDS).await
     }
 
     /// The job's one History entry (R10): a summary comment, the pre-step and the
@@ -1110,6 +1168,7 @@ impl JobRunner for DryRunJob {
             self.grace,
             cfg.options.query_timeout_s,
             "Checking",
+            ProgressUnit::Bytes,
         );
         w.skip = true;
         w.max_errors = max_errors(&self.request.errors);

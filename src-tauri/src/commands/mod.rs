@@ -15,6 +15,7 @@ pub mod import_data;
 pub mod jobs;
 pub mod objects;
 pub mod query;
+pub mod seed;
 pub mod settings;
 pub mod table_design;
 pub mod transfer;
@@ -243,7 +244,8 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             settings::get_jobs_per_connection,
             settings::set_jobs_per_connection,
             settings::get_external_tools_dir,
-            settings::set_external_tools_dir,
+            settings::tools_pick_dir,
+            settings::clear_external_tools_dir,
             import_data::import_pick_file,
             import_data::import_inspect,
             import_data::import_target,
@@ -252,6 +254,10 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             import_data::import_dry_run,
             import_data::import_prepare,
             import_data::import_start,
+            seed::seed_target,
+            seed::seed_preview,
+            seed::seed_prepare,
+            seed::seed_start,
             backup::dump_objects,
             backup::dump_pick_path,
             backup::dump_start,

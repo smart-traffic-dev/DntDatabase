@@ -12,12 +12,24 @@ beforeEach(() => {
 });
 
 describe('Sidebar', () => {
-  it('the header + is New connection (testid new-connection)', async () => {
+  it('the Objects filter row + is New connection (testid new-connection)', async () => {
     render(<Sidebar />);
     const plus = screen.getByTestId('new-connection');
     expect(plus).toHaveAccessibleName('New connection');
     await userEvent.setup().click(plus);
     expect(useDialogs.getState().request).toEqual({ kind: 'newConnection' });
+  });
+
+  it('the header holds only the view tabs; the Objects actions leave with the Objects view', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Sidebar />);
+    const bar = container.querySelector('.sidebar-bar') as HTMLElement;
+    expect(within(bar).queryAllByRole('button')).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Objects options' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: 'Favorites' }));
+    expect(screen.queryByTestId('new-connection')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Objects options' })).toBeNull();
   });
 
   it('switches between Objects and Favorites and remembers the view', async () => {
@@ -40,7 +52,7 @@ describe('Sidebar', () => {
     expect(screen.getByRole('tab', { name: 'Favorites' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('arrow keys move between the two views', async () => {
+  it('arrow keys, Home and End move between the two views', async () => {
     const user = userEvent.setup();
     render(<Sidebar />);
     screen.getByRole('tab', { name: 'Objects' }).focus();
@@ -49,6 +61,11 @@ describe('Sidebar', () => {
     expect(screen.getByRole('tab', { name: 'Favorites' })).toHaveAttribute('aria-selected', 'true');
     await user.keyboard('{ArrowLeft}');
     expect(screen.getByRole('tab', { name: 'Objects' })).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{End}');
+    expect(screen.getByRole('tab', { name: 'Favorites' })).toHaveFocus();
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: 'Objects' })).toHaveFocus();
+    expect(screen.getByRole('tab', { name: 'Objects' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('the ⋯ menu toggles system schemas, refreshes and collapses all', async () => {
@@ -56,7 +73,7 @@ describe('Sidebar', () => {
     const reload = vi.spyOn(useTree.getState(), 'reloadStored').mockResolvedValue();
     act(() => useTree.setState({ expanded: new Set(['a', 'b']) }));
     render(<Sidebar />);
-    const more = () => screen.getByRole('button', { name: 'Sidebar options' });
+    const more = () => screen.getByRole('button', { name: 'Objects options' });
 
     await user.click(more());
     const system = screen.getByRole('menuitemcheckbox', { name: /Show system schemas/ });

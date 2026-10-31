@@ -1,0 +1,1241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>DntDatabase — Modal redesign v2</title>
+<link rel="stylesheet" href="modals-v2.css" />
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <symbol id="x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+    <symbol id="trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
+    <symbol id="db" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></symbol>
+    <symbol id="table" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></symbol>
+    <symbol id="key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3"/></symbol>
+    <symbol id="lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+    <symbol id="check" viewBox="0 0 24 24"><path d="M5 12l5 5L20 7"/></symbol>
+    <symbol id="alert" viewBox="0 0 24 24"><path d="M12 3l10 18H2zM12 10v5M12 18h.01"/></symbol>
+    <symbol id="info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></symbol>
+    <symbol id="copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></symbol>
+    <symbol id="play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7z"/></symbol>
+    <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></symbol>
+    <symbol id="folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="file" viewBox="0 0 24 24"><path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8zM14 3v5h5"/></symbol>
+    <symbol id="upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></symbol>
+    <symbol id="download" viewBox="0 0 24 24"><path d="M12 4v12M7 11l5 5 5-5M4 20h16"/></symbol>
+    <symbol id="plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M7 8h10v3a5 5 0 0 1-10 0zM12 16v5"/></symbol>
+    <symbol id="shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></symbol>
+    <symbol id="server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></symbol>
+    <symbol id="terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M13 15h4"/></symbol>
+    <symbol id="eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></symbol>
+    <symbol id="chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+    <symbol id="chevd" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></symbol>
+    <symbol id="link" viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/></symbol>
+    <symbol id="gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9L7 7M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></symbol>
+    <symbol id="eraser" viewBox="0 0 24 24"><path d="M4 20h16M6 16l8-8 4 4-8 8H6z"/></symbol>
+    <symbol id="tag" viewBox="0 0 24 24"><path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="7.5" r="1"/></symbol>
+    <symbol id="user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></symbol>
+    <symbol id="star" viewBox="0 0 24 24"><path d="M12 3l2.9 6 6.1.3-4.8 4.1 1.6 6.6-5.8-3.5-5.8 3.5 1.6-6.6L3 9.3 9.1 9z"/></symbol>
+    <symbol id="bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></symbol>
+    <symbol id="box" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10"/></symbol>
+    <symbol id="history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7M3 4v5h5"/></symbol>
+    <symbol id="code" viewBox="0 0 24 24"><path d="M8 8l-4 4 4 4M16 8l4 4-4 4"/></symbol>
+    <symbol id="arrow" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M5 19l1.5-1.5M17.5 6.5L19 5"/></symbol>
+    <symbol id="ext" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
+  </defs>
+</svg>
+
+<div class="top">
+  <h1>DntDatabase · Modal redesign v2</h1>
+  <span class="meta">Review + canvas · 2026-10-26 · tokens <code>--dnt-*</code> · UI copy English</span>
+  <span class="grow"></span>
+  <span class="seg" id="theme"><span class="on" data-t="light">Light</span><span data-t="dark">Dark</span></span>
+</div>
+
+<div class="layout">
+<nav class="toc">
+  <div class="grp">Review</div>
+  <a href="#b00"><b>00</b>Audit &amp; scorecard</a>
+  <div class="grp">System</div>
+  <a href="#b01"><b>01</b>Modal anatomy &amp; rules</a>
+  <a href="#b02"><b>02</b>Shared building blocks</a>
+  <div class="grp">Connections</div>
+  <a href="#b03"><b>03</b>New / Edit connection</a>
+  <a href="#b04"><b>04</b>Password &amp; host key</a>
+  <div class="grp">Objects</div>
+  <a href="#b05"><b>05</b>Drop / Truncate</a>
+  <a href="#b06"><b>06</b>Rename &amp; Create database</a>
+  <a href="#b07"><b>07</b>Review &amp; apply / Data edits</a>
+  <a href="#b08"><b>08</b>Confirm family &amp; Run confirm</a>
+  <div class="grp">Data transfer</div>
+  <a href="#b09"><b>09</b>Export result</a>
+  <a href="#b10"><b>10</b>Import wizard</a>
+  <a href="#b11"><b>11</b>Dump &amp; Restore</a>
+  <a href="#b12"><b>12</b>Connections export / import</a>
+  <div class="grp">App</div>
+  <a href="#b13"><b>13</b>Settings</a>
+  <a href="#b14"><b>14</b>Snippets &amp; Favorites</a>
+  <a href="#b15"><b>15</b>Update · About · Toasts</a>
+  <div class="grp">Plan</div>
+  <a href="#b16"><b>16</b>Roadmap</a>
+</nav>
+
+<main>
+
+<!-- ============================== 00 AUDIT ============================== -->
+<section class="board" id="b00">
+  <header><span class="n">00</span><h2>Audit hiện trạng — 26 modal</h2></header>
+  <p class="lead">Rà soát code (<code>ui/src/dialogs</code>, <code>transfer/</code>, <code>tabs/data</code>) và chụp thật từng modal qua fake backend (<code>e2e-web/modal-audit/</code>). Khung <code>Modal.tsx</code> ổn (focus trap, Esc, trả focus), nhưng mỗi dialog tự dựng layout riêng nên không nhất quán, và nhóm dialog thao tác object (drop / truncate / rename) yếu nhất: chỉ một dòng text trong khung rộng 760px.</p>
+  <div class="kpis">
+    <div class="kpi"><b>5</b><span>kiểu "type the name to confirm" khác nhau</span></div>
+    <div class="kpi"><b>7</b><span>confirm chỉ có 1 chuỗi text (không list, không Save)</span></div>
+    <div class="kpi"><b>3</b><span>thứ tự footer khác nhau (Cancel trái / phải / không footer)</span></div>
+    <div class="kpi"><b>4</b><span>dialog vẫn đóng được khi đang chạy (TxClose, AppClose, EditPreview, NameDialog)</span></div>
+  </div>
+  <table class="rv">
+    <thead><tr><th>Modal</th><th>Điểm</th><th>Vấn đề chính</th><th>Thiếu chức năng</th><th>Ưu tiên</th></tr></thead>
+    <tbody>
+      <tr><td>Drop / Truncate / Drop database</td><td><span class="score s1"><i></i><i></i><i></i><i></i><i></i></span></td><td>Khung 760px cho 1 dòng; phải bấm "Preview SQL" mới thấy tác động; nút Apply màu xanh cho DROP; chữ "untagged", "Drop namespace", "Drop object"</td><td>Số dòng bị ảnh hưởng, object phụ thuộc, CASCADE/RESTRICT, IF EXISTS, RESTART IDENTITY, Copy SQL / Open in query, chọn nhiều object</td><td><span class="chip prod nodot">P0</span></td></tr>
+      <tr><td>Rename table</td><td><span class="score s1"><i></i><i></i><i></i><i></i><i></i></span></td><td>Giống trên; không validate tên, không chặn trùng tên cũ; Enter không submit</td><td>SQL live, danh sách view/FK tham chiếu bị ảnh hưởng</td><td><span class="chip prod nodot">P0</span></td></tr>
+      <tr><td>Confirm (7 biến thể)</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td>Chỉ 1 chuỗi; "1 unsaved changes", "tab(s)"; xoá connection không báo tab sẽ đóng</td><td>Slot chi tiết/list, nút thứ 3 (Save), khoá khi đang chạy</td><td><span class="chip prod nodot">P0</span></td></tr>
+      <tr><td>Password prompt</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td>Không có trạng thái "Connecting…", bấm được 2 lần; không thấy user@host</td><td>Remember password, cảnh báo Caps Lock</td><td><span class="chip prod nodot">P0</span></td></tr>
+      <tr><td>Data edit review</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td>"Verdict: allow" (thuật ngữ backend); focus mặc định vào Confirm kể cả khi có DELETE; không có env chip</td><td>Tóm tắt theo loại, SqlPreview, chọn commit ngay / giữ transaction</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>SSH host key</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td>Khi key đổi: không hiện fingerprint mới, chỉ có Close</td><td>So sánh cũ/mới, Replace key (typed), Copy, quản lý known_hosts</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Restore</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td><code>&lt;select&gt;</code> native lệch style; Analyze là nút phụ giữa trang; Start restore trông như đang bật</td><td>Footer 2 bước, chọn mục từ TOC, tạo DB đích, continue-on-error</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Snippets</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td>Không có footer; đổi snippet mất nội dung đang sửa; list không đi bằng phím mũi tên</td><td>Tìm kiếm, thư mục, body Monaco, nút Insert, import/export</td><td><span class="chip nodot">P2</span></td></tr>
+      <tr><td>About</td><td><span class="score s2"><i></i><i></i><i></i><i></i><i></i></span></td><td>Chỉ tên + version</td><td>Logo, links, Copy diagnostics, licenses</td><td><span class="chip nodot">P2</span></td></tr>
+      <tr><td>Export result</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>420px chật; đổi format làm form nhảy chiều cao</td><td>Chỉ dòng đang chọn, chọn cột, Clipboard, encoding, NULL text, preview, Open file</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Import wizard</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>Bước Source trống trơn; rail không đánh dấu done/lỗi; Enter không Next</td><td>Encoding, quote, skip rows, định dạng ngày, tạo bảng mới, sample value khi mapping, lưu profile</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Dump</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>Segmented giống input; Output file nằm cuối nhưng chặn Start mà không nói lý do</td><td>Tìm object, Data tri-state, gợi ý đường dẫn, progress trong dialog</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Tx close / App quit</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>Commit là primary kể cả production; App quit chỉ có "Rollback all"</td><td>Commit/rollback từng tab, số statement, tuổi transaction</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Settings</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>Hai cơ chế lưu (blur vs ngay); radio không đi bằng phím mũi tên</td><td>Tìm kiếm, tab Editor / Results, đổi phím tắt, Restore defaults</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Export / Import connections</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>Không có checkbox trạng thái giữa; password input thô; policy nằm dưới bảng dài</td><td>Filter, chọn từng dòng, policy từng dòng, toast + Open folder</td><td><span class="chip nodot">P2</span></td></tr>
+      <tr><td>Add favorite · Update</td><td><span class="score s3"><i></i><i></i><i></i><i></i><i></i></span></td><td>Không preview SQL; release notes là <code>&lt;pre&gt;</code> trong 400px</td><td>Cảnh báo trùng tên; Skip version, auto-check</td><td><span class="chip nodot">P2</span></td></tr>
+      <tr><td>New / Edit connection</td><td><span class="score s4"><i></i><i></i><i></i><i></i><i></i></span></td><td>"Save password" đặt cạnh Database; 3 kiểu boolean; kết quả Test không reset khi sửa field; Group bị giấu trong Advanced</td><td>Màu tuỳ chọn, ghi chú, SSH agent / jump host, init SQL, driver properties, charset, Copy URL</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Review &amp; apply (Design / DDL)</td><td><span class="score s4"><i></i><i></i><i></i><i></i><i></i></span></td><td>Title không nêu object; Apply luôn primary kể cả khi mất dữ liệu</td><td>Open in query (SqlPreview đã hỗ trợ nhưng chưa nối), lưu script</td><td><span class="chip stg nodot">P1</span></td></tr>
+      <tr><td>Create database · Run confirm</td><td><span class="score s4"><i></i><i></i><i></i><i></i><i></i></span></td><td>Báo lỗi "Enter a name." ngay khi mở; confirm production chỉ hiện sau lần bấm đầu</td><td>Copy SQL, IF NOT EXISTS, Run in transaction</td><td><span class="chip nodot">P2</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================== 01 SYSTEM ============================== -->
+<section class="board" id="b01">
+  <header><span class="n">01</span><h2>Modal anatomy &amp; quy tắc chung</h2></header>
+  <p class="lead">Một khung, bốn cỡ, bảy pattern. Mọi dialog dùng chung header (icon tone + title + subtitle), context bar (env chip + đường dẫn object), body chia section, footer cố định: hành động phụ bên trái, <b>Cancel + động từ chính</b> bên phải.</p>
+  <div class="row">
+    <div class="anat" style="margin-right:170px">
+      <div class="m">
+        <div class="mh mpin"><span class="ic danger"><svg class="i"><use href="#trash"/></svg></span><div class="tt"><h3>Drop table orders</h3><div class="sub">Removes the table, its data, indexes and triggers</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders<span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+        <div class="mb">
+          <div class="sect"><h5>Section title<span class="end">optional meta</span></h5><div class="blk" style="height:34px"></div><div class="g2"><div class="blk" style="height:30px"></div><div class="blk" style="height:30px"></div></div></div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy SQL</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn d">Drop table</span></div>
+      </div>
+      <span class="lab" style="top:14px">Header — icon tone (neutral / accent / warn / danger / ok), title = action + object, subtitle = consequence</span>
+      <span class="lab" style="top:64px">Context bar — env chip, connection › db › object, server version; tinted on Production</span>
+      <span class="lab" style="top:124px">Body — sections with a hairline heading, 16px padding, scrolls alone</span>
+      <span class="lab" style="top:200px">Footer — left: tertiary / reason / progress · right: Cancel, primary verb</span>
+    </div>
+  </div>
+  <div class="row" style="margin-top:28px">
+    <div class="col">
+      <p class="cap">Sizes</p>
+      <table class="spec">
+        <tr><th>Size</th><th>Width</th><th>Used for</th></tr>
+        <tr><td>S</td><td>420</td><td>Confirm, password, host key, update, about</td></tr>
+        <tr><td>M</td><td>560</td><td>Forms + live SQL, drop / rename / truncate, add favorite</td></tr>
+        <tr><td>L</td><td>760</td><td>Connection, settings, snippets, review &amp; apply, result export, dump / restore</td></tr>
+        <tr><td>XL</td><td>960</td><td>Import wizard, connection import preview</td></tr>
+      </table>
+      <p class="hint">Height: content, max <code>min(760px, 100vh − 48px)</code>. Header, context bar and footer never scroll.</p>
+    </div>
+    <div class="col notes" style="width:520px">
+      <p class="cap">Rules</p>
+      <ul>
+        <li><b>Primary = verb + object</b>: "Drop table", "Create database", "Start dump" — never "Apply" / "OK".</li>
+        <li><b>Destructive</b> → danger solid button, Cancel has initial focus, Enter in the body presses Cancel (already in <code>Modal.tsx</code>).</li>
+        <li><b>One footer order</b> everywhere, wizard too: <code>[tertiary · reason] ⟶ Cancel · (Back) · Primary</code>.</li>
+        <li><b>Disabled primary explains itself</b> in the footer's left side ("Choose an output file").</li>
+        <li><b>Busy</b>: primary shows spinner + "Dropping…"; Esc / × locked, Cancel becomes "Stop" if it can be stopped.</li>
+        <li><b>Validation</b> on blur or after the first submit, never on open.</li>
+        <li><b>One boolean style</b>: checkbox for options; switch only for turning a whole section on (SSH tunnel, Include passwords).</li>
+        <li><b>Focus</b>: 1px border turns accent; no ring / glow. Tabs and segmented: flat surface fill + bold.</li>
+        <li><b>Long work</b>: progress in the dialog + "Run in background" → Jobs panel + toast when done.</li>
+        <li><b>Dirty form</b>: Esc / × asks "Discard changes?" (connection, snippets, settings with an invalid field).</li>
+      </ul>
+    </div>
+  </div>
+  <p class="cap" style="margin-top:28px">Seven patterns</p>
+  <div class="row" style="gap:14px">
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd" style="flex-direction:column"><div class="blk" style="height:8px;width:80%"></div><div class="blk" style="height:20px"></div></div><div class="ft"><i></i><i class="d"></i></div></div><h4>1 · Confirm</h4><p>Message + optional list/details slot + up to 3 actions (Save / Don't save / Cancel).</p><span class="uses">Unsaved, stop run, delete connection, quit</span></div>
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd" style="flex-direction:column"><div style="display:flex;gap:3px"><div class="blk" style="height:16px;flex:1"></div><div class="blk" style="height:16px;flex:1"></div><div class="blk" style="height:16px;flex:1"></div></div><div class="blk" style="height:22px;background:var(--dnt-bg-raised)"></div><div class="blk" style="height:10px;width:60%;background:var(--dnt-status-danger-border)"></div></div><div class="ft"><i></i><i class="d"></i></div></div><h4>2 · Destructive</h4><p>Impact tiles → options → live SQL → typed name (prod / data loss only).</p><span class="uses">Drop, truncate, drop database, run confirm</span></div>
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd" style="flex-direction:column"><div class="blk" style="height:12px"></div><div style="display:flex;gap:3px"><div class="blk" style="height:12px;flex:1"></div><div class="blk" style="height:12px;flex:1"></div></div><div class="blk" style="height:22px;background:var(--dnt-bg-raised)"></div></div><div class="ft"><i></i><i class="p"></i></div></div><h4>3 · Form + live SQL</h4><p>Fields on top, the SQL it will run updates as you type.</p><span class="uses">Rename, create database, add favorite</span></div>
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd"><div class="blk" style="width:30%"></div><div style="flex:1;display:flex;flex-direction:column;gap:3px"><div class="blk" style="height:12px"></div><div class="blk" style="flex:1;background:var(--dnt-bg-raised)"></div></div></div><div class="ft"><i></i><i class="p"></i></div></div><h4>4 · Master–detail</h4><p>Searchable list left, editor right, one shared footer.</p><span class="uses">Snippets, import preview, known hosts</span></div>
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd"><div style="width:28%;display:flex;flex-direction:column;gap:3px"><div class="blk" style="height:8px"></div><div class="blk" style="height:8px;background:var(--dnt-bg-raised)"></div><div class="blk" style="height:8px"></div></div><div style="flex:1;display:flex;flex-direction:column;gap:3px"><div class="blk" style="height:10px"></div><div class="blk" style="height:10px"></div><div class="blk" style="height:10px;width:70%"></div></div></div><div class="ft"><i class="p"></i></div></div><h4>5 · Sectioned form</h4><p>Left nav = scroll-spy over one long page; errors dot the nav item.</p><span class="uses">Connection, settings</span></div>
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd"><div style="width:28%;display:flex;flex-direction:column;gap:3px"><div class="blk" style="height:8px;background:var(--dnt-status-success-solid)"></div><div class="blk" style="height:8px;background:var(--dnt-accent)"></div><div class="blk" style="height:8px"></div></div><div class="blk" style="flex:1;background:var(--dnt-bg-raised)"></div></div><div class="ft"><i></i><i></i><i class="p"></i></div></div><h4>6 · Wizard</h4><p>Rail with done / error marks and a one-line summary per step.</p><span class="uses">Import data, restore</span></div>
+    <div class="pat"><div class="mini"><div class="hd"></div><div class="bd" style="flex-direction:column;align-items:center;justify-content:center"><div class="blk" style="width:18px;height:18px;border-radius:50%;background:var(--dnt-status-success-solid)"></div><div class="blk" style="height:6px;width:70%;background:var(--dnt-accent)"></div></div><div class="ft"><i></i><i class="p"></i></div></div><h4>7 · Progress → Result</h4><p>Same dialog runs the job, then shows the outcome with next actions.</p><span class="uses">Export, dump, restore, update</span></div>
+  </div>
+</section>
+
+<!-- ============================== 02 BLOCKS ============================== -->
+<section class="board" id="b02">
+  <header><span class="n">02</span><h2>Shared building blocks</h2></header>
+  <p class="lead">Gom 5 bản typed-confirm, 3 bản "outcome report", nhiều kiểu file picker thành component chung. Đây là phần tiết kiệm code nhất và sửa được nhiều lỗi nhất cùng lúc.</p>
+  <div class="row">
+    <div class="col" style="width:490px">
+      <p class="cap">&lt;ContextBar&gt; — mọi dialog thao tác object</p>
+      <div class="m" style="width:490px;box-shadow:none">
+        <div class="ctx"><span class="chip stg">Staging</span><b>shop-stg</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders<span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+        <div class="ctx"><span class="chip nodot">No tag</span><b>shop-dev</b><span class="sep">›</span>dnt_fixture<span class="grow"></span><span class="mut">PostgreSQL 16.2</span></div>
+        <div class="ctx prod" style="border-bottom:0"><span class="chip prod">Production</span><b>shop-prod</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders<span class="grow"></span><span class="chip nodot"><svg class="i sm"><use href="#lock"/></svg>Read-only</span></div>
+      </div>
+      <p class="hint">Thay cho dòng text "shop-dev · untagged · dnt_fixture / orders". Không bao giờ viết "untagged".</p>
+
+      <p class="cap" style="margin-top:12px">&lt;SqlPreview&gt; — live, có toolbar</p>
+      <div class="sql">
+        <div class="bar"><b>SQL</b><span>· 2 statements</span><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy</span><span class="btn g sm"><svg class="i sm"><use href="#play"/></svg>Open in query</span><span class="btn g sm"><svg class="i sm"><use href="#download"/></svg>Save .sql</span></div>
+        <pre><span class="ln" data-n="1"><span class="sk">ALTER TABLE</span> `orders` <span class="sk">DROP COLUMN</span> `legacy_code`;</span><span class="ln loss" data-n="2"><span class="sc">-- loses 12,430 non-null values</span></span><span class="ln" data-n="3"><span class="sk">ALTER TABLE</span> `orders` <span class="sk">ADD INDEX</span> `ix_created` (`created_at`);</span></pre>
+      </div>
+      <p class="hint">Đã có <code>SqlPreview</code> với <code>onOpenInQuery</code> — chỉ cần dùng ở ObjectAction, EditPreview, TableDesign, DdlEdit, CreateNamespace.</p>
+    </div>
+    <div class="col" style="width:400px">
+      <p class="cap">&lt;ImpactPanel&gt;</p>
+      <div class="impact"><div class="bad"><b>12,430</b><span>rows deleted (estimate)</span></div><div class="warn"><b>2</b><span>dependent views</span></div><div><b>1</b><span>FK references it</span></div></div>
+      <p class="cap" style="margin-top:12px">&lt;TypedConfirm&gt; — một component duy nhất</p>
+      <div class="typed"><span class="lbl">Type <code>orders</code> to confirm</span><span class="inp focus mono"><span class="grow">order</span><span class="sfx">1 more</span></span><span class="hint">Required on Production and when data is lost. Paste is allowed.</span></div>
+      <p class="cap" style="margin-top:12px">&lt;FileField&gt; — chọn file / gợi ý đường dẫn</p>
+      <div class="filecard"><span class="ic"><svg class="i"><use href="#file"/></svg></span><div class="tx"><b>dnt_fixture-2026-10-26.sql.gz</b><span>D:\Backups\shop-dev · suggested</span></div><span class="btn sm">Change…</span></div>
+      <p class="cap" style="margin-top:12px">Footer states</p>
+      <div class="m" style="width:400px;box-shadow:none">
+        <div class="mf" style="border-top:0"><span class="why"><svg class="i sm"><use href="#info"/></svg>Choose an output file</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn dis">Start dump</span></div>
+        <div class="mf"><span class="why" style="width:150px;flex-direction:column;align-items:stretch;gap:4px"><span>Exporting · 41,200 / 120,000</span><span class="prog"><i style="width:34%"></i></span></span><span class="grow"></span><span class="btn g">Run in background</span><span class="btn">Stop</span></div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn d dis" style="gap:8px"><span style="width:10px;height:10px;border:1.5px solid currentColor;border-right-color:transparent;border-radius:50%"></span>Dropping…</span></div>
+      </div>
+    </div>
+    <div class="col" style="width:290px">
+      <p class="cap">&lt;OutcomeReport&gt; — thay 3 bản copy</p>
+      <div class="call ok"><svg class="i"><use href="#check"/></svg><div class="body"><b>Applied · 2 statements in 84 ms</b><p>orders was changed. The tree is refreshed.</p></div></div>
+      <div class="call warn"><svg class="i"><use href="#alert"/></svg><div class="body"><b>Partly applied · 1 of 2</b><p>MySQL DDL is not transactional. Statement 2 failed: Duplicate key name 'ix_created'.</p></div></div>
+      <div class="call danger"><svg class="i"><use href="#x"/></svg><div class="body"><b>Rolled back</b><p>Nothing was changed. Lock wait timeout exceeded.</p><p style="margin-top:6px"><span class="lnk">Copy details</span> &nbsp; <span class="lnk">Open in query</span></p></div></div>
+      <div class="call info"><svg class="i"><use href="#clock"/></svg><div class="body"><b>Preview expired</b><p>The table changed since the preview. <span class="lnk">Preview again</span></p></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 03 CONNECTION ============================== -->
+<section class="board" id="b03">
+  <header><span class="n">03</span><h2>New / Edit connection</h2><span class="tag chip stg nodot">P1</span></header>
+  <p class="lead">Giữ một trang cuộn (đã được duyệt ở v3) nhưng thêm nav trái dạng scroll-spy để nhảy nhanh và thấy section nào có lỗi. Nhóm lại theo ý nghĩa: <b>General</b> (tên, nhóm, màu, môi trường, read-only, ghi chú) → <b>Server</b> → <b>Authentication</b> → SSH → SSL → <b>Session</b> (init SQL, charset, timezone, timeouts) → Driver properties. Kết quả Test thành một thẻ trạng thái, tự chuyển "stale" khi sửa field.</p>
+  <div class="row cmp">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot"><img src="current/l-new-connection.png" alt="current new connection" /></div>
+      <div class="notes" style="width:360px">
+        <ul>
+          <li class="bad">"Save password" nằm cạnh Database, không cạnh Password.</li>
+          <li class="bad">Ba kiểu boolean: switch (SSH), checkbox (Save password), chip (Read-only).</li>
+          <li class="bad">Group nằm trong Advanced; footer chật, lỗi dài bị cắt.</li>
+          <li class="bad">"Connected" vẫn hiện sau khi đổi host. Save không có trạng thái busy.</li>
+          <li class="bad">Bỏ tick "Save password" khi Edit âm thầm xoá mọi secret đã lưu.</li>
+        </ul>
+      </div>
+    </div>
+    <div class="col">
+      <p class="cap">Redesign — L 760</p>
+      <div class="stage">
+      <div class="m l mpin">
+        <span class="pin" style="left:-9px;top:110px">1</span><span class="pin" style="left:749px;top:240px">2</span><span class="pin" style="left:749px;top:590px">3</span><span class="pin" style="left:-9px;top:676px">4</span>
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#plug"/></svg></span><div class="tt"><h3>Edit connection</h3><div class="sub">shop-prod · last connected 2 h ago</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="split" style="grid-template-columns:184px minmax(0,1fr)">
+          <nav>
+            <span class="navi on"><svg class="i sm"><use href="#tag"/></svg>General</span>
+            <span class="navi"><svg class="i sm"><use href="#server"/></svg>Server</span>
+            <span class="navi"><svg class="i sm"><use href="#user"/></svg>Authentication<span class="dot"></span></span>
+            <span class="navi"><svg class="i sm"><use href="#terminal"/></svg>SSH tunnel<span class="end">On</span></span>
+            <span class="navi"><svg class="i sm"><use href="#shield"/></svg>SSL / TLS<span class="end">Verify CA</span></span>
+            <span class="navi"><svg class="i sm"><use href="#clock"/></svg>Session<span class="end">2 set</span></span>
+            <span class="navi"><svg class="i sm"><use href="#code"/></svg>Driver properties<span class="end">0</span></span>
+          </nav>
+          <div class="mb" style="max-height:600px;overflow:hidden">
+            <div class="sect"><h5>General</h5>
+              <div class="f"><label>Engine</label><div class="seg"><span class="on">MySQL / MariaDB</span><span>PostgreSQL</span></div></div>
+              <div class="g2"><div class="f"><label>Name</label><span class="inp">shop-prod</span></div><div class="f"><label>Group</label><span class="inp sel">Production / EU</span></div></div>
+              <div class="f"><label>Environment &amp; color<span class="end hint">Tints tabs, the tree row and the status bar</span></label>
+                <div class="chips"><span class="pick">None</span><span class="pick"><i class="sw8" style="background:var(--dnt-gray-400)"></i>Local</span><span class="pick"><i class="sw8" style="background:var(--dnt-status-warning-solid)"></i>Staging</span><span class="pick on"><i class="sw8" style="background:var(--dnt-status-danger-solid)"></i>Production</span><span class="pick"><i class="sw8" style="background:conic-gradient(#e5484d,#e0a82e,#2fb36a,#3b78e7,#8e4ec6,#e5484d)"></i>Custom…</span></div></div>
+              <span class="cb on"><i></i>Read-only<small>— block writes from the editor and grid</small></span>
+              <div class="f"><label>Notes</label><span class="inp ph">Who owns it, maintenance window, links…</span></div>
+            </div>
+            <div class="sect"><h5>Server<span class="end"><span class="lnk"><svg class="i sm"><use href="#link"/></svg>Paste URL</span></span></h5>
+              <div class="ghp"><div class="f"><label>Host</label><span class="inp">db.internal.example.com</span></div><div class="f"><label>Port</label><span class="inp">3306</span></div></div>
+              <div class="f"><label>Default database<span class="end hint">Empty = list all</span></label><span class="inp">sales</span></div>
+            </div>
+            <div class="sect"><h5>Authentication</h5>
+              <div class="g2"><div class="f"><label>User</label><span class="inp">app</span></div><div class="f"><label>Password</label><span class="inp bad"><span class="grow mut">Stored in keychain · type to replace</span><span class="sfx">Show</span></span><span class="err"><svg class="i sm"><use href="#alert"/></svg>Access denied for user 'app' at the last test</span></div></div>
+              <div class="f"><label>Password storage</label><div class="seg"><span class="on">Save in OS keychain</span><span>Ask every time</span><span>None</span></div></div>
+              <span class="lnk" style="color:var(--dnt-status-danger-fg)">Forget stored password</span>
+            </div>
+          </div>
+        </div>
+        <div class="call warn" style="margin:0 16px 12px;border-radius:8px"><svg class="i"><use href="#refresh"/></svg><div class="body"><b>Test result is out of date</b><p>Host changed after the last test (connected · MySQL 8.0.36 · 42 ms). <span class="lnk">Test again</span></p></div></div>
+        <div class="mf"><span class="btn"><svg class="i sm"><use href="#bolt"/></svg>Test</span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy URL</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn">Save</span><span class="btn p">Save &amp; connect</span></div>
+      </div>
+      </div>
+    </div>
+    <div class="col notes">
+      <h4><span class="pin">1</span>Nav scroll-spy</h4>
+      <ul><li>Badge tóm tắt (On, Verify CA, 2 set); chấm đỏ khi section có lỗi — thay cho fold đóng/mở.</li><li>Ctrl+1…7 nhảy section.</li></ul>
+      <h4><span class="pin">2</span>General gom đủ thứ để nhận diện</h4>
+      <ul><li class="add">Group lên đầu, không còn giấu trong Advanced.</li><li class="add">Màu tuỳ chọn (Custom…) bên cạnh 3 môi trường cố định.</li><li class="add">Notes (ghi chú, link runbook).</li><li>Read-only = checkbox, cùng kiểu với mọi option khác.</li></ul>
+      <h4><span class="pin">3</span>Password rõ ràng</h4>
+      <ul><li>"Password storage" là lựa chọn 3 trạng thái, cạnh ô Password.</li><li class="add">"Forget stored password" là hành động riêng — không còn xoá ngầm khi bỏ tick.</li><li>Lỗi Test gắn vào đúng field (Access denied → Password).</li></ul>
+      <h4><span class="pin">4</span>Test đáng tin</h4>
+      <ul><li>Kết quả chuyển "out of date" khi sửa host/port/user/SSL.</li><li class="add">Save &amp; connect; Copy URL (không kèm password).</li><li>Save hiện "Saving…".</li></ul>
+      <h4>Thêm section mới</h4>
+      <ul><li class="add">Session: init SQL, charset, timezone, PG search_path, timeouts, keep-alive.</li><li class="add">SSH: agent auth, jump host, đọc <code>~/.ssh/config</code>.</li><li class="add">Driver properties: key/value tự do (cần backend).</li><li class="add">Giữ lại tham số URL không nhận diện được thay vì vứt đi.</li></ul>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:24px">
+    <div class="col" style="width:420px">
+      <p class="cap">Test result — 3 trạng thái</p>
+      <div class="call ok"><svg class="i"><use href="#check"/></svg><div class="body"><b>Connected · 42 ms</b><p>MySQL 8.0.36 · TLS 1.3 · via SSH bastion.example.com (18 ms) · 14 databases</p></div></div>
+      <div class="call danger"><svg class="i"><use href="#x"/></svg><div class="body"><b>Could not open the SSH tunnel</b><p>Step 1 of 3 · bastion.example.com:22 · Connection timed out after 10 s.</p><p style="margin-top:6px"><span class="lnk">Show details</span> &nbsp; <span class="lnk">Go to SSH tunnel</span></p></div></div>
+      <div class="call info"><svg class="i"><use href="#clock"/></svg><div class="body"><b>Testing… 2.1 s</b><p>✓ SSH tunnel &nbsp;·&nbsp; ⋯ Login &nbsp;·&nbsp; Server version</p><p style="margin-top:6px"><span class="lnk">Cancel test</span></p></div></div>
+    </div>
+    <div class="col" style="width:520px">
+      <p class="cap">SSH tunnel section (khi bật)</p>
+      <div class="m" style="width:520px;box-shadow:none"><div class="mb">
+        <div class="tg"><span class="sw on"></span><div class="tx"><b>Connect through an SSH tunnel</b><span>The database host is resolved on the SSH server</span></div></div>
+        <div class="ghp"><div class="f"><label>SSH host</label><span class="inp">bastion.example.com</span></div><div class="f"><label>Port</label><span class="inp">22</span></div></div>
+        <div class="g2"><div class="f"><label>User</label><span class="inp">deploy</span></div><div class="f"><label>Authentication</label><span class="inp sel">SSH agent</span></div></div>
+        <div class="f"><label>Jump host<span class="end hint">Optional · ProxyJump</span></label><span class="inp ph">user@jump.example.com:22</span></div>
+        <span class="lnk"><svg class="i sm"><use href="#file"/></svg>Import from ~/.ssh/config…</span>
+      </div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 04 PASSWORD / HOST KEY ============================== -->
+<section class="board" id="b04">
+  <header><span class="n">04</span><h2>Password prompt &amp; SSH host key</h2><span class="tag chip prod nodot">P0</span></header>
+  <p class="lead">Hai dialog nhỏ nhưng xuất hiện mỗi lần kết nối. Thiếu trạng thái "Connecting…" khiến người dùng bấm 2 lần; khi host key đổi, dialog chỉ có Close và bảo "xoá thủ công" mà không nói ở đâu.</p>
+  <div class="row">
+    <div class="stage">
+      <div class="m s">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#key"/></svg></span><div class="tt"><h3>Connect to shop-prod</h3><div class="sub">app@db.internal.example.com:3306 · via bastion</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <div class="call danger"><svg class="i"><use href="#x"/></svg><div class="body"><b>Access denied for user 'app'</b><p>Check the password. The account may also be locked on the server.</p></div></div>
+          <div class="f"><label>Database password</label><span class="inp focus"><span class="grow">••••••••••</span><span class="sfx">Show</span></span><span class="hint warn-t" style="display:flex;gap:4px;align-items:center"><svg class="i sm"><use href="#alert"/></svg>Caps Lock is on</span></div>
+          <div class="f"><label>SSH key passphrase<span class="end hint">~/.ssh/id_ed25519</span></label><span class="inp"><span class="grow">••••••</span><span class="sfx">Show</span></span></div>
+          <span class="cb on"><i></i>Remember in OS keychain</span>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Connect</span></div>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="m s">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#key"/></svg></span><div class="tt"><h3>Connect to shop-prod</h3><div class="sub">app@db.internal.example.com:3306</div></div><span class="x" style="opacity:.3"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <div class="f"><label>Database password</label><span class="inp dis"><span class="grow">••••••••••</span></span></div>
+          <div class="call info"><svg class="i"><use href="#clock"/></svg><div class="body"><b>Connecting… 1.4 s</b><p>✓ SSH tunnel · ⋯ Login</p></div></div>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Stop</span><span class="btn p dis">Connecting…</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:300px">
+      <h4>Password prompt</h4>
+      <ul><li class="add">Subtitle user@host · via tunnel — biết ngay server nào hỏi.</li><li class="add">"Connecting…" + bước đang chạy; Stop thay Cancel; khoá × và Enter.</li><li class="add">Remember in OS keychain.</li><li class="add">Cảnh báo Caps Lock.</li><li>Lỗi lần trước hiện dạng callout, field được focus lại và chọn sẵn.</li></ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m" style="width:520px">
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#shield"/></svg></span><div class="tt"><h3>Host key changed</h3><div class="sub">bastion.example.com:22 · SSH tunnel of shop-prod</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <div class="call danger"><svg class="i"><use href="#alert"/></svg><div class="body"><b>The server sent a different key than the one you trusted.</b><p>This happens after a server rebuild — or when someone intercepts the connection. Check with the server's owner before replacing it.</p></div></div>
+          <div class="lst">
+            <div class="h" style="grid-template-columns:80px 1fr 28px"><span></span><span>Fingerprint (SHA256)</span><span></span></div>
+            <div class="r" style="grid-template-columns:80px 1fr 28px"><span class="mut">Trusted</span><span class="mono">ed25519 · 3Fq1…kP9w<br/><span class="mut" style="font-family:var(--font-sans)">since 2026-09-02</span></span><svg class="i sm mut"><use href="#copy"/></svg></div>
+            <div class="r" style="grid-template-columns:80px 1fr 28px"><span class="bad-t">Received</span><span class="mono bad-t">ed25519 · Zx7m…a0Qe</span><svg class="i sm mut"><use href="#copy"/></svg></div>
+          </div>
+          <div class="typed"><span class="lbl">Type <code>bastion.example.com</code> to replace the trusted key</span><span class="inp ph mono">bastion.example.com</span></div>
+        </div>
+        <div class="mf"><span class="btn g sm">Open known hosts…</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn d dis">Replace key &amp; connect</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:320px">
+      <h4>Host key</h4>
+      <ul><li class="bad">Hiện tại: không có fingerprint mới, chỉ Close, bảo "remove manually".</li><li class="add">So sánh Trusted vs Received, loại key, ngày tin cậy, Copy.</li><li class="add">Replace key có typed confirm — an toàn nhưng không bắt rời app.</li><li class="add">Open known hosts… → mục mới trong Settings › Security (xem / xoá).</li><li>Unknown key (lần đầu): cùng layout, nút "Trust &amp; connect" (primary), không typed confirm.</li></ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 05 DROP / TRUNCATE ============================== -->
+<section class="board" id="b05">
+  <header><span class="n">05</span><h2>Drop / Truncate — destructive pattern</h2><span class="tag chip prod nodot">P0</span></header>
+  <p class="lead">Dialog yếu nhất hiện tại. Mở ra phải thấy ngay <b>cái gì sẽ mất</b>: số dòng, object phụ thuộc, SQL sẽ chạy — không cần bấm "Preview SQL". Nút chính màu đỏ, gọi đúng tên hành động. Dùng chung cho Drop table / view / database / schema / function, Truncate và chọn nhiều object.</p>
+  <div class="row cmp">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot"><img src="current/l-ctx-orders-drop-table.png" alt="current drop" /></div>
+      <div class="shot"><img src="current/l-ctx-orders-truncate-table.png" alt="current truncate" /></div>
+      <div class="notes" style="width:360px"><ul>
+        <li class="bad">760px cho 1 dòng text; 2 bước mới thấy SQL.</li>
+        <li class="bad">Title "Drop object" / "Drop namespace" khác chữ trên menu.</li>
+        <li class="bad">"untagged" là chữ nội bộ; Production chỉ là text, không chip.</li>
+        <li class="bad">Nút xác nhận là "Apply" màu xanh cho DROP.</li>
+        <li class="bad">Warning "lock wait 5 s" nặng ngang "mất dữ liệu".</li>
+      </ul></div>
+    </div>
+    <div class="col">
+      <p class="cap">Redesign — M 560 · Drop table on Production</p>
+      <div class="stage">
+      <div class="m mpin">
+        <span class="pin" style="left:-9px;top:120px">1</span><span class="pin" style="left:-9px;top:196px">2</span><span class="pin" style="left:-9px;top:330px">3</span><span class="pin" style="left:-9px;top:420px">4</span><span class="pin" style="left:-9px;top:540px">5</span>
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#trash"/></svg></span><div class="tt"><h3>Drop table orders</h3><div class="sub">Removes the table with its data, 3 indexes and 2 triggers</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders<span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+        <div class="mb">
+          <div class="impact"><div class="bad"><b>≈ 12,430</b><span>rows (table statistics)</span></div><div><b>18.4 MB</b><span>data + indexes</span></div><div class="warn"><b>3</b><span>dependent objects</span></div></div>
+          <div class="deps">
+            <div class="r"><span class="kd">View</span><span class="grow mono">v_orders</span><span class="chip stg nodot">Breaks</span></div>
+            <div class="r"><span class="kd">View</span><span class="grow mono">order_totals</span><span class="chip stg nodot">Breaks</span></div>
+            <div class="r"><span class="kd">Foreign key</span><span class="grow mono">order_items.order_id → orders.id</span><span class="chip prod nodot">Blocks drop</span></div>
+          </div>
+          <div class="sect"><h5>Options</h5>
+            <div class="g2"><span class="cb on"><i></i>IF EXISTS</span><span class="cb"><i></i>Dump the table first<small>.sql.gz</small></span></div>
+            <div class="f"><label>Dependent objects <span class="end hint">PostgreSQL only</span></label><div class="seg"><span class="on">Restrict</span><span>Cascade</span></div></div>
+          </div>
+          <div class="sql"><div class="bar"><b>SQL</b><span>· 1 statement</span><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy</span><span class="btn g sm"><svg class="i sm"><use href="#play"/></svg>Open in query</span></div>
+            <pre><span class="ln" data-n="1"><span class="sk">DROP TABLE IF EXISTS</span> `dnt_fixture`.`orders`;</span></pre></div>
+          <div class="call warn" style="padding:8px 10px"><svg class="i sm"><use href="#alert"/></svg><div class="body">The foreign key from <b>order_items</b> stops this drop. Drop that key first, or the server returns error 3730.</div></div>
+          <div class="typed"><span class="lbl">Type <code>orders</code> to confirm</span><span class="inp focus mono"><span class="grow">ord</span></span></div>
+        </div>
+        <div class="mf"><span class="why"><svg class="i sm"><use href="#info"/></svg>Lock wait is limited to 5 s</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn d dis">Drop table</span></div>
+      </div>
+      </div>
+    </div>
+    <div class="col notes" style="width:300px">
+      <h4><span class="pin">1</span>Impact ngay khi mở</h4>
+      <ul><li>Số dòng ước tính + dung lượng — load song song, skeleton khi đang đọc.</li><li>Drop database: số bảng / view / routine và tổng dung lượng.</li></ul>
+      <h4><span class="pin">2</span>Object phụ thuộc</h4>
+      <ul><li class="add">View sẽ hỏng, FK chặn drop, trigger mất theo — xếp theo mức độ.</li></ul>
+      <h4><span class="pin">3</span>Options thật</h4>
+      <ul><li class="add">IF EXISTS, RESTRICT / CASCADE (PG).</li><li class="add">"Dump the table first" — tận dụng dump built-in có sẵn.</li></ul>
+      <h4><span class="pin">4</span>SQL live + công cụ</h4>
+      <ul><li class="add">Copy, Open in query (dùng lại <code>SqlPreview</code>).</li><li>Cảnh báo theo mức: chặn (đỏ) &gt; mất dữ liệu &gt; ghi chú kỹ thuật (xuống footer).</li></ul>
+      <h4><span class="pin">5</span>Xác nhận</h4>
+      <ul><li>Typed confirm chỉ khi Production hoặc mất dữ liệu; nút đỏ "Drop table" tự bật khi gõ đúng.</li><li>Dev / Local không có data → bỏ typed, chỉ cần nút đỏ.</li></ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m s">
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#eraser"/></svg></span><div class="tt"><h3>Truncate table orders</h3><div class="sub">Deletes every row, keeps the table</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx"><span class="chip stg">Staging</span><b>shop-stg</b><span class="sep">›</span>public<span class="sep">›</span>orders<span class="grow"></span><span class="mut">PostgreSQL 16</span></div>
+        <div class="mb tight">
+          <div class="impact" style="grid-template-columns:1fr 1fr"><div class="bad"><b>≈ 12,430</b><span>rows deleted</span></div><div><b>1</b><span>referencing table</span></div></div>
+          <span class="cb on"><i></i>Restart identity<small>— orders_id_seq back to 1</small></span>
+          <span class="cb"><i></i>Cascade to order_items<small>(≈ 40,112 rows)</small></span>
+          <div class="sql"><div class="bar"><b>SQL</b><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg></span></div><pre><span class="ln" data-n="1"><span class="sk">TRUNCATE TABLE</span> public.orders <span class="sk">RESTART IDENTITY</span>;</span></pre></div>
+          <div class="typed"><span class="lbl">Type <code>orders</code> to confirm</span><span class="inp ph mono">orders</span></div>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn d dis">Truncate</span></div>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="m s">
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#trash"/></svg></span><div class="tt"><h3>Drop 3 tables</h3><div class="sub">Selected in the tree · runs in one batch</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx"><span class="chip nodot">No tag</span><b>shop-dev</b><span class="sep">›</span>dnt_fixture</div>
+        <div class="mb tight">
+          <div class="lst">
+            <div class="h" style="grid-template-columns:18px 1fr 80px"><span></span><span>Table</span><span style="text-align:right">Rows</span></div>
+            <div class="r" style="grid-template-columns:18px 1fr 80px"><span class="cb on"><i></i></span><span class="mono">tmp_import_1</span><span style="text-align:right" class="mut">2,001</span></div>
+            <div class="r" style="grid-template-columns:18px 1fr 80px"><span class="cb on"><i></i></span><span class="mono">tmp_import_2</span><span style="text-align:right" class="mut">1,880</span></div>
+            <div class="r" style="grid-template-columns:18px 1fr 80px"><span class="cb on"><i></i></span><span class="mono">tmp_import_3</span><span style="text-align:right" class="mut">0</span></div>
+          </div>
+          <div class="sql"><div class="bar"><b>SQL</b><span>· 3 statements</span><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg></span></div><pre><span class="ln" data-n="1"><span class="sk">DROP TABLE</span> `tmp_import_1`, `tmp_import_2`,</span><span class="ln" data-n="2">  `tmp_import_3`;</span></pre></div>
+        </div>
+        <div class="mf"><span class="why">Dev · no typed confirm</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn d">Drop 3 tables</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:200px">
+      <h4>Biến thể</h4>
+      <ul><li><b>Truncate</b>: S 420, option theo engine (Restart identity / Cascade cho PG; MySQL: FK checks).</li><li class="add"><b>Chọn nhiều</b> trong tree → một dialog, bỏ tick từng dòng.</li><li><b>Drop database</b>: impact = số object, liệt kê connection đang dùng DB đó; typed confirm luôn bật.</li><li>Title luôn khớp menu: "Drop view v_orders", "Drop database dnt_fixture" — bỏ "namespace" / "object".</li></ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 06 RENAME / CREATE ============================== -->
+<section class="board" id="b06">
+  <header><span class="n">06</span><h2>Rename &amp; Create database — form + live SQL</h2><span class="tag chip prod nodot">P0</span></header>
+  <p class="lead"><code>CreateNamespaceDialog</code> (mới) là dialog tốt nhất hiện có: form thật, Enter submit, SQL live. Lấy nó làm khuôn cho Rename, sửa 2 điểm: không báo lỗi khi vừa mở, và hiện typed confirm Production ngay từ đầu.</p>
+  <div class="row cmp">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot"><img src="current/l-ctx-orders-rename-table.png" alt="current rename" /></div>
+      <div class="shot"><img src="current/l-ctx-shop-dev-create-database.png" alt="current create database" /></div>
+    </div>
+    <div class="row" style="gap:20px">
+      <div class="stage">
+        <div class="m">
+          <div class="mh"><span class="ic acc"><svg class="i"><use href="#pencil"/></svg></span><div class="tt"><h3>Rename table orders</h3><div class="sub">Indexes, triggers and data move with it</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+          <div class="ctx"><span class="chip nodot">No tag</span><b>shop-dev</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders<span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+          <div class="mb">
+            <div class="f"><label>New name<span class="end hint">14 / 64 characters</span></label><span class="inp focus mono"><span class="grow">orders_archive</span><svg class="i sm ok-t"><use href="#check"/></svg></span><span class="hint">Same schema. To move it, use <span class="lnk">Move to database…</span></span></div>
+            <div class="sect"><h5>References<span class="end">2 found</span></h5>
+              <div class="deps">
+                <div class="r"><span class="kd">View</span><span class="grow mono">v_orders</span><span class="chip stg nodot">Keeps old name · breaks</span></div>
+                <div class="r"><span class="kd">Foreign key</span><span class="grow mono">order_items.order_id</span><span class="chip ok nodot">Follows</span></div>
+              </div>
+              <span class="cb"><i></i>Also update the definition of v_orders<small>— 1 more statement</small></span>
+            </div>
+            <div class="sql"><div class="bar"><b>SQL</b><span>· 1 statement</span><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy</span><span class="btn g sm"><svg class="i sm"><use href="#play"/></svg>Open in query</span></div>
+              <pre><span class="ln" data-n="1"><span class="sk">RENAME TABLE</span> `dnt_fixture`.`orders` <span class="sk">TO</span> `dnt_fixture`.`orders_archive`;</span></pre></div>
+          </div>
+          <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Rename table <kbd>↵</kbd></span></div>
+        </div>
+      </div>
+      <div class="stage">
+        <div class="m" style="width:480px">
+          <div class="mh"><span class="ic acc"><svg class="i"><use href="#db"/></svg></span><div class="tt"><h3>Create database</h3><div class="sub">On shop-prod</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+          <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b><span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+          <div class="mb">
+            <div class="f"><label>Name<span class="end hint">0 / 64</span></label><span class="inp focus ph">e.g. shop_reporting</span></div>
+            <div class="g2"><div class="f"><label>Character set</label><span class="inp sel">utf8mb4 <span class="mut">· default</span></span></div><div class="f"><label>Collation</label><span class="inp sel">utf8mb4_0900_ai_ci</span></div></div>
+            <div class="g2"><span class="cb on"><i></i>IF NOT EXISTS</span><span class="cb on"><i></i>Open a query tab in it</span></div>
+            <div class="sql"><div class="bar"><b>SQL</b><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg></span></div><pre><span class="ln" data-n="1"><span class="sc">-- Enter a name to see the SQL</span></span></pre></div>
+            <div class="typed"><span class="lbl">Production · type <code>shop-prod</code> to confirm</span><span class="inp ph mono">shop-prod</span></div>
+          </div>
+          <div class="mf"><span class="why"><svg class="i sm"><use href="#info"/></svg>Enter a name</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p dis">Create database</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="col notes">
+      <h4>Rename</h4>
+      <ul>
+        <li class="bad">Hiện tại: 760px, không form (Enter không chạy), không chặn tên trùng / tên cũ, phải Preview SQL.</li>
+        <li>Validate live: độ dài theo engine, ký tự, trùng tên — dấu ✓ khi hợp lệ.</li>
+        <li class="add">Danh sách tham chiếu: view nào sẽ hỏng, FK nào tự theo.</li>
+        <li class="add">Tuỳ chọn cập nhật luôn view phụ thuộc.</li>
+        <li class="add">Move to database… (MySQL RENAME giữa schema).</li>
+        <li>Nút chính "Rename table", Enter submit.</li>
+      </ul>
+      <h4>Create database / schema</h4>
+      <ul>
+        <li class="bad">Hiện tại: "Enter a name." đỏ ngay khi mở; confirm Production chỉ xuất hiện sau lần bấm đầu.</li>
+        <li>Lý do disabled ở footer thay vì lỗi đỏ.</li>
+        <li class="add">IF NOT EXISTS, mở query tab sau khi tạo.</li>
+        <li class="add">Copy SQL; selects hiện "Loading…" khi đang đọc charset.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 07 REVIEW & APPLY / DATA EDITS ============================== -->
+<section class="board" id="b07">
+  <header><span class="n">07</span><h2>Review &amp; apply · Data edit review</h2><span class="tag chip stg nodot">P1</span></header>
+  <p class="lead">Hai dialog review đã có nhiều state tốt (stale, expired, partial). Thiếu: title nêu object, nút đỏ khi mất dữ liệu, "Open in query" (SqlPreview đã hỗ trợ, chỉ chưa nối), và Data edit review đang hiện thuật ngữ backend "Verdict: allow".</p>
+  <div class="row">
+    <div class="stage">
+      <div class="m l">
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#table"/></svg></span><div class="tt"><h3>Apply 3 changes to orders</h3><div class="sub">From the table designer · 1 change loses data</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders<span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+        <div class="mb">
+          <div class="call warn"><svg class="i"><use href="#alert"/></svg><div class="body"><b>Not transactional</b><p>MySQL commits each DDL statement on its own. If statement 3 fails, 1 and 2 stay applied.</p></div></div>
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) 230px;gap:14px">
+            <div class="sql"><div class="bar"><b>SQL</b><span>· 3 statements</span><span class="grow"></span><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy</span><span class="btn g sm"><svg class="i sm"><use href="#play"/></svg>Open in query</span><span class="btn g sm"><svg class="i sm"><use href="#download"/></svg></span></div>
+              <pre><span class="ln" data-n="1"><span class="sk">ALTER TABLE</span> `orders`</span><span class="ln loss" data-n="2">  <span class="sk">DROP COLUMN</span> `legacy_code`,</span><span class="ln" data-n="3">  <span class="sk">MODIFY</span> `status` <span class="sk">VARCHAR</span>(<span class="sn">32</span>) <span class="sk">NOT NULL</span>;</span><span class="ln" data-n="4"><span class="sk">CREATE INDEX</span> `ix_created` <span class="sk">ON</span> `orders` (`created_at`);</span><span class="ln" data-n="5"><span class="sk">ALTER TABLE</span> `orders` <span class="sk">COMMENT</span> = <span class="ss">'Customer orders'</span>;</span></pre></div>
+            <div class="col" style="gap:8px">
+              <p class="cap" style="margin:0">Impact</p>
+              <div class="call danger" style="padding:8px 10px"><div class="body"><b>legacy_code dropped</b><p>12,430 non-null values lost</p></div></div>
+              <div class="call" style="padding:8px 10px"><div class="body"><b>status VARCHAR(64) → (32)</b><p>0 values longer than 32 · checked</p></div></div>
+              <div class="call" style="padding:8px 10px"><div class="body"><b>New index</b><p>Online, no table lock</p></div></div>
+            </div>
+          </div>
+          <div class="typed"><span class="lbl">Type <code>orders</code> to apply</span><span class="inp ph mono">orders</span></div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#history"/></svg>Back to designer</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn d dis">Apply 3 changes</span></div>
+      </div>
+    </div>
+    <div class="col notes">
+      <h4>Review &amp; apply (Design / DDL edit)</h4>
+      <ul>
+        <li>Title = "Apply N changes to &lt;object&gt;", không còn "Review &amp; apply" chung chung.</li>
+        <li>Nút đỏ khi có dòng mất dữ liệu; xanh khi không.</li>
+        <li class="add">Dòng "transactional / not transactional" cho cả Table design (DDL edit đã có).</li>
+        <li class="add">Open in query + Save .sql — truyền <code>onOpenInQuery</code> vào <code>SqlPreview</code>.</li>
+        <li>DDL edit: nút "Put the original definition in the editor" → "Restore original".</li>
+        <li>Outcome (applied / partial / rolled back) dùng <code>&lt;OutcomeReport&gt;</code> chung.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m">
+        <div class="mh"><span class="ic warn"><svg class="i"><use href="#table"/></svg></span><div class="tt"><h3>Save 4 changes to orders</h3><div class="sub">Edited in the data grid</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx"><span class="chip stg">Staging</span><b>shop-stg</b><span class="sep">›</span>dnt_fixture<span class="sep">›</span>orders</div>
+        <div class="mb">
+          <div class="chips"><span class="chip info">2 updates</span><span class="chip ok">1 insert</span><span class="chip prod">1 delete</span></div>
+          <div class="lst">
+            <div class="h" style="grid-template-columns:62px 70px 1fr"><span>Change</span><span>Row</span><span>Values</span></div>
+            <div class="r" style="grid-template-columns:62px 70px 1fr"><span class="tbadge">UPDATE</span><span class="mono">id = 42</span><span class="mono">status <span class="mut">'paid'</span> → 'shipped'</span></div>
+            <div class="r" style="grid-template-columns:62px 70px 1fr"><span class="tbadge">UPDATE</span><span class="mono">id = 57</span><span class="mono">total <span class="mut">19.90</span> → 21.90</span></div>
+            <div class="r" style="grid-template-columns:62px 70px 1fr"><span class="tbadge">INSERT</span><span class="mono mut">new</span><span class="mono">customer_id 7, total 9.50, …</span></div>
+            <div class="r" style="grid-template-columns:62px 70px 1fr"><span class="tbadge" style="color:var(--dnt-status-danger-fg)">DELETE</span><span class="mono">id = 77</span><span class="mono mut">whole row</span></div>
+          </div>
+          <div class="hint" style="display:flex;gap:6px"><svg class="i sm"><use href="#shield"/></svg>Rows are matched by the primary key <code>id</code>. If someone changed them since you loaded the grid, nothing is saved.</div>
+          <div class="f"><label>After saving</label><div class="seg"><span class="on">Commit now</span><span>Keep transaction open</span></div></div>
+          <span class="lnk"><svg class="i sm"><use href="#chevd"/></svg>Show 4 SQL statements</span>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy SQL</span><span class="grow"></span><span class="btn" style="border-color:var(--dnt-focus)">Cancel</span><span class="btn p">Save 4 changes</span></div>
+      </div>
+    </div>
+    <div class="col notes">
+      <h4>Data edit review</h4>
+      <ul>
+        <li class="bad">Hiện tại: "Verdict: allow|confirm|block", list SQL thô, focus mặc định ở Confirm.</li>
+        <li>Tóm tắt theo loại (chip), bảng diff before → after.</li>
+        <li>Câu giải thích conflict check bằng ngôn ngữ thường.</li>
+        <li class="add">Chọn commit ngay / giữ transaction mở.</li>
+        <li class="add">Env chip; có DELETE → focus Cancel; Production → typed confirm.</li>
+        <li>Đang lưu: khoá Esc / Cancel, nút "Saving…".</li>
+        <li>Block: đổi title thành "Can't save these changes" + lý do + nút "Open in query".</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 08 CONFIRM FAMILY ============================== -->
+<section class="board" id="b08">
+  <header><span class="n">08</span><h2>Confirm family · Transactions · Run confirm</h2><span class="tag chip prod nodot">P0</span></header>
+  <p class="lead">Thay 7 <code>ConfirmDialog</code> chỉ nhận 1 chuỗi bằng một <code>ConfirmDialog</code> giàu hơn: message + slot chi tiết (list) + tối đa 3 hành động + khoá khi đang chạy. TxClose và AppClose dùng cùng khung. Trên Production, hành động an toàn (Rollback) là primary.</p>
+  <div class="row">
+    <div class="stage" style="flex-direction:column;gap:20px;align-items:center">
+      <div class="m s">
+        <div class="mh"><span class="ic warn"><svg class="i"><use href="#file"/></svg></span><div class="tt"><h3>Save changes to report.sql?</h3></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb tight"><p style="margin:0;color:var(--dnt-fg-muted)">Your changes are lost if you don't save them.</p></div>
+        <div class="mf"><span class="btn">Don't save</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Save</span></div>
+      </div>
+      <div class="m s">
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#trash"/></svg></span><div class="tt"><h3>Delete connection shop-dev?</h3></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb tight">
+          <ul style="margin:0;padding-left:18px;color:var(--dnt-fg-muted);font-size:12px;line-height:20px">
+            <li>Saved password and SSH passphrase are removed from the keychain</li>
+            <li>2 open tabs close</li>
+            <li class="bad-t">1 tab has 3 unsaved data edits (orders)</li>
+          </ul>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn d">Delete connection</span></div>
+      </div>
+    </div>
+    <div class="stage" style="flex-direction:column;gap:20px;align-items:center">
+      <div class="m s">
+        <div class="mh"><span class="ic warn"><svg class="i"><use href="#history"/></svg></span><div class="tt"><h3>Transaction still open</h3><div class="sub">Closing Query 3</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b></div>
+        <div class="mb tight">
+          <dl class="kv"><dt>Statements</dt><dd>4 · 2 UPDATE, 1 DELETE, 1 INSERT</dd><dt>Rows changed</dt><dd>37</dd><dt>Open for</dt><dd>6 min 12 s</dd></dl>
+        </div>
+        <div class="mf"><span class="btn">Commit</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Rollback &amp; close</span></div>
+      </div>
+      <div class="m s">
+        <div class="mh"><span class="ic"><svg class="i"><use href="#clock"/></svg></span><div class="tt"><h3>Query is still running</h3><div class="sub">Query 2 · 00:00:41</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb tight"><p style="margin:0;color:var(--dnt-fg-muted)">Closing the tab stops the query. Rows already sent to the server are rolled back.</p></div>
+        <div class="mf"><span class="grow"></span><span class="btn">Keep running</span><span class="btn d">Stop &amp; close</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:250px">
+      <h4>Rich ConfirmDialog</h4>
+      <ul>
+        <li><code>title</code> là câu hỏi; <code>message</code>; <code>details</code> (list / kv); tối đa 3 action.</li>
+        <li class="add">Unsaved file: Save / Don't save / Cancel (giống DataGrip, VS Code).</li>
+        <li class="add">Delete connection: liệt kê hậu quả, gộp luôn câu hỏi "discard edits" thay vì 2 dialog nối nhau.</li>
+        <li>Dùng <code>plural()</code> mọi nơi: hết "1 unsaved changes", "tab(s)".</li>
+        <li>"Could not save 2 tabs" → liệt kê tab + lý do.</li>
+        <li>Busy: khoá Esc / Cancel, nút "Committing…".</li>
+      </ul>
+      <h4>Transaction</h4>
+      <ul>
+        <li class="add">Số statement, số dòng, thời gian mở.</li>
+        <li>Production: Rollback là primary; Commit sang trái.</li>
+        <li>Bỏ "(PRODUCTION)" text trùng với chip.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m">
+        <div class="mh"><span class="ic warn"><svg class="i"><use href="#alert"/></svg></span><div class="tt"><h3>Quit with open work?</h3><div class="sub">Choose what happens to each tab</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb tight">
+          <div class="lst">
+            <div class="h" style="grid-template-columns:1fr 150px 150px"><span>Tab</span><span>State</span><span>On quit</span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 150px;min-height:40px"><span><b>Query 3</b> <span class="chip prod" style="margin-left:4px">shop-prod</span></span><span class="mut">Transaction · 4 stmts</span><span class="seg"><span>Commit</span><span class="on">Rollback</span></span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 150px;min-height:40px"><span><b>Query 5</b> <span class="chip nodot" style="margin-left:4px">shop-dev</span></span><span class="mut">Transaction · 1 stmt</span><span class="seg"><span class="on">Commit</span><span>Rollback</span></span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 150px;min-height:40px"><span><b>Query 2</b></span><span class="mut">Running · 00:41</span><span class="mut">Stopped</span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 150px;min-height:40px"><span><b>report.sql</b></span><span class="mut">Unsaved</span><span class="seg"><span class="on">Save</span><span>Discard</span></span></div>
+          </div>
+          <div class="hint">2 background jobs (dump, import) also stop. <span class="lnk">Show jobs</span></div>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Quit</span></div>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="m">
+        <div class="mh"><span class="ic danger"><svg class="i"><use href="#play"/></svg></span><div class="tt"><h3>Run 3 statements on Production?</h3><div class="sub">2 change data · 1 has no WHERE</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b><span class="sep">›</span>dnt_fixture</div>
+        <div class="mb tight">
+          <div class="lst">
+            <div class="r" style="grid-template-columns:62px 1fr 92px"><span class="tbadge">UPDATE</span><span class="mono">orders SET status='void'</span><span class="bad-t" style="text-align:right">all ≈ 12,430</span></div>
+            <div class="r" style="grid-template-columns:62px 1fr 92px"><span class="tbadge">DELETE</span><span class="mono">sessions WHERE …</span><span class="mut" style="text-align:right">≈ 310</span></div>
+            <div class="r" style="grid-template-columns:62px 1fr 92px"><span class="tbadge">SELECT</span><span class="mono">count(*) FROM orders</span><span class="mut" style="text-align:right">read</span></div>
+          </div>
+          <span class="cb on"><i></i>Run in a transaction<small>— review, then commit or roll back</small></span>
+          <div class="typed"><span class="lbl">Type <code>orders</code> to run the unbounded UPDATE</span><span class="inp ph mono">orders</span></div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn d dis">Run 3 statements</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:240px">
+      <h4>Quit</h4>
+      <ul><li class="add">Quyết định từng tab (commit / rollback / save) thay vì chỉ "Rollback all &amp; quit".</li><li>Title đúng nội dung (không chỉ "Open transactions").</li></ul>
+      <h4>Run confirm</h4>
+      <ul><li>Đã tốt; bỏ trùng lặp giữa list và warning.</li><li class="add">Run in a transaction, Copy.</li><li>Nút chỉ đỏ khi có ghi dữ liệu.</li><li>Run blocked (read-only): thêm "Edit connection…" để tắt read-only.</li></ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 09 RESULT EXPORT ============================== -->
+<section class="board" id="b09">
+  <header><span class="n">09</span><h2>Export result</h2><span class="tag chip stg nodot">P1</span></header>
+  <p class="lead">Từ 420px một cột (form nhảy chiều cao khi đổi format) lên L 760 hai cột: trái là <b>cái gì</b> (format, phạm vi, cột, đích), phải là <b>như thế nào</b> (option theo format) + preview vài dòng đầu. Thêm phạm vi "Selected rows" và đích "Clipboard".</p>
+  <div class="row">
+    <div class="stage">
+      <div class="m l">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#download"/></svg></span><div class="tt"><h3>Export result</h3><div class="sub">Query 3 · SELECT … FROM orders JOIN customers</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div style="display:grid;grid-template-columns:260px minmax(0,1fr)">
+          <div class="mb" style="border-right:1px solid var(--dnt-border-subtle);background:var(--dnt-bg-chrome)">
+            <div class="f"><label>Format</label>
+              <div class="lst">
+                <div class="r on" style="grid-template-columns:1fr auto"><b>CSV</b><span class="mut">.csv</span></div>
+                <div class="r" style="grid-template-columns:1fr auto"><span>Excel</span><span class="mut">.xlsx</span></div>
+                <div class="r" style="grid-template-columns:1fr auto"><span>JSON</span><span class="mut">.json</span></div>
+                <div class="r" style="grid-template-columns:1fr auto"><span>SQL INSERT</span><span class="mut">.sql</span></div>
+                <div class="r" style="grid-template-columns:1fr auto"><span>Markdown</span><span class="mut">.md</span></div>
+                <div class="r" style="grid-template-columns:1fr auto"><span>HTML table <span class="chip acc nodot">new</span></span><span class="mut">.html</span></div>
+              </div>
+            </div>
+            <div class="f"><label>Rows</label>
+              <span class="cb rad"><i></i>Loaded<small>1,000</small></span>
+              <span class="cb rad on"><i></i>All rows<small>re-runs · ≈ 120,000</small></span>
+              <span class="cb rad"><i></i>Selected<small>24 rows</small></span>
+            </div>
+            <div class="f"><label>Columns<span class="end lnk">Choose…</span></label><span class="hint" style="font-size:12px">12 of 14 · <span class="mut">notes, raw_payload left out</span></span></div>
+            <div class="f"><label>Destination</label><div class="seg full"><span class="on">File</span><span>Clipboard</span></div></div>
+          </div>
+          <div class="mb">
+            <div class="sect"><h5>CSV options</h5>
+              <div class="g2">
+                <div class="f"><label>Delimiter</label><div class="seg full"><span class="on">,</span><span>;</span><span>Tab</span><span>|</span></div></div>
+                <div class="f"><label>Quote</label><div class="seg full"><span class="on">As needed</span><span>All</span><span>None</span></div></div>
+              </div>
+              <div class="g3">
+                <div class="f"><label>Encoding</label><span class="inp sel">UTF-8</span></div>
+                <div class="f"><label>Line ending</label><span class="inp sel">CRLF</span></div>
+                <div class="f"><label>NULL as</label><span class="inp mono ph">(empty)</span></div>
+              </div>
+              <div class="g2"><span class="cb on"><i></i>Header row</span><span class="cb"><i></i>UTF-8 BOM<small>for Excel</small></span><span class="cb on"><i></i>Guard formulas<small>= + - @</small></span><span class="cb"><i></i>ISO dates</span></div>
+            </div>
+            <div class="sect"><h5>Preview<span class="end">first 3 rows</span></h5>
+              <div class="sql"><pre style="padding:8px 10px"><span class="sc">id,customer,status,total,created_at</span>
+42,"Nguyen, An",shipped,21.90,2026-10-20 09:14:02
+57,Tran Binh,paid,19.90,2026-10-21 11:02:45
+61,"Le ""Cee""",void,,2026-10-22 08:30:10</pre></div>
+            </div>
+          </div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#star"/></svg>Save as preset</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Export…</span></div>
+      </div>
+    </div>
+    <div class="col" style="gap:20px">
+      <div class="stage">
+        <div class="m s">
+          <div class="mh"><span class="ic ok"><svg class="i"><use href="#check"/></svg></span><div class="tt"><h3>Exported 120,000 rows</h3><div class="sub">CSV · 14.2 MB · 6.4 s</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+          <div class="mb tight">
+            <div class="filecard"><span class="ic"><svg class="i"><use href="#file"/></svg></span><div class="tx"><b>orders-2026-10-26.csv</b><span>D:\Exports</span></div><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg></span></div>
+            <div class="call warn" style="padding:8px 10px"><svg class="i sm"><use href="#alert"/></svg><div class="body">3 cells over 32 KB were cut. <span class="lnk">Which ones?</span></div></div>
+          </div>
+          <div class="mf"><span class="btn g sm">Show in folder</span><span class="grow"></span><span class="btn">Close</span><span class="btn p">Open file</span></div>
+        </div>
+      </div>
+      <div class="col notes" style="width:420px">
+        <ul>
+          <li class="bad">Hiện tại: 420px, list checkbox dài + đoạn hint dài; không thấy kết quả sẽ ra sao.</li>
+          <li class="add">Rows: Selected; Columns: chọn cột; Destination: Clipboard.</li>
+          <li class="add">Encoding, line ending, NULL text, ISO dates, quote mode.</li>
+          <li class="add">Preview 3 dòng cập nhật theo option.</li>
+          <li class="add">Done: Open file (không chỉ folder), Copy path; Save as preset.</li>
+          <li>Đang chạy All rows: hiện % khi biết tổng; Esc hỏi "Stop export?" thay vì huỷ ngay.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 10 IMPORT WIZARD ============================== -->
+<section class="board" id="b10">
+  <header><span class="n">10</span><h2>Import wizard</h2><span class="tag chip stg nodot">P1</span></header>
+  <p class="lead">Nội dung đã rất đầy đủ (mapping, upsert, dry run, review). Vấn đề là hình thức: bước đầu là một ô file giữa khoảng trống lớn, rail không cho biết bước nào xong / lỗi, mapping không có sample value. Gộp Check vào Review (5 bước), thêm drop zone và tóm tắt mỗi bước trên rail.</p>
+  <div class="row cmp">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot"><img src="current/l-ctx-orders-import-data.png" alt="current import" /></div>
+    </div>
+    <div class="col">
+      <p class="cap">Redesign — XL 960 · Mapping step</p>
+      <div class="stage">
+      <div class="m xl">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#upload"/></svg></span><div class="tt"><h3>Import data into orders</h3><div class="sub">orders-export.csv → dnt_fixture.orders</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div style="display:grid;grid-template-columns:220px minmax(0,1fr)">
+          <div class="rail">
+            <div class="step done"><span class="num">✓</span><div class="tx"><b>Source</b><span>orders-export.csv · 12,430 rows</span></div></div>
+            <div class="step done"><span class="num">✓</span><div class="tx"><b>Target</b><span>dnt_fixture.orders · append</span></div></div>
+            <div class="step on"><span class="num">3</span><div class="tx"><b>Mapping</b><span>9 of 10 mapped · 1 issue</span></div></div>
+            <div class="step todo"><span class="num">4</span><div class="tx"><b>Options</b><span>Batch 1,000 · skip bad rows</span></div></div>
+            <div class="step todo"><span class="num">5</span><div class="tx"><b>Review &amp; run</b><span>Validate, then import</span></div></div>
+          </div>
+          <div class="mb">
+            <div style="display:flex;gap:8px;align-items:center"><span class="btn sm"><svg class="i sm"><use href="#bolt"/></svg>Auto map</span><span class="btn sm g">Clear</span><span class="grow" style="flex:1"></span><span class="cb"><i></i>Issues only</span><span class="search" style="width:180px"><svg class="i sm"><use href="#search"/></svg>Filter columns</span></div>
+            <div class="lst">
+              <div class="h" style="grid-template-columns:150px 160px minmax(0,1fr) 125px"><span>Target column</span><span>From source</span><span>Sample values</span><span>Check</span></div>
+              <div class="r" style="grid-template-columns:150px 160px minmax(0,1fr) 125px"><span class="mono">id <span class="tbadge">INT</span> <span class="tbadge">PK</span></span><span class="inp sel" style="height:26px">order_id</span><span class="mono mut">10021 · 10022 · 10023</span><span class="ok-t">✓ int</span></div>
+              <div class="r" style="grid-template-columns:150px 160px minmax(0,1fr) 125px"><span class="mono">customer_id <span class="tbadge">INT</span></span><span class="inp sel" style="height:26px">customer</span><span class="mono mut">7 · 12 · 7</span><span class="ok-t">✓ int</span></div>
+              <div class="r" style="grid-template-columns:150px 160px minmax(0,1fr) 125px"><span class="mono">status <span class="tbadge">VARCHAR(32)</span></span><span class="inp sel" style="height:26px">state</span><span class="mono mut">paid · shipped · void</span><span class="ok-t">✓ text ≤ 7</span></div>
+              <div class="r" style="grid-template-columns:150px 160px minmax(0,1fr) 125px;background:var(--dnt-status-warning-bg)"><span class="mono">total <span class="tbadge">DECIMAL(10,2)</span></span><span class="inp sel" style="height:26px">amount</span><span class="mono">21,90 · 19,90 · —</span><span class="warn-t">⚠ decimal comma</span></div>
+              <div class="r" style="grid-template-columns:150px 160px minmax(0,1fr) 125px"><span class="mono">created_at <span class="tbadge">DATETIME</span></span><span class="inp sel" style="height:26px">created</span><span class="mono mut">20/10/2026 09:14</span><span class="ok-t">✓ dd/MM/yyyy HH:mm</span></div>
+              <div class="r" style="grid-template-columns:150px 160px minmax(0,1fr) 125px"><span class="mono">notes <span class="tbadge">TEXT</span> <span class="mut">null</span></span><span class="inp sel ph" style="height:26px">— not imported —</span><span class="mut">stays NULL</span><span class="mut">skipped</span></div>
+            </div>
+            <div class="call warn" style="padding:8px 10px"><svg class="i sm"><use href="#alert"/></svg><div class="body"><b>total</b> uses a decimal comma. <span class="lnk">Read "," as the decimal separator</span> &nbsp;or&nbsp; <span class="lnk">Map to an expression…</span></div></div>
+          </div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#star"/></svg>Save as profile</span><span class="why">1 issue to fix</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn">Back</span><span class="btn p">Next: Options <kbd>↵</kbd></span></div>
+      </div>
+      </div>
+    </div>
+    <div class="col notes">
+      <ul>
+        <li class="bad">Bước Source trống trơn; rail chỉ có số; Check là bước riêng dù không bắt buộc.</li>
+        <li>Rail: ✓ xong, ● đang ở, ! lỗi + một dòng tóm tắt từng bước; bấm để quay lại.</li>
+        <li class="add">Sample values + loại suy ra cạnh kiểu đích; badge lệch kiểu với cách sửa 1 click.</li>
+        <li class="add">Map sang expression / hằng số; Save as profile (ngoài "Run again").</li>
+        <li>Footer đúng quy tắc: Cancel · Back · Next (Enter = Next).</li>
+        <li>Validate gộp vào Review &amp; run như một panel.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m l">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#upload"/></svg></span><div class="tt"><h3>Import data into orders</h3><div class="sub">Step 1 · Source</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <div class="filecard"><span class="ic"><svg class="i"><use href="#file"/></svg></span><div class="tx"><b>orders-export.csv</b><span>D:\Downloads · 2.4 MB · detected CSV, UTF-8, ";" delimiter</span></div><span class="btn sm">Change…</span></div>
+          <div class="g3">
+            <div class="f"><label>Format</label><span class="inp sel">CSV</span></div>
+            <div class="f"><label>Encoding</label><span class="inp sel">UTF-8 <span class="mut">· detected</span></span></div>
+            <div class="f"><label>Delimiter</label><div class="seg full"><span>,</span><span class="on">;</span><span>Tab</span><span>…</span></div></div>
+          </div>
+          <div class="g3">
+            <div class="f"><label>Quote / escape</label><span class="inp sel mono">" / ""</span></div>
+            <div class="f"><label>Skip first lines</label><span class="inp">0</span></div>
+            <div class="f"><label>&nbsp;</label><span class="cb on" style="height:30px"><i></i>First row has column names</span></div>
+          </div>
+          <div class="grid"><table><tr><th>order_id</th><th>customer</th><th>state</th><th>amount</th><th>created</th></tr><tr><td>10021</td><td>7</td><td>paid</td><td>21,90</td><td>20/10/2026 09:14</td></tr><tr><td>10022</td><td>12</td><td>shipped</td><td>19,90</td><td>21/10/2026 11:02</td></tr><tr><td>10023</td><td>7</td><td>void</td><td class="nul">empty</td><td>22/10/2026 08:30</td></tr></table></div>
+          <span class="hint">Showing 3 of 12,430 rows</span>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Next: Target</span></div>
+      </div>
+    </div>
+    <div class="col" style="gap:12px;width:380px">
+      <p class="cap">Empty state của bước Source</p>
+      <div class="drop"><svg class="i lg"><use href="#upload"/></svg><b>Drop a file here</b><span>CSV, TSV, JSON, Excel · or <span class="lnk">choose a file…</span></span></div>
+      <div class="hint">Recent: <span class="lnk">orders-export.csv</span> · <span class="lnk">customers.xlsx</span></div>
+      <div class="notes" style="width:380px"><ul><li class="add">Drop zone + file gần đây thay cho 1 ô "No file selected".</li><li class="add">Encoding, quote/escape, skip lines (chưa có).</li><li>Auto-detect hiện ngay trong file card.</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 11 DUMP / RESTORE ============================== -->
+<section class="board" id="b11">
+  <header><span class="n">11</span><h2>Dump &amp; Restore</h2><span class="tag chip stg nodot">P1</span></header>
+  <p class="lead">Dump: đưa file đích lên đầu và gợi ý sẵn tên, thêm tìm kiếm + cột Data tri-state, footer nói rõ vì sao chưa Start được. Restore: thành luồng 2 bước rõ ràng — nút chính đổi từ <b>Analyze</b> sang <b>Start restore</b>; không còn <code>&lt;select&gt;</code> native.</p>
+  <div class="row">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot" style="width:240px"><img src="current/l-ctx-dnt-fixture-dump.png" alt="current dump" /></div>
+      <div class="shot" style="width:240px"><img src="current/l-ctx-dnt-fixture-restore.png" alt="current restore" /></div>
+    </div>
+    <div class="stage">
+      <div class="m l" style="width:700px">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#box"/></svg></span><div class="tt"><h3>Dump dnt_fixture</h3><div class="sub">Structure and data to a .sql file</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx"><span class="chip nodot">No tag</span><b>shop-dev</b><span class="sep">›</span>dnt_fixture<span class="grow"></span><span class="mut">MySQL 8.0.36</span></div>
+        <div class="mb">
+          <div class="filecard"><span class="ic"><svg class="i"><use href="#file"/></svg></span><div class="tx"><b>dnt_fixture-2026-10-26.sql.gz</b><span>D:\Backups\shop-dev · suggested</span></div><span class="btn sm">Change…</span></div>
+          <div class="f"><label>Method<span class="end"><span class="chip ok">mysqldump 8.0.36 found</span></span></label><div class="seg"><span class="on">Built-in</span><span>mysqldump</span><span>mariadb-dump</span></div></div>
+          <div class="sect"><h5>Objects<span class="end">3 of 4 selected · ≈ 18 MB</span></h5>
+            <div style="display:flex;gap:8px"><span class="search" style="flex:1"><svg class="i sm"><use href="#search"/></svg>Filter objects</span><span class="btn sm">All</span><span class="btn sm">None</span></div>
+            <div class="lst">
+              <div class="h" style="grid-template-columns:20px 1fr 90px 70px"><span class="cb mid"><i></i></span><span>Name</span><span style="text-align:right">Size</span><span class="cb mid" style="justify-content:flex-end;gap:6px">Data<i></i></span></div>
+              <div class="grp">Tables · 2</div>
+              <div class="r" style="grid-template-columns:20px 1fr 90px 70px"><span class="cb on"><i></i></span><span class="mono">orders</span><span class="mut" style="text-align:right">18.1 MB</span><span class="cb on" style="justify-content:flex-end"><i></i></span></div>
+              <div class="r" style="grid-template-columns:20px 1fr 90px 70px"><span class="cb on"><i></i></span><span class="mono">audit_log</span><span class="mut" style="text-align:right">212 MB</span><span class="cb" style="justify-content:flex-end"><i></i></span></div>
+              <div class="grp">Views · 1</div>
+              <div class="r" style="grid-template-columns:20px 1fr 90px 70px"><span class="cb on"><i></i></span><span class="mono">order_totals</span><span class="mut" style="text-align:right">—</span><span></span></div>
+              <div class="grp">Not in the built-in dump · 1 <span class="lnk" style="margin-left:6px">Use mysqldump</span></div>
+              <div class="r" style="grid-template-columns:20px 1fr 90px 70px;opacity:.6"><span class="cb"><i></i></span><span class="mono">archive_orders <span class="mut" style="font-family:var(--font-sans)">procedure</span></span><span></span><span></span></div>
+            </div>
+          </div>
+          <div class="sect"><h5>Options</h5>
+            <div class="g3"><span class="cb on"><i></i>DROP before CREATE</span><span class="cb"><i></i>CREATE DATABASE</span><span class="cb on"><i></i>Compress (.gz)</span></div>
+            <div class="g2"><div class="f"><label>Rows per INSERT</label><span class="inp">500</span></div><div class="f"><label>WHERE filter<span class="end hint">per table</span></label><span class="lnk" style="height:30px">Add a filter…</span></div></div>
+          </div>
+        </div>
+        <div class="mf"><span class="why">3 objects · ≈ 18 MB compressed to ≈ 4 MB</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Start dump</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:200px">
+      <h4>Dump</h4>
+      <ul>
+        <li class="bad">Output file nằm cuối nhưng chặn Start mà không nói lý do; segmented nhìn như ô input.</li>
+        <li>File đích lên đầu, tên gợi ý sẵn theo ngày.</li>
+        <li class="add">Filter object, kích thước từng bảng, cột Data tri-state ở header.</li>
+        <li class="add">CREATE DATABASE, rows per INSERT, WHERE filter theo bảng.</li>
+        <li>Mục không dump được nằm trong list (mờ) + gợi ý đổi method.</li>
+        <li>Start → progress ngay trong dialog + "Run in background".</li>
+      </ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m l" style="width:700px">
+        <div class="mh"><span class="ic warn"><svg class="i"><use href="#history"/></svg></span><div class="tt"><h3>Restore into dnt_fixture</h3><div class="sub">Step 2 of 2 · file analyzed</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="ctx prod"><span class="chip prod">Production</span><b>shop-prod</b><span class="sep">›</span>dnt_fixture</div>
+        <div class="mb">
+          <div class="filecard"><span class="ic"><svg class="i"><use href="#file"/></svg></span><div class="tx"><b>dnt_fixture-2026-10-20.sql.gz</b><span>MySQL dump · server 8.0.36 · 4.1 MB · 2026-10-20 03:00</span></div><span class="btn sm">Change…</span></div>
+          <div class="g2"><div class="f"><label>Target database</label><span class="inp sel">dnt_fixture</span></div><div class="f"><label>If a statement fails</label><div class="seg full"><span class="on">Stop</span><span>Continue</span></div></div></div>
+          <div class="sect"><h5>Contents<span class="end">select what to restore</span></h5>
+            <div class="chips"><span class="chip nodot">12 CREATE TABLE</span><span class="chip nodot">3 CREATE VIEW</span><span class="chip nodot">340 INSERT</span><span class="chip prod nodot">12 DROP TABLE</span></div>
+            <div class="lst">
+              <div class="r" style="grid-template-columns:20px 1fr 110px"><span class="cb on"><i></i></span><span class="mono">orders</span><span class="mut" style="text-align:right">table + 12,430 rows</span></div>
+              <div class="r" style="grid-template-columns:20px 1fr 110px"><span class="cb on"><i></i></span><span class="mono">customers</span><span class="mut" style="text-align:right">table + 811 rows</span></div>
+              <div class="r" style="grid-template-columns:20px 1fr 110px"><span class="cb"><i></i></span><span class="mono">audit_log</span><span class="mut" style="text-align:right">table + 1.2 M rows</span></div>
+            </div>
+          </div>
+          <div class="call danger" style="padding:8px 10px"><svg class="i sm"><use href="#alert"/></svg><div class="body">The file drops and recreates 11 tables that exist in <b>dnt_fixture</b>. Their current data is replaced.</div></div>
+          <div class="typed"><span class="lbl">Type <code>dnt_fixture</code> to restore</span><span class="inp ph mono">dnt_fixture</span></div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#terminal"/></svg>Show command</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn">Back</span><span class="btn d dis">Start restore</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:280px">
+      <h4>Restore</h4>
+      <ul>
+        <li class="bad">Analyze là nút phụ giữa trang; Start restore trông như đang bật; MySQL không có option nào.</li>
+        <li>Bước 1: chọn file + đích → nút chính "Analyze". Bước 2: kết quả → nút chính "Start restore".</li>
+        <li>Đổi file / DB → quay lại bước 1 (giữ đúng logic invalidation hiện có).</li>
+        <li class="add">Chọn mục để restore từ nội dung file (TOC).</li>
+        <li class="add">Stop / Continue khi lỗi; tạo DB đích nếu chưa có.</li>
+        <li>Thống kê statement thành chip; DROP tô đỏ.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 12 CONNECTIONS EXPORT / IMPORT ============================== -->
+<section class="board" id="b12">
+  <header><span class="n">12</span><h2>Connections export / import</h2><span class="tag chip nodot">P2</span></header>
+  <p class="lead">Export: cây có checkbox trạng thái giữa và ô lọc, "Include passwords" là switch mở phần passphrase. Import: chọn từng dòng và xử lý trùng từng dòng, tóm tắt xung đột đặt <b>trên</b> bảng.</p>
+  <div class="row">
+    <div class="stage">
+      <div class="m">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#download"/></svg></span><div class="tt"><h3>Export connections</h3><div class="sub">To an encrypted .dntconn file</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <span class="search"><svg class="i sm"><use href="#search"/></svg>Filter connections</span>
+          <div class="lst">
+            <div class="r" style="grid-template-columns:20px 1fr auto"><span class="cb mid"><i></i></span><span><b>Production</b> <span class="mut">· 2 of 3</span></span><span></span></div>
+            <div class="r" style="grid-template-columns:20px 1fr auto;padding-left:30px"><span class="cb on"><i></i></span><span>shop-prod</span><span class="chip prod">Prod</span></div>
+            <div class="r" style="grid-template-columns:20px 1fr auto;padding-left:30px"><span class="cb on"><i></i></span><span>billing-prod</span><span class="chip prod">Prod</span></div>
+            <div class="r" style="grid-template-columns:20px 1fr auto;padding-left:30px"><span class="cb"><i></i></span><span>legacy-prod</span><span class="chip prod">Prod</span></div>
+            <div class="r" style="grid-template-columns:20px 1fr auto"><span class="cb on"><i></i></span><span>shop-dev</span><span class="chip nodot">MySQL</span></div>
+          </div>
+          <div class="tg"><span class="sw on"></span><div class="tx"><b>Include passwords</b><span>Encrypted with a passphrase you choose</span></div></div>
+          <div class="g2"><div class="f"><label>Passphrase</label><span class="inp"><span class="grow">••••••••••••</span><span class="sfx">Show</span></span><span class="prog"><i style="width:70%;background:var(--dnt-status-success-solid)"></i></span><span class="hint">Strong</span></div><div class="f"><label>Confirm</label><span class="inp"><span class="grow">••••••••••••</span><svg class="i sm ok-t"><use href="#check"/></svg></span></div></div>
+          <span class="hint">SSH private keys are exported as file paths only.</span>
+        </div>
+        <div class="mf"><span class="why">3 connections selected</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Export…</span></div>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="m l" style="width:700px">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#upload"/></svg></span><div class="tt"><h3>Import connections</h3><div class="sub">navicat-export.ncx · Navicat · 6 connections</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <div style="display:flex;gap:12px;align-items:flex-end">
+            <div class="f" style="width:220px"><label>Into group</label><span class="inp sel">Imported / Navicat</span></div>
+            <div class="call warn" style="flex:1;padding:6px 10px"><svg class="i sm"><use href="#alert"/></svg><div class="body"><b>2 already exist.</b> For all: <span class="lnk">Skip</span> · <span class="lnk">Overwrite</span> · <span class="lnk">Keep both</span></div></div>
+          </div>
+          <div class="lst">
+            <div class="h" style="grid-template-columns:20px 1fr 90px 1fr 200px"><span class="cb mid"><i></i></span><span>Name</span><span>Engine</span><span>Host</span><span>If it exists</span></div>
+            <div class="r" style="grid-template-columns:20px 1fr 90px 1fr 200px"><span class="cb on"><i></i></span><span>crm-prod</span><span class="chip nodot">MySQL</span><span class="mono mut">10.0.4.12:3306</span><span class="mut">new</span></div>
+            <div class="r" style="grid-template-columns:20px 1fr 90px 1fr 200px;background:var(--dnt-status-warning-bg)"><span class="cb on"><i></i></span><span>shop-dev</span><span class="chip nodot">MySQL</span><span class="mono mut">127.0.0.1:3306</span><span class="seg"><span>Skip</span><span class="on">Overwrite</span><span>Both</span></span></div>
+            <div class="r" style="grid-template-columns:20px 1fr 90px 1fr 200px;background:var(--dnt-status-warning-bg)"><span class="cb on"><i></i></span><span>analytics</span><span class="chip nodot">PG</span><span class="mono mut">pg.internal:5432</span><span class="seg"><span class="on">Skip</span><span>Overwrite</span><span>Both</span></span></div>
+            <div class="r" style="grid-template-columns:20px 1fr 90px 1fr 200px"><span class="cb"><i></i></span><span>old-oracle <span class="mut">· unsupported engine</span></span><span class="chip nodot">Oracle</span><span class="mono mut">—</span><span class="mut">skipped</span></div>
+          </div>
+        </div>
+        <div class="mf"><span class="why">4 of 6 selected · 1 skipped</span><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Import 3 connections</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:230px">
+      <ul>
+        <li class="bad">Export: group không có trạng thái giữa, không lọc, xong không báo gì.</li>
+        <li class="bad">Import: password input thô, policy chung cho mọi dòng, nằm dưới bảng dài.</li>
+        <li class="add">Lọc, đếm, độ mạnh passphrase; xong → toast + "Show in folder".</li>
+        <li class="add">Chọn từng dòng, policy từng dòng, group đích.</li>
+        <li>Engine không hỗ trợ: hiện trong bảng, mờ, có lý do.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 13 SETTINGS ============================== -->
+<section class="board" id="b13">
+  <header><span class="n">13</span><h2>Settings</h2><span class="tag chip stg nodot">P1</span></header>
+  <p class="lead">Một cơ chế lưu duy nhất: đổi là lưu ngay, có dấu "Saved" nhỏ cạnh mục vừa đổi; ô số không hợp lệ thì báo tại chỗ và chặn đóng. Thêm ô tìm kiếm, tab Editor và Results, mục Security (known hosts), cho phép đổi phím tắt.</p>
+  <div class="row cmp">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot"><img src="current/l-menu-view-appearance.png" alt="current settings" /></div>
+    </div>
+    <div class="col">
+      <div class="stage">
+      <div class="m l">
+        <div class="mh"><span class="ic"><svg class="i"><use href="#gear"/></svg></span><div class="tt"><h3>Settings</h3></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="split" style="grid-template-columns:200px minmax(0,1fr)">
+          <nav>
+            <span class="search" style="margin:0 2px 8px"><svg class="i sm"><use href="#search"/></svg>Search settings<kbd>Ctrl F</kbd></span>
+            <span class="navi"><svg class="i sm"><use href="#sun"/></svg>Appearance</span>
+            <span class="navi on"><svg class="i sm"><use href="#code"/></svg>Editor</span>
+            <span class="navi"><svg class="i sm"><use href="#table"/></svg>Results &amp; grid</span>
+            <span class="navi"><svg class="i sm"><use href="#play"/></svg>Query &amp; data</span>
+            <span class="navi"><svg class="i sm"><use href="#shield"/></svg>Security</span>
+            <span class="navi"><svg class="i sm"><use href="#folder"/></svg>Layout</span>
+            <span class="navi"><svg class="i sm"><use href="#key"/></svg>Keyboard shortcuts</span>
+            <span class="navi"><svg class="i sm"><use href="#terminal"/></svg>Advanced</span>
+          </nav>
+          <div class="mb" style="min-height:470px">
+            <div class="sect"><h5>Font</h5>
+              <div class="g2"><div class="f"><label>Family</label><span class="inp sel mono">Cascadia Code</span></div><div class="f"><label>Size<span class="end ok-t" style="font-size:11px">✓ Saved</span></label><span class="inp" style="justify-content:space-between"><span>−</span><span>13 px · 100%</span><span>+</span></span></div></div>
+              <span class="cb on"><i></i>Font ligatures</span>
+            </div>
+            <div class="sect"><h5>Editing</h5>
+              <div class="g2"><div class="f"><label>Tab size</label><div class="seg full"><span class="on">2</span><span>4</span><span>8</span></div></div><div class="f"><label>Keyword case</label><div class="seg full"><span class="on">UPPER</span><span>lower</span><span>As typed</span></div></div></div>
+              <div class="g2"><span class="cb on"><i></i>Autocomplete as you type</span><span class="cb on"><i></i>Close brackets and quotes</span><span class="cb"><i></i>Format on paste</span><span class="cb on"><i></i>Highlight current statement</span></div>
+            </div>
+            <div class="sect"><h5>Formatter</h5>
+              <div class="g2"><div class="f"><label>Indent</label><div class="seg full"><span class="on">Standard</span><span>Tabular</span><span>Compact</span></div></div><div class="f"><label>Lines between statements</label><span class="inp">1</span></div></div>
+            </div>
+          </div>
+        </div>
+        <div class="mf"><span class="btn g sm">Restore defaults for Editor</span><span class="grow"></span><span class="why">Changes save as you go</span><span class="btn">Close</span></div>
+      </div>
+      </div>
+    </div>
+    <div class="col notes">
+      <ul>
+        <li class="bad">Hai cơ chế lưu (ô số lưu khi blur, toggle lưu ngay); giá trị sai bị bỏ qua khi Close.</li>
+        <li class="bad">Radio group không đi bằng phím mũi tên; Layout lẫn trạng thái phiên với preference.</li>
+        <li class="add">Search; tab Editor (font, tab size, keyword case, autocomplete, formatter).</li>
+        <li class="add">Results &amp; grid: hiển thị NULL, định dạng ngày, số dòng mỗi trang, giới hạn ô.</li>
+        <li class="add">Security: known hosts (xem / xoá), mặc định lưu password.</li>
+        <li class="add">Restore defaults theo từng tab; auto-check update.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m" style="width:600px">
+        <div class="mh"><span class="ic"><svg class="i"><use href="#key"/></svg></span><div class="tt"><h3>Keyboard shortcuts</h3><div class="sub">Settings › Keyboard shortcuts</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb tight">
+          <div style="display:flex;gap:8px"><span class="search" style="flex:1"><svg class="i sm"><use href="#search"/></svg>run</span><span class="btn sm">Record keys</span></div>
+          <div class="lst">
+            <div class="h" style="grid-template-columns:1fr 150px 60px"><span>Command</span><span>Keys</span><span></span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 60px"><span>Run statement</span><span><span class="tbadge">Ctrl</span> <span class="tbadge">Enter</span></span><span class="mut">default</span></div>
+            <div class="r on" style="grid-template-columns:1fr 150px 60px"><span>Run all</span><span class="inp focus" style="height:24px;font-size:12px">Press keys…</span><span class="lnk">Reset</span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 60px"><span>Run selection</span><span><span class="tbadge">Ctrl</span> <span class="tbadge">Shift</span> <span class="tbadge">Enter</span></span><span class="mut">default</span></div>
+            <div class="r" style="grid-template-columns:1fr 150px 60px"><span>Explain</span><span><span class="tbadge">Ctrl</span> <span class="tbadge">E</span></span><span class="warn-t">custom</span></div>
+          </div>
+          <div class="call warn" style="padding:6px 10px"><svg class="i sm"><use href="#alert"/></svg><div class="body">Ctrl+E is also <b>Go to object</b>. Saving moves it here.</div></div>
+        </div>
+        <div class="mf"><span class="btn g sm">Export…</span><span class="btn g sm">Import…</span><span class="grow"></span><span class="btn">Close</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:300px"><h4>Shortcuts</h4><ul><li class="bad">Hiện tại: danh sách chỉ đọc.</li><li class="add">Đổi phím, tìm theo tên hoặc theo phím, cảnh báo trùng, reset từng dòng, import/export.</li></ul></div>
+  </div>
+</section>
+
+<!-- ============================== 14 SNIPPETS / FAVORITES ============================== -->
+<section class="board" id="b14">
+  <header><span class="n">14</span><h2>Snippets &amp; Add favorite</h2><span class="tag chip nodot">P2</span></header>
+  <p class="lead">Snippets theo pattern master–detail: list có tìm kiếm và thư mục bên trái, editor có tô màu SQL và preview kết quả mở rộng bên phải, footer chuẩn. Add favorite thêm preview SQL và cảnh báo trùng tên.</p>
+  <div class="row cmp">
+    <div class="col">
+      <p class="cap">Hiện tại</p>
+      <div class="shot"><img src="current/l-menu-favorites-manage-snippets.png" alt="current snippets" /></div>
+    </div>
+    <div class="col">
+      <div class="stage">
+      <div class="m l">
+        <div class="mh"><span class="ic"><svg class="i"><use href="#code"/></svg></span><div class="tt"><h3>Snippets</h3><div class="sub">Type the prefix in the editor, then Tab</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="split" style="grid-template-columns:230px minmax(0,1fr)">
+          <nav style="gap:4px">
+            <div style="display:flex;gap:6px"><span class="search" style="flex:1"><svg class="i sm"><use href="#search"/></svg>Search</span><span class="btn sm" style="width:28px;padding:0"><svg class="i sm"><use href="#plus"/></svg></span></div>
+            <div class="navh">Mine · 4</div>
+            <span class="navi on"><span class="tbadge">sel</span>Select with limit<span class="dot" style="background:var(--dnt-accent)"></span></span>
+            <span class="navi"><span class="tbadge">ins</span>Insert row</span>
+            <div class="navh">Reports · 2</div>
+            <span class="navi"><span class="tbadge">dau</span>Daily active users</span>
+            <span class="navi"><span class="tbadge">rev</span>Revenue by month</span>
+            <div class="navh">Built-in · 12</div>
+            <span class="navi"><span class="tbadge">cte</span>WITH … AS</span>
+            <span class="navi"><span class="tbadge">idx</span>Create index</span>
+          </nav>
+          <div class="mb">
+            <div class="g3" style="grid-template-columns:110px 1fr 160px"><div class="f"><label>Prefix</label><span class="inp mono">sel</span></div><div class="f"><label>Label</label><span class="inp focus">Select with limit</span></div><div class="f"><label>Folder</label><span class="inp sel">Mine</span></div></div>
+            <div class="f"><label>Body<span class="end hint"><code>${1:name}</code> tab stop · <code>$0</code> cursor</span></label>
+              <div class="sql"><pre><span class="ln" data-n="1"><span class="sk">SELECT</span> <span style="background:var(--dnt-accent-subtle);border-radius:3px">${2:*}</span></span><span class="ln" data-n="2"><span class="sk">FROM</span> <span style="background:var(--dnt-accent-subtle);border-radius:3px">${1:table}</span></span><span class="ln" data-n="3"><span class="sk">WHERE</span> $0</span><span class="ln" data-n="4"><span class="sk">LIMIT</span> <span class="sn">100</span>;</span></pre></div>
+            </div>
+            <div class="f"><label>Preview</label><div class="sql" style="background:var(--dnt-bg-raised)"><pre style="padding:6px 10px"><span class="sk">SELECT</span> * <span class="sk">FROM</span> <u>table</u> <span class="sk">WHERE</span> ▍ <span class="sk">LIMIT</span> <span class="sn">100</span>;</pre></div></div>
+          </div>
+        </div>
+        <div class="mf"><span class="btn g sm" style="color:var(--dnt-status-danger-fg)"><svg class="i sm"><use href="#trash"/></svg>Delete</span><span class="btn g sm">Duplicate</span><span class="grow"></span><span class="btn">Insert into editor</span><span class="btn">Close</span><span class="btn p">Save</span></div>
+      </div>
+      </div>
+    </div>
+    <div class="col notes">
+      <ul>
+        <li class="bad">Không footer (nút nằm trong form), đổi mục mất nội dung đang sửa, list không đi bằng phím mũi tên.</li>
+        <li class="add">Search, thư mục, xem built-in.</li>
+        <li class="add">Body tô màu SQL (Monaco), tab stop được highlight, preview mở rộng.</li>
+        <li class="add">Insert into editor, Duplicate, import / export.</li>
+        <li>Chấm xanh = chưa lưu; đổi mục / đóng thì hỏi Save / Don't save.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="row" style="margin-top:24px">
+    <div class="stage">
+      <div class="m" style="width:480px">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#star"/></svg></span><div class="tt"><h3>Add to favorites</h3><div class="sub">From the selection in Query 3</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb">
+          <div class="f"><label>Name</label><span class="inp focus">Late orders</span><span class="hint warn-t">A favorite with this name exists in Reports — this adds a second one.</span></div>
+          <div class="f"><label>Folder</label><span class="inp sel">Reports / Ops</span></div>
+          <div class="f"><label>Description<span class="end hint">Optional</span></label><span class="inp ph">What it answers</span></div>
+          <div class="sql"><div class="bar"><b>SQL</b><span>· 4 lines</span></div><pre><span class="ln" data-n="1"><span class="sk">SELECT</span> id, customer_id, created_at</span><span class="ln" data-n="2"><span class="sk">FROM</span> orders</span><span class="ln" data-n="3"><span class="sk">WHERE</span> status = <span class="ss">'paid'</span></span><span class="ln" data-n="4">  <span class="sk">AND</span> created_at &lt; now() - <span class="sk">INTERVAL</span> <span class="sn">2</span> <span class="sk">DAY</span>;</span></pre></div>
+          <span class="cb on"><i></i>Run on shop-prod / dnt_fixture<small>when opened</small></span>
+        </div>
+        <div class="mf"><span class="grow"></span><span class="btn">Cancel</span><span class="btn p">Add favorite</span></div>
+      </div>
+    </div>
+    <div class="col notes" style="width:300px"><h4>Add favorite</h4><ul><li class="add">Preview SQL sẽ được lưu.</li><li class="add">Cảnh báo trùng tên (không chặn).</li><li class="add">Description.</li><li>"Keep connection" → câu rõ nghĩa hơn: "Run on X / db when opened".</li></ul></div>
+  </div>
+</section>
+
+<!-- ============================== 15 UPDATE / ABOUT / TOASTS ============================== -->
+<section class="board" id="b15">
+  <header><span class="n">15</span><h2>Update · About · Toasts</h2><span class="tag chip nodot">P2</span></header>
+  <p class="lead">Ít dùng nhưng là "bộ mặt" của app. Update hiện release notes dạng markdown, cho Skip version; About có logo, link, Copy diagnostics; toast cho xem chi tiết lỗi tại chỗ và Cancel job đang chạy.</p>
+  <div class="row">
+    <div class="stage">
+      <div class="m">
+        <div class="mh"><span class="ic acc"><svg class="i"><use href="#download"/></svg></span><div class="tt"><h3>DntDatabase 0.1.3 is available</h3><div class="sub">You have 0.1.2 · released 2026-10-24 · 18.4 MB</div></div><span class="x"><svg class="i"><use href="#x"/></svg></span></div>
+        <div class="mb tight" style="max-height:230px;overflow:hidden">
+          <h4 style="margin:0;font-size:13px">Fixes</h4>
+          <ul style="margin:0;padding-left:18px;font-size:12px;line-height:20px;color:var(--dnt-fg-muted)"><li>Import accepts datetimes in date columns and MySQL zero dates.</li><li>Running a query no longer crashes release builds.</li></ul>
+          <h4 style="margin:4px 0 0;font-size:13px">New</h4>
+          <ul style="margin:0;padding-left:18px;font-size:12px;line-height:20px;color:var(--dnt-fg-muted)"><li>Create database / schema from the tree.</li></ul>
+          <span class="lnk"><svg class="i sm"><use href="#ext"/></svg>Full changelog</span>
+        </div>
+        <div class="mf"><span class="btn g sm">Skip this version</span><span class="grow"></span><span class="btn">Later</span><span class="btn p">Download &amp; restart</span></div>
+      </div>
+    </div>
+    <div class="stage">
+      <div class="m s">
+        <div class="mb" style="align-items:center;text-align:center;padding-top:24px;gap:8px">
+          <span style="width:56px;height:56px;border-radius:14px;background:var(--dnt-accent);color:var(--dnt-on-accent);display:grid;place-items:center"><svg class="i lg" style="width:28px;height:28px"><use href="#db"/></svg></span>
+          <b style="font-size:16px">DntDatabase</b>
+          <span class="mut">Version 0.1.2 (94ba5b5) · 2026-10-25</span>
+          <span class="mut" style="font-size:12px">Windows 10 Pro 19045 · WebView2 130 · x64</span>
+          <div style="display:flex;gap:14px;margin-top:4px"><span class="lnk">Website</span><span class="lnk">GitHub</span><span class="lnk">Report an issue</span><span class="lnk">Licenses</span></div>
+        </div>
+        <div class="mf"><span class="btn g sm"><svg class="i sm"><use href="#copy"/></svg>Copy diagnostics</span><span class="grow"></span><span class="btn">Check for updates</span><span class="btn">Close</span></div>
+      </div>
+    </div>
+    <div class="col" style="gap:10px">
+      <p class="cap">Toasts</p>
+      <div class="toast"><svg class="i ic"><use href="#check"/></svg><div class="body"><b>Dump finished</b><span class="mut">dnt_fixture-2026-10-26.sql.gz · 4.1 MB · 12 s</span><div class="acts"><span class="lnk">Show in folder</span><span class="lnk">Open Jobs</span></div></div><svg class="i sm mut"><use href="#x"/></svg></div>
+      <div class="toast p"><svg class="i ic"><use href="#upload"/></svg><div class="body"><b>Importing into orders · 46%</b><span class="prog"><i style="width:46%"></i></span><span class="mut">5,720 of 12,430 rows · 3 skipped</span><div class="acts"><span class="lnk">Cancel</span><span class="lnk">Details</span></div></div></div>
+      <div class="toast e"><svg class="i ic"><use href="#alert"/></svg><div class="body"><b>Could not refresh shop-prod</b><span class="mut">Lost connection to MySQL server during query</span><details open><summary class="lnk" style="cursor:default">Details</summary><pre>stage: list_objects · errno 2013
+server: db.internal.example.com:3306</pre></details><div class="acts"><span class="lnk">Retry</span><span class="lnk">Copy details</span></div></div><svg class="i sm mut"><use href="#x"/></svg></div>
+      <span class="hint" style="text-align:center">+2 more · <span class="lnk">Show all</span></span>
+    </div>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <div class="notes" style="width:100%;max-width:1100px">
+      <ul>
+        <li class="bad">Update: notes là <code>&lt;pre&gt;</code> trong 400px; "up to date" không ghi version; không cancel download. About: chỉ tên + version.</li>
+        <li class="add">Update: markdown notes, size + ngày, Skip this version, Full changelog, cancel khi đang tải; "You're on 0.1.2, the latest" khi up to date.</li>
+        <li class="add">About: logo, commit, OS/WebView, links, Copy diagnostics (dán vào issue), Check for updates.</li>
+        <li class="add">Toasts: Details mở tại chỗ, Cancel cho progress, "+N more" khi quá 3; dùng toast để báo xong export / dump / restore.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== 16 ROADMAP ============================== -->
+<section class="board" id="b16">
+  <header><span class="n">16</span><h2>Roadmap triển khai</h2></header>
+  <p class="lead">Làm theo thứ tự này để mỗi bước dùng lại được bước trước. P0 gần như chỉ là frontend; mục "Cần backend" là phần phải thêm command Rust.</p>
+  <table class="rv">
+    <thead><tr><th>Ưu tiên</th><th>Việc</th><th>File chính</th><th>Cần backend</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip prod nodot">P0</span></td><td>Building blocks: <code>ContextBar</code>, <code>TypedConfirm</code>, <code>OutcomeReport</code>, footer reason / busy trong <code>Modal</code>; cỡ S/M/L/XL</td><td><code>dialogs/Modal.tsx</code>, <code>dialogs.css</code>, mới <code>dialogs/parts/</code></td><td>Không</td></tr>
+      <tr><td><span class="chip prod nodot">P0</span></td><td>Drop / Truncate / Drop database theo pattern destructive: SQL live khi mở, nút đỏ đúng động từ, M 560, env chip, title khớp menu</td><td><code>ObjectActionDialog.tsx</code>, <code>SqlPreview</code></td><td>Impact (row estimate, size, dependents), CASCADE / IF EXISTS / RESTART IDENTITY</td></tr>
+      <tr><td><span class="chip prod nodot">P0</span></td><td>Rename: form thật, validate, Enter submit, chặn tên trùng</td><td><code>ObjectActionDialog.tsx</code></td><td>Danh sách tham chiếu (view / FK)</td></tr>
+      <tr><td><span class="chip prod nodot">P0</span></td><td>Rich <code>ConfirmDialog</code> (details, 3 action, busy guard), <code>plural()</code>; gộp TxClose / AppClose / EditPreview; Unsaved có Save</td><td><code>SimpleDialogs.tsx</code>, <code>DialogHost.tsx</code>, <code>TxCloseDialog.tsx</code>, <code>AppCloseDialog.tsx</code></td><td>Số statement / tuổi transaction</td></tr>
+      <tr><td><span class="chip prod nodot">P0</span></td><td>Password prompt: Connecting… + Stop, user@host, Remember, Caps Lock</td><td><code>PasswordPrompt.tsx</code>, <code>DialogHost.tsx</code></td><td>Không</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Connection: nav scroll-spy, General (group, màu, notes), Password storage, Test stale, Save &amp; connect, Copy URL</td><td><code>ConnectionDialog.tsx</code></td><td>Màu tuỳ chọn, notes; Session / SSH agent / jump host / driver props</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Review &amp; apply: title theo object, nút đỏ khi mất dữ liệu, Open in query, Save .sql; Data edit review mới</td><td><code>TableDesignDialog.tsx</code>, <code>DdlEditDialog.tsx</code>, <code>tabs/data/EditPreviewDialog.tsx</code></td><td>Giữ transaction mở sau khi lưu</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Host key changed: so sánh fingerprint, Replace key; Settings › Security known hosts</td><td><code>HostKeyDialog.tsx</code>, <code>SettingsDialog.tsx</code></td><td>List / remove / replace known host</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Export result L 760 hai cột + preview; Selected rows, Columns, Clipboard; Open file</td><td><code>ResultExportDialog.tsx</code>, <code>resultExport.ts</code></td><td>Encoding, NULL text, line ending, chọn cột</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Import wizard: rail tóm tắt + trạng thái, drop zone, sample values, gộp Check vào Review</td><td><code>transfer/import/*</code></td><td>Encoding, quote / escape, skip lines, expression mapping, profiles</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Dump: file lên đầu + gợi ý tên, filter, Data tri-state, progress trong dialog. Restore: 2 bước, select có style</td><td><code>transfer/backup/*</code></td><td>Restore chọn mục từ TOC, continue-on-error, rows per INSERT</td></tr>
+      <tr><td><span class="chip stg nodot">P1</span></td><td>Settings: một cơ chế lưu, search, Editor / Results, đổi phím tắt</td><td><code>SettingsDialog.tsx</code></td><td>Một phần (lưu preference mới)</td></tr>
+      <tr><td><span class="chip nodot">P2</span></td><td>Snippets master–detail; Add favorite preview; Update / About; toast details + Cancel; Connections export / import</td><td><code>SnippetsDialog.tsx</code>, <code>AddFavoriteDialog.tsx</code>, <code>UpdateDialog.tsx</code>, <code>AboutDialog.tsx</code>, <code>ToastHost.tsx</code>, <code>ExportDialog.tsx</code>, <code>ImportDialog.tsx</code></td><td>Skip version; import chọn từng dòng</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</main>
+</div>
+<script>
+  document.querySelectorAll('#theme span').forEach((s) => s.addEventListener('click', () => {
+    document.querySelectorAll('#theme span').forEach((o) => o.classList.toggle('on', o === s));
+    document.documentElement.classList.toggle('dark', s.dataset.t === 'dark');
+    history.replaceState(null, '', s.dataset.t === 'dark' ? '#dark' : location.hash.replace('#dark', ''));
+  }));
+  if (location.hash === '#dark') document.querySelector('#theme [data-t=dark]').click();
+</script>
+</body>
+</html>

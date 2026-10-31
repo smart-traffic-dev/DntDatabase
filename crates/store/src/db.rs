@@ -137,6 +137,38 @@ SET ssl_json = '{"version":1,"mode":"prefer","ca_path":null,"cert_path":null,"ke
 WHERE ssl_json IS NULL;
 "#;
 
+/// Data seeder spec §5.6: `jobs` and `query_history` rebuilt to allow the `seed` job kind
+/// and history origin, preserving ids and rows.
+const MIGRATION_9: &str = "
+CREATE TABLE jobs_next (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('import','import_dry_run','dump','tool_dump','restore','tool_restore','export','seed')),
+  connection_id TEXT NULL REFERENCES connections(id) ON DELETE SET NULL,
+  title TEXT NOT NULL, params_json TEXT NULL, rerunnable INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK (state IN ('queued','running','done','failed','cancelled')),
+  created_at TEXT NOT NULL, started_at TEXT NULL, finished_at TEXT NULL,
+  result_path TEXT NULL, summary TEXT NULL, error_json TEXT NULL,
+  outcome_unknown INTEGER NOT NULL DEFAULT 0, log_json TEXT NOT NULL DEFAULT '[]', dropped_lines INTEGER NOT NULL DEFAULT 0);
+INSERT INTO jobs_next SELECT * FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_next RENAME TO jobs;
+CREATE INDEX jobs_created ON jobs(created_at DESC);
+CREATE TABLE query_history_next (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  database TEXT NULL, sql_text TEXT NOT NULL, redacted INTEGER NOT NULL,
+  kind TEXT NOT NULL, started_at TEXT NOT NULL, elapsed_ms INTEGER NULL,
+  status TEXT NOT NULL CHECK (status IN ('ok','error','cancelled')),
+  row_count INTEGER NULL, affected INTEGER NULL, error_kind TEXT NULL, error_code TEXT NULL,
+  origin TEXT NOT NULL DEFAULT 'query'
+    CHECK (origin IN ('query','data_edit','object_action','table_design','import','restore','seed')),
+  outcome_unknown INTEGER NOT NULL DEFAULT 0);
+INSERT INTO query_history_next SELECT * FROM query_history;
+DROP TABLE query_history;
+ALTER TABLE query_history_next RENAME TO query_history;
+CREATE INDEX query_history_conn_time ON query_history(connection_id, started_at DESC);
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -147,6 +179,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_6),
         M::up(MIGRATION_7),
         M::up(MIGRATION_8),
+        M::up(MIGRATION_9),
     ])
 }
 
@@ -223,7 +256,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        assert_eq!(v, 9);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -356,7 +389,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        assert_eq!(v, 9);
         let row: (i64, String, i64) = conn
             .query_row(
                 "SELECT id,origin,outcome_unknown FROM query_history",
@@ -442,6 +475,78 @@ mod tests {
         assert_eq!(ssl("a").mode, dnt_core::config::SslMode::Prefer);
         assert_eq!(ssl("a").ca_path, None);
         assert_eq!(ssl("b").mode, dnt_core::config::SslMode::Disable);
+    }
+    /// The data seeder's job kind and history origin are accepted; rows and ids survive.
+    #[test]
+    fn migration_9_accepts_seed_and_keeps_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        Migrations::new(vec![
+            M::up(MIGRATION_1),
+            M::up(MIGRATION_2),
+            M::up(MIGRATION_3),
+            M::up(MIGRATION_4),
+            M::up(MIGRATION_5),
+            M::up(MIGRATION_6),
+            M::up(MIGRATION_7),
+            M::up(MIGRATION_8),
+        ])
+        .to_latest(&mut conn)
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO connections (id,name,sort_order,kind,host,port,username,secret_mode,created_at,updated_at) \
+             VALUES ('c','c',0,'mysql','h',3306,'u','ask','now','now'); \
+             INSERT INTO jobs (id,kind,connection_id,title,state,created_at) \
+             VALUES ('j1','import','c','Import a','done','now'); \
+             INSERT INTO query_history (id,connection_id,sql_text,redacted,kind,started_at,status,origin) \
+             VALUES (41,'c','SELECT 1',0,'read','now','ok','import');",
+        )
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM jobs WHERE id='j1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "import");
+        let origin: String = conn
+            .query_row("SELECT origin FROM query_history WHERE id=41", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "import");
+        conn.execute(
+            "INSERT INTO jobs (id,kind,connection_id,title,state,created_at) \
+             VALUES ('j2','seed','c','Generate data for t','queued','now')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO query_history (connection_id,sql_text,redacted,kind,started_at,status,origin) \
+             VALUES ('c','-- Generate',0,'write','now','ok','seed')",
+            [],
+        )
+        .unwrap();
+        assert!(conn
+            .execute(
+                "INSERT INTO jobs (id,kind,title,state,created_at) VALUES ('j3','bogus','t','queued','now')",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO query_history (connection_id,sql_text,redacted,kind,started_at,status,origin) \
+                 VALUES ('c','x',0,'write','now','ok','bogus')",
+                [],
+            )
+            .is_err());
+        // The index of each rebuilt table is back.
+        let indexes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' \
+                 AND name IN ('jobs_created','query_history_conn_time')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexes, 2);
     }
     #[test]
     fn foreign_keys_enabled() {

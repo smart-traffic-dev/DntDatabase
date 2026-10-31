@@ -206,7 +206,7 @@ Behaviour:
 | `job_reveal_result(id)` | `()` | reveals `result_path` in the file manager, only when the job recorded it and the file exists |
 | `job_clear_history()` | `()` | finished jobs only |
 | `get_jobs_per_connection` / `set_jobs_per_connection(n)` | `u32` / `()` | 1–8, default 2 |
-| `get_external_tools_dir` / `set_external_tools_dir(dir: Option<String>)` | | absolute existing directory or none |
+| `get_external_tools_dir` / `tools_pick_dir()` / `clear_external_tools_dir()` | `Option<String>` / `Option<String>` / `()` | picked only in the backend's folder dialog (tools run from it; the UI never names it); none = `PATH` only |
 
 ### 4.4 Store (`crates/store`)
 

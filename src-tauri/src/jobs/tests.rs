@@ -1161,3 +1161,16 @@ async fn progress_and_log_after_return_are_ignored() {
     assert!(d.log.is_empty());
     assert_eq!(f.events.of(id).len(), events);
 }
+
+/// The data seeder's job kind round-trips through its stored name and its parameters.
+#[test]
+fn seed_kind_round_trips() {
+    assert_eq!(JobKind::Seed.as_str(), "seed");
+    assert_eq!(JobKind::parse("seed"), Some(JobKind::Seed));
+    assert!(JobKind::ALL.contains(&JobKind::Seed));
+    let p = JobParams::Seed(serde_json::json!({"rows": 3}));
+    assert_eq!(
+        serde_json::to_value(&p).unwrap(),
+        serde_json::json!({"kind": "seed", "request": {"rows": 3}})
+    );
+}

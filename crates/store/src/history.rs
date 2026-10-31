@@ -65,6 +65,8 @@ pub enum HistoryOrigin {
     Import,
     /// One entry per restore job.
     Restore,
+    /// One entry per data seeder job (summary comment plus statement templates).
+    Seed,
 }
 
 impl HistoryOrigin {
@@ -76,6 +78,7 @@ impl HistoryOrigin {
             HistoryOrigin::TableDesign => "table_design",
             HistoryOrigin::Import => "import",
             HistoryOrigin::Restore => "restore",
+            HistoryOrigin::Seed => "seed",
         }
     }
 
@@ -87,6 +90,7 @@ impl HistoryOrigin {
             "table_design" => Ok(HistoryOrigin::TableDesign),
             "import" => Ok(HistoryOrigin::Import),
             "restore" => Ok(HistoryOrigin::Restore),
+            "seed" => Ok(HistoryOrigin::Seed),
             other => Err(DbError::Internal {
                 message: format!("invalid history origin {other:?} in database"),
             }),
@@ -407,6 +411,7 @@ mod tests {
         for (origin, s) in [
             (HistoryOrigin::Import, "import"),
             (HistoryOrigin::Restore, "restore"),
+            (HistoryOrigin::Seed, "seed"),
         ] {
             assert_eq!(origin.as_str(), s);
             assert_eq!(HistoryOrigin::parse(s).unwrap(), origin);

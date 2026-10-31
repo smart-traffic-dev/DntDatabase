@@ -379,6 +379,10 @@ pub struct SessionManager {
     pub(crate) import_plans: crate::import_data::ImportPlanStore,
     /// Single-use restore plans (see `backup::restore`).
     pub(crate) restore_plans: crate::backup::RestorePlanStore,
+    /// Single-use data seeder plans (see `seed_data`).
+    pub(crate) seed_plans: crate::seed_data::SeedPlanStore,
+    /// Foreign-key keys the seeder's preview read recently.
+    pub(crate) seed_keys: crate::seed_data::SeedKeyCache,
 }
 
 /// Resets `pending` of an `open` that did not finish (its future was dropped).
@@ -436,6 +440,8 @@ impl SessionManager {
             jobs,
             import_plans: crate::import_data::ImportPlanStore::default(),
             restore_plans: crate::backup::RestorePlanStore::default(),
+            seed_plans: crate::seed_data::SeedPlanStore::default(),
+            seed_keys: crate::seed_data::SeedKeyCache::default(),
         }
     }
 
@@ -808,6 +814,8 @@ impl SessionManager {
         self.loaded.drop_conn(id);
         self.results.remove_connection(id);
         self.import_plans.drop_conn(id);
+        self.seed_plans.drop_conn(id);
+        self.seed_keys.drop_conn(id);
         self.restore_plans.drop_conn(id);
     }
 

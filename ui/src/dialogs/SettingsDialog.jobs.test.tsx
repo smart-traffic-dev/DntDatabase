@@ -6,9 +6,6 @@ import { ThemeProvider } from '../theme/ThemeProvider';
 import { callsOf, fail, mockBackend, resetStores } from '../test/backend';
 import { SettingsDialog } from './SettingsDialog';
 
-const picker = vi.hoisted(() => ({ open: vi.fn() }));
-vi.mock('@tauri-apps/plugin-dialog', () => picker);
-
 function renderSettings() {
   return render(
     <ThemeProvider>
@@ -17,9 +14,7 @@ function renderSettings() {
   );
 }
 
-beforeEach(() => {
-  resetStores();
-  picker.open.mockReset();
+function backend(overrides: Parameters<typeof mockBackend>[0] = {}) {
   mockBackend({
     get_log_level: () => 'Info',
     get_table_page_size: () => 100,
@@ -28,11 +23,15 @@ beforeEach(() => {
     get_jobs_per_connection: () => 2,
     set_jobs_per_connection: () => null,
     get_external_tools_dir: () => null,
-    set_external_tools_dir: (a) => {
-      if (a.dir === 'relative') throw fail('field_name', { field: 'dir', message: 'The folder must be an absolute path that exists.' });
-      return null;
-    },
+    tools_pick_dir: () => 'D:\\tools',
+    clear_external_tools_dir: () => null,
+    ...overrides,
   });
+}
+
+beforeEach(() => {
+  resetStores();
+  backend();
 });
 
 describe('Settings: background jobs and external tools', () => {
@@ -56,33 +55,46 @@ describe('Settings: background jobs and external tools', () => {
     expect(useAppSettings.getState().jobsPerConnection).toBe(4);
   });
 
-  it('External tools folder saves a typed path, a browsed one, and empty as PATH only', async () => {
+  it('External tools folder is chosen in the backend dialog only, and Clear means PATH only', async () => {
     const user = userEvent.setup();
     renderSettings();
     const field = await screen.findByLabelText('External tools folder');
-    await user.type(field, 'C:\\pg\\bin');
-    await user.tab();
-    await screen.findByText(/Saved\./);
-    expect(callsOf('set_external_tools_dir')).toEqual([{ dir: 'C:\\pg\\bin' }]);
+    // The UI never names the folder: the field cannot be typed into.
+    expect(field).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeDisabled();
 
-    picker.open.mockResolvedValueOnce('D:\\tools');
     await user.click(screen.getByRole('button', { name: 'Browse…' }));
-    expect(picker.open).toHaveBeenCalledWith(expect.objectContaining({ directory: true }));
     expect(await screen.findByDisplayValue('D:\\tools')).toBeInTheDocument();
-    expect(callsOf('set_external_tools_dir').at(-1)).toEqual({ dir: 'D:\\tools' });
+    expect(callsOf('tools_pick_dir')).toHaveLength(1);
+    expect(screen.getByText(/Saved\./)).toBeInTheDocument();
 
-    await user.clear(field);
-    await user.tab();
-    await vi.waitFor(() => expect(callsOf('set_external_tools_dir').at(-1)).toEqual({ dir: null }));
+    await user.click(screen.getByRole('button', { name: 'Clear' }));
+    await vi.waitFor(() => expect(callsOf('clear_external_tools_dir')).toHaveLength(1));
     expect(useAppSettings.getState().externalToolsDir).toBeNull();
+    expect(field).toHaveValue('');
+  });
+
+  it('External tools folder keeps the old folder when the dialog is cancelled', async () => {
+    const user = userEvent.setup();
+    backend({ get_external_tools_dir: () => 'C:\\pg\\bin', tools_pick_dir: () => null });
+    renderSettings();
+    await screen.findByDisplayValue('C:\\pg\\bin');
+    await user.click(screen.getByRole('button', { name: 'Browse…' }));
+    await vi.waitFor(() => expect(callsOf('tools_pick_dir')).toHaveLength(1));
+    expect(screen.getByDisplayValue('C:\\pg\\bin')).toBeInTheDocument();
+    expect(screen.queryByText(/Saved\./)).toBeNull();
   });
 
   it('External tools folder shows the backend refusal', async () => {
     const user = userEvent.setup();
+    backend({
+      tools_pick_dir: () => {
+        throw fail('field_name', { field: 'dir', message: 'The tools folder does not exist.' });
+      },
+    });
     renderSettings();
-    const field = await screen.findByLabelText('External tools folder');
-    await user.type(field, 'relative');
-    await user.tab();
-    expect(await screen.findByRole('alert')).toHaveTextContent('The folder must be an absolute path that exists.');
+    await screen.findByLabelText('External tools folder');
+    await user.click(screen.getByRole('button', { name: 'Browse…' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The tools folder does not exist.');
   });
 });

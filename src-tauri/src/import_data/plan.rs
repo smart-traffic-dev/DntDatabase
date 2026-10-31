@@ -75,7 +75,11 @@ pub(crate) fn mapping_error(report: &MappingReport) -> DbError {
 /// The pre-step of a replace-all import (R17): PostgreSQL and transactional MySQL
 /// targets delete inside the transaction; MySQL `TRUNCATE` (implicit commit) and
 /// non-transactional targets delete first, irreversibly.
-fn pre_step(mode: &ImportMode, table: &TableRef, transactional: bool) -> Option<PreStep> {
+pub(crate) fn pre_step(
+    mode: &ImportMode,
+    table: &TableRef,
+    transactional: bool,
+) -> Option<PreStep> {
     let ImportMode::Replace { truncate } = mode else {
         return None;
     };

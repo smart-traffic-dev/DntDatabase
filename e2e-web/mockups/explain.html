@@ -1,0 +1,1978 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Explain panel — mockup</title>
+    <link rel="stylesheet" href="../../ui/src/theme/tokens.css" />
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        background: #e7e7ea;
+        color: var(--dnt-fg);
+        font-family: var(--font-sans);
+        font-size: var(--dnt-text-base);
+        line-height: var(--dnt-text-base-lh);
+        -webkit-font-smoothing: antialiased;
+      }
+      body.dark {
+        background: #0c0c0e;
+      }
+      button,
+      input {
+        font: inherit;
+      }
+      button {
+        cursor: pointer;
+      }
+
+      .app {
+        height: 100%;
+        min-height: 720px;
+        display: flex;
+        flex-direction: column;
+        background: var(--dnt-bg-app);
+        overflow: hidden;
+      }
+
+      /* Title bar */
+      .titlebar {
+        flex: none;
+        height: var(--dnt-titlebar-h);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 0 10px;
+        background: var(--dnt-bg-chrome);
+        border-bottom: 1px solid var(--dnt-border);
+        font-size: var(--dnt-text-sm);
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+      }
+      .logo {
+        width: 20px;
+        height: 20px;
+        display: grid;
+        place-items: center;
+        border-radius: 5px;
+        background: var(--dnt-accent);
+        color: var(--dnt-on-accent);
+        font-size: 11px;
+        font-weight: 800;
+      }
+      .title-sep {
+        color: var(--dnt-fg-subtle);
+      }
+      .title-name {
+        color: var(--dnt-fg-muted);
+        font-size: var(--dnt-text-sm);
+      }
+      .title-actions {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .theme-toggle {
+        height: 24px;
+        padding: 0 9px;
+        border: 1px solid var(--dnt-border);
+        border-radius: var(--dnt-radius-sm);
+        background: var(--dnt-bg-app);
+        color: var(--dnt-fg-muted);
+        font-size: 11px;
+      }
+      .window-btns {
+        display: flex;
+        gap: 10px;
+        padding-left: 8px;
+        color: var(--dnt-fg-subtle);
+        font-size: 12px;
+      }
+
+      /* Query editor */
+      .editor-zone {
+        flex: none;
+        height: 206px;
+        display: flex;
+        flex-direction: column;
+        border-bottom: 1px solid var(--dnt-border);
+      }
+      .tabbar {
+        flex: none;
+        height: var(--dnt-tab-h);
+        display: flex;
+        align-items: stretch;
+        gap: 2px;
+        padding: 0 8px;
+        background: var(--dnt-bg-chrome);
+        border-bottom: 1px solid var(--dnt-border);
+      }
+      .qtab {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        border: 1px solid transparent;
+        border-bottom: 0;
+        border-radius: var(--dnt-radius-sm) var(--dnt-radius-sm) 0 0;
+        color: var(--dnt-fg-muted);
+        font-size: var(--dnt-text-sm);
+      }
+      .qtab.active {
+        background: var(--dnt-bg-app);
+        border-color: var(--dnt-border);
+        color: var(--dnt-fg);
+        font-weight: 600;
+      }
+      .qtab .dirty {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--dnt-fg-subtle);
+      }
+      .qtab-add {
+        align-self: center;
+        width: 24px;
+        height: 24px;
+        border: 0;
+        border-radius: var(--dnt-radius-sm);
+        background: transparent;
+        color: var(--dnt-fg-subtle);
+        font-size: 16px;
+      }
+      .editor {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        overflow: hidden;
+        background: var(--dnt-bg-app);
+      }
+      .gutter {
+        flex: none;
+        width: 48px;
+        padding: 10px 10px 0 0;
+        border-right: 1px solid var(--dnt-border-subtle);
+        background: var(--dnt-bg-chrome);
+        color: var(--dnt-fg-subtle);
+        font-family: var(--font-mono);
+        font-size: 12px;
+        line-height: 20px;
+        text-align: right;
+        user-select: none;
+      }
+      .sql {
+        margin: 0;
+        padding: 10px 16px;
+        overflow: auto;
+        color: var(--dnt-fg);
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        line-height: 20px;
+        white-space: pre;
+      }
+      .kw {
+        color: var(--dnt-accent);
+        font-weight: 600;
+      }
+      .str {
+        color: var(--dnt-status-success-fg);
+      }
+      .num-lit {
+        color: var(--dnt-status-warning-fg);
+      }
+      .comment {
+        color: var(--dnt-fg-subtle);
+        font-style: italic;
+      }
+
+      /* Result panel chrome */
+      .result-panel {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .result-tabs {
+        flex: none;
+        height: 36px;
+        display: flex;
+        align-items: stretch;
+        gap: 2px;
+        padding: 0 10px;
+        background: var(--dnt-bg-chrome);
+        border-bottom: 1px solid var(--dnt-border);
+      }
+      .rtab {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 0 11px;
+        border: 0;
+        background: transparent;
+        color: var(--dnt-fg-muted);
+        font-size: var(--dnt-text-sm);
+      }
+      .rtab:hover {
+        background: var(--dnt-bg-hover);
+      }
+      .rtab.active {
+        color: var(--dnt-fg);
+        font-weight: 600;
+      }
+      .rtab.active::after {
+        content: '';
+        position: absolute;
+        left: 7px;
+        right: 7px;
+        bottom: -1px;
+        height: 2px;
+        border-radius: 2px;
+        background: var(--dnt-accent);
+      }
+      .badge-analyze {
+        padding: 1px 4px;
+        border: 1px solid var(--dnt-status-info-border);
+        border-radius: 3px;
+        background: var(--dnt-status-info-bg);
+        color: var(--dnt-status-info-fg);
+        font-size: 8.5px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+      }
+      .result-tabs .spacer,
+      .ex-toolbar .spacer,
+      .summary .spacer {
+        flex: 1;
+      }
+      .result-meta {
+        display: flex;
+        align-items: center;
+        align-self: center;
+        gap: 12px;
+        color: var(--dnt-fg-subtle);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+      }
+      .icon-btn {
+        align-self: center;
+        width: 24px;
+        height: 24px;
+        display: grid;
+        place-items: center;
+        border: 1px solid transparent;
+        border-radius: var(--dnt-radius-sm);
+        background: transparent;
+        color: var(--dnt-fg-muted);
+        font-size: 13px;
+      }
+      .icon-btn:hover {
+        background: var(--dnt-bg-hover);
+      }
+
+      /* Explain toolbar */
+      .ex {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .ex-toolbar {
+        flex: none;
+        height: 44px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 0 12px;
+        border-bottom: 1px solid var(--dnt-border-subtle);
+      }
+      .seg {
+        display: flex;
+        gap: 2px;
+        padding: 2px;
+        border: 1px solid var(--dnt-border);
+        border-radius: 6px;
+        background: var(--dnt-bg-sunken);
+      }
+      .seg button {
+        height: 24px;
+        padding: 0 10px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--dnt-fg-muted);
+        font-size: 11.5px;
+      }
+      .seg button:hover {
+        background: var(--dnt-bg-hover);
+      }
+      .seg button.on {
+        background: var(--dnt-bg-raised);
+        color: var(--dnt-fg);
+        font-weight: 600;
+        box-shadow: var(--dnt-shadow-1);
+      }
+      .search {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        width: 236px;
+        height: 27px;
+        padding: 0 7px;
+        border: 1px solid var(--dnt-border);
+        border-radius: 5px;
+        background: var(--dnt-bg-app);
+        color: var(--dnt-fg-subtle);
+      }
+      .search:focus-within {
+        border-color: var(--dnt-focus);
+        outline: 1px solid var(--dnt-focus);
+        outline-offset: -1px;
+      }
+      .search svg {
+        flex: none;
+      }
+      .search input {
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        outline: 0;
+        background: transparent;
+        color: var(--dnt-fg);
+        font-size: 11.5px;
+      }
+      .search kbd {
+        flex: none;
+        padding: 0 4px;
+        border: 1px solid var(--dnt-border);
+        border-radius: 3px;
+        background: var(--dnt-bg-chrome);
+        color: var(--dnt-fg-subtle);
+        font-family: var(--font-sans);
+        font-size: 9.5px;
+        line-height: 15px;
+      }
+      .btn {
+        height: 26px;
+        padding: 0 9px;
+        border: 1px solid var(--dnt-border);
+        border-radius: 5px;
+        background: var(--dnt-bg-app);
+        color: var(--dnt-fg-muted);
+        font-size: 11.5px;
+        white-space: nowrap;
+      }
+      .btn:hover {
+        background: var(--dnt-bg-hover);
+        color: var(--dnt-fg);
+      }
+      .btn.primary {
+        border-color: var(--dnt-accent);
+        background: var(--dnt-accent-subtle);
+        color: var(--dnt-accent-hover);
+      }
+
+      /* Summary strip */
+      .summary {
+        flex: none;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        gap: 22px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--dnt-border);
+        background: var(--dnt-bg-chrome);
+      }
+      .stat {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+        min-width: 0;
+      }
+      .stat span {
+        color: var(--dnt-fg-subtle);
+        font-size: 9.5px;
+        font-weight: 500;
+        letter-spacing: 0.055em;
+        line-height: 13px;
+        text-transform: uppercase;
+      }
+      .stat b {
+        color: var(--dnt-fg);
+        font-family: var(--font-mono);
+        font-size: 13px;
+        font-weight: 600;
+        line-height: 18px;
+        font-variant-numeric: tabular-nums;
+      }
+      .stat.warn b {
+        color: var(--dnt-status-warning-fg);
+      }
+      .engine-pill {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        height: 24px;
+        padding: 0 8px;
+        border: 1px solid var(--dnt-border);
+        border-radius: var(--dnt-radius-full);
+        background: var(--dnt-bg-app);
+        color: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+      }
+      .engine-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--dnt-status-success-solid);
+      }
+
+      /* Shared plan grid */
+      .ex-main {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+      .views {
+        flex: 1;
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      .view {
+        display: none;
+        flex: 1;
+        min-height: 0;
+      }
+      .view.on {
+        display: flex;
+        flex-direction: column;
+      }
+      .plan-head,
+      .row {
+        display: grid;
+        grid-template-columns: minmax(330px, 1fr) 82px 118px 78px 96px 80px 58px 70px;
+        align-items: center;
+      }
+      .plan-head {
+        flex: none;
+        height: 28px;
+        padding: 0 10px;
+        border-bottom: 1px solid var(--dnt-border);
+        background: var(--dnt-bg-chrome);
+        color: var(--dnt-fg-subtle);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.055em;
+        text-transform: uppercase;
+      }
+      .plan-head .num {
+        color: inherit;
+        font-family: var(--font-sans);
+        font-size: inherit;
+        font-weight: inherit;
+      }
+      .plan-head .center {
+        text-align: center;
+      }
+      .num {
+        padding-right: 9px;
+        color: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .num strong {
+        color: var(--dnt-fg);
+        font-weight: 500;
+      }
+      .tree {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 2px 0 16px;
+      }
+      .row {
+        min-height: 28px;
+        padding: 0 10px;
+        border-left: 3px solid transparent;
+        cursor: default;
+      }
+      .row:hover {
+        background: var(--dnt-bg-hover);
+      }
+      .row.selected {
+        border-left-color: var(--dnt-accent);
+        background: var(--dnt-bg-selected);
+      }
+      .row.hot:not(.selected) {
+        border-left-color: var(--dnt-status-warning-solid);
+      }
+      .node-cell {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
+        padding-left: calc(var(--depth) * 17px);
+      }
+      .twisty {
+        flex: none;
+        width: 16px;
+        height: 16px;
+        display: grid;
+        place-items: center;
+        padding: 0;
+        border: 0;
+        background: transparent;
+        color: var(--dnt-fg-subtle);
+        font-size: 10px;
+      }
+      .twisty.empty {
+        visibility: hidden;
+      }
+      .node-ico,
+      .insp-ico {
+        flex: none;
+        width: 17px;
+        height: 17px;
+        display: grid;
+        place-items: center;
+        border: 1px solid transparent;
+        border-radius: 4px;
+        font-size: 9px;
+        font-weight: 700;
+      }
+      .ico-scan {
+        border-color: var(--dnt-status-info-border);
+        background: var(--dnt-status-info-bg);
+        color: var(--dnt-status-info-fg);
+      }
+      .ico-join {
+        border-color: var(--dnt-border);
+        background: var(--dnt-bg-sunken);
+        color: var(--dnt-fg-muted);
+      }
+      .ico-sort {
+        border-color: var(--dnt-status-warning-border);
+        background: var(--dnt-status-warning-bg);
+        color: var(--dnt-status-warning-fg);
+      }
+      .ico-limit {
+        border-color: var(--dnt-border);
+        background: var(--dnt-bg-sunken);
+        color: var(--dnt-fg-subtle);
+      }
+      .ico-hash {
+        border-color: var(--dnt-border);
+        background: var(--dnt-bg-sunken);
+        color: var(--dnt-fg-muted);
+      }
+      .node-text {
+        min-width: 0;
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+      }
+      .node-label {
+        overflow: hidden;
+        color: var(--dnt-fg);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        font-weight: 600;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .node-sub {
+        overflow: hidden;
+        color: var(--dnt-fg-subtle);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .hot-pill {
+        flex: none;
+        padding: 1px 4px;
+        border: 1px solid var(--dnt-status-warning-border);
+        border-radius: 3px;
+        background: var(--dnt-status-warning-bg);
+        color: var(--dnt-status-warning-fg);
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+      }
+      .self-cell {
+        position: relative;
+        align-self: stretch;
+        display: flex;
+        align-items: center;
+        justify-content: flex-end;
+        overflow: hidden;
+        padding-right: 9px;
+      }
+      .self-bar {
+        position: absolute;
+        left: 4px;
+        top: 6px;
+        bottom: 6px;
+        max-width: calc(100% - 8px);
+        border-radius: 3px;
+        background: color-mix(in srgb, var(--dnt-accent) 18%, transparent);
+      }
+      .self-cell .val {
+        position: relative;
+        z-index: 1;
+        color: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        font-variant-numeric: tabular-nums;
+      }
+      .warn-cell {
+        display: flex;
+        justify-content: flex-end;
+        gap: 3px;
+      }
+      .warn-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        padding: 1px 4px;
+        border: 1px solid var(--dnt-status-warning-border);
+        border-radius: 3px;
+        background: var(--dnt-status-warning-bg);
+        color: var(--dnt-status-warning-fg);
+        font-family: var(--font-mono);
+        font-size: 9px;
+        font-weight: 600;
+        line-height: 14px;
+      }
+      .warn-pill.critical {
+        border-color: var(--dnt-status-danger-border);
+        background: var(--dnt-status-danger-bg);
+        color: var(--dnt-status-danger-fg);
+      }
+      .row.dim {
+        opacity: 0.3;
+      }
+      .row.match:not(.selected) {
+        background: color-mix(in srgb, var(--dnt-accent) 10%, transparent);
+      }
+
+      /* Table view */
+      .table-wrap {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+      }
+      .plan-table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        font-size: 11px;
+      }
+      .plan-table th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        height: 28px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--dnt-border);
+        background: var(--dnt-bg-chrome);
+        color: var(--dnt-fg-subtle);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.055em;
+        text-align: left;
+        text-transform: uppercase;
+        white-space: nowrap;
+      }
+      .plan-table th.r,
+      .plan-table td.r {
+        text-align: right;
+      }
+      .plan-table td {
+        height: 29px;
+        padding: 0 8px;
+        border-bottom: 1px solid var(--dnt-border-subtle);
+        color: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        white-space: nowrap;
+      }
+      .plan-table td.name {
+        color: var(--dnt-fg);
+        font-weight: 500;
+      }
+      .plan-table tbody tr {
+        cursor: default;
+      }
+      .plan-table tbody tr:hover td {
+        background: var(--dnt-bg-hover);
+      }
+      .plan-table tbody tr.selected td {
+        background: var(--dnt-bg-selected);
+      }
+      .plan-table tbody tr.hot td:first-child {
+        box-shadow: inset 3px 0 0 var(--dnt-status-warning-solid);
+      }
+      .cell-node {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .muted {
+        color: var(--dnt-fg-subtle);
+      }
+
+      /* Diagram */
+      .diagram-wrap {
+        position: relative;
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        background:
+          radial-gradient(circle, var(--dnt-border) 1px, transparent 1px) 0 0 / 16px 16px,
+          var(--dnt-bg-app);
+      }
+      .diagram-tools {
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        z-index: 3;
+        display: inline-flex;
+        gap: 2px;
+        padding: 2px;
+        border: 1px solid var(--dnt-border);
+        border-radius: 6px;
+        background: var(--dnt-bg-chrome);
+        box-shadow: var(--dnt-shadow-1);
+      }
+      .diagram-tools button {
+        width: 24px;
+        height: 22px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--dnt-fg-muted);
+        font-size: 12px;
+      }
+      .diagram-tools button:hover {
+        background: var(--dnt-bg-hover);
+      }
+      .diagram-tools button.wide {
+        width: auto;
+        padding: 0 7px;
+        font-size: 10px;
+      }
+      .diagram-scroll {
+        min-width: 860px;
+        padding: 4px 20px 30px;
+      }
+      #diagram {
+        display: block;
+        margin: 0 auto;
+        overflow: visible;
+      }
+      .edge {
+        fill: none;
+        stroke: var(--dnt-border-strong);
+        stroke-width: 1.1;
+      }
+      .dnode {
+        cursor: pointer;
+      }
+      .dnode rect {
+        fill: var(--dnt-bg-raised);
+        stroke: var(--dnt-border-strong);
+        stroke-width: 1.1;
+      }
+      .dnode:hover rect {
+        stroke: var(--dnt-fg-subtle);
+      }
+      .dnode.hot rect {
+        stroke: var(--dnt-status-warning-solid);
+        stroke-width: 1.8;
+      }
+      .dnode.selected rect {
+        fill: var(--dnt-bg-selected);
+        stroke: var(--dnt-accent);
+        stroke-width: 1.8;
+      }
+      .dnode text {
+        fill: var(--dnt-fg);
+        font-family: var(--font-sans);
+        font-size: 11.5px;
+        font-weight: 600;
+        pointer-events: none;
+      }
+      .dnode text.mono {
+        fill: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        font-weight: 400;
+      }
+      .dnode text.hot-text {
+        fill: var(--dnt-status-warning-fg);
+        font-family: var(--font-sans);
+        font-size: 8px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
+      }
+      .dnode circle.warn-dot {
+        fill: var(--dnt-status-warning-solid);
+        stroke: var(--dnt-bg-raised);
+        stroke-width: 1;
+      }
+
+      /* Raw */
+      .raw-wrap {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+      }
+      pre.raw {
+        margin: 0;
+        padding: 14px 18px 28px;
+        color: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        line-height: 1.6;
+        tab-size: 2;
+      }
+
+      /* Inspector */
+      .inspector {
+        flex: none;
+        width: 318px;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        border-left: 1px solid var(--dnt-border);
+        background: var(--dnt-bg-chrome);
+      }
+      .ex-main.raw-mode .inspector {
+        display: none;
+      }
+      .insp-scroll {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        padding: 12px;
+      }
+      .insp-head {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        margin-bottom: 10px;
+      }
+      .insp-head .insp-ico {
+        width: 24px;
+        height: 24px;
+        margin-top: 1px;
+        font-size: 11px;
+      }
+      .insp-head h2 {
+        margin: 0;
+        color: var(--dnt-fg);
+        font-family: var(--font-mono);
+        font-size: 12.5px;
+        font-weight: 600;
+        line-height: 18px;
+      }
+      .insp-head p {
+        margin: 2px 0 0;
+        overflow-wrap: anywhere;
+        color: var(--dnt-fg-muted);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        line-height: 15px;
+      }
+      .insp-section {
+        padding: 9px 0;
+        border-top: 1px solid var(--dnt-border-subtle);
+      }
+      .insp-section:first-of-type {
+        border-top: 0;
+        padding-top: 0;
+      }
+      .insp-section h3 {
+        margin: 0 0 7px;
+        color: var(--dnt-fg-subtle);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .kv {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        min-height: 19px;
+        font-size: 11px;
+      }
+      .kv span {
+        color: var(--dnt-fg-muted);
+      }
+      .kv b {
+        color: var(--dnt-fg);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+      }
+      .kv em {
+        margin-left: 4px;
+        color: var(--dnt-fg-subtle);
+        font-style: normal;
+        font-weight: 400;
+      }
+      .detail-line {
+        margin: 0 0 5px;
+        padding: 5px 7px;
+        border: 1px solid var(--dnt-border-subtle);
+        border-radius: 4px;
+        background: var(--dnt-bg-sunken);
+        color: var(--dnt-fg);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        line-height: 1.55;
+        overflow-wrap: anywhere;
+      }
+      .warn-box {
+        display: flex;
+        gap: 7px;
+        margin-bottom: 6px;
+        padding: 6px 7px;
+        border: 1px solid var(--dnt-status-warning-border);
+        border-radius: 5px;
+        background: var(--dnt-status-warning-bg);
+        color: var(--dnt-status-warning-fg);
+        font-size: 10.5px;
+        line-height: 1.45;
+      }
+      .warn-box .wi {
+        flex: none;
+        font-weight: 700;
+      }
+      .muted-line {
+        color: var(--dnt-fg-subtle);
+        font-size: 10.5px;
+      }
+      .insp-actions {
+        flex: none;
+        display: flex;
+        gap: 6px;
+        padding: 9px 12px;
+        border-top: 1px solid var(--dnt-border);
+      }
+      .insp-actions .btn {
+        flex: 1;
+      }
+
+      /* Status bar */
+      .statusbar {
+        flex: none;
+        height: var(--dnt-statusbar-h);
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        padding: 0 11px;
+        border-top: 1px solid var(--dnt-border);
+        background: var(--dnt-bg-chrome);
+        color: var(--dnt-fg-subtle);
+        font-size: 10.5px;
+      }
+      .statusbar .grow {
+        flex: 1;
+      }
+      .statusbar b {
+        color: var(--dnt-fg-muted);
+        font-weight: 500;
+      }
+
+      @media (max-width: 1280px) {
+        .plan-head,
+        .row {
+          grid-template-columns: minmax(280px, 1fr) 70px 100px 64px 84px 68px 50px 60px;
+        }
+        .inspector {
+          width: 282px;
+        }
+        .search {
+          width: 190px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="titlebar">
+        <div class="brand"><span class="logo">D</span> DntDatabase</div>
+        <span class="title-sep">/</span>
+        <span class="title-name">shop_prod — Query 1</span>
+        <div class="title-actions">
+          <button class="theme-toggle" id="themeToggle" type="button">Dark</button>
+          <span class="window-btns" aria-hidden="true">— □ ×</span>
+        </div>
+      </header>
+
+      <section class="editor-zone" aria-label="Query editor">
+        <div class="tabbar">
+          <div class="qtab active">Query 1 <span class="dirty" title="Unsaved changes"></span></div>
+          <div class="qtab">Query 2</div>
+          <button class="qtab-add" type="button" title="New query">+</button>
+        </div>
+        <div class="editor">
+          <div class="gutter" aria-hidden="true">1<br />2<br />3<br />4<br />5<br />6<br />7</div>
+          <pre class="sql"><span class="comment">-- Explain Analyze · statement at cursor</span>
+<span class="kw">SELECT</span> o.id, o.total, u.name
+<span class="kw">FROM</span> orders o
+<span class="kw">JOIN</span> users u <span class="kw">ON</span> u.id = o.user_id
+<span class="kw">WHERE</span> o.status = <span class="str">'paid'</span>
+<span class="kw">ORDER BY</span> o.created_at <span class="kw">DESC</span>
+<span class="kw">LIMIT</span> <span class="num-lit">50</span>;</pre>
+        </div>
+      </section>
+
+      <section class="result-panel" aria-label="Results">
+        <div class="result-tabs" role="tablist">
+          <button class="rtab" type="button" role="tab" aria-selected="false">Result 1</button>
+          <button class="rtab" type="button" role="tab" aria-selected="false">Messages</button>
+          <button class="rtab active" type="button" role="tab" aria-selected="true">
+            Explain <span class="badge-analyze">ANALYZE</span>
+          </button>
+          <div class="spacer"></div>
+          <div class="result-meta"><span>1,180 rows</span><span>18.3 ms</span></div>
+          <button class="icon-btn" type="button" title="Maximize results">⤢</button>
+          <button class="icon-btn" type="button" title="Panel menu">⋯</button>
+        </div>
+
+        <div class="ex">
+          <div class="ex-toolbar">
+            <div class="seg" role="group" aria-label="Plan view">
+              <button class="on" type="button" data-view="tree" aria-pressed="true">Tree</button>
+              <button type="button" data-view="table" aria-pressed="false">Table</button>
+              <button type="button" data-view="diagram" aria-pressed="false">Diagram</button>
+              <button type="button" data-view="raw" aria-pressed="false">Raw</button>
+            </div>
+            <label class="search" aria-label="Search plan nodes">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="4.5" stroke="currentColor" stroke-width="1.4" />
+                <path d="M10.5 10.5 14 14" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+              </svg>
+              <input id="search" type="search" placeholder="Search nodes, filters, indexes…" autocomplete="off" />
+              <kbd>/</kbd>
+            </label>
+            <div class="spacer"></div>
+            <button class="btn" id="expandAll" type="button">Expand all</button>
+            <button class="btn" id="collapseAll" type="button">Collapse all</button>
+            <button class="btn" id="copyPlan" type="button">Copy</button>
+            <button class="btn" type="button">Export…</button>
+          </div>
+
+          <div class="summary">
+            <div class="stat"><span>Total cost</span><b>1,234.56</b></div>
+            <div class="stat"><span>Est. rows</span><b>50</b></div>
+            <div class="stat"><span>Actual time</span><b>18.3 ms</b></div>
+            <div class="stat"><span>Nodes</span><b>8</b></div>
+            <div class="stat warn"><span>Warnings</span><b>⚠ 3</b></div>
+            <div class="spacer"></div>
+            <div class="engine-pill"><span class="engine-dot"></span> PostgreSQL 16 · shop_prod</div>
+          </div>
+
+          <div class="ex-main" id="exMain">
+            <div class="views">
+              <div class="view on" id="view-tree" role="tabpanel" aria-label="Plan tree">
+                <div class="plan-head" aria-hidden="true">
+                  <span>Node</span>
+                  <span class="num">Cost</span>
+                  <span class="num">Self cost</span>
+                  <span class="num">Est. rows</span>
+                  <span class="num">Actual rows</span>
+                  <span class="num">Time</span>
+                  <span class="num">Loops</span>
+                  <span class="num center">Warn</span>
+                </div>
+                <div class="tree" id="tree">
+                  <div class="row" data-id="limit" data-parent="" data-depth="0" style="--depth: 0" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty" type="button" aria-expanded="true" aria-label="Collapse Limit">▾</button>
+                      <span class="node-ico ico-limit">◫</span>
+                      <span class="node-text"><span class="node-label">Limit</span><span class="node-sub">50 rows</span></span>
+                    </div>
+                    <div class="num"><strong>1,234.56</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 13%"></span><span class="val">54.36</span></div>
+                    <div class="num">50</div>
+                    <div class="num">50</div>
+                    <div class="num">18.3 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"></div>
+                  </div>
+
+                  <div class="row" data-id="sort" data-parent="limit" data-depth="1" style="--depth: 1" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty" type="button" aria-expanded="true" aria-label="Collapse Sort">▾</button>
+                      <span class="node-ico ico-sort">↕</span>
+                      <span class="node-text"><span class="node-label">Sort</span><span class="node-sub">o.created_at DESC</span></span>
+                    </div>
+                    <div class="num"><strong>1,180.20</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 48%"></span><span class="val">199.80</span></div>
+                    <div class="num">50</div>
+                    <div class="num">50</div>
+                    <div class="num">18.1 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"><span class="warn-pill" title="External merge sort">⚠1</span></div>
+                  </div>
+
+                  <div class="row" data-id="hashjoin" data-parent="sort" data-depth="2" style="--depth: 2" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty" type="button" aria-expanded="true" aria-label="Collapse Hash Join">▾</button>
+                      <span class="node-ico ico-join">⋈</span>
+                      <span class="node-text"><span class="node-label">Hash Join</span><span class="node-sub">o.user_id = u.id</span></span>
+                    </div>
+                    <div class="num"><strong>980.40</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 14%"></span><span class="val">59.80</span></div>
+                    <div class="num">1,200</div>
+                    <div class="num">1,180</div>
+                    <div class="num">17.8 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"></div>
+                  </div>
+
+                  <div class="row" data-id="nested" data-parent="hashjoin" data-depth="3" style="--depth: 3" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty" type="button" aria-expanded="true" aria-label="Collapse Nested Loop">▾</button>
+                      <span class="node-ico ico-join">⋈</span>
+                      <span class="node-text"><span class="node-label">Nested Loop</span><span class="node-sub">× 11,940</span></span>
+                    </div>
+                    <div class="num"><strong>620.10</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 5%"></span><span class="val">20.00</span></div>
+                    <div class="num">12,000</div>
+                    <div class="num">11,940</div>
+                    <div class="num">12.1 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"></div>
+                  </div>
+
+                  <div class="row hot" data-id="orders" data-parent="nested" data-depth="4" style="--depth: 4" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty empty" type="button" aria-hidden="true" tabindex="-1">▾</button>
+                      <span class="node-ico ico-scan">▤</span>
+                      <span class="node-text"><span class="node-label">Index Scan</span><span class="node-sub">orders · idx_orders_created_at</span><span class="hot-pill">HOT</span></span>
+                    </div>
+                    <div class="num"><strong>420.10</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 100%"></span><span class="val">420.10</span></div>
+                    <div class="num">12,000</div>
+                    <div class="num">11,940</div>
+                    <div class="num">9.4 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"></div>
+                  </div>
+
+                  <div class="row" data-id="orderitems" data-parent="nested" data-depth="4" style="--depth: 4" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty empty" type="button" aria-hidden="true" tabindex="-1">▾</button>
+                      <span class="node-ico ico-scan">▤</span>
+                      <span class="node-text"><span class="node-label">Index Scan</span><span class="node-sub">order_items · idx_items_order</span></span>
+                    </div>
+                    <div class="num"><strong>180.00</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 43%"></span><span class="val">180.00</span></div>
+                    <div class="num">3</div>
+                    <div class="num">3</div>
+                    <div class="num">2.2 ms</div>
+                    <div class="num">11,940</div>
+                    <div class="warn-cell"><span class="warn-pill" title="High loop count">⚠1</span></div>
+                  </div>
+
+                  <div class="row" data-id="hash" data-parent="hashjoin" data-depth="3" style="--depth: 3" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty" type="button" aria-expanded="true" aria-label="Collapse Hash">▾</button>
+                      <span class="node-ico ico-hash">#</span>
+                      <span class="node-text"><span class="node-label">Hash</span><span class="node-sub">5,000 buckets</span></span>
+                    </div>
+                    <div class="num"><strong>300.50</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 0%"></span><span class="val">0.00</span></div>
+                    <div class="num">5,000</div>
+                    <div class="num">5,000</div>
+                    <div class="num">2.3 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"></div>
+                  </div>
+
+                  <div class="row" data-id="users" data-parent="hash" data-depth="4" style="--depth: 4" tabindex="0">
+                    <div class="node-cell">
+                      <button class="twisty empty" type="button" aria-hidden="true" tabindex="-1">▾</button>
+                      <span class="node-ico ico-scan">▤</span>
+                      <span class="node-text"><span class="node-label">Seq Scan</span><span class="node-sub">users · active = true</span></span>
+                    </div>
+                    <div class="num"><strong>300.50</strong></div>
+                    <div class="self-cell"><span class="self-bar" style="width: 71%"></span><span class="val">300.50</span></div>
+                    <div class="num">500</div>
+                    <div class="num">5,000</div>
+                    <div class="num">3.1 ms</div>
+                    <div class="num">1</div>
+                    <div class="warn-cell"><span class="warn-pill critical" title="Full scan; estimate skew 10×">⚠2</span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="view" id="view-table" role="tabpanel" aria-label="Plan table">
+                <div class="table-wrap">
+                  <table class="plan-table">
+                    <thead>
+                      <tr>
+                        <th>Node</th>
+                        <th>Type</th>
+                        <th>Object</th>
+                        <th>Access</th>
+                        <th class="r">Cost</th>
+                        <th class="r">Self</th>
+                        <th class="r">Est. rows</th>
+                        <th class="r">Actual</th>
+                        <th class="r">Time</th>
+                        <th class="r">Loops</th>
+                        <th class="r">Warn</th>
+                      </tr>
+                    </thead>
+                    <tbody id="planTable">
+                      <tr data-id="orders" class="hot">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-scan">▤</span> Index Scan <span class="hot-pill">HOT</span></span></td>
+                        <td>Index Scan</td>
+                        <td>orders</td>
+                        <td>Index</td>
+                        <td class="r">420.10</td>
+                        <td class="r">420.10</td>
+                        <td class="r">12,000</td>
+                        <td class="r">11,940</td>
+                        <td class="r">9.4 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"></td>
+                      </tr>
+                      <tr data-id="users">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-scan">▤</span> Seq Scan</span></td>
+                        <td>Seq Scan</td>
+                        <td>users</td>
+                        <td>Seq</td>
+                        <td class="r">300.50</td>
+                        <td class="r">300.50</td>
+                        <td class="r">500</td>
+                        <td class="r">5,000</td>
+                        <td class="r">3.1 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"><span class="warn-pill critical">⚠2</span></td>
+                      </tr>
+                      <tr data-id="sort">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-sort">↕</span> Sort</span></td>
+                        <td>Sort</td>
+                        <td class="muted">—</td>
+                        <td class="muted">—</td>
+                        <td class="r">1,180.20</td>
+                        <td class="r">199.80</td>
+                        <td class="r">50</td>
+                        <td class="r">50</td>
+                        <td class="r">18.1 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"><span class="warn-pill">⚠1</span></td>
+                      </tr>
+                      <tr data-id="orderitems">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-scan">▤</span> Index Scan</span></td>
+                        <td>Index Scan</td>
+                        <td>order_items</td>
+                        <td>Index</td>
+                        <td class="r">180.00</td>
+                        <td class="r">180.00</td>
+                        <td class="r">3</td>
+                        <td class="r">3</td>
+                        <td class="r">2.2 ms</td>
+                        <td class="r">11,940</td>
+                        <td class="r"><span class="warn-pill">⚠1</span></td>
+                      </tr>
+                      <tr data-id="hashjoin">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-join">⋈</span> Hash Join</span></td>
+                        <td>Hash Join</td>
+                        <td class="muted">—</td>
+                        <td>Hash</td>
+                        <td class="r">980.40</td>
+                        <td class="r">59.80</td>
+                        <td class="r">1,200</td>
+                        <td class="r">1,180</td>
+                        <td class="r">17.8 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"></td>
+                      </tr>
+                      <tr data-id="limit">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-limit">◫</span> Limit</span></td>
+                        <td>Limit</td>
+                        <td class="muted">—</td>
+                        <td class="muted">—</td>
+                        <td class="r">1,234.56</td>
+                        <td class="r">54.36</td>
+                        <td class="r">50</td>
+                        <td class="r">50</td>
+                        <td class="r">18.3 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"></td>
+                      </tr>
+                      <tr data-id="nested">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-join">⋈</span> Nested Loop</span></td>
+                        <td>Nested Loop</td>
+                        <td class="muted">—</td>
+                        <td class="muted">—</td>
+                        <td class="r">620.10</td>
+                        <td class="r">20.00</td>
+                        <td class="r">12,000</td>
+                        <td class="r">11,940</td>
+                        <td class="r">12.1 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"></td>
+                      </tr>
+                      <tr data-id="hash">
+                        <td class="name"><span class="cell-node"><span class="node-ico ico-hash">#</span> Hash</span></td>
+                        <td>Hash</td>
+                        <td class="muted">—</td>
+                        <td>Hash</td>
+                        <td class="r">300.50</td>
+                        <td class="r">0.00</td>
+                        <td class="r">5,000</td>
+                        <td class="r">5,000</td>
+                        <td class="r">2.3 ms</td>
+                        <td class="r">1</td>
+                        <td class="r"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="view" id="view-diagram" role="tabpanel" aria-label="Plan diagram">
+                <div class="diagram-wrap">
+                  <div class="diagram-tools" role="group" aria-label="Diagram zoom">
+                    <button type="button" id="zoomOut" title="Zoom out">−</button>
+                    <button type="button" id="zoomIn" title="Zoom in">+</button>
+                    <button type="button" class="wide" id="zoomFit" title="Fit to width">Fit</button>
+                  </div>
+                  <div class="diagram-scroll">
+                    <svg id="diagram" width="820" height="450" viewBox="0 0 820 450" role="img" aria-label="Execution plan diagram">
+                      <g id="diagramInner">
+                        <path class="edge" d="M470 72 V94" />
+                        <path class="edge" d="M470 152 V174" />
+                        <path class="edge" d="M470 232 V248 H276 V264" />
+                        <path class="edge" d="M470 232 V248 H656 V264" />
+                        <path class="edge" d="M276 322 V343 H128 V364" />
+                        <path class="edge" d="M276 322 V343 H326 V364" />
+                        <path class="edge" d="M656 322 V364" />
+
+                        <g class="dnode" data-id="limit" tabindex="0">
+                          <rect x="382" y="14" width="176" height="58" rx="7" />
+                          <text x="394" y="34">Limit</text>
+                          <text class="mono" x="394" y="48">50 rows</text>
+                          <text class="mono" x="394" y="62">cost 1,234.6 · 18.3 ms</text>
+                        </g>
+                        <g class="dnode" data-id="sort" tabindex="0">
+                          <rect x="382" y="94" width="176" height="58" rx="7" />
+                          <text x="394" y="114">Sort</text>
+                          <text class="mono" x="394" y="128">o.created_at DESC</text>
+                          <text class="mono" x="394" y="142">cost 1,180.2 · 18.1 ms</text>
+                          <circle class="warn-dot" cx="546" cy="106" r="4" />
+                        </g>
+                        <g class="dnode" data-id="hashjoin" tabindex="0">
+                          <rect x="382" y="174" width="176" height="58" rx="7" />
+                          <text x="394" y="194">Hash Join</text>
+                          <text class="mono" x="394" y="208">o.user_id = u.id</text>
+                          <text class="mono" x="394" y="222">cost 980.4 · 1,180 rows</text>
+                        </g>
+                        <g class="dnode" data-id="nested" tabindex="0">
+                          <rect x="188" y="264" width="176" height="58" rx="7" />
+                          <text x="200" y="284">Nested Loop</text>
+                          <text class="mono" x="200" y="298">× 11,940</text>
+                          <text class="mono" x="200" y="312">cost 620.1 · 12.1 ms</text>
+                        </g>
+                        <g class="dnode" data-id="hash" tabindex="0">
+                          <rect x="568" y="264" width="176" height="58" rx="7" />
+                          <text x="580" y="284">Hash</text>
+                          <text class="mono" x="580" y="298">5,000 buckets</text>
+                          <text class="mono" x="580" y="312">cost 300.5 · 2.3 ms</text>
+                        </g>
+                        <g class="dnode hot" data-id="orders" tabindex="0">
+                          <rect x="40" y="364" width="176" height="58" rx="7" />
+                          <text x="52" y="384">Index Scan</text>
+                          <text class="mono" x="52" y="398">orders · idx_created</text>
+                          <text class="mono" x="52" y="412">cost 420.1 · 9.4 ms</text>
+                          <text class="hot-text" x="176" y="379">HOT</text>
+                        </g>
+                        <g class="dnode" data-id="orderitems" tabindex="0">
+                          <rect x="238" y="364" width="176" height="58" rx="7" />
+                          <text x="250" y="384">Index Scan</text>
+                          <text class="mono" x="250" y="398">order_items · idx_order</text>
+                          <text class="mono" x="250" y="412">loops 11,940 · 2.2 ms</text>
+                          <circle class="warn-dot" cx="402" cy="376" r="4" />
+                        </g>
+                        <g class="dnode" data-id="users" tabindex="0">
+                          <rect x="568" y="364" width="176" height="58" rx="7" />
+                          <text x="580" y="384">Seq Scan</text>
+                          <text class="mono" x="580" y="398">users · active = true</text>
+                          <text class="mono" x="580" y="412">cost 300.5 · 3.1 ms</text>
+                          <circle class="warn-dot" cx="732" cy="376" r="4" />
+                        </g>
+                      </g>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+
+              <div class="view" id="view-raw" role="tabpanel" aria-label="Raw plan">
+                <div class="raw-wrap">
+                  <pre class="raw">[
+  {
+    "Plan": {
+      "Node Type": "Limit",
+      "Startup Cost": 0.00,
+      "Total Cost": 1234.56,
+      "Plan Rows": 50,
+      "Plan Width": 48,
+      "Actual Startup Time": 0.412,
+      "Actual Total Time": 18.310,
+      "Actual Rows": 50,
+      "Actual Loops": 1,
+      "Plans": [
+        {
+          "Node Type": "Sort",
+          "Total Cost": 1180.20,
+          "Plan Rows": 50,
+          "Actual Total Time": 18.100,
+          "Actual Rows": 50,
+          "Sort Key": ["o.created_at DESC"],
+          "Sort Method": "external merge",
+          "Disk Usage": 8192,
+          "Plans": [
+            {
+              "Node Type": "Hash Join",
+              "Total Cost": 980.40,
+              "Plan Rows": 1200,
+              "Actual Total Time": 17.800,
+              "Actual Rows": 1180,
+              "Hash Cond": "(o.user_id = u.id)",
+              "Plans": [
+                {
+                  "Node Type": "Nested Loop",
+                  "Total Cost": 620.10,
+                  "Plan Rows": 12000,
+                  "Actual Total Time": 12.100,
+                  "Actual Rows": 11940,
+                  "Plans": [
+                    {
+                      "Node Type": "Index Scan",
+                      "Relation Name": "orders",
+                      "Index Name": "idx_orders_created_at",
+                      "Total Cost": 420.10,
+                      "Plan Rows": 12000,
+                      "Actual Total Time": 9.400,
+                      "Actual Rows": 11940,
+                      "Filter": "(status = 'paid'::text)"
+                    },
+                    {
+                      "Node Type": "Index Scan",
+                      "Relation Name": "order_items",
+                      "Index Name": "idx_items_order",
+                      "Total Cost": 180.00,
+                      "Plan Rows": 3,
+                      "Actual Total Time": 2.200,
+                      "Actual Rows": 3,
+                      "Actual Loops": 11940
+                    }
+                  ]
+                },
+                {
+                  "Node Type": "Hash",
+                  "Total Cost": 300.50,
+                  "Plan Rows": 5000,
+                  "Actual Total Time": 2.300,
+                  "Actual Rows": 5000,
+                  "Plans": [
+                    {
+                      "Node Type": "Seq Scan",
+                      "Relation Name": "users",
+                      "Total Cost": 300.50,
+                      "Plan Rows": 500,
+                      "Actual Total Time": 3.100,
+                      "Actual Rows": 5000,
+                      "Filter": "(active = true)"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "Planning Time": 0.412,
+    "Execution Time": 18.744
+  }
+]</pre>
+                </div>
+              </div>
+            </div>
+
+            <aside class="inspector" id="inspector" aria-label="Selected node details">
+              <div class="insp-scroll" id="inspectorBody">
+                <!-- INSPECTOR_PLACEHOLDER -->
+              </div>
+              <div class="insp-actions">
+                <button class="btn" id="copyNode" type="button">Copy node</button>
+                <button class="btn" id="focusNode" type="button">Focus in tree</button>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+
+      <footer class="statusbar">
+        <span>Ready</span>
+        <span>PostgreSQL 16.2</span>
+        <span>UTF-8</span>
+        <span>Ln 4, Col 18</span>
+        <span class="grow"></span>
+        <span>Explain Analyze · <b>8 nodes</b> · <b>3 warnings</b></span>
+      </footer>
+    </div>
+    <script>
+      const MAX_SELF = 420.1;
+      const nodes = {
+        limit: {
+          label: 'Limit',
+          sub: '50 rows',
+          icon: 'limit',
+          iconText: '◫',
+          type: 'Limit',
+          object: '—',
+          access: '—',
+          cost: 1234.56,
+          self: 54.36,
+          est: 50,
+          actual: 50,
+          time: 18.3,
+          loops: 1,
+          details: ['Limit: 50 rows'],
+          warnings: [],
+        },
+        sort: {
+          label: 'Sort',
+          sub: 'o.created_at DESC',
+          icon: 'sort',
+          iconText: '↕',
+          type: 'Sort',
+          object: '—',
+          access: '—',
+          cost: 1180.2,
+          self: 199.8,
+          est: 50,
+          actual: 50,
+          time: 18.1,
+          loops: 1,
+          details: ['Sort Key: o.created_at DESC', 'Sort Method: external merge', 'Disk Usage: 8,192 kB'],
+          warnings: [
+            { title: 'External merge sort', body: '8,192 kB spilled to disk; raise work_mem or add a covering index.' },
+          ],
+        },
+        hashjoin: {
+          label: 'Hash Join',
+          sub: 'o.user_id = u.id',
+          icon: 'join',
+          iconText: '⋈',
+          type: 'Hash Join',
+          object: '—',
+          access: 'Hash',
+          cost: 980.4,
+          self: 59.8,
+          est: 1200,
+          actual: 1180,
+          time: 17.8,
+          loops: 1,
+          details: ['Hash Cond: (o.user_id = u.id)'],
+          warnings: [],
+        },
+        nested: {
+          label: 'Nested Loop',
+          sub: '× 11,940',
+          icon: 'join',
+          iconText: '⋈',
+          type: 'Nested Loop',
+          object: '—',
+          access: '—',
+          cost: 620.1,
+          self: 20,
+          est: 12000,
+          actual: 11940,
+          time: 12.1,
+          loops: 1,
+          details: ['Inner side runs once per outer row.'],
+          warnings: [],
+        },
+        orders: {
+          label: 'Index Scan',
+          sub: 'orders · idx_orders_created_at',
+          icon: 'scan',
+          iconText: '▤',
+          type: 'Index Scan',
+          object: 'orders',
+          access: 'Index',
+          cost: 420.1,
+          self: 420.1,
+          est: 12000,
+          actual: 11940,
+          time: 9.4,
+          loops: 1,
+          details: ['Index: idx_orders_created_at', "Filter: (status = 'paid'::text)"],
+          warnings: [],
+        },
+        orderitems: {
+          label: 'Index Scan',
+          sub: 'order_items · idx_items_order',
+          icon: 'scan',
+          iconText: '▤',
+          type: 'Index Scan',
+          object: 'order_items',
+          access: 'Index',
+          cost: 180,
+          self: 180,
+          est: 3,
+          actual: 3,
+          time: 2.2,
+          loops: 11940,
+          details: ['Index: idx_items_order', 'Inner side of the nested loop.'],
+          warnings: [
+            { title: 'High loop count', body: 'This node ran 11,940 times; per-loop overhead may dominate.' },
+          ],
+        },
+        hash: {
+          label: 'Hash',
+          sub: '5,000 buckets',
+          icon: 'hash',
+          iconText: '#',
+          type: 'Hash',
+          object: '—',
+          access: 'Hash',
+          cost: 300.5,
+          self: 0,
+          est: 5000,
+          actual: 5000,
+          time: 2.3,
+          loops: 1,
+          details: ['Buckets: 5,000', 'Memory Usage: 312 kB'],
+          warnings: [],
+        },
+        users: {
+          label: 'Seq Scan',
+          sub: 'users · active = true',
+          icon: 'scan',
+          iconText: '▤',
+          type: 'Seq Scan',
+          object: 'users',
+          access: 'Seq',
+          cost: 300.5,
+          self: 300.5,
+          est: 500,
+          actual: 5000,
+          time: 3.1,
+          loops: 1,
+          details: ['Filter: (active = true)', 'Rows Removed by Filter: 0'],
+          warnings: [
+            { title: 'Full table scan', body: 'Sequential scan over users; no index is used.' },
+            { title: 'Estimate skew 10×', body: 'The planner estimated 500 rows; 5,000 came back.' },
+          ],
+        },
+      };
+
+      const fmt = (n) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const fmtInt = (n) => n.toLocaleString('en-US');
+      const fmtTime = (n) => `${n.toFixed(1)} ms`;
+
+      const tree = document.getElementById('tree');
+      const table = document.getElementById('planTable');
+      const exMain = document.getElementById('exMain');
+      const inspectorBody = document.getElementById('inspectorBody');
+      const search = document.getElementById('search');
+      const themeToggle = document.getElementById('themeToggle');
+      const copyPlan = document.getElementById('copyPlan');
+      const copyNode = document.getElementById('copyNode');
+      const focusNode = document.getElementById('focusNode');
+      let selectedId = 'users';
+      let currentView = 'tree';
+
+      function renderInspector(id) {
+        const n = nodes[id];
+        if (!n) return;
+        const selfPct = Math.round((n.self / MAX_SELF) * 100);
+        const ratio = n.est > 0 ? n.actual / n.est : 1;
+        const skew = ratio >= 5 ? `<em>${Math.round(ratio)}× est.</em>` : '';
+        const warnHtml = n.warnings.length
+          ? n.warnings
+              .map(
+                (w) => `<div class="warn-box"><span class="wi">⚠</span><span><b>${w.title}.</b> ${w.body}</span></div>`,
+              )
+              .join('')
+          : '<div class="muted-line">No warnings for this node.</div>';
+        const title = n.object && n.object !== '—' ? `${n.label} on ${n.object}` : n.label;
+        inspectorBody.innerHTML = `
+          <div class="insp-head">
+            <span class="insp-ico ico-${n.icon}">${n.iconText}</span>
+            <div>
+              <h2>${title}</h2>
+              <p>${n.sub}</p>
+            </div>
+          </div>
+          <div class="insp-section">
+            <div class="kv"><span>Total cost</span><b>${fmt(n.cost)}</b></div>
+            <div class="kv"><span>Self cost</span><b>${fmt(n.self)}<em>${selfPct}% of max</em></b></div>
+            <div class="kv"><span>Est. rows</span><b>${fmtInt(n.est)}</b></div>
+            <div class="kv"><span>Actual rows</span><b>${fmtInt(n.actual)}${skew}</b></div>
+            <div class="kv"><span>Actual time</span><b>${fmtTime(n.time)}</b></div>
+            <div class="kv"><span>Loops</span><b>${fmtInt(n.loops)}</b></div>
+          </div>
+          <div class="insp-section">
+            <h3>Details</h3>
+            ${n.details.map((d) => `<div class="detail-line">${d}</div>`).join('')}
+          </div>
+          <div class="insp-section">
+            <h3>Warnings</h3>
+            ${warnHtml}
+          </div>
+        `;
+      }
+
+      function selectNode(id, opts = {}) {
+        if (!nodes[id]) return;
+        selectedId = id;
+        document.querySelectorAll('.row[data-id], #planTable tr[data-id], .dnode[data-id]').forEach((el) => {
+          el.classList.toggle('selected', el.dataset.id === id);
+        });
+        renderInspector(id);
+        expandAncestors(id);
+        if (opts.focusTree) switchView('tree');
+        if (opts.scroll && currentView === 'tree') {
+          tree.querySelector(`.row[data-id="${id}"]`)?.scrollIntoView({ block: 'nearest' });
+        }
+      }
+
+      function hasChildren(id) {
+        return Boolean(tree.querySelector(`.row[data-parent="${id}"]`));
+      }
+
+      function applyVisibility() {
+        tree.querySelectorAll('.row').forEach((row) => {
+          let hidden = false;
+          let p = row.dataset.parent;
+          while (p) {
+            const parent = tree.querySelector(`.row[data-id="${p}"]`);
+            if (!parent) break;
+            if (parent.dataset.collapsed === 'true') {
+              hidden = true;
+              break;
+            }
+            p = parent.dataset.parent;
+          }
+          row.hidden = hidden;
+        });
+      }
+
+      function updateTwisties() {
+        tree.querySelectorAll('.row').forEach((row) => {
+          const btn = row.querySelector('.twisty');
+          if (!btn || !hasChildren(row.dataset.id)) return;
+          const collapsed = row.dataset.collapsed === 'true';
+          btn.textContent = collapsed ? '▸' : '▾';
+          btn.setAttribute('aria-expanded', String(!collapsed));
+          btn.setAttribute('aria-label', `${collapsed ? 'Expand' : 'Collapse'} ${nodes[row.dataset.id].label}`);
+        });
+      }
+
+      function setCollapsed(id, collapsed) {
+        const row = tree.querySelector(`.row[data-id="${id}"]`);
+        if (!row) return;
+        row.dataset.collapsed = String(collapsed);
+        applyVisibility();
+        updateTwisties();
+      }
+
+      function expandAncestors(id) {
+        let row = tree.querySelector(`.row[data-id="${id}"]`);
+        while (row && row.dataset.parent) {
+          setCollapsed(row.dataset.parent, false);
+          row = tree.querySelector(`.row[data-id="${row.dataset.parent}"]`);
+        }
+      }
+
+      function switchView(view) {
+        currentView = view;
+        document.querySelectorAll('.seg [data-view]').forEach((b) => {
+          const on = b.dataset.view === view;
+          b.classList.toggle('on', on);
+          b.setAttribute('aria-pressed', String(on));
+        });
+        document.querySelectorAll('.view').forEach((v) => v.classList.toggle('on', v.id === `view-${view}`));
+        exMain.classList.toggle('raw-mode', view === 'raw');
+      }
+
+      tree.querySelectorAll('.row').forEach((row) => {
+        row.addEventListener('click', () => selectNode(row.dataset.id));
+        row.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            selectNode(row.dataset.id);
+          } else if (e.key === 'ArrowRight' && hasChildren(row.dataset.id)) {
+            e.preventDefault();
+            setCollapsed(row.dataset.id, false);
+          } else if (e.key === 'ArrowLeft' && hasChildren(row.dataset.id)) {
+            e.preventDefault();
+            setCollapsed(row.dataset.id, true);
+          }
+        });
+        const twisty = row.querySelector('.twisty');
+        twisty?.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!hasChildren(row.dataset.id)) return;
+          setCollapsed(row.dataset.id, row.dataset.collapsed !== 'true');
+        });
+      });
+
+      table.querySelectorAll('tr[data-id]').forEach((row) => {
+        row.addEventListener('click', () => selectNode(row.dataset.id));
+      });
+
+      document.querySelectorAll('.dnode[data-id]').forEach((g) => {
+        g.addEventListener('click', () => selectNode(g.dataset.id));
+        g.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            selectNode(g.dataset.id);
+          }
+        });
+      });
+
+      document.querySelectorAll('.seg [data-view]').forEach((b) => {
+        b.addEventListener('click', () => switchView(b.dataset.view));
+      });
+
+      document.getElementById('expandAll').addEventListener('click', () => {
+        tree.querySelectorAll('.row').forEach((r) => {
+          r.dataset.collapsed = 'false';
+        });
+        applyVisibility();
+        updateTwisties();
+      });
+      document.getElementById('collapseAll').addEventListener('click', () => {
+        tree.querySelectorAll('.row').forEach((r) => {
+          r.dataset.collapsed = 'true';
+        });
+        applyVisibility();
+        updateTwisties();
+      });
+
+      search.addEventListener('input', () => {
+        const q = search.value.trim().toLowerCase();
+        const rows = [...tree.querySelectorAll('.row')];
+        if (!q) {
+          rows.forEach((r) => r.classList.remove('dim', 'match'));
+          table.querySelectorAll('tr[data-id]').forEach((r) => r.classList.remove('dim'));
+          return;
+        }
+        rows.forEach((r) => {
+          const n = nodes[r.dataset.id];
+          const hay = [n.label, n.sub, n.object, n.access, ...n.details].join(' ').toLowerCase();
+          const hit = hay.includes(q);
+          r.classList.toggle('dim', !hit);
+          r.classList.toggle('match', hit);
+          if (hit) expandAncestors(r.dataset.id);
+        });
+        table.querySelectorAll('tr[data-id]').forEach((r) => {
+          const n = nodes[r.dataset.id];
+          const hay = [n.label, n.sub, n.object, n.access, ...n.details].join(' ').toLowerCase();
+          r.classList.toggle('dim', !hay.includes(q));
+        });
+      });
+
+      themeToggle.addEventListener('click', () => {
+        const dark = document.body.classList.toggle('dark');
+        themeToggle.textContent = dark ? 'Light' : 'Dark';
+      });
+
+      copyPlan.addEventListener('click', async () => {
+        const text = tree.innerText;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          /* mockup: clipboard may be unavailable */
+        }
+        copyPlan.textContent = 'Copied';
+        setTimeout(() => (copyPlan.textContent = 'Copy'), 900);
+      });
+
+      copyNode.addEventListener('click', async () => {
+        const n = nodes[selectedId];
+        const text =
+          `${n.label} on ${n.object} — cost ${fmt(n.cost)}, self ${fmt(n.self)}, ` +
+          `est ${fmtInt(n.est)} rows, actual ${fmtInt(n.actual)} rows, ${fmtTime(n.time)}, loops ${fmtInt(n.loops)}`;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          /* mockup */
+        }
+        copyNode.textContent = 'Copied';
+        setTimeout(() => (copyNode.textContent = 'Copy node'), 900);
+      });
+
+      focusNode.addEventListener('click', () => {
+        switchView('tree');
+        selectNode(selectedId, { scroll: true });
+      });
+
+      let scale = 1;
+      function applyZoom() {
+        const inner = document.getElementById('diagramInner');
+        inner.style.transformOrigin = '410px 225px';
+        inner.style.transform = `scale(${scale})`;
+      }
+      document.getElementById('zoomIn').addEventListener('click', () => {
+        scale = Math.min(1.6, scale + 0.1);
+        applyZoom();
+      });
+      document.getElementById('zoomOut').addEventListener('click', () => {
+        scale = Math.max(0.6, scale - 0.1);
+        applyZoom();
+      });
+      document.getElementById('zoomFit').addEventListener('click', () => {
+        scale = 1;
+        applyZoom();
+      });
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '/' && document.activeElement !== search) {
+          e.preventDefault();
+          search.focus();
+        }
+      });
+
+      applyVisibility();
+      updateTwisties();
+      selectNode('users');
+    </script>
+  </body>
+</html>

@@ -14,6 +14,7 @@ use dnt_store::repo::ConnectionRepo;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
 /// `app_settings` key of the log level (`info` | `debug`).
@@ -295,6 +296,10 @@ pub async fn get_external_tools_dir_impl(state: &AppState) -> Result<Option<Stri
 
 /// Stores the external tools folder: an absolute path of an existing directory, else
 /// `config` (field `dir`). `None` or blank clears it.
+///
+/// The app runs `pg_dump.exe` and the other tools from this folder, so the UI never
+/// names it: only `tools_pick_dir` (the backend's folder dialog) and
+/// `clear_external_tools_dir` reach this, never a path sent by the webview.
 pub async fn set_external_tools_dir_impl(
     state: &AppState,
     dir: Option<String>,
@@ -334,15 +339,48 @@ pub async fn get_external_tools_dir(
     guard(get_external_tools_dir_impl(&state)).await
 }
 
-/// Stores the external tools folder (absolute, existing; `None` clears it), else
-/// `config` (field `dir`).
+/// Opens the folder dialog from the backend and stores the picked folder as the external
+/// tools folder; returns it, or `None` when cancelled. The UI cannot name the folder
+/// itself: tools run from it, so a compromised webview must not be able to point it at a
+/// folder of its choosing.
 #[tauri::command]
 #[specta::specta]
-pub async fn set_external_tools_dir(
+pub async fn tools_pick_dir(
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
-    dir: Option<String>,
-) -> Result<(), AppError> {
-    guard(set_external_tools_dir_impl(&state, dir)).await
+) -> Result<Option<String>, AppError> {
+    guard(async move {
+        let repo = Arc::clone(&state.repo);
+        let current = blocking(move || Ok(saved_external_tools_dir(&repo))).await?;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut dialog = window.dialog().file().set_parent(&window);
+        if let Some(dir) = current.filter(|d| d.is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_folder(move |picked| {
+            let _ = tx.send(picked);
+        });
+        let picked = rx.await.map_err(|_| DbError::Internal {
+            message: "the folder dialog closed without an answer".into(),
+        })?;
+        let Some(picked) = picked else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| DbError::Internal {
+            message: format!("the folder dialog returned no folder path: {e}"),
+        })?;
+        let dir = path.to_string_lossy().into_owned();
+        set_external_tools_dir_impl(&state, Some(dir.clone())).await?;
+        Ok(Some(dir))
+    })
+    .await
+}
+
+/// Clears the external tools folder: only `PATH` is searched.
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_external_tools_dir(state: State<'_, AppState>) -> Result<(), AppError> {
+    guard(set_external_tools_dir_impl(&state, None)).await
 }
 
 /// Opens the log folder in the system file manager.

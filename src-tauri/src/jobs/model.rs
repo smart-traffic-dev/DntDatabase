@@ -15,10 +15,12 @@ pub enum JobKind {
     Restore,
     ToolRestore,
     Export,
+    /// The data seeder.
+    Seed,
 }
 
 impl JobKind {
-    pub const ALL: [JobKind; 7] = [
+    pub const ALL: [JobKind; 8] = [
         JobKind::Import,
         JobKind::ImportDryRun,
         JobKind::Dump,
@@ -26,6 +28,7 @@ impl JobKind {
         JobKind::Restore,
         JobKind::ToolRestore,
         JobKind::Export,
+        JobKind::Seed,
     ];
 
     /// The stored name (`jobs.kind`).
@@ -38,6 +41,7 @@ impl JobKind {
             JobKind::Restore => "restore",
             JobKind::ToolRestore => "tool_restore",
             JobKind::Export => "export",
+            JobKind::Seed => "seed",
         }
     }
 
@@ -185,7 +189,7 @@ pub struct JobEvent {
 
 /// The request a job was started with, for "Run again". The payload is the request type
 /// of the kind (ImportRequest, DryRunRequest, DumpRequest, ToolDumpRequest,
-/// RestoreRequest) carried as a JSON value, so the job framework does not depend on the
+/// RestoreRequest, SeedRequest) carried as a JSON value, so the job framework does not depend on the
 /// import/backup modules.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(tag = "kind", content = "request", rename_all = "snake_case")]
@@ -196,4 +200,5 @@ pub enum JobParams {
     ToolDump(serde_json::Value),
     Restore(serde_json::Value),
     ToolRestore(serde_json::Value),
+    Seed(serde_json::Value),
 }

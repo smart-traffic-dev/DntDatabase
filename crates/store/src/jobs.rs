@@ -16,7 +16,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobRecord {
     pub id: Uuid,
-    /// `import`, `import_dry_run`, `dump`, `tool_dump`, `restore`, `tool_restore` or `export`.
+    /// `import`, `import_dry_run`, `dump`, `tool_dump`, `restore`, `tool_restore`, `export` or `seed`.
     pub kind: String,
     /// `None` once the connection was deleted.
     pub connection_id: Option<Uuid>,

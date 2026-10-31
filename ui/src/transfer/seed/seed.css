@@ -1,0 +1,226 @@
+/* Data seeder dialog (spec §6.2): options bar, columns table, preview grid; then the review. */
+
+.modal.seed-dialog {
+  width: 960px;
+  height: min(720px, calc(100vh - 32px));
+}
+
+.seed-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-3);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.seed-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--dnt-space-3);
+}
+
+.seed-options .field {
+  width: 160px;
+}
+
+.seed-seed {
+  display: flex;
+  gap: var(--dnt-space-1);
+}
+
+.seed-seed input {
+  flex: 1;
+}
+
+.seed-dialog input[type='number'],
+.seed-dialog input[type='text'],
+.seed-dialog select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--dlg-line);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  font: inherit;
+  color: inherit;
+  min-width: 0;
+}
+
+.seed-dialog input:focus-visible,
+.seed-dialog select:focus-visible {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
+.seed-dialog select[aria-invalid='true'] {
+  border-color: var(--dnt-status-danger-fg);
+}
+
+/* Disabled controls: a muted colour, never opacity. */
+.seed-dialog input:disabled,
+.seed-dialog select:disabled {
+  color: var(--dnt-fg-disabled);
+  background: var(--dnt-bg-sunken);
+}
+
+.seed-columns,
+.seed-grid {
+  overflow: auto;
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+}
+
+.seed-columns {
+  max-height: 300px;
+}
+
+.seed-grid {
+  max-height: 240px;
+}
+
+.seed-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--dnt-text-base);
+}
+
+.seed-table th,
+.seed-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.seed-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--dnt-bg-raised);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.seed-table tbody th {
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+.seed-grid .seed-table td {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.seed-type {
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  white-space: nowrap;
+}
+
+.seed-required {
+  color: var(--dnt-status-danger-fg);
+}
+
+.seed-opts {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+}
+
+.seed-opts input[type='number'] {
+  width: 84px;
+}
+
+.seed-opts.wide input {
+  width: 220px;
+}
+
+.seed-opts.muted,
+.seed-dialog .muted {
+  color: var(--dnt-fg-muted);
+}
+
+.seed-percent {
+  width: 64px;
+}
+
+.seed-table tr.has-issue th,
+.seed-table tr.has-issue td {
+  border-bottom: 0;
+}
+
+.seed-issue td {
+  padding-top: 0;
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
+}
+
+.seed-null {
+  color: var(--dnt-fg-muted);
+  font-style: italic;
+}
+
+.seed-preview-head {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+}
+
+.seed-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  margin: 0;
+  font-size: var(--dnt-text-base);
+  font-weight: 500;
+}
+
+.seed-danger-chip {
+  padding: 0 6px;
+  border: 1px solid var(--dnt-status-danger-fg);
+  border-radius: var(--dnt-radius-sm);
+  color: var(--dnt-status-danger-fg);
+  font-size: var(--dnt-text-sm);
+  font-weight: 400;
+}
+
+.seed-summary {
+  margin: 0;
+}
+
+.seed-sql {
+  margin: 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+  font-family: var(--font-mono);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.seed-warnings {
+  margin: 0;
+  padding-left: 18px;
+  font-size: var(--dnt-text-sm);
+}
+
+.seed-note {
+  margin: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border: 1px solid var(--dnt-status-danger-fg);
+  border-radius: var(--dnt-radius-sm);
+  font-size: var(--dnt-text-sm);
+}
+
+.seed-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

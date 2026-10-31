@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { AppError, DumpRequest, EnvTag, ImportRequest, NodeId, ObjectRef, RestoreRequest, ToolDumpRequest, TxAction, UpdateInfo } from '../bindings';
+import type { AppError, DumpRequest, EnvTag, ImportRequest, NodeId, ObjectRef, RestoreRequest, SeedRequest, ToolDumpRequest, TxAction, UpdateInfo } from '../bindings';
 import type { ObjectActionRequest } from '../dialogs/ObjectActionDialog';
 import type { ExportRequest } from '../dialogs/resultExport';
 import type { SettingsTab } from '../dialogs/SettingsDialog';
@@ -47,6 +47,8 @@ export type UiRequest =
   | { kind: 'ddlEdit'; tabId: string }
   /** The data import wizard; `table` from the tree, `params` from "Run again" (R5). */
   | { kind: 'importData'; connectionId: string; table?: ObjectRef; params?: ImportRequest }
+  /** The data seeder on `table`; `params` from "Run again" (checked, reviewed and confirmed again). */
+  | { kind: 'seedData'; connectionId: string; table: ObjectRef; params?: SeedRequest; rerun?: number }
   /**
    * The dump dialog on `database` (PostgreSQL: `schema`, or every schema when absent); `table` from
    * "Dump table…" (pre-selected), `params` from "Run again" (R5).

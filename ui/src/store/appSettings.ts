@@ -36,8 +36,14 @@ interface AppSettingsState {
   externalToolsDir: string | null;
   /** Reads the folder once (`null` when it cannot be read). */
   loadExternalToolsDir(): Promise<string | null>;
-  /** Stores the folder, `null` clears it (rejects with the backend's error). */
-  setExternalToolsDir(dir: string | null): Promise<void>;
+  /**
+   * Lets the user pick the folder in the backend's folder dialog, which stores it; resolves
+   * to the folder, or `null` when cancelled (rejects with the backend's error). The UI never
+   * names the folder itself: the app runs programs from it.
+   */
+  pickExternalToolsDir(): Promise<string | null>;
+  /** Clears the folder: `PATH` only (rejects with the backend's error). */
+  clearExternalToolsDir(): Promise<void>;
   /** The stored idle-transaction warning threshold; the default until loaded. */
   idleTxWarnMinutes: number;
   /** Reads the threshold once (the default when it cannot be read). */
@@ -98,10 +104,18 @@ export const useAppSettings = create<AppSettingsState>()((set, get) => ({
       });
     return toolsLoading;
   },
-  async setExternalToolsDir(dir) {
-    await api.setExternalToolsDir(dir);
+  async pickExternalToolsDir() {
+    const dir = await api.toolsPickDir();
+    if (dir !== null) {
+      toolsLoaded = true;
+      set({ externalToolsDir: dir });
+    }
+    return dir;
+  },
+  async clearExternalToolsDir() {
+    await api.clearExternalToolsDir();
     toolsLoaded = true;
-    set({ externalToolsDir: dir });
+    set({ externalToolsDir: null });
   },
   tablePageSize: null,
   idleTxWarnMinutes: DEFAULT_IDLE_TX_WARN_MINUTES,

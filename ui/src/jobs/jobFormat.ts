@@ -24,6 +24,7 @@ export const KIND_LABEL: Record<JobKind, string> = {
   restore: 'Restore',
   tool_restore: 'Restore (external tool)',
   export: 'Export',
+  seed: 'Generate data',
 };
 
 /** The tone of a job's state chip and progress (CSS modifier). */

@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>New connection v2 — mockup</title>
+    <link rel="stylesheet" href="../../ui/src/theme/tokens.css" />
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        background: var(--dnt-bg-app); color: var(--dnt-fg);
+        font: var(--dnt-text-base)/var(--dnt-text-base-lh) var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      body::before { content: ''; position: fixed; inset: 0; background: var(--dnt-scrim); }
+
+      .modal {
+        position: relative; width: 760px; display: flex; flex-direction: column;
+        background: var(--dnt-bg-raised); border: 1px solid var(--dnt-border);
+        border-radius: var(--dnt-radius-lg); box-shadow: var(--dnt-shadow-3); overflow: hidden;
+      }
+
+      /* Header: title + live summary of what is being built */
+      .head { display: flex; align-items: center; gap: 12px; padding: 14px 16px 14px 20px; }
+      .engine-mark {
+        width: 32px; height: 32px; border-radius: var(--dnt-radius-md); display: grid; place-items: center;
+        font-weight: 700; font-size: 12px; color: #fff; background: #336791;
+      }
+      .head h1 { margin: 0; font-size: var(--dnt-text-lg); line-height: var(--dnt-text-lg-lh); font-weight: 600; }
+      .head p { margin: 0; font-size: var(--dnt-text-sm); color: var(--dnt-fg-muted); font-family: var(--font-mono); }
+      .icon-btn {
+        margin-left: auto; width: 28px; height: 28px; border: 0; background: none; border-radius: var(--dnt-radius-sm);
+        color: var(--dnt-fg-muted); font-size: 16px; cursor: pointer;
+      }
+      .icon-btn:hover { background: var(--dnt-bg-hover); }
+
+      /* Horizontal tabs replace the cramped side nav */
+      .tabs { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--dnt-border); }
+      .tab {
+        position: relative; display: flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px;
+        border: 0; background: none; color: var(--dnt-fg-muted); font: inherit; cursor: pointer;
+      }
+      .tab:hover { color: var(--dnt-fg); }
+      .tab.on { color: var(--dnt-fg); font-weight: 600; }
+      .tab.on::after {
+        content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px;
+        background: var(--dnt-accent); border-radius: 2px;
+      }
+      .pill {
+        font-size: var(--dnt-text-xs); line-height: 16px; padding: 0 6px; border-radius: var(--dnt-radius-full);
+        background: var(--dnt-bg-sunken); color: var(--dnt-fg-subtle); font-weight: 500;
+      }
+      .pill.on { background: var(--dnt-status-success-bg); color: var(--dnt-status-success-fg); }
+
+      .body { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 20px; }
+
+      /* Engine: cards with logo, no radio dots */
+      .engines { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+      .engine {
+        display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer;
+        border: 1px solid var(--dnt-border); border-radius: var(--dnt-radius-md); background: var(--dnt-bg-raised);
+      }
+      .engine:hover { border-color: var(--dnt-border-strong); }
+      .engine.on { border-color: var(--dnt-accent); background: var(--dnt-accent-subtle); box-shadow: 0 0 0 1px var(--dnt-accent) inset; }
+      .engine .logo {
+        width: 26px; height: 26px; border-radius: var(--dnt-radius-sm); display: grid; place-items: center;
+        font-size: 11px; font-weight: 700; color: #fff;
+      }
+      .logo.my { background: #00758f; } .logo.ma { background: #c0765a; } .logo.pg { background: #336791; }
+      .engine b { display: block; font-weight: 600; }
+      .engine small { color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); }
+
+      /* Sections */
+      .section h2 {
+        margin: 0 0 10px; font-size: var(--dnt-text-xs); letter-spacing: .06em; text-transform: uppercase;
+        color: var(--dnt-fg-subtle); font-weight: 600; display: flex; align-items: center; gap: 8px;
+      }
+      .section h2::after { content: ''; flex: 1; height: 1px; background: var(--dnt-border-subtle); }
+      .row { display: grid; gap: 12px; }
+      .row + .row { margin-top: 12px; }
+      .c-host { grid-template-columns: 1fr 96px; }
+      .c-2 { grid-template-columns: 1fr 1fr; }
+
+      .field label { display: block; margin-bottom: 4px; font-size: var(--dnt-text-sm); color: var(--dnt-fg-muted); font-weight: 500; }
+      .field label .opt { color: var(--dnt-fg-subtle); font-weight: 400; }
+      .input {
+        display: flex; align-items: center; height: var(--dnt-ctl-h-lg); padding: 0 10px; gap: 6px;
+        border: 1px solid var(--dnt-border); border-radius: var(--dnt-radius-sm); background: var(--dnt-bg-app);
+        color: var(--dnt-fg);
+      }
+      .input.focus { border-color: var(--dnt-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dnt-accent) 20%, transparent); }
+      .input .ph { color: var(--dnt-fg-subtle); }
+      .input .mono { font-family: var(--font-mono); font-size: 12.5px; }
+      .input .end { margin-left: auto; color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); }
+      .input .eye { margin-left: auto; color: var(--dnt-fg-muted); font-size: 13px; }
+      .caret { width: 1px; height: 16px; background: var(--dnt-fg); }
+
+      /* Toggle switch rows */
+      .switch-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+      .switch {
+        width: 28px; height: 16px; border-radius: 999px; background: var(--dnt-border-strong); position: relative; flex: none;
+      }
+      .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: var(--dnt-shadow-1); }
+      .switch.on { background: var(--dnt-accent); }
+      .switch.on::after { left: 14px; }
+      .switch-row .txt { display: flex; flex-direction: column; }
+      .switch-row small { color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); }
+
+      /* Environment: segmented control */
+      .seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--dnt-bg-sunken); border-radius: var(--dnt-radius-md); }
+      .seg span {
+        display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border-radius: var(--dnt-radius-sm);
+        color: var(--dnt-fg-muted); cursor: pointer; font-weight: 500;
+      }
+      .seg span.on { background: var(--dnt-bg-raised); color: var(--dnt-fg); box-shadow: var(--dnt-shadow-1); }
+      .dot { width: 7px; height: 7px; border-radius: 50%; }
+      .d-local { background: var(--dnt-env-local); } .d-stg { background: var(--dnt-env-staging); } .d-prod { background: var(--dnt-env-prod); }
+      .env-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+      .help { margin: 6px 0 0; font-size: var(--dnt-text-xs); color: var(--dnt-fg-subtle); }
+
+      /* Footer */
+      .foot {
+        display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+        border-top: 1px solid var(--dnt-border); background: var(--dnt-bg-chrome);
+      }
+      .btn {
+        height: var(--dnt-ctl-h-lg); padding: 0 14px; border-radius: var(--dnt-radius-sm); font: inherit; font-weight: 500;
+        border: 1px solid var(--dnt-border); background: var(--dnt-bg-raised); color: var(--dnt-fg); cursor: pointer;
+        display: inline-flex; align-items: center; gap: 6px;
+      }
+      .btn.primary { background: var(--dnt-accent); border-color: var(--dnt-accent); color: var(--dnt-on-accent); }
+      .btn.ghost { border-color: transparent; background: none; }
+      .status { display: flex; align-items: center; gap: 6px; font-size: var(--dnt-text-sm); color: var(--dnt-status-success-fg); }
+      .status .t { color: var(--dnt-fg-subtle); }
+      .spacer { flex: 1; }
+      kbd { font: 10px var(--font-mono); color: var(--dnt-fg-subtle); border: 1px solid var(--dnt-border); border-radius: 3px; padding: 0 4px; }
+      .btn.primary kbd { color: inherit; border-color: rgba(255,255,255,.4); }
+    </style>
+  </head>
+  <body>
+    <div class="modal" role="dialog" aria-labelledby="t">
+      <div class="head">
+        <div class="engine-mark" aria-hidden="true">Pg</div>
+        <div>
+          <h1 id="t">New connection</h1>
+          <p>postgres@db.internal:5432/app</p>
+        </div>
+        <button class="icon-btn" aria-label="Close">✕</button>
+      </div>
+
+      <div class="tabs" role="tablist">
+        <button class="tab on" role="tab">General</button>
+        <button class="tab" role="tab">SSH tunnel <span class="pill">Off</span></button>
+        <button class="tab" role="tab">SSL / TLS <span class="pill">Prefer</span></button>
+        <button class="tab" role="tab">Advanced</button>
+      </div>
+
+      <div class="body">
+        <div class="engines" role="radiogroup" aria-label="Engine">
+          <div class="engine" role="radio"><span class="logo my">My</span><span><b>MySQL</b><small>5.7 · 8.x</small></span></div>
+          <div class="engine" role="radio"><span class="logo ma">Ma</span><span><b>MariaDB</b><small>10.x · 11.x</small></span></div>
+          <div class="engine on" role="radio" aria-checked="true"><span class="logo pg">Pg</span><span><b>PostgreSQL</b><small>12 – 17</small></span></div>
+        </div>
+
+        <div class="section">
+          <h2>Server</h2>
+          <div class="row c-host">
+            <div class="field"><label>Host</label><div class="input focus"><span class="mono">db.internal</span><span class="caret"></span></div></div>
+            <div class="field"><label>Port</label><div class="input"><span class="mono">5432</span><span class="end">default</span></div></div>
+          </div>
+          <div class="row c-2">
+            <div class="field"><label>User</label><div class="input"><span class="mono">postgres</span></div></div>
+            <div class="field"><label>Password</label><div class="input"><span>••••••••••</span><span class="eye" aria-label="Show password">👁</span></div></div>
+          </div>
+          <div class="switch-row">
+            <span class="switch on" role="switch" aria-checked="true"></span>
+            <span class="txt">Save password in Windows Credential Manager</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Details</h2>
+          <div class="row c-2">
+            <div class="field"><label>Name</label><div class="input"><span class="ph">db.internal</span></div></div>
+            <div class="field"><label>Group</label><div class="input"><span>No group</span><span class="end">▾</span></div></div>
+          </div>
+          <div class="row c-2">
+            <div class="field"><label>Default database <span class="opt">· optional</span></label><div class="input"><span class="mono">app</span></div></div>
+            <div class="field"></div>
+          </div>
+        </div>
+
+        <div class="section">
+          <h2>Safety</h2>
+          <div class="env-line">
+            <div class="seg" role="radiogroup" aria-label="Environment">
+              <span class="on">None</span>
+              <span><i class="dot d-local"></i>Local</span>
+              <span><i class="dot d-stg"></i>Staging</span>
+              <span><i class="dot d-prod"></i>Production</span>
+            </div>
+            <div class="switch-row" style="margin:0">
+              <span class="switch" role="switch" aria-checked="false"></span>
+              <span class="txt">Read-only</span>
+            </div>
+          </div>
+          <p class="help">Production asks before statements that change data or structure, and shows PROD in tabs and the status bar.</p>
+        </div>
+      </div>
+
+      <div class="foot">
+        <button class="btn">⚡ Test connection</button>
+        <span class="status"><span aria-hidden="true">✓</span> Connected · PostgreSQL 16.2 <span class="t">· 42 ms</span></span>
+        <span class="spacer"></span>
+        <button class="btn ghost">Cancel</button>
+        <button class="btn primary">Save <kbd>Ctrl ↵</kbd></button>
+      </div>
+    </div>
+  </body>
+</html>

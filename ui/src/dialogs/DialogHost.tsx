@@ -32,6 +32,8 @@ import { ToastHost } from './ToastHost';
 import { ImportWizard } from '../transfer/import/ImportWizard';
 // Registers "Run again" of import jobs and dry runs (R5).
 import '../transfer/import/rerunImport';
+import { SeedDialog } from '../transfer/seed/SeedDialog';
+import '../transfer/seed/rerunSeed';
 import { DumpDialog } from '../transfer/backup/DumpDialog';
 import { RestoreDialog } from '../transfer/backup/RestoreDialog';
 // Registers "Run again" of dumps, tool dumps and restores (R5).
@@ -360,6 +362,16 @@ export function DialogHost() {
     dialog = (
       <ImportWizard
         key={`${request.connectionId}:${request.table?.database ?? ''}.${request.table?.schema ?? ''}.${request.table?.name ?? ''}:${request.params ? 'rerun' : ''}`}
+        connectionId={request.connectionId}
+        table={request.table}
+        params={request.params}
+        onClose={closeRequest}
+      />
+    );
+  } else if (request?.kind === 'seedData') {
+    dialog = (
+      <SeedDialog
+        key={`${request.connectionId}:${request.table.database}.${request.table.schema ?? ''}.${request.table.name}:${request.rerun ?? ''}`}
         connectionId={request.connectionId}
         table={request.table}
         params={request.params}

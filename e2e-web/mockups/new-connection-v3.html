@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>New connection v3 (wizard) — mockup</title>
+    <link rel="stylesheet" href="../../ui/src/theme/tokens.css" />
+    <style>
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        background: var(--dnt-bg-app); color: var(--dnt-fg);
+        font: var(--dnt-text-base)/var(--dnt-text-base-lh) var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+      }
+      body::before { content: ''; position: fixed; inset: 0; background: var(--dnt-scrim); }
+
+      .modal {
+        position: relative; width: 820px; height: 560px; display: grid; grid-template-columns: 200px 1fr;
+        grid-template-rows: 1fr auto; background: var(--dnt-bg-raised); border: 1px solid var(--dnt-border);
+        border-radius: var(--dnt-radius-lg); box-shadow: var(--dnt-shadow-3); overflow: hidden;
+      }
+
+      /* Left rail: stepper */
+      .rail { grid-row: 1 / 3; background: var(--dnt-bg-chrome); border-right: 1px solid var(--dnt-border); padding: 18px 14px; display: flex; flex-direction: column; }
+      .rail h1 { margin: 0 6px 18px; font-size: var(--dnt-text-md); font-weight: 600; }
+      .steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+      .steps li { position: relative; display: flex; gap: 10px; padding: 8px 6px; border-radius: var(--dnt-radius-md); }
+      .steps li:not(:last-child)::after {
+        content: ''; position: absolute; left: 17px; top: 32px; bottom: -10px; width: 1px; background: var(--dnt-border);
+      }
+      .steps li.done:not(:last-child)::after { background: var(--dnt-accent); }
+      .num {
+        position: relative; z-index: 1; flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+        font-size: 11px; font-weight: 600; border: 1px solid var(--dnt-border-strong); background: var(--dnt-bg-raised); color: var(--dnt-fg-muted);
+      }
+      .done .num { background: var(--dnt-accent); border-color: var(--dnt-accent); color: #fff; }
+      .cur .num { border-color: var(--dnt-accent); color: var(--dnt-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dnt-accent) 18%, transparent); }
+      .cur { background: var(--dnt-bg-hover); }
+      .steps b { display: block; font-weight: 600; font-size: var(--dnt-text-base); }
+      .steps li:not(.cur):not(.done) b { color: var(--dnt-fg-muted); font-weight: 500; }
+      .steps small { display: block; color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); margin-top: 1px; }
+      .rail .summary {
+        margin-top: auto; padding: 10px; border: 1px solid var(--dnt-border); border-radius: var(--dnt-radius-md);
+        background: var(--dnt-bg-raised); display: flex; gap: 8px; align-items: center; min-width: 0;
+      }
+      .summary .logo { width: 26px; height: 26px; padding: 4px; }
+      .summary div { min-width: 0; }
+      .summary b { display: block; font-size: var(--dnt-text-sm); }
+      .summary code { display: block; font: 11px var(--font-mono); color: var(--dnt-fg-subtle); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+      /* Main */
+      .main { padding: 22px 24px 8px; overflow: auto; position: relative; }
+      .main header { margin-bottom: 18px; }
+      .main h2 { margin: 0; font-size: var(--dnt-text-lg); line-height: var(--dnt-text-lg-lh); font-weight: 600; }
+      .main header p { margin: 2px 0 0; color: var(--dnt-fg-muted); font-size: var(--dnt-text-sm); }
+      .x { position: absolute; top: 14px; right: 14px; width: 28px; height: 28px; border: 0; background: none; color: var(--dnt-fg-muted); border-radius: var(--dnt-radius-sm); font-size: 15px; }
+
+      /* Step 1: engine grid */
+      .search { margin-bottom: 14px; }
+      .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+      .card {
+        display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 18px 10px 14px; text-align: center;
+        border: 1px solid var(--dnt-border); border-radius: var(--dnt-radius-lg); background: var(--dnt-bg-raised); cursor: pointer;
+      }
+      .card .logo { width: 44px; height: 44px; padding: 8px; border-radius: var(--dnt-radius-md); }
+      .card b { font-weight: 600; }
+      .card small { color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); }
+      .card.on { border-color: var(--dnt-accent); background: var(--dnt-accent-subtle); box-shadow: 0 0 0 1px var(--dnt-accent) inset; }
+      .card.soon { opacity: .5; cursor: default; }
+      .card.soon small { font-style: italic; }
+      .grid-title { margin: 18px 0 8px; font-size: var(--dnt-text-xs); text-transform: uppercase; letter-spacing: .06em; color: var(--dnt-fg-subtle); font-weight: 600; }
+
+      .logo { display: inline-grid; place-items: center; flex: none; }
+      .logo svg { width: 100%; height: 100%; }
+      .logo.mysql { background: #e8f1f7; } .logo.mysql svg { fill: #00758f; }
+      .logo.mariadb { background: #e6eef0; } .logo.mariadb svg { fill: #003545; }
+      .logo.postgresql { background: #e9eef9; } .logo.postgresql svg { fill: #336791; }
+      .dark .logo.mysql, .dark .logo.mariadb, .dark .logo.postgresql { background: #f1f3f5; }
+
+      /* Fields */
+      .seg { display: inline-flex; padding: 2px; gap: 2px; background: var(--dnt-bg-sunken); border-radius: var(--dnt-radius-md); }
+      .seg span { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 12px; border-radius: var(--dnt-radius-sm); color: var(--dnt-fg-muted); font-weight: 500; }
+      .seg span.on { background: var(--dnt-bg-raised); color: var(--dnt-fg); box-shadow: var(--dnt-shadow-1); }
+      .row { display: grid; gap: 12px; }
+      .row + .row, .seg + .row, .block + .row, .row + .block { margin-top: 14px; }
+      .c-host { grid-template-columns: 1fr 110px; }
+      .c-2 { grid-template-columns: 1fr 1fr; }
+      .field label { display: flex; justify-content: space-between; margin-bottom: 4px; font-size: var(--dnt-text-sm); color: var(--dnt-fg-muted); font-weight: 500; }
+      .field label .opt { color: var(--dnt-fg-subtle); font-weight: 400; }
+      .input {
+        display: flex; align-items: center; min-height: var(--dnt-ctl-h-lg); padding: 0 10px; gap: 6px;
+        border: 1px solid var(--dnt-border); border-radius: var(--dnt-radius-sm); background: var(--dnt-bg-app);
+        font-family: var(--font-mono); font-size: 12.5px;
+      }
+      .input.sans { font-family: var(--font-sans); font-size: var(--dnt-text-base); }
+      .input.focus { border-color: var(--dnt-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dnt-accent) 20%, transparent); }
+      .input .ph { color: var(--dnt-fg-subtle); }
+      .input .end { margin-left: auto; font-family: var(--font-sans); color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); }
+      .tag { font-family: var(--font-sans); font-size: 10.5px; padding: 0 6px; line-height: 16px; border-radius: 999px; background: var(--dnt-bg-sunken); color: var(--dnt-fg-subtle); margin-left: auto; }
+      .caret { width: 1px; height: 16px; background: var(--dnt-fg); }
+      .help { margin: 6px 0 0; font-size: var(--dnt-text-xs); color: var(--dnt-fg-subtle); }
+      .help a { color: var(--dnt-accent); text-decoration: none; }
+      .url { min-height: 58px; align-items: flex-start; padding: 8px 10px; line-height: 20px; word-break: break-all; }
+      .url .k { color: var(--dnt-fg-subtle); }
+      .url .h { color: var(--dnt-accent); }
+      .parsed { margin-top: 10px; padding: 10px 12px; border-radius: var(--dnt-radius-md); background: var(--dnt-status-success-bg); border: 1px solid var(--dnt-status-success-border); }
+      .parsed .t { display: flex; align-items: center; gap: 6px; color: var(--dnt-status-success-fg); font-weight: 600; font-size: var(--dnt-text-sm); margin-bottom: 8px; }
+      .parsed dl { margin: 0; display: grid; grid-template-columns: repeat(3, auto 1fr); gap: 4px 10px; font-size: var(--dnt-text-sm); }
+      .parsed dt { color: var(--dnt-fg-muted); }
+      .parsed dd { margin: 0; font-family: var(--font-mono); font-size: 12px; }
+      .switch-row { display: flex; align-items: center; gap: 10px; }
+      .switch { width: 28px; height: 16px; border-radius: 999px; background: var(--dnt-border-strong); position: relative; flex: none; }
+      .switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; box-shadow: var(--dnt-shadow-1); }
+      .switch.on { background: var(--dnt-accent); } .switch.on::after { left: 14px; }
+      .block { padding: 12px 14px; border: 1px solid var(--dnt-border); border-radius: var(--dnt-radius-md); }
+      .block .switch-row b { font-weight: 600; }
+      .block .switch-row small { display: block; color: var(--dnt-fg-subtle); font-size: var(--dnt-text-xs); }
+      .block + .block { margin-top: 10px; }
+      .dot { width: 7px; height: 7px; border-radius: 50%; }
+      .d-local { background: var(--dnt-env-local); } .d-stg { background: var(--dnt-env-staging); } .d-prod { background: var(--dnt-env-prod); }
+      .reset { font-family: var(--font-sans); font-size: var(--dnt-text-xs); color: var(--dnt-accent); }
+
+      /* Footer */
+      .foot { grid-column: 2; display: flex; align-items: center; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--dnt-border); }
+      .btn { height: var(--dnt-ctl-h-lg); padding: 0 14px; border-radius: var(--dnt-radius-sm); font: inherit; font-weight: 500; border: 1px solid var(--dnt-border); background: var(--dnt-bg-raised); color: var(--dnt-fg); display: inline-flex; align-items: center; gap: 6px; }
+      .btn.primary { background: var(--dnt-accent); border-color: var(--dnt-accent); color: var(--dnt-on-accent); }
+      .btn.ghost { border-color: transparent; background: none; color: var(--dnt-fg-muted); }
+      .status { display: flex; align-items: center; gap: 6px; font-size: var(--dnt-text-sm); color: var(--dnt-status-success-fg); }
+      .status .t { color: var(--dnt-fg-subtle); }
+      .spacer { flex: 1; }
+
+      .step { display: none; }
+      body[data-step='1'] .s1, body[data-step='2'] .s2, body[data-step='2b'] .s2b, body[data-step='3'] .s3, body[data-step='4'] .s4 { display: block; }
+      body[data-step='1'] .f1, body[data-step='2'] .f2, body[data-step='2b'] .f2, body[data-step='3'] .f2, body[data-step='4'] .f4 { display: flex; }
+      .fx { display: none; }
+    </style>
+  </head>
+  <body data-step="1">
+    <div class="modal" role="dialog" aria-labelledby="t">
+      <aside class="rail">
+        <h1 id="t">New connection</h1>
+        <ol class="steps">
+          <li data-i="1"><span class="num">1</span><span><b>Engine</b><small class="e">PostgreSQL</small></span></li>
+          <li data-i="2"><span class="num">2</span><span><b>Connection</b><small>Host, login or URL</small></span></li>
+          <li data-i="3"><span class="num">3</span><span><b>Security</b><small>SSH tunnel · SSL</small></span></li>
+          <li data-i="4"><span class="num">4</span><span><b>Finish</b><small>Name, environment</small></span></li>
+        </ol>
+        <div class="summary">
+          <span class="logo postgresql" data-logo="postgresql"></span>
+          <div><b>PostgreSQL</b><code>postgres@localhost:5432</code></div>
+        </div>
+      </aside>
+
+      <section class="main">
+        <button class="x" aria-label="Close">✕</button>
+
+        <!-- Step 1 -->
+        <div class="step s1">
+          <header><h2>Choose an engine</h2><p>You can change it later; port and login defaults follow the engine.</p></header>
+          <div class="grid" role="radiogroup" aria-label="Engine">
+            <div class="card" role="radio"><span class="logo mysql" data-logo="mysql"></span><b>MySQL</b><small>5.7 · 8.x · 9.x</small></div>
+            <div class="card" role="radio"><span class="logo mariadb" data-logo="mariadb"></span><b>MariaDB</b><small>10.x · 11.x</small></div>
+            <div class="card on" role="radio" aria-checked="true"><span class="logo postgresql" data-logo="postgresql"></span><b>PostgreSQL</b><small>12 – 17</small></div>
+          </div>
+          <div class="grid-title">Or start from a URL</div>
+          <div class="input sans"><span class="ph">Paste postgresql://, mysql:// or mariadb:// … engine is detected</span><span class="end">Ctrl V</span></div>
+        </div>
+
+        <!-- Step 2: parameters -->
+        <div class="step s2">
+          <header><h2>Connection</h2><p>Empty fields use the PostgreSQL defaults shown in grey.</p></header>
+          <div class="seg" role="radiogroup" aria-label="Input method"><span class="on">Parameters</span><span>Connection string</span></div>
+          <div class="row c-host">
+            <div class="field"><label>Host</label><div class="input focus"><span class="ph">localhost</span><span class="caret" style="margin-left:-6px"></span><span class="tag">default</span></div></div>
+            <div class="field"><label>Port</label><div class="input"><span class="ph">5432</span><span class="tag">default</span></div></div>
+          </div>
+          <div class="row c-2">
+            <div class="field"><label>User</label><div class="input"><span class="ph">postgres</span><span class="tag">default</span></div></div>
+            <div class="field"><label>Password</label><div class="input"><span>••••••••</span><span class="end">Show</span></div></div>
+          </div>
+          <div class="row c-2">
+            <div class="field"><label>Database <span class="opt">optional</span></label><div class="input"><span class="ph">postgres</span><span class="tag">default</span></div></div>
+            <div class="field" style="align-self:end"><div class="switch-row" style="height:32px"><span class="switch on"></span><span>Save password in Windows Credential Manager</span></div></div>
+          </div>
+          <p class="help">Defaults can be changed in <a href="#">Settings → Connections → Defaults</a>.</p>
+        </div>
+
+        <!-- Step 2: connection string -->
+        <div class="step s2b">
+          <header><h2>Connection</h2><p>Paste a URL; the fields are filled from it and stay editable.</p></header>
+          <div class="seg" role="radiogroup" aria-label="Input method"><span>Parameters</span><span class="on">Connection string</span></div>
+          <div class="row">
+            <div class="field">
+              <label>Connection string <span class="opt">password is stored in Credential Manager, not in the URL</span></label>
+              <div class="input focus url"><span><span class="k">postgresql://</span>app_user<span class="k">:</span>•••••<span class="k">@</span><span class="h">db.internal</span><span class="k">:</span>6432<span class="k">/</span>sales<span class="k">?</span>sslmode=require<span class="k">&amp;</span>application_name=dnt</span></div>
+            </div>
+          </div>
+          <div class="parsed" role="status">
+            <div class="t">✓ Parsed · 7 values</div>
+            <dl>
+              <dt>Host</dt><dd>db.internal</dd><dt>Port</dt><dd>6432</dd><dt>User</dt><dd>app_user</dd>
+              <dt>Database</dt><dd>sales</dd><dt>SSL</dt><dd>require → Security</dd><dt>App name</dt><dd>dnt</dd>
+            </dl>
+          </div>
+          <p class="help">Supported: postgresql://, postgres://, mysql://, mariadb://, and libpq key=value (host=… port=…). Unknown parameters are listed so nothing is dropped silently.</p>
+        </div>
+
+        <!-- Step 3 -->
+        <div class="step s3">
+          <header><h2>Security</h2><p>Optional. Skip if the server is reachable directly.</p></header>
+          <div class="block">
+            <div class="switch-row"><span class="switch on"></span><span><b>SSH tunnel</b><small>Connect through a bastion host</small></span></div>
+            <div class="row c-host" style="margin-top:12px">
+              <div class="field"><label>SSH host</label><div class="input"><span>bastion.example.com</span></div></div>
+              <div class="field"><label>Port</label><div class="input"><span class="ph">22</span><span class="tag">default</span></div></div>
+            </div>
+            <div class="row c-2">
+              <div class="field"><label>SSH user</label><div class="input"><span>deploy</span></div></div>
+              <div class="field"><label>Key file</label><div class="input"><span class="ph">~/.ssh/id_ed25519</span><span class="end">Browse…</span></div></div>
+            </div>
+          </div>
+          <div class="block">
+            <div class="switch-row" style="justify-content:space-between">
+              <span><b>SSL / TLS</b><small>From connection string: require</small></span>
+              <div class="seg"><span>Disable</span><span>Prefer</span><span class="on">Require</span><span>Verify CA</span><span>Verify full</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 4 -->
+        <div class="step s4">
+          <header><h2>Finish</h2><p>How it appears in the sidebar and how careful DntDatabase should be.</p></header>
+          <div class="row c-2">
+            <div class="field"><label>Name</label><div class="input sans"><span class="ph">sales @ db.internal</span><span class="tag">auto</span></div></div>
+            <div class="field"><label>Group</label><div class="input sans"><span>Production DBs</span><span class="end">▾</span></div></div>
+          </div>
+          <div class="row">
+            <div class="field"><label>Environment</label>
+              <div class="seg"><span>None</span><span><i class="dot d-local"></i>Local</span><span><i class="dot d-stg"></i>Staging</span><span class="on"><i class="dot d-prod"></i>Production</span></div>
+              <p class="help">Production asks before statements that change data or structure, and shows PROD in tabs and the status bar.</p>
+            </div>
+          </div>
+          <div class="block" style="margin-top:14px"><div class="switch-row"><span class="switch"></span><span><b>Read-only</b><small>Sessions are opened read-only on the server</small></span></div></div>
+          <div class="block"><div class="switch-row" style="justify-content:space-between"><span><b>Advanced</b><small>Connect 10 s · SSH 10 s · Query timeout off</small></span><span class="reset">Edit…</span></div></div>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <button class="btn">⚡ Test</button>
+        <span class="fx f2 status"><span aria-hidden="true">✓</span> Connected · PostgreSQL 16.2 <span class="t">· 42 ms</span></span>
+        <span class="fx f4 status"><span aria-hidden="true">✓</span> Connected · PostgreSQL 16.2 <span class="t">· via SSH · 118 ms</span></span>
+        <span class="spacer"></span>
+        <button class="btn ghost">Cancel</button>
+        <button class="btn">← Back</button>
+        <button class="btn primary nx">Next →</button>
+      </footer>
+    </div>
+    <script>
+      // Stepper state from data-step (mockup only).
+      const step = document.body.dataset.step;
+      const cur = parseInt(step, 10);
+      document.querySelectorAll('.steps li').forEach((li) => {
+        const i = +li.dataset.i;
+        li.className = i < cur ? 'done' : i === cur ? 'cur' : '';
+        if (i < cur) li.querySelector('.num').textContent = '✓';
+      });
+      if (cur === 4) document.querySelector('.nx').textContent = 'Save';
+      if (cur === 1) document.querySelector('.foot .btn:nth-of-type(3)').style.visibility = 'hidden';
+      const sum = document.querySelector('.summary code');
+      if (step === '2b' || cur >= 3) sum.textContent = 'app_user@db.internal:6432/sales';
+    </script>
+  </body>
+</html>

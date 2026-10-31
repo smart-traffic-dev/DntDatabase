@@ -24,5 +24,6 @@ pub mod ddl_edit;
 
 pub mod import_data;
 pub mod jobs;
+pub mod seed_data;
 
 pub mod backup;

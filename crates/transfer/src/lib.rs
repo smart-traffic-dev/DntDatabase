@@ -11,6 +11,7 @@ pub mod dump;
 pub mod facts;
 pub mod mapping;
 pub mod read;
+pub mod seed;
 pub mod tools;
 
 pub use facts::{file_facts, FileFacts};

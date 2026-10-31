@@ -31,11 +31,11 @@
 //! Known limits (documented, R21): the file is hashed at start and again after the last
 //! record was read (before `COMMIT`); a change in between that reverts before the end goes
 //! unnoticed. Outside a transaction the batches written before a mismatch stay.
-mod plan;
-mod run;
-mod target;
+pub(crate) mod plan;
+pub(crate) mod run;
+pub(crate) mod target;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use plan::ImportPlanStore;
 
@@ -285,6 +285,29 @@ impl Layout {
             convert: req.convert.clone(),
         };
         // The options must build (e.g. an upsert key that is inserted).
+        layout.head().map_err(build_error)?;
+        layout.tail().map_err(build_error)?;
+        Ok(layout)
+    }
+
+    /// Plain `INSERT`s of `cols` (in that order) into `table`: the data seeder's layout.
+    /// The source of each column is its position.
+    pub(crate) fn from_columns(
+        table: TableRef,
+        cols: Vec<TargetColumn>,
+        kind: DbKind,
+        dialect: Dialect,
+    ) -> Result<Layout, DbError> {
+        let layout = Layout {
+            table,
+            targets: cols.iter().map(TargetColumn::column_target).collect(),
+            sources: (0..cols.len() as u32).collect(),
+            cols,
+            opts: InsertOptions::default(),
+            dialect,
+            kind,
+            convert: ConvertOptions::default(),
+        };
         layout.head().map_err(build_error)?;
         layout.tail().map_err(build_error)?;
         Ok(layout)

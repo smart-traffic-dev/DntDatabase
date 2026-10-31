@@ -24,6 +24,8 @@ import type {
   ParsedConnString,
   RestoreRequest,
   Scope,
+  SeedPreview,
+  SeedRequest,
   ServerInfo,
   TableDataPage,
   TableDef,
@@ -39,6 +41,7 @@ import { createDdlFake, type DdlFakeState } from './ddlEdit';
 import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
 import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
 import { jobDetail, jobProgress, jobSummary } from './jobs';
+import { ordersSeedTarget, seedPreview, seedSample } from './seedFixtures';
 import type { Handler } from './shim';
 
 /** The id the dialog sends while creating (see `NIL_UUID` in ConnectionDialog). */
@@ -409,6 +412,9 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   // Data import: reviewed plans (id -> request); one counter for dry runs, plans and jobs.
   let importSeq = 0;
   const importPlans = new Map<string, { request: ImportRequest; preview: DataImportPreview }>();
+  // Data seeder: reviewed plans (id -> request); one counter for plans and jobs.
+  let seedSeq = 0;
+  const seedPlans = new Map<string, { request: SeedRequest; preview: SeedPreview }>();
   // Jobs the fake started (dry runs): `job_list` / `job_detail` answer them as the job manager would.
   const fakeJobs = new Map<string, JobSummary>();
   // Dump and restore: analyzed restore plans (id -> request); one counter for plans and jobs.
@@ -609,7 +615,8 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     get_jobs_per_connection: () => 2,
     set_jobs_per_connection: () => null,
     get_external_tools_dir: () => null,
-    set_external_tools_dir: () => null,
+    tools_pick_dir: () => null,
+    clear_external_tools_dir: () => null,
 
     // The data import wizard (P5b): `orders.csv` into the canned `orders`; `specs/import-wizard.spec.ts`.
     import_pick_file: () => IMPORT_FILE,
@@ -659,6 +666,46 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
       const irreversible = !!plan.preview.pre_step?.irreversible;
       if (!c.confirmed || !nameOk || (irreversible && !c.irreversible_ack)) throw fail('confirmation_required');
       return `import-${++importSeq}`;
+    },
+
+    // The data seeder: the canned `orders` columns, a preview following the request, single-use
+    // plans checked as `seed_start` of `src-tauri/src/seed_data/plan.rs` does; `specs/seed.spec.ts`.
+    seed_target: ({ connectionId }) => {
+      const cfg = connections.find((c) => c.id === connectionId);
+      return ordersSeedTarget(cfg?.env_tag ?? null, requireOpen(connectionId as string), cfg?.read_only ?? false);
+    },
+    seed_preview: ({ request }) => seedSample(request as SeedRequest),
+    seed_prepare: ({ request }) => {
+      const req = request as SeedRequest;
+      const cfg = connections.find((c) => c.id === req.connection_id);
+      if (cfg?.read_only) throw fail('blocked');
+      const planId = `seed-plan-${++seedSeq}`;
+      const preview = seedPreview(req, planId, cfg?.env_tag ?? null);
+      seedPlans.set(planId, { request: req, preview });
+      return preview;
+    },
+    seed_start: ({ planId, confirm }) => {
+      const plan = seedPlans.get(planId as string);
+      if (!plan) throw fail('plan_expired');
+      seedPlans.delete(planId as string);
+      const c = confirm as ImportConfirm;
+      const want = plan.preview.confirm;
+      const nameOk = want.kind !== 'type_name' || c.name === want.name;
+      const irreversible = !!plan.preview.pre_step?.irreversible;
+      if (!c.confirmed || !nameOk || (irreversible && !c.irreversible_ack)) throw fail('confirmation_required');
+      const id = `seed-${++seedSeq}`;
+      fakeJobs.set(
+        id,
+        jobSummary({
+          id,
+          kind: 'seed',
+          connection_id: plan.request.connection_id,
+          title: `Generate data for ${plan.request.table.name}`,
+          state: 'running',
+          progress: jobProgress({ phase: 'Generating', done: 0, total: plan.request.rows, unit: 'rows' }),
+        }),
+      );
+      return id;
     },
 
     // Dump and restore (P5c): `dnt_fixture` dumped by the built-in dump; `RESTORE_FILE` restored by

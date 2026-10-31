@@ -125,6 +125,27 @@ export function importActionItems(node: TreeNode): Item[] {
   return [{ label: 'Import data…', run: () => useDialogs.getState().requestDialog({ kind: 'importData', connectionId, table: object }) }];
 }
 
+/**
+ * "Generate data…" on a table of an open connection: the data seeder (disabled when read-only:
+ * every path of it writes).
+ */
+export function seedActionItems(node: TreeNode): Item[] {
+  const connectionId = connectionIdOf(node.id);
+  const object = node.objectRef;
+  if (!connectionId || node.kind !== 'object' || object?.kind !== 'Table') return [];
+  const stored = useConnections.getState();
+  if (!stored.info.has(connectionId)) return [];
+  const readOnly = !!stored.summaries.get(connectionId)?.config.read_only;
+  return [
+    {
+      label: 'Generate data…',
+      disabled: readOnly,
+      ...(readOnly ? { title: 'Read-only connection' } : {}),
+      run: () => useDialogs.getState().requestDialog({ kind: 'seedData', connectionId, table: object }),
+    },
+  ];
+}
+
 function itemsFor(node: TreeNode): Item[] {
   const tree = useTree.getState();
   const dialogs = useDialogs.getState();
@@ -198,7 +219,7 @@ function itemsFor(node: TreeNode): Item[] {
         newQuery,
       ],
       [...designActionItems(node), ...ddlActionItems(node), ...structure],
-      [...importActionItems(node), ...backupActionItems(node)],
+      [...importActionItems(node), ...seedActionItems(node), ...backupActionItems(node)],
       destructive,
       [refresh, copy],
     );

@@ -115,12 +115,46 @@ textarea:focus-visible,
   border-right: 1px solid var(--dnt-border);
 }
 
-/* Header row: Objects | Favorites, New connection, options. */
+/*
+ * Header row: the Objects | Favorites view switcher, nothing else (each view's actions sit in its filter
+ * row). Flat text tabs like the object sections: the selected one on the active fill, full colour, bold.
+ */
 .sidebar-bar {
+  flex: none;
   display: flex;
   align-items: center;
-  gap: var(--dnt-space-1);
-  padding: var(--dnt-space-2) var(--dnt-space-2) 0;
+  height: var(--dnt-ctl-h-lg);
+  padding: 0 var(--dnt-space-2);
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.sidebar-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sidebar-tab {
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  white-space: nowrap;
+}
+
+.sidebar-tab:hover:not(.on) {
+  background: var(--dnt-bg-hover);
+  color: var(--dnt-fg);
+}
+
+.sidebar-tab.on {
+  background: var(--dnt-bg-active);
+  color: var(--dnt-fg);
+  font-weight: 600;
 }
 
 .segmented {

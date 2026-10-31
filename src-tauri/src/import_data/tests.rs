@@ -41,40 +41,45 @@ use uuid::Uuid;
 
 /// A statement containing `contains` fails with `error` (`times` left: `None` = always);
 /// `kill` drops the connection with it.
-struct Rule {
+pub(crate) struct Rule {
     contains: String,
     error: DbError,
     times: Option<usize>,
     kill: bool,
 }
 
-struct Fake {
-    server: ServerInfo,
-    detail: Mutex<TableDetail>,
-    seen: Mutex<Vec<String>>,
-    rules: Mutex<Vec<Rule>>,
+/// Rows a statement containing the text returns: (text, columns, rows).
+pub(crate) type Programmed = (String, Vec<ColumnMeta>, Vec<Vec<dnt_core::value::Value>>);
+
+pub(crate) struct Fake {
+    pub(crate) server: ServerInfo,
+    pub(crate) detail: Mutex<TableDetail>,
+    pub(crate) seen: Mutex<Vec<String>>,
+    pub(crate) rules: Mutex<Vec<Rule>>,
+    /// A statement containing the text streams these columns and rows (see `rows_for`).
+    pub(crate) rows: Mutex<Vec<Programmed>>,
     /// The connection was dropped: nothing more reaches the server.
-    dead: AtomicBool,
+    pub(crate) dead: AtomicBool,
     /// A statement containing the text takes this long (after it was recorded).
-    delay: Mutex<Option<(String, Duration)>>,
+    pub(crate) delay: Mutex<Option<(String, Duration)>>,
 }
 
 impl Fake {
     /// Everything sent so far (handy when a test fails).
     #[allow(dead_code)]
-    fn sent(&self) -> Vec<String> {
+    pub(crate) fn sent(&self) -> Vec<String> {
         self.seen.lock().unwrap().clone()
     }
 
-    fn mark(&self) -> usize {
+    pub(crate) fn mark(&self) -> usize {
         self.seen.lock().unwrap().len()
     }
 
-    fn since(&self, mark: usize) -> Vec<String> {
+    pub(crate) fn since(&self, mark: usize) -> Vec<String> {
         self.seen.lock().unwrap()[mark..].to_vec()
     }
 
-    fn fail(&self, contains: &str, error: DbError) {
+    pub(crate) fn fail(&self, contains: &str, error: DbError) {
         self.rules.lock().unwrap().push(Rule {
             contains: contains.into(),
             error,
@@ -83,7 +88,20 @@ impl Fake {
         });
     }
 
-    fn kill_on(&self, contains: &str, error: DbError) {
+    /// A statement containing `contains` returns `rows` with columns `cols`.
+    pub(crate) fn rows_for(
+        &self,
+        contains: &str,
+        cols: Vec<ColumnMeta>,
+        rows: Vec<Vec<dnt_core::value::Value>>,
+    ) {
+        self.rows
+            .lock()
+            .unwrap()
+            .push((contains.into(), cols, rows));
+    }
+
+    pub(crate) fn kill_on(&self, contains: &str, error: DbError) {
         self.rules.lock().unwrap().push(Rule {
             contains: contains.into(),
             error,
@@ -93,7 +111,7 @@ impl Fake {
     }
 }
 
-struct FakeDriver(Arc<Fake>);
+pub(crate) struct FakeDriver(pub(crate) Arc<Fake>);
 
 #[async_trait]
 impl Driver for FakeDriver {
@@ -111,7 +129,7 @@ impl Driver for FakeDriver {
     }
 }
 
-struct FakeSession {
+pub(crate) struct FakeSession {
     fake: Arc<Fake>,
     tx: Mutex<TxState>,
 }
@@ -127,8 +145,23 @@ impl Canceller for NoCancel {
 
 fn logical_of(db_type: &str) -> LogicalType {
     let t = db_type.to_ascii_lowercase();
-    if t.starts_with("int") || t.starts_with("bigint") {
+    let starts = |p: &[&str]| p.iter().any(|x| t.starts_with(x));
+    if starts(&["tinyint(1)", "boolean", "bool"]) {
+        LogicalType::Bool
+    } else if starts(&["int", "bigint", "smallint", "tinyint", "mediumint"]) {
         LogicalType::Integer
+    } else if starts(&["decimal", "numeric"]) {
+        LogicalType::Decimal
+    } else if starts(&["enum"]) {
+        LogicalType::Enum
+    } else if starts(&["datetime", "timestamp"]) {
+        LogicalType::DateTime
+    } else if starts(&["date"]) {
+        LogicalType::Date
+    } else if starts(&["uuid"]) {
+        LogicalType::Uuid
+    } else if starts(&["json"]) {
+        LogicalType::Json
     } else {
         LogicalType::Text
     }
@@ -197,7 +230,18 @@ impl Session for FakeSession {
             truncated: false,
             elapsed_ms: 0,
         };
-        if stmt.ends_with("WHERE 1 = 0") {
+        let programmed = self
+            .fake
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(text, _, _)| stmt.contains(text.as_str()))
+            .map(|(_, cols, rows)| (cols.clone(), rows.clone()));
+        if let Some((cols, rows)) = programmed {
+            sink.result_start(&cols);
+            sink.rows(rows);
+        } else if stmt.ends_with("WHERE 1 = 0") {
             let cols: Vec<ColumnMeta> = self
                 .fake
                 .detail
@@ -275,7 +319,7 @@ impl Introspector for FakeSession {
 // Fixture: table `items (id int PK, name varchar(20) NOT NULL UNIQUE, note text NULL)`
 // ---------------------------------------------------------------------------------------
 
-fn column(name: &str, ordinal: u32, db_type: &str, nullable: bool) -> ColumnDetail {
+pub(crate) fn column(name: &str, ordinal: u32, db_type: &str, nullable: bool) -> ColumnDetail {
     ColumnDetail {
         name: name.into(),
         ordinal,
@@ -296,7 +340,7 @@ fn column(name: &str, ordinal: u32, db_type: &str, nullable: bool) -> ColumnDeta
     }
 }
 
-fn index(name: &str, col: &str, primary: bool) -> IndexDetail {
+pub(crate) fn index(name: &str, col: &str, primary: bool) -> IndexDetail {
     IndexDetail {
         name: name.into(),
         unique: true,
@@ -310,7 +354,7 @@ fn index(name: &str, col: &str, primary: bool) -> IndexDetail {
     }
 }
 
-fn items_detail(kind: DbKind, engine: Option<&str>) -> TableDetail {
+pub(crate) fn items_detail(kind: DbKind, engine: Option<&str>) -> TableDetail {
     let pg = kind == DbKind::Postgres;
     let mut id = column("id", 1, if pg { "integer" } else { "int" }, false);
     if pg {
@@ -355,13 +399,13 @@ fn items_detail(kind: DbKind, engine: Option<&str>) -> TableDetail {
     }
 }
 
-struct Fx {
-    sm: Arc<SessionManager>,
-    fake: Arc<Fake>,
-    repo: Arc<ConnectionRepo>,
-    conn: Uuid,
-    csv: PathBuf,
-    _dir: tempfile::TempDir,
+pub(crate) struct Fx {
+    pub(crate) sm: Arc<SessionManager>,
+    pub(crate) fake: Arc<Fake>,
+    pub(crate) repo: Arc<ConnectionRepo>,
+    pub(crate) conn: Uuid,
+    pub(crate) csv: PathBuf,
+    pub(crate) _dir: tempfile::TempDir,
 }
 
 const CSV: &str = "id,name,note\n1,a,x\n2,b,\n3,c,z\n";
@@ -370,9 +414,20 @@ async fn fixture(kind: DbKind, engine: Option<&str>, env: Option<EnvTag>, read_o
     fixture_with(kind, engine, env, read_only, None).await
 }
 
-async fn fixture_with(
+pub(crate) async fn fixture_with(
     kind: DbKind,
     engine: Option<&str>,
+    env: Option<EnvTag>,
+    read_only: bool,
+    plan_ttl: Option<Duration>,
+) -> Fx {
+    fixture_detail(kind, items_detail(kind, engine), env, read_only, plan_ttl).await
+}
+
+/// An open connection to the fake server whose table is `detail`.
+pub(crate) async fn fixture_detail(
+    kind: DbKind,
+    detail: TableDetail,
     env: Option<EnvTag>,
     read_only: bool,
     plan_ttl: Option<Duration>,
@@ -393,11 +448,12 @@ async fn fixture_with(
     };
     let fake = Arc::new(Fake {
         server,
-        detail: Mutex::new(items_detail(kind, engine)),
+        detail: Mutex::new(detail),
         seen: Mutex::new(Vec::new()),
         rules: Mutex::new(Vec::new()),
         dead: AtomicBool::new(false),
         delay: Mutex::new(None),
+        rows: Mutex::new(Vec::new()),
     });
     let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
     let repo = Arc::new(ConnectionRepo::new(
@@ -538,7 +594,51 @@ impl Fx {
     }
 }
 
-fn ok_confirm(name: Option<&str>) -> ImportConfirm {
+/// Rows programmed with `rows_for` reach the caller's sink.
+#[tokio::test]
+async fn fake_streams_programmed_rows() {
+    use dnt_core::value::Value;
+    struct Collect(Vec<Vec<Value>>);
+    impl RowSink for Collect {
+        fn result_start(&mut self, _: &[ColumnMeta]) {}
+        fn rows(&mut self, rows: Vec<Vec<Value>>) {
+            self.0.extend(rows);
+        }
+        fn result_end(&mut self, _: &ResultSummary) {}
+    }
+    let fx = pg().await;
+    let meta = ColumnMeta {
+        name: "id".into(),
+        db_type: "integer".into(),
+        logical: LogicalType::Integer,
+        nullable: Some(false),
+        origin_table: None,
+        origin_column: None,
+    };
+    fx.fake.rows_for(
+        "SELECT DISTINCT",
+        vec![meta],
+        vec![vec![Value::Int(1)], vec![Value::Int(2)]],
+    );
+    let session = FakeDriver(Arc::clone(&fx.fake))
+        .connect(&dnt_core::test_util::sample_resolved(None))
+        .await
+        .unwrap();
+    let sql = "SELECT DISTINCT \"id\" FROM \"public\".\"t\"";
+    let mut sink = Collect(Vec::new());
+    session
+        .execute_one(
+            sql,
+            classify(sql, session.dialect()),
+            &ExecOptions::default(),
+            &mut sink,
+        )
+        .await
+        .unwrap();
+    assert_eq!(sink.0, vec![vec![Value::Int(1)], vec![Value::Int(2)]]);
+}
+
+pub(crate) fn ok_confirm(name: Option<&str>) -> ImportConfirm {
     ImportConfirm {
         confirmed: true,
         name: name.map(str::to_string),
@@ -548,7 +648,7 @@ fn ok_confirm(name: Option<&str>) -> ImportConfirm {
 
 /// The control statements and the start of every write, for sequence checks. The
 /// metadata reads (the preview's target read, the SchemaCache load) are left out.
-fn shape(stmts: &[String]) -> Vec<String> {
+pub(crate) fn shape(stmts: &[String]) -> Vec<String> {
     stmts
         .iter()
         .filter(|s| !s.starts_with("SELECT unnest") && !s.ends_with("WHERE 1 = 0"))
@@ -563,7 +663,7 @@ fn shape(stmts: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn log_text(d: &JobDetail) -> String {
+pub(crate) fn log_text(d: &JobDetail) -> String {
     d.log
         .iter()
         .map(|l| l.message.clone())
@@ -573,7 +673,7 @@ fn log_text(d: &JobDetail) -> String {
 
 /// A server error as the drivers report it: a 5-character PostgreSQL SQLSTATE (no
 /// code), or a MySQL error number (with the generic SQLSTATE many of them carry).
-fn server_error(code: &str) -> DbError {
+pub(crate) fn server_error(code: &str) -> DbError {
     let pg = code.len() == 5;
     DbError::Server {
         code: (!pg).then(|| code.into()),

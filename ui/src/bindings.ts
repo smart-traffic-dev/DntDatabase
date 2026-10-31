@@ -1176,12 +1176,25 @@ async getExternalToolsDir() : Promise<Result<string | null, AppError>> {
 }
 },
 /**
- * Stores the external tools folder (absolute, existing; `None` clears it), else
- * `config` (field `dir`).
+ * Opens the folder dialog from the backend and stores the picked folder as the external
+ * tools folder; returns it, or `None` when cancelled. The UI cannot name the folder
+ * itself: tools run from it, so a compromised webview must not be able to point it at a
+ * folder of its choosing.
  */
-async setExternalToolsDir(dir: string | null) : Promise<Result<null, AppError>> {
+async toolsPickDir() : Promise<Result<string | null, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("set_external_tools_dir", { dir }) };
+    return { status: "ok", data: await TAURI_INVOKE("tools_pick_dir") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Clears the external tools folder: only `PATH` is searched.
+ */
+async clearExternalToolsDir() : Promise<Result<null, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_external_tools_dir") };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1272,6 +1285,50 @@ async importPrepare(request: ImportRequest) : Promise<Result<DataImportPreview, 
 async importStart(planId: string, confirm: ImportConfirm) : Promise<Result<string, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_start", { planId, confirm }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The table's columns with the generator inferred for each, read on a short-lived session.
+ */
+async seedTarget(connectionId: string, table: ObjectRef) : Promise<Result<SeedTarget, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("seed_target", { connectionId, table }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The first rows exactly as the job generates them; column problems come back as issues.
+ */
+async seedPreview(request: SeedRequest) : Promise<Result<SeedSample, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("seed_preview", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reads and checks everything and returns the reviewed plan (read-only connections refused).
+ */
+async seedPrepare(request: SeedRequest) : Promise<Result<SeedPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("seed_prepare", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-checks the plan and starts the seed job; returns its id.
+ */
+async seedStart(planId: string, confirm: ImportConfirm) : Promise<Result<string, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("seed_start", { planId, confirm }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1575,7 +1632,19 @@ charset?: string | null;
  * MySQL ON UPDATE CURRENT_TIMESTAMP[(n)] clause.
  */
 on_update?: string | null; identity_kind?: IdentityKind | null; unsigned?: boolean; enum_values?: string[] }
+/**
+ * A problem with one column's generator, shown under that column in the dialog.
+ */
+export type ColumnIssue = { column: string; message: string }
 export type ColumnMeta = { name: string; db_type: string; logical: LogicalType; nullable: boolean | null; origin_table: ObjectRef | null; origin_column: string | null }
+/**
+ * One column's generator and options.
+ */
+export type ColumnPlan = { name: string; generator: Generator; 
+/**
+ * 0–100; only used on nullable columns.
+ */
+null_percent: number; unique: boolean }
 /**
  * A table or view offered by autocomplete after `db.` / `schema.`.
  */
@@ -1903,6 +1972,18 @@ export type ErrorPolicy =
  * Skip refused rows and log them; more than `max_errors` stops the import (R16).
  */
 { kind: "skip"; max_errors: number }
+/**
+ * What happens to the rows already in the table.
+ */
+export type ExistingRows = "keep" | 
+/**
+ * `DELETE FROM t` first.
+ */
+"delete" | 
+/**
+ * `TRUNCATE t` first.
+ */
+"truncate"
 export type ExportFormat = "csv" | "json" | "xlsx" | "sql" | "markdown"
 /**
  * What the export dialog chose.
@@ -1948,6 +2029,12 @@ cut_cells: number;
  * Binary values only partly loaded, written as NULL / empty (see the module docs).
  */
 partial_binaries: number; elapsed_ms: number }
+export type FakeKind = "first_name" | "last_name" | "full_name" | "email" | "username" | "phone" | "street_address" | "city" | "state" | "zip_code" | "country" | "company" | "job_title" | "url" | "domain" | 
+/**
+ * Renamed explicitly: specta's snake_case would export `ipv_4` while serde reads and
+ * writes `ipv4`.
+ */
+"ipv4" | "slug" | "word" | "sentence" | "paragraph" | "hex_color" | "password_hash"
 export type Favorite = { id: string; name: string; 
 /**
  * `/`-separated folder path; `None` is the root.
@@ -2026,6 +2113,35 @@ definition: string | null;
  * `FULL`, `PARTIAL` or `SIMPLE`; `None` when the server default applies.
  */
 match_type?: string | null; deferrable?: boolean; initially_deferred?: boolean }
+/**
+ * How a column's values are made. `i64` fields cross IPC as JS numbers: requests keep them
+ * within ±2^53 (checked by [`check_generator`]).
+ */
+export type Generator = 
+/**
+ * Left out of the `INSERT`: the column's default, `AUTO_INCREMENT` or identity applies.
+ */
+{ kind: "skip" } | { kind: "sequence"; start: number; step: number } | { kind: "int_range"; min: number; max: number } | { kind: "decimal_range"; min: number; max: number; scale: number } | { kind: "bool"; true_percent: number } | 
+/**
+ * `YYYY-MM-DD`.
+ */
+{ kind: "date_range"; from: string; to: string } | 
+/**
+ * `YYYY-MM-DD HH:MM:SS`.
+ */
+{ kind: "date_time_range"; from: string; to: string } | 
+/**
+ * `HH:MM:SS`.
+ */
+{ kind: "time_range"; from: string; to: string } | { kind: "pick"; values: string[] } | 
+/**
+ * A key of the referenced table (the name of a foreign key of the table).
+ */
+{ kind: "foreign_key"; constraint: string } | { kind: "fake"; fake: FakeKind } | { kind: "uuid" } | { kind: "constant"; value: string } | 
+/**
+ * `#` digit, `?` letter A–Z, `*` letter or digit, `\x` a literal `x`.
+ */
+{ kind: "pattern"; pattern: string } | { kind: "json_object" } | { kind: "random_bytes"; len: number }
 export type Group = { id: string; parent_id: string | null; name: string; 
 /**
  * Exported as a JS number (positions are small).
@@ -2073,7 +2189,11 @@ export type HistoryOrigin =
 /**
  * One entry per restore job.
  */
-"restore"
+"restore" | 
+/**
+ * One entry per data seeder job (summary comment plus statement templates).
+ */
+"seed"
 export type HistoryStatus = "ok" | "error" | 
 /**
  * The statement was stopped. Not "not applied": the stop may have come after it
@@ -2226,7 +2346,11 @@ export type JobEvent = { job: JobSummary;
  * Log lines added since the previous event of this job.
  */
 new_log: JobLogLine[] }
-export type JobKind = "import" | "import_dry_run" | "dump" | "tool_dump" | "restore" | "tool_restore" | "export"
+export type JobKind = "import" | "import_dry_run" | "dump" | "tool_dump" | "restore" | "tool_restore" | "export" | 
+/**
+ * The data seeder.
+ */
+"seed"
 export type JobLogLevel = "info" | "warn" | "error"
 export type JobLogLine = { 
 /**
@@ -2236,10 +2360,10 @@ at: string; level: JobLogLevel; message: string }
 /**
  * The request a job was started with, for "Run again". The payload is the request type
  * of the kind (ImportRequest, DryRunRequest, DumpRequest, ToolDumpRequest,
- * RestoreRequest) carried as a JSON value, so the job framework does not depend on the
+ * RestoreRequest, SeedRequest) carried as a JSON value, so the job framework does not depend on the
  * import/backup modules.
  */
-export type JobParams = { kind: "import"; request: JsonValue } | { kind: "import_dry_run"; request: JsonValue } | { kind: "dump"; request: JsonValue } | { kind: "tool_dump"; request: JsonValue } | { kind: "restore"; request: JsonValue } | { kind: "tool_restore"; request: JsonValue }
+export type JobParams = { kind: "import"; request: JsonValue } | { kind: "import_dry_run"; request: JsonValue } | { kind: "dump"; request: JsonValue } | { kind: "tool_dump"; request: JsonValue } | { kind: "restore"; request: JsonValue } | { kind: "tool_restore"; request: JsonValue } | { kind: "seed"; request: JsonValue }
 export type JobProgress = { 
 /**
  * What the job is doing ("Reading file", "Rows", …); empty before it reports.
@@ -2669,6 +2793,87 @@ export type SecretsInput = { db_password?: string | null; ssh_password?: string 
  * Per-secret changes of `update_connection`; a missing field keeps the stored secret.
  */
 export type SecretsUpdateInput = { db_password?: SecretChangeInput; ssh_password?: SecretChangeInput; ssh_key_passphrase?: SecretChangeInput }
+/**
+ * One row of the dialog's columns table.
+ */
+export type SeedColumn = { column: TargetColumn; primary: boolean; unique_index: boolean; foreign_key: SeedForeignKey | null; 
+/**
+ * Values of a CHECK `IN` list on this column.
+ */
+check_values: string[]; 
+/**
+ * A generated column: only `Skip`.
+ */
+locked: boolean; 
+/**
+ * The inferred plan.
+ */
+plan: ColumnPlan }
+/**
+ * A foreign key as the dialog shows it.
+ */
+export type SeedForeignKey = { constraint: string; ref_schema: string | null; ref_table: string; columns: string[]; ref_columns: string[] }
+/**
+ * Keys read for one foreign key.
+ */
+export type SeedKeyCount = { constraint: string; count: number }
+/**
+ * The review step: what `seed_start` will run.
+ */
+export type SeedPreview = { plan_id: string; table: ObjectRef; rows: number; 
+/**
+ * `INSERT` statements the job sends (estimated by rows per batch).
+ */
+batches: number; transactional: boolean; pre_step: PreStep | null; insert_head: string; insert_tail: string; sample: string | null; warnings: string[]; confirm: ConfirmLevel; 
+/**
+ * Production with an irreversible pre-step: the name typed for it (the table's).
+ */
+irreversible_name: string | null; expires_in_seconds: number }
+/**
+ * What the user asked to generate (also the stored parameters of "Run again").
+ */
+export type SeedRequest = { connection_id: string; table: ObjectRef; 
+/**
+ * 1–1,000,000.
+ */
+rows: number; 
+/**
+ * Rows per `INSERT` (0 = 1,000; at most 100,000; 1 MiB of SQL at most).
+ */
+batch_rows: number; existing: ExistingRows; seed: number; 
+/**
+ * Every column of the table, in table order.
+ */
+columns: ColumnPlan[] }
+/**
+ * The live preview: the first rows exactly as the job generates them.
+ */
+export type SeedSample = { 
+/**
+ * The columns of the `INSERT`.
+ */
+columns: string[]; 
+/**
+ * At most 10 rows (display values).
+ */
+rows: Value[][]; 
+/**
+ * Those rows as one `INSERT`, exactly as the job builds its first batch (generated
+ * values only, so not redacted).
+ */
+sql: string | null; issues: ColumnIssue[]; fk_keys: SeedKeyCount[] }
+/**
+ * The table as the dialog opens it.
+ */
+export type SeedTarget = { columns: SeedColumn[]; env: EnvTag | null; read_only: boolean; server: ServerInfo; 
+/**
+ * The whole job is one transaction.
+ */
+transactional: boolean; 
+/**
+ * A random seed to start with.
+ */
+seed: number }
 export type ServerInfo = { kind: DbKind; variant: ServerVariant; version: [number, number, number]; version_string: string }
 export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres"
 /**

@@ -27,7 +27,10 @@
 //!
 //! A planned statement that holds several statements for the server (a MySQL
 //! `DELIMITER` left on, see [`resplits`]) gets the strictest verdict over all of
-//! them, and plain Explain does not cover it.
+//! them, and plain Explain does not cover it. When one of those statements is a `SET`
+//! that changes how the server lexes the rest (`sql_mode`, `NAMES`, see
+//! [`changes_lexing`]) and others follow it, the server reads them differently from
+//! the split judged here, so the verdict is at least Confirm (Block on read-only).
 //!
 //! Keyword positions are read from [`tokenize`], which keeps quoted tokens in
 //! place, so `SET \`a\` GLOBAL …` never passes for a session `SET`.
@@ -211,10 +214,19 @@ pub fn verdict(
         v = strictest(v, judge(&r, &toks));
         // A reading that holds several statements (see `resplits`): the server
         // runs each of them, so each is judged too.
-        for piece in resplit_reading(&r, &toks, dialect).into_iter().flatten() {
-            let ptoks = tokenize(&piece, dialect);
-            if !ptoks.is_empty() {
-                v = strictest(v, judge(&piece, &ptoks));
+        let pieces = resplit_reading(&r, &toks, dialect).unwrap_or_default();
+        let piece_toks: Vec<_> = pieces.iter().map(|p| tokenize(p, dialect)).collect();
+        for (n, (piece, ptoks)) in pieces.iter().zip(&piece_toks).enumerate() {
+            if ptoks.is_empty() {
+                continue;
+            }
+            v = strictest(v, judge(piece, ptoks));
+            // The server lexes the pieces after a `SET sql_mode` / `SET NAMES` with the
+            // new setting, not as they were split here, so they are not proven harmless:
+            // `SET sql_mode='NO_BACKSLASH_ESCAPES'; SELECT 'x\'; DROP TABLE t; #'`.
+            let more = piece_toks[n + 1..].iter().any(|t| !t.is_empty());
+            if more && changes_lexing(piece, ptoks, dialect) {
+                v = strictest(v, unsafe_verdict);
             }
         }
     }
@@ -287,6 +299,28 @@ fn guard_readings(stmt: &str, dialect: Dialect) -> Vec<String> {
         out.extend(pg_backslash_reading(stmt));
     }
     out
+}
+
+/// MySQL: whether `toks` (one statement of `src`) is a `SET` that may change how the
+/// server lexes the statements after it: it names `sql_mode` (`ANSI_QUOTES`,
+/// `NO_BACKSLASH_ESCAPES`), `NAMES`, `CHARACTER SET` / `CHARSET` or a `character_set_*`
+/// variable (a multibyte client charset such as GBK can swallow a `\`), as a word or
+/// quoted. A quoted token it cannot read counts too.
+fn changes_lexing(src: &str, toks: &[Token], dialect: Dialect) -> bool {
+    if !dialect.is_mysql() || !is_word(toks, 0, "SET") {
+        return false;
+    }
+    let lexing = |name: &str| {
+        let n = name.trim_start_matches('@').to_ascii_lowercase();
+        n.ends_with("sql_mode")
+            || n.contains("character_set")
+            || ["names", "character", "charset"].contains(&n.as_str())
+    };
+    toks.iter().any(|t| match t.kind {
+        TokKind::Word(w) => lexing(w),
+        TokKind::Quoted => unquote(&src[t.start..t.end]).is_none_or(|n| lexing(&n)),
+        _ => false,
+    })
 }
 
 /// Whether `stmt` (one planned statement) holds more than one statement for the
@@ -1159,6 +1193,13 @@ mod tests {
         for d in BOTH {
             assert_eq!(columns("EXPLAIN ANALYZE DELETE FROM t", *d), [C, B, A]);
         }
+        // MySQL `DESC` / `DESCRIBE` are `EXPLAIN`: read-only blocks the analyzed write.
+        for s in [
+            "DESC ANALYZE DELETE t1 FROM t1 JOIN t2 ON t1.a = t2.a",
+            "describe analyze format=tree UPDATE t SET a = 1 WHERE id = 1",
+        ] {
+            assert_eq!(columns(s, MY), [C, B, A], "{s}");
+        }
     }
 
     #[test]
@@ -1322,6 +1363,44 @@ SET @@SESSION.SQL_LOG_BIN = @MYSQLDUMP_TEMP_LOG_BIN;
         assert_eq!(columns("SELECT 1; SET tx_read_only = 0", MY), [A, B, A]);
         // Every piece a read: unchanged.
         assert_eq!(columns("SELECT 1; SELECT 2;", MY), [A, A, A]);
+    }
+
+    /// The server lexes the pieces after a `SET sql_mode` / `SET NAMES` with the new
+    /// setting: under `NO_BACKSLASH_ESCAPES` the string below ends at `\'` and the DROP
+    /// runs, though the split judged here holds a SELECT of one string.
+    #[test]
+    fn pieces_after_a_lexing_change_are_not_proven_harmless() {
+        let attack = "DELIMITER //\nSET sql_mode='NO_BACKSLASH_ESCAPES'; SELECT 'x\\'; DROP TABLE orders; #'//";
+        let p = plan(attack, Target::All, MY);
+        assert_eq!(p.stmts.len(), 1);
+        assert_eq!(plan_columns(attack, MY, false, false), [C, B, A]);
+        for s in [
+            r#"SET sql_mode = 'ANSI_QUOTES'; SELECT "x"; SELECT 1"#,
+            "set session sql_mode = ''; SELECT 1",
+            "SET @@session.sql_mode = 'NO_BACKSLASH_ESCAPES'; SELECT 1",
+            "SET @@SQL_MODE := 'ANSI'; SELECT 1",
+            "SET @@session.`sql_mode` = 'ANSI'; SELECT 1",
+            "SET NAMES gbk; SELECT 1",
+            "SET CHARACTER SET gbk; SELECT 1",
+            "set charset gbk; SELECT 1",
+            "SET character_set_client = gbk; SELECT 1",
+            "SET autocommit = 1, sql_mode = 'ANSI'; SELECT 1",
+            "/*!40101 SET sql_mode='NO_BACKSLASH_ESCAPES' */; SELECT 1",
+        ] {
+            assert_eq!(columns(s, MY), [C, B, A], "{s}");
+        }
+        // Nothing runs after it, or the SET changes nothing the lexer depends on.
+        for s in [
+            "SELECT 1; SET sql_mode = 'ANSI'",
+            "SET sql_mode = 'ANSI'; -- done",
+            "SET autocommit = 1; SELECT 1",
+            "SET @x = 1; SELECT @x",
+            "SET time_zone = '+00:00'; SELECT NOW()",
+        ] {
+            assert_eq!(columns(s, MY), [A, A, A], "{s}");
+        }
+        // A planned statement of its own: `run` re-judges the rest after the mode change.
+        assert_eq!(columns("SET sql_mode = 'ANSI'", MY), [A, A, A]);
     }
 
     const DUMP_PROCEDURE: &str = "DELIMITER $$

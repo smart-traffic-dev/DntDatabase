@@ -104,12 +104,18 @@ impl Classifier {
         }
         let (mut toks, mut skip) = (toks, skip);
         // `EXPLAIN ANALYZE …` takes its inner statement's kind; prefixes are peeled
-        // in a loop, not by recursion.
+        // in a loop, not by recursion. MySQL also takes `DESC` / `DESCRIBE` for `EXPLAIN`
+        // (`DESC ANALYZE DELETE …` runs the DELETE).
+        let mysql = self.dialect.is_mysql();
+        let explain = |w: &str| {
+            w.eq_ignore_ascii_case("EXPLAIN")
+                || (mysql && (w.eq_ignore_ascii_case("DESC") || w.eq_ignore_ascii_case("DESCRIBE")))
+        };
         loop {
             let start = toks.iter().take_while(|t| t.kind == TokKind::Open).count();
             (toks, skip) = (&toks[start..], &skip[start..]);
             match word_at(toks, 0) {
-                Some(w) if w.eq_ignore_ascii_case("EXPLAIN") => match explain_inner(&toks[1..]) {
+                Some(w) if explain(w) => match explain_inner(&toks[1..]) {
                     Some(i) if i + 1 < toks.len() => {
                         (toks, skip) = (&toks[i + 1..], &skip[i + 1..])
                     }
@@ -673,6 +679,30 @@ mod tests {
         assert_eq!(
             classify("EXPLAIN ANALYZE FORMAT=TREE UPDATE t SET a=1"),
             Write
+        );
+    }
+
+    /// MySQL `DESC` / `DESCRIBE` are `EXPLAIN`: with ANALYZE they run their statement.
+    #[test]
+    fn desc_analyze_takes_inner_kind() {
+        assert_eq!(
+            classify("DESC ANALYZE DELETE t1 FROM t1 JOIN t2 ON t1.a = t2.a"),
+            Write
+        );
+        assert_eq!(classify("describe analyze update t set a=1"), Write);
+        assert_eq!(
+            classify("DESC ANALYZE FORMAT=TREE INSERT INTO t VALUES (1)"),
+            Write
+        );
+        assert_eq!(classify("(DESC ANALYZE DELETE FROM t)"), Write);
+        assert_eq!(classify("DESC ANALYZE SELECT 1"), Read);
+        assert_eq!(classify("DESC DELETE FROM t"), Read);
+        assert_eq!(classify("DESCRIBE t"), Read);
+        assert_eq!(classify("desc t a"), Read);
+        // PG has no `DESC` statement; left as a plain read.
+        assert_eq!(
+            super::classify("DESC ANALYZE DELETE FROM t", Dialect::Postgres),
+            Read
         );
     }
 

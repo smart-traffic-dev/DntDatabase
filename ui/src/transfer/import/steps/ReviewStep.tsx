@@ -9,7 +9,7 @@ export interface Confirmation {
 }
 
 /** The confirmation `preview` asks for is complete. */
-export function confirmationDone(preview: DataImportPreview, c: Confirmation): boolean {
+export function confirmationDone(preview: Pick<DataImportPreview, 'pre_step' | 'confirm'>, c: Confirmation): boolean {
   if (preview.pre_step?.irreversible && !c.irreversibleAck) return false;
   switch (preview.confirm.kind) {
     case 'none':

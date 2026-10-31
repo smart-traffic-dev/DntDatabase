@@ -6,7 +6,7 @@ import { useDdlEdits } from '../store/ddlEdits';
 import { callsOf, config, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
 import type { TreeNode } from '../store/tree';
 import { useDialogs } from '../store/dialogs';
-import { ddlActionItems, designActionItems, importActionItems } from './TreeContextMenu';
+import { ddlActionItems, designActionItems, importActionItems, seedActionItems } from './TreeContextMenu';
 
 const table: ObjectRef = { database: 'shop', schema: null, name: 'orders', kind: 'Table' };
 const tableNode: TreeNode = { id: `conn:${ids.prod}/obj`, kind: 'object', label: 'orders', objectRef: table };
@@ -81,6 +81,19 @@ describe('table designer tree entries', () => {
     expect(importActionItems({ ...tableNode, objectRef: { ...table, kind: 'View' } })).toEqual([]);
     useConnections.getState().clearInfo(ids.prod);
     expect(importActionItems(tableNode)).toEqual([]);
+  });
+
+  it('Generate data… on a table opens the seeder; disabled read-only; not on a view', () => {
+    const found = seedActionItems(tableNode).find((e) => 'label' in e && e.label === 'Generate data…');
+    if (!found || !('run' in found)) throw new Error('no "Generate data…" item');
+    expect(found).toMatchObject({ disabled: false });
+    found.run();
+    expect(useDialogs.getState().request).toEqual({ kind: 'seedData', connectionId: ids.prod, table });
+    useConnections.getState().setStored([], [config(ids.prod, 'ro', { read_only: true })]);
+    expect(seedActionItems(tableNode)[0]).toMatchObject({ disabled: true, title: 'Read-only connection' });
+    expect(seedActionItems({ ...tableNode, objectRef: { ...table, kind: 'View' } })).toEqual([]);
+    useConnections.getState().clearInfo(ids.prod);
+    expect(seedActionItems(tableNode)).toEqual([]);
   });
 
   it('nothing while the connection is closed, and nothing on a view', () => {
