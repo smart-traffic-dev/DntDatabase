@@ -1345,7 +1345,7 @@ fn tool_conn_from_resolved() {
         read_only: true,
         application_name: "DntDatabase".into(),
     };
-    let c = ToolConn::from_resolved(&r, true);
+    let c = ToolConn::from_resolved(&r, true).unwrap();
     assert_eq!(c.kind, SqlKind::MySql);
     assert_eq!(c.host, "127.0.0.1");
     assert_eq!(c.port, 50123);

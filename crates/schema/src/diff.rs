@@ -1332,7 +1332,7 @@ mod tests {
 
     #[test]
     fn new_table_yields_create_table_only() {
-        let old = new_table("t", &pg());
+        let old = new_table("t", &pg()).unwrap();
         let mut new = old.clone();
         new.name = "orders".into();
         new.columns.push(ColumnDef {

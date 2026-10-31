@@ -23,8 +23,10 @@ use std::collections::HashSet;
 /// `original_name`). Unchanged names and referenced names (FK target table, schema
 /// and columns, key/index columns) are only checked for being empty or holding a NUL:
 /// they are always quoted on render.
-pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
-    let kind = server.kind.as_sql();
+///
+/// `Unsupported` for a non-SQL server.
+pub fn validate(def: &TableDef, server: &ServerInfo) -> Result<Vec<DraftError>, DbError> {
+    let kind = server.kind.require_sql()?;
     let mut v = Validator {
         server,
         kind,
@@ -107,7 +109,7 @@ pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
     }
     v.trusted = def.options.locked && def.original_name.is_some();
     v.options(&def.options);
-    v.errs
+    Ok(v.errs)
 }
 
 const FK_ACTIONS: &[&str] = &[
@@ -291,7 +293,7 @@ impl Validator<'_> {
                 scale,
                 unsigned,
                 values,
-            } => match type_info(base, self.server) {
+            } => match type_info(base, self.kind) {
                 // The base is rendered as is: it must be a catalog name, locked or not.
                 None => self.err(
                     el.clone(),
@@ -651,7 +653,7 @@ mod tests {
     }
 
     fn base() -> TableDef {
-        let mut t = new_table("t", &mysql8());
+        let mut t = new_table("t", &mysql8()).unwrap();
         t.columns.push(col("a", int()));
         t
     }
@@ -664,12 +666,12 @@ mod tests {
     #[test]
     fn validate_reports() {
         let my = mysql8();
-        assert_eq!(validate(&base(), &my), vec![]);
+        assert_eq!(validate(&base(), &my).unwrap(), vec![]);
 
         // Duplicate column name.
         let mut t = base();
         t.columns.push(col("a", int()));
-        let errs = validate(&t, &my);
+        let errs = validate(&t, &my).unwrap();
         assert!(
             has(&errs, ElementRef::Column("a".into()), Some("name")),
             "{errs:?}"
@@ -678,7 +680,7 @@ mod tests {
         let mut t = base();
         t.columns.push(col("A", int()));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("A".into()),
             Some("name")
         ));
@@ -687,32 +689,36 @@ mod tests {
         let mut t = base();
         t.columns.push(col("", int()));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("".into()),
             Some("name")
         ));
         let mut t = base();
         t.name = String::new();
-        assert!(has(&validate(&t, &my), ElementRef::Table, Some("name")));
+        assert!(has(
+            &validate(&t, &my).unwrap(),
+            ElementRef::Table,
+            Some("name")
+        ));
 
         // No columns.
         let mut t = base();
         t.columns.clear();
         t.primary_key = None;
-        assert!(has(&validate(&t, &my), ElementRef::Table, None));
+        assert!(has(&validate(&t, &my).unwrap(), ElementRef::Table, None));
 
         // decimal scale > precision; scale without precision.
         let mut t = base();
         t.columns.push(col("d", decimal(Some(4), Some(6))));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("d".into()),
             Some("scale")
         ));
         let mut t = base();
         t.columns.push(col("d", decimal(None, Some(2))));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("d".into()),
             Some("scale")
         ));
@@ -731,7 +737,7 @@ mod tests {
             },
         ));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("v".into()),
             Some("length")
         ));
@@ -753,40 +759,44 @@ mod tests {
             locked: false,
         });
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::ForeignKey("fk".into()),
             Some("ref_columns")
         ));
 
         // CHECK on MySQL 5.7.
-        let mut t = new_table("t", &mysql57());
+        let mut t = new_table("t", &mysql57()).unwrap();
         t.checks.push(CheckDef {
             original: None,
             name: "c".into(),
             expression: "id > 0".into(),
             locked: false,
         });
-        let errs = validate(&t, &mysql57());
+        let errs = validate(&t, &mysql57()).unwrap();
         assert!(
             errs.iter()
                 .any(|e| e.element == ElementRef::Check("c".into())
                     && e.message.contains("CHECK constraints need MySQL 8.0.16")),
             "{errs:?}"
         );
-        assert_eq!(validate(&t, &mysql8()), vec![]);
-        assert_eq!(validate(&t, &mariadb()), vec![]);
+        assert_eq!(validate(&t, &mysql8()).unwrap(), vec![]);
+        assert_eq!(validate(&t, &mariadb()).unwrap(), vec![]);
 
         // Names failing ddl::validate_identifier.
         let mut t = base();
         t.columns.push(col("a.b", int()));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a.b".into()),
             Some("name")
         ));
         let mut t = base();
         t.name = "x".repeat(65);
-        assert!(has(&validate(&t, &my), ElementRef::Table, Some("name")));
+        assert!(has(
+            &validate(&t, &my).unwrap(),
+            ElementRef::Table,
+            Some("name")
+        ));
 
         // Expression default failing check_expression.
         let mut t = base();
@@ -794,7 +804,7 @@ mod tests {
             text: "1; DROP TABLE t".into(),
         });
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("default")
         ));
@@ -803,7 +813,7 @@ mod tests {
         t.columns[1].default = Some(DefaultSpec::Value {
             text: "1; DROP TABLE t".into(),
         });
-        assert_eq!(validate(&t, &my), vec![]);
+        assert_eq!(validate(&t, &my).unwrap(), vec![]);
 
         // Custom type text with `;`.
         let mut t = base();
@@ -814,7 +824,7 @@ mod tests {
             },
         ));
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("c".into()),
             Some("data_type")
         ));
@@ -836,23 +846,23 @@ mod tests {
             values: vec![],
         };
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("data_type")
         ));
 
         // auto_increment / identity / unsigned on the wrong server.
-        let mut t = new_table("t", &pg);
+        let mut t = new_table("t", &pg).unwrap();
         t.columns[0].auto_increment = true;
         assert!(has(
-            &validate(&t, &pg),
+            &validate(&t, &pg).unwrap(),
             ElementRef::Column("id".into()),
             Some("auto_increment")
         ));
-        let mut t = new_table("t", &my);
+        let mut t = new_table("t", &my).unwrap();
         t.columns[0].identity = Some(dnt_core::meta::IdentityKind::Always);
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("id".into()),
             Some("identity")
         ));
@@ -868,7 +878,7 @@ mod tests {
             values: vec![],
         };
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("values")
         ));
@@ -877,7 +887,7 @@ mod tests {
         let mut t = base();
         t.primary_key.as_mut().unwrap().columns = vec!["nope".into()];
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::PrimaryKey,
             Some("columns")
         ));
@@ -900,7 +910,7 @@ mod tests {
             locked: false,
         });
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Index("i".into()),
             Some("parts")
         ));
@@ -908,10 +918,18 @@ mod tests {
         // Bad options on MySQL; any engine on PG.
         let mut t = base();
         t.options.engine = Some("InnoDB; DROP".into());
-        assert!(has(&validate(&t, &my), ElementRef::Options, Some("engine")));
-        let mut t = new_table("t", &pg);
+        assert!(has(
+            &validate(&t, &my).unwrap(),
+            ElementRef::Options,
+            Some("engine")
+        ));
+        let mut t = new_table("t", &pg).unwrap();
         t.options.engine = Some("InnoDB".into());
-        assert!(has(&validate(&t, &pg), ElementRef::Options, Some("engine")));
+        assert!(has(
+            &validate(&t, &pg).unwrap(),
+            ElementRef::Options,
+            Some("engine")
+        ));
 
         // A locked server element (T5-7: the backend restored it from the base) skips
         // the text-safety checks; it is never rendered.
@@ -921,7 +939,7 @@ mod tests {
         t.columns[1].data_type = TypeSpec::Custom {
             text: "geometry srid 4326 -- x".into(),
         };
-        assert_eq!(validate(&t, &my), vec![]);
+        assert_eq!(validate(&t, &my).unwrap(), vec![]);
         // The catalog and referential-action checks still apply.
         let mut t = base();
         t.columns[1].original = Some("a".into());
@@ -935,7 +953,7 @@ mod tests {
             values: vec![],
         };
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("data_type")
         ));
@@ -955,7 +973,7 @@ mod tests {
             locked: true,
         });
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::ForeignKey("fk".into()),
             Some("on_update")
         ));
@@ -970,12 +988,12 @@ mod tests {
             expression: "a > 0".into(),
             locked: true,
         });
-        assert_eq!(validate(&t, &mysql57()), vec![]);
+        assert_eq!(validate(&t, &mysql57()).unwrap(), vec![]);
         // A new element cannot be locked.
         let mut t = base();
         t.columns[1].locked = true;
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("locked")
         ));
@@ -987,14 +1005,14 @@ mod tests {
             locked: true,
         });
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Check("c".into()),
             Some("locked")
         ));
         let mut t = base();
         t.primary_key.as_mut().unwrap().locked = true;
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::PrimaryKey,
             Some("locked")
         ));
@@ -1012,19 +1030,19 @@ mod tests {
             locked: true,
             ..col("g", int())
         });
-        assert_eq!(validate(&t, &my), vec![]);
+        assert_eq!(validate(&t, &my).unwrap(), vec![]);
         // The same text as an unlocked column's default expression is refused.
         let mut t = base();
         t.columns[1].default = Some(DefaultSpec::Expression { text: expr.into() });
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("default")
         ));
         // Unlocked existing columns get every check too.
         t.columns[1].original = Some("a".into());
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("default")
         ));
@@ -1040,13 +1058,13 @@ mod tests {
             original: Some("a.b".into()),
             ..col("a.b", int())
         });
-        assert_eq!(validate(&t, &my), vec![]);
+        assert_eq!(validate(&t, &my).unwrap(), vec![]);
         // Renaming a column to `a.b` is refused.
         let mut t = base();
         t.columns[1].original = Some("a".into());
         t.columns[1].name = "a.b".into();
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a.b".into()),
             Some("name")
         ));
@@ -1055,9 +1073,13 @@ mod tests {
         let long = "x".repeat(65);
         t.name = long.clone();
         t.original_name = Some(long);
-        assert_eq!(validate(&t, &my), vec![]);
+        assert_eq!(validate(&t, &my).unwrap(), vec![]);
         t.original_name = Some("t".into());
-        assert!(has(&validate(&t, &my), ElementRef::Table, Some("name")));
+        assert!(has(
+            &validate(&t, &my).unwrap(),
+            ElementRef::Table,
+            Some("name")
+        ));
         // FK references are only checked for empty / NUL.
         let fk = |ref_col: &str| {
             let mut t = base();
@@ -1075,7 +1097,7 @@ mod tests {
                 initially_deferred: false,
                 locked: false,
             });
-            validate(&t, &my)
+            validate(&t, &my).unwrap()
         };
         assert_eq!(fk("x.y"), vec![]);
         assert!(has(
@@ -1105,11 +1127,11 @@ mod tests {
             };
             t
         };
-        assert_eq!(validate(&with_values(&["a", "b'c"]), &my), vec![]);
+        assert_eq!(validate(&with_values(&["a", "b'c"]), &my).unwrap(), vec![]);
         for bad in [&["a", "b\\c"][..], &["a\0"], &["a", "b", "A"]] {
             assert!(
                 has(
-                    &validate(&with_values(bad), &my),
+                    &validate(&with_values(bad), &my).unwrap(),
                     ElementRef::Column("a".into()),
                     Some("values")
                 ),
@@ -1121,10 +1143,10 @@ mod tests {
         let mut t = with_values(&["a\\"]);
         t.columns[1].original = Some("a".into());
         t.columns[1].locked = true;
-        assert_eq!(validate(&t, &my), vec![]);
+        assert_eq!(validate(&t, &my).unwrap(), vec![]);
         t.columns[1].original = None;
         assert!(has(
-            &validate(&t, &my),
+            &validate(&t, &my).unwrap(),
             ElementRef::Column("a".into()),
             Some("values")
         ));
@@ -1138,7 +1160,7 @@ mod tests {
             t.columns[1].data_type = TypeSpec::Custom { text: text.into() };
             assert!(
                 has(
-                    &validate(&t, &my),
+                    &validate(&t, &my).unwrap(),
                     ElementRef::Column("a".into()),
                     Some("data_type")
                 ),

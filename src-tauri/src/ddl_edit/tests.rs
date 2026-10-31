@@ -269,9 +269,9 @@ impl SqlSession for FakeSession {
         *self.tx.lock().unwrap()
     }
     fn dialect(&self) -> Dialect {
-        match self.fake.server.kind {
-            DbKind::MySql => Dialect::MySql(MySqlMode::default()),
-            DbKind::Postgres => Dialect::Postgres,
+        match self.fake.server.kind.require_sql().unwrap() {
+            SqlKind::MySql => Dialect::MySql(MySqlMode::default()),
+            SqlKind::Postgres => Dialect::Postgres,
         }
     }
 }
@@ -493,7 +493,7 @@ async fn open_new_returns_template() {
         name: None,
         table: None,
     };
-    assert_eq!(o.text, template(&target, &mysql8()));
+    assert_eq!(o.text, template(&target, &mysql8()).unwrap());
     assert!(o.text.contains("new_view"), "{}", o.text);
     assert_eq!(o.target, target);
     assert_eq!(o.object, None);

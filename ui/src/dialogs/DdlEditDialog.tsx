@@ -3,6 +3,7 @@ import { Channel } from '@tauri-apps/api/core';
 import { api, needsReconnect, toAppError } from '../api';
 import type { AppError, DdlEditPreview, DdlEditReport, ObjectState } from '../bindings';
 import { EnvTag } from '../components/EnvTag';
+import { sqlEngine } from '../query/engine';
 import { invalidateCompletion } from '../store/completion';
 import { useConnections } from '../store/connections';
 import { useDdlEdits, type DdlTarget } from '../store/ddlEdits';
@@ -104,7 +105,7 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
   const previewSeq = useRef(0);
   const busy = loading || applying;
   const env = edit?.open?.env ?? cfg?.env_tag ?? null;
-  const engine = edit?.open?.server.kind ?? 'mysql';
+  const engine = sqlEngine(edit?.open?.server.kind) ?? 'mysql';
 
   const lost = () => {
     useDdlEdits.getState().markLost(tabId);

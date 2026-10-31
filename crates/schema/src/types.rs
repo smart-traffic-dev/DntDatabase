@@ -1,6 +1,7 @@
 //! The type catalog and the parsing / spelling of column types.
 
 use crate::model::{ParamUse, TypeInfo, TypeSpec};
+use dnt_core::error::DbError;
 use dnt_core::server::{ServerInfo, SqlKind};
 
 use ParamUse::{None as No, Optional as Opt, Required as Req};
@@ -69,8 +70,8 @@ const POSTGRES: &[Entry] = &[
     ("macaddr", No, No, No, false, false, false),
 ];
 
-fn entries(server: &ServerInfo) -> &'static [Entry] {
-    match server.kind.as_sql() {
+fn entries(kind: SqlKind) -> &'static [Entry] {
+    match kind {
         SqlKind::MySql => MYSQL,
         SqlKind::Postgres => POSTGRES,
     }
@@ -89,26 +90,35 @@ fn info(e: &Entry) -> TypeInfo {
     }
 }
 
-/// The types the designer offers for `server`, in display order.
-pub fn type_catalog(server: &ServerInfo) -> Vec<TypeInfo> {
-    entries(server).iter().map(info).collect()
+/// The types the designer offers for `server`, in display order. `Unsupported` for a
+/// non-SQL server.
+pub fn type_catalog(server: &ServerInfo) -> Result<Vec<TypeInfo>, DbError> {
+    Ok(entries(server.kind.require_sql()?)
+        .iter()
+        .map(info)
+        .collect())
 }
 
-/// The catalog entry for `base` (exact, lowercase name), if `server` has it.
-pub(crate) fn type_info(base: &str, server: &ServerInfo) -> Option<TypeInfo> {
-    entries(server).iter().find(|e| e.0 == base).map(info)
+/// The catalog entry for `base` (exact, lowercase name), if `kind` has it.
+pub(crate) fn type_info(base: &str, kind: SqlKind) -> Option<TypeInfo> {
+    entries(kind).iter().find(|e| e.0 == base).map(info)
 }
 
 /// A server type spelling (MySQL `COLUMN_TYPE`, PostgreSQL `format_type`) as a
 /// [`TypeSpec`]. Anything outside the catalog (arrays, domains, user-defined types,
 /// `zerofill`, interval fields, …) is [`TypeSpec::Custom`] with the text as given.
-pub fn parse_type(db_type: &str, server: &ServerInfo) -> TypeSpec {
-    let text = db_type.trim();
-    parse_known(text, server).unwrap_or_else(|| TypeSpec::Custom { text: text.into() })
+/// `Unsupported` for a non-SQL server.
+pub fn parse_type(db_type: &str, server: &ServerInfo) -> Result<TypeSpec, DbError> {
+    Ok(parse_type_of(db_type, server.kind.require_sql()?))
 }
 
-fn parse_known(text: &str, server: &ServerInfo) -> Option<TypeSpec> {
-    let kind = server.kind.as_sql();
+/// [`parse_type`] for a `kind` server.
+pub(crate) fn parse_type_of(db_type: &str, kind: SqlKind) -> TypeSpec {
+    let text = db_type.trim();
+    parse_known(text, kind).unwrap_or_else(|| TypeSpec::Custom { text: text.into() })
+}
+
+fn parse_known(text: &str, kind: SqlKind) -> Option<TypeSpec> {
     let lower = text.to_ascii_lowercase();
     match kind {
         SqlKind::MySql => {
@@ -170,7 +180,7 @@ fn parse_known(text: &str, server: &ServerInfo) -> Option<TypeSpec> {
         },
         SqlKind::Postgres => (pg_base(&name, &suffix)?.to_string(), false),
     };
-    let ti = type_info(&base, server)?;
+    let ti = type_info(&base, kind)?;
     if unsigned && !ti.unsigned {
         return None;
     }
@@ -376,11 +386,11 @@ mod tests {
     fn parse_type_known() {
         let my = mysql8();
         assert_eq!(
-            parse_type("decimal(12,2)", &my),
+            parse_type("decimal(12,2)", &my).unwrap(),
             with(known("decimal"), set_ps(12, Some(2)))
         );
         assert_eq!(
-            parse_type("int unsigned", &my),
+            parse_type("int unsigned", &my).unwrap(),
             with(known("int"), |t| {
                 if let TypeSpec::Known { unsigned, .. } = t {
                     *unsigned = true;
@@ -388,7 +398,7 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_type("enum('a','b''c')", &my),
+            parse_type("enum('a','b''c')", &my).unwrap(),
             with(known("enum"), |t| {
                 if let TypeSpec::Known { values, .. } = t {
                     *values = vec!["a".into(), "b'c".into()];
@@ -396,26 +406,26 @@ mod tests {
             })
         );
         assert_eq!(
-            parse_type("varchar(16)", &my),
+            parse_type("varchar(16)", &my).unwrap(),
             with(known("varchar"), set_len(16))
         );
         let pg = pg();
         assert_eq!(
-            parse_type("numeric(12,2)", &pg),
+            parse_type("numeric(12,2)", &pg).unwrap(),
             with(known("numeric"), set_ps(12, Some(2)))
         );
         assert_eq!(
-            parse_type("character varying(20)", &pg),
+            parse_type("character varying(20)", &pg).unwrap(),
             with(known("varchar"), set_len(20))
         );
         assert_eq!(
-            parse_type("integer[]", &pg),
+            parse_type("integer[]", &pg).unwrap(),
             TypeSpec::Custom {
                 text: "integer[]".into()
             }
         );
         assert_eq!(
-            parse_type("order_status", &pg),
+            parse_type("order_status", &pg).unwrap(),
             TypeSpec::Custom {
                 text: "order_status".into()
             }
@@ -426,73 +436,76 @@ mod tests {
     fn parse_type_server_spellings() {
         let my57 = mysql57();
         // MySQL 5.7 default display widths are dropped; a meaningful one is kept.
-        assert_eq!(parse_type("int(11)", &my57), known("int"));
+        assert_eq!(parse_type("int(11)", &my57).unwrap(), known("int"));
         assert_eq!(
-            parse_type("int(10) unsigned", &my57),
-            parse_type("int unsigned", &my57)
+            parse_type("int(10) unsigned", &my57).unwrap(),
+            parse_type("int unsigned", &my57).unwrap()
         );
         assert_eq!(
-            parse_type("tinyint(1)", &my57),
+            parse_type("tinyint(1)", &my57).unwrap(),
             with(known("tinyint"), set_len(1))
         );
-        assert_eq!(parse_type("year(4)", &my57), known("year"));
+        assert_eq!(parse_type("year(4)", &my57).unwrap(), known("year"));
         assert_eq!(
-            parse_type("datetime(6)", &my57),
+            parse_type("datetime(6)", &my57).unwrap(),
             with(known("datetime"), set_ps(6, None))
         );
         assert_eq!(
-            parse_type("int(10) unsigned zerofill", &my57),
+            parse_type("int(10) unsigned zerofill", &my57).unwrap(),
             TypeSpec::Custom {
                 text: "int(10) unsigned zerofill".into()
             }
         );
         assert_eq!(
-            parse_type("geometry", &my57),
+            parse_type("geometry", &my57).unwrap(),
             TypeSpec::Custom {
                 text: "geometry".into()
             }
         );
         let pg = pg();
         assert_eq!(
-            parse_type("timestamp without time zone", &pg),
+            parse_type("timestamp without time zone", &pg).unwrap(),
             known("timestamp")
         );
         assert_eq!(
-            parse_type("timestamp(3) with time zone", &pg),
+            parse_type("timestamp(3) with time zone", &pg).unwrap(),
             with(known("timestamptz"), set_ps(3, None))
         );
-        assert_eq!(parse_type("time with time zone", &pg), known("timetz"));
         assert_eq!(
-            parse_type("character(10)", &pg),
+            parse_type("time with time zone", &pg).unwrap(),
+            known("timetz")
+        );
+        assert_eq!(
+            parse_type("character(10)", &pg).unwrap(),
             with(known("char"), set_len(10))
         );
         assert_eq!(
-            parse_type("double precision", &pg),
+            parse_type("double precision", &pg).unwrap(),
             known("double precision")
         );
-        assert_eq!(parse_type("numeric", &pg), known("numeric"));
+        assert_eq!(parse_type("numeric", &pg).unwrap(), known("numeric"));
         assert_eq!(
-            parse_type("bpchar", &pg),
+            parse_type("bpchar", &pg).unwrap(),
             TypeSpec::Custom {
                 text: "bpchar".into()
             }
         );
         assert_eq!(
-            parse_type("interval year to month", &pg),
+            parse_type("interval year to month", &pg).unwrap(),
             TypeSpec::Custom {
                 text: "interval year to month".into()
             }
         );
         // A MySQL-only name is not a PG catalog type.
         assert_eq!(
-            parse_type("tinyint", &pg),
+            parse_type("tinyint", &pg).unwrap(),
             TypeSpec::Custom {
                 text: "tinyint".into()
             }
         );
         // Enum member lists are MySQL syntax.
         assert_eq!(
-            parse_type("enum('a','b')", &pg),
+            parse_type("enum('a','b')", &pg).unwrap(),
             TypeSpec::Custom {
                 text: "enum('a','b')".into()
             }
@@ -514,7 +527,11 @@ mod tests {
             ("set('a','b')", "set('a','b')"),
             ("double", "double"),
         ] {
-            assert_eq!(type_text(&parse_type(x, &my), &my), canonical, "{x}");
+            assert_eq!(
+                type_text(&parse_type(x, &my).unwrap(), &my),
+                canonical,
+                "{x}"
+            );
         }
         let pg = pg();
         for (x, canonical) in [
@@ -528,7 +545,11 @@ mod tests {
             ("character(10)", "char(10)"),
             ("bpchar", "bpchar"),
         ] {
-            assert_eq!(type_text(&parse_type(x, &pg), &pg), canonical, "{x}");
+            assert_eq!(
+                type_text(&parse_type(x, &pg).unwrap(), &pg),
+                canonical,
+                "{x}"
+            );
         }
     }
 
@@ -536,6 +557,7 @@ mod tests {
     fn catalog_per_server() {
         let names = |s| {
             type_catalog(&s)
+                .unwrap()
                 .into_iter()
                 .map(|t| t.base)
                 .collect::<Vec<_>>()
@@ -549,6 +571,7 @@ mod tests {
         assert!(pg.contains(&"timestamptz".to_string()));
         assert!(!pg.contains(&"enum".to_string()));
         let varchar = type_catalog(&mysql8())
+            .unwrap()
             .into_iter()
             .find(|t| t.base == "varchar")
             .unwrap();

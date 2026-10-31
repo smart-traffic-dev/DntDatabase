@@ -81,7 +81,7 @@ pub(crate) async fn read_fk_keys(
     child: &ObjectRef,
     fk: &ForeignKeyDetail,
 ) -> Result<Vec<Vec<FullValue>>, DbError> {
-    let sql = fk_key_sql(session.server_info().kind.as_sql(), child, fk); // R1: boundary
+    let sql = fk_key_sql(session.server_info().kind.require_sql()?, child, fk);
     let opts = ExecOptions {
         max_rows: MAX_KEYS,
         full_bytes: true,

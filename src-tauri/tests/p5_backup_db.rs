@@ -20,7 +20,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{CellMode, Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::ObjectKind;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::{classify, split};
 use dnt_core::value::{ColumnMeta, FullValue, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -80,9 +80,9 @@ impl RowSink for Collect {
 }
 
 async fn connect(t: Target, db: &str) -> Result<Box<dyn Session>, DbError> {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     driver.connect(&t.resolved(Some(db))).await
 }
@@ -136,8 +136,8 @@ struct Scope {
 }
 
 fn drop_all_sql(t: Target) -> Vec<(String, String)> {
-    match t.kind() {
-        DbKind::MySql => [SRC, DST, DST2]
+    match t.sql_kind() {
+        SqlKind::MySql => [SRC, DST, DST2]
             .iter()
             .map(|d| {
                 (
@@ -146,7 +146,7 @@ fn drop_all_sql(t: Target) -> Vec<(String, String)> {
                 )
             })
             .collect(),
-        DbKind::Postgres => vec![
+        SqlKind::Postgres => vec![
             (
                 FIXTURE_DB.to_string(),
                 format!("DROP SCHEMA IF EXISTS {SRC} CASCADE"),
@@ -199,8 +199,8 @@ impl Scope {
     /// The target database `name` created fresh.
     async fn fresh_target(&self, name: &str) {
         assert!(name.starts_with("p5_"));
-        match self.t.kind() {
-            DbKind::MySql => {
+        match self.t.sql_kind() {
+            SqlKind::MySql => {
                 run(
                     self.t,
                     &format!(
@@ -210,7 +210,7 @@ impl Scope {
                 )
                 .await;
             }
-            DbKind::Postgres => {
+            SqlKind::Postgres => {
                 run_detached(
                     self.t,
                     vec![
@@ -295,9 +295,9 @@ CREATE VIEW p5_src.v_customer_orders AS
 ";
 
 async fn create_source(t: Target) {
-    match t.kind() {
-        DbKind::MySql => run(t, MYSQL_SOURCE).await,
-        DbKind::Postgres => run(t, PG_SOURCE).await,
+    match t.sql_kind() {
+        SqlKind::MySql => run(t, MYSQL_SOURCE).await,
+        SqlKind::Postgres => run(t, PG_SOURCE).await,
     };
 }
 
@@ -358,9 +358,9 @@ fn assert_done(t: Target, d: &JobDetail) {
 
 /// The integrated dump of the source (every object it offers, tables with data).
 async fn dump_source(state: &AppState, conn: Uuid, t: Target, path: &Path, compress: bool) {
-    let (database, schemas) = match t.kind() {
-        DbKind::MySql => (SRC.to_string(), vec![]),
-        DbKind::Postgres => (FIXTURE_DB.to_string(), vec![SRC.to_string()]),
+    let (database, schemas) = match t.sql_kind() {
+        SqlKind::MySql => (SRC.to_string(), vec![]),
+        SqlKind::Postgres => (FIXTURE_DB.to_string(), vec![SRC.to_string()]),
     };
     let listed = dump_objects_impl(state, conn, database.clone(), schemas.clone())
         .await
@@ -433,9 +433,9 @@ async fn restore(
 
 /// `(database to connect to, relation)` of table `name` in the source / a target.
 fn relation(t: Target, db: &str, name: &str) -> (String, String) {
-    match t.kind() {
-        DbKind::MySql => (FIXTURE_DB.into(), format!("`{db}`.`{name}`")),
-        DbKind::Postgres => (db.into(), format!("\"{SRC}\".\"{name}\"")),
+    match t.sql_kind() {
+        SqlKind::MySql => (FIXTURE_DB.into(), format!("`{db}`.`{name}`")),
+        SqlKind::Postgres => (db.into(), format!("\"{SRC}\".\"{name}\"")),
     }
 }
 
@@ -452,9 +452,9 @@ async fn rows(t: Target, db: &str, name: &str, order: &str) -> Vec<Vec<FullValue
 /// Every table of `tables` and (`with_view`) the view of the copy in `dst` equal the
 /// source, row by row.
 async fn assert_same(t: Target, dst: &str, label: &str, tables: &[&str], with_view: bool) {
-    let src_db = match t.kind() {
-        DbKind::MySql => SRC,
-        DbKind::Postgres => FIXTURE_DB,
+    let src_db = match t.sql_kind() {
+        SqlKind::MySql => SRC,
+        SqlKind::Postgres => FIXTURE_DB,
     };
     for &name in tables {
         let a = rows(t, src_db, name, "id").await;
@@ -472,8 +472,8 @@ async fn assert_same(t: Target, dst: &str, label: &str, tables: &[&str], with_vi
 
 /// The copy's generated keys continue after the restored rows.
 async fn assert_keys_continue(t: Target, dst: &str) {
-    match t.kind() {
-        DbKind::MySql => {
+    match t.sql_kind() {
+        SqlKind::MySql => {
             let r = run(
                 t,
                 &format!(
@@ -484,7 +484,7 @@ async fn assert_keys_continue(t: Target, dst: &str) {
             .await;
             assert_eq!(int(&r[0][0]), 4, "{t:?}: AUTO_INCREMENT continues");
         }
-        DbKind::Postgres => {
+        SqlKind::Postgres => {
             let r = run_on(
                 t,
                 dst,
@@ -688,9 +688,9 @@ async fn read_only_connection_blocks_restore() {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/p5");
     for t in Target::all() {
         let conn = open_conn(&state, t, true).await;
-        let files: Vec<std::path::PathBuf> = match t.kind() {
-            DbKind::MySql => vec![fixture.join("mysqldump_sample.sql")],
-            DbKind::Postgres => vec![
+        let files: Vec<std::path::PathBuf> = match t.sql_kind() {
+            SqlKind::MySql => vec![fixture.join("mysqldump_sample.sql")],
+            SqlKind::Postgres => vec![
                 fixture.join("pg_dump_plain_copy.sql"),
                 dir.path().join("plain.sql"),
             ],

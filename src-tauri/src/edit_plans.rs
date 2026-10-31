@@ -496,7 +496,7 @@ impl SessionManager {
         column: String,
     ) -> Result<LoadedCell, DbError> {
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind.as_sql(), &obj)?; // R1: boundary
+        check_object(cfg.kind.require_sql()?, &obj)?;
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, &obj).await?;
         let (metas, dialect, _) = self.edit_metas(&rt, &detail).await?;
@@ -550,7 +550,7 @@ impl SessionManager {
             ));
         }
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind.as_sql(), &obj)?; // R1: boundary
+        check_object(cfg.kind.require_sql()?, &obj)?;
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, &obj).await?;
         if !detail.columns.iter().any(|c| c.name == column) {
@@ -745,7 +745,7 @@ impl SessionManager {
         rt: &ConnectionRuntime,
         detail: &TableDetail,
     ) -> Result<(Vec<ColumnMeta>, Dialect, u64), DbError> {
-        let kind = rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = rt.cfg.kind.require_sql()?;
         let o = &detail.object;
         let cols: Vec<String> = detail
             .columns
@@ -798,7 +798,7 @@ impl SessionManager {
         obj: &ObjectRef,
     ) -> Result<(TableDetail, Vec<ColumnMeta>, Dialect), DbError> {
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind.as_sql(), obj)?; // R1: boundary
+        check_object(cfg.kind.require_sql()?, obj)?;
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, obj).await?;
         let (metas, dialect, _) = self.edit_metas(&rt, &detail).await?;
@@ -813,7 +813,7 @@ impl SessionManager {
             ));
         }
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind.as_sql(), &set.object)?; // R1: boundary
+        check_object(cfg.kind.require_sql()?, &set.object)?;
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, &set.object).await?;
         let (metas, dialect, tunnel_gen) = self.edit_metas(&rt, &detail).await?;

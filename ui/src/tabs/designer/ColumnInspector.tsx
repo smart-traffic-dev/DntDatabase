@@ -1,5 +1,6 @@
 import { useId, useState } from 'react';
 import type { ColumnDef, DefaultSpec, DesignOpen, DraftError, ElementRef, IdentityKind, TableDef, TypeSpec } from '../../bindings';
+import { sqlEngine } from '../../query/engine';
 import { deepEqual } from '../../store/tableDesigns';
 import { DraftInput } from './DraftInput';
 import {
@@ -85,7 +86,7 @@ function ColumnFields({ open, column, index, errors, editable, onSelect, edit }:
   // Only used while there is no default: an existing default carries its own kind.
   const [pendingMode, setPendingMode] = useState<DefaultSpec['kind']>('value');
   const mode = column.default?.kind ?? pendingMode;
-  const engine = open.server.kind;
+  const engine = sqlEngine(open.server.kind) ?? 'mysql';
   const pg = engine === 'postgres';
   const base = column.original === null ? undefined : open.def.columns.find((c) => c.name === column.original);
   const typeChanged = !!base && !sameType(base.data_type, column.data_type);

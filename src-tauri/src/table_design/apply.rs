@@ -135,14 +135,14 @@ pub(super) fn mysql_count_bound(server: &ServerInfo, limit: Duration) -> Option<
 /// a dedicated one that the caller closes afterwards, so nothing is restored), and the
 /// driver's own statement timeout stops it too. A count that has not returned within
 /// `limit + grace` ends the counting: the session is not used again. A count that
-/// fails or times out is "not counted".
+/// fails or times out is "not counted". `Unsupported` only for a non-SQL server.
 pub(super) async fn count_impacts(
     session: &dyn SqlSession,
     impacts: Vec<Impact>,
     limit: Duration,
     grace: Duration,
-) -> Vec<CountedImpact> {
-    let kind = session.server_info().kind.as_sql(); // R1: boundary
+) -> Result<Vec<CountedImpact>, DbError> {
+    let kind = session.server_info().kind.require_sql()?;
     let bound = mysql_count_bound(session.server_info(), limit);
     let mut out: Vec<CountedImpact> = impacts
         .into_iter()
@@ -153,7 +153,7 @@ pub(super) async fn count_impacts(
         })
         .collect();
     if !out.iter().any(|c| c.impact.count_sql.is_some()) {
-        return out;
+        return Ok(out);
     }
     let begin = async {
         match kind {
@@ -177,7 +177,7 @@ pub(super) async fn count_impacts(
         Ok::<(), DbError>(())
     };
     if !matches!(tokio::time::timeout(limit, begin).await, Ok(Ok(()))) {
-        return out;
+        return Ok(out);
     }
     for c in out.iter_mut() {
         let Some(sql) = c.impact.count_sql.clone() else {
@@ -195,7 +195,7 @@ pub(super) async fn count_impacts(
                 c.counted = true;
             }
             Ok(_) => {}
-            Err(_) => return out,
+            Err(_) => return Ok(out),
         }
     }
     let _ = tokio::time::timeout(
@@ -203,7 +203,7 @@ pub(super) async fn count_impacts(
         execute(session, "ROLLBACK", StopSignal::new(), grace, 0),
     )
     .await;
-    out
+    Ok(out)
 }
 
 /// Judges every statement on its own with the query guard: each must be exactly one
@@ -280,7 +280,7 @@ impl SessionManager {
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;
         let (session, generation) = rt
@@ -299,7 +299,7 @@ impl SessionManager {
             if fp != design.fingerprint {
                 return Err(table_changed());
             }
-            let r = compute(&design, draft, dialect);
+            let r = compute(&design, draft, dialect)?;
             if let Some(e) = draft_problem(&r.errors, r.error.as_deref()) {
                 return Err(e);
             }
@@ -314,7 +314,7 @@ impl SessionManager {
                 self.table_designs.count_timeout,
                 self.table_designs.count_grace,
             )
-            .await;
+            .await?;
             Ok((r.statements, impacts, row_estimate))
         }
         .await;
@@ -395,7 +395,7 @@ impl SessionManager {
             return Err(stopped());
         }
         progress("checking");
-        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = stored.rt.cfg.kind.require_sql()?;
         let pg = match kind {
             SqlKind::MySql => false,
             SqlKind::Postgres => true,
@@ -583,7 +583,7 @@ impl SessionManager {
         {
             return Err(stale());
         }
-        check_statement_count(cfg.kind.as_sql(), &stored.preview.statements)?; // R1: boundary
+        check_statement_count(cfg.kind.require_sql()?, &stored.preview.statements)?;
         judge(
             &stored.preview.statements,
             cfg.env_tag,

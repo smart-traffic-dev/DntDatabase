@@ -11,7 +11,7 @@ use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::Scope;
 use dnt_core::secret::MemorySecretStore;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::{
     classify,
     ident::{qualified_name, quote_ident},
@@ -146,11 +146,11 @@ impl Scratch {
         let pg = t.kind() == DbKind::Postgres;
         let ns = format!("p4b_{}", Uuid::new_v4().simple());
         let create = if pg {
-            format!("CREATE SCHEMA {}", quote_ident(t.kind().as_sql(), &ns))
+            format!("CREATE SCHEMA {}", quote_ident(t.sql_kind(), &ns))
         } else {
             format!(
                 "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-                quote_ident(t.kind().as_sql(), &ns)
+                quote_ident(t.sql_kind(), &ns)
             )
         };
         sql(s.as_ref(), &create)
@@ -184,7 +184,7 @@ impl Scratch {
 
     fn rel(&self, name: &str) -> String {
         qualified_name(
-            self.t.kind().as_sql(),
+            self.t.sql_kind(),
             self.db(),
             self.pg.then_some(self.ns.as_str()),
             name,
@@ -241,12 +241,12 @@ impl Scratch {
         let drop = if self.pg {
             format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(self.t.kind().as_sql(), &self.ns)
+                quote_ident(self.t.sql_kind(), &self.ns)
             )
         } else {
             format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(self.t.kind().as_sql(), &self.ns)
+                quote_ident(self.t.sql_kind(), &self.ns)
             )
         };
         // The app's and the body's sessions go first (they may hold locks or an open
@@ -495,7 +495,7 @@ async fn create_t(sc: &Scratch) {
         sc.rel("t")
     ))
     .await;
-    let ix = quote_ident(sc.t.kind().as_sql(), "ix_parent");
+    let ix = quote_ident(sc.t.sql_kind(), "ix_parent");
     sc.exec(&format!("CREATE INDEX {ix} ON {} (parent_id)", sc.rel("t")))
         .await;
     sc.exec(&format!(
@@ -892,8 +892,8 @@ async fn locked_texts(sc: &Scratch, names: &[&str]) -> Vec<String> {
             let r = sc
                 .rows(&format!(
                     "SELECT pg_get_indexdef('{}.{}'::regclass)",
-                    quote_ident(DbKind::Postgres.as_sql(), &sc.ns),
-                    quote_ident(DbKind::Postgres.as_sql(), n)
+                    quote_ident(SqlKind::Postgres, &sc.ns),
+                    quote_ident(SqlKind::Postgres, n)
                 ))
                 .await;
             out.push(r[0][0].clone());
@@ -1010,7 +1010,7 @@ async fn has_column(sc: &Scratch, column: &str) -> bool {
         sc.s.as_ref(),
         &format!(
             "SELECT {} FROM {}",
-            quote_ident(sc.t.kind().as_sql(), column),
+            quote_ident(sc.t.sql_kind(), column),
             sc.rel("t")
         ),
     )

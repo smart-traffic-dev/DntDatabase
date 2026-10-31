@@ -86,6 +86,8 @@ pub(crate) struct Design {
     object: Option<ObjectRef>,
     base: TableDef,
     server: ServerInfo,
+    /// The SQL engine of `server`.
+    kind: SqlKind,
     /// The dialect of the session the design was opened on (render, live SQL).
     dialect: Dialect,
     fingerprint: String,
@@ -95,7 +97,7 @@ impl Design {
     /// The relation a diff applies to (the stored table) or a new table is created in.
     fn table_ref(&self, draft_name: &str) -> TableRef {
         TableRef {
-            kind: self.server.kind.as_sql(), // R1: boundary
+            kind: self.kind,
             database: self.scope.database.clone(),
             schema: self.scope.schema.clone(),
             name: self
@@ -348,19 +350,19 @@ async fn load(session: &dyn SqlSession, object: Option<&ObjectRef>) -> Result<Lo
     let server = session.server_info().clone();
     let Some(obj) = object else {
         return Ok(Loaded {
-            base: new_table("new_table", &server),
+            base: new_table("new_table", &server)?,
             locked: Vec::new(),
             fingerprint: NEW_TABLE.into(),
         });
     };
     let (detail, ddl) = read_table(session, obj).await?;
-    let mut base = from_detail(&detail, &server);
-    let kind = server.kind.as_sql(); // R1: boundary
+    let mut base = from_detail(&detail, &server)?;
+    let kind = server.kind.require_sql()?;
     let mysql_create = match kind {
         SqlKind::MySql => ddl.as_deref(),
         SqlKind::Postgres => None,
     };
-    let locked = fidelity(&base, &detail, mysql_create, &server);
+    let locked = fidelity(&base, &detail, mysql_create, &server)?;
     apply_locks(&mut base, &locked);
     Ok(Loaded {
         base,
@@ -494,28 +496,30 @@ fn describe(e: &ElementRef) -> String {
 }
 
 /// validate + diff + render of `draft` against the design's base.
-fn compute(design: &Design, draft: TableDef, dialect: Dialect) -> DesignRender {
+///
+/// `Unsupported` only for a non-SQL server.
+fn compute(design: &Design, draft: TableDef, dialect: Dialect) -> Result<DesignRender, DbError> {
     let mut out = DesignRender::default();
     let draft = match prepare(&design.base, draft) {
         Ok(d) => d,
         Err(errors) => {
             out.errors = errors;
-            return out;
+            return Ok(out);
         }
     };
-    out.errors = validate(&draft, &design.server);
+    out.errors = validate(&draft, &design.server)?;
     if !out.errors.is_empty() {
-        return out;
+        return Ok(out);
     }
     let changes = match diff(&design.base, &draft) {
         Ok(c) => c,
         Err(DiffError::Invalid(errors)) => {
             out.errors = errors;
-            return out;
+            return Ok(out);
         }
         Err(DiffError::Locked { element, reason }) => {
             out.error = Some(format!("{} is locked: {reason}", describe(&element)));
-            return out;
+            return Ok(out);
         }
     };
     let table = design.table_ref(&draft.name);
@@ -531,7 +535,7 @@ fn compute(design: &Design, draft: TableDef, dialect: Dialect) -> DesignRender {
         }
         Err(e) => out.error = Some(e.to_string()),
     }
-    out
+    Ok(out)
 }
 
 impl SessionManager {
@@ -542,7 +546,7 @@ impl SessionManager {
         table: Option<String>,
     ) -> Result<DesignOpen, DbError> {
         let cfg = self.repo.get(conn)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         match (kind, &scope.schema) {
             (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(
@@ -586,6 +590,7 @@ impl SessionManager {
                     object,
                     base: loaded.base.clone(),
                     server: server.clone(),
+                    kind,
                     dialect,
                     fingerprint: loaded.fingerprint,
                 },
@@ -595,7 +600,7 @@ impl SessionManager {
             design_id,
             def: loaded.base,
             locked: loaded.locked,
-            catalog: type_catalog(&server),
+            catalog: type_catalog(&server)?,
             server,
             env: cfg.env_tag,
             read_only: cfg.read_only,
@@ -610,7 +615,7 @@ impl SessionManager {
     ) -> Result<DesignRender, DbError> {
         let design = self.table_designs.get(design_id)?;
         let dialect = design.dialect;
-        Ok(compute(&design, draft, dialect))
+        compute(&design, draft, dialect)
     }
 
     pub async fn table_design_close(&self, design_id: Uuid) -> Result<(), DbError> {
@@ -638,7 +643,7 @@ impl SessionManager {
         scope: &Scope,
         object: Option<ObjectRef>,
     ) -> Result<(), DbError> {
-        let kind = rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = rt.cfg.kind.require_sql()?;
         let (session, _) = rt.open_query_session(session_db(kind, scope)).await?;
         let sql = session.sql()?;
         let dialect = sql.dialect();

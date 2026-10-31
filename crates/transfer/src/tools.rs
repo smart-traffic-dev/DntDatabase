@@ -39,6 +39,7 @@
 //! verify mode) avoids it.
 
 use dnt_core::config::{ResolvedConfig, SslConfig, SslMode};
+use dnt_core::error::DbError;
 use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
@@ -209,17 +210,17 @@ pub struct ToolConn {
 
 impl ToolConn {
     /// From the runtime's resolved address (the tunnel's local port through SSH). The
-    /// password stays in `resolved`.
-    pub fn from_resolved(resolved: &ResolvedConfig, tunnelled: bool) -> ToolConn {
-        ToolConn {
-            kind: resolved.kind.as_sql(),
+    /// password stays in `resolved`. `Unsupported` for a non-SQL connection.
+    pub fn from_resolved(resolved: &ResolvedConfig, tunnelled: bool) -> Result<ToolConn, DbError> {
+        Ok(ToolConn {
+            kind: resolved.kind.require_sql()?,
             host: resolved.host.clone(),
             port: resolved.port,
             user: resolved.username.clone(),
             database: resolved.database.clone(),
             ssl: resolved.ssl.clone(),
             tunnelled,
-        }
+        })
     }
 }
 

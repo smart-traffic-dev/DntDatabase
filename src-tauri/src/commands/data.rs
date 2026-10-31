@@ -527,7 +527,7 @@ pub(crate) async fn data_query(
     filter: Option<&DataFilter>,
 ) -> Result<DataQuery, DbError> {
     check_request_size(sort, filter)?;
-    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
+    let kind = state.repo.get(id)?.kind.require_sql()?;
     check_object(kind, obj)?;
     let raw_where = raw_text(filter);
     let structured = if raw_where.is_some() { None } else { filter };
@@ -633,7 +633,7 @@ pub async fn table_row_count_impl(
     request_key: String,
 ) -> Result<TableRowCount, DbError> {
     check_request_size(&[], filter.as_ref())?;
-    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
+    let kind = state.repo.get(id)?.kind.require_sql()?;
     check_object(kind, &obj)?;
     let rel = relation(kind, &obj);
     let request = match raw_text(filter.as_ref()) {
@@ -732,7 +732,7 @@ pub async fn data_editable_impl(
     obj: ObjectRef,
 ) -> Result<EditableInfo, DbError> {
     let cfg = state.repo.get(id)?;
-    let kind = cfg.kind.as_sql(); // R1: boundary
+    let kind = cfg.kind.require_sql()?;
     check_object(kind, &obj)?;
     let detail = table_detail_impl(state, id, obj).await?;
     Ok(editable_info(&detail, kind, cfg.read_only))

@@ -5,6 +5,8 @@ const ENGINE: Record<ServerInfo['variant'], string> = {
   MySql8: 'MySQL',
   MariaDb: 'MariaDB',
   Postgres: 'PostgreSQL',
+  Mongo: 'MongoDB',
+  Redis: 'Redis',
 };
 
 /** "PostgreSQL 17.11", "MySQL 8.0.46", "MariaDB 11.4.2": engine plus short version (the full string goes in a tooltip). */

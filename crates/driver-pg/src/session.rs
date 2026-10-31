@@ -7,7 +7,7 @@ use dnt_core::driver::{
     ResultSummary, RowSink, Session, SharedSink, SqlSession, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{ConnectStage, DbError};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::{leading_keywords, session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::{next_tx_state, StmtResult, TxState};
 use dnt_core::value::{ColumnMeta, FullValue, Value};
@@ -150,7 +150,7 @@ impl PgSession {
     /// its kind always describes everything that ran.
     fn track_tx(&self, kind: StatementKind, sql: &str, result: StmtResult<'_>) {
         let mut tx = self.tx.lock().unwrap_or_else(|p| p.into_inner());
-        *tx = next_tx_state(DbKind::Postgres.as_sql(), *tx, false, kind, sql, result);
+        *tx = next_tx_state(SqlKind::Postgres, *tx, false, kind, sql, result);
     }
 
     /// Tracking applied after a statement succeeded: transaction state, the last

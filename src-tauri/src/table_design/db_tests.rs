@@ -46,7 +46,8 @@ async fn slow_count_is_stopped_on_the_server() {
             Duration::from_millis(300),
             Duration::from_secs(1),
         )
-        .await;
+        .await
+        .unwrap();
         assert!(
             fast[0].counted && fast[0].rows == Some(1.0),
             "{t:?}: {fast:?}"
@@ -64,7 +65,8 @@ async fn slow_count_is_stopped_on_the_server() {
             Duration::from_millis(300),
             Duration::from_secs(1),
         )
-        .await;
+        .await
+        .unwrap();
         assert!(!out[0].counted, "{t:?}");
         // It really ran until the bound (it did not fail up front).
         assert!(

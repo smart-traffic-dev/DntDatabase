@@ -12,7 +12,7 @@ use dnt_core::meta::{
     TableColumns, TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
-use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
+use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo, SqlKind};
 use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
@@ -92,9 +92,9 @@ impl Driver for FakeDriver {
                 message: "fake refused (10061)".into(),
             });
         }
-        let info = match self.kind {
-            DbKind::MySql => detect_mysql("8.0.36").unwrap(),
-            DbKind::Postgres => detect_pg(170002, "PostgreSQL 17.2"),
+        let info = match self.kind.require_sql()? {
+            SqlKind::MySql => detect_mysql("8.0.36").unwrap(),
+            SqlKind::Postgres => detect_pg(170002, "PostgreSQL 17.2"),
         };
         Ok(Box::new(FakeSession {
             info,
@@ -165,7 +165,7 @@ impl SqlSession for FakeSession {
         TxState::Idle
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.info.kind.as_sql())
+        Dialect::for_kind(self.info.kind.require_sql().unwrap())
     }
 }
 
@@ -553,6 +553,40 @@ async fn completion_inputs_are_validated() {
             .unwrap_err();
     assert!(is_config(&err, "database"), "{err:?}");
     assert_eq!(f.log.list_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn namespace_errors_keep_their_text() {
+    let config_error = |e: DbError| match e {
+        DbError::Config { field, message } => (field, message),
+        other => panic!("expected Config, got {other:?}"),
+    };
+    let f = fixture(DbKind::MySql, false);
+    let id = save(&f, config(DbKind::MySql, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let err =
+        f.sm.completion_objects(id, "shop", Some("x"))
+            .await
+            .unwrap_err();
+    assert_eq!(
+        config_error(err),
+        (
+            Some("schema".to_string()),
+            "MySQL has no schemas inside a database".to_string()
+        )
+    );
+
+    let f = fixture(DbKind::Postgres, false);
+    let id = save(&f, config(DbKind::Postgres, SecretMode::Saved), Some("pw"));
+    f.sm.open(id, None).await.unwrap();
+    let err = f.sm.completion_objects(id, "shop", None).await.unwrap_err();
+    assert_eq!(
+        config_error(err),
+        (
+            Some("schema".to_string()),
+            "a schema is required on PostgreSQL".to_string()
+        )
+    );
 }
 
 #[tokio::test]

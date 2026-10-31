@@ -181,9 +181,9 @@ async fn every_target_works_through_the_tunnel() {
         let tunnel = Tunnel::open(&cfg, secrets, target(t), &kh, TIMEOUT)
             .await
             .unwrap_or_else(|e| panic!("{t:?}: {e}"));
-        let driver: &dyn Driver = match t.kind() {
-            dnt_core::server::DbKind::MySql => &MySqlDriver,
-            dnt_core::server::DbKind::Postgres => &PgDriver,
+        let driver: &dyn Driver = match t.sql_kind() {
+            dnt_core::server::SqlKind::MySql => &MySqlDriver,
+            dnt_core::server::SqlKind::Postgres => &PgDriver,
         };
         select_one_through(&tunnel, driver, t).await;
         assert_eq!(tunnel.last_channel_error(), None, "{t:?}");

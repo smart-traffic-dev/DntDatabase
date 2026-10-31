@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { SchemaCacheTable } from '../../bindings';
+import type { SchemaCacheTable, ServerInfo } from '../../bindings';
 import { installBrowserGuard } from '../../desktop/browserGuard';
 import { mockBackend } from '../../test/backend';
+import { sqlCaps } from '../../test/fixtures/caps';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
 import { useObjectData } from '../../store/objectData';
@@ -145,7 +146,8 @@ describe('formatActiveEditor', () => {
   });
 
   it('takes_the_dialect_from_the_tab_engine', () => {
-    useConnections.setState({ info: new Map([['c-maria', { kind: 'MySql', variant: 'MariaDb', version: [11, 4, 2], version_string: '11.4.2' } as never]]) });
+    const maria: ServerInfo = { kind: 'mysql', variant: 'MariaDb', version: [11, 4, 2], version_string: '11.4.2', capabilities: sqlCaps('db') };
+    useConnections.setState({ info: new Map([['c-maria', maria]]) });
     const id = useQueryDocs.getState().newQuery('c-maria', 'shop');
     const { editor } = fakeEditor('select `a` from `t`', [[0, 0]], { scheme: 'query', authority: id });
     expect(formatActiveEditor(editor)).toBe(true);

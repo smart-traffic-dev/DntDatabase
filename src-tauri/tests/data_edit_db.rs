@@ -9,7 +9,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -82,9 +82,9 @@ fn uuid8() -> String {
 
 /// `name` qualified for an admin statement on `t`.
 fn scratch(t: Target, name: &str) -> String {
-    match t.kind() {
-        DbKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
-        DbKind::Postgres => format!("public.\"{name}\""),
+    match t.sql_kind() {
+        SqlKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
+        SqlKind::Postgres => format!("public.\"{name}\""),
     }
 }
 
@@ -110,9 +110,9 @@ impl RowSink for Collect {
 /// Runs `sql` (a script) on a fresh admin session of the fixture database; the rows of
 /// every result.
 async fn admin(t: Target, sql: &str) -> Vec<Vec<Value>> {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     let s = session.sql().unwrap();
@@ -132,9 +132,9 @@ async fn admin(t: Target, sql: &str) -> Vec<Vec<Value>> {
 async fn create(t: Target, tag: &str, mysql: &str, pg: &str, rows: &str) -> String {
     let name = format!("p3_{tag}_{}", uuid8());
     let q = scratch(t, &name);
-    let ddl = match t.kind() {
-        DbKind::MySql => format!("CREATE TABLE {q} ({mysql})"),
-        DbKind::Postgres => format!("CREATE TABLE {q} ({pg})"),
+    let ddl = match t.sql_kind() {
+        SqlKind::MySql => format!("CREATE TABLE {q} ({mysql})"),
+        SqlKind::Postgres => format!("CREATE TABLE {q} ({pg})"),
     };
     admin(t, &ddl).await;
     if !rows.is_empty() {
@@ -406,8 +406,8 @@ async fn concurrent_change_to_another_column() {
         )
         .await
         .unwrap();
-        match t.kind() {
-            DbKind::MySql => {
+        match t.sql_kind() {
+            SqlKind::MySql => {
                 assert_eq!(r.outcome, ApplyOutcome::Committed, "{t:?}: {r:?}");
                 assert_eq!(
                     contents(t, &name).await,
@@ -415,7 +415,7 @@ async fn concurrent_change_to_another_column() {
                     "{t:?}"
                 );
             }
-            DbKind::Postgres => {
+            SqlKind::Postgres => {
                 assert_eq!(r.outcome, ApplyOutcome::RolledBack, "{t:?}: {r:?}");
                 assert!(r.statements[0].conflict, "{t:?}");
                 assert_eq!(
@@ -971,9 +971,9 @@ async fn blobs(t: Target, tag: &str) -> String {
     )
     .await;
     let hex: String = (0..=255u8).map(|b| format!("{b:02x}")).collect();
-    let blob = match t.kind() {
-        DbKind::MySql => format!("UNHEX(REPEAT('{hex}', 4096))"),
-        DbKind::Postgres => format!("decode(repeat('{hex}', 4096), 'hex')"),
+    let blob = match t.sql_kind() {
+        SqlKind::MySql => format!("UNHEX(REPEAT('{hex}', 4096))"),
+        SqlKind::Postgres => format!("decode(repeat('{hex}', 4096), 'hex')"),
     };
     admin(
         t,

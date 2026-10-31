@@ -1,6 +1,7 @@
 //! The editor's header notes and the starting text of a new object (spec R14).
 
 use super::EditTarget;
+use crate::error::DbError;
 use crate::meta::ObjectKind;
 use crate::server::{ServerInfo, ServerVariant, SqlKind};
 use crate::sql::ident::quote_ident;
@@ -8,18 +9,18 @@ use crate::sql::ident::quote_ident;
 const ONE_TRANSACTION: &str = "Runs in one transaction.";
 
 /// Header notes for the editor of `t` on `server`.
-pub fn notes(t: &EditTarget, server: &ServerInfo) -> Vec<String> {
+pub fn notes(t: &EditTarget, server: &ServerInfo) -> Result<Vec<String>, DbError> {
     use ObjectKind::*;
-    let pg = match server.kind.as_sql() {
+    let pg = match server.kind.require_sql()? {
         SqlKind::MySql => false,
         SqlKind::Postgres => true,
     };
     if t.name.is_none() {
-        return if pg {
+        return Ok(if pg {
             vec![ONE_TRANSACTION.into()]
         } else {
             Vec::new()
-        };
+        });
     }
     if pg {
         let how = match t.kind {
@@ -28,9 +29,9 @@ pub fn notes(t: &EditTarget, server: &ServerInfo) -> Vec<String> {
             Procedure => "Replace uses CREATE OR REPLACE PROCEDURE, which keeps the argument list; Drop and re-create is needed to change it.",
             MaterializedView => "PostgreSQL has no CREATE OR REPLACE MATERIALIZED VIEW: the app drops and re-creates it, then re-creates its indexes.",
             Trigger => "The app drops and re-creates the trigger on its table.",
-            _ => return vec![ONE_TRANSACTION.into()],
+            _ => return Ok(vec![ONE_TRANSACTION.into()]),
         };
-        return vec![ONE_TRANSACTION.into(), how.into()];
+        return Ok(vec![ONE_TRANSACTION.into(), how.into()]);
     }
     let note = match t.kind {
         View => "Applied with CREATE OR REPLACE VIEW in one statement.".to_string(),
@@ -57,18 +58,18 @@ pub fn notes(t: &EditTarget, server: &ServerInfo) -> Vec<String> {
                 "MySQL has no CREATE OR REPLACE {word}: the app drops and re-creates the {what}. Between the DROP and the CREATE it does not exist."
             )
         }
-        _ => return Vec::new(),
+        _ => return Ok(Vec::new()),
     };
-    vec![note]
+    Ok(vec![note])
 }
 
 /// The starting text of a new object of `t.kind` (spec R14): qualified with the
 /// target database (MySQL) or schema (PostgreSQL); empty for a kind the engine
 /// cannot edit.
-pub fn template(t: &EditTarget, server: &ServerInfo) -> String {
+pub fn template(t: &EditTarget, server: &ServerInfo) -> Result<String, DbError> {
     use ObjectKind::*;
     let table = t.table.as_deref().unwrap_or("table_name");
-    match server.kind.as_sql() {
+    Ok(match server.kind.require_sql()? {
         SqlKind::MySql => {
             let q = |n: &str| quote_ident(SqlKind::MySql, n);
             let db = q(&t.database);
@@ -111,7 +112,7 @@ pub fn template(t: &EditTarget, server: &ServerInfo) -> String {
                 _ => String::new(),
             }
         }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -120,7 +121,6 @@ mod tests {
     use super::super::{build, check_target, isolate, parse_header, BuildInput, CatalogFacts};
     use super::*;
     use crate::meta::ObjectKind;
-    use crate::server::DbKind;
     use crate::sql::lexer::Dialect;
 
     fn new_target(kind: ObjectKind, database: &str, schema: Option<&str>) -> EditTarget {
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn templates_exact_texts() {
         use ObjectKind::*;
-        let my = |k| template(&new_target(k, "db", None), &mysql8());
+        let my = |k| template(&new_target(k, "db", None), &mysql8()).unwrap();
         assert_eq!(my(View), "CREATE VIEW `db`.`new_view` AS\nSELECT 1 AS `id`");
         assert_eq!(
             my(Function),
@@ -166,9 +166,11 @@ mod tests {
         );
         let mut on = new_target(Trigger, "db", None);
         on.table = Some("orders".into());
-        assert!(template(&on, &mariadb()).contains(" ON `orders` FOR EACH ROW"));
+        assert!(template(&on, &mariadb())
+            .unwrap()
+            .contains(" ON `orders` FOR EACH ROW"));
 
-        let pg = |k| template(&new_target(k, "app", Some("s")), &pg17());
+        let pg = |k| template(&new_target(k, "app", Some("s")), &pg17()).unwrap();
         assert_eq!(
             pg(View),
             "CREATE VIEW \"s\".\"new_view\" AS\nSELECT 1 AS id"
@@ -191,15 +193,14 @@ mod tests {
         );
         let mut on = new_target(Trigger, "app", Some("s"));
         on.table = Some("orders".into());
-        assert!(template(&on, &pg12()).contains(" ON \"s\".\"orders\" FOR EACH ROW"));
+        assert!(template(&on, &pg12())
+            .unwrap()
+            .contains(" ON \"s\".\"orders\" FOR EACH ROW"));
     }
 
     fn round_trip(t: &EditTarget, server: &ServerInfo) {
-        let d = match server.kind {
-            DbKind::MySql => Dialect::MYSQL,
-            DbKind::Postgres => Dialect::Postgres,
-        };
-        let text = template(t, server);
+        let d = Dialect::for_kind(server.kind.require_sql().unwrap());
+        let text = template(t, server).unwrap();
         let stmt = isolate(&text, t.kind, d, server).unwrap_or_else(|e| panic!("{text}: {e:?}"));
         assert_eq!(stmt, text);
         let header = parse_header(&stmt, d).unwrap_or_else(|e| panic!("{text}: {e:?}"));
@@ -241,7 +242,7 @@ mod tests {
     #[test]
     fn template_quotes_hostile_scope() {
         let my = new_target(ObjectKind::Procedure, "we`ird", None);
-        let text = template(&my, &mysql8());
+        let text = template(&my, &mysql8()).unwrap();
         assert!(
             text.starts_with("CREATE PROCEDURE `we``ird`.`new_procedure`("),
             "{text}"
@@ -252,7 +253,7 @@ mod tests {
             round_trip(&t, &mysql8());
         }
         let pg = new_target(ObjectKind::Trigger, "app", Some("Sales \"x\""));
-        let text = template(&pg, &pg17());
+        let text = template(&pg, &pg17()).unwrap();
         assert_eq!(
             text,
             "CREATE TRIGGER \"new_trigger\" BEFORE UPDATE ON \"Sales \"\"x\"\"\".\"table_name\" FOR EACH ROW\nEXECUTE FUNCTION \"Sales \"\"x\"\"\".\"trigger_function\"()"
@@ -272,39 +273,45 @@ mod tests {
             ..new_target(k, "db", s)
         };
         assert_eq!(
-            notes(&edit(Procedure, None), &mysql8()),
+            notes(&edit(Procedure, None), &mysql8()).unwrap(),
             vec!["MySQL has no CREATE OR REPLACE PROCEDURE: the app checks the text under a temporary name, then drops and re-creates the procedure. Between the DROP and the CREATE it does not exist.".to_string()]
         );
-        assert!(notes(&edit(Function, None), &mysql57())[0].contains("CREATE OR REPLACE FUNCTION"));
-        assert!(
-            notes(&edit(Trigger, None), &mysql8())[0].contains("drops and re-creates the trigger")
-        );
-        assert!(notes(&edit(Event, None), &mysql8())[0].contains("drops and re-creates the event"));
+        assert!(notes(&edit(Function, None), &mysql57()).unwrap()[0]
+            .contains("CREATE OR REPLACE FUNCTION"));
+        assert!(notes(&edit(Trigger, None), &mysql8()).unwrap()[0]
+            .contains("drops and re-creates the trigger"));
+        assert!(notes(&edit(Event, None), &mysql8()).unwrap()[0]
+            .contains("drops and re-creates the event"));
         for k in mysql_kinds() {
             if k != View {
                 assert_eq!(
-                    notes(&edit(k, None), &mariadb()),
+                    notes(&edit(k, None), &mariadb()).unwrap(),
                     vec!["Applied with CREATE OR REPLACE in one statement.".to_string()]
                 );
             }
         }
         for s in [mysql57(), mysql8(), mariadb()] {
             assert_eq!(
-                notes(&edit(View, None), &s),
+                notes(&edit(View, None), &s).unwrap(),
                 vec!["Applied with CREATE OR REPLACE VIEW in one statement.".to_string()]
             );
         }
         for k in pg_kinds() {
-            let n = notes(&edit(k, Some("public")), &pg17());
+            let n = notes(&edit(k, Some("public")), &pg17()).unwrap();
             assert_eq!(n[0], "Runs in one transaction.");
             assert_eq!(n.len(), 2, "{k:?}");
         }
-        assert!(notes(&edit(View, Some("public")), &pg17())[1].contains("Drop and re-create"));
-        assert!(notes(&edit(Function, Some("public")), &pg17())[1].contains("Drop and re-create"));
+        assert!(
+            notes(&edit(View, Some("public")), &pg17()).unwrap()[1].contains("Drop and re-create")
+        );
+        assert!(notes(&edit(Function, Some("public")), &pg17()).unwrap()[1]
+            .contains("Drop and re-create"));
         // New objects.
-        assert!(notes(&new_target(View, "db", None), &mysql8()).is_empty());
+        assert!(notes(&new_target(View, "db", None), &mysql8())
+            .unwrap()
+            .is_empty());
         assert_eq!(
-            notes(&new_target(View, "app", Some("public")), &pg17()),
+            notes(&new_target(View, "app", Some("public")), &pg17()).unwrap(),
             vec!["Runs in one transaction.".to_string()]
         );
     }

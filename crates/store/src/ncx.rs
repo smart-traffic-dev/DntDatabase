@@ -213,6 +213,8 @@ fn default_port(kind: DbKind) -> u16 {
     match kind {
         DbKind::MySql => 3306,
         DbKind::Postgres => 5432,
+        DbKind::Mongo => 27017,
+        DbKind::Redis => 6379,
     }
 }
 

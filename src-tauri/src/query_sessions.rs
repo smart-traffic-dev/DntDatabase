@@ -1011,7 +1011,7 @@ impl ConnectionRuntime {
         if session.tx_state() != TxState::Idle {
             return Err(DbError::TransactionOpen);
         }
-        let kind = self.cfg.kind.as_sql(); // R1: boundary
+        let kind = self.cfg.kind.require_sql()?;
         match use_database_sql(kind, target.as_deref()) {
             Some(sql) => {
                 execute_quietly(session, &sql).await?;
@@ -1201,7 +1201,7 @@ impl SessionManager {
             };
             done += 1;
             let table = estimate_table(&s.unbounded);
-            let savepoint = estimate_savepoint(rt.cfg.kind.as_sql(), state); // R1: boundary
+            let savepoint = estimate_savepoint(rt.cfg.kind.require_sql()?, state);
             match explain_estimate(
                 session,
                 &sql,
@@ -1719,7 +1719,7 @@ impl SessionManager {
     pub fn plan_kind(&self, plan_id: Uuid) -> Result<SqlKind, DbError> {
         let current = |t: &PlanTarget| self.plan_target_current(t);
         let (_, conn) = self.plans.locate(self.plan_ttl, plan_id, &current)?;
-        Ok(self.runtime(conn)?.cfg.kind.as_sql()) // R1: boundary
+        self.runtime(conn)?.cfg.kind.require_sql()
     }
 
     /// Export of all rows: runs statement `index` of plan `plan_id` (taken or not) again

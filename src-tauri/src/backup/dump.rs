@@ -267,6 +267,7 @@ impl RowSink for Collect {
 /// session reconnected (the snapshot would be lost).
 pub(crate) struct Reader<'a> {
     session: &'a dyn SqlSession,
+    kind: SqlKind,
     stop: StopSignal,
     grace: Duration,
     reconnects: u64,
@@ -283,17 +284,19 @@ fn snapshot_lost() -> DbError {
 }
 
 impl<'a> Reader<'a> {
+    /// `Unsupported` for a non-SQL server.
     pub(crate) fn new(
         session: &'a dyn SqlSession,
         stop: StopSignal,
         grace: Duration,
-    ) -> Reader<'a> {
-        Reader {
+    ) -> Result<Reader<'a>, DbError> {
+        Ok(Reader {
             session,
+            kind: session.server_info().kind.require_sql()?,
             stop,
             grace,
             reconnects: session.reconnects(),
-        }
+        })
     }
 
     fn check(&self) -> Result<(), DbError> {
@@ -307,7 +310,7 @@ impl<'a> Reader<'a> {
     }
 
     fn kind(&self) -> SqlKind {
-        self.session.server_info().kind.as_sql() // R1: boundary
+        self.kind
     }
 
     /// A control statement.
@@ -611,9 +614,8 @@ fn shown_name(schema: Option<&str>, name: &str) -> String {
 /// The server version for the header: `8.0.36`, `10.6.28`, `17.11`; the server's own
 /// string carries build details (`version()` on PostgreSQL). PostgreSQL 10+ numbers are
 /// `major.minor`, read from `server_version_num` as `(major, 0, minor)`.
-fn version_label(info: &ServerInfo) -> String {
+fn version_label(kind: SqlKind, info: &ServerInfo) -> String {
     let (major, minor, patch) = info.version;
-    let kind = info.kind.as_sql(); // R1: boundary
     match kind {
         SqlKind::Postgres if major >= 10 => format!("{major}.{patch}"),
         SqlKind::MySql | SqlKind::Postgres => format!("{major}.{minor}.{patch}"),
@@ -625,6 +627,8 @@ fn engine_label(info: &ServerInfo) -> &'static str {
         ServerVariant::MySql57 | ServerVariant::MySql8 => "MySQL",
         ServerVariant::MariaDb => "MariaDB",
         ServerVariant::Postgres => "PostgreSQL",
+        ServerVariant::Mongo => "MongoDB",
+        ServerVariant::Redis => "Redis",
     }
 }
 
@@ -648,7 +652,7 @@ impl SessionManager {
         if database.trim().is_empty() {
             return Err(config_error("database", "Choose a database to dump."));
         }
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         match kind {
             SqlKind::Postgres if schemas.is_empty() => {
                 return Err(config_error("schemas", "Choose at least one schema."));
@@ -657,7 +661,7 @@ impl SessionManager {
         }
         let rt = self.runtime(conn)?;
         let (session, _) = rt.open_query_session(Some(database.clone())).await?;
-        let r = Reader::new(session.sql()?, StopSignal::new(), self.cancel_grace);
+        let r = Reader::new(session.sql()?, StopSignal::new(), self.cancel_grace)?;
         let listed = tokio::time::timeout(LIST_TIMEOUT, list_dump_objects(&r, &database, &schemas))
             .await
             .map_err(|_| DbError::timeout(dnt_core::error::ConnectStage::Execute));
@@ -670,7 +674,7 @@ impl SessionManager {
     /// the command).
     pub async fn dump_start(&self, request: DumpRequest) -> Result<Uuid, DbError> {
         let cfg = self.repo.get(request.connection_id)?;
-        let request = normalise(request, cfg.kind.as_sql())?; // R1: boundary
+        let request = normalise(request, cfg.kind.require_sql()?)?;
         let rt = self.runtime(request.connection_id)?;
         let spec = JobSpec {
             kind: JobKind::Dump,
@@ -1114,7 +1118,7 @@ impl JobRunner for DumpJob {
         let part: PathBuf = target.part.clone();
         let shown = self.request.path.clone();
         let compress = self.request.compress;
-        let kind = self.rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = self.rt.cfg.kind.require_sql()?;
         let mut file =
             tokio::task::spawn_blocking(move || DumpFile::create(&part, &shown, compress, kind))
                 .await
@@ -1181,7 +1185,7 @@ impl DumpJob {
         session: &dyn SqlSession,
         file: &mut DumpFile,
     ) -> Result<Written, DbError> {
-        let r = Reader::new(session, ctx.stop(), self.grace);
+        let r = Reader::new(session, ctx.stop(), self.grace)?;
         let kind = r.kind();
         if DbKind::from(kind) != self.rt.cfg.kind {
             return Err(crate::object_actions::stale());
@@ -1260,11 +1264,17 @@ impl DumpJob {
         }
     }
 
-    fn header(&self, info: &ServerInfo, objects: &[DumpObject], seqs: Option<u32>) -> DumpHeader {
+    fn header(
+        &self,
+        kind: SqlKind,
+        info: &ServerInfo,
+        objects: &[DumpObject],
+        seqs: Option<u32>,
+    ) -> DumpHeader {
         let count = |k: ObjectKind| objects.iter().filter(|o| o.kind == k).count() as u32;
         DumpHeader {
             engine: engine_label(info).into(),
-            version: version_label(info),
+            version: version_label(kind, info),
             database: self.request.database.clone(),
             schemas: self.request.schemas.clone(),
             created: crate::run_events::utc_millis_now(),
@@ -1611,7 +1621,7 @@ impl DumpJob {
             .collect();
         let view_seq = table_order(&view_nodes);
 
-        file.raw(&header(&self.header(&info, objects, None)))?;
+        file.raw(&header(&self.header(SqlKind::MySql, &info, objects, None)))?;
         for s in session_prologue(SqlKind::MySql) {
             file.statement(s)?;
         }
@@ -1848,6 +1858,7 @@ impl DumpJob {
 
         let info = r.session.server_info().clone();
         file.raw(&header(&self.header(
+            SqlKind::Postgres,
             &info,
             &objects,
             Some(creates.len() as u32),

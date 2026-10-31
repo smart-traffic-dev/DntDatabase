@@ -4,7 +4,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::secret::MemorySecretStore;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::{classify, ddl::ObjectAction, ident::quote_ident};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -109,10 +109,7 @@ async fn create_namespace_with_options_on_every_server() {
         if pg {
             texts(
                 session.as_ref(),
-                &format!(
-                    "CREATE ROLE {}",
-                    quote_ident(DbKind::Postgres.as_sql(), &role)
-                ),
+                &format!("CREATE ROLE {}", quote_ident(SqlKind::Postgres, &role)),
             )
             .await;
         }
@@ -229,18 +226,18 @@ async fn create_namespace_with_options_on_every_server() {
         let cleanup = format!(
             "DROP {} IF EXISTS {}",
             if pg { "SCHEMA" } else { "DATABASE" },
-            quote_ident(target.kind().as_sql(), &ns)
+            quote_ident(target.sql_kind(), &ns)
         );
         texts(session.as_ref(), &cleanup).await;
         let cleanup = if pg {
             format!(
                 "DROP ROLE IF EXISTS {}",
-                quote_ident(DbKind::Postgres.as_sql(), &role)
+                quote_ident(SqlKind::Postgres, &role)
             )
         } else {
             format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(DbKind::MySql.as_sql(), &format!("{ns}_x"))
+                quote_ident(SqlKind::MySql, &format!("{ns}_x"))
             )
         };
         texts(session.as_ref(), &cleanup).await;

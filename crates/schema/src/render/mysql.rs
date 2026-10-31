@@ -302,7 +302,7 @@ impl Alter<'_> {
         };
         if let Some((charset, collation)) = &self.keep_charset {
             let has_collation = matches!(&def.data_type, TypeSpec::Known { base, .. }
-                if type_info(base, self.server).is_some_and(|t| t.collation));
+                if type_info(base, SqlKind::MySql).is_some_and(|t| t.collation));
             if has_collation && def.charset.is_none() {
                 def.charset = charset.clone();
                 if def.collation.is_none() {

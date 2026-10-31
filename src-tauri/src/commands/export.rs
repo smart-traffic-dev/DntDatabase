@@ -537,7 +537,7 @@ pub async fn export_rows(
     path: String,
 ) -> Result<ExportSummary, AppError> {
     picked(&state, &path)?;
-    let kind = kind.as_sql(); // R1: boundary
+    let kind = kind.require_sql()?;
     let summary = guard(export_rows_impl(kind, columns, rows, opts, path)).await?;
     state.export_paths.written(&summary.path);
     Ok(summary)
@@ -629,7 +629,7 @@ pub async fn export_query_result(
     channel: Channel<ExportProgress>,
 ) -> Result<ExportSummary, AppError> {
     picked(&state, &path)?;
-    let kind = kind.as_sql(); // R1: boundary
+    let kind = kind.require_sql()?;
     let summary = guard(export_query_result_impl(
         &state,
         token,

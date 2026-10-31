@@ -215,7 +215,7 @@ impl SqlSession for FakeSession {
         TxState::Idle
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.info.kind.as_sql())
+        Dialect::for_kind(self.info.kind.require_sql().unwrap())
     }
 }
 

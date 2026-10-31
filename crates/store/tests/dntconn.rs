@@ -1,6 +1,7 @@
 use dnt_core::config::{ConnectionConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::error::DbError;
 use dnt_core::secret::{MemorySecretStore, SecretKind, SecretStore};
+use dnt_core::server::DbKind;
 use dnt_core::test_util::{sample_config, sample_ssh};
 use dnt_store::db::open_in_memory;
 use dnt_store::dntconn::{dntconn_has_secrets, export_dntconn, parse_dntconn};
@@ -331,6 +332,24 @@ fn over_cap_kdf_cost_is_config_error() {
     v["secrets"]["m"] = Value::from((1u64 << 20) + 1);
     let err = parse_dntconn(&v.to_string(), Some(&pass(PASSPHRASE))).unwrap_err();
     assert!(matches!(err, DbError::Config { .. }), "{err:?}");
+}
+
+#[test]
+fn import_rejects_unsupported_kind() {
+    let (repo, _secrets, _existing) = repo_with_shop_prod();
+    let before = repo.tree().unwrap();
+    let mut bundle = empty_bundle();
+    bundle.connections = vec![ConnectionConfig {
+        id: Uuid::new_v4(),
+        kind: DbKind::Mongo,
+        ..cfg("mongo")
+    }];
+    let err = apply(&repo, bundle, ConflictPolicy::Copy).unwrap_err();
+    assert!(
+        matches!(&err, DbError::Config { field: Some(f), .. } if f == "kind"),
+        "{err:?}"
+    );
+    assert_eq!(repo.tree().unwrap(), before);
 }
 
 #[test]

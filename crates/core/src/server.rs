@@ -7,16 +7,44 @@ use specta::Type;
 pub enum DbKind {
     MySql,
     Postgres,
+    Mongo,
+    Redis,
 }
 
 impl DbKind {
-    /// The SQL dialect of this kind. Infallible only while every `DbKind` is a
-    /// SQL engine; removed when `DbKind` gains non-SQL variants (R1 Task 10).
-    pub fn as_sql(self) -> SqlKind {
+    /// How a driver of this kind talks to its engine.
+    pub fn family(self) -> EngineFamily {
         match self {
-            DbKind::MySql => SqlKind::MySql,
-            DbKind::Postgres => SqlKind::Postgres,
+            DbKind::MySql | DbKind::Postgres => EngineFamily::Sql,
+            DbKind::Mongo | DbKind::Redis => EngineFamily::Command,
         }
+    }
+
+    /// The engine's display name, used in messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            DbKind::MySql => "MySQL",
+            DbKind::Postgres => "PostgreSQL",
+            DbKind::Mongo => "MongoDB",
+            DbKind::Redis => "Redis",
+        }
+    }
+
+    /// The SQL dialect of this kind, if it is a SQL engine.
+    pub fn sql(self) -> Option<SqlKind> {
+        match self {
+            DbKind::MySql => Some(SqlKind::MySql),
+            DbKind::Postgres => Some(SqlKind::Postgres),
+            DbKind::Mongo | DbKind::Redis => None,
+        }
+    }
+
+    /// The SQL dialect of this kind, or `Unsupported` for a non-SQL engine.
+    pub fn require_sql(self) -> Result<SqlKind, DbError> {
+        self.sql().ok_or_else(|| DbError::Unsupported {
+            feature: format!("SQL on {}", self.label()),
+            version: String::new(),
+        })
     }
 }
 
@@ -44,6 +72,8 @@ pub enum ServerVariant {
     MySql8,
     MariaDb,
     Postgres,
+    Mongo,
+    Redis,
 }
 
 /// How a driver talks to its engine.
@@ -148,6 +178,33 @@ impl Capabilities {
         match kind {
             DbKind::MySql => Capabilities::sql_full(NamespaceModel::Db),
             DbKind::Postgres => Capabilities::sql_full(NamespaceModel::DbSchema),
+            DbKind::Mongo => Capabilities {
+                data_edit: true,
+                ..Capabilities::command(NamespaceModel::Db)
+            },
+            DbKind::Redis => Capabilities {
+                data_edit: true,
+                paged_objects: true,
+                ..Capabilities::command(NamespaceModel::NumberedDb)
+            },
+        }
+    }
+
+    /// A command engine with every flag off.
+    fn command(namespaces: NamespaceModel) -> Capabilities {
+        Capabilities {
+            family: EngineFamily::Command,
+            namespaces,
+            transactions: false,
+            data_edit: false,
+            designer: false,
+            ddl_edit: false,
+            object_actions: false,
+            import: false,
+            dump: false,
+            seed: false,
+            explain: false,
+            paged_objects: false,
         }
     }
 
@@ -295,7 +352,10 @@ impl MySqlCapabilities {
                 invisible_columns: v >= (10, 3, 3),
                 system_versioned: true,
             },
-            ServerVariant::MySql57 | ServerVariant::Postgres => Self::default(),
+            ServerVariant::MySql57
+            | ServerVariant::Postgres
+            | ServerVariant::Mongo
+            | ServerVariant::Redis => Self::default(),
         }
     }
 }
@@ -385,8 +445,8 @@ mod tests {
         assert_eq!(serde_json::to_value(SqlKind::MySql).unwrap(), "mysql");
         assert_eq!(serde_json::to_value(SqlKind::Postgres).unwrap(), "postgres");
         assert_eq!(DbKind::from(SqlKind::Postgres), DbKind::Postgres);
-        assert_eq!(DbKind::MySql.as_sql(), SqlKind::MySql);
-        assert_eq!(DbKind::Postgres.as_sql(), SqlKind::Postgres);
+        assert_eq!(DbKind::MySql.sql(), Some(SqlKind::MySql));
+        assert_eq!(DbKind::Postgres.sql(), Some(SqlKind::Postgres));
     }
 
     #[test]
@@ -424,6 +484,31 @@ mod tests {
             (j["family"].as_str(), j["namespaces"].as_str()),
             (Some("sql"), Some("db_schema"))
         );
+    }
+
+    #[test]
+    fn new_kinds() {
+        for (k, s) in [(DbKind::Mongo, "mongo"), (DbKind::Redis, "redis")] {
+            assert_eq!(serde_json::to_value(k).unwrap(), s);
+            assert_eq!(serde_json::from_value::<DbKind>(s.into()).unwrap(), k);
+            assert_eq!((k.family(), k.sql()), (EngineFamily::Command, None));
+        }
+        assert_eq!(DbKind::Postgres.require_sql().unwrap(), SqlKind::Postgres);
+        assert!(matches!(DbKind::Mongo.require_sql(),
+            Err(DbError::Unsupported { feature, .. }) if feature == "SQL on MongoDB"));
+        assert_eq!(
+            [
+                DbKind::MySql,
+                DbKind::Postgres,
+                DbKind::Mongo,
+                DbKind::Redis
+            ]
+            .map(DbKind::label),
+            ["MySQL", "PostgreSQL", "MongoDB", "Redis"]
+        );
+        let r = Capabilities::for_kind(DbKind::Redis);
+        assert!(r.paged_objects && r.data_edit && !r.designer && !r.transactions);
+        assert_eq!(r.namespaces, NamespaceModel::NumberedDb);
     }
 
     #[test]

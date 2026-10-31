@@ -792,12 +792,12 @@ async fn prepare_warnings_by_kind() {
         let triggers = "The table has triggers: the job runs without one transaction (each batch \
                         commits on its own).";
         let has = |w: &str| warnings.iter().any(|x| x == w);
-        match kind {
-            DbKind::MySql => {
+        match kind.require_sql().unwrap() {
+            SqlKind::MySql => {
                 assert!(has(triggers), "{warnings:?}");
                 assert!(has("TRUNCATE commits at once and resets AUTO_INCREMENT."));
             }
-            DbKind::Postgres => {
+            SqlKind::Postgres => {
                 assert!(!has(triggers), "{warnings:?}");
                 assert!(has(
                     "TRUNCATE also empties the tables that inherit from this one and fires ON \
@@ -824,9 +824,9 @@ async fn no_generated_column_by_kind() {
             c.generator = Generator::Skip;
         }
         let result = fx.sm.seed_prepare(req).await;
-        match kind {
-            DbKind::MySql => assert!(result.is_ok(), "{result:?}"),
-            DbKind::Postgres => assert!(
+        match kind.require_sql().unwrap() {
+            SqlKind::MySql => assert!(result.is_ok(), "{result:?}"),
+            SqlKind::Postgres => assert!(
                 matches!(&result, Err(DbError::Config { field: Some(f), message }) if f == "columns" && message == "Choose a generator for at least one column."),
                 "{result:?}"
             ),

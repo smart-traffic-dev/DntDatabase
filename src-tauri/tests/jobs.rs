@@ -331,7 +331,7 @@ mod tracked_exports {
         TableDetail,
     };
     use dnt_core::secret::SecretStore;
-    use dnt_core::server::{detect_mysql, DbKind, ServerInfo};
+    use dnt_core::server::{detect_mysql, DbKind, ServerInfo, SqlKind};
     use dnt_core::sql::{Dialect, StatementKind};
     use dnt_core::test_util::sample_config;
     use dnt_core::tx::TxState;
@@ -480,7 +480,7 @@ mod tracked_exports {
             TxState::Idle
         }
         fn dialect(&self) -> Dialect {
-            Dialect::for_kind(DbKind::MySql.as_sql())
+            Dialect::for_kind(SqlKind::MySql)
         }
     }
 

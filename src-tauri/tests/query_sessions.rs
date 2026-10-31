@@ -12,7 +12,7 @@ use dnt_core::meta::{
     TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
-use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
+use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo, SqlKind};
 use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
@@ -120,9 +120,9 @@ impl Driver for FakeDriver {
             self.log.entered.notify_one();
             gate.notified().await;
         }
-        let info = match self.kind {
-            DbKind::MySql => detect_mysql("8.0.36").unwrap(),
-            DbKind::Postgres => detect_pg(170002, "PostgreSQL 17.2"),
+        let info = match self.kind.require_sql()? {
+            SqlKind::MySql => detect_mysql("8.0.36").unwrap(),
+            SqlKind::Postgres => detect_pg(170002, "PostgreSQL 17.2"),
         };
         Ok(Box::new(FakeSession {
             info,
@@ -488,7 +488,7 @@ impl SqlSession for FakeSession {
         self.log.tx.lock().unwrap().unwrap_or(TxState::Idle)
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.info.kind.as_sql())
+        Dialect::for_kind(self.info.kind.require_sql().unwrap())
     }
 }
 

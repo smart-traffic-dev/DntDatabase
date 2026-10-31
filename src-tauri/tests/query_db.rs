@@ -7,7 +7,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::error::DbError;
 use dnt_core::secret::MemorySecretStore;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -203,9 +203,9 @@ async fn stop_sleep_under_one_second() {
     let state = state_in(dir.path());
     for t in Target::all() {
         let id = open(&state, t, false).await;
-        let sql = match t.kind() {
-            DbKind::MySql => "SELECT SLEEP(10)",
-            DbKind::Postgres => "SELECT pg_sleep(10)",
+        let sql = match t.sql_kind() {
+            SqlKind::MySql => "SELECT SLEEP(10)",
+            SqlKind::Postgres => "SELECT pg_sleep(10)",
         };
         let view = state
             .sessions
@@ -273,9 +273,9 @@ async fn read_only_connection_blocks_and_server_blocks() {
         state.sessions.close(id).await;
 
         // The server refuses it too: the session itself is read-only.
-        let driver: Box<dyn Driver> = match t.kind() {
-            DbKind::MySql => Box::new(MySqlDriver),
-            DbKind::Postgres => Box::new(PgDriver),
+        let driver: Box<dyn Driver> = match t.sql_kind() {
+            SqlKind::MySql => Box::new(MySqlDriver),
+            SqlKind::Postgres => Box::new(PgDriver),
         };
         let mut cfg = t.resolved(Some(FIXTURE_DB));
         cfg.read_only = true;
@@ -286,14 +286,14 @@ async fn read_only_connection_blocks_and_server_blocks() {
             .execute_one(insert, kind, &ExecOptions::default(), &mut Discard)
             .await
             .unwrap_err();
-        match (t.kind(), &err) {
-            (DbKind::Postgres, DbError::Server { sqlstate, .. }) => {
+        match (t.sql_kind(), &err) {
+            (SqlKind::Postgres, DbError::Server { sqlstate, .. }) => {
                 assert_eq!(sqlstate.as_deref(), Some("25006"), "{t:?}")
             }
-            (DbKind::MySql, DbError::Server { code, .. }) => {
+            (SqlKind::MySql, DbError::Server { code, .. }) => {
                 assert_eq!(code.as_deref(), Some("1792"), "{t:?}")
             }
-            _ => panic!("{t:?}: {err:?}"),
+            (SqlKind::MySql | SqlKind::Postgres, _) => panic!("{t:?}: {err:?}"),
         }
         session.close().await;
     }
@@ -332,13 +332,13 @@ async fn redacted_history_and_logs() {
 
     for t in Target::all() {
         let id = open(&state, t, false).await;
-        let script = match t.kind() {
-            DbKind::MySql => format!(
+        let script = match t.sql_kind() {
+            SqlKind::MySql => format!(
                 "DROP USER IF EXISTS 'p2_redact'@'%';\n\
                  CREATE USER 'p2_redact'@'%' IDENTIFIED BY '{LITERAL}';\n\
                  DROP USER 'p2_redact'@'%'"
             ),
-            DbKind::Postgres => format!(
+            SqlKind::Postgres => format!(
                 "DROP ROLE IF EXISTS p2_redact;\n\
                  CREATE ROLE p2_redact LOGIN PASSWORD '{LITERAL}';\n\
                  DROP ROLE p2_redact"
@@ -457,9 +457,9 @@ async fn estimate_on_staging_delete() {
         state.sessions.open(id, None).await.unwrap();
         let table = format!("p3_estimate_{}", &Uuid::new_v4().simple().to_string()[..8]);
         let values: Vec<String> = (1..=300).map(|i| format!("({i})")).collect();
-        let analyze = match t.kind() {
-            DbKind::MySql => format!("ANALYZE TABLE {table}"),
-            DbKind::Postgres => format!("ANALYZE {table}"),
+        let analyze = match t.sql_kind() {
+            SqlKind::MySql => format!("ANALYZE TABLE {table}"),
+            SqlKind::Postgres => format!("ANALYZE {table}"),
         };
         let setup = format!(
             "CREATE TABLE {table} (id INT PRIMARY KEY);\n\
@@ -732,9 +732,9 @@ async fn stored_results_are_exact_in_copy_and_export() {
         .collect();
     for t in Target::all() {
         let id = open(&state, t, false).await;
-        let sql = match t.kind() {
-            DbKind::MySql => "SELECT REPEAT('ab', 70000) AS t, UNHEX(REPEAT('00FF', 70000)) AS b",
-            DbKind::Postgres => {
+        let sql = match t.sql_kind() {
+            SqlKind::MySql => "SELECT REPEAT('ab', 70000) AS t, UNHEX(REPEAT('00FF', 70000)) AS b",
+            SqlKind::Postgres => {
                 "SELECT repeat('ab', 70000) AS t, decode(repeat('00ff', 70000), 'hex') AS b"
             }
         };

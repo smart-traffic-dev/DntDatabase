@@ -6,7 +6,7 @@ import { EDITOR_MIN_PX, EDITOR_RATIO_DEFAULT, RESULT_MIN_PX, editorPixels, resul
 import { emptyRun, useQueryRun, type TabRun } from '../../store/queryRun';
 import { useQueryDocs } from '../../store/queryTabs';
 import { useTabs, type QueryTabRef } from '../../store/tabs';
-import type { Engine } from '../../query/engine';
+import { sqlEngine, type Engine } from '../../query/engine';
 import { useEditorMarks, type EditorLike, type MonacoLike } from './editorMarks';
 import { ResultPanel } from './ResultPanel';
 import { SqlEditor, type SqlEditorProps } from './SqlEditor';
@@ -52,7 +52,7 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   const run = useQueryRun((s) => s.runs.get(tab.id) ?? emptyRun);
   const [mounted, setMounted] = useState<{ editor: EditorLike; monaco: MonacoLike } | null>(null);
   const onMount = useCallback<NonNullable<SqlEditorProps['onMount']>>((editor, monaco) => setMounted({ editor, monaco }), []);
-  const engine = kind ?? toolbarDoc?.dialect ?? 'mysql';
+  const engine = sqlEngine(kind) ?? toolbarDoc?.dialect ?? 'mysql';
   useEditorMarks(mounted, engine, run);
   // The editor / results split: a fraction of the measured body height (not subscribed to the text).
   // Visibility, split and maximize belong to the editor group the tab sits in.

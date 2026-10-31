@@ -3,7 +3,7 @@ use dnt_core::driver::{
     Session, SqlSession, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{literal, BuildError, ColumnTarget};
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::{classify, Dialect, MySqlMode, StatementKind};
@@ -1930,7 +1930,7 @@ async fn literal_round_trip_all_types() {
     for t in Target::mysql_family() {
         let s = connect(t).await;
         let table = quote_ident(
-            DbKind::MySql.as_sql(),
+            SqlKind::MySql,
             &format!("p3_lit_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
         );
         run(&s, &format!("CREATE TABLE {table} LIKE all_types"))

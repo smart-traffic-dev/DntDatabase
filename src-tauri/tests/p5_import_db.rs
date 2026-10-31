@@ -13,7 +13,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{CellMode, Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::build::{insert_sql_with, ColumnTarget, InsertOptions, TableRef};
 use dnt_core::sql::{classify, split};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
@@ -65,9 +65,9 @@ impl RowSink for Collect {
 }
 
 async fn connect(t: Target) -> Result<Box<dyn Session>, DbError> {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     driver.connect(&t.resolved(Some(FIXTURE_DB))).await
 }
@@ -147,9 +147,9 @@ struct Scope {
 }
 
 fn drop_sql(t: Target, name: &str) -> String {
-    match t.kind() {
-        DbKind::MySql => format!("DROP DATABASE IF EXISTS {name}"),
-        DbKind::Postgres => format!("DROP SCHEMA IF EXISTS {name} CASCADE"),
+    match t.sql_kind() {
+        SqlKind::MySql => format!("DROP DATABASE IF EXISTS {name}"),
+        SqlKind::Postgres => format!("DROP SCHEMA IF EXISTS {name} CASCADE"),
     }
 }
 
@@ -157,24 +157,24 @@ impl Scope {
     async fn create(t: Target, tag: &str) -> Scope {
         let name = format!("p5_import_{tag}");
         assert!(name.starts_with("p5_"));
-        let create = match t.kind() {
-            DbKind::MySql => format!("CREATE DATABASE {name} CHARACTER SET utf8mb4"),
-            DbKind::Postgres => format!("CREATE SCHEMA {name}"),
+        let create = match t.sql_kind() {
+            SqlKind::MySql => format!("CREATE DATABASE {name} CHARACTER SET utf8mb4"),
+            SqlKind::Postgres => format!("CREATE SCHEMA {name}"),
         };
         run(t, &format!("{};\n{create}", drop_sql(t, &name))).await;
         Scope { t, name }
     }
 
     fn table(&self, name: &str) -> TableRef {
-        match self.t.kind() {
-            DbKind::MySql => TableRef {
-                kind: DbKind::MySql.as_sql(),
+        match self.t.sql_kind() {
+            SqlKind::MySql => TableRef {
+                kind: SqlKind::MySql,
                 database: self.name.clone(),
                 schema: None,
                 name: name.into(),
             },
-            DbKind::Postgres => TableRef {
-                kind: DbKind::Postgres.as_sql(),
+            SqlKind::Postgres => TableRef {
+                kind: SqlKind::Postgres,
                 database: FIXTURE_DB.into(),
                 schema: Some(self.name.clone()),
                 name: name.into(),
@@ -958,9 +958,9 @@ async fn blob_10mib_round_trip() {
     for t in Target::all() {
         let _packet = PacketGuard::raise(t).await;
         let env = Env::new(t, "blob").await;
-        let blob_type = match t.kind() {
-            DbKind::MySql => "LONGBLOB",
-            DbKind::Postgres => "bytea",
+        let blob_type = match t.sql_kind() {
+            SqlKind::MySql => "LONGBLOB",
+            SqlKind::Postgres => "bytea",
         };
         let (src, dst) = (env.scope.rel("p5_blob"), env.scope.rel("p5_blob_copy"));
         run(

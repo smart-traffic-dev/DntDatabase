@@ -73,6 +73,15 @@ describe('ConnectionDialog', () => {
     expect(screen.getByText('Default: 5432')).toHaveAttribute('title', 'PostgreSQL default: 5432');
   });
 
+  it('engine picker offers only SQL engines', () => {
+    mockBackend({});
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    expect(screen.getByTestId('conn-engine-mysql')).toBeInTheDocument();
+    expect(screen.getByTestId('conn-engine-postgres')).toBeInTheDocument();
+    expect(screen.queryByTestId('conn-engine-mongo')).toBeNull();
+    expect(screen.queryByTestId('conn-engine-redis')).toBeNull();
+  });
+
   it('withEngine swaps only the values still at the old default', () => {
     const f = { engine: 'mysql' as const, port: '3306', portTouched: false, username: 'root' };
     expect(withEngine(f, 'postgres')).toMatchObject({ engine: 'postgres', port: '5432', username: 'postgres' });

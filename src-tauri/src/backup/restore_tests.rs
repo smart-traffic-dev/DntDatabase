@@ -161,9 +161,9 @@ impl SqlSession for FakeSession {
         *self.tx.lock().unwrap()
     }
     fn dialect(&self) -> Dialect {
-        match self.fake.server.kind {
-            DbKind::MySql => Dialect::MySql(*self.fake.mode.lock().unwrap()),
-            DbKind::Postgres => Dialect::Postgres,
+        match self.fake.server.kind.require_sql().unwrap() {
+            SqlKind::MySql => Dialect::MySql(*self.fake.mode.lock().unwrap()),
+            SqlKind::Postgres => Dialect::Postgres,
         }
     }
 }
@@ -334,9 +334,9 @@ struct Fx {
 }
 
 async fn fixture(kind: DbKind, env: Option<EnvTag>, read_only: bool, tools: &[Tool]) -> Fx {
-    let server = match kind {
-        DbKind::MySql => ServerInfo::new(kind, ServerVariant::MySql8, (8, 0, 36), "8.0.36"),
-        DbKind::Postgres => ServerInfo::new(kind, ServerVariant::Postgres, (17, 0, 0), "17.0"),
+    let server = match kind.require_sql().unwrap() {
+        SqlKind::MySql => ServerInfo::new(kind, ServerVariant::MySql8, (8, 0, 36), "8.0.36"),
+        SqlKind::Postgres => ServerInfo::new(kind, ServerVariant::Postgres, (17, 0, 0), "17.0"),
     };
     let fake = Arc::new(Fake {
         server,

@@ -1,7 +1,8 @@
 //! A draft built from introspection, and the draft of a new table.
 
 use crate::model::*;
-use crate::types::parse_type;
+use crate::types::parse_type_of;
+use dnt_core::error::DbError;
 use dnt_core::meta::{
     CheckDetail, ColumnDetail, ForeignKeyDetail, IdentityKind, IndexDetail, IndexPart, TableDetail,
     TableOptions,
@@ -22,18 +23,25 @@ use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 /// (`read_only_reason`) when partitioned, system-versioned, a PostgreSQL partition or
 /// an inheriting table. Task 9's fidelity check locks whatever else differs from the
 /// server's DDL.
-pub fn from_detail(detail: &TableDetail, server: &ServerInfo) -> TableDef {
+///
+/// `Unsupported` for a non-SQL server.
+pub fn from_detail(detail: &TableDetail, server: &ServerInfo) -> Result<TableDef, DbError> {
+    let kind = server.kind.require_sql()?;
     let opts = &detail.options;
-    TableDef {
+    Ok(TableDef {
         original_name: Some(detail.object.name.clone()),
         name: detail.object.name.clone(),
         columns: detail
             .columns
             .iter()
-            .map(|c| column(c, opts, server))
+            .map(|c| column(c, opts, kind, server))
             .collect(),
-        primary_key: detail.primary_key.as_ref().map(|i| primary_key(i, server)),
-        indexes: detail.indexes.iter().map(|i| index(i, server)).collect(),
+        primary_key: detail.primary_key.as_ref().map(|i| primary_key(i, kind)),
+        indexes: detail
+            .indexes
+            .iter()
+            .map(|i| index(i, kind, server))
+            .collect(),
         foreign_keys: detail.foreign_keys.iter().map(foreign_key).collect(),
         checks: detail.checks.iter().map(check).collect(),
         options: TableOptionsDef {
@@ -45,7 +53,7 @@ pub fn from_detail(detail: &TableDetail, server: &ServerInfo) -> TableDef {
         },
         comment: detail.comment.clone(),
         read_only_reason: read_only_reason(opts),
-    }
+    })
 }
 
 fn read_only_reason(o: &TableOptions) -> Option<String> {
@@ -71,9 +79,8 @@ fn unless_table(v: &Option<String>, table: &Option<String>) -> Option<String> {
     }
 }
 
-fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnDef {
-    let kind = server.kind.as_sql();
-    let mut data_type = parse_type(&c.db_type, server);
+fn column(c: &ColumnDetail, opts: &TableOptions, kind: SqlKind, server: &ServerInfo) -> ColumnDef {
+    let mut data_type = parse_type_of(&c.db_type, kind);
     // The driver already unescaped enum / set members: they are authoritative.
     if let TypeSpec::Known { values, .. } = &mut data_type {
         if !values.is_empty() && !c.enum_values.is_empty() {
@@ -95,7 +102,9 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
     let default = if generated.is_some() {
         None
     } else {
-        c.default.as_deref().and_then(|d| default_spec(d, server))
+        c.default
+            .as_deref()
+            .and_then(|d| default_spec(d, kind, server.variant))
     };
     // MySQL 8 spells quotes inside expression defaults as `\'` (T5-10): the text is
     // not valid SQL as given, so the column stays as the server has it.
@@ -130,7 +139,7 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
 
 /// A server-reported default as a value or an expression; `None` for an explicit
 /// `NULL` default.
-fn default_spec(d: &str, server: &ServerInfo) -> Option<DefaultSpec> {
+fn default_spec(d: &str, kind: SqlKind, variant: ServerVariant) -> Option<DefaultSpec> {
     let value = |text: String| Some(DefaultSpec::Value { text });
     let expression = || {
         Some(DefaultSpec::Expression {
@@ -140,7 +149,7 @@ fn default_spec(d: &str, server: &ServerInfo) -> Option<DefaultSpec> {
     if is_number(d) {
         return value(d.to_string());
     }
-    match (server.kind.as_sql(), server.variant) {
+    match (kind, variant) {
         // `COLUMN_DEFAULT` holds a literal unquoted; expressions are spelled as SQL.
         (SqlKind::MySql, ServerVariant::MySql57 | ServerVariant::MySql8) => {
             if is_mysql_default_expression(d) {
@@ -300,11 +309,11 @@ fn is_constraint_definition(d: &str) -> bool {
     d.starts_with("UNIQUE (") || d.starts_with("PRIMARY KEY (")
 }
 
-fn primary_key(i: &IndexDetail, server: &ServerInfo) -> KeyDef {
+fn primary_key(i: &IndexDetail, kind: SqlKind) -> KeyDef {
     let plain = parts(i).iter().all(|p| {
         p.column.is_some() && p.expression.is_none() && p.prefix.is_none() && !p.descending
     });
-    let unmodelled = match server.kind.as_sql() {
+    let unmodelled = match kind {
         SqlKind::MySql => {
             i.comment.as_deref().is_some_and(|c| !c.is_empty())
                 || i.method
@@ -326,11 +335,11 @@ fn primary_key(i: &IndexDetail, server: &ServerInfo) -> KeyDef {
     }
 }
 
-fn index(i: &IndexDetail, server: &ServerInfo) -> IndexDef {
+fn index(i: &IndexDetail, kind: SqlKind, server: &ServerInfo) -> IndexDef {
     let parts = parts(i);
     let definition = i.definition.as_deref().unwrap_or("");
     let constraint = is_constraint_definition(definition);
-    let unmodelled = match server.kind.as_sql() {
+    let unmodelled = match kind {
         SqlKind::MySql => false,
         SqlKind::Postgres => {
             (constraint && constraint_has_extra(definition))
@@ -394,8 +403,9 @@ fn check(c: &CheckDetail) -> CheckDef {
 
 /// The draft of a new table: one `id` column (MySQL `bigint unsigned AUTO_INCREMENT`,
 /// PostgreSQL `bigint GENERATED BY DEFAULT AS IDENTITY`) as the primary key.
-pub fn new_table(name: &str, server: &ServerInfo) -> TableDef {
-    let (unsigned, auto_increment, identity) = match server.kind.as_sql() {
+/// `Unsupported` for a non-SQL server.
+pub fn new_table(name: &str, server: &ServerInfo) -> Result<TableDef, DbError> {
+    let (unsigned, auto_increment, identity) = match server.kind.require_sql()? {
         SqlKind::MySql => (true, true, None),
         SqlKind::Postgres => (false, false, Some(IdentityKind::ByDefault)),
     };
@@ -422,7 +432,7 @@ pub fn new_table(name: &str, server: &ServerInfo) -> TableDef {
         generated: None,
         locked: false,
     };
-    TableDef {
+    Ok(TableDef {
         original_name: None,
         name: name.into(),
         columns: vec![id],
@@ -438,7 +448,7 @@ pub fn new_table(name: &str, server: &ServerInfo) -> TableDef {
         options: TableOptionsDef::default(),
         comment: None,
         read_only_reason: None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -583,7 +593,7 @@ mod tests {
     #[test]
     fn from_detail_marks_originals_and_locks() {
         let my = mysql8();
-        let def = from_detail(&mysql_orders(), &my);
+        let def = from_detail(&mysql_orders(), &my).unwrap();
         assert_eq!(def.original_name.as_deref(), Some("orders"));
         assert_eq!(def.name, "orders");
         assert_eq!(def.read_only_reason, None);
@@ -656,15 +666,19 @@ mod tests {
         );
 
         // An untouched draft (locked elements included) passes validation.
-        assert_eq!(crate::validate(&def, &my), vec![]);
+        assert_eq!(crate::validate(&def, &my).unwrap(), vec![]);
 
         // A partitioned table opens read-only.
         let mut partitioned = mysql_orders();
         partitioned.options.partitioned_by = Some("RANGE (id)".into());
-        assert!(from_detail(&partitioned, &my).read_only_reason.is_some());
+        assert!(from_detail(&partitioned, &my)
+            .unwrap()
+            .read_only_reason
+            .is_some());
         let mut versioned = mysql_orders();
         versioned.options.system_versioned = true;
         assert!(from_detail(&versioned, &mariadb())
+            .unwrap()
             .read_only_reason
             .is_some());
     }
@@ -764,7 +778,7 @@ mod tests {
             initially_deferred: true,
             ..Default::default()
         }];
-        let def = from_detail(&d, &pg);
+        let def = from_detail(&d, &pg).unwrap();
         let col = |n: &str| def.columns.iter().find(|c| c.name == n).unwrap();
         assert_eq!(col("id").identity, Some(IdentityKind::Always));
         assert!(!col("id").auto_increment);
@@ -810,14 +824,14 @@ mod tests {
         assert_eq!(fk.match_type.as_deref(), Some("FULL"));
         assert!(fk.deferrable && fk.initially_deferred);
 
-        assert_eq!(crate::validate(&def, &pg), vec![]);
+        assert_eq!(crate::validate(&def, &pg).unwrap(), vec![]);
 
         let mut child = d.clone();
         child.options.is_partition = true;
-        assert!(from_detail(&child, &pg).read_only_reason.is_some());
+        assert!(from_detail(&child, &pg).unwrap().read_only_reason.is_some());
         let mut heir = d.clone();
         heir.options.inherits = vec!["public.base".into()];
-        assert!(from_detail(&heir, &pg).read_only_reason.is_some());
+        assert!(from_detail(&heir, &pg).unwrap().read_only_reason.is_some());
     }
 
     #[test]
@@ -826,12 +840,13 @@ mod tests {
         let my = mysql8();
         let mut d = mysql_orders();
         d.primary_key.as_mut().unwrap().comment = Some("pk".into());
-        assert!(from_detail(&d, &my).primary_key.unwrap().locked);
+        assert!(from_detail(&d, &my).unwrap().primary_key.unwrap().locked);
         let mut d = mysql_orders();
         d.primary_key.as_mut().unwrap().method = Some("HASH".into());
-        assert!(from_detail(&d, &my).primary_key.unwrap().locked);
+        assert!(from_detail(&d, &my).unwrap().primary_key.unwrap().locked);
         assert!(
             !from_detail(&mysql_orders(), &my)
+                .unwrap()
                 .primary_key
                 .unwrap()
                 .locked
@@ -840,9 +855,9 @@ mod tests {
         // MariaDB IGNORED index.
         let mut d = mysql_orders();
         d.indexes[0].visible = false;
-        assert!(from_detail(&d, &mariadb()).indexes[0].locked);
+        assert!(from_detail(&d, &mariadb()).unwrap().indexes[0].locked);
         // MySQL 8 INVISIBLE is modelled.
-        assert!(!from_detail(&d, &my).indexes[0].locked);
+        assert!(!from_detail(&d, &my).unwrap().indexes[0].locked);
 
         // MySQL enum members with a backslash or NUL.
         for bad in ["a\\b", "a\0b"] {
@@ -850,7 +865,7 @@ mod tests {
                 enum_values: vec!["x".into(), bad.into()],
                 ..column("e", 1, "enum('x','y')")
             }]);
-            assert!(from_detail(&d, &my).columns[0].locked, "{bad:?}");
+            assert!(from_detail(&d, &my).unwrap().columns[0].locked, "{bad:?}");
         }
 
         // PostgreSQL constraints with clauses after the column list.
@@ -866,7 +881,7 @@ mod tests {
                 definition: Some(definition.into()),
                 ..Default::default()
             });
-            from_detail(&d, &pg).primary_key.unwrap().locked
+            from_detail(&d, &pg).unwrap().primary_key.unwrap().locked
         };
         assert!(!pk("PRIMARY KEY (id)"));
         assert!(!pk("PRIMARY KEY (\"a)b\")"));
@@ -885,7 +900,7 @@ mod tests {
                 definition: Some(definition.into()),
                 ..Default::default()
             }];
-            from_detail(&d, &pg).indexes[0].clone()
+            from_detail(&d, &pg).unwrap().indexes[0].clone()
         };
         let plain = uq("UNIQUE (a)", vec![]);
         assert!(plain.constraint && !plain.locked);
@@ -909,9 +924,9 @@ mod tests {
             definition: Some("CREATE UNIQUE INDEX t_a_idx ON public.t USING btree (a)".into()),
             ..Default::default()
         }];
-        assert!(from_detail(&d, &pg).indexes[0].locked);
+        assert!(from_detail(&d, &pg).unwrap().indexes[0].locked);
         d.indexes[0].unique = true;
-        assert!(!from_detail(&d, &pg).indexes[0].locked);
+        assert!(!from_detail(&d, &pg).unwrap().indexes[0].locked);
 
         // NOT VALID foreign key.
         let mut d = detail(vec![column("a", 1, "integer")]);
@@ -925,9 +940,9 @@ mod tests {
             definition: Some("FOREIGN KEY (a) REFERENCES u(id) NOT VALID".into()),
             ..Default::default()
         }];
-        assert!(from_detail(&d, &pg).foreign_keys[0].locked);
+        assert!(from_detail(&d, &pg).unwrap().foreign_keys[0].locked);
         d.foreign_keys[0].definition = Some("FOREIGN KEY (a) REFERENCES u(id)".into());
-        assert!(!from_detail(&d, &pg).foreign_keys[0].locked);
+        assert!(!from_detail(&d, &pg).unwrap().foreign_keys[0].locked);
 
         // A non-default tablespace (T9-1): primary key, constraint and plain indexes.
         let mut d = detail(vec![column("a", 1, "integer"), column("b", 2, "integer")]);
@@ -960,13 +975,17 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let def = from_detail(&d, &pg);
+        let def = from_detail(&d, &pg).unwrap();
         assert!(def.primary_key.unwrap().locked);
         assert!(def.indexes.iter().all(|i| i.locked));
         for i in &mut d.indexes {
             i.tablespace = None;
         }
-        assert!(from_detail(&d, &pg).indexes.iter().all(|i| !i.locked));
+        assert!(from_detail(&d, &pg)
+            .unwrap()
+            .indexes
+            .iter()
+            .all(|i| !i.locked));
     }
 
     #[test]
@@ -977,7 +996,7 @@ mod tests {
             default: Some("ARRAY[1, 2]".into()),
             ..column("tags", 1, "integer[]")
         }]);
-        let def = from_detail(&d, &pg);
+        let def = from_detail(&d, &pg).unwrap();
         assert_eq!(
             def.columns[0].default,
             Some(DefaultSpec::Expression {
@@ -985,7 +1004,7 @@ mod tests {
             })
         );
         assert!(!def.columns[0].locked);
-        assert_eq!(crate::validate(&def, &pg), vec![]);
+        assert_eq!(crate::validate(&def, &pg).unwrap(), vec![]);
 
         // MySQL 8 expression default with `\'`-escaped quotes: locked (T5-10).
         let my = mysql8();
@@ -999,10 +1018,10 @@ mod tests {
                 ..column("at", 2, "datetime")
             },
         ]);
-        let def = from_detail(&d, &my);
+        let def = from_detail(&d, &my).unwrap();
         assert!(def.columns[0].locked);
         assert!(!def.columns[1].locked);
-        assert_eq!(crate::validate(&def, &my), vec![]);
+        assert_eq!(crate::validate(&def, &my).unwrap(), vec![]);
     }
 
     /// The MySQL-only locks leave PostgreSQL alone, and the PostgreSQL-only index
@@ -1013,7 +1032,7 @@ mod tests {
             default: Some(r"E'a\'b'::text".into()),
             ..column("label", 1, "text")
         }]);
-        let def = from_detail(&d, &pg());
+        let def = from_detail(&d, &pg()).unwrap();
         assert_eq!(
             def.columns[0].default,
             Some(DefaultSpec::Expression {
@@ -1040,9 +1059,9 @@ mod tests {
                 ..Default::default()
             },
         ];
-        let my = from_detail(&d, &mysql8());
+        let my = from_detail(&d, &mysql8()).unwrap();
         assert!(my.indexes.iter().all(|i| !i.locked));
-        let p = from_detail(&d, &pg());
+        let p = from_detail(&d, &pg()).unwrap();
         assert!(p.indexes.iter().all(|i| i.locked));
     }
 
@@ -1063,7 +1082,7 @@ mod tests {
                 ..column("c", 3, "int(11)")
             },
         ]);
-        let def = from_detail(&d, &m);
+        let def = from_detail(&d, &m).unwrap();
         assert_eq!(
             def.columns[0].default,
             Some(DefaultSpec::Value {
@@ -1084,7 +1103,7 @@ mod tests {
 
     #[test]
     fn new_table_has_an_id_key() {
-        let my = new_table("t", &mysql8());
+        let my = new_table("t", &mysql8()).unwrap();
         assert_eq!(my.original_name, None);
         assert_eq!(my.name, "t");
         assert_eq!(my.columns.len(), 1);
@@ -1104,9 +1123,9 @@ mod tests {
         );
         assert!(id.auto_increment && !id.nullable && id.identity.is_none());
         assert_eq!(my.primary_key.as_ref().unwrap().columns, ["id"]);
-        assert!(crate::validate(&my, &mysql8()).is_empty());
+        assert!(crate::validate(&my, &mysql8()).unwrap().is_empty());
 
-        let p = new_table("t", &pg());
+        let p = new_table("t", &pg()).unwrap();
         let id = &p.columns[0];
         assert_eq!(id.identity, Some(IdentityKind::ByDefault));
         assert!(!id.auto_increment);
@@ -1121,6 +1140,6 @@ mod tests {
                 values: vec![],
             }
         );
-        assert!(crate::validate(&p, &pg()).is_empty());
+        assert!(crate::validate(&p, &pg()).unwrap().is_empty());
     }
 }

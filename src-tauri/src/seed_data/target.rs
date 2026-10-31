@@ -50,7 +50,7 @@ impl SessionManager {
     pub async fn seed_target(&self, conn: Uuid, table: ObjectRef) -> Result<SeedTarget, DbError> {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.sql()?, &table).await;

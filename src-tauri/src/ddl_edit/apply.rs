@@ -222,7 +222,7 @@ impl SessionManager {
             return Err(stopped());
         }
         progress("checking");
-        let engine = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let engine = stored.rt.cfg.kind.require_sql()?;
         let pg = match engine {
             SqlKind::MySql => false,
             SqlKind::Postgres => true,

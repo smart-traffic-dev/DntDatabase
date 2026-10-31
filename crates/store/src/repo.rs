@@ -736,6 +736,8 @@ impl ConnColumns {
             kind: match cfg.kind {
                 DbKind::MySql => "mysql",
                 DbKind::Postgres => "postgres",
+                DbKind::Mongo => "mongo",
+                DbKind::Redis => "redis",
             },
             env_tag: cfg.env_tag.map(|t| match t {
                 EnvTag::Production => "production",
@@ -810,6 +812,8 @@ impl RawConn {
         let kind = match self.kind.as_str() {
             "mysql" => DbKind::MySql,
             "postgres" => DbKind::Postgres,
+            "mongo" => DbKind::Mongo,
+            "redis" => DbKind::Redis,
             other => return Err(bad("kind", other)),
         };
         let env_tag = match self.env_tag.as_deref() {

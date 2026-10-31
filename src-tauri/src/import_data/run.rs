@@ -1155,7 +1155,7 @@ struct DryState {
 #[async_trait]
 impl JobRunner for DryRunJob {
     async fn run(self: Box<Self>, ctx: JobCtx) -> Result<JobDone, JobFailure> {
-        let kind = self.context.rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = self.context.rt.cfg.kind.require_sql()?;
         let (session, generation) = self
             .context
             .rt
@@ -1235,9 +1235,9 @@ impl DryRunJob {
         generation: u64,
         state: &mut DryState,
     ) -> Result<(), DbError> {
-        let kind = self.context.rt.cfg.kind.as_sql(); // R1: boundary
-                                                      // The session must reach the server the job was submitted for (the tunnel of
-                                                      // the submit time), or the server check writes elsewhere.
+        let kind = self.context.rt.cfg.kind.require_sql()?;
+        // The session must reach the server the job was submitted for (the tunnel of
+        // the submit time), or the server check writes elsewhere.
         if self.server_check && generation != self.context.generation {
             return Err(stale());
         }

@@ -1,4 +1,5 @@
 import type { ObjectKind, ObjectRef } from '../bindings';
+import { sqlEngine } from '../query/engine';
 import { useConnections } from '../store/connections';
 import { useDdlEdits } from '../store/ddlEdits';
 import { useQueryDocs } from '../store/queryTabs';
@@ -60,7 +61,7 @@ export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 
 export const isQueryable = (kind: ObjectKind | undefined) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
 
 const engineOf = (connectionId: string | null | undefined) =>
-  (connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined) ?? 'mysql';
+  sqlEngine(connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined) ?? 'mysql';
 
 /** Opens a new query tab on a table / view node, with its first 1000 rows selected. */
 export function openSelectTop(node: TreeNode): string {

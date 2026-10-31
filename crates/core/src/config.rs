@@ -132,6 +132,16 @@ pub struct ResolvedConfig {
 impl ConnectionConfig {
     /// Checks required fields; the error names the offending field (e.g. `ssh.key_path`).
     pub fn validate(&self) -> Result<(), DbError> {
+        match self.kind {
+            DbKind::MySql | DbKind::Postgres => self.validate_sql(),
+            DbKind::Mongo | DbKind::Redis => Err(DbError::Config {
+                field: Some("kind".into()),
+                message: format!("{} connections are not supported yet", self.kind.label()),
+            }),
+        }
+    }
+
+    fn validate_sql(&self) -> Result<(), DbError> {
         require(
             !self.name.trim().is_empty(),
             "name",
@@ -208,6 +218,16 @@ mod tests {
         });
         assert!(
             matches!(c.validate(), Err(DbError::Config { field: Some(f), .. }) if f == "ssh.key_path")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_kinds() {
+        let mut c = sample_config();
+        c.kind = DbKind::Redis;
+        assert!(
+            matches!(c.validate(), Err(DbError::Config { field: Some(f), message })
+            if f == "kind" && message == "Redis connections are not supported yet")
         );
     }
 

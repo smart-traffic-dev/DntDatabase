@@ -4,7 +4,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::secret::MemorySecretStore;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
 use dnt_driver_pg::PgDriver;
@@ -143,9 +143,9 @@ impl RowSink for NullSink {
 
 /// Runs each statement of `sqls` on a fresh admin session to `db` of `t`.
 async fn exec(t: Target, db: Option<&str>, sqls: &[&str]) {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(db)).await.unwrap();
     for sql in sqls {
@@ -161,8 +161,8 @@ async fn exec(t: Target, db: Option<&str>, sqls: &[&str]) {
 
 /// Creates database `db` (if missing) with table `table`, and drops `drop` there.
 async fn ensure_database(t: Target, db: &str, table: &str, drop: &str) {
-    match t.kind() {
-        DbKind::MySql => {
+    match t.sql_kind() {
+        SqlKind::MySql => {
             exec(
                 t,
                 None,
@@ -174,7 +174,7 @@ async fn ensure_database(t: Target, db: &str, table: &str, drop: &str) {
             )
             .await
         }
-        DbKind::Postgres => {
+        SqlKind::Postgres => {
             // No `CREATE DATABASE IF NOT EXISTS` on PostgreSQL: a failure because it
             // exists is fine.
             let driver = PgDriver;
@@ -279,9 +279,9 @@ async fn refresh_after_ddl_sees_new_table() {
 
         let before = completion_scope_impl(&state, id, db.into()).await.unwrap();
         assert!(!table_names(&before).contains(&"t_new"), "{t:?}");
-        let create = match t.kind() {
-            DbKind::MySql => format!("CREATE TABLE {db}.t_new (id int, note varchar(10))"),
-            DbKind::Postgres => "CREATE TABLE t_new (id int, note varchar(10))".to_string(),
+        let create = match t.sql_kind() {
+            SqlKind::MySql => format!("CREATE TABLE {db}.t_new (id int, note varchar(10))"),
+            SqlKind::Postgres => "CREATE TABLE t_new (id int, note varchar(10))".to_string(),
         };
         let at = (t.kind() == DbKind::Postgres).then_some(db);
         exec(t, at, &[&create]).await;

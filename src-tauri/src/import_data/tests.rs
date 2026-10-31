@@ -289,9 +289,9 @@ impl SqlSession for FakeSession {
         *self.tx.lock().unwrap()
     }
     fn dialect(&self) -> Dialect {
-        match self.fake.server.kind {
-            DbKind::MySql => Dialect::MySql(MySqlMode::default()),
-            DbKind::Postgres => Dialect::Postgres,
+        match self.fake.server.kind.require_sql().unwrap() {
+            SqlKind::MySql => Dialect::MySql(MySqlMode::default()),
+            SqlKind::Postgres => Dialect::Postgres,
         }
     }
 }
@@ -439,9 +439,9 @@ pub(crate) async fn fixture_detail(
     read_only: bool,
     plan_ttl: Option<Duration>,
 ) -> Fx {
-    let server = match kind {
-        DbKind::MySql => ServerInfo::new(kind, ServerVariant::MySql8, (8, 0, 36), "8.0.36"),
-        DbKind::Postgres => ServerInfo::new(kind, ServerVariant::Postgres, (17, 0, 0), "17.0"),
+    let server = match kind.require_sql().unwrap() {
+        SqlKind::MySql => ServerInfo::new(kind, ServerVariant::MySql8, (8, 0, 36), "8.0.36"),
+        SqlKind::Postgres => ServerInfo::new(kind, ServerVariant::Postgres, (17, 0, 0), "17.0"),
     };
     let fake = Arc::new(Fake {
         server,
@@ -710,9 +710,9 @@ fn assert_target_untouched(sent: &[String], target: &str) {
 async fn dry_run_never_writes_target() {
     for kind in [DbKind::Postgres, DbKind::MySql] {
         let fx = fixture(kind, Some("InnoDB"), None, false).await;
-        let target = match kind {
-            DbKind::Postgres => "\"public\".\"items\"",
-            DbKind::MySql => "`shop`.`items`",
+        let target = match kind.require_sql().unwrap() {
+            SqlKind::Postgres => "\"public\".\"items\"",
+            SqlKind::MySql => "`shop`.`items`",
         };
         for mode in [
             ImportMode::Append,
@@ -1925,8 +1925,8 @@ async fn prepare_warnings_by_kind() {
         let values = "MySQL 8.0.20 and later report VALUES() in ON DUPLICATE KEY UPDATE as \
                       deprecated (a warning); the import still works.";
         let has = |ws: &[String], w: &str| ws.iter().any(|x| x == w);
-        match kind {
-            DbKind::MySql => {
+        match kind.require_sql().unwrap() {
+            SqlKind::MySql => {
                 assert!(has(&truncate, triggers), "{truncate:?}");
                 assert!(has(
                     &truncate,
@@ -1934,7 +1934,7 @@ async fn prepare_warnings_by_kind() {
                 ));
                 assert!(has(&upsert, unique) && has(&upsert, values), "{upsert:?}");
             }
-            DbKind::Postgres => {
+            SqlKind::Postgres => {
                 assert!(!has(&truncate, triggers), "{truncate:?}");
                 assert!(has(
                     &truncate,

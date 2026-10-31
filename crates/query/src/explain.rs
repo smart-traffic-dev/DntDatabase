@@ -64,7 +64,7 @@ pub fn explain_sql(
                 .into(),
         });
     }
-    let (prefix, format) = match (info.kind.as_sql(), info.variant, analyze) {
+    let (prefix, format) = match (info.kind.require_sql()?, info.variant, analyze) {
         (SqlKind::Postgres, _, false) => ("EXPLAIN (FORMAT JSON)", ExplainFormat::PgJson),
         (SqlKind::Postgres, _, true) => (
             "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)",

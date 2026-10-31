@@ -225,12 +225,12 @@ impl SqlSession for FakeSession {
         *self.tx.lock().unwrap()
     }
     fn dialect(&self) -> Dialect {
-        match self.fake.server.kind {
-            DbKind::MySql => Dialect::MySql(MySqlMode {
+        match self.fake.server.kind.require_sql().unwrap() {
+            SqlKind::MySql => Dialect::MySql(MySqlMode {
                 ansi_quotes: self.fake.ansi(),
                 ..MySqlMode::default()
             }),
-            DbKind::Postgres => Dialect::Postgres,
+            SqlKind::Postgres => Dialect::Postgres,
         }
     }
 }
@@ -1141,7 +1141,8 @@ async fn mysql_family_counts_are_bounded_on_the_server() {
             Duration::from_millis(250),
             Duration::from_millis(50),
         )
-        .await;
+        .await
+        .unwrap();
         assert!(out[0].counted, "{variant}");
         let sent = fake.sent();
         let mut want = vec!["START TRANSACTION READ ONLY".to_string()];
@@ -1193,7 +1194,8 @@ async fn non_read_counts_never_run() {
         Duration::from_millis(100),
         Duration::from_millis(50),
     )
-    .await;
+    .await
+    .unwrap();
     assert!(!out[0].counted);
     assert!(!fake.sent().iter().any(|s| s.starts_with("DELETE")));
 }

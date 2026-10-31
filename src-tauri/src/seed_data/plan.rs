@@ -178,7 +178,7 @@ impl SessionManager {
     /// the request's plans.
     async fn seed_read(&self, req: SeedRequest) -> Result<Read, DbError> {
         let cfg = self.repo.get(req.connection_id)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let request = normalise(req, kind)?;
         let rt = self.runtime(request.connection_id)?;
         let (session, generation) = rt
@@ -397,7 +397,7 @@ impl SessionManager {
         if !confirm.confirmed || !name_ok || (irreversible && !confirm.irreversible_ack) {
             return Err(DbError::ConfirmationRequired { count: 1 });
         }
-        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = stored.rt.cfg.kind.require_sql()?;
         let (session, generation) = stored
             .rt
             .open_query_session(session_db(kind, &stored.request.table))

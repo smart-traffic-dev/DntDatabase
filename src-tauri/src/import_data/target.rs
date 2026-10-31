@@ -67,7 +67,7 @@ pub(crate) async fn read_target(
     session: &dyn SqlSession,
     obj: &ObjectRef,
 ) -> Result<TargetRead, DbError> {
-    let kind = session.server_info().kind.as_sql(); // R1: boundary
+    let kind = session.server_info().kind.require_sql()?;
     let detail = session.introspector().table_detail(obj).await?;
     if detail.columns.is_empty() {
         return Err(config_error("table", "The table has no columns."));
@@ -130,7 +130,7 @@ impl SessionManager {
     ) -> Result<ImportTarget, DbError> {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.sql()?, &table).await;

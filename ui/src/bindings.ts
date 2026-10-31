@@ -1754,7 +1754,7 @@ sample: string | null; warnings: string[]; confirm: ConfirmLevel;
  */
 irreversible_name: string | null; expires_in_seconds: number }
 export type DatabaseInfo = { name: string }
-export type DbKind = "mysql" | "postgres"
+export type DbKind = "mysql" | "postgres" | "mongo" | "redis"
 export type DdlEditOpen = { edit_id: string; text: string; target: EditTarget; object: ObjectRef | null; server: ServerInfo; env: EnvTag | null; read_only: boolean; strategies: Strategy[]; strategy: Strategy | null; 
 /**
  * The edit is not possible (read-only, overloads, DDL not shown).
@@ -2903,7 +2903,7 @@ transactional: boolean;
  */
 seed: number }
 export type ServerInfo = { kind: DbKind; variant: ServerVariant; version: [number, number, number]; version_string: string; capabilities: Capabilities }
-export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres"
+export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres" | "Mongo" | "Redis"
 /**
  * An entry of the import file that cannot be imported at all.
  */

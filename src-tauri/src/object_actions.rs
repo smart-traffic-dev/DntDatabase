@@ -83,7 +83,7 @@ fn object_missing(obj: &ObjectRef) -> DbError {
 /// Metadata is read on this operation's session, never from tree caches.
 async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<String, DbError> {
     let i = session.introspector();
-    let kind = session.server_info().kind.as_sql(); // R1: boundary
+    let kind = session.server_info().kind.require_sql()?;
     if let Some(obj) = action.object() {
         let scope = Scope {
             database: obj.database.clone(),
@@ -282,7 +282,7 @@ async fn namespace_options(session: &dyn SqlSession) -> Result<NamespaceOptions,
     let rows = |sql| rows_with(session, sql, ExecOptions::default());
     let pair = |r: &Vec<Option<String>>| Some((r.first()?.clone()?, r.get(1)?.clone()?));
     let mut out = NamespaceOptions::default();
-    let kind = session.server_info().kind.as_sql(); // R1: boundary
+    let kind = session.server_info().kind.require_sql()?;
     match kind {
         SqlKind::MySql => {
             out.charsets = rows(MYSQL_CHARSETS_SQL)
@@ -334,7 +334,7 @@ impl SessionManager {
         conn: Uuid,
         action: &ObjectAction,
     ) -> Result<String, DbError> {
-        action_sql(self.repo.get(conn)?.kind.as_sql(), action) // R1: boundary
+        action_sql(self.repo.get(conn)?.kind.require_sql()?, action)
     }
 
     /// Choices for the "Create database/schema" form, read on a dedicated session.
@@ -345,7 +345,7 @@ impl SessionManager {
     ) -> Result<NamespaceOptions, DbError> {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let db = namespace_options_db(cfg.kind.as_sql(), database); // R1: boundary
+        let db = namespace_options_db(cfg.kind.require_sql()?, database);
         let (session, _) = rt.open_query_session(db).await?;
         let out = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
             namespace_options(session.sql()?).await
@@ -364,7 +364,7 @@ impl SessionManager {
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let sql = action_sql(kind, &action)?;
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;
@@ -449,7 +449,7 @@ impl SessionManager {
             return Err(stopped());
         }
         progress("checking");
-        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = stored.rt.cfg.kind.require_sql()?;
         let db = action_session_db(kind, &stored.preview.action);
         let (session, generation) = stored.rt.open_query_session(db).await?;
         let sql = session.sql()?;

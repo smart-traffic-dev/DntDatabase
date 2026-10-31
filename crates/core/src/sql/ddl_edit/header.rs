@@ -248,7 +248,7 @@ pub fn check_target(h: &Header, t: &EditTarget, server: &ServerInfo) -> Result<(
             kind_label(t.kind)
         )));
     }
-    let kind = server.kind.as_sql();
+    let kind = server.kind.require_sql()?;
     let pg = match kind {
         SqlKind::MySql => false,
         SqlKind::Postgres => true,

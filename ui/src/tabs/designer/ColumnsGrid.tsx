@@ -1,5 +1,6 @@
 import { useEffect, useRef, type DragEvent, type KeyboardEvent } from 'react';
 import type { ColumnDef, DesignOpen, DraftError, ElementRef, TableDef, TypeSpec } from '../../bindings';
+import { sqlEngine } from '../../query/engine';
 import { DraftInput } from './DraftInput';
 import {
   baseText,
@@ -152,7 +153,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
           const inPk = !dropped && !!pk?.columns.includes(column.name);
           const isSelected = !dropped && selected === column.name;
           const set = (patch: Partial<ColumnDef>, key?: string) => index !== null && edit((d) => updateColumn(d, index, patch), key);
-          const retype = (spec: TypeSpec, key: string) => set(withType(column, spec, open.catalog, open.server.kind, row.base), key);
+          const retype = (spec: TypeSpec, key: string) => set(withType(column, spec, open.catalog, sqlEngine(open.server.kind) ?? 'mysql', row.base), key);
           const generated = generatedText(column);
           return (
             <div

@@ -26,7 +26,7 @@ pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ColumnBrief, ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::secret::{SecretKind, SecretStore};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{Capabilities, DbKind, NamespaceModel, ServerInfo};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::{KnownHosts, SshSecrets, Tunnel};
@@ -961,17 +961,21 @@ impl SessionManager {
     ) -> Result<Vec<CompletionObject>, DbError> {
         require_database(database)?;
         let kind = self.runtime(id)?.cfg.kind;
-        match (kind, schema) {
-            (DbKind::MySql, Some(_)) => {
+        match (Capabilities::for_kind(kind).namespaces, schema) {
+            (NamespaceModel::Db | NamespaceModel::NumberedDb, Some(_)) => {
                 return Err(config_error(
                     "schema",
-                    "MySQL has no schemas inside a database",
+                    &format!("{} has no schemas inside a database", kind.label()),
                 ))
             }
-            (DbKind::Postgres, None) => {
-                return Err(config_error("schema", "a schema is required on PostgreSQL"))
+            (NamespaceModel::DbSchema, None) => {
+                return Err(config_error(
+                    "schema",
+                    &format!("a schema is required on {}", kind.label()),
+                ))
             }
-            _ => {}
+            (NamespaceModel::Db | NamespaceModel::NumberedDb, None)
+            | (NamespaceModel::DbSchema, Some(_)) => {}
         }
         let kinds: &[ObjectKind] = match kind {
             DbKind::MySql => &[ObjectKind::Table, ObjectKind::View],
@@ -980,6 +984,7 @@ impl SessionManager {
                 ObjectKind::View,
                 ObjectKind::MaterializedView,
             ],
+            DbKind::Mongo | DbKind::Redis => &[],
         };
         let scope = Scope {
             database: database.to_string(),
@@ -1102,6 +1107,7 @@ impl ConnectionRuntime {
                     .clone()
                     .unwrap_or_else(|| cfg.username.clone()),
             ),
+            DbKind::Mongo | DbKind::Redis => None,
         };
         let metadata = HashMap::from([(home.clone(), opened.session)]);
         ConnectionRuntime {
@@ -1142,6 +1148,7 @@ impl ConnectionRuntime {
         match self.cfg.kind {
             DbKind::MySql => None,
             DbKind::Postgres => db.map(str::to_string).or_else(|| self.home.clone()),
+            DbKind::Mongo | DbKind::Redis => None,
         }
     }
 
@@ -1327,6 +1334,7 @@ impl ConnectionRuntime {
         match self.cfg.kind {
             DbKind::MySql => self.cfg.default_db.clone(),
             DbKind::Postgres => self.home.clone(),
+            DbKind::Mongo | DbKind::Redis => self.cfg.default_db.clone(),
         }
     }
 
@@ -1466,6 +1474,12 @@ impl ConnectionRuntime {
                 )
             }
             DbKind::MySql => (vec![None], &[ObjectKind::Table, ObjectKind::View]),
+            DbKind::Mongo | DbKind::Redis => {
+                return Err(DbError::Unsupported {
+                    feature: "schema cache".into(),
+                    version: String::new(),
+                })
+            }
         };
 
         // Per scope: one listing per object kind plus ONE bulk column query; never a

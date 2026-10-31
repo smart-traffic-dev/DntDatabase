@@ -9,7 +9,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::meta::ObjectKind;
 use dnt_core::secret::MemorySecretStore;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::{classify, Dialect};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -40,9 +40,9 @@ impl RowSink for Collect {
 }
 
 async fn connect(t: Target, db: &str) -> Box<dyn Session> {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     driver.connect(&t.resolved(Some(db))).await.unwrap()
 }

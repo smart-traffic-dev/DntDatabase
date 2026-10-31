@@ -258,10 +258,15 @@ fn restore_invocation(
     .map_err(tool_error)
 }
 
-/// What the scan and the job check statements against.
-fn scan_target(database: &str, dialect: Dialect, server: &ServerInfo) -> ScanTarget {
-    let kind = server.kind.as_sql(); // R1: boundary
-    ScanTarget {
+/// What the scan and the job check statements against. `Unsupported` for a non-SQL
+/// server.
+fn scan_target(
+    database: &str,
+    dialect: Dialect,
+    server: &ServerInfo,
+) -> Result<ScanTarget, DbError> {
+    let kind = server.kind.require_sql()?;
+    Ok(ScanTarget {
         kind,
         database: database.to_string(),
         dialect,
@@ -272,7 +277,7 @@ fn scan_target(database: &str, dialect: Dialect, server: &ServerInfo) -> ScanTar
             }),
             SqlKind::Postgres => None,
         },
-    }
+    })
 }
 
 /// Collects a preview tool's stderr (never stopped).
@@ -426,8 +431,8 @@ impl SessionManager {
             .await?;
         let dialect = session.sql()?.dialect();
         close_quietly(session).await;
-        let kind = cfg.kind.as_sql(); // R1: boundary
-        let target = scan_target(&request.database, dialect, rt.server_info());
+        let kind = cfg.kind.require_sql()?;
+        let target = scan_target(&request.database, dialect, rt.server_info())?;
         let path = PathBuf::from(&request.path);
         let analysis = {
             let path = path.clone();
@@ -542,7 +547,7 @@ impl SessionManager {
             let (resolved, tunnelled) = rt.tool_endpoint(Some(request.database.clone())).await?;
             let inv = restore_invocation(
                 &info,
-                &ToolConn::from_resolved(&resolved, tunnelled),
+                &ToolConn::from_resolved(&resolved, tunnelled)?,
                 &request,
                 transactional,
                 Path::new(PREVIEW_PGPASS),
@@ -768,6 +773,7 @@ struct HistoryLine<'a> {
 }
 
 /// The job's one History entry (R10): a summary comment, never a statement of the file.
+/// `false` when nothing was saved (always for a non-SQL connection).
 async fn write_history(h: HistoryLine<'_>) -> bool {
     let text = format!(
         "-- Restore {} ({}) into {}: {}",
@@ -778,7 +784,9 @@ async fn write_history(h: HistoryLine<'_>) -> bool {
     )
     // One comment line: a database name with a line break must not end it early.
     .replace(['\r', '\n'], " ");
-    let kind = h.context.cfg.kind.as_sql(); // R1: boundary
+    let Ok(kind) = h.context.cfg.kind.require_sql() else {
+        return false;
+    };
     let d = match kind {
         SqlKind::MySql => Dialect::MySql(Default::default()),
         SqlKind::Postgres => Dialect::Postgres,
@@ -1207,7 +1215,7 @@ impl AppRestoreJob {
             &self.request.database,
             self.dialect,
             self.context.rt.server_info(),
-        );
+        )?;
         // The scan's prediction of the session dialect (R33): the job splits with it and
         // stops before sending when the session disagrees.
         let mut mode = ModeTracker::new(self.dialect, target.server);
@@ -1447,7 +1455,7 @@ impl ToolRestoreJob {
         let tmp = ctx.tmp_dir().map_err(JobFailure::from)?;
         let inv = restore_invocation(
             &self.info,
-            &ToolConn::from_resolved(&resolved, tunnelled),
+            &ToolConn::from_resolved(&resolved, tunnelled).map_err(JobFailure::from)?,
             &self.request,
             self.transactional,
             &tmp.join(PGPASS_FILE),

@@ -4,7 +4,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::meta::{ObjectKind, ObjectRef};
 use dnt_core::secret::MemorySecretStore;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::{
     classify,
     ddl::ObjectAction,
@@ -122,7 +122,7 @@ async fn namespace_relation_lifecycle_and_dependencies_on_every_server() {
         let ns = format!("p4a_{}", Uuid::new_v4().simple());
         let db = if pg { FIXTURE_DB } else { &ns };
         let schema = pg.then_some(ns.as_str());
-        let rel = |name: &str| qualified_name(target.kind().as_sql(), db, schema, name);
+        let rel = |name: &str| qualified_name(target.sql_kind(), db, schema, name);
         let obj = |name: &str, kind| ObjectRef {
             database: db.into(),
             schema: schema.map(str::to_string),
@@ -132,12 +132,12 @@ async fn namespace_relation_lifecycle_and_dependencies_on_every_server() {
         let cleanup = if pg {
             format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(target.kind().as_sql(), &ns)
+                quote_ident(target.sql_kind(), &ns)
             )
         } else {
             format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(target.kind().as_sql(), &ns)
+                quote_ident(target.sql_kind(), &ns)
             )
         };
         // Run assertions in a task: cleanup still runs after an assertion panic.
@@ -391,7 +391,7 @@ async fn mysql_create_database_from_the_tree_reports_no_error() {
             .connect(&target.resolved(Some(FIXTURE_DB)))
             .await
             .unwrap();
-        let q = quote_ident(DbKind::MySql.as_sql(), &name);
+        let q = quote_ident(SqlKind::MySql, &name);
         for stmt in [
             format!("CREATE TABLE {q}.t (id INT PRIMARY KEY, v INT)"),
             format!("CREATE TABLE {q}.u (id INT PRIMARY KEY)"),
@@ -474,7 +474,7 @@ async fn mysql_create_database_from_the_tree_reports_no_error() {
             session.as_ref(),
             &format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(DbKind::MySql.as_sql(), &name)
+                quote_ident(SqlKind::MySql, &name)
             ),
         )
         .await;
@@ -525,7 +525,7 @@ async fn stop_cancels_a_real_metadata_lock_wait_without_replaying_ddl() {
             kind: ObjectKind::Table,
         };
         let rel = qualified_name(
-            target.kind().as_sql(),
+            target.sql_kind(),
             FIXTURE_DB,
             object.schema.as_deref(),
             &object.name,
@@ -674,12 +674,7 @@ async fn a_dropped_target_is_reported_missing_at_preview_and_apply() {
         let pg = target.kind() == DbKind::Postgres;
         let schema = pg.then(|| "public".to_string());
         let table = format!("gone_{}", &Uuid::new_v4().simple().to_string()[..8]);
-        let rel = qualified_name(
-            target.kind().as_sql(),
-            FIXTURE_DB,
-            schema.as_deref(),
-            &table,
-        );
+        let rel = qualified_name(target.sql_kind(), FIXTURE_DB, schema.as_deref(), &table);
         let object = ObjectRef {
             database: FIXTURE_DB.into(),
             schema,

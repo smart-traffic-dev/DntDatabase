@@ -1,5 +1,6 @@
 import { useEffect, useId, useState, type KeyboardEvent } from 'react';
 import type { ElementRef, TableDef } from '../../bindings';
+import { sqlEngine } from '../../query/engine';
 import { useConnections } from '../../store/connections';
 import { useDialogs } from '../../store/dialogs';
 import { useQueryDocs } from '../../store/queryTabs';
@@ -281,7 +282,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
           ) : null}
           <SqlPreview statements={render?.statements ?? []} impacts={render?.impacts ?? []} error={render?.error}
             live
-            engine={open.server.kind}
+            engine={sqlEngine(open.server.kind)}
             onOpenInQuery={openInQuery}
           />
         </div>

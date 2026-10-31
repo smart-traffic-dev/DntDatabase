@@ -5,7 +5,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, EnvTag, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
 use dnt_driver_pg::PgDriver;
@@ -437,9 +437,9 @@ impl RowSink for NullSink {
 }
 
 async fn admin(t: Target, sql: &str) {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     session
@@ -660,9 +660,9 @@ async fn a_cancelled_export_leaves_no_file() {
             .unwrap()
             .subsec_nanos();
         let name = format!("dnt_exp_slow_{}_{nanos}", std::process::id());
-        let (qualified, body) = match t.kind() {
-            DbKind::MySql => (format!("`{FIXTURE_DB}`.`{name}`"), "SELECT SLEEP(8) AS s"),
-            DbKind::Postgres => (format!("public.{name}"), "SELECT 1 AS s FROM pg_sleep(8)"),
+        let (qualified, body) = match t.sql_kind() {
+            SqlKind::MySql => (format!("`{FIXTURE_DB}`.`{name}`"), "SELECT SLEEP(8) AS s"),
+            SqlKind::Postgres => (format!("public.{name}"), "SELECT 1 AS s FROM pg_sleep(8)"),
         };
         admin(t, &format!("CREATE VIEW {qualified} AS {body}")).await;
         let dir = tempfile::tempdir().unwrap();
@@ -712,14 +712,14 @@ async fn sql_exports_import_back_under_any_string_mode() {
     for t in [Target::MySql8, Target::Pg17] {
         let src = unique("dnt_rs");
         let dst = unique("dnt_rd");
-        let (create, rows, mode, same) = match t.kind() {
-            DbKind::MySql => (
+        let (create, rows, mode, same) = match t.sql_kind() {
+            SqlKind::MySql => (
                 "(id INT PRIMARY KEY, s TEXT, b BLOB)",
                 "(1, 'a\\\\b', X'00ff5c27'), (2, 'it''s', NULL), (3, CONCAT('nul', CHAR(0 USING utf8mb4), '\\\\'), X'')",
                 "SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'",
                 "a.s <=> b.s AND a.b <=> b.b",
             ),
-            DbKind::Postgres => (
+            SqlKind::Postgres => (
                 "(id INT PRIMARY KEY, s TEXT, b BYTEA, ba BYTEA[])",
                 "(1, E'a\\\\b', '\\x00ff5c27', ARRAY['\\x01'::bytea, NULL]), (2, 'it''s', NULL, NULL), (3, E'\\\\x', '\\x', '{}')",
                 "SET standard_conforming_strings = off",
@@ -727,9 +727,9 @@ async fn sql_exports_import_back_under_any_string_mode() {
                  AND a.ba IS NOT DISTINCT FROM b.ba",
             ),
         };
-        let q = |name: &str| match t.kind() {
-            DbKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
-            DbKind::Postgres => format!("public.{name}"),
+        let q = |name: &str| match t.sql_kind() {
+            SqlKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
+            SqlKind::Postgres => format!("public.{name}"),
         };
         admin(t, &format!("CREATE TABLE {} {create}", q(&src))).await;
         admin(t, &format!("CREATE TABLE {} {create}", q(&dst))).await;
@@ -799,9 +799,9 @@ async fn scalar(t: Target, sql: &str) -> Value {
         }
         fn result_end(&mut self, _summary: &ResultSummary) {}
     }
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     let mut first = First::default();
@@ -1005,9 +1005,9 @@ async fn query_export_is_a_cancellable_run_of_its_tab() {
         let dir = tempfile::tempdir().unwrap();
         let state = app_state(dir.path());
         let id = open_env(&state, t, None).await;
-        let slow = match t.kind() {
-            DbKind::MySql => "SELECT SLEEP(8) AS s",
-            DbKind::Postgres => "SELECT 1 AS s FROM pg_sleep(8)",
+        let slow = match t.sql_kind() {
+            SqlKind::MySql => "SELECT SLEEP(8) AS s",
+            SqlKind::Postgres => "SELECT 1 AS s FROM pg_sleep(8)",
         };
         let p = plan(&state, "slow", id, slow).await;
         let path = dir.path().join("slow.csv");

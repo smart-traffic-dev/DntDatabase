@@ -4,7 +4,7 @@
 //! before (if left over) and after the test.
 
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::build::{
     dump_literal, insert_sql_with, ColumnTarget, InsertOptions, OnConflict, TableRef,
 };
@@ -27,9 +27,9 @@ impl RowSink for Collect {
 }
 
 async fn connect(t: Target) -> Box<dyn Session> {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap()
 }
@@ -83,15 +83,15 @@ fn fv(v: Value) -> FullValue {
 }
 
 fn table(t: Target, name: &str) -> TableRef {
-    match t.kind() {
-        DbKind::MySql => TableRef {
-            kind: DbKind::MySql.as_sql(),
+    match t.sql_kind() {
+        SqlKind::MySql => TableRef {
+            kind: SqlKind::MySql,
             database: SCOPE.into(),
             schema: None,
             name: name.into(),
         },
-        DbKind::Postgres => TableRef {
-            kind: DbKind::Postgres.as_sql(),
+        SqlKind::Postgres => TableRef {
+            kind: SqlKind::Postgres,
             database: FIXTURE_DB.into(),
             schema: Some(SCOPE.into()),
             name: name.into(),
@@ -100,9 +100,9 @@ fn table(t: Target, name: &str) -> TableRef {
 }
 
 fn drop_scope(t: Target) -> String {
-    match t.kind() {
-        DbKind::MySql => format!("DROP DATABASE IF EXISTS {SCOPE}"),
-        DbKind::Postgres => format!("DROP SCHEMA IF EXISTS {SCOPE} CASCADE"),
+    match t.sql_kind() {
+        SqlKind::MySql => format!("DROP DATABASE IF EXISTS {SCOPE}"),
+        SqlKind::Postgres => format!("DROP SCHEMA IF EXISTS {SCOPE} CASCADE"),
     }
 }
 
@@ -313,15 +313,15 @@ async fn upsert_and_dump_literal_round_trip() {
         let s = connect(t).await;
         let d = s.sql().unwrap().dialect();
         exec(&*s, &drop_scope(t)).await;
-        match t.kind() {
-            DbKind::MySql => {
+        match t.sql_kind() {
+            SqlKind::MySql => {
                 exec(
                     &*s,
                     &format!("CREATE DATABASE {SCOPE} CHARACTER SET utf8mb4"),
                 )
                 .await
             }
-            DbKind::Postgres => exec(&*s, &format!("CREATE SCHEMA {SCOPE}")).await,
+            SqlKind::Postgres => exec(&*s, &format!("CREATE SCHEMA {SCOPE}")).await,
         }
         upsert_round_trip(t, &*s, d).await;
         if t.kind() == DbKind::Postgres {

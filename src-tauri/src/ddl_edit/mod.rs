@@ -266,7 +266,7 @@ pub(crate) async fn object_listed(
     t: &EditTarget,
     name: &str,
 ) -> Result<bool, DbError> {
-    let engine = session.server_info().kind.as_sql(); // R1: boundary
+    let engine = session.server_info().kind.require_sql()?;
     Ok(session
         .introspector()
         .list_objects(&scope_of(t), t.kind)
@@ -283,7 +283,7 @@ pub(crate) async fn name_taken(
 ) -> Result<bool, DbError> {
     let scope = scope_of(t);
     let i = session.introspector();
-    let engine = session.server_info().kind.as_sql(); // R1: boundary
+    let engine = session.server_info().kind.require_sql()?;
     for k in namespace_kinds(t.kind, engine) {
         if i.list_objects(&scope, k)
             .await?
@@ -362,7 +362,7 @@ impl SessionManager {
         table: Option<String>,
     ) -> Result<DdlEditOpen, DbError> {
         let cfg = self.repo.get(conn)?;
-        let engine = cfg.kind.as_sql(); // R1: boundary
+        let engine = cfg.kind.require_sql()?;
         match (engine, &scope.schema) {
             (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(
@@ -414,13 +414,15 @@ impl SessionManager {
                 (state.text, state.fingerprint, state.facts, state.blocked)
             }
             None => (
-                template(&target, &server),
+                template(&target, &server)?,
                 ABSENT.to_string(),
                 CatalogFacts::default(),
                 None,
             ),
         };
         let object = name.as_deref().map(|n| object_ref(&target, n));
+        let offered = strategies(&target, &server)?;
+        let notes = notes(&target, &server)?;
         let edit_id = Uuid::new_v4();
         {
             let mut edits = lock(&self.ddl_edits.edits);
@@ -446,7 +448,6 @@ impl SessionManager {
                 },
             );
         }
-        let offered = strategies(&target, &server);
         Ok(DdlEditOpen {
             edit_id,
             text,
@@ -456,7 +457,7 @@ impl SessionManager {
             strategy: offered.first().copied(),
             strategies: offered,
             blocked_reason: blocked.or_else(|| cfg.read_only.then(|| READ_ONLY.to_string())),
-            notes: notes(&target, &server),
+            notes,
             target,
             server,
         })
@@ -509,7 +510,10 @@ impl SessionManager {
         let strategy = if new {
             None
         } else {
-            strategy.or_else(|| strategies(&edit.target, &edit.server).first().copied())
+            match strategy {
+                Some(s) => Some(s),
+                None => strategies(&edit.target, &edit.server)?.first().copied(),
+            }
         };
         let rehearsal = rehearsal_name();
         let built = build(&BuildInput {
@@ -544,7 +548,7 @@ impl SessionManager {
             confirm_name: confirm_name(cfg.env_tag, built.gap, &name),
             expires_in_seconds: self.plan_ttl.as_secs().min(u32::MAX as u64) as u32,
         };
-        let engine = edit.server.kind.as_sql(); // R1: boundary
+        let engine = edit.server.kind.require_sql()?;
         let rehearsed = match engine {
             SqlKind::MySql => {
                 built.gap && matches!(target.kind, ObjectKind::Function | ObjectKind::Procedure)

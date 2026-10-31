@@ -4,7 +4,7 @@ use dnt_core::config::{ConnOptions, ConnectionConfig, SecretMode};
 use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::sql::classify;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mysql::MySqlDriver;
@@ -148,9 +148,9 @@ impl RowSink for NullSink {
 
 /// Runs `sql` on a fresh admin session to the fixture database of `t`.
 async fn admin(t: Target, sql: &str) {
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     session
@@ -176,27 +176,27 @@ impl TempView {
             .unwrap()
             .subsec_nanos();
         let name = format!("dnt_k4_{tag}_{}_{nanos}", std::process::id());
-        let qualified = match t.kind() {
-            DbKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
-            DbKind::Postgres => format!("public.{name}"),
+        let qualified = match t.sql_kind() {
+            SqlKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
+            SqlKind::Postgres => format!("public.{name}"),
         };
         admin(t, &format!("CREATE VIEW {qualified} AS {body}")).await;
         TempView { t, name }
     }
 
     async fn drop_it(self) {
-        let qualified = match self.t.kind() {
-            DbKind::MySql => format!("`{FIXTURE_DB}`.`{}`", self.name),
-            DbKind::Postgres => format!("public.{}", self.name),
+        let qualified = match self.t.sql_kind() {
+            SqlKind::MySql => format!("`{FIXTURE_DB}`.`{}`", self.name),
+            SqlKind::Postgres => format!("public.{}", self.name),
         };
         admin(self.t, &format!("DROP VIEW {qualified}")).await;
     }
 }
 
 fn sleep_body(t: Target, secs: u32) -> String {
-    match t.kind() {
-        DbKind::MySql => format!("SELECT SLEEP({secs}) AS s"),
-        DbKind::Postgres => format!("SELECT 1 AS s FROM pg_sleep({secs})"),
+    match t.sql_kind() {
+        SqlKind::MySql => format!("SELECT SLEEP({secs}) AS s"),
+        SqlKind::Postgres => format!("SELECT 1 AS s FROM pg_sleep({secs})"),
     }
 }
 
@@ -441,9 +441,9 @@ async fn data_reads_time_out() {
 async fn long_cells_are_truncated() {
     require_db!();
     for t in [Target::MySql8, Target::Pg17] {
-        let body = match t.kind() {
-            DbKind::MySql => "SELECT REPEAT('x', 1048576) AS t, 1 AS n",
-            DbKind::Postgres => "SELECT repeat('x', 1048576) AS t, 1 AS n",
+        let body = match t.sql_kind() {
+            SqlKind::MySql => "SELECT REPEAT('x', 1048576) AS t, 1 AS n",
+            SqlKind::Postgres => "SELECT repeat('x', 1048576) AS t, 1 AS n",
         };
         let big = TempView::create(t, "big", body).await;
         let dir = tempfile::tempdir().unwrap();
@@ -538,9 +538,9 @@ async fn reads_outside_a_tab_transaction() {
         let dir = tempfile::tempdir().unwrap();
         let state = app_state(dir.path());
         let id = open(&state, t, false).await;
-        let table = match t.kind() {
-            DbKind::MySql => "`dnt_fixture`.`weird_names`",
-            DbKind::Postgres => "public.weird_names",
+        let table = match t.sql_kind() {
+            SqlKind::MySql => "`dnt_fixture`.`weird_names`",
+            SqlKind::Postgres => "public.weird_names",
         };
         run_on_tab(
             &state,
@@ -569,9 +569,9 @@ fn uuid8() -> String {
 
 /// `name` qualified for an admin statement on `t`.
 fn scratch(t: Target, name: &str) -> String {
-    match t.kind() {
-        DbKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
-        DbKind::Postgres => format!("public.\"{name}\""),
+    match t.sql_kind() {
+        SqlKind::MySql => format!("`{FIXTURE_DB}`.`{name}`"),
+        SqlKind::Postgres => format!("public.\"{name}\""),
     }
 }
 
@@ -586,9 +586,9 @@ async fn admin_one(t: Target, sql: &str) -> Result<Vec<Vec<Value>>, DbError> {
         }
         fn result_end(&mut self, _summary: &ResultSummary) {}
     }
-    let driver: Box<dyn Driver> = match t.kind() {
-        DbKind::MySql => Box::new(MySqlDriver),
-        DbKind::Postgres => Box::new(PgDriver),
+    let driver: Box<dyn Driver> = match t.sql_kind() {
+        SqlKind::MySql => Box::new(MySqlDriver),
+        SqlKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     let s = session.sql().unwrap();
@@ -628,8 +628,8 @@ async fn raw_where_runs_read_only() {
         let log = format!("p3_log_{tag}");
         let func = format!("p3_write_{tag}");
         admin(t, &format!("CREATE TABLE {} (n INT)", scratch(t, &log))).await;
-        let created = match t.kind() {
-            DbKind::Postgres => {
+        let created = match t.sql_kind() {
+            SqlKind::Postgres => {
                 admin_one(
                     t,
                     &format!(
@@ -640,7 +640,7 @@ async fn raw_where_runs_read_only() {
                 )
                 .await
             }
-            DbKind::MySql => {
+            SqlKind::MySql => {
                 admin_one(
                     t,
                     &format!(
@@ -708,9 +708,9 @@ async fn raw_where_runs_read_only() {
         // The data session is usable afterwards (no transaction left open).
         filtered_page(&state, id, customers, None).await.unwrap();
         close_connection_impl(&state, id).await.unwrap();
-        let drop_fn = match t.kind() {
-            DbKind::Postgres => format!("DROP FUNCTION public.{func}()"),
-            DbKind::MySql => format!("DROP FUNCTION `{FIXTURE_DB}`.`{func}`"),
+        let drop_fn = match t.sql_kind() {
+            SqlKind::Postgres => format!("DROP FUNCTION public.{func}()"),
+            SqlKind::MySql => format!("DROP FUNCTION `{FIXTURE_DB}`.`{func}`"),
         };
         admin(t, &drop_fn).await;
         admin(t, &format!("DROP TABLE {}", scratch(t, &log))).await;
@@ -771,12 +771,12 @@ async fn raw_where_session_is_closed_not_pooled() {
         admin(t, &format!("CREATE TABLE {} (n INT)", scratch(t, &table))).await;
         admin(t, &format!("INSERT INTO {} VALUES (1)", scratch(t, &table))).await;
         let key = u32::from_str_radix(&tag, 16).unwrap() & 0x7fff_ffff;
-        let (lock, held) = match t.kind() {
-            DbKind::MySql => (
+        let (lock, held) = match t.sql_kind() {
+            SqlKind::MySql => (
                 format!("GET_LOCK('p3_lock_{tag}', 0) = 1"),
                 format!("SELECT IS_USED_LOCK('p3_lock_{tag}') IS NOT NULL"),
             ),
-            DbKind::Postgres => (
+            SqlKind::Postgres => (
                 format!("pg_try_advisory_lock({key})"),
                 format!(
                     "SELECT count(*) > 0 FROM pg_locks \
@@ -822,8 +822,8 @@ async fn pg_page_has_row_versions() {
         assert!(p.columns.iter().all(|c| c.name != "xmin"), "{t:?}");
         assert_eq!(p.columns[0].name, "id", "{t:?}");
         assert!(p.truncated.is_empty(), "{t:?}");
-        match t.kind() {
-            DbKind::Postgres => {
+        match t.sql_kind() {
+            SqlKind::Postgres => {
                 let versions = p.row_versions.clone().expect("row versions");
                 assert_eq!(versions.len(), p.rows.len(), "{t:?}");
                 assert!(
@@ -839,7 +839,7 @@ async fn pg_page_has_row_versions() {
                 assert_eq!(f.row_versions.as_ref().map(Vec::len), Some(1), "{t:?}");
                 assert_eq!(f.row_versions.unwrap()[0], versions[0], "{t:?}");
             }
-            DbKind::MySql => assert_eq!(p.row_versions, None, "{t:?}"),
+            SqlKind::MySql => assert_eq!(p.row_versions, None, "{t:?}"),
         }
         // A view is not editable: no versions.
         let v = page(&state, id, view(t, "v_customer_orders"), 10, 0, None)
@@ -925,12 +925,12 @@ async fn data_editable_reports_reasons() {
         assert_eq!(ok.key, ["id"], "{t:?}");
         assert!(ok.editable_columns.iter().all(|c| c != "id"), "{t:?}");
         assert!(!ok.editable_columns.is_empty(), "{t:?}");
-        match t.kind() {
-            DbKind::Postgres => {
+        match t.sql_kind() {
+            SqlKind::Postgres => {
                 assert_eq!(ok.atomic, Atomicity::Yes, "{t:?}");
                 assert_eq!(ok.protection, ProtectionKind::RowVersion, "{t:?}");
             }
-            DbKind::MySql => assert_eq!(ok.protection, ProtectionKind::Snapshot, "{t:?}"),
+            SqlKind::MySql => assert_eq!(ok.protection, ProtectionKind::Snapshot, "{t:?}"),
         }
 
         let v = data_editable_impl(&state, id, view(t, "v_customer_orders"))

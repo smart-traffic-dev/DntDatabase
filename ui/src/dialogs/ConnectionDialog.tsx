@@ -113,6 +113,8 @@ const ENGINE_NAME: Record<ServerVariant, string> = {
   MySql8: 'MySQL',
   MariaDb: 'MariaDB',
   Postgres: 'PostgreSQL',
+  Mongo: 'MongoDB',
+  Redis: 'Redis',
 };
 
 interface Form {

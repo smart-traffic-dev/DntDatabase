@@ -5,7 +5,7 @@ import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import { openQuietly, quietOpenFailed } from '../../store/reopen';
-import type { Engine } from '../engine';
+import { sqlEngine, type Engine } from '../engine';
 import { suggest, type Suggestion } from './provider';
 import { allSnippets } from './snippets';
 import { splitIncremental, type SplitState } from './split';
@@ -218,7 +218,7 @@ export function queryDocTarget(model: unknown): CompletionTarget | null {
   const doc = useQueryDocs.getState().docs.get(uri.authority);
   if (!doc) return null;
   const kind = doc.connectionId ? useConnections.getState().summaries.get(doc.connectionId)?.config.kind : undefined;
-  return { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine: kind ?? doc.dialect };
+  return { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine: sqlEngine(kind) ?? doc.dialect };
 }
 
 type Handle = { dispose(): void };

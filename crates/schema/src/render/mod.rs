@@ -74,6 +74,14 @@ fn invalid(message: impl Into<String>) -> RenderError {
     }
 }
 
+/// The SQL engine of `server`; the designer renders nothing for another family.
+fn sql_kind(server: &ServerInfo) -> Result<SqlKind, RenderError> {
+    server
+        .kind
+        .sql()
+        .ok_or_else(|| invalid(format!("SQL on {} is not supported.", server.kind.label())))
+}
+
 fn unsupported(feature: &str, min_version: &str) -> RenderError {
     RenderError::Unsupported {
         feature: feature.into(),
@@ -180,7 +188,7 @@ pub fn render(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<Rendered, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::render(table, old, changes, server, dialect),
         SqlKind::Postgres => pg::render(table, old, changes, server, dialect),
     }
@@ -197,7 +205,7 @@ pub fn render_create(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<Rendered, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::render_create(table, def, server, dialect),
         SqlKind::Postgres => pg::render_create(table, def, server, dialect),
     }
@@ -213,7 +221,7 @@ pub fn column_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::column_sql(c, server, dialect),
         SqlKind::Postgres => pg::column_sql(c, server, dialect),
     }
@@ -225,7 +233,7 @@ pub fn primary_key_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::primary_key_sql(k, server, dialect),
         SqlKind::Postgres => pg::primary_key_sql(k, server, dialect),
     }
@@ -241,7 +249,7 @@ pub fn index_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::index_sql(i, server, dialect),
         SqlKind::Postgres => pg::index_sql(i, server, dialect),
     }
@@ -250,7 +258,7 @@ pub fn index_sql(
 /// A foreign key constraint as it appears in `CREATE TABLE`. Precondition as
 /// [`column_sql`].
 pub fn fk_sql(f: &FkDef, server: &ServerInfo, dialect: Dialect) -> Result<String, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::fk_sql(f, server, dialect),
         SqlKind::Postgres => pg::fk_sql(f, server, dialect),
     }
@@ -262,7 +270,7 @@ pub fn check_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind.as_sql() {
+    match sql_kind(server)? {
         SqlKind::MySql => mysql::check_sql(c, server, dialect),
         SqlKind::Postgres => pg::check_sql(c, server, dialect),
     }

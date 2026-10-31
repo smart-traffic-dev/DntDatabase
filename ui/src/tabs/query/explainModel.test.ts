@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { PlanNode } from '../../bindings';
+import type { PlanNode, ServerInfo } from '../../bindings';
+import { sqlCaps } from '../../test/fixtures/caps';
 import {
   allWarnings,
   ancestorsOf,
@@ -230,7 +231,10 @@ describe('per-loop figures', () => {
   });
 
   it('reportsPerLoop: MariaDB reports totals, every other server (or none known) per loop', () => {
-    const info = (variant: 'MySql8' | 'MariaDb' | 'Postgres') => ({ kind: 'MySql', variant, version: [8, 0, 36], version_string: '' }) as never;
+    const info = (variant: 'MySql8' | 'MariaDb' | 'Postgres'): ServerInfo =>
+      variant === 'Postgres'
+        ? { kind: 'postgres', variant, version: [8, 0, 36], version_string: '', capabilities: sqlCaps('db_schema') }
+        : { kind: 'mysql', variant, version: [8, 0, 36], version_string: '', capabilities: sqlCaps('db') };
     expect(reportsPerLoop(info('MariaDb'))).toBe(false);
     expect(reportsPerLoop(info('MySql8'))).toBe(true);
     expect(reportsPerLoop(info('Postgres'))).toBe(true);

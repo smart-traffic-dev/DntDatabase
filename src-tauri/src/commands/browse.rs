@@ -122,7 +122,7 @@ pub async fn list_databases_impl(
     id: Uuid,
     show_system: bool,
 ) -> Result<Vec<DatabaseInfo>, DbError> {
-    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
+    let kind = state.repo.get(id)?.kind.require_sql()?;
     let dbs = state
         .sessions
         .browse(id, None, databases_key(), |i| i.list_databases())
@@ -140,7 +140,7 @@ pub async fn list_schemas_impl(
     db: String,
     show_system: bool,
 ) -> Result<Vec<SchemaInfo>, DbError> {
-    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
+    let kind = state.repo.get(id)?.kind.require_sql()?;
     let schemas = state
         .sessions
         .browse(id, Some(&db), schemas_key(&db), |i| {

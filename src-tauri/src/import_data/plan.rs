@@ -123,9 +123,9 @@ fn warnings(
     pre: Option<&PreStep>,
     report: &MappingReport,
     layout: &Layout,
-) -> Vec<String> {
+) -> Result<Vec<String>, DbError> {
     let (detail, atomicity) = (&read.detail, read.atomicity);
-    let kind = server.kind.as_sql(); // R1: boundary
+    let kind = server.kind.require_sql()?;
     let mut out = Vec::new();
     if !transactional {
         out.push("Not transactional: batches already written stay if the import stops.".into());
@@ -174,7 +174,7 @@ fn warnings(
         out.push(w);
     }
     out.extend(report.warnings.iter().map(|w| w.message.clone()));
-    out
+    Ok(out)
 }
 
 /// The first rows of the file as one `INSERT`, built exactly as the job builds its
@@ -264,7 +264,7 @@ impl SessionManager {
     pub async fn import_prepare(&self, request: ImportRequest) -> Result<ImportPreview, DbError> {
         let conn = request.connection_id;
         let cfg = self.repo.get(conn)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let request = normalise(request, kind)?;
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
@@ -328,7 +328,7 @@ impl SessionManager {
             pre.as_ref(),
             &report,
             &layout,
-        );
+        )?;
         let production = cfg.env_tag == Some(EnvTag::Production);
         let confirm = match cfg.env_tag {
             Some(EnvTag::Production) => ConfirmLevel::TypeName {
@@ -407,7 +407,7 @@ impl SessionManager {
         if file.sha256 != stored.preview.file.sha256 || file.size != stored.preview.file.size {
             return Err(file_changed_before());
         }
-        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let kind = stored.rt.cfg.kind.require_sql()?;
         let (session, generation) = stored
             .rt
             .open_query_session(session_db(kind, &stored.request.table))
@@ -466,7 +466,7 @@ impl SessionManager {
     pub async fn import_dry_run(&self, req: DryRunRequest) -> Result<Uuid, DbError> {
         let conn = req.request.connection_id;
         let cfg = self.repo.get(conn)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let request = normalise(req.request, kind)?;
         let columns = file_columns(PathBuf::from(&request.path), request.source.clone()).await?;
         check_sources(&request, columns)?;

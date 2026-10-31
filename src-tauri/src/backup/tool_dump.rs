@@ -147,7 +147,7 @@ impl SessionManager {
     /// `dump_pick_path` (checked by the command).
     pub async fn tool_dump_start(&self, request: ToolDumpRequest) -> Result<Uuid, DbError> {
         let cfg = self.repo.get(request.connection_id)?;
-        let kind = cfg.kind.as_sql(); // R1: boundary
+        let kind = cfg.kind.require_sql()?;
         let request = normalise_tool_request(request, kind)?;
         let rt = self.runtime(request.connection_id)?;
         let configured = saved_external_tools_dir(&self.repo);
@@ -157,7 +157,7 @@ impl SessionManager {
         let (resolved, tunnelled) = rt.tool_endpoint(Some(request.database.clone())).await?;
         tool_dump_invocation(
             &info,
-            &ToolConn::from_resolved(&resolved, tunnelled),
+            &ToolConn::from_resolved(&resolved, tunnelled)?,
             rt.server_info(),
             &request,
             Path::new(secret_name(kind)),
@@ -242,10 +242,10 @@ impl JobRunner for ToolDumpJob {
             .await
             .map_err(JobFailure::from)?;
         let tmp = ctx.tmp_dir().map_err(JobFailure::from)?;
-        let secret = tmp.join(secret_name(self.rt.cfg.kind.as_sql())); // R1: boundary
+        let secret = tmp.join(secret_name(self.rt.cfg.kind.require_sql()?));
         let inv = tool_dump_invocation(
             &self.info,
-            &ToolConn::from_resolved(&resolved, tunnelled),
+            &ToolConn::from_resolved(&resolved, tunnelled).map_err(JobFailure::from)?,
             self.rt.server_info(),
             req,
             &secret,

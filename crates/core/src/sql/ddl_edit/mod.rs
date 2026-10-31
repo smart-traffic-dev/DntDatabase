@@ -45,7 +45,7 @@ pub enum Strategy {
 /// Whether objects of `kind` can be edited through their DDL on `server`.
 pub fn editable_kind(kind: ObjectKind, server: &ServerInfo) -> Result<(), DbError> {
     use ObjectKind::*;
-    let editable: &[ObjectKind] = match server.kind.as_sql() {
+    let editable: &[ObjectKind] = match server.kind.require_sql()? {
         SqlKind::MySql => &[View, Function, Procedure, Trigger, Event],
         SqlKind::Postgres => &[View, MaterializedView, Function, Procedure, Trigger],
     };

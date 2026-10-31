@@ -48,7 +48,7 @@ mod tests {
             serde_json::to_value(DefaultSpec::Value { text: "1".into() }).unwrap(),
             json!({"kind": "value", "text": "1"})
         );
-        let t = new_table("t", &test_util::pg());
+        let t = new_table("t", &test_util::pg()).unwrap();
         let back: TableDef = serde_json::from_value(serde_json::to_value(&t).unwrap()).unwrap();
         assert_eq!(back, t);
     }

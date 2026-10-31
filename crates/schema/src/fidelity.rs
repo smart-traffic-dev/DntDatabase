@@ -27,6 +27,7 @@ use crate::from_detail::{is_cast_suffix, unquote};
 use crate::model::*;
 use crate::render::{check_sql, column_sql, fk_sql, index_sql, primary_key_sql, RenderError};
 use crate::types::{default_display_width, type_text};
+use dnt_core::error::DbError;
 use dnt_core::meta::{ColumnDetail, IndexDetail, TableDetail};
 use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::ident::quote_ident;
@@ -55,18 +56,20 @@ const UNKNOWN: &str = "The table has a definition the designer cannot show.";
 /// Elements already locked by `from_detail` are reported too (with their server text),
 /// so every locked element has a reason. A MySQL line no draft element matches is
 /// reported for an element [`apply_locks`] adds (index, check) or locks the table.
+///
+/// `Unsupported` for a non-SQL server.
 pub fn fidelity(
     def: &TableDef,
     detail: &TableDetail,
     mysql_create: Option<&str>,
     server: &ServerInfo,
-) -> Vec<Locked> {
-    let kind = server.kind.as_sql();
+) -> Result<Vec<Locked>, DbError> {
+    let kind = server.kind.require_sql()?;
     let d = Dialect::for_kind(kind);
-    match kind {
+    Ok(match kind {
         SqlKind::MySql => mysql_fidelity(def, mysql_create, server, d),
         SqlKind::Postgres => pg_fidelity(def, detail, server, d),
-    }
+    })
 }
 
 /// Marks the locked elements of `def`; an index or check the draft lacks is added from
@@ -1170,7 +1173,7 @@ mod tests {
 
     impl Fixture {
         fn def(&self) -> TableDef {
-            from_detail(&self.detail, &self.server)
+            from_detail(&self.detail, &self.server).unwrap()
         }
 
         fn locks(&self) -> Vec<Locked> {
@@ -1178,7 +1181,7 @@ mod tests {
         }
 
         fn locks_with(&self, def: &TableDef, ddl: Option<&str>) -> Vec<Locked> {
-            fidelity(def, &self.detail, ddl, &self.server)
+            fidelity(def, &self.detail, ddl, &self.server).unwrap()
         }
     }
 
@@ -1317,15 +1320,19 @@ mod tests {
             // A server index the introspection missed is added to the draft, locked.
             let mut detail = f.detail.clone();
             detail.indexes.retain(|i| i.name != "ft_body");
-            let mut def = from_detail(&detail, &f.server);
-            let locks = fidelity(&def, &detail, f.ddl.as_deref(), &f.server);
+            let mut def = from_detail(&detail, &f.server).unwrap();
+            let locks = fidelity(&def, &detail, f.ddl.as_deref(), &f.server).unwrap();
             assert!(elements(&locks).contains(&idx("ft_body")), "{target}");
             apply_locks(&mut def, &locks);
             let ft = def.indexes.iter().find(|i| i.name == "ft_body").unwrap();
             assert!(ft.locked && ft.original.as_deref() == Some("ft_body"));
             assert_eq!(ft.method.as_deref(), Some("FULLTEXT"));
             assert_eq!(ft.parts[0].column.as_deref(), Some("body"));
-            assert_eq!(crate::validate(&def, &f.server), vec![], "{target}");
+            assert_eq!(
+                crate::validate(&def, &f.server).unwrap(),
+                vec![],
+                "{target}"
+            );
         }
     }
 
@@ -1420,7 +1427,7 @@ mod tests {
                 .as_ref()
                 .map(|s| format!("{s} ON DELETE CASCADE"));
             d.checks[0].definition = Some("CHECK ((total > (0)::numeric))".into());
-            let locks = fidelity(&f.def(), &d, None, &f.server);
+            let locks = fidelity(&f.def(), &d, None, &f.server).unwrap();
             assert_eq!(
                 elements(&locks),
                 vec![
@@ -1438,7 +1445,7 @@ mod tests {
                 .find(|c| c.name == "created_at")
                 .unwrap()
                 .db_type = "timestamp with time zone".into();
-            let locks = fidelity(&f.def(), &d, None, &f.server);
+            let locks = fidelity(&f.def(), &d, None, &f.server).unwrap();
             assert_eq!(elements(&locks), vec![col("created_at")], "{target}");
         }
     }
@@ -1498,14 +1505,14 @@ mod tests {
                 "  `id` tinyint(1) NOT NULL,",
             );
             let mut def = f.def();
-            def.columns[0].data_type = crate::parse_type("tinyint", &f.server);
+            def.columns[0].data_type = crate::parse_type("tinyint", &f.server).unwrap();
             assert_eq!(
                 elements(&f.locks_with(&def, Some(&ddl))),
                 vec![col("id")],
                 "{target}"
             );
             // The same width in the draft matches.
-            def.columns[0].data_type = crate::parse_type("tinyint(1)", &f.server);
+            def.columns[0].data_type = crate::parse_type("tinyint(1)", &f.server).unwrap();
             assert_eq!(f.locks_with(&def, Some(&ddl)), vec![], "{target}");
         }
     }
@@ -1706,7 +1713,7 @@ mod tests {
         let c = ColumnDef {
             original: Some("t".into()),
             name: "t".into(),
-            data_type: crate::parse_type("timestamp", &server),
+            data_type: crate::parse_type("timestamp", &server).unwrap(),
             nullable: false,
             default: Some(DefaultSpec::Expression {
                 text: "CURRENT_TIMESTAMP".into(),

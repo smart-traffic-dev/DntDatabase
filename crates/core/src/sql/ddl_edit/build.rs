@@ -92,12 +92,13 @@ const TRIGGER_EDIT_CHECK_SQL: &str = "SELECT count(*)::text FROM pg_trigger t WH
 const TRIGGER_NEW_CHECK_SQL: &str = "SELECT count(*)::text FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2 AND t.tgname = $3 AND NOT t.tgisinternal";
 
 /// The strategies offered for the target on `server` (none for a new object).
-pub fn strategies(t: &EditTarget, server: &ServerInfo) -> Vec<Strategy> {
+pub fn strategies(t: &EditTarget, server: &ServerInfo) -> Result<Vec<Strategy>, DbError> {
     use ObjectKind::*;
+    let kind = server.kind.require_sql()?;
     if t.name.is_none() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    match server.kind.as_sql() {
+    Ok(match kind {
         SqlKind::Postgres => match t.kind {
             View | Function | Procedure => vec![Strategy::Replace, Strategy::Recreate],
             MaterializedView | Trigger => vec![Strategy::Recreate],
@@ -114,7 +115,7 @@ pub fn strategies(t: &EditTarget, server: &ServerInfo) -> Vec<Strategy> {
             }
             _ => Vec::new(),
         },
-    }
+    })
 }
 
 /// Builds the statements of spec §5.2.
@@ -128,7 +129,7 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
         facts,
         rehearsal_name,
     } = *input;
-    let kind = server.kind.as_sql();
+    let kind = server.kind.require_sql()?;
     let pg = match kind {
         SqlKind::MySql => false,
         SqlKind::Postgres => true,
@@ -151,8 +152,9 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
         out.warnings.push(LOCK_WARNING.into());
         return Ok(out);
     };
+    let offered = strategies(t, server)?;
     let strategy = strategy
-        .filter(|s| strategies(t, server).contains(s))
+        .filter(|s| offered.contains(s))
         .ok_or_else(|| DbError::Config {
             field: Some("strategy".into()),
             message: format!(
@@ -493,10 +495,7 @@ mod tests {
     const REH: &str = "_dnt_p4c_check_0a1b2c3d";
 
     fn dialect(s: &ServerInfo) -> Dialect {
-        match s.kind {
-            crate::server::DbKind::MySql => Dialect::MYSQL,
-            crate::server::DbKind::Postgres => Dialect::Postgres,
-        }
+        Dialect::for_kind(s.kind.require_sql().unwrap())
     }
 
     fn my_target(kind: ObjectKind, name: Option<&str>) -> EditTarget {
@@ -1122,35 +1121,42 @@ mod tests {
         use Strategy::*;
         for k in [View, Function, Procedure] {
             assert_eq!(
-                strategies(&pg_target(k, Some("x")), &pg17()),
+                strategies(&pg_target(k, Some("x")), &pg17()).unwrap(),
                 vec![Replace, Recreate]
             );
         }
         for k in [MaterializedView, Trigger] {
             assert_eq!(
-                strategies(&pg_target(k, Some("x")), &pg12()),
+                strategies(&pg_target(k, Some("x")), &pg12()).unwrap(),
                 vec![Recreate]
             );
         }
         for s in [mysql57(), mysql8(), mariadb()] {
-            assert_eq!(strategies(&my_target(View, Some("x")), &s), vec![Replace]);
+            assert_eq!(
+                strategies(&my_target(View, Some("x")), &s).unwrap(),
+                vec![Replace]
+            );
         }
         for k in [Function, Procedure, Trigger, Event] {
             assert_eq!(
-                strategies(&my_target(k, Some("x")), &mariadb()),
+                strategies(&my_target(k, Some("x")), &mariadb()).unwrap(),
                 vec![Replace]
             );
             assert_eq!(
-                strategies(&my_target(k, Some("x")), &mysql8()),
+                strategies(&my_target(k, Some("x")), &mysql8()).unwrap(),
                 vec![Recreate]
             );
             assert_eq!(
-                strategies(&my_target(k, Some("x")), &mysql57()),
+                strategies(&my_target(k, Some("x")), &mysql57()).unwrap(),
                 vec![Recreate]
             );
-            assert!(strategies(&my_target(k, None), &mysql8()).is_empty());
+            assert!(strategies(&my_target(k, None), &mysql8())
+                .unwrap()
+                .is_empty());
         }
-        assert!(strategies(&pg_target(View, None), &pg17()).is_empty());
+        assert!(strategies(&pg_target(View, None), &pg17())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
