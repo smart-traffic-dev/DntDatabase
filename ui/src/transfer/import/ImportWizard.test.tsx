@@ -8,6 +8,7 @@ import { useDialogs } from '../../store/dialogs';
 import { useJobs } from '../../store/jobs';
 import { useLayout } from '../../store/layout';
 import { appError, callsOf, config, fail, ids, mockBackend, resetStores, serverInfo } from '../../test/backend';
+import { sqlCaps } from '../../test/fixtures/caps';
 import { jobDetail, jobSummary } from '../../test/jobs';
 import { ImportWizard } from './ImportWizard';
 import './rerunImport';
@@ -44,7 +45,7 @@ const target = (over: Partial<ImportTarget> = {}): ImportTarget => ({
   atomicity: 'yes',
   env: null,
   read_only: false,
-  server: { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36' },
+  server: { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36', capabilities: sqlCaps('db') },
   ...over,
 });
 

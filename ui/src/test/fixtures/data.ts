@@ -13,6 +13,7 @@ import type {
 // `with { type: "json" }` keeps this module loadable by Node as-is (the browser E2E
 // runner loads it directly); Vite resolves the JSON at build time either way.
 import backendErrors from './app-errors.json' with { type: 'json' };
+import { sqlCaps } from './caps';
 
 /** Thrown by a handler to make the command return `{status: "error"}`. */
 export class Failure {
@@ -112,6 +113,7 @@ export function serverInfo(variant: ServerVariant, version: [number, number, num
     variant,
     version,
     version_string: variant === 'Postgres' ? `PostgreSQL ${version.join('.')}` : version.join('.'),
+    capabilities: sqlCaps(variant === 'Postgres' ? 'db_schema' : 'db'),
   };
 }
 

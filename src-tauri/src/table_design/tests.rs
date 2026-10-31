@@ -64,8 +64,16 @@ struct Fake {
 impl Fake {
     fn new(fixture: &str, ddl: &str) -> Arc<Fake> {
         let v: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        // Built through the constructor: the recorded fixtures predate `capabilities`.
+        let s = &v["server"];
+        let field = |k: &str| s[k].clone();
         Arc::new(Fake {
-            server: serde_json::from_value(v["server"].clone()).unwrap(),
+            server: ServerInfo::new(
+                serde_json::from_value(field("kind")).unwrap(),
+                serde_json::from_value(field("variant")).unwrap(),
+                serde_json::from_value(field("version")).unwrap(),
+                s["version_string"].as_str().unwrap(),
+            ),
             detail: Mutex::new(serde_json::from_value(v["detail"].clone()).unwrap()),
             ddl: Mutex::new(ddl.trim_end().to_string()),
             seen: Mutex::new(Vec::new()),

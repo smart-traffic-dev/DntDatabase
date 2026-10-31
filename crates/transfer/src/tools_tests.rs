@@ -32,15 +32,15 @@ fn maria_client() -> ToolInfo {
 }
 
 fn server(variant: ServerVariant, version: (u32, u32, u32)) -> ServerInfo {
-    ServerInfo {
-        kind: match variant {
+    ServerInfo::new(
+        match variant {
             ServerVariant::Postgres => DbKind::Postgres,
             _ => DbKind::MySql,
         },
         variant,
         version,
-        version_string: String::new(),
-    }
+        String::new(),
+    )
 }
 
 fn conn(kind: SqlKind, db: &str) -> ToolConn {

@@ -46,12 +46,162 @@ pub enum ServerVariant {
     Postgres,
 }
 
+/// How a driver talks to its engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineFamily {
+    Sql,
+    Command,
+}
+
+/// How an engine nests its objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceModel {
+    /// database → schema → object (PostgreSQL).
+    DbSchema,
+    /// database → object (MySQL, Mongo).
+    Db,
+    /// db0…dbN → keyspace (Redis).
+    NumberedDb,
+}
+
+/// What a connected driver supports; the UI and commands gate features on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct Capabilities {
+    pub family: EngineFamily,
+    pub namespaces: NamespaceModel,
+    pub transactions: bool,
+    pub data_edit: bool,
+    pub designer: bool,
+    pub ddl_edit: bool,
+    pub object_actions: bool,
+    pub import: bool,
+    pub dump: bool,
+    pub seed: bool,
+    pub explain: bool,
+    /// Objects are browsed page by page instead of listed in full.
+    pub paged_objects: bool,
+}
+
+/// A gateable feature flag of [`Capabilities`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Cap {
+    DataEdit,
+    Designer,
+    DdlEdit,
+    ObjectActions,
+    Import,
+    Dump,
+    Seed,
+    Explain,
+}
+
+impl Cap {
+    pub const ALL: [Cap; 8] = [
+        Cap::DataEdit,
+        Cap::Designer,
+        Cap::DdlEdit,
+        Cap::ObjectActions,
+        Cap::Import,
+        Cap::Dump,
+        Cap::Seed,
+        Cap::Explain,
+    ];
+
+    /// The feature name used in `DbError::Unsupported`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Cap::DataEdit => "data editing",
+            Cap::Designer => "table designer",
+            Cap::DdlEdit => "DDL editing",
+            Cap::ObjectActions => "object actions",
+            Cap::Import => "import",
+            Cap::Dump => "dump and restore",
+            Cap::Seed => "data generation",
+            Cap::Explain => "explain",
+        }
+    }
+}
+
+impl Capabilities {
+    /// A SQL engine with every feature; objects are listed in full.
+    pub fn sql_full(namespaces: NamespaceModel) -> Capabilities {
+        Capabilities {
+            family: EngineFamily::Sql,
+            namespaces,
+            transactions: true,
+            data_edit: true,
+            designer: true,
+            ddl_edit: true,
+            object_actions: true,
+            import: true,
+            dump: true,
+            seed: true,
+            explain: true,
+            paged_objects: false,
+        }
+    }
+
+    /// The capabilities a driver of `kind` declares.
+    pub fn for_kind(kind: DbKind) -> Capabilities {
+        match kind {
+            DbKind::MySql => Capabilities::sql_full(NamespaceModel::Db),
+            DbKind::Postgres => Capabilities::sql_full(NamespaceModel::DbSchema),
+        }
+    }
+
+    pub fn has(&self, cap: Cap) -> bool {
+        match cap {
+            Cap::DataEdit => self.data_edit,
+            Cap::Designer => self.designer,
+            Cap::DdlEdit => self.ddl_edit,
+            Cap::ObjectActions => self.object_actions,
+            Cap::Import => self.import,
+            Cap::Dump => self.dump,
+            Cap::Seed => self.seed,
+            Cap::Explain => self.explain,
+        }
+    }
+}
+
+/// `Unsupported` naming the feature when `caps` lacks `cap`.
+pub fn check_cap(caps: &Capabilities, cap: Cap) -> Result<(), DbError> {
+    if caps.has(cap) {
+        Ok(())
+    } else {
+        Err(DbError::Unsupported {
+            feature: cap.label().into(),
+            version: String::new(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ServerInfo {
     pub kind: DbKind,
     pub variant: ServerVariant,
     pub version: (u32, u32, u32),
     pub version_string: String,
+    pub capabilities: Capabilities,
+}
+
+impl ServerInfo {
+    /// A server of `kind` with that kind's default capabilities.
+    pub fn new(
+        kind: DbKind,
+        variant: ServerVariant,
+        version: (u32, u32, u32),
+        version_string: impl Into<String>,
+    ) -> ServerInfo {
+        ServerInfo {
+            kind,
+            variant,
+            version,
+            version_string: version_string.into(),
+            capabilities: Capabilities::for_kind(kind),
+        }
+    }
 }
 
 /// Prefix MariaDB servers send in the handshake for old-client compatibility.
@@ -101,24 +251,19 @@ pub fn detect_mysql(version_string: &str) -> Result<ServerInfo, DbError> {
             _ => return Err(unsupported(s)),
         }
     };
-    Ok(ServerInfo {
-        kind: DbKind::MySql,
-        variant,
-        version,
-        version_string: s.into(),
-    })
+    Ok(ServerInfo::new(DbKind::MySql, variant, version, s))
 }
 
 /// Builds `ServerInfo` from `SHOW server_version_num` (e.g. 170002 → 17.0.2).
 /// Minimum-version enforcement is the driver's job.
 pub fn detect_pg(server_version_num: u32, version_string: &str) -> ServerInfo {
     let n = server_version_num;
-    ServerInfo {
-        kind: DbKind::Postgres,
-        variant: ServerVariant::Postgres,
-        version: (n / 10_000, (n / 100) % 100, n % 100),
-        version_string: version_string.into(),
-    }
+    ServerInfo::new(
+        DbKind::Postgres,
+        ServerVariant::Postgres,
+        (n / 10_000, (n / 100) % 100, n % 100),
+        version_string,
+    )
 }
 
 /// Feature flags that differ across the MySQL family (spec §6.1).
@@ -242,5 +387,53 @@ mod tests {
         assert_eq!(DbKind::from(SqlKind::Postgres), DbKind::Postgres);
         assert_eq!(DbKind::MySql.as_sql(), SqlKind::MySql);
         assert_eq!(DbKind::Postgres.as_sql(), SqlKind::Postgres);
+    }
+
+    #[test]
+    fn sql_capabilities() {
+        let c = Capabilities::sql_full(NamespaceModel::Db);
+        assert_eq!(
+            (c.family, c.namespaces, c.paged_objects),
+            (EngineFamily::Sql, NamespaceModel::Db, false)
+        );
+        assert!(
+            c.transactions
+                && c.data_edit
+                && c.designer
+                && c.ddl_edit
+                && c.object_actions
+                && c.import
+                && c.dump
+                && c.seed
+                && c.explain
+        );
+        assert_eq!(
+            Capabilities::for_kind(DbKind::Postgres),
+            Capabilities::sql_full(NamespaceModel::DbSchema)
+        );
+        assert_eq!(
+            detect_mysql("8.0.36").unwrap().capabilities.namespaces,
+            NamespaceModel::Db
+        );
+        assert_eq!(
+            detect_pg(170002, "PostgreSQL 17.2").capabilities.namespaces,
+            NamespaceModel::DbSchema
+        );
+        let j = serde_json::to_value(Capabilities::sql_full(NamespaceModel::DbSchema)).unwrap();
+        assert_eq!(
+            (j["family"].as_str(), j["namespaces"].as_str()),
+            (Some("sql"), Some("db_schema"))
+        );
+    }
+
+    #[test]
+    fn check_cap_names_the_feature() {
+        let mut c = Capabilities::sql_full(NamespaceModel::Db);
+        assert!(Cap::ALL
+            .iter()
+            .all(|&cap| c.has(cap) && check_cap(&c, cap).is_ok()));
+        c.designer = false;
+        assert!(matches!(check_cap(&c, Cap::Designer),
+            Err(DbError::Unsupported { feature, version }) if feature == "table designer" && version.is_empty()));
     }
 }

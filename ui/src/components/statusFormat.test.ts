@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ServerInfo } from '../bindings';
+import { sqlCaps } from '../test/fixtures/caps';
 import { formatElapsed, shortVersion } from './statusFormat';
 
 const info = (variant: ServerInfo['variant'], version: [number, number, number], version_string: string): ServerInfo => ({
@@ -7,6 +8,7 @@ const info = (variant: ServerInfo['variant'], version: [number, number, number],
   variant,
   version,
   version_string,
+  capabilities: sqlCaps(variant === 'Postgres' ? 'db_schema' : 'db'),
 });
 
 describe('shortVersion', () => {

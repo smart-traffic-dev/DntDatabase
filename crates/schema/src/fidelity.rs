@@ -1153,8 +1153,16 @@ mod tests {
         let json = std::fs::read_to_string(base.with_extension("json"))
             .unwrap_or_else(|e| panic!("{target}_{table}.json: {e}"));
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Built through the constructor: the recorded fixtures predate `capabilities`.
+        let s = &v["server"];
+        let field = |k: &str| s[k].clone();
         Fixture {
-            server: serde_json::from_value(v["server"].clone()).unwrap(),
+            server: ServerInfo::new(
+                serde_json::from_value(field("kind")).unwrap(),
+                serde_json::from_value(field("variant")).unwrap(),
+                serde_json::from_value(field("version")).unwrap(),
+                s["version_string"].as_str().unwrap(),
+            ),
             detail: serde_json::from_value(v["detail"].clone()).unwrap(),
             ddl: std::fs::read_to_string(base.with_extension("sql")).ok(),
         }

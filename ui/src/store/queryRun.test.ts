@@ -10,6 +10,7 @@ import type {
   RunEvent,
   Value,
 } from '../bindings';
+import { sqlCaps } from '../test/fixtures/caps';
 import { forgetCompletionConnection, invalidateCompletion } from './completion';
 import { useConnections } from './connections';
 import { useQueryDocs, type QueryDoc } from './queryTabs';
@@ -827,7 +828,7 @@ describe('useQueryRun', () => {
     expect(invalidateCompletion).toHaveBeenCalledWith('conn-1', undefined);
   });
 
-  const info = { kind: 'postgres', variant: 'Postgres', version: [16, 0, 0], version_string: '16' } as const;
+  const info = { kind: 'postgres', variant: 'Postgres', version: [16, 0, 0], version_string: '16', capabilities: sqlCaps('db_schema') } as const;
 
   it('a connection closed during a run leaves the tx state idle once the run is done', () => {
     useConnections.setState({ info: new Map([['conn-1', { ...info, version: [16, 0, 0] }]]) });
@@ -929,7 +930,7 @@ describe('useQueryRun', () => {
 
   it('closing a connection forgets its completion data and idle tx states', () => {
     useConnections.setState({
-      info: new Map([['conn-1', { kind: 'postgres', variant: 'Postgres', version: [16, 0, 0], version_string: '16' }]]),
+      info: new Map([['conn-1', { kind: 'postgres', variant: 'Postgres', version: [16, 0, 0], version_string: '16', capabilities: sqlCaps('db_schema') }]]),
     });
     useQueryRun.getState().setTxState(TAB, 'active');
     useConnections.getState().clearInfo('conn-1');

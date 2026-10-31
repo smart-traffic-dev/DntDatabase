@@ -328,18 +328,8 @@ struct Fx {
 
 async fn fixture(kind: DbKind, env: Option<EnvTag>, read_only: bool, tools: &[Tool]) -> Fx {
     let server = match kind {
-        DbKind::MySql => ServerInfo {
-            kind,
-            variant: ServerVariant::MySql8,
-            version: (8, 0, 36),
-            version_string: "8.0.36".into(),
-        },
-        DbKind::Postgres => ServerInfo {
-            kind,
-            variant: ServerVariant::Postgres,
-            version: (17, 0, 0),
-            version_string: "17.0".into(),
-        },
+        DbKind::MySql => ServerInfo::new(kind, ServerVariant::MySql8, (8, 0, 36), "8.0.36"),
+        DbKind::Postgres => ServerInfo::new(kind, ServerVariant::Postgres, (17, 0, 0), "17.0"),
     };
     let fake = Arc::new(Fake {
         server,

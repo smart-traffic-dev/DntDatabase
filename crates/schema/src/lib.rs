@@ -59,16 +59,16 @@ pub(crate) mod test_util {
     use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
 
     pub fn server(variant: ServerVariant, version: (u32, u32, u32)) -> ServerInfo {
-        ServerInfo {
-            kind: if variant == ServerVariant::Postgres {
+        ServerInfo::new(
+            if variant == ServerVariant::Postgres {
                 DbKind::Postgres
             } else {
                 DbKind::MySql
             },
             variant,
             version,
-            version_string: format!("{}.{}.{}", version.0, version.1, version.2),
-        }
+            format!("{}.{}.{}", version.0, version.1, version.2),
+        )
     }
 
     pub fn mysql8() -> ServerInfo {

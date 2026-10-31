@@ -1524,6 +1524,14 @@ export type BinaryEncoding =
  */
 "utf8_text"
 /**
+ * What a connected driver supports; the UI and commands gate features on it.
+ */
+export type Capabilities = { family: EngineFamily; namespaces: NamespaceModel; transactions: boolean; data_edit: boolean; designer: boolean; ddl_edit: boolean; object_actions: boolean; import: boolean; dump: boolean; seed: boolean; explain: boolean; 
+/**
+ * Objects are browsed page by page instead of listed in full.
+ */
+paged_objects: boolean }
+/**
  * One source value. Conversion to the target type happens later (`convert`).
  */
 export type Cell = { t: "Null" } | { t: "Text"; v: string } | 
@@ -1959,6 +1967,10 @@ export type ElementRef = { kind: "table" } | { kind: "column"; name: string } | 
  * What an empty text cell becomes in a text column (other columns always get NULL).
  */
 export type EmptyAs = "null" | "empty_string"
+/**
+ * How a driver talks to its engine.
+ */
+export type EngineFamily = "sql" | "command"
 export type EnvTag = "production" | "staging" | "local"
 /**
  * What a refused row does.
@@ -2431,6 +2443,22 @@ export type MysqlDumpOptions = {
  */
 tables: string[]; structure: boolean; data: boolean; routines: boolean; events: boolean; triggers: boolean; single_transaction: boolean }
 /**
+ * How an engine nests its objects.
+ */
+export type NamespaceModel = 
+/**
+ * database → schema → object (PostgreSQL).
+ */
+"db_schema" | 
+/**
+ * database → object (MySQL, Mongo).
+ */
+"db" | 
+/**
+ * db0…dbN → keyspace (Redis).
+ */
+"numbered_db"
+/**
  * What a "Create database/schema" form can offer: MySQL character sets and collations,
  * PostgreSQL roles (each list sorted; empty on the other engine).
  */
@@ -2874,7 +2902,7 @@ transactional: boolean;
  * A random seed to start with.
  */
 seed: number }
-export type ServerInfo = { kind: DbKind; variant: ServerVariant; version: [number, number, number]; version_string: string }
+export type ServerInfo = { kind: DbKind; variant: ServerVariant; version: [number, number, number]; version_string: string; capabilities: Capabilities }
 export type ServerVariant = "MySql57" | "MySql8" | "MariaDb" | "Postgres"
 /**
  * An entry of the import file that cannot be imported at all.

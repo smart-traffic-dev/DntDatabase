@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ImportRequest, ImportTarget, Inspection, MappingReport, TargetColumn } from '../../bindings';
+import { sqlCaps } from '../../test/fixtures/caps';
 import {
   buildRequest,
   canAdvance,
@@ -34,7 +35,7 @@ const target: ImportTarget = {
   atomicity: 'yes',
   env: null,
   read_only: false,
-  server: { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36' },
+  server: { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36', capabilities: sqlCaps('db') },
 };
 
 const inspection: Inspection = {

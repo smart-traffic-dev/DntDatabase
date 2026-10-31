@@ -1,4 +1,5 @@
 import type { ColumnPlan, SeedColumn, SeedPreview, SeedRequest, SeedSample, SeedTarget, TargetColumn } from '../../bindings';
+import { sqlCaps } from './caps';
 
 /**
  * The data seeder's canned `shop.orders` (MySQL 8): what `seed_target` answers for it, a preview and
@@ -81,7 +82,7 @@ export const seedTarget = (over: Partial<SeedTarget> = {}): SeedTarget => ({
   columns: seedColumns,
   env: null,
   read_only: false,
-  server: { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36' },
+  server: { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36', capabilities: sqlCaps('db') },
   transactional: true,
   seed: 48213,
   ...over,
