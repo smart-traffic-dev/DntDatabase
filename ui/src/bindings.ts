@@ -1703,7 +1703,7 @@ export type ConnState = { state: "disconnected" } | { state: "connecting"; stage
 /**
  * The engine a connection string names (MariaDB is told apart from MySQL only by its scheme).
  */
-export type ConnStringEngine = "mysql" | "mariadb" | "postgres"
+export type ConnStringEngine = "mysql" | "mariadb" | "postgres" | "mongo" | "mongo_srv" | "redis" | "rediss"
 export type ConnectStage = "resolve_secrets" | "open_tunnel" | "connect_db" | "detect_server" | "execute"
 export type ConnectionConfig = { id: string; group_id: string | null; name: string; 
 /**
@@ -2513,7 +2513,11 @@ ignored: string[];
 /**
  * Things worth telling the user (e.g. only the first of several hosts is used).
  */
-warnings: string[] }
+warnings: string[]; 
+/**
+ * MongoDB / Redis options; `None` for the SQL engines.
+ */
+driver: DriverOptions | null }
 export type PgDumpFormat = "plain" | "custom" | "tar"
 /**
  * pg_dump options (spec §7.2).

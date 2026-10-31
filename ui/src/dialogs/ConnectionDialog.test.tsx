@@ -771,6 +771,7 @@ describe('ConnectionDialog', () => {
           connect_timeout_s: null,
           ignored: ['charset=utf8'],
           warnings: ['Several hosts are listed; only the first (db.internal) is used.'],
+          driver: null,
         };
       },
       create_connection: (a) => a.cfg,
@@ -812,6 +813,36 @@ describe('ConnectionDialog', () => {
     expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
   });
 
+  it('a pasted MongoDB / Redis string is refused until R4 and changes nothing', async () => {
+    mockBackend({
+      parse_connection_string: () => ({
+        engine: 'redis',
+        host: 'cache',
+        port: 6379,
+        user: null,
+        password: null,
+        database: null,
+        ssl_mode: null,
+        application_name: null,
+        connect_timeout_s: null,
+        ignored: [],
+        warnings: [],
+        driver: { kind: 'redis', db: 0 },
+      }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    const hostBefore = (screen.getByTestId('conn-host') as HTMLInputElement).value;
+    await openUrl(user);
+    await user.type(screen.getByTestId('conn-string'), 'redis://cache');
+    const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
+    expect(alert).toHaveTextContent('MongoDB and Redis connections are not available in this version yet.');
+    expect(screen.queryByTestId('parse-result')).toBeNull();
+    expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
+    expect(screen.getByTestId('conn-host')).toHaveValue(hostBefore);
+    expect(screen.getByTestId('conn-port')).toHaveValue(3306);
+  });
+
   it('a string without a scheme keeps the chosen engine; mariadb:// picks MySQL / MariaDB', async () => {
     const parsed = (engine: 'mariadb' | null) => ({
       engine,
@@ -825,6 +856,7 @@ describe('ConnectionDialog', () => {
       connect_timeout_s: null,
       ignored: [],
       warnings: [],
+      driver: null,
     });
     let next: 'mariadb' | null = null;
     mockBackend({ parse_connection_string: () => parsed(next), create_connection: (a) => a.cfg });

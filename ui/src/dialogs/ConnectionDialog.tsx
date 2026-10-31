@@ -4,6 +4,7 @@ import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, stageLabel, toAp
 import type {
   AppError,
   ConnectionConfig,
+  ConnStringEngine,
   DbKind,
   EnvTag,
   OpenResult,
@@ -38,6 +39,10 @@ type SectionId = 'main' | Fold;
 const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 const PORT_MAX = 65_535;
+
+/** Engines a pasted string may name that the dialog cannot edit yet (R4 adds them). */
+const COMMAND_ENGINES: readonly ConnStringEngine[] = ['mongo', 'mongo_srv', 'redis', 'rediss'];
+const COMMAND_ENGINE_UNAVAILABLE = 'MongoDB and Redis connections are not available in this version yet.';
 
 const SSL_MODES: { id: SslMode; label: string }[] = [
   { id: 'disable', label: 'Disable' },
@@ -345,6 +350,11 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         .parseConnectionString(text)
         .then((parsed) => {
           if (seq !== parseSeq.current) return;
+          // Until R4 the dialog has no MongoDB / Redis form: refuse, never map it to MySQL.
+          if (parsed.engine !== null && COMMAND_ENGINES.includes(parsed.engine)) {
+            setParse({ state: 'failed', message: COMMAND_ENGINE_UNAVAILABLE });
+            return;
+          }
           applyParsed(parsed);
           setParse({ state: 'ok', parsed });
         })
