@@ -57,6 +57,7 @@ impl RowSink for Collect {
     fn result_end(&mut self, _: &ResultSummary) {}
 }
 async fn texts(s: &dyn Session, text: &str) -> Vec<String> {
+    let s = s.sql().unwrap();
     let mut sink = Collect::default();
     s.execute_one(
         text,

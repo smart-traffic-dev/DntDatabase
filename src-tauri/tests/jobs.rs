@@ -323,8 +323,8 @@ mod tracked_exports {
     use super::*;
     use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
     use dnt_core::driver::{
-        CancelHandle, Canceller, CellMode, Driver, ExecOptions, Introspector, ResultSummary,
-        RowSink, Session, StmtOutcome,
+        CancelHandle, Canceller, CellMode, Driver, Engine, ExecOptions, Introspector,
+        ResultSummary, RowSink, Session, SqlSession, StmtOutcome,
     };
     use dnt_core::meta::{
         DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
@@ -417,6 +417,23 @@ mod tracked_exports {
         fn server_info(&self) -> &ServerInfo {
             &self.info
         }
+        fn engine(&self) -> Engine<'_> {
+            Engine::Sql(self)
+        }
+        fn cancel_handle(&self) -> CancelHandle {
+            Arc::new(FakeCancel(Arc::clone(&self.log)))
+        }
+        fn introspector(&self) -> &dyn Introspector {
+            self
+        }
+        async fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn close(self: Box<Self>) {}
+    }
+
+    #[async_trait]
+    impl SqlSession for FakeSession {
         /// A statement mentioning `slow` streams a row every 10 ms for 10 s unless it is
         /// stopped or cancelled (then `Cancelled`); anything else returns no result.
         async fn execute_one(
@@ -465,16 +482,6 @@ mod tracked_exports {
         fn dialect(&self) -> Dialect {
             Dialect::for_kind(DbKind::MySql.as_sql())
         }
-        fn cancel_handle(&self) -> CancelHandle {
-            Arc::new(FakeCancel(Arc::clone(&self.log)))
-        }
-        fn introspector(&self) -> &dyn Introspector {
-            self
-        }
-        async fn ping(&self) -> Result<(), DbError> {
-            Ok(())
-        }
-        async fn close(self: Box<Self>) {}
     }
 
     #[async_trait]

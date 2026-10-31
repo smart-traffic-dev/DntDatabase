@@ -443,6 +443,8 @@ async fn admin(t: Target, sql: &str) {
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     session
+        .sql()
+        .unwrap()
         .execute(sql, ExecOptions::default(), &mut NullSink)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
@@ -804,6 +806,8 @@ async fn scalar(t: Target, sql: &str) -> Value {
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     let mut first = First::default();
     session
+        .sql()
+        .unwrap()
         .execute(sql, ExecOptions::default(), &mut first)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e:?}"));

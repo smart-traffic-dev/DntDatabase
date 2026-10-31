@@ -50,7 +50,8 @@ async fn connect(t: Target) -> Box<dyn Session> {
 }
 
 async fn capture(t: Target, name: &str) {
-    let s = connect(t).await;
+    let session = connect(t).await;
+    let s = session.sql().unwrap();
     let stmt = if t == Target::Pg12 || t == Target::Pg17 {
         QUERY_PG
     } else {
@@ -71,7 +72,7 @@ async fn capture(t: Target, name: &str) {
         std::fs::write(&path, text).unwrap();
         eprintln!("wrote {}", path.display());
     }
-    s.close().await;
+    session.close().await;
 }
 
 #[tokio::test]

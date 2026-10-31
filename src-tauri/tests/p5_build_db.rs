@@ -36,6 +36,7 @@ async fn connect(t: Target) -> Box<dyn Session> {
 
 /// Runs `sql` (a script); the rows of every result.
 async fn run(s: &dyn Session, sql: &str) -> Vec<Vec<Value>> {
+    let s = s.sql().unwrap();
     let mut sink = Collect(Vec::new());
     for stmt in dnt_core::sql::split(sql, s.dialect()) {
         let kind = classify(&stmt.text, s.dialect());
@@ -310,7 +311,7 @@ async fn upsert_and_dump_literal_round_trip() {
     require_db!();
     for t in Target::all() {
         let s = connect(t).await;
-        let d = s.dialect();
+        let d = s.sql().unwrap().dialect();
         exec(&*s, &drop_scope(t)).await;
         match t.kind() {
             DbKind::MySql => {

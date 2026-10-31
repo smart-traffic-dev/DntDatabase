@@ -3,7 +3,7 @@
 //! outcome of a failed apply, its History entry and the cache refresh after it.
 use crate::cache::NodeKey;
 use crate::session_manager::{config_error, lock, SessionManager};
-use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::sql::{classify, Dialect};
 use dnt_core::value::{ColumnMeta, Value};
@@ -156,7 +156,7 @@ impl RowSink for Sink {
 
 /// Sends one statement, discarding any rows.
 pub(crate) async fn execute(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     stop: StopSignal,
     grace: Duration,
@@ -197,7 +197,7 @@ pub(crate) fn mysql_statement_refused(pg: bool, error: &DbError) -> bool {
 /// PostgreSQL `COMMIT` was. An open PostgreSQL transaction is rolled back here; it only
 /// counts as rolled back when the server confirms the `ROLLBACK`.
 pub(crate) async fn failure_outcome(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     error: &DbError,
     pg: bool,
     sent: bool,

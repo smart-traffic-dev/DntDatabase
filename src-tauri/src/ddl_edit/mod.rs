@@ -19,7 +19,7 @@ use crate::session_manager::{
 };
 use crate::table_design::ddl_not_shown;
 use dnt_core::config::EnvTag;
-use dnt_core::driver::Session;
+use dnt_core::driver::{Session, SqlSession};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::{ServerInfo, SqlKind};
@@ -194,7 +194,7 @@ pub(crate) struct ObjectRead {
 /// object `t`. A DDL the server will not show is an empty text with a blocked reason;
 /// any other failure is an error.
 pub(crate) async fn read_object(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     t: &EditTarget,
     name: &str,
 ) -> Result<ObjectRead, DbError> {
@@ -223,7 +223,7 @@ pub(crate) async fn read_object(
 /// An object that is no longer listed (dropped by another session) changed: the
 /// server's "does not exist" error of the DDL read is [`object_changed`].
 pub(crate) async fn current_fingerprint(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     t: &EditTarget,
     object: Option<&ObjectRef>,
 ) -> Result<String, DbError> {
@@ -386,8 +386,9 @@ impl SessionManager {
             return Err(DbError::Busy);
         }
         let (session, _) = rt.open_query_session(Some(scope.database.clone())).await?;
+        let sql_session = session.sql()?;
         let server = session.server_info().clone();
-        let dialect = session.dialect();
+        let dialect = sql_session.dialect();
         let mut target = EditTarget {
             kind,
             database: scope.database.clone(),
@@ -398,7 +399,7 @@ impl SessionManager {
         let read = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
             editable_kind(kind, &server)?;
             match name.as_deref() {
-                Some(n) => read_object(session.as_ref(), &target, n).await.map(Some),
+                Some(n) => read_object(sql_session, &target, n).await.map(Some),
                 None => Ok(None),
             }
         })
@@ -483,13 +484,13 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(Some(edit.target.database.clone()))
             .await?;
-        let dialect = session.dialect();
+        let sql_session = session.sql()?;
+        let dialect = sql_session.dialect();
         let checked = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
             if dialect != edit.dialect {
                 return Err(stale());
             }
-            let fp =
-                current_fingerprint(session.as_ref(), &edit.target, edit.object.as_ref()).await?;
+            let fp = current_fingerprint(sql_session, &edit.target, edit.object.as_ref()).await?;
             if fp != edit.fingerprint {
                 return Err(object_changed());
             }

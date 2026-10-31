@@ -275,9 +275,10 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(session_db(kind, &request.table))
             .await?;
-        let dialect = session.dialect();
+        let sql_session = session.sql()?;
+        let dialect = sql_session.dialect();
         let server = session.server_info().clone();
-        let read = read_target_bounded(session.as_ref(), &request.table).await;
+        let read = read_target_bounded(sql_session, &request.table).await;
         close_quietly(session).await;
         let read = read?;
         let report = check_mapping(
@@ -412,7 +413,7 @@ impl SessionManager {
             .open_query_session(session_db(kind, &stored.request.table))
             .await?;
         let checked = async {
-            if generation != stored.generation || session.dialect() != stored.dialect {
+            if generation != stored.generation || session.sql()?.dialect() != stored.dialect {
                 return Err(stale());
             }
             let detail = tokio::time::timeout(

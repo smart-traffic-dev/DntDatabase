@@ -121,6 +121,8 @@ async fn admin(sql: &str) {
         .await
         .unwrap();
     session
+        .sql()
+        .unwrap()
         .execute(sql, ExecOptions::default(), &mut NullSink)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e:?}"));

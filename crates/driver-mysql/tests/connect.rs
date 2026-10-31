@@ -50,7 +50,7 @@ async fn connects_and_detects_variant() {
             .await
             .unwrap_or_else(|e| panic!("{t:?}: {e}"));
         assert_eq!(s.server_info().variant, expected_variant(t), "{t:?}");
-        assert!(!s.in_transaction(), "{t:?}");
+        assert!(!s.sql().unwrap().in_transaction(), "{t:?}");
         s.close().await;
     }
 }

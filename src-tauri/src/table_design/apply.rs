@@ -12,7 +12,7 @@ use crate::session_manager::{
     close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
@@ -95,7 +95,7 @@ impl RowSink for FirstNumber {
 /// Runs one count with the driver's own statement timeout: on expiry the driver stops
 /// it on the server (MySQL `KILL QUERY`, PostgreSQL cancel request) and waits `grace`.
 async fn count_rows(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     kind: StatementKind,
     limit: Duration,
@@ -137,7 +137,7 @@ pub(super) fn mysql_count_bound(server: &ServerInfo, limit: Duration) -> Option<
 /// `limit + grace` ends the counting: the session is not used again. A count that
 /// fails or times out is "not counted".
 pub(super) async fn count_impacts(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     impacts: Vec<Impact>,
     limit: Duration,
     grace: Duration,
@@ -286,12 +286,13 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(session_db(kind, &design.scope))
             .await?;
-        let dialect = session.dialect();
+        let sql_session = session.sql()?;
+        let dialect = sql_session.dialect();
         let draft_name = draft.name.clone();
         let result = async {
             let (fp, row_estimate) = tokio::time::timeout(
                 METADATA_CALL_TIMEOUT,
-                current_state(session.as_ref(), design.object.as_ref()),
+                current_state(sql_session, design.object.as_ref()),
             )
             .await
             .map_err(|_| timed_out())??;
@@ -308,7 +309,7 @@ impl SessionManager {
             check_statement_count(kind, &r.statements)?;
             judge(&r.statements, cfg.env_tag, cfg.read_only, dialect)?;
             let impacts = count_impacts(
-                session.as_ref(),
+                sql_session,
                 r.impacts,
                 self.table_designs.count_timeout,
                 self.table_designs.count_grace,
@@ -404,9 +405,10 @@ impl SessionManager {
             .rt
             .open_query_session(session_db(kind, &stored.scope))
             .await?;
+        let sql_session = session.sql()?;
         ops.set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {
-            if generation != stored.generation || session.dialect() != stored.dialect {
+            if generation != stored.generation || sql_session.dialect() != stored.dialect {
                 return Err(stale());
             }
             let before = session.reconnects();
@@ -415,7 +417,7 @@ impl SessionManager {
             // lock another session holds on it (PostgreSQL's size functions). A reconnect
             // after this loses it and is caught as stale below.
             execute(
-                session.as_ref(),
+                sql_session,
                 if pg {
                     "SET lock_timeout = '5s'"
                 } else {
@@ -426,13 +428,12 @@ impl SessionManager {
                 timeout_s,
             )
             .await?;
-            if current_fingerprint(session.as_ref(), stored.before.as_ref()).await?
-                != stored.fingerprint
+            if current_fingerprint(sql_session, stored.before.as_ref()).await? != stored.fingerprint
             {
                 return Err(table_changed());
             }
             self.check_design_context(&stored)?;
-            if before != session.reconnects() || session.dialect() != stored.dialect {
+            if before != session.reconnects() || sql_session.dialect() != stored.dialect {
                 return Err(stale());
             }
             if stop.is_stopped() {
@@ -458,7 +459,7 @@ impl SessionManager {
             macro_rules! send {
                 ($sql:expr) => {
                     execute(
-                        session.as_ref(),
+                        sql_session,
                         $sql,
                         stop.clone(),
                         self.cancel_grace,
@@ -471,7 +472,7 @@ impl SessionManager {
                 send!("SET LOCAL standard_conforming_strings = on").await?;
             }
             self.check_design_context(&stored)?;
-            if session.dialect() != stored.dialect || session.reconnects() != 0 {
+            if sql_session.dialect() != stored.dialect || session.reconnects() != 0 {
                 return Err(stale());
             }
             for (i, sql) in statements.iter().enumerate() {
@@ -512,7 +513,7 @@ impl SessionManager {
                 ActionOutcome::NotApplied
             } else {
                 failure_outcome(
-                    session.as_ref(),
+                    sql_session,
                     &e,
                     pg,
                     sent > 0,

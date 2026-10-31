@@ -104,6 +104,8 @@ async fn select_one_through(tunnel: &Tunnel, driver: &dyn Driver, t: Target) {
         .unwrap_or_else(|e| panic!("{t:?} via tunnel: {e}"));
     let mut rows = Rows::default();
     session
+        .sql()
+        .unwrap()
         .execute("SELECT 1", ExecOptions::default(), &mut rows)
         .await
         .unwrap();

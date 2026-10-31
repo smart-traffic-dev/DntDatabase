@@ -1,7 +1,7 @@
 //! Catalog facts of an edited object (spec §4.2), read with parameterised statements
 //! on the edit's session (PostgreSQL `$n`, MySQL `?`): what `build` needs beyond the
 //! DDL text, and whether the object can be edited at all (ruling R9).
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession};
 use dnt_core::error::DbError;
 use dnt_core::meta::ObjectKind;
 use dnt_core::server::SqlKind;
@@ -56,7 +56,7 @@ impl RowSink for TextRows {
 }
 
 async fn rows(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Vec<Option<String>>>, DbError> {
@@ -69,7 +69,7 @@ async fn rows(
 
 /// Every row of `sql` run with `options` (its params, stop and timeout), as text.
 pub(crate) async fn rows_with(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     options: ExecOptions,
 ) -> Result<Vec<Vec<Option<String>>>, DbError> {
@@ -86,7 +86,7 @@ pub(crate) async fn rows_with(
 }
 
 /// The first column of every row of `sql` run with the one parameter `param`.
-async fn texts(session: &dyn Session, sql: &str, param: &str) -> Result<Vec<String>, DbError> {
+async fn texts(session: &dyn SqlSession, sql: &str, param: &str) -> Result<Vec<String>, DbError> {
     Ok(rows(session, sql, &[param])
         .await?
         .iter()
@@ -106,7 +106,7 @@ fn flag(row: &[Option<String>], i: usize) -> bool {
 /// (several PostgreSQL routines of that name, a PostgreSQL trigger name used on
 /// several tables). A new object (`t.name` = `None`) has default facts.
 pub(crate) async fn facts(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     t: &EditTarget,
 ) -> Result<(CatalogFacts, Option<String>), DbError> {
     let mut facts = CatalogFacts::default();

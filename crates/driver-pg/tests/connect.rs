@@ -68,7 +68,7 @@ async fn connects_and_detects_variant() {
             info.version_string.starts_with("PostgreSQL"),
             "{t:?}: {info:?}"
         );
-        assert!(!s.in_transaction(), "{t:?}");
+        assert!(!s.sql().unwrap().in_transaction(), "{t:?}");
         s.close().await;
     }
 }

@@ -5,8 +5,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, CellMode, Driver, ExecOptions, Introspector, ResultSummary, RowSink,
-    Session, StmtOutcome,
+    CancelHandle, Canceller, CellMode, Driver, Engine, ExecOptions, Introspector, ResultSummary,
+    RowSink, Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{
@@ -291,6 +291,34 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(NoCancel)
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    fn reconnects(&self) -> u64 {
+        self.server.reconnects.load(Ordering::SeqCst)
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        self.server
+            .executed
+            .lock()
+            .unwrap()
+            .push((self.number, "PING".into()));
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {
+        self.server.closed.lock().unwrap().push(self.number);
+        self.server.closes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         stmt: &str,
@@ -407,27 +435,6 @@ impl Session for FakeSession {
     }
     fn dialect(&self) -> Dialect {
         *self.server.dialect.lock().unwrap()
-    }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoCancel)
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    fn reconnects(&self) -> u64 {
-        self.server.reconnects.load(Ordering::SeqCst)
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        self.server
-            .executed
-            .lock()
-            .unwrap()
-            .push((self.number, "PING".into()));
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {
-        self.server.closed.lock().unwrap().push(self.number);
-        self.server.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
 

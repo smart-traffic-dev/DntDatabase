@@ -1,4 +1,4 @@
-use dnt_core::driver::{ExecOptions, Introspector, ResultSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, Introspector, ResultSummary, RowSink, SqlSession};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::value::{ColumnMeta, Value};

@@ -33,7 +33,7 @@ use crate::session_manager::{
 };
 use async_trait::async_trait;
 use dnt_core::driver::{
-    CancelHandle, CellMode, ExecOptions, ResultSummary, RowSink, Session, StopSignal,
+    CancelHandle, CellMode, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{ForeignKeyDetail, IdentityKind, ObjectKind, ObjectRef, Scope, TableDetail};
@@ -266,7 +266,7 @@ impl RowSink for Collect {
 /// Sends the dump's statements on its session: never after Stop, and never once the
 /// session reconnected (the snapshot would be lost).
 pub(crate) struct Reader<'a> {
-    session: &'a dyn Session,
+    session: &'a dyn SqlSession,
     stop: StopSignal,
     grace: Duration,
     reconnects: u64,
@@ -283,7 +283,11 @@ fn snapshot_lost() -> DbError {
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) fn new(session: &'a dyn Session, stop: StopSignal, grace: Duration) -> Reader<'a> {
+    pub(crate) fn new(
+        session: &'a dyn SqlSession,
+        stop: StopSignal,
+        grace: Duration,
+    ) -> Reader<'a> {
         Reader {
             session,
             stop,
@@ -653,7 +657,7 @@ impl SessionManager {
         }
         let rt = self.runtime(conn)?;
         let (session, _) = rt.open_query_session(Some(database.clone())).await?;
-        let r = Reader::new(session.as_ref(), StopSignal::new(), self.cancel_grace);
+        let r = Reader::new(session.sql()?, StopSignal::new(), self.cancel_grace);
         let listed = tokio::time::timeout(LIST_TIMEOUT, list_dump_objects(&r, &database, &schemas))
             .await
             .map_err(|_| DbError::timeout(dnt_core::error::ConnectStage::Execute));
@@ -1127,12 +1131,13 @@ impl JobRunner for DumpJob {
                 .rt
                 .open_query_session(Some(self.request.database.clone()))
                 .await?;
+            let sql_session = session.sql()?;
             ctx.set_cancel(Some(session.cancel_handle()));
-            let written = self.dump(&ctx, session.as_ref(), &mut file).await;
+            let written = self.dump(&ctx, sql_session, &mut file).await;
             ctx.set_cancel(None);
-            if session.in_transaction() {
+            if sql_session.in_transaction() {
                 let _ = execute(
-                    session.as_ref(),
+                    sql_session,
                     "ROLLBACK",
                     StopSignal::new(),
                     self.grace,
@@ -1173,7 +1178,7 @@ impl DumpJob {
     async fn dump(
         &self,
         ctx: &JobCtx,
-        session: &dyn Session,
+        session: &dyn SqlSession,
         file: &mut DumpFile,
     ) -> Result<Written, DbError> {
         let r = Reader::new(session, ctx.stop(), self.grace);

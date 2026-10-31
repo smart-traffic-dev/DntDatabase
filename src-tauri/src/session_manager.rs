@@ -19,7 +19,8 @@ use crate::query_sessions::{
 use crate::result_store::ResultStore;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{
-    Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session, DEFAULT_CANCEL_GRACE,
+    Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session, SqlSession,
+    DEFAULT_CANCEL_GRACE,
 };
 pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
@@ -1451,7 +1452,9 @@ impl ConnectionRuntime {
         let (schemas, kinds): (Vec<Option<String>>, &[ObjectKind]) = match self.cfg.kind {
             DbKind::Postgres => {
                 let schemas = self
-                    .with_session(Some(&database), |s| Box::pin(current_schemas(s)))
+                    .with_session(Some(&database), |s| {
+                        Box::pin(async move { current_schemas(s.sql()?).await })
+                    })
                     .await?;
                 (
                     schemas.into_iter().map(Some).collect(),
@@ -1523,7 +1526,7 @@ impl RowSink for TextColumn {
 }
 
 /// The schemas of the session's effective `search_path` (PostgreSQL).
-async fn current_schemas(session: &dyn Session) -> Result<Vec<String>, DbError> {
+async fn current_schemas(session: &dyn SqlSession) -> Result<Vec<String>, DbError> {
     let mut sink = TextColumn::default();
     session
         .execute(

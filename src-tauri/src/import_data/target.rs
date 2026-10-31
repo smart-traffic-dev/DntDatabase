@@ -3,7 +3,7 @@
 //! from the metadata of `SELECT <cols> FROM <t> WHERE 1 = 0` on the same session.
 use super::{session_db, table_ref, ImportTarget};
 use crate::session_manager::{close_quietly, config_error, SessionManager, METADATA_CALL_TIMEOUT};
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectRef, TableDetail};
 use dnt_core::server::SqlKind;
@@ -64,7 +64,7 @@ pub(crate) fn table_changed() -> DbError {
 
 /// Reads the target on `session` (no timeout: callers bound it).
 pub(crate) async fn read_target(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     obj: &ObjectRef,
 ) -> Result<TargetRead, DbError> {
     let kind = session.server_info().kind.as_sql(); // R1: boundary
@@ -103,7 +103,7 @@ pub(crate) async fn read_target(
 
 /// [`read_target`] bounded by [`METADATA_CALL_TIMEOUT`].
 pub(crate) async fn read_target_bounded(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     obj: &ObjectRef,
 ) -> Result<TargetRead, DbError> {
     tokio::time::timeout(METADATA_CALL_TIMEOUT, read_target(session, obj))
@@ -133,7 +133,7 @@ impl SessionManager {
         let kind = cfg.kind.as_sql(); // R1: boundary
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
-        let read = read_target_bounded(session.as_ref(), &table).await;
+        let read = read_target_bounded(session.sql()?, &table).await;
         close_quietly(session).await;
         let read = read?;
         Ok(ImportTarget {

@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::ResultSummary;
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, RowSink, Session, StmtOutcome,
+    CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, RowSink, Session,
+    SqlSession, StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{
@@ -146,6 +147,23 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.fake.server
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(CountingCancel(Arc::clone(&self.fake)))
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {}
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         stmt: &str,
@@ -215,16 +233,6 @@ impl Session for FakeSession {
             DbKind::Postgres => Dialect::Postgres,
         }
     }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(CountingCancel(Arc::clone(&self.fake)))
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {}
 }
 
 #[async_trait]

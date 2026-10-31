@@ -60,7 +60,7 @@ use crate::session_manager::{
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::{
-    Canceller, ExecOptions, ResultSummary, RowSink, Session, StmtOutcome, StopSignal,
+    Canceller, ExecOptions, ResultSummary, RowSink, SqlSession, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
@@ -424,7 +424,7 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(Some(request.database.clone()))
             .await?;
-        let dialect = session.dialect();
+        let dialect = session.sql()?.dialect();
         close_quietly(session).await;
         let kind = cfg.kind.as_sql(); // R1: boundary
         let target = scan_target(&request.database, dialect, rt.server_info());
@@ -628,7 +628,8 @@ impl SessionManager {
                 .rt
                 .open_query_session(Some(stored.request.database.clone()))
                 .await?;
-            let same = generation == stored.generation && session.dialect() == stored.dialect;
+            let same =
+                generation == stored.generation && session.sql()?.dialect() == stored.dialect;
             close_quietly(session).await;
             if !same {
                 return Err(stale());
@@ -997,7 +998,7 @@ fn with_outcome(e: DbError, unknown: bool) -> DbError {
 /// Sends the statements of one restore and keeps its counters.
 struct Sender<'a> {
     ctx: &'a JobCtx,
-    session: &'a dyn Session,
+    session: &'a dyn SqlSession,
     context: &'a Context,
     cancel: RunCancel,
     opts: ExecOptions,
@@ -1125,12 +1126,13 @@ impl JobRunner for AppRestoreJob {
             .open_query_session(Some(self.request.database.clone()))
             .await
             .map_err(JobFailure::from)?;
+        let sql_session = session.sql().map_err(JobFailure::from)?;
         let cancel = RunCancel::new(session.cancel_handle());
         ctx.set_cancel(Some(Arc::new(StopRun(cancel.clone()))));
         let timeout_s = self.context.cfg.options.query_timeout_s;
         let mut w = Sender {
             ctx: &ctx,
-            session: session.as_ref(),
+            session: sql_session,
             context: &self.context,
             cancel,
             opts: ExecOptions {

@@ -90,10 +90,11 @@ impl JobRunner for SeedJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
+        let sql_session = session.sql().map_err(JobFailure::from)?;
         ctx.set_cancel(Some(session.cancel_handle()));
         let mut w = Writer::new(
             &ctx,
-            session.as_ref(),
+            sql_session,
             &self.context,
             self.dialect,
             guard_ctx(self.context.env, false),

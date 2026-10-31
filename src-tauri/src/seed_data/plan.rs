@@ -184,16 +184,17 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(session_db(kind, &request.table))
             .await?;
-        let dialect = session.dialect();
+        let sql_session = session.sql()?;
+        let dialect = sql_session.dialect();
         let result = async {
-            let read = read_target_bounded(session.as_ref(), &request.table).await?;
+            let read = read_target_bounded(sql_session, &request.table).await?;
             let mut keys = HashMap::new();
             let mut key_counts = Vec::new();
             for fk in used_fks(&request, &read.detail) {
                 let id = key_id(request.connection_id, generation, kind, &request.table, fk);
                 let tuples = self
                     .seed_keys
-                    .get_or_read(id, read_fk_keys(session.as_ref(), &request.table, fk))
+                    .get_or_read(id, read_fk_keys(sql_session, &request.table, fk))
                     .await?;
                 key_counts.push(SeedKeyCount {
                     constraint: fk.name.clone(),
@@ -402,7 +403,7 @@ impl SessionManager {
             .open_query_session(session_db(kind, &stored.request.table))
             .await?;
         let checked = async {
-            if generation != stored.generation || session.dialect() != stored.dialect {
+            if generation != stored.generation || session.sql()?.dialect() != stored.dialect {
                 return Err(stale());
             }
             let detail = tokio::time::timeout(

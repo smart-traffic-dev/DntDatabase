@@ -3,7 +3,8 @@
 //! in a local proxy, so the late signal is deterministic rather than a timing accident.
 
 use dnt_core::driver::{
-    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, StmtOutcome,
+    ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, Session, SqlSession,
+    StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::sql::classify;

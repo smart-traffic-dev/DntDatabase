@@ -1,7 +1,7 @@
 //! Rendered MySQL / MariaDB `ALTER TABLE`s run on the Docker matrix (`DNT_TEST_DB=1`):
 //! the statement is accepted and the table ends up as the draft says.
 
-use dnt_core::driver::Session;
+use dnt_core::driver::{Session, SqlSession};
 use dnt_core::server::SqlKind;
 use dnt_core::sql::build::TableRef;
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};

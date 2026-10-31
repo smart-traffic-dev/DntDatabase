@@ -154,6 +154,8 @@ async fn admin(t: Target, sql: &str) {
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
     session
+        .sql()
+        .unwrap()
         .execute(sql, ExecOptions::default(), &mut NullSink)
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e:?}"));
@@ -589,9 +591,10 @@ async fn admin_one(t: Target, sql: &str) -> Result<Vec<Vec<Value>>, DbError> {
         DbKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
-    let kind = classify(sql, session.dialect());
+    let s = session.sql().unwrap();
+    let kind = classify(sql, s.dialect());
     let mut sink = Collect(Vec::new());
-    let out = session
+    let out = s
         .execute_one(sql, kind, &ExecOptions::default(), &mut sink)
         .await;
     session.close().await;

@@ -4,8 +4,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
+    Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{
@@ -135,6 +135,28 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(FakeCancel {
+            log: Arc::clone(&self.log),
+            running: Arc::clone(&self.running),
+        })
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {
+        self.log.closes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     /// `GATED` waits for the test's gate and then succeeds (even when cancelled meanwhile:
     /// it completed first); `SLOWISH` runs 300 ms unless a cancel reaches it; anything
     /// else returns one row.
@@ -194,21 +216,6 @@ impl Session for FakeSession {
     }
     fn dialect(&self) -> Dialect {
         Dialect::for_kind(self.info.kind.as_sql())
-    }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(FakeCancel {
-            log: Arc::clone(&self.log),
-            running: Arc::clone(&self.running),
-        })
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {
-        self.log.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
 

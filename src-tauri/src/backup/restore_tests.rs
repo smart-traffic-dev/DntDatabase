@@ -6,7 +6,7 @@ use crate::backup::ext_tools::{ReadPipe, ToolChild, WritePipe};
 use crate::jobs::{JobDetail, JobState};
 use async_trait::async_trait;
 use dnt_core::config::ConnectionConfig;
-use dnt_core::driver::{CancelHandle, Driver, Introspector};
+use dnt_core::driver::{CancelHandle, Driver, Engine, Introspector, Session};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
     TableDetail,
@@ -89,6 +89,23 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.fake.server
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(NoCancel)
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {}
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         stmt: &str,
@@ -149,16 +166,6 @@ impl Session for FakeSession {
             DbKind::Postgres => Dialect::Postgres,
         }
     }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoCancel)
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {}
 }
 
 #[async_trait]

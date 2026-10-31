@@ -53,7 +53,7 @@ impl SessionManager {
         let kind = cfg.kind.as_sql(); // R1: boundary
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
-        let read = read_target_bounded(session.as_ref(), &table).await;
+        let read = read_target_bounded(session.sql()?, &table).await;
         close_quietly(session).await;
         let read = read?;
         let today = time::OffsetDateTime::now_utc().date();

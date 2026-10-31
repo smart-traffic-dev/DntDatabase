@@ -10,8 +10,8 @@ use std::task::{Context, Poll, Waker};
 use async_trait::async_trait;
 use dnt_core::config::EnvTag;
 use dnt_core::driver::{
-    CancelHandle, Canceller, ExecOptions, Introspector, ResultSummary, RowSink, ServerNotice,
-    ServerNotices, Session, StmtOutcome,
+    CancelHandle, Canceller, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
+    ServerNotice, ServerNotices, Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
@@ -153,6 +153,31 @@ impl Session for FakeSession {
         &self.info
     }
 
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(CountCancel(self.cancels.clone()))
+    }
+
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn close(self: Box<Self>) {}
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         stmt: &str,
@@ -195,24 +220,6 @@ impl Session for FakeSession {
     fn dialect(&self) -> Dialect {
         *self.dialect.lock().unwrap()
     }
-
-    fn reconnects(&self) -> u64 {
-        self.reconnects.load(Ordering::SeqCst)
-    }
-
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(CountCancel(self.cancels.clone()))
-    }
-
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-
-    async fn close(self: Box<Self>) {}
 }
 
 #[async_trait]

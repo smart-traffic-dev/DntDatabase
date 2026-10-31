@@ -3,8 +3,8 @@ use crate::values::{column_meta, to_full_value, to_value, Raw};
 use crate::{close_conn, io_error, map_pg_error, open, take_notices, ConnectParams, PgConn};
 use async_trait::async_trait;
 use dnt_core::driver::{
-    check_cell_size, CancelHandle, CellMode, ExecOptions, ExecProgress, Introspector,
-    ResultSummary, RowSink, Session, SharedSink, StmtOutcome, StopSignal,
+    check_cell_size, CancelHandle, CellMode, Engine, ExecOptions, ExecProgress, Introspector,
+    ResultSummary, RowSink, Session, SharedSink, SqlSession, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{DbKind, ServerInfo};
@@ -671,6 +671,43 @@ impl Session for PgSession {
         &self.info
     }
 
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(PgCanceller {
+            target: CancelTarget::new(&self.params),
+            state: self.cancel.clone(),
+        })
+    }
+
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+
+    async fn ping(&self) -> Result<(), DbError> {
+        self.conn
+            .lock()
+            .await
+            .client
+            .simple_query("")
+            .await
+            .map(|_| ())
+            .map_err(|e| map_pg_error(e, ConnectStage::Execute))
+    }
+
+    async fn close(self: Box<Self>) {
+        close_conn(self.conn.into_inner()).await;
+    }
+}
+
+#[async_trait]
+impl SqlSession for PgSession {
     /// `opts.max_rows` applies per result set and `opts.timeout` to the statement: an
     /// expired statement is cancelled and `Timeout { Execute }` returned
     /// (`outcome_unknown` when it may have committed part of its work, see
@@ -708,40 +745,10 @@ impl Session for PgSession {
     fn dialect(&self) -> Dialect {
         Dialect::Postgres
     }
-
-    fn reconnects(&self) -> u64 {
-        self.reconnects.load(Ordering::SeqCst)
-    }
-
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(PgCanceller {
-            target: CancelTarget::new(&self.params),
-            state: self.cancel.clone(),
-        })
-    }
-
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-
-    async fn ping(&self) -> Result<(), DbError> {
-        self.conn
-            .lock()
-            .await
-            .client
-            .simple_query("")
-            .await
-            .map(|_| ())
-            .map_err(|e| map_pg_error(e, ConnectStage::Execute))
-    }
-
-    async fn close(self: Box<Self>) {
-        close_conn(self.conn.into_inner()).await;
-    }
 }
 
 impl PgSession {
-    /// [`Session::execute_one`] once the connection is locked.
+    /// [`SqlSession::execute_one`] once the connection is locked.
     async fn execute_locked(
         &self,
         conn: &mut PgConn,

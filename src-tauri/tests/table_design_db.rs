@@ -90,6 +90,7 @@ impl RowSink for Collect {
     fn result_end(&mut self, _: &ResultSummary) {}
 }
 async fn sql(s: &dyn Session, text: &str) -> Result<Collect, DbError> {
+    let s = s.sql().unwrap();
     let mut sink = Collect::default();
     s.execute_one(
         text,

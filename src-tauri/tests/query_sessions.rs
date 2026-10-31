@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, ExecProgress, Introspector, ResultSummary,
-    RowSink, Session, StmtOutcome,
+    CancelHandle, Canceller, Driver, Engine, ExecOptions, ExecProgress, Introspector,
+    ResultSummary, RowSink, Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
@@ -197,6 +197,25 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(FakeCancel(Arc::clone(&self.log)))
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {
+        self.log.closes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     /// Scripted by the statement text (upper-cased):
     /// `ROWS_<n>` streams n rows in `batch_size` batches; `TRICKLE` streams 10 batches
     /// of 10 rows; `EXPLAIN …` returns a one-cell plan; `FAIL` is a server error 1146;
@@ -470,18 +489,6 @@ impl Session for FakeSession {
     }
     fn dialect(&self) -> Dialect {
         Dialect::for_kind(self.info.kind.as_sql())
-    }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(FakeCancel(Arc::clone(&self.log)))
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {
-        self.log.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
 

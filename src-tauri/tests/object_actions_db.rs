@@ -73,6 +73,7 @@ impl RowSink for Collect {
     fn result_end(&mut self, _: &ResultSummary) {}
 }
 async fn sql(s: &dyn Session, text: &str) -> Result<Collect, dnt_core::error::DbError> {
+    let s = s.sql().unwrap();
     let mut sink = Collect::default();
     s.execute_one(
         text,
@@ -602,18 +603,18 @@ async fn review_probe_result_budget() {
     ] {
         let started = std::time::Instant::now();
         let mut sink = Collect::default();
-        session
-            .execute_one(
-                text,
-                classify(text, session.dialect()),
-                &ExecOptions {
-                    max_rows: 1,
-                    ..ExecOptions::default()
-                },
-                &mut sink,
-            )
-            .await
-            .unwrap();
+        let s = session.sql().unwrap();
+        s.execute_one(
+            text,
+            classify(text, s.dialect()),
+            &ExecOptions {
+                max_rows: 1,
+                ..ExecOptions::default()
+            },
+            &mut sink,
+        )
+        .await
+        .unwrap();
         println!(
             "REVIEW row limit: {} ms, {} delivered row(s): {text}",
             started.elapsed().as_millis(),
@@ -623,19 +624,19 @@ async fn review_probe_result_budget() {
     }
     let mut sink = Collect::default();
     let text = "SELECT repeat('x', 131072) FROM generate_series(1, 500)";
-    session
-        .execute_one(
-            text,
-            classify(text, session.dialect()),
-            &ExecOptions {
-                max_rows: 500,
-                batch_size: 500,
-                ..ExecOptions::default()
-            },
-            &mut sink,
-        )
-        .await
-        .unwrap();
+    let s = session.sql().unwrap();
+    s.execute_one(
+        text,
+        classify(text, s.dialect()),
+        &ExecOptions {
+            max_rows: 500,
+            batch_size: 500,
+            ..ExecOptions::default()
+        },
+        &mut sink,
+    )
+    .await
+    .unwrap();
     let bytes: usize = sink
         .0
         .iter()

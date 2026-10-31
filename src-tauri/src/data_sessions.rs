@@ -29,7 +29,9 @@
 use crate::session_manager::{
     close_quietly, config_error, is_lost, lock, ConnectionRuntime, SessionManager,
 };
-use dnt_core::driver::{CancelHandle, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::{
+    CancelHandle, ExecOptions, ResultSummary, RowSink, Session, SqlSession, StopSignal,
+};
 use dnt_core::error::DbError;
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, Value};
@@ -609,7 +611,10 @@ impl SessionManager {
                 full_bytes: request.full_bytes,
                 ..ExecOptions::default()
             };
-            let outcome = run_request(session.as_ref(), request, &opts, &mut sink).await;
+            let outcome = match session.sql() {
+                Ok(sql) => run_request(sql, request, &opts, &mut sink).await,
+                Err(e) => Err(e),
+            };
             // A pooled session that went stale while idle (server restart, idle timeout):
             // one more attempt on a fresh session, unless the request was cancelled or
             // something already reached the sink.
@@ -632,7 +637,7 @@ impl SessionManager {
                 && current
                 && request.raw.is_none()
                 && reusable(&rt)
-                && !session.in_transaction()
+                && !session.sql().is_ok_and(|s| s.in_transaction())
             {
                 give_back(
                     &rt,
@@ -689,7 +694,7 @@ impl SessionManager {
         clean: bool,
     ) {
         let reusable = clean
-            && !taken.session.in_transaction()
+            && !taken.session.sql().is_ok_and(|s| s.in_transaction())
             && !rt.closed.load(Ordering::SeqCst)
             && !rt.tunnel_dead()
             && taken.tunnel_gen == rt.tunnel_gen.load(Ordering::SeqCst);
@@ -739,7 +744,7 @@ impl RowSink for FirstCell {
 
 /// Runs `request` on `session` (see [`DataRequest::raw`]).
 async fn run_request(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     request: &DataRequest,
     opts: &ExecOptions,
     sink: &mut dyn RowSink,

@@ -7,8 +7,8 @@ use crate::session_manager::SessionManager;
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
+    Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{
@@ -172,6 +172,23 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.fake.server
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(NoCancel)
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {}
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         stmt: &str,
@@ -277,16 +294,6 @@ impl Session for FakeSession {
             DbKind::Postgres => Dialect::Postgres,
         }
     }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoCancel)
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {}
 }
 
 #[async_trait]
@@ -616,15 +623,15 @@ async fn fake_streams_programmed_rows() {
         .unwrap();
     let sql = "SELECT DISTINCT \"id\" FROM \"public\".\"t\"";
     let mut sink = Collect(Vec::new());
-    session
-        .execute_one(
-            sql,
-            classify(sql, session.dialect()),
-            &ExecOptions::default(),
-            &mut sink,
-        )
-        .await
-        .unwrap();
+    let s = session.sql().unwrap();
+    s.execute_one(
+        sql,
+        classify(sql, s.dialect()),
+        &ExecOptions::default(),
+        &mut sink,
+    )
+    .await
+    .unwrap();
     assert_eq!(sink.0, vec![vec![Value::Int(1)], vec![Value::Int(2)]]);
 }
 

@@ -287,7 +287,7 @@ async fn fk_keys_skip_null_tuples_and_use_ref_schema() {
         .connect(&dnt_core::test_util::sample_resolved(None))
         .await
         .unwrap();
-    let keys = read_fk_keys(session.as_ref(), &obj("shop", Some("public")), &f)
+    let keys = read_fk_keys(session.sql().unwrap(), &obj("shop", Some("public")), &f)
         .await
         .unwrap();
     let shown: Vec<Vec<Value>> = keys

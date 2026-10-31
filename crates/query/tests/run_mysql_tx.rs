@@ -33,6 +33,7 @@ impl RunSink for Rec {
 }
 
 async fn run_text(s: &dyn Session, text: &str) -> Rec {
+    let s = s.sql().unwrap();
     let p = plan(text, Scope::All, s.dialect());
     let cancel = RunCancel::new(s.cancel_handle());
     let mut rec = Rec::default();
@@ -59,7 +60,7 @@ async fn delimiter_left_on_reports_the_servers_tx_state() {
         let rec = run_text(&*s, "DELIMITER $$\nBEGIN; INSERT INTO f1_run VALUES (1)$$").await;
         assert_eq!(rec.ok, [true], "{t:?}");
         assert_eq!(rec.tx, [TxState::Active], "{t:?}");
-        assert_eq!(s.tx_state(), TxState::Active, "{t:?}");
+        assert_eq!(s.sql().unwrap().tx_state(), TxState::Active, "{t:?}");
 
         // `SELECT 1; COMMIT` ends it.
         let rec = run_text(&*s, "DELIMITER $$\nSELECT 1; COMMIT$$").await;

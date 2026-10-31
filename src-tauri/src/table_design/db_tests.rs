@@ -2,7 +2,7 @@
 //! (`DNT_TEST_DB=1`): slow impact counts are stopped on the server (ruling T10-1), and
 //! `SHOW CREATE TABLE` is read with `ANSI_QUOTES` off (ruling T9-2).
 use super::*;
-use dnt_core::driver::Driver;
+use dnt_core::driver::{Driver, Session};
 use dnt_driver_mysql::MySqlDriver;
 use dnt_driver_pg::PgDriver;
 use dnt_schema::{Impact, ImpactKind};
@@ -39,7 +39,7 @@ async fn slow_count_is_stopped_on_the_server() {
         let probe = connect(t).await;
         // The same path counts a fast query.
         let fast = apply::count_impacts(
-            s.as_ref(),
+            s.sql().unwrap(),
             vec![count_impact(
                 "SELECT COUNT(*) FROM (SELECT 1 AS a) s".into(),
             )],
@@ -59,7 +59,7 @@ async fn slow_count_is_stopped_on_the_server() {
         };
         let started = Instant::now();
         let out = apply::count_impacts(
-            s.as_ref(),
+            s.sql().unwrap(),
             vec![count_impact(sql)],
             Duration::from_millis(300),
             Duration::from_secs(1),
@@ -91,7 +91,7 @@ async fn slow_count_is_stopped_on_the_server() {
         // The server may take a moment to tear the statement down.
         let mut left = None;
         for _ in 0..20 {
-            left = first_text(probe.as_ref(), &running).await.unwrap();
+            left = first_text(probe.sql().unwrap(), &running).await.unwrap();
             if left.as_deref() == Some("0") {
                 break;
             }
@@ -120,7 +120,7 @@ async fn mysql_family_count_bound_is_enforced_by_the_server() {
         let bound = apply::mysql_count_bound(s.server_info(), limit)
             .unwrap_or_else(|| panic!("{t:?}: no server bound"));
         crate::ddl_exec::execute(
-            s.as_ref(),
+            s.sql().unwrap(),
             "START TRANSACTION READ ONLY",
             StopSignal::new(),
             Duration::from_secs(1),
@@ -129,7 +129,7 @@ async fn mysql_family_count_bound_is_enforced_by_the_server() {
         .await
         .unwrap();
         crate::ddl_exec::execute(
-            s.as_ref(),
+            s.sql().unwrap(),
             &bound,
             StopSignal::new(),
             Duration::from_secs(1),
@@ -141,7 +141,7 @@ async fn mysql_family_count_bound_is_enforced_by_the_server() {
         let started = Instant::now();
         // `first_text` runs it without any client-side timeout.
         let _ = first_text(
-            s.as_ref(),
+            s.sql().unwrap(),
             &format!("SELECT CAST(COUNT(*) AS CHAR) FROM (SELECT SLEEP(20) AS {marker}) s"),
         )
         .await;
@@ -152,7 +152,7 @@ async fn mysql_family_count_bound_is_enforced_by_the_server() {
              WHERE info LIKE '%{marker}%' AND id <> CONNECTION_ID()"
         );
         assert_eq!(
-            first_text(probe.as_ref(), &running)
+            first_text(probe.sql().unwrap(), &running)
                 .await
                 .unwrap()
                 .as_deref(),
@@ -173,12 +173,12 @@ async fn sql_mode_reads_and_ddl_is_read_without_ansi_quotes() {
     }
     for t in targets {
         let s = connect(t).await;
-        let mode = first_text(s.as_ref(), "SELECT @@SESSION.sql_mode")
+        let mode = first_text(s.sql().unwrap(), "SELECT @@SESSION.sql_mode")
             .await
             .unwrap();
         assert!(mode.is_some(), "{t:?}: sql_mode came back unreadable");
         crate::ddl_exec::execute(
-            s.as_ref(),
+            s.sql().unwrap(),
             "SET SESSION sql_mode = 'ANSI'",
             StopSignal::new(),
             Duration::from_secs(1),
@@ -187,10 +187,10 @@ async fn sql_mode_reads_and_ddl_is_read_without_ansi_quotes() {
         .await
         .unwrap();
         assert!(
-            matches!(s.dialect(), Dialect::MySql(m) if m.ansi_quotes),
+            matches!(s.sql().unwrap().dialect(), Dialect::MySql(m) if m.ansi_quotes),
             "{t:?}"
         );
-        let ansi_mode = first_text(s.as_ref(), "SELECT @@SESSION.sql_mode")
+        let ansi_mode = first_text(s.sql().unwrap(), "SELECT @@SESSION.sql_mode")
             .await
             .unwrap()
             .unwrap();
@@ -200,13 +200,13 @@ async fn sql_mode_reads_and_ddl_is_read_without_ansi_quotes() {
             name: "orders".into(),
             kind: ObjectKind::Table,
         };
-        let ddl = read_ddl(s.as_ref(), &obj).await.unwrap().unwrap();
+        let ddl = read_ddl(s.sql().unwrap(), &obj).await.unwrap().unwrap();
         assert!(ddl.starts_with("CREATE TABLE `orders`"), "{t:?}: {ddl}");
         assert!(
-            matches!(s.dialect(), Dialect::MySql(m) if m.ansi_quotes),
+            matches!(s.sql().unwrap().dialect(), Dialect::MySql(m) if m.ansi_quotes),
             "{t:?}"
         );
-        let restored = first_text(s.as_ref(), "SELECT @@SESSION.sql_mode")
+        let restored = first_text(s.sql().unwrap(), "SELECT @@SESSION.sql_mode")
             .await
             .unwrap()
             .unwrap();

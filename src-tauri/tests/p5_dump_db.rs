@@ -49,6 +49,7 @@ async fn connect(t: Target, db: &str) -> Box<dyn Session> {
 
 /// Runs every statement of `sql` (split by the session's dialect); the rows of all.
 async fn run(s: &dyn Session, sql: &str) -> Vec<Vec<Value>> {
+    let s = s.sql().unwrap();
     let mut sink = Collect::default();
     for stmt in dnt_core::sql::split(sql, s.dialect()) {
         let kind = classify(&stmt.text, s.dialect());
@@ -62,6 +63,7 @@ async fn run(s: &dyn Session, sql: &str) -> Vec<Vec<Value>> {
 /// Restores a dump the way the app runner reads it: `split` with the engine's default
 /// dialect, one statement at a time.
 async fn restore(s: &dyn Session, dump: &str, d: Dialect) {
+    let s = s.sql().unwrap();
     for stmt in dnt_core::sql::split(dump, d) {
         let kind = classify(&stmt.text, s.dialect());
         s.execute_one(

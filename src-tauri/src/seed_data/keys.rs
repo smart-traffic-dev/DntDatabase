@@ -2,7 +2,7 @@
 //! <parent> WHERE <ref cols> IS NOT NULL ORDER BY <ref cols> LIMIT 10000`, and the cache the
 //! preview reads through so a debounced preview does not query the parent each time.
 use crate::session_manager::{lock, METADATA_CALL_TIMEOUT};
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{ForeignKeyDetail, ObjectRef};
 use dnt_core::server::SqlKind;
@@ -77,7 +77,7 @@ impl RowSink for Rows {
 /// Reads the keys of `fk` on `session` (bounded by [`METADATA_CALL_TIMEOUT`]). A tuple with
 /// an incomplete value is left out.
 pub(crate) async fn read_fk_keys(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     child: &ObjectRef,
     fk: &ForeignKeyDetail,
 ) -> Result<Vec<Vec<FullValue>>, DbError> {

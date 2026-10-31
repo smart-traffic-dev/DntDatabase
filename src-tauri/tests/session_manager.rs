@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
+    Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::meta::{
@@ -122,6 +122,25 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.info
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(NoopCancel)
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {
+        self.log.closes.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         _stmt: &str,
@@ -147,18 +166,6 @@ impl Session for FakeSession {
     }
     fn dialect(&self) -> Dialect {
         Dialect::for_kind(self.info.kind.as_sql())
-    }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoopCancel)
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {
-        self.log.closes.fetch_add(1, Ordering::SeqCst);
     }
 }
 

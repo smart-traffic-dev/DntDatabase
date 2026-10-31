@@ -3,7 +3,7 @@
 //! the draft says. Each test works in its own scratch schema, dropped afterwards also
 //! when an assertion fails.
 
-use dnt_core::driver::Session;
+use dnt_core::driver::{Session, SqlSession};
 use dnt_core::meta::IdentityKind;
 use dnt_core::server::SqlKind;
 use dnt_core::sql::build::TableRef;

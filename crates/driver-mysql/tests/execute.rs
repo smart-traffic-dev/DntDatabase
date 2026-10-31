@@ -1,6 +1,6 @@
 use dnt_core::driver::{
     CellMode, ExecOptions, ExecProgress, ExecSummary, ResultSummary, RowSink, ServerNotices,
-    Session, StmtOutcome, MAX_SERVER_NOTICES,
+    Session, SqlSession, StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
 use dnt_core::server::DbKind;

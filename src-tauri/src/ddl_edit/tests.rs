@@ -6,8 +6,8 @@ use super::*;
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome,
+    CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
+    Session, SqlSession, StmtOutcome,
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{
@@ -187,6 +187,26 @@ impl Session for FakeSession {
     fn server_info(&self) -> &ServerInfo {
         &self.fake.server
     }
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(AtomicOrdering::SeqCst) as u64
+    }
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(NoCancel)
+    }
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+    async fn ping(&self) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn close(self: Box<Self>) {}
+}
+
+#[async_trait]
+impl SqlSession for FakeSession {
     async fn execute_one(
         &self,
         stmt: &str,
@@ -248,25 +268,12 @@ impl Session for FakeSession {
     fn tx_state(&self) -> TxState {
         *self.tx.lock().unwrap()
     }
-    fn reconnects(&self) -> u64 {
-        self.reconnects.load(AtomicOrdering::SeqCst) as u64
-    }
     fn dialect(&self) -> Dialect {
         match self.fake.server.kind {
             DbKind::MySql => Dialect::MySql(MySqlMode::default()),
             DbKind::Postgres => Dialect::Postgres,
         }
     }
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(NoCancel)
-    }
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-    async fn ping(&self) -> Result<(), DbError> {
-        Ok(())
-    }
-    async fn close(self: Box<Self>) {}
 }
 
 #[async_trait]

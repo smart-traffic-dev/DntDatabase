@@ -4,7 +4,7 @@ use crate::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
     TableDetail,
 };
-use crate::server::{DbKind, ServerInfo};
+use crate::server::{Capabilities, DbKind, ServerInfo};
 use crate::sql::{classify, split, Dialect, StatementKind};
 use crate::tx::TxState;
 use crate::value::{ColumnMeta, FullValue, Value};
@@ -226,9 +226,52 @@ pub trait Driver: Send + Sync {
     async fn connect(&self, cfg: &ResolvedConfig) -> Result<Box<dyn Session>, DbError>;
 }
 
+/// What every session does, whatever its engine.
 #[async_trait]
 pub trait Session: Send + Sync {
     fn server_info(&self) -> &ServerInfo;
+    fn capabilities(&self) -> &Capabilities {
+        &self.server_info().capabilities
+    }
+    /// The engine-specific face of this session.
+    fn engine(&self) -> Engine<'_>;
+    /// Session types implement `Introspector` themselves and return `self`.
+    fn introspector(&self) -> &dyn Introspector;
+    fn cancel_handle(&self) -> CancelHandle;
+    /// How many times this session replaced its connection with a fresh one, in all.
+    /// The query layer compares it around each statement to tell the user about
+    /// reconnects that were otherwise silent (a statement that succeeded on a new
+    /// connection). Default: 0 (a session that never reconnects).
+    fn reconnects(&self) -> u64 {
+        0
+    }
+    async fn ping(&self) -> Result<(), DbError>;
+    async fn close(self: Box<Self>);
+}
+
+/// A session seen through its engine.
+pub enum Engine<'a> {
+    Sql(&'a dyn SqlSession),
+}
+
+impl dyn Session + '_ {
+    /// This session as a SQL session. Every R1 session is one; R2 adds the `Command`
+    /// arm, which returns `DbError::Unsupported { feature: "SQL", .. }`.
+    pub fn sql(&self) -> Result<&dyn SqlSession, DbError> {
+        let Engine::Sql(s) = self.engine();
+        Ok(s)
+    }
+}
+
+/// A session that runs SQL.
+#[async_trait]
+pub trait SqlSession: Session {
+    /// The dialect statements of this session are split and classified with.
+    fn dialect(&self) -> Dialect;
+    fn tx_state(&self) -> TxState;
+    fn in_transaction(&self) -> bool {
+        self.tx_state() != TxState::Idle
+    }
     /// Runs ONE statement (`kind`: its [`classify`] result) and calls `result_start` /
     /// `rows` / `result_end` on `sink` for every result it produces (a MySQL `CALL` may
     /// produce several), and `progress` while it is being stopped.
@@ -245,8 +288,8 @@ pub trait Session: Send + Sync {
         opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError>;
-    /// Runs a (possibly multi-statement) script: splits it by [`Session::dialect`],
-    /// classifies each statement and runs it with [`Session::execute_one`], stopping at
+    /// Runs a (possibly multi-statement) script: splits it by [`SqlSession::dialect`],
+    /// classifies each statement and runs it with [`SqlSession::execute_one`], stopping at
     /// the first error.
     ///
     /// A [`Canceller::cancel`] only targets a statement that is running: one that lands
@@ -267,24 +310,6 @@ pub trait Session: Send + Sync {
         }
         Ok(summary)
     }
-    fn tx_state(&self) -> TxState;
-    /// The dialect statements of this session are split and classified with.
-    fn dialect(&self) -> Dialect;
-    fn in_transaction(&self) -> bool {
-        self.tx_state() != TxState::Idle
-    }
-    /// How many times this session replaced its connection with a fresh one, in all.
-    /// The query layer compares it around each statement to tell the user about
-    /// reconnects that were otherwise silent (a statement that succeeded on a new
-    /// connection). Default: 0 (a session that never reconnects).
-    fn reconnects(&self) -> u64 {
-        0
-    }
-    fn cancel_handle(&self) -> CancelHandle;
-    /// Session types implement `Introspector` themselves and return `self`.
-    fn introspector(&self) -> &dyn Introspector;
-    async fn ping(&self) -> Result<(), DbError>;
-    async fn close(self: Box<Self>);
 }
 
 pub trait RowSink: Send {
@@ -374,7 +399,7 @@ pub trait Introspector: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::detect_pg;
+    use crate::server::{detect_pg, EngineFamily};
 
     #[test]
     fn exec_options_defaults() {
@@ -676,6 +701,23 @@ mod tests {
         fn server_info(&self) -> &ServerInfo {
             &self.info
         }
+        fn engine(&self) -> Engine<'_> {
+            Engine::Sql(self)
+        }
+        fn cancel_handle(&self) -> CancelHandle {
+            Arc::new(NoopCancel)
+        }
+        fn introspector(&self) -> &dyn Introspector {
+            self
+        }
+        async fn ping(&self) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn close(self: Box<Self>) {}
+    }
+
+    #[async_trait]
+    impl SqlSession for FakeSession {
         async fn execute_one(
             &self,
             stmt: &str,
@@ -708,16 +750,6 @@ mod tests {
         fn dialect(&self) -> Dialect {
             Dialect::Postgres
         }
-        fn cancel_handle(&self) -> CancelHandle {
-            Arc::new(NoopCancel)
-        }
-        fn introspector(&self) -> &dyn Introspector {
-            self
-        }
-        async fn ping(&self) -> Result<(), DbError> {
-            Ok(())
-        }
-        async fn close(self: Box<Self>) {}
     }
 
     #[async_trait]
@@ -756,6 +788,19 @@ mod tests {
             i as *const dyn Introspector,
             &*s as *const dyn Session
         ));
-        assert!(!s.in_transaction());
+        assert!(!s.sql().unwrap().in_transaction());
+    }
+
+    #[test]
+    fn sql_returns_the_same_session() {
+        let s: Box<dyn Session> = Box::new(fake());
+        let sql = s.sql().unwrap();
+        assert!(std::ptr::addr_eq(
+            sql as *const dyn SqlSession,
+            &*s as *const dyn Session
+        ));
+        assert_eq!(sql.dialect(), Dialect::Postgres);
+        assert!(!sql.in_transaction());
+        assert_eq!(s.capabilities().family, EngineFamily::Sql);
     }
 }

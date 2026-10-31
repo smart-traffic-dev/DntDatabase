@@ -39,7 +39,7 @@ use crate::session_manager::{
 };
 use async_trait::async_trait;
 use dnt_core::config::EnvTag;
-use dnt_core::driver::{Session, StopSignal};
+use dnt_core::driver::{SqlSession, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{BuildError, TableRef};
@@ -409,7 +409,7 @@ fn plural(n: u64, one: &str, many: &str) -> String {
 /// Sends the statements of one job and keeps its counters.
 pub(crate) struct Writer<'a> {
     pub(crate) ctx: &'a JobCtx,
-    pub(crate) session: &'a dyn Session,
+    pub(crate) session: &'a dyn SqlSession,
     context: &'a Context,
     dialect: Dialect,
     pub(crate) guard: GuardCtx,
@@ -444,7 +444,7 @@ impl<'a> Writer<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         ctx: &'a JobCtx,
-        session: &'a dyn Session,
+        session: &'a dyn SqlSession,
         context: &'a Context,
         dialect: Dialect,
         guard: GuardCtx,
@@ -871,11 +871,12 @@ impl JobRunner for ImportJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
+        let sql_session = session.sql().map_err(JobFailure::from)?;
         ctx.set_cancel(Some(session.cancel_handle()));
         let cfg_timeout = self.context.rt.cfg.options.query_timeout_s;
         let mut w = Writer::new(
             &ctx,
-            session.as_ref(),
+            sql_session,
             &self.context,
             self.dialect,
             guard_ctx(self.context.env, false),
@@ -1161,13 +1162,14 @@ impl JobRunner for DryRunJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
+        let sql_session = session.sql().map_err(JobFailure::from)?;
         ctx.set_cancel(Some(session.cancel_handle()));
         let cfg = self.context.rt.cfg.clone();
         let mut w = Writer::new(
             &ctx,
-            session.as_ref(),
+            sql_session,
             &self.context,
-            session.dialect(),
+            sql_session.dialect(),
             guard_ctx(self.context.env, cfg.read_only),
             self.confirmed,
             self.grace,

@@ -6,9 +6,9 @@ use crate::values::value_text;
 use crate::values::{column_meta, to_full_value, to_value_full};
 use async_trait::async_trait;
 use dnt_core::driver::{
-    check_cell_size, CancelHandle, CellMode, ExecOptions, ExecProgress, Introspector,
-    ResultSummary, RowSink, ServerNotice, ServerNotices, Session, SharedSink, StmtOutcome,
-    MAX_SERVER_NOTICES,
+    check_cell_size, CancelHandle, CellMode, Engine, ExecOptions, ExecProgress, Introspector,
+    ResultSummary, RowSink, ServerNotice, ServerNotices, Session, SharedSink, SqlSession,
+    StmtOutcome, MAX_SERVER_NOTICES,
 };
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo, ServerVariant};
@@ -86,7 +86,7 @@ pub struct MySqlSession {
     opts: Opts,
     /// Transaction state, changed only as the server answered each statement
     /// ([`next_tx_state`]). Reset to `Idle` by a reconnect (the server rolled the
-    /// transaction back); [`Session::tx_state`] adds `autocommit_off`.
+    /// transaction back); [`SqlSession::tx_state`] adds `autocommit_off`.
     tx: std::sync::Mutex<TxState>,
     /// Set while the user has `SET autocommit = 0` ([`next_autocommit_off`]). A session
     /// setting rather than transaction state: it survives a reconnect (re-applied on the
@@ -989,6 +989,43 @@ impl Session for MySqlSession {
         &self.info
     }
 
+    fn engine(&self) -> Engine<'_> {
+        Engine::Sql(self)
+    }
+
+    fn reconnects(&self) -> u64 {
+        self.reconnects.load(Ordering::SeqCst)
+    }
+
+    fn cancel_handle(&self) -> CancelHandle {
+        Arc::new(MySqlCanceller {
+            opts: self.opts.clone(),
+            state: self.cancel.clone(),
+        })
+    }
+
+    fn introspector(&self) -> &dyn Introspector {
+        self
+    }
+
+    async fn ping(&self) -> Result<(), DbError> {
+        self.live_conn()
+            .await?
+            .ping()
+            .await
+            .map_err(|e| map_mysql_error(e, ConnectStage::Execute))
+    }
+
+    async fn close(self: Box<Self>) {
+        // Best effort: the server drops the session either way.
+        if let Some(conn) = self.conn.into_inner() {
+            let _ = conn.disconnect().await;
+        }
+    }
+}
+
+#[async_trait]
+impl SqlSession for MySqlSession {
     /// `opts.max_rows` applies per result set and `opts.timeout` to the statement: an
     /// expired statement is killed and `Timeout { Execute }` returned (`outcome_unknown`
     /// when the killed write may be partly applied). One that ignores the kill (after a
@@ -1266,36 +1303,6 @@ impl Session for MySqlSession {
     /// MySQL with the session's current `sql_mode` lexing flags.
     fn dialect(&self) -> Dialect {
         Dialect::MySql(self.mode())
-    }
-
-    fn reconnects(&self) -> u64 {
-        self.reconnects.load(Ordering::SeqCst)
-    }
-
-    fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(MySqlCanceller {
-            opts: self.opts.clone(),
-            state: self.cancel.clone(),
-        })
-    }
-
-    fn introspector(&self) -> &dyn Introspector {
-        self
-    }
-
-    async fn ping(&self) -> Result<(), DbError> {
-        self.live_conn()
-            .await?
-            .ping()
-            .await
-            .map_err(|e| map_mysql_error(e, ConnectStage::Execute))
-    }
-
-    async fn close(self: Box<Self>) {
-        // Best effort: the server drops the session either way.
-        if let Some(conn) = self.conn.into_inner() {
-            let _ = conn.disconnect().await;
-        }
     }
 }
 

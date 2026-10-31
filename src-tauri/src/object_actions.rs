@@ -8,7 +8,7 @@ use crate::session_manager::{
     close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
-use dnt_core::driver::Session;
+use dnt_core::driver::{Session, SqlSession};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::{ServerVariant, SqlKind};
@@ -276,7 +276,7 @@ const PG_ROLES_SQL: &str =
     "SELECT rolname::text FROM pg_roles WHERE rolname !~ '^pg_' ORDER BY rolname";
 const PG_CURRENT_ROLE_SQL: &str = "SELECT current_user::text";
 
-async fn namespace_options(session: &dyn Session) -> Result<NamespaceOptions, DbError> {
+async fn namespace_options(session: &dyn SqlSession) -> Result<NamespaceOptions, DbError> {
     use crate::ddl_edit::catalog::rows_with;
     use dnt_core::driver::ExecOptions;
     let rows = |sql| rows_with(session, sql, ExecOptions::default());
@@ -347,8 +347,10 @@ impl SessionManager {
         let rt = self.runtime(conn)?;
         let db = namespace_options_db(cfg.kind.as_sql(), database); // R1: boundary
         let (session, _) = rt.open_query_session(db).await?;
-        let out =
-            tokio::time::timeout(METADATA_CALL_TIMEOUT, namespace_options(session.as_ref())).await;
+        let out = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
+            namespace_options(session.sql()?).await
+        })
+        .await;
         close_quietly(session).await;
         out.map_err(|_| config_error("object", "Metadata timed out."))?
     }
@@ -368,7 +370,7 @@ impl SessionManager {
         rt.queries.check_ddl_idle()?;
         let db = action_session_db(kind, &action);
         let (session, generation) = rt.open_query_session(db).await?;
-        let dialect = session.dialect();
+        let dialect = session.sql()?.dialect();
         let fp = tokio::time::timeout(
             METADATA_CALL_TIMEOUT,
             fingerprint(session.as_ref(), &action),
@@ -450,11 +452,12 @@ impl SessionManager {
         let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
         let db = action_session_db(kind, &stored.preview.action);
         let (session, generation) = stored.rt.open_query_session(db).await?;
+        let sql = session.sql()?;
         self.object_actions
             .operations
             .set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {
-            if generation != stored.generation || session.dialect() != stored.dialect {
+            if generation != stored.generation || sql.dialect() != stored.dialect {
                 return Err(stale());
             }
             let before = session.reconnects();
@@ -463,7 +466,7 @@ impl SessionManager {
                 return Err(stale());
             }
             self.check_action_context(&stored)?;
-            if before != session.reconnects() || session.dialect() != stored.dialect {
+            if before != session.reconnects() || sql.dialect() != stored.dialect {
                 return Err(stale());
             }
             if stop.is_stopped() {
@@ -493,7 +496,7 @@ impl SessionManager {
         };
         let result = async {
             execute(
-                session.as_ref(),
+                sql,
                 if pg {
                     "SET lock_timeout = '5s'"
                 } else {
@@ -506,7 +509,7 @@ impl SessionManager {
             .await?;
             if pg {
                 execute(
-                    session.as_ref(),
+                    sql,
                     "BEGIN",
                     stop.clone(),
                     self.cancel_grace,
@@ -515,7 +518,7 @@ impl SessionManager {
                 .await?;
             }
             self.check_action_context(&stored)?;
-            if session.dialect() != stored.dialect || session.reconnects() != 0 {
+            if sql.dialect() != stored.dialect || session.reconnects() != 0 {
                 return Err(stale());
             }
             if stop.is_stopped() {
@@ -524,7 +527,7 @@ impl SessionManager {
             progress("executing");
             sent = true;
             execute(
-                session.as_ref(),
+                sql,
                 &stored.preview.sql,
                 stop.clone(),
                 self.cancel_grace,
@@ -541,7 +544,7 @@ impl SessionManager {
                 progress("committing");
                 commit_sent = true;
                 execute(
-                    session.as_ref(),
+                    sql,
                     "COMMIT",
                     stop.clone(),
                     self.cancel_grace,
@@ -565,15 +568,7 @@ impl SessionManager {
             report.outcome = if create && mysql_statement_refused(pg, &e) && !stop.is_stopped() {
                 ActionOutcome::NotApplied
             } else {
-                failure_outcome(
-                    session.as_ref(),
-                    &e,
-                    pg,
-                    sent,
-                    commit_sent,
-                    self.cancel_grace,
-                )
-                .await
+                failure_outcome(sql, &e, pg, sent, commit_sent, self.cancel_grace).await
             };
             report.error = Some(failure_error(e, report.outcome));
         }

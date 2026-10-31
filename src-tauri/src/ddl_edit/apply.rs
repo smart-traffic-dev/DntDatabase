@@ -14,7 +14,7 @@ use crate::object_actions::stale;
 use crate::session_manager::{
     close_quietly, config_error, lock, SessionManager, METADATA_CALL_TIMEOUT,
 };
-use dnt_core::driver::{ExecOptions, Session, StopSignal};
+use dnt_core::driver::{ExecOptions, SqlSession, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef};
 use dnt_core::server::SqlKind;
@@ -139,7 +139,7 @@ pub(crate) fn history_sql(engine: SqlKind, kind: ObjectKind, statements: &[Strin
 
 /// Runs one post-check: its single text value must equal `expect`.
 async fn run_check(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     check: &PostCheck,
     stop: StopSignal,
     grace: Duration,
@@ -162,7 +162,7 @@ async fn run_check(
 }
 
 /// The object of a plan read again after a failed MySQL statement (spec §6.3).
-async fn reread_state(session: &dyn Session, plan: &EditPlan) -> ObjectState {
+async fn reread_state(session: &dyn SqlSession, plan: &EditPlan) -> ObjectState {
     let Some(name) = plan.target.name.as_deref() else {
         return ObjectState::Unknown;
     };
@@ -233,9 +233,10 @@ impl SessionManager {
             .rt
             .open_query_session(Some(stored.scope.database.clone()))
             .await?;
+        let sql_session = session.sql()?;
         ops.set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {
-            if generation != stored.generation || session.dialect() != stored.dialect {
+            if generation != stored.generation || sql_session.dialect() != stored.dialect {
                 return Err(stale());
             }
             let before = session.reconnects();
@@ -243,7 +244,7 @@ impl SessionManager {
             // The lock wait bound covers the re-read too; a reconnect after this loses
             // it and is caught as stale below.
             execute(
-                session.as_ref(),
+                sql_session,
                 if pg {
                     "SET lock_timeout = '5s'"
                 } else {
@@ -260,14 +261,14 @@ impl SessionManager {
                 }
             } else {
                 let object = object_ref(&stored.target, &object_name);
-                if current_fingerprint(session.as_ref(), &stored.target, Some(&object)).await?
+                if current_fingerprint(sql_session, &stored.target, Some(&object)).await?
                     != stored.fingerprint
                 {
                     return Err(object_changed());
                 }
             }
             self.check_edit_context(&stored)?;
-            if before != session.reconnects() || session.dialect() != stored.dialect {
+            if before != session.reconnects() || sql_session.dialect() != stored.dialect {
                 return Err(stale());
             }
             if stop.is_stopped() {
@@ -295,7 +296,7 @@ impl SessionManager {
             macro_rules! send {
                 ($sql:expr) => {
                     execute(
-                        session.as_ref(),
+                        sql_session,
                         $sql,
                         stop.clone(),
                         self.cancel_grace,
@@ -308,7 +309,7 @@ impl SessionManager {
                 send!("SET LOCAL standard_conforming_strings = on").await?;
             }
             self.check_edit_context(&stored)?;
-            if session.dialect() != stored.dialect || session.reconnects() != 0 {
+            if sql_session.dialect() != stored.dialect || session.reconnects() != 0 {
                 return Err(stale());
             }
             for (i, sql) in statements.iter().enumerate() {
@@ -337,7 +338,7 @@ impl SessionManager {
                     }
                     progress("verifying");
                     run_check(
-                        session.as_ref(),
+                        sql_session,
                         check,
                         stop.clone(),
                         self.cancel_grace,
@@ -375,7 +376,7 @@ impl SessionManager {
                 }
                 let read = tokio::time::timeout(
                     METADATA_CALL_TIMEOUT,
-                    read_object(session.as_ref(), &stored.target, &object_name),
+                    read_object(sql_session, &stored.target, &object_name),
                 )
                 .await;
                 match read {
@@ -389,7 +390,7 @@ impl SessionManager {
                 }
                 let action = if pg {
                     let action = failure_outcome(
-                        session.as_ref(),
+                        sql_session,
                         &e,
                         true,
                         sent > 0,
@@ -427,7 +428,7 @@ impl SessionManager {
                     report.object_state = if sent == 0 {
                         ObjectState::Unchanged
                     } else if matches!(e, DbError::Server { .. }) {
-                        reread_state(session.as_ref(), &stored).await
+                        reread_state(sql_session, &stored).await
                     } else {
                         self.reread_fresh(&stored).await
                     };
@@ -543,7 +544,10 @@ impl SessionManager {
         let Ok(Ok((session, _))) = opened else {
             return ObjectState::Unknown;
         };
-        let state = reread_state(session.as_ref(), stored).await;
+        let state = match session.sql() {
+            Ok(s) => reread_state(s, stored).await,
+            Err(_) => ObjectState::Unknown,
+        };
         close_quietly(session).await;
         state
     }

@@ -280,8 +280,9 @@ async fn read_only_connection_blocks_and_server_blocks() {
         let mut cfg = t.resolved(Some(FIXTURE_DB));
         cfg.read_only = true;
         let session = driver.connect(&cfg).await.unwrap();
-        let kind = classify(insert, session.dialect());
-        let err = session
+        let s = session.sql().unwrap();
+        let kind = classify(insert, s.dialect());
+        let err = s
             .execute_one(insert, kind, &ExecOptions::default(), &mut Discard)
             .await
             .unwrap_err();

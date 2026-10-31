@@ -22,7 +22,7 @@ use crate::session_manager::{
     close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::server::{ServerInfo, SqlKind};
@@ -189,7 +189,7 @@ impl RowSink for FirstText {
     fn result_end(&mut self, _: &ResultSummary) {}
 }
 
-async fn first_text(session: &dyn Session, sql: &str) -> Result<Option<String>, DbError> {
+async fn first_text(session: &dyn SqlSession, sql: &str) -> Result<Option<String>, DbError> {
     let mut sink = FirstText::default();
     let options = ExecOptions {
         // Every byte of a binary value, not a preview.
@@ -234,7 +234,7 @@ fn without_ansi_quotes(mode: &str) -> Option<String> {
 /// The table's DDL as the server prints it. On MySQL with `ANSI_QUOTES` on, the
 /// session's `sql_mode` is switched for this read and restored afterwards (`None`:
 /// it could not be, so the caller treats the DDL as unreadable).
-async fn read_ddl(session: &dyn Session, obj: &ObjectRef) -> Result<Option<String>, DbError> {
+async fn read_ddl(session: &dyn SqlSession, obj: &ObjectRef) -> Result<Option<String>, DbError> {
     let ansi = matches!(session.dialect(), Dialect::MySql(m) if m.ansi_quotes);
     if !ansi {
         return session.introspector().object_ddl(obj).await.map(Some);
@@ -293,7 +293,7 @@ pub(crate) fn ddl_not_shown(e: &DbError) -> bool {
 /// (MySQL then opens the table read-only); a transient failure (a lock wait) is an
 /// error, never "no DDL".
 async fn read_table(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     obj: &ObjectRef,
 ) -> Result<(TableDetail, Option<String>), DbError> {
     let detail = session.introspector().table_detail(obj).await?;
@@ -344,7 +344,7 @@ struct Loaded {
     fingerprint: String,
 }
 
-async fn load(session: &dyn Session, object: Option<&ObjectRef>) -> Result<Loaded, DbError> {
+async fn load(session: &dyn SqlSession, object: Option<&ObjectRef>) -> Result<Loaded, DbError> {
     let server = session.server_info().clone();
     let Some(obj) = object else {
         return Ok(Loaded {
@@ -371,7 +371,7 @@ async fn load(session: &dyn Session, object: Option<&ObjectRef>) -> Result<Loade
 
 /// The fingerprint of `object` read on `session` now.
 async fn current_fingerprint(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     object: Option<&ObjectRef>,
 ) -> Result<String, DbError> {
     Ok(current_state(session, object).await?.0)
@@ -380,7 +380,7 @@ async fn current_fingerprint(
 /// The fingerprint of `object` read on `session` now, with the table's row estimate
 /// from the same read (`None` for a new table or when the server has none).
 async fn current_state(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     object: Option<&ObjectRef>,
 ) -> Result<(String, Option<u64>), DbError> {
     match object {
@@ -566,13 +566,10 @@ impl SessionManager {
             kind: ObjectKind::Table,
         });
         let (session, _) = rt.open_query_session(session_db(kind, &scope)).await?;
+        let sql = session.sql()?;
         let server = session.server_info().clone();
-        let dialect = session.dialect();
-        let loaded = tokio::time::timeout(
-            METADATA_CALL_TIMEOUT,
-            load(session.as_ref(), object.as_ref()),
-        )
-        .await;
+        let dialect = sql.dialect();
+        let loaded = tokio::time::timeout(METADATA_CALL_TIMEOUT, load(sql, object.as_ref())).await;
         close_quietly(session).await;
         let loaded = loaded.map_err(|_| timed_out())??;
         let design_id = Uuid::new_v4();
@@ -643,12 +640,9 @@ impl SessionManager {
     ) -> Result<(), DbError> {
         let kind = rt.cfg.kind.as_sql(); // R1: boundary
         let (session, _) = rt.open_query_session(session_db(kind, scope)).await?;
-        let dialect = session.dialect();
-        let loaded = tokio::time::timeout(
-            METADATA_CALL_TIMEOUT,
-            load(session.as_ref(), object.as_ref()),
-        )
-        .await;
+        let sql = session.sql()?;
+        let dialect = sql.dialect();
+        let loaded = tokio::time::timeout(METADATA_CALL_TIMEOUT, load(sql, object.as_ref())).await;
         close_quietly(session).await;
         let loaded = loaded.map_err(|_| timed_out())??;
         if let Some(d) = lock(&self.table_designs.designs).get_mut(&design_id) {

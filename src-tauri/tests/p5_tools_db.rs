@@ -39,6 +39,7 @@ impl RowSink for Sink {
 }
 
 async fn exec(s: &dyn Session, sql: &str) {
+    let s = s.sql().unwrap();
     s.execute_one(
         sql,
         classify(sql, s.dialect()),

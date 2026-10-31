@@ -6,7 +6,7 @@
 //! runs exactly that statement.
 
 use dnt_core::driver::{
-    CancelHandle, ExecOptions, ExecProgress, ResultSummary, RowSink, ServerNotices, Session,
+    CancelHandle, ExecOptions, ExecProgress, ResultSummary, RowSink, ServerNotices, SqlSession,
     StmtOutcome, StopSignal,
 };
 use dnt_core::error::{AppError, DbError};
@@ -207,7 +207,7 @@ pub fn reconnect_notice(total: u32) -> String {
 /// transaction or a transaction left open; otherwise only without
 /// `continue_on_error`. A late completion stops it too.
 pub async fn run(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     plan: &ScriptPlan,
     opts: &ExecOptions,
     continue_on_error: bool,
@@ -225,7 +225,7 @@ pub async fn run(
 /// at that statement (not sent): its `statement_start` / `statement_end` carry the
 /// `BEGIN`'s error, followed by [`BEGIN_FAILED_NOTICE`].
 pub async fn run_with(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     plan: &ScriptPlan,
     opts: &ExecOptions,
     cfg: RunConfig,

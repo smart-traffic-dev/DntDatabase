@@ -34,7 +34,7 @@ use crate::session_manager::{
     ConnectionRuntime, SessionManager,
 };
 use dnt_core::config::{ConnectionConfig, EnvTag};
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, SqlSession};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::server::SqlKind;
 use dnt_core::sql::{classify, Dialect, StatementKind};
@@ -312,7 +312,8 @@ fn tx_fresh_after(mut fresh: bool, plan: &ScriptPlan, report: &RunReport) -> boo
 impl TabSession {
     fn tx_open(&self) -> bool {
         self.session
-            .as_ref()
+            .as_deref()
+            .and_then(|s| s.sql().ok())
             .is_some_and(|s| s.tx_state() != TxState::Idle)
     }
 
@@ -346,6 +347,7 @@ impl TabSession {
         let state = self
             .session
             .as_deref()
+            .and_then(|s| s.sql().ok())
             .map_or(TxState::Idle, |s| s.tx_state());
         if state == TxState::Idle {
             return TabTxInfo::IDLE;
@@ -438,7 +440,12 @@ impl QuerySessions {
         let slots: Vec<_> = lock(&self.tabs).slots.values().cloned().collect();
         for slot in slots {
             let ts = slot.try_lock().map_err(|_| DbError::Busy)?;
-            if ts.lost_tx || ts.session.as_ref().is_some_and(|s| s.in_transaction()) {
+            let in_tx = ts
+                .session
+                .as_deref()
+                .and_then(|s| s.sql().ok())
+                .is_some_and(|s| s.in_transaction());
+            if ts.lost_tx || in_tx {
                 return Err(DbError::TransactionOpen);
             }
         }
@@ -518,7 +525,7 @@ impl RowSink for NullSink {
 }
 
 /// Runs one statement on a tab session, its results dropped.
-async fn execute_quietly(session: &dyn Session, sql: &str) -> Result<(), DbError> {
+async fn execute_quietly(session: &dyn SqlSession, sql: &str) -> Result<(), DbError> {
     let kind = classify(sql, session.dialect());
     session
         .execute_one(sql, kind, &ExecOptions::default(), &mut NullSink)
@@ -556,7 +563,7 @@ impl RowSink for CollectSink {
 /// [`ESTIMATE_TIMEOUT`] plus `grace` plus one second (the driver should have stopped it
 /// by then; its state is unknown).
 async fn explain_estimate(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     dialect: Dialect,
     table: Option<&str>,
@@ -583,7 +590,7 @@ const CLASSIC_EXPLAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// (logged at `debug`) leaves the plan without it; a lost connection is left for the
 /// plan's own statement to report.
 async fn classic_explain(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     dialect: Dialect,
     opts: &ExecOptions,
@@ -611,7 +618,7 @@ enum EstimateError {
 }
 
 async fn explain_estimate_once(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     sql: &str,
     dialect: Dialect,
     table: Option<&str>,
@@ -1000,6 +1007,7 @@ impl ConnectionRuntime {
         if ts.database == target {
             return Ok(());
         }
+        let session = session.sql()?;
         if session.tx_state() != TxState::Idle {
             return Err(DbError::TransactionOpen);
         }
@@ -1108,10 +1116,10 @@ impl SessionManager {
             self.estimate_rows(&rt, tab, &mut ts, &mut planned).await?;
         }
         // After the estimates (which never change it, short of a lost connection).
-        let tx_state = ts
-            .session
-            .as_deref()
-            .map_or(TxState::Idle, |s| s.tx_state());
+        let tx_state = match ts.session.as_deref() {
+            Some(s) => s.sql()?.tx_state(),
+            None => TxState::Idle,
+        };
         drop(ts);
         self.mark_implicit_commits(tab, &mut planned, tx_state);
         let copy = PlanCopy {
@@ -1178,6 +1186,7 @@ impl SessionManager {
             let Some(session) = ts.session.as_deref() else {
                 continue;
             };
+            let session = session.sql()?;
             let state = session.tx_state();
             // An earlier statement of the script (`USE`, `SET search_path`, DDL, a
             // write, transaction control) may change what this one touches; and an
@@ -1407,10 +1416,10 @@ impl SessionManager {
             Some((_, slot)) => Some(slot.try_lock_owned().map_err(|_| DbError::Busy)?),
             None => None,
         };
-        let state = held
-            .as_ref()
-            .and_then(|ts| ts.session.as_deref())
-            .map_or(TxState::Idle, |s| s.tx_state());
+        let state = match held.as_ref().and_then(|ts| ts.session.as_deref()) {
+            Some(s) => s.sql()?.tx_state(),
+            None => TxState::Idle,
+        };
         let mut modes = lock(&self.tx_modes);
         let current = modes.get(tab).copied().unwrap_or_default();
         if current == TxMode::Manual && mode == TxMode::Auto {
@@ -1500,6 +1509,7 @@ impl SessionManager {
         let Some(session) = ts.session.as_deref() else {
             return Ok(TxState::Idle);
         };
+        let session = session.sql().map_err(|e| (e, None))?;
         let sent = execute_quietly(session, action.sql()).await;
         let state = session.tx_state();
         match sent {
@@ -1800,7 +1810,12 @@ impl SessionManager {
                 (e, state)
             })?;
         }
-        let session = ts.session.as_deref().ok_or((DbError::PlanExpired, None))?;
+        let session = ts
+            .session
+            .as_deref()
+            .ok_or((DbError::PlanExpired, None))?
+            .sql()
+            .map_err(early)?;
         still_one_read(&stmt, session.dialect(), ctx).map_err(early)?;
 
         let cancel = RunCancel::new(session.cancel_handle());
@@ -1902,7 +1917,7 @@ impl ExportRun {
         };
         tracing::info!(connection = %rt.cfg.id, "export reads a query result again on its tab");
         let ran = AssertUnwindSafe(async {
-            let session = ts.session.as_deref()?;
+            let session = ts.session.as_deref()?.sql().ok()?;
             let exec = std::pin::pin!(session.execute_one(&stmt.text, stmt.kind, &exec, sink));
             let watch = std::pin::pin!(async {
                 failed.notified().await;
@@ -2062,9 +2077,13 @@ fn is_lost(e: &DbError) -> bool {
 fn session_facts(
     ts: &TabSession,
 ) -> Result<(Dialect, TxState, dnt_core::server::ServerInfo), DbError> {
-    let session = ts.session.as_deref().ok_or_else(|| DbError::Internal {
-        message: "the tab's session vanished".into(),
-    })?;
+    let session = ts
+        .session
+        .as_deref()
+        .ok_or_else(|| DbError::Internal {
+            message: "the tab's session vanished".into(),
+        })?
+        .sql()?;
     Ok((
         session.dialect(),
         session.tx_state(),
@@ -2321,12 +2340,13 @@ impl RunTask {
             .ts
             .session
             .as_deref()
+            .and_then(|s| s.sql().ok())
             .map_or(TxState::Idle, |s| s.tx_state());
         let rows = sink.rows();
         let index = sink.index();
         let ticker = tokio::spawn(tick_rows(Arc::clone(&rows)));
         let ran = AssertUnwindSafe(async {
-            let session = self.ts.session.as_deref()?;
+            let session = self.ts.session.as_deref()?.sql().ok()?;
             if let Some(sql) = &self.classic {
                 let opts = ExecOptions {
                     max_rows: 1_000,

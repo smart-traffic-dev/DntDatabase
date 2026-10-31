@@ -150,6 +150,8 @@ async fn exec(t: Target, db: Option<&str>, sqls: &[&str]) {
     let session = driver.connect(&t.resolved(db)).await.unwrap();
     for sql in sqls {
         session
+            .sql()
+            .unwrap()
             .execute(sql, ExecOptions::default(), &mut NullSink)
             .await
             .unwrap_or_else(|e| panic!("{t:?}: {sql}: {e}"));
@@ -178,6 +180,8 @@ async fn ensure_database(t: Target, db: &str, table: &str, drop: &str) {
             let driver = PgDriver;
             let session = driver.connect(&t.resolved(Some("postgres"))).await.unwrap();
             let _ = session
+                .sql()
+                .unwrap()
                 .execute(
                     &format!("CREATE DATABASE {db}"),
                     ExecOptions::default(),

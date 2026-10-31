@@ -101,10 +101,12 @@ fn full_opts() -> ExecOptions {
 async fn run_on(t: Target, db: &str, sql: &str) -> Vec<Vec<FullValue>> {
     let s = connect(t, db).await.unwrap();
     let mut sink = Collect::default();
-    for stmt in split(sql, s.dialect()) {
-        let kind = classify(&stmt.text, s.dialect());
+    let sql_s = s.sql().unwrap();
+    for stmt in split(sql, sql_s.dialect()) {
+        let kind = classify(&stmt.text, sql_s.dialect());
         let shown: String = stmt.text.chars().take(200).collect();
-        s.execute_one(&stmt.text, kind, &full_opts(), &mut sink)
+        sql_s
+            .execute_one(&stmt.text, kind, &full_opts(), &mut sink)
             .await
             .unwrap_or_else(|e| panic!("{t:?} {shown}: {e:?}"));
     }
@@ -175,7 +177,11 @@ fn run_detached(t: Target, stmts: Vec<(String, String)>) {
             for (db, sql) in stmts {
                 if let Ok(s) = connect(t, &db).await {
                     let mut sink = Collect::default();
-                    let _ = s.execute(&sql, ExecOptions::default(), &mut sink).await;
+                    let _ = s
+                        .sql()
+                        .unwrap()
+                        .execute(&sql, ExecOptions::default(), &mut sink)
+                        .await;
                     s.close().await;
                 }
             }

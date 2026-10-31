@@ -78,7 +78,7 @@ use crate::data_sessions::{BoundedPage, FirstCell, DATA_CANCEL_GRACE};
 use crate::run_events::utc_millis_now;
 use crate::session_manager::{config_error, is_lost, lock, ConnectionRuntime, SessionManager};
 use dnt_core::config::{ConnectionConfig, EnvTag};
-use dnt_core::driver::{CellMode, ExecOptions, ResultSummary, RowSink, Session, StopSignal};
+use dnt_core::driver::{CellMode, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectRef, TableDetail};
 use dnt_core::sql::ident::{qualified_name, quote_ident};
@@ -406,7 +406,7 @@ impl RowSink for FullRows {
 /// PostgreSQL `standard_conforming_strings` on, MySQL `character_set_client` utf8mb4.
 /// Otherwise a `config` error (field `field`) saying `what` cannot be done safely.
 async fn check_literals(
-    s: &dyn Session,
+    s: &dyn SqlSession,
     opts: &ExecOptions,
     field: &str,
     what: &str,
@@ -514,15 +514,10 @@ impl SessionManager {
         let mut retried = false;
         let value = loop {
             let taken = self.take_data_session(&rt, Some(&obj.database)).await?;
-            let out = read_cell(
-                taken.session.as_ref(),
-                &opts,
-                &detail,
-                &metas,
-                &key,
-                &column,
-            )
-            .await;
+            let out = match taken.session.sql() {
+                Ok(s) => read_cell(s, &opts, &detail, &metas, &key, &column).await,
+                Err(e) => Err(e),
+            };
             let pooled = taken.pooled;
             self.return_data_session(&rt, taken, out.is_ok());
             match out {
@@ -616,7 +611,7 @@ pub(crate) fn size_text(n: usize) -> String {
 
 /// One cell read by key on session `s` (see the module docs).
 async fn read_cell(
-    s: &dyn Session,
+    s: &dyn SqlSession,
     opts: &ExecOptions,
     detail: &TableDetail,
     metas: &[ColumnMeta],
@@ -771,12 +766,18 @@ impl SessionManager {
         let mut retried = false;
         loop {
             let taken = self.take_data_session(rt, Some(&o.database)).await?;
+            let s = match taken.session.sql() {
+                Ok(s) => s,
+                Err(e) => {
+                    self.return_data_session(rt, taken, true);
+                    return Err(e);
+                }
+            };
             let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
-            let out = taken
-                .session
+            let out = s
                 .execute_one(&sql, StatementKind::Read, &opts, &mut page)
                 .await;
-            let (dialect, gen, pooled) = (taken.session.dialect(), taken.tunnel_gen, taken.pooled);
+            let (dialect, gen, pooled) = (s.dialect(), taken.tunnel_gen, taken.pooled);
             self.return_data_session(rt, taken, out.is_ok());
             match out {
                 Ok(_) => return Ok((page.columns, dialect, gen)),
@@ -910,7 +911,14 @@ impl SessionManager {
             self.return_data_session(&rt, taken, true);
             return Err(stale("the connection's SSH tunnel was replaced"));
         }
-        if taken.session.dialect() != plan.dialect {
+        let s = match taken.session.sql() {
+            Ok(s) => s,
+            Err(e) => {
+                self.return_data_session(&rt, taken, true);
+                return Err(e);
+            }
+        };
+        if s.dialect() != plan.dialect {
             self.return_data_session(&rt, taken, true);
             return Err(stale("the session's SQL mode changed"));
         }
@@ -926,7 +934,7 @@ impl SessionManager {
             return Err(stale("the connection was closed or reopened"));
         };
         let apply = Apply {
-            s: taken.session.as_ref(),
+            s,
             plan,
             conn: stored.conn,
             opts: ExecOptions {
@@ -1097,7 +1105,7 @@ struct Progress {
 
 /// One run of a plan on its session.
 struct Apply<'a> {
-    s: &'a dyn Session,
+    s: &'a dyn SqlSession,
     plan: &'a EditPlan,
     conn: Uuid,
     opts: ExecOptions,

@@ -115,11 +115,11 @@ async fn admin(t: Target, sql: &str) -> Vec<Vec<Value>> {
         DbKind::Postgres => Box::new(PgDriver),
     };
     let session = driver.connect(&t.resolved(Some(FIXTURE_DB))).await.unwrap();
+    let s = session.sql().unwrap();
     let mut sink = Collect(Vec::new());
-    for stmt in dnt_core::sql::split(sql, session.dialect()) {
-        let kind = classify(&stmt.text, session.dialect());
-        session
-            .execute_one(&stmt.text, kind, &ExecOptions::default(), &mut sink)
+    for stmt in dnt_core::sql::split(sql, s.dialect()) {
+        let kind = classify(&stmt.text, s.dialect());
+        s.execute_one(&stmt.text, kind, &ExecOptions::default(), &mut sink)
             .await
             .unwrap_or_else(|e| panic!("{}: {e:?}", stmt.text));
     }
@@ -636,7 +636,7 @@ async fn recheck_sees_a_commit_made_during_the_batch() {
             .await
             .unwrap();
         let run = |sql: String| {
-            let other = &other;
+            let other = other.sql().unwrap();
             async move {
                 let kind = classify(&sql, other.dialect());
                 other
