@@ -15,7 +15,7 @@ use dnt_core::meta::{
     TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{DbKind, ServerInfo, SqlKind};
 use dnt_core::sql::{Dialect, MySqlMode, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
@@ -530,16 +530,67 @@ async fn history_records_every_statement_as_table_design() {
 fn mysql_needs_exactly_one_statement() {
     let one = vec!["ALTER TABLE t ADD c int".to_string()];
     let two = vec![one[0].clone(), one[0].clone()];
-    assert!(apply::check_statement_count(DbKind::MySql, &one).is_ok());
+    assert!(apply::check_statement_count(SqlKind::MySql, &one).is_ok());
     assert!(matches!(
-        apply::check_statement_count(DbKind::MySql, &two),
+        apply::check_statement_count(SqlKind::MySql, &two),
         Err(DbError::Config { .. })
     ));
     assert!(matches!(
-        apply::check_statement_count(DbKind::MySql, &[]),
+        apply::check_statement_count(SqlKind::MySql, &[]),
         Err(DbError::Config { .. })
     ));
-    assert!(apply::check_statement_count(DbKind::Postgres, &two).is_ok());
+    assert!(apply::check_statement_count(SqlKind::Postgres, &two).is_ok());
+    assert!(matches!(
+        apply::check_statement_count(SqlKind::Postgres, &[]),
+        Err(DbError::Config { .. })
+    ));
+}
+
+#[test]
+fn only_postgres_opens_the_design_session_on_its_database() {
+    let scope = Scope {
+        database: "shop".into(),
+        schema: Some("public".into()),
+    };
+    assert_eq!(session_db(SqlKind::MySql, &scope), None);
+    assert_eq!(
+        session_db(SqlKind::Postgres, &scope).as_deref(),
+        Some("shop")
+    );
+}
+
+#[tokio::test]
+async fn open_checks_the_scope_per_engine() {
+    let message = |e: DbError| match e {
+        DbError::Config { field, message } => (field, message),
+        other => panic!("{other:?}"),
+    };
+    let f = mysql(None, false).await;
+    let bad = Scope {
+        database: "shop".into(),
+        schema: Some("public".into()),
+    };
+    let e = f.sm.table_design_open(f.conn, bad, None).await.unwrap_err();
+    assert_eq!(
+        message(e),
+        (
+            Some("scope".into()),
+            "MySQL has no schemas inside a database.".into()
+        )
+    );
+    let f = pg().await;
+    let bad = Scope {
+        database: "shop".into(),
+        schema: None,
+    };
+    let e = f.sm.table_design_open(f.conn, bad, None).await.unwrap_err();
+    assert_eq!(
+        message(e),
+        (
+            Some("scope".into()),
+            "A schema is required on PostgreSQL.".into()
+        )
+    );
 }
 
 #[test]

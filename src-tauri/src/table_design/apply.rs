@@ -15,7 +15,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_schema::{Impact, TableDef};
@@ -142,7 +142,7 @@ pub(super) async fn count_impacts(
     limit: Duration,
     grace: Duration,
 ) -> Vec<CountedImpact> {
-    let pg = session.server_info().kind == DbKind::Postgres;
+    let kind = session.server_info().kind.as_sql(); // R1: boundary
     let bound = mysql_count_bound(session.server_info(), limit);
     let mut out: Vec<CountedImpact> = impacts
         .into_iter()
@@ -156,21 +156,23 @@ pub(super) async fn count_impacts(
         return out;
     }
     let begin = async {
-        let start = if pg {
-            "BEGIN READ ONLY"
-        } else {
-            "START TRANSACTION READ ONLY"
-        };
-        execute(session, start, StopSignal::new(), grace, 0).await?;
-        if pg {
-            for sql in [
-                "SET LOCAL standard_conforming_strings = on".to_string(),
-                format!("SET LOCAL statement_timeout = '{}ms'", limit.as_millis()),
-            ] {
-                execute(session, &sql, StopSignal::new(), grace, 0).await?;
+        match kind {
+            SqlKind::MySql => {
+                let start = "START TRANSACTION READ ONLY";
+                execute(session, start, StopSignal::new(), grace, 0).await?;
+                if let Some(sql) = &bound {
+                    execute(session, sql, StopSignal::new(), grace, 0).await?;
+                }
             }
-        } else if let Some(sql) = &bound {
-            execute(session, sql, StopSignal::new(), grace, 0).await?;
+            SqlKind::Postgres => {
+                execute(session, "BEGIN READ ONLY", StopSignal::new(), grace, 0).await?;
+                for sql in [
+                    "SET LOCAL standard_conforming_strings = on".to_string(),
+                    format!("SET LOCAL statement_timeout = '{}ms'", limit.as_millis()),
+                ] {
+                    execute(session, &sql, StopSignal::new(), grace, 0).await?;
+                }
+            }
         }
         Ok::<(), DbError>(())
     };
@@ -242,14 +244,16 @@ fn judge(
 
 /// MySQL / MariaDB apply a design as ONE statement (`ALTER TABLE` / `CREATE TABLE`);
 /// PostgreSQL needs at least one.
-pub(super) fn check_statement_count(kind: DbKind, statements: &[String]) -> Result<(), DbError> {
+pub(super) fn check_statement_count(kind: SqlKind, statements: &[String]) -> Result<(), DbError> {
     match (kind, statements.len()) {
-        (_, 0) => Err(config_error("draft", "There are no changes to apply.")),
-        (DbKind::MySql, n) if n != 1 => Err(config_error(
+        (SqlKind::MySql | SqlKind::Postgres, 0) => {
+            Err(config_error("draft", "There are no changes to apply."))
+        }
+        (SqlKind::MySql, n) if n != 1 => Err(config_error(
             "draft",
             "A MySQL/MariaDB change must be a single statement.",
         )),
-        _ => Ok(()),
+        (SqlKind::MySql | SqlKind::Postgres, _) => Ok(()),
     }
 }
 
@@ -276,10 +280,11 @@ impl SessionManager {
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
+        let kind = cfg.kind.as_sql(); // R1: boundary
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;
         let (session, generation) = rt
-            .open_query_session(session_db(cfg.kind, &design.scope))
+            .open_query_session(session_db(kind, &design.scope))
             .await?;
         let dialect = session.dialect();
         let draft_name = draft.name.clone();
@@ -300,7 +305,7 @@ impl SessionManager {
             if r.statements.is_empty() {
                 return Err(config_error("draft", "There are no changes to apply."));
             }
-            check_statement_count(cfg.kind, &r.statements)?;
+            check_statement_count(kind, &r.statements)?;
             judge(&r.statements, cfg.env_tag, cfg.read_only, dialect)?;
             let impacts = count_impacts(
                 session.as_ref(),
@@ -389,11 +394,15 @@ impl SessionManager {
             return Err(stopped());
         }
         progress("checking");
-        let pg = stored.rt.cfg.kind == DbKind::Postgres;
+        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let pg = match kind {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => true,
+        };
         let timeout_s = stored.rt.cfg.options.query_timeout_s;
         let (session, generation) = stored
             .rt
-            .open_query_session(session_db(stored.rt.cfg.kind, &stored.scope))
+            .open_query_session(session_db(kind, &stored.scope))
             .await?;
         ops.set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {
@@ -573,7 +582,7 @@ impl SessionManager {
         {
             return Err(stale());
         }
-        check_statement_count(cfg.kind, &stored.preview.statements)?;
+        check_statement_count(cfg.kind.as_sql(), &stored.preview.statements)?; // R1: boundary
         judge(
             &stored.preview.statements,
             cfg.env_tag,

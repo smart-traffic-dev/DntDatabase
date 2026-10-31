@@ -36,7 +36,7 @@ use crate::session_manager::{
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::{AppError, DbError};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
@@ -665,6 +665,24 @@ fn quote_mysql_ident(name: &str) -> String {
     format!("`{}`", name.replace('`', "``"))
 }
 
+/// The `USE` that moves an open MySQL session to `target`; `None` when a fresh session
+/// is needed instead (PostgreSQL, or MySQL back to "no database", which `USE` cannot do).
+fn use_database_sql(kind: SqlKind, target: Option<&str>) -> Option<String> {
+    match (kind, target) {
+        (SqlKind::MySql, Some(db)) => Some(format!("USE {}", quote_mysql_ident(db))),
+        (SqlKind::MySql, None) | (SqlKind::Postgres, _) => None,
+    }
+}
+
+/// Whether a row estimate runs under [`ESTIMATE_SAVEPOINT`]: inside an open PostgreSQL
+/// transaction only.
+fn estimate_savepoint(kind: SqlKind, state: TxState) -> bool {
+    match kind {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => state == TxState::Active,
+    }
+}
+
 /// What a stored plan was made for: it only runs while its tab is still there.
 #[derive(Clone)]
 pub(crate) struct PlanTarget {
@@ -985,12 +1003,13 @@ impl ConnectionRuntime {
         if session.tx_state() != TxState::Idle {
             return Err(DbError::TransactionOpen);
         }
-        match (self.cfg.kind, &target) {
-            (DbKind::MySql, Some(db)) => {
-                execute_quietly(session, &format!("USE {}", quote_mysql_ident(db))).await?;
+        let kind = self.cfg.kind.as_sql(); // R1: boundary
+        match use_database_sql(kind, target.as_deref()) {
+            Some(sql) => {
+                execute_quietly(session, &sql).await?;
             }
             // PostgreSQL, or MySQL back to "no database" (which `USE` cannot do).
-            _ => {
+            None => {
                 let (fresh, generation) = self.open_query_session(target.clone()).await?;
                 if let Some(old) = ts.session.replace(fresh) {
                     close_quietly(old).await;
@@ -1173,7 +1192,7 @@ impl SessionManager {
             };
             done += 1;
             let table = estimate_table(&s.unbounded);
-            let savepoint = rt.cfg.kind == DbKind::Postgres && state == TxState::Active;
+            let savepoint = estimate_savepoint(rt.cfg.kind.as_sql(), state); // R1: boundary
             match explain_estimate(
                 session,
                 &sql,
@@ -1687,10 +1706,10 @@ impl SessionManager {
 
     /// The engine of plan `plan_id`'s connection (an export's SQL format needs it before
     /// anything runs). `PlanExpired` as for [`Self::query_plan_statement`].
-    pub fn plan_kind(&self, plan_id: Uuid) -> Result<DbKind, DbError> {
+    pub fn plan_kind(&self, plan_id: Uuid) -> Result<SqlKind, DbError> {
         let current = |t: &PlanTarget| self.plan_target_current(t);
         let (_, conn) = self.plans.locate(self.plan_ttl, plan_id, &current)?;
-        Ok(self.runtime(conn)?.cfg.kind)
+        Ok(self.runtime(conn)?.cfg.kind.as_sql()) // R1: boundary
     }
 
     /// Export of all rows: runs statement `index` of plan `plan_id` (taken or not) again
@@ -2700,6 +2719,25 @@ mod tests {
     fn mysql_ident_quoting() {
         assert_eq!(quote_mysql_ident("other db"), "`other db`");
         assert_eq!(quote_mysql_ident("a`b"), "`a``b`");
+    }
+
+    #[test]
+    fn only_mysql_switches_database_with_use() {
+        assert_eq!(
+            use_database_sql(SqlKind::MySql, Some("other db")).as_deref(),
+            Some("USE `other db`")
+        );
+        assert_eq!(use_database_sql(SqlKind::MySql, None), None);
+        assert_eq!(use_database_sql(SqlKind::Postgres, Some("other")), None);
+        assert_eq!(use_database_sql(SqlKind::Postgres, None), None);
+    }
+
+    #[test]
+    fn row_estimates_use_a_savepoint_in_postgres_transactions() {
+        assert!(estimate_savepoint(SqlKind::Postgres, TxState::Active));
+        assert!(!estimate_savepoint(SqlKind::Postgres, TxState::Idle));
+        assert!(!estimate_savepoint(SqlKind::MySql, TxState::Active));
+        assert!(!estimate_savepoint(SqlKind::MySql, TxState::Idle));
     }
 
     #[test]

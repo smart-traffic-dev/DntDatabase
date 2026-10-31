@@ -12,14 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Workspace-relative paths (with `/` separators) of files that still contain
 /// two-way kind branches. Later tasks remove entries from this list.
-const ALLOWED: &[&str] = &[
-    "src-tauri/src/commands/data.rs",
-    "src-tauri/src/ddl_edit/apply.rs",
-    "src-tauri/src/ddl_edit/catalog.rs",
-    "src-tauri/src/object_actions.rs",
-    "src-tauri/src/query_sessions.rs",
-    "src-tauri/src/table_design/apply.rs",
-];
+const ALLOWED: &[&str] = &[];
 
 const KINDS: [&str; 2] = ["DbKind::", "SqlKind::"];
 

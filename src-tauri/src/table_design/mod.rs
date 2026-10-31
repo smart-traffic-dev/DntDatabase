@@ -25,7 +25,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StopSignal};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope, TableDetail};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::build::TableRef;
 use dnt_core::sql::Dialect;
 use dnt_core::value::{ColumnMeta, Value};
@@ -95,7 +95,7 @@ impl Design {
     /// The relation a diff applies to (the stored table) or a new table is created in.
     fn table_ref(&self, draft_name: &str) -> TableRef {
         TableRef {
-            kind: self.server.kind.as_sql(),
+            kind: self.server.kind.as_sql(), // R1: boundary
             database: self.scope.database.clone(),
             schema: self.scope.schema.clone(),
             name: self
@@ -142,8 +142,11 @@ impl DesignStore {
 
 /// The session database of a design's DDL session: MySQL needs none (names are
 /// qualified), PostgreSQL the database of the table.
-fn session_db(kind: DbKind, scope: &Scope) -> Option<String> {
-    (kind == DbKind::Postgres).then(|| scope.database.clone())
+fn session_db(kind: SqlKind, scope: &Scope) -> Option<String> {
+    match kind {
+        SqlKind::MySql => None,
+        SqlKind::Postgres => Some(scope.database.clone()),
+    }
 }
 
 /// A metadata read that ran past [`METADATA_CALL_TIMEOUT`] (as metadata calls report it).
@@ -352,7 +355,11 @@ async fn load(session: &dyn Session, object: Option<&ObjectRef>) -> Result<Loade
     };
     let (detail, ddl) = read_table(session, obj).await?;
     let mut base = from_detail(&detail, &server);
-    let mysql_create = ddl.as_deref().filter(|_| server.kind == DbKind::MySql);
+    let kind = server.kind.as_sql(); // R1: boundary
+    let mysql_create = match kind {
+        SqlKind::MySql => ddl.as_deref(),
+        SqlKind::Postgres => None,
+    };
     let locked = fidelity(&base, &detail, mysql_create, &server);
     apply_locks(&mut base, &locked);
     Ok(Loaded {
@@ -535,17 +542,18 @@ impl SessionManager {
         table: Option<String>,
     ) -> Result<DesignOpen, DbError> {
         let cfg = self.repo.get(conn)?;
-        match (cfg.kind, &scope.schema) {
-            (DbKind::MySql, Some(_)) => {
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        match (kind, &scope.schema) {
+            (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(
                     "scope",
                     "MySQL has no schemas inside a database.",
                 ))
             }
-            (DbKind::Postgres, None) => {
+            (SqlKind::Postgres, None) => {
                 return Err(config_error("scope", "A schema is required on PostgreSQL."))
             }
-            _ => {}
+            (SqlKind::MySql, None) | (SqlKind::Postgres, Some(_)) => {}
         }
         if scope.database.is_empty() {
             return Err(config_error("scope", "A database is required."));
@@ -557,7 +565,7 @@ impl SessionManager {
             name,
             kind: ObjectKind::Table,
         });
-        let (session, _) = rt.open_query_session(session_db(cfg.kind, &scope)).await?;
+        let (session, _) = rt.open_query_session(session_db(kind, &scope)).await?;
         let server = session.server_info().clone();
         let dialect = session.dialect();
         let loaded = tokio::time::timeout(
@@ -633,9 +641,8 @@ impl SessionManager {
         scope: &Scope,
         object: Option<ObjectRef>,
     ) -> Result<(), DbError> {
-        let (session, _) = rt
-            .open_query_session(session_db(rt.cfg.kind, scope))
-            .await?;
+        let kind = rt.cfg.kind.as_sql(); // R1: boundary
+        let (session, _) = rt.open_query_session(session_db(kind, scope)).await?;
         let dialect = session.dialect();
         let loaded = tokio::time::timeout(
             METADATA_CALL_TIMEOUT,

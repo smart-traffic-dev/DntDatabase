@@ -4,7 +4,7 @@
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::ObjectKind;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::classify;
 use dnt_core::sql::ddl_edit::{CatalogFacts, EditTarget};
 use dnt_core::value::{ColumnMeta, Value};
@@ -113,111 +113,116 @@ pub(crate) async fn facts(
     let Some(name) = t.name.as_deref() else {
         return Ok((facts, None));
     };
-    let pg = session.server_info().kind == DbKind::Postgres;
-    if pg {
-        let schema = t.schema.as_deref().unwrap_or_default();
-        match t.kind {
-            ObjectKind::Function | ObjectKind::Procedure => {
-                let found = rows(session, PG_ROUTINE_SQL, &[schema, name]).await?;
-                if found.len() > 1 {
-                    let n = found.len();
-                    return Ok((
+    let kind = session.server_info().kind.as_sql(); // R1: boundary
+    match kind {
+        SqlKind::Postgres => {
+            let schema = t.schema.as_deref().unwrap_or_default();
+            match t.kind {
+                ObjectKind::Function | ObjectKind::Procedure => {
+                    let found = rows(session, PG_ROUTINE_SQL, &[schema, name]).await?;
+                    if found.len() > 1 {
+                        let n = found.len();
+                        return Ok((
                         facts,
                         Some(format!(
                             "{n} routines are named {name} in {schema}; editing overloaded routines is not supported. Use a query tab."
                         )),
                     ));
-                }
-                if let Some(r) = found.first() {
-                    let expected = if t.kind == ObjectKind::Procedure {
-                        "p"
-                    } else {
-                        "f"
-                    };
-                    let actual = col(r, 1).unwrap_or_default();
-                    if actual != expected {
-                        let what = match actual.as_str() {
-                            "p" => "procedure",
-                            "f" => "function",
-                            "a" => "aggregate function",
-                            "w" => "window function",
-                            _ => "routine of another kind",
-                        };
-                        let wanted = if expected == "p" {
-                            "procedure"
+                    }
+                    if let Some(r) = found.first() {
+                        let expected = if t.kind == ObjectKind::Procedure {
+                            "p"
                         } else {
-                            "function"
+                            "f"
                         };
-                        return Ok((
+                        let actual = col(r, 1).unwrap_or_default();
+                        if actual != expected {
+                            let what = match actual.as_str() {
+                                "p" => "procedure",
+                                "f" => "function",
+                                "a" => "aggregate function",
+                                "w" => "window function",
+                                _ => "routine of another kind",
+                            };
+                            let wanted = if expected == "p" {
+                                "procedure"
+                            } else {
+                                "function"
+                            };
+                            return Ok((
                             facts,
                             Some(format!(
                                 "{name} in {schema} is a {what}, not a {wanted}; edit it with a query tab."
                             )),
                         ));
+                        }
+                        facts.identity_args = col(r, 2);
+                        facts.has_comment = flag(r, 3);
+                        facts.has_grants = flag(r, 4);
+                        facts.owner = col(r, 5);
                     }
-                    facts.identity_args = col(r, 2);
-                    facts.has_comment = flag(r, 3);
-                    facts.has_grants = flag(r, 4);
-                    facts.owner = col(r, 5);
                 }
-            }
-            ObjectKind::View | ObjectKind::MaterializedView => {
-                let found = rows(session, PG_RELATION_SQL, &[schema, name]).await?;
-                if let Some(r) = found.first() {
-                    facts.has_comment = flag(r, 2);
-                    facts.has_grants = flag(r, 3);
-                    facts.owner = col(r, 4);
-                    if let Some(oid) = col(r, 0) {
-                        facts.reloptions = texts(session, PG_RELOPTIONS_SQL, &oid).await?;
-                        if col(r, 1).as_deref() == Some("m") {
-                            facts.index_defs = texts(session, PG_INDEX_SQL, &oid).await?;
-                        } else {
-                            facts.trigger_defs = texts(session, PG_VIEW_TRIGGERS_SQL, &oid).await?;
-                            facts.rule_defs = texts(session, PG_VIEW_RULES_SQL, &oid).await?;
+                ObjectKind::View | ObjectKind::MaterializedView => {
+                    let found = rows(session, PG_RELATION_SQL, &[schema, name]).await?;
+                    if let Some(r) = found.first() {
+                        facts.has_comment = flag(r, 2);
+                        facts.has_grants = flag(r, 3);
+                        facts.owner = col(r, 4);
+                        if let Some(oid) = col(r, 0) {
+                            facts.reloptions = texts(session, PG_RELOPTIONS_SQL, &oid).await?;
+                            if col(r, 1).as_deref() == Some("m") {
+                                facts.index_defs = texts(session, PG_INDEX_SQL, &oid).await?;
+                            } else {
+                                facts.trigger_defs =
+                                    texts(session, PG_VIEW_TRIGGERS_SQL, &oid).await?;
+                                facts.rule_defs = texts(session, PG_VIEW_RULES_SQL, &oid).await?;
+                            }
                         }
                     }
                 }
-            }
-            ObjectKind::Trigger => {
-                let found = rows(session, PG_TRIGGER_SQL, &[schema, name]).await?;
-                if found.len() > 1 {
-                    let n = found.len();
-                    return Ok((
+                ObjectKind::Trigger => {
+                    let found = rows(session, PG_TRIGGER_SQL, &[schema, name]).await?;
+                    if found.len() > 1 {
+                        let n = found.len();
+                        return Ok((
                         facts,
                         Some(format!(
                             "Trigger {name} exists on {n} tables in {schema}; edit it with a query tab."
                         )),
                     ));
+                    }
+                    if let Some(r) = found.first() {
+                        facts.table = col(r, 0);
+                        facts.table_oid = col(r, 1).and_then(|s| s.parse().ok());
+                        facts.has_comment = flag(r, 2);
+                    }
                 }
-                if let Some(r) = found.first() {
-                    facts.table = col(r, 0);
-                    facts.table_oid = col(r, 1).and_then(|s| s.parse().ok());
-                    facts.has_comment = flag(r, 2);
+                _ => {}
+            }
+        }
+        SqlKind::MySql if t.kind == ObjectKind::Trigger => {
+            let db = t.database.as_str();
+            let found = rows(session, MYSQL_TRIGGER_SQL, &[db, name]).await?;
+            if let Some(r) = found.first() {
+                let (table, timing, event) = (col(r, 0), col(r, 1), col(r, 2));
+                if let (Some(table), Some(timing), Some(event)) = (&table, &timing, &event) {
+                    let others = rows(
+                        session,
+                        MYSQL_SAME_TIMING_SQL,
+                        &[db, table, timing, event, name],
+                    )
+                    .await?;
+                    facts.same_timing_triggers = others
+                        .first()
+                        .and_then(|r| col(r, 0))
+                        .and_then(|n| n.trim().parse().ok())
+                        .unwrap_or(0);
+                    facts.timing_event = Some(format!("{timing} {event}"));
                 }
+                facts.table = table;
             }
-            _ => {}
         }
-    } else if t.kind == ObjectKind::Trigger {
-        let db = t.database.as_str();
-        let found = rows(session, MYSQL_TRIGGER_SQL, &[db, name]).await?;
-        if let Some(r) = found.first() {
-            let (table, timing, event) = (col(r, 0), col(r, 1), col(r, 2));
-            if let (Some(table), Some(timing), Some(event)) = (&table, &timing, &event) {
-                let others = rows(
-                    session,
-                    MYSQL_SAME_TIMING_SQL,
-                    &[db, table, timing, event, name],
-                )
-                .await?;
-                facts.same_timing_triggers = others
-                    .first()
-                    .and_then(|r| col(r, 0))
-                    .and_then(|n| n.trim().parse().ok())
-                    .unwrap_or(0);
-                facts.timing_event = Some(format!("{timing} {event}"));
-            }
-            facts.table = table;
-        }
+        SqlKind::MySql => {}
     }
     Ok((facts, None))
 }

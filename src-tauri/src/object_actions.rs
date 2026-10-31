@@ -11,7 +11,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::Session;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::{DbKind, ServerVariant};
+use dnt_core::server::{ServerVariant, SqlKind};
 use dnt_core::sql::ddl::{action_sql, ObjectAction};
 use dnt_core::sql::Dialect;
 use dnt_store::history::HistoryOrigin;
@@ -83,7 +83,7 @@ fn object_missing(obj: &ObjectRef) -> DbError {
 /// Metadata is read on this operation's session, never from tree caches.
 async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<String, DbError> {
     let i = session.introspector();
-    let kind = session.server_info().kind;
+    let kind = session.server_info().kind.as_sql(); // R1: boundary
     if let Some(obj) = action.object() {
         let scope = Scope {
             database: obj.database.clone(),
@@ -94,12 +94,7 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
             return Err(object_missing(obj));
         }
         if let ObjectAction::RenameTable { name, .. } = action {
-            // Names share a namespace with views (and materialized views on PG).
-            let mut kinds = vec![ObjectKind::Table, ObjectKind::View];
-            if kind == DbKind::Postgres {
-                kinds.push(ObjectKind::MaterializedView);
-            }
-            for k in kinds {
+            for k in table_namespace_kinds(kind) {
                 if i.list_objects(&scope, k)
                     .await?
                     .iter()
@@ -111,27 +106,24 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
         }
         return i.object_ddl(obj).await;
     }
-    let names: Vec<String> = if kind == DbKind::MySql {
-        i.list_databases()
+    let names: Vec<String> = match kind {
+        SqlKind::MySql => i
+            .list_databases()
             .await?
             .into_iter()
             .map(|d| d.name)
-            .collect()
-    } else {
-        i.list_schemas(action.database())
+            .collect(),
+        SqlKind::Postgres => i
+            .list_schemas(action.database())
             .await?
             .into_iter()
             .map(|s| s.name)
-            .collect()
+            .collect(),
     };
     let exists = names.iter().any(|n| n == action.name());
     let creating = matches!(action, ObjectAction::CreateNamespace { .. });
     if exists && creating {
-        let what = if kind == DbKind::MySql {
-            "database"
-        } else {
-            "schema"
-        };
+        let what = namespace_word(kind);
         return Err(DbError::Config {
             field: Some("name".into()),
             message: format!("A {what} named {} already exists.", action.name()),
@@ -143,26 +135,64 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
     if !exists {
         return Ok("absent".into());
     }
-    let scope = Scope {
-        database: if kind == DbKind::MySql {
-            action.name().into()
-        } else {
-            action.database().into()
-        },
-        schema: (kind == DbKind::Postgres).then(|| action.name().into()),
-    };
+    let scope = namespace_scope(kind, action);
     let mut entries = Vec::new();
-    let kinds = if kind == DbKind::MySql {
-        vec![
+    for k in namespace_object_kinds(kind) {
+        for o in i.list_objects(&scope, k).await? {
+            entries.push(format!("{k:?}:{}", o.name));
+        }
+    }
+    entries.sort();
+    Ok(entries.join("\0"))
+}
+
+/// The kinds whose names a renamed table must not take: tables share a namespace with
+/// views (and materialized views on PostgreSQL).
+fn table_namespace_kinds(kind: SqlKind) -> Vec<ObjectKind> {
+    match kind {
+        SqlKind::MySql => vec![ObjectKind::Table, ObjectKind::View],
+        SqlKind::Postgres => vec![
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::MaterializedView,
+        ],
+    }
+}
+
+/// What a namespace is called on `kind`.
+fn namespace_word(kind: SqlKind) -> &'static str {
+    match kind {
+        SqlKind::MySql => "database",
+        SqlKind::Postgres => "schema",
+    }
+}
+
+/// The scope of the namespace `action` names (a MySQL database, a PostgreSQL schema).
+fn namespace_scope(kind: SqlKind, action: &ObjectAction) -> Scope {
+    match kind {
+        SqlKind::MySql => Scope {
+            database: action.name().into(),
+            schema: None,
+        },
+        SqlKind::Postgres => Scope {
+            database: action.database().into(),
+            schema: Some(action.name().into()),
+        },
+    }
+}
+
+/// The object kinds a namespace's fingerprint lists.
+fn namespace_object_kinds(kind: SqlKind) -> Vec<ObjectKind> {
+    match kind {
+        SqlKind::MySql => vec![
             ObjectKind::Table,
             ObjectKind::View,
             ObjectKind::Function,
             ObjectKind::Procedure,
             ObjectKind::Trigger,
             ObjectKind::Event,
-        ]
-    } else {
-        vec![
+        ],
+        SqlKind::Postgres => vec![
             ObjectKind::Table,
             ObjectKind::View,
             ObjectKind::MaterializedView,
@@ -170,15 +200,47 @@ async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<Str
             ObjectKind::Procedure,
             ObjectKind::Sequence,
             ObjectKind::Type,
-        ]
-    };
-    for k in kinds {
-        for o in i.list_objects(&scope, k).await? {
-            entries.push(format!("{k:?}:{}", o.name));
-        }
+        ],
     }
-    entries.sort();
-    Ok(entries.join("\0"))
+}
+
+/// The database an object-action session opens on: none on MySQL (statements name
+/// their database), the action's database on PostgreSQL.
+fn action_session_db(kind: SqlKind, action: &ObjectAction) -> Option<String> {
+    match kind {
+        SqlKind::MySql => None,
+        SqlKind::Postgres => Some(action.database().to_string()),
+    }
+}
+
+/// The database the "Create database/schema" options are read on: a non-empty
+/// `database` on PostgreSQL, none on MySQL.
+fn namespace_options_db(kind: SqlKind, database: String) -> Option<String> {
+    match kind {
+        SqlKind::MySql => None,
+        SqlKind::Postgres => (!database.is_empty()).then_some(database),
+    }
+}
+
+/// The warnings an object-action preview shows.
+fn action_warnings(kind: SqlKind, action: &ObjectAction) -> Vec<String> {
+    let mut warnings = vec!["Each metadata lock wait is limited to 5 seconds.".into()];
+    match kind {
+        SqlKind::MySql => warnings.push(
+            "MySQL/MariaDB DDL may commit implicitly and cannot be undone by this app.".into(),
+        ),
+        SqlKind::Postgres => {}
+    }
+    if action.destructive() {
+        warnings.push(
+            "This operation removes data or an object. No CASCADE or foreign-key bypass is added."
+                .into(),
+        );
+    }
+    if matches!(action, ObjectAction::TruncateTable { .. }) {
+        warnings.push(match kind { SqlKind::MySql => "TRUNCATE may reset AUTO_INCREMENT.", SqlKind::Postgres => "TRUNCATE preserves identity values, includes descendant tables and fires ON TRUNCATE triggers." }.into());
+    }
+    warnings
 }
 
 /// What a "Create database/schema" form can offer: MySQL character sets and collations,
@@ -220,43 +282,47 @@ async fn namespace_options(session: &dyn Session) -> Result<NamespaceOptions, Db
     let rows = |sql| rows_with(session, sql, ExecOptions::default());
     let pair = |r: &Vec<Option<String>>| Some((r.first()?.clone()?, r.get(1)?.clone()?));
     let mut out = NamespaceOptions::default();
-    if session.server_info().kind == DbKind::MySql {
-        out.charsets = rows(MYSQL_CHARSETS_SQL)
+    let kind = session.server_info().kind.as_sql(); // R1: boundary
+    match kind {
+        SqlKind::MySql => {
+            out.charsets = rows(MYSQL_CHARSETS_SQL)
+                .await?
+                .iter()
+                .filter_map(pair)
+                .map(|(name, default_collation)| CharsetOption {
+                    name,
+                    default_collation,
+                })
+                .collect();
+            let info = session.server_info();
+            let full_names = info.variant == ServerVariant::MariaDb && info.version >= (10, 10, 0);
+            out.collations = rows(if full_names {
+                MARIADB_COLLATIONS_SQL
+            } else {
+                MYSQL_COLLATIONS_SQL
+            })
             .await?
             .iter()
             .filter_map(pair)
-            .map(|(name, default_collation)| CharsetOption {
-                name,
-                default_collation,
-            })
+            .map(|(name, charset)| CollationOption { name, charset })
             .collect();
-        let info = session.server_info();
-        let full_names = info.variant == ServerVariant::MariaDb && info.version >= (10, 10, 0);
-        out.collations = rows(if full_names {
-            MARIADB_COLLATIONS_SQL
-        } else {
-            MYSQL_COLLATIONS_SQL
-        })
-        .await?
-        .iter()
-        .filter_map(pair)
-        .map(|(name, charset)| CollationOption { name, charset })
-        .collect();
-        if let Some(r) = rows(MYSQL_DEFAULTS_SQL).await?.first() {
-            out.default_charset = r.first().cloned().flatten();
-            out.default_collation = r.get(1).cloned().flatten();
+            if let Some(r) = rows(MYSQL_DEFAULTS_SQL).await?.first() {
+                out.default_charset = r.first().cloned().flatten();
+                out.default_collation = r.get(1).cloned().flatten();
+            }
         }
-    } else {
-        out.roles = rows(PG_ROLES_SQL)
-            .await?
-            .into_iter()
-            .filter_map(|r| r.into_iter().next().flatten())
-            .collect();
-        out.current_role = rows(PG_CURRENT_ROLE_SQL)
-            .await?
-            .into_iter()
-            .next()
-            .and_then(|r| r.into_iter().next().flatten());
+        SqlKind::Postgres => {
+            out.roles = rows(PG_ROLES_SQL)
+                .await?
+                .into_iter()
+                .filter_map(|r| r.into_iter().next().flatten())
+                .collect();
+            out.current_role = rows(PG_CURRENT_ROLE_SQL)
+                .await?
+                .into_iter()
+                .next()
+                .and_then(|r| r.into_iter().next().flatten());
+        }
     }
     Ok(out)
 }
@@ -268,7 +334,7 @@ impl SessionManager {
         conn: Uuid,
         action: &ObjectAction,
     ) -> Result<String, DbError> {
-        action_sql(self.repo.get(conn)?.kind.as_sql(), action)
+        action_sql(self.repo.get(conn)?.kind.as_sql(), action) // R1: boundary
     }
 
     /// Choices for the "Create database/schema" form, read on a dedicated session.
@@ -279,7 +345,7 @@ impl SessionManager {
     ) -> Result<NamespaceOptions, DbError> {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let db = (cfg.kind == DbKind::Postgres && !database.is_empty()).then_some(database);
+        let db = namespace_options_db(cfg.kind.as_sql(), database); // R1: boundary
         let (session, _) = rt.open_query_session(db).await?;
         let out =
             tokio::time::timeout(METADATA_CALL_TIMEOUT, namespace_options(session.as_ref())).await;
@@ -296,14 +362,11 @@ impl SessionManager {
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
-        let sql = action_sql(cfg.kind.as_sql(), &action)?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let sql = action_sql(kind, &action)?;
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;
-        let db = if cfg.kind == DbKind::MySql {
-            None
-        } else {
-            Some(action.database().to_string())
-        };
+        let db = action_session_db(kind, &action);
         let (session, generation) = rt.open_query_session(db).await?;
         let dialect = session.dialect();
         let fp = tokio::time::timeout(
@@ -314,18 +377,7 @@ impl SessionManager {
         close_quietly(session).await;
         let fp =
             fp.map_err(|_| config_error("object", "Metadata timed out; nothing was changed."))??;
-        let mut warnings = vec!["Each metadata lock wait is limited to 5 seconds.".into()];
-        if cfg.kind == DbKind::MySql {
-            warnings.push(
-                "MySQL/MariaDB DDL may commit implicitly and cannot be undone by this app.".into(),
-            );
-        }
-        if action.destructive() {
-            warnings.push("This operation removes data or an object. No CASCADE or foreign-key bypass is added.".into());
-        }
-        if matches!(action, ObjectAction::TruncateTable { .. }) {
-            warnings.push(if cfg.kind == DbKind::MySql { "TRUNCATE may reset AUTO_INCREMENT." } else { "TRUNCATE preserves identity values, includes descendant tables and fires ON TRUNCATE triggers." }.into());
-        }
+        let warnings = action_warnings(kind, &action);
         let preview = ActionPreview {
             plan_id: Uuid::new_v4(),
             connection_id: conn,
@@ -395,11 +447,8 @@ impl SessionManager {
             return Err(stopped());
         }
         progress("checking");
-        let db = if stored.rt.cfg.kind == DbKind::MySql {
-            None
-        } else {
-            Some(stored.preview.action.database().into())
-        };
+        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let db = action_session_db(kind, &stored.preview.action);
         let (session, generation) = stored.rt.open_query_session(db).await?;
         self.object_actions
             .operations
@@ -438,7 +487,10 @@ impl SessionManager {
         let started_at = crate::run_events::utc_millis_now();
         let mut sent = false;
         let mut commit_sent = false;
-        let pg = stored.rt.cfg.kind == DbKind::Postgres;
+        let pg = match kind {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => true,
+        };
         let result = async {
             execute(
                 session.as_ref(),
@@ -631,5 +683,106 @@ mod tests {
         );
         let (_guard, signal) = store.operations.register(id, Uuid::new_v4()).unwrap();
         assert!(signal.is_stopped());
+    }
+
+    fn drop_namespace() -> ObjectAction {
+        ObjectAction::DropNamespace {
+            database: "shop".into(),
+            name: "sales".into(),
+        }
+    }
+
+    fn truncate() -> ObjectAction {
+        ObjectAction::TruncateTable {
+            object: ObjectRef {
+                database: "shop".into(),
+                schema: None,
+                name: "orders".into(),
+                kind: ObjectKind::Table,
+            },
+        }
+    }
+
+    #[test]
+    fn namespaces_differ_per_engine() {
+        assert_eq!(namespace_word(SqlKind::MySql), "database");
+        assert_eq!(namespace_word(SqlKind::Postgres), "schema");
+        let action = drop_namespace();
+        let s = namespace_scope(SqlKind::MySql, &action);
+        assert_eq!((s.database.as_str(), s.schema), ("sales", None));
+        let s = namespace_scope(SqlKind::Postgres, &action);
+        assert_eq!(
+            (s.database.as_str(), s.schema.as_deref()),
+            ("shop", Some("sales"))
+        );
+        assert_eq!(action_session_db(SqlKind::MySql, &action), None);
+        assert_eq!(
+            action_session_db(SqlKind::Postgres, &action).as_deref(),
+            Some("shop")
+        );
+        assert_eq!(namespace_options_db(SqlKind::MySql, "shop".into()), None);
+        assert_eq!(
+            namespace_options_db(SqlKind::Postgres, "shop".into()).as_deref(),
+            Some("shop")
+        );
+        assert_eq!(namespace_options_db(SqlKind::Postgres, String::new()), None);
+    }
+
+    #[test]
+    fn fingerprinted_kinds_differ_per_engine() {
+        use ObjectKind::*;
+        assert_eq!(table_namespace_kinds(SqlKind::MySql), [Table, View]);
+        assert_eq!(
+            table_namespace_kinds(SqlKind::Postgres),
+            [Table, View, MaterializedView]
+        );
+        assert_eq!(
+            namespace_object_kinds(SqlKind::MySql),
+            [Table, View, Function, Procedure, Trigger, Event]
+        );
+        assert_eq!(
+            namespace_object_kinds(SqlKind::Postgres),
+            [
+                Table,
+                View,
+                MaterializedView,
+                Function,
+                Procedure,
+                Sequence,
+                Type
+            ]
+        );
+    }
+
+    #[test]
+    fn action_warnings_differ_per_engine() {
+        assert_eq!(
+            action_warnings(SqlKind::MySql, &truncate()),
+            [
+                "Each metadata lock wait is limited to 5 seconds.",
+                "MySQL/MariaDB DDL may commit implicitly and cannot be undone by this app.",
+                "This operation removes data or an object. No CASCADE or foreign-key bypass is added.",
+                "TRUNCATE may reset AUTO_INCREMENT.",
+            ]
+        );
+        assert_eq!(
+            action_warnings(SqlKind::Postgres, &truncate()),
+            [
+                "Each metadata lock wait is limited to 5 seconds.",
+                "This operation removes data or an object. No CASCADE or foreign-key bypass is added.",
+                "TRUNCATE preserves identity values, includes descendant tables and fires ON TRUNCATE triggers.",
+            ]
+        );
+        let create = ObjectAction::CreateNamespace {
+            database: "shop".into(),
+            name: "sales".into(),
+            charset: None,
+            collation: None,
+            owner: None,
+        };
+        assert_eq!(
+            action_warnings(SqlKind::Postgres, &create),
+            ["Each metadata lock wait is limited to 5 seconds."]
+        );
     }
 }

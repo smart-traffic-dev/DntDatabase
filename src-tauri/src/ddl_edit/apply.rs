@@ -17,7 +17,7 @@ use crate::session_manager::{
 use dnt_core::driver::{ExecOptions, Session, StopSignal};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::ddl_edit::{CatalogFacts, PostCheck};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -121,8 +121,11 @@ pub(crate) fn script_delimiter(statements: &[String]) -> String {
 /// The History text of a plan: the statements joined with `;`, or for a MySQL
 /// compound statement (routine, trigger, event) a `DELIMITER` script that a query tab
 /// can run again, its delimiter one that no statement contains.
-pub(crate) fn history_sql(engine: DbKind, kind: ObjectKind, statements: &[String]) -> String {
-    let compound = engine == DbKind::MySql && kind != ObjectKind::View;
+pub(crate) fn history_sql(engine: SqlKind, kind: ObjectKind, statements: &[String]) -> String {
+    let compound = match engine {
+        SqlKind::MySql => kind != ObjectKind::View,
+        SqlKind::Postgres => false,
+    };
     if compound {
         let d = script_delimiter(statements);
         format!(
@@ -219,7 +222,11 @@ impl SessionManager {
             return Err(stopped());
         }
         progress("checking");
-        let pg = stored.rt.cfg.kind == DbKind::Postgres;
+        let engine = stored.rt.cfg.kind.as_sql(); // R1: boundary
+        let pg = match engine {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => true,
+        };
         let timeout_s = stored.rt.cfg.options.query_timeout_s;
         let object_name = stored.target.name.clone().unwrap_or_default();
         let (session, generation) = stored
@@ -457,7 +464,7 @@ impl SessionManager {
         ops.set_cancel(operation, None);
         close_quietly(session).await;
         if sent > 0 {
-            let sql = history_sql(stored.rt.cfg.kind, stored.kind, statements);
+            let sql = history_sql(engine, stored.kind, statements);
             let saved = write_history(
                 self.repo.clone(),
                 DdlHistory {

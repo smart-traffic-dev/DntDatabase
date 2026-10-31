@@ -46,7 +46,7 @@ use crate::session_manager::config_error;
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{
     insert_sql, raw_where_clause, update_sql, BuildError, ColumnTarget, RowGuard, RowKey, TableRef,
 };
@@ -135,13 +135,14 @@ pub struct TableRowCount {
 
 /// The object must be a table, view or materialized view, with a schema on PostgreSQL
 /// (and none on MySQL).
-pub fn check_object(kind: DbKind, obj: &ObjectRef) -> Result<(), DbError> {
-    let allowed = match kind {
-        DbKind::MySql => matches!(obj.kind, ObjectKind::Table | ObjectKind::View),
-        DbKind::Postgres => matches!(
-            obj.kind,
-            ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView
-        ),
+pub fn check_object(kind: SqlKind, obj: &ObjectRef) -> Result<(), DbError> {
+    let allowed = match (kind, obj.kind) {
+        (SqlKind::MySql, ObjectKind::Table | ObjectKind::View) => true,
+        (
+            SqlKind::Postgres,
+            ObjectKind::Table | ObjectKind::View | ObjectKind::MaterializedView,
+        ) => true,
+        (SqlKind::MySql | SqlKind::Postgres, _) => false,
     };
     if !allowed {
         return Err(config_error(
@@ -153,14 +154,14 @@ pub fn check_object(kind: DbKind, obj: &ObjectRef) -> Result<(), DbError> {
         return Err(config_error("database", "a database is required"));
     }
     match (kind, &obj.schema) {
-        (DbKind::Postgres, None) => {
+        (SqlKind::Postgres, None) => {
             Err(config_error("schema", "a schema is required on PostgreSQL"))
         }
-        (DbKind::MySql, Some(_)) => Err(config_error(
+        (SqlKind::MySql, Some(_)) => Err(config_error(
             "schema",
             "MySQL has no schemas inside a database",
         )),
-        _ => Ok(()),
+        (SqlKind::MySql, None) | (SqlKind::Postgres, Some(_)) => Ok(()),
     }
 }
 
@@ -178,14 +179,17 @@ pub fn check_limit(limit: u32) -> Result<(), DbError> {
 /// Whether a column of type `db_type` cannot be sorted on: PostgreSQL types without a
 /// default ordering (`json`, `xml`, the geometric types, and arrays of them). MySQL sorts
 /// every type.
-pub fn unsortable(kind: DbKind, db_type: &str) -> bool {
-    kind == DbKind::Postgres && pg_unordered(db_type)
+pub fn unsortable(kind: SqlKind, db_type: &str) -> bool {
+    match kind {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => pg_unordered(db_type),
+    }
 }
 
 /// `order` checked against the object's columns (exact name, sortable type):
 /// `(column, ascending)`.
 pub fn resolve_order(
-    kind: DbKind,
+    kind: SqlKind,
     columns: &[ColumnDetail],
     order: Option<SortSpec>,
 ) -> Result<Option<(String, bool)>, DbError> {
@@ -235,7 +239,7 @@ pub type OrderBy = Vec<(String, bool)>;
 /// by the primary key columns as a tie-breaker (stable paging over equal values), or,
 /// without a sort, the primary key alone.
 pub fn page_order(
-    kind: DbKind,
+    kind: SqlKind,
     detail: &TableDetail,
     sort: &[SortSpec],
 ) -> Result<(OrderBy, Vec<String>), DbError> {
@@ -293,7 +297,7 @@ fn raw_clause(raw: &str, dialect: Dialect) -> Result<String, DbError> {
 /// `WHERE` (structured with its parameters, or raw), all checked against the object's
 /// columns.
 pub(crate) struct DataQuery {
-    pub kind: DbKind,
+    pub kind: SqlKind,
     pub relation: String,
     pub order: OrderBy,
     pub keys: Vec<String>,
@@ -321,7 +325,7 @@ impl DataQuery {
                 .collect();
             return DataRequest {
                 sql: select_sql(
-                    self.kind.as_sql(),
+                    self.kind,
                     &self.relation,
                     extra,
                     &self.filter.sql,
@@ -344,12 +348,7 @@ impl DataQuery {
                 order.iter().map(|(c, asc)| (c.as_str(), *asc)).collect();
             let where_sql = raw_clause(&raw, dialect)?;
             Ok(select_sql(
-                kind.as_sql(),
-                &relation,
-                &extra,
-                &where_sql,
-                &order,
-                page,
+                kind, &relation, &extra, &where_sql, &order, page,
             ))
         };
         DataRequest {
@@ -373,10 +372,13 @@ impl PageExtras {
     /// For a page of `detail`: the row version only when the data view may edit it; the
     /// hidden key columns whenever the table has a key (a read-only connection still
     /// fetches complete cells by key, `data_cell_fetch`).
-    pub fn of(detail: &TableDetail, kind: DbKind, read_only: bool) -> PageExtras {
-        match editable(detail, kind.as_sql(), false) {
+    pub fn of(detail: &TableDetail, kind: SqlKind, read_only: bool) -> PageExtras {
+        match editable(detail, kind, false) {
             Ok(e) => PageExtras {
-                row_version: kind == DbKind::Postgres && !read_only,
+                row_version: match kind {
+                    SqlKind::MySql => false,
+                    SqlKind::Postgres => !read_only,
+                },
                 hidden_key: e.hidden_key,
             },
             Err(_) => PageExtras::default(),
@@ -389,15 +391,11 @@ impl PageExtras {
     }
 
     /// The select-list expressions, in order.
-    pub fn columns(&self, kind: DbKind) -> Vec<String> {
+    pub fn columns(&self, kind: SqlKind) -> Vec<String> {
         let version = self.row_version.then(|| "xmin::text".to_string());
         version
             .into_iter()
-            .chain(
-                self.hidden_key
-                    .iter()
-                    .map(|c| quote_ident(kind.as_sql(), c)),
-            )
+            .chain(self.hidden_key.iter().map(|c| quote_ident(kind, c)))
             .collect()
     }
 }
@@ -529,7 +527,7 @@ pub(crate) async fn data_query(
     filter: Option<&DataFilter>,
 ) -> Result<DataQuery, DbError> {
     check_request_size(sort, filter)?;
-    let kind = state.repo.get(id)?.kind;
+    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
     check_object(kind, obj)?;
     let raw_where = raw_text(filter);
     let structured = if raw_where.is_some() { None } else { filter };
@@ -543,11 +541,7 @@ pub(crate) async fn data_query(
     let (order, keys, filter) = match &detail {
         Some(detail) => {
             let (order, keys) = page_order(kind, detail, sort)?;
-            (
-                order,
-                keys,
-                build_where(kind.as_sql(), &detail.columns, structured)?,
-            )
+            (order, keys, build_where(kind, &detail.columns, structured)?)
         }
         None => (Vec::new(), Vec::new(), WhereClause::default()),
     };
@@ -575,13 +569,8 @@ fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn relation(kind: DbKind, obj: &ObjectRef) -> String {
-    qualified_name(
-        kind.as_sql(),
-        &obj.database,
-        obj.schema.as_deref(),
-        &obj.name,
-    )
+fn relation(kind: SqlKind, obj: &ObjectRef) -> String {
+    qualified_name(kind, &obj.database, obj.schema.as_deref(), &obj.name)
 }
 
 /// A page of `obj`: `sort` keys in order (empty: the primary key), rows matching
@@ -644,7 +633,7 @@ pub async fn table_row_count_impl(
     request_key: String,
 ) -> Result<TableRowCount, DbError> {
     check_request_size(&[], filter.as_ref())?;
-    let kind = state.repo.get(id)?.kind;
+    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
     check_object(kind, &obj)?;
     let rel = relation(kind, &obj);
     let request = match raw_text(filter.as_ref()) {
@@ -660,7 +649,7 @@ pub async fn table_row_count_impl(
         None => {
             let clause = if filtered(filter.as_ref()) {
                 let detail = table_detail_impl(state, id, obj.clone()).await?;
-                build_where(kind.as_sql(), &detail.columns, filter.as_ref())?
+                build_where(kind, &detail.columns, filter.as_ref())?
             } else {
                 WhereClause::default()
             };
@@ -703,8 +692,8 @@ fn reason_code(n: &NotEditable) -> String {
 }
 
 /// Whether the data view may edit `detail` on a connection of `kind`.
-pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> EditableInfo {
-    match editable(detail, kind.as_sql(), read_only) {
+pub fn editable_info(detail: &TableDetail, kind: SqlKind, read_only: bool) -> EditableInfo {
+    match editable(detail, kind, read_only) {
         Ok(e) => EditableInfo {
             editable: true,
             reason: None,
@@ -717,7 +706,7 @@ pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> Edi
         Err(n) => {
             // The key still identifies rows for reads (`data_cell_fetch`), e.g. on a
             // read-only connection.
-            let (key, hidden_key) = match editable(detail, kind.as_sql(), false) {
+            let (key, hidden_key) = match editable(detail, kind, false) {
                 Ok(e) => (e.key, e.hidden_key),
                 Err(_) => (Vec::new(), Vec::new()),
             };
@@ -727,10 +716,10 @@ pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> Edi
                 key,
                 hidden_key,
                 editable_columns: Vec::new(),
-                atomic: atomicity(detail, kind.as_sql()),
+                atomic: atomicity(detail, kind),
                 protection: match kind {
-                    DbKind::Postgres => ProtectionKind::RowVersion,
-                    DbKind::MySql => ProtectionKind::Snapshot,
+                    SqlKind::Postgres => ProtectionKind::RowVersion,
+                    SqlKind::MySql => ProtectionKind::Snapshot,
                 },
             }
         }
@@ -743,9 +732,10 @@ pub async fn data_editable_impl(
     obj: ObjectRef,
 ) -> Result<EditableInfo, DbError> {
     let cfg = state.repo.get(id)?;
-    check_object(cfg.kind, &obj)?;
+    let kind = cfg.kind.as_sql(); // R1: boundary
+    check_object(kind, &obj)?;
     let detail = table_detail_impl(state, id, obj).await?;
-    Ok(editable_info(&detail, cfg.kind, cfg.read_only))
+    Ok(editable_info(&detail, kind, cfg.read_only))
 }
 
 pub async fn data_preview_impl(
@@ -987,14 +977,14 @@ pub fn copy_sql(
     format: CopySqlFormat,
 ) -> Result<String, DbError> {
     let kind = match dialect {
-        Dialect::MySql(_) => DbKind::MySql,
-        Dialect::Postgres => DbKind::Postgres,
+        Dialect::MySql(_) => SqlKind::MySql,
+        Dialect::Postgres => SqlKind::Postgres,
     };
     if rows.is_empty() {
         return Err(config_error("copy", "There are no rows to copy."));
     }
     let table = TableRef {
-        kind: kind.as_sql(),
+        kind,
         database: detail.object.database.clone(),
         schema: detail.object.schema.clone(),
         name: detail.object.name.clone(),
@@ -1046,7 +1036,7 @@ pub fn copy_sql(
             insert_sql(&table, &targets, &values, &[], dialect).map_err(build)
         }
         CopySqlFormat::Update => {
-            let ed = editable(detail, kind.as_sql(), false)
+            let ed = editable(detail, kind, false)
                 .map_err(|_| config_error("copy", "The table has no key to find its rows by."))?;
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {
@@ -1210,19 +1200,33 @@ mod tests {
 
     #[test]
     fn objects_need_data_and_the_right_scope() {
-        assert!(check_object(DbKind::MySql, &obj(None, ObjectKind::Table)).is_ok());
-        assert!(check_object(DbKind::MySql, &obj(None, ObjectKind::View)).is_ok());
+        assert!(check_object(SqlKind::MySql, &obj(None, ObjectKind::Table)).is_ok());
+        assert!(check_object(SqlKind::MySql, &obj(None, ObjectKind::View)).is_ok());
         assert!(check_object(
-            DbKind::Postgres,
+            SqlKind::Postgres,
             &obj(Some("public"), ObjectKind::MaterializedView)
         )
         .is_ok());
-        let e = check_object(DbKind::MySql, &obj(None, ObjectKind::Function)).unwrap_err();
+        let e = check_object(SqlKind::MySql, &obj(None, ObjectKind::Function)).unwrap_err();
         assert_eq!(field(e).as_deref(), Some("kind"));
-        let e = check_object(DbKind::Postgres, &obj(None, ObjectKind::Table)).unwrap_err();
+        let e = check_object(SqlKind::Postgres, &obj(None, ObjectKind::Table)).unwrap_err();
         assert_eq!(field(e).as_deref(), Some("schema"));
-        let e = check_object(DbKind::MySql, &obj(Some("x"), ObjectKind::Table)).unwrap_err();
+        let e = check_object(SqlKind::MySql, &obj(Some("x"), ObjectKind::Table)).unwrap_err();
         assert_eq!(field(e).as_deref(), Some("schema"));
+    }
+
+    #[test]
+    fn object_kinds_with_data_differ_per_engine() {
+        assert!(check_object(SqlKind::Postgres, &obj(Some("public"), ObjectKind::Table)).is_ok());
+        assert!(check_object(SqlKind::Postgres, &obj(Some("public"), ObjectKind::View)).is_ok());
+        let e = check_object(SqlKind::MySql, &obj(None, ObjectKind::MaterializedView)).unwrap_err();
+        assert_eq!(field(e).as_deref(), Some("kind"));
+        let e = check_object(
+            SqlKind::Postgres,
+            &obj(Some("public"), ObjectKind::Function),
+        )
+        .unwrap_err();
+        assert_eq!(field(e).as_deref(), Some("kind"));
     }
 
     #[test]
@@ -1239,14 +1243,14 @@ mod tests {
     #[test]
     fn order_must_name_a_column_exactly() {
         let cols = [col("id"), col("we`ird\"col")];
-        assert_eq!(resolve_order(DbKind::MySql, &cols, None).unwrap(), None);
+        assert_eq!(resolve_order(SqlKind::MySql, &cols, None).unwrap(), None);
         let spec = |c: &str, dir| SortSpec {
             column: c.into(),
             dir,
         };
         assert_eq!(
             resolve_order(
-                DbKind::MySql,
+                SqlKind::MySql,
                 &cols,
                 Some(spec("we`ird\"col", SortDir::Desc))
             )
@@ -1254,7 +1258,8 @@ mod tests {
             Some(("we`ird\"col".to_string(), false))
         );
         for bad in ["ID", "id; DROP TABLE orders", "1", ""] {
-            let e = resolve_order(DbKind::MySql, &cols, Some(spec(bad, SortDir::Asc))).unwrap_err();
+            let e =
+                resolve_order(SqlKind::MySql, &cols, Some(spec(bad, SortDir::Asc))).unwrap_err();
             assert_eq!(field(e).as_deref(), Some("order"), "{bad}");
         }
     }
@@ -1270,8 +1275,8 @@ mod tests {
             "json[]",
             "pg_catalog.json",
         ] {
-            assert!(unsortable(DbKind::Postgres, t), "{t}");
-            assert!(!unsortable(DbKind::MySql, t), "{t}");
+            assert!(unsortable(SqlKind::Postgres, t), "{t}");
+            assert!(!unsortable(SqlKind::MySql, t), "{t}");
         }
         for t in [
             "jsonb",
@@ -1280,11 +1285,11 @@ mod tests {
             "timestamp with time zone",
             "int[]",
         ] {
-            assert!(!unsortable(DbKind::Postgres, t), "{t}");
+            assert!(!unsortable(SqlKind::Postgres, t), "{t}");
         }
         let cols = [typed("doc", "json")];
         let e = resolve_order(
-            DbKind::Postgres,
+            SqlKind::Postgres,
             &cols,
             Some(SortSpec {
                 column: "doc".into(),
@@ -1358,11 +1363,11 @@ mod tests {
             v.iter().map(|(c, asc)| (c.to_string(), *asc)).collect()
         };
         assert_eq!(
-            page_order(DbKind::MySql, &d, &spec("b", SortDir::Desc)).unwrap(),
+            page_order(SqlKind::MySql, &d, &spec("b", SortDir::Desc)).unwrap(),
             (owned(&[("b", false), ("a", true)]), vec![])
         );
         assert_eq!(
-            page_order(DbKind::MySql, &d, &[]).unwrap(),
+            page_order(SqlKind::MySql, &d, &[]).unwrap(),
             (
                 owned(&[("a", true), ("b", true)]),
                 vec!["a".to_string(), "b".to_string()]
@@ -1370,11 +1375,11 @@ mod tests {
         );
         let no_pk = detail(None);
         assert_eq!(
-            page_order(DbKind::MySql, &no_pk, &spec("a", SortDir::Asc)).unwrap(),
+            page_order(SqlKind::MySql, &no_pk, &spec("a", SortDir::Asc)).unwrap(),
             (owned(&[("a", true)]), vec![])
         );
         assert_eq!(
-            page_order(DbKind::MySql, &no_pk, &[]).unwrap(),
+            page_order(SqlKind::MySql, &no_pk, &[]).unwrap(),
             (vec![], vec![])
         );
     }
@@ -1392,15 +1397,15 @@ mod tests {
             key("b", SortDir::Asc),
         ];
         assert_eq!(
-            page_order(DbKind::MySql, &d, &sort).unwrap().0,
+            page_order(SqlKind::MySql, &d, &sort).unwrap().0,
             vec![("b".to_string(), false), ("a".to_string(), false)]
         );
         // An unknown key anywhere is refused.
         let bad = [key("a", SortDir::Asc), key("nope", SortDir::Asc)];
-        let e = page_order(DbKind::MySql, &d, &bad).unwrap_err();
+        let e = page_order(SqlKind::MySql, &d, &bad).unwrap_err();
         assert_eq!(field(e).as_deref(), Some("order"));
         let many = vec![key("a", SortDir::Asc); MAX_SORT_KEYS + 1];
-        assert!(page_order(DbKind::MySql, &d, &many).is_err());
+        assert!(page_order(SqlKind::MySql, &d, &many).is_err());
     }
 
     #[test]
@@ -1464,7 +1469,7 @@ mod tests {
             row_version: true,
             hidden_key: vec!["hid".into()],
         };
-        assert_eq!(extras.columns(DbKind::Postgres), ["xmin::text", "\"hid\""]);
+        assert_eq!(extras.columns(SqlKind::Postgres), ["xmin::text", "\"hid\""]);
         let p = split_page(page, &extras, 2).unwrap();
         let names: Vec<&str> = p.columns.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
@@ -1499,7 +1504,7 @@ mod tests {
                 row_version: false,
                 hidden_key: vec!["my`id".into()]
             }
-            .columns(DbKind::MySql),
+            .columns(SqlKind::MySql),
             ["`my``id`"]
         );
     }
@@ -1509,14 +1514,14 @@ mod tests {
         let d = detail(Some(vec!["a"]));
         let mut d = d;
         d.columns[0].nullable = false;
-        let ok = editable_info(&d, DbKind::Postgres, false);
+        let ok = editable_info(&d, SqlKind::Postgres, false);
         assert!(ok.editable);
         assert_eq!(ok.key, ["a"]);
         assert_eq!(ok.editable_columns, ["a", "b"]);
         assert_eq!(ok.protection, ProtectionKind::RowVersion);
         assert_eq!(ok.reason, None);
 
-        let ro = editable_info(&d, DbKind::MySql, true);
+        let ro = editable_info(&d, SqlKind::MySql, true);
         assert!(!ro.editable);
         assert_eq!(ro.reason.as_deref(), Some("read_only_connection"));
         // The key is still reported (complete cells are fetched by it); nothing to set.
@@ -1524,31 +1529,32 @@ mod tests {
         assert!(ro.hidden_key.is_empty() && ro.editable_columns.is_empty());
         let mut hidden = d.clone();
         hidden.columns[0].invisible = true;
-        let ro = editable_info(&hidden, DbKind::MySql, true);
+        let ro = editable_info(&hidden, SqlKind::MySql, true);
         assert_eq!(ro.hidden_key, ["a"]);
         // A read-only page still reads the hidden key, without row versions.
         assert_eq!(
-            PageExtras::of(&hidden, DbKind::MySql, true),
+            PageExtras::of(&hidden, SqlKind::MySql, true),
             PageExtras {
                 row_version: false,
                 hidden_key: vec!["a".into()]
             }
         );
         assert_eq!(
-            PageExtras::of(&d, DbKind::Postgres, true),
+            PageExtras::of(&d, SqlKind::Postgres, true),
             PageExtras::default()
         );
-        assert!(PageExtras::of(&d, DbKind::Postgres, false).row_version);
+        assert!(PageExtras::of(&d, SqlKind::Postgres, false).row_version);
+        assert!(!PageExtras::of(&d, SqlKind::MySql, false).row_version);
         assert_eq!(ro.protection, ProtectionKind::Snapshot);
 
         let mut v = d.clone();
         v.object.kind = ObjectKind::View;
         assert_eq!(
-            editable_info(&v, DbKind::MySql, false).reason.as_deref(),
+            editable_info(&v, SqlKind::MySql, false).reason.as_deref(),
             Some("not_a_table")
         );
         assert_eq!(
-            editable_info(&detail(None), DbKind::MySql, false)
+            editable_info(&detail(None), SqlKind::MySql, false)
                 .reason
                 .as_deref(),
             Some("no_key")
@@ -1564,7 +1570,7 @@ mod tests {
     #[test]
     fn raw_where_is_checked_with_the_sessions_dialect() {
         let q = DataQuery {
-            kind: DbKind::MySql,
+            kind: SqlKind::MySql,
             relation: "`shop`.`orders`".into(),
             order: vec![("id".into(), true)],
             keys: vec!["id".into()],

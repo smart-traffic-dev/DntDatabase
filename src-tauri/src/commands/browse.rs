@@ -31,7 +31,7 @@ use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
 };
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use tauri::State;
 use uuid::Uuid;
 
@@ -40,15 +40,15 @@ use uuid::Uuid;
 /// MySQL: the virtual `information_schema` / `performance_schema` match in any case (the
 /// server resolves them case-insensitively); `mysql` and `sys` are ordinary databases and
 /// match exactly, so a user database `MySQL` on a case-sensitive server stays visible.
-pub fn is_system(kind: DbKind, name: &str) -> bool {
+pub fn is_system(kind: SqlKind, name: &str) -> bool {
     match kind {
-        DbKind::MySql => {
+        SqlKind::MySql => {
             name.eq_ignore_ascii_case("information_schema")
                 || name.eq_ignore_ascii_case("performance_schema")
                 || name == "mysql"
                 || name == "sys"
         }
-        DbKind::Postgres => name == "information_schema" || name.starts_with("pg_"),
+        SqlKind::Postgres => name == "information_schema" || name.starts_with("pg_"),
     }
 }
 
@@ -76,7 +76,7 @@ impl Named for SchemaInfo {
 }
 
 /// `items` without the system ones, unless `show_system`.
-pub fn filter_system<T: Named>(kind: DbKind, items: Vec<T>, show_system: bool) -> Vec<T> {
+pub fn filter_system<T: Named>(kind: SqlKind, items: Vec<T>, show_system: bool) -> Vec<T> {
     if show_system {
         return items;
     }
@@ -122,15 +122,15 @@ pub async fn list_databases_impl(
     id: Uuid,
     show_system: bool,
 ) -> Result<Vec<DatabaseInfo>, DbError> {
-    let kind = state.repo.get(id)?.kind;
+    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
     let dbs = state
         .sessions
         .browse(id, None, databases_key(), |i| i.list_databases())
         .await?;
     // PostgreSQL lists no system databases (templates are excluded by the driver).
     Ok(match kind {
-        DbKind::MySql => filter_system(kind, dbs, show_system),
-        DbKind::Postgres => dbs,
+        SqlKind::MySql => filter_system(kind, dbs, show_system),
+        SqlKind::Postgres => dbs,
     })
 }
 
@@ -140,7 +140,7 @@ pub async fn list_schemas_impl(
     db: String,
     show_system: bool,
 ) -> Result<Vec<SchemaInfo>, DbError> {
-    let kind = state.repo.get(id)?.kind;
+    let kind = state.repo.get(id)?.kind.as_sql(); // R1: boundary
     let schemas = state
         .sessions
         .browse(id, Some(&db), schemas_key(&db), |i| {
@@ -316,10 +316,10 @@ mod tests {
         ]);
         // The virtual schemas match in any case; `mysql` / `sys` only exactly.
         assert_eq!(
-            filter_system(DbKind::MySql, mysql.clone(), false),
+            filter_system(SqlKind::MySql, mysql.clone(), false),
             names(&["app", "MySQL", "SYS", "mysql_archive"])
         );
-        assert_eq!(filter_system(DbKind::MySql, mysql.clone(), true), mysql);
+        assert_eq!(filter_system(SqlKind::MySql, mysql.clone(), true), mysql);
 
         let pg = names(&[
             "public",
@@ -331,10 +331,10 @@ mod tests {
             "pgx",
         ]);
         assert_eq!(
-            filter_system(DbKind::Postgres, pg.clone(), false),
+            filter_system(SqlKind::Postgres, pg.clone(), false),
             names(&["public", "sales", "pgx"])
         );
-        assert_eq!(filter_system(DbKind::Postgres, pg.clone(), true), pg);
+        assert_eq!(filter_system(SqlKind::Postgres, pg.clone(), true), pg);
     }
 
     #[test]

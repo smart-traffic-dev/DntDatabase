@@ -10,7 +10,7 @@ use dnt_testkit::{require_db, Target, FIXTURE_DB};
 use std::time::Instant;
 
 async fn connect(t: Target) -> Box<dyn Session> {
-    let driver: Box<dyn Driver> = if t.kind() == DbKind::MySql {
+    let driver: Box<dyn Driver> = if t.sql_kind() == SqlKind::MySql {
         Box::new(MySqlDriver)
     } else {
         Box::new(PgDriver)
@@ -34,7 +34,7 @@ fn count_impact(sql: String) -> Impact {
 async fn slow_count_is_stopped_on_the_server() {
     require_db!();
     for t in Target::all() {
-        let pg = t.kind() == DbKind::Postgres;
+        let pg = t.sql_kind() == SqlKind::Postgres;
         let s = connect(t).await;
         let probe = connect(t).await;
         // The same path counts a fast query.

@@ -348,7 +348,7 @@ pub async fn export_table_impl(
         Some(&obj.database),
         &request_key,
         request,
-        query.kind.as_sql(),
+        query.kind,
         opts,
         path,
         progress,
@@ -371,7 +371,7 @@ async fn export_query_reported(
 ) -> Result<ExportSummary, (DbError, Option<TxState>)> {
     let early = |e: DbError| (e, None);
     check_options(&opts).map_err(early)?;
-    let kind = state.sessions.plan_kind(plan_id).map_err(early)?.as_sql();
+    let kind = state.sessions.plan_kind(plan_id).map_err(early)?;
     // The tab is held (not busy) and the statement judged before the file is created.
     let run = state
         .sessions

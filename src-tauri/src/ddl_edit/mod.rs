@@ -22,7 +22,7 @@ use dnt_core::config::EnvTag;
 use dnt_core::driver::Session;
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::ddl_edit::{
     build, check_target, editable_kind, isolate, notes, parse_header, strategies, template,
     BuildInput, CatalogFacts, EditTarget, PostCheck, Strategy,
@@ -240,23 +240,23 @@ pub(crate) async fn current_fingerprint(
 }
 
 /// The kinds whose names a new object of `kind` must not take.
-fn namespace_kinds(kind: ObjectKind, engine: DbKind) -> Vec<ObjectKind> {
+fn namespace_kinds(kind: ObjectKind, engine: SqlKind) -> Vec<ObjectKind> {
     use ObjectKind::*;
     match (engine, kind) {
-        (DbKind::MySql, View) => vec![Table, View],
-        (DbKind::Postgres, View | MaterializedView) => vec![Table, View, MaterializedView],
-        (DbKind::Postgres, Function | Procedure) => vec![Function, Procedure],
-        (_, k) => vec![k],
+        (SqlKind::MySql, View) => vec![Table, View],
+        (SqlKind::Postgres, View | MaterializedView) => vec![Table, View, MaterializedView],
+        (SqlKind::Postgres, Function | Procedure) => vec![Function, Procedure],
+        (SqlKind::MySql | SqlKind::Postgres, k) => vec![k],
     }
 }
 
 /// Whether a catalog name is `name`: MySQL / MariaDB compare ASCII case-insensitively
 /// (routine and event names always are; table, view and trigger names are on servers
 /// with `lower_case_table_names` set, e.g. Windows), PostgreSQL exactly.
-pub(crate) fn same_catalog_name(engine: DbKind, catalog: &str, name: &str) -> bool {
+pub(crate) fn same_catalog_name(engine: SqlKind, catalog: &str, name: &str) -> bool {
     match engine {
-        DbKind::MySql => catalog.eq_ignore_ascii_case(name),
-        DbKind::Postgres => catalog == name,
+        SqlKind::MySql => catalog.eq_ignore_ascii_case(name),
+        SqlKind::Postgres => catalog == name,
     }
 }
 
@@ -266,7 +266,7 @@ pub(crate) async fn object_listed(
     t: &EditTarget,
     name: &str,
 ) -> Result<bool, DbError> {
-    let engine = session.server_info().kind;
+    let engine = session.server_info().kind.as_sql(); // R1: boundary
     Ok(session
         .introspector()
         .list_objects(&scope_of(t), t.kind)
@@ -283,7 +283,7 @@ pub(crate) async fn name_taken(
 ) -> Result<bool, DbError> {
     let scope = scope_of(t);
     let i = session.introspector();
-    let engine = session.server_info().kind;
+    let engine = session.server_info().kind.as_sql(); // R1: boundary
     for k in namespace_kinds(t.kind, engine) {
         if i.list_objects(&scope, k)
             .await?
@@ -362,17 +362,18 @@ impl SessionManager {
         table: Option<String>,
     ) -> Result<DdlEditOpen, DbError> {
         let cfg = self.repo.get(conn)?;
-        match (cfg.kind, &scope.schema) {
-            (DbKind::MySql, Some(_)) => {
+        let engine = cfg.kind.as_sql(); // R1: boundary
+        match (engine, &scope.schema) {
+            (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(
                     "scope",
                     "MySQL has no schemas inside a database.",
                 ))
             }
-            (DbKind::Postgres, None) => {
+            (SqlKind::Postgres, None) => {
                 return Err(config_error("scope", "A schema is required on PostgreSQL."))
             }
-            _ => {}
+            (SqlKind::MySql, None) | (SqlKind::Postgres, Some(_)) => {}
         }
         if scope.database.is_empty() {
             return Err(config_error("scope", "A database is required."));
@@ -542,10 +543,14 @@ impl SessionManager {
             confirm_name: confirm_name(cfg.env_tag, built.gap, &name),
             expires_in_seconds: self.plan_ttl.as_secs().min(u32::MAX as u64) as u32,
         };
-        let rehearsal = (edit.server.kind == DbKind::MySql
-            && built.gap
-            && matches!(target.kind, ObjectKind::Function | ObjectKind::Procedure))
-        .then_some(rehearsal);
+        let engine = edit.server.kind.as_sql(); // R1: boundary
+        let rehearsed = match engine {
+            SqlKind::MySql => {
+                built.gap && matches!(target.kind, ObjectKind::Function | ObjectKind::Procedure)
+            }
+            SqlKind::Postgres => false,
+        };
+        let rehearsal = rehearsed.then_some(rehearsal);
         // The edit may have been closed (or changed by an apply) while this preview ran:
         // its plan is stored only while the edit is still the one previewed. The edits
         // lock is held across the insert, so a concurrent close drops this plan too.

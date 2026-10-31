@@ -15,7 +15,7 @@ use dnt_core::meta::{
     TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
-use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo};
+use dnt_core::server::{detect_mysql, detect_pg, DbKind, ServerInfo, SqlKind};
 use dnt_core::sql::{Dialect, MySqlMode, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
@@ -1656,14 +1656,14 @@ async fn history_uses_object_action_and_delimiter_form() {
         "CREATE VIEW x AS SELECT 1".into(),
     ];
     assert_eq!(
-        super::apply::history_sql(DbKind::Postgres, ObjectKind::Function, &statements),
+        super::apply::history_sql(SqlKind::Postgres, ObjectKind::Function, &statements),
         "DROP VIEW x;\nCREATE VIEW x AS SELECT 1"
     );
 
     // The delimiter is one that no statement contains.
     let body = |s: &str| format!("CREATE PROCEDURE p() BEGIN SELECT '{s}'; END");
     let history = |statements: &[String]| {
-        super::apply::history_sql(DbKind::MySql, ObjectKind::Procedure, statements)
+        super::apply::history_sql(SqlKind::MySql, ObjectKind::Procedure, statements)
     };
     let s = [body("$$")];
     assert_eq!(
@@ -1679,6 +1679,75 @@ async fn history_uses_object_action_and_delimiter_form() {
     assert_eq!(
         history(&s),
         format!("DELIMITER $$2\n{}$$2\nDELIMITER ;", s[0])
+    );
+}
+
+#[test]
+fn namespaces_and_name_matching_differ_per_engine() {
+    use ObjectKind::*;
+    let kinds = super::namespace_kinds;
+    assert_eq!(kinds(View, SqlKind::MySql), [Table, View]);
+    assert_eq!(kinds(Procedure, SqlKind::MySql), [Procedure]);
+    assert_eq!(
+        kinds(View, SqlKind::Postgres),
+        [Table, View, MaterializedView]
+    );
+    assert_eq!(
+        kinds(MaterializedView, SqlKind::Postgres),
+        [Table, View, MaterializedView]
+    );
+    assert_eq!(kinds(Procedure, SqlKind::Postgres), [Function, Procedure]);
+    assert_eq!(kinds(Trigger, SqlKind::Postgres), [Trigger]);
+    assert!(super::same_catalog_name(SqlKind::MySql, "Orders", "orders"));
+    assert!(!super::same_catalog_name(
+        SqlKind::Postgres,
+        "Orders",
+        "orders"
+    ));
+    assert!(super::same_catalog_name(
+        SqlKind::Postgres,
+        "orders",
+        "orders"
+    ));
+}
+
+#[tokio::test]
+async fn open_checks_the_scope_per_engine() {
+    let message = |e: DbError| match e {
+        DbError::Config { field, message } => (field, message),
+        other => panic!("{other:?}"),
+    };
+    let f = fixture(Fake::new(mysql8(), MYSQL_VIEW), None, false).await;
+    let bad = Scope {
+        database: "shop".into(),
+        schema: Some("public".into()),
+    };
+    let e =
+        f.sm.ddl_edit_open(f.conn, bad, ObjectKind::View, Some("v".into()), None)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        message(e),
+        (
+            Some("scope".into()),
+            "MySQL has no schemas inside a database.".into()
+        )
+    );
+    let f = fixture(Fake::new(pg17(), PG_FUNC), None, false).await;
+    let bad = Scope {
+        database: "shop".into(),
+        schema: None,
+    };
+    let e =
+        f.sm.ddl_edit_open(f.conn, bad, ObjectKind::Function, Some("f".into()), None)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        message(e),
+        (
+            Some("scope".into()),
+            "A schema is required on PostgreSQL.".into()
+        )
     );
 }
 

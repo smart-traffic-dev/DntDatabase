@@ -496,7 +496,7 @@ impl SessionManager {
         column: String,
     ) -> Result<LoadedCell, DbError> {
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind, &obj)?;
+        check_object(cfg.kind.as_sql(), &obj)?; // R1: boundary
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, &obj).await?;
         let (metas, dialect, _) = self.edit_metas(&rt, &detail).await?;
@@ -555,7 +555,7 @@ impl SessionManager {
             ));
         }
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind, &obj)?;
+        check_object(cfg.kind.as_sql(), &obj)?; // R1: boundary
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, &obj).await?;
         if !detail.columns.iter().any(|c| c.name == column) {
@@ -750,17 +750,17 @@ impl SessionManager {
         rt: &ConnectionRuntime,
         detail: &TableDetail,
     ) -> Result<(Vec<ColumnMeta>, Dialect, u64), DbError> {
-        let kind = rt.cfg.kind;
+        let kind = rt.cfg.kind.as_sql(); // R1: boundary
         let o = &detail.object;
         let cols: Vec<String> = detail
             .columns
             .iter()
-            .map(|c| quote_ident(kind.as_sql(), &c.name))
+            .map(|c| quote_ident(kind, &c.name))
             .collect();
         let sql = format!(
             "SELECT {} FROM {} LIMIT 0",
             cols.join(", "),
-            qualified_name(kind.as_sql(), &o.database, o.schema.as_deref(), &o.name)
+            qualified_name(kind, &o.database, o.schema.as_deref(), &o.name)
         );
         let opts = ExecOptions {
             max_rows: 1,
@@ -797,7 +797,7 @@ impl SessionManager {
         obj: &ObjectRef,
     ) -> Result<(TableDetail, Vec<ColumnMeta>, Dialect), DbError> {
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind, obj)?;
+        check_object(cfg.kind.as_sql(), obj)?; // R1: boundary
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, obj).await?;
         let (metas, dialect, _) = self.edit_metas(&rt, &detail).await?;
@@ -812,7 +812,7 @@ impl SessionManager {
             ));
         }
         let cfg = self.repo.get(id)?;
-        check_object(cfg.kind, &set.object)?;
+        check_object(cfg.kind.as_sql(), &set.object)?; // R1: boundary
         let rt = self.runtime(id)?;
         let detail = self.table_detail_fresh(id, &set.object).await?;
         let (metas, dialect, tunnel_gen) = self.edit_metas(&rt, &detail).await?;
