@@ -43,6 +43,9 @@ const PORT_MAX = 65_535;
 /** Engines a pasted string may name that the dialog cannot edit yet (R4 adds them). */
 const COMMAND_ENGINES: readonly ConnStringEngine[] = ['mongo', 'mongo_srv', 'redis', 'rediss'];
 const COMMAND_ENGINE_UNAVAILABLE = 'MongoDB and Redis connections are not available in this version yet.';
+const COMMAND_SCHEMES: readonly string[] = ['mongodb://', 'mongodb+srv://', 'redis://', 'rediss://'];
+/** Stored kinds the dialog has no form for until R4 (it would rewrite their user / port). */
+const COMMAND_KINDS: readonly DbKind[] = ['mongo', 'redis'];
 
 const SSL_MODES: { id: SslMode; label: string }[] = [
   { id: 'disable', label: 'Disable' },
@@ -293,6 +296,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const [parse, setParse] = useState<ParseState>({ state: 'idle' });
   const testSeq = useRef(0);
   const parseSeq = useRef(0);
+  // Until R4: an existing Mongo/Redis connection is shown but cannot be saved from this form.
+  const unavailableKind = mode === 'edit' && !!initial && COMMAND_KINDS.includes(initial.kind);
   const testButton = useRef<HTMLButtonElement>(null);
   const detailsButton = useRef<HTMLButtonElement>(null);
 
@@ -342,6 +347,12 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     const seq = ++parseSeq.current;
     if (text === '') {
       setParse({ state: 'idle' });
+      return;
+    }
+    // Refused by its scheme alone: the parser would reject options the dialog does not need
+    // (e.g. Atlas's `retryWrites`) and hide the real reason.
+    if (COMMAND_SCHEMES.some((s) => text.toLowerCase().startsWith(s))) {
+      setParse({ state: 'failed', message: COMMAND_ENGINE_UNAVAILABLE });
       return;
     }
     setParse({ state: 'parsing' });
@@ -465,6 +476,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   };
 
   const save = async () => {
+    if (unavailableKind) return;
     setFieldError(null);
     setSaveError(null);
     if (!checkForm()) return;
@@ -1162,6 +1174,11 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           }}
         >
           <div className="conn-page" data-testid="conn-panel">
+            {unavailableKind && (
+              <p className="field-error" role="alert" data-testid="conn-kind-unavailable">
+                {COMMAND_ENGINE_UNAVAILABLE}
+              </p>
+            )}
             {main}
             <div className="conn-folds">
               {fold('ssh', 'SSH tunnel', sshBody)}
@@ -1187,7 +1204,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             <button type="button" className="btn" onClick={requestClose} disabled={saving}>
               Cancel
             </button>
-            <button type="submit" className="btn primary" data-testid="conn-save" disabled={saving}>
+            <button type="submit" className="btn primary" data-testid="conn-save" disabled={saving || unavailableKind}>
               Save
             </button>
           </footer>

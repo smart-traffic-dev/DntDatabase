@@ -14,6 +14,7 @@ import {
 } from '../test/backend';
 const sheet = import.meta.glob('./dialogs.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const css = Object.values(sheet)[0] ?? '';
+import type { DriverOptions } from '../bindings';
 import { ConnectionDialog, formProblem, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds, withEngine } from './ConnectionDialog';
 
 beforeEach(resetStores);
@@ -856,6 +857,66 @@ describe('ConnectionDialog', () => {
     expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
     expect(screen.getByTestId('conn-host')).toHaveValue(hostBefore);
     expect(screen.getByTestId('conn-port')).toHaveValue(3306);
+  });
+
+  it('a pasted Mongo/Redis URI is refused by its scheme, before it is parsed', async () => {
+    mockBackend({
+      parse_connection_string: () => {
+        throw appError('config', 'Unsupported URI option: retryWrites', { field: 'uri' });
+      },
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await openUrl(user);
+    await user.type(screen.getByTestId('conn-string'), 'MONGODB+SRV://u:p@c.x.net/db?retryWrites=true&w=majority');
+    const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
+    expect(alert).toHaveTextContent(/^MongoDB and Redis connections are not available in this version yet\.$/);
+    // Past the debounce: still no parse call.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(callsOf('parse_connection_string')).toHaveLength(0);
+    expect(screen.getByRole('alert')).toHaveTextContent(/^MongoDB and Redis connections are not available/);
+  });
+
+  it.each<{ kind: 'redis' | 'mongo'; driver: DriverOptions }>([
+    { kind: 'redis', driver: { kind: 'redis', db: 0 } },
+    {
+      kind: 'mongo',
+      driver: { kind: 'mongo', srv: true, auth_source: null, replica_set: null, direct_connection: false, extra_hosts: [] },
+    },
+  ])('editing a $kind connection is refused until R4 (no silent rewrite)', async ({ kind, driver }) => {
+    const stored = config(ids.prod, 'cache', {
+      kind,
+      host: 'cache.local',
+      port: kind === 'redis' ? 6379 : 0,
+      username: '',
+      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0, driver },
+    });
+    mockBackend({ update_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /^MongoDB and Redis connections are not available in this version yet\.$/,
+    );
+    expect(screen.getByTestId('conn-save')).toBeDisabled();
+    await user.click(screen.getByTestId('conn-save'));
+    await user.keyboard('{Enter}');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(callsOf('update_connection')).toHaveLength(0);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('editing a MySQL connection with an empty user still saves', async () => {
+    const stored = config(ids.prod, 'shop', { username: '' });
+    mockBackend({ update_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
+    expect(screen.queryByText(/not available in this version/)).toBeNull();
+    expect(screen.getByTestId('conn-save')).toBeEnabled();
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('update_connection')[0]).toMatchObject({ cfg: { kind: 'mysql', username: 'root' } });
   });
 
   it('a string without a scheme keeps the chosen engine; mariadb:// picks MySQL / MariaDB', async () => {

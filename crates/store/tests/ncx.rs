@@ -85,15 +85,15 @@ fn ncx_skips_mongo_and_redis_with_reason() {
         vec![
             SkippedItem {
                 name: "Docs Mongo".into(),
-                reason: "Docs Mongo: MongoDB connections are not imported from Navicat yet".into(),
+                reason: "MongoDB connections are not imported from Navicat yet".into(),
             },
             SkippedItem {
                 name: "Cache".into(),
-                reason: "Cache: Redis connections are not imported from Navicat yet".into(),
+                reason: "Redis connections are not imported from Navicat yet".into(),
             },
             SkippedItem {
                 name: "lower mongo".into(),
-                reason: "lower mongo: MongoDB connections are not imported from Navicat yet".into(),
+                reason: "MongoDB connections are not imported from Navicat yet".into(),
             },
             SkippedItem {
                 name: "Ora".into(),

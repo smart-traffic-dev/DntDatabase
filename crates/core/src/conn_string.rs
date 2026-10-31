@@ -483,6 +483,9 @@ fn parse_redis(tls: bool, rest: &str) -> Result<ParsedConnString, DbError> {
     let parts = url_parts(rest);
     parsed.credentials(parts.creds)?;
     let host = decode(parts.hosts, false)?;
+    if host.contains(',') {
+        return Err(invalid_uri("Redis takes a single host"));
+    }
     let (host, port) = match host.trim() {
         "" => (None, None),
         h => {
@@ -656,10 +659,8 @@ fn driver_mismatch() -> DbError {
 /// other secret); every component is percent-encoded.
 pub fn to_uri(cfg: &ConnectionConfig) -> Result<String, DbError> {
     let ssl_mode = cfg.ssl.as_ref().map(|s| s.mode);
-    let tls = matches!(
-        ssl_mode,
-        Some(SslMode::Require | SslMode::VerifyCa | SslMode::VerifyFull)
-    );
+    // Mongo/Redis: TLS exactly when their drivers apply it (`Prefer` counts, spec §6.4).
+    let tls = crate::tls::command_tls(cfg.ssl.as_ref()) != crate::tls::CommandTls::Off;
     let database = cfg
         .default_db
         .as_deref()
@@ -1187,6 +1188,52 @@ mod tests {
             assert!(back.password.is_none(), "{uri}");
             assert_eq!(config_from(&back), config_from(&p), "{uri}");
         }
+    }
+
+    #[test]
+    fn redis_rejects_a_host_list() {
+        for s in ["redis://a,b", "rediss://u:pw@a:6379,b:6380/1"] {
+            assert_eq!(uri_err(s), "Redis takes a single host", "{s}");
+        }
+    }
+
+    #[test]
+    fn to_uri_tls_matches_command_tls() {
+        use crate::tls::{command_tls, CommandTls};
+        let modes = [
+            None,
+            Some(SslMode::Disable),
+            Some(SslMode::Prefer),
+            Some(SslMode::Require),
+            Some(SslMode::VerifyCa),
+            Some(SslMode::VerifyFull),
+        ];
+        for base in ["mongodb://h/db", "redis://h"] {
+            for mode in modes {
+                let mut c = config_from(&ok(base));
+                c.ssl = mode.map(|mode| SslConfig {
+                    version: 1,
+                    mode,
+                    ca_path: None,
+                    cert_path: None,
+                    key_path: None,
+                });
+                let want_tls = command_tls(c.ssl.as_ref()) != CommandTls::Off;
+                let uri = to_uri(&c).unwrap();
+                let got_tls = uri.starts_with("rediss://") || uri.contains("tls=true");
+                assert_eq!(got_tls, want_tls, "{base} {mode:?} -> {uri}");
+            }
+        }
+        assert_eq!(
+            command_tls(Some(&SslConfig {
+                version: 1,
+                mode: SslMode::Prefer,
+                ca_path: None,
+                cert_path: None,
+                key_path: None,
+            })),
+            CommandTls::Unverified
+        );
     }
 
     #[test]
