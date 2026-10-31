@@ -99,7 +99,7 @@ fn run_cfg() -> RunConfig {
 /// Plans `text` with the session's language, guards it for `ctx` and runs it.
 async fn run_text(session: &dyn Session, text: &str, ctx: &PolicyCtx, rec: &mut Rec) -> RunReport {
     let c = session.command().unwrap();
-    let mut plan = plan_commands(text, Target::All, c.language());
+    let mut plan = plan_commands(text, Target::All, c.language(), None);
     guard_commands(&mut plan, ctx);
     let cancel = RunCancel::new(session.cancel_handle());
     run_commands(c, &plan, &ExecOptions::default(), run_cfg(), &cancel, rec).await
@@ -196,7 +196,7 @@ async fn select_changes_db_for_the_rest() {
 async fn stop_before_start_sends_nothing() {
     let (s, store) = connect().await;
     let c = s.command().unwrap();
-    let mut plan = plan_commands("SET a 1\nSET b 2", Target::All, c.language());
+    let mut plan = plan_commands("SET a 1\nSET b 2", Target::All, c.language(), None);
     guard_commands(&mut plan, &local());
     let cancel = RunCancel::new(s.cancel_handle());
     cancel.signal().stop();
@@ -241,7 +241,7 @@ async fn cancel_stops_a_blocked_command() {
         let cancel = cancel.clone();
         tokio::spawn(async move {
             let c = s.command().unwrap();
-            let mut plan = plan_commands("GET a\nSET b 1", Target::All, c.language());
+            let mut plan = plan_commands("GET a\nSET b 1", Target::All, c.language(), None);
             guard_commands(&mut plan, &local());
             let mut rec = Rec::default();
             let report = run_commands(
@@ -256,9 +256,16 @@ async fn cancel_stops_a_blocked_command() {
             (report, rec)
         })
     };
-    store.wait_blocked().await;
+    // A broken cancel fails the test instead of hanging it.
+    let limit = Duration::from_secs(10);
+    tokio::time::timeout(limit, store.wait_blocked())
+        .await
+        .expect("the command never blocked");
     cancel.cancel().await.unwrap();
-    let (report, rec) = run.await.unwrap();
+    let (report, rec) = tokio::time::timeout(limit, run)
+        .await
+        .expect("the cancelled run never ended")
+        .unwrap();
     assert_eq!(report.stop, Some(StopReason::Cancelled));
     assert_eq!(rec.ends, [(0, Err("cancelled".to_string()))]);
     let err = report.stmts[0].result.as_ref().unwrap_err();
@@ -307,7 +314,7 @@ async fn exec_commits_queued() {
 async fn flushdb_on_production_needs_db_name() {
     let (s, store) = connect().await;
     let c = s.command().unwrap();
-    let mut plan = plan_commands("FLUSHDB", Target::All, c.language());
+    let mut plan = plan_commands("FLUSHDB", Target::All, c.language(), Some("0"));
     guard_commands(&mut plan, &ctx(Some(EnvTag::Production), false));
     assert_eq!(plan.stmts[0].verdict, Verdict::Confirm);
     assert_eq!(plan.stmts[0].confirm_name.as_deref(), Some("0"));
@@ -326,6 +333,40 @@ async fn flushdb_on_production_needs_db_name() {
 }
 
 #[tokio::test]
+async fn flushdb_after_select_confirms_the_selected_db() {
+    let (s, store) = connect().await;
+    let c = s.command().unwrap();
+    let prod = ctx(Some(EnvTag::Production), false);
+    let mut plan = plan_commands("SELECT 2\nFLUSHDB", Target::All, c.language(), Some("0"));
+    guard_commands(&mut plan, &prod);
+    assert_eq!(plan.stmts[1].verdict, Verdict::Confirm);
+    assert_eq!(plan.stmts[1].confirm_name.as_deref(), Some("2"));
+
+    // The name typed is the db the run flushes.
+    store.set("0", b"k", FakeValue::Str("v".into()));
+    store.set("2", b"k", FakeValue::Str("v".into()));
+    let cancel = RunCancel::new(s.cancel_handle());
+    let report = run_commands(
+        c,
+        &plan,
+        &ExecOptions::default(),
+        run_cfg(),
+        &cancel,
+        &mut Rec::default(),
+    )
+    .await;
+    assert_eq!(report.stop, None);
+    assert_eq!(store.get("2", b"k"), None);
+    assert!(store.get("0", b"k").is_some());
+
+    // The session is in db 2 now, but the language does not read it: the plan names
+    // the db it is given.
+    let mut plan = plan_commands("FLUSHDB", Target::All, c.language(), Some("0"));
+    guard_commands(&mut plan, &prod);
+    assert_eq!(plan.stmts[0].confirm_name.as_deref(), Some("0"));
+}
+
+#[tokio::test]
 async fn unknown_command_blocked_read_only() {
     let (s, store) = connect().await;
     let mut rec = Rec::default();
@@ -341,7 +382,12 @@ async fn unknown_command_blocked_read_only() {
     assert!(store.executed().is_empty(), "nothing is sent");
 
     let c = s.command().unwrap();
-    let mut plan = plan_commands("FROB x\nCONFIG GET maxmemory", Target::All, c.language());
+    let mut plan = plan_commands(
+        "FROB x\nCONFIG GET maxmemory",
+        Target::All,
+        c.language(),
+        None,
+    );
     guard_commands(&mut plan, &ctx(Some(EnvTag::Production), false));
     assert_eq!(plan.stmts[0].verdict, Verdict::Confirm);
     assert_eq!(plan.stmts[0].confirm_name.as_deref(), Some("cache"));

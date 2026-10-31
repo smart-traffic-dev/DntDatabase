@@ -208,12 +208,11 @@ impl Driver for FakeCommandDriver {
             .as_deref()
             .and_then(|d| db_index(d).ok())
             .unwrap_or(0);
-        let db = Arc::new(AtomicUsize::new(start));
         Ok(Box::new(FakeCommandSession {
             info: server_info(),
             store: self.store.clone(),
-            language: FakeLanguage { db: db.clone() },
-            db,
+            language: FakeLanguage,
+            db: AtomicUsize::new(start),
             queue: Mutex::new(None),
             cancel: Arc::new(CancelState::default()),
         }))
@@ -348,10 +347,9 @@ fn tokenize(text: &str) -> (Vec<Token>, Option<usize>) {
     (tokens, None)
 }
 
-/// The language of one session; it reads the session's current db to name targets.
-struct FakeLanguage {
-    db: Arc<AtomicUsize>,
-}
+/// The language. It names no database for a command's targets: they are in the db in
+/// effect when the command runs (see `CommandTarget::database`).
+struct FakeLanguage;
 
 fn parse_error(message: impl Into<String>, offset: usize) -> CommandParseError {
     CommandParseError {
@@ -360,23 +358,12 @@ fn parse_error(message: impl Into<String>, offset: usize) -> CommandParseError {
     }
 }
 
-impl FakeLanguage {
-    fn build(&self, name: &str, class: CommandClass, op: Op) -> ParsedCommand {
-        build_command(self.db.load(Ordering::SeqCst), None, name, class, op)
-    }
-}
-
-/// The `ParsedCommand` of `op`, its targets named in db `db`. `payload_db`: the db a
-/// key edit runs in.
-fn build_command(
-    db: usize,
-    payload_db: Option<usize>,
-    name: &str,
-    class: CommandClass,
-    op: Op,
-) -> ParsedCommand {
+/// The `ParsedCommand` of `op`. `db`: the db a key edit runs in, which its targets
+/// name (`None`: the db in effect, so targets name no db and `FLUSHDB` drops the db
+/// with an empty name).
+fn build_command(db: Option<usize>, name: &str, class: CommandClass, op: Op) -> ParsedCommand {
     let target = |key: &[u8]| CommandTarget {
-        database: Some(db.to_string()),
+        database: db.map(|d| d.to_string()),
         name: KeyName::from_bytes(key.to_vec()).display,
     };
     let mut targets = Vec::new();
@@ -395,7 +382,7 @@ fn build_command(
             kind: CommandDropKind::Database,
             target: CommandTarget {
                 database: None,
-                name: db.to_string(),
+                name: String::new(),
             },
         }),
         _ => {}
@@ -407,7 +394,7 @@ fn build_command(
         unbounded: false,
         drops,
         session_effect,
-        payload: Arc::new(Payload { db: payload_db, op }),
+        payload: Arc::new(Payload { db, op }),
     }
 }
 
@@ -517,7 +504,7 @@ impl CommandLanguage for FakeLanguage {
             }
             _ => (CommandClass::Unknown, Op::Unknown(name.clone())),
         };
-        Ok(self.build(&name, class, op))
+        Ok(build_command(None, &name, class, op))
     }
 
     /// `CONFIG SET requirepass <x>` (any case) becomes `CONFIG SET requirepass ***`.
@@ -570,8 +557,8 @@ struct FakeCommandSession {
     info: ServerInfo,
     store: FakeStore,
     language: FakeLanguage,
-    /// The current db, shared with `language`.
-    db: Arc<AtomicUsize>,
+    /// The current db.
+    db: AtomicUsize,
     /// `Some` between `MULTI` and `EXEC` / `DISCARD`: the queued commands.
     queue: Mutex<Option<Vec<Payload>>>,
     cancel: Arc<CancelState>,
@@ -945,15 +932,8 @@ impl DataAccess for FakeCommandSession {
     /// `SetString`, `HashSet`, `HashDelete` and `Delete`; the others are `Unsupported`.
     fn build_key_edit(&self, db: &str, edit: &KeyEdit) -> Result<Vec<ParsedCommand>, DbError> {
         let index = db_index(db)?;
-        let write = |name: &str, op: Op| {
-            vec![build_command(
-                index,
-                Some(index),
-                name,
-                CommandClass::Write,
-                op,
-            )]
-        };
+        let write =
+            |name: &str, op: Op| vec![build_command(Some(index), name, CommandClass::Write, op)];
         Ok(match edit {
             KeyEdit::SetString { key, value } => {
                 write("SET", Op::Set(key.raw.clone(), value.clone()))
@@ -1037,9 +1017,7 @@ mod tests {
 
     #[test]
     fn split_skips_blank_and_comment_lines() {
-        let lang = FakeLanguage {
-            db: Arc::new(AtomicUsize::new(0)),
-        };
+        let lang = FakeLanguage;
         let spans = lang.split("GET a\n\n  # note\r\n  SET b 1\r\n");
         let got: Vec<_> = spans.iter().map(|s| (s.range, s.text.as_str())).collect();
         assert_eq!(got, [((0, 5), "GET a"), ((19, 26), "SET b 1")]);

@@ -2,8 +2,8 @@
 //! the Command counterpart of [`crate::plan::plan`] and [`crate::guard::guard`].
 
 use dnt_core::command::{
-    CommandClass, CommandLanguage, CommandParseError, CommandSession, CommandSessionEffect,
-    ParsedCommand,
+    CommandClass, CommandDropKind, CommandLanguage, CommandParseError, CommandSession,
+    CommandSessionEffect, ParsedCommand,
 };
 use dnt_core::driver::{
     ExecOptions, ExecProgress, ResultSummary, RowSink, ServerNotices, StmtOutcome,
@@ -83,26 +83,59 @@ pub fn label_of(class: &CommandClass) -> StmtKindLabel {
 /// planned slice, `CommandPlan::source`. Empty or whitespace-only input gives an
 /// empty plan. A command that does not parse is `Block` (label `Other`); every other
 /// verdict is `Allow` until [`guard_commands`] sets them.
-pub fn plan_commands(text: &str, target: Target, lang: &dyn CommandLanguage) -> CommandPlan {
+///
+/// Db-relative targets are resolved to the database in effect when each command
+/// runs: `current_db` (the session's) as changed by every earlier command of the
+/// editor text that parses with a `UseDatabase` effect, those before a Cursor or
+/// Selection plan included. A target with `database: None` gets that database, and a
+/// `Database` drop with an empty name gets it as its name. While it is unknown
+/// (`current_db` is `None` and nothing changed it) they stay as they are.
+pub fn plan_commands(
+    text: &str,
+    target: Target,
+    lang: &dyn CommandLanguage,
+    current_db: Option<&str>,
+) -> CommandPlan {
     let map = Utf16Map::new(text);
     let (from, to) = match target {
         Target::All | Target::Cursor(_) => (0, text.len()),
         Target::Selection(a, b) => (map.to_byte(a.min(b)), map.to_byte(a.max(b))),
     };
     let source = &text[from..to];
-    let mut found = lang.split(source);
     let range = |r: (usize, usize)| (map.to_u16(from + r.0), map.to_u16(from + r.1));
+
+    let mut db = current_db.map(str::to_string);
+    if from > 0 {
+        // A selection runs in the db the commands before it leave.
+        for s in lang.split(text).iter().filter(|s| s.range.1 <= from) {
+            if let Ok(cmd) = lang.parse(&s.text) {
+                track_database(&mut db, &cmd);
+            }
+        }
+    }
+    let mut found: Vec<_> = lang
+        .split(source)
+        .into_iter()
+        .map(|s| {
+            let mut parsed = lang.parse(&s.text);
+            if let Ok(cmd) = &mut parsed {
+                resolve_database(cmd, db.as_deref());
+                track_database(&mut db, cmd);
+            }
+            (s, parsed)
+        })
+        .collect();
 
     if let Target::Cursor(c) = target {
         // Snap a cursor inside a surrogate pair, or past the end, onto the text.
         let c = map.to_u16(map.to_byte(c));
         let pick = found
             .iter()
-            .position(|s| {
+            .position(|(s, _)| {
                 let (start, end) = range(s.range);
                 start <= c && c <= end
             })
-            .or_else(|| found.iter().rposition(|s| range(s.range).1 <= c))
+            .or_else(|| found.iter().rposition(|(s, _)| range(s.range).1 <= c))
             .or(if found.is_empty() { None } else { Some(0) });
         found = pick.map(|i| found.swap_remove(i)).into_iter().collect();
     }
@@ -110,8 +143,7 @@ pub fn plan_commands(text: &str, target: Target, lang: &dyn CommandLanguage) -> 
     let stmts = found
         .into_iter()
         .enumerate()
-        .map(|(index, s)| {
-            let parsed = lang.parse(&s.text);
+        .map(|(index, (s, parsed))| {
             let (label, verdict) = match &parsed {
                 Ok(cmd) => (label_of(&cmd.class), Verdict::Allow),
                 Err(_) => (StmtKindLabel::Other, Verdict::Block),
@@ -134,6 +166,34 @@ pub fn plan_commands(text: &str, target: Target, lang: &dyn CommandLanguage) -> 
         base: map.to_u16(from),
         stmts,
         guard: None,
+    }
+}
+
+/// The database in effect after `cmd`.
+fn track_database(db: &mut Option<String>, cmd: &ParsedCommand) {
+    if let Some(CommandSessionEffect::UseDatabase(name)) = &cmd.session_effect {
+        *db = Some(name.clone());
+    }
+}
+
+/// Names `db` in `cmd`'s db-relative targets and drops (see [`plan_commands`]).
+fn resolve_database(cmd: &mut ParsedCommand, db: Option<&str>) {
+    let Some(db) = db else {
+        return;
+    };
+    let drop_targets = cmd.drops.iter_mut().filter_map(|d| match d.kind {
+        CommandDropKind::Database => {
+            if d.target.name.is_empty() {
+                d.target.name = db.to_string();
+            }
+            None
+        }
+        CommandDropKind::Object => Some(&mut d.target),
+    });
+    for t in cmd.targets.iter_mut().chain(drop_targets) {
+        if t.database.is_none() {
+            t.database = Some(db.to_string());
+        }
     }
 }
 
@@ -338,13 +398,16 @@ fn command_error_offset(stmt: &PlannedCommand, err: &DbError) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dnt_core::command::{CommandSessionEffect, CommandSpan, CommandTarget};
+    use dnt_core::command::{
+        CommandDrop, CommandDropKind, CommandSessionEffect, CommandSpan, CommandTarget,
+    };
     use dnt_core::config::EnvTag;
     use dnt_core::redact::Redacted;
     use std::sync::Arc;
 
     /// One command per line: `GET` is Read, `SET` Write, `USE db` a SessionChange to
-    /// `db`, anything else Unknown; a line with `!` does not parse.
+    /// `db`, anything else Unknown; a line with `!` does not parse. `FLUSH` drops the
+    /// database in effect. Targets name no database.
     pub(super) struct Lines;
 
     impl CommandLanguage for Lines {
@@ -388,6 +451,16 @@ mod tests {
                 }
                 _ => None,
             };
+            let drops = (name == "FLUSH")
+                .then(|| CommandDrop {
+                    kind: CommandDropKind::Database,
+                    target: CommandTarget {
+                        database: None,
+                        name: String::new(),
+                    },
+                })
+                .into_iter()
+                .collect();
             Ok(ParsedCommand {
                 name,
                 class,
@@ -399,7 +472,7 @@ mod tests {
                     .into_iter()
                     .collect(),
                 unbounded: false,
-                drops: Vec::new(),
+                drops,
                 session_effect,
                 payload: Arc::new(()),
             })
@@ -430,7 +503,7 @@ mod tests {
     }
 
     fn guarded(text: &str, ctx: &PolicyCtx) -> CommandPlan {
-        let mut p = plan_commands(text, Target::All, &Lines);
+        let mut p = plan_commands(text, Target::All, &Lines, None);
         guard_commands(&mut p, ctx);
         p
     }
@@ -447,19 +520,19 @@ mod tests {
             (13, "GET c"),
             (9999, "GET c"),
         ] {
-            let p = plan_commands(T, Target::Cursor(cursor), &Lines);
+            let p = plan_commands(T, Target::Cursor(cursor), &Lines, None);
             assert_eq!(texts(&p), [want], "cursor {cursor}");
             assert_eq!(p.stmts[0].index, 0);
             assert_eq!(p.base, 0);
         }
-        let p = plan_commands("  GET a", Target::Cursor(0), &Lines);
+        let p = plan_commands("  GET a", Target::Cursor(0), &Lines, None);
         assert_eq!(texts(&p), ["GET a"]);
         assert_eq!(p.stmts[0].range, (2, 7));
     }
 
     #[test]
     fn selection_plans_only_the_slice() {
-        let p = plan_commands(T, Target::Selection(18, 6), &Lines);
+        let p = plan_commands(T, Target::Selection(18, 6), &Lines, None);
         assert_eq!(texts(&p), ["SET b", "GET c"]);
         assert_eq!(p.source, "SET b\n\nGET c");
         assert_eq!(p.base, 6);
@@ -484,7 +557,7 @@ mod tests {
                 Target::Cursor(3),
                 Target::Selection(0, 4),
             ] {
-                let p = plan_commands(text, target, &Lines);
+                let p = plan_commands(text, target, &Lines, None);
                 assert!(p.stmts.is_empty(), "{text:?} {target:?}");
                 assert!(p.runnable());
             }
@@ -497,13 +570,13 @@ mod tests {
         let get = text.find("GET").unwrap();
         let get16 = text[..get].encode_utf16().count() as u32;
         assert_eq!((get, get16), (19, 16));
-        let p = plan_commands(text, Target::All, &Lines);
+        let p = plan_commands(text, Target::All, &Lines, None);
         assert_eq!(p.stmts[0].range, (0, 15));
         assert_eq!(p.stmts[1].range, (get16, get16 + 5));
         assert_eq!(p.stmts[1].source_range, (get, get + 5));
-        let p = plan_commands(text, Target::Cursor(17), &Lines);
+        let p = plan_commands(text, Target::Cursor(17), &Lines, None);
         assert_eq!(texts(&p), ["GET k"]);
-        let p = plan_commands(text, Target::Selection(16, 21), &Lines);
+        let p = plan_commands(text, Target::Selection(16, 21), &Lines, None);
         assert_eq!(texts(&p), ["GET k"]);
         assert_eq!(p.base, 16);
         assert_eq!(p.stmts[0].range, (16, 21));
@@ -515,7 +588,7 @@ mod tests {
     #[test]
     fn parse_error_blocks_the_whole_script() {
         let text = "GET a\nSET !\nGET b";
-        let p = plan_commands(text, Target::All, &Lines);
+        let p = plan_commands(text, Target::All, &Lines, None);
         assert_eq!(
             verdicts(&p)[1],
             Verdict::Block,
@@ -534,6 +607,55 @@ mod tests {
         assert_eq!(bad.parsed.as_ref().unwrap_err().offset, Some(4));
         assert!(!p.runnable());
         assert_eq!(p.guard, Some(ctx(Some(EnvTag::Local), false)));
+    }
+
+    /// The database each command's targets and drops resolve to.
+    fn resolved(p: &CommandPlan) -> Vec<(Vec<Option<&str>>, Vec<&str>)> {
+        p.stmts
+            .iter()
+            .map(|s| {
+                let cmd = s.parsed.as_ref().unwrap();
+                (
+                    cmd.targets.iter().map(|t| t.database.as_deref()).collect(),
+                    cmd.drops.iter().map(|d| d.target.name.as_str()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn use_database_flows_into_later_targets() {
+        let text = "NUKE k\nUSE a\nNUKE k\nFLUSH";
+        let p = plan_commands(text, Target::All, &Lines, Some("x"));
+        assert_eq!(
+            resolved(&p),
+            [
+                (vec![Some("x")], vec![]),
+                // `USE a`'s own target is resolved before its effect applies.
+                (vec![Some("x")], vec![]),
+                (vec![Some("a")], vec![]),
+                (vec![], vec!["a"]),
+            ]
+        );
+
+        // A Cursor or Selection plan still sees the `USE` before it.
+        let p = plan_commands("USE a\nNUKE k", Target::Cursor(7), &Lines, Some("x"));
+        assert_eq!(texts(&p), ["NUKE k"]);
+        assert_eq!(resolved(&p), [(vec![Some("a")], vec![])]);
+        let p = plan_commands("USE a\nFLUSH", Target::Selection(6, 11), &Lines, Some("x"));
+        assert_eq!(texts(&p), ["FLUSH"]);
+        assert_eq!(resolved(&p), [(vec![], vec!["a"])]);
+
+        // A `USE` that does not parse changes nothing; an unknown db stays unknown.
+        let p = plan_commands("USE b!\nNUKE k", Target::All, &Lines, Some("x"));
+        assert_eq!(
+            p.stmts[1].parsed.as_ref().unwrap().targets[0]
+                .database
+                .as_deref(),
+            Some("x")
+        );
+        let p = plan_commands("NUKE k\nFLUSH", Target::All, &Lines, None);
+        assert_eq!(resolved(&p), [(vec![None], vec![]), (vec![], vec![""])]);
     }
 
     #[test]
@@ -914,7 +1036,7 @@ mod run_tests {
         cancel: &RunCancel,
         rec: &mut Rec,
     ) -> RunReport {
-        let plan = plan_commands(text, Target::All, &Lines);
+        let plan = plan_commands(text, Target::All, &Lines, None);
         run_commands(session, &plan, &ExecOptions::default(), cfg, cancel, rec).await
     }
 
@@ -931,7 +1053,7 @@ mod run_tests {
         assert!(rec.events.is_empty() && rec.notices.is_empty() && rec.tx.is_empty());
 
         // A write on a read-only connection.
-        let mut plan = plan_commands("GET a\nGET b\nSET c\nSET d", Target::All, &Lines);
+        let mut plan = plan_commands("GET a\nGET b\nSET c\nSET d", Target::All, &Lines, None);
         guard_commands(
             &mut plan,
             &PolicyCtx {

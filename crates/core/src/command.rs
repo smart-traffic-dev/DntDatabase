@@ -82,6 +82,9 @@ pub enum CommandClass {
 /// A collection, key or key pattern; `database` when the command names one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandTarget {
+    /// `None`: the database in effect when this command runs (the session's, as
+    /// changed by the script's earlier `SessionChange` commands), not the one current
+    /// when the command was parsed. A language never fills it from session state.
     pub database: Option<String>,
     pub name: String,
 }
@@ -90,6 +93,9 @@ pub struct CommandTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandDrop {
     pub kind: CommandDropKind,
+    /// For a [`CommandDropKind::Database`] drop, `target.name` is the database; an
+    /// empty name means the database in effect when this command runs (`FLUSHDB`), as
+    /// for a [`CommandTarget`] with `database: None`.
     pub target: CommandTarget,
 }
 
