@@ -211,7 +211,7 @@ impl SessionManager {
         close_quietly(session).await;
         let (read, keys, key_counts) = result?;
         let specs = specs(&request, &read.columns, &keys)?;
-        let issues = check_plans(&specs, request.rows, cfg.kind);
+        let issues = check_plans(&specs, request.rows, cfg.kind.as_sql());
         Ok(Read {
             cfg,
             request,
@@ -239,13 +239,14 @@ impl SessionManager {
         if !out.issues.is_empty() {
             return Ok(out);
         }
-        let mut seeder = match Seeder::new(r.specs, r.request.seed, r.request.rows, r.cfg.kind) {
-            Ok(s) => s,
-            Err(issues) => {
-                out.issues = issues;
-                return Ok(out);
-            }
-        };
+        let mut seeder =
+            match Seeder::new(r.specs, r.request.seed, r.request.rows, r.cfg.kind.as_sql()) {
+                Ok(s) => s,
+                Err(issues) => {
+                    out.issues = issues;
+                    return Ok(out);
+                }
+            };
         let cols = seeder.columns();
         out.columns = cols.iter().map(|c| c.name.clone()).collect();
         if cols.is_empty() {
@@ -279,8 +280,8 @@ impl SessionManager {
         }
         let kind = r.cfg.kind;
         let request = r.request;
-        let mut seeder =
-            Seeder::new(r.specs.clone(), request.seed, request.rows, kind).map_err(|issues| {
+        let mut seeder = Seeder::new(r.specs.clone(), request.seed, request.rows, kind.as_sql())
+            .map_err(|issues| {
                 let i = &issues[0];
                 config_error("columns", &format!("{}: {}", i.column, i.message))
             })?;

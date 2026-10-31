@@ -15,7 +15,7 @@
 use dnt_core::config::{
     ConnOptions, ConnectionConfig, EnvTag, SecretMode, SshAuth, SshConfig, SslConfig, SslMode,
 };
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_store::keyring_store::KeyringSecretStore;
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use secrecy::SecretString;
@@ -46,19 +46,18 @@ struct Seed {
     key_passphrase: Option<&'static str>,
 }
 
-fn base(name: &str, kind: DbKind, port: u16) -> ConnectionConfig {
+fn base(name: &str, kind: SqlKind, port: u16) -> ConnectionConfig {
     ConnectionConfig {
         id: Uuid::nil(),
         group_id: None,
         name: name.into(),
         sort_order: 0,
-        kind,
+        kind: kind.into(),
         host: "127.0.0.1".into(),
         port,
-        username: if kind == DbKind::Postgres {
-            "postgres"
-        } else {
-            "root"
+        username: match kind {
+            SqlKind::MySql => "root",
+            SqlKind::Postgres => "postgres",
         }
         .into(),
         default_db: Some("dnt_fixture".into()),
@@ -94,29 +93,29 @@ fn via_ssh(name: &str, target: &str, auth: SshAuth, key: Option<&str>) -> Connec
             auth,
             key_path: key.map(|k| dnt_testkit::testdata("ssh").join(k)),
         }),
-        ..base(name, DbKind::MySql, 3306)
+        ..base(name, SqlKind::MySql, 3306)
     }
 }
 
 fn seeds() -> Vec<Seed> {
     let certs = dnt_testkit::testdata("certs");
     vec![
-        seed(GROUP_MYSQL, base("MySQL 5.7", DbKind::MySql, 33057)),
-        seed(GROUP_MYSQL, base("MySQL 8.0", DbKind::MySql, 33080)),
+        seed(GROUP_MYSQL, base("MySQL 5.7", SqlKind::MySql, 33057)),
+        seed(GROUP_MYSQL, base("MySQL 8.0", SqlKind::MySql, 33080)),
         seed(
             GROUP_MYSQL,
-            base("MySQL 8.4 (explain profile)", DbKind::MySql, 33084),
+            base("MySQL 8.4 (explain profile)", SqlKind::MySql, 33084),
         ),
-        seed(GROUP_MYSQL, base("MariaDB 10.6", DbKind::MySql, 33106)),
-        seed(GROUP_MYSQL, base("MariaDB 11.4", DbKind::MySql, 33114)),
-        seed(GROUP_PG, base("PostgreSQL 12", DbKind::Postgres, 54312)),
-        seed(GROUP_PG, base("PostgreSQL 17", DbKind::Postgres, 54317)),
+        seed(GROUP_MYSQL, base("MariaDB 10.6", SqlKind::MySql, 33106)),
+        seed(GROUP_MYSQL, base("MariaDB 11.4", SqlKind::MySql, 33114)),
+        seed(GROUP_PG, base("PostgreSQL 12", SqlKind::Postgres, 54312)),
+        seed(GROUP_PG, base("PostgreSQL 17", SqlKind::Postgres, 54317)),
         // Behaviour worth clicking through by hand.
         seed(
             GROUP_SCENARIOS,
             ConnectionConfig {
                 env_tag: Some(EnvTag::Production),
-                ..base("shop-prod (MySQL 8 · PROD)", DbKind::MySql, 33080)
+                ..base("shop-prod (MySQL 8 · PROD)", SqlKind::MySql, 33080)
             },
         ),
         seed(
@@ -124,14 +123,14 @@ fn seeds() -> Vec<Seed> {
             ConnectionConfig {
                 env_tag: Some(EnvTag::Staging),
                 read_only: true,
-                ..base("reporting-ro (MySQL 8 · read-only)", DbKind::MySql, 33080)
+                ..base("reporting-ro (MySQL 8 · read-only)", SqlKind::MySql, 33080)
             },
         ),
         seed(
             GROUP_SCENARIOS,
             ConnectionConfig {
                 username: "dnt_limited".into(),
-                ..base("limited user (PG 17)", DbKind::Postgres, 54317)
+                ..base("limited user (PG 17)", SqlKind::Postgres, 54317)
             },
         ),
         seed(
@@ -144,7 +143,7 @@ fn seeds() -> Vec<Seed> {
                     cert_path: None,
                     key_path: None,
                 }),
-                ..base("PG 17 · SSL verify CA", DbKind::Postgres, 54317)
+                ..base("PG 17 · SSL verify CA", SqlKind::Postgres, 54317)
             },
         ),
         Seed {
@@ -186,7 +185,7 @@ fn seeds() -> Vec<Seed> {
                 GROUP_SCENARIOS,
                 ConnectionConfig {
                     secret_mode: SecretMode::Ask,
-                    ..base("asks for password (PG 17)", DbKind::Postgres, 54317)
+                    ..base("asks for password (PG 17)", SqlKind::Postgres, 54317)
                 },
             )
         },
@@ -196,7 +195,7 @@ fn seeds() -> Vec<Seed> {
                 GROUP_SCENARIOS,
                 ConnectionConfig {
                     env_tag: None,
-                    ..base("dead server (port 33999)", DbKind::MySql, 33999)
+                    ..base("dead server (port 33999)", SqlKind::MySql, 33999)
                 },
             )
         },
@@ -295,4 +294,21 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     println!("Servers: docker compose -f testdata/docker-compose.test.yml up -d --wait");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dnt_core::server::DbKind;
+
+    #[test]
+    fn base_logs_in_as_each_engines_superuser() {
+        let my = base("m", SqlKind::MySql, 3306);
+        assert_eq!((my.kind, my.username.as_str()), (DbKind::MySql, "root"));
+        let pg = base("p", SqlKind::Postgres, 5432);
+        assert_eq!(
+            (pg.kind, pg.username.as_str()),
+            (DbKind::Postgres, "postgres")
+        );
+    }
 }

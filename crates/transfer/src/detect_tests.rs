@@ -9,15 +9,15 @@ const MY: Dialect = Dialect::MySql(MySqlMode {
 });
 const PG: Dialect = Dialect::Postgres;
 
-fn target(kind: DbKind, db: &str) -> ScanTarget {
+fn target(kind: SqlKind, db: &str) -> ScanTarget {
     ScanTarget {
         kind,
         database: db.into(),
         dialect: match kind {
-            DbKind::MySql => MY,
-            DbKind::Postgres => PG,
+            SqlKind::MySql => MY,
+            SqlKind::Postgres => PG,
         },
-        server: (kind == DbKind::MySql).then_some(MySqlServer {
+        server: (kind == SqlKind::MySql).then_some(MySqlServer {
             version: (8, 0, 36),
             mariadb: false,
         }),
@@ -30,18 +30,18 @@ fn mariadb(db: &str) -> ScanTarget {
             version: (11, 4, 2),
             mariadb: true,
         }),
-        ..target(DbKind::MySql, db)
+        ..target(SqlKind::MySql, db)
     }
 }
 
-fn refused(sql: &str, kind: DbKind) -> Option<Refusal> {
-    let d = if kind == DbKind::MySql { MY } else { PG };
+fn refused(sql: &str, kind: SqlKind) -> Option<Refusal> {
+    let d = if kind == SqlKind::MySql { MY } else { PG };
     statement_refusal(sql, d, &target(kind, "shop"))
 }
 
 const PG_HEADER: &str = "--\n-- PostgreSQL database dump\n--\n";
 
-fn scan_text(text: &str, kind: DbKind, db: &str) -> ScanResult {
+fn scan_text(text: &str, kind: SqlKind, db: &str) -> ScanResult {
     scan(text.as_bytes(), &target(kind, db)).unwrap()
 }
 
@@ -87,22 +87,22 @@ fn detect_app_dump_header() {
                 -- Created: 2026-10-25T00:00:00Z\n-- Objects: 1 tables (1 with data), 0 views\n\
                 SET client_encoding = 'UTF8';\nCREATE TABLE \"public\".\"t\" (id integer);\n\
                 -- End of dump: 2 statements\n";
-    let r = scan_text(text, DbKind::Postgres, "shop");
+    let r = scan_text(text, SqlKind::Postgres, "shop");
     assert!(r.stats.app_dump);
-    assert_eq!(r.engine, Some(DbKind::Postgres));
+    assert_eq!(r.engine, Some(SqlKind::Postgres));
     assert_eq!(r.path, RestorePath::AppRunner);
     assert_eq!(r.stats.statements, 2);
     assert!(r.refusals.is_empty(), "{:?}", r.refusals);
     // With a BOM too.
     let r = scan(
         [BOM, text.as_bytes()].concat().as_slice(),
-        &target(DbKind::Postgres, "shop"),
+        &target(SqlKind::Postgres, "shop"),
     )
     .unwrap();
     assert!(r.stats.app_dump);
     // Not the app's: a plain script.
     assert!(
-        !scan_text("SELECT 1;", DbKind::Postgres, "shop")
+        !scan_text("SELECT 1;", SqlKind::Postgres, "shop")
             .stats
             .app_dump
     );
@@ -112,13 +112,13 @@ fn detect_app_dump_header() {
 fn detect_copy_block_is_psql() {
     let body = "SET client_encoding = 'UTF8';\nCREATE TABLE t (id int, name text);\n\
                 COPY public.t (id, name) FROM stdin;\n1\ta\n2\t\\N\n\\.\n\nSELECT 1;\n";
-    let r = scan_text(&format!("{PG_HEADER}{body}"), DbKind::Postgres, "shop");
+    let r = scan_text(&format!("{PG_HEADER}{body}"), SqlKind::Postgres, "shop");
     assert_eq!(r.path, RestorePath::Psql);
     assert_eq!(r.stats.copy_blocks, 1);
     assert!(r.pg_dump);
     assert!(r.refusals.is_empty(), "{:?}", r.refusals);
     // The psql path needs a pg_dump file.
-    let r = scan_text(body, DbKind::Postgres, "shop");
+    let r = scan_text(body, SqlKind::Postgres, "shop");
     assert_eq!(r.path, RestorePath::Psql);
     assert_eq!(r.refused, 1);
     assert!(r.refusals[0].contains("not written by pg_dump"), "{r:?}");
@@ -128,7 +128,7 @@ fn detect_copy_block_is_psql() {
 fn detect_connect_is_psql() {
     let r = scan_text(
         &format!("{PG_HEADER}\\connect shop\nCREATE TABLE t (id int);\n"),
-        DbKind::Postgres,
+        SqlKind::Postgres,
         "shop",
     );
     assert_eq!(r.path, RestorePath::Psql);
@@ -138,7 +138,7 @@ fn detect_connect_is_psql() {
     // pg_dump 17.6+ restrict lines are allowed.
     let r = scan_text(
         &format!("{PG_HEADER}\\restrict abc\nSELECT 1;\n\\unrestrict abc\n"),
-        DbKind::Postgres,
+        SqlKind::Postgres,
         "shop",
     );
     assert_eq!(r.path, RestorePath::Psql);
@@ -172,62 +172,62 @@ fn psql_commands_other_than_connect_are_refused() {
             "{line}"
         );
     }
-    let r = scan_text("\\! calc.exe\nSELECT 1;\n", DbKind::Postgres, "shop");
+    let r = scan_text("\\! calc.exe\nSELECT 1;\n", SqlKind::Postgres, "shop");
     assert!(r.refused >= 1);
     assert!(r.refusals[0].contains("\\!"), "{:?}", r.refusals);
 }
 
 #[test]
 fn mysql_file_with_client_command_is_refused() {
-    let r = scan_text("SELECT * FROM t\\G\nSELECT 1;\n", DbKind::MySql, "shop");
+    let r = scan_text("SELECT * FROM t\\G\nSELECT 1;\n", SqlKind::MySql, "shop");
     assert!(r.refused >= 1, "{r:?}");
     assert!(r.refusals[0].contains("\\G"), "{:?}", r.refusals);
     assert_eq!(r.path, RestorePath::AppRunner);
-    let r = scan_text("\\. other.sql\nSELECT 1;\n", DbKind::MySql, "shop");
+    let r = scan_text("\\. other.sql\nSELECT 1;\n", SqlKind::MySql, "shop");
     assert_eq!(r.refused, 1, "{r:?}");
     // A backslash inside a string is data.
-    let r = scan_text("INSERT INTO t VALUES ('a\\\\b');\n", DbKind::MySql, "shop");
+    let r = scan_text("INSERT INTO t VALUES ('a\\\\b');\n", SqlKind::MySql, "shop");
     assert!(r.refusals.is_empty(), "{:?}", r.refusals);
 }
 
 #[test]
 fn database_statements_are_refused_for_the_app_runner() {
     for (sql, kind) in [
-        ("CREATE DATABASE other", DbKind::MySql),
+        ("CREATE DATABASE other", SqlKind::MySql),
         (
             "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop`",
-            DbKind::MySql,
+            SqlKind::MySql,
         ),
-        ("CREATE SCHEMA other", DbKind::MySql),
-        ("CREATE OR REPLACE DATABASE x", DbKind::MySql),
-        ("DROP DATABASE IF EXISTS shop", DbKind::MySql),
-        ("DROP SCHEMA other", DbKind::MySql),
-        ("USE other", DbKind::MySql),
-        ("USE `other`", DbKind::MySql),
-        ("/*!40000 USE other */", DbKind::MySql),
-        ("ALTER DATABASE other CHARACTER SET utf8mb4", DbKind::MySql),
-        ("CREATE DATABASE other", DbKind::Postgres),
-        ("DROP DATABASE shop", DbKind::Postgres),
-        ("ALTER DATABASE other SET x = 1", DbKind::Postgres),
+        ("CREATE SCHEMA other", SqlKind::MySql),
+        ("CREATE OR REPLACE DATABASE x", SqlKind::MySql),
+        ("DROP DATABASE IF EXISTS shop", SqlKind::MySql),
+        ("DROP SCHEMA other", SqlKind::MySql),
+        ("USE other", SqlKind::MySql),
+        ("USE `other`", SqlKind::MySql),
+        ("/*!40000 USE other */", SqlKind::MySql),
+        ("ALTER DATABASE other CHARACTER SET utf8mb4", SqlKind::MySql),
+        ("CREATE DATABASE other", SqlKind::Postgres),
+        ("DROP DATABASE shop", SqlKind::Postgres),
+        ("ALTER DATABASE other SET x = 1", SqlKind::Postgres),
     ] {
         assert!(refused(sql, kind).is_some(), "{sql} should be refused");
     }
     for (sql, kind) in [
-        ("USE shop", DbKind::MySql),
-        ("USE `shop`", DbKind::MySql),
-        ("ALTER DATABASE shop CHARACTER SET utf8mb4", DbKind::MySql),
-        ("ALTER DATABASE CHARACTER SET utf8mb4", DbKind::MySql),
-        ("CREATE SCHEMA sales", DbKind::Postgres),
-        ("DROP SCHEMA IF EXISTS sales CASCADE", DbKind::Postgres),
-        ("ALTER DATABASE shop SET x = 1", DbKind::Postgres),
-        ("CREATE TABLE `database` (id int)", DbKind::MySql),
-        ("SELECT 'CREATE DATABASE x'", DbKind::MySql),
+        ("USE shop", SqlKind::MySql),
+        ("USE `shop`", SqlKind::MySql),
+        ("ALTER DATABASE shop CHARACTER SET utf8mb4", SqlKind::MySql),
+        ("ALTER DATABASE CHARACTER SET utf8mb4", SqlKind::MySql),
+        ("CREATE SCHEMA sales", SqlKind::Postgres),
+        ("DROP SCHEMA IF EXISTS sales CASCADE", SqlKind::Postgres),
+        ("ALTER DATABASE shop SET x = 1", SqlKind::Postgres),
+        ("CREATE TABLE `database` (id int)", SqlKind::MySql),
+        ("SELECT 'CREATE DATABASE x'", SqlKind::MySql),
     ] {
         assert!(refused(sql, kind).is_none(), "{sql} should be allowed");
     }
     let r = scan_text(
         "CREATE DATABASE x;\nUSE x;\nCREATE TABLE t (id int);\n",
-        DbKind::MySql,
+        SqlKind::MySql,
         "shop",
     );
     assert_eq!(r.refused, 2);
@@ -239,7 +239,7 @@ fn statement_counts_by_kind() {
     let text = "-- header\nSET NAMES utf8mb4;\nDROP TABLE IF EXISTS t;\nCREATE TABLE t (id int);\n\
                 INSERT INTO t VALUES (1), (2);\nSELECT * FROM t;\nSTART TRANSACTION;\n\
                 UPDATE t SET id = 3 WHERE id = 1;\nCOMMIT;\n";
-    let r = scan_text(text, DbKind::MySql, "shop");
+    let r = scan_text(text, SqlKind::MySql, "shop");
     let s = &r.stats;
     assert_eq!(s.statements, 8);
     assert_eq!(s.ddl, 2);
@@ -256,32 +256,56 @@ fn statement_counts_by_kind() {
 fn pg_statements_outside_a_transaction_block() {
     let r = scan_text(
         "CREATE TABLE t (id int);\nCREATE INDEX CONCURRENTLY i ON t (id);\nVACUUM t;\n",
-        DbKind::Postgres,
+        SqlKind::Postgres,
         "shop",
     );
     assert_eq!(r.outside_tx, 2);
     assert!(!r.transaction_ok());
-    assert!(scan_text("CREATE TABLE t (id int);", DbKind::Postgres, "shop").transaction_ok());
+    assert!(scan_text("CREATE TABLE t (id int);", SqlKind::Postgres, "shop").transaction_ok());
+}
+
+/// The engine-specific checks apply on their own engine only.
+#[test]
+fn engine_specific_checks_follow_the_target() {
+    let text = "CREATE INDEX CONCURRENTLY i ON t (id);\nVACUUM t;\n";
+    assert_eq!(scan_text(text, SqlKind::MySql, "shop").outside_tx, 0);
+    assert_eq!(scan_text(text, SqlKind::Postgres, "shop").outside_tx, 2);
+
+    let merged = "SELECT 1; INSERT INTO t VALUES (1)";
+    let my = statement_refusal(merged, MY, &target(SqlKind::MySql, "shop"));
+    assert!(
+        my.as_ref()
+            .is_some_and(|r| r.0.contains("2 statements in one")),
+        "{my:?}"
+    );
+    assert_eq!(
+        statement_refusal(merged, PG, &target(SqlKind::Postgres, "shop")),
+        None
+    );
+
+    let lexing = "SET standard_conforming_strings = off";
+    assert!(refused(lexing, SqlKind::MySql).is_none());
+    assert!(refused(lexing, SqlKind::Postgres).is_some());
 }
 
 #[test]
 fn other_engine_files_are_refused() {
     let my = "-- MySQL dump 10.13  Distrib 8.4.3, for Win64 (x86_64)\n\
               /*!40101 SET NAMES utf8mb4 */;\nCREATE TABLE `t` (id int);\n";
-    let r = scan_text(my, DbKind::Postgres, "shop");
-    assert_eq!(r.engine, Some(DbKind::MySql));
+    let r = scan_text(my, SqlKind::Postgres, "shop");
+    assert_eq!(r.engine, Some(SqlKind::MySql));
     assert!(r.refusals.iter().any(|m| m.contains("MySQL dump")), "{r:?}");
     // MySQL comments without a header.
-    let r = scan_text("/*!40101 SET NAMES utf8 */;\n", DbKind::Postgres, "shop");
-    assert_eq!(r.engine, Some(DbKind::MySql));
+    let r = scan_text("/*!40101 SET NAMES utf8 */;\n", SqlKind::Postgres, "shop");
+    assert_eq!(r.engine, Some(SqlKind::MySql));
     assert_eq!(r.refused, 1);
     let pg = "--\n-- PostgreSQL database dump\n--\nSET statement_timeout = 0;\n";
-    let r = scan_text(pg, DbKind::MySql, "shop");
-    assert_eq!(r.engine, Some(DbKind::Postgres));
+    let r = scan_text(pg, SqlKind::MySql, "shop");
+    assert_eq!(r.engine, Some(SqlKind::Postgres));
     assert_eq!(r.refused, 1);
     assert_eq!(
         header_engine("-- DntDatabase dump v1\n-- Source: MariaDB 11.4.2, database x\n"),
-        Some(DbKind::MySql)
+        Some(SqlKind::MySql)
     );
 }
 
@@ -296,7 +320,7 @@ const AQ: Dialect = Dialect::MySql(MySqlMode {
 
 /// The dialect after each statement, or the refusal.
 fn track(stmts: &[&str]) -> Result<Dialect, Refusal> {
-    let mut t = ModeTracker::new(MY, target(DbKind::MySql, "shop").server);
+    let mut t = ModeTracker::new(MY, target(SqlKind::MySql, "shop").server);
     for s in stmts {
         t.after(s)?;
     }
@@ -333,7 +357,7 @@ fn sql_mode_literal_feeds_the_scan() {
     // INSERTs would be one statement.
     let text = "SET sql_mode = 'NO_BACKSLASH_ESCAPES';\nINSERT INTO t VALUES ('a\\');\n\
                 INSERT INTO t VALUES ('b');\n";
-    let r = scan_text(text, DbKind::MySql, "shop");
+    let r = scan_text(text, SqlKind::MySql, "shop");
     assert_eq!(r.stats.statements, 3);
     assert_eq!(r.stats.writes, 2);
 }
@@ -377,12 +401,12 @@ fn sql_mode_prediction_follows_the_server_or_refuses() {
     // The scan refuses the file; the split follows the last assignment.
     let text = "SET sql_mode='ANSI', sql_mode='NO_BACKSLASH_ESCAPES';\n\
                 INSERT INTO t VALUES ('a\\');\nINSERT INTO t VALUES ('b');\n";
-    let r = scan_text(text, DbKind::MySql, "shop");
+    let r = scan_text(text, SqlKind::MySql, "shop");
     assert_eq!(r.stats.statements, 3, "{r:?}");
     assert!(r.refusals.is_empty(), "{:?}", r.refusals);
     let r = scan_text(
         "SET sql_mode = DEFAULT;\nSELECT 1;\n",
-        DbKind::MySql,
+        SqlKind::MySql,
         "shop",
     );
     assert_eq!(r.refused, 1, "{r:?}");
@@ -409,7 +433,7 @@ fn pg_backslash_commands_mid_line_are_refused() {
         ("SELECT 1 \\set ON_ERROR_STOP off\n;\n", "\\set"),
         ("SELECT 1 \\connect other\n;\n", "\\connect"),
     ] {
-        let r = scan_text(&format!("{PG_HEADER}{text}"), DbKind::Postgres, "shop");
+        let r = scan_text(&format!("{PG_HEADER}{text}"), SqlKind::Postgres, "shop");
         assert!(r.refused >= 1, "{text}: {r:?}");
         assert!(
             r.refusals.iter().any(|m| m.contains(why)),
@@ -422,7 +446,7 @@ fn pg_backslash_commands_mid_line_are_refused() {
         "SELECT 1 \\connect other",
         "SELECT 'x' \\gexec",
     ] {
-        assert!(refused(sql, DbKind::Postgres).is_some(), "{sql}");
+        assert!(refused(sql, SqlKind::Postgres).is_some(), "{sql}");
     }
     // Backslashes in strings and dollar quotes are data.
     for sql in [
@@ -431,7 +455,7 @@ fn pg_backslash_commands_mid_line_are_refused() {
         "CREATE FUNCTION f() RETURNS text AS $$ SELECT '\\x' $$ LANGUAGE sql",
         "SELECT 1 -- \\! in a comment",
     ] {
-        assert!(refused(sql, DbKind::Postgres).is_none(), "{sql}");
+        assert!(refused(sql, SqlKind::Postgres).is_none(), "{sql}");
     }
 }
 
@@ -441,7 +465,7 @@ fn pg_backslash_commands_mid_line_are_refused() {
 fn delimiter_merged_statements_are_refused() {
     let r = scan_text(
         "DELIMITER $$\nSELECT 1; DROP DATABASE other; USE other $$\n",
-        DbKind::MySql,
+        SqlKind::MySql,
         "shop",
     );
     assert_eq!(r.refused, 1, "{r:?}");
@@ -452,7 +476,7 @@ fn delimiter_merged_statements_are_refused() {
     );
     let r = scan_text(
         "DELIMITER $$\nSELECT 1; INSERT INTO t VALUES (1) $$\n",
-        DbKind::MySql,
+        SqlKind::MySql,
         "shop",
     );
     assert_eq!(r.refused, 1, "{r:?}");
@@ -467,7 +491,7 @@ fn delimiter_merged_statements_are_refused() {
          BEGIN SET NEW.a = 1; END ;;\nDELIMITER ;\n",
         "DELIMITER //\nCREATE OR REPLACE FUNCTION f() RETURNS INT BEGIN RETURN 1; END //\n",
     ] {
-        let r = scan_text(ok, DbKind::MySql, "shop");
+        let r = scan_text(ok, SqlKind::MySql, "shop");
         assert!(r.refusals.is_empty(), "{ok}: {:?}", r.refusals);
     }
 }
@@ -484,10 +508,10 @@ fn prepared_and_stored_code_is_refused() {
         "CALL p()",
         "/*!50003 CALL p() */",
     ] {
-        assert!(refused(sql, DbKind::MySql).is_some(), "{sql}");
+        assert!(refused(sql, SqlKind::MySql).is_some(), "{sql}");
     }
-    assert!(refused("CREATE TABLE prepare_log (id int)", DbKind::MySql).is_none());
-    assert!(refused("SELECT 'CALL p()'", DbKind::MySql).is_none());
+    assert!(refused("CREATE TABLE prepare_log (id int)", SqlKind::MySql).is_none());
+    assert!(refused("SELECT 'CALL p()'", SqlKind::MySql).is_none());
 }
 
 /// C4: settings that change how PostgreSQL lexes strings are refused (both paths).
@@ -508,7 +532,7 @@ fn pg_string_lexing_settings_are_refused() {
         "RESET ALL",
         "DISCARD ALL",
     ] {
-        assert!(refused(sql, DbKind::Postgres).is_some(), "{sql}");
+        assert!(refused(sql, SqlKind::Postgres).is_some(), "{sql}");
     }
     for sql in [
         "SET standard_conforming_strings = on",
@@ -517,11 +541,11 @@ fn pg_string_lexing_settings_are_refused() {
         "SELECT pg_catalog.set_config('search_path', '', false)",
         "SET search_path = public",
     ] {
-        assert!(refused(sql, DbKind::Postgres).is_none(), "{sql}");
+        assert!(refused(sql, SqlKind::Postgres).is_none(), "{sql}");
     }
     let r = scan_text(
         &format!("{PG_HEADER}SET standard_conforming_strings = off;\nCOPY t FROM stdin;\n\\.\n"),
-        DbKind::Postgres,
+        SqlKind::Postgres,
         "shop",
     );
     assert_eq!(r.path, RestorePath::Psql);
@@ -540,10 +564,10 @@ fn mariadb_dump_sandbox_line_is_not_a_client_command() {
                 /*M!100616 SET @OLD_NOTE_VERBOSITY=@@NOTE_VERBOSITY, NOTE_VERBOSITY=0 */;\n\
                 DROP TABLE IF EXISTS `t`;\nCREATE TABLE `t` (`id` int NOT NULL);\n\
                 INSERT INTO `t` VALUES (1),(2);\n/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\n";
-    for t in [mariadb("shop"), target(DbKind::MySql, "shop")] {
+    for t in [mariadb("shop"), target(SqlKind::MySql, "shop")] {
         let r = scan(text.as_bytes(), &t).unwrap();
         assert!(r.refusals.is_empty(), "{t:?}: {:?}", r.refusals);
-        assert_eq!(r.engine, Some(DbKind::MySql));
+        assert_eq!(r.engine, Some(SqlKind::MySql));
         assert_eq!(r.stats.writes, 1);
     }
     // A backslash in a comment the server does run is still refused.
@@ -558,7 +582,7 @@ fn mariadb_dump_sandbox_line_is_not_a_client_command() {
         server_reading("/*M!100616 SET x=1 */", MY, t.server.unwrap()).trim(),
         "SET x=1"
     );
-    let mysql = target(DbKind::MySql, "shop").server.unwrap();
+    let mysql = target(SqlKind::MySql, "shop").server.unwrap();
     assert_eq!(
         server_reading("/*M!100616 SET x=1 */", MY, mysql).trim(),
         ""
@@ -572,8 +596,8 @@ fn mariadb_dump_sandbox_line_is_not_a_client_command() {
 
 #[test]
 fn pg_database_names_fold_unquoted() {
-    assert!(refused("ALTER DATABASE SHOP SET x = 1", DbKind::Postgres).is_none());
-    assert!(refused("ALTER DATABASE \"Shop\" SET x = 1", DbKind::Postgres).is_some());
+    assert!(refused("ALTER DATABASE SHOP SET x = 1", SqlKind::Postgres).is_none());
+    assert!(refused("ALTER DATABASE \"Shop\" SET x = 1", SqlKind::Postgres).is_some());
 }
 
 #[test]
@@ -584,7 +608,7 @@ fn analyze_hashes_raw_bytes_and_reads_gzip() {
     std::fs::write(&plain, &text).unwrap();
     let gz = dir.path().join("a.sql.gz");
     std::fs::write(&gz, gzip(text.as_bytes())).unwrap();
-    let t = target(DbKind::MySql, "shop");
+    let t = target(SqlKind::MySql, "shop");
     for (p, zipped) in [(&plain, false), (&gz, true)] {
         let a = analyze_file(p, &t).unwrap();
         assert_eq!(a.gzip, zipped);
@@ -638,7 +662,7 @@ fn fixture_files_detect_as_planned() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/tests/fixtures/p5");
     let copy = analyze_file(
         &dir.join("pg_dump_plain_copy.sql"),
-        &target(DbKind::Postgres, "p5_dst"),
+        &target(SqlKind::Postgres, "p5_dst"),
     )
     .unwrap()
     .scan
@@ -646,18 +670,18 @@ fn fixture_files_detect_as_planned() {
     .unwrap();
     assert_eq!(copy.path, RestorePath::Psql, "{copy:?}");
     assert_eq!(copy.stats.copy_blocks, 1);
-    assert_eq!(copy.engine, Some(DbKind::Postgres));
+    assert_eq!(copy.engine, Some(SqlKind::Postgres));
     assert!(copy.refusals.is_empty(), "{:?}", copy.refusals);
     let my = analyze_file(
         &dir.join("mysqldump_sample.sql"),
-        &target(DbKind::MySql, "p5_dst"),
+        &target(SqlKind::MySql, "p5_dst"),
     )
     .unwrap()
     .scan
     .unwrap()
     .unwrap();
     assert_eq!(my.path, RestorePath::AppRunner, "{my:?}");
-    assert_eq!(my.engine, Some(DbKind::MySql));
+    assert_eq!(my.engine, Some(SqlKind::MySql));
     assert!(my.refusals.is_empty(), "{:?}", my.refusals);
     assert!(my.stats.ddl >= 2, "{:?}", my.stats);
     assert!(my.stats.writes >= 1, "{:?}", my.stats);

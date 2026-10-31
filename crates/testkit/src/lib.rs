@@ -2,7 +2,7 @@
 //! Only used as a dev-dependency by other crates.
 
 use dnt_core::config::{ResolvedConfig, SshAuth, SshConfig};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_store::repo::NewSecrets;
 use secrecy::SecretString;
 use std::path::PathBuf;
@@ -52,9 +52,18 @@ impl Target {
     }
 
     pub fn kind(&self) -> DbKind {
+        self.sql_kind().into()
+    }
+
+    /// The SQL engine of the server.
+    pub fn sql_kind(&self) -> SqlKind {
         match self {
-            Target::Pg12 | Target::Pg17 => DbKind::Postgres,
-            _ => DbKind::MySql,
+            Target::MySql57
+            | Target::MySql8
+            | Target::MySql84
+            | Target::MariaDb106
+            | Target::MariaDb114 => SqlKind::MySql,
+            Target::Pg12 | Target::Pg17 => SqlKind::Postgres,
         }
     }
 
@@ -73,9 +82,9 @@ impl Target {
 
     /// Superuser name (`root` for MySQL family, `postgres` for PG).
     pub fn admin_user(&self) -> &'static str {
-        match self.kind() {
-            DbKind::MySql => "root",
-            DbKind::Postgres => "postgres",
+        match self.sql_kind() {
+            SqlKind::MySql => "root",
+            SqlKind::Postgres => "postgres",
         }
     }
 
@@ -164,4 +173,31 @@ pub fn ssh_config(auth: SshAuth) -> (SshConfig, NewSecrets) {
             ssh_key_passphrase: None,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_and_admin_user_per_target() {
+        let mysql = [
+            Target::MySql57,
+            Target::MySql8,
+            Target::MySql84,
+            Target::MariaDb106,
+            Target::MariaDb114,
+        ];
+        for t in mysql {
+            assert_eq!((t.sql_kind(), t.kind()), (SqlKind::MySql, DbKind::MySql));
+            assert_eq!(t.admin_user(), "root");
+        }
+        for t in Target::pg() {
+            assert_eq!(
+                (t.sql_kind(), t.kind()),
+                (SqlKind::Postgres, DbKind::Postgres)
+            );
+            assert_eq!(t.admin_user(), "postgres");
+        }
+    }
 }

@@ -11,7 +11,7 @@ use base64::engine::general_purpose::GeneralPurposeConfig;
 use base64::engine::{DecodePaddingMode, GeneralPurpose};
 use base64::Engine as _;
 use dnt_core::meta::{ColumnDetail, IdentityKind};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::ColumnTarget;
 use dnt_core::value::{FullValue, LogicalType, Value};
 use serde::{Deserialize, Serialize};
@@ -42,7 +42,7 @@ pub struct TargetColumn {
 
 impl TargetColumn {
     /// From `table_detail`'s column and the logical type the driver reports for it (R13).
-    pub fn from_detail(cd: &ColumnDetail, logical: LogicalType, kind: DbKind) -> TargetColumn {
+    pub fn from_detail(cd: &ColumnDetail, logical: LogicalType, kind: SqlKind) -> TargetColumn {
         let identity = cd.identity_kind.or_else(|| {
             cd.identity.as_deref().map(|s| {
                 if s.eq_ignore_ascii_case("always") {
@@ -52,8 +52,10 @@ impl TargetColumn {
                 }
             })
         });
-        let unsigned = kind == DbKind::MySql
-            && (cd.unsigned || cd.db_type.to_ascii_lowercase().contains("unsigned"));
+        let unsigned = match kind {
+            SqlKind::MySql => cd.unsigned || cd.db_type.to_ascii_lowercase().contains("unsigned"),
+            SqlKind::Postgres => false,
+        };
         TargetColumn {
             name: cd.name.clone(),
             db_type: cd.db_type.clone(),
@@ -194,7 +196,7 @@ pub fn convert(
     cell: &Cell,
     col: &TargetColumn,
     opts: &ConvertOptions,
-    kind: DbKind,
+    kind: SqlKind,
 ) -> Result<FullValue, CellError> {
     let fail = |reason| CellError {
         column: col.name.clone(),
@@ -222,11 +224,13 @@ pub fn convert(
             Some(from_text(s, col, opts, kind).map_err(fail)?)
         }
     };
+    let null_generates = match kind {
+        SqlKind::MySql => col.auto_increment,
+        SqlKind::Postgres => false,
+    };
     match value {
         Some(v) => Ok(v),
-        None if !col.nullable && !(kind == DbKind::MySql && col.auto_increment) => {
-            Err(fail(CellReason::NotNull))
-        }
+        None if !col.nullable && !null_generates => Err(fail(CellReason::NotNull)),
         None => Ok(plain(Value::Null)),
     }
 }
@@ -239,7 +243,7 @@ fn from_bool(
     b: bool,
     col: &TargetColumn,
     opts: &ConvertOptions,
-    kind: DbKind,
+    kind: SqlKind,
 ) -> Result<FullValue, CellReason> {
     match col.logical {
         LogicalType::Bool => Ok(plain(Value::Bool(b))),
@@ -252,11 +256,13 @@ fn from_text(
     s: &str,
     col: &TargetColumn,
     opts: &ConvertOptions,
-    kind: DbKind,
+    kind: SqlKind,
 ) -> Result<FullValue, CellReason> {
     use LogicalType as L;
-    let pg = kind == DbKind::Postgres;
-    let mysql = kind == DbKind::MySql;
+    let (pg, mysql) = match kind {
+        SqlKind::MySql => (false, true),
+        SqlKind::Postgres => (true, false),
+    };
     let invalid = |expected| Err(CellReason::Invalid { expected });
     let v = match col.logical {
         L::Text => {

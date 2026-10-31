@@ -202,8 +202,8 @@ impl SeedJob {
             keys.insert(fk.name.clone(), fk_keys(fk, Arc::new(tuples)));
         }
         let specs = specs(&self.request, &self.read.columns, &keys)?;
-        let seeder =
-            Seeder::new(specs, self.request.seed, self.request.rows, kind).map_err(|issues| {
+        let seeder = Seeder::new(specs, self.request.seed, self.request.rows, kind.as_sql())
+            .map_err(|issues| {
                 let i = &issues[0];
                 config_error("columns", &format!("{}: {}", i.column, i.message))
             })?;

@@ -39,7 +39,7 @@
 //! verify mode) avoids it.
 
 use dnt_core::config::{ResolvedConfig, SslConfig, SslMode};
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -95,10 +95,10 @@ impl Tool {
     }
 
     /// The engine the tool works with.
-    pub fn kind(self) -> DbKind {
+    pub fn kind(self) -> SqlKind {
         match self {
-            Tool::MysqlDump | Tool::MariadbDump => DbKind::MySql,
-            Tool::PgDump | Tool::PgRestore | Tool::Psql => DbKind::Postgres,
+            Tool::MysqlDump | Tool::MariadbDump => SqlKind::MySql,
+            Tool::PgDump | Tool::PgRestore | Tool::Psql => SqlKind::Postgres,
         }
     }
 }
@@ -196,7 +196,7 @@ fn mysql8_client(info: &ToolInfo) -> bool {
 /// Where and as whom a tool connects. Never holds the password.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolConn {
-    pub kind: DbKind,
+    pub kind: SqlKind,
     /// The address to dial: the tunnel's local end through SSH.
     pub host: String,
     pub port: u16,
@@ -212,7 +212,7 @@ impl ToolConn {
     /// password stays in `resolved`.
     pub fn from_resolved(resolved: &ResolvedConfig, tunnelled: bool) -> ToolConn {
         ToolConn {
-            kind: resolved.kind,
+            kind: resolved.kind.as_sql(),
             host: resolved.host.clone(),
             port: resolved.port,
             user: resolved.username.clone(),

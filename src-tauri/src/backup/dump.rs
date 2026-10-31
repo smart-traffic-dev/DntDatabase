@@ -37,7 +37,7 @@ use dnt_core::driver::{
 };
 use dnt_core::error::DbError;
 use dnt_core::meta::{ForeignKeyDetail, IdentityKind, ObjectKind, ObjectRef, Scope, TableDetail};
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{DbKind, ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::build::{literal, ColumnTarget, TableRef};
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::{classify, Dialect};
@@ -848,7 +848,12 @@ impl RowSink for DataSink<'_> {
                 collation: None,
             })
             .collect();
-        let head = insert_head(self.kind, &self.relation, &targets, self.overriding);
+        let head = insert_head(
+            self.kind.as_sql(),
+            &self.relation,
+            &targets,
+            self.overriding,
+        );
         self.inserts = Some(DumpInserts::new(
             head,
             targets,
@@ -1597,7 +1602,7 @@ impl DumpJob {
         let view_seq = table_order(&view_nodes);
 
         file.raw(&header(&self.header(&info, objects, None)))?;
-        for s in session_prologue(DbKind::MySql) {
+        for s in session_prologue(SqlKind::MySql) {
             file.statement(s)?;
         }
         for t in &tables {
@@ -1626,7 +1631,7 @@ impl DumpJob {
             }
             file.statement(&v.ddl)?;
         }
-        for s in session_epilogue(DbKind::MySql) {
+        for s in session_epilogue(SqlKind::MySql) {
             file.statement(s)?;
         }
         r.exec("COMMIT").await?;
@@ -1837,7 +1842,7 @@ impl DumpJob {
             &objects,
             Some(creates.len() as u32),
         )))?;
-        for s in session_prologue(DbKind::Postgres) {
+        for s in session_prologue(SqlKind::Postgres) {
             file.statement(s)?;
         }
         let include_drop = self.request.include_drop;
@@ -1968,7 +1973,7 @@ impl DumpJob {
             ))?;
             file.script(ddl, pg)?;
         }
-        for s in session_epilogue(DbKind::Postgres) {
+        for s in session_epilogue(SqlKind::Postgres) {
             file.statement(s)?;
         }
         r.exec("COMMIT").await?;

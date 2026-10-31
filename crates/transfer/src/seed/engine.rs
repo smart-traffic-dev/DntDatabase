@@ -13,7 +13,7 @@ use super::rng::{cell_rng, SplitMix64};
 use super::{ColumnIssue, ColumnPlan, Generator};
 use crate::convert::TargetColumn;
 use crate::read::Cell;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::value::{FullValue, LogicalType, Value};
 
 /// Attempts at a fresh value for a unique column before it is given up (or probed).
@@ -61,7 +61,7 @@ fn suffixed(kind: FakeKind) -> bool {
 
 /// The problem with one value of a `Pick` list or a `Constant` for `col`: the type's numeric
 /// range (which `convert` does not check), then the conversion itself.
-fn listed_value_problem(v: &str, col: &TargetColumn, kind: DbKind) -> Option<String> {
+fn listed_value_problem(v: &str, col: &TargetColumn, kind: SqlKind) -> Option<String> {
     match col.logical {
         LogicalType::Integer => {
             if let Ok(n) = v.trim().parse::<i128>() {
@@ -85,7 +85,7 @@ fn listed_value_problem(v: &str, col: &TargetColumn, kind: DbKind) -> Option<Str
 }
 
 /// The problem with one column's plan for `rows` rows, if any.
-fn check_one(s: &SeedColumnSpec, at: usize, rows: u32, kind: DbKind) -> Option<String> {
+fn check_one(s: &SeedColumnSpec, at: usize, rows: u32, kind: SqlKind) -> Option<String> {
     let col = &s.column;
     let gen = &s.plan.generator;
     if col.generated {
@@ -147,7 +147,7 @@ fn check_one(s: &SeedColumnSpec, at: usize, rows: u32, kind: DbKind) -> Option<S
 }
 
 /// Every column's problem for `rows` rows (spec §4.2, §5.2).
-pub fn check_plans(specs: &[SeedColumnSpec], rows: u32, kind: DbKind) -> Vec<ColumnIssue> {
+pub fn check_plans(specs: &[SeedColumnSpec], rows: u32, kind: SqlKind) -> Vec<ColumnIssue> {
     specs
         .iter()
         .enumerate()
@@ -190,7 +190,7 @@ pub struct Seeder {
     specs: Vec<SeedColumnSpec>,
     seed: u32,
     rows: u32,
-    kind: DbKind,
+    kind: SqlKind,
     /// Values already used, per column (unique columns only).
     seen: Vec<HashSet<String>>,
     /// The first column of each column's foreign key (its RNG picks the key of the group).
@@ -203,7 +203,7 @@ impl Seeder {
         specs: Vec<SeedColumnSpec>,
         seed: u32,
         rows: u32,
-        kind: DbKind,
+        kind: SqlKind,
     ) -> Result<Seeder, Vec<ColumnIssue>> {
         let issues = check_plans(&specs, rows, kind);
         if !issues.is_empty() {

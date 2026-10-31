@@ -93,7 +93,7 @@ pub(crate) async fn read_target(
         .columns
         .iter()
         .zip(&metas)
-        .map(|(cd, m)| TargetColumn::from_detail(cd, m.logical, kind))
+        .map(|(cd, m)| TargetColumn::from_detail(cd, m.logical, kind.as_sql()))
         .collect();
     Ok(TargetRead {
         keys: key_choices(&detail),

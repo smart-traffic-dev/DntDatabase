@@ -1,17 +1,17 @@
 //! Batch builder (spec §6.3, R19): splits by rows and bytes, equals `insert_sql_with`, classifies
 //! like its template.
 
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{insert_sql_with, ColumnTarget, InsertOptions, OnConflict, TableRef};
 use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::value::{FullValue, LogicalType, Value};
 use dnt_transfer::batch::{Batch, BatchBuilder};
 
-fn table(kind: DbKind) -> TableRef {
+fn table(kind: SqlKind) -> TableRef {
     TableRef {
-        kind: kind.as_sql(),
+        kind,
         database: "db".into(),
-        schema: (kind == DbKind::Postgres).then(|| "public".into()),
+        schema: (kind == SqlKind::Postgres).then(|| "public".into()),
         name: "t".into(),
     }
 }
@@ -51,10 +51,10 @@ fn upsert() -> InsertOptions {
     }
 }
 
-fn dialects() -> [(DbKind, Dialect); 2] {
+fn dialects() -> [(SqlKind, Dialect); 2] {
     [
-        (DbKind::MySql, Dialect::MYSQL),
-        (DbKind::Postgres, Dialect::Postgres),
+        (SqlKind::MySql, Dialect::MYSQL),
+        (SqlKind::Postgres, Dialect::Postgres),
     ]
 }
 
@@ -211,9 +211,9 @@ fn repeated_keys_stay_together_without_pg_upsert() {
     let rows = vec![row(1, "a"), row(1, "b"), row(1, "c")];
     // MySQL upsert handles a repeated key in one statement; plain PG inserts have no key.
     for (kind, d, opts) in [
-        (DbKind::MySql, Dialect::MYSQL, upsert()),
+        (SqlKind::MySql, Dialect::MYSQL, upsert()),
         (
-            DbKind::Postgres,
+            SqlKind::Postgres,
             Dialect::Postgres,
             InsertOptions::default(),
         ),
@@ -277,7 +277,7 @@ fn invalid_options_are_refused_at_new() {
         on_conflict: OnConflict::Error,
     };
     assert!(BatchBuilder::new(
-        table(DbKind::MySql),
+        table(SqlKind::MySql),
         cols(),
         overriding,
         Dialect::MYSQL,

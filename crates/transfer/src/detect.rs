@@ -31,7 +31,7 @@
 use std::io::{self, BufReader, Chain, Cursor, Read};
 use std::path::Path;
 
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::{
     classify, leading_blank_len, leading_keywords, readings, resplit_reading, session_effect,
     tokenize, Dialect, MySqlMode, SplitError, SplitEvent, SplitOptions, StatementKind,
@@ -136,31 +136,31 @@ fn is_pg_tar(head: &[u8]) -> bool {
 /// The engine a dump's header names: the app's dump (`-- Source: MySQL|MariaDB|PostgreSQL`),
 /// mysqldump / mariadb-dump (`-- MySQL dump`, `-- MariaDB dump`) and pg_dump
 /// (`-- PostgreSQL database dump`). `None`: no known header.
-pub fn header_engine(head: &str) -> Option<DbKind> {
+pub fn header_engine(head: &str) -> Option<SqlKind> {
     for line in head.lines().take(40) {
         let l = line.trim();
         if let Some(src) = l.strip_prefix("-- Source: ") {
             if src.starts_with("PostgreSQL") {
-                return Some(DbKind::Postgres);
+                return Some(SqlKind::Postgres);
             }
             if src.starts_with("MySQL") || src.starts_with("MariaDB") {
-                return Some(DbKind::MySql);
+                return Some(SqlKind::MySql);
             }
         }
         if l.starts_with("-- MySQL dump") || l.starts_with("-- MariaDB dump") {
-            return Some(DbKind::MySql);
+            return Some(SqlKind::MySql);
         }
         if l.starts_with("-- PostgreSQL database dump") {
-            return Some(DbKind::Postgres);
+            return Some(SqlKind::Postgres);
         }
     }
     None
 }
 
-fn engine_name(kind: DbKind) -> &'static str {
+fn engine_name(kind: SqlKind) -> &'static str {
     match kind {
-        DbKind::MySql => "MySQL",
-        DbKind::Postgres => "PostgreSQL",
+        SqlKind::MySql => "MySQL",
+        SqlKind::Postgres => "PostgreSQL",
     }
 }
 
@@ -294,7 +294,10 @@ fn own_readings(text: &str, dialect: Dialect, server: Option<MySqlServer>) -> Ve
 
 /// The refusals of one statement (or one piece of it) by its keywords.
 fn keyword_refusal(r: &str, dialect: Dialect, target: &ScanTarget) -> Option<Refusal> {
-    let mysql = target.kind == DbKind::MySql;
+    let mysql = match target.kind {
+        SqlKind::MySql => true,
+        SqlKind::Postgres => false,
+    };
     let target_db = target.database.as_str();
     let words = leading_keywords(r, dialect, 4);
     let w: Vec<&str> = words.iter().map(String::as_str).collect();
@@ -352,10 +355,10 @@ fn keyword_refusal(r: &str, dialect: Dialect, target: &ScanTarget) -> Option<Ref
         }
         _ => {}
     }
-    if !mysql {
-        return pg_setting_refusal(r);
+    match target.kind {
+        SqlKind::MySql => None,
+        SqlKind::Postgres => pg_setting_refusal(r),
     }
-    None
 }
 
 /// PostgreSQL settings that change how strings are lexed, and `set_config` other than
@@ -455,28 +458,34 @@ fn backslash_refusal(r: &str, dialect: Dialect) -> Option<Refusal> {
 ///
 /// Every reading of a MySQL executable comment is checked.
 pub fn statement_refusal(text: &str, dialect: Dialect, target: &ScanTarget) -> Option<Refusal> {
-    let mysql = target.kind == DbKind::MySql;
     for r in check_readings(text, dialect, target) {
         if let Some(x) = keyword_refusal(&r, dialect, target) {
             return Some(x);
         }
-        if mysql {
-            let toks = tokenize(&r, dialect);
-            if let Some(pieces) = resplit_reading(&r, &toks, dialect) {
-                for p in &pieces {
-                    if let Some(x) = keyword_refusal(p, dialect, target) {
-                        return Some(x);
+        match target.kind {
+            SqlKind::MySql => {
+                let toks = tokenize(&r, dialect);
+                if let Some(pieces) = resplit_reading(&r, &toks, dialect) {
+                    for p in &pieces {
+                        if let Some(x) = keyword_refusal(p, dialect, target) {
+                            return Some(x);
+                        }
                     }
+                    return Some(Refusal(format!(
+                        "The file holds {} statements in one (a DELIMITER left on); the server \
+                         would run them without the app checking each.",
+                        pieces.len()
+                    )));
                 }
-                return Some(Refusal(format!(
-                    "The file holds {} statements in one (a DELIMITER left on); the server \
-                     would run them without the app checking each.",
-                    pieces.len()
-                )));
             }
+            SqlKind::Postgres => {}
         }
     }
-    for r in own_readings(text, dialect, if mysql { target.server } else { None }) {
+    let own_server = match target.kind {
+        SqlKind::MySql => target.server,
+        SqlKind::Postgres => None,
+    };
+    for r in own_readings(text, dialect, own_server) {
         if let Some(x) = backslash_refusal(&r, dialect) {
             return Some(x);
         }
@@ -744,7 +753,7 @@ pub fn sent_text(text: &str, dialect: Dialect) -> &str {
 /// Where a text file is restored.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanTarget {
-    pub kind: DbKind,
+    pub kind: SqlKind,
     /// The target database.
     pub database: String,
     /// The target session's dialect (its `sql_mode` on MySQL).
@@ -769,7 +778,7 @@ pub struct ScanResult {
     /// only).
     pub connects: u64,
     /// The engine the header names.
-    pub engine: Option<DbKind>,
+    pub engine: Option<SqlKind>,
     /// The header says pg_dump wrote the file (`-- PostgreSQL database dump`).
     pub pg_dump: bool,
 }
@@ -821,7 +830,11 @@ impl Scan<'_> {
         {
             s.drops += 1;
         }
-        if self.target.kind == DbKind::Postgres && pg_outside_tx_block(text) {
+        let outside_tx = match self.target.kind {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => pg_outside_tx_block(text),
+        };
+        if outside_tx {
             self.res.outside_tx += 1;
         }
         if let Some(r) = statement_refusal(text, dialect, self.target) {
@@ -836,11 +849,11 @@ impl Scan<'_> {
             self.res.connects += 1;
         }
         let r = match self.target.kind {
-            DbKind::MySql => Some(Refusal(format!(
+            SqlKind::MySql => Some(Refusal(format!(
                 "The file uses the client command {}, which the app does not run.",
                 line.trim().chars().take(2).collect::<String>()
             ))),
-            DbKind::Postgres => psql_command_refusal(line, &self.target.database),
+            SqlKind::Postgres => psql_command_refusal(line, &self.target.database),
         };
         if let Some(r) = r {
             self.refuse(r);
@@ -930,7 +943,7 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
     // PostgreSQL lexes MySQL's `/*! … */` as comments and would skip them silently.
     st.mysql_comments |= head.lines().any(|l| l.trim_start().starts_with("/*!"));
     if st.mysql_comments && st.res.engine.is_none() {
-        st.res.engine = Some(DbKind::MySql);
+        st.res.engine = Some(SqlKind::MySql);
     }
     if let Some(e) = st.res.engine.filter(|e| *e != target.kind) {
         st.refuse(Refusal(format!(
@@ -939,9 +952,11 @@ pub fn scan(mut reader: impl Read, target: &ScanTarget) -> Result<ScanResult, Sc
             engine_name(target.kind)
         )));
     }
-    if target.kind == DbKind::Postgres
-        && (st.res.stats.copy_blocks > 0 || st.res.stats.client_commands > 0)
-    {
+    let needs_psql = match target.kind {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => st.res.stats.copy_blocks > 0 || st.res.stats.client_commands > 0,
+    };
+    if needs_psql {
         st.res.path = RestorePath::Psql;
         if !st.res.pg_dump {
             st.refuse(Refusal(

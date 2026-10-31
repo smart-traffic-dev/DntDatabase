@@ -1,7 +1,7 @@
 //! What a column's type allows: integer bounds and `decimal(p,s)`.
 
 use crate::convert::TargetColumn;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 
 /// The largest integer a request may carry (JS numbers are exact up to 2^53 − 1).
 pub const JS_SAFE: i128 = (1 << 53) - 1;
@@ -13,19 +13,32 @@ fn base_type(db_type: &str) -> String {
     t.split_whitespace().next().unwrap_or("").to_string()
 }
 
-/// The values an integer column holds; any other column gets the `i64` range.
-pub fn int_bounds(col: &TargetColumn, kind: DbKind) -> (i128, i128) {
-    let unsigned = kind == DbKind::MySql && col.unsigned;
-    let base = base_type(&col.db_type);
-    if kind == DbKind::MySql && base == "year" {
-        return (1901, 2155);
-    }
-    let bits: u32 = match base.as_str() {
-        "tinyint" if kind == DbKind::MySql => 8,
+/// The width of the integer types both engines have; 64 for any other type.
+fn int_bits(base: &str) -> u32 {
+    match base {
         "smallint" | "int2" | "smallserial" | "serial2" => 16,
-        "mediumint" if kind == DbKind::MySql => 24,
         "int" | "integer" | "int4" | "serial" | "serial4" => 32,
         _ => 64,
+    }
+}
+
+/// The values an integer column holds; any other column gets the `i64` range.
+pub fn int_bounds(col: &TargetColumn, kind: SqlKind) -> (i128, i128) {
+    let base = base_type(&col.db_type);
+    // `UNSIGNED`, `YEAR`, `TINYINT` and `MEDIUMINT` are MySQL's alone.
+    let (unsigned, bits) = match kind {
+        SqlKind::MySql => {
+            if base == "year" {
+                return (1901, 2155);
+            }
+            let bits = match base.as_str() {
+                "tinyint" => 8,
+                "mediumint" => 24,
+                other => int_bits(other),
+            };
+            (col.unsigned, bits)
+        }
+        SqlKind::Postgres => (false, int_bits(&base)),
     };
     if unsigned {
         (0, (1i128 << bits) - 1)
@@ -80,7 +93,7 @@ pub fn decimal_spec(db_type: &str) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
     use crate::convert::TargetColumn;
-    use dnt_core::server::DbKind;
+    use dnt_core::server::SqlKind;
     use dnt_core::value::LogicalType;
 
     fn col(db_type: &str, unsigned: bool) -> TargetColumn {
@@ -102,8 +115,8 @@ mod tests {
 
     #[test]
     fn int_bounds_by_type() {
-        let m = DbKind::MySql;
-        let p = DbKind::Postgres;
+        let m = SqlKind::MySql;
+        let p = SqlKind::Postgres;
         assert_eq!(int_bounds(&col("tinyint", false), m), (-128, 127));
         assert_eq!(int_bounds(&col("tinyint(4) unsigned", true), m), (0, 255));
         assert_eq!(int_bounds(&col("smallint", false), m), (-32768, 32767));
@@ -131,6 +144,26 @@ mod tests {
             int_bounds(&col("bigint", false), p),
             (i64::MIN as i128, i64::MAX as i128)
         );
+    }
+
+    /// `UNSIGNED`, `YEAR`, `TINYINT` and `MEDIUMINT` mean nothing on PostgreSQL.
+    #[test]
+    fn int_bounds_mysql_only_types() {
+        let i64_range = (i64::MIN as i128, i64::MAX as i128);
+        for (db_type, unsigned, mysql) in [
+            ("tinyint", false, (-128, 127)),
+            ("mediumint", false, (-8388608, 8388607)),
+            ("year", false, (1901, 2155)),
+            ("integer", true, (0, 4294967295)),
+        ] {
+            let c = col(db_type, unsigned);
+            assert_eq!(int_bounds(&c, SqlKind::MySql), mysql, "{db_type}");
+            let pg = match db_type {
+                "integer" => (-2147483648, 2147483647),
+                _ => i64_range,
+            };
+            assert_eq!(int_bounds(&c, SqlKind::Postgres), pg, "{db_type}");
+        }
     }
 
     #[test]

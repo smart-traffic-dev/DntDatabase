@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
 
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{dump_row_tuple, BuildError, ColumnTarget};
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::{split, strip_comments, tokenize, Dialect, TokKind, Token};
@@ -78,15 +78,15 @@ pub fn header(h: &DumpHeader) -> String {
 }
 
 /// The statements a restore runs first (R23).
-pub fn session_prologue(kind: DbKind) -> Vec<&'static str> {
+pub fn session_prologue(kind: SqlKind) -> Vec<&'static str> {
     match kind {
-        DbKind::MySql => vec![
+        SqlKind::MySql => vec![
             "SET NAMES utf8mb4",
             "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'",
             "SET time_zone = '+00:00'",
             "SET FOREIGN_KEY_CHECKS = 0",
         ],
-        DbKind::Postgres => vec![
+        SqlKind::Postgres => vec![
             "SET client_encoding = 'UTF8'",
             "SET standard_conforming_strings = on",
         ],
@@ -94,10 +94,10 @@ pub fn session_prologue(kind: DbKind) -> Vec<&'static str> {
 }
 
 /// The statements a restore runs last (R23).
-pub fn session_epilogue(kind: DbKind) -> Vec<&'static str> {
+pub fn session_epilogue(kind: SqlKind) -> Vec<&'static str> {
     match kind {
-        DbKind::MySql => vec!["SET FOREIGN_KEY_CHECKS = 1"],
-        DbKind::Postgres => Vec::new(),
+        SqlKind::MySql => vec!["SET FOREIGN_KEY_CHECKS = 1"],
+        SqlKind::Postgres => Vec::new(),
     }
 }
 
@@ -378,7 +378,7 @@ pub fn mysql_view_ddl(ddl: &str, source_db: &str) -> String {
     }
 
     // `<source_db>`. starting a dotted name.
-    let qualifier = quote_ident(DbKind::MySql.as_sql(), source_db);
+    let qualifier = quote_ident(SqlKind::MySql, source_db);
     for i in 0..toks.len() {
         let t = &toks[i];
         if t.kind != TokKind::Quoted || text(t) != qualifier {
@@ -426,7 +426,7 @@ fn pg_text(s: &str) -> String {
 pub fn create_schema_sql(schema: &str) -> String {
     format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_ident(DbKind::Postgres.as_sql(), schema)
+        quote_ident(SqlKind::Postgres, schema)
     )
 }
 
@@ -458,7 +458,7 @@ pub fn setval_sql(sequence: &str, last_value: &str, is_called: &str) -> String {
 pub fn add_fk_sql(relation: &str, name: &str, definition: &str) -> String {
     format!(
         "ALTER TABLE {relation} ADD CONSTRAINT {} {}",
-        quote_ident(DbKind::Postgres.as_sql(), name),
+        quote_ident(SqlKind::Postgres, name),
         definition.trim().trim_end_matches(';')
     )
 }
@@ -470,19 +470,15 @@ pub fn add_fk_sql(relation: &str, name: &str, definition: &str) -> String {
 /// `INSERT INTO <relation> (<cols>)[ OVERRIDING SYSTEM VALUE] VALUES ` (with the trailing
 /// space). `relation` is already quoted (MySQL dumps name tables unqualified, R23).
 pub fn insert_head(
-    kind: DbKind,
+    kind: SqlKind,
     relation: &str,
     cols: &[ColumnTarget],
     overriding: bool,
 ) -> String {
-    let names: Vec<String> = cols
-        .iter()
-        .map(|c| quote_ident(kind.as_sql(), &c.name))
-        .collect();
-    let overriding = if overriding && kind == DbKind::Postgres {
-        " OVERRIDING SYSTEM VALUE"
-    } else {
-        ""
+    let names: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+    let overriding = match kind {
+        SqlKind::Postgres if overriding => " OVERRIDING SYSTEM VALUE",
+        SqlKind::MySql | SqlKind::Postgres => "",
     };
     format!(
         "INSERT INTO {relation} ({}){overriding} VALUES ",

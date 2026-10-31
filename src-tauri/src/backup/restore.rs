@@ -261,7 +261,7 @@ fn restore_invocation(
 /// What the scan and the job check statements against.
 fn scan_target(database: &str, dialect: Dialect, server: &ServerInfo) -> ScanTarget {
     ScanTarget {
-        kind: server.kind,
+        kind: server.kind.as_sql(),
         database: database.to_string(),
         dialect,
         server: (server.kind == DbKind::MySql).then_some(MySqlServer {

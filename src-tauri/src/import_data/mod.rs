@@ -371,7 +371,7 @@ impl Layout {
             .zip(&self.sources)
             .map(|(col, src)| {
                 let cell = record.cells.get(*src as usize).unwrap_or(&Cell::Null);
-                convert(cell, col, &self.convert, self.kind)
+                convert(cell, col, &self.convert, self.kind.as_sql())
             })
             .collect()
     }

@@ -4,7 +4,7 @@
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::ColumnTarget;
 use dnt_core::sql::{leading_blank_len, split, Dialect};
 use dnt_core::value::{FullValue, LogicalType, Value};
@@ -83,7 +83,7 @@ fn header_keeps_hostile_names_inside_comments() {
 #[test]
 fn session_statements_follow_r23() {
     assert_eq!(
-        session_prologue(DbKind::MySql),
+        session_prologue(SqlKind::MySql),
         [
             "SET NAMES utf8mb4",
             "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'",
@@ -92,17 +92,17 @@ fn session_statements_follow_r23() {
         ]
     );
     assert_eq!(
-        session_epilogue(DbKind::MySql),
+        session_epilogue(SqlKind::MySql),
         ["SET FOREIGN_KEY_CHECKS = 1"]
     );
     assert_eq!(
-        session_prologue(DbKind::Postgres),
+        session_prologue(SqlKind::Postgres),
         [
             "SET client_encoding = 'UTF8'",
             "SET standard_conforming_strings = on"
         ]
     );
-    assert!(session_epilogue(DbKind::Postgres).is_empty());
+    assert!(session_epilogue(SqlKind::Postgres).is_empty());
 }
 
 fn node(name: &str, refs: &[&str]) -> TableNode {
@@ -338,7 +338,7 @@ fn inserts_are_batched_by_rows_and_bytes() {
         col("id", "int", LogicalType::Integer),
         col("name", "varchar(20)", LogicalType::Text),
     ];
-    let head = insert_head(DbKind::MySql, "`t`", &cols, false);
+    let head = insert_head(SqlKind::MySql, "`t`", &cols, false);
     assert_eq!(head, "INSERT INTO `t` (`id`, `name`) VALUES ");
     let mut ins = DumpInserts::new(head, cols.clone(), Dialect::MYSQL, 2, 1024 * 1024);
     let mut out = Vec::new();
@@ -356,7 +356,7 @@ fn inserts_are_batched_by_rows_and_bytes() {
     );
     // Bytes: a row that does not fit starts a new statement; a lone big row still goes.
     let mut ins = DumpInserts::new(
-        insert_head(DbKind::MySql, "`t`", &cols, false),
+        insert_head(SqlKind::MySql, "`t`", &cols, false),
         cols.clone(),
         Dialect::MYSQL,
         1000,
@@ -375,7 +375,7 @@ fn inserts_are_batched_by_rows_and_bytes() {
         col("id", "integer", LogicalType::Integer),
         col("tags", "text[]", LogicalType::Array),
     ];
-    let head = insert_head(DbKind::Postgres, "\"public\".\"t\"", &cols, true);
+    let head = insert_head(SqlKind::Postgres, "\"public\".\"t\"", &cols, true);
     assert_eq!(
         head,
         "INSERT INTO \"public\".\"t\" (\"id\", \"tags\") OVERRIDING SYSTEM VALUE VALUES "
@@ -389,6 +389,24 @@ fn inserts_are_batched_by_rows_and_bytes() {
         ins.flush().unwrap(),
         "INSERT INTO \"public\".\"t\" (\"id\", \"tags\") OVERRIDING SYSTEM VALUE VALUES \
          (1, '{\"a b\",NULL}'::text[])"
+    );
+}
+
+/// `OVERRIDING SYSTEM VALUE` is PostgreSQL's alone, and only when asked for.
+#[test]
+fn insert_head_overriding_is_postgres_only() {
+    let cols = vec![col("id", "integer", LogicalType::Integer)];
+    assert_eq!(
+        insert_head(SqlKind::MySql, "`t`", &cols, true),
+        "INSERT INTO `t` (`id`) VALUES "
+    );
+    assert_eq!(
+        insert_head(SqlKind::Postgres, "\"t\"", &cols, false),
+        "INSERT INTO \"t\" (\"id\") VALUES "
+    );
+    assert_eq!(
+        insert_head(SqlKind::Postgres, "\"t\"", &cols, true),
+        "INSERT INTO \"t\" (\"id\") OVERRIDING SYSTEM VALUE VALUES "
     );
 }
 
@@ -416,7 +434,7 @@ impl Shared {
 fn write_sample(w: &mut DumpWriter) -> Vec<String> {
     w.raw(&header(&mysql_header())).unwrap();
     let mut stmts: Vec<String> = Vec::new();
-    for s in session_prologue(DbKind::MySql) {
+    for s in session_prologue(SqlKind::MySql) {
         w.statement(s).unwrap();
         stmts.push(s.to_string());
     }
@@ -441,7 +459,7 @@ fn write_sample(w: &mut DumpWriter) -> Vec<String> {
         .unwrap();
     assert_eq!(n, 1);
     stmts.push("CREATE VIEW `v` AS select 1".into());
-    for s in session_epilogue(DbKind::MySql) {
+    for s in session_epilogue(SqlKind::MySql) {
         w.statement(s).unwrap();
         stmts.push(s.to_string());
     }

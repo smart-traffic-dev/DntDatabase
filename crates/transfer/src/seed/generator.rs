@@ -9,7 +9,7 @@ use super::limits::{
 use super::rng::SplitMix64;
 use crate::convert::{convert, BinaryEncoding, ConvertOptions, EmptyAs, TargetColumn};
 use crate::read::Cell;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::value::{FullValue, LogicalType};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -132,7 +132,7 @@ fn convert_options() -> ConvertOptions {
 }
 
 /// The integers `col` and a request (JS numbers) both hold.
-pub(crate) fn int_limits(col: &TargetColumn, kind: DbKind) -> (i128, i128) {
+pub(crate) fn int_limits(col: &TargetColumn, kind: SqlKind) -> (i128, i128) {
     let whole = (col.logical == LogicalType::Decimal)
         .then(|| decimal_whole_max(&col.db_type))
         .flatten();
@@ -207,7 +207,7 @@ fn date_of_julian(j: i64) -> Date {
 
 /// The problem with `gen`'s options for `col` (spec §4.2), if any. Checks that need the
 /// row count or other columns live in the engine.
-pub fn check_generator(gen: &Generator, col: &TargetColumn, kind: DbKind) -> Option<String> {
+pub fn check_generator(gen: &Generator, col: &TargetColumn, kind: SqlKind) -> Option<String> {
     let range = |lo: i128, hi: i128| -> Option<String> {
         let (min, max) = int_limits(col, kind);
         (lo < min || hi > max).then(|| format!("Values must be between {min} and {max}."))
@@ -257,11 +257,13 @@ pub fn check_generator(gen: &Generator, col: &TargetColumn, kind: DbKind) -> Opt
             (Some(a), Some(b)) => {
                 let first = parse_datetime("1970-01-01 00:00:01").expect("a valid literal");
                 let last = parse_datetime("2038-01-19 03:14:07").expect("a valid literal");
-                (kind == DbKind::MySql && is_timestamp(&col.db_type) && (a < first || b > last))
-                    .then(|| {
-                        "MySQL TIMESTAMP holds 1970-01-01 00:00:01 to 2038-01-19 03:14:07."
-                            .to_string()
-                    })
+                let mysql_timestamp = match kind {
+                    SqlKind::MySql => is_timestamp(&col.db_type),
+                    SqlKind::Postgres => false,
+                };
+                (mysql_timestamp && (a < first || b > last)).then(|| {
+                    "MySQL TIMESTAMP holds 1970-01-01 00:00:01 to 2038-01-19 03:14:07.".to_string()
+                })
             }
             _ => Some("Enter dates and times as YYYY-MM-DD HH:MM:SS.".into()),
         },
@@ -404,7 +406,11 @@ pub(crate) fn cut(s: &str, n: usize) -> String {
 }
 
 /// `cell` as a value of `col` (the message names why not, never the value).
-pub(crate) fn to_value(cell: &Cell, col: &TargetColumn, kind: DbKind) -> Result<FullValue, String> {
+pub(crate) fn to_value(
+    cell: &Cell,
+    col: &TargetColumn,
+    kind: SqlKind,
+) -> Result<FullValue, String> {
     convert(cell, col, &convert_options(), kind)
         .map_err(|e| format!("A generated value was refused: {}.", e.reason))
 }
@@ -417,7 +423,7 @@ pub fn generate(
     col: &TargetColumn,
     rng: &mut SplitMix64,
     row: u64,
-    kind: DbKind,
+    kind: SqlKind,
 ) -> Result<Option<FullValue>, String> {
     let Some(mut cell) = raw(gen, rng, row) else {
         return Ok(None);
@@ -496,7 +502,7 @@ mod tests {
     use super::*;
     use crate::convert::TargetColumn;
     use crate::seed::rng::SplitMix64;
-    use dnt_core::server::DbKind;
+    use dnt_core::server::SqlKind;
     use dnt_core::value::{LogicalType, Value};
 
     fn col(db_type: &str, logical: LogicalType) -> TargetColumn {
@@ -517,7 +523,7 @@ mod tests {
     }
 
     fn value(gen: &Generator, c: &TargetColumn, rng: &mut SplitMix64, row: u64) -> Value {
-        generate(gen, c, rng, row, DbKind::MySql)
+        generate(gen, c, rng, row, SqlKind::MySql)
             .unwrap()
             .unwrap()
             .to_display()
@@ -562,7 +568,7 @@ mod tests {
 
     #[test]
     fn check_rejects_out_of_type_ranges() {
-        let m = DbKind::MySql;
+        let m = SqlKind::MySql;
         let tiny = col("tinyint", LogicalType::Integer);
         assert_eq!(
             check_generator(&Generator::IntRange { min: 0, max: 1000 }, &tiny, m).as_deref(),
@@ -580,7 +586,7 @@ mod tests {
             scale: 2,
         };
         assert_eq!(
-            check_generator(&big, &num, DbKind::Postgres).as_deref(),
+            check_generator(&big, &num, SqlKind::Postgres).as_deref(),
             Some("Values must be below 1000.")
         );
         let int = col("int", LogicalType::Integer);
@@ -609,7 +615,7 @@ mod tests {
 
     #[test]
     fn check_rejects_bad_dates() {
-        let m = DbKind::MySql;
+        let m = SqlKind::MySql;
         let d = col("date", LogicalType::Date);
         let bad = Generator::DateRange {
             from: "2026-02-30".into(),
@@ -649,7 +655,7 @@ mod tests {
 
     #[test]
     fn check_rejects_empty_and_out_of_range_options() {
-        let m = DbKind::MySql;
+        let m = SqlKind::MySql;
         let t = col("varchar(20)", LogicalType::Text);
         assert_eq!(
             check_generator(&Generator::Pick { values: vec![] }, &t, m).as_deref(),
@@ -738,7 +744,7 @@ mod tests {
             &bin,
             &mut rng,
             0,
-            DbKind::MySql,
+            SqlKind::MySql,
         )
         .unwrap()
         .unwrap();
@@ -747,20 +753,20 @@ mod tests {
         let seq = Generator::Sequence { start: 10, step: 5 };
         let got: Vec<Value> = (0..3).map(|r| value(&seq, &i, &mut rng, r)).collect();
         assert_eq!(got, vec![Value::Int(10), Value::Int(15), Value::Int(20)]);
-        assert!(generate(&Generator::Skip, &i, &mut rng, 0, DbKind::MySql)
+        assert!(generate(&Generator::Skip, &i, &mut rng, 0, SqlKind::MySql)
             .unwrap()
             .is_none());
         let fk = Generator::ForeignKey {
             constraint: "fk".into(),
         };
-        assert!(generate(&fk, &i, &mut rng, 0, DbKind::MySql)
+        assert!(generate(&fk, &i, &mut rng, 0, SqlKind::MySql)
             .unwrap()
             .is_none());
     }
 
     #[test]
     fn integer_generators_respect_decimal_precision() {
-        let m = DbKind::MySql;
+        let m = SqlKind::MySql;
         let dec = col("decimal(5,2)", LogicalType::Decimal);
         assert_eq!(
             check_generator(&Generator::IntRange { min: 1, max: 1000 }, &dec, m).as_deref(),
@@ -780,17 +786,17 @@ mod tests {
             to: "2000-01-01 00:00:00".into(),
         };
         assert_eq!(
-            check_generator(&old, &ts, DbKind::MySql).as_deref(),
+            check_generator(&old, &ts, SqlKind::MySql).as_deref(),
             Some("MySQL TIMESTAMP holds 1970-01-01 00:00:01 to 2038-01-19 03:14:07.")
         );
-        assert_eq!(check_generator(&old, &ts, DbKind::Postgres), None);
+        assert_eq!(check_generator(&old, &ts, SqlKind::Postgres), None);
         let dt = col("datetime", LogicalType::DateTime);
-        assert_eq!(check_generator(&old, &dt, DbKind::MySql), None);
+        assert_eq!(check_generator(&old, &dt, SqlKind::MySql), None);
     }
 
     #[test]
     fn random_bytes_fit_the_column() {
-        let m = DbKind::MySql;
+        let m = SqlKind::MySql;
         let vb = col("varbinary(8)", LogicalType::Binary);
         assert_eq!(
             check_generator(&Generator::RandomBytes { len: 16 }, &vb, m).as_deref(),
@@ -834,7 +840,7 @@ mod tests {
     fn conversion_failures_are_messages() {
         let mut rng = SplitMix64::new(7);
         let i = col("int", LogicalType::Integer);
-        let err = generate(&Generator::Uuid, &i, &mut rng, 0, DbKind::MySql).unwrap_err();
+        let err = generate(&Generator::Uuid, &i, &mut rng, 0, SqlKind::MySql).unwrap_err();
         assert_eq!(err, "A generated value was refused: not an integer.");
     }
 

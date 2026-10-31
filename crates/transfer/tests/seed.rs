@@ -4,14 +4,14 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::value::{FullValue, LogicalType, Value};
 use dnt_transfer::convert::TargetColumn;
 use dnt_transfer::seed::engine::{check_plans, FkKeys, SeedColumnSpec, Seeder};
 use dnt_transfer::seed::{ColumnIssue, ColumnPlan, FakeKind, Generator};
 use proptest::prelude::*;
 
-const MY: DbKind = DbKind::MySql;
+const MY: SqlKind = SqlKind::MySql;
 
 fn column(name: &str, db_type: &str, logical: LogicalType, nullable: bool) -> TargetColumn {
     TargetColumn {

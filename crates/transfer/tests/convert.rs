@@ -2,7 +2,7 @@
 //! and `TargetColumn::from_detail`.
 
 use dnt_core::meta::{ColumnDetail, IdentityKind};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{literal, BuildError};
 use dnt_core::sql::Dialect;
 use dnt_core::value::{FullValue, LogicalType, Value};
@@ -11,8 +11,8 @@ use dnt_transfer::convert::{
 };
 use dnt_transfer::read::Cell;
 
-const MY: DbKind = DbKind::MySql;
-const PG: DbKind = DbKind::Postgres;
+const MY: SqlKind = SqlKind::MySql;
+const PG: SqlKind = SqlKind::Postgres;
 
 fn col(logical: LogicalType, db_type: &str) -> TargetColumn {
     TargetColumn {
@@ -43,14 +43,14 @@ fn num(s: &str) -> Cell {
     Cell::Number(s.into())
 }
 
-fn ok(cell: Cell, c: &TargetColumn, kind: DbKind) -> Value {
+fn ok(cell: Cell, c: &TargetColumn, kind: SqlKind) -> Value {
     match convert(&cell, c, &opts(), kind) {
         Ok(v) => v.as_value().cloned().expect("not binary"),
         Err(e) => panic!("{cell:?} into {}: {e}", c.db_type),
     }
 }
 
-fn err(cell: Cell, c: &TargetColumn, kind: DbKind) -> CellReason {
+fn err(cell: Cell, c: &TargetColumn, kind: SqlKind) -> CellReason {
     match convert(&cell, c, &opts(), kind) {
         Ok(v) => panic!("{cell:?} into {} accepted as {v:?}", c.db_type),
         Err(e) => {
@@ -583,6 +583,25 @@ fn target_column_from_detail() {
     assert!(t.has_default);
     assert_eq!(t.collation.as_deref(), Some("utf8mb4_bin"));
     assert_eq!(t.column_target().collation.as_deref(), Some("utf8mb4_bin"));
+}
+
+/// `UNSIGNED`, and NULL making the server generate the value, are MySQL's alone.
+#[test]
+fn unsigned_and_auto_increment_null_are_mysql_only() {
+    let by_type = detail("id", "int unsigned");
+    let mut by_flag = detail("id", "integer");
+    by_flag.unsigned = true;
+    for d in [by_type, by_flag] {
+        assert!(TargetColumn::from_detail(&d, LogicalType::Integer, MY).unsigned);
+        assert!(!TargetColumn::from_detail(&d, LogicalType::Integer, PG).unsigned);
+    }
+
+    let mut c = col(LogicalType::Integer, "integer");
+    c.nullable = false;
+    c.has_default = true;
+    c.auto_increment = true;
+    assert!(convert(&Cell::Null, &c, &opts(), MY).unwrap().is_null());
+    assert_eq!(err(Cell::Null, &c, PG), CellReason::NotNull);
 }
 
 #[test]

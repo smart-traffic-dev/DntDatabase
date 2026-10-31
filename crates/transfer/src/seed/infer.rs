@@ -5,7 +5,7 @@ use super::generator::{format_date, ColumnPlan, FakeKind, Generator};
 use super::limits::{decimal_spec, decimal_whole_max, int_bounds, is_bit, max_bytes};
 use crate::convert::TargetColumn;
 use dnt_core::meta::{ForeignKeyDetail, TableDetail};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::value::LogicalType;
 use time::Date;
 
@@ -315,7 +315,7 @@ fn by_type(col: &TargetColumn, today: Date) -> Option<Generator> {
     Some(match col.logical {
         L::Integer => {
             // `YEAR` starts at 1901: the range starts at the type's floor when it is above 1.
-            let (lo, hi) = int_bounds(col, DbKind::MySql);
+            let (lo, hi) = int_bounds(col, SqlKind::MySql);
             let min = lo.max(1);
             Generator::IntRange {
                 min: min as i64,

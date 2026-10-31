@@ -2,7 +2,7 @@
 
 use super::*;
 use dnt_core::config::{SslConfig, SslMode};
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{DbKind, ServerInfo, ServerVariant, SqlKind};
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -43,13 +43,13 @@ fn server(variant: ServerVariant, version: (u32, u32, u32)) -> ServerInfo {
     }
 }
 
-fn conn(kind: DbKind, db: &str) -> ToolConn {
+fn conn(kind: SqlKind, db: &str) -> ToolConn {
     ToolConn {
         kind,
         host: "127.0.0.1".into(),
         port: match kind {
-            DbKind::MySql => 3306,
-            DbKind::Postgres => 5432,
+            SqlKind::MySql => 3306,
+            SqlKind::Postgres => 5432,
         },
         user: "app".into(),
         database: Some(db.into()),
@@ -194,11 +194,11 @@ fn only_whitelisted_names() {
     ] {
         assert_eq!(Tool::from_name(other), None, "{other}");
     }
-    assert_eq!(Tool::MysqlDump.kind(), DbKind::MySql);
-    assert_eq!(Tool::MariadbDump.kind(), DbKind::MySql);
-    assert_eq!(Tool::PgDump.kind(), DbKind::Postgres);
-    assert_eq!(Tool::PgRestore.kind(), DbKind::Postgres);
-    assert_eq!(Tool::Psql.kind(), DbKind::Postgres);
+    assert_eq!(Tool::MysqlDump.kind(), SqlKind::MySql);
+    assert_eq!(Tool::MariadbDump.kind(), SqlKind::MySql);
+    assert_eq!(Tool::PgDump.kind(), SqlKind::Postgres);
+    assert_eq!(Tool::PgRestore.kind(), SqlKind::Postgres);
+    assert_eq!(Tool::Psql.kind(), SqlKind::Postgres);
 }
 
 #[test]
@@ -241,7 +241,7 @@ fn version_output_is_parsed() {
 fn mysqldump_args_mysql8_client_against_mysql8() {
     let inv = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &server(ServerVariant::MySql8, (8, 0, 36)),
         &mysql_opts(&["customers", "orders"]),
         &secret(),
@@ -302,7 +302,7 @@ fn mysqldump_args_mysql8_client_against_mariadb_and_57() {
         };
         let inv = mysql_dump_args(
             &mysql84(),
-            &conn(DbKind::MySql, "shop"),
+            &conn(SqlKind::MySql, "shop"),
             &srv,
             &o,
             &secret(),
@@ -339,7 +339,7 @@ fn mysqldump_args_mariadb_client() {
     let srv = server(ServerVariant::MariaDb, (11, 4, 2));
     let inv = mysql_dump_args(
         &maria_client(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &srv,
         &o,
         &secret(),
@@ -364,7 +364,7 @@ fn mysqldump_args_mariadb_client() {
     );
     // mariadb-dump: the same options.
     let md = info(Tool::MariadbDump, "mariadb-dump from 11.4.2-MariaDB");
-    let inv2 = mysql_dump_args(&md, &conn(DbKind::MySql, "shop"), &srv, &o, &secret()).unwrap();
+    let inv2 = mysql_dump_args(&md, &conn(SqlKind::MySql, "shop"), &srv, &o, &secret()).unwrap();
     assert_eq!(args(&inv2), args(&inv));
     assert_eq!(
         inv2.program,
@@ -378,7 +378,7 @@ fn mysql_tls_arguments() {
     let tls_args = |client: &ToolInfo, mode: SslMode| {
         let c = ToolConn {
             ssl: ssl(mode),
-            ..conn(DbKind::MySql, "shop")
+            ..conn(SqlKind::MySql, "shop")
         };
         let inv = mysql_dump_args(client, &c, &srv, &mysql_opts(&[]), &secret()).unwrap();
         let a = args(&inv);
@@ -467,7 +467,7 @@ fn tunnel_with_verify_full_is_refused() {
     let c = ToolConn {
         ssl: ssl(SslMode::VerifyFull),
         tunnelled: true,
-        ..conn(DbKind::MySql, "shop")
+        ..conn(SqlKind::MySql, "shop")
     };
     assert_eq!(
         mysql_dump_args(&mysql84(), &c, &srv, &mysql_opts(&[]), &secret()),
@@ -476,7 +476,7 @@ fn tunnel_with_verify_full_is_refused() {
     let pg = ToolConn {
         ssl: ssl(SslMode::VerifyFull),
         tunnelled: true,
-        ..conn(DbKind::Postgres, "app")
+        ..conn(SqlKind::Postgres, "app")
     };
     let pgd = info(Tool::PgDump, "pg_dump (PostgreSQL) 17.2");
     assert_eq!(
@@ -517,7 +517,7 @@ fn unsafe_names_refused() {
             matches!(
                 mysql_dump_args(
                     &mysql84(),
-                    &conn(DbKind::MySql, "shop"),
+                    &conn(SqlKind::MySql, "shop"),
                     &srv,
                     &mysql_opts(&[bad]),
                     &secret()
@@ -530,7 +530,7 @@ fn unsafe_names_refused() {
             matches!(
                 mysql_dump_args(
                     &mysql84(),
-                    &conn(DbKind::MySql, bad),
+                    &conn(SqlKind::MySql, bad),
                     &srv,
                     &mysql_opts(&[]),
                     &secret()
@@ -546,7 +546,7 @@ fn unsafe_names_refused() {
         };
         assert!(
             matches!(
-                pg_dump_args(&pgd, &conn(DbKind::Postgres, "app"), &o, &pgpass()),
+                pg_dump_args(&pgd, &conn(SqlKind::Postgres, "app"), &o, &pgpass()),
                 Err(ToolError::UnsafeName { .. })
             ),
             "schema {bad:?}"
@@ -557,7 +557,7 @@ fn unsafe_names_refused() {
         };
         assert!(
             matches!(
-                pg_dump_args(&pgd, &conn(DbKind::Postgres, "app"), &o, &pgpass()),
+                pg_dump_args(&pgd, &conn(SqlKind::Postgres, "app"), &o, &pgpass()),
                 Err(ToolError::UnsafeName { .. })
             ),
             "table {bad:?}"
@@ -566,7 +566,7 @@ fn unsafe_names_refused() {
     // A line break in the host or user is refused too.
     let c = ToolConn {
         user: "a\nb".into(),
-        ..conn(DbKind::MySql, "shop")
+        ..conn(SqlKind::MySql, "shop")
     };
     assert!(matches!(
         mysql_dump_args(&mysql84(), &c, &srv, &mysql_opts(&[]), &secret()),
@@ -576,7 +576,7 @@ fn unsafe_names_refused() {
     // `non_ascii_refused_on_windows`).
     let ok = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &srv,
         &mysql_opts(&["don hang", "a\"b", "x-y"]),
         &secret(),
@@ -599,7 +599,7 @@ fn mysqldump_needs_structure_or_data_and_the_right_tool() {
     assert_eq!(
         mysql_dump_args(
             &mysql84(),
-            &conn(DbKind::MySql, "shop"),
+            &conn(SqlKind::MySql, "shop"),
             &srv,
             &o,
             &secret()
@@ -610,7 +610,7 @@ fn mysqldump_needs_structure_or_data_and_the_right_tool() {
     assert!(matches!(
         mysql_dump_args(
             &pgd,
-            &conn(DbKind::MySql, "shop"),
+            &conn(SqlKind::MySql, "shop"),
             &srv,
             &mysql_opts(&[]),
             &secret()
@@ -620,7 +620,7 @@ fn mysqldump_needs_structure_or_data_and_the_right_tool() {
     assert!(matches!(
         mysql_dump_args(
             &mysql84(),
-            &conn(DbKind::Postgres, "shop"),
+            &conn(SqlKind::Postgres, "shop"),
             &srv,
             &mysql_opts(&[]),
             &secret()
@@ -629,7 +629,7 @@ fn mysqldump_needs_structure_or_data_and_the_right_tool() {
     ));
     let c = ToolConn {
         database: None,
-        ..conn(DbKind::MySql, "shop")
+        ..conn(SqlKind::MySql, "shop")
     };
     assert_eq!(
         mysql_dump_args(&mysql84(), &c, &srv, &mysql_opts(&[]), &secret()),
@@ -653,7 +653,7 @@ fn pg_dump_args_each_format() {
             format,
             ..pg_opts()
         };
-        let inv = pg_dump_args(&pgd, &conn(DbKind::Postgres, "app"), &o, &pgpass()).unwrap();
+        let inv = pg_dump_args(&pgd, &conn(SqlKind::Postgres, "app"), &o, &pgpass()).unwrap();
         assert_eq!(
             args(&inv),
             [
@@ -697,7 +697,7 @@ fn pg_dump_args_schemas_tables_and_switches() {
         database: Some(r"d\b x".into()),
         ssl: ssl(SslMode::VerifyFull),
         host: "db.example.com".into(),
-        ..conn(DbKind::Postgres, "app")
+        ..conn(SqlKind::Postgres, "app")
     };
     let inv = pg_dump_args(&pgd, &c, &o, &pgpass()).unwrap();
     assert_eq!(
@@ -721,7 +721,7 @@ fn pg_dump_args_schemas_tables_and_switches() {
         data: true,
         ..pg_opts()
     };
-    let inv = pg_dump_args(&pgd, &conn(DbKind::Postgres, "app"), &data_only, &pgpass()).unwrap();
+    let inv = pg_dump_args(&pgd, &conn(SqlKind::Postgres, "app"), &data_only, &pgpass()).unwrap();
     assert!(args(&inv).contains(&"--data-only".to_string()));
     let none = PgDumpOptions {
         structure: false,
@@ -729,7 +729,7 @@ fn pg_dump_args_schemas_tables_and_switches() {
         ..pg_opts()
     };
     assert_eq!(
-        pg_dump_args(&pgd, &conn(DbKind::Postgres, "app"), &none, &pgpass()),
+        pg_dump_args(&pgd, &conn(SqlKind::Postgres, "app"), &none, &pgpass()),
         Err(ToolError::NothingToDump)
     );
 }
@@ -740,7 +740,7 @@ fn pg_sslmodes_in_conninfo() {
     let mode_of = |mode: Option<SslMode>| {
         let c = ToolConn {
             ssl: mode.and_then(ssl),
-            ..conn(DbKind::Postgres, "app")
+            ..conn(SqlKind::Postgres, "app")
         };
         let a = args(&pg_dump_args(&pgd, &c, &pg_opts(), &pgpass()).unwrap());
         a.last().unwrap().clone()
@@ -761,7 +761,7 @@ fn psql_args_exact() {
     let psql = info(Tool::Psql, "psql (PostgreSQL) 17.2");
     let inv = psql_args(
         &psql,
-        &conn(DbKind::Postgres, "app"),
+        &conn(SqlKind::Postgres, "app"),
         &PsqlOptions {
             single_transaction: true,
         },
@@ -786,7 +786,7 @@ fn psql_args_exact() {
     assert_eq!(inv.secret, SecretFileSpec::PgPass(pgpass()));
     let inv = psql_args(
         &psql,
-        &conn(DbKind::Postgres, "app"),
+        &conn(SqlKind::Postgres, "app"),
         &PsqlOptions {
             single_transaction: false,
         },
@@ -798,7 +798,7 @@ fn psql_args_exact() {
     assert!(matches!(
         psql_args(
             &pgd,
-            &conn(DbKind::Postgres, "app"),
+            &conn(SqlKind::Postgres, "app"),
             &PsqlOptions {
                 single_transaction: false
             },
@@ -818,7 +818,7 @@ fn pg_restore_args_exact() {
         no_owner: true,
         no_privileges: true,
     };
-    let inv = pg_restore_args(&pr, &conn(DbKind::Postgres, "app"), &all, &pgpass(), file).unwrap();
+    let inv = pg_restore_args(&pr, &conn(SqlKind::Postgres, "app"), &all, &pgpass(), file).unwrap();
     assert_eq!(
         args(&inv),
         [
@@ -841,7 +841,8 @@ fn pg_restore_args_exact() {
         no_owner: false,
         no_privileges: false,
     };
-    let inv = pg_restore_args(&pr, &conn(DbKind::Postgres, "app"), &none, &pgpass(), file).unwrap();
+    let inv =
+        pg_restore_args(&pr, &conn(SqlKind::Postgres, "app"), &none, &pgpass(), file).unwrap();
     assert_eq!(
         args(&inv),
         [
@@ -855,7 +856,7 @@ fn pg_restore_args_exact() {
     assert!(matches!(
         pg_restore_args(
             &pr,
-            &conn(DbKind::Postgres, "app"),
+            &conn(SqlKind::Postgres, "app"),
             &none,
             &pgpass(),
             Path::new("-f")
@@ -941,7 +942,7 @@ fn pgpass_scope_is_the_tool_server() {
         port: 50123,
         user: "app".into(),
         tunnelled: true,
-        ..conn(DbKind::Postgres, "app")
+        ..conn(SqlKind::Postgres, "app")
     };
     let invs = [
         pg_dump_args(
@@ -982,7 +983,7 @@ fn pgpass_scope_is_the_tool_server() {
     }
     let mysql = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &server(ServerVariant::MySql8, (8, 0, 36)),
         &mysql_opts(&[]),
         &secret(),
@@ -1029,14 +1030,14 @@ fn non_ascii_refused_on_windows() {
     let pgd = info(Tool::PgDump, "pg_dump (PostgreSQL) 17.2");
     let mysql_table = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &srv,
         &mysql_opts(&["đơn_hàng"]),
         &secret(),
     );
     let mysql_db = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "cửa_hàng"),
+        &conn(SqlKind::MySql, "cửa_hàng"),
         &srv,
         &mysql_opts(&[]),
         &secret(),
@@ -1045,7 +1046,7 @@ fn non_ascii_refused_on_windows() {
         &mysql84(),
         &ToolConn {
             user: "người_dùng".into(),
-            ..conn(DbKind::MySql, "shop")
+            ..conn(SqlKind::MySql, "shop")
         },
         &srv,
         &mysql_opts(&[]),
@@ -1053,7 +1054,7 @@ fn non_ascii_refused_on_windows() {
     );
     let pg_schema = pg_dump_args(
         &pgd,
-        &conn(DbKind::Postgres, "app"),
+        &conn(SqlKind::Postgres, "app"),
         &PgDumpOptions {
             schemas: vec!["bán_hàng".into()],
             ..pg_opts()
@@ -1062,7 +1063,7 @@ fn non_ascii_refused_on_windows() {
     );
     let pg_table = pg_dump_args(
         &pgd,
-        &conn(DbKind::Postgres, "app"),
+        &conn(SqlKind::Postgres, "app"),
         &PgDumpOptions {
             tables: vec![("public".into(), "đơn_hàng".into())],
             ..pg_opts()
@@ -1071,20 +1072,20 @@ fn non_ascii_refused_on_windows() {
     );
     let pg_db = pg_dump_args(
         &pgd,
-        &conn(DbKind::Postgres, "dữ_liệu"),
+        &conn(SqlKind::Postgres, "dữ_liệu"),
         &pg_opts(),
         &pgpass(),
     );
     let secret_path = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &srv,
         &mysql_opts(&[]),
         Path::new(r"C:\Users\Đức\job-tmp\j1\client.cnf"),
     );
     let pgpass_path = pg_dump_args(
         &pgd,
-        &conn(DbKind::Postgres, "app"),
+        &conn(SqlKind::Postgres, "app"),
         &pg_opts(),
         Path::new(r"C:\Users\Đức\job-tmp\j1\pgpass.conf"),
     );
@@ -1133,7 +1134,7 @@ fn non_ascii_refused_on_windows() {
 fn secrets_never_in_args_env_or_log() {
     let mysql = mysql_dump_args(
         &mysql84(),
-        &conn(DbKind::MySql, "shop"),
+        &conn(SqlKind::MySql, "shop"),
         &server(ServerVariant::MySql8, (8, 0, 36)),
         &mysql_opts(&["a"]),
         &secret(),
@@ -1141,7 +1142,7 @@ fn secrets_never_in_args_env_or_log() {
     .unwrap();
     let pg_conn = ToolConn {
         ssl: ssl(SslMode::VerifyCa),
-        ..conn(DbKind::Postgres, "app")
+        ..conn(SqlKind::Postgres, "app")
     };
     let pgd = pg_dump_args(
         &info(Tool::PgDump, "pg_dump (PostgreSQL) 17.2"),
@@ -1345,7 +1346,7 @@ fn tool_conn_from_resolved() {
         application_name: "DntDatabase".into(),
     };
     let c = ToolConn::from_resolved(&r, true);
-    assert_eq!(c.kind, DbKind::MySql);
+    assert_eq!(c.kind, SqlKind::MySql);
     assert_eq!(c.host, "127.0.0.1");
     assert_eq!(c.port, 50123);
     assert_eq!(c.user, "app");
