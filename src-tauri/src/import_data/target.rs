@@ -97,7 +97,7 @@ pub(crate) async fn read_target(
         .collect();
     Ok(TargetRead {
         keys: key_choices(&detail),
-        atomicity: dnt_query::atomicity(&detail, kind),
+        atomicity: dnt_query::atomicity(&detail, kind.as_sql()),
         fingerprint: dnt_query::fingerprint(&detail),
         columns,
         detail,
@@ -120,7 +120,7 @@ pub(crate) async fn read_target_bounded(
 pub(crate) fn statement_atomic(detail: &TableDetail, kind: dnt_core::server::DbKind) -> bool {
     let mut d = detail.clone();
     d.triggers.clear();
-    dnt_query::atomicity(&d, kind) == Atomicity::Yes
+    dnt_query::atomicity(&d, kind.as_sql()) == Atomicity::Yes
 }
 
 impl SessionManager {

@@ -374,7 +374,7 @@ impl PageExtras {
     /// hidden key columns whenever the table has a key (a read-only connection still
     /// fetches complete cells by key, `data_cell_fetch`).
     pub fn of(detail: &TableDetail, kind: DbKind, read_only: bool) -> PageExtras {
-        match editable(detail, kind, false) {
+        match editable(detail, kind.as_sql(), false) {
             Ok(e) => PageExtras {
                 row_version: kind == DbKind::Postgres && !read_only,
                 hidden_key: e.hidden_key,
@@ -704,7 +704,7 @@ fn reason_code(n: &NotEditable) -> String {
 
 /// Whether the data view may edit `detail` on a connection of `kind`.
 pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> EditableInfo {
-    match editable(detail, kind, read_only) {
+    match editable(detail, kind.as_sql(), read_only) {
         Ok(e) => EditableInfo {
             editable: true,
             reason: None,
@@ -717,7 +717,7 @@ pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> Edi
         Err(n) => {
             // The key still identifies rows for reads (`data_cell_fetch`), e.g. on a
             // read-only connection.
-            let (key, hidden_key) = match editable(detail, kind, false) {
+            let (key, hidden_key) = match editable(detail, kind.as_sql(), false) {
                 Ok(e) => (e.key, e.hidden_key),
                 Err(_) => (Vec::new(), Vec::new()),
             };
@@ -727,7 +727,7 @@ pub fn editable_info(detail: &TableDetail, kind: DbKind, read_only: bool) -> Edi
                 key,
                 hidden_key,
                 editable_columns: Vec::new(),
-                atomic: atomicity(detail, kind),
+                atomic: atomicity(detail, kind.as_sql()),
                 protection: match kind {
                     DbKind::Postgres => ProtectionKind::RowVersion,
                     DbKind::MySql => ProtectionKind::Snapshot,
@@ -1046,7 +1046,7 @@ pub fn copy_sql(
             insert_sql(&table, &targets, &values, &[], dialect).map_err(build)
         }
         CopySqlFormat::Update => {
-            let ed = editable(detail, kind, false)
+            let ed = editable(detail, kind.as_sql(), false)
                 .map_err(|_| config_error("copy", "The table has no key to find its rows by."))?;
             let mut out = Vec::with_capacity(rows.len());
             for row in rows {

@@ -2,7 +2,7 @@
 //! normalization of every engine's output into one [`PlanTree`].
 
 use dnt_core::error::DbError;
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::Dialect;
 use dnt_core::value::Value;
 use serde::{Deserialize, Serialize};
@@ -64,19 +64,27 @@ pub fn explain_sql(
                 .into(),
         });
     }
-    let (prefix, format) = match (info.kind, info.variant, analyze) {
-        (DbKind::Postgres, _, false) => ("EXPLAIN (FORMAT JSON)", ExplainFormat::PgJson),
-        (DbKind::Postgres, _, true) => (
+    let (prefix, format) = match (info.kind.as_sql(), info.variant, analyze) {
+        (SqlKind::Postgres, _, false) => ("EXPLAIN (FORMAT JSON)", ExplainFormat::PgJson),
+        (SqlKind::Postgres, _, true) => (
             "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)",
             ExplainFormat::PgJson,
         ),
-        (_, ServerVariant::MariaDb, false) => ("EXPLAIN FORMAT=JSON", ExplainFormat::MariaDbJson),
-        (_, ServerVariant::MariaDb, true) => ("ANALYZE FORMAT=JSON", ExplainFormat::MariaDbJson),
-        (_, ServerVariant::MySql57, false) => ("EXPLAIN", ExplainFormat::Table),
-        (_, ServerVariant::MySql57, true) => return Err(unsupported("EXPLAIN ANALYZE", info)),
-        (_, _, false) => ("EXPLAIN FORMAT=JSON", ExplainFormat::MySqlJson),
-        (_, _, true) if info.version >= (8, 0, 18) => ("EXPLAIN ANALYZE", ExplainFormat::MySqlTree),
-        (_, _, true) => return Err(unsupported("EXPLAIN ANALYZE", info)),
+        (SqlKind::MySql, ServerVariant::MariaDb, false) => {
+            ("EXPLAIN FORMAT=JSON", ExplainFormat::MariaDbJson)
+        }
+        (SqlKind::MySql, ServerVariant::MariaDb, true) => {
+            ("ANALYZE FORMAT=JSON", ExplainFormat::MariaDbJson)
+        }
+        (SqlKind::MySql, ServerVariant::MySql57, false) => ("EXPLAIN", ExplainFormat::Table),
+        (SqlKind::MySql, ServerVariant::MySql57, true) => {
+            return Err(unsupported("EXPLAIN ANALYZE", info))
+        }
+        (SqlKind::MySql, _, false) => ("EXPLAIN FORMAT=JSON", ExplainFormat::MySqlJson),
+        (SqlKind::MySql, _, true) if info.version >= (8, 0, 18) => {
+            ("EXPLAIN ANALYZE", ExplainFormat::MySqlTree)
+        }
+        (SqlKind::MySql, _, true) => return Err(unsupported("EXPLAIN ANALYZE", info)),
     };
     let classic = matches!(
         format,

@@ -6,7 +6,7 @@ use std::fmt;
 
 use dnt_core::config::EnvTag;
 use dnt_core::meta::{ColumnDetail, IndexDetail, ObjectKind, ObjectRef, TableDetail};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{
     delete_sql, exists_sql, insert_sql, literal, select_by_key_sql, update_sql, BuildError,
     ColumnTarget, RowGuard, RowKey, TableRef,
@@ -239,7 +239,7 @@ const TRANSACTIONAL_ENGINES: &[&str] = &["InnoDB", "MyRocks", "NDB", "NDBCLUSTER
 /// whose every column exists and is `NOT NULL`.
 pub fn editable(
     detail: &TableDetail,
-    kind: DbKind,
+    kind: SqlKind,
     read_only: bool,
 ) -> Result<Editability, NotEditable> {
     if read_only {
@@ -286,8 +286,8 @@ pub fn editable(
         editable_columns,
         atomic: atomicity(detail, kind),
         protection_kind: match kind {
-            DbKind::Postgres => ProtectionKind::RowVersion,
-            DbKind::MySql => ProtectionKind::Snapshot,
+            SqlKind::Postgres => ProtectionKind::RowVersion,
+            SqlKind::MySql => ProtectionKind::Snapshot,
         },
     })
 }
@@ -309,10 +309,10 @@ pub fn insertable(c: &ColumnDetail) -> bool {
 /// Spec §4.2a: PostgreSQL DML is atomic. MySQL: a transactional engine and no trigger
 /// → `Yes`; a transactional engine with a trigger (it may write elsewhere) or an engine
 /// that could not be read → `Unknown`; any other engine → `No`.
-pub fn atomicity(detail: &TableDetail, kind: DbKind) -> Atomicity {
+pub fn atomicity(detail: &TableDetail, kind: SqlKind) -> Atomicity {
     match kind {
-        DbKind::Postgres => Atomicity::Yes,
-        DbKind::MySql => match detail.options.engine.as_deref() {
+        SqlKind::Postgres => Atomicity::Yes,
+        SqlKind::MySql => match detail.options.engine.as_deref() {
             None => Atomicity::Unknown,
             Some(e)
                 if !TRANSACTIONAL_ENGINES
@@ -446,8 +446,8 @@ fn build_capped(
     max_sql: usize,
 ) -> Result<EditPlan, EditError> {
     let kind = match dialect {
-        Dialect::MySql(_) => DbKind::MySql,
-        Dialect::Postgres => DbKind::Postgres,
+        Dialect::MySql(_) => SqlKind::MySql,
+        Dialect::Postgres => SqlKind::Postgres,
     };
     let ed = editable(detail, kind, ctx.read_only).map_err(EditError::NotEditable)?;
     let (o, t) = (&set.object, &detail.object);
@@ -468,7 +468,7 @@ fn build_capped(
         overwrite: set.overwrite,
         loaded,
         table: TableRef {
-            kind: kind.as_sql(),
+            kind,
             database: t.database.clone(),
             schema: t.schema.clone(),
             name: t.name.clone(),
@@ -981,8 +981,8 @@ pub fn cell_select(
     column: &str,
 ) -> Result<String, EditError> {
     let kind = match dialect {
-        Dialect::MySql(_) => DbKind::MySql,
-        Dialect::Postgres => DbKind::Postgres,
+        Dialect::MySql(_) => SqlKind::MySql,
+        Dialect::Postgres => SqlKind::Postgres,
     };
     let ed = editable(detail, kind, false).map_err(EditError::NotEditable)?;
     let refuse = |_: Uuid, _: &str| -> Result<FullValue, String> { Err(String::new()) };
@@ -995,7 +995,7 @@ pub fn cell_select(
         overwrite: true,
         loaded: &refuse,
         table: TableRef {
-            kind: kind.as_sql(),
+            kind,
             database: t.database.clone(),
             schema: t.schema.clone(),
             name: t.name.clone(),
@@ -1558,7 +1558,7 @@ mod tests {
     #[test]
     fn editable_uses_pk_then_not_null_unique() {
         let (d, _) = my_items(INNODB);
-        let e = editable(&d, DbKind::MySql, false).unwrap();
+        let e = editable(&d, SqlKind::MySql, false).unwrap();
         assert_eq!(e.key, ["id"]);
         assert_eq!(e.atomic, Atomicity::Yes);
         assert_eq!(e.protection_kind, ProtectionKind::Snapshot);
@@ -1587,7 +1587,7 @@ mod tests {
             index("by_code", &["code"], true, false),
         ];
         d.columns[2].invisible = true;
-        let e = editable(&d, DbKind::MySql, false).unwrap();
+        let e = editable(&d, SqlKind::MySql, false).unwrap();
         assert_eq!(e.key, ["sku", "code"]);
         assert_eq!(e.hidden_key, ["sku"]);
 
@@ -1596,7 +1596,7 @@ mod tests {
         d.columns[0].auto_increment = true;
         d.columns[0].identity = Some("ALWAYS".into());
         d.columns[1].generated = Some("upper(x)".into());
-        let e = editable(&d, DbKind::Postgres, false).unwrap();
+        let e = editable(&d, SqlKind::Postgres, false).unwrap();
         assert_eq!(e.editable_columns, ["tags", "ref", "doc"]);
         assert_eq!(e.protection_kind, ProtectionKind::RowVersion);
     }
@@ -1606,7 +1606,7 @@ mod tests {
         let (mut d, m) = my_items(INNODB);
         d.primary_key = None;
         d.indexes = vec![index("by_name", &["name"], true, false)];
-        assert_eq!(editable(&d, DbKind::MySql, false), Err(NotEditable::NoKey));
+        assert_eq!(editable(&d, SqlKind::MySql, false), Err(NotEditable::NoKey));
         assert_eq!(
             build_edit_plan(
                 &set(vec![RowEdit::Delete { row: my_row() }]),
@@ -1623,13 +1623,13 @@ mod tests {
         for kind in [ObjectKind::View, ObjectKind::MaterializedView] {
             d.object.kind = kind;
             assert_eq!(
-                editable(&d, DbKind::MySql, false),
+                editable(&d, SqlKind::MySql, false),
                 Err(NotEditable::NotATable)
             );
         }
         let (d, _) = my_items(INNODB);
         assert_eq!(
-            editable(&d, DbKind::MySql, true),
+            editable(&d, SqlKind::MySql, true),
             Err(NotEditable::ReadOnlyConnection)
         );
     }
@@ -1638,37 +1638,41 @@ mod tests {
     fn myisam_is_not_atomic() {
         for engine in ["MyISAM", "MEMORY", "Aria", "CSV", "ARCHIVE"] {
             let (d, _) = my_items(Some(engine));
-            assert_eq!(atomicity(&d, DbKind::MySql), Atomicity::No, "{engine}");
+            assert_eq!(atomicity(&d, SqlKind::MySql), Atomicity::No, "{engine}");
         }
         // An engine that could not be read.
         let (d, _) = my_items(None);
-        assert_eq!(atomicity(&d, DbKind::MySql), Atomicity::Unknown);
+        assert_eq!(atomicity(&d, SqlKind::MySql), Atomicity::Unknown);
     }
 
     #[test]
     fn innodb_with_trigger_is_unknown() {
         for engine in ["InnoDB", "innodb", "MyRocks", "NDB", "ndbcluster"] {
             let (mut d, _) = my_items(Some(engine));
-            assert_eq!(atomicity(&d, DbKind::MySql), Atomicity::Yes, "{engine}");
+            assert_eq!(atomicity(&d, SqlKind::MySql), Atomicity::Yes, "{engine}");
             d.triggers = vec![TriggerDetail {
                 name: "audit".into(),
                 timing: "AFTER".into(),
                 event: "UPDATE".into(),
             }];
-            assert_eq!(atomicity(&d, DbKind::MySql), Atomicity::Unknown, "{engine}");
+            assert_eq!(
+                atomicity(&d, SqlKind::MySql),
+                Atomicity::Unknown,
+                "{engine}"
+            );
         }
     }
 
     #[test]
     fn pg_is_atomic() {
         let (mut d, _) = pg_items();
-        assert_eq!(atomicity(&d, DbKind::Postgres), Atomicity::Yes);
+        assert_eq!(atomicity(&d, SqlKind::Postgres), Atomicity::Yes);
         d.triggers = vec![TriggerDetail {
             name: "audit".into(),
             timing: "AFTER".into(),
             event: "UPDATE".into(),
         }];
-        assert_eq!(atomicity(&d, DbKind::Postgres), Atomicity::Yes);
+        assert_eq!(atomicity(&d, SqlKind::Postgres), Atomicity::Yes);
     }
 
     // ---- verdict ------------------------------------------------------------------------
@@ -2662,17 +2666,17 @@ mod tests {
         partial.partial = true;
         d.indexes = vec![partial.clone()];
         assert_eq!(
-            editable(&d, DbKind::Postgres, false),
+            editable(&d, SqlKind::Postgres, false),
             Err(NotEditable::NoKey)
         );
         // A full unique index after it is used instead.
         d.indexes.push(index("by_sku", &["sku"], true, false));
-        assert_eq!(editable(&d, DbKind::Postgres, false).unwrap().key, ["sku"]);
+        assert_eq!(editable(&d, SqlKind::Postgres, false).unwrap().key, ["sku"]);
         // A partial primary key cannot exist, but would be refused the same way.
         let mut pk = partial.clone();
         pk.primary = true;
         d.primary_key = Some(pk);
-        assert_eq!(editable(&d, DbKind::Postgres, false).unwrap().key, ["sku"]);
+        assert_eq!(editable(&d, SqlKind::Postgres, false).unwrap().key, ["sku"]);
         // The flag is part of the fingerprint.
         let mut full = d.clone();
         full.indexes[0].partial = false;

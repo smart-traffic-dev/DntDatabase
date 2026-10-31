@@ -1,6 +1,6 @@
 //! Which statements a run executes, with their editor ranges in UTF-16.
 
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::{
     classify, leading_blank_len, split, Dialect, Statement, StatementKind, TxControl,
 };
@@ -226,14 +226,8 @@ pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: b
             state = TxState::Active;
         }
         let commits = |prev| {
-            next_tx_state(
-                DbKind::MySql.as_sql(),
-                prev,
-                false,
-                s.kind,
-                &s.text,
-                StmtResult::Ok,
-            ) == TxState::Idle
+            next_tx_state(SqlKind::MySql, prev, false, s.kind, &s.text, StmtResult::Ok)
+                == TxState::Idle
         };
         // A `BEGIN` in an open transaction commits it before starting the next one.
         let begin = s.kind == StatementKind::Transaction(TxControl::Begin);
@@ -241,19 +235,15 @@ pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: b
             && (begin
                 || (!matches!(s.kind, StatementKind::Transaction(_)) && commits(TxState::Active)));
         state = next_tx_state(
-            DbKind::MySql.as_sql(),
+            SqlKind::MySql,
             state,
             autocommit_off,
             s.kind,
             &s.text,
             StmtResult::Ok,
         );
-        autocommit_off = next_autocommit_off(
-            DbKind::MySql.as_sql(),
-            autocommit_off,
-            s.kind,
-            StmtResult::Ok,
-        );
+        autocommit_off =
+            next_autocommit_off(SqlKind::MySql, autocommit_off, s.kind, StmtResult::Ok);
     }
 }
 
@@ -515,12 +505,12 @@ mod tests {
     /// leaves the session in a transaction.
     #[test]
     fn multi_piece_begin_is_tracked() {
-        use dnt_core::server::DbKind;
+        use dnt_core::server::SqlKind;
         use dnt_core::tx::{next_tx_state, StmtResult, TxState};
         let p = plan("DELIMITER $$\nSELECT 1; BEGIN$$", Target::All, MY);
         let s = &p.stmts[0];
         let after = next_tx_state(
-            DbKind::MySql.as_sql(),
+            SqlKind::MySql,
             TxState::Idle,
             false,
             s.kind,
@@ -531,7 +521,7 @@ mod tests {
         let p = plan("DELIMITER $$\nSELECT 1; COMMIT$$", Target::All, MY);
         let s = &p.stmts[0];
         let after = next_tx_state(
-            DbKind::MySql.as_sql(),
+            SqlKind::MySql,
             TxState::Active,
             false,
             s.kind,
