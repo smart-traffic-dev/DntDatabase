@@ -22,10 +22,13 @@ name = "seed_dev"
 path = "src/bin/seed_dev.rs"
 
 [dependencies]
+async-trait.workspace = true
 dirs.workspace = true
 dnt-core.workspace = true
 dnt-store.workspace = true
 secrecy.workspace = true
+# `Notify` for the fake Command driver's blocked-command hook.
+tokio = { workspace = true, features = ["sync"] }
 uuid.workspace = true
 rcgen = { version = "0.13", optional = true }
 ssh-key = { version = "0.6", default-features = false, features = ["std", "ed25519", "encryption", "getrandom"], optional = true }

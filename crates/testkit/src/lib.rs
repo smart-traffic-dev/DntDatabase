@@ -1,5 +1,8 @@
-//! Integration-test support: the Docker target matrix, fixture paths and SSH helpers.
-//! Only used as a dev-dependency by other crates.
+//! Integration-test support: the Docker target matrix, fixture paths, SSH helpers and
+//! an in-memory Command driver ([`fake_command`]). Only used as a dev-dependency by
+//! other crates.
+
+pub mod fake_command;
 
 use dnt_core::config::{ResolvedConfig, SshAuth, SshConfig};
 use dnt_core::server::{DbKind, SqlKind};
