@@ -6,7 +6,7 @@ use dnt_core::meta::{
     CheckDetail, ColumnDetail, ForeignKeyDetail, IdentityKind, IndexDetail, IndexPart, TableDetail,
     TableOptions,
 };
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 
 /// The draft of an existing table. Every element's `original` is its current name.
 ///
@@ -72,6 +72,7 @@ fn unless_table(v: &Option<String>, table: &Option<String>) -> Option<String> {
 }
 
 fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnDef {
+    let kind = server.kind.as_sql();
     let mut data_type = parse_type(&c.db_type, server);
     // The driver already unescaped enum / set members: they are authoritative.
     if let TypeSpec::Known { values, .. } = &mut data_type {
@@ -81,9 +82,13 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
     }
     // Members the designer refuses to render (validate.rs) stay as the server has them.
     let unsafe_values = match &data_type {
-        TypeSpec::Known { values, .. } => values
-            .iter()
-            .any(|v| v.contains('\0') || (server.kind == DbKind::MySql && v.contains('\\'))),
+        TypeSpec::Known { values, .. } => values.iter().any(|v| {
+            v.contains('\0')
+                || match kind {
+                    SqlKind::MySql => v.contains('\\'),
+                    SqlKind::Postgres => false,
+                }
+        }),
         TypeSpec::Custom { .. } => false,
     };
     let generated = c.generated.clone();
@@ -94,8 +99,12 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
     };
     // MySQL 8 spells quotes inside expression defaults as `\'` (T5-10): the text is
     // not valid SQL as given, so the column stays as the server has it.
-    let escaped_default = server.kind == DbKind::MySql
-        && matches!(&default, Some(DefaultSpec::Expression { text }) if text.contains("\\'"));
+    let escaped_default = match kind {
+        SqlKind::MySql => {
+            matches!(&default, Some(DefaultSpec::Expression { text }) if text.contains("\\'"))
+        }
+        SqlKind::Postgres => false,
+    };
     ColumnDef {
         original: Some(c.name.clone()),
         name: c.name.clone(),
@@ -104,7 +113,10 @@ fn column(c: &ColumnDetail, opts: &TableOptions, server: &ServerInfo) -> ColumnD
         default,
         // MySQL / MariaDB only: PostgreSQL drivers flag identity columns too, which the
         // draft carries as `identity`.
-        auto_increment: c.auto_increment && server.kind == DbKind::MySql,
+        auto_increment: match kind {
+            SqlKind::MySql => c.auto_increment,
+            SqlKind::Postgres => false,
+        },
         identity: c.identity_kind,
         on_update: c.on_update.clone(),
         charset: unless_table(&c.charset, &opts.charset),
@@ -128,9 +140,9 @@ fn default_spec(d: &str, server: &ServerInfo) -> Option<DefaultSpec> {
     if is_number(d) {
         return value(d.to_string());
     }
-    match (server.kind, server.variant) {
+    match (server.kind.as_sql(), server.variant) {
         // `COLUMN_DEFAULT` holds a literal unquoted; expressions are spelled as SQL.
-        (DbKind::MySql, ServerVariant::MySql57 | ServerVariant::MySql8) => {
+        (SqlKind::MySql, ServerVariant::MySql57 | ServerVariant::MySql8) => {
             if is_mysql_default_expression(d) {
                 expression()
             } else {
@@ -138,12 +150,12 @@ fn default_spec(d: &str, server: &ServerInfo) -> Option<DefaultSpec> {
             }
         }
         // MariaDB quotes string literals; anything unquoted is an expression.
-        (DbKind::MySql, _) => match unquote(d) {
+        (SqlKind::MySql, _) => match unquote(d) {
             Some((text, "")) => value(text),
             _ => expression(),
         },
         // `pg_get_expr`: `'text'::type`, `NULL::type`, numbers, `true`, functions.
-        (DbKind::Postgres, _) => {
+        (SqlKind::Postgres, _) => {
             if let Some((text, rest)) = unquote(d) {
                 if rest.is_empty() || is_cast_suffix(rest) {
                     return value(text);
@@ -292,14 +304,14 @@ fn primary_key(i: &IndexDetail, server: &ServerInfo) -> KeyDef {
     let plain = parts(i).iter().all(|p| {
         p.column.is_some() && p.expression.is_none() && p.prefix.is_none() && !p.descending
     });
-    let unmodelled = match server.kind {
-        DbKind::MySql => {
+    let unmodelled = match server.kind.as_sql() {
+        SqlKind::MySql => {
             i.comment.as_deref().is_some_and(|c| !c.is_empty())
                 || i.method
                     .as_deref()
                     .is_some_and(|m| !m.eq_ignore_ascii_case("BTREE"))
         }
-        DbKind::Postgres => i.definition.as_deref().is_some_and(constraint_has_extra),
+        SqlKind::Postgres => i.definition.as_deref().is_some_and(constraint_has_extra),
     };
     KeyDef {
         original: Some(i.name.clone()),
@@ -318,16 +330,21 @@ fn index(i: &IndexDetail, server: &ServerInfo) -> IndexDef {
     let parts = parts(i);
     let definition = i.definition.as_deref().unwrap_or("");
     let constraint = is_constraint_definition(definition);
-    let pg = server.kind == DbKind::Postgres;
+    let unmodelled = match server.kind.as_sql() {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => {
+            (constraint && constraint_has_extra(definition))
+                // An invalid unique index (e.g. a failed CONCURRENTLY build) reads as not unique.
+                || (definition.starts_with("CREATE UNIQUE INDEX") && !i.unique)
+        }
+    };
     let locked = i.partial
         || i.nulls_not_distinct
         || i.expression.is_some()
         || parts.iter().any(|p| p.expression.is_some())
         // MariaDB IGNORED indexes: the designer can only express MySQL 8 INVISIBLE.
         || (!i.visible && server.variant == ServerVariant::MariaDb)
-        || (pg && constraint && constraint_has_extra(definition))
-        // An invalid unique index (e.g. a failed CONCURRENTLY build) reads as not unique.
-        || (pg && definition.starts_with("CREATE UNIQUE INDEX") && !i.unique)
+        || unmodelled
         // A non-default tablespace: re-creating the index would move it (ruling T9-1).
         || i.tablespace.is_some();
     IndexDef {
@@ -378,7 +395,10 @@ fn check(c: &CheckDetail) -> CheckDef {
 /// The draft of a new table: one `id` column (MySQL `bigint unsigned AUTO_INCREMENT`,
 /// PostgreSQL `bigint GENERATED BY DEFAULT AS IDENTITY`) as the primary key.
 pub fn new_table(name: &str, server: &ServerInfo) -> TableDef {
-    let mysql = server.kind == DbKind::MySql;
+    let (unsigned, auto_increment, identity) = match server.kind.as_sql() {
+        SqlKind::MySql => (true, true, None),
+        SqlKind::Postgres => (false, false, Some(IdentityKind::ByDefault)),
+    };
     let id = ColumnDef {
         original: None,
         name: "id".into(),
@@ -387,13 +407,13 @@ pub fn new_table(name: &str, server: &ServerInfo) -> TableDef {
             length: None,
             precision: None,
             scale: None,
-            unsigned: mysql,
+            unsigned,
             values: Vec::new(),
         },
         nullable: false,
         default: None,
-        auto_increment: mysql,
-        identity: (!mysql).then_some(IdentityKind::ByDefault),
+        auto_increment,
+        identity,
         on_update: None,
         charset: None,
         collation: None,
@@ -983,6 +1003,47 @@ mod tests {
         assert!(def.columns[0].locked);
         assert!(!def.columns[1].locked);
         assert_eq!(crate::validate(&def, &my), vec![]);
+    }
+
+    /// The MySQL-only locks leave PostgreSQL alone, and the PostgreSQL-only index
+    /// locks leave MySQL alone.
+    #[test]
+    fn kind_specific_locks() {
+        let d = detail(vec![ColumnDetail {
+            default: Some(r"E'a\'b'::text".into()),
+            ..column("label", 1, "text")
+        }]);
+        let def = from_detail(&d, &pg());
+        assert_eq!(
+            def.columns[0].default,
+            Some(DefaultSpec::Expression {
+                text: r"E'a\'b'::text".into()
+            })
+        );
+        assert!(!def.columns[0].locked);
+
+        let mut d = detail(vec![column("a", 1, "int")]);
+        d.indexes = vec![
+            IndexDetail {
+                name: "a_key".into(),
+                unique: true,
+                columns: vec!["a".into()],
+                parts: vec![part("a")],
+                definition: Some("UNIQUE (a) DEFERRABLE".into()),
+                ..Default::default()
+            },
+            IndexDetail {
+                name: "a_idx".into(),
+                columns: vec!["a".into()],
+                parts: vec![part("a")],
+                definition: Some("CREATE UNIQUE INDEX a_idx ON t (a)".into()),
+                ..Default::default()
+            },
+        ];
+        let my = from_detail(&d, &mysql8());
+        assert!(my.indexes.iter().all(|i| !i.locked));
+        let p = from_detail(&d, &pg());
+        assert!(p.indexes.iter().all(|i| i.locked));
     }
 
     #[test]

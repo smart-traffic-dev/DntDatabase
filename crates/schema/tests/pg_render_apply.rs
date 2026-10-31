@@ -5,7 +5,7 @@
 
 use dnt_core::driver::Session;
 use dnt_core::meta::IdentityKind;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::TableRef;
 use dnt_driver_pg::{PgDriver, PgSession};
 use dnt_schema::*;
@@ -65,7 +65,7 @@ where
 impl Ctx {
     fn table(&self, name: &str) -> TableRef {
         TableRef {
-            kind: DbKind::Postgres.as_sql(),
+            kind: SqlKind::Postgres,
             database: "postgres".into(),
             schema: Some(self.sch.into()),
             name: name.into(),

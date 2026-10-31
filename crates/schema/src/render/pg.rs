@@ -30,14 +30,14 @@ use crate::diff::Change;
 use crate::model::*;
 use crate::types::type_text;
 use dnt_core::meta::IdentityKind;
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::build::{literal, BuildError, ColumnTarget, TableRef};
 use dnt_core::sql::ident::{count_where_sql, qualified_name, quote_ident};
 use dnt_core::sql::Dialect;
 use dnt_core::value::{FullValue, LogicalType, Value};
 
 fn q(name: &str) -> String {
-    quote_ident(DbKind::Postgres.as_sql(), name)
+    quote_ident(SqlKind::Postgres, name)
 }
 
 fn check_dialect(d: Dialect) -> Result<(), RenderError> {
@@ -117,7 +117,7 @@ pub(super) fn render(
 ) -> Result<Rendered, RenderError> {
     check_dialect(d)?;
     let schema = table.schema.as_deref();
-    let rel = |name: &str| qualified_name(DbKind::Postgres.as_sql(), &table.database, schema, name);
+    let rel = |name: &str| qualified_name(SqlKind::Postgres, &table.database, schema, name);
     let mut ordered: Vec<&Change> = changes.iter().collect();
     ordered.sort_by_key(|c| rank(c));
 
@@ -658,7 +658,7 @@ pub(super) fn render_create(
         return Err(invalid(OPTIONS_MYSQL_ONLY));
     }
     let schema = table.schema.as_deref();
-    let rel = |name: &str| qualified_name(DbKind::Postgres.as_sql(), &table.database, schema, name);
+    let rel = |name: &str| qualified_name(SqlKind::Postgres, &table.database, schema, name);
     let relation = rel(&def.name);
     let mut items = Vec::new();
     for c in &def.columns {
@@ -993,7 +993,7 @@ mod tests {
     use crate::diff;
     use crate::test_util::*;
     use dnt_core::meta::IdentityKind;
-    use dnt_core::server::DbKind;
+    use dnt_core::server::SqlKind;
 
     const PG: Dialect = Dialect::Postgres;
 
@@ -1077,7 +1077,7 @@ mod tests {
 
     fn table(name: &str) -> TableRef {
         TableRef {
-            kind: DbKind::Postgres.as_sql(),
+            kind: SqlKind::Postgres,
             database: "dnt_fixture".into(),
             schema: Some("public".into()),
             name: name.into(),

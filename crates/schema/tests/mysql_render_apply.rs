@@ -2,7 +2,7 @@
 //! the statement is accepted and the table ends up as the draft says.
 
 use dnt_core::driver::Session;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::TableRef;
 use dnt_driver_mysql::{MySqlDriver, MySqlSession};
 use dnt_schema::*;
@@ -116,7 +116,7 @@ async fn create(s: &MySqlSession, table: &str) -> TableDef {
 async fn apply(s: &MySqlSession, old: &TableDef, new: &TableDef) -> String {
     let changes = diff(old, new).expect("diff");
     let table = TableRef {
-        kind: DbKind::MySql.as_sql(),
+        kind: SqlKind::MySql,
         database: DB.into(),
         schema: None,
         name: old.name.clone(),

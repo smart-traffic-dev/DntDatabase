@@ -28,7 +28,7 @@ use crate::model::*;
 use crate::render::{check_sql, column_sql, fk_sql, index_sql, primary_key_sql, RenderError};
 use crate::types::{default_display_width, type_text};
 use dnt_core::meta::{ColumnDetail, IndexDetail, TableDetail};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::Dialect;
 use serde::{Deserialize, Serialize};
@@ -61,10 +61,11 @@ pub fn fidelity(
     mysql_create: Option<&str>,
     server: &ServerInfo,
 ) -> Vec<Locked> {
-    let d = Dialect::for_kind(server.kind.as_sql());
-    match server.kind {
-        DbKind::MySql => mysql_fidelity(def, mysql_create, server, d),
-        DbKind::Postgres => pg_fidelity(def, detail, server, d),
+    let kind = server.kind.as_sql();
+    let d = Dialect::for_kind(kind);
+    match kind {
+        SqlKind::MySql => mysql_fidelity(def, mysql_create, server, d),
+        SqlKind::Postgres => pg_fidelity(def, detail, server, d),
     }
 }
 
@@ -179,8 +180,11 @@ fn word_char(c: char) -> bool {
 /// MySQL: backticks quote names; `'` and `"` strings with `''` / `\x` escapes (default
 /// `sql_mode`); `/*!NNNNN … */` is its content. PostgreSQL: `"` quotes names; `'`
 /// strings with `''` only (`standard_conforming_strings`).
-fn tokens(s: &str, kind: DbKind) -> Vec<Tok> {
-    let mysql = kind == DbKind::MySql;
+fn tokens(s: &str, kind: SqlKind) -> Vec<Tok> {
+    let (versioned_comments, backtick_names, double_quote_names, backslash_escapes) = match kind {
+        SqlKind::MySql => (true, true, false, true),
+        SqlKind::Postgres => (false, false, true, false),
+    };
     let chars: Vec<char> = s.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
@@ -198,7 +202,7 @@ fn tokens(s: &str, kind: DbKind) -> Vec<Tok> {
             let body: String = chars[i + 2..end.min(chars.len())].iter().collect();
             i = (end + 2).min(chars.len());
             match body.strip_prefix('!') {
-                Some(rest) if mysql => {
+                Some(rest) if versioned_comments => {
                     let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
                     out.extend(tokens(rest, kind));
                 }
@@ -207,8 +211,8 @@ fn tokens(s: &str, kind: DbKind) -> Vec<Tok> {
             continue;
         }
         let quoted = match c {
-            '`' if mysql => Some(true),
-            '"' => Some(!mysql),
+            '`' if backtick_names => Some(true),
+            '"' => Some(double_quote_names),
             '\'' => Some(false),
             _ => None,
         };
@@ -228,7 +232,7 @@ fn tokens(s: &str, kind: DbKind) -> Vec<Tok> {
                     j += 1;
                     break;
                 }
-                if mysql && !ident && ch == '\\' && j + 1 < chars.len() {
+                if backslash_escapes && !ident && ch == '\\' && j + 1 < chars.len() {
                     text.push(match chars[j + 1] {
                         'n' => '\n',
                         't' => '\t',
@@ -331,7 +335,7 @@ fn paren_group(s: &str) -> Option<&str> {
 /// A `SHOW CREATE TABLE` element line (or a rendered fragment), normalised. `column`:
 /// the nullable-column rules apply.
 fn mysql_norm(s: &str, table: &TableOptionsDef, column: bool) -> Vec<Tok> {
-    let mut t = tokens(s, DbKind::MySql);
+    let mut t = tokens(s, SqlKind::MySql);
     if is_punct(t.last(), ',') {
         t.pop();
     }
@@ -392,7 +396,7 @@ fn mysql_norm(s: &str, table: &TableOptionsDef, column: bool) -> Vec<Tok> {
             if let Some(Tok::Str(v)) = at(1) {
                 if is_number(v) {
                     out.push(t[i].clone());
-                    out.extend(tokens(v, DbKind::MySql));
+                    out.extend(tokens(v, SqlKind::MySql));
                     i += 2;
                     continue;
                 }
@@ -432,7 +436,7 @@ enum LineKind {
 }
 
 fn classify(line: &str) -> LineKind {
-    let t = tokens(line, DbKind::MySql);
+    let t = tokens(line, SqlKind::MySql);
     let w = |j: usize, s: &str| is_word(t.get(j), s);
     let ident = |j: usize| match t.get(j) {
         Some(Tok::Ident(n)) => Some(n.clone()),
@@ -469,7 +473,7 @@ fn classify(line: &str) -> LineKind {
 }
 
 fn is_fulltext(line: &str) -> bool {
-    let t = tokens(line, DbKind::MySql);
+    let t = tokens(line, SqlKind::MySql);
     is_word(t.first(), "fulltext") || is_word(t.first(), "spatial")
 }
 
@@ -646,7 +650,7 @@ fn mysql_fidelity(
 /// `AUTO_INCREMENT` and `COMMENT` are read but not compared (the counter moves; the
 /// comment is its own field).
 fn trailer_options(trailer: &str) -> Option<Vec<(&'static str, String)>> {
-    let t = tokens(trailer, DbKind::MySql);
+    let t = tokens(trailer, SqlKind::MySql);
     if !is_punct(t.first(), ')') {
         return None;
     }
@@ -705,7 +709,7 @@ fn options_match(trailer: &str, o: &TableOptionsDef) -> bool {
 /// A locked index for a server line no draft index matched: its columns (with prefix
 /// lengths), uniqueness and FULLTEXT / SPATIAL kind; expression parts are left out.
 fn index_from_line(name: &str, line: &str) -> IndexDef {
-    let t = tokens(line, DbKind::MySql);
+    let t = tokens(line, SqlKind::MySql);
     let first = |w: &str| is_word(t.first(), w);
     let method = if first("fulltext") {
         Some("FULLTEXT".to_string())
@@ -798,7 +802,7 @@ fn check_expression(line: &str) -> Option<String> {
 
 /// Tokens with identifier quotes that change nothing removed (`"id"` → `id`).
 fn pg_norm(s: &str) -> Vec<Tok> {
-    tokens(s, DbKind::Postgres)
+    tokens(s, SqlKind::Postgres)
         .into_iter()
         .map(|t| match t {
             Tok::Ident(n) if is_plain_pg_name(&n) => Tok::Word(n),
@@ -819,7 +823,7 @@ fn is_plain_pg_name(n: &str) -> bool {
 fn unquote_numbers(t: Vec<Tok>) -> Vec<Tok> {
     t.into_iter()
         .flat_map(|t| match t {
-            Tok::Str(s) if is_number(&s) => tokens(&s, DbKind::Postgres),
+            Tok::Str(s) if is_number(&s) => tokens(&s, SqlKind::Postgres),
             other => vec![other],
         })
         .collect()
@@ -928,7 +932,7 @@ fn pg_column_matches(c: &ColumnDef, dc: &ColumnDetail, server: &ServerInfo, d: D
 fn pg_column_text(dc: &ColumnDetail) -> String {
     let mut out = format!(
         "{} {}",
-        quote_ident(DbKind::Postgres.as_sql(), &dc.name),
+        quote_ident(SqlKind::Postgres, &dc.name),
         dc.db_type
     );
     if let Some(g) = &dc.generated {
@@ -984,7 +988,7 @@ fn in_tablespace(element: ElementRef, index: Option<&IndexDetail>) -> Option<Loc
     let text = format!(
         "{} TABLESPACE {}",
         index.definition.as_deref().unwrap_or(&index.name),
-        quote_ident(DbKind::Postgres.as_sql(), ts)
+        quote_ident(SqlKind::Postgres, ts)
     );
     Some(lock(
         element,
@@ -1184,6 +1188,32 @@ mod tests {
 
     fn check(n: &str) -> ElementRef {
         ElementRef::Check(n.into())
+    }
+
+    /// Backticks, `"`, backslash escapes and `/*!…*/` lex per kind.
+    #[test]
+    fn tokens_per_kind() {
+        let s = r#"`a` "b" 'c\n' /*!50100 d */"#;
+        assert_eq!(
+            tokens(s, SqlKind::MySql),
+            vec![
+                Tok::Ident("a".into()),
+                Tok::Str("b".into()),
+                Tok::Str("c\n".into()),
+                Tok::Word("d".into()),
+            ]
+        );
+        assert_eq!(
+            tokens(s, SqlKind::Postgres),
+            vec![
+                Tok::Punct('`'),
+                Tok::Word("a".into()),
+                Tok::Punct('`'),
+                Tok::Ident("b".into()),
+                Tok::Str(r"c\n".into()),
+                Tok::Opaque("/*!50100 d */".into()),
+            ]
+        );
     }
 
     #[test]

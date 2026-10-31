@@ -1,7 +1,7 @@
 //! The type catalog and the parsing / spelling of column types.
 
 use crate::model::{ParamUse, TypeInfo, TypeSpec};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 
 use ParamUse::{None as No, Optional as Opt, Required as Req};
 
@@ -70,9 +70,9 @@ const POSTGRES: &[Entry] = &[
 ];
 
 fn entries(server: &ServerInfo) -> &'static [Entry] {
-    match server.kind {
-        DbKind::MySql => MYSQL,
-        DbKind::Postgres => POSTGRES,
+    match server.kind.as_sql() {
+        SqlKind::MySql => MYSQL,
+        SqlKind::Postgres => POSTGRES,
     }
 }
 
@@ -108,26 +108,30 @@ pub fn parse_type(db_type: &str, server: &ServerInfo) -> TypeSpec {
 }
 
 fn parse_known(text: &str, server: &ServerInfo) -> Option<TypeSpec> {
+    let kind = server.kind.as_sql();
     let lower = text.to_ascii_lowercase();
-    if server.kind == DbKind::MySql {
-        for base in ["enum", "set"] {
-            if let Some(list) = lower
-                .strip_prefix(base)
-                .and_then(|r| r.strip_prefix('('))
-                .filter(|r| r.ends_with(')'))
-            {
-                // Values keep their case: take them from `text`, not `lower`.
-                let inner = &text[text.len() - list.len()..text.len() - 1];
-                return Some(TypeSpec::Known {
-                    base: base.into(),
-                    length: None,
-                    precision: None,
-                    scale: None,
-                    unsigned: false,
-                    values: parse_quoted_list(inner)?,
-                });
+    match kind {
+        SqlKind::MySql => {
+            for base in ["enum", "set"] {
+                if let Some(list) = lower
+                    .strip_prefix(base)
+                    .and_then(|r| r.strip_prefix('('))
+                    .filter(|r| r.ends_with(')'))
+                {
+                    // Values keep their case: take them from `text`, not `lower`.
+                    let inner = &text[text.len() - list.len()..text.len() - 1];
+                    return Some(TypeSpec::Known {
+                        base: base.into(),
+                        length: None,
+                        precision: None,
+                        scale: None,
+                        unsigned: false,
+                        values: parse_quoted_list(inner)?,
+                    });
+                }
             }
         }
+        SqlKind::Postgres => {}
     }
     // `<name>[(<args>)][ <suffix>]`
     let (name, args, suffix) = match lower.find('(') {
@@ -143,7 +147,10 @@ fn parse_known(text: &str, server: &ServerInfo) -> Option<TypeSpec> {
         // PostgreSQL names of several words (`double precision`, `character varying`).
         None => {
             let first = lower.split_whitespace().next().unwrap_or("");
-            let split = server.kind == DbKind::MySql || matches!(first, "time" | "timestamp");
+            let split = match kind {
+                SqlKind::MySql => true,
+                SqlKind::Postgres => first == "time" || first == "timestamp",
+            };
             match lower.trim().split_once(char::is_whitespace) {
                 Some((name, rest)) if split => (name, None, rest),
                 _ => (lower.as_str(), None, ""),
@@ -155,13 +162,13 @@ fn parse_known(text: &str, server: &ServerInfo) -> Option<TypeSpec> {
     }
     let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
     let suffix = suffix.split_whitespace().collect::<Vec<_>>().join(" ");
-    let (base, unsigned) = match server.kind {
-        DbKind::MySql => match suffix.as_str() {
+    let (base, unsigned) = match kind {
+        SqlKind::MySql => match suffix.as_str() {
             "" => (name, false),
             "unsigned" => (name, true),
             _ => return None,
         },
-        DbKind::Postgres => (pg_base(&name, &suffix)?.to_string(), false),
+        SqlKind::Postgres => (pg_base(&name, &suffix)?.to_string(), false),
     };
     let ti = type_info(&base, server)?;
     if unsigned && !ti.unsigned {
@@ -170,7 +177,11 @@ fn parse_known(text: &str, server: &ServerInfo) -> Option<TypeSpec> {
     let mut nums = Vec::new();
     if let Some(args) = args {
         // MySQL 5.7 spells the only YEAR as `year(4)`.
-        if !(server.kind == DbKind::MySql && base == "year" && args.trim() == "4") {
+        let year4 = match kind {
+            SqlKind::MySql => base == "year" && args.trim() == "4",
+            SqlKind::Postgres => false,
+        };
+        if !year4 {
             for a in args.split(',') {
                 nums.push(a.trim().parse::<u32>().ok()?);
             }
@@ -477,6 +488,13 @@ mod tests {
             parse_type("tinyint", &pg),
             TypeSpec::Custom {
                 text: "tinyint".into()
+            }
+        );
+        // Enum member lists are MySQL syntax.
+        assert_eq!(
+            parse_type("enum('a','b')", &pg),
+            TypeSpec::Custom {
+                text: "enum('a','b')".into()
             }
         );
     }

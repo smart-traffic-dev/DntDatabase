@@ -10,7 +10,7 @@ mod pg;
 
 use crate::diff::Change;
 use crate::model::*;
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::build::TableRef;
 use dnt_core::sql::Dialect;
 use serde::{Deserialize, Serialize};
@@ -180,9 +180,9 @@ pub fn render(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<Rendered, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::render(table, old, changes, server, dialect),
-        DbKind::Postgres => pg::render(table, old, changes, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::render(table, old, changes, server, dialect),
+        SqlKind::Postgres => pg::render(table, old, changes, server, dialect),
     }
 }
 
@@ -197,9 +197,9 @@ pub fn render_create(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<Rendered, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::render_create(table, def, server, dialect),
-        DbKind::Postgres => pg::render_create(table, def, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::render_create(table, def, server, dialect),
+        SqlKind::Postgres => pg::render_create(table, def, server, dialect),
     }
 }
 
@@ -213,9 +213,9 @@ pub fn column_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::column_sql(c, server, dialect),
-        DbKind::Postgres => pg::column_sql(c, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::column_sql(c, server, dialect),
+        SqlKind::Postgres => pg::column_sql(c, server, dialect),
     }
 }
 
@@ -225,9 +225,9 @@ pub fn primary_key_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::primary_key_sql(k, server, dialect),
-        DbKind::Postgres => pg::primary_key_sql(k, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::primary_key_sql(k, server, dialect),
+        SqlKind::Postgres => pg::primary_key_sql(k, server, dialect),
     }
 }
 
@@ -241,18 +241,18 @@ pub fn index_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::index_sql(i, server, dialect),
-        DbKind::Postgres => pg::index_sql(i, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::index_sql(i, server, dialect),
+        SqlKind::Postgres => pg::index_sql(i, server, dialect),
     }
 }
 
 /// A foreign key constraint as it appears in `CREATE TABLE`. Precondition as
 /// [`column_sql`].
 pub fn fk_sql(f: &FkDef, server: &ServerInfo, dialect: Dialect) -> Result<String, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::fk_sql(f, server, dialect),
-        DbKind::Postgres => pg::fk_sql(f, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::fk_sql(f, server, dialect),
+        SqlKind::Postgres => pg::fk_sql(f, server, dialect),
     }
 }
 
@@ -262,8 +262,8 @@ pub fn check_sql(
     server: &ServerInfo,
     dialect: Dialect,
 ) -> Result<String, RenderError> {
-    match server.kind {
-        DbKind::MySql => mysql::check_sql(c, server, dialect),
-        DbKind::Postgres => pg::check_sql(c, server, dialect),
+    match server.kind.as_sql() {
+        SqlKind::MySql => mysql::check_sql(c, server, dialect),
+        SqlKind::Postgres => pg::check_sql(c, server, dialect),
     }
 }

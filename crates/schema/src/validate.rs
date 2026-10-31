@@ -3,7 +3,7 @@
 use crate::model::*;
 use crate::types::type_info;
 use dnt_core::error::DbError;
-use dnt_core::server::{DbKind, MySqlCapabilities, ServerInfo, ServerVariant};
+use dnt_core::server::{MySqlCapabilities, ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::build::{check_expression, BuildError};
 use dnt_core::sql::ddl::validate_identifier;
 use dnt_core::sql::Dialect;
@@ -24,10 +24,11 @@ use std::collections::HashSet;
 /// and columns, key/index columns) are only checked for being empty or holding a NUL:
 /// they are always quoted on render.
 pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
+    let kind = server.kind.as_sql();
     let mut v = Validator {
         server,
-        kind: server.kind,
-        dialect: Dialect::for_kind(server.kind.as_sql()),
+        kind,
+        dialect: Dialect::for_kind(kind),
         trusted: false,
         errs: Vec::new(),
     };
@@ -120,7 +121,7 @@ const MATCH_TYPES: &[&str] = &["SIMPLE", "FULL", "PARTIAL"];
 
 struct Validator<'a> {
     server: &'a ServerInfo,
-    kind: DbKind,
+    kind: SqlKind,
     dialect: Dialect,
     /// The current element is locked and server-derived: skip text-safety checks.
     trusted: bool,
@@ -137,7 +138,10 @@ impl Validator<'_> {
     }
 
     fn mysql(&self) -> bool {
-        self.kind == DbKind::MySql
+        match self.kind {
+            SqlKind::MySql => true,
+            SqlKind::Postgres => false,
+        }
     }
 
     /// Starts the checks of one element. Only an element that exists on the server
@@ -156,8 +160,8 @@ impl Validator<'_> {
     /// Name comparison key: MySQL names compare case-insensitively.
     fn key(&self, name: &str) -> String {
         match self.kind {
-            DbKind::MySql => name.to_lowercase(),
-            DbKind::Postgres => name.to_string(),
+            SqlKind::MySql => name.to_lowercase(),
+            SqlKind::Postgres => name.to_string(),
         }
     }
 
@@ -170,7 +174,7 @@ impl Validator<'_> {
         if original == Some(name) {
             return true;
         }
-        if let Err(e) = validate_identifier(self.kind.as_sql(), name) {
+        if let Err(e) = validate_identifier(self.kind, name) {
             let message = match e {
                 DbError::Config { message, .. } => message,
                 other => other.to_string(),
