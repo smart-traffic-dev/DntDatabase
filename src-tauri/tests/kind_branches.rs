@@ -1,0 +1,185 @@
+//! Ratchet against two-way `DbKind` / `SqlKind` branches.
+//!
+//! A branch such as `kind == DbKind::MySql` or `if let SqlKind::Postgres = kind`
+//! silently routes every other kind (including future non-SQL kinds such as
+//! MongoDB or Redis) into the "else" arm. Exhaustive `match` expressions are
+//! required instead. Files that still contain such branches are listed in
+//! `ALLOWED`; the list may only shrink.
+
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Workspace-relative paths (with `/` separators) of files that still contain
+/// two-way kind branches. Later tasks remove entries from this list.
+const ALLOWED: &[&str] = &[
+    "crates/core/src/sql/ddl.rs",
+    "crates/core/src/sql/ddl_edit/build.rs",
+    "crates/core/src/sql/ddl_edit/header.rs",
+    "crates/core/src/sql/ddl_edit/mod.rs",
+    "crates/core/src/sql/ddl_edit/template.rs",
+    "crates/core/src/sql/filter.rs",
+    "crates/core/src/tx.rs",
+    "crates/schema/src/fidelity.rs",
+    "crates/schema/src/from_detail.rs",
+    "crates/schema/src/types.rs",
+    "crates/schema/src/validate.rs",
+    "crates/testkit/src/bin/seed_dev.rs",
+    "crates/transfer/src/convert.rs",
+    "crates/transfer/src/detect.rs",
+    "crates/transfer/src/dump.rs",
+    "crates/transfer/src/seed/generator.rs",
+    "crates/transfer/src/seed/limits.rs",
+    "src-tauri/src/backup/dump.rs",
+    "src-tauri/src/backup/restore.rs",
+    "src-tauri/src/commands/data.rs",
+    "src-tauri/src/ddl_edit/apply.rs",
+    "src-tauri/src/ddl_edit/catalog.rs",
+    "src-tauri/src/export_format.rs",
+    "src-tauri/src/import_data/plan.rs",
+    "src-tauri/src/import_data/run.rs",
+    "src-tauri/src/object_actions.rs",
+    "src-tauri/src/query_sessions.rs",
+    "src-tauri/src/seed_data/plan.rs",
+    "src-tauri/src/seed_data/run.rs",
+    "src-tauri/src/seed_data/target.rs",
+    "src-tauri/src/table_design/apply.rs",
+];
+
+const KINDS: [&str; 2] = ["DbKind::", "SqlKind::"];
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+fn starts_with_cmp(s: &str) -> bool {
+    s.starts_with("==") || s.starts_with("!=")
+}
+
+fn ends_with_cmp(s: &str) -> bool {
+    s.ends_with("==") || s.ends_with("!=")
+}
+
+/// Returns true when `line` contains a two-way `DbKind` / `SqlKind` branch.
+fn offends(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.starts_with("//") {
+        return false;
+    }
+    for kind in KINDS {
+        if !trimmed.contains(kind) {
+            continue;
+        }
+        if trimmed.contains(&format!("if let {kind}")) || trimmed.contains("matches!(") {
+            return true;
+        }
+        for (pos, _) in trimmed.match_indices(kind) {
+            // `== K::` / `!= K::`
+            if ends_with_cmp(trimmed[..pos].trim_end()) {
+                return true;
+            }
+            // `K::<Variant> ==` / `K::<Variant> !=`
+            let rest = &trimmed[pos + kind.len()..];
+            let after_variant = rest.trim_start_matches(is_ident_char);
+            if starts_with_cmp(after_variant.trim_start()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/.."))
+}
+
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            if name != "tests" {
+                collect_rs_files(&path, out);
+            }
+        } else if name.ends_with(".rs") && !name.contains("tests") {
+            out.push(path);
+        }
+    }
+}
+
+fn relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn file_offends(text: &str) -> bool {
+    text.lines()
+        .take_while(|line| line.trim() != "#[cfg(test)]")
+        .any(offends)
+}
+
+fn scan() -> BTreeSet<String> {
+    let root = workspace_root();
+    let mut src_dirs = vec![root.join("src-tauri").join("src")];
+    if let Ok(crates) = fs::read_dir(root.join("crates")) {
+        for entry in crates.flatten() {
+            let src = entry.path().join("src");
+            if src.is_dir() {
+                src_dirs.push(src);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for dir in &src_dirs {
+        collect_rs_files(dir, &mut files);
+    }
+    assert!(!files.is_empty(), "no source files found under {root:?}");
+    files
+        .iter()
+        .filter(|path| {
+            let text = fs::read_to_string(path)
+                .unwrap_or_else(|err| panic!("cannot read {path:?}: {err}"));
+            file_offends(&text)
+        })
+        .map(|path| relative(&root, path))
+        .collect()
+}
+
+#[test]
+fn offends_detects_two_way_branches() {
+    for line in [
+        "if kind == DbKind::MySql {",
+        "    kind != SqlKind::Postgres",
+        "DbKind::MySql == kind",
+        "matches!(kind, DbKind::MySql)",
+        "if let SqlKind::MySql = kind {",
+    ] {
+        assert!(offends(line), "{line}");
+    }
+    for line in [
+        "match kind { DbKind::MySql => 1, DbKind::Postgres => 2 }",
+        "let k = DbKind::MySql;",
+        "// if kind == DbKind::MySql",
+    ] {
+        assert!(!offends(line), "{line}");
+    }
+}
+
+#[test]
+fn no_binary_kind_branches() {
+    let offending = scan();
+    let allowed: BTreeSet<String> = ALLOWED.iter().map(|s| s.replace('\\', "/")).collect();
+    let new: Vec<&String> = offending.difference(&allowed).collect();
+    let stale: Vec<&String> = allowed.difference(&offending).collect();
+    assert!(
+        new.is_empty() && stale.is_empty(),
+        "two-way DbKind/SqlKind branches must become exhaustive matches\n\
+         new offenders: {new:#?}\n\
+         stale ALLOWED entries: {stale:#?}"
+    );
+}
