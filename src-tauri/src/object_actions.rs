@@ -5,10 +5,11 @@ use crate::ddl_exec::{
     DdlHistory, DdlOperations, HISTORY_FAILED,
 };
 use crate::session_manager::{
-    close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, lock, sql_or_close, ConnectionRuntime, SessionManager,
+    METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
-use dnt_core::driver::{Session, SqlSession};
+use dnt_core::driver::SqlSession;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::{Cap, ServerVariant, SqlKind};
@@ -81,9 +82,9 @@ fn object_missing(obj: &ObjectRef) -> DbError {
 }
 
 /// Metadata is read on this operation's session, never from tree caches.
-async fn fingerprint(session: &dyn Session, action: &ObjectAction) -> Result<String, DbError> {
+async fn fingerprint(session: &dyn SqlSession, action: &ObjectAction) -> Result<String, DbError> {
     let i = session.introspector();
-    let kind = session.server_info().kind.require_sql()?;
+    let kind = session.sql_kind();
     if let Some(obj) = action.object() {
         let scope = Scope {
             database: obj.database.clone(),
@@ -282,8 +283,7 @@ async fn namespace_options(session: &dyn SqlSession) -> Result<NamespaceOptions,
     let rows = |sql| rows_with(session, sql, ExecOptions::default());
     let pair = |r: &Vec<Option<String>>| Some((r.first()?.clone()?, r.get(1)?.clone()?));
     let mut out = NamespaceOptions::default();
-    let kind = session.server_info().kind.require_sql()?;
-    match kind {
+    match session.sql_kind() {
         SqlKind::MySql => {
             out.charsets = rows(MYSQL_CHARSETS_SQL)
                 .await?
@@ -347,6 +347,7 @@ impl SessionManager {
         let rt = self.runtime(conn)?;
         let db = namespace_options_db(kind, database);
         let (session, _) = rt.open_query_session(db).await?;
+        let session = sql_or_close(session).await?;
         let out = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
             namespace_options(session.sql()?).await
         })
@@ -370,12 +371,11 @@ impl SessionManager {
         rt.queries.check_ddl_idle()?;
         let db = action_session_db(kind, &action);
         let (session, generation) = rt.open_query_session(db).await?;
-        let dialect = session.sql()?.dialect();
-        let fp = tokio::time::timeout(
-            METADATA_CALL_TIMEOUT,
-            fingerprint(session.as_ref(), &action),
-        )
-        .await;
+        let session = sql_or_close(session).await?;
+        let sql_session = session.sql()?;
+        let dialect = sql_session.dialect();
+        let fp =
+            tokio::time::timeout(METADATA_CALL_TIMEOUT, fingerprint(sql_session, &action)).await;
         close_quietly(session).await;
         let fp =
             fp.map_err(|_| config_error("object", "Metadata timed out; nothing was changed."))??;
@@ -452,6 +452,7 @@ impl SessionManager {
         let kind = stored.rt.cfg.kind.require_sql()?;
         let db = action_session_db(kind, &stored.preview.action);
         let (session, generation) = stored.rt.open_query_session(db).await?;
+        let session = sql_or_close(session).await?;
         let sql = session.sql()?;
         self.object_actions
             .operations
@@ -462,7 +463,7 @@ impl SessionManager {
             }
             let before = session.reconnects();
             session.ping().await?;
-            if fingerprint(session.as_ref(), &stored.preview.action).await? != stored.fingerprint {
+            if fingerprint(sql, &stored.preview.action).await? != stored.fingerprint {
                 return Err(stale());
             }
             self.check_action_context(&stored)?;

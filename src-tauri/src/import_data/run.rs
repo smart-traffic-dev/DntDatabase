@@ -35,7 +35,7 @@ use crate::ddl_exec::{execute, stopped, HISTORY_FAILED};
 use crate::jobs::{JobCtx, JobDone, JobFailure, JobLogLevel, JobRunner, ProgressUnit};
 use crate::object_actions::stale;
 use crate::session_manager::{
-    close_quietly, config_error, ConnectionRuntime, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, sql_or_close, ConnectionRuntime, METADATA_CALL_TIMEOUT,
 };
 use async_trait::async_trait;
 use dnt_core::config::EnvTag;
@@ -871,6 +871,7 @@ impl JobRunner for ImportJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
+        let session = sql_or_close(session).await.map_err(JobFailure::from)?;
         let sql_session = session.sql().map_err(JobFailure::from)?;
         ctx.set_cancel(Some(session.cancel_handle()));
         let cfg_timeout = self.context.rt.cfg.options.query_timeout_s;
@@ -1162,6 +1163,7 @@ impl JobRunner for DryRunJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
+        let session = sql_or_close(session).await.map_err(JobFailure::from)?;
         let sql_session = session.sql().map_err(JobFailure::from)?;
         ctx.set_cancel(Some(session.cancel_handle()));
         let cfg = self.context.rt.cfg.clone();

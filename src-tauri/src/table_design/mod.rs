@@ -19,7 +19,8 @@ pub use apply::{CountedImpact, DesignPreview, DesignReport};
 
 use crate::ddl_exec::DdlOperations;
 use crate::session_manager::{
-    close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, lock, sql_or_close, ConnectionRuntime, SessionManager,
+    METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
@@ -357,7 +358,7 @@ async fn load(session: &dyn SqlSession, object: Option<&ObjectRef>) -> Result<Lo
     };
     let (detail, ddl) = read_table(session, obj).await?;
     let mut base = from_detail(&detail, &server)?;
-    let kind = server.kind.require_sql()?;
+    let kind = session.sql_kind();
     let mysql_create = match kind {
         SqlKind::MySql => ddl.as_deref(),
         SqlKind::Postgres => None,
@@ -570,13 +571,14 @@ impl SessionManager {
             kind: ObjectKind::Table,
         });
         let (session, _) = rt.open_query_session(session_db(kind, &scope)).await?;
+        let session = sql_or_close(session).await?;
         let sql = session.sql()?;
         let server = session.server_info().clone();
         let dialect = sql.dialect();
+        let server_kind = sql.sql_kind();
         let loaded = tokio::time::timeout(METADATA_CALL_TIMEOUT, load(sql, object.as_ref())).await;
         close_quietly(session).await;
         let loaded = loaded.map_err(|_| timed_out())??;
-        let server_kind = server.kind.require_sql()?;
         let design_id = Uuid::new_v4();
         {
             let mut designs = lock(&self.table_designs.designs);
@@ -646,6 +648,7 @@ impl SessionManager {
     ) -> Result<(), DbError> {
         let kind = rt.cfg.kind.require_sql()?;
         let (session, _) = rt.open_query_session(session_db(kind, scope)).await?;
+        let session = sql_or_close(session).await?;
         let sql = session.sql()?;
         let dialect = sql.dialect();
         let loaded = tokio::time::timeout(METADATA_CALL_TIMEOUT, load(sql, object.as_ref())).await;

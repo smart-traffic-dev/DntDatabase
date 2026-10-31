@@ -4,7 +4,7 @@ use crate::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
     TableDetail,
 };
-use crate::server::{Capabilities, DbKind, ServerInfo};
+use crate::server::{Capabilities, DbKind, ServerInfo, SqlKind};
 use crate::sql::{classify, split, Dialect, StatementKind};
 use crate::tx::TxState;
 use crate::value::{ColumnMeta, FullValue, Value};
@@ -273,6 +273,10 @@ impl dyn Session + '_ {
 pub trait SqlSession: Session {
     /// The dialect statements of this session are split and classified with.
     fn dialect(&self) -> Dialect;
+    /// The SQL engine of this session, from its [`SqlSession::dialect`].
+    fn sql_kind(&self) -> SqlKind {
+        crate::sql::build::kind_of(self.dialect())
+    }
     fn tx_state(&self) -> TxState;
     fn in_transaction(&self) -> bool {
         self.tx_state() != TxState::Idle
@@ -807,5 +811,11 @@ mod tests {
         assert_eq!(sql.dialect(), Dialect::Postgres);
         assert!(!sql.in_transaction());
         assert_eq!(s.capabilities().family, EngineFamily::Sql);
+    }
+
+    #[test]
+    fn sql_kind_follows_dialect() {
+        let s: Box<dyn Session> = Box::new(fake());
+        assert_eq!(s.sql().unwrap().sql_kind(), SqlKind::Postgres);
     }
 }

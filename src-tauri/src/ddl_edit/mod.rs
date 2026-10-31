@@ -15,11 +15,12 @@ pub use apply::{DdlEditReport, EditOutcome, ObjectState};
 use crate::ddl_exec::DdlOperations;
 use crate::object_actions::{stale, MAX_PLANS};
 use crate::session_manager::{
-    close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, lock, sql_or_close, ConnectionRuntime, SessionManager,
+    METADATA_CALL_TIMEOUT,
 };
 use crate::table_design::ddl_not_shown;
 use dnt_core::config::EnvTag;
-use dnt_core::driver::{Session, SqlSession};
+use dnt_core::driver::SqlSession;
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::server::{Cap, ServerInfo, SqlKind};
@@ -262,11 +263,11 @@ pub(crate) fn same_catalog_name(engine: SqlKind, catalog: &str, name: &str) -> b
 
 /// Whether an object of `t.kind` named `name` is listed in `t`'s scope.
 pub(crate) async fn object_listed(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     t: &EditTarget,
     name: &str,
 ) -> Result<bool, DbError> {
-    let engine = session.server_info().kind.require_sql()?;
+    let engine = session.sql_kind();
     Ok(session
         .introspector()
         .list_objects(&scope_of(t), t.kind)
@@ -277,13 +278,13 @@ pub(crate) async fn object_listed(
 
 /// Whether `name` is taken among the kinds sharing the namespace of `t.kind`.
 pub(crate) async fn name_taken(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     t: &EditTarget,
     name: &str,
 ) -> Result<bool, DbError> {
     let scope = scope_of(t);
     let i = session.introspector();
-    let engine = session.server_info().kind.require_sql()?;
+    let engine = session.sql_kind();
     for k in namespace_kinds(t.kind, engine) {
         if i.list_objects(&scope, k)
             .await?
@@ -298,7 +299,7 @@ pub(crate) async fn name_taken(
 
 /// A new object's name must not be taken among the kinds sharing its namespace.
 pub(crate) async fn check_name_free(
-    session: &dyn Session,
+    session: &dyn SqlSession,
     t: &EditTarget,
     name: &str,
 ) -> Result<(), DbError> {
@@ -386,6 +387,7 @@ impl SessionManager {
             return Err(DbError::Busy);
         }
         let (session, _) = rt.open_query_session(Some(scope.database.clone())).await?;
+        let session = sql_or_close(session).await?;
         let sql_session = session.sql()?;
         let server = session.server_info().clone();
         let dialect = sql_session.dialect();
@@ -485,6 +487,7 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(Some(edit.target.database.clone()))
             .await?;
+        let session = sql_or_close(session).await?;
         let sql_session = session.sql()?;
         let dialect = sql_session.dialect();
         let checked = tokio::time::timeout(METADATA_CALL_TIMEOUT, async {
@@ -499,7 +502,7 @@ impl SessionManager {
             let header = parse_header(&stmt, dialect)?;
             check_target(&header, &edit.target, &edit.server)?;
             if edit.object.is_none() {
-                check_name_free(session.as_ref(), &edit.target, &header.name).await?;
+                check_name_free(sql_session, &edit.target, &header.name).await?;
             }
             Ok((stmt, header))
         })

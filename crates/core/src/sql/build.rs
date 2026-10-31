@@ -600,7 +600,7 @@ const RAW_WHERE_FORBIDDEN: &[&str] = &[
     "REVOKE", "CALL", "DO", "COPY", "SET",
 ];
 
-fn kind_of(d: Dialect) -> SqlKind {
+pub(crate) fn kind_of(d: Dialect) -> SqlKind {
     match d {
         Dialect::MySql(_) => SqlKind::MySql,
         Dialect::Postgres => SqlKind::Postgres,

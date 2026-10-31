@@ -9,7 +9,8 @@ use crate::ddl_exec::{
 };
 use crate::object_actions::{stale, MAX_PLANS};
 use crate::session_manager::{
-    close_quietly, config_error, lock, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, lock, sql_or_close, ConnectionRuntime, SessionManager,
+    METADATA_CALL_TIMEOUT,
 };
 use dnt_core::config::EnvTag;
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
@@ -135,14 +136,14 @@ pub(super) fn mysql_count_bound(server: &ServerInfo, limit: Duration) -> Option<
 /// a dedicated one that the caller closes afterwards, so nothing is restored), and the
 /// driver's own statement timeout stops it too. A count that has not returned within
 /// `limit + grace` ends the counting: the session is not used again. A count that
-/// fails or times out is "not counted". `Unsupported` only for a non-SQL server.
+/// fails or times out is "not counted".
 pub(super) async fn count_impacts(
     session: &dyn SqlSession,
     impacts: Vec<Impact>,
     limit: Duration,
     grace: Duration,
 ) -> Result<Vec<CountedImpact>, DbError> {
-    let kind = session.server_info().kind.require_sql()?;
+    let kind = session.sql_kind();
     let bound = mysql_count_bound(session.server_info(), limit);
     let mut out: Vec<CountedImpact> = impacts
         .into_iter()
@@ -286,6 +287,7 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(session_db(kind, &design.scope))
             .await?;
+        let session = sql_or_close(session).await?;
         let sql_session = session.sql()?;
         let dialect = sql_session.dialect();
         let draft_name = draft.name.clone();
@@ -405,6 +407,7 @@ impl SessionManager {
             .rt
             .open_query_session(session_db(kind, &stored.scope))
             .await?;
+        let session = sql_or_close(session).await?;
         let sql_session = session.sql()?;
         ops.set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {

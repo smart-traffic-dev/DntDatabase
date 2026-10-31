@@ -78,8 +78,8 @@ fn invalid(message: impl Into<String>) -> RenderError {
 fn sql_kind(server: &ServerInfo) -> Result<SqlKind, RenderError> {
     server
         .kind
-        .sql()
-        .ok_or_else(|| invalid(format!("SQL on {} is not supported.", server.kind.label())))
+        .require_sql()
+        .map_err(|e| invalid(e.to_string()))
 }
 
 fn unsupported(feature: &str, min_version: &str) -> RenderError {
@@ -273,5 +273,26 @@ pub fn check_sql(
     match sql_kind(server)? {
         SqlKind::MySql => mysql::check_sql(c, server, dialect),
         SqlKind::Postgres => pg::check_sql(c, server, dialect),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dnt_core::server::{DbKind, ServerVariant};
+
+    /// A non-SQL server gets the same text as `DbKind::require_sql`'s error.
+    #[test]
+    fn sql_kind_refuses_a_non_sql_server_with_the_require_sql_text() {
+        let mongo = ServerInfo::new(DbKind::Mongo, ServerVariant::Mongo, (7, 0, 0), "7.0.0");
+        assert_eq!(
+            sql_kind(&mongo),
+            Err(invalid("SQL on MongoDB is not supported"))
+        );
+        assert_eq!(
+            DbKind::Mongo.require_sql().unwrap_err().to_string(),
+            "SQL on MongoDB is not supported"
+        );
+        assert_eq!(sql_kind(&crate::test_util::pg()), Ok(SqlKind::Postgres));
     }
 }

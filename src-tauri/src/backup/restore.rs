@@ -55,7 +55,7 @@ use crate::jobs::{
 };
 use crate::object_actions::stale;
 use crate::session_manager::{
-    close_quietly, config_error, lock, ConnectionRuntime, SessionManager,
+    close_quietly, config_error, lock, sql_or_close, ConnectionRuntime, SessionManager,
 };
 use async_trait::async_trait;
 use dnt_core::config::{ConnectionConfig, EnvTag};
@@ -429,6 +429,7 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(Some(request.database.clone()))
             .await?;
+        let session = sql_or_close(session).await?;
         let dialect = session.sql()?.dialect();
         close_quietly(session).await;
         let kind = cfg.kind.require_sql()?;
@@ -633,6 +634,7 @@ impl SessionManager {
                 .rt
                 .open_query_session(Some(stored.request.database.clone()))
                 .await?;
+            let session = sql_or_close(session).await?;
             let same =
                 generation == stored.generation && session.sql()?.dialect() == stored.dialect;
             close_quietly(session).await;
@@ -1134,6 +1136,7 @@ impl JobRunner for AppRestoreJob {
             .open_query_session(Some(self.request.database.clone()))
             .await
             .map_err(JobFailure::from)?;
+        let session = sql_or_close(session).await.map_err(JobFailure::from)?;
         let sql_session = session.sql().map_err(JobFailure::from)?;
         let cancel = RunCancel::new(session.cancel_handle());
         ctx.set_cancel(Some(Arc::new(StopRun(cancel.clone()))));

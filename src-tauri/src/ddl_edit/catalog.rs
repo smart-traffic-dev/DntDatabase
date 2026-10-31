@@ -113,7 +113,7 @@ pub(crate) async fn facts(
     let Some(name) = t.name.as_deref() else {
         return Ok((facts, None));
     };
-    let kind = session.server_info().kind.require_sql()?;
+    let kind = session.sql_kind();
     match kind {
         SqlKind::Postgres => {
             let schema = t.schema.as_deref().unwrap_or_default();

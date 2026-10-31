@@ -148,7 +148,8 @@ pub enum DbError {
     /// The guard needs the user to confirm `count` statements on a Production connection.
     #[error("{count} statement(s) need confirmation on Production")]
     ConfirmationRequired { count: u32 },
-    #[error("{feature} is not supported on server version {version}")]
+    /// An empty `version`: the feature is not supported at all (no version clause).
+    #[error("{feature} is not supported{}", version_note(.version))]
     Unsupported { feature: String, version: String },
     #[error("internal error: {message}")]
     Internal { message: String },
@@ -170,6 +171,14 @@ fn outcome_note(outcome_unknown: &bool) -> &'static str {
         " (the statement may have been applied)"
     } else {
         ""
+    }
+}
+
+fn version_note(version: &str) -> String {
+    if version.is_empty() {
+        String::new()
+    } else {
+        format!(" on server version {version}")
     }
 }
 
@@ -447,7 +456,11 @@ impl From<DbError> for AppError {
                 )
             },
             DbError::Unsupported { feature, version } => AppError {
-                detail: Some(format!("{feature} (server version {version})")),
+                detail: Some(if version.is_empty() {
+                    feature
+                } else {
+                    format!("{feature} (server version {version})")
+                }),
                 ..AppError::base(
                     "unsupported",
                     "This feature is not supported by the server.",
@@ -1116,6 +1129,30 @@ mod tests {
         assert_eq!(a.detail.as_deref(), Some("1 statement"));
         let a: AppError = DbError::Busy.into();
         assert_eq!(a.detail, None);
+    }
+
+    /// Today's text for a non-empty version, recorded before the empty-version fix.
+    const NON_EMPTY_TEXT: &str = "server version is not supported on server version 5.6";
+    const NON_EMPTY_DETAIL: &str = "server version (server version 5.6)";
+
+    #[test]
+    fn unsupported_without_version_omits_the_clause() {
+        // A non-empty version keeps its text and detail.
+        let v = DbError::Unsupported {
+            feature: "server version".into(),
+            version: "5.6".into(),
+        };
+        assert_eq!(v.to_string(), NON_EMPTY_TEXT);
+        let a: AppError = v.into();
+        assert_eq!(a.detail.as_deref(), Some(NON_EMPTY_DETAIL));
+        let e = DbError::Unsupported {
+            feature: "table designer".into(),
+            version: String::new(),
+        };
+        assert_eq!(e.to_string(), "table designer is not supported");
+        let a: AppError = e.into();
+        assert_eq!(a.kind, "unsupported");
+        assert_eq!(a.detail.as_deref(), Some("table designer"));
     }
 
     #[test]

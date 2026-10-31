@@ -2,7 +2,9 @@
 //! columns, enum values, keys and the engine; the driver's logical type of every column
 //! from the metadata of `SELECT <cols> FROM <t> WHERE 1 = 0` on the same session.
 use super::{session_db, table_ref, ImportTarget};
-use crate::session_manager::{close_quietly, config_error, SessionManager, METADATA_CALL_TIMEOUT};
+use crate::session_manager::{
+    close_quietly, config_error, sql_or_close, SessionManager, METADATA_CALL_TIMEOUT,
+};
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, SqlSession};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectRef, TableDetail};
@@ -67,7 +69,7 @@ pub(crate) async fn read_target(
     session: &dyn SqlSession,
     obj: &ObjectRef,
 ) -> Result<TargetRead, DbError> {
-    let kind = session.server_info().kind.require_sql()?;
+    let kind = session.sql_kind();
     let detail = session.introspector().table_detail(obj).await?;
     if detail.columns.is_empty() {
         return Err(config_error("table", "The table has no columns."));
@@ -132,6 +134,7 @@ impl SessionManager {
         let rt = self.runtime(conn)?;
         let kind = cfg.kind.require_sql()?;
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
+        let session = sql_or_close(session).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.sql()?, &table).await;
         close_quietly(session).await;

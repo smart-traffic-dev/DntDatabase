@@ -29,7 +29,8 @@ use crate::jobs::{
 };
 use crate::result_store::block_outside_executor;
 use crate::session_manager::{
-    close_quietly, config_error, ConnectionRuntime, SessionManager, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, sql_or_close, ConnectionRuntime, SessionManager,
+    METADATA_CALL_TIMEOUT,
 };
 use async_trait::async_trait;
 use dnt_core::driver::{
@@ -284,19 +285,18 @@ fn snapshot_lost() -> DbError {
 }
 
 impl<'a> Reader<'a> {
-    /// `Unsupported` for a non-SQL server.
     pub(crate) fn new(
         session: &'a dyn SqlSession,
         stop: StopSignal,
         grace: Duration,
-    ) -> Result<Reader<'a>, DbError> {
-        Ok(Reader {
+    ) -> Reader<'a> {
+        Reader {
             session,
-            kind: session.server_info().kind.require_sql()?,
+            kind: session.sql_kind(),
             stop,
             grace,
             reconnects: session.reconnects(),
-        })
+        }
     }
 
     fn check(&self) -> Result<(), DbError> {
@@ -661,7 +661,8 @@ impl SessionManager {
         }
         let rt = self.runtime(conn)?;
         let (session, _) = rt.open_query_session(Some(database.clone())).await?;
-        let r = Reader::new(session.sql()?, StopSignal::new(), self.cancel_grace)?;
+        let session = sql_or_close(session).await?;
+        let r = Reader::new(session.sql()?, StopSignal::new(), self.cancel_grace);
         let listed = tokio::time::timeout(LIST_TIMEOUT, list_dump_objects(&r, &database, &schemas))
             .await
             .map_err(|_| DbError::timeout(dnt_core::error::ConnectStage::Execute));
@@ -1135,6 +1136,7 @@ impl JobRunner for DumpJob {
                 .rt
                 .open_query_session(Some(self.request.database.clone()))
                 .await?;
+            let session = sql_or_close(session).await?;
             let sql_session = session.sql()?;
             ctx.set_cancel(Some(session.cancel_handle()));
             let written = self.dump(&ctx, sql_session, &mut file).await;
@@ -1185,7 +1187,7 @@ impl DumpJob {
         session: &dyn SqlSession,
         file: &mut DumpFile,
     ) -> Result<Written, DbError> {
-        let r = Reader::new(session, ctx.stop(), self.grace)?;
+        let r = Reader::new(session, ctx.stop(), self.grace);
         let kind = r.kind();
         if DbKind::from(kind) != self.rt.cfg.kind {
             return Err(crate::object_actions::stale());

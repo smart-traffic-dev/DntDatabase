@@ -12,7 +12,7 @@ use crate::ddl_exec::{
 };
 use crate::object_actions::stale;
 use crate::session_manager::{
-    close_quietly, config_error, lock, SessionManager, METADATA_CALL_TIMEOUT,
+    close_quietly, config_error, lock, sql_or_close, SessionManager, METADATA_CALL_TIMEOUT,
 };
 use dnt_core::driver::{ExecOptions, SqlSession, StopSignal};
 use dnt_core::error::{AppError, DbError};
@@ -233,6 +233,7 @@ impl SessionManager {
             .rt
             .open_query_session(Some(stored.scope.database.clone()))
             .await?;
+        let session = sql_or_close(session).await?;
         let sql_session = session.sql()?;
         ops.set_cancel(operation, Some(session.cancel_handle()));
         let checked = async {
@@ -256,7 +257,7 @@ impl SessionManager {
             )
             .await?;
             if stored.new {
-                if name_taken(session.as_ref(), &stored.target, &object_name).await? {
+                if name_taken(sql_session, &stored.target, &object_name).await? {
                     return Err(object_changed());
                 }
             } else {

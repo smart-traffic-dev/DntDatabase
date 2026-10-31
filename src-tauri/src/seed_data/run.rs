@@ -17,7 +17,7 @@ use crate::import_data::target::TargetRead;
 use crate::import_data::{guard_ctx, judge_all, session_db, Layout, PreStep};
 use crate::jobs::{JobCtx, JobDone, JobFailure, JobLogLevel, JobRunner, ProgressUnit};
 use crate::object_actions::stale;
-use crate::session_manager::{close_quietly, config_error, METADATA_CALL_TIMEOUT};
+use crate::session_manager::{close_quietly, config_error, sql_or_close, METADATA_CALL_TIMEOUT};
 use async_trait::async_trait;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::server::SqlKind;
@@ -90,6 +90,7 @@ impl JobRunner for SeedJob {
             .open_query_session(session_db(kind, &self.request.table))
             .await
             .map_err(JobFailure::from)?;
+        let session = sql_or_close(session).await.map_err(JobFailure::from)?;
         let sql_session = session.sql().map_err(JobFailure::from)?;
         ctx.set_cancel(Some(session.cancel_handle()));
         let mut w = Writer::new(

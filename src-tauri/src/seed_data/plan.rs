@@ -15,7 +15,7 @@ use crate::import_data::{
 use crate::jobs::{JobKind, JobParams, JobSpec};
 use crate::object_actions::stale;
 use crate::session_manager::{
-    close_quietly, config_error, lock, ConnectionRuntime, SessionManager,
+    close_quietly, config_error, lock, sql_or_close, ConnectionRuntime, SessionManager,
 };
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::error::DbError;
@@ -183,6 +183,7 @@ impl SessionManager {
         let (session, generation) = rt
             .open_query_session(session_db(kind, &request.table))
             .await?;
+        let session = sql_or_close(session).await?;
         let sql_session = session.sql()?;
         let dialect = sql_session.dialect();
         let result = async {
@@ -402,6 +403,7 @@ impl SessionManager {
             .rt
             .open_query_session(session_db(kind, &stored.request.table))
             .await?;
+        let session = sql_or_close(session).await?;
         let checked = async {
             if generation != stored.generation || session.sql()?.dialect() != stored.dialect {
                 return Err(stale());

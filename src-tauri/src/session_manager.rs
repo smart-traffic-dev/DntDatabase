@@ -328,6 +328,17 @@ pub(crate) async fn close_quietly(session: Box<dyn Session>) {
     let _ = tokio::time::timeout(CLOSE_DEAD_TIMEOUT, session.close()).await;
 }
 
+/// `session` unchanged when it is a SQL session; otherwise it is closed (never just
+/// dropped) and the `sql()` error returned. Callers can then `.sql()` it infallibly.
+pub(crate) async fn sql_or_close(session: Box<dyn Session>) -> Result<Box<dyn Session>, DbError> {
+    let refused = session.sql().err();
+    if let Some(e) = refused {
+        close_quietly(session).await;
+        return Err(e);
+    }
+    Ok(session)
+}
+
 pub struct SessionManager {
     drivers: HashMap<DbKind, Arc<dyn Driver>>,
     pub(crate) repo: Arc<ConnectionRepo>,

@@ -3,7 +3,7 @@
 use super::{SeedColumn, SeedForeignKey, SeedTarget};
 use crate::import_data::session_db;
 use crate::import_data::target::{read_target_bounded, TargetRead};
-use crate::session_manager::{close_quietly, SessionManager};
+use crate::session_manager::{close_quietly, sql_or_close, SessionManager};
 use dnt_core::error::DbError;
 use dnt_core::meta::ObjectRef;
 use dnt_core::server::{Cap, SqlKind};
@@ -52,6 +52,7 @@ impl SessionManager {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
         let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
+        let session = sql_or_close(session).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.sql()?, &table).await;
         close_quietly(session).await;
