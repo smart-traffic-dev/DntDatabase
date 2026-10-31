@@ -6,7 +6,7 @@ use crate::import_data::target::{read_target_bounded, TargetRead};
 use crate::session_manager::{close_quietly, SessionManager};
 use dnt_core::error::DbError;
 use dnt_core::meta::ObjectRef;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_query::Atomicity;
 use dnt_transfer::seed::infer::{check_values, fk_of, infer_plan, unique_single};
 use uuid::Uuid;
@@ -38,8 +38,11 @@ pub(crate) fn seed_columns(read: &TargetRead, today: time::Date) -> Vec<SeedColu
 }
 
 /// Whether the whole job runs in one transaction (as the import, R15).
-pub(crate) fn transactional(kind: DbKind, read: &TargetRead) -> bool {
-    kind == DbKind::Postgres || read.atomicity == Atomicity::Yes
+pub(crate) fn transactional(kind: SqlKind, read: &TargetRead) -> bool {
+    match kind {
+        SqlKind::MySql => read.atomicity == Atomicity::Yes,
+        SqlKind::Postgres => true,
+    }
 }
 
 impl SessionManager {
@@ -47,7 +50,8 @@ impl SessionManager {
     pub async fn seed_target(&self, conn: Uuid, table: ObjectRef) -> Result<SeedTarget, DbError> {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let (session, _) = rt.open_query_session(session_db(cfg.kind, &table)).await?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.as_ref(), &table).await;
         close_quietly(session).await;
@@ -57,7 +61,7 @@ impl SessionManager {
             columns: seed_columns(&read, today),
             env: cfg.env_tag,
             read_only: cfg.read_only,
-            transactional: transactional(cfg.kind, &read),
+            transactional: transactional(kind, &read),
             server,
             seed: Uuid::new_v4().as_u128() as u32,
         })

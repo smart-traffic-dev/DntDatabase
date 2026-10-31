@@ -5,7 +5,7 @@ use crate::session_manager::{lock, METADATA_CALL_TIMEOUT};
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{ForeignKeyDetail, ObjectRef};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::TableRef;
 use dnt_core::sql::classify;
 use dnt_core::sql::ident::quote_ident;
@@ -25,10 +25,10 @@ pub(crate) const KEY_CACHE_MAX: usize = 32;
 
 /// The parent table of `fk` on a child table `child`: MySQL names the parent's database in
 /// `ref_schema` (default: the child's), PostgreSQL its schema (default: the child's).
-pub(crate) fn parent_ref(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail) -> TableRef {
+pub(crate) fn parent_ref(kind: SqlKind, child: &ObjectRef, fk: &ForeignKeyDetail) -> TableRef {
     match kind {
-        DbKind::MySql => TableRef {
-            kind: kind.as_sql(),
+        SqlKind::MySql => TableRef {
+            kind,
             database: fk
                 .ref_schema
                 .clone()
@@ -36,8 +36,8 @@ pub(crate) fn parent_ref(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail)
             schema: None,
             name: fk.ref_table.clone(),
         },
-        DbKind::Postgres => TableRef {
-            kind: kind.as_sql(),
+        SqlKind::Postgres => TableRef {
+            kind,
             database: child.database.clone(),
             schema: fk.ref_schema.clone().or_else(|| child.schema.clone()),
             name: fk.ref_table.clone(),
@@ -47,11 +47,11 @@ pub(crate) fn parent_ref(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail)
 
 /// The key read of `fk` (identifiers quoted; NULL tuples left out; ordered so the preview
 /// is reproducible).
-pub(crate) fn fk_key_sql(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail) -> String {
+pub(crate) fn fk_key_sql(kind: SqlKind, child: &ObjectRef, fk: &ForeignKeyDetail) -> String {
     let cols: Vec<String> = fk
         .ref_columns
         .iter()
-        .map(|c| quote_ident(kind.as_sql(), c))
+        .map(|c| quote_ident(kind, c))
         .collect();
     let not_null: Vec<String> = cols.iter().map(|c| format!("{c} IS NOT NULL")).collect();
     format!(
@@ -81,7 +81,7 @@ pub(crate) async fn read_fk_keys(
     child: &ObjectRef,
     fk: &ForeignKeyDetail,
 ) -> Result<Vec<Vec<FullValue>>, DbError> {
-    let sql = fk_key_sql(session.server_info().kind, child, fk);
+    let sql = fk_key_sql(session.server_info().kind.as_sql(), child, fk); // R1: boundary
     let opts = ExecOptions {
         max_rows: MAX_KEYS,
         full_bytes: true,
@@ -119,7 +119,7 @@ pub(crate) struct KeyId {
 pub(crate) fn key_id(
     conn: Uuid,
     generation: u64,
-    kind: DbKind,
+    kind: SqlKind,
     child: &ObjectRef,
     fk: &ForeignKeyDetail,
 ) -> KeyId {

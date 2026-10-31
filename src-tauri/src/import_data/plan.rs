@@ -19,7 +19,7 @@ use crate::session_manager::{
 use dnt_core::config::EnvTag;
 use dnt_core::error::DbError;
 use dnt_core::meta::TableDetail;
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::build::{insert_head, ColumnTarget, InsertOptions, OnConflict, TableRef};
 use dnt_core::sql::{Dialect, MySqlMode};
 use dnt_core::value::LogicalType;
@@ -89,7 +89,10 @@ pub(crate) fn pre_step(
     } else {
         format!("DELETE FROM {rel}")
     };
-    let irreversible = table.kind == DbKind::MySql.as_sql() && (*truncate || !transactional);
+    let irreversible = match table.kind {
+        SqlKind::MySql => *truncate || !transactional,
+        SqlKind::Postgres => false,
+    };
     Some(PreStep {
         sql,
         irreversible,
@@ -122,45 +125,49 @@ fn warnings(
     layout: &Layout,
 ) -> Vec<String> {
     let (detail, atomicity) = (&read.detail, read.atomicity);
-    let mysql = server.kind == DbKind::MySql;
+    let kind = server.kind.as_sql(); // R1: boundary
     let mut out = Vec::new();
     if !transactional {
         out.push("Not transactional: batches already written stay if the import stops.".into());
     }
-    if mysql && atomicity == Atomicity::Unknown && !detail.triggers.is_empty() {
-        out.push(
-            "The table has triggers: the import runs without one transaction (each batch \
-             commits on its own)."
-                .into(),
-        );
-    }
-    if let ImportMode::Upsert { key } = &request.mode {
-        if mysql && other_unique_keys(detail, key) {
-            out.push(
-                "The table has other unique keys: MySQL updates the row matching any unique key."
-                    .into(),
-            );
+    match kind {
+        SqlKind::MySql => {
+            if atomicity == Atomicity::Unknown && !detail.triggers.is_empty() {
+                out.push(
+                    "The table has triggers: the import runs without one transaction (each \
+                     batch commits on its own)."
+                        .into(),
+                );
+            }
+            if let ImportMode::Upsert { key } = &request.mode {
+                if other_unique_keys(detail, key) {
+                    out.push(
+                        "The table has other unique keys: MySQL updates the row matching any \
+                         unique key."
+                            .into(),
+                    );
+                }
+                let updates = matches!(&layout.opts.on_conflict, OnConflict::Update { update, .. } if !update.is_empty());
+                if updates
+                    && server.variant == ServerVariant::MySql8
+                    && server.version >= (8, 0, 20)
+                {
+                    out.push(
+                        "MySQL 8.0.20 and later report VALUES() in ON DUPLICATE KEY UPDATE as \
+                         deprecated (a warning); the import still works."
+                            .into(),
+                    );
+                }
+            }
         }
-        let updates = matches!(&layout.opts.on_conflict, OnConflict::Update { update, .. } if !update.is_empty());
-        if mysql
-            && updates
-            && server.variant == ServerVariant::MySql8
-            && server.version >= (8, 0, 20)
-        {
-            out.push(
-                "MySQL 8.0.20 and later report VALUES() in ON DUPLICATE KEY UPDATE as \
-                 deprecated (a warning); the import still works."
-                    .into(),
-            );
-        }
+        SqlKind::Postgres => {}
     }
     if let ImportMode::Replace { truncate: true } = &request.mode {
-        out.push(if mysql {
-            "TRUNCATE commits at once and resets AUTO_INCREMENT.".into()
-        } else {
-            "TRUNCATE also empties the tables that inherit from this one and fires ON \
-             TRUNCATE triggers."
-                .into()
+        out.push(match kind {
+            SqlKind::MySql => "TRUNCATE commits at once and resets AUTO_INCREMENT.".into(),
+            SqlKind::Postgres => "TRUNCATE also empties the tables that inherit from this one \
+                                   and fires ON TRUNCATE triggers."
+                .into(),
         });
     }
     if let Some(w) = pre.and_then(|p| p.warning.clone()) {
@@ -209,7 +216,7 @@ async fn sample(
 }
 
 /// The temporary table statements of a server-check dry run, as the guard sees them.
-fn dry_run_statements(req: &ImportRequest, kind: DbKind) -> Result<Vec<String>, DbError> {
+fn dry_run_statements(req: &ImportRequest, kind: SqlKind) -> Result<Vec<String>, DbError> {
     let target = table_ref(kind, &req.table);
     let tmp = temp_table(kind, &target);
     let cols: Vec<ColumnTarget> = req
@@ -236,10 +243,10 @@ fn dry_run_statements(req: &ImportRequest, kind: DbKind) -> Result<Vec<String>, 
     ])
 }
 
-fn dialect_of(kind: DbKind) -> Dialect {
+fn dialect_of(kind: SqlKind) -> Dialect {
     match kind {
-        DbKind::MySql => Dialect::MySql(MySqlMode::default()),
-        DbKind::Postgres => Dialect::Postgres,
+        SqlKind::MySql => Dialect::MySql(MySqlMode::default()),
+        SqlKind::Postgres => Dialect::Postgres,
     }
 }
 
@@ -257,7 +264,8 @@ impl SessionManager {
     pub async fn import_prepare(&self, request: ImportRequest) -> Result<ImportPreview, DbError> {
         let conn = request.connection_id;
         let cfg = self.repo.get(conn)?;
-        let request = normalise(request, cfg.kind)?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let request = normalise(request, kind)?;
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
@@ -265,7 +273,7 @@ impl SessionManager {
         let path = PathBuf::from(&request.path);
         let file = hash_file(path.clone()).await?;
         let (session, generation) = rt
-            .open_query_session(session_db(cfg.kind, &request.table))
+            .open_query_session(session_db(kind, &request.table))
             .await?;
         let dialect = session.dialect();
         let server = session.server_info().clone();
@@ -282,12 +290,15 @@ impl SessionManager {
         if !report.errors.is_empty() {
             return Err(mapping_error(&report));
         }
-        let layout = Layout::new(&request, &read.columns, cfg.kind, dialect)?;
+        let layout = Layout::new(&request, &read.columns, kind, dialect)?;
         check_sources(
             &request,
             file_columns(path.clone(), request.source.clone()).await?,
         )?;
-        let transactional = cfg.kind == DbKind::Postgres || read.atomicity == Atomicity::Yes;
+        let transactional = match kind {
+            SqlKind::MySql => read.atomicity == Atomicity::Yes,
+            SqlKind::Postgres => true,
+        };
         let pre = pre_step(&request.mode, &layout.table, transactional);
         let insert_head = layout.head().map_err(build_error)?;
         let insert_tail = layout.tail().map_err(build_error)?;
@@ -349,7 +360,7 @@ impl SessionManager {
             preview.plan_id,
             StoredImport {
                 preview: preview.clone(),
-                statement_atomic: statement_atomic(&read.detail, cfg.kind),
+                statement_atomic: statement_atomic(&read.detail, kind),
                 request,
                 rt,
                 generation,
@@ -395,9 +406,10 @@ impl SessionManager {
         if file.sha256 != stored.preview.file.sha256 || file.size != stored.preview.file.size {
             return Err(file_changed_before());
         }
+        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
         let (session, generation) = stored
             .rt
-            .open_query_session(session_db(stored.rt.cfg.kind, &stored.request.table))
+            .open_query_session(session_db(kind, &stored.request.table))
             .await?;
         let checked = async {
             if generation != stored.generation || session.dialect() != stored.dialect {
@@ -453,17 +465,18 @@ impl SessionManager {
     pub async fn import_dry_run(&self, req: DryRunRequest) -> Result<Uuid, DbError> {
         let conn = req.request.connection_id;
         let cfg = self.repo.get(conn)?;
-        let request = normalise(req.request, cfg.kind)?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let request = normalise(req.request, kind)?;
         let columns = file_columns(PathBuf::from(&request.path), request.source.clone()).await?;
         check_sources(&request, columns)?;
         if req.server_check {
             if cfg.read_only {
                 return Err(DbError::Blocked { count: 1 });
             }
-            let statements = dry_run_statements(&request, cfg.kind)?;
+            let statements = dry_run_statements(&request, kind)?;
             judge_all(
                 &statements,
-                dialect_of(cfg.kind),
+                dialect_of(kind),
                 guard_ctx(cfg.env_tag, cfg.read_only),
                 req.confirmed,
             )?;

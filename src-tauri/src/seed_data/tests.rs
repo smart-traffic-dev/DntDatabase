@@ -6,7 +6,7 @@ use crate::import_data::tests::{column, fixture_detail, index, FakeDriver, Fx};
 use dnt_core::config::EnvTag;
 use dnt_core::driver::Driver;
 use dnt_core::meta::{ForeignKeyDetail, ObjectKind, ObjectRef, TableDetail, TableOptions};
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use dnt_transfer::seed::{FakeKind, Generator};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -197,7 +197,7 @@ async fn normalise_rules() {
                 rows,
                 ..base.clone()
             },
-            DbKind::MySql,
+            SqlKind::MySql,
         )
         .unwrap_err();
         assert!(
@@ -207,7 +207,7 @@ async fn normalise_rules() {
     }
     let mut with_schema = base.clone();
     with_schema.table.schema = Some("x".into());
-    let err = normalise(with_schema, DbKind::MySql).unwrap_err();
+    let err = normalise(with_schema, SqlKind::MySql).unwrap_err();
     assert!(err
         .to_string()
         .contains("MySQL has no schemas inside a database."));
@@ -216,7 +216,7 @@ async fn normalise_rules() {
             batch_rows: 0,
             ..base.clone()
         },
-        DbKind::MySql,
+        SqlKind::MySql,
     )
     .unwrap();
     assert_eq!(n.batch_rows, 1000);
@@ -225,7 +225,7 @@ async fn normalise_rules() {
             batch_rows: 500_000,
             ..base
         },
-        DbKind::MySql,
+        SqlKind::MySql,
     )
     .unwrap();
     assert_eq!(n.batch_rows, 100_000);
@@ -255,13 +255,13 @@ fn obj(database: &str, schema: Option<&str>) -> ObjectRef {
 fn fk_key_query_quotes_identifiers() {
     let f = fk("f", &["id"], Some("shop"), "we`ird");
     assert_eq!(
-        fk_key_sql(DbKind::MySql, &obj("shop", None), &f),
+        fk_key_sql(SqlKind::MySql, &obj("shop", None), &f),
         "SELECT DISTINCT `id` FROM `shop`.`we``ird` WHERE `id` IS NOT NULL ORDER BY `id` LIMIT 10000"
     );
     // MySQL without ref_schema: the child's database.
     let f = fk("f", &["id"], None, "parent");
     assert_eq!(
-        fk_key_sql(DbKind::MySql, &obj("app", None), &f),
+        fk_key_sql(SqlKind::MySql, &obj("app", None), &f),
         "SELECT DISTINCT `id` FROM `app`.`parent` WHERE `id` IS NOT NULL ORDER BY `id` LIMIT 10000"
     );
 }
@@ -269,7 +269,7 @@ fn fk_key_query_quotes_identifiers() {
 #[tokio::test]
 async fn fk_keys_skip_null_tuples_and_use_ref_schema() {
     let f = fk("f", &["a", "b"], Some("other"), "parent");
-    let sql = fk_key_sql(DbKind::Postgres, &obj("shop", Some("public")), &f);
+    let sql = fk_key_sql(SqlKind::Postgres, &obj("shop", Some("public")), &f);
     assert_eq!(
         sql,
         "SELECT DISTINCT \"a\", \"b\" FROM \"other\".\"parent\" WHERE \"a\" IS NOT NULL AND \"b\" IS NOT NULL ORDER BY \"a\", \"b\" LIMIT 10000"
@@ -736,14 +736,14 @@ fn key_ids_differ_by_database() {
     let a = super::keys::key_id(
         uuid::Uuid::nil(),
         1,
-        DbKind::Postgres,
+        SqlKind::Postgres,
         &obj("db_a", Some("public")),
         &f,
     );
     let b = super::keys::key_id(
         uuid::Uuid::nil(),
         1,
-        DbKind::Postgres,
+        SqlKind::Postgres,
         &obj("db_b", Some("public")),
         &f,
     );
@@ -772,4 +772,64 @@ async fn empty_key_sets_are_not_cached() {
             .unwrap();
     }
     assert_eq!(reads.load(Ordering::SeqCst), 2);
+}
+
+/// The engine-specific review warnings: MySQL's trigger note and each engine's TRUNCATE note.
+#[tokio::test]
+async fn prepare_warnings_by_kind() {
+    for kind in [DbKind::MySql, DbKind::Postgres] {
+        let mut detail = orders_detail(kind);
+        detail.triggers = vec![dnt_core::meta::TriggerDetail {
+            name: "orders_audit".into(),
+            timing: "AFTER".into(),
+            event: "INSERT".into(),
+        }];
+        let fx = fixture_detail(kind, detail, None, false, None).await;
+        with_customers(&fx);
+        let mut req = base_request(&fx, 2).await;
+        req.existing = ExistingRows::Truncate;
+        let warnings = fx.sm.seed_prepare(req).await.unwrap().warnings;
+        let triggers = "The table has triggers: the job runs without one transaction (each batch \
+                        commits on its own).";
+        let has = |w: &str| warnings.iter().any(|x| x == w);
+        match kind {
+            DbKind::MySql => {
+                assert!(has(triggers), "{warnings:?}");
+                assert!(has("TRUNCATE commits at once and resets AUTO_INCREMENT."));
+            }
+            DbKind::Postgres => {
+                assert!(!has(triggers), "{warnings:?}");
+                assert!(has(
+                    "TRUNCATE also empties the tables that inherit from this one and fires ON \
+                     TRUNCATE triggers."
+                ));
+            }
+        }
+    }
+}
+
+/// A job that generates no column: PostgreSQL refuses it, MySQL inserts default rows.
+#[tokio::test]
+async fn no_generated_column_by_kind() {
+    for kind in [DbKind::MySql, DbKind::Postgres] {
+        let mut detail = orders_detail(kind);
+        detail
+            .columns
+            .retain(|c| c.name == "id" || c.name == "note");
+        detail.indexes.retain(|ix| ix.primary);
+        detail.foreign_keys.clear();
+        let fx = fixture_detail(kind, detail, None, false, None).await;
+        let mut req = base_request(&fx, 2).await;
+        for c in &mut req.columns {
+            c.generator = Generator::Skip;
+        }
+        let result = fx.sm.seed_prepare(req).await;
+        match kind {
+            DbKind::MySql => assert!(result.is_ok(), "{result:?}"),
+            DbKind::Postgres => assert!(
+                matches!(&result, Err(DbError::Config { field: Some(f), message }) if f == "columns" && message == "Choose a generator for at least one column."),
+                "{result:?}"
+            ),
+        }
+    }
 }

@@ -30,7 +30,7 @@ use crate::session_manager::config_error;
 use dnt_core::config::EnvTag;
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::value::Value;
 use dnt_transfer::convert::TargetColumn;
 use dnt_transfer::seed::engine::{FkKeys, SeedColumnSpec};
@@ -155,7 +155,7 @@ pub struct SeedPreview {
 }
 
 /// The request's own checks (no server needed); the batch size is normalised.
-pub(crate) fn normalise(mut req: SeedRequest, kind: DbKind) -> Result<SeedRequest, DbError> {
+pub(crate) fn normalise(mut req: SeedRequest, kind: SqlKind) -> Result<SeedRequest, DbError> {
     if req.table.kind != ObjectKind::Table
         || req.table.database.is_empty()
         || req.table.name.is_empty()
@@ -163,16 +163,16 @@ pub(crate) fn normalise(mut req: SeedRequest, kind: DbKind) -> Result<SeedReques
         return Err(config_error("table", "Choose a table to fill."));
     }
     match (kind, &req.table.schema) {
-        (DbKind::MySql, Some(_)) => {
+        (SqlKind::MySql, Some(_)) => {
             return Err(config_error(
                 "table",
                 "MySQL has no schemas inside a database.",
             ))
         }
-        (DbKind::Postgres, None) => {
+        (SqlKind::Postgres, None) => {
             return Err(config_error("table", "A schema is required on PostgreSQL."))
         }
-        _ => {}
+        (SqlKind::MySql, None) | (SqlKind::Postgres, Some(_)) => {}
     }
     if req.rows == 0 || req.rows > MAX_ROWS {
         return Err(config_error("rows", "Choose between 1 and 1,000,000 rows."));

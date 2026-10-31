@@ -6,6 +6,7 @@ use crate::session_manager::{close_quietly, config_error, SessionManager, METADA
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectRef, TableDetail};
+use dnt_core::server::SqlKind;
 use dnt_core::sql::classify;
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::value::{ColumnMeta, Value};
@@ -40,15 +41,11 @@ impl RowSink for Metas {
 }
 
 /// `SELECT <every column> FROM <t> WHERE 1 = 0`: no row, only the column types.
-pub(crate) fn types_sql(
-    detail: &TableDetail,
-    obj: &ObjectRef,
-    kind: dnt_core::server::DbKind,
-) -> String {
+pub(crate) fn types_sql(detail: &TableDetail, obj: &ObjectRef, kind: SqlKind) -> String {
     let list: Vec<String> = detail
         .columns
         .iter()
-        .map(|c| quote_ident(kind.as_sql(), &c.name))
+        .map(|c| quote_ident(kind, &c.name))
         .collect();
     format!(
         "SELECT {} FROM {} WHERE 1 = 0",
@@ -70,7 +67,7 @@ pub(crate) async fn read_target(
     session: &dyn Session,
     obj: &ObjectRef,
 ) -> Result<TargetRead, DbError> {
-    let kind = session.server_info().kind;
+    let kind = session.server_info().kind.as_sql(); // R1: boundary
     let detail = session.introspector().table_detail(obj).await?;
     if detail.columns.is_empty() {
         return Err(config_error("table", "The table has no columns."));
@@ -93,11 +90,11 @@ pub(crate) async fn read_target(
         .columns
         .iter()
         .zip(&metas)
-        .map(|(cd, m)| TargetColumn::from_detail(cd, m.logical, kind.as_sql()))
+        .map(|(cd, m)| TargetColumn::from_detail(cd, m.logical, kind))
         .collect();
     Ok(TargetRead {
         keys: key_choices(&detail),
-        atomicity: dnt_query::atomicity(&detail, kind.as_sql()),
+        atomicity: dnt_query::atomicity(&detail, kind),
         fingerprint: dnt_query::fingerprint(&detail),
         columns,
         detail,
@@ -117,10 +114,10 @@ pub(crate) async fn read_target_bounded(
 /// Whether one statement on the table is all-or-nothing (a failed multi-row `INSERT`
 /// leaves no row): PostgreSQL, and MySQL transactional engines (triggers run inside the
 /// statement there).
-pub(crate) fn statement_atomic(detail: &TableDetail, kind: dnt_core::server::DbKind) -> bool {
+pub(crate) fn statement_atomic(detail: &TableDetail, kind: SqlKind) -> bool {
     let mut d = detail.clone();
     d.triggers.clear();
-    dnt_query::atomicity(&d, kind.as_sql()) == Atomicity::Yes
+    dnt_query::atomicity(&d, kind) == Atomicity::Yes
 }
 
 impl SessionManager {
@@ -133,7 +130,8 @@ impl SessionManager {
     ) -> Result<ImportTarget, DbError> {
         let cfg = self.repo.get(conn)?;
         let rt = self.runtime(conn)?;
-        let (session, _) = rt.open_query_session(session_db(cfg.kind, &table)).await?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let (session, _) = rt.open_query_session(session_db(kind, &table)).await?;
         let server = session.server_info().clone();
         let read = read_target_bounded(session.as_ref(), &table).await;
         close_quietly(session).await;

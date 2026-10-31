@@ -63,7 +63,7 @@ use dnt_core::driver::{
     Canceller, ExecOptions, ResultSummary, RowSink, Session, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{AppError, ConnectStage, DbError};
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::{classify, Dialect, SplitEvent, SplitOptions, StatementKind, StreamSplitter};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
@@ -260,14 +260,18 @@ fn restore_invocation(
 
 /// What the scan and the job check statements against.
 fn scan_target(database: &str, dialect: Dialect, server: &ServerInfo) -> ScanTarget {
+    let kind = server.kind.as_sql(); // R1: boundary
     ScanTarget {
-        kind: server.kind.as_sql(),
+        kind,
         database: database.to_string(),
         dialect,
-        server: (server.kind == DbKind::MySql).then_some(MySqlServer {
-            version: server.version,
-            mariadb: server.variant == ServerVariant::MariaDb,
-        }),
+        server: match kind {
+            SqlKind::MySql => Some(MySqlServer {
+                version: server.version,
+                mariadb: server.variant == ServerVariant::MariaDb,
+            }),
+            SqlKind::Postgres => None,
+        },
     }
 }
 
@@ -422,7 +426,7 @@ impl SessionManager {
             .await?;
         let dialect = session.dialect();
         close_quietly(session).await;
-        let kind = cfg.kind;
+        let kind = cfg.kind.as_sql(); // R1: boundary
         let target = scan_target(&request.database, dialect, rt.server_info());
         let path = PathBuf::from(&request.path);
         let analysis = {
@@ -434,7 +438,10 @@ impl SessionManager {
                 })?
                 .map_err(|e| config_error("path", &format!("Could not read the file: {e}.")))?
         };
-        let pg = kind == DbKind::Postgres;
+        let pg = match kind {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => true,
+        };
         let mut warnings: Vec<String> = Vec::new();
         let partial = "Not in one transaction: a failure leaves a partial restore.".to_string();
         let (restore_path, stats, transactional) = match analysis.container {
@@ -770,9 +777,10 @@ async fn write_history(h: HistoryLine<'_>) -> bool {
     )
     // One comment line: a database name with a line break must not end it early.
     .replace(['\r', '\n'], " ");
-    let d = match h.context.cfg.kind {
-        DbKind::MySql => Dialect::MySql(Default::default()),
-        DbKind::Postgres => Dialect::Postgres,
+    let kind = h.context.cfg.kind.as_sql(); // R1: boundary
+    let d = match kind {
+        SqlKind::MySql => Dialect::MySql(Default::default()),
+        SqlKind::Postgres => Dialect::Postgres,
     };
     let sql = dnt_query::redact::redact(&text, d);
     let error = h.error.as_ref();

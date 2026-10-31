@@ -32,7 +32,7 @@ use crate::commands::transfer::path_error;
 use crate::result_store::{block_outside_executor, value_bytes};
 use dnt_core::driver::{ResultSummary, RowSink};
 use dnt_core::error::DbError;
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::value::{ColumnMeta, Value};
 use serde::{Deserialize, Serialize};
@@ -535,7 +535,7 @@ impl FormatWriter for Markdown {
 
 struct Sql {
     out: Out,
-    kind: DbKind,
+    kind: SqlKind,
     table: String,
     columns: String,
 }
@@ -547,14 +547,14 @@ struct Sql {
 ///   bytes in hex.
 /// - PostgreSQL: quotes doubled; a string holding `\` is an escape string `E'…'` with
 ///   backslashes doubled (the same with `standard_conforming_strings` on or off).
-pub fn sql_string(kind: DbKind, s: &str) -> String {
+pub fn sql_string(kind: SqlKind, s: &str) -> String {
     let quoted = || s.replace('\'', "''");
     match kind {
-        DbKind::MySql if s.contains(['\\', '\0']) => format!("_utf8mb4 X'{}'", hex(s.as_bytes())),
-        DbKind::Postgres if s.contains('\\') => {
+        SqlKind::MySql if s.contains(['\\', '\0']) => format!("_utf8mb4 X'{}'", hex(s.as_bytes())),
+        SqlKind::Postgres if s.contains('\\') => {
             format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
         }
-        _ => format!("'{}'", quoted()),
+        SqlKind::MySql | SqlKind::Postgres => format!("'{}'", quoted()),
     }
 }
 
@@ -606,7 +606,7 @@ fn pg_bytea_array(items: &[Value]) -> String {
         .iter()
         .map(|v| match v {
             Value::Array(inner) => pg_bytea_array(inner),
-            v => sql_literal(DbKind::Postgres, v),
+            v => sql_literal(SqlKind::Postgres, v),
         })
         .collect();
     format!("ARRAY[{}]", parts.join(", "))
@@ -621,7 +621,7 @@ fn mysql_geometry(text: &str) -> Option<String> {
 }
 
 /// The SQL literal of a value for `kind`.
-pub fn sql_literal(kind: DbKind, v: &Value) -> String {
+pub fn sql_literal(kind: SqlKind, v: &Value) -> String {
     match v {
         Value::Null => "NULL".into(),
         v if is_partial(v) => "NULL".into(),
@@ -633,19 +633,26 @@ pub fn sql_literal(kind: DbKind, v: &Value) -> String {
         Value::Float(f) => sql_string(kind, &float_text(*f)),
         Value::Decimal(s) if is_sql_number(s) => s.clone(),
         Value::Bytes { preview, .. } => match kind {
-            DbKind::MySql => format!("X'{}'", hex(preview)),
+            SqlKind::MySql => format!("X'{}'", hex(preview)),
             // An escape string, so `standard_conforming_strings = off` reads it the same.
-            DbKind::Postgres => format!("E'\\\\x{}'::bytea", hex(preview)),
+            SqlKind::Postgres => format!("E'\\\\x{}'::bytea", hex(preview)),
         },
-        Value::Array(items) if kind == DbKind::Postgres && has_bytes(items) => {
-            format!("{}::bytea[]", pg_bytea_array(items))
-        }
-        Value::Other { type_name, text } if kind == DbKind::MySql && type_name == "geometry" => {
-            mysql_geometry(text).unwrap_or_else(|| sql_string(kind, text))
-        }
+        Value::Array(items) if has_bytes(items) => match kind {
+            SqlKind::MySql => text_literal(kind, v),
+            SqlKind::Postgres => format!("{}::bytea[]", pg_bytea_array(items)),
+        },
+        Value::Other { type_name, text } if type_name == "geometry" => match kind {
+            SqlKind::MySql => mysql_geometry(text).unwrap_or_else(|| sql_string(kind, text)),
+            SqlKind::Postgres => text_literal(kind, v),
+        },
         Value::DateTime(s) | Value::TimestampTz(s) => sql_string(kind, s),
-        other => sql_string(kind, &cell_text(other).unwrap_or_default()),
+        other => text_literal(kind, other),
     }
+}
+
+/// A value as the string literal of its cell text.
+fn text_literal(kind: SqlKind, v: &Value) -> String {
+    sql_string(kind, &cell_text(v).unwrap_or_default())
 }
 
 impl FormatWriter for Sql {
@@ -660,12 +667,13 @@ impl FormatWriter for Sql {
         }
         let names: Vec<String> = cols
             .iter()
-            .map(|c| quote_ident(self.kind.as_sql(), &c.name))
+            .map(|c| quote_ident(self.kind, &c.name))
             .collect();
         self.columns = names.join(", ");
-        if self.kind == DbKind::MySql {
+        match self.kind {
             // The file's strings are UTF-8 whatever the importing client's charset.
-            self.out.put("SET NAMES utf8mb4;\n")?;
+            SqlKind::MySql => self.out.put("SET NAMES utf8mb4;\n")?,
+            SqlKind::Postgres => {}
         }
         Ok(())
     }
@@ -864,7 +872,7 @@ impl FormatWriter for Xlsx {
 /// `kind`: the engine whose identifiers and literals the SQL format uses.
 pub fn open_writer(
     opts: &ExportOptions,
-    kind: DbKind,
+    kind: SqlKind,
     path: &Path,
     shown: &str,
 ) -> Result<Box<dyn FormatWriter>, DbError> {
@@ -894,7 +902,7 @@ pub fn open_writer(
         ExportFormat::Sql => Box::new(Sql {
             out: Out::create(path, shown)?,
             kind,
-            table: quote_ident(kind.as_sql(), opts.table_name.trim()),
+            table: quote_ident(kind, opts.table_name.trim()),
             columns: String::new(),
         }),
         ExportFormat::Xlsx => Box::new(Xlsx::create(path, shown)?),
@@ -1256,7 +1264,7 @@ impl ExportWorker {
 /// Writes rows already in memory (the loaded rows) to `target`.
 pub fn write_rows(
     opts: &ExportOptions,
-    kind: DbKind,
+    kind: SqlKind,
     target: &Target,
     columns: &[ColumnMeta],
     rows: &[Vec<Value>],
@@ -1349,7 +1357,7 @@ mod tests {
         )
     }
 
-    fn export(o: &ExportOptions, kind: DbKind) -> (tempfile::TempDir, PathBuf) {
+    fn export(o: &ExportOptions, kind: SqlKind) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("out.file");
         let target = Target::new(path.to_str().unwrap()).unwrap();
@@ -1365,7 +1373,7 @@ mod tests {
 
     #[test]
     fn csv_is_rfc4180_with_null_unquoted() {
-        let (_d, p) = export(&opts(ExportFormat::Csv), DbKind::MySql);
+        let (_d, p) = export(&opts(ExportFormat::Csv), SqlKind::MySql);
         assert_eq!(
             read(&p),
             "id,name,blob,at\r\n\
@@ -1377,7 +1385,7 @@ mod tests {
 
     fn one_row(
         o: &ExportOptions,
-        kind: DbKind,
+        kind: SqlKind,
         cols: &[ColumnMeta],
         row: Vec<Value>,
     ) -> (String, Written) {
@@ -1406,13 +1414,13 @@ mod tests {
             header: false,
             ..opts(ExportFormat::Csv)
         };
-        let (text, _) = one_row(&plain, DbKind::MySql, &cols, row());
+        let (text, _) = one_row(&plain, SqlKind::MySql, &cols, row());
         assert_eq!(text, "=1+1,@SUM(A1),-5,\tx,plain\r\n");
         let guarded = ExportOptions {
             formula_guard: true,
             ..plain
         };
-        let (text, _) = one_row(&guarded, DbKind::MySql, &cols, row());
+        let (text, _) = one_row(&guarded, SqlKind::MySql, &cols, row());
         assert_eq!(text, "'=1+1,'@SUM(A1),-5,'\tx,plain\r\n");
         assert!(formula_like("+1") && formula_like("-a") && formula_like("\rx"));
         assert!(!formula_like("a=1") && !formula_like(""));
@@ -1432,34 +1440,34 @@ mod tests {
                 Value::Array(vec![partial(), Value::bytes(&[1])]),
             ]
         };
-        let (text, w) = one_row(&opts(ExportFormat::Csv), DbKind::Postgres, &cols, row());
+        let (text, w) = one_row(&opts(ExportFormat::Csv), SqlKind::Postgres, &cols, row());
         assert_eq!(w.partial_binaries, 2);
         assert_eq!(
             text.lines().nth(1).unwrap(),
             "1,,\"{NULL,\"\"\\\\x01\"\"}\""
         );
-        let (text, w) = one_row(&opts(ExportFormat::Json), DbKind::Postgres, &cols, row());
+        let (text, w) = one_row(&opts(ExportFormat::Json), SqlKind::Postgres, &cols, row());
         assert_eq!(w.partial_binaries, 2);
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v[0]["blob"], serde_json::Value::Null);
         assert_eq!(v[0]["arr"], serde_json::json!([null, "0x01"]));
         let (text, _) = one_row(
             &opts(ExportFormat::Sql),
-            DbKind::MySql,
+            SqlKind::MySql,
             &cols[..2],
             row()[..2].to_vec(),
         );
         assert!(text.contains("VALUES (1, NULL);"), "{text}");
         let (text, _) = one_row(
             &opts(ExportFormat::Markdown),
-            DbKind::MySql,
+            SqlKind::MySql,
             &cols[..2],
             row()[..2].to_vec(),
         );
         assert_eq!(text.lines().nth(2).unwrap(), "| 1 |  |");
         let (_, w) = one_row(
             &opts(ExportFormat::Xlsx),
-            DbKind::MySql,
+            SqlKind::MySql,
             &cols[..2],
             row()[..2].to_vec(),
         );
@@ -1472,11 +1480,11 @@ mod tests {
     fn duplicate_column_names() {
         let cols = [col("id"), col("id")];
         let row = vec![Value::Int(1), Value::Int(2)];
-        let (text, _) = one_row(&opts(ExportFormat::Csv), DbKind::MySql, &cols, row.clone());
+        let (text, _) = one_row(&opts(ExportFormat::Csv), SqlKind::MySql, &cols, row.clone());
         assert!(text.starts_with("id,id_2\r\n"), "{text}");
         let (text, _) = one_row(
             &opts(ExportFormat::Markdown),
-            DbKind::MySql,
+            SqlKind::MySql,
             &cols,
             row.clone(),
         );
@@ -1486,7 +1494,7 @@ mod tests {
         let target = Target::new(path.to_str().unwrap()).unwrap();
         let err = write_rows(
             &opts(ExportFormat::Sql),
-            DbKind::MySql,
+            SqlKind::MySql,
             &target,
             &cols,
             &[row],
@@ -1520,7 +1528,7 @@ mod tests {
             assert!(!is_sql_number(bad), "{bad}");
         }
         assert_eq!(
-            sql_literal(DbKind::MySql, &Value::Decimal("1-2".into())),
+            sql_literal(SqlKind::MySql, &Value::Decimal("1-2".into())),
             "'1-2'"
         );
     }
@@ -1550,7 +1558,7 @@ mod tests {
             header: false,
             ..opts(ExportFormat::Csv)
         };
-        let (_d, p) = export(&o, DbKind::MySql);
+        let (_d, p) = export(&o, SqlKind::MySql);
         let text = read(&p);
         assert!(text.starts_with('\u{feff}'));
         let lines: Vec<&str> = text.trim_start_matches('\u{feff}').split("\r\n").collect();
@@ -1563,7 +1571,7 @@ mod tests {
             delimiter: "\t".into(),
             ..opts(ExportFormat::Csv)
         };
-        let (_d, p) = export(&tab, DbKind::MySql);
+        let (_d, p) = export(&tab, SqlKind::MySql);
         assert!(read(&p).starts_with("id\tname\tblob\tat\r\n"));
         for bad in ["", ";;", "\"", "\n"] {
             let o = ExportOptions {
@@ -1576,7 +1584,7 @@ mod tests {
 
     #[test]
     fn json_is_an_array_of_objects() {
-        let (_d, p) = export(&opts(ExportFormat::Json), DbKind::Postgres);
+        let (_d, p) = export(&opts(ExportFormat::Json), SqlKind::Postgres);
         let v: serde_json::Value = serde_json::from_str(&read(&p)).unwrap();
         assert_eq!(
             v,
@@ -1616,7 +1624,7 @@ mod tests {
         let target = Target::new(path.to_str().unwrap()).unwrap();
         write_rows(
             &opts(ExportFormat::Json),
-            DbKind::MySql,
+            SqlKind::MySql,
             &target,
             &[col("a")],
             &[],
@@ -1627,7 +1635,7 @@ mod tests {
 
     #[test]
     fn markdown_escapes_pipes_and_newlines() {
-        let (_d, p) = export(&opts(ExportFormat::Markdown), DbKind::MySql);
+        let (_d, p) = export(&opts(ExportFormat::Markdown), SqlKind::MySql);
         let text = read(&p);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "| id | name | blob | at |");
@@ -1646,7 +1654,7 @@ mod tests {
             table_name: "we`ird\"t".into(),
             ..opts(ExportFormat::Sql)
         };
-        let (_d, p) = export(&o, DbKind::MySql);
+        let (_d, p) = export(&o, SqlKind::MySql);
         let text = read(&p);
         assert_eq!(text.lines().next(), Some("SET NAMES utf8mb4;"));
         let first = text.lines().nth(1).unwrap();
@@ -1659,7 +1667,7 @@ mod tests {
             text.contains("VALUES (2, NULL, NULL, '2024-02-01');"),
             "{text}"
         );
-        let (_d, p) = export(&o, DbKind::Postgres);
+        let (_d, p) = export(&o, SqlKind::Postgres);
         let text = read(&p);
         assert!(
             text.starts_with("INSERT INTO \"we`ird\"\"t\" (\"id\", \"name\", \"blob\", \"at\")"),
@@ -1675,8 +1683,8 @@ mod tests {
 
     #[test]
     fn sql_literals_escape_strings() {
-        let my = |v: Value| sql_literal(DbKind::MySql, &v);
-        let pg = |v: Value| sql_literal(DbKind::Postgres, &v);
+        let my = |v: Value| sql_literal(SqlKind::MySql, &v);
+        let pg = |v: Value| sql_literal(SqlKind::Postgres, &v);
         // A backslash or NUL: hex on MySQL (the same with NO_BACKSLASH_ESCAPES), an
         // escape string on PostgreSQL.
         assert_eq!(
@@ -1697,6 +1705,11 @@ mod tests {
                 Value::Array(vec![Value::bytes(&[2])])
             ])),
             "ARRAY[E'\\\\x01'::bytea, NULL, ARRAY[E'\\\\x02'::bytea]]::bytea[]"
+        );
+        // MySQL has no bytea[]: an array holding bytes is written as its text.
+        assert_eq!(
+            my(Value::Array(vec![Value::bytes(&[1]), Value::Null])),
+            "_utf8mb4 X'7b225c5c783031222c4e554c4c7d'"
         );
         // MySQL geometry (its internal form, hex) as a binary literal.
         let geo = |text: &str| Value::Other {
@@ -1727,7 +1740,7 @@ mod tests {
 
     #[test]
     fn xlsx_is_a_zip_with_one_sheet() {
-        let (_d, p) = export(&opts(ExportFormat::Xlsx), DbKind::MySql);
+        let (_d, p) = export(&opts(ExportFormat::Xlsx), SqlKind::MySql);
         let bytes = std::fs::read(&p).unwrap();
         assert_eq!(&bytes[..2], b"PK");
         assert!(bytes.len() > 1000);
@@ -1741,7 +1754,7 @@ mod tests {
         let rows = vec![vec![Value::Text("x".repeat(XLSX_MAX_CHARS + 5))]];
         let w = write_rows(
             &opts(ExportFormat::Xlsx),
-            DbKind::MySql,
+            SqlKind::MySql,
             &target,
             &[col("t")],
             &rows,
@@ -1759,7 +1772,7 @@ mod tests {
             table_name: String::new(),
             ..opts(ExportFormat::Sql)
         };
-        assert!(write_rows(&bad, DbKind::MySql, &target, &[col("a")], &[]).is_err());
+        assert!(write_rows(&bad, SqlKind::MySql, &target, &[col("a")], &[]).is_err());
         assert!(!path.exists() && !target.part.exists());
         assert!(Target::new(" ").is_err());
     }
@@ -1800,7 +1813,7 @@ mod tests {
             std::fs::write(&target.part, b"someone else's").unwrap();
             let rows = vec![vec![Value::Int(1)]];
             let err =
-                write_rows(&opts(format), DbKind::MySql, &target, &[col("a")], &rows).unwrap_err();
+                write_rows(&opts(format), SqlKind::MySql, &target, &[col("a")], &rows).unwrap_err();
             assert!(
                 matches!(&err, DbError::Config { message, .. } if message.contains(".dntpart")),
                 "{format:?}: {err:?}"
@@ -1809,7 +1822,7 @@ mod tests {
             assert_eq!(std::fs::read(&target.part).unwrap(), b"someone else's");
             assert!(!path.exists(), "{format:?}");
             // Same through the streaming writer.
-            assert!(open_writer(&opts(format), DbKind::MySql, &target.part, "out").is_err());
+            assert!(open_writer(&opts(format), SqlKind::MySql, &target.part, "out").is_err());
             assert_eq!(std::fs::read(&target.part).unwrap(), b"someone else's");
         }
     }
@@ -1826,7 +1839,7 @@ mod tests {
         let rows = vec![vec![Value::Int(1)]];
         assert!(write_rows(
             &opts(ExportFormat::Csv),
-            DbKind::MySql,
+            SqlKind::MySql,
             &target,
             &[col("a")],
             &rows
@@ -1855,7 +1868,7 @@ mod tests {
         let rows = vec![vec![Value::Int(1)]];
         assert!(write_rows(
             &opts(ExportFormat::Csv),
-            DbKind::MySql,
+            SqlKind::MySql,
             &target,
             &[col("a")],
             &rows
@@ -1891,7 +1904,7 @@ mod tests {
     fn the_sink_streams_the_first_result_and_reports_progress() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.csv");
-        let w = open_writer(&opts(ExportFormat::Csv), DbKind::MySql, &path, "s.csv").unwrap();
+        let w = open_writer(&opts(ExportFormat::Csv), SqlKind::MySql, &path, "s.csv").unwrap();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let s2 = seen.clone();
         let mut sink = ExportSink::new(

@@ -43,7 +43,7 @@ use crate::session_manager::config_error;
 use dnt_core::config::EnvTag;
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef};
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_core::sql::build::{
     insert_head, insert_sql_with, insert_tail, BuildError, ColumnTarget, InsertOptions, OnConflict,
     TableRef,
@@ -167,9 +167,9 @@ pub struct ImportPreview {
 }
 
 /// The relation `obj` names on `kind`.
-pub(crate) fn table_ref(kind: DbKind, obj: &ObjectRef) -> TableRef {
+pub(crate) fn table_ref(kind: SqlKind, obj: &ObjectRef) -> TableRef {
     TableRef {
-        kind: kind.as_sql(),
+        kind,
         database: obj.database.clone(),
         schema: obj.schema.clone(),
         name: obj.name.clone(),
@@ -178,12 +178,15 @@ pub(crate) fn table_ref(kind: DbKind, obj: &ObjectRef) -> TableRef {
 
 /// The session database of an import: PostgreSQL the table's database, MySQL none (names
 /// are qualified by the database).
-pub(crate) fn session_db(kind: DbKind, obj: &ObjectRef) -> Option<String> {
-    (kind == DbKind::Postgres).then(|| obj.database.clone())
+pub(crate) fn session_db(kind: SqlKind, obj: &ObjectRef) -> Option<String> {
+    match kind {
+        SqlKind::MySql => None,
+        SqlKind::Postgres => Some(obj.database.clone()),
+    }
 }
 
 /// The request's own checks (no server needed); batch sizes are normalised.
-pub(crate) fn normalise(mut req: ImportRequest, kind: DbKind) -> Result<ImportRequest, DbError> {
+pub(crate) fn normalise(mut req: ImportRequest, kind: SqlKind) -> Result<ImportRequest, DbError> {
     if req.table.kind != ObjectKind::Table {
         return Err(config_error("table", "Choose a table to import into."));
     }
@@ -191,16 +194,16 @@ pub(crate) fn normalise(mut req: ImportRequest, kind: DbKind) -> Result<ImportRe
         return Err(config_error("table", "Choose a table to import into."));
     }
     match (kind, &req.table.schema) {
-        (DbKind::MySql, Some(_)) => {
+        (SqlKind::MySql, Some(_)) => {
             return Err(config_error(
                 "table",
                 "MySQL has no schemas inside a database.",
             ))
         }
-        (DbKind::Postgres, None) => {
+        (SqlKind::Postgres, None) => {
             return Err(config_error("table", "A schema is required on PostgreSQL."))
         }
-        _ => {}
+        (SqlKind::MySql, None) | (SqlKind::Postgres, Some(_)) => {}
     }
     req.batch_rows = match req.batch_rows {
         0 => DEFAULT_BATCH_ROWS,
@@ -210,9 +213,10 @@ pub(crate) fn normalise(mut req: ImportRequest, kind: DbKind) -> Result<ImportRe
         0 => DEFAULT_BATCH_BYTES as u32,
         n => n.clamp(MIN_BATCH_BYTES, MAX_BATCH_BYTES),
     };
-    if kind == DbKind::MySql {
+    match kind {
         // `OVERRIDING SYSTEM VALUE` is PostgreSQL only.
-        req.override_identity = false;
+        SqlKind::MySql => req.override_identity = false,
+        SqlKind::Postgres => {}
     }
     Ok(req)
 }
@@ -245,7 +249,7 @@ pub(crate) struct Layout {
     sources: Vec<u32>,
     pub(crate) opts: InsertOptions,
     pub(crate) dialect: Dialect,
-    pub(crate) kind: DbKind,
+    pub(crate) kind: SqlKind,
     convert: ConvertOptions,
 }
 
@@ -254,7 +258,7 @@ impl Layout {
     pub(crate) fn new(
         req: &ImportRequest,
         targets: &[TargetColumn],
-        kind: DbKind,
+        kind: SqlKind,
         dialect: Dialect,
     ) -> Result<Layout, DbError> {
         let mut cols = Vec::new();
@@ -295,7 +299,7 @@ impl Layout {
     pub(crate) fn from_columns(
         table: TableRef,
         cols: Vec<TargetColumn>,
-        kind: DbKind,
+        kind: SqlKind,
         dialect: Dialect,
     ) -> Result<Layout, DbError> {
         let layout = Layout {
@@ -371,7 +375,7 @@ impl Layout {
             .zip(&self.sources)
             .map(|(col, src)| {
                 let cell = record.cells.get(*src as usize).unwrap_or(&Cell::Null);
-                convert(cell, col, &self.convert, self.kind.as_sql())
+                convert(cell, col, &self.convert, self.kind)
             })
             .collect()
     }

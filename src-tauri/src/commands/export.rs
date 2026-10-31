@@ -32,7 +32,7 @@ use crate::jobs::{JobDone, JobKind, JobSpec, TrackedJob};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::ObjectRef;
-use dnt_core::server::DbKind;
+use dnt_core::server::{DbKind, SqlKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use futures_util::future::{select, Either};
@@ -140,7 +140,7 @@ async fn stoppable<T>(
 }
 
 pub async fn export_rows_impl(
-    kind: DbKind,
+    kind: SqlKind,
     columns: Vec<ColumnMeta>,
     rows: Vec<Vec<Value>>,
     opts: ExportOptions,
@@ -169,7 +169,7 @@ struct Stream {
 impl Stream {
     fn open(
         opts: &ExportOptions,
-        kind: DbKind,
+        kind: SqlKind,
         path: &str,
         progress: Progress,
     ) -> Result<Stream, DbError> {
@@ -235,7 +235,7 @@ async fn stream_to_file(
     db: Option<&str>,
     key: &str,
     request: DataRequest,
-    kind: DbKind,
+    kind: SqlKind,
     opts: ExportOptions,
     path: String,
     progress: Progress,
@@ -268,7 +268,7 @@ async fn stream_to_file(
 pub async fn export_query_result_impl(
     state: &AppState,
     token: Uuid,
-    kind: DbKind,
+    kind: SqlKind,
     opts: ExportOptions,
     path: String,
     operation: Uuid,
@@ -348,7 +348,7 @@ pub async fn export_table_impl(
         Some(&obj.database),
         &request_key,
         request,
-        query.kind,
+        query.kind.as_sql(),
         opts,
         path,
         progress,
@@ -371,7 +371,7 @@ async fn export_query_reported(
 ) -> Result<ExportSummary, (DbError, Option<TxState>)> {
     let early = |e: DbError| (e, None);
     check_options(&opts).map_err(early)?;
-    let kind = state.sessions.plan_kind(plan_id).map_err(early)?;
+    let kind = state.sessions.plan_kind(plan_id).map_err(early)?.as_sql();
     // The tab is held (not busy) and the statement judged before the file is created.
     let run = state
         .sessions
@@ -537,6 +537,7 @@ pub async fn export_rows(
     path: String,
 ) -> Result<ExportSummary, AppError> {
     picked(&state, &path)?;
+    let kind = kind.as_sql(); // R1: boundary
     let summary = guard(export_rows_impl(kind, columns, rows, opts, path)).await?;
     state.export_paths.written(&summary.path);
     Ok(summary)
@@ -628,6 +629,7 @@ pub async fn export_query_result(
     channel: Channel<ExportProgress>,
 ) -> Result<ExportSummary, AppError> {
     picked(&state, &path)?;
+    let kind = kind.as_sql(); // R1: boundary
     let summary = guard(export_query_result_impl(
         &state,
         token,
@@ -721,7 +723,7 @@ mod tests {
         let summary = export_query_result_impl(
             &state,
             token.0,
-            DbKind::MySql,
+            SqlKind::MySql,
             csv(),
             path.clone(),
             Uuid::new_v4(),
@@ -782,7 +784,7 @@ mod tests {
                 export_query_result_impl(
                     &state,
                     token.0,
-                    DbKind::MySql,
+                    SqlKind::MySql,
                     csv(),
                     path,
                     Uuid::new_v4(),

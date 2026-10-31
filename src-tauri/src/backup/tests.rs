@@ -17,7 +17,7 @@ use dnt_core::meta::{
     ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail, TableOptions,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
-use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
+use dnt_core::server::{DbKind, ServerInfo, ServerVariant, SqlKind};
 use dnt_core::sql::{leading_blank_len, split, Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
@@ -1515,14 +1515,14 @@ fn requests_are_checked() {
         e => panic!("{e:?}"),
     };
     assert_eq!(
-        field(normalise(req(vec![]), DbKind::MySql).unwrap_err()),
+        field(normalise(req(vec![]), SqlKind::MySql).unwrap_err()),
         "objects"
     );
     for (kind, bad) in [
-        (DbKind::MySql, obj(None, ObjectKind::Sequence)),
-        (DbKind::MySql, obj(Some("s"), ObjectKind::Table)),
-        (DbKind::Postgres, obj(None, ObjectKind::Table)),
-        (DbKind::Postgres, obj(Some("s"), ObjectKind::Function)),
+        (SqlKind::MySql, obj(None, ObjectKind::Sequence)),
+        (SqlKind::MySql, obj(Some("s"), ObjectKind::Table)),
+        (SqlKind::Postgres, obj(None, ObjectKind::Table)),
+        (SqlKind::Postgres, obj(Some("s"), ObjectKind::Function)),
     ] {
         assert_eq!(
             field(normalise(req(vec![bad]), kind).unwrap_err()),
@@ -1530,14 +1530,14 @@ fn requests_are_checked() {
         );
     }
     let twice = vec![obj(None, ObjectKind::Table), obj(None, ObjectKind::Table)];
-    assert!(normalise(req(twice), DbKind::MySql).is_err());
+    assert!(normalise(req(twice), SqlKind::MySql).is_err());
     // Data only for tables; PostgreSQL schemas come from the objects.
     let ok = normalise(
         req(vec![
             obj(Some("b"), ObjectKind::View),
             obj(Some("a"), ObjectKind::Table),
         ]),
-        DbKind::Postgres,
+        SqlKind::Postgres,
     )
     .unwrap();
     assert_eq!(ok.schemas, ["a", "b"]);
@@ -1545,13 +1545,30 @@ fn requests_are_checked() {
     let mut outside = req(vec![obj(Some("b"), ObjectKind::Table)]);
     outside.schemas = vec!["a".into()];
     assert_eq!(
-        field(normalise(outside, DbKind::Postgres).unwrap_err()),
+        field(normalise(outside, SqlKind::Postgres).unwrap_err()),
         "schemas"
     );
     let mut no_path = req(vec![obj(None, ObjectKind::Table)]);
     no_path.path = " ".into();
     assert_eq!(
-        field(normalise(no_path, DbKind::MySql).unwrap_err()),
+        field(normalise(no_path, SqlKind::MySql).unwrap_err()),
         "path"
     );
+}
+
+/// Listing the dumpable objects needs a schema on PostgreSQL only.
+#[tokio::test]
+async fn dump_objects_needs_a_schema_on_postgres_only() {
+    let pg = fixture(DbKind::Postgres, false).await;
+    let err = pg
+        .sm
+        .dump_objects(pg.conn, "shop".into(), vec![])
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, DbError::Config { field: Some(f), message } if f == "schemas" && message == "Choose at least one schema."),
+        "{err:?}"
+    );
+    let my = mysql_shop(false).await;
+    assert!(!my.all_objects(&[]).await.objects.is_empty());
 }

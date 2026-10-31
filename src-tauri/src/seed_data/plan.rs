@@ -20,7 +20,7 @@ use crate::session_manager::{
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ForeignKeyDetail, TableDetail};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::Dialect;
 use dnt_query::Atomicity;
 use dnt_transfer::batch::DEFAULT_BATCH_BYTES;
@@ -162,6 +162,7 @@ fn plural(n: u64, one: &str, many: &str) -> String {
 /// What the preview and the prepare read and check.
 struct Read {
     cfg: ConnectionConfig,
+    kind: SqlKind,
     request: SeedRequest,
     rt: Arc<ConnectionRuntime>,
     generation: u64,
@@ -177,10 +178,11 @@ impl SessionManager {
     /// the request's plans.
     async fn seed_read(&self, req: SeedRequest) -> Result<Read, DbError> {
         let cfg = self.repo.get(req.connection_id)?;
-        let request = normalise(req, cfg.kind)?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let request = normalise(req, kind)?;
         let rt = self.runtime(request.connection_id)?;
         let (session, generation) = rt
-            .open_query_session(session_db(cfg.kind, &request.table))
+            .open_query_session(session_db(kind, &request.table))
             .await?;
         let dialect = session.dialect();
         let result = async {
@@ -188,13 +190,7 @@ impl SessionManager {
             let mut keys = HashMap::new();
             let mut key_counts = Vec::new();
             for fk in used_fks(&request, &read.detail) {
-                let id = key_id(
-                    request.connection_id,
-                    generation,
-                    cfg.kind,
-                    &request.table,
-                    fk,
-                );
+                let id = key_id(request.connection_id, generation, kind, &request.table, fk);
                 let tuples = self
                     .seed_keys
                     .get_or_read(id, read_fk_keys(session.as_ref(), &request.table, fk))
@@ -211,9 +207,10 @@ impl SessionManager {
         close_quietly(session).await;
         let (read, keys, key_counts) = result?;
         let specs = specs(&request, &read.columns, &keys)?;
-        let issues = check_plans(&specs, request.rows, cfg.kind.as_sql());
+        let issues = check_plans(&specs, request.rows, kind);
         Ok(Read {
             cfg,
+            kind,
             request,
             rt,
             generation,
@@ -239,25 +236,20 @@ impl SessionManager {
         if !out.issues.is_empty() {
             return Ok(out);
         }
-        let mut seeder =
-            match Seeder::new(r.specs, r.request.seed, r.request.rows, r.cfg.kind.as_sql()) {
-                Ok(s) => s,
-                Err(issues) => {
-                    out.issues = issues;
-                    return Ok(out);
-                }
-            };
+        let mut seeder = match Seeder::new(r.specs, r.request.seed, r.request.rows, r.kind) {
+            Ok(s) => s,
+            Err(issues) => {
+                out.issues = issues;
+                return Ok(out);
+            }
+        };
         let cols = seeder.columns();
         out.columns = cols.iter().map(|c| c.name.clone()).collect();
         if cols.is_empty() {
             return Ok(out);
         }
-        let layout = Layout::from_columns(
-            table_ref(r.cfg.kind, &r.request.table),
-            cols,
-            r.cfg.kind,
-            r.dialect,
-        )?;
+        let layout =
+            Layout::from_columns(table_ref(r.kind, &r.request.table), cols, r.kind, r.dialect)?;
         let s = sample(&mut seeder, &layout, r.request.rows, r.request.batch_rows)?;
         out.rows = s.rows;
         out.sql = s.sql;
@@ -278,19 +270,22 @@ impl SessionManager {
                 &format!("{}: {}", i.column, i.message),
             ));
         }
-        let kind = r.cfg.kind;
+        let kind = r.kind;
         let request = r.request;
-        let mut seeder = Seeder::new(r.specs.clone(), request.seed, request.rows, kind.as_sql())
-            .map_err(|issues| {
+        let mut seeder =
+            Seeder::new(r.specs.clone(), request.seed, request.rows, kind).map_err(|issues| {
                 let i = &issues[0];
                 config_error("columns", &format!("{}: {}", i.column, i.message))
             })?;
         let cols = seeder.columns();
-        if cols.is_empty() && kind == DbKind::Postgres {
-            return Err(config_error(
-                "columns",
-                "Choose a generator for at least one column.",
-            ));
+        match kind {
+            SqlKind::Postgres if cols.is_empty() => {
+                return Err(config_error(
+                    "columns",
+                    "Choose a generator for at least one column.",
+                ));
+            }
+            SqlKind::MySql | SqlKind::Postgres => {}
         }
         let layout = Layout::from_columns(table_ref(kind, &request.table), cols, kind, r.dialect)?;
         let transactional = transactional(kind, &r.read);
@@ -401,9 +396,10 @@ impl SessionManager {
         if !confirm.confirmed || !name_ok || (irreversible && !confirm.irreversible_ack) {
             return Err(DbError::ConfirmationRequired { count: 1 });
         }
+        let kind = stored.rt.cfg.kind.as_sql(); // R1: boundary
         let (session, generation) = stored
             .rt
-            .open_query_session(session_db(stored.rt.cfg.kind, &stored.request.table))
+            .open_query_session(session_db(kind, &stored.request.table))
             .await?;
         let checked = async {
             if generation != stored.generation || session.dialect() != stored.dialect {
@@ -485,29 +481,32 @@ fn warnings(
     request: &SeedRequest,
     read: &TargetRead,
     specs: &[SeedColumnSpec],
-    kind: DbKind,
+    kind: SqlKind,
     transactional: bool,
     pre: Option<&crate::import_data::PreStep>,
 ) -> Vec<String> {
-    let mysql = kind == DbKind::MySql;
     let mut out = Vec::new();
     if !transactional {
         out.push("Not transactional: batches already written stay if the job stops.".into());
     }
-    if mysql && read.atomicity == Atomicity::Unknown && !read.detail.triggers.is_empty() {
-        out.push(
-            "The table has triggers: the job runs without one transaction (each batch commits \
-             on its own)."
-                .into(),
-        );
+    match kind {
+        SqlKind::MySql => {
+            if read.atomicity == Atomicity::Unknown && !read.detail.triggers.is_empty() {
+                out.push(
+                    "The table has triggers: the job runs without one transaction (each batch \
+                     commits on its own)."
+                        .into(),
+                );
+            }
+        }
+        SqlKind::Postgres => {}
     }
     if request.existing == ExistingRows::Truncate {
-        out.push(if mysql {
-            "TRUNCATE commits at once and resets AUTO_INCREMENT.".into()
-        } else {
-            "TRUNCATE also empties the tables that inherit from this one and fires ON TRUNCATE \
-             triggers."
-                .into()
+        out.push(match kind {
+            SqlKind::MySql => "TRUNCATE commits at once and resets AUTO_INCREMENT.".into(),
+            SqlKind::Postgres => "TRUNCATE also empties the tables that inherit from this one \
+                                   and fires ON TRUNCATE triggers."
+                .into(),
         });
     }
     if let Some(w) = pre.and_then(|p| p.warning.clone()) {

@@ -13,19 +13,11 @@ use std::path::{Path, PathBuf};
 /// Workspace-relative paths (with `/` separators) of files that still contain
 /// two-way kind branches. Later tasks remove entries from this list.
 const ALLOWED: &[&str] = &[
-    "src-tauri/src/backup/dump.rs",
-    "src-tauri/src/backup/restore.rs",
     "src-tauri/src/commands/data.rs",
     "src-tauri/src/ddl_edit/apply.rs",
     "src-tauri/src/ddl_edit/catalog.rs",
-    "src-tauri/src/export_format.rs",
-    "src-tauri/src/import_data/plan.rs",
-    "src-tauri/src/import_data/run.rs",
     "src-tauri/src/object_actions.rs",
     "src-tauri/src/query_sessions.rs",
-    "src-tauri/src/seed_data/plan.rs",
-    "src-tauri/src/seed_data/run.rs",
-    "src-tauri/src/seed_data/target.rs",
     "src-tauri/src/table_design/apply.rs",
 ];
 

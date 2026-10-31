@@ -20,7 +20,7 @@ use crate::object_actions::stale;
 use crate::session_manager::{close_quietly, config_error, METADATA_CALL_TIMEOUT};
 use async_trait::async_trait;
 use dnt_core::error::{AppError, DbError};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::Dialect;
 use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_transfer::batch::DEFAULT_BATCH_BYTES;
@@ -150,10 +150,13 @@ impl SeedJob {
             return Err(stale());
         }
         let kind = self.layout.kind;
-        let pg = kind == DbKind::Postgres;
-        if pg {
-            w.send("SET standard_conforming_strings = on", None).await?;
-        }
+        let begin = match kind {
+            SqlKind::MySql => "START TRANSACTION",
+            SqlKind::Postgres => {
+                w.send("SET standard_conforming_strings = on", None).await?;
+                "BEGIN"
+            }
+        };
         // The table as it is now: a changed table is stale, nothing is written.
         let detail = tokio::time::timeout(
             METADATA_CALL_TIMEOUT,
@@ -177,8 +180,7 @@ impl SeedJob {
             );
         }
         if self.transactional {
-            w.send(if pg { "BEGIN" } else { "START TRANSACTION" }, None)
-                .await?;
+            w.send(begin, None).await?;
             w.in_tx = true;
         }
         if let Some(p) = self.pre_step.as_ref().filter(|p| !p.irreversible) {
@@ -202,8 +204,8 @@ impl SeedJob {
             keys.insert(fk.name.clone(), fk_keys(fk, Arc::new(tuples)));
         }
         let specs = specs(&self.request, &self.read.columns, &keys)?;
-        let seeder = Seeder::new(specs, self.request.seed, self.request.rows, kind.as_sql())
-            .map_err(|issues| {
+        let seeder =
+            Seeder::new(specs, self.request.seed, self.request.rows, kind).map_err(|issues| {
                 let i = &issues[0];
                 config_error("columns", &format!("{}: {}", i.column, i.message))
             })?;

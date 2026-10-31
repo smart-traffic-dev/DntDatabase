@@ -41,7 +41,7 @@ use async_trait::async_trait;
 use dnt_core::config::EnvTag;
 use dnt_core::driver::{Session, StopSignal};
 use dnt_core::error::{AppError, DbError};
-use dnt_core::server::DbKind;
+use dnt_core::server::SqlKind;
 use dnt_core::sql::build::{BuildError, TableRef};
 use dnt_core::sql::ident::quote_ident;
 use dnt_core::sql::Dialect;
@@ -949,10 +949,13 @@ impl ImportJob {
         if now.sha256 != self.file.sha256 || now.size != self.file.size {
             return Err(file_changed_before());
         }
-        let pg = self.layout.kind == DbKind::Postgres;
-        if pg {
-            w.send("SET standard_conforming_strings = on", None).await?;
-        }
+        let begin = match self.layout.kind {
+            SqlKind::MySql => "START TRANSACTION",
+            SqlKind::Postgres => {
+                w.send("SET standard_conforming_strings = on", None).await?;
+                "BEGIN"
+            }
+        };
         // The table as it is now (R19): a changed table is stale, nothing is written.
         let detail = tokio::time::timeout(
             METADATA_CALL_TIMEOUT,
@@ -984,8 +987,7 @@ impl ImportJob {
             );
         }
         if self.transactional {
-            w.send(if pg { "BEGIN" } else { "START TRANSACTION" }, None)
-                .await?;
+            w.send(begin, None).await?;
             w.in_tx = true;
         }
         if let Some(p) = self.pre_step.as_ref().filter(|p| !p.irreversible) {
@@ -1084,26 +1086,29 @@ impl ImportJob {
 // ---------------------------------------------------------------------------------------
 
 /// The dry run's temporary table: a session-private copy of the target (R18).
-pub(crate) fn temp_table(kind: DbKind, target: &TableRef) -> TableRef {
+pub(crate) fn temp_table(kind: SqlKind, target: &TableRef) -> TableRef {
     let suffix = Uuid::new_v4().simple().to_string();
     TableRef {
-        kind: kind.as_sql(),
+        kind,
         database: target.database.clone(),
-        schema: (kind == DbKind::Postgres).then(|| "pg_temp".to_string()),
+        schema: match kind {
+            SqlKind::MySql => None,
+            SqlKind::Postgres => Some("pg_temp".to_string()),
+        },
         name: format!("{TEMP_PREFIX}{}", &suffix[..8]),
     }
 }
 
 /// `CREATE TEMPORARY TABLE <tmp> LIKE <t>` (MySQL) / `CREATE TEMP TABLE <tmp> (LIKE <t>
 /// INCLUDING DEFAULTS INCLUDING CONSTRAINTS INCLUDING IDENTITY INCLUDING GENERATED)`.
-pub(crate) fn create_temp_sql(kind: DbKind, tmp: &TableRef, target: &TableRef) -> String {
+pub(crate) fn create_temp_sql(kind: SqlKind, tmp: &TableRef, target: &TableRef) -> String {
     match kind {
-        DbKind::MySql => format!(
+        SqlKind::MySql => format!(
             "CREATE TEMPORARY TABLE {} LIKE {}",
             tmp.relation(),
             target.relation()
         ),
-        DbKind::Postgres => format!(
+        SqlKind::Postgres => format!(
             "CREATE TEMP TABLE {} (LIKE {} INCLUDING DEFAULTS INCLUDING CONSTRAINTS \
              INCLUDING IDENTITY INCLUDING GENERATED)",
             tmp.relation(),
@@ -1125,7 +1130,7 @@ fn drop_sequence_defaults_sql(tmp: &TableRef, read: &TargetRead) -> Option<Strin
                 .is_some_and(|d| d.to_ascii_lowercase().contains("nextval("))
         })
         .map(|c| {
-            let q = quote_ident(DbKind::Postgres.as_sql(), &c.name);
+            let q = quote_ident(SqlKind::Postgres, &c.name);
             format!("ALTER COLUMN {q} DROP DEFAULT, ALTER COLUMN {q} DROP NOT NULL")
         })
         .collect();
@@ -1149,7 +1154,7 @@ struct DryState {
 #[async_trait]
 impl JobRunner for DryRunJob {
     async fn run(self: Box<Self>, ctx: JobCtx) -> Result<JobDone, JobFailure> {
-        let kind = self.context.rt.cfg.kind;
+        let kind = self.context.rt.cfg.kind.as_sql(); // R1: boundary
         let (session, generation) = self
             .context
             .rt
@@ -1180,13 +1185,16 @@ impl JobRunner for DryRunJob {
         if w.in_tx && w.cleanup("ROLLBACK").await.is_ok() {
             w.in_tx = false;
         }
-        if let (DbKind::MySql, Some(tmp)) = (kind, &state.temp) {
-            let _ = w
-                .cleanup(&format!(
-                    "DROP TEMPORARY TABLE IF EXISTS {}",
-                    tmp.relation()
-                ))
-                .await;
+        match (kind, &state.temp) {
+            (SqlKind::MySql, Some(tmp)) => {
+                let _ = w
+                    .cleanup(&format!(
+                        "DROP TEMPORARY TABLE IF EXISTS {}",
+                        tmp.relation()
+                    ))
+                    .await;
+            }
+            (SqlKind::MySql, None) | (SqlKind::Postgres, _) => {}
         }
         let (valid, rejected) = (w.imported, w.skipped);
         ctx.set_cancel(None);
@@ -1225,9 +1233,9 @@ impl DryRunJob {
         generation: u64,
         state: &mut DryState,
     ) -> Result<(), DbError> {
-        let kind = self.context.rt.cfg.kind;
-        // The session must reach the server the job was submitted for (the tunnel of
-        // the submit time), or the server check writes elsewhere.
+        let kind = self.context.rt.cfg.kind.as_sql(); // R1: boundary
+                                                      // The session must reach the server the job was submitted for (the tunnel of
+                                                      // the submit time), or the server check writes elsewhere.
         if self.server_check && generation != self.context.generation {
             return Err(stale());
         }
@@ -1265,30 +1273,31 @@ impl DryRunJob {
             return Ok(());
         }
         self.context.check()?;
-        let pg = kind == DbKind::Postgres;
-        if pg {
-            w.send("SET standard_conforming_strings = on", None).await?;
-        }
         let tmp = temp_table(kind, &layout.table);
         let tmp_layout = layout.appending_to(tmp.clone());
         let create = create_temp_sql(kind, &tmp, &layout.table);
-        let alter = if pg {
-            drop_sequence_defaults_sql(&tmp, &read)
-        } else {
-            None
+        let alter = match kind {
+            SqlKind::MySql => None,
+            SqlKind::Postgres => {
+                w.send("SET standard_conforming_strings = on", None).await?;
+                drop_sequence_defaults_sql(&tmp, &read)
+            }
         };
         // The cleanup drops the table if it exists, so it is known before it is created.
         state.temp = Some(tmp);
-        if pg {
-            w.send("BEGIN", None).await?;
-            w.in_tx = true;
-            w.send(&create, Some(0)).await?;
-        } else {
+        match kind {
             // MySQL: outside the transaction (GTID consistency refuses CREATE TEMPORARY
             // TABLE inside one on some servers); the cleanup drops it.
-            w.send(&create, Some(0)).await?;
-            w.send("START TRANSACTION", None).await?;
-            w.in_tx = true;
+            SqlKind::MySql => {
+                w.send(&create, Some(0)).await?;
+                w.send("START TRANSACTION", None).await?;
+                w.in_tx = true;
+            }
+            SqlKind::Postgres => {
+                w.send("BEGIN", None).await?;
+                w.in_tx = true;
+                w.send(&create, Some(0)).await?;
+            }
         }
         if let Some(alter) = alter {
             w.send(&alter, Some(0)).await?;

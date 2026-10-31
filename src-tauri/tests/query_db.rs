@@ -780,7 +780,7 @@ async fn stored_results_are_exact_in_copy_and_export() {
         let summary = export_query_result_impl(
             &state,
             token,
-            t.kind(),
+            t.sql_kind(),
             ExportOptions {
                 format: ExportFormat::Csv,
                 delimiter: ",".into(),

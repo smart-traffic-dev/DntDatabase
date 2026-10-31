@@ -1896,3 +1896,56 @@ async fn dry_run_cleans_up_after_stop() {
     assert_eq!(sent[sent.len() - 2], "ROLLBACK", "{sent:?}");
     assert!(sent[sent.len() - 1].starts_with("DROP TEMPORARY TABLE IF EXISTS"));
 }
+
+/// The engine-specific review warnings: MySQL's trigger, upsert and TRUNCATE notes, the
+/// PostgreSQL TRUNCATE note.
+#[tokio::test]
+async fn prepare_warnings_by_kind() {
+    for kind in [DbKind::MySql, DbKind::Postgres] {
+        let mut detail = items_detail(kind, Some("InnoDB"));
+        detail.triggers = vec![dnt_core::meta::TriggerDetail {
+            name: "items_audit".into(),
+            timing: "AFTER".into(),
+            event: "INSERT".into(),
+        }];
+        let fx = fixture_detail(kind, detail, None, false, None).await;
+        let warnings = |mode: ImportMode| async {
+            fx.sm
+                .import_prepare(fx.request(mode, ErrorPolicy::Stop))
+                .await
+                .unwrap()
+                .warnings
+        };
+        let truncate = warnings(ImportMode::Replace { truncate: true }).await;
+        let upsert = warnings(ImportMode::Upsert {
+            key: vec!["id".into()],
+        })
+        .await;
+        let triggers = "The table has triggers: the import runs without one transaction (each \
+                        batch commits on its own).";
+        let unique = "The table has other unique keys: MySQL updates the row matching any \
+                      unique key.";
+        let values = "MySQL 8.0.20 and later report VALUES() in ON DUPLICATE KEY UPDATE as \
+                      deprecated (a warning); the import still works.";
+        let has = |ws: &[String], w: &str| ws.iter().any(|x| x == w);
+        match kind {
+            DbKind::MySql => {
+                assert!(has(&truncate, triggers), "{truncate:?}");
+                assert!(has(
+                    &truncate,
+                    "TRUNCATE commits at once and resets AUTO_INCREMENT."
+                ));
+                assert!(has(&upsert, unique) && has(&upsert, values), "{upsert:?}");
+            }
+            DbKind::Postgres => {
+                assert!(!has(&truncate, triggers), "{truncate:?}");
+                assert!(has(
+                    &truncate,
+                    "TRUNCATE also empties the tables that inherit from this one and fires ON \
+                     TRUNCATE triggers."
+                ));
+                assert!(!has(&upsert, unique) && !has(&upsert, values), "{upsert:?}");
+            }
+        }
+    }
+}

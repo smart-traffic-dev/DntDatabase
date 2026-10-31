@@ -12,7 +12,7 @@ use dnt_core::meta::{
     TableDetail,
 };
 use dnt_core::secret::{MemorySecretStore, SecretStore};
-use dnt_core::server::{ServerInfo, ServerVariant};
+use dnt_core::server::{DbKind, ServerInfo, ServerVariant};
 use dnt_core::sql::{MySqlMode, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_store::db::open_in_memory;

@@ -220,11 +220,11 @@ enum ReadAs {
 }
 
 /// How a column with the driver metadata `m` is read (the probe `WHERE 1 = 0`).
-fn read_as(kind: DbKind, m: &ColumnMeta) -> ReadAs {
+fn read_as(kind: SqlKind, m: &ColumnMeta) -> ReadAs {
     match (kind, m.logical) {
-        (DbKind::MySql, LogicalType::Other) => ReadAs::Binary,
-        (DbKind::Postgres, LogicalType::Other) => ReadAs::Text,
-        (DbKind::Postgres, LogicalType::Array) => {
+        (SqlKind::MySql, LogicalType::Other) => ReadAs::Binary,
+        (SqlKind::Postgres, LogicalType::Other) => ReadAs::Text,
+        (SqlKind::Postgres, LogicalType::Array) => {
             let elem = m.db_type.trim_end_matches("[]");
             if PG_FAITHFUL_ELEMENTS.contains(&elem) {
                 ReadAs::Value
@@ -232,7 +232,7 @@ fn read_as(kind: DbKind, m: &ColumnMeta) -> ReadAs {
                 ReadAs::Text
             }
         }
-        _ => ReadAs::Value,
+        (SqlKind::MySql | SqlKind::Postgres, _) => ReadAs::Value,
     }
 }
 
@@ -302,8 +302,8 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    fn kind(&self) -> DbKind {
-        self.session.server_info().kind
+    fn kind(&self) -> SqlKind {
+        self.session.server_info().kind.as_sql() // R1: boundary
     }
 
     /// A control statement.
@@ -409,7 +409,7 @@ pub(crate) async fn list_dump_objects(
 ) -> Result<DumpObjects, DbError> {
     let mut out = DumpObjects::default();
     match r.kind() {
-        DbKind::MySql => {
+        SqlKind::MySql => {
             let scope = Scope {
                 database: database.into(),
                 schema: None,
@@ -431,7 +431,7 @@ pub(crate) async fn list_dump_objects(
                 }
             }
         }
-        DbKind::Postgres => {
+        SqlKind::Postgres => {
             for schema in schemas {
                 let s = Some(schema.as_str());
                 let scope = Scope {
@@ -510,7 +510,7 @@ pub(crate) async fn list_dump_objects(
 
 /// The request's own checks (no server needed): objects of the engine's kinds, no
 /// duplicates, PostgreSQL schemas filled from the objects when none were named.
-pub(crate) fn normalise(mut req: DumpRequest, kind: DbKind) -> Result<DumpRequest, DbError> {
+pub(crate) fn normalise(mut req: DumpRequest, kind: SqlKind) -> Result<DumpRequest, DbError> {
     if req.database.trim().is_empty() {
         return Err(config_error("database", "Choose a database to dump."));
     }
@@ -525,12 +525,13 @@ pub(crate) fn normalise(mut req: DumpRequest, kind: DbKind) -> Result<DumpReques
     }
     let mut seen = HashSet::new();
     for o in &mut req.objects {
-        let allowed = match kind {
-            DbKind::MySql => matches!(o.kind, ObjectKind::Table | ObjectKind::View),
-            DbKind::Postgres => matches!(
-                o.kind,
-                ObjectKind::Table | ObjectKind::View | ObjectKind::Sequence | ObjectKind::Type
-            ),
+        let allowed = match (kind, o.kind) {
+            (SqlKind::MySql, ObjectKind::Table | ObjectKind::View) => true,
+            (
+                SqlKind::Postgres,
+                ObjectKind::Table | ObjectKind::View | ObjectKind::Sequence | ObjectKind::Type,
+            ) => true,
+            (SqlKind::MySql | SqlKind::Postgres, _) => false,
         };
         if !allowed {
             return Err(config_error(
@@ -539,19 +540,19 @@ pub(crate) fn normalise(mut req: DumpRequest, kind: DbKind) -> Result<DumpReques
             ));
         }
         match (kind, &o.schema) {
-            (DbKind::MySql, Some(_)) => {
+            (SqlKind::MySql, Some(_)) => {
                 return Err(config_error(
                     "objects",
                     "MySQL has no schemas inside a database.",
                 ))
             }
-            (DbKind::Postgres, None) => {
+            (SqlKind::Postgres, None) => {
                 return Err(config_error(
                     "objects",
                     "A schema is required on PostgreSQL.",
                 ))
             }
-            _ => {}
+            (SqlKind::MySql, None) | (SqlKind::Postgres, Some(_)) => {}
         }
         if o.name.is_empty() {
             return Err(config_error("objects", "An object has no name."));
@@ -562,8 +563,8 @@ pub(crate) fn normalise(mut req: DumpRequest, kind: DbKind) -> Result<DumpReques
         }
     }
     match kind {
-        DbKind::MySql => req.schemas.clear(),
-        DbKind::Postgres => {
+        SqlKind::MySql => req.schemas.clear(),
+        SqlKind::Postgres => {
             let used: BTreeSet<String> = req
                 .objects
                 .iter()
@@ -608,9 +609,10 @@ fn shown_name(schema: Option<&str>, name: &str) -> String {
 /// `major.minor`, read from `server_version_num` as `(major, 0, minor)`.
 fn version_label(info: &ServerInfo) -> String {
     let (major, minor, patch) = info.version;
-    match info.kind {
-        DbKind::Postgres if major >= 10 => format!("{major}.{patch}"),
-        _ => format!("{major}.{minor}.{patch}"),
+    let kind = info.kind.as_sql(); // R1: boundary
+    match kind {
+        SqlKind::Postgres if major >= 10 => format!("{major}.{patch}"),
+        SqlKind::MySql | SqlKind::Postgres => format!("{major}.{minor}.{patch}"),
     }
 }
 
@@ -642,8 +644,12 @@ impl SessionManager {
         if database.trim().is_empty() {
             return Err(config_error("database", "Choose a database to dump."));
         }
-        if cfg.kind == DbKind::Postgres && schemas.is_empty() {
-            return Err(config_error("schemas", "Choose at least one schema."));
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        match kind {
+            SqlKind::Postgres if schemas.is_empty() => {
+                return Err(config_error("schemas", "Choose at least one schema."));
+            }
+            SqlKind::MySql | SqlKind::Postgres => {}
         }
         let rt = self.runtime(conn)?;
         let (session, _) = rt.open_query_session(Some(database.clone())).await?;
@@ -660,7 +666,7 @@ impl SessionManager {
     /// the command).
     pub async fn dump_start(&self, request: DumpRequest) -> Result<Uuid, DbError> {
         let cfg = self.repo.get(request.connection_id)?;
-        let request = normalise(request, cfg.kind)?;
+        let request = normalise(request, cfg.kind.as_sql())?; // R1: boundary
         let rt = self.runtime(request.connection_id)?;
         let spec = JobSpec {
             kind: JobKind::Dump,
@@ -697,7 +703,12 @@ fn write_error(shown: &str, e: &std::io::Error) -> DbError {
 impl DumpFile {
     /// Creates the temp file: only a NEW file (a stale temp file or anything planted there,
     /// a symbolic link included, is refused and left as it is).
-    fn create(part: &Path, shown: &str, compress: bool, kind: DbKind) -> Result<DumpFile, DbError> {
+    fn create(
+        part: &Path,
+        shown: &str,
+        compress: bool,
+        kind: SqlKind,
+    ) -> Result<DumpFile, DbError> {
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -721,7 +732,7 @@ impl DumpFile {
             w: DumpWriter::new(
                 Box::new(BufWriter::with_capacity(256 * 1024, file)),
                 compress,
-                Dialect::for_kind(kind.as_sql()),
+                Dialect::for_kind(kind),
             ),
             sync,
             shown: shown.to_string(),
@@ -789,7 +800,7 @@ struct DataSink<'a> {
     ctx: &'a JobCtx,
     /// The inserted columns in `SELECT` order.
     cols: Vec<DataCol>,
-    kind: DbKind,
+    kind: SqlKind,
     relation: String,
     overriding: bool,
     phase: String,
@@ -817,8 +828,8 @@ impl DataSink<'_> {
     fn dialect(&self) -> Dialect {
         match self.kind {
             // The dump sets a `sql_mode` without ANSI_QUOTES / NO_BACKSLASH_ESCAPES (R23).
-            DbKind::MySql => Dialect::MYSQL,
-            DbKind::Postgres => Dialect::Postgres,
+            SqlKind::MySql => Dialect::MYSQL,
+            SqlKind::Postgres => Dialect::Postgres,
         }
     }
 }
@@ -848,12 +859,7 @@ impl RowSink for DataSink<'_> {
                 collation: None,
             })
             .collect();
-        let head = insert_head(
-            self.kind.as_sql(),
-            &self.relation,
-            &targets,
-            self.overriding,
-        );
+        let head = insert_head(self.kind, &self.relation, &targets, self.overriding);
         self.inserts = Some(DumpInserts::new(
             head,
             targets,
@@ -1016,7 +1022,7 @@ fn obj_ref(database: &str, o: &DumpObject) -> ObjectRef {
 
 fn pg_relation(schema: &str, name: &str) -> String {
     TableRef {
-        kind: DbKind::Postgres.as_sql(),
+        kind: SqlKind::Postgres,
         database: String::new(),
         schema: Some(schema.into()),
         name: name.into(),
@@ -1076,7 +1082,7 @@ fn fk_definition(fk: &ForeignKeyDetail, table_schema: Option<&str>) -> String {
     if let Some(def) = &fk.definition {
         return def.clone();
     }
-    let q = |n: &String| quote_ident(DbKind::Postgres.as_sql(), n);
+    let q = |n: &String| quote_ident(SqlKind::Postgres, n);
     let list = |v: &[String]| v.iter().map(q).collect::<Vec<_>>().join(", ");
     let schema = fk
         .ref_schema
@@ -1104,7 +1110,7 @@ impl JobRunner for DumpJob {
         let part: PathBuf = target.part.clone();
         let shown = self.request.path.clone();
         let compress = self.request.compress;
-        let kind = self.rt.cfg.kind;
+        let kind = self.rt.cfg.kind.as_sql(); // R1: boundary
         let mut file =
             tokio::task::spawn_blocking(move || DumpFile::create(&part, &shown, compress, kind))
                 .await
@@ -1172,12 +1178,12 @@ impl DumpJob {
     ) -> Result<Written, DbError> {
         let r = Reader::new(session, ctx.stop(), self.grace);
         let kind = r.kind();
-        if kind != self.rt.cfg.kind {
+        if DbKind::from(kind) != self.rt.cfg.kind {
             return Err(crate::object_actions::stale());
         }
         // The snapshot (R24).
         match kind {
-            DbKind::MySql => {
+            SqlKind::MySql => {
                 r.exec("SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'")
                     .await?;
                 r.exec("SET time_zone = '+00:00'").await?;
@@ -1186,7 +1192,7 @@ impl DumpJob {
                 r.exec("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
                     .await?;
             }
-            DbKind::Postgres => {
+            SqlKind::Postgres => {
                 // Row security off: a table whose rows a policy would hide fails the dump
                 // instead of dumping only the visible rows.
                 r.exec("SET row_security = off").await?;
@@ -1244,8 +1250,8 @@ impl DumpJob {
             }
         }
         match kind {
-            DbKind::MySql => self.mysql(ctx, &r, file, &objects).await,
-            DbKind::Postgres => self.postgres(ctx, &r, file, &objects).await,
+            SqlKind::MySql => self.mysql(ctx, &r, file, &objects).await,
+            SqlKind::Postgres => self.postgres(ctx, &r, file, &objects).await,
         }
     }
 
@@ -1288,10 +1294,10 @@ impl DumpJob {
                 identity_options: Vec::new(),
             };
             match r.kind() {
-                DbKind::MySql => t.ddl = r.meta(intro.object_ddl(&oref)).await?,
-                DbKind::Postgres => {
+                SqlKind::MySql => t.ddl = r.meta(intro.object_ddl(&oref)).await?,
+                SqlKind::Postgres => {
                     let rel = pg_relation(o.schema.as_deref().unwrap_or("public"), &o.name);
-                    let q = |n: &str| quote_ident(DbKind::Postgres.as_sql(), n);
+                    let q = |n: &str| quote_ident(SqlKind::Postgres, n);
                     for row in r.rows(PG_TABLE_TYPES, vec![rel.clone()]).await? {
                         if let (Some(s), Some(n)) = (text_of(row.first()), text_of(row.get(1))) {
                             t.types.push((s, n));
@@ -1398,17 +1404,16 @@ impl DumpJob {
             );
             return Ok(0);
         }
-        let overriding = kind == DbKind::Postgres
-            && cols.iter().any(|c| {
+        let overriding = match kind {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => cols.iter().any(|c| {
                 c.identity_kind == Some(IdentityKind::Always)
                     || c.identity
                         .as_deref()
                         .is_some_and(|i| i.eq_ignore_ascii_case("ALWAYS"))
-            });
-        let quoted: Vec<String> = cols
-            .iter()
-            .map(|c| quote_ident(kind.as_sql(), &c.name))
-            .collect();
+            }),
+        };
+        let quoted: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
         // The driver's types first: they decide how each column is read.
         let probe = format!(
             "SELECT {} FROM {select_from} WHERE 1 = 0",
@@ -1515,7 +1520,7 @@ impl DumpJob {
             });
         }
         let info = r.session.server_info().clone();
-        let q = |n: &str| quote_ident(DbKind::MySql.as_sql(), n);
+        let q = |n: &str| quote_ident(SqlKind::MySql, n);
         let has_table = |n: &str| tables.iter().any(|t| t.obj.name.eq_ignore_ascii_case(n));
         let has_view = |n: &str| views.iter().any(|v| v.name.eq_ignore_ascii_case(n));
         for t in &tables {
@@ -1615,7 +1620,7 @@ impl DumpJob {
         let mut rows = 0;
         for t in tables.iter().filter(|t| t.obj.data) {
             let from = TableRef {
-                kind: DbKind::MySql.as_sql(),
+                kind: SqlKind::MySql,
                 database: db.clone(),
                 schema: None,
                 name: t.obj.name.clone(),
@@ -1922,7 +1927,7 @@ impl DumpJob {
                 file.statement(&format!(
                     "ALTER SEQUENCE {} OWNED BY {rel}.{}",
                     pg_relation(schema, name),
-                    quote_ident(DbKind::Postgres.as_sql(), col)
+                    quote_ident(SqlKind::Postgres, col)
                 ))?;
             }
         }
@@ -2001,7 +2006,7 @@ impl DumpJob {
             return Ok(None);
         };
         let base = text_of(row.first()).ok_or_else(|| table_changed(&format!("Type {name}")))?;
-        let q = |n: &str| quote_ident(DbKind::Postgres.as_sql(), n);
+        let q = |n: &str| quote_ident(SqlKind::Postgres, n);
         let mut ddl = format!("CREATE DOMAIN {} AS {base}", pg_relation(schema, name));
         if let (Some(cs), Some(cn)) = (text_of(row.get(1)), text_of(row.get(2))) {
             ddl.push_str(&format!(" COLLATE {}.{}", q(&cs), q(&cn)));

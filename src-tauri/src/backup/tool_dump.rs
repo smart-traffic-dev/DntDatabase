@@ -22,7 +22,7 @@ use crate::jobs::{
 use crate::session_manager::{config_error, ConnectionRuntime, SessionManager};
 use async_trait::async_trait;
 use dnt_core::error::DbError;
-use dnt_core::server::{DbKind, ServerInfo};
+use dnt_core::server::{ServerInfo, SqlKind};
 use dnt_transfer::tools::{
     mysql_dump_args, pg_dump_args, shown_command, Invocation, MysqlDumpOptions, PgDumpFormat,
     PgDumpOptions, Tool, ToolConn, ToolInfo, ToolOutput,
@@ -55,7 +55,7 @@ pub struct ToolDumpRequest {
 /// engine and its options (the other engine's options dropped).
 pub(crate) fn normalise_tool_request(
     mut req: ToolDumpRequest,
-    kind: DbKind,
+    kind: SqlKind,
 ) -> Result<ToolDumpRequest, DbError> {
     if req.database.trim().is_empty() {
         return Err(config_error("database", "Choose a database to dump."));
@@ -64,13 +64,13 @@ pub(crate) fn normalise_tool_request(
         return Err(config_error("path", "Choose a file to dump to."));
     }
     match (kind, req.tool) {
-        (DbKind::MySql, Tool::MysqlDump | Tool::MariadbDump) => {
+        (SqlKind::MySql, Tool::MysqlDump | Tool::MariadbDump) => {
             req.pg = None;
             if req.mysql.is_none() {
                 return Err(config_error("mysql", "The mysqldump options are missing."));
             }
         }
-        (DbKind::Postgres, Tool::PgDump) => {
+        (SqlKind::Postgres, Tool::PgDump) => {
             req.mysql = None;
             let Some(pg) = &req.pg else {
                 return Err(config_error("pg", "The pg_dump options are missing."));
@@ -81,7 +81,7 @@ pub(crate) fn normalise_tool_request(
                 req.compress = false;
             }
         }
-        (_, tool) => {
+        (SqlKind::MySql | SqlKind::Postgres, tool) => {
             return Err(config_error(
                 "tool",
                 &format!("{} cannot dump this connection.", tool.name()),
@@ -112,10 +112,10 @@ pub(crate) fn tool_dump_invocation(
     built.map_err(tool_error)
 }
 
-fn secret_name(kind: DbKind) -> &'static str {
+fn secret_name(kind: SqlKind) -> &'static str {
     match kind {
-        DbKind::MySql => MYSQL_SECRET_FILE,
-        DbKind::Postgres => PGPASS_FILE,
+        SqlKind::MySql => MYSQL_SECRET_FILE,
+        SqlKind::Postgres => PGPASS_FILE,
     }
 }
 
@@ -147,7 +147,8 @@ impl SessionManager {
     /// `dump_pick_path` (checked by the command).
     pub async fn tool_dump_start(&self, request: ToolDumpRequest) -> Result<Uuid, DbError> {
         let cfg = self.repo.get(request.connection_id)?;
-        let request = normalise_tool_request(request, cfg.kind)?;
+        let kind = cfg.kind.as_sql(); // R1: boundary
+        let request = normalise_tool_request(request, kind)?;
         let rt = self.runtime(request.connection_id)?;
         let configured = saved_external_tools_dir(&self.repo);
         let path_env = std::env::var_os("PATH");
@@ -159,7 +160,7 @@ impl SessionManager {
             &ToolConn::from_resolved(&resolved, tunnelled),
             rt.server_info(),
             &request,
-            Path::new(secret_name(cfg.kind)),
+            Path::new(secret_name(kind)),
         )?;
         drop(resolved);
         let spec = JobSpec {
@@ -241,7 +242,7 @@ impl JobRunner for ToolDumpJob {
             .await
             .map_err(JobFailure::from)?;
         let tmp = ctx.tmp_dir().map_err(JobFailure::from)?;
-        let secret = tmp.join(secret_name(self.rt.cfg.kind));
+        let secret = tmp.join(secret_name(self.rt.cfg.kind.as_sql())); // R1: boundary
         let inv = tool_dump_invocation(
             &self.info,
             &ToolConn::from_resolved(&resolved, tunnelled),
@@ -359,29 +360,29 @@ mod tests {
 
     #[test]
     fn tool_request_matches_the_engine() {
-        let m = normalise_tool_request(req(Tool::MysqlDump), DbKind::MySql).unwrap();
+        let m = normalise_tool_request(req(Tool::MysqlDump), SqlKind::MySql).unwrap();
         assert!(m.pg.is_none() && m.mysql.is_some());
-        let m = normalise_tool_request(req(Tool::MariadbDump), DbKind::MySql).unwrap();
+        let m = normalise_tool_request(req(Tool::MariadbDump), SqlKind::MySql).unwrap();
         assert!(m.pg.is_none());
-        let p = normalise_tool_request(req(Tool::PgDump), DbKind::Postgres).unwrap();
+        let p = normalise_tool_request(req(Tool::PgDump), SqlKind::Postgres).unwrap();
         assert!(p.mysql.is_none() && p.pg.is_some());
         for (tool, kind) in [
-            (Tool::PgDump, DbKind::MySql),
-            (Tool::MysqlDump, DbKind::Postgres),
-            (Tool::Psql, DbKind::Postgres),
-            (Tool::PgRestore, DbKind::Postgres),
+            (Tool::PgDump, SqlKind::MySql),
+            (Tool::MysqlDump, SqlKind::Postgres),
+            (Tool::Psql, SqlKind::Postgres),
+            (Tool::PgRestore, SqlKind::Postgres),
         ] {
             assert!(normalise_tool_request(req(tool), kind).is_err(), "{tool:?}");
         }
         let mut no_opts = req(Tool::MysqlDump);
         no_opts.mysql = None;
-        assert!(normalise_tool_request(no_opts, DbKind::MySql).is_err());
+        assert!(normalise_tool_request(no_opts, SqlKind::MySql).is_err());
         let mut no_db = req(Tool::MysqlDump);
         no_db.database = " ".into();
-        assert!(normalise_tool_request(no_db, DbKind::MySql).is_err());
+        assert!(normalise_tool_request(no_db, SqlKind::MySql).is_err());
         let mut no_path = req(Tool::MysqlDump);
         no_path.path = String::new();
-        assert!(normalise_tool_request(no_path, DbKind::MySql).is_err());
+        assert!(normalise_tool_request(no_path, SqlKind::MySql).is_err());
     }
 
     #[test]
@@ -394,7 +395,7 @@ mod tests {
             let mut r = req(Tool::PgDump);
             r.compress = true;
             r.pg.as_mut().unwrap().format = format;
-            let r = normalise_tool_request(r, DbKind::Postgres).unwrap();
+            let r = normalise_tool_request(r, SqlKind::Postgres).unwrap();
             assert_eq!(r.compress, kept, "{format:?}");
         }
     }
