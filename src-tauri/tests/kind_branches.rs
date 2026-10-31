@@ -3,16 +3,11 @@
 //! A branch such as `kind == DbKind::MySql` or `if let SqlKind::Postgres = kind`
 //! silently routes every other kind (including future non-SQL kinds such as
 //! MongoDB or Redis) into the "else" arm. Exhaustive `match` expressions are
-//! required instead. Files that still contain such branches are listed in
-//! `ALLOWED`; the list may only shrink.
+//! required instead; no source file may contain such a branch.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-/// Workspace-relative paths (with `/` separators) of files that still contain
-/// two-way kind branches. Later tasks remove entries from this list.
-const ALLOWED: &[&str] = &[];
 
 const KINDS: [&str; 2] = ["DbKind::", "SqlKind::"];
 
@@ -98,23 +93,25 @@ fn gates_test_module(lines: &[&str], at: usize) -> bool {
         })
 }
 
-/// Number of offending lines in a file's text, stopping at the first
-/// `#[cfg(test)]` that gates a module.
-fn offending_lines(text: &str) -> usize {
+/// Offending lines in a file's text as `line_number: line`, stopping at the
+/// first `#[cfg(test)]` that gates a module.
+fn offending_lines(text: &str) -> Vec<String> {
     let lines: Vec<&str> = text.lines().collect();
-    let mut count = 0;
+    let mut found = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         if line.trim() == "#[cfg(test)]" && gates_test_module(&lines, i) {
             break;
         }
         if offends(line) {
-            count += 1;
+            found.push(format!("{}: {}", i + 1, line.trim()));
         }
     }
-    count
+    found
 }
 
-fn scan() -> BTreeSet<String> {
+/// Workspace-relative path (with `/` separators) of every file containing a
+/// two-way kind branch, mapped to its offending lines.
+fn scan() -> BTreeMap<String, Vec<String>> {
     let root = workspace_root();
     let mut src_dirs = vec![root.join("src-tauri").join("src")];
     let crates_dir = root.join("crates");
@@ -135,12 +132,12 @@ fn scan() -> BTreeSet<String> {
     assert!(!files.is_empty(), "no source files found under {root:?}");
     files
         .iter()
-        .filter(|path| {
+        .filter_map(|path| {
             let text = fs::read_to_string(path)
                 .unwrap_or_else(|err| panic!("cannot read {path:?}: {err}"));
-            offending_lines(&text) > 0
+            let lines = offending_lines(&text);
+            (!lines.is_empty()).then(|| (relative(&root, path), lines))
         })
-        .map(|path| relative(&root, path))
         .collect()
 }
 
@@ -167,31 +164,27 @@ fn offends_detects_two_way_branches() {
 #[test]
 fn single_item_cfg_test_does_not_stop_scan() {
     let text = "#[cfg(test)] use x;\nif kind == DbKind::MySql {\n}\n";
-    assert_eq!(offending_lines(text), 1);
+    assert_eq!(offending_lines(text), ["2: if kind == DbKind::MySql {"]);
     let text = "#[cfg(test)]\nuse x;\nif kind == DbKind::MySql {\n}\n";
-    assert_eq!(offending_lines(text), 1);
+    assert_eq!(offending_lines(text), ["3: if kind == DbKind::MySql {"]);
 }
 
 #[test]
 fn cfg_test_module_stops_scan() {
     let text = "#[cfg(test)]\nmod tests {\n    if kind == DbKind::MySql {}\n}\n";
-    assert_eq!(offending_lines(text), 0);
+    assert!(offending_lines(text).is_empty());
     let text = "#[cfg(test)]\n#[path = \"x.rs\"]\nmod t;\nif kind == DbKind::MySql {\n";
-    assert_eq!(offending_lines(text), 0);
+    assert!(offending_lines(text).is_empty());
     let text = "if kind == DbKind::MySql {}\n#[cfg(test)]\npub(crate) mod t {\n    a == DbKind::MySql\n}\n";
-    assert_eq!(offending_lines(text), 1);
+    assert_eq!(offending_lines(text), ["1: if kind == DbKind::MySql {}"]);
 }
 
 #[test]
 fn no_binary_kind_branches() {
     let offending = scan();
-    let allowed: BTreeSet<String> = ALLOWED.iter().map(|s| s.replace('\\', "/")).collect();
-    let new: Vec<&String> = offending.difference(&allowed).collect();
-    let stale: Vec<&String> = allowed.difference(&offending).collect();
     assert!(
-        new.is_empty() && stale.is_empty(),
+        offending.is_empty(),
         "two-way DbKind/SqlKind branches must become exhaustive matches\n\
-         new offenders: {new:#?}\n\
-         stale ALLOWED entries: {stale:#?}"
+         offenders: {offending:#?}"
     );
 }
