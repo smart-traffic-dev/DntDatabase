@@ -37,6 +37,9 @@ pub enum StmtKindLabel {
     Ddl,
     Transaction,
     Other,
+    // A Command-family admin or unknown command (`crate::command::label_of`); a plain
+    // comment so bindings.ts gains only the `"admin"` literal.
+    Admin,
 }
 
 impl From<StatementKind> for StmtKindLabel {

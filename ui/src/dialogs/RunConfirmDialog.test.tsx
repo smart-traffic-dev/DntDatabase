@@ -51,6 +51,14 @@ describe('RunConfirmDialog', () => {
     expect(dialog.className).toContain('env-production');
   });
 
+  it('labels_admin_commands', () => {
+    render(<RunConfirmDialog plan={prodPlan([stmt(0, 'admin', 'confirm', 'FLUSHALL')])} onDone={vi.fn()} />);
+    const rows = screen.getByTestId('run-confirm').querySelectorAll('[data-testid="run-confirm-row"]');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('ADMIN');
+    expect(rows[0]).toHaveTextContent('FLUSHALL');
+  });
+
   it('follows the production guard layout: badge, SQL block, danger solid primary on the right', () => {
     render(<RunConfirmDialog plan={plan} onDone={vi.fn()} />);
     const dialog = screen.getByTestId('run-confirm');

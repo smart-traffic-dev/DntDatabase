@@ -7,6 +7,7 @@
 //! Every offset exchanged with the UI is a UTF-16 code-unit offset into the
 //! editor text; byte offsets stay inside this crate and `dnt-core`.
 
+pub mod command;
 pub mod edit;
 pub mod explain;
 pub mod guard;
@@ -18,6 +19,7 @@ pub mod risk;
 pub mod run;
 pub mod unbounded;
 
+pub use command::{guard_commands, label_of, plan_commands, CommandPlan, PlannedCommand};
 pub use edit::{
     atomicity, build_edit_plan, editable, fingerprint, Atomicity, CellInput, EditError, EditPlan,
     EditSet, Editability, NotEditable, PlannedEdit, Protection, ProtectionKind, RowEdit, RowRef,

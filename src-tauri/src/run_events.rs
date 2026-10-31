@@ -377,6 +377,7 @@ fn kind_label(kind: StatementKind) -> &'static str {
         StmtKindLabel::Ddl => "ddl",
         StmtKindLabel::Transaction => "transaction",
         StmtKindLabel::Other => "other",
+        StmtKindLabel::Admin => "admin",
     }
 }
 

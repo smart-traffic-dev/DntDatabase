@@ -20,6 +20,7 @@ const LABEL: Record<StmtKindLabel, string> = {
   ddl: 'DDL',
   transaction: 'TX',
   other: 'OTHER',
+  admin: 'ADMIN',
 };
 
 /** The sentence for one unbounded write, without the table (shown after it). */

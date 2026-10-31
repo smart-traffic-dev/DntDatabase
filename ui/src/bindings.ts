@@ -2978,7 +2978,7 @@ affected: number | null; error: AppError | null;
  * it was loaded.
  */
 conflict: boolean }
-export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other"
+export type StmtKindLabel = "read" | "write" | "ddl" | "transaction" | "other" | "admin"
 /**
  * Why a run is being stopped.
  */
