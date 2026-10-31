@@ -82,7 +82,7 @@ export function config(id: string, name: string, over: Partial<ConnectionConfig>
       secret_mode: 'saved',
       ssh: null,
       ssl: null,
-      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0 },
+      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0, driver: { kind: 'none' } },
       ...over,
     },
     has_db_password: true,

@@ -32,6 +32,7 @@ fn cfg(database: Option<&str>) -> ResolvedConfig {
         connect_timeout: Duration::from_secs(1),
         read_only: false,
         application_name: "DntDatabase".into(),
+        driver: dnt_core::config::DriverOptions::None,
     }
 }
 

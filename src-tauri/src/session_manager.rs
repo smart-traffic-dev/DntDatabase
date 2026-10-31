@@ -219,6 +219,7 @@ fn resolved_config(
             .application_name
             .clone()
             .unwrap_or_else(|| DEFAULT_APPLICATION_NAME.into()),
+        driver: cfg.options.driver.clone(),
     }
 }
 
@@ -236,6 +237,7 @@ pub(crate) fn with_database(base: &ResolvedConfig, database: Option<String>) -> 
         connect_timeout: base.connect_timeout,
         read_only: base.read_only,
         application_name: base.application_name.clone(),
+        driver: base.driver.clone(),
     }
 }
 

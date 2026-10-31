@@ -97,6 +97,33 @@ pub struct ConnOptions {
     pub application_name: Option<String>,
     /// Per-statement time limit of query tabs, in seconds; 0 = no limit.
     pub query_timeout_s: u32,
+    /// Engine-specific options; `None` for SQL engines and for pre-R3 `options_json`.
+    pub driver: DriverOptions,
+}
+
+/// One `host:port` pair (extra Mongo seed hosts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+pub struct HostPort {
+    pub host: String,
+    pub port: u16,
+}
+
+/// Options that only one engine family understands.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Type)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DriverOptions {
+    #[default]
+    None,
+    Mongo {
+        srv: bool,
+        auth_source: Option<String>,
+        replica_set: Option<String>,
+        direct_connection: bool,
+        extra_hosts: Vec<HostPort>,
+    },
+    Redis {
+        db: u16,
+    },
 }
 
 impl Default for ConnOptions {
@@ -108,6 +135,7 @@ impl Default for ConnOptions {
             charset: None,
             application_name: None,
             query_timeout_s: 0,
+            driver: DriverOptions::None,
         }
     }
 }
@@ -127,6 +155,7 @@ pub struct ResolvedConfig {
     pub connect_timeout: Duration,
     pub read_only: bool,
     pub application_name: String,
+    pub driver: DriverOptions,
 }
 
 impl ConnectionConfig {
@@ -203,6 +232,25 @@ mod tests {
         let o: ConnOptions = serde_json::from_str("{}").unwrap();
         assert_eq!(o.query_timeout_s, 0);
         assert_eq!(ConnOptions::default().query_timeout_s, 0);
+    }
+
+    #[test]
+    fn old_options_json_has_no_driver_options() {
+        let o: ConnOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(o.driver, DriverOptions::None);
+        let o: ConnOptions = serde_json::from_str(r#"{"version":1,"connect_timeout_s":10,"ssh_timeout_s":10,"charset":null,"application_name":null,"query_timeout_s":0}"#).unwrap();
+        assert_eq!(o.driver, DriverOptions::None);
+    }
+
+    #[test]
+    fn driver_options_serde_shape() {
+        let r = DriverOptions::Redis { db: 3 };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            serde_json::json!({"kind":"redis","db":3})
+        );
+        let m: DriverOptions = serde_json::from_value(serde_json::json!({"kind":"mongo","srv":true,"auth_source":"admin","replica_set":null,"direct_connection":false,"extra_hosts":[]})).unwrap();
+        assert!(matches!(m, DriverOptions::Mongo { srv: true, .. }));
     }
 
     #[test]

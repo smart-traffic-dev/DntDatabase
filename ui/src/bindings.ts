@@ -1694,7 +1694,11 @@ export type ConnOptions = { version: number; connect_timeout_s: number; ssh_time
 /**
  * Per-statement time limit of query tabs, in seconds; 0 = no limit.
  */
-query_timeout_s: number }
+query_timeout_s: number; 
+/**
+ * Engine-specific options; `None` for SQL engines and for pre-R3 `options_json`.
+ */
+driver: DriverOptions }
 export type ConnState = { state: "disconnected" } | { state: "connecting"; stage: ConnectStage } | { state: "connected" } | { state: "reconnecting" } | { state: "failed" }
 /**
  * The engine a connection string names (MariaDB is told apart from MySQL only by its scheme).
@@ -1818,6 +1822,10 @@ export type Dialect = ({ engine: "mysql" } & MySqlMode) | { engine: "postgres" }
  * A problem in the draft, shown at the element (and field) that causes it.
  */
 export type DraftError = { element: ElementRef; field: string | null; message: string }
+/**
+ * Options that only one engine family understands.
+ */
+export type DriverOptions = { kind: "none" } | { kind: "mongo"; srv: boolean; auth_source: string | null; replica_set: string | null; direct_connection: boolean; extra_hosts: HostPort[] } | { kind: "redis"; db: number }
 /**
  * What a `DROP` removes.
  */
@@ -2213,6 +2221,10 @@ export type HistoryStatus = "ok" | "error" |
  * show such a row as not applied.
  */
 "cancelled"
+/**
+ * One `host:port` pair (extra Mongo seed hosts).
+ */
+export type HostPort = { host: string; port: number }
 export type IdentityKind = "always" | "by_default"
 /**
  * Something a change does beyond the schema: values it may lose, a table rebuild,

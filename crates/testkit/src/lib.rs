@@ -110,6 +110,7 @@ impl Target {
             connect_timeout: Duration::from_secs(10),
             read_only: false,
             application_name: "DntDatabase".into(),
+            driver: dnt_core::config::DriverOptions::None,
         }
     }
 

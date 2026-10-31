@@ -1344,6 +1344,7 @@ fn tool_conn_from_resolved() {
         connect_timeout: std::time::Duration::from_secs(10),
         read_only: true,
         application_name: "DntDatabase".into(),
+        driver: dnt_core::config::DriverOptions::None,
     };
     let c = ToolConn::from_resolved(&r, true).unwrap();
     assert_eq!(c.kind, SqlKind::MySql);

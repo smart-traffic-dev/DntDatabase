@@ -1,7 +1,7 @@
 //! Fixtures shared by tests in this crate and downstream crates (feature `test-util`).
 
 use crate::config::{
-    ConnOptions, ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig,
+    ConnOptions, ConnectionConfig, DriverOptions, ResolvedConfig, SecretMode, SshAuth, SshConfig,
 };
 use crate::server::DbKind;
 use secrecy::SecretString;
@@ -55,5 +55,6 @@ pub fn sample_resolved(pw: Option<&str>) -> ResolvedConfig {
         connect_timeout: Duration::from_secs(10),
         read_only: false,
         application_name: "DntDatabase".into(),
+        driver: DriverOptions::None,
     }
 }
