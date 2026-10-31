@@ -85,11 +85,12 @@ pub fn label_of(class: &CommandClass) -> StmtKindLabel {
 /// verdict is `Allow` until [`guard_commands`] sets them.
 ///
 /// Db-relative targets are resolved to the database in effect when each command
-/// runs: `current_db` (the session's) as changed by every earlier command of the
-/// editor text that parses with a `UseDatabase` effect, those before a Cursor or
-/// Selection plan included. A target with `database: None` gets that database, and a
-/// `Database` drop with an empty name gets it as its name. While it is unknown
-/// (`current_db` is `None` and nothing changed it) they stay as they are.
+/// runs: `current_db` (the session's) at the first planned command, as changed by
+/// every earlier PLANNED command that parses with a `UseDatabase` effect. Commands
+/// outside a Cursor or Selection target are not sent, so they change nothing. A
+/// target with `database: None` gets that database, and a `Database` drop with an
+/// empty name gets it as its name. While it is unknown (`current_db` is `None` and
+/// nothing changed it) they stay as they are.
 pub fn plan_commands(
     text: &str,
     target: Target,
@@ -104,46 +105,32 @@ pub fn plan_commands(
     let source = &text[from..to];
     let range = |r: (usize, usize)| (map.to_u16(from + r.0), map.to_u16(from + r.1));
 
-    let mut db = current_db.map(str::to_string);
-    if from > 0 {
-        // A selection runs in the db the commands before it leave.
-        for s in lang.split(text).iter().filter(|s| s.range.1 <= from) {
-            if let Ok(cmd) = lang.parse(&s.text) {
-                track_database(&mut db, &cmd);
-            }
-        }
-    }
-    let mut found: Vec<_> = lang
-        .split(source)
-        .into_iter()
-        .map(|s| {
-            let mut parsed = lang.parse(&s.text);
-            if let Ok(cmd) = &mut parsed {
-                resolve_database(cmd, db.as_deref());
-                track_database(&mut db, cmd);
-            }
-            (s, parsed)
-        })
-        .collect();
+    let mut found = lang.split(source);
 
     if let Target::Cursor(c) = target {
         // Snap a cursor inside a surrogate pair, or past the end, onto the text.
         let c = map.to_u16(map.to_byte(c));
         let pick = found
             .iter()
-            .position(|(s, _)| {
+            .position(|s| {
                 let (start, end) = range(s.range);
                 start <= c && c <= end
             })
-            .or_else(|| found.iter().rposition(|(s, _)| range(s.range).1 <= c))
+            .or_else(|| found.iter().rposition(|s| range(s.range).1 <= c))
             .or(if found.is_empty() { None } else { Some(0) });
         found = pick.map(|i| found.swap_remove(i)).into_iter().collect();
     }
 
+    let mut db = current_db.map(str::to_string);
     let stmts = found
         .into_iter()
         .enumerate()
-        .map(|(index, (s, parsed))| {
+        .map(|(index, s)| {
+            let mut parsed = lang.parse(&s.text);
+            if let Ok(cmd) = &mut parsed {
+                resolve_database(cmd, db.as_deref());
+                track_database(&mut db, cmd);
+            }
             let (label, verdict) = match &parsed {
                 Ok(cmd) => (label_of(&cmd.class), Verdict::Allow),
                 Err(_) => (StmtKindLabel::Other, Verdict::Block),
@@ -181,18 +168,23 @@ fn resolve_database(cmd: &mut ParsedCommand, db: Option<&str>) {
     let Some(db) = db else {
         return;
     };
-    let drop_targets = cmd.drops.iter_mut().filter_map(|d| match d.kind {
-        CommandDropKind::Database => {
-            if d.target.name.is_empty() {
-                d.target.name = db.to_string();
-            }
-            None
-        }
-        CommandDropKind::Object => Some(&mut d.target),
-    });
-    for t in cmd.targets.iter_mut().chain(drop_targets) {
+    for t in &mut cmd.targets {
         if t.database.is_none() {
             t.database = Some(db.to_string());
+        }
+    }
+    for d in &mut cmd.drops {
+        match d.kind {
+            CommandDropKind::Database => {
+                if d.target.name.is_empty() {
+                    d.target.name = db.to_string();
+                }
+            }
+            CommandDropKind::Object => {
+                if d.target.database.is_none() {
+                    d.target.database = Some(db.to_string());
+                }
+            }
         }
     }
 }
@@ -240,7 +232,10 @@ pub trait CommandRunSink: RowSink {
 /// - Before each command the run stops on a cancel (that command is not sent).
 /// - After a failure it stops as `run_with` does: on a cancel, a lost connection, an
 ///   unknown outcome, a command sent inside a transaction or a transaction left open;
-///   otherwise only without `continue_on_error`. A late completion stops it too.
+///   otherwise only without `continue_on_error`. A failed `UseDatabase` command stops
+///   it even with `continue_on_error` (`Error { index }`): the later commands were
+///   planned and confirmed against the db it did not select. A late completion stops
+///   it too.
 /// - A changed `tx_state` goes to `sink.tx_state`; a `SessionChange` that succeeded
 ///   to `sink.database`. Reconnects are counted and noticed as in `run_with`.
 /// - `cfg.manual_tx` is ignored: the Command family has no manual-commit mode.
@@ -316,7 +311,12 @@ pub async fn run_commands(
                 (Ok(outcome), stop)
             }
             Err(err) => {
-                let stop = stop_after_error(&err, after, cfg.continue_on_error, stmt.index);
+                let use_db = matches!(
+                    cmd.session_effect,
+                    Some(CommandSessionEffect::UseDatabase(_))
+                );
+                let stop = stop_after_error(&err, after, cfg.continue_on_error, stmt.index)
+                    .or(use_db.then_some(StopReason::Error { index: stmt.index }));
                 let position = command_error_offset(stmt, &err);
                 let mut app = AppError::from(err);
                 app.tx_state = Some(after.as_str().into());
@@ -638,13 +638,25 @@ mod tests {
             ]
         );
 
-        // A Cursor or Selection plan still sees the `USE` before it.
+        // A `USE` outside a Cursor or Selection plan is not sent: it changes nothing.
         let p = plan_commands("USE a\nNUKE k", Target::Cursor(7), &Lines, Some("x"));
         assert_eq!(texts(&p), ["NUKE k"]);
-        assert_eq!(resolved(&p), [(vec![Some("a")], vec![])]);
+        assert_eq!(resolved(&p), [(vec![Some("x")], vec![])]);
         let p = plan_commands("USE a\nFLUSH", Target::Selection(6, 11), &Lines, Some("x"));
         assert_eq!(texts(&p), ["FLUSH"]);
-        assert_eq!(resolved(&p), [(vec![], vec!["a"])]);
+        assert_eq!(resolved(&p), [(vec![], vec!["x"])]);
+        // One inside the selection does.
+        let p = plan_commands(
+            "GET z\nUSE a\nFLUSH",
+            Target::Selection(6, 17),
+            &Lines,
+            Some("x"),
+        );
+        assert_eq!(texts(&p), ["USE a", "FLUSH"]);
+        assert_eq!(
+            resolved(&p),
+            [(vec![Some("x")], vec![]), (vec![], vec!["a"])]
+        );
 
         // A `USE` that does not parse changes nothing; an unknown db stays unknown.
         let p = plan_commands("USE b!\nNUKE k", Target::All, &Lines, Some("x"));
@@ -1182,18 +1194,31 @@ mod run_tests {
 
     #[tokio::test]
     async fn successful_use_reports_the_database() {
-        let s = FakeCmd::new(vec![ok(), fail(server_err(None)), ok()]);
+        // A failed `USE` is not reported (and stops the run, see below).
+        let s = FakeCmd::new(vec![ok(), ok(), fail(server_err(None))]);
         let mut rec = Rec::default();
         let report = go(
             &s,
-            "USE one\nUSE two\nGET a",
+            "USE one\nGET a\nUSE two",
             cfg(true),
             &cancel(),
             &mut rec,
         )
         .await;
-        assert_eq!(report.stop, None);
+        assert_eq!(report.stop, Some(StopReason::Error { index: 2 }));
         assert_eq!(rec.databases, ["one"]);
+    }
+
+    #[tokio::test]
+    async fn failed_use_stops_even_with_continue_on_error() {
+        // Later commands were planned (and confirmed) against the db it failed to select.
+        let s = FakeCmd::new(vec![fail(server_err(None))]);
+        let mut rec = Rec::default();
+        let report = go(&s, "USE bad\nSET x", cfg(true), &cancel(), &mut rec).await;
+        assert_eq!(s.received(), ["USE bad"]);
+        assert_eq!(report.stop, Some(StopReason::Error { index: 0 }));
+        assert_eq!(report.stmts.len(), 1);
+        assert!(rec.databases.is_empty());
     }
 
     #[tokio::test]

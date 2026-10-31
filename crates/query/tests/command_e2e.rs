@@ -367,6 +367,35 @@ async fn flushdb_after_select_confirms_the_selected_db() {
 }
 
 #[tokio::test]
+async fn cursor_flushdb_confirms_the_session_db() {
+    let (s, store) = connect().await;
+    let c = s.command().unwrap();
+    // The cursor on line 2 plans `FLUSHDB` alone: the `SELECT 2` above it is not sent.
+    let text = "SELECT 2\nFLUSHDB";
+    let mut plan = plan_commands(text, Target::Cursor(10), c.language(), Some("0"));
+    guard_commands(&mut plan, &ctx(Some(EnvTag::Production), false));
+    assert_eq!(plan.stmts.len(), 1);
+    assert_eq!(plan.stmts[0].text, "FLUSHDB");
+    assert_eq!(plan.stmts[0].confirm_name.as_deref(), Some("0"));
+
+    store.set("0", b"k", FakeValue::Str("v".into()));
+    store.set("2", b"k", FakeValue::Str("v".into()));
+    let cancel = RunCancel::new(s.cancel_handle());
+    let report = run_commands(
+        c,
+        &plan,
+        &ExecOptions::default(),
+        run_cfg(),
+        &cancel,
+        &mut Rec::default(),
+    )
+    .await;
+    assert_eq!(report.stop, None);
+    assert_eq!(store.get("0", b"k"), None, "the db it confirmed");
+    assert!(store.get("2", b"k").is_some());
+}
+
+#[tokio::test]
 async fn unknown_command_blocked_read_only() {
     let (s, store) = connect().await;
     let mut rec = Rec::default();
