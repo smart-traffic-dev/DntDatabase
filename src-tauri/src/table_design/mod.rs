@@ -95,7 +95,7 @@ impl Design {
     /// The relation a diff applies to (the stored table) or a new table is created in.
     fn table_ref(&self, draft_name: &str) -> TableRef {
         TableRef {
-            kind: self.server.kind,
+            kind: self.server.kind.as_sql(),
             database: self.scope.database.clone(),
             schema: self.scope.schema.clone(),
             name: self

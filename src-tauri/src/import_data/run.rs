@@ -1087,7 +1087,7 @@ impl ImportJob {
 pub(crate) fn temp_table(kind: DbKind, target: &TableRef) -> TableRef {
     let suffix = Uuid::new_v4().simple().to_string();
     TableRef {
-        kind,
+        kind: kind.as_sql(),
         database: target.database.clone(),
         schema: (kind == DbKind::Postgres).then(|| "pg_temp".to_string()),
         name: format!("{TEMP_PREFIX}{}", &suffix[..8]),
@@ -1125,7 +1125,7 @@ fn drop_sequence_defaults_sql(tmp: &TableRef, read: &TargetRead) -> Option<Strin
                 .is_some_and(|d| d.to_ascii_lowercase().contains("nextval("))
         })
         .map(|c| {
-            let q = quote_ident(DbKind::Postgres, &c.name);
+            let q = quote_ident(DbKind::Postgres.as_sql(), &c.name);
             format!("ALTER COLUMN {q} DROP DEFAULT, ALTER COLUMN {q} DROP NOT NULL")
         })
         .collect();

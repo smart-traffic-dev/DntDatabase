@@ -84,13 +84,13 @@ fn fv(v: Value) -> FullValue {
 fn table(t: Target, name: &str) -> TableRef {
     match t.kind() {
         DbKind::MySql => TableRef {
-            kind: DbKind::MySql,
+            kind: DbKind::MySql.as_sql(),
             database: SCOPE.into(),
             schema: None,
             name: name.into(),
         },
         DbKind::Postgres => TableRef {
-            kind: DbKind::Postgres,
+            kind: DbKind::Postgres.as_sql(),
             database: FIXTURE_DB.into(),
             schema: Some(SCOPE.into()),
             name: name.into(),

@@ -65,7 +65,7 @@ where
 impl Ctx {
     fn table(&self, name: &str) -> TableRef {
         TableRef {
-            kind: DbKind::Postgres,
+            kind: DbKind::Postgres.as_sql(),
             database: "postgres".into(),
             schema: Some(self.sch.into()),
             name: name.into(),

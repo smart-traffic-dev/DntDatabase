@@ -1930,7 +1930,7 @@ async fn literal_round_trip_all_types() {
     for t in Target::mysql_family() {
         let s = connect(t).await;
         let table = quote_ident(
-            DbKind::MySql,
+            DbKind::MySql.as_sql(),
             &format!("p3_lit_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
         );
         run(&s, &format!("CREATE TABLE {table} LIKE all_types"))

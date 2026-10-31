@@ -166,13 +166,13 @@ impl Scope {
     fn table(&self, name: &str) -> TableRef {
         match self.t.kind() {
             DbKind::MySql => TableRef {
-                kind: DbKind::MySql,
+                kind: DbKind::MySql.as_sql(),
                 database: self.name.clone(),
                 schema: None,
                 name: name.into(),
             },
             DbKind::Postgres => TableRef {
-                kind: DbKind::Postgres,
+                kind: DbKind::Postgres.as_sql(),
                 database: FIXTURE_DB.into(),
                 schema: Some(self.name.clone()),
                 name: name.into(),

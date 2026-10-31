@@ -321,7 +321,7 @@ impl DataQuery {
                 .collect();
             return DataRequest {
                 sql: select_sql(
-                    self.kind,
+                    self.kind.as_sql(),
                     &self.relation,
                     extra,
                     &self.filter.sql,
@@ -344,7 +344,12 @@ impl DataQuery {
                 order.iter().map(|(c, asc)| (c.as_str(), *asc)).collect();
             let where_sql = raw_clause(&raw, dialect)?;
             Ok(select_sql(
-                kind, &relation, &extra, &where_sql, &order, page,
+                kind.as_sql(),
+                &relation,
+                &extra,
+                &where_sql,
+                &order,
+                page,
             ))
         };
         DataRequest {
@@ -388,7 +393,11 @@ impl PageExtras {
         let version = self.row_version.then(|| "xmin::text".to_string());
         version
             .into_iter()
-            .chain(self.hidden_key.iter().map(|c| quote_ident(kind, c)))
+            .chain(
+                self.hidden_key
+                    .iter()
+                    .map(|c| quote_ident(kind.as_sql(), c)),
+            )
             .collect()
     }
 }
@@ -534,7 +543,11 @@ pub(crate) async fn data_query(
     let (order, keys, filter) = match &detail {
         Some(detail) => {
             let (order, keys) = page_order(kind, detail, sort)?;
-            (order, keys, build_where(kind, &detail.columns, structured)?)
+            (
+                order,
+                keys,
+                build_where(kind.as_sql(), &detail.columns, structured)?,
+            )
         }
         None => (Vec::new(), Vec::new(), WhereClause::default()),
     };
@@ -563,7 +576,12 @@ fn elapsed_ms(started: Instant) -> u64 {
 }
 
 fn relation(kind: DbKind, obj: &ObjectRef) -> String {
-    qualified_name(kind, &obj.database, obj.schema.as_deref(), &obj.name)
+    qualified_name(
+        kind.as_sql(),
+        &obj.database,
+        obj.schema.as_deref(),
+        &obj.name,
+    )
 }
 
 /// A page of `obj`: `sort` keys in order (empty: the primary key), rows matching
@@ -642,7 +660,7 @@ pub async fn table_row_count_impl(
         None => {
             let clause = if filtered(filter.as_ref()) {
                 let detail = table_detail_impl(state, id, obj.clone()).await?;
-                build_where(kind, &detail.columns, filter.as_ref())?
+                build_where(kind.as_sql(), &detail.columns, filter.as_ref())?
             } else {
                 WhereClause::default()
             };
@@ -976,7 +994,7 @@ pub fn copy_sql(
         return Err(config_error("copy", "There are no rows to copy."));
     }
     let table = TableRef {
-        kind,
+        kind: kind.as_sql(),
         database: detail.object.database.clone(),
         schema: detail.object.schema.clone(),
         name: detail.object.name.clone(),

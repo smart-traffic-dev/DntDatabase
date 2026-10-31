@@ -27,7 +27,7 @@ pub fn validate(def: &TableDef, server: &ServerInfo) -> Vec<DraftError> {
     let mut v = Validator {
         server,
         kind: server.kind,
-        dialect: Dialect::for_kind(server.kind),
+        dialect: Dialect::for_kind(server.kind.as_sql()),
         trusted: false,
         errs: Vec::new(),
     };
@@ -170,7 +170,7 @@ impl Validator<'_> {
         if original == Some(name) {
             return true;
         }
-        if let Err(e) = validate_identifier(self.kind, name) {
+        if let Err(e) = validate_identifier(self.kind.as_sql(), name) {
             let message = match e {
                 DbError::Config { message, .. } => message,
                 other => other.to_string(),

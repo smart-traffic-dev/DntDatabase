@@ -4,7 +4,7 @@
 use super::{kind_label, EditTarget, Header, Strategy};
 use crate::error::DbError;
 use crate::meta::ObjectKind;
-use crate::server::{DbKind, ServerInfo, ServerVariant};
+use crate::server::{ServerInfo, ServerVariant, SqlKind};
 use crate::sql::ident::{qualified_name, quote_ident};
 use serde::{Deserialize, Serialize};
 
@@ -97,13 +97,13 @@ pub fn strategies(t: &EditTarget, server: &ServerInfo) -> Vec<Strategy> {
     if t.name.is_none() {
         return Vec::new();
     }
-    match server.kind {
-        DbKind::Postgres => match t.kind {
+    match server.kind.as_sql() {
+        SqlKind::Postgres => match t.kind {
             View | Function | Procedure => vec![Strategy::Replace, Strategy::Recreate],
             MaterializedView | Trigger => vec![Strategy::Recreate],
             _ => Vec::new(),
         },
-        DbKind::MySql => match t.kind {
+        SqlKind::MySql => match t.kind {
             View => vec![Strategy::Replace],
             Function | Procedure | Trigger | Event => {
                 if server.variant == ServerVariant::MariaDb {
@@ -128,7 +128,11 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
         facts,
         rehearsal_name,
     } = *input;
-    let pg = server.kind == DbKind::Postgres;
+    let kind = server.kind.as_sql();
+    let pg = match kind {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => true,
+    };
     let mut out = Built {
         statements: Vec::new(),
         warnings: Vec::new(),
@@ -156,7 +160,7 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
                 kind_label(t.kind)
             ),
         })?;
-    let q = qualified_name(server.kind, &t.database, t.schema.as_deref(), name);
+    let q = qualified_name(kind, &t.database, t.schema.as_deref(), name);
     let what = kind_label(t.kind);
     if pg {
         let schema = pg_schema(t)?;
@@ -200,8 +204,8 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
                     .ok_or_else(|| missing_fact("table", "table"))?;
                 out.statements.push(format!(
                     "DROP TRIGGER {} ON {}",
-                    quote_ident(DbKind::Postgres, name),
-                    qualified_name(DbKind::Postgres, &t.database, Some(schema), table)
+                    quote_ident(SqlKind::Postgres, name),
+                    qualified_name(SqlKind::Postgres, &t.database, Some(schema), table)
                 ));
                 out.statements.push(stmt.to_string());
             }
@@ -224,7 +228,7 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
             out.statements.push(format!(
                 "ALTER {} {q} OWNER TO {}",
                 kind_word(t.kind),
-                quote_ident(DbKind::Postgres, owner)
+                quote_ident(SqlKind::Postgres, owner)
             ));
         }
         // Post-check.
@@ -319,7 +323,7 @@ pub fn build(input: &BuildInput) -> Result<Built, DbError> {
                 out.gap = true;
                 if matches!(t.kind, ObjectKind::Function | ObjectKind::Procedure) {
                     // Rehearsal (R5): the same text under a temporary name.
-                    let rehearsal = quote_ident(DbKind::MySql, rehearsal_name);
+                    let rehearsal = quote_ident(SqlKind::MySql, rehearsal_name);
                     out.statements.push(format!(
                         "{}{rehearsal}{}",
                         &stmt[..h.name_span.0],

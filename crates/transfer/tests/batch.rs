@@ -9,7 +9,7 @@ use dnt_transfer::batch::{Batch, BatchBuilder};
 
 fn table(kind: DbKind) -> TableRef {
     TableRef {
-        kind,
+        kind: kind.as_sql(),
         database: "db".into(),
         schema: (kind == DbKind::Postgres).then(|| "public".into()),
         name: "t".into(),

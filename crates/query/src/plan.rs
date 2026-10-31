@@ -226,8 +226,14 @@ pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: b
             state = TxState::Active;
         }
         let commits = |prev| {
-            next_tx_state(DbKind::MySql, prev, false, s.kind, &s.text, StmtResult::Ok)
-                == TxState::Idle
+            next_tx_state(
+                DbKind::MySql.as_sql(),
+                prev,
+                false,
+                s.kind,
+                &s.text,
+                StmtResult::Ok,
+            ) == TxState::Idle
         };
         // A `BEGIN` in an open transaction commits it before starting the next one.
         let begin = s.kind == StatementKind::Transaction(TxControl::Begin);
@@ -235,14 +241,19 @@ pub fn mark_implicit_commits(plan: &mut ScriptPlan, start: TxState, manual_tx: b
             && (begin
                 || (!matches!(s.kind, StatementKind::Transaction(_)) && commits(TxState::Active)));
         state = next_tx_state(
-            DbKind::MySql,
+            DbKind::MySql.as_sql(),
             state,
             autocommit_off,
             s.kind,
             &s.text,
             StmtResult::Ok,
         );
-        autocommit_off = next_autocommit_off(DbKind::MySql, autocommit_off, s.kind, StmtResult::Ok);
+        autocommit_off = next_autocommit_off(
+            DbKind::MySql.as_sql(),
+            autocommit_off,
+            s.kind,
+            StmtResult::Ok,
+        );
     }
 }
 
@@ -509,7 +520,7 @@ mod tests {
         let p = plan("DELIMITER $$\nSELECT 1; BEGIN$$", Target::All, MY);
         let s = &p.stmts[0];
         let after = next_tx_state(
-            DbKind::MySql,
+            DbKind::MySql.as_sql(),
             TxState::Idle,
             false,
             s.kind,
@@ -520,7 +531,7 @@ mod tests {
         let p = plan("DELIMITER $$\nSELECT 1; COMMIT$$", Target::All, MY);
         let s = &p.stmts[0];
         let after = next_tx_state(
-            DbKind::MySql,
+            DbKind::MySql.as_sql(),
             TxState::Active,
             false,
             s.kind,

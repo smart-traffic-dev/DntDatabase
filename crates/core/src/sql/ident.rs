@@ -4,23 +4,23 @@
 //! in double quotes, the quote character doubled inside. Nothing the user typed is ever
 //! interpolated unquoted; numbers (`LIMIT` / `OFFSET`) are formatted from integers.
 
-use crate::server::DbKind;
+use crate::server::SqlKind;
 
 /// `name` quoted for `kind`: `` `a``b` `` (MySQL) or `"a""b"` (PostgreSQL).
-pub fn quote_ident(kind: DbKind, name: &str) -> String {
+pub fn quote_ident(kind: SqlKind, name: &str) -> String {
     match kind {
-        DbKind::MySql => format!("`{}`", name.replace('`', "``")),
-        DbKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        SqlKind::MySql => format!("`{}`", name.replace('`', "``")),
+        SqlKind::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
     }
 }
 
 /// The qualified name of a relation: `` `db`.`t` `` on MySQL (the database qualifies it,
 /// a schema is not used), `"schema"."t"` on PostgreSQL (the session is on the database;
 /// without a schema the name is left unqualified).
-pub fn qualified_name(kind: DbKind, database: &str, schema: Option<&str>, name: &str) -> String {
+pub fn qualified_name(kind: SqlKind, database: &str, schema: Option<&str>, name: &str) -> String {
     let prefix = match kind {
-        DbKind::MySql => Some(database),
-        DbKind::Postgres => schema,
+        SqlKind::MySql => Some(database),
+        SqlKind::Postgres => schema,
     };
     match prefix {
         Some(p) => format!("{}.{}", quote_ident(kind, p), quote_ident(kind, name)),
@@ -32,7 +32,7 @@ pub fn qualified_name(kind: DbKind, database: &str, schema: Option<&str>, name: 
 /// `relation` must come from [`qualified_name`]; `order` lists `(column, ascending)` and
 /// the columns are quoted here.
 pub fn select_page_sql(
-    kind: DbKind,
+    kind: SqlKind,
     relation: &str,
     order: &[(&str, bool)],
     limit: u64,
@@ -51,7 +51,7 @@ pub fn select_page_sql(
 /// (`` `db`.`t`.* ``): MySQL refuses a bare `*` after other select items. With no
 /// extra columns the statement is `SELECT * FROM …` as before.
 pub fn select_sql(
-    kind: DbKind,
+    kind: SqlKind,
     relation: &str,
     extra_cols: &[String],
     where_sql: &str,
@@ -62,8 +62,8 @@ pub fn select_sql(
         "*".to_string()
     } else {
         let star = match kind {
-            DbKind::MySql => format!("{relation}.*"),
-            DbKind::Postgres => "*".to_string(),
+            SqlKind::MySql => format!("{relation}.*"),
+            SqlKind::Postgres => "*".to_string(),
         };
         format!("{}, {star}", extra_cols.join(", "))
     };
@@ -105,53 +105,56 @@ mod tests {
 
     #[test]
     fn quotes_are_doubled_per_engine() {
-        assert_eq!(quote_ident(DbKind::MySql, "orders"), "`orders`");
-        assert_eq!(quote_ident(DbKind::MySql, "we`ird\"col"), "`we``ird\"col`");
-        assert_eq!(quote_ident(DbKind::Postgres, "orders"), "\"orders\"");
+        assert_eq!(quote_ident(SqlKind::MySql, "orders"), "`orders`");
+        assert_eq!(quote_ident(SqlKind::MySql, "we`ird\"col"), "`we``ird\"col`");
+        assert_eq!(quote_ident(SqlKind::Postgres, "orders"), "\"orders\"");
         assert_eq!(
-            quote_ident(DbKind::Postgres, "we`ird\"col"),
+            quote_ident(SqlKind::Postgres, "we`ird\"col"),
             "\"we`ird\"\"col\""
         );
-        assert_eq!(quote_ident(DbKind::MySql, "đơn_hàng"), "`đơn_hàng`");
-        assert_eq!(quote_ident(DbKind::Postgres, "đơn_hàng"), "\"đơn_hàng\"");
-        assert_eq!(quote_ident(DbKind::Postgres, ""), "\"\"");
+        assert_eq!(quote_ident(SqlKind::MySql, "đơn_hàng"), "`đơn_hàng`");
+        assert_eq!(quote_ident(SqlKind::Postgres, "đơn_hàng"), "\"đơn_hàng\"");
+        assert_eq!(quote_ident(SqlKind::Postgres, ""), "\"\"");
     }
 
     #[test]
     fn mysql_qualifies_by_database_postgres_by_schema() {
         assert_eq!(
-            qualified_name(DbKind::MySql, "shop", None, "đơn_hàng"),
+            qualified_name(SqlKind::MySql, "shop", None, "đơn_hàng"),
             "`shop`.`đơn_hàng`"
         );
         assert_eq!(
-            qualified_name(DbKind::MySql, "sh`op", Some("ignored"), "t"),
+            qualified_name(SqlKind::MySql, "sh`op", Some("ignored"), "t"),
             "`sh``op`.`t`"
         );
         assert_eq!(
-            qualified_name(DbKind::Postgres, "shop", Some("pub\"lic"), "Orders"),
+            qualified_name(SqlKind::Postgres, "shop", Some("pub\"lic"), "Orders"),
             "\"pub\"\"lic\".\"Orders\""
         );
-        assert_eq!(qualified_name(DbKind::Postgres, "shop", None, "t"), "\"t\"");
+        assert_eq!(
+            qualified_name(SqlKind::Postgres, "shop", None, "t"),
+            "\"t\""
+        );
     }
 
     #[test]
     fn select_page_quotes_the_order_column() {
-        let rel = qualified_name(DbKind::MySql, "shop", None, "weird_names");
+        let rel = qualified_name(SqlKind::MySql, "shop", None, "weird_names");
         assert_eq!(
-            select_page_sql(DbKind::MySql, &rel, &[], 101, 0),
+            select_page_sql(SqlKind::MySql, &rel, &[], 101, 0),
             "SELECT * FROM `shop`.`weird_names` LIMIT 101 OFFSET 0"
         );
         assert_eq!(
-            select_page_sql(DbKind::MySql, &rel, &[("we`ird\"col", false)], 11, 200),
+            select_page_sql(SqlKind::MySql, &rel, &[("we`ird\"col", false)], 11, 200),
             "SELECT * FROM `shop`.`weird_names` ORDER BY `we``ird\"col` DESC LIMIT 11 OFFSET 200"
         );
-        let rel = qualified_name(DbKind::Postgres, "shop", Some("public"), "đơn_hàng");
+        let rel = qualified_name(SqlKind::Postgres, "shop", Some("public"), "đơn_hàng");
         assert_eq!(
-            select_page_sql(DbKind::Postgres, &rel, &[("x\"; DROP", true)], 5, 5),
+            select_page_sql(SqlKind::Postgres, &rel, &[("x\"; DROP", true)], 5, 5),
             "SELECT * FROM \"public\".\"đơn_hàng\" ORDER BY \"x\"\"; DROP\" ASC LIMIT 5 OFFSET 5"
         );
         assert_eq!(
-            select_page_sql(DbKind::Postgres, &rel, &[("a", true), ("b", true)], 5, 0),
+            select_page_sql(SqlKind::Postgres, &rel, &[("a", true), ("b", true)], 5, 0),
             "SELECT * FROM \"public\".\"đơn_hàng\" ORDER BY \"a\" ASC, \"b\" ASC LIMIT 5 OFFSET 0"
         );
         assert_eq!(
@@ -162,10 +165,10 @@ mod tests {
 
     #[test]
     fn select_with_where_and_without_a_page() {
-        let rel = qualified_name(DbKind::Postgres, "shop", Some("public"), "t");
+        let rel = qualified_name(SqlKind::Postgres, "shop", Some("public"), "t");
         assert_eq!(
             select_sql(
-                DbKind::Postgres,
+                SqlKind::Postgres,
                 &rel,
                 &[],
                 " WHERE (\"a\" = $1)",
@@ -176,7 +179,7 @@ mod tests {
         );
         assert_eq!(
             select_sql(
-                DbKind::MySql,
+                SqlKind::MySql,
                 "`t`",
                 &[],
                 " WHERE (`a` = ?)",
@@ -193,10 +196,10 @@ mod tests {
 
     #[test]
     fn select_puts_extra_cols_first() {
-        let rel = qualified_name(DbKind::Postgres, "shop", Some("public"), "t");
+        let rel = qualified_name(SqlKind::Postgres, "shop", Some("public"), "t");
         assert_eq!(
             select_sql(
-                DbKind::Postgres,
+                SqlKind::Postgres,
                 &rel,
                 &["xmin::text".into()],
                 " WHERE (\"id\" = $1)",
@@ -207,10 +210,10 @@ mod tests {
              ORDER BY \"id\" ASC LIMIT 100 OFFSET 0"
         );
         // MySQL only accepts `*` after other items when it is qualified.
-        let rel = qualified_name(DbKind::MySql, "shop", None, "t");
+        let rel = qualified_name(SqlKind::MySql, "shop", None, "t");
         assert_eq!(
             select_sql(
-                DbKind::MySql,
+                SqlKind::MySql,
                 &rel,
                 &["`hid`".into(), "`k2`".into()],
                 "",

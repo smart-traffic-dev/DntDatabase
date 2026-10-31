@@ -469,7 +469,7 @@ impl Session for FakeSession {
         self.log.tx.lock().unwrap().unwrap_or(TxState::Idle)
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.info.kind)
+        Dialect::for_kind(self.info.kind.as_sql())
     }
     fn cancel_handle(&self) -> CancelHandle {
         Arc::new(FakeCancel(Arc::clone(&self.log)))

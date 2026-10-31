@@ -136,11 +136,11 @@ impl Scratch {
         let pg = t.kind() == DbKind::Postgres;
         let ns = format!("p4c_{}", Uuid::new_v4().simple());
         let create = if pg {
-            format!("CREATE SCHEMA {}", quote_ident(t.kind(), &ns))
+            format!("CREATE SCHEMA {}", quote_ident(t.kind().as_sql(), &ns))
         } else {
             format!(
                 "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-                quote_ident(t.kind(), &ns)
+                quote_ident(t.kind().as_sql(), &ns)
             )
         };
         let boot = connect(t, FIXTURE_DB).await;
@@ -322,12 +322,12 @@ impl Scratch {
         let drop = if self.pg {
             format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(self.t.kind(), &self.ns)
+                quote_ident(self.t.kind().as_sql(), &self.ns)
             )
         } else {
             format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(self.t.kind(), &self.ns)
+                quote_ident(self.t.kind().as_sql(), &self.ns)
             )
         };
         self.state.sessions.close(self.id).await;

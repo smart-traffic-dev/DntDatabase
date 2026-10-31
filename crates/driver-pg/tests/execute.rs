@@ -1651,7 +1651,7 @@ async fn literal_round_trip_all_types() {
     for t in Target::pg() {
         let s = connect(t).await;
         let table = quote_ident(
-            DbKind::Postgres,
+            DbKind::Postgres.as_sql(),
             &format!("p3_lit_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
         );
         run(
@@ -1697,7 +1697,7 @@ async fn pg_literal_round_trip(s: &PgSession, table: &str) -> Result<(), String>
         for (j, (v, c)) in row.iter().zip(&targets).enumerate() {
             match literal(v, c, d) {
                 Ok(l) => {
-                    names.push(quote_ident(DbKind::Postgres, &c.name));
+                    names.push(quote_ident(DbKind::Postgres.as_sql(), &c.name));
                     lits.push(l);
                     written.push(j);
                 }

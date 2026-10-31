@@ -89,7 +89,7 @@ pub(crate) fn pre_step(
     } else {
         format!("DELETE FROM {rel}")
     };
-    let irreversible = table.kind == DbKind::MySql && (*truncate || !transactional);
+    let irreversible = table.kind == DbKind::MySql.as_sql() && (*truncate || !transactional);
     Some(PreStep {
         sql,
         irreversible,

@@ -2,7 +2,7 @@
 
 use super::EditTarget;
 use crate::meta::ObjectKind;
-use crate::server::{DbKind, ServerInfo, ServerVariant};
+use crate::server::{ServerInfo, ServerVariant, SqlKind};
 use crate::sql::ident::quote_ident;
 
 const ONE_TRANSACTION: &str = "Runs in one transaction.";
@@ -10,7 +10,10 @@ const ONE_TRANSACTION: &str = "Runs in one transaction.";
 /// Header notes for the editor of `t` on `server`.
 pub fn notes(t: &EditTarget, server: &ServerInfo) -> Vec<String> {
     use ObjectKind::*;
-    let pg = server.kind == DbKind::Postgres;
+    let pg = match server.kind.as_sql() {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => true,
+    };
     if t.name.is_none() {
         return if pg {
             vec![ONE_TRANSACTION.into()]
@@ -65,9 +68,9 @@ pub fn notes(t: &EditTarget, server: &ServerInfo) -> Vec<String> {
 pub fn template(t: &EditTarget, server: &ServerInfo) -> String {
     use ObjectKind::*;
     let table = t.table.as_deref().unwrap_or("table_name");
-    match server.kind {
-        DbKind::MySql => {
-            let q = |n: &str| quote_ident(DbKind::MySql, n);
+    match server.kind.as_sql() {
+        SqlKind::MySql => {
+            let q = |n: &str| quote_ident(SqlKind::MySql, n);
             let db = q(&t.database);
             match t.kind {
                 View => format!("CREATE VIEW {db}.`new_view` AS\nSELECT 1 AS `id`"),
@@ -87,8 +90,8 @@ pub fn template(t: &EditTarget, server: &ServerInfo) -> String {
                 _ => String::new(),
             }
         }
-        DbKind::Postgres => {
-            let q = |n: &str| quote_ident(DbKind::Postgres, n);
+        SqlKind::Postgres => {
+            let q = |n: &str| quote_ident(SqlKind::Postgres, n);
             let s = q(t.schema.as_deref().unwrap_or("public"));
             match t.kind {
                 View => format!("CREATE VIEW {s}.\"new_view\" AS\nSELECT 1 AS id"),

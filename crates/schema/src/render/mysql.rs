@@ -22,7 +22,7 @@ use dnt_core::sql::ident::{count_where_sql, qualified_name, quote_ident};
 use dnt_core::sql::Dialect;
 
 fn q(name: &str) -> String {
-    quote_ident(DbKind::MySql, name)
+    quote_ident(DbKind::MySql.as_sql(), name)
 }
 
 fn check_dialect(d: Dialect) -> Result<(), RenderError> {
@@ -73,7 +73,7 @@ pub(super) fn render(
             impacts: vec![],
         });
     }
-    let relation = qualified_name(DbKind::MySql, &table.database, None, &table.name);
+    let relation = qualified_name(DbKind::MySql.as_sql(), &table.database, None, &table.name);
     for c in changes {
         if let Change::AddForeignKey { fk } = c {
             let dropped = changes.iter().any(
@@ -117,7 +117,7 @@ pub(super) fn render(
             }
             Change::RenameTable { to, .. } => clauses.push(format!(
                 "RENAME TO {}",
-                qualified_name(DbKind::MySql, &table.database, None, to)
+                qualified_name(DbKind::MySql.as_sql(), &table.database, None, to)
             )),
             Change::SetOptions { old: o, new: n } => {
                 let options = changed_options(o, n)?;
@@ -467,7 +467,7 @@ pub(super) fn render_create(
     }
     let mut sql = format!(
         "CREATE TABLE {} (\n  {}\n)",
-        qualified_name(DbKind::MySql, &table.database, None, &def.name),
+        qualified_name(DbKind::MySql.as_sql(), &table.database, None, &def.name),
         items.join(",\n  ")
     );
     if !options.is_empty() {
@@ -1062,7 +1062,7 @@ mod tests {
 
     fn table(name: &str) -> TableRef {
         TableRef {
-            kind: DbKind::MySql,
+            kind: DbKind::MySql.as_sql(),
             database: "dnt_fixture".into(),
             schema: None,
             name: name.into(),

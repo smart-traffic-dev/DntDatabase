@@ -48,7 +48,7 @@ pub(crate) fn types_sql(
     let list: Vec<String> = detail
         .columns
         .iter()
-        .map(|c| quote_ident(kind, &c.name))
+        .map(|c| quote_ident(kind.as_sql(), &c.name))
         .collect();
     format!(
         "SELECT {} FROM {} WHERE 1 = 0",

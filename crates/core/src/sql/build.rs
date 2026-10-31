@@ -4,7 +4,7 @@
 //! the statement sent. Every value goes through [`literal`]; nothing else formats a value
 //! into SQL.
 
-use crate::server::DbKind;
+use crate::server::SqlKind;
 use crate::sql::filter::WhereClause;
 use crate::sql::ident::{qualified_name, quote_ident};
 use crate::sql::Dialect;
@@ -396,7 +396,7 @@ fn render_pg_part(part: &NamePart) -> String {
     if plain {
         name.to_string()
     } else {
-        crate::sql::ident::quote_ident(crate::server::DbKind::Postgres, name)
+        crate::sql::ident::quote_ident(crate::server::SqlKind::Postgres, name)
     }
 }
 
@@ -539,7 +539,7 @@ fn push_array_item(out: &mut String, t: &str) {
 /// The table a statement reads or writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRef {
-    pub kind: DbKind,
+    pub kind: SqlKind,
     pub database: String,
     pub schema: Option<String>,
     pub name: String,
@@ -600,10 +600,10 @@ const RAW_WHERE_FORBIDDEN: &[&str] = &[
     "REVOKE", "CALL", "DO", "COPY", "SET",
 ];
 
-fn kind_of(d: Dialect) -> DbKind {
+fn kind_of(d: Dialect) -> SqlKind {
     match d {
-        Dialect::MySql(_) => DbKind::MySql,
-        Dialect::Postgres => DbKind::Postgres,
+        Dialect::MySql(_) => SqlKind::MySql,
+        Dialect::Postgres => SqlKind::Postgres,
     }
 }
 
@@ -1220,7 +1220,7 @@ mod dml_tests {
 
     fn my_table() -> TableRef {
         TableRef {
-            kind: DbKind::MySql,
+            kind: SqlKind::MySql,
             database: "shop".into(),
             schema: None,
             name: "users".into(),
@@ -1228,7 +1228,7 @@ mod dml_tests {
     }
     fn pg_table() -> TableRef {
         TableRef {
-            kind: DbKind::Postgres,
+            kind: SqlKind::Postgres,
             database: "shop".into(),
             schema: Some("public".into()),
             name: "users".into(),

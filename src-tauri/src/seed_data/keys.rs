@@ -28,7 +28,7 @@ pub(crate) const KEY_CACHE_MAX: usize = 32;
 pub(crate) fn parent_ref(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail) -> TableRef {
     match kind {
         DbKind::MySql => TableRef {
-            kind,
+            kind: kind.as_sql(),
             database: fk
                 .ref_schema
                 .clone()
@@ -37,7 +37,7 @@ pub(crate) fn parent_ref(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail)
             name: fk.ref_table.clone(),
         },
         DbKind::Postgres => TableRef {
-            kind,
+            kind: kind.as_sql(),
             database: child.database.clone(),
             schema: fk.ref_schema.clone().or_else(|| child.schema.clone()),
             name: fk.ref_table.clone(),
@@ -51,7 +51,7 @@ pub(crate) fn fk_key_sql(kind: DbKind, child: &ObjectRef, fk: &ForeignKeyDetail)
     let cols: Vec<String> = fk
         .ref_columns
         .iter()
-        .map(|c| quote_ident(kind, c))
+        .map(|c| quote_ident(kind.as_sql(), c))
         .collect();
     let not_null: Vec<String> = cols.iter().map(|c| format!("{c} IS NOT NULL")).collect();
     format!(

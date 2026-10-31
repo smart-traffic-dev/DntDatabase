@@ -755,12 +755,12 @@ impl SessionManager {
         let cols: Vec<String> = detail
             .columns
             .iter()
-            .map(|c| quote_ident(kind, &c.name))
+            .map(|c| quote_ident(kind.as_sql(), &c.name))
             .collect();
         let sql = format!(
             "SELECT {} FROM {} LIMIT 0",
             cols.join(", "),
-            qualified_name(kind, &o.database, o.schema.as_deref(), &o.name)
+            qualified_name(kind.as_sql(), &o.database, o.schema.as_deref(), &o.name)
         );
         let opts = ExecOptions {
             max_rows: 1,

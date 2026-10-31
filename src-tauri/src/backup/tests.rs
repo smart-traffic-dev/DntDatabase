@@ -254,7 +254,7 @@ impl Session for FakeSession {
         *self.tx.lock().unwrap()
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.fake.server.kind)
+        Dialect::for_kind(self.fake.server.kind.as_sql())
     }
     fn cancel_handle(&self) -> CancelHandle {
         Arc::new(CountCancel(Arc::clone(&self.fake)))

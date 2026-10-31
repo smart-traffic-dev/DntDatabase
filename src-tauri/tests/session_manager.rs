@@ -146,7 +146,7 @@ impl Session for FakeSession {
         TxState::Idle
     }
     fn dialect(&self) -> Dialect {
-        Dialect::for_kind(self.info.kind)
+        Dialect::for_kind(self.info.kind.as_sql())
     }
     fn cancel_handle(&self) -> CancelHandle {
         Arc::new(NoopCancel)

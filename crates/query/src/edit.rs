@@ -468,7 +468,7 @@ fn build_capped(
         overwrite: set.overwrite,
         loaded,
         table: TableRef {
-            kind,
+            kind: kind.as_sql(),
             database: t.database.clone(),
             schema: t.schema.clone(),
             name: t.name.clone(),
@@ -995,7 +995,7 @@ pub fn cell_select(
         overwrite: true,
         loaded: &refuse,
         table: TableRef {
-            kind,
+            kind: kind.as_sql(),
             database: t.database.clone(),
             schema: t.schema.clone(),
             name: t.name.clone(),

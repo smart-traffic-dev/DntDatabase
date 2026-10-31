@@ -281,9 +281,9 @@ impl MySqlSession {
     fn track_tx(&self, kind: StatementKind, sql: &str, result: StmtResult<'_>) {
         let mut tx = self.tx.lock().unwrap_or_else(|p| p.into_inner());
         let off = self.autocommit_off.load(Ordering::SeqCst);
-        *tx = next_tx_state(DbKind::MySql, *tx, off, kind, sql, result);
+        *tx = next_tx_state(DbKind::MySql.as_sql(), *tx, off, kind, sql, result);
         self.autocommit_off.store(
-            next_autocommit_off(DbKind::MySql, off, kind, result),
+            next_autocommit_off(DbKind::MySql.as_sql(), off, kind, result),
             Ordering::SeqCst,
         );
     }

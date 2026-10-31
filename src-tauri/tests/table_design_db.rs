@@ -145,11 +145,11 @@ impl Scratch {
         let pg = t.kind() == DbKind::Postgres;
         let ns = format!("p4b_{}", Uuid::new_v4().simple());
         let create = if pg {
-            format!("CREATE SCHEMA {}", quote_ident(t.kind(), &ns))
+            format!("CREATE SCHEMA {}", quote_ident(t.kind().as_sql(), &ns))
         } else {
             format!(
                 "CREATE DATABASE {} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-                quote_ident(t.kind(), &ns)
+                quote_ident(t.kind().as_sql(), &ns)
             )
         };
         sql(s.as_ref(), &create)
@@ -183,7 +183,7 @@ impl Scratch {
 
     fn rel(&self, name: &str) -> String {
         qualified_name(
-            self.t.kind(),
+            self.t.kind().as_sql(),
             self.db(),
             self.pg.then_some(self.ns.as_str()),
             name,
@@ -240,12 +240,12 @@ impl Scratch {
         let drop = if self.pg {
             format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(self.t.kind(), &self.ns)
+                quote_ident(self.t.kind().as_sql(), &self.ns)
             )
         } else {
             format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(self.t.kind(), &self.ns)
+                quote_ident(self.t.kind().as_sql(), &self.ns)
             )
         };
         // The app's and the body's sessions go first (they may hold locks or an open
@@ -494,7 +494,7 @@ async fn create_t(sc: &Scratch) {
         sc.rel("t")
     ))
     .await;
-    let ix = quote_ident(sc.t.kind(), "ix_parent");
+    let ix = quote_ident(sc.t.kind().as_sql(), "ix_parent");
     sc.exec(&format!("CREATE INDEX {ix} ON {} (parent_id)", sc.rel("t")))
         .await;
     sc.exec(&format!(
@@ -891,8 +891,8 @@ async fn locked_texts(sc: &Scratch, names: &[&str]) -> Vec<String> {
             let r = sc
                 .rows(&format!(
                     "SELECT pg_get_indexdef('{}.{}'::regclass)",
-                    quote_ident(DbKind::Postgres, &sc.ns),
-                    quote_ident(DbKind::Postgres, n)
+                    quote_ident(DbKind::Postgres.as_sql(), &sc.ns),
+                    quote_ident(DbKind::Postgres.as_sql(), n)
                 ))
                 .await;
             out.push(r[0][0].clone());
@@ -1009,7 +1009,7 @@ async fn has_column(sc: &Scratch, column: &str) -> bool {
         sc.s.as_ref(),
         &format!(
             "SELECT {} FROM {}",
-            quote_ident(sc.t.kind(), column),
+            quote_ident(sc.t.kind().as_sql(), column),
             sc.rel("t")
         ),
     )

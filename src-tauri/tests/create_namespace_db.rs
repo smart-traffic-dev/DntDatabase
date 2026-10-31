@@ -108,7 +108,10 @@ async fn create_namespace_with_options_on_every_server() {
         if pg {
             texts(
                 session.as_ref(),
-                &format!("CREATE ROLE {}", quote_ident(DbKind::Postgres, &role)),
+                &format!(
+                    "CREATE ROLE {}",
+                    quote_ident(DbKind::Postgres.as_sql(), &role)
+                ),
             )
             .await;
         }
@@ -225,18 +228,18 @@ async fn create_namespace_with_options_on_every_server() {
         let cleanup = format!(
             "DROP {} IF EXISTS {}",
             if pg { "SCHEMA" } else { "DATABASE" },
-            quote_ident(target.kind(), &ns)
+            quote_ident(target.kind().as_sql(), &ns)
         );
         texts(session.as_ref(), &cleanup).await;
         let cleanup = if pg {
             format!(
                 "DROP ROLE IF EXISTS {}",
-                quote_ident(DbKind::Postgres, &role)
+                quote_ident(DbKind::Postgres.as_sql(), &role)
             )
         } else {
             format!(
                 "DROP DATABASE IF EXISTS {}",
-                quote_ident(DbKind::MySql, &format!("{ns}_x"))
+                quote_ident(DbKind::MySql.as_sql(), &format!("{ns}_x"))
             )
         };
         texts(session.as_ref(), &cleanup).await;

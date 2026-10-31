@@ -378,7 +378,7 @@ pub fn mysql_view_ddl(ddl: &str, source_db: &str) -> String {
     }
 
     // `<source_db>`. starting a dotted name.
-    let qualifier = quote_ident(DbKind::MySql, source_db);
+    let qualifier = quote_ident(DbKind::MySql.as_sql(), source_db);
     for i in 0..toks.len() {
         let t = &toks[i];
         if t.kind != TokKind::Quoted || text(t) != qualifier {
@@ -426,7 +426,7 @@ fn pg_text(s: &str) -> String {
 pub fn create_schema_sql(schema: &str) -> String {
     format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_ident(DbKind::Postgres, schema)
+        quote_ident(DbKind::Postgres.as_sql(), schema)
     )
 }
 
@@ -458,7 +458,7 @@ pub fn setval_sql(sequence: &str, last_value: &str, is_called: &str) -> String {
 pub fn add_fk_sql(relation: &str, name: &str, definition: &str) -> String {
     format!(
         "ALTER TABLE {relation} ADD CONSTRAINT {} {}",
-        quote_ident(DbKind::Postgres, name),
+        quote_ident(DbKind::Postgres.as_sql(), name),
         definition.trim().trim_end_matches(';')
     )
 }
@@ -475,7 +475,10 @@ pub fn insert_head(
     cols: &[ColumnTarget],
     overriding: bool,
 ) -> String {
-    let names: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+    let names: Vec<String> = cols
+        .iter()
+        .map(|c| quote_ident(kind.as_sql(), &c.name))
+        .collect();
     let overriding = if overriding && kind == DbKind::Postgres {
         " OVERRIDING SYSTEM VALUE"
     } else {

@@ -198,7 +198,7 @@ fn a_tree_plan_has_no_classic_table_until_one_is_attached() {
 }
 
 fn dialect(info: &ServerInfo) -> Dialect {
-    Dialect::for_kind(info.kind)
+    Dialect::for_kind(info.kind.as_sql())
 }
 
 /// A statement planned under a MySQL `DELIMITER` may hold several statements; an

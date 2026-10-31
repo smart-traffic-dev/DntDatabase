@@ -14,7 +14,7 @@ pub use template::{notes, template};
 
 use crate::error::DbError;
 use crate::meta::ObjectKind;
-use crate::server::{DbKind, ServerInfo};
+use crate::server::{ServerInfo, SqlKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -45,14 +45,11 @@ pub enum Strategy {
 /// Whether objects of `kind` can be edited through their DDL on `server`.
 pub fn editable_kind(kind: ObjectKind, server: &ServerInfo) -> Result<(), DbError> {
     use ObjectKind::*;
-    let ok = match server.kind {
-        DbKind::MySql => matches!(kind, View | Function | Procedure | Trigger | Event),
-        DbKind::Postgres => matches!(
-            kind,
-            View | MaterializedView | Function | Procedure | Trigger
-        ),
+    let editable: &[ObjectKind] = match server.kind.as_sql() {
+        SqlKind::MySql => &[View, Function, Procedure, Trigger, Event],
+        SqlKind::Postgres => &[View, MaterializedView, Function, Procedure, Trigger],
     };
-    if ok {
+    if editable.contains(&kind) {
         Ok(())
     } else {
         Err(DbError::Config {

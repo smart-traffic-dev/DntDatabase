@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::server::DbKind;
+use crate::server::SqlKind;
 
 /// The MySQL `sql_mode` flags that change how a script is lexed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, specta::Type)]
@@ -39,10 +39,10 @@ impl Dialect {
 
     /// The default dialect of a server kind (MySQL flags start off; the session
     /// refines them from `@@sql_mode`).
-    pub fn for_kind(kind: DbKind) -> Dialect {
+    pub fn for_kind(kind: SqlKind) -> Dialect {
         match kind {
-            DbKind::MySql => Dialect::MYSQL,
-            DbKind::Postgres => Dialect::Postgres,
+            SqlKind::MySql => Dialect::MYSQL,
+            SqlKind::Postgres => Dialect::Postgres,
         }
     }
 }

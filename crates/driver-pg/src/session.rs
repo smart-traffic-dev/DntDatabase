@@ -150,7 +150,7 @@ impl PgSession {
     /// its kind always describes everything that ran.
     fn track_tx(&self, kind: StatementKind, sql: &str, result: StmtResult<'_>) {
         let mut tx = self.tx.lock().unwrap_or_else(|p| p.into_inner());
-        *tx = next_tx_state(DbKind::Postgres, *tx, false, kind, sql, result);
+        *tx = next_tx_state(DbKind::Postgres.as_sql(), *tx, false, kind, sql, result);
     }
 
     /// Tracking applied after a statement succeeded: transaction state, the last

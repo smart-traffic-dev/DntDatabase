@@ -13,13 +13,6 @@ use std::path::{Path, PathBuf};
 /// Workspace-relative paths (with `/` separators) of files that still contain
 /// two-way kind branches. Later tasks remove entries from this list.
 const ALLOWED: &[&str] = &[
-    "crates/core/src/sql/ddl.rs",
-    "crates/core/src/sql/ddl_edit/build.rs",
-    "crates/core/src/sql/ddl_edit/header.rs",
-    "crates/core/src/sql/ddl_edit/mod.rs",
-    "crates/core/src/sql/ddl_edit/template.rs",
-    "crates/core/src/sql/filter.rs",
-    "crates/core/src/tx.rs",
     "crates/schema/src/fidelity.rs",
     "crates/schema/src/from_detail.rs",
     "crates/schema/src/types.rs",

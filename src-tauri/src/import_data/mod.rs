@@ -169,7 +169,7 @@ pub struct ImportPreview {
 /// The relation `obj` names on `kind`.
 pub(crate) fn table_ref(kind: DbKind, obj: &ObjectRef) -> TableRef {
     TableRef {
-        kind,
+        kind: kind.as_sql(),
         database: obj.database.clone(),
         schema: obj.schema.clone(),
         name: obj.name.clone(),

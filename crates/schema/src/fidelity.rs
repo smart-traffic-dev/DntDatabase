@@ -61,7 +61,7 @@ pub fn fidelity(
     mysql_create: Option<&str>,
     server: &ServerInfo,
 ) -> Vec<Locked> {
-    let d = Dialect::for_kind(server.kind);
+    let d = Dialect::for_kind(server.kind.as_sql());
     match server.kind {
         DbKind::MySql => mysql_fidelity(def, mysql_create, server, d),
         DbKind::Postgres => pg_fidelity(def, detail, server, d),
@@ -926,7 +926,11 @@ fn pg_column_matches(c: &ColumnDef, dc: &ColumnDetail, server: &ServerInfo, d: D
 }
 
 fn pg_column_text(dc: &ColumnDetail) -> String {
-    let mut out = format!("{} {}", quote_ident(DbKind::Postgres, &dc.name), dc.db_type);
+    let mut out = format!(
+        "{} {}",
+        quote_ident(DbKind::Postgres.as_sql(), &dc.name),
+        dc.db_type
+    );
     if let Some(g) = &dc.generated {
         out.push_str(&format!(" GENERATED ALWAYS AS ({g}) STORED"));
     }
@@ -980,7 +984,7 @@ fn in_tablespace(element: ElementRef, index: Option<&IndexDetail>) -> Option<Loc
     let text = format!(
         "{} TABLESPACE {}",
         index.definition.as_deref().unwrap_or(&index.name),
-        quote_ident(DbKind::Postgres, ts)
+        quote_ident(DbKind::Postgres.as_sql(), ts)
     );
     Some(lock(
         element,

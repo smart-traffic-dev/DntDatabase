@@ -4,7 +4,7 @@
 use super::{editable_kind, kind_label, text_error, EditTarget};
 use crate::error::DbError;
 use crate::meta::ObjectKind;
-use crate::server::{DbKind, ServerInfo, ServerVariant};
+use crate::server::{ServerInfo, ServerVariant, SqlKind};
 use crate::sql::ddl::validate_identifier;
 use crate::sql::lexer::{is_kw, tokenize, word_at, Dialect, TokKind, Token};
 use crate::sql::multi::skip_user;
@@ -248,7 +248,11 @@ pub fn check_target(h: &Header, t: &EditTarget, server: &ServerInfo) -> Result<(
             kind_label(t.kind)
         )));
     }
-    let pg = server.kind == DbKind::Postgres;
+    let kind = server.kind.as_sql();
+    let pg = match kind {
+        SqlKind::MySql => false,
+        SqlKind::Postgres => true,
+    };
     let new = t.name.is_none();
     if new && h.or_replace {
         return Err(text_error("Remove OR REPLACE: the object is new."));
@@ -291,7 +295,7 @@ pub fn check_target(h: &Header, t: &EditTarget, server: &ServerInfo) -> Result<(
             )));
         }
         Some(_) => {}
-        None => validate_identifier(server.kind, &h.name).map_err(|e| match e {
+        None => validate_identifier(kind, &h.name).map_err(|e| match e {
             DbError::Config { message, .. } => text_error(message),
             other => other,
         })?,

@@ -721,7 +721,7 @@ impl DumpFile {
             w: DumpWriter::new(
                 Box::new(BufWriter::with_capacity(256 * 1024, file)),
                 compress,
-                Dialect::for_kind(kind),
+                Dialect::for_kind(kind.as_sql()),
             ),
             sync,
             shown: shown.to_string(),
@@ -1011,7 +1011,7 @@ fn obj_ref(database: &str, o: &DumpObject) -> ObjectRef {
 
 fn pg_relation(schema: &str, name: &str) -> String {
     TableRef {
-        kind: DbKind::Postgres,
+        kind: DbKind::Postgres.as_sql(),
         database: String::new(),
         schema: Some(schema.into()),
         name: name.into(),
@@ -1071,7 +1071,7 @@ fn fk_definition(fk: &ForeignKeyDetail, table_schema: Option<&str>) -> String {
     if let Some(def) = &fk.definition {
         return def.clone();
     }
-    let q = |n: &String| quote_ident(DbKind::Postgres, n);
+    let q = |n: &String| quote_ident(DbKind::Postgres.as_sql(), n);
     let list = |v: &[String]| v.iter().map(q).collect::<Vec<_>>().join(", ");
     let schema = fk
         .ref_schema
@@ -1286,7 +1286,7 @@ impl DumpJob {
                 DbKind::MySql => t.ddl = r.meta(intro.object_ddl(&oref)).await?,
                 DbKind::Postgres => {
                     let rel = pg_relation(o.schema.as_deref().unwrap_or("public"), &o.name);
-                    let q = |n: &str| quote_ident(DbKind::Postgres, n);
+                    let q = |n: &str| quote_ident(DbKind::Postgres.as_sql(), n);
                     for row in r.rows(PG_TABLE_TYPES, vec![rel.clone()]).await? {
                         if let (Some(s), Some(n)) = (text_of(row.first()), text_of(row.get(1))) {
                             t.types.push((s, n));
@@ -1400,7 +1400,10 @@ impl DumpJob {
                         .as_deref()
                         .is_some_and(|i| i.eq_ignore_ascii_case("ALWAYS"))
             });
-        let quoted: Vec<String> = cols.iter().map(|c| quote_ident(kind, &c.name)).collect();
+        let quoted: Vec<String> = cols
+            .iter()
+            .map(|c| quote_ident(kind.as_sql(), &c.name))
+            .collect();
         // The driver's types first: they decide how each column is read.
         let probe = format!(
             "SELECT {} FROM {select_from} WHERE 1 = 0",
@@ -1507,7 +1510,7 @@ impl DumpJob {
             });
         }
         let info = r.session.server_info().clone();
-        let q = |n: &str| quote_ident(DbKind::MySql, n);
+        let q = |n: &str| quote_ident(DbKind::MySql.as_sql(), n);
         let has_table = |n: &str| tables.iter().any(|t| t.obj.name.eq_ignore_ascii_case(n));
         let has_view = |n: &str| views.iter().any(|v| v.name.eq_ignore_ascii_case(n));
         for t in &tables {
@@ -1607,7 +1610,7 @@ impl DumpJob {
         let mut rows = 0;
         for t in tables.iter().filter(|t| t.obj.data) {
             let from = TableRef {
-                kind: DbKind::MySql,
+                kind: DbKind::MySql.as_sql(),
                 database: db.clone(),
                 schema: None,
                 name: t.obj.name.clone(),
@@ -1914,7 +1917,7 @@ impl DumpJob {
                 file.statement(&format!(
                     "ALTER SEQUENCE {} OWNED BY {rel}.{}",
                     pg_relation(schema, name),
-                    quote_ident(DbKind::Postgres, col)
+                    quote_ident(DbKind::Postgres.as_sql(), col)
                 ))?;
             }
         }
@@ -1993,7 +1996,7 @@ impl DumpJob {
             return Ok(None);
         };
         let base = text_of(row.first()).ok_or_else(|| table_changed(&format!("Type {name}")))?;
-        let q = |n: &str| quote_ident(DbKind::Postgres, n);
+        let q = |n: &str| quote_ident(DbKind::Postgres.as_sql(), n);
         let mut ddl = format!("CREATE DOMAIN {} AS {base}", pg_relation(schema, name));
         if let (Some(cs), Some(cn)) = (text_of(row.get(1)), text_of(row.get(2))) {
             ddl.push_str(&format!(" COLLATE {}.{}", q(&cs), q(&cn)));

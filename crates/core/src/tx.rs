@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::server::DbKind;
+use crate::server::SqlKind;
 use crate::sql::{leading_keywords, Dialect, StatementKind, TxControl};
 
 /// Transaction state of a session as the query layer sees it.
@@ -54,13 +54,14 @@ const MYSQL_PARSE_ERRORS: [u16; 2] = [1064, 1149];
 /// changes it; a lost connection keeps it (the driver re-applies it on the new
 /// connection). Always `false` on PostgreSQL, which has no such mode.
 pub fn next_autocommit_off(
-    engine: DbKind,
+    engine: SqlKind,
     prev_off: bool,
     kind: StatementKind,
     result: StmtResult<'_>,
 ) -> bool {
-    if engine == DbKind::Postgres {
-        return false;
+    match engine {
+        SqlKind::MySql => {}
+        SqlKind::Postgres => return false,
     }
     match (kind, result) {
         (StatementKind::Transaction(TxControl::AutocommitOff), StmtResult::Ok) => true,
@@ -96,7 +97,7 @@ pub fn next_autocommit_off(
 /// `PREPARE TRANSACTION`, the implicit-commit statements) leads the statement, before
 /// any quoted text.
 pub fn next_tx_state(
-    engine: DbKind,
+    engine: SqlKind,
     prev: TxState,
     autocommit_off: bool,
     kind: StatementKind,
@@ -114,15 +115,17 @@ pub fn next_tx_state(
 
 /// [`next_tx_state`] without the MySQL autocommit mode.
 fn tx_state_after(
-    engine: DbKind,
+    engine: SqlKind,
     prev: TxState,
     kind: StatementKind,
     stmt: &str,
     result: StmtResult<'_>,
 ) -> TxState {
     let dialect = Dialect::for_kind(engine);
-    let implicit_commit = engine == DbKind::MySql && mysql_implicit_commit(kind, stmt);
-    let pg = engine == DbKind::Postgres;
+    let (implicit_commit, pg) = match engine {
+        SqlKind::MySql => (mysql_implicit_commit(kind, stmt), false),
+        SqlKind::Postgres => (false, true),
+    };
     let ends_tx = matches!(
         kind,
         StatementKind::Transaction(TxControl::Commit | TxControl::Rollback)
@@ -226,7 +229,7 @@ fn is_and_chain(stmt: &str, dialect: Dialect) -> bool {
 mod tests {
     use super::*;
     use crate::sql::classify;
-    use DbKind::{MySql, Postgres};
+    use SqlKind::{MySql, Postgres};
     use TxState::{Aborted, Active, Idle};
 
     fn failed(sqlstate: &str) -> StmtResult<'_> {
@@ -244,14 +247,14 @@ mod tests {
     }
 
     /// `next_tx_state` with the statement classified for `engine`, autocommit on.
-    fn next(engine: DbKind, prev: TxState, stmt: &str, result: StmtResult<'_>) -> TxState {
+    fn next(engine: SqlKind, prev: TxState, stmt: &str, result: StmtResult<'_>) -> TxState {
         let kind = classify(stmt, Dialect::for_kind(engine));
         next_tx_state(engine, prev, false, kind, stmt, result)
     }
 
     /// Runs `script` (each statement with its result) on a fresh session, tracking the
     /// autocommit mode as a driver does; returns the state after each statement.
-    fn run_script(engine: DbKind, script: &[(&str, StmtResult<'_>)]) -> Vec<TxState> {
+    fn run_script(engine: SqlKind, script: &[(&str, StmtResult<'_>)]) -> Vec<TxState> {
         let (mut state, mut ac_off) = (Idle, false);
         script
             .iter()

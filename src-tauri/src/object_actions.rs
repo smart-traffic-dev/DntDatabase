@@ -268,7 +268,7 @@ impl SessionManager {
         conn: Uuid,
         action: &ObjectAction,
     ) -> Result<String, DbError> {
-        action_sql(self.repo.get(conn)?.kind, action)
+        action_sql(self.repo.get(conn)?.kind.as_sql(), action)
     }
 
     /// Choices for the "Create database/schema" form, read on a dedicated session.
@@ -296,7 +296,7 @@ impl SessionManager {
         if cfg.read_only {
             return Err(DbError::Blocked { count: 1 });
         }
-        let sql = action_sql(cfg.kind, &action)?;
+        let sql = action_sql(cfg.kind.as_sql(), &action)?;
         let rt = self.runtime(conn)?;
         rt.queries.check_ddl_idle()?;
         let db = if cfg.kind == DbKind::MySql {

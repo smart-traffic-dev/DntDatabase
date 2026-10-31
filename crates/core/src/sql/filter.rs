@@ -33,7 +33,7 @@
 
 use crate::error::DbError;
 use crate::meta::ColumnDetail;
-use crate::server::DbKind;
+use crate::server::SqlKind;
 use crate::sql::ident::quote_ident;
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -169,7 +169,7 @@ fn filter_error(message: String) -> DbError {
 }
 
 struct Builder {
-    kind: DbKind,
+    kind: SqlKind,
     params: Vec<String>,
 }
 
@@ -178,14 +178,17 @@ impl Builder {
     fn param(&mut self, value: String) -> String {
         self.params.push(value);
         match self.kind {
-            DbKind::MySql => "?".into(),
-            DbKind::Postgres => format!("${}", self.params.len()),
+            SqlKind::MySql => "?".into(),
+            SqlKind::Postgres => format!("${}", self.params.len()),
         }
     }
 
     fn cond(&mut self, column: &ColumnDetail, c: &FilterCond) -> String {
         let q = quote_ident(self.kind, &column.name);
-        let pg = self.kind == DbKind::Postgres;
+        let pg = match self.kind {
+            SqlKind::MySql => false,
+            SqlKind::Postgres => true,
+        };
         // Comparisons: the column itself (PG infers the parameter's type from it), or
         // its text where PG has no operator for the type.
         let cmp = if pg && pg_unordered(&column.db_type) {
@@ -237,7 +240,7 @@ impl Builder {
 /// values for the operator, too many conditions or values, a value over
 /// [`MAX_VALUE_BYTES`].
 pub fn build_where(
-    kind: DbKind,
+    kind: SqlKind,
     columns: &[ColumnDetail],
     filter: Option<&DataFilter>,
 ) -> Result<WhereClause, DbError> {
@@ -352,14 +355,14 @@ mod tests {
     fn a_raw_filter_is_never_built_as_structured() {
         let mut raw = filter(FilterMode::And, vec![]);
         raw.raw_where = Some("id > 0".into());
-        let (field, _) = field_of(build(DbKind::MySql, &raw).unwrap_err());
+        let (field, _) = field_of(build(SqlKind::MySql, &raw).unwrap_err());
         assert_eq!(field.as_deref(), Some("filter"));
         // Absent from the JSON: structured mode.
         let f: DataFilter = serde_json::from_str(r#"{"mode":"and","conditions":[]}"#).unwrap();
         assert_eq!(f.raw_where, None);
     }
 
-    fn build(kind: DbKind, f: &DataFilter) -> Result<WhereClause, DbError> {
+    fn build(kind: SqlKind, f: &DataFilter) -> Result<WhereClause, DbError> {
         build_where(kind, &cols(), Some(f))
     }
 
@@ -373,12 +376,12 @@ mod tests {
     #[test]
     fn no_filter_or_no_conditions_is_no_where() {
         assert_eq!(
-            build_where(DbKind::MySql, &cols(), None).unwrap(),
+            build_where(SqlKind::MySql, &cols(), None).unwrap(),
             WhereClause::default()
         );
         let empty = filter(FilterMode::And, vec![]);
         assert_eq!(
-            build(DbKind::Postgres, &empty).unwrap(),
+            build(SqlKind::Postgres, &empty).unwrap(),
             WhereClause::default()
         );
     }
@@ -405,7 +408,7 @@ mod tests {
         ];
         for (op, values, want) in cases {
             let w = build(
-                DbKind::MySql,
+                SqlKind::MySql,
                 &filter(FilterMode::And, vec![cond("id", *op, values)]),
             )
             .unwrap();
@@ -428,7 +431,7 @@ mod tests {
                 cond("doc", FilterOp::IsNull, &[]),
             ],
         );
-        let w = build(DbKind::Postgres, &f).unwrap();
+        let w = build(SqlKind::Postgres, &f).unwrap();
         assert_eq!(
             w.sql,
             " WHERE (\"id\" = $1) OR (\"doc\"::text = $2) OR (\"name\"::text ILIKE $3 ESCAPE '!') \
@@ -457,7 +460,7 @@ mod tests {
         assert_eq!(escape_like(r"back\slash"), r"back\slash");
         let w = |op| {
             build(
-                DbKind::MySql,
+                SqlKind::MySql,
                 &filter(FilterMode::And, vec![cond("name", op, &["5%"])]),
             )
             .unwrap()
@@ -473,7 +476,7 @@ mod tests {
     #[test]
     fn injection_in_values_stays_in_the_parameters() {
         let evil = "'; DROP TABLE orders; -- \" ` $1 ?";
-        for kind in [DbKind::MySql, DbKind::Postgres] {
+        for kind in [SqlKind::MySql, SqlKind::Postgres] {
             let w = build(
                 kind,
                 &filter(
@@ -493,7 +496,7 @@ mod tests {
     #[test]
     fn identifiers_are_quoted_and_must_exist_exactly() {
         let w = build(
-            DbKind::MySql,
+            SqlKind::MySql,
             &filter(
                 FilterMode::And,
                 vec![cond("we`ird\"col", FilterOp::Eq, &["x"])],
@@ -502,7 +505,7 @@ mod tests {
         .unwrap();
         assert_eq!(w.sql, " WHERE (`we``ird\"col` = ?)");
         let w = build(
-            DbKind::Postgres,
+            SqlKind::Postgres,
             &filter(
                 FilterMode::And,
                 vec![cond("we`ird\"col", FilterOp::Eq, &["x"])],
@@ -519,7 +522,7 @@ mod tests {
             "id ",
         ] {
             let e = build(
-                DbKind::Postgres,
+                SqlKind::Postgres,
                 &filter(FilterMode::And, vec![cond(bad, FilterOp::IsNull, &[])]),
             )
             .unwrap_err();
@@ -542,7 +545,7 @@ mod tests {
         ];
         for (op, values) in bad {
             let e = build(
-                DbKind::MySql,
+                SqlKind::MySql,
                 &filter(FilterMode::And, vec![cond("id", *op, values)]),
             )
             .unwrap_err();
@@ -553,12 +556,12 @@ mod tests {
         let many: Vec<String> = (0..=MAX_IN_VALUES).map(|i| i.to_string()).collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
         assert!(build(
-            DbKind::MySql,
+            SqlKind::MySql,
             &filter(FilterMode::And, vec![cond("id", FilterOp::In, &refs)]),
         )
         .is_err());
         assert!(build(
-            DbKind::MySql,
+            SqlKind::MySql,
             &filter(
                 FilterMode::And,
                 vec![cond("id", FilterOp::In, &refs[..MAX_IN_VALUES])]
@@ -570,10 +573,10 @@ mod tests {
     #[test]
     fn limits_on_conditions_and_value_size() {
         let conds = vec![cond("id", FilterOp::IsNull, &[]); MAX_CONDITIONS + 1];
-        assert!(build(DbKind::MySql, &filter(FilterMode::And, conds)).is_err());
+        assert!(build(SqlKind::MySql, &filter(FilterMode::And, conds)).is_err());
         let long = "x".repeat(MAX_VALUE_BYTES + 1);
         assert!(build(
-            DbKind::MySql,
+            SqlKind::MySql,
             &filter(FilterMode::And, vec![cond("name", FilterOp::Eq, &[&long])]),
         )
         .is_err());

@@ -463,7 +463,7 @@ mod tracked_exports {
             TxState::Idle
         }
         fn dialect(&self) -> Dialect {
-            Dialect::for_kind(DbKind::MySql)
+            Dialect::for_kind(DbKind::MySql.as_sql())
         }
         fn cancel_handle(&self) -> CancelHandle {
             Arc::new(FakeCancel(Arc::clone(&self.log)))

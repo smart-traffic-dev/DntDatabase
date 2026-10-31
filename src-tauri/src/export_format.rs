@@ -660,7 +660,7 @@ impl FormatWriter for Sql {
         }
         let names: Vec<String> = cols
             .iter()
-            .map(|c| quote_ident(self.kind, &c.name))
+            .map(|c| quote_ident(self.kind.as_sql(), &c.name))
             .collect();
         self.columns = names.join(", ");
         if self.kind == DbKind::MySql {
@@ -894,7 +894,7 @@ pub fn open_writer(
         ExportFormat::Sql => Box::new(Sql {
             out: Out::create(path, shown)?,
             kind,
-            table: quote_ident(kind, opts.table_name.trim()),
+            table: quote_ident(kind.as_sql(), opts.table_name.trim()),
             columns: String::new(),
         }),
         ExportFormat::Xlsx => Box::new(Xlsx::create(path, shown)?),

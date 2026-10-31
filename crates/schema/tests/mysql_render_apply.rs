@@ -116,7 +116,7 @@ async fn create(s: &MySqlSession, table: &str) -> TableDef {
 async fn apply(s: &MySqlSession, old: &TableDef, new: &TableDef) -> String {
     let changes = diff(old, new).expect("diff");
     let table = TableRef {
-        kind: DbKind::MySql,
+        kind: DbKind::MySql.as_sql(),
         database: DB.into(),
         schema: None,
         name: old.name.clone(),
