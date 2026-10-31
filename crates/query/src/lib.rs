@@ -1,7 +1,7 @@
 //! Query-editor decisions: which statements a run executes (`plan`), whether
-//! each may run on a Production or read-only connection (`guard`), how a planned
-//! script runs and when it stops (`run`), how a data-view edit set becomes
-//! guarded key-based DML (`edit`), and the byte <-> UTF-16 offset mapping
+//! each may run on a Production or read-only connection (`guard`; `policy` for the
+//! Command family), how a planned script runs and when it stops (`run`), how a
+//! data-view edit set becomes guarded key-based DML (`edit`), and the byte <-> UTF-16 offset mapping
 //! shared with the editor (`offsets`).
 //!
 //! Every offset exchanged with the UI is a UTF-16 code-unit offset into the
@@ -12,6 +12,7 @@ pub mod explain;
 pub mod guard;
 pub mod offsets;
 pub mod plan;
+pub mod policy;
 pub mod redact;
 pub mod risk;
 pub mod run;
@@ -31,6 +32,7 @@ pub use plan::{
     mark_implicit_commits, plan, statement_ranges, PlannedStmt, ScriptPlan, StmtKindLabel, Target,
     Verdict,
 };
+pub use policy::{policy, PolicyCtx, PolicyOutcome, RiskClass, RiskFacts};
 pub use redact::{redact, Redacted, REDACTED};
 pub use risk::{
     confirm_name, confirm_names_match, drop_targets, estimate_sql, estimate_table, parse_estimate,
