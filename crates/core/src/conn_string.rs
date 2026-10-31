@@ -336,17 +336,19 @@ fn url_parts(rest: &str) -> UrlParts<'_> {
     }
 }
 
-/// The decoded `key=value` pairs of a query, in order.
-fn query_pairs(query: Option<&str>) -> Result<Vec<(String, String)>, DbError> {
-    let mut pairs = Vec::new();
-    for pair in query.into_iter().flat_map(|q| q.split('&')) {
-        if pair.is_empty() {
-            continue;
-        }
-        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        pairs.push((decode(k, true)?, decode(v, true)?));
-    }
-    Ok(pairs)
+/// The `key=value` pairs of a query, in order, each decoded as it is reached: a caller that
+/// applies them in turn reports the first bad pair, whatever its kind of error.
+fn query_pairs(
+    query: Option<&str>,
+) -> impl Iterator<Item = Result<(String, String), DbError>> + '_ {
+    query
+        .into_iter()
+        .flat_map(|q| q.split('&'))
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            Ok((decode(k, true)?, decode(v, true)?))
+        })
 }
 
 fn parse_url(engine: ConnStringEngine, rest: &str) -> Result<ParsedConnString, DbError> {
@@ -357,7 +359,8 @@ fn parse_url(engine: ConnStringEngine, rest: &str) -> Result<ParsedConnString, D
     if let Some(path) = parts.path {
         parsed.database = non_empty(decode(path.trim_end_matches('/'), false)?);
     }
-    for (k, v) in query_pairs(parts.query)? {
+    for pair in query_pairs(parts.query) {
+        let (k, v) = pair?;
         parsed.option(&k, v)?;
     }
     Ok(parsed)
@@ -422,7 +425,8 @@ fn parse_mongo(srv: bool, rest: &str) -> Result<ParsedConnString, DbError> {
     let mut replica_set = None;
     let mut direct_connection = false;
     // MongoDB option names are case-insensitive; errors use the name as written.
-    for (key, value) in query_pairs(parts.query)? {
+    for pair in query_pairs(parts.query) {
+        let (key, value) = pair?;
         match key.to_ascii_lowercase().as_str() {
             "authsource" => auth_source = non_empty(value),
             "replicaset" => replica_set = non_empty(value),
@@ -496,7 +500,8 @@ fn parse_redis(tls: bool, rest: &str) -> Result<ParsedConnString, DbError> {
             .filter(|_| p.bytes().all(|b| b.is_ascii_digit()))
             .ok_or_else(|| invalid_uri("Redis database must be a number"))?,
     };
-    for (key, value) in query_pairs(parts.query)? {
+    for pair in query_pairs(parts.query) {
+        let (key, value) = pair?;
         if !key.eq_ignore_ascii_case("timeout") {
             return Err(unsupported_option(&key));
         }
@@ -591,7 +596,8 @@ pub fn parse_connection_string(input: &str) -> Result<ParsedConnString, DbError>
         return parse_keywords(s);
     }
     Err(invalid(
-        "not a connection string; expected postgresql://, mysql://, mariadb:// or host=… port=…",
+        "not a connection string; expected postgresql://, mysql://, mariadb://, mongodb://, \
+         mongodb+srv://, redis://, rediss:// or host=… port=…",
     ))
 }
 
@@ -842,6 +848,15 @@ mod tests {
         assert!(err("mysql://h?sslmode=maybe").contains("unknown SSL mode"));
     }
 
+    /// Pairs are decoded and applied one by one: with two bad pairs, the first one's error.
+    #[test]
+    fn sql_reports_the_first_error() {
+        assert_eq!(
+            err("postgresql://h?sslmode=bogus&x=%zz"),
+            "unknown SSL mode \"bogus\""
+        );
+    }
+
     #[test]
     fn unknown_parameters_are_listed() {
         let p = ok("mysql://h/db?charset=utf8mb4&serverTimezone=UTC");
@@ -920,7 +935,11 @@ mod tests {
             assert!(!err(s).contains("hunter2"), "{s}");
         }
         assert!(err("   ").contains("paste"));
-        assert!(err("just text").contains("not a connection string"));
+        assert_eq!(
+            err("just text"),
+            "not a connection string; expected postgresql://, mysql://, mariadb://, mongodb://, \
+             mongodb+srv://, redis://, rediss:// or host=… port=…"
+        );
     }
 
     // ---- MongoDB / Redis (R3) ----
@@ -1019,6 +1038,13 @@ mod tests {
         let dbg = format!("{p:?}");
         assert!(!dbg.contains("p@ss/w") && !dbg.contains("p%40ss"), "{dbg}");
         assert!(dbg.contains("***"), "{dbg}");
+        let mut without_password = p.clone();
+        without_password.password = None;
+        let json = serde_json::to_string(&without_password).unwrap();
+        assert!(
+            !json.contains("p@ss/w") && !json.contains("p%40ss"),
+            "{json}"
+        );
         assert_eq!(
             to_uri(&config_from(&p)).unwrap(),
             "mongodb://app@h1:27018,h2:27017/sales?authSource=admin&replicaSet=rs0"

@@ -2,7 +2,7 @@
 
 use dnt_core::error::DbError;
 use rusqlite::Connection;
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{HookError, HookResult, Migrations, M};
 use std::path::Path;
 
 const MIGRATION_1: &str = "
@@ -199,8 +199,20 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_7),
         M::up(MIGRATION_8),
         M::up(MIGRATION_9),
-        M::up(MIGRATION_10).foreign_key_check(),
+        M::up_with_hook(MIGRATION_10, require_foreign_keys_off).foreign_key_check(),
     ])
+}
+
+/// Hook of a migration that rebuilds a parent table: with foreign keys on, its `DROP TABLE`
+/// has already run the children's ON DELETE actions, so it fails and the migration rolls back.
+fn require_foreign_keys_off(tx: &rusqlite::Transaction) -> HookResult {
+    let on: i64 = tx.query_row("PRAGMA foreign_keys", [], |r| r.get(0))?;
+    if on != 0 {
+        return Err(HookError::Hook(
+            "foreign keys must be off while rebuilding the connections table".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Opens (creating if needed) the database file, migrates to latest and enables foreign keys.
@@ -264,7 +276,11 @@ mod tests {
 
     #[test]
     fn migrations_are_valid() {
-        migrations().validate().unwrap();
+        // `Migrations::validate` opens its own connection, where the bundled SQLite has foreign
+        // keys on, which migration 10's hook refuses; so do what it does, the way `prepare` does.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        migrations().to_latest(&mut conn).unwrap();
     }
 
     /// A database at schema version 2 (before favorites) migrates to the latest version and keeps its rows.
@@ -627,6 +643,41 @@ mod tests {
     /// and only the kind CHECK of the schema changes.
     #[test]
     fn migration_10_keeps_child_rows() {
+        let conn = v9_with_children();
+        let rows_before: Vec<_> = ALL_TABLES.iter().map(|t| dump(&conn, t)).collect();
+        let schema_before = schema(&conn);
+
+        let conn = prepare(conn).unwrap();
+        check_migrated(conn, rows_before, schema_before);
+    }
+
+    /// Migration 10 run directly with foreign keys on (not through `prepare`) would cascade
+    /// its `DROP TABLE` into the children; its hook refuses, so it rolls back and keeps them.
+    #[test]
+    fn migration_10_refuses_with_foreign_keys_on() {
+        let mut conn = v9_with_children();
+        let rows_before: Vec<_> = ALL_TABLES.iter().map(|t| dump(&conn, t)).collect();
+        let schema_before = schema(&conn);
+
+        let err = migrations().to_latest(&mut conn).unwrap_err();
+
+        assert!(
+            err.to_string().contains("foreign keys must be off"),
+            "{err}"
+        );
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 9);
+        for (table, before) in ALL_TABLES.iter().zip(&rows_before) {
+            assert_eq!(&dump(&conn, table), before, "{table}");
+        }
+        assert_eq!(schema(&conn), schema_before);
+    }
+
+    /// A schema-9 database with foreign keys on (as the app left it) and a row in every table,
+    /// each child linked to connection `a`.
+    fn v9_with_children() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
         // As today: foreign keys are on when the app opens its database.
         conn.pragma_update(None, "foreign_keys", true).unwrap();
@@ -663,11 +714,16 @@ mod tests {
              INSERT INTO app_settings (key,value) VALUES ('k','v');",
         )
         .unwrap();
-        let rows_before: Vec<_> = ALL_TABLES.iter().map(|t| dump(&conn, t)).collect();
-        let schema_before = schema(&conn);
+        conn
+    }
 
-        let conn = prepare(conn).unwrap();
+    type Schema = Vec<(String, String, String, Option<String>)>;
 
+    fn check_migrated(
+        conn: Connection,
+        rows_before: Vec<Vec<Vec<rusqlite::types::Value>>>,
+        schema_before: Schema,
+    ) {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
@@ -743,7 +799,8 @@ mod tests {
         };
         insert("m", "mongo").unwrap();
         insert("r", "redis").unwrap();
-        assert!(insert("o", "oracle").is_err());
+        let err = insert("o", "oracle").unwrap_err();
+        assert!(err.to_string().contains("CHECK constraint failed"), "{err}");
 
         // The children's foreign keys point at the rebuilt table.
         conn.execute("DELETE FROM connections WHERE id='a'", [])

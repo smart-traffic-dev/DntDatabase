@@ -761,6 +761,10 @@ fn dntconn_round_trips_mongo_and_redis() {
         assert_eq!(got.options.driver, c.options.driver);
     }
     assert_eq!(
+        secret(&dst_secrets, mongo.id, SecretKind::DbPassword).as_deref(),
+        Some("mongo-pw-1")
+    );
+    assert_eq!(
         secret(&dst_secrets, redis.id, SecretKind::DbPassword).as_deref(),
         Some("redis-pw-2")
     );

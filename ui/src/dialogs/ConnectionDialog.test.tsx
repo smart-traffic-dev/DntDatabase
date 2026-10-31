@@ -798,45 +798,60 @@ describe('ConnectionDialog', () => {
   it('an unreadable connection string says why and changes nothing', async () => {
     mockBackend({
       parse_connection_string: () => {
-        throw appError('config', 'unsupported scheme "redis://"; use postgresql://, mysql:// or mariadb://', {
-          field: 'conn_string',
-        });
+        throw appError(
+          'config',
+          'unsupported scheme "sqlserver://"; use postgresql://, mysql://, mariadb://, mongodb://, mongodb+srv://, redis:// or rediss://',
+          { field: 'conn_string' },
+        );
       },
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     await openUrl(user);
-    await user.type(screen.getByTestId('conn-string'), 'redis://localhost');
+    await user.type(screen.getByTestId('conn-string'), 'sqlserver://localhost');
     const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
-    expect(alert).toHaveTextContent('unsupported scheme "redis://"');
+    expect(alert).toHaveTextContent('unsupported scheme "sqlserver://"');
     expect(screen.getByTestId('conn-string')).toHaveAttribute('aria-invalid', 'true');
     expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
   });
 
-  it('a pasted MongoDB / Redis string is refused until R4 and changes nothing', async () => {
+  const mongoDriver = {
+    kind: 'mongo',
+    srv: false,
+    auth_source: null,
+    replica_set: null,
+    direct_connection: false,
+    extra_hosts: [],
+  } as const;
+  it.each([
+    { uri: 'mongodb://h', engine: 'mongo', port: 27017, driver: mongoDriver },
+    { uri: 'mongodb+srv://h', engine: 'mongo_srv', port: null, driver: { ...mongoDriver, srv: true } },
+    { uri: 'redis://h', engine: 'redis', port: 6379, driver: { kind: 'redis', db: 0 } as const },
+    { uri: 'rediss://h', engine: 'rediss', port: 6379, driver: { kind: 'redis', db: 0 } as const },
+  ])('a pasted $uri string is refused until R4 and changes nothing', async ({ uri, engine, port, driver }) => {
     mockBackend({
       parse_connection_string: () => ({
-        engine: 'redis',
-        host: 'cache',
-        port: 6379,
+        engine,
+        host: 'h',
+        port,
         user: null,
         password: null,
         database: null,
-        ssl_mode: null,
+        ssl_mode: engine === 'rediss' ? 'require' : null,
         application_name: null,
         connect_timeout_s: null,
         ignored: [],
         warnings: [],
-        driver: { kind: 'redis', db: 0 },
+        driver,
       }),
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
     const hostBefore = (screen.getByTestId('conn-host') as HTMLInputElement).value;
     await openUrl(user);
-    await user.type(screen.getByTestId('conn-string'), 'redis://cache');
+    await user.type(screen.getByTestId('conn-string'), uri);
     const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
-    expect(alert).toHaveTextContent('MongoDB and Redis connections are not available in this version yet.');
+    expect(alert).toHaveTextContent(/^MongoDB and Redis connections are not available in this version yet\.$/);
     expect(screen.queryByTestId('parse-result')).toBeNull();
     expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
     expect(screen.getByTestId('conn-host')).toHaveValue(hostBefore);
