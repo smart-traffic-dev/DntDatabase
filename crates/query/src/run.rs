@@ -409,8 +409,9 @@ impl RowSink for Collect<'_> {
     }
 }
 
-/// The stop after statement `index` failed with `err`, leaving the session in `after`.
-fn stop_after_error(
+/// The stop after statement `index` failed with `err`, leaving the session in `after`
+/// (also used by [`crate::command::run_commands`]).
+pub(crate) fn stop_after_error(
     err: &DbError,
     after: TxState,
     continue_on_error: bool,
