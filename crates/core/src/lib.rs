@@ -3,6 +3,7 @@ pub mod config;
 pub mod conn_string;
 pub mod data_access;
 pub mod driver;
+pub mod edit;
 pub mod error;
 pub mod keyspace;
 pub mod meta;

@@ -443,7 +443,7 @@ pub trait Introspector: Send + Sync {
 mod tests {
     use super::*;
     use crate::command::{CommandLanguage, CommandParseError, CommandSpan, ParsedCommand};
-    use crate::data_access::DataAccess;
+    use crate::data_access::{DataAccess, KeyEdit, PageSpec};
     use crate::redact::Redacted;
     use crate::server::{detect_pg, EngineFamily};
 
@@ -883,7 +883,43 @@ mod tests {
 
     struct NoDataAccess;
 
-    impl DataAccess for NoDataAccess {}
+    fn no_data_access() -> DbError {
+        DbError::Internal {
+            message: "n/a".into(),
+        }
+    }
+
+    impl DataAccess for NoDataAccess {
+        fn page(
+            &self,
+            _obj: &crate::meta::ObjectRef,
+            _spec: &PageSpec,
+        ) -> Result<ParsedCommand, DbError> {
+            Err(no_data_access())
+        }
+        fn count(
+            &self,
+            _obj: &crate::meta::ObjectRef,
+            _filter: Option<&crate::sql::filter::DataFilter>,
+        ) -> Result<ParsedCommand, DbError> {
+            Err(no_data_access())
+        }
+        fn build_edits(
+            &self,
+            _obj: &crate::meta::ObjectRef,
+            _detail: &crate::meta::TableDetail,
+            _edits: &crate::edit::EditSet,
+        ) -> Result<Vec<ParsedCommand>, DbError> {
+            Err(no_data_access())
+        }
+        fn build_key_edit(
+            &self,
+            _db: &str,
+            _edit: &KeyEdit,
+        ) -> Result<Vec<ParsedCommand>, DbError> {
+            Err(no_data_access())
+        }
+    }
 
     #[async_trait]
     impl Session for FakeCommand {
