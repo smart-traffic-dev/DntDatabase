@@ -251,6 +251,27 @@ mod tests {
         );
         let m: DriverOptions = serde_json::from_value(serde_json::json!({"kind":"mongo","srv":true,"auth_source":"admin","replica_set":null,"direct_connection":false,"extra_hosts":[]})).unwrap();
         assert!(matches!(m, DriverOptions::Mongo { srv: true, .. }));
+        assert_eq!(
+            serde_json::to_value(DriverOptions::None).unwrap(),
+            serde_json::json!({"kind":"none"})
+        );
+        let m = DriverOptions::Mongo {
+            srv: false,
+            auth_source: Some("admin".into()),
+            replica_set: Some("rs0".into()),
+            direct_connection: true,
+            extra_hosts: vec![HostPort {
+                host: "db2.example.com".into(),
+                port: 27018,
+            }],
+        };
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(
+            j,
+            serde_json::json!({"kind":"mongo","srv":false,"auth_source":"admin","replica_set":"rs0",
+                "direct_connection":true,"extra_hosts":[{"host":"db2.example.com","port":27018}]})
+        );
+        assert_eq!(serde_json::from_value::<DriverOptions>(j).unwrap(), m);
     }
 
     #[test]

@@ -402,7 +402,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       application_name: orNull(form.appName),
       // 0 = no timeout; never negative, fractional or beyond MAX_QUERY_TIMEOUT_S.
       query_timeout_s: queryTimeoutSeconds(form.queryTimeout),
-      driver: { kind: 'none' },
+      driver: initial?.options.driver ?? { kind: 'none' },
     },
   });
 

@@ -679,6 +679,24 @@ describe('ConnectionDialog', () => {
     expect(callsOf('update_connection')[0]).toMatchObject({ cfg: { options: { query_timeout_s: 0 } } });
   });
 
+  it('editing_keeps_the_stored_driver_options', async () => {
+    mockBackend({ update_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    const stored = config(ids.prod, 'x').config;
+    render(
+      <ConnectionDialog
+        mode="edit"
+        initial={{ ...stored, options: { ...stored.options, driver: { kind: 'redis', db: 3 } } }}
+        onClose={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('update_connection')).toHaveLength(1));
+    expect(callsOf('update_connection')[0]).toMatchObject({
+      cfg: { options: { driver: { kind: 'redis', db: 3 } } },
+    });
+  });
+
   it('query_timeout_is_clamped_to_whole_seconds_within_a_day', () => {
     expect(MAX_QUERY_TIMEOUT_S).toBe(86_400);
     expect(queryTimeoutSeconds('')).toBe(0);
