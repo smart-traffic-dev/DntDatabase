@@ -25,6 +25,10 @@
 //! `limit` are honoured. A structured filter may only use `Eq` on `_id` / `value`
 //! (joined with its mode); any other operator, and a raw WHERE or JSON filter, is
 //! `Unsupported`. [`FakeStore::build_reads_as_writes`] makes both build a Write.
+//!
+//! `build_edits` writes a collection with one command per edit: setting a row's
+//! `value` or adding a row is `HSET h:<name> <_id> <value>`, deleting a row is
+//! `HDEL h:<name> <_id>` (driver-built Write commands in the collection's db).
 
 use async_trait::async_trait;
 use dnt_core::command::{
@@ -37,7 +41,7 @@ use dnt_core::driver::{
     CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
     Session, StmtOutcome,
 };
-use dnt_core::edit::EditSet;
+use dnt_core::edit::{CellInput, EditSet, RowEdit, RowRef};
 use dnt_core::error::DbError;
 use dnt_core::keyspace::{
     KeyBytes, KeyName, KeyPage, KeySummary, KeyType, KeyValue, KeyValueView, Keyspace, ScanRequest,
@@ -1275,13 +1279,77 @@ impl DataAccess for FakeCommandSession {
         Ok(self.read(db, &key, "COUNT", args, op))
     }
 
+    /// One command per edit, in order, in the collection's db: an `Update` of `value`
+    /// is `HSET <key> <_id> <value>`, an `Insert` (of `_id` and `value`) the same, a
+    /// `Delete` is `HDEL <key> <_id>`. Values are text (`Text`, or a `Value` of text);
+    /// changing `_id`, or any other input, is a server error.
     fn build_edits(
         &self,
-        _obj: &ObjectRef,
+        obj: &ObjectRef,
         _detail: &TableDetail,
-        _edits: &EditSet,
+        edits: &EditSet,
     ) -> Result<Vec<ParsedCommand>, DbError> {
-        Err(unsupported("collections"))
+        let (db, key) = Self::collection(obj)?;
+        let display = KeyName::from_bytes(key.clone()).display;
+        let text = |input: &CellInput| match input {
+            CellInput::Text { text }
+            | CellInput::Value {
+                value: Value::Text(text),
+            } => Ok(text.clone()),
+            _ => Err(server_err("ERR the fake store holds text values only")),
+        };
+        let cell = |cells: &[(String, CellInput)], name: &str| {
+            cells
+                .iter()
+                .find(|(c, _)| c == name)
+                .map(|(_, v)| text(v))
+                .transpose()
+        };
+        let row_id = |row: &RowRef| match row.key.iter().find(|(c, _)| c == COLLECTION_ID) {
+            Some((_, Value::Text(id))) => Ok(id.clone()),
+            _ => Err(server_err("ERR the row has no _id")),
+        };
+        let hset = |id: String, value: String| {
+            let args = [display.clone(), id.clone(), value.clone()];
+            build_command(
+                Some(db),
+                "HSET",
+                canonical_text("HSET", &args),
+                CommandClass::Write,
+                Op::HSet(key.clone(), id, value),
+            )
+        };
+        edits
+            .edits
+            .iter()
+            .map(|edit| match edit {
+                RowEdit::Update { row, set } => {
+                    if set.iter().any(|(c, _)| c != COLLECTION_VALUE) {
+                        return Err(server_err("ERR only the value of a field can be set"));
+                    }
+                    let value = cell(set, COLLECTION_VALUE)?
+                        .ok_or_else(|| server_err("ERR there is no value to set"))?;
+                    Ok(hset(row_id(row)?, value))
+                }
+                RowEdit::Insert { values } => {
+                    let id = cell(values, COLLECTION_ID)?
+                        .ok_or_else(|| server_err("ERR a new row needs an _id"))?;
+                    let value = cell(values, COLLECTION_VALUE)?.unwrap_or_default();
+                    Ok(hset(id, value))
+                }
+                RowEdit::Delete { row } => {
+                    let id = row_id(row)?;
+                    let args = [display.clone(), id.clone()];
+                    Ok(build_command(
+                        Some(db),
+                        "HDEL",
+                        canonical_text("HDEL", &args),
+                        CommandClass::Write,
+                        Op::HDel(key.clone(), id),
+                    ))
+                }
+            })
+            .collect()
     }
 
     /// `SetString`, `HashSet`, `HashDelete` and `Delete`; the others are `Unsupported`.

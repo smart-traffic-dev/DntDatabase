@@ -54,6 +54,15 @@
 //! row as the UPDATE did) before it is called a conflict. An INSERT's row is read back
 //! (PostgreSQL `RETURNING`, MySQL its `read_back` SELECT) into [`ApplyReport::inserted`].
 //!
+//! # The Command family (spec §7.4)
+//!
+//! A collection's edits are built by the driver (`DataAccess::build_edits` on a data
+//! session) and stored as they are; every command is judged by the policy, and the
+//! edit is blocked on a read-only connection and, unless atomic, on Production
+//! ([`command_edit_verdict`]). Apply checks it all again, then sends the commands in
+//! order on one data session, each once; the first failure stops it. History rows are
+//! redacted with the connection's `CommandLanguage`.
+//!
 //! # Complete cell values (spec §5.3)
 //!
 //! A page cuts long text and keeps a preview of binary data. `data_cell_fetch` reads
@@ -72,13 +81,16 @@
 //! in the row guard's snapshot. A token used for another connection, table or column,
 //! or after it expired, is a `config` error on that column.
 
-use crate::commands::data::check_object;
+use crate::commands::data::{check_collection, check_object};
 use crate::commands::settings::saved_confirm_unbounded;
 use crate::data_sessions::{BoundedPage, FirstCell, DATA_CANCEL_GRACE};
 use crate::run_events::utc_millis_now;
 use crate::session_manager::{config_error, is_lost, lock, ConnectionRuntime, SessionManager};
+use dnt_core::command::{CommandLanguage, ParsedCommand};
 use dnt_core::config::{ConnectionConfig, EnvTag};
-use dnt_core::driver::{CellMode, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal};
+use dnt_core::driver::{
+    CellMode, Engine, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal,
+};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ObjectRef, TableDetail};
 use dnt_core::sql::ident::{qualified_name, quote_ident};
@@ -88,7 +100,7 @@ use dnt_query::edit::{
     base64_encode, build_edit_plan, cell_select, display_sql, edit_verdict, fingerprint, Atomicity,
     EditError, EditPlan, EditSet, PlannedEdit, Protection,
 };
-use dnt_query::{redact, GuardCtx, Verdict};
+use dnt_query::{policy, redact, GuardCtx, PolicyCtx, RiskFacts, Verdict};
 use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use futures_util::future::{select, Either};
 use serde::Serialize;
@@ -171,8 +183,23 @@ struct StoredEdit {
     object: ObjectRef,
     env: Option<EnvTag>,
     read_only: bool,
-    plan: EditPlan,
+    plan: StoredPlan,
     at: Instant,
+}
+
+/// The plan of a stored edit, per engine family.
+enum StoredPlan {
+    Sql(EditPlan),
+    Command(CommandEdit),
+}
+
+/// A Command-family edit plan: the commands the driver's `DataAccess::build_edits`
+/// built, run in order through a data session, each judged by the policy.
+struct CommandEdit {
+    commands: Vec<ParsedCommand>,
+    atomic: Atomicity,
+    /// The collection's [`fingerprint`] when the plan was made.
+    fingerprint: u64,
 }
 
 impl StoredEdit {
@@ -852,7 +879,7 @@ impl SessionManager {
                 object: set.object,
                 env: cfg.env_tag,
                 read_only: cfg.read_only,
-                plan,
+                plan: StoredPlan::Sql(plan),
                 at: Instant::now(),
             },
         );
@@ -877,7 +904,12 @@ impl SessionManager {
         if rt.tunnel_dead() || rt.tunnel_gen.load(Ordering::SeqCst) != stored.tunnel_gen {
             return Err(stale("the connection's SSH tunnel was replaced"));
         }
-        let plan = &stored.plan;
+        let plan = match &stored.plan {
+            StoredPlan::Sql(plan) => plan,
+            StoredPlan::Command(edit) => {
+                return self.command_edit_apply(&stored, edit, rt, confirmed).await
+            }
+        };
         let cfg = self.repo.get(stored.conn)?;
         let n = count(plan.stmts.len());
         match edit_verdict(
@@ -1446,6 +1478,353 @@ impl Apply<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------------
+// The Command family (spec §7.4): the driver's `DataAccess::build_edits` builds the
+// commands, the policy judges each one, and they run in order on a data session.
+
+/// Why a Production edit of a collection that is not [`Atomicity::Yes`] is blocked.
+pub const NOT_ATOMIC_COLLECTION_ON_PRODUCTION: &str = "Changes to this collection cannot be \
+     rolled back as a unit, so the data view does not edit it on a Production connection. \
+     Use the console instead.";
+/// Why an edit on a read-only connection is blocked.
+pub const READ_ONLY_EDIT: &str = "the connection is read-only";
+
+/// The policy context of a connection whose config is `cfg` (as stored now).
+fn policy_ctx(sm: &SessionManager, cfg: &ConnectionConfig) -> PolicyCtx {
+    PolicyCtx {
+        env: cfg.env_tag,
+        read_only: cfg.read_only,
+        confirm_unbounded: saved_confirm_unbounded(&sm.repo),
+        connection_name: cfg.name.clone(),
+    }
+}
+
+/// The verdict of a Command edit's `commands` under `ctx` (also used to judge a stored
+/// plan again at Apply), with the reason of a `Block`: Block on a read-only connection
+/// ([`READ_ONLY_EDIT`]); else the strictest [`policy`] verdict of the commands; Block on
+/// Production when the edit is not atomic ([`NOT_ATOMIC_COLLECTION_ON_PRODUCTION`]).
+pub(crate) fn command_edit_verdict(
+    commands: &[ParsedCommand],
+    atomic: Atomicity,
+    ctx: &PolicyCtx,
+) -> (Verdict, Option<String>) {
+    if ctx.read_only {
+        return (Verdict::Block, Some(READ_ONLY_EDIT.to_string()));
+    }
+    let rank = |v: Verdict| match v {
+        Verdict::Allow => 0,
+        Verdict::Confirm => 1,
+        Verdict::Block => 2,
+    };
+    let verdict = commands
+        .iter()
+        .map(|c| policy(&RiskFacts::from(c), ctx).verdict)
+        .fold(Verdict::Allow, |a, b| if rank(b) > rank(a) { b } else { a });
+    if ctx.env == Some(EnvTag::Production) && atomic != Atomicity::Yes {
+        return (
+            Verdict::Block,
+            Some(NOT_ATOMIC_COLLECTION_ON_PRODUCTION.to_string()),
+        );
+    }
+    (verdict, None)
+}
+
+/// What a Command apply did so far (kept outside its future, as [`Progress`]).
+#[derive(Default)]
+struct CommandProgress {
+    /// The command in flight (or about to be sent).
+    at: usize,
+    statements: Vec<StmtApply>,
+}
+
+/// The [`ApplyReport`] of `statements` with `outcome` (a Command edit inserts no rows
+/// it reads back).
+fn command_report(outcome: ApplyOutcome, statements: Vec<StmtApply>) -> ApplyReport {
+    ApplyReport {
+        outcome,
+        statements,
+        inserted: Vec::new(),
+        error: None,
+    }
+}
+
+impl SessionManager {
+    /// Builds and stores the plan of `set` on Command connection `id` (see the module
+    /// docs and [`command_edit_verdict`]). Errors: `config` (field `kind` / `database`
+    /// for an object that is no collection, `edit` for a set without changes),
+    /// `not_open`, driver errors of the table detail or of `build_edits`.
+    pub async fn command_edit_preview(
+        &self,
+        id: Uuid,
+        set: EditSet,
+    ) -> Result<EditPreview, DbError> {
+        if set.edits.len() > MAX_EDITS {
+            return Err(config_error(
+                "edit",
+                &format!("apply at most {MAX_EDITS} changes at once"),
+            ));
+        }
+        let cfg = self.repo.get(id)?;
+        check_collection(&set.object)?;
+        let rt = self.runtime(id)?;
+        let caps = rt.server_info().capabilities;
+        let detail = self.table_detail_fresh(id, &set.object).await?;
+        // The commands are built by the `DataAccess` of a data session; nothing is sent.
+        let taken = self
+            .take_data_session(&rt, Some(&set.object.database))
+            .await?;
+        let tunnel_gen = taken.tunnel_gen;
+        let built = match taken.session.engine() {
+            Engine::Command(c) => c.data_access().build_edits(&set.object, &detail, &set),
+            Engine::Sql(_) => Err(DbError::Unsupported {
+                feature: "command data editing on a SQL session".into(),
+                version: String::new(),
+            }),
+        };
+        self.return_data_session(&rt, taken, true);
+        let commands = built?;
+        if commands.is_empty() {
+            return Err(config_error("edit", "there are no changes to apply"));
+        }
+        let atomic = if caps.transactions {
+            Atomicity::Yes
+        } else {
+            Atomicity::No
+        };
+        let (verdict, reason) = command_edit_verdict(&commands, atomic, &policy_ctx(self, &cfg));
+        let mut preview = EditPreview {
+            plan_id: Uuid::nil(),
+            statements: commands.iter().map(|c| c.text.clone()).collect(),
+            verdict,
+            atomic,
+            protections: vec![Protection::KeyOnly; commands.len()],
+            reason,
+        };
+        preview.plan_id = self.edit_plans.insert(
+            self.plan_ttl,
+            StoredEdit {
+                conn: id,
+                runtime: Arc::downgrade(&rt),
+                tunnel_gen,
+                object: set.object,
+                env: cfg.env_tag,
+                read_only: cfg.read_only,
+                plan: StoredPlan::Command(CommandEdit {
+                    commands,
+                    atomic,
+                    fingerprint: fingerprint(&detail),
+                }),
+                at: Instant::now(),
+            },
+        );
+        Ok(preview)
+    }
+
+    /// Runs a stored Command plan once (the connection and tunnel were checked by
+    /// [`Self::edit_apply`]). Before anything is sent: read-only is `blocked`, the
+    /// verdict is judged again with the config as stored now, then the env tag,
+    /// read-only flag, collection fingerprint and tunnel must be the plan's. The
+    /// commands run in order, each once (never retried); the first failure stops the
+    /// apply (`partially_applied`, or `unknown` when it may have been applied).
+    async fn command_edit_apply(
+        &self,
+        stored: &StoredEdit,
+        edit: &CommandEdit,
+        rt: Arc<ConnectionRuntime>,
+        confirmed: bool,
+    ) -> Result<ApplyReport, DbError> {
+        let cfg = self.repo.get(stored.conn)?;
+        let n = count(edit.commands.len());
+        if cfg.read_only {
+            return Err(DbError::Blocked { count: n });
+        }
+        match command_edit_verdict(&edit.commands, edit.atomic, &policy_ctx(self, &cfg)) {
+            (Verdict::Block, Some(reason)) => return Err(config_error("edit", &reason)),
+            (Verdict::Block, None) => return Err(DbError::Blocked { count: n }),
+            (Verdict::Confirm, _) if !confirmed => {
+                return Err(DbError::ConfirmationRequired { count: n })
+            }
+            _ => {}
+        }
+        if cfg.env_tag != stored.env || cfg.read_only != stored.read_only {
+            return Err(stale(
+                "the connection's environment or read-only setting changed",
+            ));
+        }
+        let detail = self.table_detail_fresh(stored.conn, &stored.object).await?;
+        if fingerprint(&detail) != edit.fingerprint {
+            return Err(stale("the collection's structure changed"));
+        }
+        let taken = self
+            .take_data_session(&rt, Some(&stored.object.database))
+            .await?;
+        if taken.tunnel_gen != stored.tunnel_gen {
+            self.return_data_session(&rt, taken, true);
+            return Err(stale("the connection's SSH tunnel was replaced"));
+        }
+        let c = match taken.session.engine() {
+            Engine::Command(c) => c,
+            Engine::Sql(_) => {
+                self.return_data_session(&rt, taken, true);
+                return Err(stale("the connection's session is not a command session"));
+            }
+        };
+        let started_at = utc_millis_now();
+        let t0 = Instant::now();
+        // Registered before anything is sent, so closing the connection finds it.
+        let stop = StopSignal::new();
+        let Some(running) = rt
+            .data
+            .register_apply(&rt.closed, taken.session.as_ref(), &stop)
+        else {
+            self.return_data_session(&rt, taken, false);
+            return Err(stale("the connection was closed or reopened"));
+        };
+        let opts = ExecOptions {
+            max_rows: 2,
+            timeout: Some(self.edit_timeout(&rt)),
+            cancel_grace: DATA_CANCEL_GRACE,
+            stop,
+            ..ExecOptions::default()
+        };
+        let progress = Mutex::new(CommandProgress::default());
+        let record = |s: StmtApply| lock(&progress).statements.push(s);
+        let run = async {
+            for (i, cmd) in edit.commands.iter().enumerate() {
+                lock(&progress).at = i;
+                tracing::debug!(
+                    target: "dnt::sql",
+                    connection = %stored.conn,
+                    command = %c.language().redact(&cmd.text).text,
+                    "applying an edit plan"
+                );
+                let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
+                match c.execute_command(cmd, &opts, &mut page).await {
+                    Ok(out) => record(StmtApply {
+                        index: count(i),
+                        affected: out
+                            .results
+                            .first()
+                            .and_then(|r| r.affected)
+                            .map(|n| n as f64),
+                        error: None,
+                        conflict: false,
+                    }),
+                    Err(e) => {
+                        let outcome = if outcome_unknown(&e) {
+                            ApplyOutcome::Unknown { at: count(i) }
+                        } else {
+                            ApplyOutcome::PartiallyApplied { applied: count(i) }
+                        };
+                        record(StmtApply {
+                            index: count(i),
+                            affected: None,
+                            error: Some(AppError::from(e)),
+                            conflict: false,
+                        });
+                        return (outcome, false);
+                    }
+                }
+            }
+            (ApplyOutcome::Committed, true)
+        };
+        let abort = running.abort.notified();
+        let (outcome, clean) = match select(pin!(abort), pin!(run)).await {
+            // Closing gave up waiting: the command in flight is abandoned with `run`.
+            Either::Left(((), _run)) => {
+                let mut p = lock(&progress);
+                let at = p.at;
+                if p.statements.len() == edit.commands.len() {
+                    (ApplyOutcome::Committed, false)
+                } else {
+                    if p.statements.len() == at {
+                        p.statements.push(StmtApply {
+                            index: count(at),
+                            affected: None,
+                            error: Some(AppError::from(closed_mid_apply(false, true))),
+                            conflict: false,
+                        });
+                    }
+                    (ApplyOutcome::Unknown { at: count(at) }, false)
+                }
+            }
+            Either::Right((out, _)) => out,
+        };
+        let report = command_report(outcome, std::mem::take(&mut lock(&progress).statements));
+        tracing::info!(connection = %stored.conn, outcome = ?report.outcome, "edit plan applied");
+        let entries = command_history_entries(
+            stored.conn,
+            &stored.object.database,
+            &edit.commands,
+            c.language(),
+            &report,
+            &started_at,
+            u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+        );
+        // The session is closed (or pooled) before closing is told the apply ended.
+        self.return_data_session(&rt, taken, clean);
+        // Recorded before closing is told the apply ended.
+        self.write_edit_history(entries).await;
+        drop(running);
+        Ok(report)
+    }
+}
+
+/// The history rows of an applied Command plan: one per command that was sent, origin
+/// `data_edit`, its text redacted with the connection's `language` (as a console run's).
+/// `outcome_unknown`: the command without an answer.
+fn command_history_entries(
+    conn: Uuid,
+    database: &str,
+    commands: &[ParsedCommand],
+    language: &dyn CommandLanguage,
+    report: &ApplyReport,
+    started_at: &str,
+    elapsed_ms: u64,
+) -> Vec<NewHistoryEntry> {
+    let unknown_at = match report.outcome {
+        ApplyOutcome::Unknown { at } => Some(at as usize),
+        _ => None,
+    };
+    report
+        .statements
+        .iter()
+        .enumerate()
+        .filter_map(|(pos, sent)| {
+            let cmd = commands.get(pos)?;
+            let text = language.redact(&cmd.text);
+            let (status, error_kind, error_code) = match &sent.error {
+                Some(e) => (
+                    if e.kind == "cancelled" {
+                        HistoryStatus::Cancelled
+                    } else {
+                        HistoryStatus::Error
+                    },
+                    Some(e.kind.clone()),
+                    e.server_code.clone().or_else(|| e.sqlstate.clone()),
+                ),
+                None => (HistoryStatus::Ok, None, None),
+            };
+            Some(NewHistoryEntry {
+                connection_id: conn,
+                database: Some(database.to_owned()),
+                sql_text: text.text,
+                redacted: text.changed,
+                kind: "write".into(),
+                started_at: started_at.to_owned(),
+                elapsed_ms: Some(elapsed_ms),
+                status,
+                row_count: None,
+                affected: sent.affected.map(|n| n as u64),
+                error_kind,
+                error_code,
+                origin: HistoryOrigin::DataEdit,
+                outcome_unknown: unknown_at == Some(pos),
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,14 +2040,14 @@ mod tests {
             object: o,
             env: None,
             read_only: false,
-            plan: EditPlan {
+            plan: StoredPlan::Sql(EditPlan {
                 stmts: vec![],
                 atomic: Atomicity::Yes,
                 verdict: Verdict::Allow,
                 reason: None,
                 fingerprint: 0,
                 dialect: Dialect::MYSQL,
-            },
+            }),
             at: Instant::now(),
         };
         let a = store.insert(ttl, stored(obj("a")));

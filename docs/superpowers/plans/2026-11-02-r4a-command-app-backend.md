@@ -260,17 +260,17 @@ pub fn check_raw_json(text: &str) -> Result<(), DbError>;
   - No retry.
 - **Production:** the same rule as SQL for non-atomic edits. When `atomic != Yes`, the edit is blocked with the existing `NOT_ATOMIC_ON_PRODUCTION`-style message, adapted: `Changes to this collection cannot be rolled back as a unit, so the data view does not edit it on a Production connection. Use the console instead.`
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `command_collection_is_editable`
   - `command_edit_preview_lists_commands`
   - `command_edit_apply_writes_and_logs_history`
   - `command_edit_blocked_on_production_when_not_atomic`
   - `command_edit_refused_read_only`
   - `sql_edit_unchanged`
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.** Regenerate the bindings; they may only gain `ProtectionKind` `"key"` (serde casing as existing).
-- [ ] **Step 4: Run** `cargo test --workspace`, `bindings_are_current`, the UI lint and the UI test. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): Command data-view edits`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.** Regenerate the bindings; they may only gain `ProtectionKind` `"key"` (serde casing as existing).
+- [x] **Step 4: Run** `cargo test --workspace`, `bindings_are_current`, the UI lint and the UI test. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): Command data-view edits`.
 
 ### Task 7: Key browser backend
 

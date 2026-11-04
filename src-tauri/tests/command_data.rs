@@ -3,7 +3,7 @@
 //! SQL data view (unchanged) (R4a Task 5).
 
 use async_trait::async_trait;
-use dnt_core::config::{ConnectionConfig, DriverOptions, ResolvedConfig, SecretMode};
+use dnt_core::config::{ConnectionConfig, DriverOptions, EnvTag, ResolvedConfig, SecretMode};
 use dnt_core::driver::{
     CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
     Session, SqlSession, StmtOutcome,
@@ -19,14 +19,20 @@ use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
+use dnt_query::edit::{CellInput, Protection, RowEdit, RowRef};
+use dnt_query::Verdict;
 use dnt_store::db::open_in_memory;
+use dnt_store::history::{HistoryEntry, HistoryFilter, HistoryOrigin, HistoryStatus};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
+use dnt_store::repo::{SecretChange, SecretUpdate};
 use dnt_testkit::fake_command::{collection_key, FakeCommandDriver, FakeStore, FakeValue};
 use dnt_tunnel::KnownHosts;
 use dntdatabase::commands::data::{
-    table_data_impl, table_row_count_impl, DataFilter, FilterCond, FilterMode, FilterOp, SortDir,
+    data_apply_impl, data_editable_impl, data_preview_impl, table_data_impl, table_row_count_impl,
+    Atomicity, DataFilter, EditSet, FilterCond, FilterMode, FilterOp, ProtectionKind, SortDir,
     SortSpec,
 };
+use dntdatabase::edit_plans::ApplyOutcome;
 use dntdatabase::export_paths::ExportPaths;
 use dntdatabase::file_picks::FilePicks;
 use dntdatabase::session_manager::SessionManager;
@@ -81,6 +87,11 @@ async fn fixture(driver: Arc<dyn Driver>, cfg: ConnectionConfig) -> Fixture {
 /// The fake Command driver as Redis, open on db "0", with collection `users` in db "2":
 /// `u1 = alice`, `u2 = bob`, `u3 = carol`.
 async fn redis_fixture() -> (Fixture, FakeStore) {
+    redis_fixture_with(None, false).await
+}
+
+/// [`redis_fixture`] with an env tag and read-only flag.
+async fn redis_fixture_with(env_tag: Option<EnvTag>, read_only: bool) -> (Fixture, FakeStore) {
     let driver = FakeCommandDriver::with_kind(DbKind::Redis);
     let store = driver.store();
     let mut cfg = ConnectionConfig {
@@ -90,6 +101,8 @@ async fn redis_fixture() -> (Fixture, FakeStore) {
         port: 6379,
         default_db: Some("0".into()),
         secret_mode: SecretMode::Saved,
+        env_tag,
+        read_only,
         ..sample_config()
     };
     cfg.options.driver = DriverOptions::Redis { db: 0 };
@@ -584,5 +597,285 @@ async fn sql_data_view_unchanged() {
             "SELECT * FROM `shop`.`orders` ORDER BY `id` ASC LIMIT 2 OFFSET 0",
             "SELECT COUNT(*) FROM `shop`.`orders` WHERE (`id` = ?)",
         ]
+    );
+}
+
+// ---------------------------------------------------------------------------------
+// Data-view edits of the Command family (R4a Task 6).
+
+/// The row `id` of `users` as the grid holds it.
+fn user_row(id: &str, value: &str) -> RowRef {
+    RowRef {
+        key: vec![("_id".into(), text(id))],
+        original: vec![("value".into(), text(value))],
+        xmin: None,
+        loaded: vec![],
+    }
+}
+
+fn typed(s: &str) -> CellInput {
+    CellInput::Text { text: s.into() }
+}
+
+/// `u1` becomes `alicia`, `u4 = dave` is added, `u2` is deleted.
+fn user_edits() -> EditSet {
+    EditSet {
+        object: users(),
+        edits: vec![
+            RowEdit::Update {
+                row: user_row("u1", "alice"),
+                set: vec![("value".into(), typed("alicia"))],
+            },
+            RowEdit::Insert {
+                values: vec![("_id".into(), typed("u4")), ("value".into(), typed("dave"))],
+            },
+            RowEdit::Delete {
+                row: user_row("u2", "bob"),
+            },
+        ],
+        overwrite: false,
+    }
+}
+
+fn history(f: &Fixture) -> Vec<HistoryEntry> {
+    let mut rows = f
+        .state
+        .repo
+        .history_list(&HistoryFilter {
+            connection_id: Some(f.id),
+            search: None,
+            origin: None,
+            limit: 1000,
+        })
+        .unwrap();
+    rows.sort_by_key(|r| r.id);
+    rows
+}
+
+fn users_hash(store: &FakeStore) -> BTreeMap<String, String> {
+    match store.get("2", &collection_key("users")) {
+        Some(FakeValue::Hash(h)) => h,
+        other => panic!("expected the users hash, got {other:?}"),
+    }
+}
+
+fn original_users() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("u1".into(), "alice".into()),
+        ("u2".into(), "bob".into()),
+        ("u3".into(), "carol".into()),
+    ])
+}
+
+#[tokio::test]
+async fn command_collection_is_editable() {
+    let (f, store) = redis_fixture().await;
+    let info = data_editable_impl(&f.state, f.id, users()).await.unwrap();
+    assert!(info.editable, "{info:?}");
+    assert_eq!(info.reason, None);
+    assert_eq!(info.key, ["_id"]);
+    assert!(info.hidden_key.is_empty());
+    assert_eq!(info.editable_columns, ["value"]);
+    // The fake has no transactions.
+    assert_eq!(info.atomic, Atomicity::No);
+    assert_eq!(info.protection, ProtectionKind::Key);
+
+    // Only collections are edited.
+    let key = ObjectRef {
+        kind: ObjectKind::Key,
+        ..users()
+    };
+    let info = data_editable_impl(&f.state, f.id, key).await.unwrap();
+    assert!(!info.editable);
+    assert_eq!(
+        info.reason.as_deref(),
+        Some("only collections can be edited")
+    );
+    assert!(info.editable_columns.is_empty());
+    assert_eq!(info.protection, ProtectionKind::Key);
+    assert!(store.executed().is_empty());
+}
+
+#[tokio::test]
+async fn command_edit_preview_lists_commands() {
+    let (f, store) = redis_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(
+        p.statements,
+        [
+            "HSET h:users u1 alicia",
+            "HSET h:users u4 dave",
+            "HDEL h:users u2"
+        ]
+    );
+    assert_eq!(p.verdict, Verdict::Allow);
+    assert_eq!(p.atomic, Atomicity::No);
+    assert_eq!(p.protections, vec![Protection::KeyOnly; 3]);
+    assert_eq!(p.reason, None);
+    // A preview sends nothing.
+    assert!(store.executed().is_empty());
+    assert_eq!(users_hash(&store), original_users());
+}
+
+#[tokio::test]
+async fn command_edit_apply_writes_and_logs_history() {
+    let (f, store) = redis_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed, "{r:?}");
+    assert!(r.error.is_none());
+    let sent: Vec<_> = r
+        .statements
+        .iter()
+        .map(|s| (s.index, s.affected, s.error.is_none(), s.conflict))
+        .collect();
+    assert_eq!(
+        sent,
+        [
+            (0, Some(0.0), true, false),
+            (1, Some(1.0), true, false),
+            (2, Some(1.0), true, false)
+        ]
+    );
+    assert_eq!(store.executed(), ["HSET", "HSET", "HDEL"]);
+    assert_eq!(
+        users_hash(&store),
+        BTreeMap::from([
+            ("u1".into(), "alicia".into()),
+            ("u3".into(), "carol".into()),
+            ("u4".into(), "dave".into()),
+        ])
+    );
+
+    let rows = history(&f);
+    let texts: Vec<_> = rows.iter().map(|r| r.sql_text.as_str()).collect();
+    assert_eq!(texts, p.statements);
+    for row in &rows {
+        assert_eq!(row.origin, HistoryOrigin::DataEdit);
+        assert_eq!(row.kind, "write");
+        assert_eq!(row.status, HistoryStatus::Ok);
+        assert_eq!(row.database.as_deref(), Some("2"));
+        assert!(!row.redacted);
+        assert!(!row.outcome_unknown);
+    }
+
+    // A plan runs once: never sent again.
+    let e = data_apply_impl(&f.state, p.plan_id, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DbError::PlanExpired), "{e:?}");
+    assert_eq!(store.executed().len(), 3);
+}
+
+/// What `data_apply` of a Production plan for a collection without transactions says.
+const NOT_ATOMIC: &str = "Changes to this collection cannot be rolled back as a unit, so the \
+     data view does not edit it on a Production connection. Use the console instead.";
+
+#[tokio::test]
+async fn command_edit_blocked_on_production_when_not_atomic() {
+    let (f, store) = redis_fixture_with(Some(EnvTag::Production), false).await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(p.verdict, Verdict::Block);
+    assert_eq!(p.atomic, Atomicity::No);
+    assert_eq!(p.reason.as_deref(), Some(NOT_ATOMIC));
+    // Confirming does not lift it.
+    let e = data_apply_impl(&f.state, p.plan_id, true)
+        .await
+        .unwrap_err();
+    match e {
+        DbError::Config { field, message } => {
+            assert_eq!(field.as_deref(), Some("edit"));
+            assert_eq!(message, NOT_ATOMIC);
+        }
+        other => panic!("expected the not-atomic refusal, got {other:?}"),
+    }
+    assert!(store.executed().is_empty());
+    assert_eq!(users_hash(&store), original_users());
+}
+
+#[tokio::test]
+async fn command_edit_refused_read_only() {
+    let (f, store) = redis_fixture_with(None, true).await;
+    let info = data_editable_impl(&f.state, f.id, users()).await.unwrap();
+    assert!(!info.editable);
+    assert_eq!(info.reason.as_deref(), Some("the connection is read-only"));
+    // The key still identifies the rows.
+    assert_eq!(info.key, ["_id"]);
+    assert!(info.editable_columns.is_empty());
+
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(p.verdict, Verdict::Block);
+    assert_eq!(p.reason.as_deref(), Some("the connection is read-only"));
+    let e = data_apply_impl(&f.state, p.plan_id, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DbError::Blocked { count: 3 }), "{e:?}");
+    assert!(store.executed().is_empty());
+
+    // Made read-only after a preview: the stored plan is judged again at apply.
+    let (f, store) = redis_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(p.verdict, Verdict::Allow);
+    let mut cfg = f.state.repo.get(f.id).unwrap();
+    cfg.read_only = true;
+    f.state
+        .repo
+        .update(
+            cfg,
+            SecretUpdate {
+                db_password: SecretChange::Keep,
+                ssh_password: SecretChange::Keep,
+                ssh_key_passphrase: SecretChange::Keep,
+            },
+        )
+        .unwrap();
+    let e = data_apply_impl(&f.state, p.plan_id, true)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DbError::Blocked { count: 3 }), "{e:?}");
+    assert!(store.executed().is_empty());
+    assert_eq!(users_hash(&store), original_users());
+    assert!(history(&f).is_empty());
+}
+
+#[tokio::test]
+async fn sql_edit_unchanged() {
+    let (f, executed) = sql_fixture().await;
+    let info = data_editable_impl(&f.state, f.id, orders()).await.unwrap();
+    assert!(info.editable, "{info:?}");
+    assert_eq!(info.key, ["id"]);
+    assert_eq!(info.protection, ProtectionKind::Snapshot);
+
+    lock(&executed).clear();
+    let set = EditSet {
+        object: orders(),
+        edits: vec![RowEdit::Insert {
+            values: vec![("id".into(), typed("3"))],
+        }],
+        overwrite: false,
+    };
+    let p = data_preview_impl(&f.state, f.id, set).await.unwrap();
+    assert_eq!(p.verdict, Verdict::Allow);
+    assert_eq!(p.statements.len(), 1);
+    assert!(
+        p.statements[0].starts_with("INSERT INTO `shop`.`orders`"),
+        "{:?}",
+        p.statements
+    );
+    assert!(!p.protections.contains(&Protection::KeyOnly));
+    // The preview read the column types only.
+    assert_eq!(
+        *lock(&executed),
+        ["SELECT `id` FROM `shop`.`orders` LIMIT 0"]
     );
 }

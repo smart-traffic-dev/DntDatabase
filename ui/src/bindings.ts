@@ -2640,9 +2640,9 @@ export type Protection =
 { level: "key_only" }
 /**
  * How a server reports a concurrent change to a row: PostgreSQL `xmin`, MySQL a
- * snapshot of the row's values.
+ * snapshot of the row's values; a Command-family edit is guarded by its key only.
  */
-export type ProtectionKind = "row_version" | "snapshot"
+export type ProtectionKind = "row_version" | "snapshot" | "key"
 export type QueryTabRecord = { id: string; title: string; 
 /**
  * Exported as a JS number (positions are small).

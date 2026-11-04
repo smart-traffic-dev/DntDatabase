@@ -81,12 +81,13 @@ pub struct EditPlan {
 }
 
 /// How a server reports a concurrent change to a row: PostgreSQL `xmin`, MySQL a
-/// snapshot of the row's values.
+/// snapshot of the row's values; a Command-family edit is guarded by its key only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtectionKind {
     RowVersion,
     Snapshot,
+    Key,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2701,6 +2702,7 @@ mod tests {
         assert_eq!(serde_json::json!(Atomicity::Unknown), "unknown");
         assert_eq!(serde_json::json!(ProtectionKind::RowVersion), "row_version");
         assert_eq!(serde_json::json!(ProtectionKind::Snapshot), "snapshot");
+        assert_eq!(serde_json::json!(ProtectionKind::Key), "key");
     }
 
     /// MySQL has no `RETURNING`: the new row is read back by its key, the

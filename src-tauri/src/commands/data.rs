@@ -47,7 +47,7 @@ use crate::state::AppState;
 use dnt_core::data_access::{check_raw_json, PageSpec};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
-use dnt_core::server::{Cap, EngineFamily, SqlKind};
+use dnt_core::server::{check_cap, Cap, Capabilities, EngineFamily, SqlKind};
 use dnt_core::sql::build::{
     insert_sql, raw_where_clause, update_sql, BuildError, ColumnTarget, RowGuard, RowKey, TableRef,
 };
@@ -735,21 +735,21 @@ fn command_read_checks(
     sort: &[SortSpec],
     filter: Option<&DataFilter>,
 ) -> Result<(), DbError> {
-    match state.sessions.capabilities(id)?.family {
-        EngineFamily::Command => {}
-        EngineFamily::Sql => {
-            return Err(DbError::Unsupported {
-                feature: "a command data view on a SQL session".into(),
-                version: String::new(),
-            })
-        }
-    }
+    require_command_session(state, id, "a command data view")?;
     check_request_size(EngineFamily::Command, sort, filter)?;
     if let Some(raw) = filter.and_then(|f| f.raw_json.as_deref()) {
         check_raw_json(raw)?;
     }
-    match obj.kind {
-        ObjectKind::Collection => {}
+    if !is_collection(obj.kind) {
+        return Err(config_error("kind", "only collections have data to show"));
+    }
+    check_collection(obj)
+}
+
+/// Whether objects of `kind` are the Command family's data-view objects.
+fn is_collection(kind: ObjectKind) -> bool {
+    match kind {
+        ObjectKind::Collection => true,
         ObjectKind::Table
         | ObjectKind::View
         | ObjectKind::MaterializedView
@@ -759,14 +759,35 @@ fn command_read_checks(
         | ObjectKind::Event
         | ObjectKind::Sequence
         | ObjectKind::Type
-        | ObjectKind::Key => {
-            return Err(config_error("kind", "only collections have data to show"))
-        }
+        | ObjectKind::Key => false,
+    }
+}
+
+/// A Command-family data-view object: a collection of a named database.
+pub(crate) fn check_collection(obj: &ObjectRef) -> Result<(), DbError> {
+    if !is_collection(obj.kind) {
+        return Err(config_error("kind", "only collections can be edited"));
     }
     if obj.database.is_empty() {
         return Err(config_error("database", "a database is required"));
     }
     Ok(())
+}
+
+/// `Unsupported` unless connection `id`'s session is a Command one (`what`: the feature).
+fn require_command_session(
+    state: &AppState,
+    id: Uuid,
+    what: &str,
+) -> Result<Capabilities, DbError> {
+    let caps = state.sessions.capabilities(id)?;
+    match caps.family {
+        EngineFamily::Command => Ok(caps),
+        EngineFamily::Sql => Err(DbError::Unsupported {
+            feature: format!("{what} on a SQL session"),
+            version: String::new(),
+        }),
+    }
 }
 
 /// [`table_data_impl`] of the Command family: the page is built by the data session's
@@ -906,6 +927,10 @@ pub async fn data_editable_impl(
     id: Uuid,
     obj: ObjectRef,
 ) -> Result<EditableInfo, DbError> {
+    match state.repo.get(id)?.kind.family() {
+        EngineFamily::Sql => {}
+        EngineFamily::Command => return command_editable(state, id, obj).await,
+    }
     let kind = require_cap(state, id, Cap::DataEdit)?;
     let cfg = state.repo.get(id)?;
     check_object(kind, &obj)?;
@@ -913,13 +938,77 @@ pub async fn data_editable_impl(
     Ok(editable_info(&detail, kind, cfg.read_only))
 }
 
+/// [`data_editable_impl`] of the Command family: a collection is edited by its key
+/// ([`ProtectionKind::Key`]), every other column can be set, and the edit is atomic only
+/// on an engine with transactions. When it is not editable, `reason` is UI copy: the
+/// connection is read-only, the engine edits nothing, or the object is no collection.
+async fn command_editable(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+) -> Result<EditableInfo, DbError> {
+    let caps = require_command_session(state, id, "command data editing")?;
+    let read_only = state.repo.get(id)?.read_only;
+    if obj.database.is_empty() {
+        return Err(config_error("database", "a database is required"));
+    }
+    // The key (the detail's primary key, else `_id`) and the other columns.
+    let (key, others) = if is_collection(obj.kind) {
+        let detail = table_detail_impl(state, id, obj.clone()).await?;
+        let mut key = key_order(&detail);
+        if key.is_empty() {
+            key.push("_id".to_string());
+        }
+        let others: Vec<String> = detail
+            .columns
+            .iter()
+            .filter(|c| !key.contains(&c.name))
+            .map(|c| c.name.clone())
+            .collect();
+        (key, others)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let reason = if read_only {
+        Some("the connection is read-only")
+    } else if !caps.data_edit {
+        Some("editing is not available for this engine")
+    } else if !is_collection(obj.kind) {
+        Some("only collections can be edited")
+    } else {
+        None
+    };
+    Ok(EditableInfo {
+        editable: reason.is_none(),
+        reason: reason.map(str::to_string),
+        key,
+        hidden_key: Vec::new(),
+        editable_columns: if reason.is_none() { others } else { Vec::new() },
+        atomic: if caps.transactions {
+            Atomicity::Yes
+        } else {
+            Atomicity::No
+        },
+        protection: ProtectionKind::Key,
+    })
+}
+
 pub async fn data_preview_impl(
     state: &AppState,
     id: Uuid,
     set: EditSet,
 ) -> Result<EditPreview, DbError> {
-    require_cap(state, id, Cap::DataEdit)?;
-    state.sessions.edit_preview(id, set).await
+    match state.repo.get(id)?.kind.family() {
+        EngineFamily::Sql => {
+            require_cap(state, id, Cap::DataEdit)?;
+            state.sessions.edit_preview(id, set).await
+        }
+        EngineFamily::Command => {
+            let caps = require_command_session(state, id, "command data editing")?;
+            check_cap(&caps, Cap::DataEdit)?;
+            state.sessions.command_edit_preview(id, set).await
+        }
+    }
 }
 
 pub async fn data_apply_impl(
