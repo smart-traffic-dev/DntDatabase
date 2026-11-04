@@ -35,7 +35,7 @@ pub use plan::{
     Verdict,
 };
 pub use policy::{policy, PolicyCtx, PolicyOutcome, RiskClass, RiskFacts};
-pub use redact::{redact, Redacted, REDACTED};
+pub use redact::{redact, redact_spans, Redacted, REDACTED};
 pub use risk::{
     confirm_name, confirm_names_match, drop_targets, estimate_sql, estimate_table, parse_estimate,
     DropKind, DropTarget, RowEstimate,

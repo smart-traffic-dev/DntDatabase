@@ -47,30 +47,16 @@ pub use dnt_core::redact::Redacted;
 /// Replaces every possible secret literal of `stmt` with [`REDACTED`]. Never
 /// panics; linear in the length of `stmt`.
 pub fn redact(stmt: &str, dialect: Dialect) -> Redacted {
-    let mut spans = Vec::new();
-    scan(stmt, 0, dialect, 0, &mut spans);
-    if dialect.is_mysql() {
-        if let Some(inlined) = blank_exec_openers(stmt) {
-            scan(&inlined, 0, dialect, 0, &mut spans);
-        }
-    }
+    let spans = redact_spans(stmt, dialect);
     if spans.is_empty() {
         return Redacted {
             text: stmt.to_string(),
             changed: false,
         };
     }
-    spans.sort_unstable();
     let mut text = String::with_capacity(stmt.len());
-    let (mut at, mut i) = (0, 0);
-    while i < spans.len() {
-        let (start, mut end) = spans[i];
-        i += 1;
-        while i < spans.len() && spans[i].0 <= end {
-            end = end.max(spans[i].1);
-            i += 1;
-        }
-        // Spans are char boundaries of `stmt` (blanking only rewrites ASCII).
+    let mut at = 0;
+    for (start, end) in spans {
         text.push_str(stmt.get(at..start).unwrap_or_default());
         text.push_str(REDACTED);
         at = end;
@@ -80,6 +66,28 @@ pub fn redact(stmt: &str, dialect: Dialect) -> Redacted {
         text,
         changed: true,
     }
+}
+
+/// Byte ranges of `stmt` that [`redact`] replaces with [`REDACTED`]: sorted, with
+/// overlapping or touching ranges merged. Spans are `char` boundaries of `stmt`
+/// (blanking exec-comment openers only rewrites ASCII).
+pub fn redact_spans(stmt: &str, dialect: Dialect) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    scan(stmt, 0, dialect, 0, &mut spans);
+    if dialect.is_mysql() {
+        if let Some(inlined) = blank_exec_openers(stmt) {
+            scan(&inlined, 0, dialect, 0, &mut spans);
+        }
+    }
+    spans.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+    for (start, end) in spans {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
 }
 
 /// `stmt` with every `/*!digits` / `/*M!digits` opener replaced by spaces (same
@@ -632,6 +640,7 @@ mod tests {
     fn red(s: &str, d: Dialect) -> String {
         let r = redact(s, d);
         assert_eq!(r.changed, r.text != s, "changed flag for {s:?}");
+        assert_eq!(from_spans(s, d), r.text, "spans of {s:?}");
         r.text
     }
 
@@ -639,6 +648,64 @@ mod tests {
         let r = redact(input, d);
         assert_eq!(r.text, want, "input {input:?}");
         assert!(r.changed, "changed for {input:?}");
+        assert_eq!(from_spans(input, d), want, "spans of {input:?}");
+    }
+
+    /// `s` with every `redact_spans` range replaced by `REDACTED`, built here
+    /// independently of `redact`.
+    fn from_spans(s: &str, d: Dialect) -> String {
+        let spans = redact_spans(s, d);
+        for w in spans.windows(2) {
+            assert!(w[0].1 < w[1].0, "sorted and merged: {spans:?}");
+        }
+        let mut out = s.to_string();
+        for &(start, end) in spans.iter().rev() {
+            assert!(s.is_char_boundary(start) && s.is_char_boundary(end));
+            out.replace_range(start..end, REDACTED);
+        }
+        out
+    }
+
+    #[test]
+    fn spans_identified_by() {
+        let s = "CREATE USER u IDENTIFIED BY 'pw'";
+        assert_eq!(redact_spans(s, MY), [(28, 32)]);
+        assert_eq!(&s[28..32], "'pw'");
+    }
+
+    #[test]
+    fn spans_unterminated_literal() {
+        let s = "ALTER USER u IDENTIFIED BY 'hun";
+        let spans = redact_spans(s, MY);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].1, s.len());
+        assert_eq!(spans, redact_spans(s, PG));
+    }
+
+    #[test]
+    fn spans_mysql_exec_comment_union() {
+        // Only the scan with blanked openers sees `'a*/b'` as one literal.
+        let s = "/*!50000 CREATE USER u IDENTIFIED BY 'a*/b' */";
+        let spans = redact_spans(s, MY);
+        let start = s.find("'a").unwrap();
+        assert!(
+            spans.iter().any(|&(a, b)| a <= start && b >= start + 6),
+            "{spans:?}"
+        );
+    }
+
+    #[test]
+    fn spans_merge_overlaps() {
+        // `PASSWORD(...)` and `IDENTIFIED BY` reach the same literal.
+        let s = "SET PASSWORD = PASSWORD('x')";
+        let spans = redact_spans(s, MY);
+        assert_eq!(spans.len(), 1, "{spans:?}");
+    }
+
+    #[test]
+    fn spans_none_for_plain_select() {
+        assert!(redact_spans("SELECT 1", MY).is_empty());
+        assert!(redact_spans("", PG).is_empty());
     }
 
     #[test]
