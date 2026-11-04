@@ -78,15 +78,11 @@ beforeEach(() => {
 });
 
 describe('Settings → AI', () => {
-  it("shows the endpoint's own error, not the database wording", async () => {
+  it("shows the endpoint's own error", async () => {
     world.settings = view({ ...DEFAULTS, base_url: 'https://api.example.com/v1' });
     backend(world, {
       ai_models: () => {
-        throw new Failure(
-          appError('connect', 'Could not connect to the database server.', {
-            detail: 'The endpoint rejected the request (404): Not Found',
-          }),
-        );
+        throw new Failure(appError('ai', 'The endpoint rejected the request (404): Not Found'));
       },
     });
     const user = userEvent.setup();

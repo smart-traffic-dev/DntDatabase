@@ -1,4 +1,23 @@
 {
+  "ai": {
+    "kind": "ai",
+    "message": "The API key was rejected (401).",
+    "detail": null,
+    "stage": null,
+    "timings": null,
+    "server_code": null,
+    "sqlstate": null,
+    "position": null,
+    "retryable": false,
+    "outcome_unknown": false,
+    "hint": null,
+    "fingerprint": null,
+    "key_openssh": null,
+    "host": null,
+    "port": null,
+    "field": null,
+    "tx_state": null
+  },
   "auth_mysql": {
     "kind": "auth",
     "message": "Authentication failed.",

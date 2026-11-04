@@ -20,7 +20,7 @@ pub enum AiError {
     #[error("This endpoint does not support fill-in-the-middle: {message}")]
     FimUnsupported { message: String },
     /// Any other 4xx.
-    #[error("The endpoint rejected the request ({status}): {message}")]
+    #[error("The endpoint rejected the request ({status}){}", reason(.message))]
     BadRequest { status: u16, message: String },
     /// 5xx.
     #[error("The endpoint failed ({status}).")]
@@ -36,4 +36,13 @@ pub enum AiError {
     /// A 2xx whose body is not the OpenAI shape.
     #[error("Unexpected response: {message}")]
     InvalidResponse { message: String },
+}
+
+/// `": {message}"`, or `"."` when the endpoint gave no reason.
+fn reason(message: &str) -> String {
+    if message.trim().is_empty() {
+        ".".to_string()
+    } else {
+        format!(": {message}")
+    }
 }

@@ -255,6 +255,22 @@ fn server_name(variant: ServerVariant) -> &'static str {
     }
 }
 
+/// The schema unqualified names resolve to on PostgreSQL when the editor names none: as the
+/// editor's own completion has it (`currentSchemaOf`), `public` when the database has it, else
+/// the schema of the first table. The cache does not say which `search_path` entry is first.
+fn current_schema(tables: &[TableBrief]) -> Option<String> {
+    let mut schemas = tables.iter().filter_map(|t| t.schema.as_deref());
+    let first = schemas.clone().next()?;
+    Some(
+        if schemas.any(|s| s == "public") {
+            "public"
+        } else {
+            first
+        }
+        .to_string(),
+    )
+}
+
 pub async fn ai_complete_impl(
     state: &AppState,
     req: AiCompleteRequest,
@@ -306,11 +322,16 @@ pub async fn ai_complete_impl(
         },
         None => Vec::new(),
     };
+    let schema = req.schema.clone().or_else(|| {
+        matches!(dialect, Dialect::Postgres)
+            .then(|| current_schema(&tables))
+            .flatten()
+    });
     let prompt = match build(&PromptInput {
         dialect,
         server_version: version.as_deref(),
         database: req.database.as_deref(),
-        schema: req.schema.as_deref(),
+        schema: schema.as_deref(),
         text: &req.text,
         cursor_utf16: req.cursor,
         tables: &tables,
@@ -431,4 +452,27 @@ pub async fn ai_complete(
 #[specta::specta]
 pub fn ai_cancel(state: State<'_, AppState>, request_id: String) {
     ai_cancel_impl(&state, &request_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(schema: Option<&str>, name: &str) -> TableBrief {
+        TableBrief {
+            schema: schema.map(str::to_string),
+            name: name.to_string(),
+            columns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn current_schema_prefers_public_then_the_first_table() {
+        assert_eq!(current_schema(&[]), None);
+        assert_eq!(current_schema(&[t(None, "a")]), None);
+        let pg = [t(Some("sales"), "a"), t(Some("public"), "b")];
+        assert_eq!(current_schema(&pg).as_deref(), Some("public"));
+        let pg = [t(Some("sales"), "a"), t(Some("audit"), "b")];
+        assert_eq!(current_schema(&pg).as_deref(), Some("sales"));
+    }
 }

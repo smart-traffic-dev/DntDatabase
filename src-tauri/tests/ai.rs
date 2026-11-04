@@ -301,8 +301,11 @@ async fn test_reports_verdicts() {
     f.fake
         .push(Step::Reply(Err(AiError::Unauthorized { status: 401 })));
     match ai_test_impl(&f.state).await.unwrap_err() {
-        DbError::Auth { message } => assert_eq!(message, "The API key was rejected (401)."),
-        other => panic!("expected Auth, got {other:?}"),
+        DbError::Ai { message, retryable } => {
+            assert_eq!(message, "The API key was rejected (401).");
+            assert!(!retryable);
+        }
+        other => panic!("expected Ai, got {other:?}"),
     }
 }
 
@@ -468,7 +471,22 @@ async fn transient_errors_are_errors_not_internal() {
         let err = ai_complete_impl(&f.state, request(id, "SELECT |"))
             .await
             .unwrap_err();
-        assert!(matches!(err, DbError::Connect { .. }), "{e:?} -> {err:?}");
+        match &err {
+            DbError::Ai { message, retryable } => {
+                assert_eq!(message, &e.to_string());
+                assert!(*retryable, "{e:?}");
+            }
+            other => panic!("{e:?} -> {other:?}"),
+        }
+        let app = dnt_core::error::AppError::from(err);
+        assert_eq!(app.kind, "ai");
+        // A sentence: the endpoint's reason, with a full stop.
+        assert!(
+            app.message.starts_with(e.to_string().trim_end_matches('.')),
+            "{}",
+            app.message
+        );
+        assert!(app.message.ends_with('.'), "{}", app.message);
     }
     // Not paused.
     f.fake.push(Step::Reply(Ok("1".into())));

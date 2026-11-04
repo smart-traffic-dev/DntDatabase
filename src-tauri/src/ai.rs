@@ -229,16 +229,22 @@ pub fn settings_view(cfg: AiConfig, has_key: bool) -> AiSettings {
     }
 }
 
-/// An [`AiError`] as the command layer reports it. Never `Internal`: the UI reports
+/// An [`AiError`] as the command layer reports it: settings problems are `Config`, the
+/// endpoint's are `Ai` (kind `ai`, its own message). Never `Internal`: the UI reports
 /// those as bugs, and these are the endpoint's or the settings' problems.
 pub fn to_db_error(e: AiError) -> DbError {
+    let retryable = matches!(
+        e,
+        AiError::RateLimited { .. }
+            | AiError::Server { .. }
+            | AiError::Timeout
+            | AiError::Network { .. }
+    );
     match e {
         AiError::Config { message } => config_err("ai", message),
-        AiError::Unauthorized { .. } => DbError::Auth {
-            message: e.to_string(),
-        },
-        other => DbError::Connect {
+        other => DbError::Ai {
             message: other.to_string(),
+            retryable,
         },
     }
 }

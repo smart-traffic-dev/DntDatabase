@@ -435,6 +435,15 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         .into(),
     );
     out.insert("blocked", DbError::Blocked { count: 2 }.into());
+    // AI editor completion: the endpoint's own reason.
+    out.insert(
+        "ai",
+        DbError::Ai {
+            message: "The API key was rejected (401).".into(),
+            retryable: false,
+        }
+        .into(),
+    );
     out.insert(
         "confirmation_required",
         DbError::ConfirmationRequired { count: 3 }.into(),

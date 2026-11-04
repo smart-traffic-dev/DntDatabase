@@ -22,7 +22,7 @@ export function AiConsentDialog({
   return (
     <Modal
       title={`Turn on AI for ${connectionName}`}
-      subtitle={`Suggestions are sent from ${host}`}
+      subtitle={`Suggestions come from ${host}`}
       tone="warning"
       role="alertdialog"
       onClose={onClose}
@@ -37,7 +37,10 @@ export function AiConsentDialog({
           <li>the text of the query editor, with passwords hidden;</li>
           <li>the names and types of this database's tables and columns.</li>
         </ul>
-        <p>Row data is never sent. You can turn AI off for this connection at any time in Settings → AI.</p>
+        <p>
+          Row data is never sent. You can turn AI off for this connection at any time in Settings → AI or the connection's
+          settings.
+        </p>
         <label className="check">
           <input type="checkbox" checked={allowed} onChange={(e) => setAllowed(e.target.checked)} />
           <span>I am allowed to share this database's schema and queries with this endpoint</span>

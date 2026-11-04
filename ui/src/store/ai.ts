@@ -2,13 +2,11 @@ import { create } from 'zustand';
 import { commands, type AiConnectionView, type AiSettings, type AiTrigger } from '../bindings';
 
 /**
- * The text of a failed AI command. The backend reports endpoint failures as `connect` / `auth`
- * errors, whose `message` is the database wording ("Could not connect to the database server.");
- * the endpoint's own text ("The endpoint rejected the request (404)…") is in `detail`.
+ * The text of a failed AI command: the backend's `ai` and `config` errors carry the endpoint's
+ * or the setting's own reason as their message.
  */
 export function aiErrorText(e: unknown, fallback = 'The AI request failed.'): string {
-  const o = (typeof e === 'object' && e !== null ? e : {}) as { kind?: unknown; message?: unknown; detail?: unknown };
-  if ((o.kind === 'connect' || o.kind === 'auth') && typeof o.detail === 'string' && o.detail) return o.detail;
+  const o = (typeof e === 'object' && e !== null ? e : {}) as { message?: unknown };
   return typeof o.message === 'string' && o.message ? o.message : fallback;
 }
 

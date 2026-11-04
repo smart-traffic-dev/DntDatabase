@@ -151,6 +151,11 @@ pub enum DbError {
     /// An empty `version`: the feature is not supported at all (no version clause).
     #[error("{feature} is not supported{}", version_note(.version))]
     Unsupported { feature: String, version: String },
+    /// The AI endpoint failed (rejected the key, refused the request, timed out, …).
+    /// `message` is written for users and names the endpoint's own reason; it never holds
+    /// the key or the prompt. `retryable`: the same request may succeed later.
+    #[error("AI endpoint error: {message}")]
+    Ai { message: String, retryable: bool },
     #[error("internal error: {message}")]
     Internal { message: String },
     /// A browse call (or similar) for a connection that has no runtime.
@@ -465,6 +470,11 @@ impl From<DbError> for AppError {
                     "unsupported",
                     "This feature is not supported by the server.",
                 )
+            },
+            // Like `Config`, the message is the user-facing text (the endpoint's reason).
+            DbError::Ai { message, retryable } => AppError {
+                retryable,
+                ..AppError::base("ai", sentence(&message))
             },
             DbError::Internal { message } => AppError {
                 detail: Some(message),
