@@ -2,7 +2,7 @@ use dnt_core::config::{
     ConnectionConfig, DriverOptions, EnvTag, HostPort, SecretMode, SslConfig, SslMode,
 };
 use dnt_core::error::DbError;
-use dnt_core::secret::{MemorySecretStore, SecretKind, SecretStore};
+use dnt_core::secret::{AppSecret, MemorySecretStore, SecretKind, SecretStore};
 use dnt_core::server::DbKind;
 use dnt_core::test_util::{sample_config, sample_ssh};
 use dnt_store::db::{open, open_in_memory};
@@ -464,6 +464,15 @@ impl SecretStore for FlakyStore {
     }
     fn delete_all(&self, conn: Uuid) -> Result<(), DbError> {
         self.inner.delete_all(conn)
+    }
+    fn get_app(&self, secret: AppSecret) -> Result<Option<SecretString>, DbError> {
+        self.inner.get_app(secret)
+    }
+    fn set_app(&self, secret: AppSecret, value: &SecretString) -> Result<(), DbError> {
+        self.inner.set_app(secret, value)
+    }
+    fn delete_app(&self, secret: AppSecret) -> Result<(), DbError> {
+        self.inner.delete_app(secret)
     }
 }
 
