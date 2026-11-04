@@ -163,6 +163,18 @@ describe('AI inline provider', () => {
     expect(d.calls).toEqual([]);
   });
 
+  it('typing what was suggested returns the rest without a new request', async () => {
+    const d = deps({ kind: 'suggestion', text: 'status = 1' });
+    const p = createAiInlineProvider(fakeMonaco(), d);
+    await ask(p, 'SELECT * FROM t WHERE |');
+    const rest = await ask(p, 'SELECT * FROM t WHERE sta|');
+    expect(rest[0]!.insertText).toBe('tus = 1');
+    expect(d.calls).toHaveLength(1);
+    // Typing something else asks again.
+    await ask(p, 'SELECT * FROM t WHERE x|');
+    expect(d.calls).toHaveLength(2);
+  });
+
   it('drops the request when typing goes on during the pause', async () => {
     const d = deps();
     const tok = token();

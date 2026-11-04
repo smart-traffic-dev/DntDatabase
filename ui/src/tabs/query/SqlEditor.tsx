@@ -89,7 +89,7 @@ function options(): Monaco.editor.IStandaloneEditorConstructionOptions {
     snippetSuggestions: 'bottom',
     suggest: { showWords: false, showSnippets: true, filterGraceful: true, localityBonus: false },
     // AI ghost text (query/ai/inlineProvider.ts); the provider decides when there is one.
-    inlineSuggest: { enabled: true },
+    inlineSuggest: { enabled: true, suppressSuggestions: true },
   };
   return editorOptions;
 }

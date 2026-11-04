@@ -7,7 +7,7 @@ import { aiErrorText, ensureAiLoaded, useAi } from '../../store/ai';
 import { queryDocTarget, suggestShown, type CompletionTarget } from '../completion/monacoProvider';
 
 /** Pause in typing before an automatic request. */
-export const AI_DEBOUNCE_MS = 350;
+export const AI_DEBOUNCE_MS = 150;
 /** Suggestions remembered per (connection, database, text, cursor). */
 const CACHE_SIZE = 50;
 
@@ -84,6 +84,8 @@ export function createAiInlineProvider(monaco: typeof Monaco, deps: AiInlineDeps
     cache.set(key, text);
     if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value as string);
   };
+  // `suppressSuggestions`: the word suggest list stays closed while ghost text shows, so Tab
+  // always takes the ghost text.
   const items = (text: string | null, position: Monaco.Position) =>
     text
       ? {
@@ -93,20 +95,43 @@ export function createAiInlineProvider(monaco: typeof Monaco, deps: AiInlineDeps
               range: new monaco.Range(position.lineNumber, position.column, position.lineNumber, position.column),
             },
           ],
+          suppressSuggestions: true,
         }
       : { items: [] };
+
+  // The last suggestion and where it was made. Typing what it suggests keeps the rest of it on
+  // screen at once, without a new request (VS Code's "typing as suggested").
+  let last: { scope: string; before: string; after: string; text: string } | null = null;
+  const typedThrough = (scope: string, before: string, after: string): string | null => {
+    if (!last || last.scope !== scope || last.after !== after || !before.startsWith(last.before)) return null;
+    const typed = before.slice(last.before.length);
+    return typed.length < last.text.length && last.text.startsWith(typed) ? last.text.slice(typed.length) : null;
+  };
 
   return {
     async provideInlineCompletions(model, position, context, token) {
       const explicit = context.triggerKind === monaco.languages.InlineCompletionTriggerKind?.Explicit;
       void ensureAiLoaded();
       const target = deps.ctxOf(model);
-      if (skipReason(monaco, model, position, explicit, target) !== null || !target?.connId) return { items: [] };
+      const reason = skipReason(monaco, model, position, explicit, target);
+      if (!target?.connId) return { items: [] };
 
       const text = model.getValue();
       const cursor = model.getOffsetAt(position);
+      const scope = `${target.connId}|${target.db ?? ''}`;
+      // The suggest list opening on what was typed, or a word right after the cursor, does not
+      // drop a suggestion being typed through.
+      if (reason === null || reason === 'suggest list open' || reason === 'inside a word') {
+        const rest = typedThrough(scope, text.slice(0, cursor), text.slice(cursor));
+        if (rest) return items(rest, position);
+      }
+      if (reason !== null) return { items: [] };
       const key = `${target.connId}|${target.db ?? ''}|${cursor}|${hash(text)}`;
-      if (cache.has(key)) return items(cache.get(key) ?? null, position);
+      if (cache.has(key)) {
+        const hit = cache.get(key) ?? null;
+        if (hit) last = { scope, before: text.slice(0, cursor), after: text.slice(cursor), text: hit };
+        return items(hit, position);
+      }
 
       if (!explicit) {
         await deps.sleep(AI_DEBOUNCE_MS);
@@ -131,6 +156,8 @@ export function createAiInlineProvider(monaco: typeof Monaco, deps: AiInlineDeps
         }
         useAi.getState().end({ kind: 'ok' });
         const suggestion = out.kind === 'suggestion' ? out.text : null;
+        // Kept even when typing went on meanwhile: the next request may be typing through it.
+        if (suggestion) last = { scope, before: text.slice(0, cursor), after: text.slice(cursor), text: suggestion };
         if (!token.isCancellationRequested) remember(key, suggestion);
         return token.isCancellationRequested ? { items: [] } : items(suggestion, position);
       } catch (e) {

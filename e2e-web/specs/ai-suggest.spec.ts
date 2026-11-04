@@ -85,6 +85,24 @@ test.describe('AI suggestions in the query editor', () => {
     await expect(ghost(page)).toHaveCount(0);
   });
 
+  test('typing what is suggested keeps the rest, and Tab still takes it', async ({ page }) => {
+    const requests: AiCompleteRequest[] = [];
+    await openQuery(page, 'automatic', requests);
+    await typeInEditor(page, 'SELECT * FROM orders WHERE ');
+    await expect(ghost(page).first()).toBeVisible();
+    const asked = requests.length;
+
+    // "st" would open the word suggest list (START TRANSACTION…) and take Tab.
+    await page.keyboard.type('st');
+    await page.waitForTimeout(500);
+    await expect(ghost(page).first()).toContainText('atus');
+    await expect(page.locator('[data-testid="query-editor"] .suggest-widget.visible')).toHaveCount(0);
+    expect(requests).toHaveLength(asked);
+
+    await page.keyboard.press('Tab');
+    await expect.poll(() => editorText(page)).toContain('WHERE status = 1');
+  });
+
   test('Esc dismisses the suggestion', async ({ page }) => {
     await openQuery(page, 'automatic', []);
     await typeInEditor(page, 'SELECT * FROM orders WHERE ');
