@@ -302,7 +302,7 @@ export function SettingsAiPanel() {
         </p>
       )}
 
-      <section className="settings-section" aria-labelledby="settings-ai-connections">
+      <section className="settings-section field" aria-labelledby="settings-ai-connections">
         <h3 id="settings-ai-connections" className="field-label">
           Connections with AI
         </h3>

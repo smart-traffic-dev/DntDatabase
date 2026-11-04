@@ -692,6 +692,7 @@ fieldset.export-form {
 .conn-main {
   flex: 1;
   min-width: 0;
+  overflow-y: auto;
 }
 
 /* Settings: the connection dialog's side-nav frame at a steady height, so switching tabs never resizes it. */
@@ -703,7 +704,8 @@ fieldset.export-form {
   margin-top: var(--dnt-space-2);
 }
 
-.settings-actions {
+/* `.field.` so it wins over `.field`'s column, declared further down. */
+.field.settings-actions {
   flex-direction: row;
   flex-wrap: wrap;
   gap: var(--dnt-space-2);
@@ -729,7 +731,7 @@ fieldset.export-form {
 }
 
 /* Settings → AI: max tokens, timeout and max lines side by side. */
-.settings-ai-numbers {
+.field.settings-ai-numbers {
   flex-direction: row;
   gap: var(--dnt-space-3);
 }
