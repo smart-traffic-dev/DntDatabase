@@ -40,6 +40,9 @@ pub type CommandPayload = Arc<dyn Any + Send + Sync>;
 pub struct ParsedCommand {
     /// The command as the engine names it: `find`, `updateMany`, `HSET`.
     pub name: String,
+    /// The command as written (a driver-built command: the driver's canonical text).
+    /// Never redacted: redact it with [`CommandLanguage::redact`] before it is kept.
+    pub text: String,
     pub class: CommandClass,
     /// The collections / keys / patterns it acts on.
     pub targets: Vec<CommandTarget>,
@@ -56,6 +59,8 @@ impl fmt::Debug for ParsedCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ParsedCommand")
             .field("name", &self.name)
+            // `text` is not redacted: it never reaches a log through `Debug`.
+            .field("text", &format_args!("<text>"))
             .field("class", &self.class)
             .field("targets", &self.targets)
             .field("unbounded", &self.unbounded)
@@ -149,9 +154,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parsed_command_debug_hides_the_payload() {
+    fn parsed_command_debug_hides_the_payload_and_text() {
         let cmd = ParsedCommand {
             name: "GET".into(),
+            text: "GET hunter2".into(),
             class: CommandClass::Read,
             targets: vec![CommandTarget {
                 database: None,
@@ -165,5 +171,6 @@ mod tests {
         let text = format!("{:?}", cmd.clone());
         assert!(text.contains("payload: <payload>"), "{text}");
         assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
     }
 }

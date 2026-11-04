@@ -130,6 +130,7 @@ mod tests {
     fn cmd(name: &str, class: CommandClass) -> ParsedCommand {
         ParsedCommand {
             name: name.into(),
+            text: name.into(),
             class,
             targets: vec![],
             unbounded: false,

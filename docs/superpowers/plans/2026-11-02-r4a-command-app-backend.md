@@ -84,15 +84,15 @@ pub fn available_engines(&self) -> Vec<DbKind>;                                 
 - Open path: the schema-cache warm-up (`spawn_schema_load`) runs only when the session family is `Sql`, so a Command open logs no warning.
 - `with_kind(k)` sets both `Driver::kind()` and `ServerInfo.kind` to `k` (variant `Redis` for Redis, `Mongo` for Mongo).
 
-- [ ] **Step 1: Write the failing tests.**
+- [x] **Step 1: Write the failing tests.**
   - `available_engines_lists_registered_drivers`: Postgres and Redis registered gives `[Postgres, Redis]`.
   - `language_for_redis_comes_from_the_driver`: `language_for(Redis)` is `Some`; `language_for(MySql)` with the MySQL driver registered is `None`.
   - `command_open_skips_schema_warmup`: opening a Redis fake connection gives no schema-load attempt. Count `list_objects` calls on the fake, or assert no `Unsupported("schema cache")` warning path ran.
   - `fake_with_kind_reports_redis`
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.** Register the command and regenerate the bindings. The bindings gain only `availableEngines`.
-- [ ] **Step 4: Run** `cargo test --workspace`, `bindings_are_current` and the UI lint. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(core): driver command languages, available engines`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.** Register the command and regenerate the bindings. The bindings gain only `availableEngines`.
+- [x] **Step 4: Run** `cargo test --workspace`, `bindings_are_current` and the UI lint. Expected: PASS.
+- [x] **Step 5: Commit** `feat(core): driver command languages, available engines`.
 
 ### Task 2: Plan Command scripts in a query tab
 

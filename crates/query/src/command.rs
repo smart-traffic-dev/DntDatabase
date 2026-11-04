@@ -533,6 +533,7 @@ mod tests {
                 .collect();
             Ok(ParsedCommand {
                 name,
+                text: text.to_string(),
                 class,
                 targets: target
                     .map(|k| CommandTarget {

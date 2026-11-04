@@ -1,4 +1,4 @@
-use crate::command::CommandSession;
+use crate::command::{CommandLanguage, CommandSession};
 use crate::config::ResolvedConfig;
 use crate::error::DbError;
 use crate::keyspace::Keyspace;
@@ -225,6 +225,11 @@ pub type CancelHandle = Arc<dyn Canceller>;
 #[async_trait]
 pub trait Driver: Send + Sync {
     fn kind(&self) -> DbKind;
+    /// The command language of a Command driver, usable without a session (splitting,
+    /// redaction, Favorites). Default: `None` (a SQL driver).
+    fn command_language(&self) -> Option<Arc<dyn CommandLanguage>> {
+        None
+    }
     async fn connect(&self, cfg: &ResolvedConfig) -> Result<Box<dyn Session>, DbError>;
 }
 

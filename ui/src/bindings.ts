@@ -128,6 +128,12 @@ async parseConnectionString(input: string) : Promise<Result<ParsedConnString, Ap
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * The engines this build can connect to, in `DbKind` order.
+ */
+async availableEngines() : Promise<DbKind[]> {
+    return await TAURI_INVOKE("available_engines");
+},
 async objectActionPreview(connectionId: string, action: ObjectAction) : Promise<Result<ActionPreview, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("object_action_preview", { connectionId, action }) };

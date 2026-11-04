@@ -160,11 +160,13 @@ impl FakeStore {
     }
 }
 
-/// The fake Command driver. `kind()` is `DbKind::Postgres` (there is no fake kind), so
-/// that R2 app tests can store its connection; its sessions are Command sessions all
-/// the same.
+/// The fake Command driver. [`FakeCommandDriver::new`] reports `DbKind::Postgres` (the
+/// R2 app tests store its connection as one); [`FakeCommandDriver::with_kind`] reports
+/// the kind it is registered under (`DbKind::Redis`). Its sessions are Command sessions
+/// whatever the kind.
 pub struct FakeCommandDriver {
     store: FakeStore,
+    kind: DbKind,
 }
 
 impl Default for FakeCommandDriver {
@@ -175,8 +177,15 @@ impl Default for FakeCommandDriver {
 
 impl FakeCommandDriver {
     pub fn new() -> Self {
+        Self::with_kind(DbKind::Postgres)
+    }
+
+    /// A driver whose `kind()` and sessions' `ServerInfo.kind` are `kind` (and
+    /// `ServerInfo.variant` the matching one).
+    pub fn with_kind(kind: DbKind) -> Self {
         FakeCommandDriver {
             store: FakeStore::new(),
+            kind,
         }
     }
 
@@ -185,13 +194,14 @@ impl FakeCommandDriver {
     }
 }
 
-fn server_info() -> ServerInfo {
-    let mut info = ServerInfo::new(
-        DbKind::Postgres,
-        ServerVariant::Postgres,
-        (0, 0, 0),
-        "fake-command",
-    );
+fn server_info(kind: DbKind) -> ServerInfo {
+    let variant = match kind {
+        DbKind::MySql => ServerVariant::MySql8,
+        DbKind::Postgres => ServerVariant::Postgres,
+        DbKind::Mongo => ServerVariant::Mongo,
+        DbKind::Redis => ServerVariant::Redis,
+    };
+    let mut info = ServerInfo::new(kind, variant, (0, 0, 0), "fake-command");
     info.capabilities = Capabilities {
         family: EngineFamily::Command,
         namespaces: NamespaceModel::NumberedDb,
@@ -212,7 +222,11 @@ fn server_info() -> ServerInfo {
 #[async_trait]
 impl Driver for FakeCommandDriver {
     fn kind(&self) -> DbKind {
-        DbKind::Postgres
+        self.kind
+    }
+
+    fn command_language(&self) -> Option<Arc<dyn CommandLanguage>> {
+        Some(Arc::new(FakeLanguage))
     }
 
     /// The session starts in `cfg.database` when it names a db 0–15, else in db 0.
@@ -223,7 +237,7 @@ impl Driver for FakeCommandDriver {
             .and_then(|d| db_index(d).ok())
             .unwrap_or(0);
         Ok(Box::new(FakeCommandSession {
-            info: server_info(),
+            info: server_info(self.kind),
             store: self.store.clone(),
             language: FakeLanguage,
             db: AtomicUsize::new(start),
@@ -372,10 +386,46 @@ fn parse_error(message: impl Into<String>, offset: usize) -> CommandParseError {
     }
 }
 
-/// The `ParsedCommand` of `op`. `db`: the db a key edit runs in, which its targets
-/// name (`None`: the db in effect, so targets name no db and `FLUSHDB` drops the db
-/// with an empty name).
-fn build_command(db: Option<usize>, name: &str, class: CommandClass, op: Op) -> ParsedCommand {
+/// `token` as the language reads it back: bare, or quoted with `\"` / `\\` escapes when
+/// it is empty or holds whitespace, a quote or a backslash.
+fn quote(token: &str) -> String {
+    let bare = !token.is_empty()
+        && !token
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\\');
+    if bare {
+        return token.to_string();
+    }
+    let mut out = String::with_capacity(token.len() + 2);
+    out.push('"');
+    for c in token.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out.push('"');
+    out
+}
+
+/// The canonical text of a driver-built command: its name and quoted arguments.
+fn canonical_text(name: &str, args: &[String]) -> String {
+    std::iter::once(name.to_string())
+        .chain(args.iter().map(|a| quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The `ParsedCommand` of `op`, written as `text`. `db`: the db a key edit runs in,
+/// which its targets name (`None`: the db in effect, so targets name no db and
+/// `FLUSHDB` drops the db with an empty name).
+fn build_command(
+    db: Option<usize>,
+    name: &str,
+    text: String,
+    class: CommandClass,
+    op: Op,
+) -> ParsedCommand {
     let target = |key: &[u8]| CommandTarget {
         database: db.map(|d| d.to_string()),
         name: KeyName::from_bytes(key.to_vec()).display,
@@ -403,6 +453,7 @@ fn build_command(db: Option<usize>, name: &str, class: CommandClass, op: Op) -> 
     }
     ParsedCommand {
         name: name.to_string(),
+        text,
         class,
         targets,
         unbounded: false,
@@ -518,7 +569,7 @@ impl CommandLanguage for FakeLanguage {
             }
             _ => (CommandClass::Unknown, Op::Unknown(name.clone())),
         };
-        Ok(build_command(None, &name, class, op))
+        Ok(build_command(None, &name, text.to_string(), class, op))
     }
 
     /// `CONFIG SET requirepass <x>` (any case) becomes `CONFIG SET requirepass ***`.
@@ -961,24 +1012,49 @@ impl DataAccess for FakeCommandSession {
     /// The store holds text: a value or field that is not UTF-8 is a server error.
     fn build_key_edit(&self, db: &str, edit: &KeyEdit) -> Result<Vec<ParsedCommand>, DbError> {
         let index = db_index(db)?;
-        let write =
-            |name: &str, op: Op| vec![build_command(Some(index), name, CommandClass::Write, op)];
+        let write = |name: &str, args: &[String], op: Op| {
+            vec![build_command(
+                Some(index),
+                name,
+                canonical_text(name, args),
+                CommandClass::Write,
+                op,
+            )]
+        };
         let text = |b: &KeyBytes| {
             String::from_utf8(b.0.clone())
                 .map_err(|_| server_err("ERR the fake store holds UTF-8 text only"))
         };
         Ok(match edit {
             KeyEdit::SetString { key, value } => {
-                write("SET", Op::Set(key.raw.clone(), text(value)?))
+                let value = text(value)?;
+                write(
+                    "SET",
+                    &[key.display.clone(), value.clone()],
+                    Op::Set(key.raw.clone(), value),
+                )
             }
-            KeyEdit::HashSet { key, field, value } => write(
-                "HSET",
-                Op::HSet(key.raw.clone(), text(field)?, text(value)?),
-            ),
+            KeyEdit::HashSet { key, field, value } => {
+                let (field, value) = (text(field)?, text(value)?);
+                write(
+                    "HSET",
+                    &[key.display.clone(), field.clone(), value.clone()],
+                    Op::HSet(key.raw.clone(), field, value),
+                )
+            }
             KeyEdit::HashDelete { key, field } => {
-                write("HDEL", Op::HDel(key.raw.clone(), text(field)?))
+                let field = text(field)?;
+                write(
+                    "HDEL",
+                    &[key.display.clone(), field.clone()],
+                    Op::HDel(key.raw.clone(), field),
+                )
             }
-            KeyEdit::Delete { key } => write("DEL", Op::Del(vec![key.raw.clone()])),
+            KeyEdit::Delete { key } => write(
+                "DEL",
+                std::slice::from_ref(&key.display),
+                Op::Del(vec![key.raw.clone()]),
+            ),
             _ => return Err(unsupported("this key edit")),
         })
     }
@@ -1046,6 +1122,71 @@ mod tests {
         assert!(glob_match(b"a?c", b"abc"));
         assert!(!glob_match(b"a?c", b"ac"));
         assert!(!glob_match(b"user:*", b"order:1"));
+    }
+
+    /// `connect` builds its sessions' `ServerInfo` with `server_info(self.kind)`.
+    #[test]
+    fn fake_with_kind_reports_redis() {
+        let driver = FakeCommandDriver::with_kind(DbKind::Redis);
+        assert_eq!(driver.kind(), DbKind::Redis);
+        let info = server_info(driver.kind);
+        assert_eq!(
+            (info.kind, info.variant),
+            (DbKind::Redis, ServerVariant::Redis)
+        );
+        assert_eq!(info.capabilities.family, EngineFamily::Command);
+        let mongo = server_info(DbKind::Mongo);
+        assert_eq!(
+            (mongo.kind, mongo.variant),
+            (DbKind::Mongo, ServerVariant::Mongo)
+        );
+        // `new()` keeps the kind the R2 tests store.
+        assert_eq!(FakeCommandDriver::new().kind(), DbKind::Postgres);
+    }
+
+    #[test]
+    fn driver_exposes_its_language() {
+        let lang = FakeCommandDriver::with_kind(DbKind::Redis)
+            .command_language()
+            .expect("a Command driver has a language");
+        assert_eq!(lang.split("GET a\nGET b").len(), 2);
+        assert!(lang
+            .redact("CONFIG SET requirepass hunter2")
+            .text
+            .ends_with("***"));
+    }
+
+    #[test]
+    fn parsed_and_built_commands_carry_their_text() {
+        let cmd = FakeLanguage.parse(r#"SET k "a b""#).unwrap();
+        assert_eq!(cmd.text, r#"SET k "a b""#);
+        let session = FakeCommandSession {
+            info: server_info(DbKind::Redis),
+            store: FakeStore::new(),
+            language: FakeLanguage,
+            db: AtomicUsize::new(0),
+            queue: Mutex::new(None),
+            cancel: Arc::new(CancelState::default()),
+        };
+        let key = KeyName::from_bytes(b"user 1".to_vec());
+        let built = session
+            .build_key_edit(
+                "2",
+                &KeyEdit::HashSet {
+                    key: key.clone(),
+                    field: KeyBytes::from("na\"me"),
+                    value: KeyBytes::from(""),
+                },
+            )
+            .unwrap();
+        assert_eq!(built[0].text, r#"HSET "user 1" "na\"me" """#);
+        // The canonical text reads back as the same command.
+        let back = FakeLanguage.parse(&built[0].text).unwrap();
+        assert_eq!(back.targets[0].name, "user 1");
+        let del = session
+            .build_key_edit("2", &KeyEdit::Delete { key })
+            .unwrap();
+        assert_eq!(del[0].text, r#"DEL "user 1""#);
     }
 
     #[test]

@@ -9,6 +9,7 @@ use crate::state::AppState;
 use dnt_core::config::ConnectionConfig;
 use dnt_core::conn_string::ParsedConnString;
 use dnt_core::error::{AppError, DbError};
+use dnt_core::server::DbKind;
 use dnt_store::repo::{Group, NewSecrets, NodeId, SecretChange, SecretUpdate, Tree};
 use dnt_tunnel::KnownHosts;
 use secrecy::SecretString;
@@ -194,6 +195,12 @@ pub async fn connection_state_impl(state: &AppState, id: Uuid) -> Result<ConnSta
     Ok(state.sessions.state(id))
 }
 
+/// The engines this build can connect to (kinds with a registered driver), in
+/// `DbKind` order.
+pub fn available_engines_impl(state: &AppState) -> Vec<DbKind> {
+    state.sessions.available_engines()
+}
+
 /// Trusts the host key the user confirmed after an `ssh_host_key_unknown` error.
 pub async fn trust_host_key_impl(
     state: &AppState,
@@ -338,6 +345,13 @@ pub async fn trust_host_key(
         key_openssh,
     ))
     .await
+}
+
+/// The engines this build can connect to, in `DbKind` order.
+#[tauri::command]
+#[specta::specta]
+pub fn available_engines(state: State<'_, AppState>) -> Vec<DbKind> {
+    available_engines_impl(&state)
 }
 
 /// Reads a pasted connection string into the dialog's fields (nothing is stored or logged).

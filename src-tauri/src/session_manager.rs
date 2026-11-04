@@ -17,6 +17,7 @@ use crate::query_sessions::{
     close_slot, PlanStore, QuerySessions, Runs, PLAN_TTL, SLOT_CLOSE_WAIT,
 };
 use crate::result_store::ResultStore;
+use dnt_core::command::CommandLanguage;
 use dnt_core::config::{ConnectionConfig, ResolvedConfig, SecretMode, SshAuth, SshConfig};
 use dnt_core::driver::{
     Driver, ExecOptions, Introspector, ResultSummary, RowSink, Session, SqlSession,
@@ -26,7 +27,9 @@ pub use dnt_core::error::StageTiming;
 use dnt_core::error::{ssh_channel_error, ConnectStage, DbError, SshStage};
 use dnt_core::meta::{ColumnBrief, ObjectKind, ObjectRef, Scope, TableDetail};
 use dnt_core::secret::{SecretKind, SecretStore};
-use dnt_core::server::{check_cap, Cap, Capabilities, DbKind, NamespaceModel, ServerInfo, SqlKind};
+use dnt_core::server::{
+    check_cap, Cap, Capabilities, DbKind, EngineFamily, NamespaceModel, ServerInfo, SqlKind,
+};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_tunnel::{KnownHosts, SshSecrets, Tunnel};
@@ -645,9 +648,15 @@ impl SessionManager {
         if let Err(e) = self.repo.touch_connected(id) {
             tracing::warn!(connection = %id, error = %e, "could not record the connection time");
         }
-        // Warm the cache of the database a new query tab starts on.
-        if let Some(home) = rt.home_database() {
-            rt.spawn_schema_load(home);
+        // Warm the cache of the database a new query tab starts on. The Command family
+        // has no schema cache.
+        match rt.info.capabilities.family {
+            EngineFamily::Sql => {
+                if let Some(home) = rt.home_database() {
+                    rt.spawn_schema_load(home);
+                }
+            }
+            EngineFamily::Command => {}
         }
         Ok(OpenResult { info, timings })
     }
@@ -783,6 +792,19 @@ impl SessionManager {
             session,
             info,
         })
+    }
+
+    /// The command language of `kind`, from its registered driver: `None` for a SQL
+    /// driver or a kind without one. Needs no session.
+    pub fn language_for(&self, kind: DbKind) -> Option<Arc<dyn CommandLanguage>> {
+        self.drivers.get(&kind)?.command_language()
+    }
+
+    /// The kinds with a registered driver, in `DbKind` order.
+    pub fn available_engines(&self) -> Vec<DbKind> {
+        let mut kinds: Vec<DbKind> = self.drivers.keys().copied().collect();
+        kinds.sort();
+        kinds
     }
 
     fn driver(&self, kind: DbKind) -> Result<&Arc<dyn Driver>, DbError> {
@@ -1596,6 +1618,104 @@ mod tests {
     fn manager_is_send_and_sync() {
         assert_send_sync::<SessionManager>();
         assert_send_sync::<ConnectionRuntime>();
+    }
+
+    mod engines {
+        use super::super::{lock, SessionManager};
+        use dnt_core::config::{ConnectionConfig, DriverOptions, SecretMode};
+        use dnt_core::driver::Driver;
+        use dnt_core::secret::{MemorySecretStore, SecretStore};
+        use dnt_core::server::DbKind;
+        use dnt_core::test_util::sample_config;
+        use dnt_store::db::open_in_memory;
+        use dnt_store::repo::{ConnectionRepo, NewSecrets};
+        use dnt_testkit::fake_command::FakeCommandDriver;
+        use dnt_tunnel::KnownHosts;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        fn manager(
+            drivers: Vec<(DbKind, Arc<dyn Driver>)>,
+        ) -> (SessionManager, Arc<ConnectionRepo>, tempfile::TempDir) {
+            let secrets: Arc<dyn SecretStore> = Arc::new(MemorySecretStore::default());
+            let repo = Arc::new(ConnectionRepo::new(
+                open_in_memory().unwrap(),
+                Arc::clone(&secrets),
+            ));
+            let dir = tempfile::tempdir().unwrap();
+            let sm = SessionManager::new(
+                Arc::clone(&repo),
+                secrets,
+                KnownHosts::new(dir.path().join("known_hosts")),
+                drivers.into_iter().collect::<HashMap<_, _>>(),
+            );
+            (sm, repo, dir)
+        }
+
+        fn redis() -> Arc<dyn Driver> {
+            Arc::new(FakeCommandDriver::with_kind(DbKind::Redis))
+        }
+
+        #[test]
+        fn available_engines_lists_registered_drivers() {
+            // Registered out of order: listed in `DbKind` order.
+            let (sm, _repo, _dir) = manager(vec![
+                (DbKind::Redis, redis()),
+                (DbKind::Postgres, Arc::new(dnt_driver_pg::PgDriver)),
+            ]);
+            assert_eq!(sm.available_engines(), [DbKind::Postgres, DbKind::Redis]);
+            let (none, _repo, _dir) = manager(vec![]);
+            assert!(none.available_engines().is_empty());
+        }
+
+        #[test]
+        fn language_for_redis_comes_from_the_driver() {
+            let (sm, _repo, _dir) = manager(vec![
+                (DbKind::Redis, redis()),
+                (DbKind::MySql, Arc::new(dnt_driver_mysql::MySqlDriver)),
+            ]);
+            let lang = sm
+                .language_for(DbKind::Redis)
+                .expect("Redis has a language");
+            assert_eq!(
+                lang.redact("CONFIG SET requirepass hunter2").text,
+                "CONFIG SET requirepass ***"
+            );
+            assert!(sm.language_for(DbKind::MySql).is_none());
+            // No driver registered: no language.
+            assert!(sm.language_for(DbKind::Mongo).is_none());
+        }
+
+        /// A Redis connection with a home database opens without starting a schema-cache
+        /// load (which would only log an `Unsupported("schema cache")` warning).
+        #[tokio::test]
+        async fn command_open_skips_schema_warmup() {
+            let (sm, repo, _dir) = manager(vec![(DbKind::Redis, redis())]);
+            let mut cfg = ConnectionConfig {
+                id: Uuid::nil(),
+                kind: DbKind::Redis,
+                name: "Fake Redis".into(),
+                port: 6379,
+                default_db: Some("0".into()),
+                secret_mode: SecretMode::Saved,
+                ..sample_config()
+            };
+            cfg.options.driver = DriverOptions::Redis { db: 0 };
+            let secrets = NewSecrets {
+                db_password: None,
+                ssh_password: None,
+                ssh_key_passphrase: None,
+            };
+            let id = repo.create(cfg, secrets).unwrap().id;
+            let opened = sm.open(id, None).await.unwrap();
+            assert_eq!(opened.info.kind, DbKind::Redis);
+            let rt = sm.runtime(id).unwrap();
+            assert_eq!(rt.home_database().as_deref(), Some("0"));
+            assert!(lock(&rt.schema_tasks).is_empty());
+            assert!(lock(&rt.schema_caches).is_empty());
+            sm.close(id).await;
+        }
     }
 
     mod missing_password {

@@ -157,6 +157,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             connections::connection_state,
             connections::trust_host_key,
             connections::parse_connection_string,
+            connections::available_engines,
             objects::object_action_preview,
             objects::object_action_render,
             objects::namespace_options,
