@@ -1,5 +1,6 @@
 //! App-wide state: data paths, connection repository, secret store and sessions.
 
+use crate::ai::AiManager;
 use crate::export_paths::ExportPaths;
 use crate::file_picks::FilePicks;
 use crate::session_manager::SessionManager;
@@ -69,6 +70,8 @@ pub fn default_drivers() -> HashMap<DbKind, Arc<dyn Driver>> {
 }
 
 pub struct AppState {
+    /// AI editor completion: endpoint client, pause state, in-flight requests.
+    pub ai: Arc<AiManager>,
     pub repo: Arc<ConnectionRepo>,
     pub secrets: Arc<dyn SecretStore>,
     pub sessions: SessionManager,
@@ -104,6 +107,7 @@ impl AppState {
             tracing::warn!(error = %e, "could not recover the jobs of the last run");
         }
         Ok(AppState {
+            ai: Arc::new(AiManager::new()),
             repo,
             secrets,
             sessions,

@@ -23,6 +23,7 @@ tauri-build.workspace = true
 # `JobRunner` (jobs) is an async trait object.
 async-trait.workspace = true
 dirs.workspace = true
+dnt-ai.workspace = true
 dnt-core.workspace = true
 dnt-driver-mysql.workspace = true
 dnt-driver-pg.workspace = true

@@ -5,6 +5,84 @@
 
 
 export const commands = {
+async aiSettingsGet() : Promise<Result<AiSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_settings_get") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiSettingsSet(config: AiConfig) : Promise<Result<AiSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_settings_set", { config }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stores the API key in the OS keychain. The only command that receives it.
+ */
+async aiKeySet(key: string) : Promise<Result<AiSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_key_set", { key }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiKeyClear() : Promise<Result<AiSettings, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_key_clear") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiModels() : Promise<Result<string[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_models") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiTest() : Promise<Result<AiTestResult, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_test") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiOptInList() : Promise<Result<AiConnectionView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_opt_in_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiOptInSet(connId: string, enabled: boolean) : Promise<Result<AiConnectionView[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_opt_in_set", { connId, enabled }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiComplete(request: AiCompleteRequest) : Promise<Result<AiCompletion, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_complete", { request }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiCancel(requestId: string) : Promise<void> {
+    await TAURI_INVOKE("ai_cancel", { requestId });
+},
 async listTree() : Promise<Result<Tree, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_tree") };
@@ -1491,6 +1569,90 @@ async restoreStart(planId: string, confirmed: boolean, name: string | null) : Pr
 export type ActionOutcome = "applied" | "not_applied" | "rolled_back" | "unknown"
 export type ActionPreview = { plan_id: string; connection_id: string; action: ObjectAction; sql: string; confirm_name: string | null; warnings: string[]; expires_in_seconds: number }
 export type ActionReport = { outcome: ActionOutcome; error: AppError | null; warnings: string[] }
+/**
+ * One suggestion request of the query editor.
+ */
+export type AiCompleteRequest = { 
+/**
+ * Chosen by the UI; `ai_cancel` names it.
+ */
+request_id: string; conn_id: string; database: string | null; schema: string | null; 
+/**
+ * The whole editor document.
+ */
+text: string; 
+/**
+ * Monaco offset (UTF-16).
+ */
+cursor: number }
+export type AiCompletion = { kind: "suggestion"; text: string } | 
+/**
+ * Nothing to show (not set up, not allowed here, cursor in a secret, cancelled, or
+ * the model had nothing useful).
+ */
+{ kind: "empty" } | 
+/**
+ * Suggestions are paused after an endpoint error (spec §7).
+ */
+{ kind: "paused"; message: string }
+/**
+ * The stored settings, as Settings → AI edits them.
+ */
+export type AiConfig = { 
+/**
+ * OpenAI-compatible base URL, e.g. `https://api.example.com/v1`; `None` = AI not set up.
+ */
+base_url: string | null; model: string | null; trigger: AiTrigger; max_tokens: number; timeout_ms: number; max_lines: number }
+/**
+ * A connection that has consented, for Settings → AI.
+ */
+export type AiConnectionView = { connection_id: string; name: string; granted_at: string; 
+/**
+ * Consent was given to the current endpoint. `false` after the base URL moved to
+ * another origin: the user must agree again.
+ */
+active: boolean }
+/**
+ * What Settings → Test concluded.
+ */
+export type AiProbeVerdict = "ok" | 
+/**
+ * The reply continues past the suffix: the model most likely ignores `suffix`.
+ */
+"ignores_suffix" | "empty"
+/**
+ * [`AiConfig`] plus what the UI may know about the key and the endpoint.
+ */
+export type AiSettings = { config: AiConfig; 
+/**
+ * A key is stored. The key itself is never sent to the UI.
+ */
+has_key: boolean; 
+/**
+ * `scheme://host[:port]` of the base URL: what consent is tied to.
+ */
+origin: string | null; 
+/**
+ * Host of the base URL, for the consent text.
+ */
+host: string | null }
+export type AiTestResult = { verdict: AiProbeVerdict; elapsed_ms: number; 
+/**
+ * The cleaned suggestion for the probe.
+ */
+sample: string | null }
+/**
+ * When the editor asks for a suggestion.
+ */
+export type AiTrigger = 
+/**
+ * After a pause in typing.
+ */
+"automatic" | 
+/**
+ * Only on Alt+\.
+ */
+"manual" | "off"
 export type AppError = { kind: string; message: string; detail: string | null; stage: string | null; 
 /**
  * Connect errors: the stages that completed before the failing one.

@@ -6,6 +6,7 @@
 // its size on the stack does not matter (and the commands' signature is fixed by the UI).
 #![allow(clippy::result_large_err)]
 
+pub mod ai;
 pub mod browse;
 pub mod connections;
 pub mod data;
@@ -143,6 +144,16 @@ pub(crate) fn require_cap(state: &AppState, id: Uuid, cap: Cap) -> Result<SqlKin
 pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
     tauri_specta::Builder::<tauri::Wry>::new()
         .commands(tauri_specta::collect_commands![
+            ai::ai_settings_get,
+            ai::ai_settings_set,
+            ai::ai_key_set,
+            ai::ai_key_clear,
+            ai::ai_models,
+            ai::ai_test,
+            ai::ai_opt_in_list,
+            ai::ai_opt_in_set,
+            ai::ai_complete,
+            ai::ai_cancel,
             connections::list_tree,
             connections::create_connection,
             connections::update_connection,

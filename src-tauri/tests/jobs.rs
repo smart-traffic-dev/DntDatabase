@@ -555,6 +555,7 @@ mod tracked_exports {
             .id;
         sessions.open(id, None).await.unwrap();
         let state = AppState {
+            ai: Default::default(),
             repo,
             secrets,
             sessions,

@@ -169,6 +169,7 @@ async fn fixture(env: Option<EnvTag>, read_only: bool) -> Fixture {
     let id = repo.create(cfg, new_secrets).unwrap().id;
     sessions.open(id, None).await.unwrap();
     let state = AppState {
+        ai: Default::default(),
         repo,
         secrets,
         sessions,

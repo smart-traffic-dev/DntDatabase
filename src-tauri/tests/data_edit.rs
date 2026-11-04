@@ -1534,6 +1534,7 @@ async fn cell_load_file_needs_data_edit() {
     f.sm.open(f.id, None).await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let state = AppState {
+        ai: Default::default(),
         repo: Arc::clone(&f.repo),
         secrets: Arc::new(MemorySecretStore::default()),
         sessions: f.sm,

@@ -1,6 +1,7 @@
 //! DntDatabase app shell: session layer, Tauri commands and logging. The binary
 //! (`main.rs`) wires them into the Tauri app.
 
+pub mod ai;
 pub mod cache;
 pub mod commands;
 pub mod data_sessions;
