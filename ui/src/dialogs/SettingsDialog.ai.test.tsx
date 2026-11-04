@@ -78,6 +78,20 @@ beforeEach(() => {
 });
 
 describe('Settings → AI', () => {
+  it('Test saves unsaved changes first, so it tests what is on screen', async () => {
+    const user = userEvent.setup();
+    renderAi();
+    await user.type(await screen.findByLabelText('Base URL'), 'https://api.deepseek.com/beta');
+    await user.type(screen.getByLabelText('Model'), 'deepseek-flash');
+    await user.click(screen.getByRole('button', { name: 'Test' }));
+    expect(await screen.findByText(/The endpoint works/)).toBeInTheDocument();
+    expect(callsOf('ai_settings_set')).toEqual([
+      { config: { ...DEFAULTS, base_url: 'https://api.deepseek.com/beta', model: 'deepseek-flash' } },
+    ]);
+    expect(callsOf('ai_test')).toHaveLength(1);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  });
+
   it('saves the endpoint and shows validation errors', async () => {
     const user = userEvent.setup();
     renderAi();

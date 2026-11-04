@@ -94,10 +94,10 @@ export function SettingsAiPanel() {
     }
   };
 
-  const save = () =>
-    run(async () => {
-      if (!draft) return;
-      const s = await api.aiSettingsSet({
+  /** Stores the draft; Test and Load models use the stored settings, so they save first. */
+  const persist = async () => {
+    if (!draft || !settings || JSON.stringify(draftOf(settings.config)) === JSON.stringify(draft)) return;
+    const s = await api.aiSettingsSet({
         base_url: draft.baseUrl.trim() || null,
         model: draft.model.trim() || null,
         trigger: draft.trigger,
@@ -105,13 +105,18 @@ export function SettingsAiPanel() {
         timeout_ms: Number(draft.timeoutMs),
         max_lines: Number(draft.maxLines),
       });
-      setSettings(s);
-      setDraft(draftOf(s.config));
-      useAi.getState().setSettings(s);
-      const list = await api.aiOptInList();
-      setOptIns(list);
-      useAi.getState().setOptIns(list);
-      setTest(null);
+    setSettings(s);
+    setDraft(draftOf(s.config));
+    useAi.getState().setSettings(s);
+    const list = await api.aiOptInList();
+    setOptIns(list);
+    useAi.getState().setOptIns(list);
+    setTest(null);
+  };
+
+  const save = () =>
+    run(async () => {
+      await persist();
       setNotice('Saved.');
     });
 
@@ -134,12 +139,14 @@ export function SettingsAiPanel() {
 
   const loadModels = () =>
     run(async () => {
+      await persist();
       setModels(await api.aiModels());
     });
 
   const runTest = () =>
     run(async () => {
       setTest(null);
+      await persist();
       setTest(await api.aiTest());
     });
 
@@ -232,7 +239,7 @@ export function SettingsAiPanel() {
               <option key={m} value={m} />
             ))}
           </datalist>
-          <button type="button" className="btn" disabled={busy || !settings.config.base_url} onClick={() => void loadModels()}>
+          <button type="button" className="btn" disabled={busy || !draft.baseUrl.trim()} onClick={() => void loadModels()}>
             Load models
           </button>
         </div>
@@ -279,8 +286,8 @@ export function SettingsAiPanel() {
         <button
           type="button"
           className="btn"
-          disabled={busy || dirty || !settings.config.base_url}
-          title={dirty ? 'Save the settings first' : undefined}
+          disabled={busy || !draft.baseUrl.trim() || !draft.model.trim()}
+          title={dirty ? 'Saves the settings, then tests them' : undefined}
           onClick={() => void runTest()}
         >
           Test
