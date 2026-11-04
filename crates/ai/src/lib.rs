@@ -2,6 +2,8 @@
 
 mod endpoint;
 mod error;
+pub mod provider;
 
 pub use endpoint::{Endpoint, DEFAULT_TIMEOUT};
 pub use error::AiError;
+pub use provider::{FimClient, FimReply, FimRequest, HttpFimClient};

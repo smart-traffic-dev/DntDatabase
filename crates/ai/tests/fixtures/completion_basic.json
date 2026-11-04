@@ -1,0 +1,1 @@
+{"id":"cmpl-1","object":"text_completion","created":1730700000,"model":"coder","choices":[{"text":"active = 1","index":0,"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":4,"total_tokens":24}}

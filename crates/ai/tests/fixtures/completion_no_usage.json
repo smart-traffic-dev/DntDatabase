@@ -1,0 +1,1 @@
+{"id":"cmpl-2","object":"text_completion","model":"coder","choices":[{"index":0,"text":"o.status = 'paid'"}]}
