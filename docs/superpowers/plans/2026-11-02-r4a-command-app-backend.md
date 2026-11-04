@@ -322,14 +322,14 @@ key_edit_preview(id: Uuid, db: String, edit: KeyEdit) -> EditPreview            
   - otherwise use today's SQL check (both dialects).
 - The refusal error is unchanged.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `favorite_with_redis_secret_is_refused`: `AUTH s3cret` with a Redis connection id gives the existing refusal error.
   - `favorite_without_connection_uses_sql_check`
   - `sql_favorite_rules_unchanged`
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `cargo test -p dnt-store` and `cargo test -p dntdatabase`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): Favorites redact with the connection's language`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `cargo test -p dnt-store` and `cargo test -p dntdatabase`. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): Favorites redact with the connection's language`.
 
 ### Task 9: Full verification
 

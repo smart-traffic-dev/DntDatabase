@@ -5,7 +5,7 @@ use dnt_core::error::DbError;
 use dnt_core::secret::MemorySecretStore;
 use dnt_core::test_util::sample_config;
 use dnt_store::db::open_in_memory;
-use dnt_store::favorites::{FavoriteInput, SnippetInput};
+use dnt_store::favorites::{sql_redact, FavoriteInput, SnippetInput};
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -78,13 +78,16 @@ fn favorites_crud_keeps_text_verbatim() {
     let conn = connection(&repo);
     let sql = "-- Tiếng Việt 😀\r\nSELECT * FROM `orders` WHERE id = ?;\n";
     let created = repo
-        .favorite_create(&FavoriteInput {
-            name: "  Orders  ".into(),
-            folder: Some(" Reports / Daily ".into()),
-            sql: sql.into(),
-            connection_id: Some(conn),
-            database: Some("shop".into()),
-        })
+        .favorite_create(
+            &FavoriteInput {
+                name: "  Orders  ".into(),
+                folder: Some(" Reports / Daily ".into()),
+                sql: sql.into(),
+                connection_id: Some(conn),
+                database: Some("shop".into()),
+            },
+            &sql_redact,
+        )
         .unwrap();
     assert_eq!(created.name, "Orders");
     assert_eq!(created.folder.as_deref(), Some("Reports/Daily"));
@@ -108,6 +111,7 @@ fn favorites_crud_keeps_text_verbatim() {
                 connection_id: None,
                 database: None,
             },
+            &sql_redact,
         )
         .unwrap();
     assert_eq!(updated.folder, None);
@@ -125,11 +129,14 @@ fn favorites_crud_keeps_text_verbatim() {
 #[test]
 fn favorites_order_and_move() {
     let repo = repo();
-    let b = repo.favorite_create(&fav("b", None)).unwrap();
-    repo.favorite_create(&fav("a", None)).unwrap();
-    repo.favorite_create(&fav("z", Some("Reports"))).unwrap();
-    repo.favorite_create(&fav("y", Some("Reports"))).unwrap();
-    repo.favorite_create(&fav("x", Some("Admin"))).unwrap();
+    let b = repo.favorite_create(&fav("b", None), &sql_redact).unwrap();
+    repo.favorite_create(&fav("a", None), &sql_redact).unwrap();
+    repo.favorite_create(&fav("z", Some("Reports")), &sql_redact)
+        .unwrap();
+    repo.favorite_create(&fav("y", Some("Reports")), &sql_redact)
+        .unwrap();
+    repo.favorite_create(&fav("x", Some("Admin")), &sql_redact)
+        .unwrap();
     // Root first, then folders by path; inside a folder in creation order.
     assert_eq!(
         names(&repo),
@@ -161,10 +168,13 @@ fn favorites_refuse_secrets_and_bad_input() {
         "SET PASSWORD FOR u = 'x'",
     ] {
         let err = repo
-            .favorite_create(&FavoriteInput {
-                sql: sql.into(),
-                ..fav("secret", None)
-            })
+            .favorite_create(
+                &FavoriteInput {
+                    sql: sql.into(),
+                    ..fav("secret", None)
+                },
+                &sql_redact,
+            )
             .unwrap_err();
         assert_eq!(field(&err), Some("sql"), "{sql}");
         assert!(err.to_string().contains("secret"), "{err}");
@@ -172,7 +182,7 @@ fn favorites_refuse_secrets_and_bad_input() {
     assert!(repo.favorites_list().unwrap().is_empty());
 
     // The update path refuses too, and leaves the row unchanged.
-    let ok = repo.favorite_create(&fav("ok", None)).unwrap();
+    let ok = repo.favorite_create(&fav("ok", None), &sql_redact).unwrap();
     let err = repo
         .favorite_update(
             ok.id,
@@ -180,18 +190,24 @@ fn favorites_refuse_secrets_and_bad_input() {
                 sql: "CREATE USER u IDENTIFIED BY 'x'".into(),
                 ..fav("ok", None)
             },
+            &sql_redact,
         )
         .unwrap_err();
     assert_eq!(field(&err), Some("sql"));
     assert_eq!(repo.favorites_list().unwrap(), vec![ok]);
 
-    let err = repo.favorite_create(&fav("  ", None)).unwrap_err();
+    let err = repo
+        .favorite_create(&fav("  ", None), &sql_redact)
+        .unwrap_err();
     assert_eq!(field(&err), Some("name"));
     let err = repo
-        .favorite_create(&FavoriteInput {
-            sql: " \n".into(),
-            ..fav("empty", None)
-        })
+        .favorite_create(
+            &FavoriteInput {
+                sql: " \n".into(),
+                ..fav("empty", None)
+            },
+            &sql_redact,
+        )
         .unwrap_err();
     assert_eq!(field(&err), Some("sql"));
 }
@@ -201,11 +217,14 @@ fn deleting_connection_keeps_favorite_unbound() {
     let repo = repo();
     let conn = connection(&repo);
     let f = repo
-        .favorite_create(&FavoriteInput {
-            connection_id: Some(conn),
-            database: Some("shop".into()),
-            ..fav("bound", None)
-        })
+        .favorite_create(
+            &FavoriteInput {
+                connection_id: Some(conn),
+                database: Some("shop".into()),
+                ..fav("bound", None)
+            },
+            &sql_redact,
+        )
         .unwrap();
     repo.delete(conn).unwrap();
     let got = &repo.favorites_list().unwrap()[0];
@@ -214,10 +233,13 @@ fn deleting_connection_keeps_favorite_unbound() {
     assert_eq!(got.database.as_deref(), Some("shop"));
     // An unknown connection is stored as NULL rather than failing.
     let other = repo
-        .favorite_create(&FavoriteInput {
-            connection_id: Some(Uuid::new_v4()),
-            ..fav("ghost", None)
-        })
+        .favorite_create(
+            &FavoriteInput {
+                connection_id: Some(Uuid::new_v4()),
+                ..fav("ghost", None)
+            },
+            &sql_redact,
+        )
         .unwrap();
     assert_eq!(other.connection_id, None);
 }

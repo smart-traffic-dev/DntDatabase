@@ -1,12 +1,15 @@
 //! Favorites (saved queries) and user-defined editor snippets.
 //!
-//! The store refuses favorite SQL holding a secret literal (see `dnt_store::favorites`),
-//! so the error reaches the UI as `AppError { kind: "config", field: "sql" }`.
+//! The store refuses favorite text holding a secret (see `dnt_store::favorites`), so the
+//! error reaches the UI as `AppError { kind: "config", field: "sql" }`. The secret check
+//! is the command language's `redact` when the favorite's connection is of a Command
+//! kind, otherwise the SQL one.
 
 use super::{blocking, guard};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
-use dnt_store::favorites::{Favorite, FavoriteInput, Snippet, SnippetInput};
+use dnt_core::redact::Redacted;
+use dnt_store::favorites::{sql_redact, Favorite, FavoriteInput, Snippet, SnippetInput};
 use std::sync::Arc;
 use tauri::State;
 use uuid::Uuid;
@@ -16,12 +19,28 @@ pub async fn favorites_list_impl(state: &AppState) -> Result<Vec<Favorite>, DbEr
     blocking(move || repo.favorites_list()).await
 }
 
+/// The redactor whose secrets a favorite may not hold: the language of its connection's
+/// kind when that kind has one, otherwise the SQL check of both dialects.
+async fn favorite_redactor(
+    state: &AppState,
+    input: &FavoriteInput,
+) -> Result<Box<dyn Fn(&str) -> Redacted + Send>, DbError> {
+    let repo = Arc::clone(&state.repo);
+    let probe = input.clone();
+    let kind = blocking(move || repo.favorite_connection_kind(&probe)).await?;
+    Ok(match kind.and_then(|k| state.sessions.language_for(k)) {
+        Some(language) => Box::new(move |text: &str| language.redact(text)),
+        None => Box::new(sql_redact),
+    })
+}
+
 pub async fn favorites_create_impl(
     state: &AppState,
     input: FavoriteInput,
 ) -> Result<Favorite, DbError> {
+    let redact = favorite_redactor(state, &input).await?;
     let repo = Arc::clone(&state.repo);
-    blocking(move || repo.favorite_create(&input)).await
+    blocking(move || repo.favorite_create(&input, &*redact)).await
 }
 
 pub async fn favorites_update_impl(
@@ -29,8 +48,9 @@ pub async fn favorites_update_impl(
     id: Uuid,
     input: FavoriteInput,
 ) -> Result<Favorite, DbError> {
+    let redact = favorite_redactor(state, &input).await?;
     let repo = Arc::clone(&state.repo);
-    blocking(move || repo.favorite_update(id, &input)).await
+    blocking(move || repo.favorite_update(id, &input, &*redact)).await
 }
 
 pub async fn favorites_rename_impl(

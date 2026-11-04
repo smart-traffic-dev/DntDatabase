@@ -1,17 +1,21 @@
 //! Favorites (Navicat "saved queries") and user-defined editor snippets (migration 3).
 //!
 //! A favorite is the user's own saved SQL, optionally bound to a connection and database.
-//! Unlike a query tab's draft, it is kept on purpose, so it must never hold a secret: SQL
-//! in which `dnt_query::redact` finds a possible secret literal (`IDENTIFIED BY '…'`,
-//! `PASSWORD '…'`, a connection string with a password, …) under either dialect is
-//! refused with a [`DbError::Config`] naming the `sql` field.
+//! Unlike a query tab's draft, it is kept on purpose, so it must never hold a secret: text
+//! in which the caller's redactor finds a possible secret is refused with a
+//! [`DbError::Config`] naming the `sql` field. For SQL that is [`sql_redact`]
+//! (`dnt_query::redact` under either dialect: `IDENTIFIED BY '…'`, `PASSWORD '…'`, a
+//! connection string with a password, …); for a Command connection, its language's
+//! `redact`.
 //!
 //! Folders are `/`-separated paths (`Reports/Daily`); `None` is the root. Paths are
 //! normalised: each segment is trimmed and empty segments are dropped.
 
 use crate::db::internal;
-use crate::repo::{now_rfc3339, parse_uuid, ConnectionRepo};
+use crate::repo::{find_connection, now_rfc3339, parse_uuid, ConnectionRepo};
 use dnt_core::error::DbError;
+use dnt_core::redact::Redacted;
+use dnt_core::server::DbKind;
 use dnt_core::sql::Dialect;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -133,12 +137,24 @@ pub fn normalize_folder(folder: Option<&str>) -> Result<Option<String>, DbError>
     Ok(Some(path))
 }
 
-/// Refuses SQL in which the history redaction would hide something.
-pub fn refuse_secrets(sql: &str) -> Result<(), DbError> {
-    let secret = [Dialect::MYSQL, Dialect::Postgres]
+/// The SQL redaction of `sql` under the first dialect (MySQL, then PostgreSQL) that finds
+/// a possible secret in it; unchanged when neither does. The redactor of a favorite whose
+/// connection has no command language.
+pub fn sql_redact(sql: &str) -> Redacted {
+    [Dialect::MYSQL, Dialect::Postgres]
         .into_iter()
-        .any(|d| dnt_query::redact(sql, d).changed);
-    if secret {
+        .map(|d| dnt_query::redact(sql, d))
+        .find(|r| r.changed)
+        .unwrap_or_else(|| Redacted {
+            text: sql.to_string(),
+            changed: false,
+        })
+}
+
+/// Refuses text in which `redact` (the History redaction of its language) would hide
+/// something.
+pub fn refuse_secrets(sql: &str, redact: &dyn Fn(&str) -> Redacted) -> Result<(), DbError> {
+    if redact(sql).changed {
         return Err(config(
             "sql",
             "This SQL contains a password or another secret literal (for example \
@@ -157,14 +173,17 @@ struct ValidFavorite {
     database: Option<String>,
 }
 
-fn validate_favorite(input: &FavoriteInput) -> Result<ValidFavorite, DbError> {
+fn validate_favorite(
+    input: &FavoriteInput,
+    redact: &dyn Fn(&str) -> Redacted,
+) -> Result<ValidFavorite, DbError> {
     let name = required("name", "The name", &input.name)?;
     let folder = normalize_folder(input.folder.as_deref())?;
     if input.sql.trim().is_empty() {
         return Err(config("sql", "There is no SQL to save."));
     }
     text_size("sql", &input.sql)?;
-    refuse_secrets(&input.sql)?;
+    refuse_secrets(&input.sql, redact)?;
     let database = input
         .database
         .as_deref()
@@ -320,6 +339,19 @@ fn snippet_write_error(prefix: &str, e: rusqlite::Error) -> DbError {
 }
 
 impl ConnectionRepo {
+    /// The kind of the connection a favorite input names, which chooses its redactor:
+    /// `None` without a connection or when it does not exist (it is then stored as NULL).
+    pub fn favorite_connection_kind(
+        &self,
+        input: &FavoriteInput,
+    ) -> Result<Option<DbKind>, DbError> {
+        let Some(id) = input.connection_id else {
+            return Ok(None);
+        };
+        let conn = self.lock()?;
+        Ok(find_connection(&conn, id)?.map(|c| c.kind))
+    }
+
     /// Every favorite: root first, then by folder path, inside a folder by `sort`.
     pub fn favorites_list(&self) -> Result<Vec<Favorite>, DbError> {
         let raw = {
@@ -339,9 +371,14 @@ impl ConnectionRepo {
     }
 
     /// Saves a new favorite at the end of its folder. A `connection_id` that does not
-    /// exist is stored as NULL.
-    pub fn favorite_create(&self, input: &FavoriteInput) -> Result<Favorite, DbError> {
-        let v = validate_favorite(input)?;
+    /// exist is stored as NULL. Text in which `redact` finds a secret is refused
+    /// ([`sql_redact`] for SQL, the connection's `CommandLanguage::redact` for commands).
+    pub fn favorite_create(
+        &self,
+        input: &FavoriteInput,
+        redact: &dyn Fn(&str) -> Redacted,
+    ) -> Result<Favorite, DbError> {
+        let v = validate_favorite(input, redact)?;
         let now = now_rfc3339()?;
         let id = Uuid::new_v4();
         self.transaction(|tx| {
@@ -367,9 +404,15 @@ impl ConnectionRepo {
         })
     }
 
-    /// Replaces every field of favorite `id`; a new folder puts it last there.
-    pub fn favorite_update(&self, id: Uuid, input: &FavoriteInput) -> Result<Favorite, DbError> {
-        let v = validate_favorite(input)?;
+    /// Replaces every field of favorite `id`; a new folder puts it last there. `redact`
+    /// as for [`Self::favorite_create`].
+    pub fn favorite_update(
+        &self,
+        id: Uuid,
+        input: &FavoriteInput,
+        redact: &dyn Fn(&str) -> Redacted,
+    ) -> Result<Favorite, DbError> {
+        let v = validate_favorite(input, redact)?;
         let now = now_rfc3339()?;
         self.transaction(|tx| {
             let old = get_favorite(tx, id)?;
@@ -547,12 +590,26 @@ mod tests {
             "ALTER ROLE r PASSWORD 'x'",
             "SELECT dblink_connect('postgresql://u:pw@h/db')",
         ] {
-            let err = refuse_secrets(sql).unwrap_err();
+            let err = refuse_secrets(sql, &sql_redact).unwrap_err();
             assert!(
                 matches!(&err, DbError::Config { field: Some(f), .. } if f == "sql"),
                 "{sql}: {err:?}"
             );
         }
-        refuse_secrets("SELECT * FROM users WHERE id = 1").unwrap();
+        refuse_secrets("SELECT * FROM users WHERE id = 1", &sql_redact).unwrap();
+        assert!(!sql_redact("SELECT 1").changed);
+    }
+
+    #[test]
+    fn secrets_are_refused_by_the_given_redactor() {
+        let auth = |text: &str| Redacted {
+            text: text.replace("s3cret", "***"),
+            changed: text.contains("s3cret"),
+        };
+        let err = refuse_secrets("AUTH s3cret", &auth).unwrap_err();
+        let sql_err = refuse_secrets("ALTER ROLE r PASSWORD 'x'", &sql_redact).unwrap_err();
+        assert_eq!(format!("{err:?}"), format!("{sql_err:?}"));
+        refuse_secrets("AUTH s3cret", &sql_redact).unwrap();
+        refuse_secrets("GET a", &auth).unwrap();
     }
 }

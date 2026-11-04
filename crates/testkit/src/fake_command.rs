@@ -728,7 +728,8 @@ impl CommandLanguage for FakeLanguage {
         Ok(build_command(None, &name, text.to_string(), class, op))
     }
 
-    /// `CONFIG SET requirepass <x>` (any case) becomes `CONFIG SET requirepass ***`.
+    /// `CONFIG SET requirepass <x>` (any case) becomes `CONFIG SET requirepass ***`, and
+    /// `AUTH [user] <password>` becomes `AUTH ***`.
     fn redact(&self, text: &str) -> Redacted {
         let mut out = String::with_capacity(text.len());
         let mut changed = false;
@@ -744,6 +745,13 @@ impl CommandLanguage for FakeLanguage {
                     out.push_str(&line[..secret.start]);
                     out.push_str("***");
                     out.push_str(&line[secret.end.min(line.trim_end().len())..]);
+                    changed = true;
+                }
+                _ if is(0, "AUTH") && tokens.len() > 1 => {
+                    let (first, last) = (&tokens[1], &tokens[tokens.len() - 1]);
+                    out.push_str(&line[..first.start]);
+                    out.push_str("***");
+                    out.push_str(&line[last.end.min(line.trim_end().len())..]);
                     changed = true;
                 }
                 _ => out.push_str(line),
@@ -1586,6 +1594,20 @@ mod tests {
             .redact("CONFIG SET requirepass hunter2")
             .text
             .ends_with("***"));
+    }
+
+    #[test]
+    fn language_redacts_auth_arguments() {
+        for (text, want) in [
+            ("AUTH s3cret", "AUTH ***"),
+            ("auth admin s3cret\n", "auth ***\n"),
+            ("GET a\nAUTH s3cret\nGET b", "GET a\nAUTH ***\nGET b"),
+        ] {
+            let r = FakeLanguage.redact(text);
+            assert_eq!((r.text.as_str(), r.changed), (want, true), "{text}");
+        }
+        let r = FakeLanguage.redact("AUTH\nGET auth");
+        assert_eq!((r.text.as_str(), r.changed), ("AUTH\nGET auth", false));
     }
 
     #[test]
