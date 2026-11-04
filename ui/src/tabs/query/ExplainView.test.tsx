@@ -36,6 +36,7 @@ const planIn = (dialect: Dialect): PlanView => ({
   plan_id: 'p',
   stmts: [],
   dialect,
+  family: 'sql',
   connection_name: 'c',
   env_tag: null,
   read_only: false,

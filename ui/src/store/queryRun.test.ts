@@ -72,6 +72,7 @@ const planOf = (stmts: PlanStmtView[], extra: Partial<PlanView> = {}): PlanView 
   plan_id: 'plan-1',
   stmts,
   dialect: { engine: 'postgres' },
+  family: 'sql',
   connection_name: 'local',
   env_tag: null,
   read_only: false,

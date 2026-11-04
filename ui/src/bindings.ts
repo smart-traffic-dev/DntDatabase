@@ -325,9 +325,11 @@ async queryPlan(tabId: string, connId: string, database: string | null, text: st
 },
 /**
  * Statement ranges for highlighting the statement under the cursor (debounced 150 ms).
+ * `conn_id`: the tab's connection; a Command engine's script splits by its language
+ * (`dialect` is then ignored). Null: split by `dialect`.
  */
-async statementRanges(text: string, dialect: Dialect) : Promise<([number, number])[]> {
-    return await TAURI_INVOKE("statement_ranges", { text, dialect });
+async statementRanges(text: string, dialect: Dialect, connId: string | null) : Promise<([number, number])[]> {
+    return await TAURI_INVOKE("statement_ranges", { text, dialect, connId });
 },
 /**
  * Commits or rolls back the tab's transaction; returns the new state. `busy` while the
@@ -2590,7 +2592,15 @@ export type PlanTable = { columns: string[]; rows: ((string | null)[])[] }
  * A normalized explain result. `raw` is the engine's original output.
  */
 export type PlanTree = { kind: "tree"; root: PlanNode; raw: string; classic?: PlanTable | null } | { kind: "table"; columns: string[]; rows: string[][]; raw: string }
-export type PlanView = { plan_id: string; stmts: PlanStmtView[]; dialect: Dialect; connection_name: string; env_tag: EnvTag | null; read_only: boolean; 
+export type PlanView = { plan_id: string; stmts: PlanStmtView[]; 
+/**
+ * The SQL dialect the plan was split with; `None` for the Command family.
+ */
+dialect: Dialect | null; 
+/**
+ * The engine family the plan was made for: SQL statements or engine commands.
+ */
+family: EngineFamily; connection_name: string; env_tag: EnvTag | null; read_only: boolean; 
 /**
  * The tab session's transaction state when the plan was made.
  */

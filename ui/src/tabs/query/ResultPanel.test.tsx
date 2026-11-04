@@ -24,6 +24,7 @@ const PLAN = {
   plan_id: 'p1',
   stmts: [stmt(0, 'read'), stmt(1, 'read'), stmt(2, 'write')],
   dialect: { engine: 'postgres' as const },
+  family: 'sql' as const,
   connection_name: 'c',
   env_tag: null,
   read_only: false,

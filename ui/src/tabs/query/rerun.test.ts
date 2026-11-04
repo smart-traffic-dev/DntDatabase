@@ -10,6 +10,7 @@ const plan = (id: string, verdict: 'allow' | 'confirm' | 'block' = 'allow'): Pla
   plan_id: id,
   stmts: [{ index: 0, range: [0, 8], kind: 'read', verdict, preview: 'SELECT 1' }],
   dialect: { engine: 'postgres' },
+  family: 'sql',
   connection_name: 'c',
   env_tag: null,
   read_only: false,

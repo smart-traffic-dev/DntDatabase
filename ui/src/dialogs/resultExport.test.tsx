@@ -23,6 +23,7 @@ const plan = (stmts: PlanStmtView[]) => ({
   plan_id: 'p1',
   stmts,
   dialect: { engine: 'mysql' as const },
+  family: 'sql' as const,
   connection_name: 'c',
   env_tag: null,
   read_only: false,

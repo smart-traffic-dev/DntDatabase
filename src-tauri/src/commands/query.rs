@@ -11,8 +11,9 @@ use crate::query_sessions::{with_tx_state, PlanView, TabTxInfo, TxAction, TxMode
 use crate::result_store::{ResultPage, ResultSearch};
 use crate::run_events::{EventSink, RunEvent, RunOptions};
 use crate::state::AppState;
+use dnt_core::command::CommandLanguage;
 use dnt_core::error::{AppError, DbError};
-use dnt_core::server::Cap;
+use dnt_core::server::{Cap, EngineFamily};
 use dnt_core::sql::Dialect;
 use dnt_core::tx::TxState;
 use dnt_core::value::Value;
@@ -106,11 +107,26 @@ pub async fn query_result_find(
     guard(query_result_find_impl(&state, token, query, max)).await
 }
 
+/// Whether connection `conn_id` is of the Command family: its completion is empty (no
+/// SQL objects to complete).
+fn is_command(state: &AppState, conn_id: Uuid) -> Result<bool, DbError> {
+    Ok(match state.repo.get(conn_id)?.kind.family() {
+        EngineFamily::Sql => false,
+        EngineFamily::Command => true,
+    })
+}
+
 pub async fn completion_scope_impl(
     state: &AppState,
     conn_id: Uuid,
     database: String,
 ) -> Result<SchemaCache, DbError> {
+    if is_command(state, conn_id)? {
+        return Ok(SchemaCache {
+            database,
+            tables: Vec::new(),
+        });
+    }
     require_sql(state, conn_id)?;
     state.sessions.schema_cache_for(conn_id, &database).await
 }
@@ -121,6 +137,9 @@ pub async fn completion_objects_impl(
     database: String,
     schema: Option<String>,
 ) -> Result<Vec<CompletionObject>, DbError> {
+    if is_command(state, conn_id)? {
+        return Ok(Vec::new());
+    }
     require_sql(state, conn_id)?;
     state
         .sessions
@@ -164,7 +183,8 @@ pub async fn query_plan_impl(
     text: String,
     target: Target,
 ) -> Result<PlanView, DbError> {
-    require_sql(state, conn_id)?;
+    // Both families plan: SQL statements, or the commands of the driver's language.
+    state.sessions.require_driver(conn_id)?;
     state
         .sessions
         .query_plan(&tab_id, conn_id, database, &text, target)
@@ -245,9 +265,35 @@ fn guard_tab<'a, T: 'a>(
 }
 
 /// UTF-16 ranges (end-exclusive) of every statement of `text`, as `query_plan` would
-/// split it with `Target::All`. Pure: no session needed.
-pub fn statement_ranges_impl(text: &str, dialect: Dialect) -> Vec<(u32, u32)> {
-    dnt_query::statement_ranges(text, dialect)
+/// split it with `Target::All`: with the command language of connection `conn_id`'s
+/// driver when it has one (a Command engine), else with `dialect`. No session needed.
+pub fn statement_ranges_impl(
+    state: &AppState,
+    text: &str,
+    dialect: Dialect,
+    conn_id: Option<Uuid>,
+) -> Vec<(u32, u32)> {
+    let language = conn_id
+        .and_then(|id| state.repo.get(id).ok())
+        .and_then(|cfg| state.sessions.language_for(cfg.kind));
+    ranges_of(text, dialect, language.as_deref())
+}
+
+/// [`statement_ranges_impl`] once the language is known.
+fn ranges_of(
+    text: &str,
+    dialect: Dialect,
+    language: Option<&dyn CommandLanguage>,
+) -> Vec<(u32, u32)> {
+    match language {
+        // The same split and UTF-16 mapping as `plan_commands`.
+        Some(lang) => dnt_query::plan_commands(text, Target::All, lang, None)
+            .stmts
+            .iter()
+            .map(|s| s.range)
+            .collect(),
+        None => dnt_query::statement_ranges(text, dialect),
+    }
 }
 
 /// Plans what `target` selects in `text` for tab `tab_id` on `conn_id` / `database`
@@ -275,10 +321,18 @@ pub async fn query_plan(
 }
 
 /// Statement ranges for highlighting the statement under the cursor (debounced 150 ms).
+/// `conn_id`: the tab's connection; a Command engine's script splits by its language
+/// (`dialect` is then ignored). Null: split by `dialect`.
 #[tauri::command]
 #[specta::specta]
-pub async fn statement_ranges(text: String, dialect: Dialect) -> Vec<(u32, u32)> {
-    statement_ranges_impl(&text, dialect)
+pub async fn statement_ranges(
+    app: tauri::AppHandle,
+    text: String,
+    dialect: Dialect,
+    conn_id: Option<Uuid>,
+) -> Vec<(u32, u32)> {
+    use tauri::Manager;
+    statement_ranges_impl(&app.state::<AppState>(), &text, dialect, conn_id)
 }
 
 /// Commits or rolls back the tab's transaction; returns the new state. `busy` while the
@@ -453,12 +507,9 @@ mod tests {
     #[test]
     fn statement_ranges_command() {
         let text = "SELECT 'Tiếng 😀';\r\nSELECT 2;\n-- tail";
-        assert_eq!(
-            statement_ranges_impl(text, Dialect::MYSQL),
-            [(0, 17), (20, 28)]
-        );
-        assert_eq!(statement_ranges_impl("", Dialect::Postgres), []);
+        assert_eq!(ranges_of(text, Dialect::MYSQL, None), [(0, 17), (20, 28)]);
+        assert_eq!(ranges_of("", Dialect::Postgres, None), []);
         let block = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; END$$\nDELIMITER ;";
-        assert_eq!(statement_ranges_impl(block, Dialect::MYSQL).len(), 1);
+        assert_eq!(ranges_of(block, Dialect::MYSQL, None).len(), 1);
     }
 }

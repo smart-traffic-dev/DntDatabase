@@ -122,17 +122,17 @@ pub struct PlanView { /* … */ pub dialect: Option<Dialect>, pub family: Engine
 - **Command family refusals:** `query_tx` (Commit/Rollback) and `query_tx_mode(Manual)` return `DbError::Unsupported { feature: "transactions".into(), version: String::new() }`. `query_tx_mode(Auto)` is accepted.
 - **Completion:** `completion_scope_impl` and `completion_objects_impl` return an empty result for the Command family instead of an error.
 
-- [ ] **Step 1: Write the failing tests** in `src-tauri/tests/command_tabs.rs` (new):
+- [x] **Step 1: Write the failing tests** in `src-tauri/tests/command_tabs.rs` (new):
   - `command_plan_has_labels_and_verdicts`: `SET a 1\nGET a\nNUKE` on Production gives labels `write, read, admin`; verdicts `Confirm, Allow, Confirm`; `confirm_name` of stmt 2 is the connection name; `family == Command`; `dialect == None`.
   - `command_plan_blocks_on_read_only`
   - `command_tab_switches_db_with_a_fresh_session`: plan with db "0", then with db "2". The fake counts opens; `current_database()` is "2".
   - `command_statement_ranges_follow_the_language`
   - `command_tx_buttons_are_refused`
   - `sql_plan_view_unchanged`: an existing SQL plan test asserts `dialect == Some(..)` and `family == Sql`.
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.** Regenerate the bindings; the only changes are `PlanView.dialect` becoming nullable and `PlanView.family`. Fix the TS readers.
-- [ ] **Step 4: Run** `cargo test -p dntdatabase`, `bindings_are_current`, `pnpm --dir ui lint` and `pnpm --dir ui test`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): plan Command scripts in query tabs`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.** Regenerate the bindings; the only changes are `PlanView.dialect` becoming nullable and `PlanView.family`. Fix the TS readers.
+- [x] **Step 4: Run** `cargo test -p dntdatabase`, `bindings_are_current`, `pnpm --dir ui lint` and `pnpm --dir ui test`. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): plan Command scripts in query tabs`.
 
 ### Task 3: Run Command scripts (events, History, redaction)
 

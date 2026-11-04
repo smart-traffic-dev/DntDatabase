@@ -834,6 +834,14 @@ impl SessionManager {
         }
     }
 
+    /// The engine of connection `id`, of either family, once a driver is registered for
+    /// it (`Internal` "no driver registered" otherwise).
+    pub(crate) fn require_driver(&self, id: Uuid) -> Result<DbKind, DbError> {
+        let kind = self.repo.get(id)?.kind;
+        self.driver(kind)?;
+        Ok(kind)
+    }
+
     /// The SQL engine of connection `id`; `Unsupported` for a non-SQL connection.
     pub(crate) fn require_sql(&self, id: Uuid) -> Result<SqlKind, DbError> {
         self.repo.get(id)?.kind.require_sql()

@@ -36,15 +36,16 @@ use crate::session_manager::{
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, SqlSession};
 use dnt_core::error::{AppError, DbError};
-use dnt_core::server::SqlKind;
+use dnt_core::server::{EngineFamily, SqlKind};
 use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_query::{
-    classic_table, confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_with,
-    mark_implicit_commits, parse_estimate, plan, run_with, DropTarget, ExplainFormat, GuardCtx,
-    PlanTable, PlannedStmt, RowEstimate, RunCancel, RunConfig, RunReport, ScriptPlan,
-    StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict, WriteOp,
+    classic_table, confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_commands,
+    guard_with, mark_implicit_commits, parse_estimate, plan, plan_commands, run_with, CommandPlan,
+    DropTarget, ExplainFormat, GuardCtx, PlanTable, PlannedStmt, PolicyCtx, RowEstimate, RunCancel,
+    RunConfig, RunReport, ScriptPlan, StmtKindLabel, StopReason, Target, UnboundedWrite, Verdict,
+    WriteOp,
 };
 use dnt_store::repo::ConnectionRepo;
 use futures_util::FutureExt;
@@ -128,7 +129,10 @@ pub struct PlanStmtView {
 pub struct PlanView {
     pub plan_id: Uuid,
     pub stmts: Vec<PlanStmtView>,
-    pub dialect: Dialect,
+    /// The SQL dialect the plan was split with; `None` for the Command family.
+    pub dialect: Option<Dialect>,
+    /// The engine family the plan was made for: SQL statements or engine commands.
+    pub family: EngineFamily,
     pub connection_name: String,
     pub env_tag: Option<EnvTag>,
     pub read_only: bool,
@@ -708,9 +712,38 @@ pub(crate) struct ExplainPlan {
     classic: Option<String>,
 }
 
+/// The script of a stored plan: SQL statements, or the commands of a Command engine.
+/// Either way it went through its family's guard (`guard` is set).
+#[derive(Clone)]
+pub enum StoredScript {
+    Sql(ScriptPlan),
+    Command(CommandPlan),
+}
+
+impl StoredScript {
+    fn family(&self) -> EngineFamily {
+        match self {
+            StoredScript::Sql(_) => EngineFamily::Sql,
+            StoredScript::Command(_) => EngineFamily::Command,
+        }
+    }
+
+    /// The SQL plan; `Unsupported` for a Command plan (a path not built for it yet).
+    fn into_sql(self, what: &str) -> Result<ScriptPlan, DbError> {
+        match self {
+            StoredScript::Sql(p) => Ok(p),
+            StoredScript::Command(_) => Err(DbError::Unsupported {
+                feature: what.to_string(),
+                version: String::new(),
+            }),
+        }
+    }
+}
+
 struct StoredPlan {
     target: PlanTarget,
-    plan: ScriptPlan,
+    plan: StoredScript,
+    /// SQL only.
     explain: Option<ExplainPlan>,
     /// When the plan was made.
     at: Instant,
@@ -725,7 +758,8 @@ struct StoredPlan {
 #[derive(Clone)]
 pub(crate) struct PlanCopy {
     target: PlanTarget,
-    plan: ScriptPlan,
+    plan: StoredScript,
+    /// SQL only.
     explain: Option<ExplainPlan>,
     /// See [`StoredPlan::source`]; for a statement copy, the plan it was cut from (its
     /// own source when that plan is itself derived).
@@ -746,6 +780,30 @@ fn one_statement(plan: &ScriptPlan, index: u32) -> Option<ScriptPlan> {
         explain: plan.explain,
         guard: plan.guard,
     })
+}
+
+/// Command `index` of `plan` as a one-command plan, as [`one_statement`] cuts a SQL
+/// plan: its text is the whole source, its index, range, resolved targets, guard
+/// context and `assumed_db` are kept (the plan's own `assumed_db` becomes the
+/// command's).
+fn one_command(plan: &CommandPlan, index: u32) -> Option<CommandPlan> {
+    let mut one = plan.stmts.iter().find(|s| s.index == index)?.clone();
+    one.source_range = (0, one.text.len());
+    Some(CommandPlan {
+        source: one.text.clone(),
+        base: one.range.0,
+        assumed_db: one.assumed_db.clone(),
+        stmts: vec![one],
+        guard: plan.guard.clone(),
+    })
+}
+
+/// Statement `index` of `script` as a one-statement script.
+fn one_of(script: &StoredScript, index: u32) -> Option<StoredScript> {
+    match script {
+        StoredScript::Sql(p) => one_statement(p, index).map(StoredScript::Sql),
+        StoredScript::Command(p) => one_command(p, index).map(StoredScript::Command),
+    }
 }
 
 /// Plans by id. A pending (never taken) plan lives for the plan TTL and only the newest
@@ -770,16 +828,15 @@ impl PlanStore {
         &self,
         ttl: Duration,
         target: PlanTarget,
-        plan: ScriptPlan,
+        plan: StoredScript,
         explain: Option<ExplainPlan>,
         source: Option<Uuid>,
     ) -> Uuid {
         debug_assert!(
-            explain
-                .as_ref()
-                .map_or(&plan, |e| &e.original)
-                .guard
-                .is_some(),
+            match &plan {
+                StoredScript::Sql(p) => explain.as_ref().map_or(p, |e| &e.original).guard.is_some(),
+                StoredScript::Command(p) => explain.is_none() && p.guard.is_some(),
+            },
             "stored plans must be guarded"
         );
         let id = Uuid::new_v4();
@@ -857,7 +914,7 @@ impl PlanStore {
         ttl: Duration,
         id: Uuid,
         current: &dyn Fn(&PlanTarget) -> bool,
-    ) -> Result<(String, Uuid, ScriptPlan), DbError> {
+    ) -> Result<(String, Uuid, StoredScript), DbError> {
         let mut plans = lock(&self.plans);
         Self::prune(&mut plans, ttl);
         let p = Self::checked(&mut plans, id, current)?;
@@ -886,7 +943,7 @@ impl PlanStore {
         let mut plans = lock(&self.plans);
         Self::prune(&mut plans, ttl);
         let p = Self::checked(&mut plans, id, current)?;
-        let plan = one_statement(&p.plan, index).ok_or(DbError::PlanExpired)?;
+        let plan = one_of(&p.plan, index).ok_or(DbError::PlanExpired)?;
         let explain = match &p.explain {
             Some(e) => Some(ExplainPlan {
                 format: e.format,
@@ -962,8 +1019,9 @@ impl ConnectionRuntime {
     }
 
     /// Puts `ts` on the database `database` resolves to: opens the session if there is
-    /// none; otherwise switches (refused with an open transaction): MySQL runs `USE`,
-    /// PostgreSQL opens a session on the new database and closes the old one.
+    /// none; otherwise switches (refused with an open transaction): MySQL runs `USE`;
+    /// PostgreSQL and the Command family open a session on the new database and close
+    /// the old one.
     ///
     /// A stale session (see [`Self::is_stale`]) is closed first. Idle, it is simply
     /// replaced; with a transaction open, which the server has lost with the tunnel, the
@@ -1004,16 +1062,30 @@ impl ConnectionRuntime {
         if ts.database == target {
             return Ok(());
         }
-        let session = session.sql()?;
-        if session.tx_state() != TxState::Idle {
-            return Err(DbError::TransactionOpen);
-        }
-        let kind = self.cfg.kind.require_sql()?;
-        match use_database_sql(kind, target.as_deref()) {
-            Some(sql) => {
+        let use_sql = match self.cfg.kind.family() {
+            EngineFamily::Sql => {
+                let session = session.sql()?;
+                if session.tx_state() != TxState::Idle {
+                    return Err(DbError::TransactionOpen);
+                }
+                let kind = self.cfg.kind.require_sql()?;
+                use_database_sql(kind, target.as_deref()).map(|sql| (session, sql))
+            }
+            // A Command tab never guesses its language's switch command: it opens a
+            // fresh session on the target db.
+            EngineFamily::Command => {
+                if session.command()?.tx_state() != TxState::Idle {
+                    return Err(DbError::TransactionOpen);
+                }
+                None
+            }
+        };
+        match use_sql {
+            Some((session, sql)) => {
                 execute_quietly(session, &sql).await?;
             }
-            // PostgreSQL, or MySQL back to "no database" (which `USE` cannot do).
+            // PostgreSQL, MySQL back to "no database" (which `USE` cannot do), or a
+            // Command session.
             None => {
                 let (fresh, generation) = self.open_query_session(target.clone()).await?;
                 if let Some(old) = ts.session.replace(fresh) {
@@ -1067,6 +1139,18 @@ impl SessionManager {
         }
     }
 
+    /// What the Command guard judges a plan with on a connection whose config is `cfg`
+    /// (as stored now): the same facts as [`Self::guard_ctx`], plus the connection's
+    /// name (what a Production confirmation may ask to type).
+    fn policy_ctx(&self, cfg: &ConnectionConfig) -> PolicyCtx {
+        PolicyCtx {
+            env: cfg.env_tag,
+            read_only: cfg.read_only,
+            confirm_unbounded: self.confirm_unbounded(),
+            connection_name: cfg.name.clone(),
+        }
+    }
+
     /// The stored "Confirm UPDATE/DELETE without WHERE" setting (on by default).
     fn confirm_unbounded(&self) -> bool {
         saved_confirm_unbounded(&self.repo)
@@ -1098,15 +1182,37 @@ impl SessionManager {
         target: Target,
     ) -> Result<PlanView, DbError> {
         let (rt, mut ts) = self.tab_session(tab, conn, database).await?;
-        let (dialect, _, _) = session_facts(&ts)?;
         let plan_target = PlanTarget {
             tab: tab.to_string(),
             conn,
             runtime: Arc::downgrade(&rt),
             database: ts.database.clone(),
         };
-
         let cfg = self.current_config(&rt);
+        match rt.cfg.kind.family() {
+            EngineFamily::Sql => {}
+            EngineFamily::Command => {
+                let session = held_session(&ts)?;
+                let command = session.command()?;
+                let mut planned = plan_commands(
+                    text,
+                    target,
+                    command.language(),
+                    command.current_database().as_deref(),
+                );
+                guard_commands(&mut planned, &self.policy_ctx(&cfg));
+                let tx_state = session.tx_state();
+                drop(ts);
+                let copy = PlanCopy {
+                    target: plan_target,
+                    plan: StoredScript::Command(planned),
+                    explain: None,
+                    source: None,
+                };
+                return self.store_plan(&rt, &cfg, copy, None, tx_state);
+            }
+        }
+        let (dialect, _, _) = session_facts(&ts)?;
         let mut planned = plan(text, target, dialect);
         guard_with(&mut planned, self.guard_ctx(&cfg, false));
         if matches!(cfg.env_tag, Some(EnvTag::Staging | EnvTag::Production)) {
@@ -1121,11 +1227,11 @@ impl SessionManager {
         self.mark_implicit_commits(tab, &mut planned, tx_state);
         let copy = PlanCopy {
             target: plan_target,
-            plan: planned,
+            plan: StoredScript::Sql(planned),
             explain: None,
             source: None,
         };
-        self.store_plan(&rt, &cfg, copy, dialect, tx_state)
+        self.store_plan(&rt, &cfg, copy, Some(dialect), tx_state)
     }
 
     /// Row estimates (spec §4.3), on the tab's own held session: for every statement of
@@ -1289,7 +1395,7 @@ impl SessionManager {
         rt: &ConnectionRuntime,
         cfg: &ConnectionConfig,
         copy: PlanCopy,
-        dialect: Dialect,
+        dialect: Option<Dialect>,
         tx_state: TxState,
     ) -> Result<PlanView, DbError> {
         let PlanCopy {
@@ -1298,23 +1404,51 @@ impl SessionManager {
             explain,
             source,
         } = copy;
-        let judged = explain.as_ref().map_or(&planned, |e| &e.original);
-        let stmts = judged
-            .stmts
-            .iter()
-            .map(|s| PlanStmtView {
-                index: s.index,
-                range: s.range,
-                kind: s.kind.into(),
-                verdict: s.verdict,
-                preview: preview(&s.text),
-                unbounded: s.unbounded.clone(),
-                drops: s.drops.clone(),
-                confirm_name: s.confirm_name.clone(),
-                estimate: s.estimate,
-                implicit_commit: s.implicit_commit,
-            })
-            .collect();
+        let (stmts, dialect) = match &planned {
+            StoredScript::Sql(p) => {
+                let judged = explain.as_ref().map_or(p, |e| &e.original);
+                let stmts = judged
+                    .stmts
+                    .iter()
+                    .map(|s| PlanStmtView {
+                        index: s.index,
+                        range: s.range,
+                        kind: s.kind.into(),
+                        verdict: s.verdict,
+                        preview: preview(&s.text),
+                        unbounded: s.unbounded.clone(),
+                        drops: s.drops.clone(),
+                        confirm_name: s.confirm_name.clone(),
+                        estimate: s.estimate,
+                        implicit_commit: s.implicit_commit,
+                    })
+                    .collect();
+                (stmts, dialect)
+            }
+            // No unbounded / drop details, row estimates or implicit commits: the
+            // verdicts and confirm names say it all.
+            StoredScript::Command(p) => {
+                debug_assert!(dialect.is_none(), "a Command plan has no dialect");
+                let stmts = p
+                    .stmts
+                    .iter()
+                    .map(|s| PlanStmtView {
+                        index: s.index,
+                        range: s.range,
+                        kind: s.label,
+                        verdict: s.verdict,
+                        preview: preview(&s.text),
+                        unbounded: Vec::new(),
+                        drops: Vec::new(),
+                        confirm_name: s.confirm_name.clone(),
+                        estimate: None,
+                        implicit_commit: false,
+                    })
+                    .collect();
+                (stmts, None)
+            }
+        };
+        let family = planned.family();
         // The connection closed while we planned: `shutdown` closes the tab's session;
         // keep no plan for it.
         if rt.closed.load(Ordering::SeqCst) {
@@ -1327,6 +1461,7 @@ impl SessionManager {
             plan_id,
             stmts,
             dialect,
+            family,
             connection_name: cfg.name.clone(),
             env_tag: cfg.env_tag,
             read_only: cfg.read_only,
@@ -1409,14 +1544,24 @@ impl SessionManager {
     pub async fn query_tx_mode(&self, tab: &str, mode: TxMode) -> Result<TxState, DbError> {
         validate_tab(tab)?;
         // Held while the mode changes, so a run of the tab cannot start meanwhile.
-        let held = match self.find_tab_runtime(tab) {
+        let found = self.find_tab_runtime(tab);
+        let family = found.as_ref().map(|(rt, _)| rt.cfg.kind.family());
+        let held = match found {
             Some((_, slot)) => Some(slot.try_lock_owned().map_err(|_| DbError::Busy)?),
             None => None,
         };
-        let state = match held.as_ref().and_then(|ts| ts.session.as_deref()) {
-            Some(s) => s.sql()?.tx_state(),
-            None => TxState::Idle,
+        let state = match (held.as_ref().and_then(|ts| ts.session.as_deref()), family) {
+            (Some(s), Some(EngineFamily::Command)) => s.command()?.tx_state(),
+            (Some(s), _) => s.sql()?.tx_state(),
+            (None, _) => TxState::Idle,
         };
+        // A Command tab has no manual-commit mode: scripts use the language's own
+        // transaction commands.
+        match (family, mode) {
+            (Some(EngineFamily::Command), TxMode::Manual) => return Err(transactions_refused()),
+            (Some(EngineFamily::Command), TxMode::Auto)
+            | (Some(EngineFamily::Sql) | None, TxMode::Auto | TxMode::Manual) => {}
+        }
         let mut modes = lock(&self.tx_modes);
         let current = modes.get(tab).copied().unwrap_or_default();
         if current == TxMode::Manual && mode == TxMode::Auto {
@@ -1486,6 +1631,11 @@ impl SessionManager {
         let Some((rt, slot)) = self.find_tab_runtime(tab) else {
             return Ok(TxState::Idle);
         };
+        match rt.cfg.kind.family() {
+            EngineFamily::Sql => {}
+            // Commit / Rollback buttons are SQL only: nothing is sent.
+            EngineFamily::Command => return Err((transactions_refused(), None)),
+        }
         let mut ts = Arc::clone(&slot)
             .try_lock_owned()
             .map_err(|_| (DbError::Busy, None))?;
@@ -1619,8 +1769,10 @@ impl SessionManager {
     /// use [`SessionManager::test_take_plan`]).
     #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, ScriptPlan), DbError> {
-        self.plans
-            .take(self.plan_ttl, plan_id, &|t| self.plan_target_current(t))
+        let (tab, conn, plan) = self
+            .plans
+            .take(self.plan_ttl, plan_id, &|t| self.plan_target_current(t))?;
+        Ok((tab, conn, plan.into_sql("taking a Command plan")?))
     }
 
     /// Statement `index` of plan `plan_id` (taken or not) as a one-statement plan, for
@@ -1641,7 +1793,8 @@ impl SessionManager {
         let copy = self.plans.statement(self.plan_ttl, plan_id, index, &|t| {
             self.plan_target_current(t)
         })?;
-        Ok((copy.target.tab, copy.target.conn, copy.plan))
+        let plan = copy.plan.into_sql("a statement of a Command plan")?;
+        Ok((copy.target.tab, copy.target.conn, plan))
     }
 
     /// [`Self::take_plan`] for integration tests (feature `test-helpers`).
@@ -1696,18 +1849,32 @@ impl SessionManager {
             }
             ensured?;
         }
-        let (dialect, tx_state, _) = session_facts(&ts)?;
-        drop(ts);
         let cfg = self.current_config(&rt);
-        let judged = match &mut copy.explain {
-            Some(e) => &mut e.original,
-            None => &mut copy.plan,
+        let (dialect, tx_state) = match &mut copy.plan {
+            // The one-command plan, judged again with the current config.
+            StoredScript::Command(one) => {
+                let tx_state = held_session(&ts)?.command()?.tx_state();
+                drop(ts);
+                guard_commands(one, &self.policy_ctx(&cfg));
+                (None, tx_state)
+            }
+            StoredScript::Sql(plan) => {
+                let (dialect, tx_state, _) = session_facts(&ts)?;
+                drop(ts);
+                match &mut copy.explain {
+                    Some(e) => {
+                        let analyze = e.original.guard.is_some_and(|g| g.analyze);
+                        guard_with(&mut e.original, self.guard_ctx(&cfg, analyze));
+                    }
+                    None => {
+                        let analyze = plan.guard.is_some_and(|g| g.analyze);
+                        guard_with(plan, self.guard_ctx(&cfg, analyze));
+                        self.mark_implicit_commits(&tab, plan, tx_state);
+                    }
+                }
+                (Some(dialect), tx_state)
+            }
         };
-        let analyze = judged.guard.is_some_and(|g| g.analyze);
-        guard_with(judged, self.guard_ctx(&cfg, analyze));
-        if copy.explain.is_none() {
-            self.mark_implicit_commits(&tab, &mut copy.plan, tx_state);
-        }
         self.store_plan(&rt, &cfg, copy, dialect, tx_state)
     }
 
@@ -1997,10 +2164,15 @@ fn not_read() -> DbError {
 /// statement for the server, not an Explain) the guard allows under `ctx` (the guard
 /// context a run is judged with, `SessionManager::guard_ctx`) without confirmation.
 fn export_read(copy: &PlanCopy, ctx: GuardCtx) -> Result<PlannedStmt, DbError> {
-    if copy.explain.is_some() || copy.plan.explain {
+    let plan = match &copy.plan {
+        StoredScript::Sql(plan) => plan,
+        // Command results are exported from the loaded rows.
+        StoredScript::Command(_) => return Err(not_read()),
+    };
+    if copy.explain.is_some() || plan.explain {
         return Err(not_read());
     }
-    let mut judged = copy.plan.clone();
+    let mut judged = plan.clone();
     guard_with(&mut judged, ctx);
     let dialect = judged.dialect;
     let stmt = judged.stmts.first().ok_or(DbError::PlanExpired)?;
@@ -2070,17 +2242,26 @@ fn is_lost(e: &DbError) -> bool {
     )
 }
 
-/// The dialect, transaction state and server of a held tab session.
+/// The session of a held tab, whatever its engine.
+fn held_session(ts: &TabSession) -> Result<&dyn Session, DbError> {
+    ts.session.as_deref().ok_or_else(|| DbError::Internal {
+        message: "the tab's session vanished".into(),
+    })
+}
+
+/// A Command tab's Commit / Rollback buttons and Manual commit mode.
+fn transactions_refused() -> DbError {
+    DbError::Unsupported {
+        feature: "transactions".into(),
+        version: String::new(),
+    }
+}
+
+/// The dialect, transaction state and server of a held SQL tab session.
 fn session_facts(
     ts: &TabSession,
 ) -> Result<(Dialect, TxState, dnt_core::server::ServerInfo), DbError> {
-    let session = ts
-        .session
-        .as_deref()
-        .ok_or_else(|| DbError::Internal {
-            message: "the tab's session vanished".into(),
-        })?
-        .sql()?;
+    let session = held_session(ts)?.sql()?;
     Ok((
         session.dialect(),
         session.tx_state(),
@@ -2172,11 +2353,17 @@ fn rejudge(
     confirmed: bool,
     confirm_names: &[String],
 ) -> Result<ScriptPlan, DbError> {
-    let mut judged = copy
-        .explain
-        .as_ref()
-        .map_or(&copy.plan, |e| &e.original)
-        .clone();
+    let plan = match &copy.plan {
+        StoredScript::Sql(plan) => plan,
+        // Running a Command plan comes with its own run path (R4a Task 3).
+        StoredScript::Command(_) => {
+            return Err(DbError::Unsupported {
+                feature: "running commands".into(),
+                version: String::new(),
+            })
+        }
+    };
+    let mut judged = copy.explain.as_ref().map_or(plan, |e| &e.original).clone();
     let Some(ctx) = judged.guard else {
         return Err(DbError::Internal {
             message: "the run plan was never guarded".into(),
@@ -2208,7 +2395,7 @@ fn rejudge(
     if copy.explain.is_none() {
         return Ok(judged);
     }
-    let mut run_plan = copy.plan.clone();
+    let mut run_plan = plan.clone();
     for (s, j) in run_plan.stmts.iter_mut().zip(&judged.stmts) {
         s.verdict = j.verdict;
     }
@@ -2713,11 +2900,11 @@ impl SessionManager {
         };
         let copy = PlanCopy {
             target,
-            plan: planned,
+            plan: StoredScript::Sql(planned),
             explain: Some(explain),
             source: None,
         };
-        self.store_plan(&rt, &cfg, copy, dialect, tx_state)
+        self.store_plan(&rt, &cfg, copy, Some(dialect), tx_state)
     }
 }
 

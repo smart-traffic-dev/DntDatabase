@@ -23,6 +23,7 @@ const planOf = (stmts: PlanStmtView[]): PlanView => ({
   plan_id: 'plan-1',
   stmts,
   dialect: { engine: 'mysql' } as PlanView['dialect'],
+  family: 'sql',
   connection_name: 'shop-prod',
   env_tag: 'production',
   read_only: false,

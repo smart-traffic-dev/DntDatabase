@@ -17,6 +17,7 @@ const planOf = (stmts: PlanStmtView[], env: PlanView['env_tag'] = 'production'):
   plan_id: 'p1',
   stmts,
   dialect: { engine: 'mysql' } as PlanView['dialect'],
+  family: 'sql',
   connection_name: 'shop-prod',
   env_tag: env,
   read_only: false,

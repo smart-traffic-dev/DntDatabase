@@ -21,6 +21,7 @@ const planOf = (verdict: PlanStmtView['verdict']): PlanView => ({
   plan_id: 'plan-x',
   stmts: [stmt(verdict)],
   dialect: { engine: 'mysql' } as PlanView['dialect'],
+  family: 'sql',
   connection_name: 'shop-prod',
   env_tag: 'production',
   read_only: false,

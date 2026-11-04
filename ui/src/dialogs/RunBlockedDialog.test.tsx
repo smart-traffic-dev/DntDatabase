@@ -12,6 +12,7 @@ const plan: PlanView = {
     { index: 1, range: [9, 20], kind: 'write', verdict: 'block', preview: 'DELETE FROM t' },
   ],
   dialect: { engine: 'mysql' } as PlanView['dialect'],
+  family: 'sql',
   connection_name: 'reports',
   env_tag: null,
   read_only: true,

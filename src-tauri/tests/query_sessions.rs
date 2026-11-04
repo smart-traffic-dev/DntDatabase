@@ -616,7 +616,8 @@ async fn plan_opens_session_lazily_once() {
     assert_eq!(first.stmts[1].index, 1);
     assert_eq!(first.stmts[1].range, (10, 18));
     assert_eq!(first.stmts[1].kind, StmtKindLabel::Read);
-    assert_eq!(first.dialect, Dialect::MYSQL);
+    assert_eq!(first.dialect, Some(Dialect::MYSQL));
+    assert_eq!(first.family, dnt_core::server::EngineFamily::Sql);
     assert_eq!(first.tx_state, TxState::Idle);
     assert_eq!(first.connection_name, "Shop DB");
     // Planning sends nothing to the server.
