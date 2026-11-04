@@ -299,3 +299,29 @@ async fn lists_models_sorted_unique() {
         ("GET", "/v1/models")
     );
 }
+
+/// Sends the Settings → Test probe to a real endpoint. Run by hand:
+/// `DNT_AI_BASE_URL=… DNT_AI_MODEL=… [DNT_AI_KEY=…] cargo test -p dnt-ai --test provider -- --ignored`
+#[tokio::test]
+#[ignore = "calls the endpoint in DNT_AI_BASE_URL"]
+async fn real_endpoint_smoke() {
+    let base = std::env::var("DNT_AI_BASE_URL").expect("DNT_AI_BASE_URL");
+    let model = std::env::var("DNT_AI_MODEL").expect("DNT_AI_MODEL");
+    let key = std::env::var("DNT_AI_KEY").ok();
+    let c = client(&base, key.as_deref(), Duration::from_secs(20));
+    let req = FimRequest::new(
+        model,
+        dnt_ai::post::PROBE_PROMPT.to_string(),
+        dnt_ai::post::PROBE_SUFFIX.to_string(),
+    );
+    match c.complete(&req).await {
+        Ok(reply) => println!(
+            "ok in {:?}: {} chars, finish {:?}, verdict {:?}",
+            reply.elapsed,
+            reply.text.chars().count(),
+            reply.finish_reason,
+            dnt_ai::post::judge_probe(&reply.text)
+        ),
+        Err(e) => println!("error: {e}"),
+    }
+}

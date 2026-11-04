@@ -2,6 +2,7 @@
 
 mod endpoint;
 mod error;
+pub mod post;
 pub mod prompt;
 pub mod provider;
 
