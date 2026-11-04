@@ -489,7 +489,7 @@ fn commit(tx: Transaction<'_>) -> Result<(), DbError> {
     tx.commit().map_err(|e| internal("commit transaction", e))
 }
 
-fn not_found(what: &str, id: Uuid) -> DbError {
+pub(crate) fn not_found(what: &str, id: Uuid) -> DbError {
     DbError::Internal {
         message: format!("{what} {id} not found"),
     }

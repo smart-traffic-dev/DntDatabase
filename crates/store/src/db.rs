@@ -188,6 +188,17 @@ DROP TABLE connections;
 ALTER TABLE connections_next RENAME TO connections;
 ";
 
+/// AI editor completion spec §6.3: per-connection consent to send editor text and schema
+/// names to the AI endpoint whose origin it names.
+const MIGRATION_11: &str = "
+CREATE TABLE ai_opt_in (
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL CHECK (scope IN ('editor')),
+  origin TEXT NOT NULL,
+  granted_at TEXT NOT NULL,
+  PRIMARY KEY (connection_id, scope));
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -200,6 +211,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_8),
         M::up(MIGRATION_9),
         M::up_with_hook(MIGRATION_10, require_foreign_keys_off).foreign_key_check(),
+        M::up(MIGRATION_11),
     ])
 }
 
@@ -274,6 +286,9 @@ pub(crate) fn internal(context: impl std::fmt::Display, err: impl std::fmt::Disp
 mod tests {
     use super::*;
 
+    /// `user_version` after every migration.
+    const LATEST: i64 = 11;
+
     #[test]
     fn migrations_are_valid() {
         // `Migrations::validate` opens its own connection, where the bundled SQLite has foreign
@@ -308,7 +323,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10);
+        assert_eq!(v, LATEST);
         let tabs: i64 = conn
             .query_row("SELECT COUNT(*) FROM query_tabs", [], |r| r.get(0))
             .unwrap();
@@ -441,7 +456,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10);
+        assert_eq!(v, LATEST);
         let row: (i64, String, i64) = conn
             .query_row(
                 "SELECT id,origin,outcome_unknown FROM query_history",
@@ -727,7 +742,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10);
+        // Migrated to the latest (10, then the later migrations).
+        assert_eq!(v, LATEST);
         // Every row of every table is still there, byte for byte (links included).
         for (table, before) in ALL_TABLES.iter().zip(&rows_before) {
             assert_eq!(&dump(&conn, table), before, "{table}");
@@ -765,8 +781,10 @@ mod tests {
                 (ty, name, tbl, sql)
             })
             .collect();
+        // Tables of later migrations are not migration 10's concern.
         let actual: Vec<_> = schema(&conn)
             .into_iter()
+            .filter(|(_, _, tbl, _)| tbl != "ai_opt_in")
             .map(|(ty, name, tbl, sql)| {
                 let sql = sql.map(|s| {
                     s.replace(

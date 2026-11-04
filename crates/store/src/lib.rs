@@ -1,5 +1,6 @@
 //! Local persistence: SQLite connection repository and OS keychain secret store.
 
+pub mod ai;
 pub mod db;
 pub mod dntconn;
 pub mod favorites;
