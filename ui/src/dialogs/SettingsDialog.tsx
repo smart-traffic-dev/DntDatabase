@@ -22,6 +22,7 @@ import type { LayoutPreset } from '../store/layoutTree';
 import { useTabs } from '../store/tabs';
 import { useTheme, type Density, type Theme } from '../theme/ThemeProvider';
 import { Modal } from './Modal';
+import { SettingsAiPanel } from './SettingsAiPanel';
 import { SHORTCUTS } from './shortcutsList';
 
 const THEMES: { id: Theme; label: string }[] = [
@@ -609,12 +610,13 @@ function ShortcutsPanel() {
   );
 }
 
-export type SettingsTab = 'appearance' | 'layout' | 'queryData' | 'advanced' | 'shortcuts';
+export type SettingsTab = 'appearance' | 'layout' | 'queryData' | 'ai' | 'advanced' | 'shortcuts';
 
 const TABS: { id: SettingsTab; label: string; render(): ReactNode }[] = [
   { id: 'appearance', label: 'Appearance', render: () => <AppearancePanel /> },
   { id: 'layout', label: 'Layout', render: () => <LayoutPanel /> },
   { id: 'queryData', label: 'Query & data', render: () => <QueryDataPanel /> },
+  { id: 'ai', label: 'AI', render: () => <SettingsAiPanel /> },
   { id: 'advanced', label: 'Advanced', render: () => <AdvancedPanel /> },
   { id: 'shortcuts', label: 'Keyboard shortcuts', render: () => <ShortcutsPanel /> },
 ];

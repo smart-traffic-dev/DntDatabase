@@ -722,7 +722,40 @@ fieldset.export-form {
   gap: var(--dnt-space-2);
 }
 
-.settings-path-row input {
+.settings-path-row input,
+.settings-path-row select {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Settings → AI: max tokens, timeout and max lines side by side. */
+.settings-ai-numbers {
+  flex-direction: row;
+  gap: var(--dnt-space-3);
+}
+
+.settings-ai-numbers label {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
+}
+
+/* Settings → AI: the connections AI is on for. */
+.settings-ai-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-ai-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  padding: var(--dnt-space-1) 0;
+}
+
+.settings-ai-list li > span:first-child {
   flex: 1;
   min-width: 0;
 }
