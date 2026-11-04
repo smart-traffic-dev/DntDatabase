@@ -1,0 +1,24 @@
+[package]
+name = "dnt-ai"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_ai"
+
+[dependencies]
+async-trait.workspace = true
+dnt-core.workspace = true
+dnt-query.workspace = true
+reqwest.workspace = true
+rustls = { workspace = true, features = ["ring", "std", "tls12"] }
+rustls-platform-verifier.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }
