@@ -2,6 +2,7 @@
 
 mod endpoint;
 mod error;
+pub mod prompt;
 pub mod provider;
 
 pub use endpoint::{Endpoint, DEFAULT_TIMEOUT};
