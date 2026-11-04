@@ -1,4 +1,5 @@
 import type {
+  AiSettings,
   ColumnDef,
   ColumnDetail,
   ColumnMeta,
@@ -422,6 +423,13 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   const restorePlans = new Map<string, RestoreRequest>();
   // Connection groups (`create_group`): flat, in creation order.
   const groups: Tree['groups'] = [];
+  // Settings → AI: not set up.
+  let aiSettings: AiSettings = {
+    config: { base_url: null, model: null, trigger: 'automatic', max_tokens: 128, timeout_ms: 5000, max_lines: 8 },
+    has_key: false,
+    origin: null,
+    host: null,
+  };
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -590,6 +598,23 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     get_log_level: () => 'Info',
     set_log_level: () => null,
     open_log_folder: () => null,
+
+    // AI editor completion: not set up, AI off for every connection.
+    ai_settings_get: () => aiSettings,
+    ai_settings_set: (args) => {
+      const config = args.config as typeof aiSettings.config;
+      const url = config.base_url ? new URL(config.base_url) : null;
+      aiSettings = { ...aiSettings, config, origin: url ? url.origin : null, host: url ? url.host : null };
+      return aiSettings;
+    },
+    ai_key_set: () => (aiSettings = { ...aiSettings, has_key: true }),
+    ai_key_clear: () => (aiSettings = { ...aiSettings, has_key: false }),
+    ai_models: () => [],
+    ai_test: () => ({ verdict: 'ok', elapsed_ms: 1, sample: 'id = 1' }),
+    ai_opt_in_list: () => [],
+    ai_opt_in_set: () => [],
+    ai_complete: () => ({ kind: 'empty' }),
+    ai_cancel: () => null,
 
     // What @tauri-apps/plugin-dialog / plugin-opener call. No native picker in a browser.
     'plugin:dialog|open': () => null,
