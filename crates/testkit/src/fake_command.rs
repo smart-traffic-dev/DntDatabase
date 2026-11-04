@@ -18,6 +18,13 @@
 //! collection named `<name>`. `list_objects(scope, Collection)` lists them; the
 //! `table_detail` of one has the columns `_id` (the field name, the primary key) and
 //! `value`, and its rows are the hash's fields.
+//!
+//! The data view reads a collection through `DataAccess`: `page` builds a `FIND` and
+//! `count` a `COUNT` (driver-built Read commands, not in the console's language). Rows
+//! are `(_id, value)`, sorted by `_id` unless `sort` names `_id` / `value`; `skip` and
+//! `limit` are honoured. A structured filter may only use `Eq` on `_id` / `value`
+//! (joined with its mode); any other operator, and a raw WHERE or JSON filter, is
+//! `Unsupported`. [`FakeStore::build_reads_as_writes`] makes both build a Write.
 
 use async_trait::async_trait;
 use dnt_core::command::{
@@ -44,7 +51,7 @@ use dnt_core::redact::Redacted;
 use dnt_core::server::{
     Capabilities, DbKind, EngineFamily, NamespaceModel, ServerInfo, ServerVariant,
 };
-use dnt_core::sql::filter::DataFilter;
+use dnt_core::sql::filter::{DataFilter, FilterMode, FilterOp, SortDir, SortSpec};
 use dnt_core::sql::TxControl;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
@@ -102,6 +109,8 @@ struct StoreInner {
     block_next: AtomicBool,
     blocked: AtomicBool,
     blocked_changed: Notify,
+    /// `DataAccess::page` / `count` build a Write (a driver bug the backend must catch).
+    reads_as_writes: AtomicBool,
 }
 
 /// A shared handle on the data of a [`FakeCommandDriver`] (every session of the driver
@@ -120,7 +129,14 @@ impl FakeStore {
             block_next: AtomicBool::new(false),
             blocked: AtomicBool::new(false),
             blocked_changed: Notify::new(),
+            reads_as_writes: AtomicBool::new(false),
         }))
+    }
+
+    /// From now on, `DataAccess::page` and `count` build `HSET <collection> _ _` (a
+    /// Write) instead of their read: a driver bug the data view must refuse.
+    pub fn build_reads_as_writes(&self) {
+        self.0.reads_as_writes.store(true, Ordering::SeqCst);
     }
 
     fn lock(&self) -> MutexGuard<'_, StoreState> {
@@ -304,6 +320,20 @@ enum Op {
     HSet(Vec<u8>, String, String),
     /// Only built by key edits; not in the console's language.
     HDel(Vec<u8>, String),
+    /// Only built by `DataAccess::page`: rows `(_id, value)` of collection hash `key`.
+    Find {
+        key: Vec<u8>,
+        filter: RowFilter,
+        /// `(column, ascending)`, then `_id` ascending.
+        sort: Vec<(Field, bool)>,
+        skip: u64,
+        limit: u32,
+    },
+    /// Only built by `DataAccess::count`: how many rows of `key` match `filter`.
+    Count {
+        key: Vec<u8>,
+        filter: RowFilter,
+    },
     Select(usize),
     Multi,
     Exec,
@@ -311,6 +341,94 @@ enum Op {
     FlushDb,
     Config,
     Unknown(String),
+}
+
+/// A column of a collection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Field {
+    Id,
+    Value,
+}
+
+impl Field {
+    fn of(name: &str) -> Result<Field, DbError> {
+        match name {
+            COLLECTION_ID => Ok(Field::Id),
+            COLLECTION_VALUE => Ok(Field::Value),
+            _ => Err(server_err(format!("ERR no such field '{name}'"))),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Field::Id => COLLECTION_ID,
+            Field::Value => COLLECTION_VALUE,
+        }
+    }
+
+    fn get<'a>(self, id: &'a str, value: &'a str) -> &'a str {
+        match self {
+            Field::Id => id,
+            Field::Value => value,
+        }
+    }
+}
+
+/// A collection filter: `field = value` conditions, all (`any: false`) or any of them.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RowFilter {
+    any: bool,
+    eq: Vec<(Field, String)>,
+}
+
+impl RowFilter {
+    /// Only `Eq` on `_id` / `value`; anything else is `Unsupported`.
+    fn of(filter: Option<&DataFilter>) -> Result<RowFilter, DbError> {
+        let Some(filter) = filter else {
+            return Ok(RowFilter::default());
+        };
+        if filter.raw_where.is_some() || filter.raw_json.is_some() {
+            return Err(unsupported("raw filters"));
+        }
+        let mut eq = Vec::with_capacity(filter.conditions.len());
+        for c in &filter.conditions {
+            match c.op {
+                FilterOp::Eq => {}
+                _ => return Err(unsupported("this filter operator")),
+            }
+            let [value] = c.values.as_slice() else {
+                return Err(server_err("ERR an equality takes one value"));
+            };
+            eq.push((Field::of(&c.column)?, value.clone()));
+        }
+        Ok(RowFilter {
+            any: match filter.mode {
+                FilterMode::And => false,
+                FilterMode::Or => true,
+            },
+            eq,
+        })
+    }
+
+    fn matches(&self, id: &str, value: &str) -> bool {
+        let hit = |(f, v): &(Field, String)| f.get(id, value) == v;
+        match (self.eq.is_empty(), self.any) {
+            (true, _) => true,
+            (false, false) => self.eq.iter().all(hit),
+            (false, true) => self.eq.iter().any(hit),
+        }
+    }
+
+    /// The filter as it reads in a command's text.
+    fn text(&self) -> Vec<String> {
+        let joiner = if self.any { "OR" } else { "AND" };
+        let mut out = Vec::new();
+        for (i, (f, v)) in self.eq.iter().enumerate() {
+            out.push(if i == 0 { "WHERE" } else { joiner }.to_string());
+            out.extend([f.name().to_string(), "=".to_string(), v.clone()]);
+        }
+        out
+    }
 }
 
 /// The payload: the op and, for a key edit, the database it targets (`None`: the
@@ -451,9 +569,13 @@ fn build_command(
     let mut drops = Vec::new();
     let mut session_effect = None;
     match &op {
-        Op::Get(k) | Op::HGetAll(k) | Op::Set(k, _) | Op::HSet(k, _, _) | Op::HDel(k, _) => {
-            targets.push(target(k))
-        }
+        Op::Get(k)
+        | Op::HGetAll(k)
+        | Op::Set(k, _)
+        | Op::HSet(k, _, _)
+        | Op::HDel(k, _)
+        | Op::Find { key: k, .. }
+        | Op::Count { key: k, .. } => targets.push(target(k)),
         Op::Del(keys) => targets.extend(keys.iter().map(|k| target(k))),
         Op::Scan {
             pattern: Some(p), ..
@@ -770,6 +892,57 @@ impl FakeCommandSession {
                     Some(FakeValue::Str(_)) => return Err(wrong_type()),
                 });
             }
+            Op::Find {
+                key,
+                filter,
+                sort,
+                skip,
+                limit,
+            } => {
+                let mut found: Vec<(&String, &String)> = match data.get(key) {
+                    None => vec![],
+                    Some(FakeValue::Hash(h)) => {
+                        h.iter().filter(|(f, v)| filter.matches(f, v)).collect()
+                    }
+                    Some(FakeValue::Str(_)) => return Err(wrong_type()),
+                };
+                // The hash is already in `_id` order: a stable sort keeps it as the
+                // tie-breaker.
+                for (field, asc) in sort.iter().rev() {
+                    found.sort_by(|a, b| {
+                        let o = field.get(a.0, a.1).cmp(field.get(b.0, b.1));
+                        if *asc {
+                            o
+                        } else {
+                            o.reverse()
+                        }
+                    });
+                }
+                let page = found
+                    .into_iter()
+                    .skip(usize::try_from(*skip).unwrap_or(usize::MAX))
+                    .take(*limit as usize)
+                    .map(|(f, v)| vec![Value::Text(f.clone()), Value::Text(v.clone())])
+                    .collect();
+                rows = Some((
+                    vec![text_col(COLLECTION_ID), text_col(COLLECTION_VALUE)],
+                    page,
+                ));
+            }
+            Op::Count { key, filter } => {
+                let n = match data.get(key) {
+                    None => 0,
+                    Some(FakeValue::Hash(h)) => {
+                        h.iter().filter(|(f, v)| filter.matches(f, v)).count()
+                    }
+                    Some(FakeValue::Str(_)) => return Err(wrong_type()),
+                };
+                let count = ColumnMeta {
+                    logical: LogicalType::Integer,
+                    ..text_col("count")
+                };
+                rows = Some((vec![count], vec![vec![Value::Int(n as i64)]]));
+            }
             Op::Select(n) => self.db.store(*n, Ordering::SeqCst),
             Op::FlushDb => data.clear(),
             Op::Config => {}
@@ -1003,17 +1176,103 @@ impl Keyspace for FakeCommandSession {
     }
 }
 
-impl DataAccess for FakeCommandSession {
-    fn page(&self, _obj: &ObjectRef, _spec: &PageSpec) -> Result<ParsedCommand, DbError> {
-        Err(unsupported("collections"))
+impl FakeCommandSession {
+    /// The db index and hash key of collection `obj`.
+    fn collection(obj: &ObjectRef) -> Result<(usize, Vec<u8>), DbError> {
+        match obj.kind {
+            ObjectKind::Collection => {}
+            ObjectKind::Table
+            | ObjectKind::View
+            | ObjectKind::MaterializedView
+            | ObjectKind::Function
+            | ObjectKind::Procedure
+            | ObjectKind::Trigger
+            | ObjectKind::Event
+            | ObjectKind::Sequence
+            | ObjectKind::Type
+            | ObjectKind::Key => return Err(unsupported("data of this object")),
+        }
+        Ok((db_index(&obj.database)?, collection_key(&obj.name)))
     }
 
+    /// A read the data view asked for: `name` with `args` and `op`, or, after
+    /// [`FakeStore::build_reads_as_writes`], an `HSET` on the collection.
+    fn read(&self, db: usize, key: &[u8], name: &str, args: Vec<String>, op: Op) -> ParsedCommand {
+        let display = KeyName::from_bytes(key.to_vec()).display;
+        if self.store.0.reads_as_writes.load(Ordering::SeqCst) {
+            let args = [display, "_".to_string(), "_".to_string()];
+            let op = Op::HSet(key.to_vec(), "_".into(), "_".into());
+            return build_command(
+                Some(db),
+                "HSET",
+                canonical_text("HSET", &args),
+                CommandClass::Write,
+                op,
+            );
+        }
+        let args: Vec<String> = std::iter::once(display).chain(args).collect();
+        build_command(
+            Some(db),
+            name,
+            canonical_text(name, &args),
+            CommandClass::Read,
+            op,
+        )
+    }
+}
+
+impl DataAccess for FakeCommandSession {
+    /// `FIND <key> [WHERE …] [SORT …] SKIP n LIMIT n`.
+    fn page(&self, obj: &ObjectRef, spec: &PageSpec) -> Result<ParsedCommand, DbError> {
+        let (db, key) = Self::collection(obj)?;
+        let filter = RowFilter::of(spec.filter.as_ref())?;
+        let sort = spec
+            .sort
+            .iter()
+            .map(|SortSpec { column, dir }| {
+                let asc = match dir {
+                    SortDir::Asc => true,
+                    SortDir::Desc => false,
+                };
+                Ok((Field::of(column)?, asc))
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+        let mut args = filter.text();
+        for (i, (field, asc)) in sort.iter().enumerate() {
+            args.push(if i == 0 { "SORT" } else { "," }.to_string());
+            args.push(field.name().to_string());
+            args.push(if *asc { "ASC" } else { "DESC" }.to_string());
+        }
+        args.extend([
+            "SKIP".to_string(),
+            spec.skip.to_string(),
+            "LIMIT".to_string(),
+            spec.limit.to_string(),
+        ]);
+        let op = Op::Find {
+            key: key.clone(),
+            filter,
+            sort,
+            skip: spec.skip,
+            limit: spec.limit,
+        };
+        Ok(self.read(db, &key, "FIND", args, op))
+    }
+
+    /// `COUNT <key> [WHERE …]`.
     fn count(
         &self,
-        _obj: &ObjectRef,
-        _filter: Option<&DataFilter>,
+        obj: &ObjectRef,
+        filter: Option<&DataFilter>,
     ) -> Result<ParsedCommand, DbError> {
-        Err(unsupported("collections"))
+        let (db, key) = Self::collection(obj)?;
+        let filter = RowFilter::of(filter)?;
+        let args = filter.text();
+        let op = Op::Count {
+            key: key.clone(),
+            filter,
+        };
+        Ok(self.read(db, &key, "COUNT", args, op))
     }
 
     fn build_edits(

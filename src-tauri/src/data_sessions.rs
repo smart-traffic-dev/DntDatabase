@@ -29,8 +29,10 @@
 use crate::session_manager::{
     close_quietly, config_error, is_lost, lock, ConnectionRuntime, SessionManager,
 };
+use dnt_core::command::{CommandSession, ParsedCommand};
+use dnt_core::data_access::{check_read, DataAccess};
 use dnt_core::driver::{
-    CancelHandle, ExecOptions, ResultSummary, RowSink, Session, SqlSession, StopSignal,
+    CancelHandle, Engine, ExecOptions, ResultSummary, RowSink, Session, SqlSession, StopSignal,
 };
 use dnt_core::error::DbError;
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
@@ -438,9 +440,26 @@ impl fmt::Debug for RawRead {
     }
 }
 
+/// Builds a Command-family read with the `DataAccess` of the session it runs on.
+pub type BuildCommand = dyn Fn(&dyn DataAccess) -> Result<ParsedCommand, DbError> + Send + Sync;
+
+/// A data-view read of the Command family (see [`DataRequest::command`]).
+#[derive(Clone)]
+pub struct CommandRead(pub Arc<BuildCommand>);
+
+impl fmt::Debug for CommandRead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("CommandRead(..)")
+    }
+}
+
 /// One statement for [`SessionManager::data_exec`].
 #[derive(Debug, Clone, Default)]
 pub struct DataRequest {
+    /// Command family: the read is built by the data session's `DataAccess` (`page` /
+    /// `count`), refused unless [`check_read`] passes, then run with `execute_command`.
+    /// `sql`, `raw` and `params` are then ignored; it fails on a SQL session.
+    pub command: Option<CommandRead>,
     /// ONE read statement: built by the backend, or a user statement the plan / guard
     /// classified as a read (export). Ignored when `raw` is set.
     pub sql: String,
@@ -612,9 +631,16 @@ impl SessionManager {
                 full_bytes: request.full_bytes,
                 ..ExecOptions::default()
             };
-            let outcome = match session.sql() {
-                Ok(sql) => run_request(sql, request, &opts, &mut sink).await,
-                Err(e) => Err(e),
+            let outcome = match (&request.command, session.engine()) {
+                (None, Engine::Sql(sql)) => run_request(sql, request, &opts, &mut sink).await,
+                (Some(read), Engine::Command(c)) => {
+                    run_command_read(c, read, &opts, &mut sink).await
+                }
+                // A SQL read on a Command session is refused as SQL-only code refuses it.
+                (None, Engine::Command(_)) => session.sql().map(|_| ()),
+                (Some(_), Engine::Sql(_)) => Err(DbError::Internal {
+                    message: "a command read cannot run on a SQL session".into(),
+                }),
             };
             // A pooled session that went stale while idle (server restart, idle timeout):
             // one more attempt on a fresh session, unless the request was cancelled or
@@ -741,6 +767,19 @@ impl RowSink for FirstCell {
         }
     }
     fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+/// Builds the Command read on `session` and runs it, after [`check_read`]: a driver that
+/// built anything but a plain read gets nothing sent.
+async fn run_command_read(
+    session: &dyn CommandSession,
+    read: &CommandRead,
+    opts: &ExecOptions,
+    sink: &mut dyn RowSink,
+) -> Result<(), DbError> {
+    let cmd = (read.0)(session.data_access())?;
+    check_read(&cmd)?;
+    session.execute_command(&cmd, opts, sink).await.map(|_| ())
 }
 
 /// Runs `request` on `session` (see [`DataRequest::raw`]).

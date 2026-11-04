@@ -220,7 +220,7 @@ pub fn check_raw_json(text: &str) -> Result<(), DbError>;
   - Splits the page the same way. `row_versions`, `hidden_key` and `hidden_key_values` are `None` or empty, and `key_order` is the table detail's key, `["_id"]` when known.
   - The count reads the first cell, as SQL does.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `data_page_reads_through_data_access`
   - `data_count_reads_through_data_access`
   - `data_page_refuses_non_read_command`: a fake hook makes `page` return a Write command, giving `Internal "the driver built …"`; nothing is executed.
@@ -228,10 +228,10 @@ pub fn check_raw_json(text: &str) -> Result<(), DbError>;
   - `raw_json_must_be_an_object`
   - `filter_types_are_per_family`
   - `sql_data_view_unchanged`
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.** Regenerate the bindings; they may only gain `DataFilter.raw_json`. Fix the TS literals.
-- [ ] **Step 4: Run** `cargo test --workspace`, `bindings_are_current`, the UI lint and the UI test. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): Command data-view reads via DataAccess`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.** Regenerate the bindings; they may only gain `DataFilter.raw_json`. Fix the TS literals.
+- [x] **Step 4: Run** `cargo test --workspace`, `bindings_are_current`, the UI lint and the UI test. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): Command data-view reads via DataAccess`.
 
 ### Task 6: Data-view edits for the Command family
 

@@ -1747,7 +1747,14 @@ export type DataFilter = { mode: FilterMode; conditions: FilterCond[];
  * [`crate::sql::build::check_raw_where`] and run inside a read-only transaction; it
  * never goes through [`build_where`]. Absent / null: structured mode.
  */
-raw_where?: string | null }
+raw_where?: string | null; 
+/**
+ * Command family: a JSON filter object typed by the user, passed to the driver's
+ * `DataAccess` after [`crate::data_access::check_raw_json`]. `conditions` must then
+ * be empty. Never set together with `raw_where`; refused on the SQL family.
+ * Absent / null: no JSON filter.
+ */
+raw_json?: string | null }
 /**
  * The review step: what `import_start` will run (R19). Exported to TypeScript as
  * `DataImportPreview` (the connections import already has an `ImportPreview`).

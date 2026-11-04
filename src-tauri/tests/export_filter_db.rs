@@ -86,6 +86,7 @@ fn and(conditions: Vec<FilterCond>) -> Option<DataFilter> {
         mode: FilterMode::And,
         conditions,
         raw_where: None,
+        raw_json: None,
     })
 }
 
@@ -257,6 +258,7 @@ async fn filters_sort_and_count_on_every_target() {
                         cond("id", FilterOp::Eq, &["3"]),
                     ],
                     raw_where: None,
+                    raw_json: None,
                 })
             )
             .await,

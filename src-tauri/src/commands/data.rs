@@ -36,7 +36,7 @@ use super::browse::table_detail_impl;
 use super::transfer::path_error;
 use super::workspace::write_atomic;
 use super::{blocking, guard, require_cap, require_sql};
-use crate::data_sessions::{BoundedPage, DataRequest, RawRead};
+use crate::data_sessions::{BoundedPage, CommandRead, DataRequest, RawRead};
 use crate::edit_plans::size_text;
 pub use crate::edit_plans::{
     ApplyOutcome, ApplyReport, CellPayload, EditPreview, LoadedCell, StmtApply,
@@ -44,9 +44,10 @@ pub use crate::edit_plans::{
 use crate::file_picks::FileAccess;
 use crate::session_manager::config_error;
 use crate::state::AppState;
+use dnt_core::data_access::{check_raw_json, PageSpec};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
-use dnt_core::server::{Cap, SqlKind};
+use dnt_core::server::{Cap, EngineFamily, SqlKind};
 use dnt_core::sql::build::{
     insert_sql, raw_where_clause, update_sql, BuildError, ColumnTarget, RowGuard, RowKey, TableRef,
 };
@@ -469,7 +470,14 @@ pub fn split_page(
 /// Refuses an oversized sort or filter at once, before the object's columns are read
 /// (the same bounds [`build_where`] / [`page_order`] apply, checked without them). The
 /// IPC payload itself is already deserialized by then: Tauri gives no hook before that.
-pub fn check_request_size(sort: &[SortSpec], filter: Option<&DataFilter>) -> Result<(), DbError> {
+///
+/// The filter types are per family: a raw `WHERE` on the SQL family, a JSON filter
+/// ([`DataFilter::raw_json`]) on the Command family, never both.
+pub fn check_request_size(
+    family: EngineFamily,
+    sort: &[SortSpec],
+    filter: Option<&DataFilter>,
+) -> Result<(), DbError> {
     if sort.len() > MAX_SORT_KEYS {
         return Err(config_error(
             "order",
@@ -479,6 +487,22 @@ pub fn check_request_size(sort: &[SortSpec], filter: Option<&DataFilter>) -> Res
     let Some(filter) = filter else {
         return Ok(());
     };
+    if filter.raw_where.is_some() && filter.raw_json.is_some() {
+        return Err(config_error(
+            "filter",
+            "Use either a WHERE filter or a JSON filter, not both",
+        ));
+    }
+    let foreign = match family {
+        EngineFamily::Sql => filter.raw_json.is_some(),
+        EngineFamily::Command => filter.raw_where.is_some(),
+    };
+    if foreign {
+        return Err(config_error(
+            "filter",
+            "This filter type is not available for this engine",
+        ));
+    }
     if let Some(raw) = &filter.raw_where {
         if !filter.conditions.is_empty() {
             return Err(config_error(
@@ -490,6 +514,20 @@ pub fn check_request_size(sort: &[SortSpec], filter: Option<&DataFilter>) -> Res
             return Err(config_error(
                 "filter",
                 &format!("the WHERE text is too long (at most {MAX_VALUE_BYTES} bytes)"),
+            ));
+        }
+    }
+    if let Some(raw) = &filter.raw_json {
+        if !filter.conditions.is_empty() {
+            return Err(config_error(
+                "filter",
+                "a JSON filter takes no other conditions",
+            ));
+        }
+        if raw.len() > MAX_VALUE_BYTES {
+            return Err(config_error(
+                "filter",
+                &format!("the JSON filter is too long (at most {MAX_VALUE_BYTES} bytes)"),
             ));
         }
     }
@@ -526,7 +564,7 @@ pub(crate) async fn data_query(
     sort: &[SortSpec],
     filter: Option<&DataFilter>,
 ) -> Result<DataQuery, DbError> {
-    check_request_size(sort, filter)?;
+    check_request_size(EngineFamily::Sql, sort, filter)?;
     let kind = state.repo.get(id)?.kind.require_sql()?;
     check_object(kind, obj)?;
     let raw_where = raw_text(filter);
@@ -586,6 +624,13 @@ pub async fn table_data_impl(
     filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableDataPage, DbError> {
+    match state.repo.get(id)?.kind.family() {
+        EngineFamily::Sql => {}
+        EngineFamily::Command => {
+            return command_table_data(state, id, obj, limit, offset, sort, filter, request_key)
+                .await
+        }
+    }
     require_sql(state, id)?;
     check_limit(limit)?;
     let query = data_query(state, id, &obj, &sort, filter.as_ref()).await?;
@@ -633,8 +678,14 @@ pub async fn table_row_count_impl(
     filter: Option<DataFilter>,
     request_key: String,
 ) -> Result<TableRowCount, DbError> {
+    match state.repo.get(id)?.kind.family() {
+        EngineFamily::Sql => {}
+        EngineFamily::Command => {
+            return command_row_count(state, id, obj, filter, request_key).await;
+        }
+    }
     let kind = require_sql(state, id)?;
-    check_request_size(&[], filter.as_ref())?;
+    check_request_size(EngineFamily::Sql, &[], filter.as_ref())?;
     check_object(kind, &obj)?;
     let rel = relation(kind, &obj);
     let request = match raw_text(filter.as_ref()) {
@@ -661,6 +712,129 @@ pub async fn table_row_count_impl(
                 ..DataRequest::default()
             }
         }
+    };
+    let started = Instant::now();
+    let read = state
+        .sessions
+        .data_read_request(id, Some(&obj.database), &request_key, &request)
+        .await?;
+    let rows = count_value(read.rows.first().and_then(|r| r.first()))?;
+    Ok(TableRowCount {
+        rows,
+        elapsed_ms: elapsed_ms(started),
+    })
+}
+
+/// The checks every Command-family data-view read passes before anything is built: the
+/// connection's session is a Command one, the filter is a JSON one (or structured) and
+/// safe ([`check_raw_json`]), and the object is a collection of a database.
+fn command_read_checks(
+    state: &AppState,
+    id: Uuid,
+    obj: &ObjectRef,
+    sort: &[SortSpec],
+    filter: Option<&DataFilter>,
+) -> Result<(), DbError> {
+    match state.sessions.capabilities(id)?.family {
+        EngineFamily::Command => {}
+        EngineFamily::Sql => {
+            return Err(DbError::Unsupported {
+                feature: "a command data view on a SQL session".into(),
+                version: String::new(),
+            })
+        }
+    }
+    check_request_size(EngineFamily::Command, sort, filter)?;
+    if let Some(raw) = filter.and_then(|f| f.raw_json.as_deref()) {
+        check_raw_json(raw)?;
+    }
+    match obj.kind {
+        ObjectKind::Collection => {}
+        ObjectKind::Table
+        | ObjectKind::View
+        | ObjectKind::MaterializedView
+        | ObjectKind::Function
+        | ObjectKind::Procedure
+        | ObjectKind::Trigger
+        | ObjectKind::Event
+        | ObjectKind::Sequence
+        | ObjectKind::Type
+        | ObjectKind::Key => {
+            return Err(config_error("kind", "only collections have data to show"))
+        }
+    }
+    if obj.database.is_empty() {
+        return Err(config_error("database", "a database is required"));
+    }
+    Ok(())
+}
+
+/// [`table_data_impl`] of the Command family: the page is built by the data session's
+/// `DataAccess` and must be a read ([`dnt_core::data_access::check_read`]).
+#[allow(clippy::too_many_arguments)]
+async fn command_table_data(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+    limit: u32,
+    offset: u64,
+    sort: Vec<SortSpec>,
+    filter: Option<DataFilter>,
+    request_key: String,
+) -> Result<TableDataPage, DbError> {
+    check_limit(limit)?;
+    command_read_checks(state, id, &obj, &sort, filter.as_ref())?;
+    // The stable key order, when the detail can be read (the driver orders the page).
+    let keys = if sort.is_empty() {
+        table_detail_impl(state, id, obj.clone())
+            .await
+            .map(|d| key_order(&d))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let fetch = limit + 1;
+    let spec = PageSpec {
+        sort,
+        filter,
+        limit: fetch,
+        skip: offset,
+    };
+    let target = obj.clone();
+    let request = DataRequest {
+        command: Some(CommandRead(Arc::new(move |access| {
+            access.page(&target, &spec)
+        }))),
+        max_rows: fetch as usize,
+        ..DataRequest::default()
+    };
+    let started = Instant::now();
+    let page = state
+        .sessions
+        .data_read_request(id, Some(&obj.database), &request_key, &request)
+        .await?;
+    let mut page = split_page(page, &PageExtras::default(), limit)?;
+    page.key_order = keys;
+    page.elapsed_ms = elapsed_ms(started);
+    Ok(page)
+}
+
+/// [`table_row_count_impl`] of the Command family (see [`command_table_data`]).
+async fn command_row_count(
+    state: &AppState,
+    id: Uuid,
+    obj: ObjectRef,
+    filter: Option<DataFilter>,
+    request_key: String,
+) -> Result<TableRowCount, DbError> {
+    command_read_checks(state, id, &obj, &[], filter.as_ref())?;
+    let target = obj.clone();
+    let request = DataRequest {
+        command: Some(CommandRead(Arc::new(move |access| {
+            access.count(&target, filter.as_ref())
+        }))),
+        max_rows: 1,
+        ..DataRequest::default()
     };
     let started = Instant::now();
     let read = state
@@ -1161,7 +1335,11 @@ mod tests {
             mode: FilterMode::And,
             conditions,
             raw_where: None,
+            raw_json: None,
         };
+        fn check_request_size(sort: &[SortSpec], f: Option<&DataFilter>) -> Result<(), DbError> {
+            super::check_request_size(EngineFamily::Sql, sort, f)
+        }
         let ok = filter(vec![cond(vec!["1".into()]); MAX_CONDITIONS]);
         assert!(check_request_size(&[], Some(&ok)).is_ok());
         assert!(check_request_size(&[], None).is_ok());
@@ -1201,6 +1379,20 @@ mod tests {
             field(check_request_size(&sort, None).unwrap_err()).as_deref(),
             Some("order")
         );
+        // A JSON filter is bounded the same way (Command family).
+        let json = |text: String, conditions| DataFilter {
+            raw_json: Some(text),
+            ..filter(conditions)
+        };
+        let command =
+            |f: &DataFilter| super::check_request_size(EngineFamily::Command, &[], Some(f));
+        assert!(command(&json("{}".into(), vec![])).is_ok());
+        for bad in [
+            json("x".repeat(MAX_VALUE_BYTES + 1), vec![]),
+            json("{}".into(), vec![cond(vec!["1".into()])]),
+        ] {
+            assert_eq!(field(command(&bad).unwrap_err()).as_deref(), Some("filter"));
+        }
     }
 
     #[test]

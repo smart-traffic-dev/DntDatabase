@@ -606,6 +606,7 @@ fn raw(text: &str) -> Option<DataFilter> {
         mode: FilterMode::And,
         conditions: vec![],
         raw_where: Some(text.into()),
+        raw_json: None,
     })
 }
 

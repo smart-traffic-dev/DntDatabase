@@ -121,6 +121,47 @@ pub fn check_read(cmd: &ParsedCommand) -> Result<(), DbError> {
     }
 }
 
+/// Keys that run JavaScript on the server, refused anywhere in a JSON filter.
+const SERVER_SIDE_JS: [&str; 3] = ["$where", "$function", "$accumulator"];
+
+fn filter_error(message: &str) -> DbError {
+    DbError::Config {
+        field: Some("filter".into()),
+        message: message.into(),
+    }
+}
+
+/// Whether `v` holds a server-side JavaScript key at any depth.
+fn has_server_side_js(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(map) => map
+            .iter()
+            .any(|(k, v)| SERVER_SIDE_JS.contains(&k.as_str()) || has_server_side_js(v)),
+        serde_json::Value::Array(items) => items.iter().any(has_server_side_js),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => false,
+    }
+}
+
+/// Checks a user's JSON filter (`DataFilter::raw_json`) before any driver sees it: it
+/// must parse as a JSON object, and no key at any depth may run server-side JavaScript
+/// (`$where`, `$function`, `$accumulator`). A `Config` error on field `filter` otherwise.
+pub fn check_raw_json(text: &str) -> Result<(), DbError> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|_| filter_error("The filter must be a JSON object"))?;
+    if !value.is_object() {
+        return Err(filter_error("The filter must be a JSON object"));
+    }
+    if has_server_side_js(&value) {
+        return Err(filter_error(
+            "Server-side JavaScript is not allowed in a filter",
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +251,41 @@ mod tests {
         // Binary members travel as standard base64.
         assert_eq!(zadd["member"], "/wBh");
         assert_eq!(KeyBytes::from("hi"), KeyBytes(b"hi".to_vec()));
+    }
+
+    fn filter_message(r: Result<(), DbError>) -> String {
+        match r {
+            Err(DbError::Config { field, message }) => {
+                assert_eq!(field.as_deref(), Some("filter"));
+                message
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_json_is_an_object_without_server_side_js() {
+        assert!(check_raw_json(r#"{"a":{"$gt":1},"b":[{"c":"$where"}]}"#).is_ok());
+        assert!(check_raw_json("{}").is_ok());
+        for bad in [
+            r#"{"$where":"1"}"#,
+            r#"{"a":{"$where":"1"}}"#,
+            r#"{"$or":[{"x":1},{"$expr":{"$function":{}}}]}"#,
+            r#"{"g":{"$accumulator":{}}}"#,
+        ] {
+            assert_eq!(
+                filter_message(check_raw_json(bad)),
+                "Server-side JavaScript is not allowed in a filter",
+                "{bad}"
+            );
+        }
+        for bad in ["[1]", "\"x\"", "1", "null", "{", ""] {
+            assert_eq!(
+                filter_message(check_raw_json(bad)),
+                "The filter must be a JSON object",
+                "{bad}"
+            );
+        }
     }
 
     #[test]

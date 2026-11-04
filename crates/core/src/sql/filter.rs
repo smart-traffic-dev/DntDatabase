@@ -123,6 +123,12 @@ pub struct DataFilter {
     /// never goes through [`build_where`]. Absent / null: structured mode.
     #[serde(default)]
     pub raw_where: Option<String>,
+    /// Command family: a JSON filter object typed by the user, passed to the driver's
+    /// `DataAccess` after [`crate::data_access::check_raw_json`]. `conditions` must then
+    /// be empty. Never set together with `raw_where`; refused on the SQL family.
+    /// Absent / null: no JSON filter.
+    #[serde(default)]
+    pub raw_json: Option<String>,
 }
 
 /// A `WHERE` clause (with its leading space, or empty) and its parameters, in order.
@@ -253,6 +259,11 @@ pub fn build_where(
             "a raw WHERE filter is not a structured filter".into(),
         ));
     }
+    if filter.raw_json.is_some() {
+        return Err(filter_error(
+            "a JSON filter is not a structured filter".into(),
+        ));
+    }
     if filter.conditions.is_empty() {
         return Ok(WhereClause::default());
     }
@@ -348,6 +359,7 @@ mod tests {
             mode,
             conditions,
             raw_where: None,
+            raw_json: None,
         }
     }
 
@@ -357,9 +369,14 @@ mod tests {
         raw.raw_where = Some("id > 0".into());
         let (field, _) = field_of(build(SqlKind::MySql, &raw).unwrap_err());
         assert_eq!(field.as_deref(), Some("filter"));
+        let mut json = filter(FilterMode::And, vec![]);
+        json.raw_json = Some("{}".into());
+        let (field, _) = field_of(build(SqlKind::MySql, &json).unwrap_err());
+        assert_eq!(field.as_deref(), Some("filter"));
         // Absent from the JSON: structured mode.
         let f: DataFilter = serde_json::from_str(r#"{"mode":"and","conditions":[]}"#).unwrap();
         assert_eq!(f.raw_where, None);
+        assert_eq!(f.raw_json, None);
     }
 
     fn build(kind: SqlKind, f: &DataFilter) -> Result<WhereClause, DbError> {
