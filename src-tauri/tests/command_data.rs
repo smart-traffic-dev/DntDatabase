@@ -76,6 +76,7 @@ async fn fixture(driver: Arc<dyn Driver>, cfg: ConnectionConfig) -> Fixture {
         paths: AppPaths::in_dir(dir.path().join("data")),
         export_paths: ExportPaths::default(),
         file_picks: FilePicks::default(),
+        ai: Default::default(),
     };
     Fixture {
         state,

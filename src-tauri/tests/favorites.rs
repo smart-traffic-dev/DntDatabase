@@ -159,6 +159,7 @@ fn redis_state(dir: &std::path::Path) -> (AppState, Uuid) {
         paths: AppPaths::in_dir(dir.join("data")),
         export_paths: ExportPaths::default(),
         file_picks: FilePicks::default(),
+        ai: Default::default(),
     };
     (state, id)
 }
