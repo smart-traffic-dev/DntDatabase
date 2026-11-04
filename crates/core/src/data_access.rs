@@ -62,12 +62,14 @@ pub enum KeyEdit {
     },
     ListSet {
         key: KeyName,
+        #[specta(type = f64)]
         index: i64,
         value: KeyBytes,
     },
     ListRemove {
         key: KeyName,
         value: KeyBytes,
+        #[specta(type = f64)]
         count: i64,
     },
     SetAdd {
@@ -90,6 +92,7 @@ pub enum KeyEdit {
     /// `None` removes the expiry (persist).
     Expire {
         key: KeyName,
+        #[specta(type = Option<f64>)]
         ttl_ms: Option<i64>,
     },
     Rename {

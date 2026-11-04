@@ -297,17 +297,17 @@ key_edit_preview(id: Uuid, db: String, edit: KeyEdit) -> EditPreview            
 - **`count` on `ScanRequest`** is clamped to 1..=1000.
 - **Bindings:** the keyspace and `KeyEdit` types are exported because these commands use them. The bindings gain only the new commands and the types they reference.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `keys_scan_pages_through_keys`
   - `key_value_reads_a_hash`
   - `key_edit_round_trip`: preview, then `data_apply`, then the value has changed, and a History row is written.
   - `key_edit_blocked_read_only`
   - `key_edit_confirms_on_production`: `Delete` on Production gives Confirm.
   - `keys_refused_without_paged_objects`: a fake with `paged_objects` off.
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.** Register the commands and regenerate the bindings.
-- [ ] **Step 4: Run** `cargo test --workspace`, `bindings_are_current`, the UI lint and the UI test. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): key browser commands`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.** Register the commands and regenerate the bindings.
+- [x] **Step 4: Run** `cargo test --workspace`, `bindings_are_current`, the UI lint and the UI test. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): key browser commands`.
 
 ### Task 8: Favorites redact with the connection's language
 

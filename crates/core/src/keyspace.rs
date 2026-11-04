@@ -39,6 +39,7 @@ pub struct KeyPage {
 pub struct KeySummary {
     pub name: KeyName,
     pub key_type: KeyType,
+    #[specta(type = Option<f64>)]
     pub ttl_ms: Option<i64>,
 }
 
@@ -112,6 +113,7 @@ pub enum KeyType {
 /// A page of a hash / list / set / zset / stream value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct ValueRange {
+    #[specta(type = f64)]
     pub offset: u64,
     pub count: u32,
 }
@@ -123,24 +125,29 @@ pub enum KeyValue {
     },
     Hash {
         fields: Vec<(Value, Value)>,
+        #[specta(type = f64)]
         total: u64,
         next: Option<String>,
     },
     List {
         items: Vec<Value>,
+        #[specta(type = f64)]
         total: u64,
     },
     Set {
         members: Vec<Value>,
+        #[specta(type = f64)]
         total: u64,
         next: Option<String>,
     },
     ZSet {
         members: Vec<(Value, f64)>,
+        #[specta(type = f64)]
         total: u64,
     },
     Stream {
         entries: Vec<StreamEntry>,
+        #[specta(type = f64)]
         total: u64,
     },
     Other {
@@ -154,7 +161,9 @@ pub enum KeyValue {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct KeyValueView {
     pub value: KeyValue,
+    #[specta(type = Option<f64>)]
     pub ttl_ms: Option<i64>,
+    #[specta(type = Option<f64>)]
     pub memory_bytes: Option<u64>,
 }
 

@@ -13,6 +13,7 @@ pub mod export;
 pub mod favorites;
 pub mod import_data;
 pub mod jobs;
+pub mod keys;
 pub mod objects;
 pub mod query;
 pub mod seed;
@@ -215,6 +216,9 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             data::data_cell_load_file,
             data::data_cell_save_file,
             data::data_copy_sql,
+            keys::keys_scan,
+            keys::key_value,
+            keys::key_edit_preview,
             export::export_rows,
             export::export_table,
             export::export_query,

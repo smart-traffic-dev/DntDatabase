@@ -61,7 +61,9 @@
 //! edit is blocked on a read-only connection and, unless atomic, on Production
 //! ([`command_edit_verdict`]). Apply checks it all again, then sends the commands in
 //! order on one data session, each once; the first failure stops it. History rows are
-//! redacted with the connection's `CommandLanguage`.
+//! redacted with the connection's `CommandLanguage`. A key edit of the key browser
+//! (`DataAccess::build_key_edit`) is stored and applied the same way; it has no
+//! collection structure to recheck.
 //!
 //! # Complete cell values (spec §5.3)
 //!
@@ -88,11 +90,13 @@ use crate::run_events::utc_millis_now;
 use crate::session_manager::{config_error, is_lost, lock, ConnectionRuntime, SessionManager};
 use dnt_core::command::{CommandLanguage, ParsedCommand};
 use dnt_core::config::{ConnectionConfig, EnvTag};
+use dnt_core::data_access::KeyEdit;
 use dnt_core::driver::{
     CellMode, Engine, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal,
 };
 use dnt_core::error::{AppError, DbError};
-use dnt_core::meta::{ObjectRef, TableDetail};
+use dnt_core::keyspace::KeyName;
+use dnt_core::meta::{ObjectKind, ObjectRef, TableDetail};
 use dnt_core::sql::ident::{qualified_name, quote_ident};
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
@@ -193,19 +197,25 @@ enum StoredPlan {
     Command(CommandEdit),
 }
 
-/// A Command-family edit plan: the commands the driver's `DataAccess::build_edits`
-/// built, run in order through a data session, each judged by the policy.
+/// A Command-family edit plan: the commands the driver's `DataAccess::build_edits` (a
+/// collection) or `build_key_edit` (a key) built, run in order through a data session,
+/// each judged by the policy.
 struct CommandEdit {
     commands: Vec<ParsedCommand>,
     atomic: Atomicity,
-    /// The collection's [`fingerprint`] when the plan was made.
-    fingerprint: u64,
+    /// The collection's [`fingerprint`] when the plan was made; `None` for a key edit
+    /// (a key has no structure to change).
+    fingerprint: Option<u64>,
 }
 
 impl StoredEdit {
+    /// Whether `o` of connection `conn` is the object of this plan. A key (the key
+    /// browser) is never the same object as a table or collection of the same name.
     fn same_table(&self, conn: Uuid, o: &ObjectRef) -> bool {
         let t = &self.object;
-        self.conn == conn && (&t.database, &t.schema, &t.name) == (&o.database, &o.schema, &o.name)
+        self.conn == conn
+            && (&t.database, &t.schema, &t.name) == (&o.database, &o.schema, &o.name)
+            && (t.kind == ObjectKind::Key) == (o.kind == ObjectKind::Key)
     }
 }
 
@@ -1548,6 +1558,25 @@ fn command_report(outcome: ApplyOutcome, statements: Vec<StmtApply>) -> ApplyRep
     }
 }
 
+/// The key `edit` changes (a rename: the key before it).
+fn edit_key(edit: &KeyEdit) -> &KeyName {
+    match edit {
+        KeyEdit::SetString { key, .. }
+        | KeyEdit::HashSet { key, .. }
+        | KeyEdit::HashDelete { key, .. }
+        | KeyEdit::ListPush { key, .. }
+        | KeyEdit::ListSet { key, .. }
+        | KeyEdit::ListRemove { key, .. }
+        | KeyEdit::SetAdd { key, .. }
+        | KeyEdit::SetRemove { key, .. }
+        | KeyEdit::ZSetAdd { key, .. }
+        | KeyEdit::ZSetRemove { key, .. }
+        | KeyEdit::Expire { key, .. }
+        | KeyEdit::Rename { key, .. }
+        | KeyEdit::Delete { key } => key,
+    }
+}
+
 impl SessionManager {
     /// Builds and stores the plan of `set` on Command connection `id` (see the module
     /// docs and [`command_edit_verdict`]). Errors: `config` (field `kind` / `database`
@@ -1612,7 +1641,80 @@ impl SessionManager {
                 plan: StoredPlan::Command(CommandEdit {
                     commands,
                     atomic,
-                    fingerprint: fingerprint(&detail),
+                    fingerprint: Some(fingerprint(&detail)),
+                }),
+                at: Instant::now(),
+            },
+        );
+        Ok(preview)
+    }
+
+    /// Builds and stores the plan of key edit `edit` in database `db` of Command
+    /// connection `id` (the key browser): the commands come from the `DataAccess` of a
+    /// data session on `db` (`build_key_edit`; nothing is sent), are judged as a
+    /// collection's ([`command_edit_verdict`]) and applied by [`Self::edit_apply`].
+    /// The edit is atomic when it is one command, or the engine has transactions.
+    /// Errors: `config` (field `database` when `db` is empty, `edit` when there is
+    /// nothing to apply), `not_open`, driver errors of `build_key_edit`.
+    pub async fn key_edit_preview(
+        &self,
+        id: Uuid,
+        db: &str,
+        edit: &KeyEdit,
+    ) -> Result<EditPreview, DbError> {
+        if db.is_empty() {
+            return Err(config_error("database", "a database is required"));
+        }
+        let cfg = self.repo.get(id)?;
+        let rt = self.runtime(id)?;
+        let caps = rt.server_info().capabilities;
+        let taken = self.take_data_session(&rt, Some(db)).await?;
+        let tunnel_gen = taken.tunnel_gen;
+        let built = match taken.session.engine() {
+            Engine::Command(c) => c.data_access().build_key_edit(db, edit),
+            Engine::Sql(_) => Err(DbError::Unsupported {
+                feature: "key editing on a SQL session".into(),
+                version: String::new(),
+            }),
+        };
+        self.return_data_session(&rt, taken, true);
+        let commands = built?;
+        if commands.is_empty() {
+            return Err(config_error("edit", "there are no changes to apply"));
+        }
+        // One command is applied as a unit by the server.
+        let atomic = if commands.len() == 1 || caps.transactions {
+            Atomicity::Yes
+        } else {
+            Atomicity::No
+        };
+        let (verdict, reason) = command_edit_verdict(&commands, atomic, &policy_ctx(self, &cfg));
+        let mut preview = EditPreview {
+            plan_id: Uuid::nil(),
+            statements: commands.iter().map(|c| c.text.clone()).collect(),
+            verdict,
+            atomic,
+            protections: vec![Protection::KeyOnly; commands.len()],
+            reason,
+        };
+        preview.plan_id = self.edit_plans.insert(
+            self.plan_ttl,
+            StoredEdit {
+                conn: id,
+                runtime: Arc::downgrade(&rt),
+                tunnel_gen,
+                object: ObjectRef {
+                    database: db.to_string(),
+                    schema: None,
+                    name: edit_key(edit).display.clone(),
+                    kind: ObjectKind::Key,
+                },
+                env: cfg.env_tag,
+                read_only: cfg.read_only,
+                plan: StoredPlan::Command(CommandEdit {
+                    commands,
+                    atomic,
+                    fingerprint: None,
                 }),
                 at: Instant::now(),
             },
@@ -1651,9 +1753,11 @@ impl SessionManager {
                 "the connection's environment or read-only setting changed",
             ));
         }
-        let detail = self.table_detail_fresh(stored.conn, &stored.object).await?;
-        if fingerprint(&detail) != edit.fingerprint {
-            return Err(stale("the collection's structure changed"));
+        if let Some(planned) = edit.fingerprint {
+            let detail = self.table_detail_fresh(stored.conn, &stored.object).await?;
+            if fingerprint(&detail) != planned {
+                return Err(stale("the collection's structure changed"));
+            }
         }
         let taken = self
             .take_data_session(&rt, Some(&stored.object.database))

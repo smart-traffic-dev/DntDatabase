@@ -115,6 +115,8 @@ struct StoreInner {
     blocked_changed: Notify,
     /// `DataAccess::page` / `count` build a Write (a driver bug the backend must catch).
     reads_as_writes: AtomicBool,
+    /// Sessions opened from now on report `capabilities.paged_objects = false`.
+    no_paged_objects: AtomicBool,
 }
 
 /// A shared handle on the data of a [`FakeCommandDriver`] (every session of the driver
@@ -134,7 +136,14 @@ impl FakeStore {
             blocked: AtomicBool::new(false),
             blocked_changed: Notify::new(),
             reads_as_writes: AtomicBool::new(false),
+            no_paged_objects: AtomicBool::new(false),
         }))
+    }
+
+    /// Sessions opened from now on report `capabilities.paged_objects = false` (an
+    /// engine without a key browser); their `keyspace()` still answers.
+    pub fn without_paged_objects(&self) {
+        self.0.no_paged_objects.store(true, Ordering::SeqCst);
     }
 
     /// From now on, `DataAccess::page` and `count` build `HSET <collection> _ _` (a
@@ -273,8 +282,12 @@ impl Driver for FakeCommandDriver {
             .as_deref()
             .and_then(|d| db_index(d).ok())
             .unwrap_or(0);
+        let mut info = server_info(self.kind);
+        if self.store.0.no_paged_objects.load(Ordering::SeqCst) {
+            info.capabilities.paged_objects = false;
+        }
         Ok(Box::new(FakeCommandSession {
-            info: server_info(self.kind),
+            info,
             store: self.store.clone(),
             language: FakeLanguage,
             db: AtomicUsize::new(start),

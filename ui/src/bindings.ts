@@ -740,6 +740,41 @@ async dataCopySql(id: string, obj: ObjectRef, rows: RowRef[], format: CopySqlFor
 }
 },
 /**
+ * One page of the keys of `db` matching `req` (a glob `pattern`, a `key_type`).
+ * `next_cursor: null`: the scan is complete.
+ */
+async keysScan(id: string, db: string, req: ScanRequest) : Promise<Result<KeyPage, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("keys_scan", { id, db, req }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * One page of the value of `key` in `db`.
+ */
+async keyValue(id: string, db: string, key: KeyName, range: ValueRange) : Promise<Result<KeyValueView, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("key_value", { id, db, key, range }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Previews one key edit in `db`: the commands it sends and their verdict. Apply it
+ * with `data_apply`.
+ */
+async keyEditPreview(id: string, db: string, edit: KeyEdit) : Promise<Result<EditPreview, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("key_edit_preview", { id, db, edit }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Writes rows the UI holds (the loaded rows) to `path`. `kind`: the engine whose
  * quoting the SQL format uses.
  */
@@ -2418,6 +2453,11 @@ export type JobSummary = { id: string; kind: JobKind; connection_id: string | nu
 export type JsInteger = number | string
 export type JsonValue = null | boolean | number | string | JsonValue[] | Partial<{ [key in string]: JsonValue }>
 /**
+ * Binary data of a key's value (a string value, a field, a member), serialized as
+ * standard base64 like [`KeyName::raw`].
+ */
+export type KeyBytes = string
+/**
  * A key an upsert can use.
  */
 export type KeyChoice = { name: string; columns: string[]; primary: boolean }
@@ -2429,6 +2469,36 @@ export type KeyDef = { original: string | null;
  * Constraint name (PostgreSQL); MySQL always names it `PRIMARY`.
  */
 name: string | null; columns: string[]; locked: boolean }
+/**
+ * One edit of a key-value key.
+ */
+export type KeyEdit = { op: "set_string"; key: KeyName; value: KeyBytes } | { op: "hash_set"; key: KeyName; field: KeyBytes; value: KeyBytes } | { op: "hash_delete"; key: KeyName; field: KeyBytes } | 
+/**
+ * `head`: push at the head (`LPUSH`), else at the tail.
+ */
+{ op: "list_push"; key: KeyName; value: KeyBytes; head: boolean } | { op: "list_set"; key: KeyName; index: number; value: KeyBytes } | { op: "list_remove"; key: KeyName; value: KeyBytes; count: number } | { op: "set_add"; key: KeyName; member: KeyBytes } | { op: "set_remove"; key: KeyName; member: KeyBytes } | { op: "z_set_add"; key: KeyName; member: KeyBytes; score: number } | { op: "z_set_remove"; key: KeyName; member: KeyBytes } | 
+/**
+ * `None` removes the expiry (persist).
+ */
+{ op: "expire"; key: KeyName; ttl_ms: number | null } | { op: "rename"; key: KeyName; to: KeyName } | { op: "delete"; key: KeyName }
+/**
+ * A key as the server stores it (`raw`, serialized as standard base64) and as the UI
+ * shows it (`display`).
+ */
+export type KeyName = { display: string; raw: string }
+export type KeyPage = { keys: KeySummary[]; 
+/**
+ * `None`: the scan is complete.
+ */
+next_cursor: string | null }
+export type KeySummary = { name: KeyName; key_type: KeyType; ttl_ms: number | null }
+export type KeyType = "String" | "Hash" | "List" | "Set" | "ZSet" | "Stream" | "Json" | { Other: string }
+export type KeyValue = { String: { value: Value } } | { Hash: { fields: ([Value, Value])[]; total: number; next: string | null } } | { List: { items: Value[]; total: number } } | { Set: { members: Value[]; total: number; next: string | null } } | { ZSet: { members: ([Value, number])[]; total: number } } | { Stream: { entries: StreamEntry[]; total: number } } | { Other: { type_name: string; text: string } }
+/**
+ * What [`Keyspace::key_value`] returns: the value plus its TTL and (best-effort,
+ * `MEMORY USAGE`) memory use.
+ */
+export type KeyValueView = { value: KeyValue; ttl_ms: number | null; memory_bytes: number | null }
 /**
  * A complete value and the token that stands for it in a later edit.
  */
@@ -2814,6 +2884,7 @@ export type RunOptions = {
  * took. The SQL is never rewritten and the session never dropped for it.
  */
 max_rows: number; continue_on_error: boolean }
+export type ScanRequest = { cursor: string | null; pattern: string | null; key_type: KeyType | null; count: number }
 /**
  * What a text file holds (statement counts by kind).
  */
@@ -3064,6 +3135,7 @@ export type StopReason =
  * How an existing object is changed: `CREATE OR REPLACE`, or drop and re-create.
  */
 export type Strategy = "replace" | "recreate"
+export type StreamEntry = { id: string; fields: ([Value, Value])[] }
 /**
  * The transaction of a query tab, for the status bar and the idle-transaction warning.
  */
@@ -3300,6 +3372,10 @@ export type Value = { t: "Null" } | { t: "Bool"; v: boolean } | { t: "Int"; v: J
  * A byte length; far below 2^53 in practice, so a plain number.
  */
 len: number; preview: number[] } } | { t: "Date"; v: string } | { t: "Time"; v: string } | { t: "DateTime"; v: string } | { t: "TimestampTz"; v: string } | { t: "Array"; v: Value[] } | { t: "Other"; v: { type_name: string; text: string } }
+/**
+ * A page of a hash / list / set / zset / stream value.
+ */
+export type ValueRange = { offset: number; count: number }
 export type Verdict = "allow" | "confirm" | "block"
 /**
  * The statement that changes every row.
