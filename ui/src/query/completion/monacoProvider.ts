@@ -63,7 +63,7 @@ function snippetItems(monaco: typeof Monaco, range: Monaco.IRange): Monaco.langu
  * Whether the suggest list of `editor` is on screen. Monaco adds `visible` 100 ms after it
  * shows the list (a fade-in), so the class alone misses a load that settles in that window.
  */
-function suggestShown(editor: Monaco.editor.ICodeEditor): boolean {
+export function suggestShown(editor: Monaco.editor.ICodeEditor): boolean {
   const widget = editor.getDomNode()?.querySelector('.suggest-widget');
   if (!widget) return false;
   const check = (widget as Element & { checkVisibility?: (o: object) => boolean }).checkVisibility;

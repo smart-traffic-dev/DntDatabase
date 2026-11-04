@@ -4,6 +4,7 @@ import { memo, useEffect } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
 import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
+import { bindAiKeys, ensureAiInline } from '../../query/ai/inlineProvider';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
 import type { Engine } from '../../query/engine';
 import { clearCursor, reportCursor } from '../../store/cursor';
@@ -87,6 +88,8 @@ function options(): Monaco.editor.IStandaloneEditorConstructionOptions {
     // Snippet-kind items come from our provider only (built-in and user snippets), ranked last.
     snippetSuggestions: 'bottom',
     suggest: { showWords: false, showSnippets: true, filterGraceful: true, localityBonus: false },
+    // AI ghost text (query/ai/inlineProvider.ts); the provider decides when there is one.
+    inlineSuggest: { enabled: true },
   };
   return editorOptions;
 }
@@ -147,11 +150,13 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
         }}
         onMount={(editor, monaco) => {
           ensureCompletion(monaco);
+          ensureAiInline(monaco);
           editors.set(doc.id, editor);
           editor.onDidDispose(() => {
             if (editors.get(doc.id) === editor) editors.delete(doc.id);
           });
           bindRunKeys(doc.id, editor, monaco);
+          bindAiKeys(editor, monaco);
           bindEditorFontScale(editor);
           onMount?.(editor, monaco);
         }}

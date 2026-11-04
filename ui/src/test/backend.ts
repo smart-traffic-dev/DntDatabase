@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { vi } from 'vitest';
 import { appError, Failure } from './fixtures/data';
+import { resetAiLoad, useAi } from '../store/ai';
 import { useAppSettings } from '../store/appSettings';
 import { useConnections } from '../store/connections';
 import { useDataEdits } from '../store/dataEdits';
@@ -67,4 +68,6 @@ export function resetStores() {
   useDialogs.setState({ objectActionRunning: false, tableDesignRunning: false, ddlEditRunning: false, prompt: null, request: null, notice: null, internalError: null, question: null });
   useToasts.getState().reset();
   useJobs.getState().reset();
+  useAi.getState().reset();
+  resetAiLoad();
 }

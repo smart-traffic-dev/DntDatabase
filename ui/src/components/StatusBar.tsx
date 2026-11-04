@@ -18,6 +18,7 @@ import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { JobsCounter } from '../jobs/JobsCounter';
+import { AiStatus } from './AiStatus';
 import { LockIcon } from './icons';
 import { formatClock, formatElapsed, shortVersion } from './statusFormat';
 
@@ -230,6 +231,7 @@ export function StatusBar() {
       {queryTabId && <QueryStatus tabId={queryTabId} />}
       {queryTabId && (
         <span className="status-right">
+          {tabConnection && <AiStatus connId={tabConnection} />}
           <CursorStatus tabId={queryTabId} />
           UTF-8
         </span>

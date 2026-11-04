@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { AiConfig, AiConnectionView, AiSettings, AiTestResult, AiTrigger } from '../bindings';
+import { useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
 import { Callout } from './parts';
@@ -106,21 +107,28 @@ export function SettingsAiPanel() {
       });
       setSettings(s);
       setDraft(draftOf(s.config));
-      setOptIns(await api.aiOptInList());
+      useAi.getState().setSettings(s);
+      const list = await api.aiOptInList();
+      setOptIns(list);
+      useAi.getState().setOptIns(list);
       setTest(null);
       setNotice('Saved.');
     });
 
   const saveKey = () =>
     run(async () => {
-      setSettings(await api.aiKeySet(key));
+      const s = await api.aiKeySet(key);
+      setSettings(s);
+      useAi.getState().setSettings(s);
       setKey('');
       setNotice('The API key is saved.');
     });
 
   const clearKey = () =>
     run(async () => {
-      setSettings(await api.aiKeyClear());
+      const s = await api.aiKeyClear();
+      setSettings(s);
+      useAi.getState().setSettings(s);
       setNotice('The API key is removed.');
     });
 
@@ -137,7 +145,9 @@ export function SettingsAiPanel() {
 
   const setOptIn = (id: string, enabled: boolean) =>
     run(async () => {
-      setOptIns(await api.aiOptInSet(id, enabled));
+      const list = await api.aiOptInSet(id, enabled);
+      setOptIns(list);
+      useAi.getState().setOptIns(list);
       setConsentFor(null);
       setPick('');
     });
