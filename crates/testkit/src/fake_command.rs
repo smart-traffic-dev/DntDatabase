@@ -13,6 +13,11 @@
 //! | `FLUSHDB`                                | Admin, drops the current db |
 //! | `CONFIG …`                               | Admin                       |
 //! | anything else                            | Unknown (the server refuses it) |
+//!
+//! Collections (the data view's objects): every hash key `h:<name>` of a db is a
+//! collection named `<name>`. `list_objects(scope, Collection)` lists them; the
+//! `table_detail` of one has the columns `_id` (the field name, the primary key) and
+//! `value`, and its rows are the hash's fields.
 
 use async_trait::async_trait;
 use dnt_core::command::{
@@ -32,8 +37,8 @@ use dnt_core::keyspace::{
     ValueRange,
 };
 use dnt_core::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
-    TableDetail,
+    ColumnDetail, DatabaseInfo, IndexDetail, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo,
+    Scope, TableColumns, TableDetail, TableOptions,
 };
 use dnt_core::redact::Redacted;
 use dnt_core::server::{
@@ -50,6 +55,18 @@ use tokio::sync::Notify;
 
 /// Number of databases, named `"0"` … `"15"`.
 pub const DB_COUNT: usize = 16;
+
+/// The prefix of a hash key that is a collection: `h:<name>`.
+pub const COLLECTION_PREFIX: &[u8] = b"h:";
+/// The column of a collection that holds the field name (its primary key).
+pub const COLLECTION_ID: &str = "_id";
+/// The column of a collection that holds the field's value.
+pub const COLLECTION_VALUE: &str = "value";
+
+/// The key of collection `name`.
+pub fn collection_key(name: &str) -> Vec<u8> {
+    [COLLECTION_PREFIX, name.as_bytes()].concat()
+}
 
 /// A value of the fake store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1078,20 +1095,95 @@ impl Introspector for FakeCommandSession {
         Ok(vec![])
     }
 
+    /// The collections of `scope.database` (see [`COLLECTION_PREFIX`]), in name order;
+    /// nothing for any other kind.
     async fn list_objects(
         &self,
-        _scope: &Scope,
-        _kind: ObjectKind,
+        scope: &Scope,
+        kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
-        Ok(vec![])
+        let index = db_index(&scope.database)?;
+        Ok(match kind {
+            ObjectKind::Collection => self.store.lock().dbs[index]
+                .iter()
+                .filter_map(|(key, value)| match value {
+                    FakeValue::Hash(_) => key.strip_prefix(COLLECTION_PREFIX),
+                    FakeValue::Str(_) => None,
+                })
+                .filter_map(|name| std::str::from_utf8(name).ok())
+                .map(|name| ObjectSummary {
+                    name: name.to_string(),
+                    kind: ObjectKind::Collection,
+                    comment: None,
+                    row_estimate: None,
+                })
+                .collect(),
+            ObjectKind::Table
+            | ObjectKind::View
+            | ObjectKind::MaterializedView
+            | ObjectKind::Function
+            | ObjectKind::Procedure
+            | ObjectKind::Trigger
+            | ObjectKind::Event
+            | ObjectKind::Sequence
+            | ObjectKind::Type
+            | ObjectKind::Key => vec![],
+        })
     }
 
     async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
         Ok(vec![])
     }
 
-    async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
-        Err(unsupported("table detail"))
+    /// A collection's columns: `_id` (the field name, the primary key) and `value`.
+    async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {
+        match obj.kind {
+            ObjectKind::Collection => {}
+            ObjectKind::Table
+            | ObjectKind::View
+            | ObjectKind::MaterializedView
+            | ObjectKind::Function
+            | ObjectKind::Procedure
+            | ObjectKind::Trigger
+            | ObjectKind::Event
+            | ObjectKind::Sequence
+            | ObjectKind::Type
+            | ObjectKind::Key => return Err(unsupported("table detail")),
+        }
+        let index = db_index(&obj.database)?;
+        let key = collection_key(&obj.name);
+        match self.store.lock().dbs[index].get(&key) {
+            Some(FakeValue::Hash(_)) => {}
+            Some(FakeValue::Str(_)) | None => {
+                return Err(server_err(format!("ERR no such collection '{}'", obj.name)))
+            }
+        }
+        let column = |name: &str, ordinal: u32| ColumnDetail {
+            name: name.into(),
+            ordinal,
+            db_type: "string".into(),
+            nullable: ordinal != 1,
+            ..ColumnDetail::default()
+        };
+        Ok(TableDetail {
+            object: obj.clone(),
+            columns: vec![column(COLLECTION_ID, 1), column(COLLECTION_VALUE, 2)],
+            primary_key: Some(IndexDetail {
+                name: COLLECTION_ID.into(),
+                unique: true,
+                primary: true,
+                columns: vec![COLLECTION_ID.into()],
+                ..IndexDetail::default()
+            }),
+            indexes: vec![],
+            foreign_keys: vec![],
+            checks: vec![],
+            triggers: vec![],
+            options: TableOptions::default(),
+            row_estimate: None,
+            size_bytes: None,
+            comment: None,
+        })
     }
 
     async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {

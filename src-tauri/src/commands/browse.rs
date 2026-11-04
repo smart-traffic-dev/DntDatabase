@@ -22,7 +22,8 @@
 //! and the detail / DDL of its objects, and an object's exact path both of its results.
 //!
 //! `show_system` is applied after the cache: MySQL system databases in `list_databases`,
-//! PostgreSQL system schemas in `list_schemas` (see [`is_system`]).
+//! PostgreSQL system schemas in `list_schemas` (see [`is_system`]). A Command-family
+//! connection's listings are returned as the driver gives them.
 
 use super::guard;
 use crate::cache::{NodeKey, SchemaCache};
@@ -31,7 +32,7 @@ use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
 };
-use dnt_core::server::SqlKind;
+use dnt_core::server::{EngineFamily, SqlKind};
 use tauri::State;
 use uuid::Uuid;
 
@@ -122,15 +123,19 @@ pub async fn list_databases_impl(
     id: Uuid,
     show_system: bool,
 ) -> Result<Vec<DatabaseInfo>, DbError> {
-    let kind = state.repo.get(id)?.kind.require_sql()?;
+    let kind = state.repo.get(id)?.kind;
     let dbs = state
         .sessions
         .browse(id, None, databases_key(), |i| i.list_databases())
         .await?;
-    // PostgreSQL lists no system databases (templates are excluded by the driver).
-    Ok(match kind {
-        SqlKind::MySql => filter_system(kind, dbs, show_system),
-        SqlKind::Postgres => dbs,
+    Ok(match kind.family() {
+        // PostgreSQL lists no system databases (templates are excluded by the driver).
+        EngineFamily::Sql => match kind.require_sql()? {
+            SqlKind::MySql => filter_system(SqlKind::MySql, dbs, show_system),
+            SqlKind::Postgres => dbs,
+        },
+        // The driver's listing as is: a Command engine has no system databases to hide.
+        EngineFamily::Command => dbs,
     })
 }
 
@@ -140,7 +145,7 @@ pub async fn list_schemas_impl(
     db: String,
     show_system: bool,
 ) -> Result<Vec<SchemaInfo>, DbError> {
-    let kind = state.repo.get(id)?.kind.require_sql()?;
+    let kind = state.repo.get(id)?.kind;
     let schemas = state
         .sessions
         .browse(id, Some(&db), schemas_key(&db), |i| {
@@ -148,7 +153,11 @@ pub async fn list_schemas_impl(
             Box::pin(async move { i.list_schemas(&db).await })
         })
         .await?;
-    Ok(filter_system(kind, schemas, show_system))
+    Ok(match kind.family() {
+        EngineFamily::Sql => filter_system(kind.require_sql()?, schemas, show_system),
+        // As the driver lists them (normally none).
+        EngineFamily::Command => schemas,
+    })
 }
 
 pub async fn list_objects_impl(

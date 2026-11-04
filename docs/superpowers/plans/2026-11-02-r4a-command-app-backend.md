@@ -177,13 +177,13 @@ pub struct PlanView { /* … */ pub dialect: Option<Dialect>, pub family: Engine
   - `table_detail` of that collection gives column `_id` (the field name) plus `value`, with `_id` as primary key;
   - its rows are the hash's fields.
 
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
   - `command_tree_lists_databases_and_objects`: the fake's dbs with keys plus the current db; `list_objects(Collection)` gives `["users"]` after `HSET h:users u1 alice`; `table_detail` of it gives the two columns with `_id` primary.
   - `sql_tree_unchanged`
-- [ ] **Step 2: Run** them. Expected: FAIL on `list_databases`.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `cargo test -p dntdatabase`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): browse Command connections`.
+- [x] **Step 2: Run** them. Expected: FAIL on `list_databases`.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `cargo test -p dntdatabase`. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): browse Command connections`.
 
 ### Task 5: Data-view reads for the Command family
 
