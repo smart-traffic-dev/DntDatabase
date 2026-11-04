@@ -333,7 +333,7 @@ key_edit_preview(id: Uuid, db: String, edit: KeyEdit) -> EditPreview            
 
 ### Task 9: Full verification
 
-- [ ] **Step 1: Run the CI set:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `pnpm --dir ui lint` and `pnpm --dir ui test`. Expected: PASS.
-- [ ] **Step 2: Run the DB suite** against the user's running `dnt-test` stack, without compose up/down. Swap in its certs/keys from `D:\DntDatabase\testdata`, then restore this worktree's own, verifying by hash. Run with `DNT_TEST_DB=1` and `--test-threads=1`. Expected: PASS, apart from the known MySQL cancel flakes, which are fixed on unmerged branches.
-- [ ] **Step 3: Run e2e-web:** `$env:E2E_WEB_PORT='5176'; pnpm --dir e2e-web test`. Expected: PASS. e2e-web uses a fake IPC backend, so new commands it does not mock may need minimal mocks; list them.
-- [ ] **Step 4: Commit** only if a step required a change.
+- [x] **Step 1: Run the CI set:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `pnpm --dir ui lint` and `pnpm --dir ui test`. Expected: PASS.
+- [x] **Step 2: Run the DB suite** against the user's running `dnt-test` stack, without compose up/down. Swap in its certs/keys from `D:\DntDatabase\testdata`, then restore this worktree's own, verifying by hash. Run with `DNT_TEST_DB=1` and `--test-threads=1`. Expected: PASS, apart from the known MySQL cancel flakes, which are fixed on unmerged branches.
+- [x] **Step 3: Run e2e-web:** `$env:E2E_WEB_PORT='5176'; pnpm --dir e2e-web test`. Expected: PASS. e2e-web uses a fake IPC backend, so new commands it does not mock may need minimal mocks; list them.
+- [x] **Step 4: Commit** only if a step required a change.
