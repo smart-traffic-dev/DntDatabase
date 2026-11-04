@@ -1701,6 +1701,7 @@ version = "0.1.3"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
+ "dnt-ai",
  "dnt-core",
  "dnt-driver-mysql",
  "dnt-driver-pg",
