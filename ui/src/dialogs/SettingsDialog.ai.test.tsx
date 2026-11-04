@@ -78,6 +78,25 @@ beforeEach(() => {
 });
 
 describe('Settings → AI', () => {
+  it("shows the endpoint's own error, not the database wording", async () => {
+    world.settings = view({ ...DEFAULTS, base_url: 'https://api.example.com/v1' });
+    backend(world, {
+      ai_models: () => {
+        throw new Failure(
+          appError('connect', 'Could not connect to the database server.', {
+            detail: 'The endpoint rejected the request (404): Not Found',
+          }),
+        );
+      },
+    });
+    const user = userEvent.setup();
+    renderAi();
+    await user.click(await screen.findByRole('button', { name: 'Load models' }));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('The endpoint rejected the request (404): Not Found');
+    expect(alert).not.toHaveTextContent('database');
+  });
+
   it('Test saves unsaved changes first, so it tests what is on screen', async () => {
     const user = userEvent.setup();
     renderAi();

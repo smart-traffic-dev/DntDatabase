@@ -3,7 +3,7 @@
 // dismisses (Monaco's own inline-suggest keys); Alt+\ asks explicitly.
 import type * as Monaco from 'monaco-editor';
 import { commands, type AiCompleteRequest, type AiCompletion } from '../../bindings';
-import { ensureAiLoaded, useAi } from '../../store/ai';
+import { aiErrorText, ensureAiLoaded, useAi } from '../../store/ai';
 import { queryDocTarget, suggestShown, type CompletionTarget } from '../completion/monacoProvider';
 
 /** Pause in typing before an automatic request. */
@@ -134,8 +134,7 @@ export function createAiInlineProvider(monaco: typeof Monaco, deps: AiInlineDeps
         if (!token.isCancellationRequested) remember(key, suggestion);
         return token.isCancellationRequested ? { items: [] } : items(suggestion, position);
       } catch (e) {
-        const message = (e as { message?: string } | null)?.message ?? 'The AI request failed.';
-        useAi.getState().end({ kind: 'failed', message });
+        useAi.getState().end({ kind: 'failed', message: aiErrorText(e) });
         return { items: [] };
       } finally {
         sub?.dispose();

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { AiConfig, AiConnectionView, AiSettings, AiTestResult, AiTrigger } from '../bindings';
-import { useAi } from '../store/ai';
+import { aiErrorText, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
 import { Callout } from './parts';
@@ -88,7 +88,7 @@ export function SettingsAiPanel() {
     try {
       await action();
     } catch (e) {
-      setError(toAppError(e).message);
+      setError(aiErrorText(toAppError(e)));
     } finally {
       setBusy(false);
     }
