@@ -177,7 +177,16 @@ impl FimClient for HttpFimClient {
 
     async fn list_models(&self) -> Result<Vec<String>, AiError> {
         let rb = self.client.get(self.endpoint.url("models"));
-        let (_, v) = self.send(rb).await?;
+        let (_, v) = match self.send(rb).await {
+            // DeepSeek serves FIM at `/beta/completions` but its models at `/models`.
+            Err(AiError::BadRequest { status: 404, .. })
+                if self.endpoint.parent_url("models").is_some() =>
+            {
+                let url = self.endpoint.parent_url("models").expect("checked above");
+                self.send(self.client.get(url)).await?
+            }
+            other => other?,
+        };
         let data =
             v.get("data")
                 .and_then(Value::as_array)

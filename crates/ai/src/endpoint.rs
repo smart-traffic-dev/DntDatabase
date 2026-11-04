@@ -64,6 +64,19 @@ impl Endpoint {
         url
     }
 
+    /// `path` under the base URL's parent (`…/beta` → `…/{path}`); `None` when the base has
+    /// no path of its own. Some providers serve `/models` only outside their beta path.
+    pub fn parent_url(&self, path: &str) -> Option<Url> {
+        let base = self.base.path().trim_end_matches('/');
+        let (parent, last) = base.rsplit_once('/')?;
+        if last.is_empty() {
+            return None;
+        }
+        let mut url = self.base.clone();
+        url.set_path(&format!("{parent}/{path}"));
+        Some(url)
+    }
+
     /// `scheme://host[:port]` (port only when not the scheme's default): what the
     /// per-connection consent is tied to.
     pub fn origin(&self) -> String {
@@ -83,6 +96,27 @@ impl fmt::Debug for Endpoint {
             .field("api_key", &self.api_key.as_ref().map(|_| "***"))
             .field("timeout", &self.timeout)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod parent_url_tests {
+    use super::*;
+
+    fn ep(base: &str) -> Endpoint {
+        Endpoint::parse(base, None, DEFAULT_TIMEOUT).unwrap()
+    }
+
+    #[test]
+    fn parent_url_drops_the_last_segment() {
+        let at = |b: &str| ep(b).parent_url("models").map(|u| u.to_string());
+        assert_eq!(
+            at("https://api.deepseek.com/beta").as_deref(),
+            Some("https://api.deepseek.com/models")
+        );
+        assert_eq!(at("https://h/a/v1/").as_deref(), Some("https://h/a/models"));
+        assert_eq!(at("https://h"), None);
+        assert_eq!(at("https://h/"), None);
     }
 }
 

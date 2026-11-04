@@ -286,6 +286,24 @@ async fn error_message_is_truncated() {
 }
 
 #[tokio::test]
+async fn models_404_retries_once_outside_the_base_path() {
+    // DeepSeek: FIM at `/beta/completions`, models only at `/models`.
+    let server = FakeServer::start(Reply::json(404, r#"{"error":{"message":"Not Found"}}"#)).await;
+    let err = client(&server.base(), Some("sk-test-123"), Duration::from_secs(5))
+        .list_models()
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, AiError::BadRequest { status: 404, .. }),
+        "{err:?}"
+    );
+    let rec = server.recorded();
+    let paths: Vec<_> = rec.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(paths, ["/v1/models", "/models"]);
+    assert_eq!(rec[1].header("authorization"), Some("Bearer sk-test-123"));
+}
+
+#[tokio::test]
 async fn lists_models_sorted_unique() {
     let server = FakeServer::start(Reply::json(200, &fixture("models.json"))).await;
     let models = client(&server.base(), None, Duration::from_secs(5))
