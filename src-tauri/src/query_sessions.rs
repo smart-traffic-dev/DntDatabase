@@ -27,7 +27,8 @@
 use crate::commands::settings::saved_confirm_unbounded;
 use crate::result_store::ResultStore;
 use crate::run_events::{
-    tick_rows, ChannelSink, EventSink, HistoryCtx, RunEvent, RunFlags, RunOptions, StoredRun,
+    tick_rows, ChannelSink, EventSink, HistoryCtx, Redactor, RunEvent, RunFlags, RunOptions,
+    StoredRun,
 };
 use crate::session_manager::{
     close_quietly, closed_error, config_error, connect_db, lock, with_database, ConnState,
@@ -40,6 +41,7 @@ use dnt_core::server::{EngineFamily, SqlKind};
 use dnt_core::sql::{classify, Dialect, StatementKind};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
+use dnt_query::command::run_commands;
 use dnt_query::{
     classic_table, confirm_names_match, estimate_sql, estimate_table, explain_sql, guard_commands,
     guard_with, mark_implicit_commits, parse_estimate, plan, plan_commands, run_with, CommandPlan,
@@ -714,7 +716,7 @@ pub(crate) struct ExplainPlan {
 
 /// The script of a stored plan: SQL statements, or the commands of a Command engine.
 /// Either way it went through its family's guard (`guard` is set).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum StoredScript {
     Sql(ScriptPlan),
     Command(CommandPlan),
@@ -728,14 +730,27 @@ impl StoredScript {
         }
     }
 
-    /// The SQL plan; `Unsupported` for a Command plan (a path not built for it yet).
-    fn into_sql(self, what: &str) -> Result<ScriptPlan, DbError> {
+    /// The SQL plan; `None` for a Command plan.
+    pub fn into_sql(self) -> Option<ScriptPlan> {
         match self {
-            StoredScript::Sql(p) => Ok(p),
-            StoredScript::Command(_) => Err(DbError::Unsupported {
-                feature: what.to_string(),
-                version: String::new(),
-            }),
+            StoredScript::Sql(p) => Some(p),
+            StoredScript::Command(_) => None,
+        }
+    }
+
+    /// The Command plan; `None` for a SQL plan.
+    pub fn into_command(self) -> Option<CommandPlan> {
+        match self {
+            StoredScript::Sql(_) => None,
+            StoredScript::Command(p) => Some(p),
+        }
+    }
+
+    /// How many statements or commands the plan has.
+    fn len(&self) -> usize {
+        match self {
+            StoredScript::Sql(p) => p.stmts.len(),
+            StoredScript::Command(p) => p.stmts.len(),
         }
     }
 }
@@ -1768,11 +1783,9 @@ impl SessionManager {
     /// public: nothing outside may take a plan around `query_run`'s re-judgement (tests
     /// use [`SessionManager::test_take_plan`]).
     #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, ScriptPlan), DbError> {
-        let (tab, conn, plan) = self
-            .plans
-            .take(self.plan_ttl, plan_id, &|t| self.plan_target_current(t))?;
-        Ok((tab, conn, plan.into_sql("taking a Command plan")?))
+    pub(crate) fn take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, StoredScript), DbError> {
+        self.plans
+            .take(self.plan_ttl, plan_id, &|t| self.plan_target_current(t))
     }
 
     /// Statement `index` of plan `plan_id` (taken or not) as a one-statement plan, for
@@ -1789,18 +1802,17 @@ impl SessionManager {
         &self,
         plan_id: Uuid,
         index: u32,
-    ) -> Result<(String, Uuid, ScriptPlan), DbError> {
+    ) -> Result<(String, Uuid, StoredScript), DbError> {
         let copy = self.plans.statement(self.plan_ttl, plan_id, index, &|t| {
             self.plan_target_current(t)
         })?;
-        let plan = copy.plan.into_sql("a statement of a Command plan")?;
-        Ok((copy.target.tab, copy.target.conn, plan))
+        Ok((copy.target.tab, copy.target.conn, copy.plan))
     }
 
     /// [`Self::take_plan`] for integration tests (feature `test-helpers`).
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
-    pub fn test_take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, ScriptPlan), DbError> {
+    pub fn test_take_plan(&self, plan_id: Uuid) -> Result<(String, Uuid, StoredScript), DbError> {
         self.take_plan(plan_id)
     }
 
@@ -1811,7 +1823,7 @@ impl SessionManager {
         &self,
         plan_id: Uuid,
         index: u32,
-    ) -> Result<(String, Uuid, ScriptPlan), DbError> {
+    ) -> Result<(String, Uuid, StoredScript), DbError> {
         self.plan_statement(plan_id, index)
     }
 
@@ -2331,10 +2343,37 @@ impl Runs {
     }
 }
 
-/// How many statements of `plan` have the verdict `v`.
-fn count_verdict(plan: &ScriptPlan, v: Verdict) -> u32 {
-    let n = plan.stmts.iter().filter(|s| s.verdict == v).count();
-    u32::try_from(n).unwrap_or(u32::MAX)
+/// The run rules of a judged plan, whose statements or commands have `verdicts`
+/// (verdict, confirm name): `Blocked` when any is Block; `ConfirmationRequired` when
+/// any is Confirm and the user did not confirm, or when `confirm_names` are not
+/// exactly the names its Confirm ones ask for ([`confirm_names_match`]).
+fn check_verdicts<'a>(
+    verdicts: impl Iterator<Item = (Verdict, Option<&'a String>)>,
+    confirmed: bool,
+    confirm_names: &[String],
+) -> Result<(), DbError> {
+    let mut blocked = 0u32;
+    let mut confirm = 0u32;
+    let mut required = Vec::new();
+    for (verdict, name) in verdicts {
+        match verdict {
+            Verdict::Block => blocked = blocked.saturating_add(1),
+            Verdict::Confirm => {
+                confirm = confirm.saturating_add(1);
+                required.extend(name.cloned());
+            }
+            Verdict::Allow => {}
+        }
+    }
+    if blocked > 0 {
+        return Err(DbError::Blocked { count: blocked });
+    }
+    if (confirm > 0 && !confirmed) || !confirm_names_match(&required, confirm_names) {
+        return Err(DbError::ConfirmationRequired {
+            count: confirm.max(1),
+        });
+    }
+    Ok(())
 }
 
 /// Judges a stored plan again with the connection's current config and returns the plan
@@ -2347,27 +2386,44 @@ fn count_verdict(plan: &ScriptPlan, v: Verdict) -> u32 {
 /// On Production a confirmation also needs the typed names (spec §4.3): `confirm_names`
 /// must be exactly the `confirm_name`s the guard gives the Confirm statements now
 /// ([`confirm_names_match`], case-sensitive), else `ConfirmationRequired`.
+///
+/// A Command plan is judged again by `guard_commands` with `policy_now` (the
+/// connection's current config, `SessionManager::policy_ctx`), with the same rules and
+/// errors. Its db-relative targets keep the db they were resolved to when planned, so
+/// a name asked for then is asked for now; the run refuses a command whose session is
+/// on another db since (`DatabaseChanged`).
 fn rejudge(
     copy: &PlanCopy,
     now: GuardCtx,
+    policy_now: &PolicyCtx,
     confirmed: bool,
     confirm_names: &[String],
-) -> Result<ScriptPlan, DbError> {
+) -> Result<StoredScript, DbError> {
+    let never_guarded = || DbError::Internal {
+        message: "the run plan was never guarded".into(),
+    };
     let plan = match &copy.plan {
         StoredScript::Sql(plan) => plan,
-        // Running a Command plan comes with its own run path (R4a Task 3).
-        StoredScript::Command(_) => {
-            return Err(DbError::Unsupported {
-                feature: "running commands".into(),
-                version: String::new(),
-            })
+        StoredScript::Command(plan) => {
+            if plan.guard.is_none() {
+                return Err(never_guarded());
+            }
+            let mut judged = plan.clone();
+            guard_commands(&mut judged, policy_now);
+            check_verdicts(
+                judged
+                    .stmts
+                    .iter()
+                    .map(|s| (s.verdict, s.confirm_name.as_ref())),
+                confirmed,
+                confirm_names,
+            )?;
+            return Ok(StoredScript::Command(judged));
         }
     };
     let mut judged = copy.explain.as_ref().map_or(plan, |e| &e.original).clone();
     let Some(ctx) = judged.guard else {
-        return Err(DbError::Internal {
-            message: "the run plan was never guarded".into(),
-        });
+        return Err(never_guarded());
     };
     guard_with(
         &mut judged,
@@ -2376,24 +2432,16 @@ fn rejudge(
             ..now
         },
     );
-    let blocked = count_verdict(&judged, Verdict::Block);
-    if blocked > 0 {
-        return Err(DbError::Blocked { count: blocked });
-    }
-    let confirm = count_verdict(&judged, Verdict::Confirm);
-    let required: Vec<String> = judged
-        .stmts
-        .iter()
-        .filter(|s| s.verdict == Verdict::Confirm)
-        .filter_map(|s| s.confirm_name.clone())
-        .collect();
-    if (confirm > 0 && !confirmed) || !confirm_names_match(&required, confirm_names) {
-        return Err(DbError::ConfirmationRequired {
-            count: confirm.max(1),
-        });
-    }
+    check_verdicts(
+        judged
+            .stmts
+            .iter()
+            .map(|s| (s.verdict, s.confirm_name.as_ref())),
+        confirmed,
+        confirm_names,
+    )?;
     if copy.explain.is_none() {
-        return Ok(judged);
+        return Ok(StoredScript::Sql(judged));
     }
     let mut run_plan = plan.clone();
     for (s, j) in run_plan.stmts.iter_mut().zip(&judged.stmts) {
@@ -2404,7 +2452,7 @@ fn rejudge(
     // judged the explained statement with the current config), so `run` only re-checks
     // its boundaries.
     run_plan.guard = None;
-    Ok(run_plan)
+    Ok(StoredScript::Sql(run_plan))
 }
 
 /// Wraps a run's `emit` so that the first event it cannot deliver (the window whose
@@ -2457,7 +2505,11 @@ struct RunTask {
     rt: Arc<ConnectionRuntime>,
     slot: TabSlot,
     ts: OwnedMutexGuard<TabSession>,
-    plan: ScriptPlan,
+    /// The judged plan: SQL statements or commands.
+    plan: StoredScript,
+    /// How the history and the log redact the plan's text.
+    redactor: Redactor,
+    /// SQL only.
     explain: Option<ExplainFormat>,
     /// Explain mode: the plain `EXPLAIN` run before the plan for the classic table.
     classic: Option<String>,
@@ -2486,7 +2538,7 @@ impl RunTask {
             Arc::clone(&self.flags),
             // The driver decodes in STREAM_BATCH_SIZE rows; UI events stay coalesced.
             RUN_BATCH_SIZE,
-            self.plan.dialect,
+            self.redactor.clone(),
             HistoryCtx {
                 repo: Arc::clone(&self.repo),
                 connection_id: self.rt.cfg.id,
@@ -2529,7 +2581,28 @@ impl RunTask {
         let index = sink.index();
         let ticker = tokio::spawn(tick_rows(Arc::clone(&rows)));
         let ran = AssertUnwindSafe(async {
-            let session = self.ts.session.as_deref()?.sql().ok()?;
+            let session = self.ts.session.as_deref()?;
+            let plan = match &self.plan {
+                StoredScript::Sql(plan) => plan,
+                StoredScript::Command(plan) => {
+                    let session = session.command().ok()?;
+                    return Some(
+                        run_commands(
+                            session,
+                            plan,
+                            &self.exec,
+                            RunConfig {
+                                continue_on_error: self.continue_on_error,
+                                manual_tx: false,
+                            },
+                            &self.cancel,
+                            &mut sink,
+                        )
+                        .await,
+                    );
+                }
+            };
+            let session = session.sql().ok()?;
             if let Some(sql) = &self.classic {
                 let opts = ExecOptions {
                     max_rows: 1_000,
@@ -2538,12 +2611,12 @@ impl RunTask {
                     stop: self.cancel.signal(),
                     ..ExecOptions::default()
                 };
-                sink.set_classic(classic_explain(session, sql, self.plan.dialect, &opts).await);
+                sink.set_classic(classic_explain(session, sql, plan.dialect, &opts).await);
             }
             Some(
                 run_with(
                     session,
-                    &self.plan,
+                    plan,
                     &self.exec,
                     RunConfig {
                         continue_on_error: self.continue_on_error,
@@ -2595,7 +2668,7 @@ impl RunTask {
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         tracing::info!(
             connection = %self.rt.cfg.id,
-            statements = self.plan.stmts.len(),
+            statements = self.plan.len(),
             elapsed_ms,
             stopped = stop.is_some(),
             "query run finished"
@@ -2651,14 +2724,16 @@ impl RunTask {
         } else if let Some(db) = &sink.use_db {
             ts.database = Some(db.clone());
         }
-        match report {
-            Some(report) => {
-                ts.tx_fresh = tx_fresh_after(ts.tx_fresh, &self.plan, report)
+        match (report, &self.plan) {
+            (Some(report), StoredScript::Sql(plan)) => {
+                ts.tx_fresh = tx_fresh_after(ts.tx_fresh, plan, report)
                     // Begun, then stopped before its statement: nothing used it.
                     || report.began_unused;
-                ts.track_tx(self.tx_open_before, started_ms, &self.plan, report);
+                ts.track_tx(self.tx_open_before, started_ms, plan, report);
             }
-            None => ts.forget_tx_if_idle(),
+            // A Command tab has no row estimates and no transaction tracking: its
+            // transaction state is the session's own (`tx_state`).
+            (Some(_), StoredScript::Command(_)) | (None, _) => ts.forget_tx_if_idle(),
         }
         let current = self.rt.queries.is_slot(&self.tab, &self.slot);
         if self.rt.closed.load(Ordering::SeqCst) || !current || ts.closed {
@@ -2667,7 +2742,12 @@ impl RunTask {
         } else {
             self.rt.queries.sync_bound(&self.tab, ts);
         }
-        if sink.ddl_ok {
+        let schema_cache = match self.plan.family() {
+            EngineFamily::Sql => true,
+            // The Command family has no schema cache.
+            EngineFamily::Command => false,
+        };
+        if sink.ddl_ok && schema_cache {
             let database = ts.database.clone().or_else(|| self.rt.home_database());
             if let Some(db) = database {
                 self.rt.refresh_schema_cache(&db);
@@ -2740,9 +2820,20 @@ impl SessionManager {
         let run_plan = rejudge(
             &copy,
             self.guard_ctx(&cfg, false),
+            &self.policy_ctx(&cfg),
             confirmed,
             &confirm_names,
         )?;
+        let redactor = match &run_plan {
+            StoredScript::Sql(p) => Redactor::Sql(p.dialect),
+            StoredScript::Command(_) => {
+                Redactor::Command(rt.driver.command_language().ok_or_else(|| {
+                    DbError::Internal {
+                        message: "the connection's driver has no command language".into(),
+                    }
+                })?)
+            }
+        };
         // A stale session is replaced; one dropped after a lost connection reopens.
         if rt.is_stale(&ts) || ts.session.is_none() {
             let ensured = self
@@ -2751,8 +2842,17 @@ impl SessionManager {
             rt.queries.sync_bound(&tab, &ts);
             ensured?;
         }
-        // A session that cannot run SQL is refused before the plan is used up.
-        let session = ts.session.as_deref().ok_or(DbError::PlanExpired)?.sql()?;
+        // A session that cannot run the plan's family is refused before the plan is
+        // used up.
+        let session = ts.session.as_deref().ok_or(DbError::PlanExpired)?;
+        match &run_plan {
+            StoredScript::Sql(_) => {
+                session.sql()?;
+            }
+            StoredScript::Command(_) => {
+                session.command()?;
+            }
+        }
         self.plans.take(self.plan_ttl, plan_id, &current)?;
         let tx_open_before = ts.tx_open();
 
@@ -2794,6 +2894,7 @@ impl SessionManager {
             slot,
             ts,
             plan: run_plan,
+            redactor,
             classic: copy.explain.as_ref().and_then(|e| e.classic.clone()),
             explain: copy.explain.map(|e| e.format),
             exec,

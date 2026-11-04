@@ -150,17 +150,17 @@ pub struct PlanView { /* … */ pub dialect: Option<Dialect>, pub family: Engine
   - DDL-success refresh: `CommandClass::Ddl` triggers the same tree refresh as SQL DDL, but no schema cache.
 - **`after_run`:** the tx-fresh and tx-tracking logic is skipped for Command plans, and the tab's tx state comes from `dyn Session::tx_state()`.
 
-- [ ] **Step 1: Write the failing tests** in `command_tabs.rs`. Collect events through the existing EventSink test pattern in `src-tauri/tests/query_sessions.rs`.
+- [x] **Step 1: Write the failing tests** in `command_tabs.rs`. Collect events through the existing EventSink test pattern in `src-tauri/tests/query_sessions.rs`.
   - `command_run_streams_rows_and_history`: `SET a 1\nGET a` gives events `StatementStart`, `ResultEnd`, …, then `Done{stop: None}`. The rows for `GET` contain `"1"`. There are 2 History rows, origin `query`, kinds `write` and `read`.
   - `command_history_is_redacted`: `CONFIG SET requirepass hunter2` run on Local gives a History `sql_text` containing `***` and not `hunter2`.
   - `command_run_rechecks_confirm_names`: a Production plan for `FLUSHDB`, run with the right name, executes. A second plan run with a wrong name gives the same error SQL gives for a wrong confirm name, and nothing reaches the fake (`store.executed()` is unchanged).
   - `command_run_blocked_plan_is_refused`
   - `command_run_reports_database_change`: `SELECT 2` sets the tab db to "2", so the next plan uses db "2".
   - `command_cancel_stops_a_blocked_command`: `block_next`, then `query_cancel`, gives `Done{stop: Cancelled}`.
-- [ ] **Step 2: Run** them. Expected: FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `cargo test -p dntdatabase`. Expected: PASS.
-- [ ] **Step 5: Commit** `feat(app): run Command scripts with events and redacted History`.
+- [x] **Step 2: Run** them. Expected: FAIL.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `cargo test -p dntdatabase`. Expected: PASS.
+- [x] **Step 5: Commit** `feat(app): run Command scripts with events and redacted History`.
 
 ### Task 4: Browse a Command connection
 

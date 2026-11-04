@@ -11,14 +11,17 @@
 
 use crate::result_store::{ResultStore, ResultToken};
 use crate::session_manager::lock;
+use dnt_core::command::{CommandClass, CommandLanguage};
 use dnt_core::driver::{ExecProgress, ResultSummary, RowSink, StmtOutcome};
 use dnt_core::error::{AppError, DbError};
+use dnt_core::redact::Redacted;
 use dnt_core::sql::{session_effect, Dialect, StatementKind, TxControl};
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
+use dnt_query::command::CommandRunSink;
 use dnt_query::{
-    parse_plan, redact, ExplainFormat, PlanTable, PlanTree, PlannedStmt, RunSink, StmtKindLabel,
-    StopReason,
+    parse_plan, redact, ExplainFormat, PlanTable, PlanTree, PlannedCommand, PlannedStmt, RunSink,
+    StmtKindLabel, StopReason,
 };
 use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
 use dnt_store::repo::ConnectionRepo;
@@ -300,14 +303,39 @@ pub(crate) struct HistoryCtx {
     pub(crate) database: Option<String>,
 }
 
-/// The [`RunSink`] of `query_run`: turns the run into [`RunEvent`]s, records one history
-/// row per statement passed to `execute_one`, and logs each statement (redacted) at
-/// `debug` under `dnt::sql`.
+/// How a run's statements are redacted for the history and the log: with the SQL
+/// dialect, or with the Command language of the connection's driver.
+#[derive(Clone)]
+pub(crate) enum Redactor {
+    Sql(Dialect),
+    Command(Arc<dyn CommandLanguage>),
+}
+
+impl Redactor {
+    fn redact(&self, text: &str) -> Redacted {
+        match self {
+            Redactor::Sql(dialect) => redact(text, *dialect),
+            Redactor::Command(language) => language.redact(text),
+        }
+    }
+
+    /// The SQL dialect; `None` for the Command family.
+    fn dialect(&self) -> Option<Dialect> {
+        match self {
+            Redactor::Sql(dialect) => Some(*dialect),
+            Redactor::Command(_) => None,
+        }
+    }
+}
+
+/// The [`RunSink`] (and [`CommandRunSink`]) of `query_run`: turns the run into
+/// [`RunEvent`]s, records one history row per statement or command sent, and logs each
+/// one (redacted) at `debug` under `dnt::sql`.
 pub(crate) struct ChannelSink {
     emit: EventSink,
     rows: Arc<RowStream>,
     flags: Arc<RunFlags>,
-    dialect: Dialect,
+    redactor: Redactor,
     history: HistoryCtx,
     /// The run's history writer, started with the first statement.
     writer: Option<HistoryWriter>,
@@ -319,7 +347,8 @@ pub(crate) struct ChannelSink {
     stored_token: Option<ResultToken>,
     /// A `Ddl` statement succeeded.
     pub(crate) ddl_ok: bool,
-    /// The database a successful MySQL `USE` moved the session to (the last one).
+    /// The database a successful MySQL `USE`, or a Command `SessionChange`
+    /// ([`CommandRunSink::database`]), moved the session to (the last one).
     pub(crate) use_db: Option<String>,
     /// The session's transaction state as the run last reported it (set it to the
     /// state at the start of the run: `run` reports changes only).
@@ -370,8 +399,9 @@ pub(crate) fn utc_millis_now() -> String {
     )
 }
 
-fn kind_label(kind: StatementKind) -> &'static str {
-    match StmtKindLabel::from(kind) {
+/// The history's `kind` of a statement or command labelled `label`.
+fn kind_label(label: StmtKindLabel) -> &'static str {
+    match label {
         StmtKindLabel::Read => "read",
         StmtKindLabel::Write => "write",
         StmtKindLabel::Ddl => "ddl",
@@ -416,7 +446,7 @@ impl ChannelSink {
         emit: EventSink,
         flags: Arc<RunFlags>,
         batch_size: usize,
-        dialect: Dialect,
+        redactor: Redactor,
         history: HistoryCtx,
         explain: Option<ExplainFormat>,
     ) -> Self {
@@ -424,7 +454,7 @@ impl ChannelSink {
             rows: Arc::new(RowStream::new(Arc::clone(&emit), batch_size)),
             emit,
             flags,
-            dialect,
+            redactor,
             history,
             writer: None,
             next_result_id: 0,
@@ -486,7 +516,9 @@ impl ChannelSink {
         self.writer.take()
     }
 
-    fn record(&mut self, stmt: &PlannedStmt, result: &Result<StmtOutcome, AppError>) {
+    /// Records the history row of the statement or command started last, labelled
+    /// `label`.
+    fn record(&mut self, label: StmtKindLabel, result: &Result<StmtOutcome, AppError>) {
         let Some(cur) = self.current.take() else {
             return;
         };
@@ -522,7 +554,7 @@ impl ChannelSink {
             database: self.history.database.clone(),
             sql_text: cur.sql_text,
             redacted: cur.redacted,
-            kind: kind_label(stmt.kind).into(),
+            kind: kind_label(label).into(),
             started_at: cur.started_at,
             elapsed_ms: Some(millis(cur.t0.elapsed())),
             status,
@@ -700,14 +732,16 @@ impl Drop for ChannelSink {
     }
 }
 
-impl RunSink for ChannelSink {
-    fn statement_start(&mut self, stmt: &PlannedStmt) {
+impl ChannelSink {
+    /// Statement or command `index` (editor range `range`, text `text`) is sent: logs
+    /// it redacted, keeps it for its history row, emits `statement_start`.
+    fn begin(&mut self, index: u32, range: (u32, u32), text: &str) {
         // A timeout's `stopping` is per statement; a user's stop lasts for the run.
         if !self.flags.user.load(Ordering::SeqCst) {
             self.flags.stopping.store(false, Ordering::SeqCst);
         }
-        self.index.store(stmt.index, Ordering::SeqCst);
-        let redacted = redact(&stmt.text, self.dialect);
+        self.index.store(index, Ordering::SeqCst);
+        let redacted = self.redactor.redact(text);
         tracing::debug!(
             target: "dnt::sql",
             connection = %self.history.connection_id,
@@ -724,55 +758,124 @@ impl RunSink for ChannelSink {
             ex.columns.clear();
             ex.rows.clear();
         }
-        (self.emit)(RunEvent::StatementStart {
-            index: stmt.index,
-            range: stmt.range,
+        (self.emit)(RunEvent::StatementStart { index, range });
+    }
+
+    /// Statement or command `index` failed with `error`; `commits` says whether it
+    /// commits the open transaction (for a connection lost while it ran).
+    fn failed(&mut self, index: u32, error: &AppError, commits: bool) {
+        if error.kind == "connection_lost" && self.tx_now != TxState::Idle {
+            if commits {
+                self.lost_committing = true;
+            } else {
+                self.lost_in_tx = true;
+            }
+        }
+        (self.emit)(RunEvent::StatementError {
+            index,
+            error: error.clone(),
         });
     }
 
-    fn statement_end(&mut self, stmt: &PlannedStmt, result: &Result<StmtOutcome, AppError>) {
-        self.rows.flush();
-        self.abandon_stored();
-        match result {
-            Ok(_) => {
-                if stmt.kind == StatementKind::Ddl {
-                    self.ddl_ok = true;
-                }
-                if let Some(db) = session_effect(&stmt.text, self.dialect).and_then(|e| e.use_db) {
-                    self.history.database = Some(db.clone());
-                    self.use_db = Some(db);
-                }
-                if let Some(ex) = &self.explain {
-                    (self.emit)(explain_event(stmt.index, ex));
-                }
-            }
-            Err(error) => {
-                if error.kind == "connection_lost" && self.tx_now != TxState::Idle {
-                    if commits_open_tx(stmt, self.dialect) {
-                        self.lost_committing = true;
-                    } else {
-                        self.lost_in_tx = true;
-                    }
-                }
-                (self.emit)(RunEvent::StatementError {
-                    index: stmt.index,
-                    error: error.clone(),
-                });
-            }
-        }
-        self.record(stmt, result);
-    }
-
-    fn notice(&mut self, index: u32, message: &str) {
+    fn emit_notice(&mut self, index: u32, message: &str) {
         (self.emit)(RunEvent::Notice {
             index,
             message: message.into(),
         });
     }
 
-    fn tx_state(&mut self, state: TxState) {
+    fn set_tx_state(&mut self, state: TxState) {
         self.tx_now = state;
         (self.emit)(RunEvent::TxState { state });
+    }
+
+    /// The session is on `db` now: the history rows that follow record it, and the
+    /// tab moves to it after the run.
+    fn moved_to(&mut self, db: String) {
+        self.history.database = Some(db.clone());
+        self.use_db = Some(db);
+    }
+}
+
+impl RunSink for ChannelSink {
+    fn statement_start(&mut self, stmt: &PlannedStmt) {
+        self.begin(stmt.index, stmt.range, &stmt.text);
+    }
+
+    fn statement_end(&mut self, stmt: &PlannedStmt, result: &Result<StmtOutcome, AppError>) {
+        self.rows.flush();
+        self.abandon_stored();
+        // Always `Some` in a SQL run.
+        let dialect = self.redactor.dialect();
+        match result {
+            Ok(_) => {
+                if stmt.kind == StatementKind::Ddl {
+                    self.ddl_ok = true;
+                }
+                if let Some(db) = dialect
+                    .and_then(|d| session_effect(&stmt.text, d))
+                    .and_then(|e| e.use_db)
+                {
+                    self.moved_to(db);
+                }
+                if let Some(ex) = &self.explain {
+                    (self.emit)(explain_event(stmt.index, ex));
+                }
+            }
+            Err(error) => {
+                let commits = dialect.is_some_and(|d| commits_open_tx(stmt, d));
+                self.failed(stmt.index, error, commits);
+            }
+        }
+        self.record(StmtKindLabel::from(stmt.kind), result);
+    }
+
+    fn notice(&mut self, index: u32, message: &str) {
+        self.emit_notice(index, message);
+    }
+
+    fn tx_state(&mut self, state: TxState) {
+        self.set_tx_state(state);
+    }
+}
+
+/// A Command run emits the same events as a SQL run, and records the same history rows
+/// (`kind`: the command's label, `sql_text`: redacted with the connection's language).
+impl CommandRunSink for ChannelSink {
+    fn statement_start(&mut self, stmt: &PlannedCommand) {
+        self.begin(stmt.index, stmt.range, &stmt.text);
+    }
+
+    fn statement_end(&mut self, stmt: &PlannedCommand, result: &Result<StmtOutcome, AppError>) {
+        self.rows.flush();
+        self.abandon_stored();
+        let class = stmt.parsed.as_ref().ok().map(|c| &c.class);
+        match result {
+            Ok(_) => {
+                // The tree refreshes as after SQL DDL; there is no schema cache to reload.
+                if matches!(class, Some(CommandClass::Ddl)) {
+                    self.ddl_ok = true;
+                }
+            }
+            Err(error) => {
+                // `EXEC` commits the open transaction.
+                let commits = matches!(class, Some(CommandClass::Transaction(TxControl::Commit)));
+                self.failed(stmt.index, error, commits);
+            }
+        }
+        self.record(stmt.label, result);
+    }
+
+    fn notice(&mut self, index: u32, message: &str) {
+        self.emit_notice(index, message);
+    }
+
+    fn tx_state(&mut self, state: TxState) {
+        self.set_tx_state(state);
+    }
+
+    fn database(&mut self, name: &str) {
+        self.moved_to(name.to_string());
     }
 }
 

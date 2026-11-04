@@ -1512,6 +1512,7 @@ async fn taken_plan_is_guarded_and_runs_once() {
     assert_eq!(view.stmts.len(), 3);
 
     let (tab, conn, p) = f.sm.test_take_plan(view.plan_id).unwrap();
+    let p = p.into_sql().unwrap();
     assert_eq!((tab.as_str(), conn), ("t1", id));
     assert!(p.guard.is_some(), "every stored plan is guarded");
     assert_eq!(p.stmts[1].verdict, Verdict::Confirm);
@@ -1521,6 +1522,7 @@ async fn taken_plan_is_guarded_and_runs_once() {
 
     // Retry / Fetch all re-run one stored statement verbatim (DELIMITER context kept).
     let (_, _, one) = f.sm.test_plan_statement(view.plan_id, 1).unwrap();
+    let one = one.into_sql().unwrap();
     assert_eq!(one.stmts.len(), 1);
     assert_eq!(one.stmts[0].index, 1);
     assert_eq!(
@@ -1707,6 +1709,7 @@ async fn only_latest_taken_plan_is_kept_without_ttl() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     // The latest taken plans outlive the TTL; a pending plan does not.
     let (_, _, one) = f.sm.test_plan_statement(second.plan_id, 0).unwrap();
+    let one = one.into_sql().unwrap();
     assert_eq!(one.stmts[0].text, "SELECT 2");
     assert!(f.sm.test_plan_statement(other.plan_id, 0).is_ok());
     assert_eq!(
@@ -1726,6 +1729,7 @@ async fn plan_statement_carries_only_the_statement() {
     let text = format!("SELECT 1;\n{}\nSELECT 2", "-- filler\n".repeat(1000));
     let view = plan(&f, "t1", id, None, &text).await.unwrap();
     let (_, _, one) = f.sm.test_plan_statement(view.plan_id, 1).unwrap();
+    let one = one.into_sql().unwrap();
     assert_eq!(one.source, "SELECT 2");
     assert_eq!(one.stmts[0].source_range, (0, 8));
     assert_eq!(one.stmts[0].range, view.stmts[1].range);
@@ -3215,6 +3219,7 @@ async fn mysql_ddl_in_manual_tx_is_flagged_implicit_commit() {
         let got: Vec<bool> = view.stmts.iter().map(|s| s.implicit_commit).collect();
         assert_eq!(got, want, "{kind:?} {mode:?}");
         let (_, _, p) = f.sm.test_take_plan(view.plan_id).unwrap();
+        let p = p.into_sql().unwrap();
         let got: Vec<bool> = p.stmts.iter().map(|s| s.implicit_commit).collect();
         assert_eq!(got, want, "{kind:?} {mode:?}: on the stored plan too");
     }
