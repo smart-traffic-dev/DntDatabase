@@ -312,6 +312,30 @@ describe('KeysTab', () => {
     expect(within(valuePane()).queryByRole('button', { name: 'Remove item 0' })).toBeNull();
   });
 
+  it('hash and list values whose bytes are not UTF-8 offer no Edit but keep Delete / Remove', async () => {
+    const binary = { t: 'Bytes', v: { len: 3, preview: [0xff, 0x00, 0xfe] } } as const;
+    let which: 'hash' | 'list' = 'hash';
+    setup({
+      keys_scan: () => page([summary('h', 'Hash'), summary('l', 'List')]),
+      key_value: () =>
+        which === 'hash'
+          ? { value: { Hash: { fields: [[{ t: 'Text', v: 'bin' }, binary], [{ t: 'Text', v: 'small' }, { t: 'Text', v: 'x' }]], total: 2, next: null } }, ttl_ms: null, memory_bytes: null }
+          : { value: { List: { items: [binary, { t: 'Text', v: 'y' }], total: 2 } }, ttl_ms: null, memory_bytes: null },
+    });
+    await waitFor(() => expect(keyRows()).toHaveLength(2));
+    fireEvent.click(keyRows()[0]!);
+    const pane = valuePane();
+    await within(pane).findByRole('button', { name: 'Edit small' });
+    expect(within(pane).queryByRole('button', { name: 'Edit bin' })).toBeNull();
+    expect(within(pane).getByRole('button', { name: 'Delete bin' })).toBeInTheDocument();
+
+    which = 'list';
+    fireEvent.click(keyRows()[1]!);
+    await within(valuePane()).findByRole('button', { name: 'Edit item 1' });
+    expect(within(valuePane()).queryByRole('button', { name: 'Edit item 0' })).toBeNull();
+    expect(within(valuePane()).getByRole('button', { name: 'Remove item 0' })).toBeInTheDocument();
+  });
+
   it('Refresh of an open key that vanished shows the notice and leaves the list usable', async () => {
     let gone = false;
     setup({

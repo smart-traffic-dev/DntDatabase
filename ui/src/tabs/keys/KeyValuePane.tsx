@@ -5,7 +5,9 @@ import { useKeysTabs, valueCounts, type KeysTabState } from '../../store/keysTab
 import { KeyPromptDialog } from './KeyDialogs';
 import {
   bytesToBase64,
+  editableText,
   formatTtl,
+  isUtf8,
   keyNameOf,
   keyTypeLabel,
   parseHex,
@@ -131,16 +133,6 @@ function render(bytes: Uint8Array, mode: Mode): string {
   return text;
 }
 
-/** Whether `bytes` are valid UTF-8 (else Text / JSON would show replacement characters). */
-function isUtf8(bytes: Uint8Array): boolean {
-  try {
-    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * A string value: Text / JSON / Hex modes; `Save` sends `set_string`. Until the draft is edited
  * it stands for the exact bytes of the value (a mode switch never goes through a lossy decode);
@@ -228,7 +220,7 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
                     key={JSON.stringify(v)}
                     name={name}
                     value={v}
-                    editable={editable && field !== null && valueBytes(v) !== null}
+                    editable={editable && field !== null && editableText(v)}
                     pad={editable}
                     onSave={(text) => field && edit({ op: 'hash_set', key: keyName, field, value: textBytes(text) })}
                   />
@@ -267,7 +259,7 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
               return (
                 <tr key={`${index}:${JSON.stringify(v)}`}>
                   <td className="mono">{index}</td>
-                  <EditableCell name={`item ${index}`} value={v} editable={editable && bytes !== null} pad={editable} onSave={(text) => edit({ op: 'list_set', key: keyName, index, value: textBytes(text) })} />
+                  <EditableCell name={`item ${index}`} value={v} editable={editable && editableText(v)} pad={editable} onSave={(text) => edit({ op: 'list_set', key: keyName, index, value: textBytes(text) })} />
                   {editable && bytes !== null ? (
                     <td className="kt-actions">
                       <button type="button" className="btn small" aria-label={`Remove item ${index}`} onClick={() => edit({ op: 'list_remove', key: keyName, value: bytes, count: 1 })}>

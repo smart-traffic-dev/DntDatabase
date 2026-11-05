@@ -63,6 +63,25 @@ export function valueBytes(v: Value): Uint8Array | null {
   }
 }
 
+/** Whether `bytes` are valid UTF-8 (else Text / JSON would show replacement characters). */
+export function isUtf8(bytes: Uint8Array): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a value can be edited as text and saved back without loss: its bytes are known in full
+ * and, for raw bytes, are UTF-8 (else the edit would save replacement characters).
+ */
+export function editableText(v: Value): boolean {
+  const bytes = valueBytes(v);
+  return bytes !== null && (v.t !== 'Bytes' || isUtf8(bytes));
+}
+
 /** `valueBytes` in base64 (what an edit of an existing field / member sends). */
 export function valueKeyBytes(v: Value): KeyBytes | null {
   const bytes = valueBytes(v);
