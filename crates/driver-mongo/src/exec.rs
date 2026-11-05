@@ -256,16 +256,20 @@ pub(crate) fn plan(
 ) -> Result<Plan, DbError> {
     let b = build(cmd, current_db, opts)?;
     let mut body = b.body;
+    let name = body.keys().next().cloned();
     let cap = if b.read { opts.timeout } else { None };
-    match max_time_ms(b.max_time_ms, cap) {
-        Some(ms) => {
-            body.insert("maxTimeMS", Bson::Int64(ms));
-        }
-        None => {
-            body.remove("maxTimeMS");
-        }
+    // `insert` sets an existing field in place; nothing is ever removed, which would move
+    // the next field up into the command name.
+    if let Some(ms) = max_time_ms(b.max_time_ms, cap) {
+        body.insert("maxTimeMS", Bson::Int64(ms));
     }
     body.insert("comment", comment);
+    // The server runs the command its first field names: it must be the one classified.
+    if body.keys().next() != name.as_ref() {
+        return Err(DbError::Internal {
+            message: "the command name changed while building the command".into(),
+        });
+    }
     Ok(Plan {
         db: b.db.unwrap_or_else(|| current_db.to_string()),
         body,
@@ -563,17 +567,21 @@ fn db_method(
                 DbMethod::AdminCommand => admin,
                 _ => db.clone(),
             };
-            let mut body = doc_at(args, 0);
-            let user_max = match body.remove("maxTimeMS") {
-                None => None,
-                Some(v) => Some(
-                    integral_value(&v)
+            // The document is sent as written: the guard classified its first field as the
+            // command name, and only fields after it may be changed (in place).
+            let body = doc_at(args, 0);
+            let first = body.keys().next().map(String::as_str);
+            let user_max = match (first, body.get("maxTimeMS")) {
+                // `{maxTimeMS: …, drop: …}` names no command the server knows (`Unknown`);
+                // it stays that way.
+                (Some("maxTimeMS"), _) | (_, None) => None,
+                (_, Some(v)) => Some(
+                    integral_value(v)
                         .filter(|n| *n >= 0)
                         .ok_or_else(|| config("maxTimeMS expects a non-negative integer"))?,
                 ),
             };
             // `getMore` takes no `maxTimeMS` on an ordinary cursor.
-            let first = body.keys().next().map(String::as_str);
             let read = first != Some("getMore") && run_command_allowed(&body, false);
             Built::new(&db, body, Shape::Reply, read).max_time(user_max)
         }
@@ -976,7 +984,13 @@ impl Output {
 
 /// Sends `plan` and buffers its result: a cursor is read until `opts.max_rows + 1`
 /// documents, its end, or `opts.stop`; a cursor left open is dropped (the crate kills it).
-pub(crate) async fn run(client: &Client, plan: Plan, opts: &ExecOptions) -> Result<Output, Fail> {
+/// `class`: the command's class, for what a stop says about its outcome.
+pub(crate) async fn run(
+    client: &Client,
+    plan: Plan,
+    opts: &ExecOptions,
+    class: &CommandClass,
+) -> Result<Output, Fail> {
     let db = client.database(&plan.db);
     if plan.cursor {
         let mut action = db
@@ -994,7 +1008,7 @@ pub(crate) async fn run(client: &Client, plan: Plan, opts: &ExecOptions) -> Resu
                 affected: None,
             });
         }
-        let (docs, truncated) = read_cursor(cursor, opts).await?;
+        let (docs, truncated) = read_cursor(cursor, opts, class).await?;
         cursor_output(plan.shape, docs, truncated, opts)
     } else {
         let reply = db.run_command(plan.body).await?;
@@ -1005,11 +1019,12 @@ pub(crate) async fn run(client: &Client, plan: Plan, opts: &ExecOptions) -> Resu
 async fn read_cursor(
     mut cursor: Cursor<Document>,
     opts: &ExecOptions,
+    class: &CommandClass,
 ) -> Result<(Vec<Document>, bool), Fail> {
     let mut docs = Vec::new();
     while docs.len() <= opts.max_rows {
         if opts.stop.is_stopped() {
-            return Err(Fail::Db(DbError::cancelled()));
+            return Err(Fail::Db(stopped(class)));
         }
         if !cursor.advance().await? {
             return Ok((docs, false));
@@ -1018,6 +1033,16 @@ async fn read_cursor(
     }
     docs.truncate(opts.max_rows);
     Ok((docs, true))
+}
+
+/// A stop while the command's cursor is read: the command was sent, so a command that
+/// may write (an `aggregate` with `$out` / `$merge` wrote before its first reply) may
+/// have applied.
+fn stopped(class: &CommandClass) -> DbError {
+    DbError::Cancelled {
+        outcome_unknown: *class != CommandClass::Read,
+        was_in_tx: false,
+    }
 }
 
 fn cursor_output(
@@ -1225,9 +1250,27 @@ fn code_name(code: i32) -> String {
         .map_or_else(|| code.to_string(), |(_, n)| (*n).to_string())
 }
 
+/// `message` with the validation failure's `errInfo`, without any `consideredValue`: that is
+/// the rejected value itself, which may be a secret under a name the redactor does not know
+/// (`propertyName: "password"`).
 fn with_err_info(message: String, info: &Document) -> String {
-    let info = Bson::Document(info.clone()).into_relaxed_extjson();
-    format!("{message}; errInfo: {info}")
+    let mut info = Bson::Document(info.clone());
+    drop_considered_values(&mut info);
+    format!("{message}; errInfo: {}", info.into_relaxed_extjson())
+}
+
+/// Removes every `consideredValue` field, at any depth.
+fn drop_considered_values(b: &mut Bson) {
+    match b {
+        Bson::Document(d) => {
+            d.remove("consideredValue");
+            for (_, v) in d.iter_mut() {
+                drop_considered_values(v);
+            }
+        }
+        Bson::Array(a) => a.iter_mut().for_each(drop_considered_values),
+        _ => {}
+    }
 }
 
 /// A server error. The message is redacted: the server quotes the refused command in
@@ -1930,6 +1973,193 @@ mod tests {
                 );
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_sent_command_is_the_classified_one() {
+        let none = ExecOptions::default();
+        let timeout = ExecOptions {
+            timeout: Some(Duration::from_millis(60)),
+            ..ExecOptions::default()
+        };
+        let first = |d: &Document| d.keys().next().cloned();
+        // runCommand / adminCommand: the user's document as written, in its order; only
+        // `maxTimeMS` (in place) and the trailing `comment` change.
+        for text in [
+            "db.runCommand({maxTimeMS: 0, dropDatabase: 1})",
+            "db.runCommand({maxTimeMS: 5, drop: 'users'})",
+            "db.adminCommand({maxTimeMS: 5, drop: 'users'})",
+            "db.runCommand({comment: 'x', drop: 'users'})",
+            "db.runCommand({drop: 'users', maxTimeMS: 5})",
+            "db.runCommand({count: 'c', maxTimeMS: 70, query: {}})",
+            "db.runCommand({find: 'c', maxTimeMS: 0})",
+            "db.runCommand({ping: 1})",
+            "db.getSiblingDB('x').runCommand({dropDatabase: 1, maxTimeMS: 9})",
+            "db.adminCommand({explain: {find: 'c'}, verbosity: 'queryPlanner', maxTimeMS: 9})",
+        ] {
+            let sent_doc = match &shell(text) {
+                ShellCommand::Db { args, .. } => doc_at(args, 0),
+                other => panic!("{other:?}"),
+            };
+            for opts in [&none, &timeout] {
+                let p = plan_of(text, opts);
+                assert_eq!(first(&p.body), first(&sent_doc), "{text}");
+                let mut keys: Vec<&String> = p.body.keys().collect();
+                if !sent_doc.contains_key("comment") {
+                    assert_eq!(keys.pop().map(String::as_str), Some("comment"), "{text}");
+                }
+                // A read without its own limit gets `opts.timeout`, after its fields.
+                if !sent_doc.contains_key("maxTimeMS")
+                    && keys.last().map(|k| k.as_str()) == Some("maxTimeMS")
+                {
+                    keys.pop();
+                }
+                assert_eq!(keys, sent_doc.keys().collect::<Vec<_>>(), "{text}");
+            }
+        }
+        // A leading `maxTimeMS` is not a command: classified Unknown with no drop, and sent
+        // untouched (the server refuses it), never as `dropDatabase`.
+        let cmd = parsed("db.runCommand({maxTimeMS: 0, dropDatabase: 1})");
+        assert_eq!((cmd.class, cmd.drops.len()), (CommandClass::Unknown, 0));
+        let p = plan_of("db.runCommand({maxTimeMS: 5, drop: 'users'})", &timeout);
+        assert_eq!(
+            p.body,
+            doc! { "maxTimeMS": 5, "drop": "users", "comment": "dnt:u1" }
+        );
+        // A later `maxTimeMS` of a read is capped in place.
+        let p = plan_of(
+            "db.runCommand({count: 'c', maxTimeMS: 70, query: {}})",
+            &timeout,
+        );
+        assert_eq!(
+            p.body,
+            doc! { "count": "c", "maxTimeMS": 60i64, "query": {}, "comment": "dnt:u1" }
+        );
+
+        // Console methods: options (merged with `extend`) never come before the name.
+        for (text, name) in [
+            (
+                "db.c.find({}, {}, {maxTimeMS: 5, hint: 'x', sort: {a: 1}})",
+                "find",
+            ),
+            ("db.c.findOne({}, {}, {collation: {locale: 'en'}})", "find"),
+            ("db.c.countDocuments({}, {hint: 'x', skip: 1})", "aggregate"),
+            ("db.c.estimatedDocumentCount({maxTimeMS: 5})", "count"),
+            (
+                "db.c.distinct('a', {}, {collation: {locale: 'en'}})",
+                "distinct",
+            ),
+            (
+                "db.c.aggregate([], {allowDiskUse: true, batchSize: 2})",
+                "aggregate",
+            ),
+            ("db.c.insertOne({a: 1}, {writeConcern: {w: 1}})", "insert"),
+            ("db.c.insertMany([{a: 1}], {ordered: false})", "insert"),
+            (
+                "db.c.updateOne({}, {$set: {a: 1}}, {upsert: true, let: {}})",
+                "update",
+            ),
+            ("db.c.replaceOne({}, {a: 1}, {hint: 'x'})", "update"),
+            (
+                "db.c.deleteMany({a: 1}, {collation: {locale: 'en'}})",
+                "delete",
+            ),
+            (
+                "db.c.findOneAndUpdate({}, {$set: {a: 1}}, {projection: {a: 1}})",
+                "findAndModify",
+            ),
+            ("db.c.findOneAndDelete({}, {sort: {a: 1}})", "findAndModify"),
+            (
+                "db.c.createIndex({a: 1}, {unique: true, writeConcern: {w: 1}})",
+                "createIndexes",
+            ),
+            ("db.c.drop({writeConcern: {w: 1}})", "drop"),
+            (
+                "db.createCollection('n', {capped: true, size: 1})",
+                "create",
+            ),
+            ("db.stats({scale: 2})", "dbStats"),
+            ("db.serverStatus({repl: 0})", "serverStatus"),
+            ("db.c.explain().find({}, {}, {hint: 'x'})", "explain"),
+        ] {
+            for opts in [&none, &timeout] {
+                assert_eq!(
+                    first(&plan_of(text, opts).body).as_deref(),
+                    Some(name),
+                    "{text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validation_errors_never_show_the_rejected_value() {
+        let info = doc! {
+            "failingDocumentId": 1,
+            "details": {
+                "operatorName": "$jsonSchema",
+                "schemaRulesNotSatisfied": [{
+                    "operatorName": "properties",
+                    "propertiesNotSatisfied": [{
+                        "propertyName": "password",
+                        "details": [{
+                            "operatorName": "maxLength",
+                            "specifiedAs": { "maxLength": 4 },
+                            "reason": "specified string length was not satisfied",
+                            "consideredValue": "hunter2-secret",
+                        }],
+                    }],
+                }, {
+                    "operatorName": "required",
+                    "consideredValue": { "nested": ["hunter2-secret"] },
+                }],
+            },
+        };
+        let message = with_err_info("Document failed validation".into(), &info);
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(!message.contains("consideredValue"), "{message}");
+        assert!(
+            message.contains("\"propertyName\":\"password\""),
+            "{message}"
+        );
+        assert!(message.contains("maxLength"), "{message}");
+        // The same through a write reply.
+        let r = reply(
+            Shape::Insert {
+                ids: vec![Bson::Int32(1)],
+            },
+            doc! {
+                "n": 0, "ok": 1.0,
+                "writeErrors": [{
+                    "index": 0, "code": 121, "errmsg": "Document failed validation",
+                    "errInfo": info,
+                }],
+            },
+        );
+        match r {
+            Err(DbError::Server { message, .. }) => {
+                assert!(!message.contains("hunter2"), "{message}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stop_while_reading_a_write_cursor_may_have_applied() {
+        for (text, unknown) in [
+            ("db.c.find()", false),
+            ("db.c.aggregate([{$match: {}}])", false),
+            ("db.c.aggregate([{$match: {}}, {$out: 'd'}])", true),
+            ("db.c.aggregate([{$merge: 'd'}])", true),
+        ] {
+            assert!(
+                matches!(
+                    stopped(&parsed(text).class),
+                    DbError::Cancelled { outcome_unknown, was_in_tx: false } if outcome_unknown == unknown
+                ),
+                "{text}"
+            );
         }
     }
 

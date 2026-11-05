@@ -214,7 +214,7 @@ impl CommandSession for MongoSession {
         let _running = self.start(uuid, cmd.class.clone());
         let plan = exec::plan(&payload.cmd, &self.db(), opts, &comment)?;
         let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
-        let output = match exec::run(&self.client(), plan, opts).await {
+        let output = match exec::run(&self.client(), plan, opts, &cmd.class).await {
             Ok(out) => out,
             Err(Fail::Db(e)) => return Err(e),
             Err(Fail::Mongo(e)) => return Err(self.mapped(&e, &cmd.class)),
