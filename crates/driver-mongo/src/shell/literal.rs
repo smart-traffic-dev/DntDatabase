@@ -481,8 +481,16 @@ fn regex_options(flags: &str, at: usize) -> Result<String, ShellError> {
     Ok(chars.into_iter().collect())
 }
 
+/// 32 hex digits, or the canonical `8-4-4-4-12` layout.
 fn uuid_binary(s: &str) -> Option<Bson> {
-    let digits: String = s.chars().filter(|c| *c != '-').collect();
+    let b = s.as_bytes();
+    let digits: String = match b.len() {
+        32 => s.to_string(),
+        36 if [8, 13, 18, 23].iter().all(|&i| b[i] == b'-') => {
+            s.chars().filter(|c| *c != '-').collect()
+        }
+        _ => return None,
+    };
     match hex::decode(&digits) {
         Ok(bytes) if bytes.len() == 16 => Some(Bson::Binary(Binary {
             subtype: BinarySubtype::Uuid,
@@ -495,15 +503,21 @@ fn uuid_binary(s: &str) -> Option<Bson> {
 /// RFC 3339, plus what mongosh's `ISODate` also takes: a date alone, a space for `T`,
 /// no seconds, no offset (UTC), and `+HHMM` / `+HH` offsets.
 fn parse_iso_date(s: &str) -> Option<DateTime> {
+    // ISO-8601 text is ASCII; refusing anything else also keeps the slicing below on
+    // char boundaries.
+    if !s.is_ascii() {
+        return None;
+    }
     if let Ok(d) = DateTime::parse_rfc3339_str(s) {
         return Some(d);
     }
     DateTime::parse_rfc3339_str(normalize_iso(s)?).ok()
 }
 
+/// Only called on ASCII text; every slice still goes through `get` so it cannot panic.
 fn normalize_iso(s: &str) -> Option<String> {
     let date = s.get(..10)?;
-    let rest = &s[10..];
+    let rest = s.get(10..)?;
     if rest.is_empty() {
         return Some(format!("{date}T00:00:00Z"));
     }
@@ -517,7 +531,7 @@ fn normalize_iso(s: &str) -> Option<String> {
     let zone = match zone.len() {
         0 => "Z".to_string(),
         3 => format!("{zone}:00"),
-        5 => format!("{}:{}", &zone[..3], &zone[3..]),
+        5 => format!("{}:{}", zone.get(..3)?, zone.get(3..)?),
         _ => zone.to_string(),
     };
     Some(format!("{date}T{clock}{zone}"))
@@ -641,7 +655,11 @@ fn wrapper(key: &str, v: Bson, at: usize) -> Result<Bson, ShellError> {
             .map(Bson::ObjectId)
             .ok_or_else(|| expected("a 24-digit hex string")),
         "$date" => match &v {
-            Bson::String(s) => parse_iso_date(s),
+            Bson::String(s) => {
+                return parse_iso_date(s)
+                    .map(Bson::DateTime)
+                    .ok_or_else(|| ShellError::new(format!("Invalid ISO-8601 date: {s}"), at))
+            }
             other => integral_value(other).map(DateTime::from_millis),
         }
         .map(Bson::DateTime)
@@ -1064,6 +1082,33 @@ mod tests {
                 "UUID() expects no argument or a 32-digit hex string",
                 5,
             ),
+            // Dashes only in the canonical 8-4-4-4-12 places.
+            (
+                "UUID('0001020-30405-0607-0809-0a0b0c0d0e0f')",
+                "UUID() expects no argument or a 32-digit hex string",
+                5,
+            ),
+            (
+                "UUID('00010203-04050607-0809-0a0b-0c0d0e0f')",
+                "UUID() expects no argument or a 32-digit hex string",
+                5,
+            ),
+            (
+                "UUID('0-0010203040506070809-0a0b0c0d0e0f')",
+                "UUID() expects no argument or a 32-digit hex string",
+                5,
+            ),
+            // Non-ASCII date text is refused, never sliced mid-character.
+            (
+                "ISODate('2020-01-01T00:00+1é1')",
+                "Invalid ISO-8601 date: 2020-01-01T00:00+1é1",
+                8,
+            ),
+            (
+                "new Date('2020-01-01T00:00+1é1')",
+                "Invalid ISO-8601 date: 2020-01-01T00:00+1é1",
+                9,
+            ),
             (
                 "BinData(256, 'AQI=')",
                 "BinData() expects a subtype (0-255) and a base64 string",
@@ -1253,6 +1298,8 @@ mod tests {
             r#"{"$binary": {"base64": "AQI=", "subType": "zz"}}"#,
             r#"{"$binary": {"base64": "AQI=", "subType": "00", "x": 1}}"#,
             r#"{"$uuid": "123"}"#,
+            r#"{"$uuid": "0001020-30405-0607-0809-0a0b0c0d0e0f"}"#,
+            r#"{"$date": "2020-01-01T00:00+1é1"}"#,
             r#"{"$regularExpression": {"pattern": "a"}}"#,
             r#"{"$regularExpression": {"pattern": "a", "options": "g"}}"#,
             r#"{"$timestamp": {"t": -1, "i": 0}}"#,
@@ -1271,6 +1318,15 @@ mod tests {
         for text in bad {
             let e = lit_err(text);
             assert!(e.offset < text.len(), "{text}: {e:?}");
+            // The wrapper check failed, not the lexer or the object syntax.
+            let m = e.message.as_str();
+            assert!(
+                m.starts_with("Invalid $")
+                    || m.starts_with("Extended JSON $")
+                    || m.starts_with("Invalid ISO-8601 date: ")
+                    || m.starts_with("Invalid regular expression flag "),
+                "{text}: {e:?}"
+            );
             // Never silently a sub-document, at any depth.
             assert!(
                 parse_document(&format!("{{a: [{text}]}}")).is_err(),
@@ -1294,6 +1350,24 @@ mod tests {
                 "Invalid $numberInt: expected a string holding a 32-bit integer",
                 15
             )
+        );
+        // Non-ASCII date text (a multi-byte char where the zone is sliced) is an error, not a panic.
+        for text in [
+            r#"{"$date": "2020-01-01T00:00+1é1"}"#,
+            r#"{"$date": "2020-01-01T00:00é"}"#,
+            r#"{"$date": "2020-01-0é"}"#,
+        ] {
+            let e = lit_err(text);
+            assert!(
+                e.message.starts_with("Invalid ISO-8601 date: "),
+                "{text}: {e:?}"
+            );
+            assert_eq!(e.offset, 10, "{text}");
+        }
+        // UUID: 32 hex digits or 8-4-4-4-12, nothing in between.
+        assert_eq!(
+            lit(r#"{"$uuid": "000102030405060708090a0b0c0d0e0f"}"#),
+            uuid_bin()
         );
     }
 
