@@ -120,8 +120,13 @@ struct StoreInner {
     no_paged_objects: AtomicBool,
     /// The command index the next `execute_atomic` fails at ([`NO_FORCED_DB`]: none).
     fail_atomic_at: AtomicUsize,
-    /// Sessions opened from now on report `capabilities.transactions = true`.
+    /// Every session reports `capabilities.transactions = true`.
     transactions: AtomicBool,
+    /// The command index the next `execute_atomic` loses its answer at
+    /// ([`NO_FORCED_DB`]: none).
+    fail_atomic_unknown_at: AtomicUsize,
+    /// The next `execute_atomic` is `Unsupported`.
+    atomic_unsupported: AtomicBool,
     /// How many times `execute_atomic` was called (every session).
     atomic_calls: AtomicUsize,
     /// An `HDEL` of a field that is not there is `DocumentNotFound` (as a Mongo
@@ -149,15 +154,37 @@ impl FakeStore {
             no_paged_objects: AtomicBool::new(false),
             fail_atomic_at: AtomicUsize::new(NO_FORCED_DB),
             transactions: AtomicBool::new(false),
+            fail_atomic_unknown_at: AtomicUsize::new(NO_FORCED_DB),
+            atomic_unsupported: AtomicBool::new(false),
             atomic_calls: AtomicUsize::new(0),
             missing_documents: AtomicBool::new(false),
         }))
     }
 
-    /// Sessions opened from now on report `capabilities.transactions = true` (their
+    /// Every session reports `capabilities.transactions = true` from now on (their
     /// `execute_atomic` is always there).
     pub fn with_transactions(&self) {
-        self.0.transactions.store(true, Ordering::SeqCst);
+        self.set_transactions(true);
+    }
+
+    /// Every session, open or not, reports `capabilities.transactions = on` from now on
+    /// (as if the server's topology changed under the connection).
+    pub fn set_transactions(&self, on: bool) {
+        self.0.transactions.store(on, Ordering::SeqCst);
+    }
+
+    /// The next `execute_atomic` runs the commands before `index`, then loses the
+    /// connection at `index` without an answer (`ConnectionLost { outcome_unknown:
+    /// true }`, `rolled_back: false`; nothing is restored). Used once.
+    pub fn fail_atomic_unknown_at(&self, index: usize) {
+        self.0.fail_atomic_unknown_at.store(index, Ordering::SeqCst);
+    }
+
+    /// The next `execute_atomic` answers as the trait's default does
+    /// (`Unsupported { feature: "transactions" }`, index 0, `rolled_back: false`) and
+    /// runs nothing. Used once.
+    pub fn atomic_unsupported(&self) {
+        self.0.atomic_unsupported.store(true, Ordering::SeqCst);
     }
 
     /// How many times `execute_atomic` was called, by every session.
@@ -324,11 +351,8 @@ impl Driver for FakeCommandDriver {
         if self.store.0.no_paged_objects.load(Ordering::SeqCst) {
             info.capabilities.paged_objects = false;
         }
-        if self.store.0.transactions.load(Ordering::SeqCst) {
-            info.capabilities.transactions = true;
-        }
         Ok(Box::new(FakeCommandSession {
-            info,
+            info: info.into(),
             store: self.store.clone(),
             language: FakeLanguage,
             db: AtomicUsize::new(start),
@@ -823,8 +847,24 @@ impl Canceller for FakeCanceller {
     }
 }
 
+/// A session's `ServerInfo` without and with `capabilities.transactions` (which one it
+/// reports follows [`FakeStore::set_transactions`]).
+struct SessionInfo {
+    plain: ServerInfo,
+    with_tx: ServerInfo,
+}
+
+impl From<ServerInfo> for SessionInfo {
+    fn from(mut plain: ServerInfo) -> Self {
+        plain.capabilities.transactions = false;
+        let mut with_tx = plain.clone();
+        with_tx.capabilities.transactions = true;
+        SessionInfo { plain, with_tx }
+    }
+}
+
 struct FakeCommandSession {
-    info: ServerInfo,
+    info: SessionInfo,
     store: FakeStore,
     language: FakeLanguage,
     /// The current db.
@@ -1050,7 +1090,11 @@ impl FakeCommandSession {
 #[async_trait]
 impl Session for FakeCommandSession {
     fn server_info(&self) -> &ServerInfo {
-        &self.info
+        if self.store.0.transactions.load(Ordering::SeqCst) {
+            &self.info.with_tx
+        } else {
+            &self.info.plain
+        }
     }
     fn engine(&self) -> Engine<'_> {
         Engine::Command(self)
@@ -1178,7 +1222,8 @@ impl CommandSession for FakeCommandSession {
     }
 
     /// Runs the commands in order on a snapshot of the store; the first error (or the
-    /// one [`FakeStore::fail_atomic_at`] forces) restores the snapshot.
+    /// one [`FakeStore::fail_atomic_at`] forces) restores the snapshot. See also
+    /// [`FakeStore::fail_atomic_unknown_at`] and [`FakeStore::atomic_unsupported`].
     async fn execute_atomic(
         &self,
         cmds: &[ParsedCommand],
@@ -1191,6 +1236,18 @@ impl CommandSession for FakeCommandSession {
             fn result_end(&mut self, _summary: &ResultSummary) {}
         }
         self.store.0.atomic_calls.fetch_add(1, Ordering::SeqCst);
+        if self
+            .store
+            .0
+            .atomic_unsupported
+            .swap(false, Ordering::SeqCst)
+        {
+            return Err(AtomicFailure {
+                index: 0,
+                error: unsupported("transactions"),
+                rolled_back: false,
+            });
+        }
         let snapshot = self.store.lock().dbs.clone();
         let db = self.db.load(Ordering::SeqCst);
         let forced = self
@@ -1198,8 +1255,24 @@ impl CommandSession for FakeCommandSession {
             .0
             .fail_atomic_at
             .swap(NO_FORCED_DB, Ordering::SeqCst);
+        let unknown = self
+            .store
+            .0
+            .fail_atomic_unknown_at
+            .swap(NO_FORCED_DB, Ordering::SeqCst);
         let mut outcomes = Vec::with_capacity(cmds.len());
         for (index, cmd) in cmds.iter().enumerate() {
+            if index == unknown {
+                return Err(AtomicFailure {
+                    index,
+                    error: DbError::ConnectionLost {
+                        was_in_tx: true,
+                        outcome_unknown: true,
+                        message: "the connection was lost".into(),
+                    },
+                    rolled_back: false,
+                });
+            }
             let outcome = if index == forced {
                 Err(server_err("ERR forced atomic failure"))
             } else {
@@ -1719,7 +1792,7 @@ mod tests {
         let cmd = FakeLanguage.parse(r#"SET k "a b""#).unwrap();
         assert_eq!(cmd.text, r#"SET k "a b""#);
         let session = FakeCommandSession {
-            info: server_info(DbKind::Redis),
+            info: server_info(DbKind::Redis).into(),
             store: FakeStore::new(),
             language: FakeLanguage,
             db: AtomicUsize::new(0),
@@ -1782,7 +1855,7 @@ mod tests {
         ]);
         store.set("0", &collection_key("orders"), FakeValue::Hash(hash));
         let session = FakeCommandSession {
-            info: server_info(DbKind::Mongo),
+            info: server_info(DbKind::Mongo).into(),
             store: store.clone(),
             language: FakeLanguage,
             db: AtomicUsize::new(0),
@@ -1824,7 +1897,7 @@ mod tests {
 
     fn atomic_session(store: &FakeStore) -> FakeCommandSession {
         FakeCommandSession {
-            info: server_info(DbKind::Mongo),
+            info: server_info(DbKind::Mongo).into(),
             store: store.clone(),
             language: FakeLanguage,
             db: AtomicUsize::new(0),
@@ -1882,7 +1955,7 @@ mod tests {
         store.set("0", b"b", FakeValue::Str("2".into()));
         store.set("2", b"c", FakeValue::Str("3".into()));
         let session = FakeCommandSession {
-            info: server_info(DbKind::Redis),
+            info: server_info(DbKind::Redis).into(),
             store,
             language: FakeLanguage,
             db: AtomicUsize::new(0),
@@ -1899,7 +1972,7 @@ mod tests {
     fn fake_missing_key_is_key_not_found() {
         use dnt_core::error::AppError;
         let session = FakeCommandSession {
-            info: server_info(DbKind::Redis),
+            info: server_info(DbKind::Redis).into(),
             store: FakeStore::new(),
             language: FakeLanguage,
             db: AtomicUsize::new(0),

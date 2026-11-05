@@ -997,6 +997,105 @@ async fn atomic_failure_is_rolled_back() {
     assert!(rows.iter().all(|r| !r.outcome_unknown));
 }
 
+#[tokio::test]
+async fn atomic_failure_not_rolled_back_is_unknown() {
+    let (f, store) = atomic_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    // The answer is lost at the last command (as a commit without an answer).
+    store.fail_atomic_unknown_at(2);
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    // The whole unit is unknown, not just the command that failed.
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 3 }, "{r:?}");
+    assert_eq!(
+        sent(&r),
+        [
+            (0, None, false, false),
+            (1, None, false, false),
+            (2, None, true, false)
+        ]
+    );
+    let rows = history(&f);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    assert!(rows.iter().all(|r| r.outcome_unknown), "{rows:?}");
+    // No row claims it was applied or rolled back.
+    assert_eq!(rows[0].status, HistoryStatus::Ok);
+    assert!(rows
+        .iter()
+        .all(|r| r.error_kind.as_deref() != Some("rolled_back")));
+
+    // An earlier command too: still the whole unit.
+    let (f, store) = atomic_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    store.fail_atomic_unknown_at(1);
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Unknown { at: 3 }, "{r:?}");
+    assert_eq!(sent(&r), [(0, None, false, false), (1, None, true, false)]);
+    assert!(history(&f).iter().all(|r| r.outcome_unknown));
+}
+
+#[tokio::test]
+async fn atomic_unsupported_applies_nothing() {
+    let (f, store) = atomic_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    store.atomic_unsupported();
+    let e = data_apply_impl(&f.state, p.plan_id, false)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&e, DbError::Unsupported { feature, .. } if feature == "transactions"),
+        "{e:?}"
+    );
+    // Nothing was sent, nothing is unknown, and there is nothing to record.
+    assert_eq!(store.atomic_calls(), 1);
+    assert!(store.executed().is_empty(), "{:?}", store.executed());
+    assert_eq!(users_hash(&store), original_users());
+    assert!(history(&f).is_empty());
+}
+
+#[tokio::test]
+async fn transaction_support_change_makes_plan_stale() {
+    // Previewed without transactions, applied where there are: never run atomically.
+    let (f, store) = redis_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(p.atomic, Atomicity::No);
+    store.set_transactions(true);
+    let e = data_apply_impl(&f.state, p.plan_id, false)
+        .await
+        .unwrap_err();
+    match &e {
+        DbError::PlanStale { reason } => {
+            assert_eq!(reason, "the server's transaction support changed")
+        }
+        other => panic!("expected PlanStale, got {other:?}"),
+    }
+    assert!(store.executed().is_empty());
+    assert_eq!(store.atomic_calls(), 0);
+
+    // Previewed with transactions, applied where there are none: never one by one.
+    let (f, store) = atomic_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(p.atomic, Atomicity::Yes);
+    store.set_transactions(false);
+    let e = data_apply_impl(&f.state, p.plan_id, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DbError::PlanStale { .. }), "{e:?}");
+    assert!(store.executed().is_empty());
+    assert_eq!(store.atomic_calls(), 0);
+    assert_eq!(users_hash(&store), original_users());
+    assert!(history(&f).is_empty());
+}
+
 /// `u1` becomes `alicia`, `u2` is deleted.
 fn update_then_delete() -> EditSet {
     EditSet {

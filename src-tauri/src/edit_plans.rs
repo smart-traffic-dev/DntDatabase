@@ -1751,9 +1751,11 @@ impl SessionManager {
     /// [`Self::edit_apply`]). Before anything is sent: read-only is `blocked`, the
     /// verdict is judged again with the config as stored now, then the env tag,
     /// read-only flag, collection fingerprint ([`command_fingerprint`]) and tunnel must
-    /// be the plan's. An atomic plan of an engine with transactions runs as one
-    /// `execute_atomic` unit: a failure it rolled back is `rolled_back`, any other
-    /// `unknown`. Otherwise the commands run in order, each once (never retried); the
+    /// be the plan's, and so must the data session's transaction support. An atomic
+    /// plan of an engine with transactions runs as one `execute_atomic` unit: a failure
+    /// it rolled back is `rolled_back`, `Unsupported` (nothing sent) is the error, any
+    /// other failure leaves the whole unit `unknown` (`at` = the number of commands).
+    /// Otherwise the commands run in order, each once (never retried); the
     /// first failure stops the apply (`partially_applied`, or `unknown` when it may have
     /// been applied). A failure whose document no longer exists (`DocumentNotFound`) is
     /// a conflict.
@@ -1794,6 +1796,12 @@ impl SessionManager {
         if taken.tunnel_gen != stored.tunnel_gen {
             self.return_data_session(&rt, taken, true);
             return Err(stale("the connection's SSH tunnel was replaced"));
+        }
+        // Fail closed: a plan made with (or without) transactions never runs on a
+        // session of another topology.
+        if taken.session.server_info().capabilities.transactions != edit.transaction {
+            self.return_data_session(&rt, taken, true);
+            return Err(stale("the server's transaction support changed"));
         }
         let c = match taken.session.engine() {
             Engine::Command(c) => c,
@@ -1842,17 +1850,12 @@ impl SessionManager {
                 // One unit: all the commands take effect or none do.
                 edit.commands.iter().for_each(log);
                 return match c.execute_atomic(&edit.commands, &opts).await {
-                    Ok(outs) => {
-                        for (i, out) in outs.iter().enumerate() {
-                            record(StmtApply {
-                                index: count(i),
-                                affected: affected(out),
-                                error: None,
-                                conflict: false,
-                            });
-                        }
-                        (ApplyOutcome::Committed, true)
-                    }
+                    // The default `execute_atomic`: nothing was sent.
+                    Err(AtomicFailure {
+                        error: error @ DbError::Unsupported { .. },
+                        rolled_back: false,
+                        ..
+                    }) => Err(error),
                     Err(AtomicFailure {
                         index,
                         error,
@@ -1875,12 +1878,27 @@ impl SessionManager {
                             error: Some(AppError::from(error)),
                             conflict,
                         });
+                        // Not known to be rolled back: the earlier commands took effect
+                        // only if the unit committed (a failed commit reports the last
+                        // index), so the whole unit is unknown, as a SQL COMMIT without
+                        // an answer.
                         let outcome = if rolled_back {
                             ApplyOutcome::RolledBack
                         } else {
-                            ApplyOutcome::Unknown { at: count(index) }
+                            ApplyOutcome::Unknown { at: n }
                         };
-                        (outcome, false)
+                        Ok((outcome, false))
+                    }
+                    Ok(outs) => {
+                        for (i, out) in outs.iter().enumerate() {
+                            record(StmtApply {
+                                index: count(i),
+                                affected: affected(out),
+                                error: None,
+                                conflict: false,
+                            });
+                        }
+                        Ok((ApplyOutcome::Committed, true))
                     }
                 };
             }
@@ -1908,36 +1926,36 @@ impl SessionManager {
                             error: Some(AppError::from(e)),
                             conflict,
                         });
-                        return (outcome, false);
+                        return Ok((outcome, false));
                     }
                 }
             }
-            (ApplyOutcome::Committed, true)
+            Ok((ApplyOutcome::Committed, true))
         };
         let abort = running.abort.notified();
-        let mut closed_error = None;
-        let (outcome, clean) = match select(pin!(abort), pin!(run)).await {
+        let ended = match select(pin!(abort), pin!(run)).await {
             // Closing gave up waiting on an atomic unit (which records nothing until it
-            // ends): it may be committing, so whether it applied cannot be told.
+            // ends): it may be committing, so whether it applied cannot be told. The
+            // last command (where a failed commit is reported) carries the error.
             Either::Left(((), _run)) if atomic => {
+                let last = edit.commands.len().saturating_sub(1);
                 let mut p = lock(&progress);
                 p.statements = (0..edit.commands.len())
                     .map(|i| StmtApply {
                         index: count(i),
                         affected: None,
-                        error: None,
+                        error: (i == last).then(|| AppError::from(closed_mid_apply(true, true))),
                         conflict: false,
                     })
                     .collect();
-                closed_error = Some(AppError::from(closed_mid_apply(true, true)));
-                (ApplyOutcome::Unknown { at: n }, false)
+                Ok((ApplyOutcome::Unknown { at: n }, false))
             }
             // Closing gave up waiting: the command in flight is abandoned with `run`.
             Either::Left(((), _run)) => {
                 let mut p = lock(&progress);
                 let at = p.at;
                 if p.statements.len() == edit.commands.len() {
-                    (ApplyOutcome::Committed, false)
+                    Ok((ApplyOutcome::Committed, false))
                 } else {
                     if p.statements.len() == at {
                         p.statements.push(StmtApply {
@@ -1947,13 +1965,21 @@ impl SessionManager {
                             conflict: false,
                         });
                     }
-                    (ApplyOutcome::Unknown { at: count(at) }, false)
+                    Ok((ApplyOutcome::Unknown { at: count(at) }, false))
                 }
             }
             Either::Right((out, _)) => out,
         };
-        let mut report = command_report(outcome, std::mem::take(&mut lock(&progress).statements));
-        report.error = closed_error;
+        let (outcome, clean) = match ended {
+            Ok(ended) => ended,
+            // Nothing was sent: a plain failure, no History row.
+            Err(e) => {
+                self.return_data_session(&rt, taken, true);
+                drop(running);
+                return Err(e);
+            }
+        };
+        let report = command_report(outcome, std::mem::take(&mut lock(&progress).statements));
         tracing::info!(connection = %stored.conn, outcome = ?report.outcome, "edit plan applied");
         let entries = command_history_entries(
             stored.conn,
