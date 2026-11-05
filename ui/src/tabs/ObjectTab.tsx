@@ -138,6 +138,9 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   // A read-only connection still opens the editor (view-only, with the reason), as the tree does.
   const caps = useCaps(tab.connectionId);
   const editable = !!conn && connected && !!caps?.ddl_edit && editableKindsOf(conn.kind).includes(tab.objectRef.kind);
+  // SQL DDL by the connection's engine; a Command-family definition (a collection's options) is JSON.
+  const engine = conn ? sqlEngine(conn.kind) : dialectOfConnection(tab.connectionId);
+  const language = engine ? editorLanguage(engine) : 'json';
 
   const copy = async () => {
     try {
@@ -187,7 +190,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
         ) : null}
         <div className="ot-ddl-text" data-testid="object-ddl-text">
           <Editor
-            language={editorLanguage(dialectOfConnection(tab.connectionId))}
+            language={language}
             value={ddl}
             theme={monacoTheme.theme}
             beforeMount={monacoTheme.beforeMount}
