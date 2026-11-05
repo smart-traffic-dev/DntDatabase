@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { draftToFilter, emptyDraft, type FilterDraft } from '../store/tableData';
 import { FilterBar } from './FilterBar';
+import { pickMenuOption } from '../components/selectMenuTestKit';
 
 function Harness({ onApply, initial = emptyDraft(), error = null }: { onApply(draft: FilterDraft): void; initial?: FilterDraft; error?: string | null }) {
   const [draft, setDraft] = useState(initial);
@@ -17,14 +18,14 @@ describe('FilterBar', () => {
     render(<Harness onApply={onApply} />);
     const bar = screen.getByRole('search', { name: 'Filter' });
     await user.click(within(bar).getByRole('button', { name: '+ Condition' }));
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 1' }), 'between');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 1' }), 'BETWEEN');
     await user.type(within(bar).getByRole('textbox', { name: 'From 1' }), '1');
     await user.type(within(bar).getByRole('textbox', { name: 'To 1' }), '9');
     await user.click(within(bar).getByRole('button', { name: '+ Condition' }));
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'in');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 2' }), 'IN (list)');
     await user.type(within(bar).getByRole('textbox', { name: 'Value 2' }), 'a, b');
     await user.click(within(bar).getByRole('button', { name: '+ Condition' }));
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 3' }), 'is_null');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 3' }), 'IS NULL');
     expect(within(bar).queryByRole('textbox', { name: /3$/ })).toBeNull();
     await user.click(within(bar).getByRole('button', { name: 'Apply' }));
     const draft = onApply.mock.calls[0]![0] as FilterDraft;

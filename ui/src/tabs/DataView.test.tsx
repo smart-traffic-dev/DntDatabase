@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent } from '@testing-library/react';
 import type { ApplyReport, ColumnMeta, EditPreview, EditableInfo, ObjectRef, TableDataPage, Value } from '../bindings';
 import { closeTab } from '../components/tabActions';
+import { pickMenuOption } from '../components/selectMenuTestKit';
 import { DialogHost } from '../dialogs/DialogHost';
 import { ONE_AT_A_TIME, useDataEdits } from '../store/dataEdits';
 import { openValueEditor } from './data/openValueEditor';
@@ -694,9 +695,9 @@ describe('DataView filter and multi-sort', () => {
     await user.click(screen.getByRole('button', { name: 'Filter' }));
     const bar = screen.getByRole('search', { name: 'Filter' });
     // Opening an empty bar offers a first condition on the first column.
-    expect(within(bar).getByRole('combobox', { name: 'Column 1' })).toHaveValue('id');
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Column 1' }), 'we`ird"col');
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 1' }), 'contains');
+    expect(within(bar).getByRole('combobox', { name: 'Column 1' })).toHaveTextContent(/^id$/);
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Column 1' }), 'we`ird"col');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 1' }), 'contains');
     await user.type(within(bar).getByRole('textbox', { name: 'Value 1' }), "50%'; DROP");
     await user.click(within(bar).getByRole('button', { name: 'Apply' }));
     const filter = { mode: 'and', conditions: [{ column: 'we`ird"col', op: 'contains', values: ["50%'; DROP"] }] };
@@ -710,10 +711,10 @@ describe('DataView filter and multi-sort', () => {
 
     // A second row: BETWEEN takes two values; OR for the bar.
     await user.click(within(bar).getByRole('button', { name: '+ Condition' }));
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'between');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 2' }), 'BETWEEN');
     await user.type(within(bar).getByRole('textbox', { name: 'From 2' }), '1');
     await user.type(within(bar).getByRole('textbox', { name: 'To 2' }), '9{Enter}');
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Match conditions' }), 'or');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Match conditions' }), 'any (OR)');
     await user.click(within(bar).getByRole('button', { name: 'Apply' }));
     await waitFor(() =>
       expect(lastData()).toMatchObject({
@@ -722,11 +723,11 @@ describe('DataView filter and multi-sort', () => {
     );
 
     // IS NULL takes no value; IN needs at least one.
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'in');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 2' }), 'IN (list)');
     await user.clear(within(bar).getByRole('textbox', { name: 'Value 2' }));
     await user.click(within(bar).getByRole('button', { name: 'Apply' }));
     expect(within(bar).getByRole('alert')).toHaveTextContent('IN on id needs at least one value.');
-    await user.selectOptions(within(bar).getByRole('combobox', { name: 'Operator 2' }), 'is_null');
+    await pickMenuOption(user, within(bar).getByRole('combobox', { name: 'Operator 2' }), 'IS NULL');
     expect(within(bar).queryByRole('textbox', { name: /2$/ })).toBeNull();
     await user.click(within(bar).getByRole('button', { name: 'Remove condition 2' }));
     expect(within(bar).getAllByTestId('filter-row')).toHaveLength(1);

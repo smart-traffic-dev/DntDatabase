@@ -108,6 +108,21 @@ export function quoteIdent(kind: DbKind, name: string): string {
   }
 }
 
+/** The hint an empty query editor shows, in the tab's language. */
+export function editorPlaceholder(kind: DbKind): string {
+  switch (kind) {
+    case 'mysql':
+    case 'postgres':
+      return 'Write SQL  ·  Ctrl+Enter runs the statement at the cursor  ·  Ctrl+Space suggests';
+    case 'mongo':
+      return 'Write a command, e.g. db.orders.find({ status: "paid" })  ·  Ctrl+Enter runs it';
+    case 'redis':
+      return 'Write a command, e.g. GET key  ·  Ctrl+Enter runs it';
+    default:
+      return assertNever(kind);
+  }
+}
+
 export function editorLanguage(kind: DbKind): 'mysql' | 'pgsql' | 'mongo' | 'redis' {
   switch (kind) {
     case 'mysql':

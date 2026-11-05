@@ -4,7 +4,8 @@ import { useConnections } from '../store/connections';
 import type { ObjectTabRef as Tab } from '../store/tabs';
 import { DataActions, DataPager } from './DataView';
 import { ObjectSections, READ_ONLY_TIP, SectionRefresh, resourceOf, useRowEstimate, useSubTab } from './objectSections';
-import { ENV_SHORT, useStripWidth } from './stripWidth';
+import { ContextMark } from '../components/EnvTag';
+import { useStripWidth } from './stripWidth';
 import './query/toolbar.css';
 
 /**
@@ -32,7 +33,8 @@ export function ObjectActions({ tab }: { tab: Tab }) {
   return (
     <div className={`tab-actions${narrow ? ' w-narrow' : ' w-wide'}`} role="toolbar" aria-label="Object" ref={bar}>
       <span className="ta-chip ta-chip-static" data-testid="object-context" title={tip}>
-        {env ? <span className={`qt-env env-${env}`}>{ENV_SHORT[env]}</span> : narrow ? <DatabaseIcon /> : null}
+        <ContextMark env={env} kind={conn?.kind} />
+        {!conn && !env && narrow ? <DatabaseIcon /> : null}
         {!narrow && (
           <>
             {conn && (

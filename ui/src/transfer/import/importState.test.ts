@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ImportRequest, ImportTarget, Inspection, MappingReport, TargetColumn } from '../../bindings';
 import { sqlCaps } from '../../test/fixtures/caps';
 import {
+  advanceBlocker,
   buildRequest,
   canAdvance,
   canOpen,
@@ -75,23 +76,29 @@ describe('formatFromPath', () => {
 });
 
 describe('step gating', () => {
-  it('Next is disabled until a file is inspected', () => {
+  it('Next is disabled until a file is inspected and the target loaded; the footer says why', () => {
     let s = initialState({ connectionId: 'c1', table });
     expect(canAdvance(s)).toBe(false);
+    expect(advanceBlocker(s)).toBe('Choose a file first');
     s = reduce(s, { type: 'file', path: 'orders.csv' });
     expect(s.source.format).toBe('csv');
     expect(canAdvance(s)).toBe(false);
+    expect(advanceBlocker(s)).toBe('Reading the file…');
     s = reduce(s, { type: 'inspected', inspection });
-    expect(canAdvance(s)).toBe(true);
-  });
-
-  it('Target needs the loaded target; Mapping needs a report without errors', () => {
-    let s = run(initialState({ connectionId: 'c1', table }), { type: 'file', path: 'a.csv' }, { type: 'inspected', inspection }, { type: 'goto', step: 'target' });
-    expect(s.step).toBe('target');
     expect(canAdvance(s)).toBe(false);
+    expect(advanceBlocker(s)).toBe('Reading the table…');
+    expect(advanceBlocker(reduce(s, { type: 'table', table: null }))).toBe('Choose the target table');
     s = reduce(s, { type: 'targetLoaded', target });
     expect(canAdvance(s)).toBe(true);
+    expect(advanceBlocker(s)).toBeNull();
+  });
+
+  it('Mapping needs a report without errors', () => {
+    let s = run(initialState({ connectionId: 'c1', table }), { type: 'file', path: 'a.csv' }, { type: 'inspected', inspection }, { type: 'targetLoaded', target });
+    expect(canAdvance(s)).toBe(true);
     s = run(s, { type: 'goto', step: 'mapping' }, { type: 'mapping', mapping: [{ target: 'id', source: null }] });
+    expect(s.step).toBe('mapping');
+    expect(advanceBlocker(s)).toBe('Checking the mapping…');
     // Not checked yet.
     expect(canAdvance(s)).toBe(false);
     s = reduce(s, { type: 'report', report: { errors: [{ column: 'id', message: 'Required' }], warnings: [] } });
@@ -115,7 +122,7 @@ describe('step gating', () => {
   it('a step opens only when every step before it can be left', () => {
     const s = initialState({ connectionId: 'c1', table });
     expect(canOpen(s, 'source')).toBe(true);
-    expect(canOpen(s, 'target')).toBe(false);
+    expect(canOpen(s, 'mapping')).toBe(false);
     const r = ready();
     expect(canOpen(r, 'review')).toBe(true);
     // A refused goto keeps the step.

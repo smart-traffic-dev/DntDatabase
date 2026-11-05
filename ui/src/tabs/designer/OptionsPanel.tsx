@@ -1,4 +1,5 @@
 import type { DesignOpen, DraftError, TableDef, TableOptionsDef } from '../../bindings';
+import { SelectMenu, type SelectMenuOption } from '../../components/SelectMenu';
 import { DraftInput } from './DraftInput';
 import './elementsGrid.css';
 import { isKind, sqlEngine } from '../../engine';
@@ -25,26 +26,24 @@ function Choice({ label, value, values, disabled, error, onChange }: {
   error?: string;
   onChange(v: string | null): void;
 }) {
+  const options: SelectMenuOption[] = [
+    { value: '', label: 'Server default' },
+    ...(value !== null && !values.includes(value) ? [value] : []).concat(values).map((v) => ({ value: v, label: v })),
+  ];
   return (
-    <label className="dz-field">
-      <span>{label}</span>
-      <select
-        aria-label={label}
-        className={`dz-input${error ? ' dz-invalid' : ''}`}
+    <div className="dz-field">
+      <span aria-hidden="true">{label}</span>
+      <SelectMenu
+        label={label}
+        size="md"
         value={value ?? ''}
+        options={options}
         disabled={disabled}
+        invalid={!!error}
         title={error}
-        onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
-      >
-        <option value="">Server default</option>
-        {value !== null && !values.includes(value) ? <option value={value}>{value}</option> : null}
-        {values.map((v) => (
-          <option key={v} value={v}>
-            {v}
-          </option>
-        ))}
-      </select>
-    </label>
+        onChange={(v) => onChange(v === '' ? null : v)}
+      />
+    </div>
   );
 }
 

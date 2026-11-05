@@ -390,7 +390,7 @@ export function ObjectInfoPanel({ onCollapse }: { onCollapse?: () => void }) {
   return (
     <section className="hs-view oi-view" aria-label="Object info" data-testid="object-info-view">
       <div className="rs-head">
-        <strong className="rs-title">OBJECT INFO</strong>
+        <strong className="rs-title">Object info</strong>
         <span className="spacer" />
         {object && (
           <button

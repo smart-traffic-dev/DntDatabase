@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import type { Tree } from '../../ui/src/bindings';
 import { config, ids } from '../../ui/src/test/fixtures/data';
-import { byId } from '../src/app';
+import { byId, pickOption } from '../src/app';
 import { createBackend } from '../src/backend';
 import { installBackend } from '../src/shim';
 import { expect, test } from '../src/test';
@@ -32,7 +32,7 @@ async function openQuery(page: Page) {
 
 async function bindProd(page: Page) {
   await byId(page, 'query-context').click();
-  await byId(page, 'query-connection').selectOption({ label: 'shop-prod' });
+  await pickOption(page, 'query-connection', 'shop-prod');
   await page.keyboard.press('Escape');
 }
 
@@ -65,7 +65,7 @@ test.describe('query toolbar row', () => {
     await chip.click();
     const picker = page.getByRole('dialog', { name: 'Connection and database' });
     await expect(byId(page, 'query-connection')).toBeFocused();
-    await byId(page, 'query-connection').selectOption({ label: 'shop-prod' });
+    await pickOption(page, 'query-connection', 'shop-prod');
     await page.keyboard.press('Escape');
     await expect(picker).toBeHidden();
     await expect(chip).toBeFocused();
@@ -77,7 +77,7 @@ test.describe('query toolbar row', () => {
 
     // The Run menu.
     await byId(page, 'query-run-menu').click();
-    for (const id of ['query-run-statement', 'query-run-all', 'query-run-selection', 'query-continue-on-error', 'query-add-favorite']) {
+    for (const id of ['query-run-statement', 'query-run-all', 'query-run-selection', 'query-continue-on-error']) {
       await expect(byId(page, id)).toBeVisible();
     }
     await page.keyboard.press('Escape');
@@ -85,7 +85,7 @@ test.describe('query toolbar row', () => {
 
     // ⋯: Format, the Limit radio list, Auto / Manual commit, Open in new group.
     await byId(page, 'query-more').click();
-    for (const id of ['query-format', 'query-row-limit-1000', 'query-tx-auto', 'query-tx-manual', 'query-open-in-group']) {
+    for (const id of ['query-format', 'query-add-favorite', 'query-row-limit-1000', 'query-tx-auto', 'query-tx-manual', 'query-open-in-group']) {
       await expect(byId(page, id)).toBeVisible();
     }
     await byId(page, 'query-row-limit-1000').click();

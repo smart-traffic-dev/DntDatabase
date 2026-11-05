@@ -111,31 +111,98 @@
   color: inherit;
 }
 
-.ot-info {
-  display: grid;
-  max-width: 560px;
+/* Structure's head: the object at a glance (rows, size, engine…), a row of label-over-value cells. */
+.ot-summary-wrap {
+  margin-bottom: var(--dnt-space-4);
+}
+
+.ot-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dnt-space-2) var(--dnt-space-8);
   margin: 0;
 }
 
-.ot-info-row {
-  display: grid;
-  grid-template-columns: 160px 1fr;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--dnt-border);
+.ot-summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.ot-info dt {
+.ot-summary dt {
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+}
+
+.ot-summary dd {
+  margin: 0;
+  color: var(--dnt-fg);
+  font-size: var(--dnt-text-base);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.ot-comment {
+  margin: var(--dnt-space-2) 0 0;
   color: var(--dnt-fg-muted);
 }
 
-.ot-info dd {
-  margin: 0;
+/* "No foreign keys, checks and triggers." after the sections that exist. */
+.ot-structure .ot-absent {
+  margin-top: var(--dnt-space-4);
+  font-size: var(--dnt-text-sm);
+}
+
+/*
+ * DDL: the read-only editor fills the panel edge to edge (no padded box inside the panel), and its
+ * actions float at its top-right corner instead of taking a 40px row of their own.
+ */
+.ot-ddl-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ot-ddl-wrap > .ot-bar {
+  position: absolute;
+  top: var(--dnt-space-2);
+  /* Clear of the editor's vertical scrollbar. */
+  right: var(--dnt-space-4);
+  z-index: var(--dnt-z-sticky);
+  height: auto;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-0_5);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-raised);
+  box-shadow: var(--dnt-shadow-1);
+}
+
+.ot-ddl-wrap > .ot-bar .btn {
+  border-color: transparent;
+}
+
+.ot-ddl-wrap > .ot-bar .btn:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.ot-ddl-wrap > .ot-bar .btn[aria-pressed='true'] {
+  background: var(--dnt-bg-active);
+  color: var(--dnt-fg);
 }
 
 .ot-ddl {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  padding: 0;
+}
+
+.ot-ddl > .ot-error {
+  margin: var(--dnt-space-2) var(--dnt-space-3) 0;
 }
 
 /* Read-only Monaco: it fills the panel, so a short DDL is not a lost island in an empty box. */
@@ -143,21 +210,14 @@
   flex: 1;
   min-height: 160px;
   overflow: hidden;
-  border: 1px solid var(--dnt-border);
-  border-radius: var(--dnt-radius-md);
+  padding-top: var(--dnt-space-2);
 }
 
 .ot-structure h3 {
   margin: 20px 0 6px;
-  font-size: var(--dnt-text-xs);
+  font-size: var(--dnt-text-sm);
   font-weight: 600;
-  color: var(--dnt-fg-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.ot-structure section:first-child h3 {
-  margin-top: 0;
+  color: var(--dnt-fg);
 }
 
 .ot-structure p {

@@ -44,17 +44,14 @@ test.describe('import wizard (browser, fake IPC backend)', () => {
     const next = wizard.getByRole('button', { name: 'Next' });
     await expect(next).toBeDisabled();
 
-    // Source: the picked file's preview, three records.
+    // Source & target: the picked file's preview, three records; the table pre-filled from the tree.
+    await expect(wizard.getByTestId('import-blocked')).toHaveText('Choose a file first');
     await wizard.getByRole('button', { name: 'Choose file…' }).click();
-    await expect(wizard.getByLabel('File', { exact: true })).toHaveValue(IMPORT_FILE);
+    await expect(byId(page, 'import-file')).toHaveText(IMPORT_FILE);
     const preview = byId(page, 'import-preview');
     await expect(preview.locator('tbody tr')).toHaveCount(3);
     await expect(preview).toContainText('amount');
     await expect(preview).toContainText('42.00');
-    await expect(next).toBeEnabled();
-    await next.click();
-
-    // Target: pre-filled from the tree.
     const columns = byId(page, 'import-target-columns');
     await expect(columns).toContainText('decimal(12,2)');
     await expect(columns).toContainText('auto increment');
@@ -147,7 +144,6 @@ test.describe('import wizard (browser, fake IPC backend)', () => {
     const next = wizard.getByRole('button', { name: 'Next' });
     await wizard.getByRole('button', { name: 'Choose file…' }).click();
     await expect(byId(page, 'import-preview').locator('tbody tr')).toHaveCount(3);
-    await next.click();
     await expect(byId(page, 'import-target-columns')).toContainText('decimal(12,2)');
     await next.click();
     await expect(wizard.getByLabel('Source for customer_id')).toHaveValue('1');

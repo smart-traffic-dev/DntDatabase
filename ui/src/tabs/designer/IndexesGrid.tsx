@@ -53,18 +53,14 @@ export function IndexesGrid(p: ElementGridProps) {
                     </span>
                   ) : (
                     <GridSelect
-                      aria-label="Column"
+                      label="Column"
+                      size="xs"
+                      className="dz-part-select"
                       value={part.column ?? ''}
+                      options={columns}
                       disabled={disabled}
-                      onChange={(e) => editParts((d, n) => updatePart(d, n, i, { column: e.target.value }))}
-                    >
-                      {part.column === null || !columns.includes(part.column) ? <option value={part.column ?? ''}>{part.column ?? ''}</option> : null}
-                      {columns.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                    </GridSelect>
+                      onChange={(column) => editParts((d, n) => updatePart(d, n, i, { column }))}
+                    />
                   )}
                   {pg ? null : (
                     <input
@@ -121,19 +117,12 @@ export function IndexesGrid(p: ElementGridProps) {
               <>
                 <div role="cell">
                   <GridSelect
-                    aria-label="Method"
+                    label="Method"
                     value={idx.method ?? ''}
+                    options={[{ value: '', label: 'default' }, ...PG_METHODS]}
                     disabled={disabled}
-                    onChange={(e) => set({ method: e.target.value === '' ? null : e.target.value })}
-                  >
-                    <option value="">default</option>
-                    {idx.method !== null && !PG_METHODS.includes(idx.method) ? <option value={idx.method}>{idx.method}</option> : null}
-                    {PG_METHODS.map((m) => (
-                      <option key={m} value={m}>
-                        {m}
-                      </option>
-                    ))}
-                  </GridSelect>
+                    onChange={(v) => set({ method: v === '' ? null : v })}
+                  />
                 </div>
                 <div role="cell">
                   <DraftInput

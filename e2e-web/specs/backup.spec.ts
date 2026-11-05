@@ -27,7 +27,7 @@ test.describe('dump and restore dialogs (browser, fake IPC backend)', () => {
 
     const dialog = byId(page, 'dump-dialog');
     await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText('Dump dnt_fixture');
+    await expect(dialog.getByRole('heading', { name: 'Dump database dnt_fixture' })).toBeVisible();
     await expect.poll(() => backend.calls.find((c) => c.cmd === 'dump_objects')?.args).toEqual({ connectionId: ids.analytics, database: 'dnt_fixture', schemas: [] });
 
     // Objects: the table (with its data toggle) and the view, all selected; the skipped procedure with its reason.

@@ -215,18 +215,22 @@ export function noticeTone(message: string): 'info' | 'warning' {
 }
 
 /**
- * Status bar text of a finished run: "1 row affected · 3 ms", "10,000 rows · 1,234 ms", and
- * with failed statements (continue on error) "Finished with 2 errors · 3 rows · 12 ms", as
- * the Messages' final line says it (`stopReasonText`).
+ * Status bar text of a finished run: the run as a whole, not one result again. A single result's
+ * row count is on its result tab ("40 rows"), so the status bar says what that does not: the
+ * statements, the affected rows, the errors and the time — "Done in 3 ms", "1 row affected ·
+ * 3 ms", "3 statements · 40 rows in 2 results · 12 ms", "Finished with 2 errors · 12 ms" (as the
+ * Messages' final line says it, `stopReasonText`).
  */
 export function lastRunText(last: LastRun): string {
   const parts: string[] = [];
   const affected = last.affected ?? null;
+  const sets = last.resultSets ?? 1;
   if ((last.errors ?? 0) > 0) parts.push(`Finished with ${plural(last.errors!, 'error')}`);
-  if ((last.resultSets ?? 1) > 0 || affected === null) parts.push(plural(last.rows, 'row'));
+  if ((last.statements ?? 1) > 1) parts.push(plural(last.statements!, 'statement'));
+  if (sets > 1) parts.push(`${plural(last.rows, 'row')} in ${sets} results`);
   if (affected !== null) parts.push(`${plural(affected, 'row')} affected`);
-  parts.push(`${formatCount(last.elapsedMs)} ms`);
-  return parts.join(' · ');
+  const ms = `${formatCount(last.elapsedMs)} ms`;
+  return parts.length === 0 ? `Done in ${ms}` : [...parts, ms].join(' · ');
 }
 
 export interface StartOptions {

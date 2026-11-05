@@ -81,6 +81,132 @@
   min-width: 0;
 }
 
+/* Source & target: the file, then the table it goes into, on one page. */
+.import-source-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-6);
+}
+
+.import-wizard-heading {
+  margin: 0;
+  font-size: var(--dnt-text-base);
+  font-weight: 600;
+}
+
+/* No file yet: one large target that opens the picker (the Open dialog admits the file). */
+.import-file-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--dnt-space-2);
+  min-height: 168px;
+  padding: var(--dnt-space-4);
+  border: 1px dashed var(--dlg-line);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+  text-align: center;
+  cursor: pointer;
+}
+
+.import-file-zone:hover {
+  border-color: var(--dnt-accent);
+}
+
+.import-file-zone p {
+  margin: 0;
+}
+
+.import-file-zone .btn {
+  margin-top: var(--dnt-space-1);
+}
+
+.import-file-zone-title {
+  font-weight: 500;
+  color: var(--dnt-fg);
+}
+
+.import-file-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-raised);
+  color: var(--dnt-fg-muted);
+}
+
+/* A file chosen: its path, and a way to choose another. */
+.import-file-row {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  min-width: 0;
+  padding: var(--dnt-space-1_5) var(--dnt-space-2);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-md);
+}
+
+.import-file-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dnt-text-sm);
+}
+
+/* The target's columns, folded under a summary line; the app's chevron, not the native triangle. */
+.import-target-cols {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+  font-size: var(--dnt-text-sm);
+}
+
+.import-target-cols summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  list-style: none;
+  color: var(--dnt-fg-muted);
+  cursor: pointer;
+}
+
+.import-target-cols summary::-webkit-details-marker {
+  display: none;
+}
+
+.import-target-cols summary::marker {
+  content: '';
+}
+
+.import-target-cols summary:hover {
+  color: var(--dnt-fg);
+}
+
+.import-target-cols summary:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: 1px;
+}
+
+.import-chevron {
+  display: inline-flex;
+  color: var(--dnt-fg-subtle);
+  transition: transform 0.12s ease;
+}
+
+.import-target-cols[open] .import-chevron {
+  transform: rotate(90deg);
+}
+
+.import-target-cols .import-wizard-grid {
+  margin-top: var(--dnt-space-2);
+  max-height: 220px;
+}
+
 .import-wizard-options {
   display: flex;
   flex-wrap: wrap;

@@ -3,7 +3,7 @@ import { api, toAppError } from '../../api';
 import type { RestorePreview, RestoreRequest, ScanStats } from '../../bindings';
 import { EnvTag } from '../../components/EnvTag';
 import { showJobs } from '../../components/windowActions';
-import { Modal } from '../../dialogs/Modal';
+import { Modal, ModalObject } from '../../dialogs/Modal';
 import { formatBytes } from '../../jobs/jobFormat';
 import { useConnections } from '../../store/connections';
 import { useJobs } from '../../store/jobs';
@@ -207,9 +207,28 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
   const canStart = !!preview && !starting && !analyzing && !readOnly && confirmationDone(preview, confirmation);
   const options = databases.includes(target) || !target ? databases : [target, ...databases];
 
+  // Why Start restore is off, next to it (nothing once the analysis asks for its confirmation:
+  // the checkbox or the typed name says it right above).
+  let blocked: string | null = null;
+  if (!canStart && !busy) {
+    if (readOnly) blocked = 'Read-only connection';
+    else if (!path) blocked = 'Choose a file first';
+    else if (!target) blocked = 'Choose a target database';
+    else if (!preview) blocked = 'Analyze the file first';
+  }
+
   return (
     <Modal
-      title="Restore"
+      title={
+        target ? (
+          <>
+            Restore into <ModalObject>{target}</ModalObject>
+          </>
+        ) : (
+          'Restore'
+        )
+      }
+      subtitle={`On ${cfg?.name ?? connectionId}`}
       badge={production ? <EnvTag env="production" variant="chip" /> : undefined}
       onClose={close}
       className={`backup-dialog${production ? ' env-production' : ''}`}
@@ -411,8 +430,13 @@ export function RestoreDialog({ connectionId, database, params, onClose }: Props
           Cancel
         </button>
         <span className="spacer" />
+        {!failure?.unsupported && blocked && (
+          <span className="foot-note" data-testid="restore-blocked">
+            {blocked}
+          </span>
+        )}
         {!failure?.unsupported && (
-          <button type="button" className={`btn ${production ? 'danger' : 'primary'}`} disabled={!canStart} onClick={() => void start()}>
+          <button type="button" className={`btn ${production ? 'danger' : 'primary'}`} disabled={!canStart} title={blocked ?? undefined} onClick={() => void start()}>
             Start restore
           </button>
         )}

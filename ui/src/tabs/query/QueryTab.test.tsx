@@ -77,7 +77,7 @@ describe('query tab shell', () => {
     await userEvent.setup().click(screen.getByTestId('query-more'));
     expect(screen.getByTestId('query-format')).toBeInTheDocument();
     const limits = ROW_LIMITS.map((n) => screen.getByTestId(`query-row-limit-${n}`).textContent);
-    expect(limits).toEqual(['Display limit 1,000', '✓Display limit 10,000', 'Display limit 100,000', 'Display limit 1,000,000']);
+    expect(limits).toEqual(['1,000 rows', '✓10,000 rows', '100,000 rows', '1,000,000 rows']);
   });
 
   it('closeConnection closes object tabs but keeps query tabs', () => {
@@ -104,11 +104,14 @@ describe('query tab shell', () => {
         <QueryTab tab={{ id: docId, kind: 'query', connectionId: ids.prod, title: 'Query 1' }} />
       </>,
     );
-    await userEvent.setup().click(screen.getByTestId('query-context'));
-    const select = screen.getByTestId('query-connection') as HTMLSelectElement;
-    expect(select.value).toBe(ids.prod);
-    expect(select.selectedOptions[0]).toHaveTextContent('(deleted connection)');
-    expect(select.selectedOptions[0]).toBeDisabled();
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId('query-context'));
+    const select = screen.getByTestId('query-connection');
+    expect(select).toHaveTextContent('(deleted connection)');
+    await user.click(select);
+    const deleted = screen.getByRole('option', { name: '(deleted connection)' });
+    expect(deleted).toHaveAttribute('aria-selected', 'true');
+    expect(deleted).toHaveAttribute('aria-disabled', 'true');
   });
 
   it('command_tab_speaks_its_language_without_a_mysql_fallback', () => {

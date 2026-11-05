@@ -24,6 +24,32 @@
   justify-content: flex-end;
   gap: var(--dnt-space-1);
   overflow: hidden;
+  /* Its own width decides which hints fit (the Object info panel can take the room, not only the window). */
+  container-type: inline-size;
+}
+
+/*
+ * Hints shrink with an ellipsis instead of overflowing: with `justify-content: flex-end` the
+ * overflow would be cut on the LEFT ("imary key 1–3"). The range and the buttons never shrink.
+ */
+.dv-pagerbar > .dv-key-order,
+.dv-pagerbar > .dv-filtered,
+.dv-pagerbar > .dv-chip {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dv-pagerbar > .icon-btn {
+  flex: none;
+}
+
+/* Too narrow for the hint: the range alone (the hint is also the pager's tooltip). */
+@container (max-width: 240px) {
+  .dv-pagerbar > .dv-key-order {
+    display: none;
+  }
 }
 
 .dv-pagerbar .icon-btn {
@@ -135,44 +161,87 @@
   white-space: nowrap;
 }
 
-/* The filter bar (Navicat Filter): condition rows under the toolbar. */
+/*
+ * The filter bar (Navicat Filter): condition rows under the toolbar, then one line of actions
+ * (add, match, raw mode | Apply, Clear) right under them. Dense: every control is ctl-h-sm.
+ */
 .filter-bar {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 6px 12px;
+  gap: var(--dnt-space-1_5);
+  padding: var(--dnt-space-2) var(--dnt-space-3);
   border-bottom: 1px solid var(--dnt-border);
   background: var(--dnt-bg-chrome);
-  font-size: var(--dnt-text-base);
+  font-size: var(--dnt-text-sm);
 }
 
-.fb-head,
-.fb-row {
+.fb-row,
+.fb-actions {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--dnt-space-1_5);
 }
 
-.fb-head .spacer {
-  flex: 1;
+/* The actions line up under the conditions (past the join-word column). */
+.fb-actions {
+  padding-left: calc(44px + var(--dnt-space-1_5));
+}
+
+.filter-bar .qt-btn {
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-2);
+  font-size: var(--dnt-text-sm);
+}
+
+/* The raw-mode toggle, when on. */
+.filter-bar .qt-btn[aria-pressed='true'] {
+  border-color: var(--dnt-accent);
+  background: var(--dnt-bg-selected);
+  color: var(--dnt-accent-hover);
+}
+
+/* How a row joins the ones above ("Where", "and" / "or"): a fixed column so the controls line up. */
+.fb-join {
+  flex: none;
+  width: 44px;
+  color: var(--dnt-fg-muted);
+  text-align: right;
+}
+
+.fb-column {
+  width: 180px;
+}
+
+.fb-op {
+  width: 120px;
 }
 
 .fb-mode {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--dnt-space-1_5);
   color: var(--dnt-fg-muted);
 }
 
-.fb-op {
-  min-width: 110px;
+.fb-mode-menu {
+  width: 104px;
 }
 
-.fb-value {
-  height: 28px;
+/* Between the filter's own controls and Apply / Clear. */
+.fb-sep {
+  flex: none;
+  width: 1px;
+  height: var(--dnt-space-4);
+  margin: 0 var(--dnt-space-1);
+  background: var(--dnt-border);
+}
+
+.fb-value,
+.fb-raw {
+  height: var(--dnt-ctl-h-sm);
   min-width: 160px;
-  padding: 0 8px;
+  padding: 0 var(--dnt-space-2);
   border: 1px solid var(--dnt-border);
   border-radius: var(--dnt-radius-sm);
   background: var(--dnt-bg-app);
@@ -180,22 +249,26 @@
   font: inherit;
 }
 
+.fb-raw {
+  flex: 1;
+  max-width: 720px;
+  font-family: var(--font-mono);
+}
+
+.fb-value:hover,
+.fb-raw:hover {
+  border-color: var(--dnt-border-strong);
+}
+
+/* Focus: the 1px border turns accent (no ring). */
+.fb-value:focus,
+.fb-raw:focus {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
 .fb-and {
   color: var(--dnt-fg-muted);
-}
-
-.fb-remove {
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: var(--dnt-radius-sm);
-  background: none;
-  color: var(--dnt-fg-muted);
-  cursor: pointer;
-}
-
-.fb-remove:hover {
-  background: var(--dnt-bg-hover);
 }
 
 .fb-error {

@@ -17,6 +17,16 @@ const FOCUSABLE = [
 
 export type ModalTone = 'neutral' | 'accent' | 'warning' | 'danger' | 'success';
 
+/**
+ * The object a dialog acts on, set apart in its title: every dialog that acts on something reads
+ * "<Action> <object>" in sentence case ("Drop table **orders**", "Generate data for **orders**"),
+ * with the context (`dnt_fixture.orders`, the connection) in the muted `subtitle` line, not in an
+ * em-dash suffix.
+ */
+export function ModalObject({ children }: { children: ReactNode }) {
+  return <span className="modal-obj">{children}</span>;
+}
+
 interface Props {
   title: ReactNode;
   /** Header content before the title (e.g. the Production chip). */

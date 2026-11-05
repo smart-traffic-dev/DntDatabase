@@ -5,6 +5,9 @@ import { addQueryToFavorites } from '../../components/favoritesActions';
 import { focusFocusedGroup } from '../../components/focusGroup';
 import { CheckIcon, ChevronDownIcon, DatabaseIcon, ExplainIcon, MoreIcon, PlayIcon, RollbackIcon, StopIcon } from '../../components/icons';
 import { formatClock } from '../../components/statusFormat';
+import { EngineLogo } from '../../components/EngineLogo';
+import { ContextMark } from '../../components/EnvTag';
+import { SelectMenu, inSelectMenu, type SelectMenuOption } from '../../components/SelectMenu';
 import { sqlEngine } from '../../engine';
 import { useCaps } from '../../engine/useCaps';
 import { useNow } from '../../lib/useNow';
@@ -19,7 +22,7 @@ import { ANALYZE_NEEDS, useRunGate } from './runGate';
 import { ROW_LIMITS, docKindOf, useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 import { MAX_GROUPS, useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
-import { ENV_SHORT, belowLeft, belowRight, useStripWidth } from '../stripWidth';
+import { belowLeft, belowRight, useStripWidth } from '../stripWidth';
 import './toolbar.css';
 
 const RUN_TIP = 'Run the selection, or every statement (Ctrl+R)';
@@ -225,7 +228,7 @@ const STOP_GUARD_MS = 400;
  * Run (the selection, else every statement; red on a Production connection) or, while the tab
  * runs or exports, Stop in the same
  * element and slot with the elapsed time inside it. Its ▾ menu holds Run statement, Run all,
- * Run selection, Continue on error and Add to favorites.
+ * Run selection and Continue on error (only what changes how the run goes; Add to favorites is in ⋯).
  */
 function RunSplit({
   doc,
@@ -287,14 +290,6 @@ function RunSplit({
       checked: doc.continueOnError,
       title: 'Keep running the next statements when one fails',
       run: () => update(doc.id, { continueOnError: !doc.continueOnError }),
-    },
-    { separator: true },
-    {
-      label: 'Add to favorites',
-      hint: 'Ctrl+Shift+D',
-      testId: 'query-add-favorite',
-      title: 'Add the selection, or the whole query, to favorites',
-      run: () => addQueryToFavorites(doc.id),
     },
   ];
   return (
@@ -489,49 +484,43 @@ function ContextFields({ doc }: { doc: ToolbarDoc }) {
     update(doc.id, { connectionId, database: null, dialect: docKindOf(connectionId) });
     useTabs.getState().bind(doc.id, connectionId);
   };
+  const connections: SelectMenuOption[] = [
+    { value: '', label: 'Choose a connection' },
+    ...(doc.connectionId && !summaries.has(doc.connectionId) ? [{ value: doc.connectionId, label: '(deleted connection)', disabled: true }] : []),
+    ...[...summaries.values()].map((c) => ({
+      value: c.config.id,
+      label: c.config.name,
+      hint: c.config.env_tag ?? undefined,
+      icon: <EngineLogo engine={c.config.kind} size={16} compact />,
+    })),
+  ];
+  const dbOptions: SelectMenuOption[] = [{ value: '', label: 'Default database' }, ...[...databases].map((d) => ({ value: d, label: d }))];
   return (
     <>
-      <label className="qt-pick">
+      <div className="qt-pick">
         <span>Connection</span>
-        <select
+        <SelectMenu
           className="qt-select"
-          data-testid="query-connection"
-          aria-label="Connection"
+          testId="query-connection"
+          label="Connection"
           value={doc.connectionId ?? ''}
-          onChange={(e) => bind(e.target.value || null)}
-        >
-          <option value="">Choose a connection</option>
-          {doc.connectionId && !summaries.has(doc.connectionId) && (
-            <option value={doc.connectionId} disabled>
-              (deleted connection)
-            </option>
-          )}
-          {[...summaries.values()].map((c) => (
-            <option key={c.config.id} value={c.config.id}>
-              {c.config.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label className="qt-pick">
+          options={connections}
+          onChange={(v) => bind(v || null)}
+        />
+      </div>
+      <div className="qt-pick">
         <span>Database</span>
-        <select
+        <SelectMenu
           className="qt-select"
-          data-testid="query-database"
-          aria-label="Database"
+          testId="query-database"
+          label="Database"
           value={doc.database ?? ''}
+          options={dbOptions}
           disabled={!doc.connectionId}
           title={!doc.connectionId ? 'Choose a connection first' : open ? undefined : 'Open the connection to list all its databases'}
-          onChange={(e) => update(doc.id, { database: e.target.value || null })}
-        >
-          <option value="">Default database</option>
-          {[...databases].map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
-        </select>
-      </label>
+          onChange={(v) => update(doc.id, { database: v || null })}
+        />
+      </div>
     </>
   );
 }
@@ -555,9 +544,10 @@ function ContextChip({ doc, env, narrow }: { doc: ToolbarDoc; env: EnvTag | null
 
   useEffect(() => {
     if (!open) return;
-    picker.current?.querySelector<HTMLSelectElement>('select')?.focus();
+    picker.current?.querySelector<HTMLElement>('[role="combobox"]')?.focus();
+    // A select's list opens in <body>: a click there is still inside the picker.
     const away = (e: globalThis.MouseEvent) => {
-      if (!wrap.current?.contains(e.target as Node)) setOpen(false);
+      if (!wrap.current?.contains(e.target as Node) && !inSelectMenu(e.target)) setOpen(false);
     };
     document.addEventListener('mousedown', away);
     return () => document.removeEventListener('mousedown', away);
@@ -586,7 +576,7 @@ function ContextChip({ doc, env, narrow }: { doc: ToolbarDoc; env: EnvTag | null
       className="qt-context"
       ref={wrap}
       onBlur={(e) => {
-        if (open && !wrap.current?.contains(e.relatedTarget as Node | null)) setOpen(false);
+        if (open && !wrap.current?.contains(e.relatedTarget as Node | null) && !inSelectMenu(e.relatedTarget)) setOpen(false);
       }}
     >
       <button
@@ -600,13 +590,9 @@ function ContextChip({ doc, env, narrow }: { doc: ToolbarDoc; env: EnvTag | null
         title={tip}
         onClick={() => setOpen((v) => !v)}
       >
-        {env && (
-          <span className={`qt-env env-${env}`} data-testid="query-context-env">
-            {ENV_SHORT[env]}
-          </span>
-        )}
+        <ContextMark env={env} kind={conn?.kind} testId="query-context-env" />
         {narrow ? (
-          !env && <DatabaseIcon />
+          !conn && !env && <DatabaseIcon />
         ) : (
           <>
             {name ? (
@@ -725,18 +711,26 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
     ...(formatOn
       ? ([
           { label: 'Format SQL', hint: 'Ctrl+Shift+F', testId: 'query-format', run: () => formatTab(doc.id) },
-          { separator: true },
         ] satisfies MenuEntry[])
       : []),
+    {
+      label: 'Add to favorites',
+      hint: 'Ctrl+Shift+D',
+      testId: 'query-add-favorite',
+      title: 'Add the selection, or the whole query, to favorites',
+      run: () => addQueryToFavorites(doc.id),
+    },
+    { separator: true },
+    { heading: 'Display limit' },
     ...ROW_LIMITS.map((n) => ({
-      label: `Display limit ${limitText(n)}`,
+      label: `${limitText(n)} rows`,
       testId: `query-row-limit-${n}`,
       title: 'Rows kept for display; the database may still finish producing the result',
       checked: doc.rowLimit === n,
       run: () => update(doc.id, { rowLimit: n }),
     })),
     { separator: true },
-    ...(txOn ? [...commitItems, { separator: true } satisfies MenuEntry] : []),
+    ...(txOn ? [{ heading: 'Commit mode' } satisfies MenuEntry, ...commitItems, { separator: true } satisfies MenuEntry] : []),
     {
       label: 'Open in new group',
       hint: 'Ctrl+\\',

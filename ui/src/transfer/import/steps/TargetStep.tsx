@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../../api';
 import type { TargetColumn } from '../../../bindings';
+import { ChevronIcon } from '../../../components/icons';
+import { EngineLogo } from '../../../components/EngineLogo';
+import { SelectMenu } from '../../../components/SelectMenu';
+import { plural } from '../../../lib/plural';
 import { useConnections } from '../../../store/connections';
 import type { StepProps } from './stepProps';
 import { isKind, sqlEngine } from '../../../engine';
@@ -17,6 +21,9 @@ export function columnFlags(c: TargetColumn): string[] {
 
 /** Keeps `current` selectable while (or if) its list cannot be read. */
 const withCurrent = (names: string[], current: string | null) => (current && !names.includes(current) ? [current, ...names] : names);
+
+/** "Choose…" then the names, as SelectMenu options. */
+const pickList = (names: string[]) => [{ value: '', label: 'Choose…' }, ...names.map((n) => ({ value: n, label: n }))];
 
 interface Props extends StepProps {
   targetError: string | null;
@@ -78,80 +85,76 @@ export function TargetStep({ state, dispatch, targetError }: Props) {
 
   const t = state.target;
   const name = (cid: string) => summaries.get(cid)?.config.name ?? cid;
+  // NOT NULL without a default and filled by nothing else: the file must provide them.
+  const required = t ? t.columns.filter((c) => !c.nullable && !c.has_default && !c.auto_increment && !c.identity && !c.generated).length : 0;
 
   return (
-    <div className="stack">
+    <section className="stack" aria-label="Target table">
+      <h3 className="import-wizard-heading">Target table</h3>
       <div className="import-wizard-options">
         <div className="field">
           <label htmlFor="iw-conn">Connection</label>
-          <select
+          <SelectMenu
             id="iw-conn"
+            size="md"
+            label="Connection"
             value={id}
-            onChange={(e) => {
+            options={withCurrent(open, id).map((cid) => {
+              const k = summaries.get(cid)?.config.kind;
+              return { value: cid, label: name(cid), icon: k ? <EngineLogo engine={k} size={16} compact /> : undefined };
+            })}
+            onChange={(v) => {
               setDatabase(null);
               setSchema(null);
               setTables([]);
-              dispatch({ type: 'connection', connectionId: e.target.value });
+              dispatch({ type: 'connection', connectionId: v });
             }}
-          >
-            {withCurrent(open, id).map((cid) => (
-              <option key={cid} value={cid}>
-                {name(cid)}
-              </option>
-            ))}
-          </select>
+          />
         </div>
         <div className="field">
           <label htmlFor="iw-db">Database</label>
-          <select
+          <SelectMenu
             id="iw-db"
+            size="md"
+            label="Database"
             value={database ?? ''}
-            onChange={(e) => {
-              setDatabase(e.target.value || null);
+            options={pickList(withCurrent(databases, database))}
+            onChange={(v) => {
+              setDatabase(v || null);
               setSchema(null);
               setTables([]);
               dispatch({ type: 'table', table: null });
             }}
-          >
-            <option value="">Choose…</option>
-            {withCurrent(databases, database).map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
+          />
         </div>
         {pg && (
           <div className="field">
             <label htmlFor="iw-schema">Schema</label>
-            <select
+            <SelectMenu
               id="iw-schema"
+              size="md"
+              label="Schema"
               value={schema ?? ''}
-              onChange={(e) => {
-                setSchema(e.target.value || null);
+              options={pickList(withCurrent(schemas, schema))}
+              onChange={(v) => {
+                setSchema(v || null);
                 setTables([]);
                 dispatch({ type: 'table', table: null });
               }}
-            >
-              <option value="">Choose…</option>
-              {withCurrent(schemas, schema).map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
+            />
           </div>
         )}
         <div className="field">
           <label htmlFor="iw-table">Table</label>
-          <select id="iw-table" value={state.table?.name ?? ''} onChange={(e) => pickTable(e.target.value)}>
-            <option value="">Choose…</option>
-            {withCurrent(tables, state.table?.name ?? null).map((n) => (
-              <option key={n} value={n}>
-                {n}
-              </option>
-            ))}
-          </select>
+          <SelectMenu
+            id="iw-table"
+            size="md"
+            mono
+            label="Table"
+            value={state.table?.name ?? ''}
+            options={pickList(withCurrent(tables, state.table?.name ?? null))}
+            onChange={pickTable}
+          />
         </div>
       </div>
 
@@ -168,6 +171,15 @@ export function TargetStep({ state, dispatch, targetError }: Props) {
       {t && (
         <>
           {t.read_only && <p className="import-wizard-note">This connection is read-only: you can validate the file, but not import it.</p>}
+          {/* A summary line; the column list folds open on demand (the Mapping step lists them again). */}
+          <details className="import-target-cols">
+            <summary>
+              <span className="import-chevron" aria-hidden="true">
+                <ChevronIcon />
+              </span>
+              {plural(t.columns.length, 'column')}
+              {required > 0 ? ` · ${required} required` : ''}
+            </summary>
           <div className="import-wizard-grid">
             <table className="import-table" data-testid="import-target-columns">
               <thead>
@@ -192,8 +204,9 @@ export function TargetStep({ state, dispatch, targetError }: Props) {
               </tbody>
             </table>
           </div>
+          </details>
         </>
       )}
-    </div>
+    </section>
   );
 }

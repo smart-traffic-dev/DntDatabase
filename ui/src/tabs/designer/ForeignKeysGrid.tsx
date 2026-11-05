@@ -54,14 +54,7 @@ export function ForeignKeysGrid(p: ForeignKeysGridProps) {
 
   const action = (label: string, value: string, disabled: boolean, onChange: (v: string) => void) => (
     <div role="cell">
-      <GridSelect aria-label={label} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
-        {ACTIONS.includes(value) ? null : <option value={value}>{value}</option>}
-        {ACTIONS.map((a) => (
-          <option key={a} value={a}>
-            {a}
-          </option>
-        ))}
-      </GridSelect>
+      <GridSelect label={label} value={value} options={ACTIONS} disabled={disabled} onChange={onChange} />
     </div>
   );
 

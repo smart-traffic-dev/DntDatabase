@@ -78,6 +78,17 @@ export function toAppError(e: unknown): AppError {
   return internal(e instanceof Error ? e.message : String(e));
 }
 
+/** A real backend AppError payload (as opposed to a JS error or a bare string). */
+export function isAppErrorPayload(e: unknown): boolean {
+  if (e instanceof AppErrorEx) return true;
+  if (typeof e !== 'object' || e === null) return false;
+  const o = e as Record<string, unknown>;
+  return typeof o.kind === 'string' && typeof o.message === 'string';
+}
+
+/** The message of every internal error (the backend sends the same text). */
+export const INTERNAL_MESSAGE = 'An internal error occurred.';
+
 function internal(message: string): AppError {
   return {
     kind: 'internal',

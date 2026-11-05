@@ -287,7 +287,8 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
             onOpenInQuery={openInQuery}
           />
         </div>
-        {subTab === 'columns' ? (
+        {/* Only for a selected column: an empty inspector would take 320px to say "select a column". */}
+        {subTab === 'columns' && selection?.kind === 'column' && draft.columns.some((c) => c.name === selection.name) ? (
           <ColumnInspector open={open} draft={draft} errors={errors} editable={editable} selection={selection} onSelect={select} edit={edit} />
         ) : null}
       </div>

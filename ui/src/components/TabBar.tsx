@@ -27,7 +27,7 @@ import { draggedItem, openTabOfNode, setDraggedTab, TAB_DRAG_TYPE, useDrag } fro
 import { useRunMarks } from '../store/runMarks';
 import { useTree } from '../store/tree';
 import { hasStripActions, TabStripActions } from '../tabs/TabStripActions';
-import { closeAllTabs, closeOtherTabs, closeSavedTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
+import { closeAllTabs, closeOtherTabs, closeTab, closeTabsToRight, reopenClosedTab, togglePin } from './tabActions';
 
 /** While dragging, this close to an end of an overflowing strip scrolls it by a step per move. */
 const SCROLL_EDGE = 24;
@@ -76,11 +76,37 @@ function TabKind({ tab }: { tab: Tab }) {
       <KindIcon kind={tab.objectRef.kind} />
     );
   return (
-    <span className="tab-kind" aria-hidden="true" data-kind={kindLabel(tab)}>
+    <span className={`tab-kind tk-${kindTone(tab)}`} aria-hidden="true" data-kind={kindLabel(tab)}>
       {icon}
     </span>
   );
 }
+
+/** The colour family of a tab's glyph: queries, data, views and editors read apart at a glance. */
+function kindTone(tab: Tab): 'query' | 'table' | 'view' | 'design' | 'code' | 'other' {
+  if (tab.kind === 'query') return 'query';
+  if (tab.kind === 'design') return 'design';
+  if (tab.kind === 'ddl') return 'code';
+  if (tab.kind === 'keys') return 'table';
+  switch (tab.objectRef.kind) {
+    case 'Table':
+    case 'Collection':
+    case 'Key':
+      return 'table';
+    case 'View':
+    case 'MaterializedView':
+      return 'view';
+    case 'Function':
+    case 'Procedure':
+    case 'Trigger':
+      return 'code';
+    default:
+      return 'other';
+  }
+}
+
+/** Editors of an object open next to its data tab: a quiet suffix tells `orders` from `orders`. */
+const TITLE_SUFFIX: Partial<Record<Tab['kind'], string>> = { design: 'Design', ddl: 'DDL' };
 
 /**
  * Titles open on more than one connection (`orders` of shop-dev and of shop-prod): those tabs
@@ -170,29 +196,30 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
     const others = tabs.filter((t) => t.id !== tab.id && !t.pinned);
     const right = tabs.slice(at + 1).filter((t) => !t.pinned);
     const unpinned = tabs.filter((t) => !t.pinned);
+    // Trimmed to what a tab is right-clicked for: Split left / up stay on the drag-to-edge drop
+    // zones, Close saved in the command palette; Save leads for a query tab.
     return [
+      ...(tab.kind === 'query'
+        ? ([
+            { label: 'Save', hint: 'Ctrl+S', run: () => void useQueryDocs.getState().saveFile(tab.id, false) },
+            { separator: true },
+          ] satisfies MenuEntry[])
+        : []),
       { label: 'Close', hint: 'Ctrl+W', run: () => void closeTab(tab) },
       { label: 'Close others', disabled: others.length === 0, run: () => void closeOtherTabs(tab) },
       { label: 'Close tabs to the right', disabled: right.length === 0, run: () => void closeTabsToRight(tab) },
-      { label: 'Close saved', run: () => void closeSavedTabs(groupId) },
       { label: 'Close all', disabled: unpinned.length === 0, run: () => void closeAllTabs(groupId) },
+      { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
       { separator: true },
       { label: tab.pinned ? 'Unpin' : 'Pin', run: () => togglePin(tab) },
-      { separator: true },
       { label: 'Split right', hint: 'Ctrl+\\', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'right'), focusFocusedGroup()) },
       { label: 'Split down', hint: 'Ctrl+K Ctrl+\\', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'down'), focusFocusedGroup()) },
-      { label: 'Split left', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'left'), focusFocusedGroup()) },
-      { label: 'Split up', disabled: !canSplit, run: () => (useTabs.getState().splitTab(tab.id, 'up'), focusFocusedGroup()) },
       ...groups
         .map((g, i) => ({ g, i }))
         .filter(({ g }) => g.id !== groupId)
         .map(({ g, i }) => ({ label: `Move to group ${i + 1}`, run: () => (useTabs.getState().moveTab(tab.id, g.id), focusFocusedGroup()) })),
-      { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !canReopen, run: () => void reopenClosedTab() },
       { separator: true },
       { label: 'Copy title', run: () => void navigator.clipboard?.writeText(tab.title).catch(() => undefined) },
-      ...(tab.kind === 'query'
-        ? [{ label: 'Save', hint: 'Ctrl+S', run: () => void useQueryDocs.getState().saveFile(tab.id, false) }]
-        : []),
     ];
   };
 
@@ -383,9 +410,11 @@ export function TabBar({ groupId: groupProp }: { groupId?: string } = {}) {
                     <PinIcon />
                   </span>
                 )}
-                {env && <EnvTag env={env} />}
+                {/* Production only: a staging dot here read as "unsaved" (the chip and status bar name staging). */}
+                {env === 'production' && <EnvTag env={env} />}
                 <TabKind tab={tab} />
                 <span className="tab-title">{tab.title}</span>
+                {TITLE_SUFFIX[tab.kind] && <span className="tab-suffix">{TITLE_SUFFIX[tab.kind]}</span>}
                 {conn && ambiguous.has(tab.title) && <span className="tab-conn">{conn.name}</span>}
                 {readOnly && (
                   <span className="tab-ro" title="Read-only connection" aria-label="Read-only connection">

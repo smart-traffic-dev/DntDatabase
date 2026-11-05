@@ -21,7 +21,12 @@ export interface MenuSeparator {
   separator: true;
 }
 
-export type MenuEntry = MenuAction | MenuSeparator;
+/** A small muted label over a group (a "pick one" list: "Display limit" over 1,000 / 10,000 …). */
+export interface MenuHeading {
+  heading: string;
+}
+
+export type MenuEntry = MenuAction | MenuSeparator | MenuHeading;
 
 interface Props {
   label: string;
@@ -124,6 +129,10 @@ export function ActionMenu({ label, x, y, items, onClose, autoFocus = true, chec
       {items.map((item, i) =>
         'separator' in item ? (
           <div key={`sep-${i}`} role="separator" className="menu-sep" />
+        ) : 'heading' in item ? (
+          <div key={`h-${i}`} role="presentation" className="menu-heading">
+            {item.heading}
+          </div>
         ) : (
           <button
             key={`${i}:${item.label}`}

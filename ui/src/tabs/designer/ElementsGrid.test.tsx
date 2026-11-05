@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { FkDef, IndexDef } from '../../bindings';
 import { useCompletion } from '../../store/completion';
 import { resetStores } from '../../test/backend';
+import { menuOptionLabels, pickMenuOption } from '../../components/selectMenuTestKit';
 import { def, draftOf, opened, setup } from './designerTestKit';
 
 beforeEach(() => {
@@ -72,8 +73,8 @@ describe('element editors', () => {
     await goTo(user, /Foreign keys/);
     const row = elRow('fk_orders_customer');
     const onDelete = within(row).getByRole('combobox', { name: 'ON DELETE' });
-    expect(within(onDelete).getAllByRole('option').map((o) => o.textContent)).toEqual(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']);
-    await user.selectOptions(onDelete, 'SET NULL');
+    expect(await menuOptionLabels(user, onDelete)).toEqual(['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT']);
+    await pickMenuOption(user, onDelete, 'SET NULL');
     expect(draftOf().foreign_keys[0]!.on_delete).toBe('SET NULL');
     expect(within(row).getByTitle('Modified')).toBeInTheDocument();
     // MySQL cannot change a foreign key in place.
@@ -96,12 +97,12 @@ describe('element editors', () => {
     setup();
     await goTo(user, /Options/);
     const engine = screen.getByRole('combobox', { name: 'Engine' });
-    expect(engine).toHaveValue('InnoDB');
+    expect(engine).toHaveTextContent('InnoDB');
     expect(screen.queryByText('1 unsaved change')).toBeNull();
-    await user.selectOptions(engine, 'MyISAM');
+    await pickMenuOption(user, engine, 'MyISAM');
     expect(draftOf().options.engine).toBe('MyISAM');
     expect(screen.getByText('1 unsaved change')).toBeInTheDocument();
-    expect(within(engine).queryByRole('option', { name: 'Aria' })).toBeNull();
+    expect(await menuOptionLabels(user, engine)).not.toContain('Aria');
   });
 
   it('rename_table_in_options', async () => {
@@ -163,7 +164,7 @@ describe('postgres editors', () => {
     await goTo(user, /Indexes/);
     const row = elRow('orders_total_key');
     expect(within(row).getByText('Constraint')).toBeInTheDocument();
-    expect(within(row).getByRole('combobox', { name: 'Method' })).toHaveValue('btree');
+    expect(within(row).getByRole('combobox', { name: 'Method' })).toHaveTextContent(/^btree$/);
     expect(within(row).queryByRole('spinbutton', { name: 'Prefix length' })).toBeNull();
     expect(within(row).queryByRole('checkbox', { name: 'Visible' })).toBeNull();
     await user.type(within(row).getByRole('textbox', { name: 'Include' }), 'id, ');

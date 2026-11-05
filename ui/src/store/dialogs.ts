@@ -149,6 +149,14 @@ export const useDialogs = create<DialogsState>()((set, get) => ({
       if (current !== null) useToasts.getState().dismissKey(noticeKey(current));
       return;
     }
+    // "Could not restore the query tabs: An internal error occurred." while the internal-error
+    // toast already shows that failure: one toast, the internal one, now saying what failed
+    // (it keeps Open log folder and the details).
+    const internal = get().internalError;
+    if (kind === 'error' && internal && notice.includes(internal.message)) {
+      set({ internalError: { ...internal, message: notice } });
+      return;
+    }
     set({ notice });
     useToasts.getState().show({
       kind,

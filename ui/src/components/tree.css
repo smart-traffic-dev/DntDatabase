@@ -39,10 +39,14 @@
   font-size: var(--dnt-text-base);
 }
 
-.context-menu .menu-sep {
-  height: 1px;
-  margin: 4px 2px;
-  background: var(--dnt-border);
+/* The part of a label the filter matched. */
+.tree-match {
+  padding: 0;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-status-warning-bg);
+  color: inherit;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--dnt-status-warning-border);
 }
 
 .tree-hint {

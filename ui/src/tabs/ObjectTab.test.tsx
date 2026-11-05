@@ -92,43 +92,49 @@ beforeEach(() => {
 
 describe('ObjectTab', () => {
   it('table_shows_three_subtabs_and_columns', async () => {
-    const user = userEvent.setup();
     setup(makeTab('Table'));
     const tabs = screen.getAllByRole('tab').map((t) => t.textContent);
-    expect(tabs).toEqual(['Data', 'Info', 'DDL', 'Structure']);
-    expect(screen.getByRole('tab', { name: 'Info' })).toHaveAttribute('aria-selected', 'true');
+    // Info is gone: its summary heads Structure (a tab stored on Info opens there).
+    expect(tabs).toEqual(['Data', 'Structure', 'DDL']);
+    expect(screen.getByRole('tab', { name: 'Structure' })).toHaveAttribute('aria-selected', 'true');
 
-    expect(await screen.findByText('Customer orders')).toBeInTheDocument();
-    expect(screen.getByText('≈ 48,213')).toBeInTheDocument();
-    expect(screen.getByText('InnoDB')).toBeInTheDocument();
-    expect(screen.getByText('HASH(id)')).toBeInTheDocument();
+    const summary = within(await screen.findByRole('region', { name: 'Summary' }));
+    expect(summary.getByText('Customer orders')).toBeInTheDocument();
+    expect(summary.getByText('≈ 48,213')).toBeInTheDocument();
+    expect(summary.getByText('InnoDB')).toBeInTheDocument();
+    expect(summary.getByText('HASH(id)')).toBeInTheDocument();
     // DDL is lazy: not fetched until its sub-tab opens.
     expect(callsOf('object_ddl')).toHaveLength(0);
 
-    await user.click(screen.getByRole('tab', { name: 'Structure' }));
-    const columns = within(await screen.findByRole('region', { name: 'Columns' }));
+    const columns = within(screen.getByRole('region', { name: 'Columns' }));
     const rows = columns.getAllByRole('row');
     expect(rows).toHaveLength(4);
     const cells = (row: HTMLElement) => within(row).getAllByRole('cell').map((c) => c.textContent);
-    expect(cells(rows[1]!)).toEqual(['id', 'bigint', 'NO', '—', 'auto_increment', 'surrogate key']);
-    expect(cells(rows[2]!)).toEqual(['status', 'varchar(20)', 'YES', "'new'", '', '']);
-    expect(cells(rows[3]!)).toEqual(['total', 'decimal(10,2)', 'NO', '—', 'generated (STORED), invisible', '']);
+    // Sentence case Yes / No; the primary key column carries a PK chip.
+    expect(cells(rows[1]!)).toEqual(['idPK', 'bigint', 'No', '—', 'auto_increment', 'surrogate key']);
+    expect(cells(rows[2]!)).toEqual(['status', 'varchar(20)', 'Yes', "'new'", '', '']);
+    expect(cells(rows[3]!)).toEqual(['total', 'decimal(10,2)', 'No', '—', 'generated (STORED), invisible', '']);
 
     const indexRows = within(screen.getByRole('region', { name: 'Indexes' })).getAllByRole('row');
     expect(indexRows).toHaveLength(3); // header + PK + idx_status (PRIMARY not duplicated)
     expect(within(indexRows[1]!).getByText('PK')).toBeInTheDocument();
-    expect(cells(indexRows[2]!)).toEqual(['idx_status', 'status', 'NO', 'BTREE']);
+    expect(cells(indexRows[2]!)).toEqual(['idx_status', 'status', 'No', 'BTREE']);
     const fkRows = within(screen.getByRole('region', { name: 'Foreign keys' })).getAllByRole('row');
     expect(cells(fkRows[1]!)).toEqual(['fk_customer', 'customer_id → crm.customers(id)', 'CASCADE', 'SET NULL']);
     expect(screen.getByText('(total >= 0)')).toBeInTheDocument();
     expect(screen.getByText('trg_audit')).toBeInTheDocument();
-    // Info and Structure share one detail fetch.
     expect(callsOf('table_detail')).toHaveLength(1);
+  });
+
+  it('a structure with no foreign keys, checks or triggers says so in one line', async () => {
+    setup(makeTab('Table'), { table_detail: () => detail({ foreign_keys: [], checks: [], triggers: [] }) });
+    expect(await screen.findByText('No foreign keys, checks and triggers.')).toBeInTheDocument();
+    for (const gone of ['Foreign keys', 'Checks', 'Triggers']) expect(screen.queryByRole('region', { name: gone })).toBeNull();
   });
 
   it('materialized_view_has_data_and_three_subtabs', () => {
     setup(makeTab('MaterializedView', 'mv_sales', 'public'));
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Data', 'Info', 'DDL', 'Structure']);
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Data', 'Structure', 'DDL']);
   });
 
   it.each(['Table', 'View', 'MaterializedView'] as const)('%s_opened_from_the_tree_shows_data_first', async (kind) => {
@@ -175,16 +181,16 @@ describe('ObjectTab', () => {
       comment: null,
     });
     setup(makeTab('View', 'v_open'), { table_detail: () => view });
-    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Data', 'Info', 'DDL', 'Structure']);
-    // Info of a view lists what a view has (columns, comment), not a column of dashes.
-    const cols = await screen.findByText('Columns');
-    expect(cols.closest('.ot-info-row')).toHaveTextContent(String(view.columns.length));
-    for (const gone of ['Row estimate', 'Size', 'Engine', 'Tablespace', 'Partitioned by', 'System versioned']) {
-      expect(screen.queryByText(gone)).toBeNull();
+    expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual(['Data', 'Structure', 'DDL']);
+    // The summary of a view lists what a view has (columns), not a column of dashes.
+    const summary = within(await screen.findByRole('region', { name: 'Summary' }));
+    expect(summary.getByText('Columns').closest('.ot-summary-item')).toHaveTextContent(String(view.columns.length));
+    for (const gone of ['Rows', 'Size', 'Engine', 'Tablespace', 'Partitioned by', 'System versioned']) {
+      expect(summary.queryByText(gone)).toBeNull();
     }
     expect(callsOf('table_detail')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
-    await user.click(screen.getByRole('tab', { name: 'Structure' }));
     expect(await screen.findByRole('region', { name: 'Columns' })).toBeInTheDocument();
+    void user;
     await user.click(screen.getByTestId('object-tab-ddl'));
     expect(await screen.findByTestId('monaco-mock')).toHaveValue(DDL);
     expect(callsOf('object_ddl')[0]).toEqual({ id: ids.prod, obj: ref('View', 'v_open') });
@@ -250,7 +256,7 @@ describe('ObjectTab', () => {
     expect(within(actions).getByRole('button', { name: 'Refresh' })).toHaveAttribute('title', 'Reload this section');
   });
 
-  it.each(['Info', 'Structure'] as const)('%s_has_one_refresh_in_the_strip_actions', async (section) => {
+  it.each(['Structure'] as const)('%s_has_one_refresh_in_the_strip_actions', async (section) => {
     const user = userEvent.setup();
     setup(makeTab('Table'));
     await user.click(screen.getByRole('tab', { name: section }));
@@ -358,7 +364,7 @@ describe('ObjectTab', () => {
     await user.click(screen.getByTestId('object-tab-ddl'));
     await screen.findByTestId('monaco-mock');
     expect(callsOf('object_ddl')).toHaveLength(1);
-    await user.click(screen.getByRole('tab', { name: 'Info' }));
+    await user.click(screen.getByRole('tab', { name: 'Structure' }));
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(callsOf('table_detail')).toHaveLength(2));
     await user.click(screen.getByTestId('object-tab-ddl'));
@@ -376,11 +382,12 @@ describe('ObjectTab', () => {
     expect(await screen.findByText('5.0 GB')).toBeInTheDocument();
   });
 
-  it('null_row_estimate_and_size_show_dash', async () => {
+  it('unknown row estimate and size are left out of the summary, not shown as dashes', async () => {
     setup(makeTab('Table'), { table_detail: () => detail({ row_estimate: null, size_bytes: null }) });
-    const row = (await screen.findByText('Row estimate')).parentElement!;
-    expect(within(row).getByText('—')).toBeInTheDocument();
-    expect(within(screen.getByText('Size').parentElement!).getByText('—')).toBeInTheDocument();
+    const summary = within(await screen.findByRole('region', { name: 'Summary' }));
+    expect(summary.getByText('Engine')).toBeInTheDocument();
+    expect(summary.queryByText('Rows')).toBeNull();
+    expect(summary.queryByText('Size')).toBeNull();
   });
 
   it('ddl_error_is_shown_inline', async () => {
@@ -397,7 +404,7 @@ describe('ObjectTab', () => {
     expect(alert).toHaveTextContent('Database does not exist.');
     expect(within(alert).getByText('Details')).toBeInTheDocument();
     // The other sub-tabs keep working.
-    await user.click(screen.getByRole('tab', { name: 'Info' }));
+    await user.click(screen.getByRole('tab', { name: 'Structure' }));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByText('Customer orders')).toBeInTheDocument();
   });
@@ -451,14 +458,14 @@ describe('ObjectTab', () => {
     const user = userEvent.setup();
     setup(makeTab('Table'));
     await screen.findByText('Customer orders');
-    screen.getByRole('tab', { name: 'Info' }).focus();
+    screen.getByRole('tab', { name: 'Structure' }).focus();
     await user.keyboard('{ArrowRight}');
     expect(screen.getByRole('tab', { name: 'DDL' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', { name: 'DDL' })).toHaveFocus();
-    await user.keyboard('{End}');
-    expect(screen.getByRole('tab', { name: 'Structure' })).toHaveFocus();
-    await user.keyboard('{ArrowRight}');
-    expect(screen.getByRole('tab', { name: 'Data' })).toHaveAttribute('aria-selected', 'true');
+    await user.keyboard('{Home}');
+    expect(screen.getByRole('tab', { name: 'Data' })).toHaveFocus();
+    await user.keyboard('{ArrowLeft}');
+    expect(screen.getByRole('tab', { name: 'DDL' })).toHaveAttribute('aria-selected', 'true');
     await user.keyboard('{ArrowLeft}');
     expect(screen.getByRole('tab', { name: 'Structure' })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tabpanel')).toHaveAccessibleName('Structure');

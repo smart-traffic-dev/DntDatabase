@@ -1,6 +1,6 @@
 import { commands, type Result } from '../bindings';
 import { useDialogs } from '../store/dialogs';
-import { AppErrorEx, toAppError } from './errors';
+import { AppErrorEx, INTERNAL_MESSAGE, isAppErrorPayload, toAppError } from './errors';
 
 export {
   AppErrorEx,
@@ -22,9 +22,15 @@ export type Api = {
   [K in keyof Commands]: (...args: Parameters<Commands[K]>) => Promise<Unwrap<ReturnType<Commands[K]>>>;
 };
 
-/** Every `internal` failure also reaches the global toast (spec §7: "Open log folder"). */
+/**
+ * Every `internal` failure also reaches the global toast (spec §7: "Open log folder").
+ * A command that failed without an AppError (Tauri's bare string for an unknown command, a JS
+ * error from a broken bridge: "Cannot read properties of undefined (reading 'invoke')") gets the
+ * backend's own plain message; its raw text goes to the details (Copy details), not the screen.
+ */
 function failure(e: unknown): AppErrorEx {
-  const error = toAppError(e);
+  const raw = toAppError(e);
+  const error = isAppErrorPayload(e) ? raw : { ...raw, message: INTERNAL_MESSAGE, detail: raw.message };
   if (error.kind === 'internal') useDialogs.getState().reportInternal(error);
   return new AppErrorEx(error);
 }

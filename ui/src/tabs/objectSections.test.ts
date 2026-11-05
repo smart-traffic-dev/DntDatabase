@@ -7,8 +7,8 @@ describe('subTabsOf', () => {
   });
 
   it('tables and views keep all four sections; other objects DDL only', () => {
-    expect(subTabsOf('Table')).toEqual(['data', 'info', 'ddl', 'structure']);
-    expect(subTabsOf('View')).toEqual(['data', 'info', 'ddl', 'structure']);
+    expect(subTabsOf('Table')).toEqual(['data', 'structure', 'ddl']);
+    expect(subTabsOf('View')).toEqual(['data', 'structure', 'ddl']);
     expect(subTabsOf('Function')).toEqual(['ddl']);
   });
 });

@@ -3,10 +3,11 @@ import { api, toAppError } from '../../api';
 import type { AppError, DataImportPreview, ImportRequest, ObjectRef } from '../../bindings';
 import { EnvTag } from '../../components/EnvTag';
 import { showJobs } from '../../components/windowActions';
-import { Modal } from '../../dialogs/Modal';
+import { Modal, ModalObject } from '../../dialogs/Modal';
+import { useConnections } from '../../store/connections';
 import { useJobs } from '../../store/jobs';
 import { pickedFileMessage } from '../backup/backupFormat';
-import { buildRequest, canAdvance, canOpen, initialState, reduce, STEPS } from './importState';
+import { advanceBlocker, buildRequest, canAdvance, canOpen, initialState, reduce, STEPS } from './importState';
 import { CheckStep } from './steps/CheckStep';
 import { MappingStep } from './steps/MappingStep';
 import { OptionsStep } from './steps/OptionsStep';
@@ -34,7 +35,7 @@ function reviewMessage(err: AppError): string {
 }
 
 /**
- * The data import wizard (spec §6.7): Source · Target · Mapping · Options · Check · Review. The
+ * The data import wizard (spec §6.7): Source & target · Mapping · Options · Check · Review. The
  * backend reads the file and the table, maps and checks the mapping, runs the dry run as a job and
  * builds the plan; the wizard only collects choices and shows what the backend answered.
  */
@@ -202,10 +203,25 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
   const production = target?.env === 'production';
   const readOnly = !!target?.read_only;
   const canStart = !!preview && !readOnly && !starting && !preparing && confirmationDone(preview, confirmation);
+  // Why Next is off, next to it (nothing when the page already shows an error).
+  const pageError = step === 'source' ? inspectError ?? targetError : step === 'mapping' ? checkError : null;
+  const blocked = nextStep && !pageError ? advanceBlocker(state) : null;
+  const startBlocked = !nextStep && !canStart && !starting && !preparing && preview ? (readOnly ? 'Read-only connection' : null) : null;
+  const connectionName = useConnections((s) => s.summaries.get(state.connectionId)?.config.name) ?? state.connectionId;
+  const qualified = state.table ? [state.table.database, state.table.schema, state.table.name].filter(Boolean).join('.') : '';
 
   return (
     <Modal
-      title={state.table ? `Import data into ${state.table.name}` : 'Import data'}
+      title={
+        state.table ? (
+          <>
+            Import data into <ModalObject>{state.table.name}</ModalObject>
+          </>
+        ) : (
+          'Import data'
+        )
+      }
+      subtitle={qualified ? `${qualified} on ${connectionName}` : `On ${connectionName}`}
       badge={production ? <EnvTag env="production" variant="chip" /> : undefined}
       onClose={close}
       className={`import-wizard${production ? ' env-production' : ''}`}
@@ -228,8 +244,12 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
           ))}
         </nav>
         <div className="import-wizard-main modal-body">
-          {step === 'source' && <SourceStep state={state} dispatch={dispatch} inspectError={inspectError} />}
-          {step === 'target' && <TargetStep state={state} dispatch={dispatch} targetError={targetError} />}
+          {step === 'source' && (
+            <div className="import-source-page">
+              <SourceStep state={state} dispatch={dispatch} inspectError={inspectError} />
+              <TargetStep state={state} dispatch={dispatch} targetError={targetError} />
+            </div>
+          )}
           {step === 'mapping' && <MappingStep state={state} dispatch={dispatch} onAutoMap={() => void autoMap()} checkError={checkError} />}
           {step === 'options' && <OptionsStep state={state} dispatch={dispatch} />}
           {step === 'check' && <CheckStep state={state} dispatch={dispatch} />}
@@ -251,15 +271,20 @@ export function ImportWizard({ connectionId, table, params, onClose }: Props) {
           Cancel
         </button>
         <span className="spacer" />
+        {(blocked ?? startBlocked) && (
+          <span className="foot-note" data-testid="import-blocked">
+            {blocked ?? startBlocked}
+          </span>
+        )}
         <button type="button" className="btn" disabled={!prev || starting} onClick={() => prev && dispatch({ type: 'goto', step: prev.id })}>
           Back
         </button>
         {nextStep ? (
-          <button type="button" className="btn primary" disabled={!canAdvance(state)} onClick={() => dispatch({ type: 'goto', step: nextStep.id })}>
+          <button type="button" className="btn primary" disabled={!canAdvance(state)} title={blocked ?? undefined} onClick={() => dispatch({ type: 'goto', step: nextStep.id })}>
             Next
           </button>
         ) : (
-          <button type="button" className={`btn ${production ? 'danger' : 'primary'}`} disabled={!canStart} onClick={() => void start()}>
+          <button type="button" className={`btn ${production ? 'danger' : 'primary'}`} disabled={!canStart} title={startBlocked ?? undefined} onClick={() => void start()}>
             Start import
           </button>
         )}

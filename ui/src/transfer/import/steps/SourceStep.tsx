@@ -20,6 +20,15 @@ const DELIMITERS: { value: string; label: string }[] = [
 
 const delimiterName = (d: string) => DELIMITERS.find((x) => x.value === d)?.label ?? d;
 
+/** A sheet of data with a folded corner (the shared icon set has no file glyph). */
+const FileIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+    <path d="M14 3v5h5" />
+    <path d="M9 13h6M9 17h6" />
+  </svg>
+);
+
 /** One source cell as the preview shows it (text, as read; NULL marked). */
 export function CellText({ cell }: { cell: Cell }) {
   if (cell.t === 'Null') return <span className="import-null">NULL</span>;
@@ -56,16 +65,42 @@ export function SourceStep({ state, dispatch, inspectError }: Props) {
   const xlsx = source.format === 'xlsx';
 
   return (
-    <div className="stack">
-      <div className="field">
-        <label htmlFor="iw-file">File</label>
-        <div className="row">
-          <input id="iw-file" readOnly value={state.path ?? ''} placeholder="No file selected" />
+    <section className="stack" aria-label="File">
+      <h3 className="import-wizard-heading">File</h3>
+      {state.path ? (
+        <div className="import-file-row">
+          <span className="import-file-icon" aria-hidden="true">
+            <FileIcon />
+          </span>
+          <span className="import-file-path mono" title={state.path} data-testid="import-file">
+            {state.path}
+          </span>
           <button type="button" className="btn" disabled={picking} onClick={() => void choose()}>
             Choose file…
           </button>
         </div>
-      </div>
+      ) : (
+        // The whole zone opens the picker (the backend's Open dialog admits the file it returns,
+        // so a file cannot be dropped in).
+        <div className="import-file-zone" data-testid="import-file-zone" onClick={() => !picking && void choose()}>
+          <span className="import-file-icon" aria-hidden="true">
+            <FileIcon />
+          </span>
+          <p className="import-file-zone-title">Choose a file to import</p>
+          <p className="hint">CSV or TSV, JSON (an array of objects), JSON Lines, or an Excel workbook (.xlsx)</p>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={picking}
+            onClick={(e) => {
+              e.stopPropagation();
+              void choose();
+            }}
+          >
+            Choose file…
+          </button>
+        </div>
+      )}
 
       {state.path && (
         <div className="import-wizard-options">
@@ -162,6 +197,6 @@ export function SourceStep({ state, dispatch, inspectError }: Props) {
           {inspection.rows.length === 0 && <p className="hint">The file has no records.</p>}
         </>
       )}
-    </div>
+    </section>
   );
 }

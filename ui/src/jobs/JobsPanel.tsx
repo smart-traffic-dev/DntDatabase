@@ -122,7 +122,7 @@ export function JobsPanel({ onCollapse }: { onCollapse?: () => void }) {
   return (
     <section className="hs-view jb-view" aria-label="Jobs" data-testid="jobs-view">
       <div className="rs-head">
-        <strong className="rs-title">JOBS</strong>
+        <strong className="rs-title">Jobs</strong>
         <span className="spacer" />
         {!(openId !== null && jobs[openId]) && (
           <button
@@ -160,7 +160,10 @@ export function JobsPanel({ onCollapse }: { onCollapse?: () => void }) {
       ) : (
         <div className="hs-list" ref={listRef}>
           {order.length === 0 ? (
-            <div className="qr-empty">No background jobs.</div>
+            <div className="rs-empty">
+              <strong>No background jobs</strong>
+              <span>Dumps, restores, imports and generated data run here while you keep working.</span>
+            </div>
           ) : (
             <ul className="jb-list" aria-label="Background jobs">
               {order.map((id) => {

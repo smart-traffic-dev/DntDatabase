@@ -7,6 +7,8 @@ import type { ObjectTabRef as Tab } from '../store/tabs';
 export const READ_ONLY_TIP = 'This connection is read-only. Change it in Edit connection.';
 
 const SUB_LABEL: Record<SubTab, string> = { data: 'Data', info: 'Info', ddl: 'DDL', structure: 'Structure' };
+// `info` stays a SubTab value (a stored tab may still name it: it shows Structure, which now
+// opens with the Info summary), but it is no longer offered.
 
 /** DOM ids of an object tab's section tab and of its panel (the panel is in ObjectTab, the tabs in the toolbar row). */
 const domKey = (tabId: string) => encodeURIComponent(tabId);
@@ -63,12 +65,14 @@ export function ObjectSections({ tab }: { tab: Tab }) {
 }
 
 /**
- * Tables and views (incl. materialized) open on their Data (like Navicat), then Info, DDL and
- * Structure; a collection has its Data, then its DDL (options and validator); other objects have DDL only.
+ * Tables and views (incl. materialized) open on their Data (like Navicat), then Structure (its
+ * summary: rows, size, engine… then columns, indexes, keys) and DDL; a collection has its Data,
+ * then its DDL (options and validator); other objects have DDL only. Info was a sub-tab of its own:
+ * eight lines that now head Structure.
  */
 export function subTabsOf(kind: Tab['objectRef']['kind']): SubTab[] {
   if (kind === 'Collection') return ['data', 'ddl'];
-  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['data', 'info', 'ddl', 'structure'] : ['ddl'];
+  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['data', 'structure', 'ddl'] : ['ddl'];
 }
 
 // Data also loads the (cached) detail: its row estimate is shown next to the page.
@@ -86,7 +90,9 @@ export function useRowEstimate(tab: Tab): number | null {
 export function useSubTab(tab: Tab): SubTab {
   const subs = subTabsOf(tab.objectRef.kind);
   const stored = useObjectData((s) => s.byTab[tab.id]?.sub);
-  return stored && subs.includes(stored) ? stored : subs[0]!;
+  // A tab saved on the old Info sub-tab opens on Structure, where that summary now is.
+  const wanted = stored === 'info' ? 'structure' : stored;
+  return wanted && subs.includes(wanted) ? wanted : subs[0]!;
 }
 
 /**

@@ -80,6 +80,12 @@ const editorWith = (executeEdits = vi.fn(() => true)): EditorLike => ({
   executeEdits,
 });
 
+/** The connection filter (a SelectMenu): open it and pick All connections. */
+async function pickAllConnections(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(screen.getByTestId('history-connection'));
+  await user.click(screen.getByRole('option', { name: 'All connections' }));
+}
+
 describe('HistoryPanel filters', () => {
   it('lists the focused tab connection by default, with All connections as the other choice', async () => {
     const user = userEvent.setup();
@@ -87,8 +93,11 @@ describe('HistoryPanel filters', () => {
     expect(await rowsOf()).toHaveLength(2);
     expect(callsOf('history_list')[0]).toMatchObject({ filter: { connection_id: ids.prod, search: null } });
     const select = screen.getByTestId('history-connection');
-    expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(['shop-prod', 'All connections']);
-    await user.selectOptions(select, '');
+    expect(select).toHaveTextContent('shop-prod');
+    await user.click(select);
+    const list = screen.getByRole('listbox', { name: 'Connection options' });
+    expect(within(list).getAllByRole('option').map((o) => o.textContent)).toEqual(['shop-prod', 'All connections']);
+    await user.click(within(list).getByRole('option', { name: 'All connections' }));
     await waitFor(() => expect(callsOf('history_list').at(-1)).toMatchObject({ filter: { connection_id: null } }));
   });
 
@@ -103,7 +112,8 @@ describe('HistoryPanel filters', () => {
       useQueryDocs.getState().newQuery(null, null);
     });
     await waitFor(() => expect(callsOf('history_list').at(-1)).toMatchObject({ filter: { connection_id: null } }));
-    expect(within(screen.getByTestId('history-connection')).getAllByRole('option').map((o) => o.textContent)).toEqual(['All connections']);
+    await userEvent.setup().click(screen.getByTestId('history-connection'));
+    expect(within(screen.getByRole('listbox', { name: 'Connection options' })).getAllByRole('option').map((o) => o.textContent)).toEqual(['All connections']);
   });
 
   it('search is debounced 300 ms', async () => {
@@ -233,7 +243,7 @@ describe('HistoryPanel rows', () => {
     render(<HistoryPanel />);
     await rowsOf();
     expect(screen.queryByTestId('history-origin')).toBeNull();
-    await user.selectOptions(screen.getByTestId('history-connection'), '');
+    await pickAllConnections(user);
     const origins = await screen.findAllByTestId('history-origin');
     expect(origins[0]).toHaveTextContent('shop-prod');
     expect(origins[1]).toHaveTextContent('gone-conn');
@@ -242,7 +252,7 @@ describe('HistoryPanel rows', () => {
   it('shows an empty state', async () => {
     rows = [];
     render(<HistoryPanel />);
-    expect(await screen.findByText('No history.')).toBeInTheDocument();
+    expect(await screen.findByText('No history yet')).toBeInTheDocument();
   });
 });
 
@@ -312,7 +322,7 @@ describe('HistoryPanel actions', () => {
     const user = userEvent.setup();
     rows = [entry(1, { connection_id: ids.analytics, database: 'audit' })];
     render(<HistoryPanel />);
-    await user.selectOptions(screen.getByTestId('history-connection'), '');
+    await pickAllConnections(user);
     await user.click((await rowsOf())[0]!);
     const before = useQueryDocs.getState().docs.size;
     await user.click(screen.getByRole('button', { name: 'Open in new tab' }));

@@ -302,16 +302,14 @@ describe('table tab shortcuts', () => {
     useTabs.getState().open(objectTab('orders'));
   });
 
-  it('Alt+1..4 switch Data / Info / DDL / Structure; a section that does not exist is ignored', async () => {
+  it('Alt+1..3 switch Data / Structure / DDL; a section that does not exist is ignored', async () => {
     const { useObjectData } = await import('../store/objectData');
     const id = useTabs.getState().activeId!;
     expect(alt('3')).toBe(true);
     expect(useObjectData.getState().byTab[id]?.sub).toBe('ddl');
     alt('2');
-    expect(useObjectData.getState().byTab[id]?.sub).toBe('info');
-    alt('4');
     expect(useObjectData.getState().byTab[id]?.sub).toBe('structure');
-    expect(alt('5')).toBe(false);
+    expect(alt('4')).toBe(false);
   });
 
   it('F4 opens the designer of the table', () => {

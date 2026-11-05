@@ -107,7 +107,7 @@ describe('JobsPanel', () => {
 
   it('says so when there are no jobs', () => {
     render(<JobsPanel />);
-    expect(screen.getByText('No background jobs.')).toBeInTheDocument();
+    expect(screen.getByText('No background jobs')).toBeInTheDocument();
   });
 
   it('a row opens its detail: the log with the dropped count, Copy log, Open folder and Run again', async () => {

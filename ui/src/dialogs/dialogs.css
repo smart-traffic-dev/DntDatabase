@@ -9,6 +9,7 @@
   background: var(--dnt-scrim);
 }
 
+
 .modal {
   /* Separator / field border; dark mode overrides it (the hairline is too faint on the raised surface). */
   --dlg-line: var(--dnt-border);
@@ -396,49 +397,7 @@ fieldset.export-form {
   font-size: var(--dnt-text-xs);
 }
 
-/* Vendor marks: the glyph in the brand colour on a light tile (readable in both themes). */
-.engine-logo {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  border-radius: var(--dnt-radius-md);
-  background: var(--dnt-gray-100);
-}
-
-.engine-logo svg {
-  width: 62%;
-  height: 62%;
-  fill: currentColor;
-}
-
-.engine-logo.engine-mysql {
-  background: var(--dnt-brand-mysql-bg);
-  color: var(--dnt-brand-mysql);
-}
-
-.engine-logo.engine-mariadb {
-  background: var(--dnt-brand-mariadb-bg);
-  color: var(--dnt-brand-mariadb);
-}
-
-.engine-logo.engine-postgres {
-  background: var(--dnt-brand-postgres-bg);
-  color: var(--dnt-brand-postgres);
-}
-
-.engine-logo.engine-mongo {
-  background: var(--dnt-brand-mongo-bg);
-  color: var(--dnt-brand-mongo);
-}
-
-.engine-logo.engine-redis {
-  background: var(--dnt-brand-redis-bg);
-  color: var(--dnt-brand-redis);
-}
-
-.dark .engine-logo {
-  background: var(--dnt-gray-100);
-}
+/* Vendor marks: components/engineLogo.css (shared with the connection tree). */
 
 /* Connection string: pasted right above the fields it fills. */
 .conn-string {

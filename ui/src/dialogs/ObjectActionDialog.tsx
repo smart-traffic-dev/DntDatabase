@@ -16,7 +16,7 @@ import { useDataEdits } from '../store/dataEdits';
 import { objectTabId, useTabs, type ObjectTabRef } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { connNodeId } from '../store/treeModel';
-import { Modal } from './Modal';
+import { Modal, ModalObject } from './Modal';
 import { CreateNamespaceDialog } from './CreateNamespaceDialog';
 import { Callout, ContextBar, FooterNote, ImpactTiles, OutcomeReport, SqlBlock, TypedConfirm, type Impact } from './parts';
 import './objectAction.css';
@@ -40,17 +40,26 @@ const KIND_WORD: Record<ObjectKind, string> = {
   Key: 'key',
 };
 
-/** The words the tree menu uses: "Drop table orders", "Drop database shop", "Rename table orders". */
-export function actionTitle(action: ObjectAction, postgres = false): string {
+/** The title split into the action ("Drop table") and the object it acts on ("orders"). */
+function actionTitleParts(action: ObjectAction, postgres: boolean): [string, string | null] {
   const ns = postgres ? 'schema' : 'database';
   switch (action.kind) {
-    case 'create_namespace': return `Create ${ns}`;
-    case 'drop_namespace': return `Drop ${ns} ${action.name}`;
-    case 'rename_table': return `Rename table ${action.object.name}`;
-    case 'drop_object': return `Drop ${KIND_WORD[action.object.kind]} ${action.object.name}`;
-    case 'truncate_table': return `Truncate table ${action.object.name}`;
+    case 'create_namespace': return [`Create ${ns}`, null];
+    case 'drop_namespace': return [`Drop ${ns}`, action.name];
+    case 'rename_table': return ['Rename table', action.object.name];
+    case 'drop_object': return [`Drop ${KIND_WORD[action.object.kind]}`, action.object.name];
+    case 'truncate_table': return ['Truncate table', action.object.name];
   }
 }
+
+/** The words the tree menu uses: "Drop table orders", "Drop database shop", "Rename table orders". */
+export function actionTitle(action: ObjectAction, postgres = false): string {
+  const [verb, name] = actionTitleParts(action, postgres);
+  return name === null ? verb : `${verb} ${name}`;
+}
+
+/** The backend's note on every destructive plan; a fact about how the SQL runs, shown as a tooltip. */
+const LOCK_WAIT_NOTE = /metadata lock wait/i;
 
 /** The primary button: the verb and the kind of object, never "Apply". */
 function actionVerb(action: ObjectAction, postgres: boolean, busy: boolean): string {
@@ -330,7 +339,8 @@ function ObjectActionForm({ request, onClose }: { request: ObjectActionRequest; 
 
   const impacts: Impact[] = [];
   if (detail) {
-    if (detail.row_estimate !== null) impacts.push({ value: `≈ ${formatCount(detail.row_estimate)}`, label: action.kind === 'truncate_table' ? 'rows deleted (estimate)' : 'rows (estimate)', tone: 'danger' });
+    // A plain number: the title, the icon and the typed confirmation already say it is destructive.
+    if (detail.row_estimate !== null) impacts.push({ value: `≈ ${formatCount(detail.row_estimate)}`, label: action.kind === 'truncate_table' ? 'rows deleted (estimate)' : 'rows (estimate)' });
     if (detail.size_bytes !== null) impacts.push({ value: formatBytes(detail.size_bytes), label: 'data + indexes' });
     if (action.kind === 'drop_object') impacts.push({ value: String(detail.indexes.length + (detail.primary_key ? 1 : 0)), label: `indexes · ${plural(detail.triggers.length, 'trigger')}` });
   }
@@ -339,7 +349,11 @@ function ObjectActionForm({ request, onClose }: { request: ObjectActionRequest; 
   if (readOnly) note = 'This connection is read-only.';
   else if (running) note = stage ? `${stage}… Stop does not undo DDL already sent.` : 'Running…';
   else if (busy && !preview) note = 'Preparing the SQL…';
-  else if (needsTyped && !typedOk) note = 'Type the name to confirm';
+  // A missing typed name needs no footer note: the confirmation field says it right above.
+
+  const lockNote = preview?.warnings.find((w) => LOCK_WAIT_NOTE.test(w));
+  const warnings = preview?.warnings.filter((w) => !LOCK_WAIT_NOTE.test(w)) ?? [];
+  const [titleVerb, titleName] = actionTitleParts(request.action, postgres);
 
   const primaryLabel = actionVerb(action, postgres, running);
   const showPrimary = !report && !missing;
@@ -348,7 +362,7 @@ function ObjectActionForm({ request, onClose }: { request: ObjectActionRequest; 
 
   return (
     <Modal
-      title={actionTitle(request.action, postgres)}
+      title={titleName === null ? titleVerb : <>{titleVerb} <ModalObject>{titleName}</ModalObject></>}
       subtitle={actionConsequence(request.action, postgres)}
       icon={rename ? <TableIcon /> : <TrashIcon />}
       tone={rename ? 'accent' : 'danger'}
@@ -385,12 +399,13 @@ function ObjectActionForm({ request, onClose }: { request: ObjectActionRequest; 
           <SqlBlock
             sql={sql}
             caption={preview ? 'exactly what runs' : rename && liveSql ? 'live' : undefined}
+            captionTitle={lockNote}
             placeholder={readOnly ? 'Read-only connection: nothing can run.' : rename ? (name === original || !name.trim() ? 'Type a new name to see the SQL.' : problem ? 'Fix the name to see the SQL.' : 'Rendering…') : busy ? 'Preparing the SQL…' : error ? 'No SQL.' : ''}
             onOpenInQuery={readOnly ? undefined : openInQuery}
           />
-          {preview && preview.warnings.length > 0 && (
+          {warnings.length > 0 && (
             <Callout tone="warning" role="note">
-              {preview.warnings.map((w) => <p key={w}>{w}</p>)}
+              {warnings.map((w) => <p key={w}>{w}</p>)}
             </Callout>
           )}
           {needsTyped && preview?.confirm_name && (

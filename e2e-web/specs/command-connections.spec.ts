@@ -31,8 +31,8 @@ test.describe('MongoDB and Redis connections (browser, fake IPC backend)', () =>
     await byId(page, 'conn-name').fill('e2e-mongo');
     await saveConnectionDialog(page);
 
-    await expect(treeRow(page, 'e2e-redis').locator('.chip')).toHaveText('RD');
-    await expect(treeRow(page, 'e2e-mongo').locator('.chip')).toHaveText('MG');
+    await expect(treeRow(page, 'e2e-redis').getByRole('img', { name: 'Redis' })).toHaveClass(/engine-redis/);
+    await expect(treeRow(page, 'e2e-mongo').getByRole('img', { name: 'MongoDB' })).toHaveClass(/engine-mongo/);
 
     const created = backend.calls.filter((c) => c.cmd === 'create_connection').map((c) => c.args.cfg);
     expect(created).toMatchObject([

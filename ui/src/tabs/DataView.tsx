@@ -751,6 +751,8 @@ export function DataView({ tab }: { tab: Tab }) {
         <FilterBar
           handle={barRef}
           columns={state.columns}
+          // Each column's type next to its name in the Column list (known once a page loaded).
+          columnTypes={data ? Object.fromEntries(data.columns.map((c) => [c.name, c.db_type])) : undefined}
           draft={state.draft}
           active={filtered}
           error={filterError ?? rawError}
