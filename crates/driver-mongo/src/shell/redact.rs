@@ -1,18 +1,27 @@
-//! Redaction (spec §4.5): the form of a command that is safe to keep in History, logs
-//! and Favorites. Masked with `***`:
+//! Redaction (spec §4.5): the form of a script that is safe to keep in History, logs and
+//! Favorites. Secrets are replaced with `***`, in two tiers, per command of
+//! [`split`](super::parse::split):
 //!
-//! - the value of every key whose name holds `pwd`, `password` or `secret` (any case, at
-//!   any depth: `ldapQueryPassword`, `client_secret`);
-//! - the password of a `mongodb://` / `mongodb+srv://` URI, up to the last `@` before the
-//!   host, so a password holding `@` is masked whole;
-//! - the second argument of `….auth(…)` and `….changeUserPassword(…)`.
+//! - **Precise**, for a command that lexes and parses: the value of every key whose name
+//!   holds `pwd`, `password` or `secret` (any case, at any depth: `ldapQueryPassword`,
+//!   `client_secret`), and the password of a `mongodb://` / `mongodb+srv://` URI up to
+//!   the last `@` before the host (so a password holding `@` is masked whole).
+//! - **Coarse**, for everything else: a run of commands that do not parse (with the
+//!   text between them), the text between commands (comments), and comments inside a
+//!   parsed command. Everything after the FIRST secret marker of the region is masked,
+//!   to the region's end. The markers are those key names anywhere (as names or inside
+//!   quotes), `.auth` / `.changeUserPassword` (masked after `(` and a quoted first
+//!   argument), and a `mongodb://` / `mongodb+srv://` URI with user info (masked after
+//!   the scheme). Over-masking is accepted; leaking is not.
 //!
-//! Text that does not lex is scanned without tokens, from the line it fails on, for the
-//! same keys and calls; URIs are always scanned in the raw text. Never panics.
+//! `db.auth(…)` and `db.changeUserPassword(…)` are not in the grammar, so they are
+//! always coarse. Never panics.
 
+use dnt_core::command::CommandLanguage;
 use dnt_core::redact::Redacted;
 
-use super::{lex_script, Piece, Token, TokenKind};
+use super::parse::split;
+use super::{lex, MongoLanguage, Token, TokenKind};
 
 /// What a secret is replaced with.
 pub const MASK: &str = "***";
@@ -20,12 +29,20 @@ pub const MASK: &str = "***";
 /// The redacted form of `text`.
 pub fn redact(text: &str) -> Redacted {
     let mut ranges = Vec::new();
-    for piece in lex_script(text) {
-        match piece {
-            Piece::Tokens(tokens) => token_ranges(text, &tokens, &mut ranges),
-            Piece::Raw(from, to) => raw_ranges(text, from, to, &mut ranges),
+    // The end of the last command, and where the current run of bad commands began.
+    let mut at = 0;
+    let mut bad_from: Option<usize> = None;
+    for s in split(text) {
+        let (start, end) = s.range;
+        if MongoLanguage.parse(&s.text).is_ok() {
+            coarse(text, bad_from.take().unwrap_or(at), start, &mut ranges);
+            precise(text, start, &s.text, &mut ranges);
+        } else if bad_from.is_none() {
+            bad_from = Some(at);
         }
+        at = end;
     }
+    coarse(text, bad_from.unwrap_or(at), text.len(), &mut ranges);
     uri_ranges(text, &mut ranges);
     apply(text, ranges)
 }
@@ -35,62 +52,51 @@ fn is_secret(key: &str) -> bool {
     key.contains("pwd") || key.contains("password") || key.contains("secret")
 }
 
-fn is_auth_call(name: &str) -> bool {
-    name.eq_ignore_ascii_case("auth") || name.eq_ignore_ascii_case("changeUserPassword")
+fn is_word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
+fn skip_space(b: &[u8], mut i: usize) -> usize {
+    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+        i += 1;
+    }
+    i
 }
 
 // ---------------------------------------------------------------------------------
-// Tokens
+// Precise: a command that parses
+
+/// The secret values of the parsed command `span` (at byte `start` of `text`), and the
+/// comments between its tokens (coarse).
+fn precise(text: &str, start: usize, span: &str, out: &mut Vec<(usize, usize)>) {
+    let Ok(toks) = lex(span) else {
+        // `use 2024_logs`: parses, but is not JavaScript tokens.
+        coarse(text, start, start + span.len(), out);
+        return;
+    };
+    let toks: Vec<Token> = toks
+        .into_iter()
+        .map(|t| Token {
+            start: t.start + start,
+            end: t.end + start,
+            ..t
+        })
+        .collect();
+    for (i, t) in toks.iter().enumerate() {
+        if let TokenKind::Ident(key) | TokenKind::Str(key) = &t.kind {
+            if is_secret(key) && punct(&toks, i + 1, ':') && i + 2 < toks.len() {
+                let end = value_end(&toks, i + 2);
+                out.push((toks[i + 2].start, toks[end - 1].end));
+            }
+        }
+    }
+    for w in toks.windows(2) {
+        coarse(text, w[0].end, w[1].start, out);
+    }
+}
 
 fn punct(toks: &[Token], i: usize, c: char) -> bool {
     matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Punct(p)) if *p == c)
-}
-
-/// Secret values (`key: value`, `key = value`) and auth passwords in the tokens of one
-/// piece of `text`, as byte ranges. A value that runs to the end of the tokens (the
-/// text after them does not lex, or nothing follows) is also scanned in the raw text.
-fn token_ranges(text: &str, toks: &[Token], out: &mut Vec<(usize, usize)>) {
-    let b = text.as_bytes();
-    for (i, t) in toks.iter().enumerate() {
-        let (TokenKind::Ident(word) | TokenKind::Str(word)) = &t.kind else {
-            continue;
-        };
-        // Checked first and on its own: `changeUserPassword` is also a secret-looking word.
-        let call = matches!(t.kind, TokenKind::Ident(_))
-            && is_auth_call(word)
-            && i > 0
-            && punct(toks, i - 1, '.')
-            && punct(toks, i + 1, '(');
-        if call {
-            let first_end = arg_end(toks, i + 1);
-            let second_end = if punct(toks, first_end, ',') {
-                let end = arg_end(toks, first_end);
-                push_tokens(toks, first_end + 1, end, out);
-                end
-            } else {
-                first_end
-            };
-            if second_end >= toks.len() {
-                raw_auth(b, toks[i + 1].start, out);
-            }
-        }
-        let assign = punct(toks, i + 1, ':')
-            || (punct(toks, i + 1, '=') && !punct(toks, i + 2, '=') && !punct(toks, i + 2, '>'));
-        if is_secret(word) && assign {
-            let end = value_end(toks, i + 2);
-            push_tokens(toks, i + 2, end, out);
-            if end >= toks.len() {
-                raw_value_at(b, toks[i + 1].end, out);
-            }
-        }
-    }
-}
-
-/// The bytes of `toks[from..to]`, when that is not empty.
-fn push_tokens(toks: &[Token], from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
-    if from < to && to <= toks.len() {
-        out.push((toks[from].start, toks[to - 1].end));
-    }
 }
 
 /// Just past the bracket that closes the one at `open`.
@@ -111,172 +117,111 @@ fn closing(toks: &[Token], open: usize) -> usize {
     toks.len()
 }
 
-/// The `,`, closing bracket or `;` that ends the argument after `open` (the token before
-/// its first one), or the end.
-fn arg_end(toks: &[Token], open: usize) -> usize {
-    let mut depth = 0usize;
-    for (i, t) in toks.iter().enumerate().skip(open + 1) {
-        match t.kind {
-            TokenKind::Punct('(' | '[' | '{') => depth += 1,
-            TokenKind::Punct(')' | ']' | '}') if depth == 0 => return i,
-            TokenKind::Punct(')' | ']' | '}') => depth -= 1,
-            TokenKind::Punct(',') if depth == 0 => return i,
-            TokenKind::Punct(';') => return i,
-            _ => {}
-        }
-    }
-    toks.len()
-}
-
-/// Just past the value that starts at `i`: a literal, a call, a bracketed value, and any
-/// member access, call or arithmetic that continues it.
+/// Just past the value that starts at `i` (a literal of a parsed command: a scalar, a
+/// helper call or a bracketed value, `new` and a sign included). At least `i + 1`.
 fn value_end(toks: &[Token], mut i: usize) -> usize {
-    let p = |i: usize| match toks.get(i).map(|t| &t.kind) {
-        Some(TokenKind::Punct(c)) => Some(*c),
-        _ => None,
-    };
-    loop {
-        // Prefix operators and `new`.
-        while matches!(p(i), Some('-' | '+' | '!' | '~'))
-            || matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Ident(w)) if w == "new")
-        {
-            i += 1;
-        }
-        i = match toks.get(i).map(|t| &t.kind) {
-            None => return toks.len(),
-            Some(TokenKind::Punct('(' | '[' | '{')) => closing(toks, i),
-            Some(TokenKind::Punct(_)) => return i,
-            Some(TokenKind::Ident(_)) if p(i + 1) == Some('(') => closing(toks, i + 1),
-            Some(_) => i + 1,
-        };
-        while matches!(p(i), Some('(' | '[')) {
-            i = closing(toks, i);
-        }
-        match p(i) {
-            Some('.' | '+' | '-' | '*' | '/' | '%') => i += 1,
-            _ => return i,
-        }
+    while matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Punct('-')))
+        || matches!(toks.get(i).map(|t| &t.kind), Some(TokenKind::Ident(w)) if w == "new")
+    {
+        i += 1;
     }
+    let end = match toks.get(i).map(|t| &t.kind) {
+        None => toks.len(),
+        Some(TokenKind::Punct('(' | '[' | '{')) => closing(toks, i),
+        Some(TokenKind::Ident(_)) if punct(toks, i + 1, '(') => closing(toks, i + 1),
+        Some(_) => i + 1,
+    };
+    end.min(toks.len()).max(1)
 }
 
 // ---------------------------------------------------------------------------------
-// Raw text (what does not lex)
+// Coarse: everything else
 
-fn is_word(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
-}
-
-/// Past any whitespace, line breaks included (a value may start on the next line).
-fn skip_space(b: &[u8], mut i: usize) -> usize {
-    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
-        i += 1;
-    }
-    i
-}
-
-/// Just past the quote that closes the one at `at`; `'` and `"` strings end at the end
-/// of their line when unterminated, templates at the end of the text.
-fn skip_quoted(b: &[u8], at: usize) -> usize {
-    let q = b[at];
-    let mut k = at + 1;
-    while k < b.len() {
-        match b[k] {
-            b'\\' => k += 2,
-            c if c == q => return k + 1,
-            b'\n' if q != b'`' => return k,
-            _ => k += 1,
+/// Masks `text[from..to]` from just after its first secret marker to `to` (trailing
+/// whitespace, which holds no secret, is kept).
+fn coarse(text: &str, from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
+    let Some(region) = text.get(from..to) else {
+        return;
+    };
+    if let Some(m) = first_marker(region) {
+        let end = region.trim_end().len();
+        if m < end {
+            out.push((from + m, from + end));
         }
     }
-    b.len()
 }
 
-/// A value from `from`: up to a `,`, `;`, closing bracket or line end outside brackets
-/// and quotes. Returns its end without trailing blanks, and where the scan stopped.
-fn raw_value(b: &[u8], from: usize) -> (usize, usize) {
-    let mut depth = 0usize;
-    let mut k = from;
-    while k < b.len() {
-        match b[k] {
-            b'\'' | b'"' | b'`' => {
-                k = skip_quoted(b, k);
-                continue;
+/// Where masking starts in `s`: just after its first secret marker.
+fn first_marker(s: &str) -> Option<usize> {
+    let lower = s.to_ascii_lowercase();
+    let b = lower.as_bytes();
+    // (where the marker starts, where masking starts)
+    let mut best: Option<(usize, usize)> = None;
+    let mut consider = |start: usize, mask_from: usize| {
+        if best.is_none_or(|(s0, _)| start < s0) {
+            best = Some((start, mask_from));
+        }
+    };
+    for key in ["pwd", "password", "secret"] {
+        if let Some(i) = lower.find(key) {
+            let mut e = i + key.len();
+            while e < b.len() && is_word(b[e]) {
+                e += 1;
             }
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' if depth == 0 => break,
-            b')' | b']' | b'}' => depth -= 1,
-            b',' | b';' | b'\n' if depth == 0 => break,
-            _ => {}
+            consider(i, e);
         }
-        k += 1;
     }
-    let stop = k.min(b.len());
-    let mut end = stop;
-    while end > from && b[end - 1].is_ascii_whitespace() {
-        end -= 1;
+    for name in [".auth", ".changeuserpassword"] {
+        let mut from = 0;
+        while let Some(i) = lower.get(from..).and_then(|r| r.find(name)) {
+            let i = from + i;
+            let e = i + name.len();
+            if !b.get(e).is_some_and(|&c| is_word(c)) {
+                consider(i, after_first_argument(b, e));
+                break;
+            }
+            from = e;
+        }
     }
-    (end, stop)
+    for scheme in ["mongodb://", "mongodb+srv://"] {
+        let mut from = 0;
+        while let Some(i) = lower.get(from..).and_then(|r| r.find(scheme)) {
+            let i = from + i;
+            let e = i + scheme.len();
+            let uri_end = b[e..]
+                .iter()
+                .position(u8::is_ascii_whitespace)
+                .map_or(b.len(), |p| e + p);
+            if b[e..uri_end].contains(&b'@') {
+                consider(i, e);
+                break;
+            }
+            from = e;
+        }
+    }
+    best.map(|(_, m)| m)
 }
 
-/// Masks the value that starts after byte `from` (past whitespace and line breaks).
-/// Returns where the value ends.
-fn raw_value_at(b: &[u8], from: usize, out: &mut Vec<(usize, usize)>) -> usize {
-    let v = skip_space(b, from);
-    let (end, _) = raw_value(b, v);
-    if end > v {
-        out.push((v, end));
+/// After `.auth` (ending at `e`): past `(` and a quoted first argument and its `,` when
+/// they are there, else past what is there of them. Never past the password.
+fn after_first_argument(b: &[u8], e: usize) -> usize {
+    let open = skip_space(b, e);
+    if b.get(open) != Some(&b'(') {
+        return e;
     }
-    end
-}
-
-/// Masks the second argument of the call whose `(` is at byte `open`. Returns where the
-/// scan ended.
-fn raw_auth(b: &[u8], open: usize, out: &mut Vec<(usize, usize)>) -> usize {
-    let (_, stop) = raw_value(b, skip_space(b, open + 1));
-    let stop = skip_space(b, stop);
-    if b.get(stop) == Some(&b',') {
-        raw_value_at(b, stop + 1, out)
+    let arg = skip_space(b, open + 1);
+    let Some(&q @ (b'\'' | b'"' | b'`')) = b.get(arg) else {
+        return open + 1;
+    };
+    let mut k = arg + 1;
+    while k < b.len() && b[k] != q {
+        k += if b[k] == b'\\' { 2 } else { 1 };
+    }
+    let comma = skip_space(b, k + 1);
+    if k < b.len() && b.get(comma) == Some(&b',') {
+        comma + 1
     } else {
-        stop
-    }
-}
-
-/// The keys and auth calls that start in `text[from..to]`, scanned without tokens; a
-/// value may run past `to`.
-fn raw_ranges(text: &str, from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
-    let b = text.as_bytes();
-    let to = to.min(b.len());
-    let mut i = from;
-    while i < to {
-        if !is_word(b[i]) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < b.len() && is_word(b[i]) {
-            i += 1;
-        }
-        // ASCII bytes on both sides: char boundaries.
-        let word = &text[start..i];
-        // A call first: `changeUserPassword` is also a secret-looking word.
-        let open = skip_space(b, i);
-        if is_auth_call(word) && start > 0 && b[start - 1] == b'.' && b.get(open) == Some(&b'(') {
-            i = i.max(raw_auth(b, open, out));
-        } else if is_secret(word) {
-            // `key:`, `'key':`, `key =` (not `==` / `=>`).
-            let mut j = i;
-            if matches!(b.get(j), Some(b'\'' | b'"' | b'`')) {
-                j += 1;
-            }
-            j = skip_space(b, j);
-            let assign = match (b.get(j), b.get(j + 1)) {
-                (Some(b':'), _) => true,
-                (Some(b'='), next) => !matches!(next, Some(b'=' | b'>')),
-                _ => false,
-            };
-            if assign {
-                i = i.max(raw_value_at(b, j + 1, out));
-            }
-        }
+        open + 1
     }
 }
 
@@ -371,8 +316,17 @@ mod tests {
         }
     }
 
+    /// None of `secrets` is left in the redacted `text`.
+    fn hidden(text: &str, secrets: &[&str]) {
+        let r = MongoLanguage.redact(text).text;
+        for s in secrets {
+            assert!(!r.contains(s), "{text:?} -> {r:?} keeps {s}");
+        }
+    }
+
     #[test]
     fn redacts_password_keys_at_any_depth() {
+        // Commands that parse: only the values.
         check(&[
             (
                 "db.runCommand({createUser: 'u', pwd: 'hunter2', roles: []})",
@@ -387,34 +341,47 @@ mod tests {
                 "db.adminCommand({setParameter: 1, ldapQueryPassword: ***})",
             ),
             (
-                "db.c.insertOne({'client_secret': NumberLong(5), \"MY_PWD\": {a: 1, b: [2]}, n: 1})",
-                "db.c.insertOne({'client_secret': ***, \"MY_PWD\": ***, n: 1})",
-            ),
-            (
-                "db.c.insertOne({secret: 'a' + 'b', n: 1})",
-                "db.c.insertOne({secret: ***, n: 1})",
+                "db.c.insertOne({'client_secret': NumberLong(5), \"MY_PWD\": {a: 1, b: [2]}, n: -1, \
+                 secretN: -2, s: new Date()})",
+                "db.c.insertOne({'client_secret': ***, \"MY_PWD\": ***, n: -1, secretN: ***, s: new Date()})",
             ),
             (
                 "db.c.insertOne({\n  user: 'u',\n  pwd: 'p',\n})\ndb.c.find()",
                 "db.c.insertOne({\n  user: 'u',\n  pwd: ***,\n})\ndb.c.find()",
             ),
-            // db.auth / db.changeUserPassword: the second argument.
-            ("db.auth('admin', 'hunter2')", "db.auth('admin', ***)"),
             (
-                "db.getSiblingDB('admin').changeUserPassword('u', \"n3w\" )",
-                "db.getSiblingDB('admin').changeUserPassword('u', *** )",
-            ),
-            (
-                "db.auth({user: 'u', pwd: 'p'})",
-                "db.auth({user: 'u', pwd: ***})",
+                "use 2024logs\ndb.c.insertOne({pwd: 'x'})",
+                "use 2024logs\ndb.c.insertOne({pwd: ***})",
             ),
             // Nothing to redact: the text is kept byte for byte.
-            (
-                "db.c.find({name: 'pwd'}) // password: none",
-                "db.c.find({name: 'pwd'}) // password: none",
-            ),
-            ("db.auth('u')", "db.auth('u')"),
+            ("db.c.find({name: 'pwd'})", "db.c.find({name: 'pwd'})"),
             ("use 2024_logs\nshow dbs", "use 2024_logs\nshow dbs"),
+            // A comment is coarse: everything after its marker.
+            (
+                "db.c.find({name: 'x'}) // password: none\nshow dbs",
+                "db.c.find({name: 'x'}) // password***\nshow dbs",
+            ),
+            (
+                "db.c.find({a: 1 /* pwd: x */, b: 2})",
+                "db.c.find({a: 1 /* pwd***, b: 2})",
+            ),
+            // Not parsed: everything after the first marker.
+            (
+                "db.c.insertOne({secret: 'a' + 'b', n: 1})",
+                "db.c.insertOne({secret***",
+            ),
+            ("db.auth('admin', 'hunter2')", "db.auth('admin',***"),
+            (
+                "db.getSiblingDB('admin').changeUserPassword('u', \"n3w\" )",
+                "db.getSiblingDB('admin').changeUserPassword('u',***",
+            ),
+            ("db.auth({user: 'u', pwd: 'p'})", "db.auth(***"),
+            ("db.auth('u')", "db.auth(***"),
+            // A parsed command after a bad one is precise again.
+            (
+                "db.auth('u', 'p')\ndb.c.insertOne({pwd: 'q', n: 1})",
+                "db.auth('u',***\ndb.c.insertOne({pwd: ***, n: 1})",
+            ),
         ]);
     }
 
@@ -426,15 +393,19 @@ mod tests {
                 "db.c.insertOne({uri: 'mongodb://app:***@db.example.com:27017/x?tls=true'})",
             ),
             (
-                "mongodb+srv://u:s3cr@t@cluster0.example.net/?retryWrites=true",
-                "mongodb+srv://u:***@cluster0.example.net/?retryWrites=true",
+                "db.c.insertOne({u: 'mongodb+srv://u:s3cr@t@cluster0.example.net/?w=1'})",
+                "db.c.insertOne({u: 'mongodb+srv://u:***@cluster0.example.net/?w=1'})",
             ),
-            ("MONGODB://u:x@h", "MONGODB://u:***@h"),
             (
-                "a mongodb://a:1@h b mongodb+srv://b:2@h2",
-                "a mongodb://a:***@h b mongodb+srv://b:***@h2",
+                "db.c.insertOne({a: 'MONGODB://u:x@h', b: 'mongodb://v:y@h2'})",
+                "db.c.insertOne({a: 'MONGODB://u:***@h', b: 'mongodb://v:***@h2'})",
             ),
-            // No password: unchanged.
+            // Not a command: coarse, after the scheme.
+            (
+                "mongodb+srv://u:s3cr@t@cluster0.example.net/?retryWrites=true",
+                "mongodb+srv://***",
+            ),
+            // No user info: unchanged.
             (
                 "db.c.insertOne({u: 'mongodb://u@h/db'})",
                 "db.c.insertOne({u: 'mongodb://u@h/db'})",
@@ -448,38 +419,35 @@ mod tests {
         check(&[
             (
                 "db.createUser({user: 'u', pwd: 'hunter2",
-                "db.createUser({user: 'u', pwd: ***",
+                "db.createUser({user: 'u', pwd***",
             ),
-            ("db.auth('u', 'hunter2", "db.auth('u', ***"),
+            ("db.auth('u', 'hunter2", "db.auth('u',***"),
             (
                 "db.changeUserPassword('u', \"n3w",
-                "db.changeUserPassword('u', ***",
+                "db.changeUserPassword('u',***",
             ),
             (
                 "db.c.insertOne({password: \"a,b\", note: 'open",
-                "db.c.insertOne({password: ***, note: 'open",
+                "db.c.insertOne({password***",
             ),
-            ("{secret: `multi\nline` 'x", "{secret: ***"),
-            ("x = {'Password' : abc def, y: 1} 'oops", "x = {'Password' : ***, y: 1} 'oops"),
-            // The lines before the bad one are read as tokens; the URI anywhere.
+            ("{secret: `multi\nline` 'x", "{secret***"),
+            (
+                "x = {'Password' : abc def, y: 1} 'oops",
+                "x = {'Password***",
+            ),
+            // A bad run masks to its end, past the lines that do lex.
             (
                 "db.createUser({\n  user: 'u',\n  pwd: 'p1'\n})\ndb.auth('u', 'p2\nmongodb://u:p3@h",
-                "db.createUser({\n  user: 'u',\n  pwd: ***\n})\ndb.auth('u', ***\nmongodb://u:***@h",
-            ),
-            (
-                "use 2024logs\ndb.c.insertOne({pwd: 'x'})",
-                "use 2024logs\ndb.c.insertOne({pwd: ***})",
+                "db.createUser({\n  user: 'u',\n  pwd***",
             ),
             ("db.c.find({a: 'open", "db.c.find({a: 'open"),
-            // A value on the line after its key or comma, where the text stops lexing.
             (
                 "db.runCommand({createUser: 'app', pwd:\n  'S3cret!, roles: []})",
-                "db.runCommand({createUser: 'app', pwd:\n  ***",
+                "db.runCommand({createUser: 'app', pwd***",
             ),
-            ("db.auth('admin',\n  'hunter2", "db.auth('admin',\n  ***"),
-            ("x({a: 'open\n pwd:\n 'p'", "x({a: 'open\n pwd:\n ***"),
-            ("x('a, pwd:\n 'hunter3')", "x('a, pwd:\n ***)"),
-            ("x('a, y.auth('u',\r\n 'hunter4'", "x('a, y.auth('u',\r\n ***"),
+            ("db.auth('admin',\n  'hunter2", "db.auth('admin',***"),
+            ("x({a: 'open\n pwd:\n 'p'", "x({a: 'open\n pwd***"),
+            ("x('a, y.auth('u',\r\n 'hunter4'", "x('a, y.auth('u',***"),
         ]);
         for (text, secret) in [
             (
@@ -489,8 +457,36 @@ mod tests {
             ("db.auth('admin',\n  'hunter2", "hunter2"),
             ("x({a: 'open\n pwd:\n 'p'", "'p'"),
         ] {
-            assert!(!MongoLanguage.redact(text).text.contains(secret), "{text}");
+            hidden(text, &[secret]);
         }
+    }
+
+    #[test]
+    fn redacts_values_that_continue_past_a_bad_line() {
+        for text in [
+            "db.c.insertOne({pwd: 'a' +\n 'hunter2})",
+            "db.auth('admin', 'a' +\n 'hunter2",
+            "db.c.insertOne({pwd:\n 'a' +\n 'hunter2})",
+            "{a: 'x', pwd: x.y\n.z('hunter2})",
+            "db.c.insertOne({a: 'x', pwd\n: 'hunter2})",
+            "db.c.insertOne({a: 'x', 'pwd'\n: 'hunter2})",
+            "db.c.insertOne({a: 'x', pwd\n= 'hunter2})",
+            "db.c.insertOne({a: 'x', pwd: f(\n'hunter2})",
+            "db.auth\n('u', 'hunter2",
+            "db.auth(\n'u'\n, 'hunter2",
+            "x(`unterminated\nb' pwd: 'hunter2",
+            "/* note\nsay \"x, pwd: \" + 'hunter2'",
+            "db.c.insertOne({note: `Bob's\nit's ok', pwd: 'hunter2'})",
+            "db.c.find({a: 1}); db.auth('u',\n'hunter2'); show dbs",
+            "// pwd\n'hunter2",
+        ] {
+            hidden(text, &["hunter2"]);
+        }
+        // A stray apostrophe: it lexes, but does not parse.
+        hidden(
+            "db.c.insertOne({note: 'it's', pwd: 'S3cret's'})",
+            &["S3cret"],
+        );
     }
 
     #[test]
@@ -499,13 +495,12 @@ mod tests {
         let text = "db.c.insertOne({a: 1,\nuse :'x',pwd:'hunter2'})";
         let r = MongoLanguage.redact(text);
         assert_eq!(r.text, "db.c.insertOne({a: 1,\nuse :'x',pwd:***})");
-        assert!(matches!(
-            MongoLanguage.parse(text).unwrap().class,
-            dnt_core::command::CommandClass::Write
-        ));
-        assert_eq!(MongoLanguage.parse(text).unwrap().name, "insertOne");
+        let p = MongoLanguage.parse(text).unwrap();
+        assert_eq!(
+            (p.name.as_str(), p.class),
+            ("insertOne", dnt_core::command::CommandClass::Write)
+        );
         // A name the lexer refuses there is not taken as a `use` name either.
-        let text = "db.c.insertOne({a: 1,\nuse 2024_x, pwd: 'p'})";
-        assert!(!MongoLanguage.redact(text).text.contains("'p'"));
+        hidden("db.c.insertOne({a: 1,\nuse 2024_x, pwd: 'p'})", &["'p'"]);
     }
 }

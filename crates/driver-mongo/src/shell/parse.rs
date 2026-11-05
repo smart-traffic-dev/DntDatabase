@@ -964,6 +964,14 @@ pub fn split(text: &str) -> Vec<CommandSpan> {
         match piece {
             Piece::Tokens(tokens) => token_spans(text, &tokens, &mut out),
             Piece::Raw(from, to) => line_spans(text, from, to, &mut out),
+            Piece::Unclosed(from, to) => {
+                let body = text.get(from..to).unwrap_or_default();
+                let start = from + (body.len() - body.trim_start().len());
+                let end = from + body.trim_end().len();
+                if start < end {
+                    out.push(span(text, start, end));
+                }
+            }
         }
     }
     out
@@ -1011,6 +1019,10 @@ fn token_spans(text: &str, tokens: &[Token], out: &mut Vec<CommandSpan>) {
                 out.push(span(tokens[f].start, t.end));
             }
         }
+    }
+    // Brackets still open at the end: the rest is one command (it will not parse).
+    if let (Some(f), Some(last)) = (first, tokens.last()) {
+        out.push(span(tokens[f].start, last.end));
     }
 }
 
@@ -1131,6 +1143,58 @@ mod tests {
                 "db.a.find()",
                 "db.b.find()",
             ]
+        );
+        // Brackets still open where the text stops lexing, or at the end: one command.
+        assert_eq!(
+            spans("db.c.insertOne({\n  a: 'bad\n})\ndb.d.find()"),
+            ["db.c.insertOne({", "a: 'bad", "})", "db.d.find()"]
+        );
+        assert_eq!(spans("db.c.find({"), ["db.c.find({"]);
+        assert_eq!(
+            spans("db.c.insertOne({a: 1}); db.d.insertOne({\n b: 'bad\n})"),
+            [
+                "db.c.insertOne({a: 1})",
+                "db.d.insertOne({",
+                "b: 'bad",
+                "})"
+            ]
+        );
+        // An unterminated template or comment runs to the end: nothing inside it is
+        // lexed as a command of its own.
+        for (text, want) in [
+            (
+                "db.e.find({\n  b: `bad\n}); db.c.drop()",
+                vec!["db.e.find({\n  b:", "`bad\n}); db.c.drop()"],
+            ),
+            (
+                "db.c.find({a: 'x'}); db.e.find({\n  b: `bad\n}); db.c.drop()",
+                vec![
+                    "db.c.find({a: 'x'})",
+                    "db.e.find({\n  b:",
+                    "`bad\n}); db.c.drop()",
+                ],
+            ),
+            (
+                "db.a.find() /* note\ndb.c.drop()\n",
+                vec!["db.a.find()", "/* note\ndb.c.drop()"],
+            ),
+            (
+                "db.a.find({t: `${x}\n`}); db.c.drop()",
+                vec!["db.a.find({t:", "`${x}\n`}); db.c.drop()"],
+            ),
+            (
+                "db.a.find({t: `\\1\n`})\ndb.c.drop()",
+                vec!["db.a.find({t:", "`\\1\n`})\ndb.c.drop()"],
+            ),
+        ] {
+            let got = spans(text);
+            assert_eq!(got, want, "{text:?}");
+            assert!(got.iter().all(|s| s != "db.c.drop()"), "{text:?}");
+        }
+        // A bad escape in a string is one bad line; the next command is its own.
+        assert_eq!(
+            spans("db.a.find({t: '\\1'})\ndb.c.find()"),
+            ["db.a.find({t: '\\1'})", "db.c.find()"]
         );
         // `use` names the lexer refuses, after `;` too.
         assert_eq!(

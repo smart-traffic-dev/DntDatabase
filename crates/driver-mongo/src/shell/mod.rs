@@ -93,12 +93,17 @@ pub(crate) enum Piece {
     Tokens(Vec<Token>),
     /// Whole lines (a byte range of the script) that do not lex.
     Raw(usize, usize),
+    /// From an unterminated template literal or comment to the end of the script (a
+    /// byte range): nothing in it may be read as a command of its own.
+    Unclosed(usize, usize),
 }
 
 /// Lexes a script for splitting and redaction, which must work on any text, into
 /// pieces in order. When the text stops lexing, the lines from the bad one (backed off
 /// to the line where an unfinished string or comment began) up to the end of the bad
-/// line are one [`Piece::Raw`], and lexing resumes on the next line.
+/// line are one [`Piece::Raw`], and lexing resumes on the next line. An unterminated
+/// template literal or comment never ends, so from where it begins the rest of the text
+/// is one [`Piece::Unclosed`].
 ///
 /// The name after a `use` that starts a statement (bracket depth 0, at a line start or
 /// after `;`) is one name token whatever raw-name characters it holds (`use 2024_logs`,
@@ -111,17 +116,28 @@ pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
         let Some(rest) = text.get(pos..) else {
             break;
         };
-        let bad = match lex(rest) {
+        let (bad, message) = match lex(rest) {
             Ok(t) => {
                 cur.extend(shifted(t, pos));
                 break;
             }
-            Err(e) => pos + e.offset,
+            Err(e) => (pos + e.offset, e.message),
         };
         if let Some(t) = use_name(text, pos, bad, &cur) {
             pos = t.last().map_or(text.len(), |t| t.end);
             cur.extend(t);
             continue;
+        }
+        // Lexing never resumes inside a template literal or a comment that does not end:
+        // from where it begins, the rest of the text is one piece.
+        if let Some(begin) = unclosed_begin(text, pos, bad, &message) {
+            let (cut, prefix) = lexable_prefix(text, pos, begin);
+            cur.extend(prefix);
+            if !cur.is_empty() {
+                pieces.push(Piece::Tokens(std::mem::take(&mut cur)));
+            }
+            pieces.push(Piece::Unclosed(cut, text.len()));
+            break;
         }
         let (cut, prefix) = lexable_prefix(text, pos, line_start(text, bad).max(pos));
         cur.extend(prefix);
@@ -139,6 +155,26 @@ pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
         pieces.push(Piece::Tokens(cur));
     }
     pieces
+}
+
+/// When the lex error `message` at `bad` (lexing from `pos`) is inside a construct that
+/// may span lines and does not end (an unterminated template literal or comment, or a
+/// `${` or bad escape inside a template literal): where that construct begins.
+fn unclosed_begin(text: &str, pos: usize, bad: usize, message: &str) -> Option<usize> {
+    const TEMPLATE: &str = "Unterminated template literal";
+    let inside_template = || {
+        // Lexing up to the error ends inside the template, at its backtick.
+        match lex(text.get(pos..bad)?) {
+            Err(e) if e.message == TEMPLATE => Some(pos + e.offset),
+            _ => None,
+        }
+    };
+    match message {
+        TEMPLATE | "Unterminated comment" => Some(bad),
+        m if m.starts_with("Template literal substitutions") => inside_template(),
+        "Invalid escape sequence" => inside_template(),
+        _ => None,
+    }
 }
 
 fn shifted(tokens: Vec<Token>, by: usize) -> Vec<Token> {
@@ -272,8 +308,23 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join(" "),
                 Piece::Raw(a, b) => format!("[{}]", &text[a..b]),
+                Piece::Unclosed(a, b) => format!("<{}>", &text[a..b]),
             })
             .collect()
+    }
+
+    #[test]
+    fn lex_script_stops_at_an_unclosed_template_or_comment() {
+        assert_eq!(
+            pieces("db.e.find({\n  b: `bad\n}); db.c.drop()"),
+            ["db . e . find ( { b :", "<`bad\n}); db.c.drop()>"]
+        );
+        assert_eq!(pieces("a()\n/* note\nb()"), ["a ( )", "</* note\nb()>"]);
+        // `${` and a bad escape inside a template: from the template's backtick.
+        assert_eq!(pieces("f(`${x}\n`)\ng()"), ["f (", "<`${x}\n`)\ng()>"]);
+        assert_eq!(pieces("f(`\\1\n`)\ng()"), ["f (", "<`\\1\n`)\ng()>"]);
+        // A bad escape in a string is one bad line.
+        assert_eq!(pieces("f('\\1')\ng()"), ["[f('\\1')\n]", "g ( )"]);
     }
 
     #[test]
