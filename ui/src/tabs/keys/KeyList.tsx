@@ -67,14 +67,16 @@ export function KeyList({ tabId, state, total }: Props) {
         </p>
       ) : null}
       <ul className="kt-keys" role="listbox" aria-label="Keys">
-        {state.keys.map((k) => {
+        {state.keys.map((k, i) => {
           const selected = sameKey(state.selected, k.name);
+          // One Tab stop: the selected key, else the first one.
+          const stop = selected || (i === 0 && !state.keys.some((o) => sameKey(state.selected, o.name)));
           return (
             <li
               key={k.name.raw}
               role="option"
               aria-selected={selected}
-              tabIndex={selected ? 0 : -1}
+              tabIndex={stop ? 0 : -1}
               className={`kt-key${selected ? ' on' : ''}`}
               data-testid="key-row"
               onClick={() => void store.select(tabId, k.name)}

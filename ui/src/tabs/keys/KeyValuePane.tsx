@@ -61,9 +61,9 @@ function AddRow({ label, buttons }: { label: string; buttons: { label: string; r
 }
 
 /** A cell that turns into an input on `Edit`; Enter saves, Escape cancels. */
-function EditableCell({ name, value, editable, onSave }: { name: string; value: Value; editable: boolean; onSave(text: string): void }) {
+function EditableCell({ name, value, editable, pad, onSave }: { name: string; value: Value; editable: boolean; pad?: boolean; onSave(text: string): void }) {
   const [draft, setDraft] = useState<string | null>(null);
-  if (draft === null) {
+  if (draft === null || !editable) {
     return (
       <>
         <td className="mono kt-cell">{valueText(value)}</td>
@@ -73,6 +73,9 @@ function EditableCell({ name, value, editable, onSave }: { name: string; value: 
               Edit
             </button>
           </td>
+        ) : pad ? (
+          // A value known only by its preview: nothing to edit, the row keeps its columns.
+          <td className="kt-actions" />
         ) : null}
       </>
     );
@@ -128,12 +131,29 @@ function render(bytes: Uint8Array, mode: Mode): string {
   return text;
 }
 
-/** A string value: Text / JSON / Hex modes; `Save` sends `set_string`. */
-function StringEditor({ keyName, value, editable, edit }: { keyName: KeyName; value: Value; editable: boolean; edit: Edit }) {
-  const original = valueBytes(value) ?? new TextEncoder().encode(valueText(value));
-  const [mode, setMode] = useState<Mode>('text');
-  const [draft, setDraft] = useState(() => render(original, 'text'));
-  const bytes = mode === 'hex' ? parseHex(draft) : new TextEncoder().encode(draft);
+/** Whether `bytes` are valid UTF-8 (else Text / JSON would show replacement characters). */
+function isUtf8(bytes: Uint8Array): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A string value: Text / JSON / Hex modes; `Save` sends `set_string`. Until the draft is edited
+ * it stands for the exact bytes of the value (a mode switch never goes through a lossy decode);
+ * bytes that are not UTF-8 open in Hex. A value known only by its preview cannot be saved.
+ */
+function StringEditor({ keyName, value, editable: canEdit, edit }: { keyName: KeyName; value: Value; editable: boolean; edit: Edit }) {
+  const exact = valueBytes(value);
+  const original = exact ?? new TextEncoder().encode(valueText(value));
+  const editable = canEdit && exact !== null;
+  const [mode, setMode] = useState<Mode>(() => (exact && !isUtf8(exact) ? 'hex' : 'text'));
+  const [draft, setDraft] = useState(() => render(original, exact && !isUtf8(exact) ? 'hex' : 'text'));
+  const [edited, setEdited] = useState(false);
+  const bytes = !edited ? original : mode === 'hex' ? parseHex(draft) : new TextEncoder().encode(draft);
   const switchTo = (next: Mode) => {
     setDraft(render(bytes ?? original, next));
     setMode(next);
@@ -147,7 +167,18 @@ function StringEditor({ keyName, value, editable, edit }: { keyName: KeyName; va
           </button>
         ))}
       </div>
-      <textarea className="kt-text mono" aria-label="String value" readOnly={!editable} value={draft} spellCheck={false} onChange={(e) => setDraft(e.target.value)} />
+      <textarea
+        className="kt-text mono"
+        aria-label="String value"
+        readOnly={!editable}
+        value={draft}
+        spellCheck={false}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setEdited(true);
+        }}
+      />
+      {canEdit && exact === null ? <p className="hint">Only the start of this value was loaded, so it cannot be edited here.</p> : null}
       {editable ? (
         <div className="kt-save">
           {bytes === null ? (
@@ -183,7 +214,7 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
             <tr>
               <th>field</th>
               <th>value</th>
-              {editable ? <th aria-label="Actions" /> : null}
+              {editable ? <th aria-label="Actions" colSpan={2} /> : null}
             </tr>
           </thead>
           <tbody>
@@ -197,7 +228,8 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
                     key={JSON.stringify(v)}
                     name={name}
                     value={v}
-                    editable={editable && field !== null}
+                    editable={editable && field !== null && valueBytes(v) !== null}
+                    pad={editable}
                     onSave={(text) => field && edit({ op: 'hash_set', key: keyName, field, value: textBytes(text) })}
                   />
                   {editable && field !== null ? (
@@ -206,6 +238,8 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
                         Delete
                       </button>
                     </td>
+                  ) : editable ? (
+                    <td className="kt-actions" />
                   ) : null}
                 </tr>
               );
@@ -224,7 +258,7 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
             <tr>
               <th>index</th>
               <th>value</th>
-              {editable ? <th aria-label="Actions" /> : null}
+              {editable ? <th aria-label="Actions" colSpan={2} /> : null}
             </tr>
           </thead>
           <tbody>
@@ -233,13 +267,15 @@ function ValueBody({ keyName, value, editable, edit }: { keyName: KeyName; value
               return (
                 <tr key={`${index}:${JSON.stringify(v)}`}>
                   <td className="mono">{index}</td>
-                  <EditableCell name={`item ${index}`} value={v} editable={editable} onSave={(text) => edit({ op: 'list_set', key: keyName, index, value: textBytes(text) })} />
+                  <EditableCell name={`item ${index}`} value={v} editable={editable && bytes !== null} pad={editable} onSave={(text) => edit({ op: 'list_set', key: keyName, index, value: textBytes(text) })} />
                   {editable && bytes !== null ? (
                     <td className="kt-actions">
                       <button type="button" className="btn small" aria-label={`Remove item ${index}`} onClick={() => edit({ op: 'list_remove', key: keyName, value: bytes, count: 1 })}>
                         Remove
                       </button>
                     </td>
+                  ) : editable ? (
+                    <td className="kt-actions" />
                   ) : null}
                 </tr>
               );
