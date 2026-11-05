@@ -455,7 +455,7 @@ fn integral(a: &Arg) -> Option<i64> {
     integral_value(&a.value)
 }
 
-fn integral_value(v: &Bson) -> Option<i64> {
+pub(crate) fn integral_value(v: &Bson) -> Option<i64> {
     match v {
         Bson::Int32(n) => Some(i64::from(*n)),
         Bson::Int64(n) => Some(*n),
