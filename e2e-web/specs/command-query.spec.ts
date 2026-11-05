@@ -1,0 +1,100 @@
+import type { Page } from '@playwright/test';
+import { config, ids } from '../../ui/src/test/fixtures/data';
+import { byId } from '../src/app';
+import { createBackend } from '../src/backend';
+import { installBackend } from '../src/shim';
+import { expect, test } from '../src/test';
+
+// A Redis query tab against the fake Command server: the commands run through the same plan →
+// confirm → run flow as SQL, results land in the grid, and History lists what ran.
+
+const redis = (id: string, name: string, env: 'production' | null) =>
+  config(id, name, {
+    kind: 'redis',
+    port: 6379,
+    username: '',
+    env_tag: env,
+    options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0, driver: { kind: 'redis', db: 0 } },
+  }).config;
+
+async function setup(page: Page) {
+  const backend = createBackend();
+  await backend.handlers.create_connection!({ cfg: redis(ids.analytics, 'cache', null) });
+  await backend.handlers.create_connection!({ cfg: redis(ids.prod, 'cache-prod', 'production') });
+  await installBackend(page, backend.handlers);
+  await page.goto('/');
+  return backend;
+}
+
+/** A new query tab bound to the connection `name`. */
+async function newTab(page: Page, name: string) {
+  await byId(page, 'new-query').click();
+  await byId(page, 'query-context').click();
+  await byId(page, 'query-connection').selectOption({ label: name });
+  await page.keyboard.press('Escape');
+}
+
+const editor = (page: Page) => page.getByTestId('query-editor').locator('.monaco-editor .view-lines');
+
+/** Types `text` on a new line of the focused editor and runs the statement at the cursor. */
+async function runLine(page: Page, text: string) {
+  await editor(page).click();
+  await page.keyboard.press('Control+End');
+  if ((await editor(page).innerText()).trim() !== '') await page.keyboard.press('Enter');
+  await page.keyboard.type(text);
+  await page.keyboard.press('Control+Enter');
+}
+
+test.describe('query tab of a Redis connection (browser, fake IPC backend)', () => {
+  test('SET then GET shows the value; History lists both commands', async ({ page }) => {
+    const backend = await setup(page);
+    await newTab(page, 'cache');
+    // The editor speaks Redis: the first word of a line is the command keyword.
+    await expect(page.getByTestId('query-editor').locator('[data-mode-id="redis"]')).toHaveCount(1);
+
+    await runLine(page, 'SET a 1');
+    await expect(page.getByTestId('messages')).toContainText('1 row affected');
+    await runLine(page, 'GET a');
+    const grid = byId(page, 'result-grid');
+    await expect(grid).toBeVisible();
+    // Glide draws on a canvas: the record view (Shift+Space on the first row) shows the row as text.
+    // The first data column starts after the 32 px row marker; rows sit under a 36 px header.
+    const box = (await grid.locator('canvas').first().boundingBox())!;
+    await page.mouse.click(box.x + 60, box.y + 48);
+    await page.keyboard.press('Shift+Space');
+    const record = byId(page, 'record-view');
+    await expect(record.getByRole('region', { name: 'value' }).locator('.gt-field-value')).toHaveText('1');
+
+    // Statement ranges came from the backend (one per line), never from the SQL splitter.
+    await expect
+      .poll(() => backend.calls.filter((c) => c.cmd === 'statement_ranges').at(-1)?.args)
+      // Monaco's line ending follows the platform.
+      .toMatchObject({ text: expect.stringMatching(/^SET a 1\r?\nGET a$/), dialect: { engine: 'postgres' }, connId: ids.analytics });
+    expect(backend.calls.filter((c) => c.cmd.startsWith('completion_'))).toEqual([]);
+
+    await page.getByRole('navigation', { name: 'Right sidebar' }).getByRole('button', { name: 'History' }).click();
+    const rows = page.getByTestId('history-row');
+    await expect(rows.filter({ hasText: 'SET a 1' })).toHaveCount(1);
+    await expect(rows.filter({ hasText: 'GET a' })).toHaveCount(1);
+  });
+
+  test('FLUSHDB on Production asks for the connection name before it runs', async ({ page }) => {
+    const backend = await setup(page);
+    await newTab(page, 'cache-prod');
+    await runLine(page, 'FLUSHDB');
+
+    const dialog = byId(page, 'run-confirm');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByTestId('run-confirm-row')).toContainText('ADMIN');
+    await expect(dialog.getByTestId('run-confirm-row')).toContainText('FLUSHDB');
+    await expect(dialog.getByText('cache-prod', { exact: true }).first()).toBeVisible();
+    await expect(byId(page, 'run-confirm-run')).toBeDisabled();
+    await byId(page, 'run-confirm-name').fill('cache-prod');
+    await expect(byId(page, 'run-confirm-run')).toBeEnabled();
+    await byId(page, 'run-confirm-cancel').click();
+    await expect(dialog).toBeHidden();
+    // Cancelled: nothing ran, the data is intact.
+    expect(backend.calls.filter((c) => c.cmd === 'query_run')).toEqual([]);
+    expect(backend.command.redis.get(0)?.size).toBe(5);
+  });
+});

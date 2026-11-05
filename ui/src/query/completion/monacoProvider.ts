@@ -5,7 +5,7 @@ import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import { openQuietly, quietOpenFailed } from '../../store/reopen';
-import { isKind, sqlEngine, type SqlEngine } from '../../engine';
+import { SQL_LANGUAGES, isKind, sqlEngine, type SqlEngine } from '../../engine';
 import { suggest, type Suggestion } from './provider';
 import { allSnippets } from './snippets';
 import { splitIncremental, type SplitState } from './split';
@@ -17,7 +17,6 @@ export interface CompletionTarget {
   engine: SqlEngine;
 }
 
-const LANGUAGES = ['mysql', 'pgsql'];
 
 function itemKind(monaco: typeof Monaco, kind: Suggestion['kind']): Monaco.languages.CompletionItemKind {
   const K = monaco.languages.CompletionItemKind;
@@ -207,18 +206,23 @@ export function registerCompletion(
       return items.then((list) => (token?.isCancellationRequested ? { suggestions: [] } : toList(list)));
     },
   };
-  const subs = LANGUAGES.map((lang) => monaco.languages.registerCompletionItemProvider(lang, provider));
+  // The SQL languages only: a Command editor (`mongo`, `redis`) gets no SQL completion.
+  const subs = SQL_LANGUAGES.map((lang) => monaco.languages.registerCompletionItemProvider(lang, provider));
   return { dispose: () => subs.forEach((s) => s.dispose()) };
 }
 
-/** The query document behind a `query://<tab id>` model (see `SqlEditor`). */
+/**
+ * The SQL query document behind a `query://<tab id>` model (see `SqlEditor`); null for a Command
+ * tab (MongoDB, Redis): SQL completion, the AI ghost text and the SQL editor commands skip it.
+ */
 export function queryDocTarget(model: unknown): CompletionTarget | null {
   const uri = (model as { uri?: { scheme?: string; authority?: string } } | null)?.uri;
   if (uri?.scheme !== 'query' || !uri.authority) return null;
   const doc = useQueryDocs.getState().docs.get(uri.authority);
   if (!doc) return null;
-  const kind = doc.connectionId ? useConnections.getState().summaries.get(doc.connectionId)?.config.kind : undefined;
-  return { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine: (kind && sqlEngine(kind)) || doc.dialect };
+  const kind = (doc.connectionId ? useConnections.getState().summaries.get(doc.connectionId)?.config.kind : undefined) ?? doc.dialect;
+  const engine = sqlEngine(kind);
+  return engine ? { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine } : null;
 }
 
 type Handle = { dispose(): void };

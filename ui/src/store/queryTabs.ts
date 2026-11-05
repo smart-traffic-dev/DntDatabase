@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
-import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
-import { isKind, sqlEngine, type SqlEngine } from '../engine';
+import { commands, type DbKind, type Dialect, type QueryTabRecord, type TxAction, type TxState } from '../bindings';
+import { isKind, rangesDialect, sqlEngine, type SqlEngine } from '../engine';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { liveJobCount } from './jobs';
@@ -36,7 +36,11 @@ export interface QueryDoc {
   continueOnError: boolean;
   rowLimit: RowLimit;
   sortOrder: number;
-  dialect: SqlEngine;
+  /**
+   * The kind the text is written for: its connection's (a SQL engine, or a Command language),
+   * kept while the connection is not known; `mysql` for a tab that never had one.
+   */
+  dialect: DbKind;
 }
 
 interface QueryDocsState {
@@ -79,10 +83,64 @@ function nextTitle(docs: Iterable<QueryDoc>): string {
 /** The last component of a Windows or POSIX path. */
 export const fileName = (path: string): string => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
+const kindOfConnection = (connectionId: string | null): DbKind | undefined =>
+  connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
+
+/**
+ * The SQL engine of a connection, for SQL-only views (table data, DDL, copy as INSERT); MySQL
+ * without a known SQL connection. A query document takes `docKindOf` instead.
+ */
 export const dialectOfConnection = (connectionId: string | null): SqlEngine => {
-  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
+  const kind = kindOfConnection(connectionId);
   return (kind && sqlEngine(kind)) || 'mysql';
 };
+
+/** `QueryDoc.dialect` of a document on `connectionId`: the connection's kind (a tab without one: `mysql`). */
+export const docKindOf = (connectionId: string | null): DbKind => kindOfConnection(connectionId) ?? 'mysql';
+
+/** Pause in typing before a Command tab asks the backend for its statement ranges. */
+export const RANGES_DEBOUNCE_MS = 150;
+
+const rangeTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Per tab, the sequence number of its latest ranges request: an answer to an older one is dropped. */
+const rangeSeq = new Map<string, number>();
+
+/**
+ * Statement ranges of a Command tab's `text`, cut by the backend in the connection's language
+ * (`statement_ranges`; the local splitter is SQL-only). Debounced by `RANGES_DEBOUNCE_MS`; a newer
+ * call supersedes an older one, whose answer never reaches `done`. A failure leaves the ranges as
+ * they were (display only: what runs is cut again by `query_plan`).
+ */
+export function requestCommandRanges(
+  tabId: string,
+  text: string,
+  kind: DbKind,
+  connectionId: string | null,
+  done: (ranges: [number, number][]) => void,
+): void {
+  clearTimeout(rangeTimers.get(tabId));
+  const seq = (rangeSeq.get(tabId) ?? 0) + 1;
+  rangeSeq.set(tabId, seq);
+  rangeTimers.set(
+    tabId,
+    setTimeout(() => {
+      rangeTimers.delete(tabId);
+      commands.statementRanges(text, rangesDialect(kind), connectionId).then(
+        (ranges) => {
+          if (rangeSeq.get(tabId) === seq) done(ranges);
+        },
+        () => {},
+      );
+    }, RANGES_DEBOUNCE_MS),
+  );
+}
+
+/** Drops the pending ranges request of a tab and any answer still on its way. */
+export function cancelCommandRanges(tabId: string): void {
+  clearTimeout(rangeTimers.get(tabId));
+  rangeTimers.delete(tabId);
+  rangeSeq.set(tabId, (rangeSeq.get(tabId) ?? 0) + 1);
+}
 
 const asRowLimit = (n: number): RowLimit => (ROW_LIMITS as number[]).includes(n) ? (n as RowLimit) : DEFAULT_ROW_LIMIT;
 
@@ -117,7 +175,7 @@ export function fromRecord(r: QueryTabRecord): QueryDoc {
     continueOnError: r.continue_on_error,
     rowLimit: asRowLimit(r.row_limit),
     sortOrder: r.sort_order,
-    dialect: dialectOfConnection(r.connection_id),
+    dialect: docKindOf(r.connection_id),
   };
 }
 
@@ -314,7 +372,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       continueOnError: false,
       rowLimit: DEFAULT_ROW_LIMIT,
       sortOrder: Math.max(-1, ...[...docs.values()].map((d) => d.sortOrder)) + 1,
-      dialect: dialectOfConnection(fields.connectionId),
+      dialect: docKindOf(fields.connectionId),
       ...fields,
     };
     set({ docs: new Map(docs).set(id, doc) });
@@ -347,7 +405,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
       const stale = doc.connectionId !== null && !useConnections.getState().summaries.has(doc.connectionId);
       const next: QueryDoc = {
         ...doc,
-        ...(stale ? { connectionId: null, database: null, dialect: dialectOfConnection(null) } : {}),
+        ...(stale ? { connectionId: null, database: null, dialect: docKindOf(null) } : {}),
         sortOrder: Math.max(-1, ...[...get().docs.values()].map((d) => d.sortOrder)) + 1,
       };
       set((s) => ({ docs: new Map(s.docs).set(next.id, next) }));
@@ -385,7 +443,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
           const doc = fromRecord(r);
           if (!doc.connectionId || !known || known.has(doc.connectionId)) return doc;
           // The connection was deleted: the tab stays, unbound ("Choose a connection").
-          return { ...doc, connectionId: null, database: null, dialect: dialectOfConnection(null) };
+          return { ...doc, connectionId: null, database: null, dialect: docKindOf(null) };
         });
       if (!fresh.length) return;
       const docs = new Map(get().docs);
@@ -528,6 +586,7 @@ export const useQueryDocs = create<QueryDocsState>()((set, get) => {
     reset: () => {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
+      for (const id of [...rangeTimers.keys()]) cancelCommandRanges(id);
       inflight.clear();
       unsaved.clear();
       closing.clear();

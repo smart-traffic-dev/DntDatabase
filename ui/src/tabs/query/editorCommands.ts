@@ -5,7 +5,7 @@
 import { format as formatWithSqlFormatter, type SqlLanguage } from 'sql-formatter';
 import type * as Monaco from 'monaco-editor';
 import type { ObjectKind, ObjectRef } from '../../bindings';
-import { isKind } from '../../engine';
+import { SQL_EDITOR_WHEN, isKind } from '../../engine';
 import { objectTabId, useTabs } from '../../store/tabs';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
@@ -334,6 +334,8 @@ const bindings: Binding[] = [
     id: 'dnt.formatSql',
     label: 'Format SQL',
     keys: (m) => [m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyF],
+    // Hidden (and unbound) in a Command editor: there is no formatter for its language.
+    precondition: SQL_EDITOR_WHEN,
     order: 4,
     run: (e) => void formatActiveEditor(e as unknown as CommandEditor),
   },

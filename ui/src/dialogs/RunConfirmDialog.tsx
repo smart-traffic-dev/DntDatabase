@@ -115,7 +115,9 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
   const production = plan.env_tag === 'production';
   // Off Production every Confirm is normally an unbounded write; list any other one too.
   const listed = production ? confirm : confirm.filter((s) => !unbounded.includes(s));
-  const implicit = plan.stmts.filter((s) => s.implicit_commit === true);
+  // SQL-only notices (implicit commit, the server's row estimate): a Command plan has neither.
+  const sql = plan.family !== 'command';
+  const implicit = sql ? plan.stmts.filter((s) => s.implicit_commit === true) : [];
   const names = confirmNamesOf(plan);
   const [typed, setTyped] = useState<Record<string, string>>({});
   const matched = names.every((n) => typed[n] === n);
@@ -163,13 +165,13 @@ export function RunConfirmDialog({ plan, onDone }: Props) {
                       {dropsText(s.drops ?? [])}
                     </span>
                   )}
-                  <Estimate estimate={s.estimate} />
+                  {sql && <Estimate estimate={s.estimate} />}
                 </li>
               ))}
             </ul>
           </div>
         )}
-        {unbounded.length > 0 && <UnboundedWarning stmts={unbounded} showEstimate={!production} />}
+        {unbounded.length > 0 && <UnboundedWarning stmts={unbounded} showEstimate={sql && !production} />}
         {implicit.length > 0 && <ImplicitCommitWarning stmts={implicit} />}
         {names.length > 0 && (
           <section className="run-confirm-type" aria-label="Type the names to confirm">

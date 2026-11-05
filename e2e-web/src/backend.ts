@@ -40,6 +40,7 @@ import type {
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
 import { commandDatabases, commandInfo, commandObjects, createCommandFake, type CommandFakeState } from './commandFixtures';
+import { createCommandQueries } from './commandQuery';
 import { createDdlFake, type DdlFakeState } from './ddlEdit';
 import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
 import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
@@ -505,6 +506,15 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   };
   const ddl = createDdlFake(requireOpen, (id) => connections.find((c) => c.id === id));
   const command = createCommandFake();
+  // Query tabs of the Command connections; their runs are listed in History.
+  const commandQueries = createCommandQueries(
+    command,
+    (id) => connections.find((c) => c.id === id),
+    requireOpen,
+    (entry) => {
+      history = [{ ...entry, id: Math.max(0, ...history.map((h) => h.id)) + 1 }, ...history];
+    },
+  );
 
   const handlers: Record<string, Handler> = {
     // Startup: the stored connections, the restored query tabs, favorites and snippets.
@@ -702,6 +712,8 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     // The DDL editor (`ddlEdit.ts`).
     ...ddl.handlers,
+    // MongoDB / Redis query tabs (`commandQuery.ts`).
+    ...commandQueries,
     // Background jobs (P5): only those the fake started (dry runs); `specs/jobs.spec.ts` overrides these.
     job_list: () => [...fakeJobs.values()],
     job_active_count: () => [...fakeJobs.values()].filter((j) => j.state === 'queued' || j.state === 'running').length,

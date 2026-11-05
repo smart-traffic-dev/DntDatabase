@@ -123,6 +123,12 @@ export function editorLanguage(kind: DbKind): 'mysql' | 'pgsql' | 'mongo' | 'red
   }
 }
 
+/** The Monaco languages of the SQL family: SQL completion and Format SQL serve these only. */
+export const SQL_LANGUAGES: readonly string[] = [editorLanguage('mysql'), editorLanguage('postgres')];
+
+/** Monaco context expression "the editor shows a SQL language" (an action's precondition). */
+export const SQL_EDITOR_WHEN = SQL_LANGUAGES.map((l) => `editorLangId == ${l}`).join(' || ');
+
 export function engineChip(kind: DbKind): 'MY' | 'PG' | 'MG' | 'RD' {
   switch (kind) {
     case 'mysql':

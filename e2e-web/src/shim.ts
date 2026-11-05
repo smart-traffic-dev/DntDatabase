@@ -5,8 +5,23 @@ import { Failure, appError } from '../../ui/src/test/fixtures/data';
 /** A fake backend command: receives the IPC arguments and returns the command's value. */
 export type Handler = (args: Record<string, unknown>) => unknown;
 
+/**
+ * A handler's answer that also streams `messages` through the Tauri `Channel` passed as argument
+ * `arg` (e.g. `query_run`'s `channel`), in order and after the command has returned, as the
+ * backend's channel does.
+ */
+export class WithChannel {
+  constructor(
+    public readonly value: unknown,
+    public readonly arg: string,
+    public readonly messages: unknown[],
+  ) {}
+}
+
 /** What the exposed bridge hands back to the page (the page cannot receive thrown objects). */
-type Envelope = { ok: true; value: unknown } | { ok: false; error: AppError };
+type Envelope =
+  | { ok: true; value: unknown; channel?: { arg: string; messages: unknown[] } }
+  | { ok: false; error: AppError };
 
 /**
  * Installed before the app's own scripts. The generated bindings call
@@ -43,6 +58,15 @@ const INIT_SCRIPT = `(() => {
     invoke: async (cmd, args) => {
       if (local[cmd]) return local[cmd](args ?? {});
       const reply = await window.__e2eInvoke(cmd, args ?? {});
+      if (reply.ok && reply.channel) {
+        // Channel messages as Tauri sends them ({index, message}, then {index, end}), after the reply.
+        const { arg, messages } = reply.channel;
+        const id = (args ?? {})[arg].id;
+        setTimeout(() => {
+          messages.forEach((message, index) => window.__TAURI_INTERNALS__.runCallback(id, { index, message }));
+          window.__TAURI_INTERNALS__.runCallback(id, { index: messages.length, end: true });
+        }, 0);
+      }
       if (reply.ok) return reply.value;
       // Tauri rejects with the deserialized error payload (a plain object), not an Error.
       // tauri-specta turns that into {status:"error"} and src/api turns it into AppErrorEx.
@@ -104,7 +128,9 @@ export async function installBackend(page: Page, handlers: Record<string, Handle
       return { ok: false, error };
     }
     try {
-      return { ok: true, value: await handler(args ?? {}) };
+      const value = await handler(args ?? {});
+      if (value instanceof WithChannel) return { ok: true, value: value.value, channel: { arg: value.arg, messages: value.messages } };
+      return { ok: true, value };
     } catch (e) {
       if (e instanceof Failure) return { ok: false, error: e.error };
       const error = appError('internal', `e2e: handler for "${cmd}" threw: ${(e as Error)?.message ?? String(e)}`);

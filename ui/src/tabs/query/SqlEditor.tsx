@@ -1,4 +1,4 @@
-import Editor, { type OnMount } from '@monaco-editor/react';
+import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
 import { memo, useEffect } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
@@ -6,7 +6,9 @@ import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
 import { bindAiKeys, ensureAiInline } from '../../query/ai/inlineProvider';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
-import { editorLanguage, type SqlEngine } from '../../engine';
+import type { DbKind } from '../../bindings';
+import { editorLanguage, sqlEngine } from '../../engine';
+import { registerCommandLanguages } from '../../engine/monaco';
 import { clearCursor, reportCursor } from '../../store/cursor';
 import { exportRunOf, useExporting } from '../../store/queryExport';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
@@ -17,7 +19,8 @@ import { registerEditorCommands } from './editorCommands';
 
 export interface SqlEditorProps {
   doc: QueryDoc;
-  engine: SqlEngine;
+  /** What the text is written for: a SQL engine, or a Command language (MongoDB, Redis). */
+  engine: DbKind;
   onMount?: (editor: Parameters<OnMount>[0], monaco: Parameters<OnMount>[1]) => void;
 }
 
@@ -120,13 +123,20 @@ function sameEditor(prev: SqlEditorProps, next: SqlEditorProps): boolean {
 /** The Monaco editor of a query document. Monaco itself is bundled by `monaco/setup.ts`. */
 export const SqlEditor = memo(SqlEditorView, sameEditor);
 
-function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
+function SqlEditorView({ doc, engine: kind, onMount }: SqlEditorProps) {
   const monacoTheme = useDntMonacoTheme();
   const { connectionId, database } = doc;
+  // Null for a Command language: no SQL autocomplete to load.
+  const engine = sqlEngine(kind);
   // Load the schema for autocomplete as soon as the editor opens, not on the first suggestion.
   useEffect(() => {
-    prefetchCompletion({ tabId: doc.id, connId: connectionId, db: database, engine });
+    if (engine) prefetchCompletion({ tabId: doc.id, connId: connectionId, db: database, engine });
   }, [doc.id, connectionId, database, engine]);
+  // The Command languages exist before the editor makes its model (registered once per monaco).
+  const beforeMount: BeforeMount = (monaco) => {
+    registerCommandLanguages(monaco);
+    monacoTheme.beforeMount(monaco);
+  };
   // This render hands `doc.sql` to the editor as its value (applied without an onChange).
   shownText.set(doc.id, doc.sql);
   useEffect(
@@ -140,10 +150,10 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
     <div className="sql-editor" data-testid="query-editor">
       <Editor
         path={`query://${doc.id}`}
-        language={editorLanguage(engine)}
+        language={editorLanguage(kind)}
         value={doc.sql}
         theme={monacoTheme.theme}
-        beforeMount={monacoTheme.beforeMount}
+        beforeMount={beforeMount}
         onChange={(sql) => {
           shownText.set(doc.id, sql ?? '');
           useQueryDocs.getState().update(doc.id, { sql: sql ?? '', dirty: true });

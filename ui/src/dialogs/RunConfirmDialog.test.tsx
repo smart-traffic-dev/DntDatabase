@@ -60,6 +60,25 @@ describe('RunConfirmDialog', () => {
     expect(rows[0]).toHaveTextContent('FLUSHALL');
   });
 
+  it('run_confirm_shows_admin_label', () => {
+    // A Command plan: no SQL dialect; the SQL-only notices (implicit commit, row estimate) stay hidden.
+    const flush: PlanStmtView = {
+      ...stmt(0, 'admin', 'confirm', 'FLUSHDB'),
+      confirm_name: 'cache-prod',
+      implicit_commit: true,
+      estimate: { kind: 'rows', n: 5 },
+    };
+    const command: PlanView = { ...prodPlan([flush]), dialect: null, family: 'command', connection_name: 'cache-prod' };
+    render(<RunConfirmDialog plan={command} onDone={vi.fn()} />);
+    const rows = screen.getAllByTestId('run-confirm-row');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('#1ADMINFLUSHDB');
+    expect(screen.getByText('cache-prod', { selector: 'code' })).toBeInTheDocument();
+    expect(screen.getByTestId('run-confirm-name')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-confirm-implicit-commit')).toBeNull();
+    expect(screen.queryByTestId('run-confirm-estimate')).toBeNull();
+  });
+
   it('follows the production guard layout: badge, SQL block, danger solid primary on the right', () => {
     render(<RunConfirmDialog plan={plan} onDone={vi.fn()} />);
     const dialog = screen.getByTestId('run-confirm');

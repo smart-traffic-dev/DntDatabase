@@ -4,9 +4,9 @@ import { Splitter } from '../../components/Splitter';
 import { useConnections } from '../../store/connections';
 import { EDITOR_MIN_PX, EDITOR_RATIO_DEFAULT, RESULT_MIN_PX, editorPixels, resultsOf, useLayout } from '../../store/layout';
 import { emptyRun, useQueryRun, type TabRun } from '../../store/queryRun';
-import { useQueryDocs } from '../../store/queryTabs';
+import { docKindOf, useQueryDocs } from '../../store/queryTabs';
 import { useTabs, type QueryTabRef } from '../../store/tabs';
-import { sqlEngine, type SqlEngine } from '../../engine';
+import type { DbKind } from '../../bindings';
 import { useEditorMarks, type EditorLike, type MonacoLike } from './editorMarks';
 import { ResultPanel } from './ResultPanel';
 import { SqlEditor, type SqlEditorProps } from './SqlEditor';
@@ -22,7 +22,7 @@ const EditorHost = memo(function EditorHost({
   onMount,
 }: {
   tabId: string;
-  engine: SqlEngine;
+  engine: DbKind;
   onMount: SqlEditorProps['onMount'];
 }) {
   const doc = useQueryDocs((s) => s.docs.get(tabId));
@@ -52,8 +52,10 @@ export function QueryTab({ tab }: { tab: QueryTabRef }) {
   const run = useQueryRun((s) => s.runs.get(tab.id) ?? emptyRun);
   const [mounted, setMounted] = useState<{ editor: EditorLike; monaco: MonacoLike } | null>(null);
   const onMount = useCallback<NonNullable<SqlEditorProps['onMount']>>((editor, monaco) => setMounted({ editor, monaco }), []);
-  const engine = (kind && sqlEngine(kind)) || toolbarDoc?.dialect || 'mysql';
-  useEditorMarks(mounted, engine, run);
+  // What the text is written for: the connection's kind, else the document's own (no MySQL
+  // fallback for a Command tab). The editor's language, completion and ranges follow it.
+  const engine: DbKind = kind ?? toolbarDoc?.dialect ?? docKindOf(null);
+  useEditorMarks(mounted, engine, run, { tabId: tab.id, connectionId });
   // The editor / results split: a fraction of the measured body height (not subscribed to the text).
   // Visibility, split and maximize belong to the editor group the tab sits in.
   const groupId = useTabs((s) => s.groupOf[tab.id] ?? s.focusedGroupId);

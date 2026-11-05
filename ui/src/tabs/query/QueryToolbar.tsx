@@ -15,7 +15,7 @@ import { setTxMode, txOf, useTxMode } from '../../store/txMode';
 import type { EnvTag, TxMode } from '../../bindings';
 import { EDIT_COMMANDS, editorOf } from './activeEditor';
 import { ANALYZE_NEEDS, useRunGate } from './runGate';
-import { ROW_LIMITS, dialectOfConnection, useQueryDocs, type QueryDoc } from '../../store/queryTabs';
+import { ROW_LIMITS, docKindOf, useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 import { MAX_GROUPS, useTabs } from '../../store/tabs';
 import { useTree } from '../../store/tree';
 import { ENV_SHORT, belowLeft, belowRight, useStripWidth } from '../stripWidth';
@@ -485,7 +485,7 @@ function ContextFields({ doc }: { doc: ToolbarDoc }) {
   if (doc.database) databases.add(doc.database);
 
   const bind = (connectionId: string | null) => {
-    update(doc.id, { connectionId, database: null, dialect: dialectOfConnection(connectionId) });
+    update(doc.id, { connectionId, database: null, dialect: docKindOf(connectionId) });
     useTabs.getState().bind(doc.id, connectionId);
   };
   return (

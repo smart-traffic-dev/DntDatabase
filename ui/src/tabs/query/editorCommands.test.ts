@@ -338,6 +338,12 @@ describe('registered actions', () => {
     const keys = actions.flatMap((a) => a.keybindings);
     expect(new Set(keys).size).toBe(keys.length);
   });
+
+  it('format_sql_is_hidden_in_command_editors', () => {
+    const format = register().find((a) => a.id === 'dnt.formatSql')!;
+    // Shown (and bound) only while the editor speaks a SQL language.
+    expect(format.precondition).toBe('editorLangId == mysql || editorLangId == pgsql');
+  });
 });
 
 describe('browser guard and Monaco', () => {

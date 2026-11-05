@@ -3,11 +3,12 @@
 // editor text, which is what Monaco's model uses.
 import type * as Monaco from 'monaco-editor';
 import { useEffect, useMemo, useRef } from 'react';
-import type { PlanView } from '../../bindings';
+import type { DbKind, PlanView } from '../../bindings';
 import { splitIncremental, type SplitState } from '../../query/completion/split';
 import { stmtsByIndex } from '../../query/plan';
-import type { SqlEngine } from '../../engine';
+import { sqlEngine } from '../../engine';
 import type { TabRun } from '../../store/queryRun';
+import { cancelCommandRanges, requestCommandRanges } from '../../store/queryTabs';
 import { currentStatement } from './format';
 
 export type MonacoLike = typeof Monaco;
@@ -125,8 +126,25 @@ interface Mounted {
   monaco: MonacoLike;
 }
 
-/** Keeps the highlight, markers and glyphs of `mounted` in step with the document and its run. */
-export function useEditorMarks(mounted: Mounted | null, engine: SqlEngine, run: TabRun) {
+/** The tab a Command editor's statement ranges are asked for (`requestCommandRanges`). */
+export interface RangesTab {
+  tabId: string;
+  connectionId: string | null;
+}
+
+/**
+ * Keeps the highlight, markers and glyphs of `mounted` in step with the document and its run.
+ * `kind`: what the text is written for. A SQL engine's statements come from the local splitter;
+ * a Command language's from the backend (`tab` says which tab and connection to ask for).
+ */
+export function useEditorMarks(mounted: Mounted | null, kind: DbKind, run: TabRun, tab?: RangesTab) {
+  const engine = sqlEngine(kind);
+  // A Command editor's ranges are asked per (language, tab, connection); a SQL editor's effect
+  // depends on its engine only.
+  const command = engine === null && tab ? { kind, tabId: tab.tabId, connectionId: tab.connectionId } : null;
+  const commandKey = command ? `${command.kind}\n${command.tabId}\n${command.connectionId ?? ''}` : null;
+  const commandRef = useRef(command);
+  commandRef.current = command;
   const ranges = useRef<[number, number][]>([]);
   const highlight = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
   const glyphs = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
@@ -135,7 +153,8 @@ export function useEditorMarks(mounted: Mounted | null, engine: SqlEngine, run: 
   const planId = useRef<string | null>(null);
   planId.current = run.plan?.plan_id ?? null;
 
-  // Current statement: the local splitter (debounced, no IPC while typing) + the cursor.
+  // Current statement: the local splitter (debounced, no IPC while typing) + the cursor; a
+  // Command tab asks the backend (debounced in `requestCommandRanges`).
   // Display only: what runs is still cut by the backend when the run starts.
   useEffect(() => {
     if (!mounted) return;
@@ -147,6 +166,7 @@ export function useEditorMarks(mounted: Mounted | null, engine: SqlEngine, run: 
     // Local split (UI only, see split.ts), redone from the statement before the first edit.
     let split: SplitState | null = null;
     let changedFrom = 0;
+    const cmd = commandRef.current;
     const paint = () => {
       const model = editor.getModel();
       const pos = editor.getPosition();
@@ -157,6 +177,14 @@ export function useEditorMarks(mounted: Mounted | null, engine: SqlEngine, run: 
       );
     };
     const refresh = () => {
+      if (engine === null) {
+        if (!cmd) return;
+        requestCommandRanges(cmd.tabId, editor.getModel()?.getValue() ?? '', cmd.kind, cmd.connectionId, (r) => {
+          ranges.current = r;
+          paint();
+        });
+        return;
+      }
       clearTimeout(timer);
       timer = setTimeout(() => {
         const sql = editor.getModel()?.getValue() ?? '';
@@ -188,9 +216,10 @@ export function useEditorMarks(mounted: Mounted | null, engine: SqlEngine, run: 
       highlight.current = null;
       glyphs.current = null;
       clearTimeout(timer);
+      if (cmd) cancelCommandRanges(cmd.tabId);
       subs.forEach((s) => s.dispose());
     };
-  }, [mounted, engine]);
+  }, [mounted, engine, commandKey]);
 
   // Error markers and finished / failed statement glyphs follow the run.
   const statements = useMemo(() => statementMarkers({ plan: run.plan, messages: run.messages }), [run.plan, run.messages]);
