@@ -21,7 +21,7 @@ const EDITABLE: EditableInfo = {
 
 async function openOrders(page: Page) {
   const backend = createBackend({ data_editable: () => EDITABLE });
-  await backend.handlers.create_connection!({ cfg: config(ids.analytics, 'Analytics', { default_db: 'dnt_fixture', env: 'local' }).config });
+  await backend.handlers.create_connection!({ cfg: config(ids.analytics, 'Analytics', { default_db: 'dnt_fixture', env_tag: 'local' }).config });
   await installBackend(page, backend.handlers);
   await page.goto('/');
   await expandRow(page, 'Analytics');
