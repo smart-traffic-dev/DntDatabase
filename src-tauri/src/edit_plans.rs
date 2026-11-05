@@ -742,6 +742,20 @@ pub fn edit_error(e: EditError) -> DbError {
     }
 }
 
+/// The default `execute_atomic`'s failure, which sent nothing: `Unsupported` at index 0,
+/// not rolled back. An `Unsupported` at a later index is a failure of the unit like any
+/// other (the commands before it may have run).
+fn atomic_unsent(f: &AtomicFailure) -> bool {
+    matches!(
+        f,
+        AtomicFailure {
+            index: 0,
+            error: DbError::Unsupported { .. },
+            rolled_back: false,
+        }
+    )
+}
+
 /// Whether a failed statement may have been applied.
 fn outcome_unknown(e: &DbError) -> bool {
     match e.unstaged() {
@@ -1753,7 +1767,8 @@ impl SessionManager {
     /// read-only flag, collection fingerprint ([`command_fingerprint`]) and tunnel must
     /// be the plan's, and so must the data session's transaction support. An atomic
     /// plan of an engine with transactions runs as one `execute_atomic` unit: a failure
-    /// it rolled back is `rolled_back`, `Unsupported` (nothing sent) is the error, any
+    /// it rolled back is `rolled_back`, `Unsupported` at index 0 (nothing sent,
+    /// [`atomic_unsent`]) is the error, any
     /// other failure leaves the whole unit `unknown` (`at` = the number of commands).
     /// Otherwise the commands run in order, each once (never retried); the
     /// first failure stops the apply (`partially_applied`, or `unknown` when it may have
@@ -1851,11 +1866,7 @@ impl SessionManager {
                 edit.commands.iter().for_each(log);
                 return match c.execute_atomic(&edit.commands, &opts).await {
                     // The default `execute_atomic`: nothing was sent.
-                    Err(AtomicFailure {
-                        error: error @ DbError::Unsupported { .. },
-                        rolled_back: false,
-                        ..
-                    }) => Err(error),
+                    Err(f) if atomic_unsent(&f) => Err(f.error),
                     Err(AtomicFailure {
                         index,
                         error,
@@ -2109,6 +2120,25 @@ mod tests {
             .0,
             "edit"
         );
+    }
+
+    /// Only the default's failure (`Unsupported` at index 0, not rolled back) is a plain
+    /// error with nothing sent; an `Unsupported` later in the unit is a unit failure.
+    #[test]
+    fn only_an_unsupported_at_index_zero_sent_nothing() {
+        let unsupported = || DbError::Unsupported {
+            feature: "transactions".into(),
+            version: String::new(),
+        };
+        let f = |index, error, rolled_back| AtomicFailure {
+            index,
+            error,
+            rolled_back,
+        };
+        assert!(atomic_unsent(&f(0, unsupported(), false)));
+        assert!(!atomic_unsent(&f(1, unsupported(), false)));
+        assert!(!atomic_unsent(&f(0, unsupported(), true)));
+        assert!(!atomic_unsent(&f(0, DbError::Busy, false)));
     }
 
     #[test]
