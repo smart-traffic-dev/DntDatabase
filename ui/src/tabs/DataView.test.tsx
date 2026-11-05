@@ -898,6 +898,14 @@ describe('DataView editing', () => {
     expect(screen.queryByRole('button', { name: 'Apply changes' })).not.toBeInTheDocument();
   });
 
+  it('sql_cut_cell_still_loads', async () => {
+    const full = deferred<unknown>();
+    await editable({ data_cell_fetch: () => full.promise }, { stage: false, pageOver: { truncated: [[0, 2]], truncated_cells: 1 } });
+    fireEvent.doubleClick(cell(0, 2));
+    expect(await screen.findByText('Loading the full value…')).toBeInTheDocument();
+    expect(lastCall('data_cell_fetch')).toMatchObject({ column: 'doc' });
+  });
+
   const binCol: ColumnMeta = { name: 'doc', db_type: 'blob', logical: 'Binary', nullable: true, origin_table: null, origin_column: null };
   const bytes = (len: number, shown = len): Value => ({ t: 'Bytes', v: { len, preview: Array.from({ length: shown }, (_, i) => i % 256) } });
   /** Row 0's `doc` is `doc0`; the others hold 3 whole bytes. */
@@ -1545,6 +1553,22 @@ describe('DataView on a Command (MongoDB) connection', () => {
     await user.click(screen.getByRole('button', { name: 'Apply changes' }));
     await screen.findByRole('dialog', { name: 'Review changes' });
     expect(lastCall('data_preview')).toMatchObject({ set: { edits: [{ op: 'update', set: [['customer', { kind: 'unset' }]] }] } });
+  });
+
+  it('command_cut_cell_not_editable', async () => {
+    const fetchCell = vi.fn();
+    await mongoView({
+      table_data: () => ({ ...docs(), truncated: [[0, 2]], truncated_cells: 1 }),
+      data_cell_fetch: fetchCell,
+    });
+    expect(cell(0, 2)).toHaveAttribute('data-editable', 'false');
+    // The value editor shows the preview, read-only, and never asks for the full value.
+    fireEvent.doubleClick(cell(0, 2));
+    const editor = await screen.findByRole('region', { name: 'Value editor' });
+    expect(screen.queryByText('Loading the full value…')).toBeNull();
+    expect(within(editor).queryByRole('button', { name: 'Save' })).toBeNull();
+    expect(editor.querySelector('textarea')).toHaveAttribute('readonly');
+    expect(fetchCell).not.toHaveBeenCalled();
   });
 
   it('the SQL family has no Remove field', async () => {

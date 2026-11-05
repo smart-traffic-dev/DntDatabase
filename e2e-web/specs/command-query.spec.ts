@@ -113,6 +113,10 @@ test.describe('query tab of a Redis connection (browser, fake IPC backend)', () 
     // 2-space indent, one field per line.
     await expect(docs.first()).toContainText('"_id":');
     await expect(docs.first().locator('pre')).toHaveText(/^\{\n {2}"_id": /);
+    // Rebuilt from the flattened columns (one per top-level field, `_id` first), not from a `document` column.
+    await expect(docs.first().locator('pre')).toContainText('"customer": "ada"');
+    await expect(docs.first().locator('pre')).toContainText('"total": 19.9');
+    await expect(docs.first().locator('pre')).not.toContainText('"document"');
 
     await table.click();
     await expect(byId(page, 'result-grid')).toBeVisible();

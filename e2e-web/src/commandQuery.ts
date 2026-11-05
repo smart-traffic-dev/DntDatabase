@@ -152,13 +152,29 @@ function redisCommand(state: CommandFakeState, db: number, database: string | nu
   }
 }
 
+/** A document field as a result value (nested values as JSON; a missing field is Null). */
+function fieldValue(v: unknown): Value {
+  if (v === undefined || v === null) return { t: 'Null' };
+  if (typeof v === 'string') return text(v);
+  if (typeof v === 'boolean') return { t: 'Bool', v };
+  if (typeof v === 'number') return Number.isInteger(v) ? { t: 'Int', v } : { t: 'Float', v };
+  return { t: 'Json', v: JSON.stringify(v) };
+}
+
+/** Documents as rows: one column per top-level field, `_id` first, then in order of first appearance (spec core 7.3). */
+function flatten(docs: Record<string, unknown>[]): Outcome {
+  const columns = ['_id'];
+  for (const d of docs) for (const k of Object.keys(d)) if (!columns.includes(k)) columns.push(k);
+  return { kind: 'rows', columns, rows: docs.map((d) => columns.map((c) => fieldValue(d[c]))) };
+}
+
 function mongoCommand(state: CommandFakeState, database: string | null, source: string): Command {
   const m = /^db\.([A-Za-z_][\w]*)\.(find|deleteMany)\(\s*(\{\s*\})?\s*\)$/.exec(source.trim());
   const docs = () => state.mongo.get(database ?? '')?.get(m?.[1] ?? '') ?? [];
   if (m?.[2] === 'find') {
     return {
       facts: { class: 'read', unbounded: false, target: m[1]!, dropsDatabase: null },
-      run: () => ({ kind: 'rows', columns: ['_id', 'document'], rows: docs().map((d) => [text(String(d._id)), { t: 'Json', v: JSON.stringify(d) }]) }),
+      run: () => flatten(docs()),
     };
   }
   if (m?.[2] === 'deleteMany') {

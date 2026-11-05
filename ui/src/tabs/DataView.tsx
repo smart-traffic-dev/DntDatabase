@@ -651,9 +651,11 @@ export function DataView({ tab }: { tab: Tab }) {
     // What the cell holds now: a change staged for it (when it is text, NULL or a value), else the page's value.
     const change = isNew ? staged.inserts[row - data.rows.length]?.values.get(column.name) : id ? staged.updates.get(id)?.cells.get(column.name) : undefined;
     const showsChange = change !== undefined && (change.kind === 'text' || change.kind === 'null' || change.kind === 'value');
-    const cut = !isNew && !showsChange && isCutCell(data, row, col);
+    const cutHere = !isNew && !showsChange && isCutCell(data, row, col);
+    // The full value of a cut cell can be fetched for SQL only: a Command-family cut cell is viewed, never edited.
+    const cut = cutHere && family !== 'command';
     const value = showsChange ? (shown.rows[row]?.[col] ?? { t: 'Null' as const }) : (data.rows[row]?.[col] ?? shown.rows[row]?.[col] ?? { t: 'Null' as const });
-    const canEdit = editable && !!info?.editable_columns.includes(column.name) && (isNew || (!!id && !staged.deletes.has(id)));
+    const canEdit = !(cutHere && family === 'command') && editable && !!info?.editable_columns.includes(column.name) && (isNew || (!!id && !staged.deletes.has(id)));
     return (
       <ValueEditor
         key={`${editorCell.rowId ?? 'new'},${row},${column.name},${String(showsChange)}`}
@@ -662,7 +664,7 @@ export function DataView({ tab }: { tab: Tab }) {
         column={column}
         value={value}
         truncated={cut}
-        fetchKey={!isNew && info ? rowKeyPairs(data, info, row) : null}
+        fetchKey={!isNew && info && !(cutHere && family === 'command') ? rowKeyPairs(data, info, row) : null}
         editable={canEdit}
         onStage={(input, token) => {
           if (setCell(row, col, input, cut ? token : null)) closeValueEditor(tab.id);
