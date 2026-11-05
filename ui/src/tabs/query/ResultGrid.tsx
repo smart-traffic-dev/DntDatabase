@@ -17,6 +17,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import type { ObjectRef, Value } from '../../bindings';
 import { api } from '../../api';
 import { ActionMenu, type MenuEntry } from '../../components/ActionMenu';
+import type { SqlEngine } from '../../engine';
 import { codeFontSizes, monoFontFamily } from '../../monaco/fonts';
 import { useTokenPx } from '../../theme/useTokenPx';
 import { CHUNK, type ResultSet } from '../../store/queryRun';
@@ -44,7 +45,6 @@ import {
   toCsv,
   toInsertStatements,
   toTsv,
-  type Engine,
 } from './gridCopy';
 import { MAX_MATCHES, findMatches, firstMatchFrom, parseGoToRow, stepIndex } from './gridFind';
 import { blockValues, cellValue, currentCol, currentRow, selectionBlock, selectionSize, selectionSummary, type SelectionLike } from './gridSelection';
@@ -325,7 +325,7 @@ export function copyOutcome(
   mode: CopyMode,
   sel: GridSelection | undefined,
   result: ResultSet,
-  opts: { engine: Engine; tableRef?: ObjectRef | null; cellsCapped: boolean; firstRowNumber: number; cellColumn?: number | null },
+  opts: { engine: SqlEngine; tableRef?: ObjectRef | null; cellsCapped: boolean; firstRowNumber: number; cellColumn?: number | null },
 ): CopyOutcome {
   const colCount = result.columns.length;
   if (mode === 'column') {
@@ -416,7 +416,7 @@ export function ResultGrid({
   headerMarks?: Record<number, string>;
   firstRowNumber?: number;
   /** Quoting rules for INSERT statements. */
-  engine?: Engine;
+  engine?: SqlEngine;
   /** The table the rows come from (the Data tab); else the result's single source table. */
   tableRef?: ObjectRef | null;
   /** The page reports cells cut at 64 KB: copying text of that size as INSERT is refused. */

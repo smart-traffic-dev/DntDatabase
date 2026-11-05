@@ -4,11 +4,12 @@ import { EnvTag } from '../components/EnvTag';
 import { CheckIcon, ErrorIcon, InfoIcon, LockIcon, WarningIcon } from '../components/icons';
 import { useConnections } from '../store/connections';
 import './parts.css';
+import { engineLabel } from '../engine';
 
 /** "MySQL 8.0.36", "MariaDB 11.4.2", "PostgreSQL 16.2". */
 export function serverLabel(info: ServerInfo | undefined): string | null {
   if (!info) return null;
-  const name = info.variant === 'MariaDb' ? 'MariaDB' : info.kind === 'mysql' ? 'MySQL' : 'PostgreSQL';
+  const name = info.variant === 'MariaDb' ? 'MariaDB' : engineLabel(info.kind);
   return `${name} ${info.version.join('.')}`;
 }
 

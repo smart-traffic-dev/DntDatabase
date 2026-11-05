@@ -6,7 +6,7 @@ import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
 import { bindAiKeys, ensureAiInline } from '../../query/ai/inlineProvider';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
-import type { Engine } from '../../query/engine';
+import { editorLanguage, type SqlEngine } from '../../engine';
 import { clearCursor, reportCursor } from '../../store/cursor';
 import { exportRunOf, useExporting } from '../../store/queryExport';
 import { canStop, emptyRun, useQueryRun } from '../../store/queryRun';
@@ -17,7 +17,7 @@ import { registerEditorCommands } from './editorCommands';
 
 export interface SqlEditorProps {
   doc: QueryDoc;
-  engine: Engine;
+  engine: SqlEngine;
   onMount?: (editor: Parameters<OnMount>[0], monaco: Parameters<OnMount>[1]) => void;
 }
 
@@ -140,7 +140,7 @@ function SqlEditorView({ doc, engine, onMount }: SqlEditorProps) {
     <div className="sql-editor" data-testid="query-editor">
       <Editor
         path={`query://${doc.id}`}
-        language={engine === 'postgres' ? 'pgsql' : 'mysql'}
+        language={editorLanguage(engine)}
         value={doc.sql}
         theme={monacoTheme.theme}
         beforeMount={monacoTheme.beforeMount}

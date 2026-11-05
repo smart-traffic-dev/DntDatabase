@@ -1,6 +1,6 @@
 import { useEffect, useId, useState, type KeyboardEvent } from 'react';
 import type { ElementRef, TableDef } from '../../bindings';
-import { sqlEngine } from '../../query/engine';
+import { isKind, sqlEngine } from '../../engine';
 import { useConnections } from '../../store/connections';
 import { useDialogs } from '../../store/dialogs';
 import { useQueryDocs } from '../../store/queryTabs';
@@ -132,7 +132,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
   const nameError = errors.find((e) => e.element.kind === 'table' && e.field === 'name')?.message;
 
   // Toolbar: the selected column's actions (Columns), undo / redo everywhere.
-  const pg = open.server.kind === 'postgres';
+  const pg = isKind(open.server.kind, 'postgres');
   const at = selection?.kind === 'column' ? draft.columns.findIndex((c) => c.name === selection.name) : -1;
   const current = at >= 0 ? draft.columns[at] : undefined;
   const pk = draft.primary_key;
@@ -282,7 +282,7 @@ export function DesignerTab({ tab }: { tab: DesignTabRef }) {
           ) : null}
           <SqlPreview statements={render?.statements ?? []} impacts={render?.impacts ?? []} error={render?.error}
             live
-            engine={sqlEngine(open.server.kind)}
+            engine={sqlEngine(open.server.kind) ?? undefined}
             onOpenInQuery={openInQuery}
           />
         </div>

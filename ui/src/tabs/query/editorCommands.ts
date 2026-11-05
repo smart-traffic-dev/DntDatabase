@@ -5,6 +5,7 @@
 import { format as formatWithSqlFormatter, type SqlLanguage } from 'sql-formatter';
 import type * as Monaco from 'monaco-editor';
 import type { ObjectKind, ObjectRef } from '../../bindings';
+import { isKind } from '../../engine';
 import { objectTabId, useTabs } from '../../store/tabs';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
@@ -90,7 +91,7 @@ export function formatSql(text: string, dialect: FormatDialect): string {
 /** The formatter dialect of an editor: MariaDB is told apart through its connection's server variant. */
 function dialectOfEditor(editor: CommandEditor): FormatDialect {
   const target = queryDocTarget(editor.getModel());
-  if (target?.engine === 'postgres') return 'postgres';
+  if (target && isKind(target.engine, 'postgres')) return 'postgres';
   const variant = target?.connId ? useConnections.getState().info.get(target.connId)?.variant : undefined;
   return variant === 'MariaDb' ? 'mariadb' : 'mysql';
 }
@@ -227,7 +228,7 @@ export async function resolveRelation(target: CompletionTarget, parts: string[])
   const pick = <T extends { name: string; kind: ObjectKind }>(items: T[]) =>
     items.find((t) => isRelation(t.kind) && t.name === name) ?? items.find((t) => isRelation(t.kind) && eqi(t.name, name));
 
-  if (engine === 'postgres') {
+  if (isKind(engine, 'postgres')) {
     if (!db) return null;
     const scope = await useCompletion.scope(connId, db);
     const tables = (scope?.tables ?? []).filter((t) => isRelation(t.kind) && eqi(t.name, name));

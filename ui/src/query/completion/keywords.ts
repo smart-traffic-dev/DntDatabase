@@ -1,6 +1,6 @@
 // Static keyword and built-in function lists per dialect (spec §7.3), plus the reserved
 // words that force an identifier to be quoted when autocomplete inserts it.
-import type { Engine } from '../engine';
+import { isKind, type SqlEngine } from '../../engine';
 
 const COMMON_KEYWORDS = [
   'SELECT', 'FROM', 'WHERE', 'AND', 'OR', 'NOT', 'IN', 'IS', 'NULL', 'LIKE', 'BETWEEN', 'EXISTS',
@@ -83,6 +83,6 @@ export const PG_RESERVED: ReadonlySet<string> = new Set([
   'SIMILAR', 'SOME', 'SYMMETRIC', 'TRAILING', 'USER', 'VARIADIC', 'WINDOW',
 ]);
 
-export const keywordsOf = (engine: Engine) => (engine === 'postgres' ? PG_KEYWORDS : MYSQL_KEYWORDS);
-export const functionsOf = (engine: Engine) => (engine === 'postgres' ? PG_FUNCTIONS : MYSQL_FUNCTIONS);
-export const reservedOf = (engine: Engine) => (engine === 'postgres' ? PG_RESERVED : MYSQL_RESERVED);
+export const keywordsOf = (engine: SqlEngine) => (isKind(engine, 'postgres') ? PG_KEYWORDS : MYSQL_KEYWORDS);
+export const functionsOf = (engine: SqlEngine) => (isKind(engine, 'postgres') ? PG_FUNCTIONS : MYSQL_FUNCTIONS);
+export const reservedOf = (engine: SqlEngine) => (isKind(engine, 'postgres') ? PG_RESERVED : MYSQL_RESERVED);

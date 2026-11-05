@@ -12,6 +12,7 @@ import { editorFontOptions } from '../monaco/fonts';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
+import { isKind, editorLanguage } from '../engine';
 
 const DASH = '—';
 
@@ -128,7 +129,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const conn = useConnections((s) => s.summaries.get(tab.connectionId)?.config);
   const connected = useConnections((s) => s.info.has(tab.connectionId));
   // A read-only connection still opens the editor (view-only, with the reason), as the tree does.
-  const editable = !!conn && connected && DDL_EDITABLE_KINDS[conn.kind === 'postgres' ? 'postgres' : 'mysql'].includes(tab.objectRef.kind);
+  const editable = !!conn && connected && DDL_EDITABLE_KINDS[isKind(conn.kind, 'postgres') ? 'postgres' : 'mysql'].includes(tab.objectRef.kind);
 
   const copy = async () => {
     try {
@@ -178,7 +179,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
         ) : null}
         <div className="ot-ddl-text" data-testid="object-ddl-text">
           <Editor
-            language={dialectOfConnection(tab.connectionId) === 'postgres' ? 'pgsql' : 'mysql'}
+            language={editorLanguage(dialectOfConnection(tab.connectionId))}
             value={ddl}
             theme={monacoTheme.theme}
             beforeMount={monacoTheme.beforeMount}

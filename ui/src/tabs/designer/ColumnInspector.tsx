@@ -1,6 +1,6 @@
 import { useId, useState } from 'react';
 import type { ColumnDef, DefaultSpec, DesignOpen, DraftError, ElementRef, IdentityKind, TableDef, TypeSpec } from '../../bindings';
-import { sqlEngine } from '../../query/engine';
+import { isKind, sqlEngine, type SqlEngine } from '../../engine';
 import { deepEqual } from '../../store/tableDesigns';
 import { DraftInput } from './DraftInput';
 import {
@@ -41,16 +41,21 @@ const normalizeNum = (t: string) => numText(parseParam(t));
 
 /** The fields of the selected column, as its type allows; the original type when it changed. */
 export function ColumnInspector({ open, draft, errors, editable, selection, onSelect, edit }: ColumnInspectorProps) {
-  const pg = open.server.kind === 'postgres';
+  const engine = sqlEngine(open.server.kind);
+  const pg = isKind(open.server.kind, 'postgres');
   const index = selection?.kind === 'column' ? draft.columns.findIndex((c) => c.name === selection.name) : -1;
   const column = index >= 0 ? draft.columns[index] : undefined;
   const inBase = !!column && column.original !== null && open.def.columns.some((c) => c.name === column.original);
   return (
     <aside className="dz-inspector" aria-label="Column inspector">
-      {column ? (
+      {!column ? (
+        <p className="dz-subtle">Select a column to see its details.</p>
+      ) : engine ? (
+        // The designer opens only on SQL kinds; a Command kind (no engine) shows no fields rather than a guessed MySQL.
         <ColumnFields
           key={columnKey(column, inBase)}
           open={open}
+          engine={engine}
           column={column}
           index={index}
           errors={errors}
@@ -58,9 +63,7 @@ export function ColumnInspector({ open, draft, errors, editable, selection, onSe
           onSelect={onSelect}
           edit={edit}
         />
-      ) : (
-        <p className="dz-subtle">Select a column to see its details.</p>
-      )}
+      ) : null}
       <span className="dz-spacer" />
       <div className="dz-hint">
 {pg ? '' : 'Ctrl+↑/↓ reorders columns · '}Delete marks a column for drop · Ctrl+Z undoes · Ctrl+S reviews and applies
@@ -71,6 +74,7 @@ export function ColumnInspector({ open, draft, errors, editable, selection, onSe
 
 interface FieldsProps {
   open: DesignOpen;
+  engine: SqlEngine;
   column: ColumnDef;
   index: number;
   errors: DraftError[];
@@ -81,13 +85,12 @@ interface FieldsProps {
 
 const IDENTITY_LABEL: Record<IdentityKind, string> = { always: 'Always', by_default: 'By default' };
 
-function ColumnFields({ open, column, index, errors, editable, onSelect, edit }: FieldsProps) {
+function ColumnFields({ open, engine, column, index, errors, editable, onSelect, edit }: FieldsProps) {
   const uid = useId();
   // Only used while there is no default: an existing default carries its own kind.
   const [pendingMode, setPendingMode] = useState<DefaultSpec['kind']>('value');
   const mode = column.default?.kind ?? pendingMode;
-  const engine = sqlEngine(open.server.kind) ?? 'mysql';
-  const pg = engine === 'postgres';
+  const pg = isKind(engine, 'postgres');
   const base = column.original === null ? undefined : open.def.columns.find((c) => c.name === column.original);
   const typeChanged = !!base && !sameType(base.data_type, column.data_type);
   const info = typeInfoOf(open.catalog, column.data_type);

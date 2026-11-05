@@ -1,5 +1,5 @@
 import type { ObjectKind, ObjectRef } from '../bindings';
-import { sqlEngine } from '../query/engine';
+import { isKind, quoteIdent, sqlEngine, type SqlEngine } from '../engine';
 import { useConnections } from '../store/connections';
 import { useDdlEdits } from '../store/ddlEdits';
 import { useQueryDocs } from '../store/queryTabs';
@@ -28,10 +28,7 @@ export function openNewQuery(node?: TreeNode): string {
   return useQueryDocs.getState().newQuery(connectionId, database);
 }
 
-/** Quotes an identifier the way the engine does (the quote character inside it doubled). */
-export function quoteIdent(kind: 'mysql' | 'postgres', name: string): string {
-  return kind === 'postgres' ? `"${name.replaceAll('"', '""')}"` : `\`${name.replaceAll('`', '``')}\``;
-}
+export { quoteIdent };
 
 export interface SelectOptions {
   /** Default 1000. */
@@ -46,11 +43,11 @@ export interface SelectOptions {
  * The one helper for this SQL: the tree's "Select top 1000", the object tab's Query button and
  * the data view's "Open in query" (which passes its page size, offset and sort).
  */
-export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 'postgres', opts: SelectOptions = {}): string {
+export function selectTopSql(target: { objectRef?: ObjectRef }, kind: SqlEngine, opts: SelectOptions = {}): string {
   const ref = target.objectRef;
   if (!ref) return '';
   // PostgreSQL addresses a table by schema (a connection is one database); MySQL by database.
-  const qualifier = kind === 'postgres' ? ref.schema : ref.database;
+  const qualifier = isKind(kind, 'postgres') ? ref.schema : ref.database;
   const table = qualifier ? `${quoteIdent(kind, qualifier)}.${quoteIdent(kind, ref.name)}` : quoteIdent(kind, ref.name);
   const order = opts.orderBy ? ` ORDER BY ${quoteIdent(kind, opts.orderBy.column)} ${opts.orderBy.dir === 'desc' ? 'DESC' : 'ASC'}` : '';
   const offset = opts.offset ? ` OFFSET ${Math.trunc(opts.offset)}` : '';
@@ -60,13 +57,17 @@ export function selectTopSql(target: { objectRef?: ObjectRef }, kind: 'mysql' | 
 /** Whether `SELECT * FROM` makes sense on an object of this kind. */
 export const isQueryable = (kind: ObjectKind | undefined) => kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
 
-const engineOf = (connectionId: string | null | undefined) =>
-  sqlEngine(connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined) ?? 'mysql';
+/** The SQL engine of a connection, or `null` for none or for a Command-family kind. */
+const engineOf = (connectionId: string | null | undefined): SqlEngine | null => {
+  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
+  return kind ? sqlEngine(kind) : null;
+};
 
 /** Opens a new query tab on a table / view node, with its first 1000 rows selected. */
 export function openSelectTop(node: TreeNode): string {
   const id = openNewQuery(node);
-  useQueryDocs.getState().update(id, { sql: selectTopSql(node, engineOf(connectionIdOf(node.id))) });
+  const engine = engineOf(connectionIdOf(node.id));
+  if (engine) useQueryDocs.getState().update(id, { sql: selectTopSql(node, engine) });
   return id;
 }
 
@@ -78,7 +79,8 @@ export function openQueryOnNode(node: TreeNode): string {
 /** Opens a query bound to `connectionId` / `database`, with the first 1000 rows of `ref` selected when it is a table or view. */
 function openQueryOn(connectionId: string, database: string | null, ref?: ObjectRef): string {
   const id = useQueryDocs.getState().newQuery(connectionId, database);
-  if (ref && isQueryable(ref.kind)) useQueryDocs.getState().update(id, { sql: selectTopSql({ objectRef: ref }, engineOf(connectionId)) });
+  const engine = engineOf(connectionId);
+  if (engine && ref && isQueryable(ref.kind)) useQueryDocs.getState().update(id, { sql: selectTopSql({ objectRef: ref }, engine) });
   return id;
 }
 

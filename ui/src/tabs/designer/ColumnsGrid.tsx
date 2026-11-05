@@ -1,6 +1,6 @@
 import { useEffect, useRef, type DragEvent, type KeyboardEvent } from 'react';
 import type { ColumnDef, DesignOpen, DraftError, ElementRef, TableDef, TypeSpec } from '../../bindings';
-import { sqlEngine } from '../../query/engine';
+import { isKind, sqlEngine } from '../../engine';
 import { DraftInput } from './DraftInput';
 import {
   baseText,
@@ -83,7 +83,8 @@ function KeyIcon() {
 
 /** The Columns grid: one row per draft column, plus the opened table's columns the draft drops. */
 export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect, edit }: ColumnsGridProps) {
-  const pg = open.server.kind === 'postgres';
+  const pg = isKind(open.server.kind, 'postgres');
+  const engine = sqlEngine(open.server.kind);
   const rows = columnRows(open.def, draft);
   const rowEls = useRef(new Map<string, HTMLDivElement>());
   const dragFrom = useRef<number | null>(null);
@@ -153,7 +154,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
           const inPk = !dropped && !!pk?.columns.includes(column.name);
           const isSelected = !dropped && selected === column.name;
           const set = (patch: Partial<ColumnDef>, key?: string) => index !== null && edit((d) => updateColumn(d, index, patch), key);
-          const retype = (spec: TypeSpec, key: string) => set(withType(column, spec, open.catalog, sqlEngine(open.server.kind) ?? 'mysql', row.base), key);
+          const retype = (spec: TypeSpec, key: string) => engine && set(withType(column, spec, open.catalog, engine, row.base), key);
           const generated = generatedText(column);
           return (
             <div

@@ -4,7 +4,7 @@ import { api, toAppError } from '../api';
 import type { AppError, CountedImpact, DesignPreview, DesignReport, Impact } from '../bindings';
 import { EnvTag } from '../components/EnvTag';
 import { formatCompact } from '../lib/plural';
-import { sqlEngine } from '../query/engine';
+import { sqlEngine } from '../engine';
 import { invalidateCompletion } from '../store/completion';
 import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
@@ -88,7 +88,8 @@ export function TableDesignDialog({ tabId, onClose }: { tabId: string; onClose()
   const mounted = useRef(true);
   const previewSeq = useRef(0);
   const busy = loading || applying;
-  const engine = sqlEngine(design?.open?.server.kind);
+  const serverKind = design?.open?.server.kind;
+  const engine = (serverKind && sqlEngine(serverKind)) || undefined;
   const env = design?.open?.env ?? cfg?.env_tag ?? null;
 
   const lost = () => {

@@ -6,7 +6,7 @@
 // what is executed or guarded: running (`runQuery` → backend `plan`/`split`) and the
 // destructive-statement guard always use the backend splitter, which also knows the
 // server's SQL mode (ANSI_QUOTES, NO_BACKSLASH_ESCAPES) that this port assumes off.
-import type { Engine } from '../engine';
+import { isKind, type SqlEngine } from '../../engine';
 
 const NL = 10;
 const CR = 13;
@@ -197,7 +197,7 @@ function push(out: [number, number][], text: string, from: number, to: number, m
  * like the `statement_ranges` command: strings, quoted identifiers, comments, PG dollar
  * quotes / E-strings and MySQL `DELIMITER` directives are honoured; blank fragments dropped.
  */
-export function splitRanges(text: string, engine: Engine): [number, number][] {
+export function splitRanges(text: string, engine: SqlEngine): [number, number][] {
   return splitIncremental(null, text, engine, 0).ranges;
 }
 
@@ -210,7 +210,7 @@ interface Bound {
 
 /** The result of a split, reusable by the next `splitIncremental` of an edited text. */
 export interface SplitState {
-  engine: Engine;
+  engine: SqlEngine;
   ranges: [number, number][];
   bounds: Bound[];
 }
@@ -221,8 +221,8 @@ export interface SplitState {
  * in both texts) is kept, only the rest is scanned again. Typing near the end of a long
  * script rescans one statement instead of the whole text.
  */
-export function splitIncremental(prev: SplitState | null, text: string, engine: Engine, changedFrom: number): SplitState {
-  const mysql = engine !== 'postgres';
+export function splitIncremental(prev: SplitState | null, text: string, engine: SqlEngine, changedFrom: number): SplitState {
+  const mysql = !isKind(engine, 'postgres');
   let start: Bound = { at: 0, delim: ';', nRanges: 0 };
   let bounds: Bound[] = [start];
   let out: [number, number][] = [];

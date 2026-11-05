@@ -13,6 +13,7 @@ import type { AppError, ConnectionSummary, Group, ServerInfo } from '../bindings
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { expireConnectionPlans } from './queryRun';
+import { engineChip } from '../engine';
 import {
   ROOT,
   computeRows,
@@ -157,7 +158,7 @@ export const useTree = create<TreeState>()((set, get) => {
       parentId: cfg.group_id ? groupNodeId(cfg.group_id) : undefined,
       kind: 'connection',
       label: cfg.name,
-      engine: info ? engineOf(info.variant) : cfg.kind === 'postgres' ? 'PG' : 'MY',
+      engine: info ? engineOf(info.variant) : engineChip(cfg.kind),
       meta: info ? versionShort(info) : undefined,
       envTag: cfg.env_tag ?? undefined,
       ssh: !!cfg.ssh,
@@ -426,7 +427,7 @@ export const useTree = create<TreeState>()((set, get) => {
           loading: false,
           error: undefined,
           meta: undefined,
-          engine: stored?.config.kind === 'postgres' ? 'PG' : 'MY',
+          engine: stored ? engineChip(stored.config.kind) : 'MY',
         });
       }
       commit(d);

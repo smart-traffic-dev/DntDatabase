@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ElementRef, Impact } from '../../bindings';
+import { isKind } from '../../engine';
 import './sqlPreview.css';
 
 const PG_HEADER = [
@@ -33,7 +34,7 @@ export interface ScriptOptions {
  * On MySQL, `delimited` ends each with a delimiter no statement contains, between `DELIMITER` lines.
  */
 export function scriptOf(statements: string[], engine: 'mysql' | 'postgres' = 'mysql', transaction = false, options: ScriptOptions = {}): string {
-  if (engine !== 'postgres') {
+  if (!isKind(engine, 'postgres')) {
     if (!options.delimited) return statements.map((s) => `${s};`).join('\n');
     const d = scriptDelimiter(statements);
     return `DELIMITER ${d}\n${statements.map((s) => `${s}${d}`).join('\n')}\nDELIMITER ;`;

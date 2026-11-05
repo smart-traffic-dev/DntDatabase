@@ -1,7 +1,7 @@
 // Turns a completion context into suggestions (spec §7.3). Pure: the scope, the container
 // names and the object loader come from the caller (`monacoProvider.ts`).
 import type { CompletionObject, ObjectKind, SchemaCacheTable } from '../../bindings';
-import type { Engine } from '../engine';
+import { isKind, type SqlEngine } from '../../engine';
 import { analyze, type TableRef } from './context';
 import { functionsOf, keywordsOf, reservedOf } from './keywords';
 
@@ -26,7 +26,7 @@ export interface SuggestInput {
   offset: number;
   /** Statement ranges of `text` (`statement_ranges`), UTF-16 offsets. */
   ranges: [number, number][];
-  engine: Engine;
+  engine: SqlEngine;
   scope: CompletionScope | null;
   /** MySQL databases or PostgreSQL schemas: the qualifiers that `x.` lists objects of. */
   containers: string[];
@@ -37,10 +37,10 @@ export interface SuggestInput {
 }
 
 /** `name` as the dialect needs it in SQL: quoted when it is not a plain lower/any-case word. */
-export function quoteIdent(name: string, engine: Engine): string {
-  const plain = engine === 'postgres' ? /^[a-z_][a-z0-9_$]*$/ : /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+export function quoteIdent(name: string, engine: SqlEngine): string {
+  const plain = isKind(engine, 'postgres') ? /^[a-z_][a-z0-9_$]*$/ : /^[A-Za-z_$][A-Za-z0-9_$]*$/;
   if (plain.test(name) && !/^[0-9$]/.test(name) && !reservedOf(engine).has(name.toUpperCase())) return name;
-  const q = engine === 'postgres' ? '"' : '`';
+  const q = isKind(engine, 'postgres') ? '"' : '`';
   return q + name.split(q).join(q + q) + q;
 }
 
@@ -85,7 +85,7 @@ function resolve(scope: CompletionScope | null, ref: TableRef): SchemaCacheTable
   return findBy(candidates, (t) => t.name, ref.table);
 }
 
-function columnsOf(tables: (SchemaCacheTable | undefined)[], engine: Engine): Suggestion[] {
+function columnsOf(tables: (SchemaCacheTable | undefined)[], engine: SqlEngine): Suggestion[] {
   const seen = new Set<string>();
   const out: Suggestion[] = [];
   for (const t of tables) {
@@ -111,7 +111,7 @@ export function currentSchemaOf(scope: CompletionScope | null): string | null {
 /** `tablesOf` per scope object: rebuilt only when the scope is (re)loaded, not per keystroke. */
 const tablesMemo = new WeakMap<CompletionScope, Map<string, Suggestion[]>>();
 
-function tablesOf(scope: CompletionScope | null, engine: Engine, currentSchema: string | null): Suggestion[] {
+function tablesOf(scope: CompletionScope | null, engine: SqlEngine, currentSchema: string | null): Suggestion[] {
   if (!scope) return [];
   let perScope = tablesMemo.get(scope);
   if (!perScope) tablesMemo.set(scope, (perScope = new Map()));
@@ -121,11 +121,11 @@ function tablesOf(scope: CompletionScope | null, engine: Engine, currentSchema: 
   return list;
 }
 
-function buildTables(scope: CompletionScope, engine: Engine, currentSchema: string | null): Suggestion[] {
+function buildTables(scope: CompletionScope, engine: SqlEngine, currentSchema: string | null): Suggestion[] {
   return scope.tables.map((t) => {
     const name = quoteIdent(t.name, engine);
     // A PG table of another schema than the current one is inserted as `schema.table`.
-    const qualify = engine === 'postgres' && t.schema !== null && currentSchema !== null && t.schema !== currentSchema;
+    const qualify = isKind(engine, 'postgres') && t.schema !== null && currentSchema !== null && t.schema !== currentSchema;
     return {
       label: t.name,
       kind: objectKind(t.kind),
@@ -137,7 +137,7 @@ function buildTables(scope: CompletionScope, engine: Engine, currentSchema: stri
 
 /** Keyword and function suggestions per dialect: static, built once. */
 const staticLists = new Map<string, Suggestion[]>();
-function staticList(engine: Engine, kind: 'keyword' | 'function'): Suggestion[] {
+function staticList(engine: SqlEngine, kind: 'keyword' | 'function'): Suggestion[] {
   const k = `${kind}:${engine}`;
   let list = staticLists.get(k);
   if (!list) {
@@ -146,10 +146,10 @@ function staticList(engine: Engine, kind: 'keyword' | 'function'): Suggestion[] 
   }
   return list;
 }
-const keywords = (engine: Engine) => staticList(engine, 'keyword');
-const functions = (engine: Engine) => staticList(engine, 'function');
+const keywords = (engine: SqlEngine) => staticList(engine, 'keyword');
+const functions = (engine: SqlEngine) => staticList(engine, 'function');
 
-const objectSuggestions = (objects: CompletionObject[] | null, engine: Engine): Suggestion[] =>
+const objectSuggestions = (objects: CompletionObject[] | null, engine: SqlEngine): Suggestion[] =>
   (objects ?? []).map((o) => ({ label: o.name, kind: objectKind(o.kind), insertText: quoteIdent(o.name, engine) }));
 
 /**
@@ -165,7 +165,7 @@ export function suggest(input: SuggestInput): Suggestion[] | Promise<Suggestion[
     case 'none':
       return [];
     case 'table': {
-      const containerKind = engine === 'postgres' ? 'schema' : 'database';
+      const containerKind = isKind(engine, 'postgres') ? 'schema' : 'database';
       return [
         ...tablesOf(scope, engine, current),
         ...input.containers.map((c) => ({ label: c, kind: containerKind, insertText: quoteIdent(c, engine) }) as Suggestion),

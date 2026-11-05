@@ -1,0 +1,201 @@
+/**
+ * Everything the UI decides per engine kind. The ESLint rule `no-restricted-syntax` forbids comparing
+ * a kind with a literal anywhere else, so a new engine is added here and the compiler (through
+ * `assertNever`) lists what is missing.
+ */
+import type { Capabilities, DbKind, Dialect, EngineFamily, ServerInfo } from '../bindings';
+import { assertNever } from './assertNever';
+
+export { assertNever };
+
+/** SQL engine of a query document (follows its connection; MariaDB counts as `mysql`). */
+export type SqlEngine = Dialect['engine'];
+
+export function familyOf(kind: DbKind): EngineFamily {
+  switch (kind) {
+    case 'mysql':
+    case 'postgres':
+      return 'sql';
+    case 'mongo':
+    case 'redis':
+      return 'command';
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** The SQL engine of a connection kind; `null` for the Command family. There is no MySQL fallback. */
+export function sqlEngine(kind: DbKind): SqlEngine | null {
+  switch (kind) {
+    case 'mysql':
+    case 'postgres':
+      return kind;
+    case 'mongo':
+    case 'redis':
+      return null;
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** What the drivers declare (`Capabilities::for_kind` in Rust), used until the server reports its own. */
+export function defaultCaps(kind: DbKind): Capabilities {
+  switch (kind) {
+    case 'mysql':
+      return sqlFull('db');
+    case 'postgres':
+      return sqlFull('db_schema');
+    case 'mongo':
+      return { ...commandBase('db'), data_edit: true };
+    case 'redis':
+      return { ...commandBase('numbered_db'), data_edit: true, paged_objects: true };
+    default:
+      return assertNever(kind);
+  }
+}
+
+function sqlFull(namespaces: Capabilities['namespaces']): Capabilities {
+  return {
+    family: 'sql',
+    namespaces,
+    transactions: true,
+    data_edit: true,
+    designer: true,
+    ddl_edit: true,
+    object_actions: true,
+    import: true,
+    dump: true,
+    seed: true,
+    explain: true,
+    paged_objects: false,
+  };
+}
+
+function commandBase(namespaces: Capabilities['namespaces']): Capabilities {
+  return {
+    family: 'command',
+    namespaces,
+    transactions: false,
+    data_edit: false,
+    designer: false,
+    ddl_edit: false,
+    object_actions: false,
+    import: false,
+    dump: false,
+    seed: false,
+    explain: false,
+    paged_objects: false,
+  };
+}
+
+/** What the connected server reports, else what its driver declares. */
+export function capsOf(info: ServerInfo | null | undefined, kind: DbKind): Capabilities {
+  return info?.capabilities ?? defaultCaps(kind);
+}
+
+/** Quote an identifier the way the engine's query language does; Command names are not quoted. */
+export function quoteIdent(kind: DbKind, name: string): string {
+  switch (kind) {
+    case 'postgres':
+      return `"${name.replaceAll('"', '""')}"`;
+    case 'mysql':
+      return `\`${name.replaceAll('`', '``')}\``;
+    case 'mongo':
+    case 'redis':
+      return name;
+    default:
+      return assertNever(kind);
+  }
+}
+
+export function editorLanguage(kind: DbKind): 'mysql' | 'pgsql' | 'mongo' | 'redis' {
+  switch (kind) {
+    case 'mysql':
+      return 'mysql';
+    case 'postgres':
+      return 'pgsql';
+    case 'mongo':
+      return 'mongo';
+    case 'redis':
+      return 'redis';
+    default:
+      return assertNever(kind);
+  }
+}
+
+export function engineChip(kind: DbKind): 'MY' | 'PG' | 'MG' | 'RD' {
+  switch (kind) {
+    case 'mysql':
+      return 'MY';
+    case 'postgres':
+      return 'PG';
+    case 'mongo':
+      return 'MG';
+    case 'redis':
+      return 'RD';
+    default:
+      return assertNever(kind);
+  }
+}
+
+export function engineLabel(kind: DbKind): string {
+  switch (kind) {
+    case 'mysql':
+      return 'MySQL / MariaDB';
+    case 'postgres':
+      return 'PostgreSQL';
+    case 'mongo':
+      return 'MongoDB';
+    case 'redis':
+      return 'Redis';
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** What the tree calls a namespace of this kind (the top level a user creates). */
+export function namespaceLabel(kind: DbKind): 'Database' | 'Schema' {
+  switch (kind) {
+    case 'mysql':
+    case 'mongo':
+    case 'redis':
+      return 'Database';
+    case 'postgres':
+      return 'Schema';
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** The `Table` / `JSON` result toggle: MongoDB only. */
+export function hasDocumentView(kind: DbKind): boolean {
+  switch (kind) {
+    case 'mongo':
+      return true;
+    case 'mysql':
+    case 'postgres':
+    case 'redis':
+      return false;
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** The dialect passed to `statementRanges`; the backend ignores it when the connection has a language. */
+export function rangesDialect(kind: DbKind): Dialect {
+  switch (kind) {
+    case 'mysql':
+      return { engine: 'mysql' };
+    case 'postgres':
+    case 'mongo':
+    case 'redis':
+      return { engine: 'postgres' };
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** Escape hatch for SQL-only code that already holds a `SqlEngine`; prefer a `switch`. */
+export function isKind(kind: DbKind, k: DbKind): boolean {
+  return kind === k;
+}

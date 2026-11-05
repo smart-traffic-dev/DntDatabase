@@ -3,7 +3,7 @@ import { Channel } from '@tauri-apps/api/core';
 import { api, needsReconnect, toAppError } from '../api';
 import type { AppError, DdlEditPreview, DdlEditReport, ObjectState } from '../bindings';
 import { EnvTag } from '../components/EnvTag';
-import { sqlEngine } from '../query/engine';
+import { sqlEngine, isKind } from '../engine';
 import { invalidateCompletion } from '../store/completion';
 import { useConnections } from '../store/connections';
 import { useDdlEdits, type DdlTarget } from '../store/ddlEdits';
@@ -105,7 +105,8 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
   const previewSeq = useRef(0);
   const busy = loading || applying;
   const env = edit?.open?.env ?? cfg?.env_tag ?? null;
-  const engine = sqlEngine(edit?.open?.server.kind) ?? 'mysql';
+  const serverKind = edit?.open?.server.kind;
+  const engine = (serverKind ? sqlEngine(serverKind) : null) ?? 'mysql';
 
   const lost = () => {
     useDdlEdits.getState().markLost(tabId);
@@ -275,7 +276,7 @@ export function DdlEditDialog({ tabId, onClose }: { tabId: string; onClose(): vo
               impacts={[]}
               showImpacts={false}
               engine={engine}
-              script={{ pgHeader: DDL_EDIT_PG_HEADER, delimited: engine === 'mysql' && edit?.target.kind !== 'View' }}
+              script={{ pgHeader: DDL_EDIT_PG_HEADER, delimited: isKind(engine, 'mysql') && edit?.target.kind !== 'View' }}
             />
             <p>{preview.transactional ? 'Runs in one transaction' : 'Not transactional: statements run one by one'}</p>
             {preview.warnings.length > 0 ? (

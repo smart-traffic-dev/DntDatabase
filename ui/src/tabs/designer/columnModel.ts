@@ -1,4 +1,5 @@
 import type { ColumnDef, DefaultSpec, DraftError, ElementRef, Locked, TableDef, TypeInfo, TypeSpec } from '../../bindings';
+import { isKind } from '../../engine';
 import { deepEqual } from '../../store/tableDesigns';
 
 export type RowState = 'unchanged' | 'modified' | 'new' | 'drop';
@@ -147,19 +148,19 @@ export function withBase(spec: TypeSpec, text: string, catalog: TypeInfo[]): Typ
   };
 }
 
-export type Engine = 'mysql' | 'postgres';
+export type SqlEngine = 'mysql' | 'postgres';
 
-const INTEGERS: Record<Engine, string[]> = {
+const INTEGERS: Record<SqlEngine, string[]> = {
   mysql: ['tinyint', 'smallint', 'mediumint', 'int', 'bigint'],
   postgres: ['smallint', 'integer', 'bigint'],
 };
 
 /** An integer type: MySQL AUTO_INCREMENT and PostgreSQL identity apply only to these. */
-export const isInteger = (spec: TypeSpec, engine: Engine) => spec.kind === 'known' && INTEGERS[engine].includes(spec.base);
+export const isInteger = (spec: TypeSpec, engine: SqlEngine) => spec.kind === 'known' && INTEGERS[engine].includes(spec.base);
 
 /** MySQL `ON UPDATE CURRENT_TIMESTAMP` applies to `timestamp` and `datetime` only. */
-export const takesOnUpdate = (spec: TypeSpec, engine: Engine) =>
-  engine === 'mysql' && spec.kind === 'known' && (spec.base === 'timestamp' || spec.base === 'datetime');
+export const takesOnUpdate = (spec: TypeSpec, engine: SqlEngine) =>
+  isKind(engine, 'mysql') && spec.kind === 'known' && (spec.base === 'timestamp' || spec.base === 'datetime');
 
 /** `CURRENT_TIMESTAMP`, with the type's fractional-seconds precision when it has one. */
 export const onUpdateText = (spec: TypeSpec) =>
@@ -172,19 +173,19 @@ const precisionOf = (spec: TypeSpec) => (spec.kind === 'known' ? spec.precision 
  * (collation and charset, AUTO_INCREMENT / identity, ON UPDATE, values), and `using` goes when the
  * type is back to the opened table's (`base`).
  */
-export function withType(c: ColumnDef, spec: TypeSpec, catalog: TypeInfo[], engine: Engine, base: ColumnDef | null | undefined): Partial<ColumnDef> {
+export function withType(c: ColumnDef, spec: TypeSpec, catalog: TypeInfo[], engine: SqlEngine, base: ColumnDef | null | undefined): Partial<ColumnDef> {
   const info = typeInfoOf(catalog, spec);
   const textual = spec.kind === 'custom' || !!info?.collation;
   const keepsOnUpdate = takesOnUpdate(spec, engine) && c.on_update !== null;
   return {
     data_type: spec,
     collation: textual ? c.collation : null,
-    charset: textual && engine === 'mysql' ? c.charset : null,
-    auto_increment: engine === 'mysql' && isInteger(spec, engine) && c.auto_increment,
-    identity: engine === 'postgres' && isInteger(spec, engine) ? c.identity : null,
+    charset: textual && isKind(engine, 'mysql') ? c.charset : null,
+    auto_increment: isKind(engine, 'mysql') && isInteger(spec, engine) && c.auto_increment,
+    identity: isKind(engine, 'postgres') && isInteger(spec, engine) ? c.identity : null,
     // ON UPDATE follows a change of the fractional-seconds precision.
     on_update: !keepsOnUpdate ? null : precisionOf(spec) === precisionOf(c.data_type) ? c.on_update : onUpdateText(spec),
-    using: engine === 'postgres' && base && !sameType(base.data_type, spec) ? c.using : null,
+    using: isKind(engine, 'postgres') && base && !sameType(base.data_type, spec) ? c.using : null,
   };
 }
 

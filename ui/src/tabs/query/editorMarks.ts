@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { PlanView } from '../../bindings';
 import { splitIncremental, type SplitState } from '../../query/completion/split';
 import { stmtsByIndex } from '../../query/plan';
-import type { Engine } from '../../query/engine';
+import type { SqlEngine } from '../../engine';
 import type { TabRun } from '../../store/queryRun';
 import { currentStatement } from './format';
 
@@ -126,7 +126,7 @@ interface Mounted {
 }
 
 /** Keeps the highlight, markers and glyphs of `mounted` in step with the document and its run. */
-export function useEditorMarks(mounted: Mounted | null, engine: Engine, run: TabRun) {
+export function useEditorMarks(mounted: Mounted | null, engine: SqlEngine, run: TabRun) {
   const ranges = useRef<[number, number][]>([]);
   const highlight = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);
   const glyphs = useRef<Monaco.editor.IEditorDecorationsCollection | null>(null);

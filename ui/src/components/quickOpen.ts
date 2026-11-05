@@ -6,6 +6,7 @@ import { useTree } from '../store/tree';
 import { connectionIdOf } from '../store/treeModel';
 import { openObjectRef } from './openObject';
 import { rankItems, type Ranked } from './paletteMatch';
+import { isKind } from '../engine';
 
 /** The object kinds quick open searches. */
 export const QUICK_OPEN_KINDS: readonly ObjectKind[] = ['Table', 'View', 'MaterializedView', 'Function', 'Procedure'];
@@ -44,7 +45,8 @@ export function collectObjectEntries(): ObjectEntry[] {
     if (node.kind === 'object' && node.objectRef && connectionId) add(connectionId, node.objectRef);
   }
   for (const { connId, db, scope } of useCompletion.loadedScopes()) {
-    const postgres = connections.get(connId)?.config.kind === 'postgres';
+    const kind = connections.get(connId)?.config.kind;
+  const postgres = !!kind && isKind(kind, 'postgres');
     for (const t of scope.tables) {
       add(connId, { database: db, schema: postgres ? t.schema : null, name: t.name, kind: t.kind });
     }

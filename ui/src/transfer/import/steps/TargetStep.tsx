@@ -3,6 +3,7 @@ import { api } from '../../../api';
 import type { TargetColumn } from '../../../bindings';
 import { useConnections } from '../../../store/connections';
 import type { StepProps } from './stepProps';
+import { isKind } from '../../../engine';
 
 /** The column's flags as the target list shows them. */
 export function columnFlags(c: TargetColumn): string[] {
@@ -27,7 +28,7 @@ export function TargetStep({ state, dispatch, targetError }: Props) {
   const info = useConnections((s) => s.info);
   const open = [...info.keys()].filter((id) => summaries.has(id) || id === state.connectionId);
   const kind = summaries.get(state.connectionId)?.config.kind ?? info.get(state.connectionId)?.kind ?? 'mysql';
-  const pg = kind === 'postgres';
+  const pg = isKind(kind, 'postgres');
 
   const [database, setDatabase] = useState<string | null>(state.table?.database ?? null);
   const [schema, setSchema] = useState<string | null>(state.table?.schema ?? null);

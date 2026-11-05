@@ -1,9 +1,7 @@
 // Pure formatting of copied grid cells: TSV (pastes into Excel), CSV and INSERT statements.
 import type { ObjectRef, Value } from '../../bindings';
-import { quoteIdent } from '../../components/newQuery';
+import { isKind, quoteIdent, type SqlEngine } from '../../engine';
 import { cellView } from './format';
-
-export type Engine = 'mysql' | 'postgres';
 
 /** The most bytes a cell can carry; the backend cuts longer text to this (data views). */
 export const CELL_CAP_BYTES = 64 * 1024;
@@ -74,8 +72,8 @@ export const toTsv = (rows: Value[][], header: string[] | null = null) => delimi
 export const toCsv = (rows: Value[][], header: string[] | null = null) => delimited(rows, header, ',', csvField);
 
 /** `ref` as a quoted, qualified name for `engine` (PostgreSQL by schema, MySQL by database). */
-export function qualifiedTable(ref: ObjectRef, engine: Engine): string {
-  const qualifier = engine === 'postgres' ? ref.schema : ref.database;
+export function qualifiedTable(ref: ObjectRef, engine: SqlEngine): string {
+  const qualifier = isKind(engine, 'postgres') ? ref.schema : ref.database;
   const name = quoteIdent(engine, ref.name);
   return qualifier ? `${quoteIdent(engine, qualifier)}.${name}` : name;
 }
@@ -100,9 +98,9 @@ export type Literal = { ok: true; sql: string } | { ok: false; reason: string };
 const INTEGER = /^-?\d+$/;
 const NUMBER = /^-?\d+(\.\d+)?([eE][+-]?\d+)?$/;
 
-function quoteString(s: string, engine: Engine): string {
+function quoteString(s: string, engine: SqlEngine): string {
   let out = s.replaceAll("'", "''");
-  if (engine === 'mysql') out = out.replaceAll('\\', '\\\\');
+  if (isKind(engine, 'mysql')) out = out.replaceAll('\\', '\\\\');
   return `'${out}'`;
 }
 
@@ -110,7 +108,7 @@ function quoteString(s: string, engine: Engine): string {
  * `v` as a SQL literal. Refuses (never guesses) what cannot be written exactly: binary values (the
  * grid holds only a preview), possibly truncated text, non-finite numbers.
  */
-export function sqlLiteral(v: Value, engine: Engine, capped = false): Literal {
+export function sqlLiteral(v: Value, engine: SqlEngine, capped = false): Literal {
   if (maybeTruncated(v, capped)) return { ok: false, reason: 'a value was truncated' };
   switch (v.t) {
     case 'Null':
@@ -131,7 +129,7 @@ export function sqlLiteral(v: Value, engine: Engine, capped = false): Literal {
     case 'Other':
       return { ok: true, sql: quoteString(v.v.text, engine) };
     case 'Array': {
-      if (engine !== 'postgres') return { ok: false, reason: 'arrays are PostgreSQL only' };
+      if (!isKind(engine, 'postgres')) return { ok: false, reason: 'arrays are PostgreSQL only' };
       if (v.v.length === 0) return { ok: true, sql: "'{}'" };
       const parts: string[] = [];
       for (const item of v.v) {
@@ -155,7 +153,7 @@ export type InsertResult = { ok: true; text: string } | { ok: false; message: st
  */
 export function toInsertStatements(opts: {
   table: string;
-  engine: Engine;
+  engine: SqlEngine;
   columns: string[];
   rows: Value[][];
   capped?: boolean;

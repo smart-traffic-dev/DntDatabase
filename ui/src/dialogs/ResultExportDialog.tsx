@@ -6,6 +6,7 @@ import { useQueryRun } from '../store/queryRun';
 import { asTxState } from '../store/queryTabs';
 import { Modal } from './Modal';
 import { FORMATS, defaultOptions, type ExportRequest } from './resultExport';
+import { isKind } from '../engine';
 
 /** CSV delimiters offered (value sent as is). */
 export const DELIMITERS: { value: string; label: string }[] = [
@@ -238,7 +239,7 @@ export function ResultExportDialog({ request, onClose }: Props) {
                 aria-invalid={tableMissing}
                 onChange={(e) => set({ table_name: e.target.value })}
               />
-              <p className="hint">Quoted as one identifier for {request.engine === 'postgres' ? 'PostgreSQL' : 'MySQL'}.</p>
+              <p className="hint">Quoted as one identifier for {isKind(request.engine, 'postgres') ? 'PostgreSQL' : 'MySQL'}.</p>
             </div>
           ) : null}
           <div className="field" role="radiogroup" aria-label="Rows">

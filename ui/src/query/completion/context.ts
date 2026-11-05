@@ -1,7 +1,7 @@
 // Reads the completion context from the tokens of the current statement (spec §7.3).
 // No syntax tree: a light tokenizer plus the `name [AS] alias` pattern after FROM/JOIN/UPDATE.
 
-import type { Engine } from '../engine';
+import { isKind, type SqlEngine } from '../../engine';
 
 export type CompletionContext =
   | { kind: 'default' }
@@ -62,7 +62,7 @@ function scanQuoted(text: string, from: number, quote: string, backslash: boolea
 /** A PostgreSQL dollar-quote tag, matched in place (sticky) at `lastIndex`. */
 const DOLLAR_TAG = /\$([A-Za-z_][A-Za-z0-9_]*)?\$/y;
 
-function tokenize(text: string, engine: Engine): Token[] {
+function tokenize(text: string, engine: SqlEngine): Token[] {
   const tokens: Token[] = [];
   let i = 0;
   while (i < text.length) {
@@ -74,8 +74,8 @@ function tokenize(text: string, engine: Engine): Token[] {
     }
     const next = text.charAt(i + 1);
     const lineComment =
-      (c === '-' && next === '-' && (engine === 'postgres' || i + 2 >= text.length || /\s/.test(text.charAt(i + 2)))) ||
-      (c === '#' && engine === 'mysql');
+      (c === '-' && next === '-' && (isKind(engine, 'postgres') || i + 2 >= text.length || /\s/.test(text.charAt(i + 2)))) ||
+      (c === '#' && isKind(engine, 'mysql'));
     if (lineComment) {
       const nl = text.indexOf('\n', i);
       i = nl < 0 ? text.length : nl;
@@ -88,20 +88,20 @@ function tokenize(text: string, engine: Engine): Token[] {
       tokens.push({ kind: 'comment', start, end: i, value: '', open: close < 0 });
       continue;
     }
-    if (c === "'" || (c === '"' && engine === 'mysql')) {
-      const q = scanQuoted(text, i, c, engine === 'mysql');
+    if (c === "'" || (c === '"' && isKind(engine, 'mysql'))) {
+      const q = scanQuoted(text, i, c, isKind(engine, 'mysql'));
       i = q.end;
       tokens.push({ kind: 'string', start, end: i, value: '', open: q.open });
       continue;
     }
-    if ((c === '`' && engine === 'mysql') || (c === '"' && engine === 'postgres')) {
+    if ((c === '`' && isKind(engine, 'mysql')) || (c === '"' && isKind(engine, 'postgres'))) {
       const q = scanQuoted(text, i, c, false);
       i = q.end;
       const inner = text.slice(start + 1, q.open ? i : i - 1);
       tokens.push({ kind: 'qident', start, end: i, value: inner.split(c + c).join(c), open: q.open });
       continue;
     }
-    if (c === '$' && engine === 'postgres') {
+    if (c === '$' && isKind(engine, 'postgres')) {
       DOLLAR_TAG.lastIndex = i;
       const tag = DOLLAR_TAG.exec(text);
       if (tag) {
@@ -204,7 +204,7 @@ function readStatement(tokens: Token[]): StatementInfo {
 export function analyze(
   stmt: string,
   offset: number,
-  engine: Engine,
+  engine: SqlEngine,
 ): { context: CompletionContext; prefix: string; info: StatementInfo } {
   const all = tokenize(stmt, engine);
   // Only the statement around the cursor: a `;` ends it on either side.

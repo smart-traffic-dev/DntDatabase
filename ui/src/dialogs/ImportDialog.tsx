@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, toAppError } from '../api';
-import type { ConflictPolicy, DbKind, ImportPreview } from '../bindings';
+import type { ConflictPolicy, ImportPreview } from '../bindings';
 import { confirmDiscardForImport } from '../components/tabActions';
 import { useDialogs } from '../store/dialogs';
 import { useTabs } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { Modal } from './Modal';
+import { engineChip } from '../engine';
 
 interface Props {
   onClose(): void;
@@ -19,7 +20,7 @@ const POLICIES: { value: ConflictPolicy; label: string; help: string }[] = [
 
 const CONFLICT_LABEL = { same_id: 'Same id', same_name: 'Same name' } as const;
 
-const chip = (kind: DbKind) => (kind === 'postgres' ? 'PG' : 'MY');
+const chip = engineChip;
 
 /** Import dialog for `.dntconn` and Navicat `.ncx` files. */
 export function ImportDialog({ onClose }: Props) {

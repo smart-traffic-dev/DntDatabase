@@ -5,7 +5,7 @@ import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import { openQuietly, quietOpenFailed } from '../../store/reopen';
-import { sqlEngine, type Engine } from '../engine';
+import { isKind, sqlEngine, type SqlEngine } from '../../engine';
 import { suggest, type Suggestion } from './provider';
 import { allSnippets } from './snippets';
 import { splitIncremental, type SplitState } from './split';
@@ -14,7 +14,7 @@ export interface CompletionTarget {
   tabId: string;
   connId: string | null;
   db: string | null;
-  engine: Engine;
+  engine: SqlEngine;
 }
 
 const LANGUAGES = ['mysql', 'pgsql'];
@@ -75,7 +75,7 @@ export function prefetchCompletion(target: CompletionTarget): void {
   const { connId, db, engine } = target;
   if (!connId) return;
   if (db) useCompletion.peekScope(connId, db);
-  if (db || engine === 'mysql') useCompletion.peekContainers(connId, db ?? '', engine);
+  if (db || isKind(engine, 'mysql')) useCompletion.peekContainers(connId, db ?? '', engine);
 }
 
 /**
@@ -101,7 +101,7 @@ export function registerCompletion(
     listener?: { dispose(): void };
   }
   const snapshots = new WeakMap<object, Snapshot>();
-  const snapshot = (model: Monaco.editor.ITextModel, engine: Engine): { text: string; ranges: [number, number][] } => {
+  const snapshot = (model: Monaco.editor.ITextModel, engine: SqlEngine): { text: string; ranges: [number, number][] } => {
     const version = model.getVersionId();
     let snap = snapshots.get(model);
     if (snap && snap.version === version && snap.split.engine === engine) return { text: snap.text, ranges: snap.split.ranges };
@@ -157,7 +157,7 @@ export function registerCompletion(
       // `undefined`: still loading (the load is started, never awaited here).
       const scope = connId && db ? useCompletion.peekScope(connId, db) : null;
       const containers =
-        connId && (db || engine === 'mysql') ? useCompletion.peekContainers(connId, db ?? '', engine) : [];
+        connId && (db || isKind(engine, 'mysql')) ? useCompletion.peekContainers(connId, db ?? '', engine) : [];
       const items = suggest({
         text,
         offset,
@@ -172,7 +172,7 @@ export function registerCompletion(
       const loads = () =>
         Promise.all([
           db ? useCompletion.scope(connId as string, db) : null,
-          db || engine === 'mysql' ? useCompletion.containers(connId as string, db ?? '', engine) : null,
+          db || isKind(engine, 'mysql') ? useCompletion.containers(connId as string, db ?? '', engine) : null,
         ]);
       // The scope failed because the connection is not open yet (a restored tab: restoring
       // never connects). Typing here opens it quietly, then the tables load.
@@ -218,7 +218,7 @@ export function queryDocTarget(model: unknown): CompletionTarget | null {
   const doc = useQueryDocs.getState().docs.get(uri.authority);
   if (!doc) return null;
   const kind = doc.connectionId ? useConnections.getState().summaries.get(doc.connectionId)?.config.kind : undefined;
-  return { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine: sqlEngine(kind) ?? doc.dialect };
+  return { tabId: doc.id, connId: doc.connectionId, db: doc.database, engine: (kind && sqlEngine(kind)) || doc.dialect };
 }
 
 type Handle = { dispose(): void };

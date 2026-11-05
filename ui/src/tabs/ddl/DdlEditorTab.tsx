@@ -9,6 +9,7 @@ import { useDdlEdits } from '../../store/ddlEdits';
 import { useDialogs } from '../../store/dialogs';
 import type { DdlTabRef } from '../../store/tabs';
 import './ddlEditor.css';
+import { editorLanguage } from '../../engine';
 
 const KIND_LABELS: Partial<Record<ObjectKind, string>> = {
   View: 'View',
@@ -176,7 +177,7 @@ export function DdlEditorTab({ tab }: { tab: DdlTabRef }) {
       ) : null}
       <div className="ddl-body">
         <Editor
-          language={open.server.kind === 'postgres' ? 'pgsql' : 'mysql'}
+          language={editorLanguage(open.server.kind)}
           value={state.text}
           theme={monacoTheme.theme}
           beforeMount={monacoTheme.beforeMount}

@@ -11,6 +11,7 @@ import { connNodeId, seg } from '../store/treeModel';
 import { Modal } from './Modal';
 import { refreshAfterAction, type ObjectActionRequest } from './ObjectActionDialog';
 import './objectAction.css';
+import { isKind, namespaceLabel } from '../engine';
 
 type CreateAction = Extract<ObjectAction, { kind: 'create_namespace' }>;
 
@@ -20,13 +21,13 @@ const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
 export function nameProblem(kind: DbKind, name: string, existing: readonly string[]): string | null {
   if (!name.trim()) return 'Enter a name.';
   if (/[.\0]/.test(name)) return 'Names cannot contain a dot (.).';
-  if (kind === 'mysql') {
+  if (isKind(kind, 'mysql')) {
     if ([...name].length > 64) return 'MySQL names are limited to 64 characters.';
     if (/[/\\]/.test(name)) return 'Database names cannot contain / or \\.';
     if (name.endsWith(' ')) return 'MySQL names cannot end with a space.';
     if ([...name].some((c) => (c.codePointAt(0) ?? 0) > 0xffff)) return 'MySQL names cannot contain emoji or other supplementary characters.';
   } else if (utf8Bytes(name) > 63) return 'PostgreSQL names are limited to 63 bytes.';
-  if (existing.includes(name)) return `${kind === 'mysql' ? 'A database' : 'A schema'} named ${name} already exists.`;
+  if (existing.includes(name)) return `A ${namespaceLabel(kind).toLowerCase()} named ${name} already exists.`;
   return null;
 }
 
@@ -46,8 +47,8 @@ export function CreateNamespaceDialog({ request, onClose }: { request: ObjectAct
   const cfg = useConnections((s) => s.summaries.get(connectionId)?.config);
   const info = useConnections((s) => s.info.get(connectionId));
   const kind: DbKind = cfg?.kind ?? info?.kind ?? 'mysql';
-  const mysql = kind === 'mysql';
-  const what = mysql ? 'database' : 'schema';
+  const mysql = isKind(kind, 'mysql');
+  const what = namespaceLabel(kind).toLowerCase();
   const parentId = mysql ? connNodeId(connectionId) : `${connNodeId(connectionId)}/db:${seg(base.database)}`;
   const childIds = useTree((s) => s.childIds.get(parentId));
   const nodes = useTree((s) => s.nodes);

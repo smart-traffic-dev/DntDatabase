@@ -1,6 +1,6 @@
 import type { AppError, ObjectKind, ObjectRef, Scope, ServerVariant } from '../bindings';
 
-export type Engine = 'MY' | 'PG' | 'MA';
+export type Engine = 'MY' | 'PG' | 'MA' | 'MG' | 'RD';
 
 export interface TreeNode {
   id: string;
@@ -87,6 +87,10 @@ export function engineOf(variant: ServerVariant): Engine {
       return 'PG';
     case 'MariaDb':
       return 'MA';
+    case 'Mongo':
+      return 'MG';
+    case 'Redis':
+      return 'RD';
     default:
       return 'MY';
   }

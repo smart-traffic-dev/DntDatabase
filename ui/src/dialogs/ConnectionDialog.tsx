@@ -28,6 +28,7 @@ import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
 import { PasswordInput } from './PasswordInput';
 import { ConfirmDialog } from './SimpleDialogs';
+import { isKind } from '../engine';
 
 /**
  * One page (single-page redesign): name, engine, server and environment always show; the
@@ -240,6 +241,16 @@ const showsSslFiles = (f: Form) =>
 
 const CLOSED: Record<Fold, boolean> = { url: false, ssh: false, ssl: false, advanced: false };
 
+/** The connection kind a parsed scheme selects; MariaDB shares the MySQL driver. Command schemes keep the MySQL default until the dialog handles them. */
+function kindOfScheme(engine: ConnStringEngine): DbKind {
+  switch (engine) {
+    case 'postgres':
+      return 'postgres';
+    default:
+      return 'mysql';
+  }
+}
+
 /** The form on another engine: a port and user still at the old engine's default (or empty) follow the new one. */
 export function withEngine<F extends Pick<Form, 'engine' | 'port' | 'portTouched' | 'username'>>(f: F, engine: DbKind): F {
   if (engine === f.engine) return f;
@@ -337,7 +348,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const applyParsed = (p: ParsedConnString) => {
     setForm((prev) => {
       // No scheme (`user@host/db`) keeps the chosen engine; MariaDB shares the MySQL driver.
-      const f = p.engine === null ? prev : withEngine(prev, p.engine === 'postgres' ? 'postgres' : 'mysql');
+      const f = p.engine === null ? prev : withEngine(prev, kindOfScheme(p.engine));
       return {
         ...f,
         host: p.host ?? f.host,
@@ -665,7 +676,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         id="cd-conn-string"
         data-testid="conn-string"
         value={connString}
-        placeholder={form.engine === 'postgres' ? 'postgresql://user:password@host:5432/database' : 'mysql://user:password@host:3306/database'}
+        placeholder={isKind(form.engine, 'postgres') ? 'postgresql://user:password@host:5432/database' : 'mysql://user:password@host:3306/database'}
         spellCheck={false}
         autoComplete="off"
         // Opened from its link: the cursor goes straight into it.
@@ -835,7 +846,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           <input
             id="cd-db"
             value={form.defaultDb}
-            placeholder={form.engine === 'postgres' ? defaultUser(form.engine) : 'All databases'}
+            placeholder={isKind(form.engine, 'postgres') ? defaultUser(form.engine) : 'All databases'}
             onChange={(e) => set('defaultDb', e.target.value)}
           />
         </div>

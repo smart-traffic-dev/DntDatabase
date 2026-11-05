@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
 import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
-import type { Engine } from '../query/engine';
+import { isKind, type SqlEngine } from '../engine';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { liveJobCount } from './jobs';
@@ -18,8 +18,8 @@ export const AUTOSAVE_MS = 1000;
 // `sql_mode` flags) is `engineDialect(engine)` before a plan, `PlanView.dialect` after one.
 
 /** The backend `Dialect` of an engine, without `sql_mode` flags (what `statement_ranges` takes). */
-export const engineDialect = (engine: Engine): Dialect =>
-  engine === 'postgres' ? { engine: 'postgres' } : { engine: 'mysql' };
+export const engineDialect = (engine: SqlEngine): Dialect =>
+  isKind(engine, 'postgres') ? { engine: 'postgres' } : { engine: 'mysql' };
 
 /** The editor document of a query tab, persisted in `query_tabs` (spec §7.2). */
 export interface QueryDoc {
@@ -36,7 +36,7 @@ export interface QueryDoc {
   continueOnError: boolean;
   rowLimit: RowLimit;
   sortOrder: number;
-  dialect: Engine;
+  dialect: SqlEngine;
 }
 
 interface QueryDocsState {
@@ -79,10 +79,10 @@ function nextTitle(docs: Iterable<QueryDoc>): string {
 /** The last component of a Windows or POSIX path. */
 export const fileName = (path: string): string => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 
-export const dialectOfConnection = (connectionId: string | null): Engine =>
-  connectionId && useConnections.getState().summaries.get(connectionId)?.config.kind === 'postgres'
-    ? 'postgres'
-    : 'mysql';
+export const dialectOfConnection = (connectionId: string | null): SqlEngine => {
+  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
+  return kind && isKind(kind, 'postgres') ? 'postgres' : 'mysql';
+};
 
 const asRowLimit = (n: number): RowLimit => (ROW_LIMITS as number[]).includes(n) ? (n as RowLimit) : DEFAULT_ROW_LIMIT;
 

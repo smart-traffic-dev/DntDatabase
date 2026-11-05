@@ -3,12 +3,13 @@ import { DraftInput } from './DraftInput';
 import { ElementGrid, type ElementGridProps } from './ElementGrid';
 import { GridSelect } from './GridSelect';
 import { addPart, parseList, removePart, updatePart } from './elementModel';
+import { isKind } from '../../engine';
 
 const PG_METHODS = ['btree', 'hash', 'gist', 'spgist', 'gin', 'brin'];
 
 /** The Indexes grid: name, unique, parts (column, prefix on MySQL, DESC), and the engine's extras. */
 export function IndexesGrid(p: ElementGridProps) {
-  const pg = p.open.server.kind === 'postgres';
+  const pg = isKind(p.open.server.kind, 'postgres');
   const mysql8 = p.open.server.variant === 'MySql8';
   const columns = p.draft.columns.map((c) => c.name);
   const cols = ['minmax(0, 1.5fr)', '56px', 'minmax(0, 2.4fr)', ...(pg ? ['110px', 'minmax(0, 1fr)'] : []), ...(mysql8 ? ['64px'] : []), 'minmax(0, 1.2fr)'].join(' ');

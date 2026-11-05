@@ -12,7 +12,7 @@ import { BUILTIN_SNIPPETS } from './snippets';
 import { splitIncremental, splitRanges } from './split';
 import { currentSchemaOf, suggest, type Suggestion } from './provider';
 import type { CompletionScope } from './provider';
-import type { Engine } from '../engine';
+import type { SqlEngine } from '../../engine';
 
 /** `text` with a `|` marking the cursor. */
 function at(marked: string) {
@@ -65,7 +65,7 @@ const pgScope: CompletionScope = {
 
 async function run(
   marked: string,
-  engine: Engine = 'mysql',
+  engine: SqlEngine = 'mysql',
   opts: { containers?: string[]; objects?: CompletionObject[]; ranges?: [number, number][] } = {},
 ) {
   const { text, offset } = at(marked);
@@ -733,7 +733,7 @@ describe('monaco provider: fix round 1', () => {
 
   it('split_ranges_match_the_backend_splitter', () => {
     // The cases of `crates/core/src/sql/split.rs` (statement texts, trimmed, no delimiter).
-    const cases: [string, Engine, string[]][] = [
+    const cases: [string, SqlEngine, string[]][] = [
       ['select 1; select 2', 'mysql', ['select 1', 'select 2']],
       ['select \';\' ; select "a;b"; select `c;d`', 'mysql', ["select ';'", 'select "a;b"', 'select `c;d`']],
       ['select 1 -- x;y\n; select 2 # z;\n;', 'mysql', ['select 1 -- x;y', 'select 2 # z;']],

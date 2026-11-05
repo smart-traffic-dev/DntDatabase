@@ -1,6 +1,7 @@
 import type { DesignOpen, DraftError, TableDef, TableOptionsDef } from '../../bindings';
 import { DraftInput } from './DraftInput';
 import './elementsGrid.css';
+import { isKind } from '../../engine';
 
 type Edit = (recipe: (d: TableDef) => TableDef, coalesce?: string) => void;
 
@@ -49,7 +50,7 @@ function Choice({ label, value, values, disabled, error, onChange }: {
 
 /** The Options section: the table's name; engine, charset, collation and row format on MySQL / MariaDB. */
 export function OptionsPanel({ open, draft, errors, editable, edit }: OptionsPanelProps) {
-  const mysql = open.server.kind === 'mysql';
+  const mysql = isKind(open.server.kind, 'mysql');
   const opts = draft.options;
   const optionErrors = errors.filter((e) => e.element.kind === 'options');
   const errorOf = (field: string) => optionErrors.find((e) => e.field === field)?.message;

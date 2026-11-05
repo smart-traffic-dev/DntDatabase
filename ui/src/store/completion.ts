@@ -4,7 +4,7 @@
 // same window the backend keeps a failed load.
 import { commands, type CompletionObject, type Result } from '../bindings';
 import type { CompletionScope } from '../query/completion/provider';
-import type { Engine } from '../query/engine';
+import { isKind, type SqlEngine } from '../engine';
 import { useConnections } from './connections';
 
 /** How long a failed fetch is remembered before the next completion tries again. */
@@ -57,20 +57,20 @@ const cached = <T>(k: string, load: () => Promise<T | null>, fallback: T): Promi
 const peekOf = <T>(e: Entry<T>): T | undefined => e.settled?.value;
 
 const scopeKey = (connId: string, db: string) => key('scope', connId, db);
-const containersKey = (connId: string, db: string, engine: Engine) =>
-  engine === 'postgres' ? key('containers', connId, db) : key('containers', connId, null);
+const containersKey = (connId: string, db: string, engine: SqlEngine) =>
+  isKind(engine, 'postgres') ? key('containers', connId, db) : key('containers', connId, null);
 const loadScope = (connId: string, db: string) => () => value(commands.completionScope(connId, db));
-const loadContainers = (connId: string, db: string, engine: Engine) => async () => {
+const loadContainers = (connId: string, db: string, engine: SqlEngine) => async () => {
   const list = await value(
-    engine === 'postgres' ? commands.listSchemas(connId, db, false) : commands.listDatabases(connId, false),
+    isKind(engine, 'postgres') ? commands.listSchemas(connId, db, false) : commands.listDatabases(connId, false),
   );
   return list ? list.map((x) => x.name) : null;
 };
 
-function objectsEntry(connId: string, db: string | null, engine: Engine, qualifier: string) {
-  if (engine === 'postgres' && !db) return null;
-  const database = engine === 'postgres' ? (db as string) : qualifier;
-  const schema = engine === 'postgres' ? qualifier : null;
+function objectsEntry(connId: string, db: string | null, engine: SqlEngine, qualifier: string) {
+  if (isKind(engine, 'postgres') && !db) return null;
+  const database = isKind(engine, 'postgres') ? (db as string) : qualifier;
+  const schema = isKind(engine, 'postgres') ? qualifier : null;
   return entry<CompletionObject[] | null>(
     key('objects', connId, database, schema),
     () => value(commands.completionObjects(connId, database, schema)),
@@ -91,15 +91,15 @@ export const useCompletion = {
     return peekOf(entry<CompletionScope | null>(scopeKey(connId, db), loadScope(connId, db), null));
   },
   /** The qualifiers of `x.`: databases on MySQL, schemas of `db` on PostgreSQL. */
-  containers(connId: string, db: string, engine: Engine): Promise<string[]> {
+  containers(connId: string, db: string, engine: SqlEngine): Promise<string[]> {
     return cached<string[]>(containersKey(connId, db, engine), loadContainers(connId, db, engine), []);
   },
   /** `containers` if already loaded, else `undefined` (the load is started). */
-  peekContainers(connId: string, db: string, engine: Engine): string[] | undefined {
+  peekContainers(connId: string, db: string, engine: SqlEngine): string[] | undefined {
     return peekOf(entry<string[]>(containersKey(connId, db, engine), loadContainers(connId, db, engine), []));
   },
   /** Tables and views after `qualifier.` (a MySQL database, or a schema of `db` on PostgreSQL). */
-  objects(connId: string, db: string | null, engine: Engine, qualifier: string): Promise<CompletionObject[] | null> {
+  objects(connId: string, db: string | null, engine: SqlEngine, qualifier: string): Promise<CompletionObject[] | null> {
     const e = objectsEntry(connId, db, engine, qualifier);
     return e ? e.value : Promise.resolve(null);
   },
@@ -107,7 +107,7 @@ export const useCompletion = {
   objectsNow(
     connId: string,
     db: string | null,
-    engine: Engine,
+    engine: SqlEngine,
     qualifier: string,
   ): CompletionObject[] | null | Promise<CompletionObject[] | null> {
     const e = objectsEntry(connId, db, engine, qualifier);

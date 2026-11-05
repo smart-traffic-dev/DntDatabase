@@ -7,6 +7,7 @@ import { CloseIcon, FilterIcon, MoreIcon, NextIcon, PrevIcon, RefreshIcon, StopI
 import { belowRight } from './stripWidth';
 import { selectTopSql } from '../components/newQuery';
 import { dataExportRequest, requestExport, toggleTabFilterBar } from '../dialogs/resultExport';
+import { isKind } from '../engine';
 import { useAppSettings } from '../store/appSettings';
 import { confirmDiscard, readOnlyCopy, rowIdOf, rowKeyPairs, rowRef, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
 import { useObjectData } from '../store/objectData';
@@ -45,7 +46,7 @@ const UNSORTABLE_PG = new Set(['json', 'xml', 'point', 'line', 'lseg', 'box', 'p
 
 /** Whether a column of `dbType` cannot be sorted on (MySQL sorts every type). */
 export function unsortable(engine: 'mysql' | 'postgres', dbType: string): boolean {
-  if (engine !== 'postgres') return false;
+  if (!isKind(engine, 'postgres')) return false;
   let t = dbType.trim().toLowerCase();
   while (t.endsWith('[]')) t = t.slice(0, -2).trim();
   t = t.split('.').pop() ?? t;
@@ -103,7 +104,7 @@ export function filterValueText(v: Value, engine: 'mysql' | 'postgres'): string 
     case 'Array':
       return null;
     case 'Bool':
-      return engine === 'postgres' ? String(v.v) : v.v ? '1' : '0';
+      return isKind(engine, 'postgres') ? String(v.v) : v.v ? '1' : '0';
     case 'Int':
     case 'UInt':
     case 'Float':

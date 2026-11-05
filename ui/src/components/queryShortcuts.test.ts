@@ -1,10 +1,12 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 import { useLayout } from '../store/layout';
 import { usePalette } from '../store/palette';
 import { useQueryDocs } from '../store/queryTabs';
 import { objectTabId, useTabs, type ObjectTabRef } from '../store/tabs';
 import { mockBackend, resetStores } from '../test/backend';
+import { config } from '../test/fixtures/data';
 import { installBrowserGuard } from '../desktop/browserGuard';
 import { onQueryShortcut } from './queryShortcuts';
 
@@ -258,6 +260,8 @@ describe('guards', () => {
 
 describe('Ctrl+Q', () => {
   it('on an open table: a new query on its connection and database selects its rows', () => {
+    // The SELECT is quoted for the connection's engine, so the connection must be known.
+    useConnections.getState().summaries.set('c1', config('c1', 'shop'));
     useTabs.getState().open(objectTab('orders'));
     expect(ctrl('q')).toBe(true);
     const id = useTabs.getState().activeId!;
