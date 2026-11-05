@@ -4,9 +4,11 @@
 //!
 //! - **Precise**, for a command that lexes and parses. Masked: the value of every key
 //!   whose (decoded) name holds `pwd`, `password` or `secret` (any case, at any depth:
-//!   `ldapQueryPassword`, `client_secret`), and every string whose decoded value holds a
-//!   `mongodb://` / `mongodb+srv://` URI with user info. The password of a URI in the
-//!   raw text is also masked up to the last `@` before the host.
+//!   `ldapQueryPassword`, `client_secret`), and every string or regex whose decoded value
+//!   holds a `mongodb://` / `mongodb+srv://` URI with user info (an `@` in the authority,
+//!   before the first `/`, `?` or `#`). The password of a URI in the raw text is also
+//!   masked up to the last `@` of its authority. Comments around and between the tokens
+//!   are coarse.
 //! - **Coarse**, for everything else. That is a run of commands that do not parse,
 //!   together with the text around it up to the commands that parse on either side
 //!   (comments); the text between parsed commands; and comments inside a parsed command.
@@ -25,8 +27,8 @@
 use dnt_core::command::CommandLanguage;
 use dnt_core::redact::Redacted;
 
-use super::parse::split;
-use super::{lex, MongoLanguage, Token, TokenKind};
+use super::parse::{split, use_range};
+use super::{lex_script, MongoLanguage, Piece, Token, TokenKind};
 
 /// What a secret is replaced with.
 pub const MASK: &str = "***";
@@ -63,26 +65,95 @@ fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
-/// A `mongodb://` / `mongodb+srv://` URI with user info (an `@` after the scheme).
-fn has_uri_with_user_info(s: &str) -> bool {
+const SCHEMES: [&str; 2] = ["mongodb://", "mongodb+srv://"];
+
+/// The user info of every `mongodb://` / `mongodb+srv://` URI in `s` (any case), as the
+/// byte offsets of the first `:` in it (if any) and of its last `@`. The user info is in
+/// the authority: the text after `//` up to the first `/`, `?`, `#`, whitespace or
+/// `stop` character, so an `@` in the path or query (`?appName=a@b`) is not one.
+fn user_infos(s: &str, stop: &[u8]) -> Vec<(Option<usize>, usize)> {
     let lower = s.to_ascii_lowercase();
-    ["mongodb://", "mongodb+srv://"].iter().any(|scheme| {
-        lower
-            .find(scheme)
-            .is_some_and(|i| lower[i + scheme.len()..].contains('@'))
-    })
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    for scheme in SCHEMES {
+        let mut from = 0;
+        while let Some(i) = lower.get(from..).and_then(|r| r.find(scheme)) {
+            let begin = from + i + scheme.len();
+            let mut end = begin;
+            while end < b.len()
+                && !matches!(b[end], b'/' | b'?' | b'#')
+                && !b[end].is_ascii_whitespace()
+                && !stop.contains(&b[end])
+            {
+                end += 1;
+            }
+            if let Some(at) = b[begin..end].iter().rposition(|&c| c == b'@') {
+                let colon = b[begin..begin + at].iter().position(|&c| c == b':');
+                out.push((colon.map(|c| begin + c), begin + at));
+            }
+            from = begin;
+        }
+    }
+    out
+}
+
+/// A `mongodb://` / `mongodb+srv://` URI with user info, in a decoded string.
+fn has_uri_with_user_info(s: &str) -> bool {
+    !user_infos(s, &[]).is_empty()
+}
+
+/// The source of a regex as the text it matches, near enough to find a URI in it: `\/`
+/// is `/`, and `\x40` and `\u{40}` are `@`.
+fn regex_text(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut it = pattern.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let hex = |it: &mut std::iter::Peekable<std::str::Chars>, n: usize| {
+            let digits: String = (0..n)
+                .filter_map(|_| it.next_if(char::is_ascii_hexdigit))
+                .collect();
+            u32::from_str_radix(&digits, 16)
+                .ok()
+                .and_then(char::from_u32)
+        };
+        match it.next() {
+            Some('x') => out.extend(hex(&mut it, 2)),
+            Some('u') if it.next_if_eq(&'{').is_some() => {
+                out.extend(hex(&mut it, 6));
+                it.next_if_eq(&'}');
+            }
+            Some('u') => out.extend(hex(&mut it, 4)),
+            Some(c) => out.push(c),
+            None => {}
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------
 // Precise: a command that parses
 
 /// The secrets of the parsed command `span` (at byte `start` of `text`), and the
-/// comments between its tokens (coarse).
+/// comments around and between its tokens (coarse).
 fn precise(text: &str, start: usize, span: &str, out: &mut Vec<(usize, usize)>) {
-    let Ok(toks) = lex(span) else {
-        // `use 2024_logs`: parses, but is not JavaScript tokens.
-        coarse(text, start, start + span.len(), out);
+    // `use` takes its name raw (`use 2024_pwd_logs`, `use a'b`): what is around the
+    // keyword and the name is comments, read as the parser reads them.
+    if let Some((kw, end)) = use_range(span) {
+        coarse(text, start, start + kw, out);
+        coarse(text, start + end, start + span.len(), out);
         return;
+    }
+    let mut pieces = lex_script(span);
+    let toks = match (pieces.pop(), pieces.is_empty()) {
+        (Some(Piece::Tokens(toks)), true) if !toks.is_empty() => toks,
+        _ => {
+            coarse(text, start, start + span.len(), out);
+            return;
+        }
     };
     let toks: Vec<Token> = toks
         .into_iter()
@@ -104,12 +175,19 @@ fn precise(text: &str, start: usize, span: &str, out: &mut Vec<(usize, usize)>) 
             TokenKind::Str(value) if has_uri_with_user_info(value) => {
                 out.push((t.start, t.end));
             }
+            TokenKind::Regex { pattern, .. } if has_uri_with_user_info(&regex_text(pattern)) => {
+                out.push((t.start, t.end));
+            }
             _ => {}
         }
     }
-    for w in toks.windows(2) {
-        coarse(text, w[0].end, w[1].start, out);
+    // Comments: before the first token, between tokens, after the last one.
+    let mut at = start;
+    for t in &toks {
+        coarse(text, at, t.start, out);
+        at = t.end;
     }
+    coarse(text, at, start + span.len(), out);
 }
 
 fn punct(toks: &[Token], i: usize, c: char) -> bool {
@@ -198,26 +276,13 @@ fn has_marker(s: &str) -> bool {
 // ---------------------------------------------------------------------------------
 // URIs in the raw text
 
-/// The password of every `mongodb://` / `mongodb+srv://` URI: from the first `:` of the
-/// user info to the last `@` before the next whitespace.
+/// The password of every `mongodb://` / `mongodb+srv://` URI written out in the text:
+/// from the first `:` of the user info to its last `@`. The authority also ends at a
+/// quote, which ends the string holding the URI.
 fn uri_ranges(text: &str, out: &mut Vec<(usize, usize)>) {
-    let lower = text.to_ascii_lowercase();
-    let b = text.as_bytes();
-    for scheme in ["mongodb://", "mongodb+srv://"] {
-        let mut from = 0;
-        while let Some(i) = lower.get(from..).and_then(|s| s.find(scheme)) {
-            let s = from + i + scheme.len();
-            let mut e = s;
-            while e < b.len() && !b[e].is_ascii_whitespace() {
-                e += 1;
-            }
-            let at = b[s..e].iter().rposition(|&c| c == b'@').map(|p| s + p);
-            if let Some(at) = at {
-                if let Some(colon) = b[s..at].iter().position(|&c| c == b':') {
-                    out.push((s + colon + 1, at));
-                }
-            }
-            from = s;
+    for (colon, at) in user_infos(text, b"'\"`") {
+        if let Some(colon) = colon {
+            out.push((colon + 1, at));
         }
     }
 }
@@ -482,6 +547,94 @@ mod tests {
             ),
             // `auth` only as a whole word.
             ("db.c.find({author: 'open", "db.c.find({author: 'open"),
+        ]);
+    }
+
+    #[test]
+    fn redacts_comments_at_the_edges_of_a_command() {
+        // Comments before the first token and after the last one of a command are read
+        // too (here the bad region is one command, so they are coarse).
+        for text in [
+            "'}\\\ndb.c.find()//db.c.insertOne({pwd: 'HUNTER9'})})\n\"",
+            "/*)\r/*/*db.c.insertOne({pwd: 'HUNTER9'})\":/*/db.d.drop()",
+            "use 2024_pwd_logs'oopsa\u{301}0x //*/0xdb.db.changeUserPassword('u', 'HUNTER9')\
+             db.c.find({u: 'MONGODB+SRV://u:HUNTER9@h'}) x",
+        ] {
+            hidden(text, &["HUNTER9"]);
+        }
+        check(&[
+            ("/* pwd: x */ use test", "*** use test"),
+            ("use test // secret: x", "use test ***"),
+            ("use test; /* plain */", "use test; /* plain */"),
+        ]);
+    }
+
+    #[test]
+    fn uri_user_info_is_in_the_authority() {
+        check(&[
+            // An `@` after the host is not user info.
+            (
+                "db.c.find({a: 'see mongodb://h/db or mail u@x.com'})",
+                "db.c.find({a: 'see mongodb://h/db or mail u@x.com'})",
+            ),
+            (
+                "db.c.find({a: 'mongodb://h/x?appName=a@b'})",
+                "db.c.find({a: 'mongodb://h/x?appName=a@b'})",
+            ),
+            (
+                "db.c.find({a: 'mongodb://h#x@y'})",
+                "db.c.find({a: 'mongodb://h#x@y'})",
+            ),
+            // The raw-text rule stops at the quote that ends the string.
+            (
+                "db.c.insertOne({a:'mongodb://h:1/x',b:'u@y'})",
+                "db.c.insertOne({a:'mongodb://h:1/x',b:'u@y'})",
+            ),
+            // User info is masked, in any URI of the string.
+            (
+                "db.c.insertOne({u: 'mongodb://u:p@h'})",
+                "db.c.insertOne({u: ***})",
+            ),
+            (
+                "db.c.insertOne({u: 'mongodb://h/x mongodb://u:p@h2'})",
+                "db.c.insertOne({u: ***})",
+            ),
+            (
+                "db.c.insertOne({u: 'mongodb://app:p@ss@h:1/x?a=b@c'})",
+                "db.c.insertOne({u: ***})",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn redacts_uri_in_a_regex() {
+        check(&[
+            (
+                "db.c.find({a: /mongodb:\\/\\/u:hunter2@h/})",
+                "db.c.find({a: ***})",
+            ),
+            (
+                "db.c.find({a: /mongodb:\\/\\/u:hunter2\\x40h/i})",
+                "db.c.find({a: ***})",
+            ),
+            (
+                "db.c.find({a: /mongodb:\\/\\/u:hunter2\\u{40}h/u})",
+                "db.c.find({a: ***})",
+            ),
+            (
+                "db.c.find({a: /mongodb:\\/\\/h\\/db/})",
+                "db.c.find({a: /mongodb:\\/\\/h\\/db/})",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn use_name_is_not_a_marker() {
+        check(&[
+            ("use 2024_pwd_logs", "use 2024_pwd_logs"),
+            ("use 2024_pwd_logs\nshow dbs", "use 2024_pwd_logs\nshow dbs"),
+            ("use 'secret_db';", "use 'secret_db';"),
+            ("use 2024_pwd_logs // pwd", "use 2024_pwd_logs ***"),
         ]);
     }
 

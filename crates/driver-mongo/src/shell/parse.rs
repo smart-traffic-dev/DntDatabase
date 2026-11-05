@@ -202,10 +202,11 @@ const JS_OPERATORS: &str = "=+-*/%<>!&|?~^";
 /// the offset a classification error ([`super::classify::classify`]) is reported at.
 pub fn parse_command(text: &str) -> Result<(ShellCommand, usize), ShellError> {
     // `use` takes a raw name (`use 2024-logs`), which need not lex.
-    let lead = text.len() - text.trim_start().len();
-    if starts_with_use(&text[lead..]) {
-        return parse_use(text, lead + "use".len()).map(|(name, at)| (ShellCommand::Use(name), at));
+    if let Some(kw) = use_keyword(text) {
+        return parse_use(text, kw + "use".len())
+            .map(|(name, at, _)| (ShellCommand::Use(name), at));
     }
+    let lead = text.len() - text.trim_start().len();
     let mut toks = lex(text)?;
     while matches!(
         toks.last(),
@@ -225,14 +226,8 @@ pub fn parse_command(text: &str) -> Result<(ShellCommand, usize), ShellError> {
         return Err(ShellError::new("Expected a command", lead.min(text.len())));
     };
     match &first.kind {
-        // Behind a comment.
-        TokenKind::Ident(w) if w == "use" => {
-            if starts_with_use(text.get(first.start..).unwrap_or("")) {
-                parse_use(text, first.end).map(|(name, at)| (ShellCommand::Use(name), at))
-            } else {
-                Err(ShellError::new(JS_REFUSED, first.start))
-            }
-        }
+        // `use` behind a comment is found by `use_keyword`; this is `use(…)`, `use.x`.
+        TokenKind::Ident(w) if w == "use" => Err(ShellError::new(JS_REFUSED, first.start)),
         TokenKind::Ident(w) if w == "show" => p.show().map(|s| (s, first.start)),
         TokenKind::Ident(w) if w == "db" => p.db_stmt(),
         _ => Err(ShellError::new(JS_REFUSED, first.start)),
@@ -248,9 +243,43 @@ fn starts_with_use(s: &str) -> bool {
     })
 }
 
+/// Where the `use` keyword of a `use` command starts: after leading whitespace, or behind
+/// comments (the first token, when the text before the keyword lexes).
+fn use_keyword(text: &str) -> Option<usize> {
+    let lead = text.len() - text.trim_start().len();
+    if starts_with_use(&text[lead..]) {
+        return Some(lead);
+    }
+    // `lex` may fail after the keyword (`use 2024-logs`): lex only up to a `use`, which
+    // must be the first token (not one in a comment: `/* use */ use x`, `// use⏎use x`).
+    for (kw, _) in text.match_indices("use").take(16) {
+        match lex(&text[..kw]) {
+            Ok(before) if before.is_empty() => {}
+            Ok(_) => return None,
+            Err(_) => continue,
+        }
+        let end = kw + "use".len();
+        if lex(&text[..end]).is_ok_and(|t| t.len() == 1 && t[0].start == kw) {
+            return starts_with_use(&text[kw..]).then_some(kw);
+        }
+    }
+    None
+}
+
+/// For a `use` command: where its `use` keyword starts and where its name ends (the raw
+/// text, or the string literal with its quotes). Before the keyword and after the name
+/// there are only whitespace, comments and `;`. `None` for any other text, and for a
+/// `use` that does not parse.
+pub(crate) fn use_range(text: &str) -> Option<(usize, usize)> {
+    let kw = use_keyword(text)?;
+    let (_, _, end) = parse_use(text, kw + "use".len()).ok()?;
+    Some((kw, end))
+}
+
 /// The database name of `use`, which starts after byte `after`: a string literal, or
 /// the raw text up to whitespace or `;`. Only whitespace, comments and `;` may follow.
-fn parse_use(text: &str, after: usize) -> Result<(String, usize), ShellError> {
+/// Returns the name, and where it starts and ends.
+fn parse_use(text: &str, after: usize) -> Result<(String, usize, usize), ShellError> {
     let shift = |e: ShellError, by: usize| ShellError::new(e.message, e.offset + by);
     let rest = &text[after..];
     let at = after + (rest.len() - rest.trim_start().len());
@@ -278,7 +307,7 @@ fn parse_use(text: &str, after: usize) -> Result<(String, usize), ShellError> {
     if !valid_db_name(&name) {
         return Err(ShellError::new(INVALID_DB, at));
     }
-    Ok((name, at))
+    Ok((name, at, tail_at))
 }
 
 /// One call argument and where it starts.
@@ -956,15 +985,18 @@ impl<'a> Parser<'a> {
 
 /// The commands of a script (spec §4.1): a command ends at `;`, or at the end of a line
 /// once its brackets are closed, unless the next line (past blank lines and comments)
-/// starts with `.`. Strings, regexes and comments never split. Never panics; lines that
-/// do not lex are one command each, and the rules resume after them.
+/// starts with `.`. Strings, regexes and comments never split. Never panics; text that
+/// does not lex (a bad line, with the lines back to where an unfinished string, template
+/// or comment began) is one command, and the rules resume after it.
 pub fn split(text: &str) -> Vec<CommandSpan> {
     let mut out = Vec::new();
     for piece in lex_script(text) {
         match piece {
             Piece::Tokens(tokens) => token_spans(text, &tokens, &mut out),
-            Piece::Raw(from, to) => line_spans(text, from, to, &mut out),
-            Piece::Unclosed(from, to) => {
+            // Text that does not lex is one command, however many lines it has: read a
+            // line at a time, what JavaScript reads as a comment, string or template
+            // could become a command of its own (`/* off:⏎db.c.drop()⏎*/ 'oops`).
+            Piece::Raw(from, to) | Piece::Unclosed(from, to) => {
                 let body = text.get(from..to).unwrap_or_default();
                 let start = from + (body.len() - body.trim_start().len());
                 let end = from + body.trim_end().len();
@@ -1023,23 +1055,6 @@ fn token_spans(text: &str, tokens: &[Token], out: &mut Vec<CommandSpan>) {
     // Brackets still open at the end: the rest is one command (it will not parse).
     if let (Some(f), Some(last)) = (first, tokens.last()) {
         out.push(span(tokens[f].start, last.end));
-    }
-}
-
-/// One command per non-blank line of `text[from..to]` (text that does not lex).
-fn line_spans(text: &str, from: usize, to: usize, out: &mut Vec<CommandSpan>) {
-    let mut at = from;
-    for line in text
-        .get(from..to)
-        .unwrap_or_default()
-        .split_inclusive(['\n', '\r'])
-    {
-        let body = line.trim();
-        if !body.is_empty() && !body.starts_with("//") {
-            let start = at + (line.len() - line.trim_start().len());
-            out.push(span(text, start, start + body.len()));
-        }
-        at += line.len();
     }
 }
 
@@ -1235,6 +1250,85 @@ mod tests {
             spans("db.a.find(); use 2024_logs\ndb.b.find()"),
             ["db.a.find()", "use 2024_logs", "db.b.find()"]
         );
+    }
+
+    #[test]
+    fn split_never_runs_what_javascript_reads_as_text() {
+        for text in [
+            // A bad region over lines is one command (a construct that ended before the
+            // bad line, read a line at a time, would yield its content as commands).
+            "/* disabled:\ndb.c.drop()\n*/ x = 'oops",
+            "db.x.insertOne({a: `line one\ndb.c.drop()\nend`, b: 'oops",
+            "/* note\ndb.c.drop() // */ x 'oops",
+            "db.x.insertOne({a: `note\ndb.c.drop()//`, b: 'oops",
+            "db.x.insertOne({a: 'note \\\ndb.c.drop()//', b: 'oops",
+            "/*)\r/*/*db.c.insertOne({pwd: 'HUNTER9'})\":/*/db.c.drop()",
+            "'}\\\ndb.c.drop()//db.c.insertOne({pwd: 'HUNTER9'})})\n\"",
+            // After an error JavaScript may go on into a template, a comment or a
+            // continued string on the same line (`\1` and `1_0` are JavaScript).
+            "'\\1' + `\ndb.c.drop()\n`",
+            "x = 1_0 /*\ndb.c.drop()\n*/",
+            "x = 1_0 + 'a\\\ndb.c.drop()'",
+            // `/` that JavaScript reads the other way.
+            "a++ /x/*\ndb.c.drop()\n*/",
+            "typeof /`/ + `\ndb.c.drop()\n`",
+            "if (a) /`/ + `\ndb.c.drop()\n`",
+            "x)\n./ db.c.find()//;db.c.drop()",
+            "await)\n./***/ /mongodb://;db.c.drop()",
+            "a\u{301}/x//;db.c.drop()",
+            "f(1_0)\n/x//;db.c.drop()",
+            "db.  --> ('pwd'db['c'].find()\r/x//* c */;db.c.drop()",
+            // Comments JavaScript has and the lexer did not, or ended elsewhere.
+            "// a\r/*\ndb.c.drop()\n*/",
+            "// a\u{2028}/*\ndb.c.drop()\n*/",
+            "<!-- x; db.c.drop()",
+            "x\n--> ; db.c.drop()",
+            "#! x; db.c.drop()",
+        ] {
+            for s in spans(text) {
+                if let Ok(p) = MongoLanguage.parse(&s) {
+                    assert_ne!(p.name, "drop", "{text:?} runs {s:?}");
+                }
+            }
+        }
+        // What JavaScript reads the same way still splits as before.
+        for (text, want) in [
+            (
+                "db.c.find({a: /x/})\ndb.d.find({b: [/y/i, /z/]})",
+                vec!["db.c.find({a: /x/})", "db.d.find({b: [/y/i, /z/]})"],
+            ),
+            (
+                "db.c.find({a: 1}) // note\rdb.d.find()",
+                vec!["db.c.find({a: 1})", "db.d.find()"],
+            ),
+            ("\u{feff}show dbs", vec!["show dbs"]),
+            (
+                "db.c.find({x: 'bad)\ndb.d.find()",
+                vec!["db.c.find({x: 'bad)", "db.d.find()"],
+            ),
+        ] {
+            assert_eq!(spans(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn use_behind_a_comment() {
+        assert_eq!(cmd("/* use */ use x"), ShellCommand::Use("x".into()));
+        assert_eq!(cmd("// use\nuse x"), ShellCommand::Use("x".into()));
+        assert_eq!(
+            cmd("// use\r\n/* use */use 01-x"),
+            ShellCommand::Use("01-x".into())
+        );
+        assert_eq!(parsed("db.c.find({a: 'use x'})").name, "find");
+        assert_eq!(
+            cmd("/* note */ use 2024-logs"),
+            ShellCommand::Use("2024-logs".into())
+        );
+        assert_eq!(err("/* c */ use(1)").0, JS_REFUSED);
+        assert_eq!(use_range("  use x // c"), Some((2, 7)));
+        assert_eq!(use_range("/* c */ use 'a-b';"), Some((8, 17)));
+        assert_eq!(use_range("use 'a b'"), None);
+        assert_eq!(use_range("db.c.find()"), None);
     }
 
     #[test]

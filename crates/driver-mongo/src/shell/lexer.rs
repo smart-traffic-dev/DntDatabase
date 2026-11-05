@@ -34,9 +34,61 @@ pub fn lex(text: &str) -> Result<Vec<Token>, ShellError> {
         src: text,
         pos: 0,
         out: Vec::new(),
+        strict: false,
+        resumed: false,
     };
     lx.run()?;
     Ok(lx.out)
+}
+
+/// What [`lex_strict`] reports where JavaScript may read the text another way.
+pub(crate) const NOT_LIKE_JS: &str = "JavaScript may read this differently";
+
+/// [`lex`], but also fails ([`NOT_LIKE_JS`]) where JavaScript may read the text another
+/// way than `lex` does, so that splitting never takes what JavaScript reads as a comment,
+/// string or template for a command:
+///
+/// - a `/` that JavaScript may read as division or as a regex, either way: after `)`, `}`,
+///   `.`, a keyword such as `typeof` or `return` (`if (a) /x/`, `typeof /x/`), or `++` /
+///   `--` (`a++ /x/`); and, when `resumed` (the text goes on from text that was not
+///   lexed, so what came before is not known), before any other token;
+/// - an HTML-like comment (`<!--`, `-->`) or a hashbang (`#!`);
+/// - a non-ASCII character outside strings and comments that is neither whitespace nor
+///   the start of a name (a combining mark, which JavaScript takes into a name).
+pub(crate) fn lex_strict(text: &str, resumed: bool) -> Result<Vec<Token>, ShellError> {
+    let mut lx = Lexer {
+        src: text,
+        pos: 0,
+        out: Vec::new(),
+        strict: true,
+        resumed,
+    };
+    lx.run()?;
+    Ok(lx.out)
+}
+
+/// Keywords after which JavaScript reads a `/` as the start of a regex.
+const BEFORE_EXPRESSION: &[&str] = &[
+    "await",
+    "case",
+    "delete",
+    "do",
+    "else",
+    "extends",
+    "in",
+    "instanceof",
+    "new",
+    "of",
+    "return",
+    "throw",
+    "typeof",
+    "void",
+    "yield",
+];
+
+/// A JavaScript line terminator (a `//` comment ends at one).
+fn is_line_end(c: char) -> bool {
+    matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
 fn is_ident_start(c: char) -> bool {
@@ -51,6 +103,14 @@ struct Lexer<'a> {
     src: &'a str,
     pos: usize,
     out: Vec<Token>,
+    /// See [`lex_strict`].
+    strict: bool,
+    resumed: bool,
+}
+
+/// Whitespace as JavaScript has it: Unicode whitespace and U+FEFF.
+fn is_space(c: char) -> bool {
+    c.is_whitespace() || c == '\u{feff}'
 }
 
 impl Lexer<'_> {
@@ -80,13 +140,16 @@ impl Lexer<'_> {
     fn run(&mut self) -> Result<(), ShellError> {
         while let Some(c) = self.peek() {
             let start = self.pos;
-            if c.is_whitespace() {
+            if is_space(c) {
                 self.bump();
                 continue;
             }
+            if self.strict && self.not_like_js(c) {
+                return Err(ShellError::new(NOT_LIKE_JS, start));
+            }
             let kind = match (c, self.peek2()) {
                 ('/', Some('/')) => {
-                    self.eat_while(|c| c != '\n');
+                    self.eat_while(|c| !is_line_end(c));
                     continue;
                 }
                 ('/', Some('*')) => {
@@ -129,6 +192,34 @@ impl Lexer<'_> {
         }
     }
 
+    /// Whether the text at `c` (the next character) is read another way by JavaScript
+    /// than by this lexer (see [`lex_strict`]).
+    fn not_like_js(&self, c: char) -> bool {
+        let rest = &self.src[self.pos..];
+        if rest.starts_with("<!--") || rest.starts_with("-->") || rest.starts_with("#!") {
+            return true;
+        }
+        // Not whitespace here, and not a name: it would be a punctuation token.
+        if !c.is_ascii() && !is_ident_start(c) {
+            return true;
+        }
+        if c != '/' || rest.starts_with("//") || rest.starts_with("/*") {
+            return false;
+        }
+        let n = self.out.len();
+        match self.out.last().map(|t| &t.kind) {
+            None => self.resumed,
+            Some(TokenKind::Punct(')' | '}' | '.')) => true,
+            Some(TokenKind::Ident(w)) => BEFORE_EXPRESSION.contains(&w.as_str()),
+            // `a++ /x/`: JavaScript reads division.
+            Some(TokenKind::Punct(p @ ('+' | '-'))) if n >= 2 => {
+                let (a, b) = (&self.out[n - 2], &self.out[n - 1]);
+                a.kind == TokenKind::Punct(*p) && a.end == b.start
+            }
+            _ => false,
+        }
+    }
+
     fn block_comment(&mut self, start: usize) -> Result<(), ShellError> {
         match self.src[start + 2..].find("*/") {
             Some(i) => {
@@ -145,9 +236,10 @@ impl Lexer<'_> {
         let mut in_class = false;
         loop {
             match self.bump().ok_or_else(unterminated)? {
-                '\n' | '\r' => return Err(unterminated()),
+                c if is_line_end(c) => return Err(unterminated()),
                 '\\' => match self.bump() {
-                    None | Some('\n' | '\r') => return Err(unterminated()),
+                    None => return Err(unterminated()),
+                    Some(c) if is_line_end(c) => return Err(unterminated()),
                     Some(_) => {}
                 },
                 '[' => in_class = true,
@@ -463,6 +555,65 @@ line;` 'é\u{1F600}\x41\/\d' "😀""#
             (e.message.as_str(), e.offset),
             ("Unterminated regular expression", 2)
         );
+    }
+
+    #[test]
+    fn strict_refuses_what_javascript_reads_another_way() {
+        for (text, at) in [
+            ("if (a) /x/", 7),
+            ("{} /x/", 3),
+            ("typeof /x/", 7),
+            ("return /x/", 7),
+            ("a++ /x/", 4),
+            ("a-- /x/", 4),
+            ("a./x/", 2),
+            ("x <!-- y", 2),
+            ("--> y", 0),
+            ("#!x", 0),
+            ("a\u{301}", 1),
+        ] {
+            let e = lex_strict(text, false).unwrap_err();
+            assert_eq!(
+                (e.message.as_str(), e.offset),
+                (NOT_LIKE_JS, at),
+                "{text:?}"
+            );
+            // `lex` reads them as before.
+            lex(text).unwrap();
+        }
+        // Resumed after text that was not lexed, a leading `/` could be either.
+        assert_eq!(lex_strict("/x/", true).unwrap_err().offset, 0);
+        lex_strict("/x/", false).unwrap();
+        lex_strict("// c\n/* d */ x", true).unwrap();
+        // What JavaScript reads the same way.
+        for text in [
+            "db.c.find({a: /x/, b: [/y/i]}, /z/)",
+            "a / b",
+            "[1] / 2",
+            "'s' / 2",
+            "a + +/x/",
+            "x = /a/",
+            "new Date()",
+            "é",
+        ] {
+            assert_eq!(lex_strict(text, false), lex(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn line_comments_end_at_every_line_terminator() {
+        for text in [
+            "a // b\rc",
+            "a // b\u{2028}c",
+            "a // b\u{2029}c",
+            "a // b\r\nc",
+        ] {
+            assert_eq!(kinds(text), vec![ident("a"), ident("c")], "{text:?}");
+        }
+        // U+FEFF is whitespace, as in JavaScript.
+        assert_eq!(kinds("\u{feff}a\u{feff}"), vec![ident("a")]);
+        let e = lex("x(/a\u{2028}/)").unwrap_err();
+        assert_eq!(e.message, "Unterminated regular expression");
     }
 
     #[test]

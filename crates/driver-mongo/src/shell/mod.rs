@@ -13,6 +13,7 @@ use dnt_core::command::{CommandLanguage, CommandParseError, CommandSpan, ParsedC
 use dnt_core::redact::Redacted;
 
 pub use classify::{has_out_or_merge, OutKind};
+use lexer::lex_strict;
 pub use lexer::{lex, Token, TokenKind};
 pub use literal::{parse_document, parse_literal};
 pub use parse::{CollMethod, DbMethod, Modifier, ShellCommand, ShowWhat, Verbosity, JS_REFUSED};
@@ -91,7 +92,8 @@ const MAX_LEX_RETRIES: usize = 16;
 pub(crate) enum Piece {
     /// The tokens of text that lexes; offsets are bytes of the whole script.
     Tokens(Vec<Token>),
-    /// Whole lines (a byte range of the script) that do not lex.
+    /// Whole lines (a byte range of the script) that do not lex: one command, however
+    /// many lines it has.
     Raw(usize, usize),
     /// From an unterminated template literal or comment to the end of the script (a
     /// byte range): nothing in it may be read as a command of its own.
@@ -99,11 +101,13 @@ pub(crate) enum Piece {
 }
 
 /// Lexes a script for splitting and redaction, which must work on any text, into
-/// pieces in order. When the text stops lexing, the lines from the bad one (backed off
-/// to the line where an unfinished string or comment began) up to the end of the bad
-/// line are one [`Piece::Raw`], and lexing resumes on the next line. An unterminated
-/// template literal or comment never ends, so from where it begins the rest of the text
-/// is one [`Piece::Unclosed`].
+/// pieces in order. Lexing is strict ([`lex_strict`]): where JavaScript may read the
+/// text another way, it stops as on a lex error. When the text stops lexing, the lines
+/// from the bad one (backed off to the line where an unfinished string or comment
+/// began) up to the end of the bad line are one [`Piece::Raw`], and lexing resumes on
+/// the next line. An unterminated template literal or comment never ends, so from where
+/// it begins the rest of the text is one [`Piece::Unclosed`]; so is the rest of the text
+/// from a bad region whose line, from the error on, could begin such a construct.
 ///
 /// The name after a `use` that starts a statement (bracket depth 0, at a line start or
 /// after `;`) is one name token whatever raw-name characters it holds (`use 2024_logs`,
@@ -116,7 +120,7 @@ pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
         let Some(rest) = text.get(pos..) else {
             break;
         };
-        let (bad, message) = match lex(rest) {
+        let (bad, message) = match lex_strict(rest, pos > 0) {
             Ok(t) => {
                 cur.extend(shifted(t, pos));
                 break;
@@ -148,6 +152,14 @@ pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
         if end <= pos {
             end = text.len();
         }
+        // From the error on, this lexer no longer knows how JavaScript reads the line.
+        // When the rest of it could open something that runs over lines (a template, a
+        // block comment, a string continued with `\`), nothing after it may be read as a
+        // command of its own either.
+        if may_open_lines(text.get(bad..end).unwrap_or_default()) {
+            pieces.push(Piece::Unclosed(cut, text.len()));
+            break;
+        }
         pieces.push(Piece::Raw(cut, end));
         pos = end;
     }
@@ -155,6 +167,12 @@ pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
         pieces.push(Piece::Tokens(cur));
     }
     pieces
+}
+
+/// Whether the rest of a line (`s`, its line break included) holds what could begin a
+/// construct that runs over lines: a backtick, `/*`, or a `\` before the line break.
+fn may_open_lines(s: &str) -> bool {
+    s.contains('`') || s.contains("/*") || s.trim_end_matches(['\n', '\r']).ends_with('\\')
 }
 
 /// When the lex error `message` at `bad` (lexing from `pos`) is inside a construct that
@@ -168,7 +186,7 @@ fn unclosed_begin(text: &str, pos: usize, bad: usize, message: &str) -> Option<u
     const TEMPLATE: &str = "Unterminated template literal";
     const STRING: &str = "Unterminated string";
     // Lexing up to the error ends inside the construct holding it, at its first quote.
-    let enclosing = || match lex(text.get(pos..bad)?) {
+    let enclosing = || match lex_strict(text.get(pos..bad)?, pos > 0) {
         Err(e) if e.message == TEMPLATE => Some(pos + e.offset),
         Err(e) if e.message == STRING && continues_over_a_line(text, pos + e.offset) => {
             Some(pos + e.offset)
@@ -245,7 +263,7 @@ fn lexable_prefix(text: &str, pos: usize, mut cut: usize) -> (usize, Vec<Token>)
         let Some(prefix) = text.get(pos..cut) else {
             break;
         };
-        match lex(prefix) {
+        match lex_strict(prefix, pos > 0) {
             Ok(t) => return (cut, shifted(t, pos)),
             Err(e) => {
                 let next = line_start(text, pos + e.offset).max(pos);
@@ -297,7 +315,7 @@ fn use_name(text: &str, pos: usize, bad: usize, cur: &[Token]) -> Option<Vec<Tok
     {
         return None;
     }
-    let mut tokens = shifted(lex(text.get(pos..kw)?).ok()?, pos);
+    let mut tokens = shifted(lex_strict(text.get(pos..kw)?, pos > 0).ok()?, pos);
     // A statement start: depth 0 (as `split` counts it), after `;` or a line break.
     let depth = cur.iter().chain(&tokens).fold(0usize, |d, t| match t.kind {
         TokenKind::Punct('(' | '[' | '{') => d + 1,
@@ -308,7 +326,9 @@ fn use_name(text: &str, pos: usize, bad: usize, cur: &[Token]) -> Option<Vec<Tok
     let starts = match tokens.last().or(cur.last()) {
         None => true,
         Some(t) if t.kind == TokenKind::Punct(';') => true,
-        Some(t) => text.get(t.end..kw).is_some_and(|gap| gap.contains('\n')),
+        Some(t) => text
+            .get(t.end..kw)
+            .is_some_and(|gap| gap.contains(['\n', '\r'])),
     };
     if depth != 0 || !starts {
         return None;
@@ -358,6 +378,34 @@ mod tests {
         assert_eq!(pieces("f(`\\1\n`)\ng()"), ["f (", "<`\\1\n`)\ng()>"]);
         // A bad escape in a string is one bad line.
         assert_eq!(pieces("f('\\1')\ng()"), ["[f('\\1')\n]", "g ( )"]);
+        // From an error on, a backtick, `/*` or a `\` at the line end may begin something
+        // JavaScript reads over lines: the rest is one piece.
+        assert_eq!(pieces("a\nb 1_0 /*\nc()\n*/"), ["a", "<b 1_0 /*\nc()\n*/>"]);
+        assert_eq!(pieces("f('\\1' + `\nc()\n`)"), ["<f('\\1' + `\nc()\n`)>"]);
+        assert_eq!(pieces("a 1_0 'x \\\nc()'"), ["<a 1_0 'x \\\nc()'>"]);
+        // A backtick before the error is not one.
+        assert_eq!(pieces("`t` 'bad\nc()"), ["[`t` 'bad\n]", "c ( )"]);
+    }
+
+    #[test]
+    fn lex_script_is_strict() {
+        // Where JavaScript may read the text another way, the line is a bad one.
+        assert_eq!(
+            pieces("f()\nif (a) /x/\ng()"),
+            ["f ( )", "[if (a) /x/\n]", "g ( )"]
+        );
+        // Lexing resumed after a bad line does not know what came before a `/`.
+        assert_eq!(
+            pieces("f(1_0)\n/x/\ng()"),
+            ["[f(1_0)\n]", "[/x/\n]", "g ( )"]
+        );
+        // A bad region over lines is kept whole.
+        assert_eq!(
+            pieces("/* off:\ndb.c.drop()\n*/ x = 'oops"),
+            ["[/* off:\ndb.c.drop()\n*/ x = 'oops]"]
+        );
+        // A lone CR starts a statement for `use` too.
+        assert_eq!(pieces("a()\ruse 2024_x"), ["a ( ) use 2024_x"]);
     }
 
     #[test]
