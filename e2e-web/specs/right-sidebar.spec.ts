@@ -13,7 +13,7 @@ test.describe('right sidebar', () => {
     await expect(bar).toBeVisible();
     expect((await bar.boundingBox())?.width).toBe(40);
     await expect(page.getByTestId('history-view')).toHaveCount(0);
-    await expect(bar.getByRole('button')).toHaveCount(2);
+    await expect(bar.getByRole('button')).toHaveCount(3);
 
     // Open from the History icon.
     await bar.getByRole('button', { name: 'History' }).click();

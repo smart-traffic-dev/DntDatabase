@@ -96,10 +96,15 @@ export function ComboInput({ label, value, options, placeholder, disabled, error
   }, [open]);
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'ArrowDown') {
+    // In a designer grid a closed list leaves ↑ / ↓ to the grid (next row, as Navicat);
+    // Alt+↓ or F4 opens it there. Elsewhere ↓ opens it.
+    const inGrid = !!e.currentTarget.closest('.dz-grid');
+    if (!open && (e.key === 'F4' || (e.key === 'ArrowDown' && (e.altKey || !inGrid)))) {
       e.preventDefault();
-      if (!open) show('');
-      else setActive((i) => Math.max(0, Math.min(i + 1, ordered.length - 1)));
+      show('');
+    } else if (e.key === 'ArrowDown' && open) {
+      e.preventDefault();
+      setActive((i) => Math.max(0, Math.min(i + 1, ordered.length - 1)));
     } else if (e.key === 'ArrowUp' && open) {
       e.preventDefault();
       setActive((i) => Math.max(i - 1, 0));

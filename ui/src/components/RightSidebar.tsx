@@ -3,7 +3,8 @@ import { JobsPanel } from '../jobs/JobsPanel';
 import { RIGHT_DEFAULT, RIGHT_MAX, RIGHT_MIN, useLayout, type RightActivity } from '../store/layout';
 import { ErrorBoundary } from './ErrorBoundary';
 import { HistoryPanel } from './HistoryPanel';
-import { HistoryIcon, JobsIcon } from './icons';
+import { HistoryIcon, JobsIcon, ObjectInfoIcon } from './icons';
+import { ObjectInfoPanel } from './ObjectInfoPanel';
 import { Splitter } from './Splitter';
 import './rightSidebar.css';
 
@@ -18,6 +19,7 @@ interface Activity {
 const ACTIVITIES: Activity[] = [
   { id: 'history', label: 'History', icon: <HistoryIcon />, hint: 'Ctrl+Shift+H' },
   { id: 'jobs', label: 'Jobs', icon: <JobsIcon /> },
+  { id: 'info', label: 'Object info', icon: <ObjectInfoIcon /> },
 ];
 
 /**
@@ -47,7 +49,11 @@ export function RightSidebar() {
             onChange={setWidth}
           />
           <aside className="rs-panel" data-testid="right-sidebar-panel" style={{ width }}>
-            {activity === 'jobs' ? (
+            {activity === 'info' ? (
+              <ErrorBoundary label="Object info">
+                <ObjectInfoPanel onCollapse={() => setVisible(false)} />
+              </ErrorBoundary>
+            ) : activity === 'jobs' ? (
               <ErrorBoundary label="Jobs">
                 <JobsPanel onCollapse={() => setVisible(false)} />
               </ErrorBoundary>

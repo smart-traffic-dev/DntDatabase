@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { useDialogs } from '../store/dialogs';
+import { useLayout } from '../store/layout';
 import { useObjectData } from '../store/objectData';
 import { useQueryDocs } from '../store/queryTabs';
 import { useTabs } from '../store/tabs';
@@ -74,13 +75,17 @@ describe('ConnectionTree keys', () => {
     expect(useTree.getState().expanded.has(prodNode)).toBe(true);
   });
 
-  it('a single click opens a preview tab, a double-click keeps it; objects drag into the editor', async () => {
+  it('a single click shows a table in Object info, a double-click opens its tab; objects drag into the editor', async () => {
     await setup();
+    useLayout.setState({ rightVisible: false, rightActivity: 'history' });
     const orders = screen.getAllByTestId('tree-row').find((r) => r.textContent?.includes('orders'))!;
     fireEvent.click(orders);
-    expect(useTabs.getState().tabs).toEqual([expect.objectContaining({ title: 'orders', preview: true })]);
+    expect(useTree.getState().selectedId).toBe(ordersNode);
+    expect(useLayout.getState()).toMatchObject({ rightVisible: true, rightActivity: 'info' });
+    expect(useTabs.getState().tabs).toEqual([]);
     fireEvent.doubleClick(orders);
-    expect(useTabs.getState().tabs).toEqual([expect.objectContaining({ title: 'orders', preview: false })]);
+    expect(useTabs.getState().tabs).toEqual([expect.objectContaining({ title: 'orders' })]);
+    expect(useTabs.getState().tabs[0]?.preview).toBeFalsy();
 
     expect(orders).toHaveAttribute('draggable', 'true');
     const data = new Map<string, string>();

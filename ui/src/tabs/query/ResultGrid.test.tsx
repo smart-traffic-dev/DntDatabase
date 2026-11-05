@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ResultSet } from '../../store/queryRun';
-import { copyOutcome, emptyPages, initialWidths, overridesFor, pageNeedsRows, sampleRows, storePage, touchPage, withResize, selectionCells, tooLargeMessage } from './ResultGrid';
+import { copyOutcome, emptyPages, initialWidths, overridesFor, pageNeedsRows, sampleRows, storePage, touchPage, withResize, selectionCells, tooLargeMessage, keepsRowSelection } from './ResultGrid';
+import type { GridSelection } from '@glideapps/glide-data-grid';
 
 const result: ResultSet = {
   id: 1,
@@ -166,5 +167,21 @@ describe('stored result pages', () => {
     expect(pageNeedsRows(500, 0, 10_000)).toBe(false);
     expect(pageNeedsRows(3, 2, 1003)).toBe(false);
     expect(pageNeedsRows(3, 2, 1004)).toBe(true);
+  });
+});
+describe('keepsRowSelection (Navicat: a second click on a selected row number keeps it)', () => {
+  const sel = (rows: number[], cell = false) => ({
+    columns: { length: 0 },
+    rows: { length: rows.length },
+    current: cell ? { cell: [0, 0], range: { x: 0, y: 0, width: 1, height: 1 }, rangeStack: [] } : undefined,
+  }) as unknown as GridSelection;
+  it('ignores the toggle-off of the single selected row', () => {
+    expect(keepsRowSelection(sel([3]), sel([]))).toBe(true);
+  });
+  it('lets every other change through', () => {
+    expect(keepsRowSelection(sel([3]), sel([], true))).toBe(false);
+    expect(keepsRowSelection(sel([3, 4]), sel([]))).toBe(false);
+    expect(keepsRowSelection(sel([3]), sel([5]))).toBe(false);
+    expect(keepsRowSelection(undefined, sel([]))).toBe(false);
   });
 });

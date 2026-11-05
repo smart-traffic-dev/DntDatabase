@@ -21,8 +21,8 @@ export const RIGHT_MAX = 560;
 const STORAGE_KEY = 'dnt.layout';
 
 /** The panels of the right sidebar that exist. */
-export type RightActivity = 'history' | 'jobs';
-const isRightActivity = (v: unknown): v is RightActivity => v === 'history' || v === 'jobs';
+export type RightActivity = 'history' | 'jobs' | 'info';
+const isRightActivity = (v: unknown): v is RightActivity => v === 'history' || v === 'jobs' || v === 'info';
 
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 
@@ -78,7 +78,7 @@ interface Saved {
   /** The right sidebar (activity bar + History panel) is open. */
   rightVisible: boolean;
   rightWidth: number;
-  /** The panel the right sidebar shows (History or Jobs). */
+  /** The panel the right sidebar shows (History, Jobs or Object info). */
   rightActivity: RightActivity;
 }
 

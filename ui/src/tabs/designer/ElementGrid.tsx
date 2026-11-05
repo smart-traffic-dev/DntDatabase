@@ -11,6 +11,7 @@ import {
   type ElementKey,
   type ElementRow,
 } from './elementModel';
+import { onGridNavKey } from './gridNav';
 import { RowStateCell } from './RowStateCell';
 import './columnsGrid.css';
 import './elementsGrid.css';
@@ -89,7 +90,7 @@ export function ElementGrid<K extends ElementKey>(p: FrameProps<K>) {
 
   return (
     <div className="dz-columns">
-      <div className="dz-grid dz-egrid" style={{ ['--dz-cols' as string]: `28px ${p.cols} 112px` }} role="table" aria-label={p.label} aria-rowcount={rows.length + 1}>
+      <div className="dz-grid dz-egrid" style={{ ['--dz-cols' as string]: `28px ${p.cols} 112px` }} role="table" aria-label={p.label} aria-rowcount={rows.length + 1} onKeyDown={onGridNavKey}>
         <div role="row" className="dz-row dz-head">
           <div role="columnheader" aria-label="State" />
           {p.headers.map((h) => (

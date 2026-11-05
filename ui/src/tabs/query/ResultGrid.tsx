@@ -293,6 +293,14 @@ export function selectionCells(
   return rows;
 }
 
+/**
+ * Glide drops a single selected row when its number is clicked again; Navicat keeps it selected.
+ * True when `next` is that toggle-off (an empty selection replacing exactly one selected row).
+ */
+export function keepsRowSelection(prev: GridSelection | undefined, next: GridSelection): boolean {
+  return !!prev && prev.rows.length === 1 && next.rows.length === 0 && next.columns.length === 0 && !next.current;
+}
+
 /** Writes `text` to the clipboard; false when the system refused. */
 export async function writeClipboard(text: string): Promise<boolean> {
   try {
@@ -653,6 +661,9 @@ export function ResultGrid({
     });
     gridRef.current?.scrollTo(col, row);
   }, [loadPage]);
+
+  const onGridSelectionChange = useCallback((next: GridSelection) => {    setSel((prev) => (keepsRowSelection(prev, next) ? prev : next));
+  }, []);
 
   const summary = selectionSummary(sel, result.rowCount, result.columns.length);
   useEffect(() => onSelectionSummary?.(summary), [summary, onSelectionSummary]);
@@ -1019,13 +1030,16 @@ export function ResultGrid({
             rowHeight={rowHeight}
             headerHeight={GRID_HEADER_HEIGHT}
             getRowThemeOverride={getRowThemeOverride}
-            rowMarkers={firstRowNumber === undefined ? 'number' : { kind: 'number', startIndex: firstRowNumber }}
+            // Navicat: a click on the row number selects the whole row (Shift / Ctrl extend it), and
+            // Ctrl+C then copies every column of it. Glide's plain 'number' markers ignore clicks.
+            rowMarkers={{ kind: 'clickable-number', startIndex: firstRowNumber ?? 1 }}
+            rowSelect="multi"
             rangeSelect="rect"
             theme={theme}
             smoothScrollX
             smoothScrollY
             gridSelection={sel}
-            onGridSelectionChange={setSel}
+            onGridSelectionChange={onGridSelectionChange}
             onVisibleRegionChanged={result.token ? (range) => loadVisible(range.y, range.y + range.height - 1) : undefined}
             // Ctrl+F and Ctrl+G belong to the grid tools above, not Glide's built-in search.
             keybindings={{ search: false }}

@@ -58,7 +58,7 @@ test('dragging a splitter resizes the two panes it divides', async ({ page }) =>
   expect(Math.abs((await groups(page).nth(0).boundingBox())!.width - before)).toBeLessThan(4);
 });
 
-test('a single click in the tree opens a preview tab that the next click replaces', async ({ page }) => {
+test('a single click shows a table in Object info and a routine in a preview tab; a double click keeps a tab', async ({ page }) => {
   await installBackend(page, createBackend().handlers);
   await page.goto('/');
   await fillConnectionDialog(page, { name: 'e2e-mysql8', engine: 'mysql', port: 33080, user: 'root', password: 'dnt_test' });
@@ -66,17 +66,18 @@ test('a single click in the tree opens a preview tab that the next click replace
   await expandRow(page, 'e2e-mysql8');
   await expandRow(page, 'dnt_fixture');
   await expandRow(page, 'Tables');
-  const objects = page.locator('[data-testid="tree-row"].kind-object');
-  await expect(objects.first()).toBeVisible();
-  const names = await objects.locator('span.label').allTextContents();
-  await treeRow(page, names[0]!).click();
+  // A table: the Object info panel, no tab.
+  await treeRow(page, 'orders').click();
+  await expect(page.getByTestId('object-info-view')).toContainText('orders');
+  await expect(page.locator('.tab')).toHaveCount(0);
+  // A routine: a preview tab.
+  await expandRow(page, 'Procedures');
+  await treeRow(page, 'p_restock').click();
   await expect(stripTabs(page, 0)).toHaveCount(1);
   await expect(page.locator('.tab.preview')).toHaveCount(1);
-  if (names.length > 1) {
-    await treeRow(page, names[1]!).click();
-    await expect(stripTabs(page, 0)).toHaveCount(1);
-    await expect(stripTabs(page, 0)).toContainText(names[1]!);
-  }
-  await treeRow(page, names.at(-1)!).dblclick();
-  await expect(page.locator('.tab.preview')).toHaveCount(0);
+  // A double click on the table opens its tab (kept); the preview stays until replaced.
+  await treeRow(page, 'orders').dblclick();
+  await expect(stripTabs(page, 0)).toHaveCount(2);
+  await expect(page.locator('.tab.preview')).toHaveCount(1);
+  await expect(page.locator('.tab:not(.preview)')).toContainText('orders');
 });

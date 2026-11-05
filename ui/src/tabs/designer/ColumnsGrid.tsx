@@ -2,6 +2,7 @@ import { useEffect, useRef, type DragEvent, type KeyboardEvent } from 'react';
 import type { ColumnDef, DesignOpen, DraftError, ElementRef, TableDef, TypeSpec } from '../../bindings';
 import { isKind, sqlEngine } from '../../engine';
 import { DraftInput } from './DraftInput';
+import { onGridNavKey } from './gridNav';
 import {
   baseText,
   columnErrors,
@@ -104,15 +105,26 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
   const pk = draft.primary_key;
 
   const onRowKey = (e: KeyboardEvent<HTMLDivElement>, row: ColumnRow) => {
-    if (e.target !== e.currentTarget || row.index === null || !editable || row.column.locked) return;
+    if (row.index === null || !editable || row.column.locked) return;
     const index = row.index;
-    if (e.key === 'Delete') {
+    const onRow = e.target === e.currentTarget;
+    if (e.key === 'Delete' && onRow) {
       e.preventDefault();
       edit((d) => dropColumn(d, index));
       onSelect(null);
-    } else if ((e.ctrlKey || e.metaKey) && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !pg) {
+    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && !pg) {
+      // Navicat moves the field from any of its cells, and the focus stays on that cell.
       e.preventDefault();
-      edit((d) => moveColumn(d, index, index + (e.key === 'ArrowUp' ? -1 : 1)));
+      const to = index + (e.key === 'ArrowUp' ? -1 : 1);
+      if (to < 0 || to >= draft.columns.length) return;
+      const target = e.target as HTMLElement;
+      const label = onRow ? null : target.getAttribute('aria-label');
+      edit((d) => moveColumn(d, index, to));
+      requestAnimationFrame(() => {
+        const el = rowEls.current.get(row.key);
+        const field = label ? el?.querySelector<HTMLElement>(`[aria-label="${label}"]`) : el;
+        if (field && document.activeElement !== field) field.focus();
+      });
     }
   };
 
@@ -127,7 +139,7 @@ export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect
 
   return (
     <div className="dz-columns">
-      <div className={`dz-grid${pg ? ' dz-grid-pg' : ''}`} role="table" aria-label="Columns" aria-rowcount={rows.length + 1}>
+      <div className={`dz-grid${pg ? ' dz-grid-pg' : ''}`} role="table" aria-label="Columns" aria-rowcount={rows.length + 1} onKeyDown={onGridNavKey}>
         <div role="row" className="dz-row dz-head">
           {pg ? null : <div role="columnheader" aria-label="Order" />}
           <div role="columnheader" aria-label="State" />
