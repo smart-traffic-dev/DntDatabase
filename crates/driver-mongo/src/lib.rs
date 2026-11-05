@@ -2,7 +2,9 @@
 
 mod cancel;
 mod client;
+mod data;
 mod exec;
+mod introspect;
 pub mod rows;
 mod session;
 pub mod shell;

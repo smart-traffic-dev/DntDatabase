@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use dnt_core::command::{CommandLanguage, CommandParseError, CommandSpan, ParsedCommand};
 use dnt_core::redact::Redacted;
+use dnt_core::sql::filter::DataFilter;
 
 pub use classify::{has_out_or_merge, OutKind};
 use lexer::lex_strict;
@@ -49,6 +50,12 @@ pub struct MongoLanguage;
 /// The driver's form of a parsed command (`ParsedCommand::payload`), read by `exec.rs`.
 pub(crate) struct Payload {
     pub cmd: ShellCommand,
+    /// A data-view read (`find` / `countDocuments`, see `data.rs`) whose structured filter
+    /// compares values: they are coerced by the fields' inferred types (spec §6.2), which
+    /// the session reads from the fixed sample right before it runs `cmd` with the coerced
+    /// filter. Until then `cmd` holds the filter with every value as text. `None` for
+    /// everything else.
+    pub typed: Option<DataFilter>,
 }
 
 impl CommandLanguage for MongoLanguage {
@@ -73,7 +80,7 @@ impl CommandLanguage for MongoLanguage {
             unbounded: c.unbounded,
             drops: c.drops,
             session_effect: c.session_effect,
-            payload: Arc::new(Payload { cmd }),
+            payload: Arc::new(Payload { cmd, typed: None }),
         })
     }
 

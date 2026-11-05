@@ -1668,6 +1668,7 @@ dependencies = [
  "base64 0.22.1",
  "dnt-core",
  "dnt-driver-mongo",
+ "dnt-query",
  "dnt-testkit",
  "hex",
  "mongodb",

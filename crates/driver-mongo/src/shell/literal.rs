@@ -482,7 +482,7 @@ fn regex_options(flags: &str, at: usize) -> Result<String, ShellError> {
 }
 
 /// 32 hex digits, or the canonical `8-4-4-4-12` layout.
-fn uuid_binary(s: &str) -> Option<Bson> {
+pub(crate) fn uuid_binary(s: &str) -> Option<Bson> {
     let b = s.as_bytes();
     let digits: String = match b.len() {
         32 => s.to_string(),
@@ -502,7 +502,7 @@ fn uuid_binary(s: &str) -> Option<Bson> {
 
 /// RFC 3339, plus what mongosh's `ISODate` also takes: a date alone, a space for `T`,
 /// no seconds, no offset (UTC), and `+HHMM` / `+HH` offsets.
-fn parse_iso_date(s: &str) -> Option<DateTime> {
+pub(crate) fn parse_iso_date(s: &str) -> Option<DateTime> {
     // ISO-8601 text is ASCII; refusing anything else also keeps the slicing below on
     // char boundaries.
     if !s.is_ascii() {

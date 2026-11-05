@@ -29,7 +29,8 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::cancel::{self, MongoCanceller};
 use crate::client::{self, Opened};
 use crate::exec::{self, Fail};
-use crate::shell::MongoLanguage;
+use crate::shell::{MongoLanguage, ShellCommand};
+use crate::{data, introspect};
 
 /// The command running now, shared with the canceller.
 pub(crate) struct Running {
@@ -203,6 +204,42 @@ impl MongoSession {
         }
     }
 
+    /// A data-view read (`cmd`) with `filter` coerced by the field types of the fixed
+    /// sample (spec §6.1, §6.2), read first like any command: same comment (a cancel stops
+    /// it), same timeout, every sampled document kept whatever `opts.max_rows` says.
+    async fn typed_read(
+        &self,
+        cmd: &ShellCommand,
+        filter: &DataFilter,
+        opts: &ExecOptions,
+        comment: &str,
+        sink: &mut dyn RowSink,
+    ) -> Result<ShellCommand, DbError> {
+        let ShellCommand::Coll { db, coll, .. } = cmd else {
+            return Err(DbError::Internal {
+                message: "a typed filter belongs to a collection read".into(),
+            });
+        };
+        let sample = introspect::sample_command(db.clone(), coll.clone());
+        let sample_opts = ExecOptions {
+            max_rows: introspect::SAMPLE_SIZE,
+            ..opts.clone()
+        };
+        let plan = exec::plan(&sample, &self.db(), &sample_opts, comment)?;
+        let (out, _) = self
+            .run_watched(plan, &sample_opts, &CommandClass::Read, sink)
+            .await?;
+        data::resolve(cmd, filter, &introspect::field_types(&out.docs))
+    }
+
+    /// The `DbError` of an introspection failure.
+    fn failed(&self, f: Fail) -> DbError {
+        match f {
+            Fail::Db(e) => e,
+            Fail::Mongo(e) => self.mapped(&e, &CommandClass::Read),
+        }
+    }
+
     /// The result of a command that ended, `after` a stop or a timeout or not.
     fn ended(
         &self,
@@ -353,7 +390,17 @@ impl CommandSession for MongoSession {
         let uuid = Uuid::new().to_string();
         let comment = cancel::comment_of(&uuid);
         let _running = self.start(uuid, cmd.class.clone(), opts);
-        let plan = exec::plan(&payload.cmd, &self.db(), opts, &comment)?;
+        let typed;
+        let shell = match &payload.typed {
+            None => &payload.cmd,
+            Some(filter) => {
+                typed = self
+                    .typed_read(&payload.cmd, filter, opts, &comment, sink)
+                    .await?;
+                &typed
+            }
+        };
+        let plan = exec::plan(shell, &self.db(), opts, &comment)?;
         let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
         let (output, late) = self.run_watched(plan, opts, &cmd.class, sink).await?;
         if let Some(db) = moves_to {
@@ -367,7 +414,7 @@ impl CommandSession for MongoSession {
     }
 }
 
-/// The object tree and data view come with plan Task 11.
+/// Document edits come with plan Task 12; MongoDB has no keys.
 fn not_yet(what: &str) -> DbError {
     DbError::Unsupported {
         feature: format!("{what} on MongoDB"),
@@ -375,10 +422,13 @@ fn not_yet(what: &str) -> DbError {
     }
 }
 
+/// The tree (spec §6.1), through the session's current `Client`.
 #[async_trait]
 impl Introspector for MongoSession {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
-        Err(not_yet("listing databases"))
+        introspect::list_databases(&self.client())
+            .await
+            .map_err(|f| self.failed(f))
     }
 
     async fn list_schemas(&self, _db: &str) -> Result<Vec<SchemaInfo>, DbError> {
@@ -387,36 +437,43 @@ impl Introspector for MongoSession {
 
     async fn list_objects(
         &self,
-        _scope: &Scope,
-        _kind: ObjectKind,
+        scope: &Scope,
+        kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
-        Err(not_yet("listing collections"))
+        introspect::list_objects(&self.client(), &scope.database, kind)
+            .await
+            .map_err(|f| self.failed(f))
     }
 
     async fn list_columns(&self, _scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
         Ok(Vec::new())
     }
 
-    async fn table_detail(&self, _obj: &ObjectRef) -> Result<TableDetail, DbError> {
-        Err(not_yet("collection details"))
+    async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {
+        introspect::table_detail(&self.client(), obj)
+            .await
+            .map_err(|f| self.failed(f))
     }
 
-    async fn object_ddl(&self, _obj: &ObjectRef) -> Result<String, DbError> {
-        Err(not_yet("collection definitions"))
+    async fn object_ddl(&self, obj: &ObjectRef) -> Result<String, DbError> {
+        introspect::object_ddl(&self.client(), obj)
+            .await
+            .map_err(|f| self.failed(f))
     }
 }
 
+/// The data view (spec §6.2): commands built here, run by `execute_command`.
 impl DataAccess for MongoSession {
-    fn page(&self, _obj: &ObjectRef, _spec: &PageSpec) -> Result<ParsedCommand, DbError> {
-        Err(not_yet("the data view"))
+    fn page(&self, obj: &ObjectRef, spec: &PageSpec) -> Result<ParsedCommand, DbError> {
+        data::page(obj, spec)
     }
 
     fn count(
         &self,
-        _obj: &ObjectRef,
-        _filter: Option<&DataFilter>,
+        obj: &ObjectRef,
+        filter: Option<&DataFilter>,
     ) -> Result<ParsedCommand, DbError> {
-        Err(not_yet("the data view"))
+        data::count(obj, filter)
     }
 
     fn build_edits(

@@ -23,6 +23,8 @@ tokio = { workspace = true, features = ["rt", "time"] }
 [dev-dependencies]
 dnt-core = { workspace = true, features = ["test-util"] }
 dnt-driver-mongo = { path = ".", features = ["test-helpers"] }
+# `command_fingerprint`, which the edit plans compute from `table_detail`.
+dnt-query.workspace = true
 dnt-testkit = { path = "../testkit" }
 secrecy.workspace = true
 tempfile.workspace = true
