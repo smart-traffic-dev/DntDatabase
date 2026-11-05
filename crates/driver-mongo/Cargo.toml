@@ -6,9 +6,24 @@ edition.workspace = true
 [lib]
 name = "dnt_driver_mongo"
 
+[features]
+# Exposes `test_helpers` (the connect step without a session) for integration tests only.
+test-helpers = []
+
 [dependencies]
+async-trait.workspace = true
 base64.workspace = true
 dnt-core.workspace = true
 hex.workspace = true
 mongodb.workspace = true
+secrecy.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+dnt-core = { workspace = true, features = ["test-util"] }
+dnt-driver-mongo = { path = ".", features = ["test-helpers"] }
+dnt-testkit = { path = "../testkit" }
+secrecy.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

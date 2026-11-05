@@ -25,6 +25,7 @@ fn cfg(database: Option<&str>) -> ResolvedConfig {
         host: "fake".into(),
         port: 0,
         tls_server_name: "fake".into(),
+        via_tunnel: false,
         username: "fake".into(),
         password: None,
         database: database.map(str::to_string),

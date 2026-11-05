@@ -1,20 +1,61 @@
-//! Generates TLS certificates (`testdata/certs`) and SSH keys (`testdata/ssh`) for the Docker
-//! test matrix. Idempotent: existing files are kept.
+//! Generates TLS certificates (`testdata/certs`), SSH keys (`testdata/ssh`) and the MongoDB
+//! replica-set keyfile (`testdata/mongo/keyfile`) for the Docker test matrix. Idempotent:
+//! existing files are kept. All of them are gitignored.
 
 use rcgen::{
     date_time_ymd, BasicConstraints, CertificateParams, DistinguishedName, DnType,
     ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
-use ssh_key::rand_core::OsRng;
+use ssh_key::rand_core::{OsRng, RngCore};
 use ssh_key::{Algorithm, LineEnding, PrivateKey};
 use std::error::Error;
+use std::fmt::Write as _;
 use std::path::Path;
 
 const KEY_PASSPHRASE: &str = "dnt_pass";
 
 fn main() -> Result<(), Box<dyn Error>> {
-    gen_certs(&dnt_testkit::testdata("certs"))?;
+    let certs = dnt_testkit::testdata("certs");
+    gen_certs(&certs)?;
+    gen_client_combined_pem(&certs)?;
     gen_ssh_keys(&dnt_testkit::testdata("ssh"))?;
+    gen_mongo_keyfile(&dnt_testkit::testdata("mongo/keyfile"))?;
+    Ok(())
+}
+
+/// `client-combined.pem`: the client certificate followed by its key, the one-file form
+/// MongoDB clients take (`tlsCertificateKeyFile`). Rewritten every run, it is derived.
+fn gen_client_combined_pem(dir: &Path) -> Result<(), Box<dyn Error>> {
+    let cert = std::fs::read_to_string(dir.join("client.pem"))?;
+    let key = std::fs::read_to_string(dir.join("client-key.pem"))?;
+    let mut combined = cert.trim_end().to_string();
+    combined.push('\n');
+    combined.push_str(key.trim_end());
+    combined.push('\n');
+    std::fs::write(dir.join("client-combined.pem"), combined)?;
+    println!("certs: client-combined.pem written");
+    Ok(())
+}
+
+/// Shared secret of the `mongo80` replica set's internal authentication: 128 hex
+/// characters (MongoDB takes 6–1024 characters of the base64 alphabet).
+fn gen_mongo_keyfile(path: &Path) -> Result<(), Box<dyn Error>> {
+    if path.exists() {
+        println!("mongo: keyfile up to date");
+        return Ok(());
+    }
+    let mut bytes = [0u8; 64];
+    OsRng.fill_bytes(&mut bytes);
+    let mut text = String::with_capacity(129);
+    for b in bytes {
+        write!(text, "{b:02x}")?;
+    }
+    text.push('\n');
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)?;
+    println!("mongo: generated keyfile");
     Ok(())
 }
 

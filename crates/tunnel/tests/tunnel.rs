@@ -96,6 +96,7 @@ async fn select_one_through(tunnel: &Tunnel, driver: &dyn Driver, t: Target) {
     let cfg = ResolvedConfig {
         host: "127.0.0.1".into(),
         port: tunnel.local_addr().port(),
+        via_tunnel: true,
         ..t.resolved(None)
     };
     let session = driver

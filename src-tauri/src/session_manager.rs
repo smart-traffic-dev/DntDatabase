@@ -211,6 +211,7 @@ fn resolved_config(
         host,
         port,
         tls_server_name: cfg.host.clone(),
+        via_tunnel: tunnel.is_some(),
         username: cfg.username.clone(),
         password: secrets.db_password.clone(),
         database: cfg.default_db.clone(),
@@ -233,6 +234,7 @@ pub(crate) fn with_database(base: &ResolvedConfig, database: Option<String>) -> 
         host: base.host.clone(),
         port: base.port,
         tls_server_name: base.tls_server_name.clone(),
+        via_tunnel: base.via_tunnel,
         username: base.username.clone(),
         password: base.password.clone(),
         database,
@@ -1637,6 +1639,15 @@ mod tests {
     fn manager_is_send_and_sync() {
         assert_send_sync::<SessionManager>();
         assert_send_sync::<ConnectionRuntime>();
+    }
+
+    #[test]
+    fn with_database_keeps_the_tunnel_flag() {
+        let mut base = dnt_core::test_util::sample_resolved(None);
+        for via_tunnel in [false, true] {
+            base.via_tunnel = via_tunnel;
+            assert_eq!(with_database(&base, None).via_tunnel, via_tunnel);
+        }
     }
 
     mod engines {

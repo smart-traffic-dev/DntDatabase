@@ -1337,6 +1337,7 @@ fn tool_conn_from_resolved() {
         host: "127.0.0.1".into(),
         port: 50123,
         tls_server_name: "db.internal".into(),
+        via_tunnel: true,
         username: "app".into(),
         password: Some(secrecy::SecretString::from(PASSWORD.to_string())),
         database: Some("shop".into()),

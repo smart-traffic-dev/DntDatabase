@@ -2,7 +2,17 @@ name: dnt-test
 
 # Integration-test matrix. Start with:
 #   docker compose -f testdata/docker-compose.test.yml up -d --wait
-# Run `cargo run -p dnt-testkit --bin gen_fixtures` first (certs + ssh keys are mounted from here).
+# Run `cargo run -p dnt-testkit --features gen-fixtures --bin gen_fixtures` first (certs, ssh
+# keys and the Mongo keyfile are mounted from here).
+#
+# MongoDB (crates/driver-mongo), users root/dnt_test and dnt/dnt_test (readWrite on dnt_fixture):
+#   mongo60  mongo:6.0, standalone with auth, host port 27060.
+#   mongo80  mongo:8.0, single-node replica set rs0 (member 127.0.0.1:27080, published 1:1),
+#            keyFile internal auth, TLS allowed but not required (testdata/certs; client
+#            certificates verified against ca.pem when presented), host port 27080.
+# Both run with `enableTestCommands=1` (test only: the failCommand failpoint). The healthcheck
+# initialises them once (testdata/mongo/*.js) and seeds dnt_fixture.orders + view paid_orders.
+# Start only these with: docker compose -f testdata/docker-compose.test.yml up -d --wait mongo60 mongo80
 
 x-mysql-args: &mysql-args
   - --ssl-ca=/certs/ca.pem
@@ -47,6 +57,23 @@ x-pg-command: &pg-command
     -c ssl_ca_file=/etc/dnt-ssl/ca.pem
     -c ssl_cert_file=/etc/dnt-ssl/server.pem
     -c ssl_key_file=/etc/dnt-ssl/server-key.pem
+
+# Initialises (once) and seeds a MongoDB service; healthy once the `paid_orders` view exists.
+# Needs DNT_PORT (and DNT_REPLSET for a replica set) in the service environment.
+x-mongo-health: &mongo-health
+  test:
+    - CMD-SHELL
+    - >-
+      as_root="--port $$DNT_PORT -u root -p dnt_test --authenticationDatabase admin";
+      mongosh --quiet $$as_root --eval 'quit(db.getSiblingDB("dnt_fixture").getCollectionInfos({name: "paid_orders"}).length ? 0 : 1)' >/dev/null 2>&1 && exit 0;
+      mongosh --quiet --port $$DNT_PORT --file /dnt-mongo/bootstrap.js >/dev/null 2>&1;
+      mongosh --quiet $$as_root --file /dnt-mongo/prepare.js &&
+      mongoimport --quiet $$as_root --db dnt_fixture --collection orders --jsonArray --file /dnt-mongo/orders.json &&
+      mongosh --quiet $$as_root --file /dnt-mongo/finish.js
+  interval: 5s
+  timeout: 90s
+  retries: 40
+  start_period: 30s
 
 x-pg-env: &pg-env
   POSTGRES_USER: postgres
@@ -144,6 +171,53 @@ services:
       - ./certs:/certs:ro
       - ./sql/pg_common.sql:/docker-entrypoint-initdb.d/01_common.sql:ro
     healthcheck: *pg-health
+
+  mongo60:
+    image: mongo:6.0
+    command:
+      - mongod
+      - --auth
+      - --bind_ip_all
+      - --setParameter
+      - enableTestCommands=1
+    environment:
+      DNT_PORT: "27017"
+    ports: ["27060:27017"]
+    volumes:
+      - ./mongo:/dnt-mongo:ro
+    healthcheck: *mongo-health
+
+  # mongod refuses a keyfile that is not 0400/0600 and owned by its user, which a Windows bind
+  # mount can never satisfy; the wrapper copies it (and builds the server's one-file PEM) first.
+  mongo80:
+    image: mongo:8.0
+    command:
+      - bash
+      - -c
+      - >-
+        mkdir -p /etc/dnt-mongo &&
+        cp /dnt-mongo/keyfile /certs/ca.pem /etc/dnt-mongo/ &&
+        { cat /certs/server.pem; echo; cat /certs/server-key.pem; } > /etc/dnt-mongo/server-combined.pem &&
+        chown -R mongodb:mongodb /etc/dnt-mongo &&
+        chmod 400 /etc/dnt-mongo/keyfile &&
+        exec docker-entrypoint.sh mongod
+        --port 27080
+        --bind_ip_all
+        --replSet rs0
+        --keyFile /etc/dnt-mongo/keyfile
+        --tlsMode allowTLS
+        --tlsCertificateKeyFile /etc/dnt-mongo/server-combined.pem
+        --tlsCAFile /etc/dnt-mongo/ca.pem
+        --tlsAllowConnectionsWithoutCertificates
+        --setParameter enableTestCommands=1
+    environment:
+      DNT_PORT: "27080"
+      DNT_REPLSET: rs0
+    ports: ["27080:27080"]
+    volumes:
+      - ./certs:/certs:ro
+      - ./mongo:/dnt-mongo:ro
+    healthcheck: *mongo-health
 
   ssh:
     image: lscr.io/linuxserver/openssh-server

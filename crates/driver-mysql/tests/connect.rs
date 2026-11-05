@@ -10,7 +10,9 @@ fn expected_variant(t: Target) -> ServerVariant {
         Target::MySql57 => ServerVariant::MySql57,
         Target::MySql8 | Target::MySql84 => ServerVariant::MySql8,
         Target::MariaDb106 | Target::MariaDb114 => ServerVariant::MariaDb,
-        Target::Pg12 | Target::Pg17 => unreachable!("not a MySQL-family target"),
+        Target::Pg12 | Target::Pg17 | Target::Mongo60 | Target::Mongo80 => {
+            unreachable!("not a MySQL-family target")
+        }
     }
 }
 

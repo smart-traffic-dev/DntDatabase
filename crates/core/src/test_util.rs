@@ -48,6 +48,7 @@ pub fn sample_resolved(pw: Option<&str>) -> ResolvedConfig {
         host: "127.0.0.1".into(),
         port: 3306,
         tls_server_name: "127.0.0.1".into(),
+        via_tunnel: false,
         username: "root".into(),
         password: pw.map(SecretString::from),
         database: Some("app".into()),

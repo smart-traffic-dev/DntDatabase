@@ -1,0 +1,77 @@
+[
+  {
+    "_id": {"$oid": "65a1b2c3d4e5f60718293a01"},
+    "status": "paid",
+    "customer": "Alice",
+    "qty": {"$numberInt": "3"},
+    "total_cents": {"$numberLong": "9007199254740993"},
+    "price": {"$numberDouble": "19.99"},
+    "ratio_nan": {"$numberDouble": "NaN"},
+    "ratio_inf": {"$numberDouble": "Infinity"},
+    "ratio_neg_inf": {"$numberDouble": "-Infinity"},
+    "amount": {"$numberDecimal": "1234.5678"},
+    "gift": true,
+    "note": null,
+    "legacy": {"$undefined": true},
+    "created_at": {"$date": {"$numberLong": "1730764800123"}},
+    "expires_at": {"$date": {"$numberLong": "253402300800000"}},
+    "ts": {"$timestamp": {"t": 1730764800, "i": 7}},
+    "low": {"$minKey": 1},
+    "high": {"$maxKey": 1},
+    "pattern": {"$regularExpression": {"pattern": "^ab+c$", "options": "i"}},
+    "token": {"$binary": {"base64": "3q2+7w==", "subType": "00"}},
+    "digest": {"$binary": {"base64": "AAECAwQFBgcICQoLDA0ODw==", "subType": "05"}},
+    "uid": {"$binary": {"base64": "Ej5FZ+ibEtOkVkJmFBdAAA==", "subType": "04"}},
+    "tag": {"$symbol": "vip"},
+    "js": {"$code": "function () { return 1; }"},
+    "js_scope": {"$code": "function () { return x; }", "$scope": {"x": {"$numberInt": "1"}}},
+    "ref": {"$dbPointer": {"$ref": "orders", "$id": {"$oid": "65a1b2c3d4e5f60718293a02"}}},
+    "shipping": {
+      "carrier": "DHL",
+      "order_ref": {"$oid": "65a1b2c3d4e5f60718293a02"},
+      "at": {"$date": {"$numberLong": "1730851200000"}},
+      "weight_g": {"$numberLong": "1500"}
+    },
+    "items": [
+      {"sku": "A-1", "qty": {"$numberInt": "2"}},
+      {"sku": "B-2", "qty": {"$numberInt": "1"}}
+    ],
+    "mixed": {"$numberInt": "42"}
+  },
+  {
+    "_id": {"$oid": "65a1b2c3d4e5f60718293a02"},
+    "status": "pending",
+    "customer": "Bob",
+    "qty": {"$numberInt": "1"},
+    "price": {"$numberDouble": "5.5"},
+    "created_at": {"$date": {"$numberLong": "1730851200000"}},
+    "mixed": "forty-two"
+  },
+  {
+    "_id": {"$binary": {"base64": "AQID", "subType": "00"}},
+    "status": "paid",
+    "customer": "Carol",
+    "qty": {"$numberInt": "2"},
+    "price": {"$numberDouble": "12.25"},
+    "created_at": {"$date": {"$numberLong": "1730937600000"}},
+    "mixed": {"nested": true}
+  },
+  {
+    "_id": {"$oid": "65a1b2c3d4e5f60718293a04"},
+    "status": "shipped",
+    "customer": "Dave",
+    "qty": {"$numberInt": "5"},
+    "price": {"$numberDouble": "3.0"},
+    "created_at": {"$date": {"$numberLong": "1731024000000"}},
+    "mixed": [{"$numberInt": "1"}, "two"]
+  },
+  {
+    "_id": {"$oid": "65a1b2c3d4e5f60718293a05"},
+    "status": "paid",
+    "customer": "Eve",
+    "qty": {"$numberInt": "4"},
+    "price": {"$numberDouble": "7.75"},
+    "created_at": {"$date": {"$numberLong": "1731110400000"}},
+    "mixed": null
+  }
+]

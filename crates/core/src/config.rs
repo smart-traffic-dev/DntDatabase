@@ -148,6 +148,9 @@ pub struct ResolvedConfig {
     pub host: String,
     pub port: u16,
     pub tls_server_name: String,
+    /// `host:port` is the local end of an SSH tunnel. Mongo then connects directly to that
+    /// one server and refuses host-name verification (spec §5.1 of the Mongo driver).
+    pub via_tunnel: bool,
     pub username: String,
     pub password: Option<SecretString>,
     pub database: Option<String>,
