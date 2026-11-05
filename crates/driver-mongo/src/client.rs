@@ -509,8 +509,20 @@ mod tests {
         }
     }
 
+    /// Pins the crate's redacting `Debug` of `Credential`: an upgrade that starts printing
+    /// the password fails here.
+    fn assert_no_password(what: &str, value: &impl std::fmt::Debug) {
+        let text = format!("{value:?}");
+        assert!(
+            !text.contains(PASSWORD),
+            "{what} Debug shows the password: {text}"
+        );
+    }
+
     fn plan(c: &ResolvedConfig) -> ClientOptionsPlan {
-        client_options(c, false).unwrap_or_else(|e| panic!("{e}"))
+        let p = client_options(c, false).unwrap_or_else(|e| panic!("{e}"));
+        assert_no_password("ClientOptionsPlan", &p);
+        p
     }
 
     fn config_error(r: Result<ClientOptionsPlan, DbError>) -> (String, String) {
@@ -610,7 +622,10 @@ mod tests {
         assert!(tls_options(&p).allow_invalid_certificates == Some(true));
 
         // The lookup gets the credential as a struct, never in the string.
+        assert_no_password("ClientOptionsPlan", &p);
+        assert_no_password("ClientOptions", &p.options);
         let cs = srv_connection_string(&p).unwrap();
+        assert_no_password("ConnectionString", &cs);
         assert_eq!(
             cs.host_info,
             HostInfo::DnsRecord("cluster0.example.net".into())
@@ -653,8 +668,14 @@ mod tests {
         found.repl_set_name = Some("from-txt".into());
         found.max_pool_size = Some(100);
         found.retry_writes = Some(true);
+        found.credential = p.options.credential.clone();
         let want_tls = p.options.tls.clone();
         apply_srv_overrides(&mut found, p);
+        assert_no_password("ClientOptions after the SRV lookup", &found);
+        assert_eq!(
+            found.credential.as_ref().unwrap().password.as_deref(),
+            Some(PASSWORD)
+        );
         assert_eq!(found.hosts, [tcp("shard-00-00.example.net", 27017)]);
         assert_eq!(found.repl_set_name.as_deref(), Some("from-txt"));
         assert_eq!(found.max_pool_size, Some(2));

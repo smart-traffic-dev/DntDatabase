@@ -230,7 +230,7 @@ impl ConnectionConfig {
             )?;
             validate_ssh(ssh)?;
         }
-        self.validate_ssl()
+        self.validate_ssl(false)
     }
 
     /// Spec §6.2, Redis: `db` is left to the server.
@@ -242,7 +242,7 @@ impl ConnectionConfig {
         if let Some(ssh) = &self.ssh {
             validate_ssh(ssh)?;
         }
-        self.validate_ssl()
+        self.validate_ssl(true)
     }
 
     fn require_name(&self) -> Result<(), DbError> {
@@ -265,9 +265,15 @@ impl ConnectionConfig {
         require(self.port != 0, "port", "port must be between 1 and 65535")
     }
 
-    fn validate_ssl(&self) -> Result<(), DbError> {
+    /// `Verify CA` always needs a CA file. `Verify full` does too, unless the engine's client
+    /// falls back to bundled public roots (`verify_full_needs_ca == false`: MongoDB, spec §5.1).
+    fn validate_ssl(&self, verify_full_needs_ca: bool) -> Result<(), DbError> {
         if let Some(ssl) = &self.ssl {
-            let verifies = matches!(ssl.mode, SslMode::VerifyCa | SslMode::VerifyFull);
+            let verifies = match ssl.mode {
+                SslMode::VerifyCa => true,
+                SslMode::VerifyFull => verify_full_needs_ca,
+                SslMode::Disable | SslMode::Prefer | SslMode::Require => false,
+            };
             require(
                 !verifies || ssl.ca_path.is_some(),
                 "ssl.ca_path",
@@ -494,7 +500,7 @@ mod tests {
         let mut c = mongo_config();
         c.ssl = Some(SslConfig {
             version: 1,
-            mode: SslMode::VerifyFull,
+            mode: SslMode::VerifyCa,
             ca_path: None,
             cert_path: None,
             key_path: None,
@@ -562,6 +568,43 @@ mod tests {
         let mut c = redis_config();
         c.ssh = Some(sample_ssh());
         assert!(c.validate().is_ok());
+    }
+
+    /// MongoDB's client trusts the bundled public roots when no CA file is set (Mongo spec
+    /// §5.1, e.g. Atlas); every other engine still needs the CA file for Verify full.
+    #[test]
+    fn verify_full_without_ca_only_for_mongo() {
+        let verify_full = Some(SslConfig {
+            version: 1,
+            mode: SslMode::VerifyFull,
+            ca_path: None,
+            cert_path: None,
+            key_path: None,
+        });
+        let mut c = mongo_config();
+        c.ssl = verify_full.clone();
+        assert!(c.validate().is_ok(), "Mongo: bundled roots");
+        c.options.driver = mongo_options(true, vec![]);
+        assert!(c.validate().is_ok(), "Mongo SRV: bundled roots");
+
+        let mut sql = Vec::new();
+        for kind in [DbKind::MySql, DbKind::Postgres] {
+            let mut c = sample_config();
+            c.kind = kind;
+            sql.push(c);
+        }
+        for mut c in sql.into_iter().chain([redis_config()]) {
+            c.ssl = verify_full.clone();
+            assert_eq!(
+                error_of(&c),
+                err(
+                    "ssl.ca_path",
+                    "SSL verification requires a CA certificate file"
+                ),
+                "{:?}",
+                c.kind
+            );
+        }
     }
 
     #[test]
