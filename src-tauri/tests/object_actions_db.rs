@@ -426,6 +426,7 @@ async fn mysql_create_database_from_the_tree_reports_no_error() {
                     schema: None,
                 },
                 kind,
+                false,
             )
             .await
             .unwrap();

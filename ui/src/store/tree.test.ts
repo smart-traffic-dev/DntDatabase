@@ -86,6 +86,7 @@ describe('tree store', () => {
       id: ids.prod,
       scope: { database: 'shop', schema: 'public' },
       kind: 'MaterializedView',
+      showSystem: false,
     });
     const object = useTree.getState().nodes.get(`${conn}/db:shop/schema:public/folder:MaterializedView/obj:MaterializedView:orders`);
     expect(object?.objectRef).toEqual({ database: 'shop', schema: 'public', name: 'orders', kind: 'MaterializedView' });

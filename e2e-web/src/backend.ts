@@ -592,10 +592,12 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     list_schemas: () => [{ name: 'public' }],
 
-    list_objects: ({ id, scope, kind }): ObjectSummary[] => {
+    list_objects: ({ id, scope, kind, showSystem }): ObjectSummary[] => {
       const cfg = connections.find((c) => c.id === id);
       if (cfg?.kind === 'mongo' || cfg?.kind === 'redis') {
-        return commandObjects(command, cfg, scope as Scope, kind as ObjectKind);
+        const objects = commandObjects(command, cfg, scope as Scope, kind as ObjectKind);
+        // The real app hides a MongoDB database's system.* collections unless asked.
+        return showSystem || cfg.kind !== 'mongo' ? objects : objects.filter((o) => !o.name.startsWith('system.'));
       }
       if (kind !== 'Table') return ddl.listObjects(id as string, scope as Scope, kind as ObjectKind);
       if ((scope as Scope).database !== 'dnt_fixture') return [];

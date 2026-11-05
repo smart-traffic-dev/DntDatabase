@@ -456,8 +456,15 @@ fn parse_mongo(srv: bool, rest: &str) -> Result<ParsedConnString, DbError> {
                     parsed.connect_timeout_s = Some(s);
                 }
             }
+            // Options that only tune the driver's behaviour (Atlas's copy-paste URIs carry
+            // them): accepted and ignored, the driver sets its own.
+            "retrywrites" | "w" | "journal" | "wtimeoutms" | "maxpoolsize" | "readpreference" => {}
             _ => return Err(unsupported_option(&key)),
         }
+    }
+    // As the server does: the credentials belong to the path database unless told otherwise.
+    if auth_source.is_none() {
+        auth_source = parsed.database.clone();
     }
     parsed.driver = Some(DriverOptions::Mongo {
         srv,
@@ -1075,7 +1082,7 @@ mod tests {
         assert!(srv && extra.is_empty());
         assert_eq!(
             to_uri(&config_from(&p)).unwrap(),
-            "mongodb+srv://u@cluster0.x.mongodb.net/db"
+            "mongodb+srv://u@cluster0.x.mongodb.net/db?authSource=db"
         );
     }
 
@@ -1113,14 +1120,43 @@ mod tests {
     #[test]
     fn mongo_unknown_option_is_an_error() {
         assert_eq!(
-            uri_err("mongodb://h/db?w=majority"),
-            "Unsupported URI option: w"
+            uri_err("mongodb://h/db?compressors=zlib"),
+            "Unsupported URI option: compressors"
         );
         assert_eq!(
             uri_err("mongodb://h/db?tlsCAFile=%2Fetc%2Fca.pem"),
             "Unsupported URI option: tlsCAFile (pick the CA file in the dialog)"
         );
         assert!(uri_err("mongodb://h?tls=maybe").contains("true or false"));
+    }
+
+    #[test]
+    fn atlas_uri_options_accepted() {
+        let p = ok("mongodb+srv://u:pw@cluster0.x.mongodb.net/shop?retryWrites=true&w=majority&appName=Cluster0&journal=true&wtimeoutMS=500&maxPoolSize=20&readPreference=secondaryPreferred&authSource=admin");
+        assert_eq!(p.host.as_deref(), Some("cluster0.x.mongodb.net"));
+        assert_eq!(p.database.as_deref(), Some("shop"));
+        assert_eq!(p.application_name.as_deref(), Some("Cluster0"));
+        assert_eq!(mongo_driver(&p).1, Some("admin"));
+        assert!(p.ignored.is_empty() && p.warnings.is_empty());
+        // Names are case-insensitive, as the others are.
+        ok("mongodb://h/db?RETRYWRITES=false&W=1&maxpoolsize=5");
+        // Still unknown: anything else.
+        assert_eq!(
+            uri_err("mongodb://h/db?retryWrites=true&compressors=zlib"),
+            "Unsupported URI option: compressors"
+        );
+    }
+
+    #[test]
+    fn auth_source_defaults_to_path_db() {
+        let p = ok("mongodb://u:pw@h/shop");
+        assert_eq!(mongo_driver(&p).1, Some("shop"));
+        // An explicit authSource wins.
+        let p = ok("mongodb://u:pw@h/shop?authSource=admin");
+        assert_eq!(mongo_driver(&p).1, Some("admin"));
+        // No path database: nothing to default to.
+        let p = ok("mongodb://u:pw@h/?retryWrites=true");
+        assert_eq!(mongo_driver(&p).1, None);
     }
 
     #[test]

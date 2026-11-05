@@ -256,7 +256,7 @@ export const useTree = create<TreeState>()((set, get) => {
     }
     if (node.kind === 'folder' && node.folderKind) {
       const kind = node.folderKind;
-      const objects = await api.listObjects(connectionId, scope, kind);
+      const objects = await api.listObjects(connectionId, scope, kind, get().showSystem);
       return {
         children: objects.map((o) => ({
           id: `${id}/obj:${kind}:${seg(o.name)}`,

@@ -23,7 +23,8 @@
 //!
 //! `show_system` is applied after the cache: MySQL system databases in `list_databases`,
 //! PostgreSQL system schemas in `list_schemas` (see [`is_system`]). A Command-family
-//! connection's listings are returned as the driver gives them.
+//! connection's `list_databases` / `list_objects` drop [`command_system_names`] (MongoDB:
+//! `admin`, `local`, `config` and `system.*` collections).
 
 use super::guard;
 use crate::cache::{NodeKey, SchemaCache};
@@ -32,7 +33,7 @@ use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
 };
-use dnt_core::server::{EngineFamily, SqlKind};
+use dnt_core::server::{DbKind, EngineFamily, SqlKind};
 use tauri::State;
 use uuid::Uuid;
 
@@ -87,6 +88,46 @@ pub fn filter_system<T: Named>(kind: SqlKind, items: Vec<T>, show_system: bool) 
         .collect()
 }
 
+/// What a Command engine keeps for itself: the names of its system databases and the
+/// prefix of its system collections (`""`: none). Hidden unless "Show system objects".
+pub fn command_system_names(kind: DbKind) -> (&'static [&'static str], &'static str) {
+    match kind {
+        DbKind::Mongo => (&["admin", "local", "config"], "system."),
+        DbKind::Redis | DbKind::MySql | DbKind::Postgres => (&[], ""),
+    }
+}
+
+/// A Command connection's `dbs` without the system databases, unless `show_system`.
+pub fn filter_command_databases(
+    kind: DbKind,
+    dbs: Vec<DatabaseInfo>,
+    show_system: bool,
+) -> Vec<DatabaseInfo> {
+    if show_system {
+        return dbs;
+    }
+    let (system, _) = command_system_names(kind);
+    dbs.into_iter()
+        .filter(|d| !system.contains(&d.name.as_str()))
+        .collect()
+}
+
+/// A Command connection's `objects` without the system collections, unless `show_system`.
+pub fn filter_command_objects(
+    kind: DbKind,
+    objects: Vec<ObjectSummary>,
+    show_system: bool,
+) -> Vec<ObjectSummary> {
+    let (_, prefix) = command_system_names(kind);
+    if show_system || prefix.is_empty() {
+        return objects;
+    }
+    objects
+        .into_iter()
+        .filter(|o| !o.name.starts_with(prefix))
+        .collect()
+}
+
 fn scope_segments(database: &str, schema: Option<&str>) -> Vec<String> {
     let mut segments = vec![format!("db:{database}")];
     if let Some(schema) = schema {
@@ -134,8 +175,7 @@ pub async fn list_databases_impl(
             SqlKind::MySql => filter_system(SqlKind::MySql, dbs, show_system),
             SqlKind::Postgres => dbs,
         },
-        // The driver's listing as is: a Command engine has no system databases to hide.
-        EngineFamily::Command => dbs,
+        EngineFamily::Command => filter_command_databases(kind, dbs, show_system),
     })
 }
 
@@ -165,16 +205,23 @@ pub async fn list_objects_impl(
     id: Uuid,
     scope: Scope,
     kind: ObjectKind,
+    show_system: bool,
 ) -> Result<Vec<ObjectSummary>, DbError> {
+    let db_kind = state.repo.get(id)?.kind;
     let key = folder_key(&scope, kind);
     let db = scope.database.clone();
-    state
+    let objects = state
         .sessions
         .browse(id, Some(&db), key, |i| {
             let scope = scope.clone();
             Box::pin(async move { i.list_objects(&scope, kind).await })
         })
-        .await
+        .await?;
+    Ok(match db_kind.family() {
+        // SQL objects are listed as the driver gives them (system schemas are not objects).
+        EngineFamily::Sql => objects,
+        EngineFamily::Command => filter_command_objects(db_kind, objects, show_system),
+    })
 }
 
 pub async fn table_detail_impl(
@@ -258,8 +305,9 @@ pub async fn list_objects(
     id: Uuid,
     scope: Scope,
     kind: ObjectKind,
+    show_system: bool,
 ) -> Result<Vec<ObjectSummary>, AppError> {
-    guard(list_objects_impl(&state, id, scope, kind)).await
+    guard(list_objects_impl(&state, id, scope, kind, show_system)).await
 }
 
 #[tauri::command]

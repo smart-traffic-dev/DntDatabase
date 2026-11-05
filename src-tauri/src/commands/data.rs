@@ -44,7 +44,7 @@ pub use crate::edit_plans::{
 use crate::file_picks::FileAccess;
 use crate::session_manager::config_error;
 use crate::state::AppState;
-use dnt_core::data_access::{check_raw_json, PageSpec};
+use dnt_core::data_access::PageSpec;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{ColumnDetail, ObjectKind, ObjectRef, TableDetail};
 use dnt_core::server::{check_cap, Cap, Capabilities, EngineFamily, SqlKind};
@@ -727,7 +727,7 @@ pub async fn table_row_count_impl(
 
 /// The checks every Command-family data-view read passes before anything is built: the
 /// connection's session is a Command one, the filter is a JSON one (or structured) and
-/// safe ([`check_raw_json`]), and the object is a collection of a database.
+/// within the size limit (a raw JSON filter is the driver's to parse and vet), and the object is a collection of a database.
 fn command_read_checks(
     state: &AppState,
     id: Uuid,
@@ -737,9 +737,6 @@ fn command_read_checks(
 ) -> Result<(), DbError> {
     require_command_session(state, id, "a command data view")?;
     check_request_size(EngineFamily::Command, sort, filter)?;
-    if let Some(raw) = filter.and_then(|f| f.raw_json.as_deref()) {
-        check_raw_json(raw)?;
-    }
     if !is_collection(obj.kind) {
         return Err(config_error("kind", "only collections have data to show"));
     }

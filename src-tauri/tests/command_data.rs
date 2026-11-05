@@ -348,6 +348,18 @@ async fn raw_json_must_be_an_object() {
     assert!(store.executed().is_empty());
 }
 
+/// The app does not parse a Command raw filter: mongosh syntax (not JSON) is the
+/// driver's to read, so it reaches the driver byte for byte on `page` and `count`.
+#[tokio::test]
+async fn command_raw_filter_reaches_driver_unparsed() {
+    let (f, store) = redis_fixture().await;
+    let raw = r#"{_id: ObjectId("507f1f77bcf86cd799439011")}"#;
+    // The fake (a driver) refuses what it cannot run; the point is that it was asked.
+    let _ = page(&f, 10, 0, vec![], Some(json_filter(raw))).await;
+    let _ = count(&f, Some(json_filter(raw))).await;
+    assert_eq!(store.raw_filters(), [raw, raw]);
+}
+
 #[tokio::test]
 async fn filter_types_are_per_family() {
     // Command: no raw WHERE, never both.

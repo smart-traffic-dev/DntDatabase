@@ -37,7 +37,7 @@ use dnt_core::command::{
     CommandSession, CommandSessionEffect, CommandSpan, CommandTarget, ParsedCommand,
 };
 use dnt_core::config::ResolvedConfig;
-use dnt_core::data_access::{DataAccess, KeyEdit, PageSpec};
+use dnt_core::data_access::{check_raw_json, DataAccess, KeyEdit, PageSpec};
 use dnt_core::driver::{
     CancelHandle, Canceller, Driver, Engine, ExecOptions, Introspector, ResultSummary, RowSink,
     Session, StmtOutcome,
@@ -102,6 +102,8 @@ struct StoreState {
     dbs: Vec<Db>,
     /// The names of the commands executed, in order (every session).
     executed: Vec<String>,
+    /// The raw JSON filters page / count were asked for, in order.
+    raw_filters: Vec<String>,
 }
 
 /// No db forced by [`FakeStore::force_db`].
@@ -145,6 +147,7 @@ impl FakeStore {
             state: Mutex::new(StoreState {
                 dbs: vec![Db::new(); DB_COUNT],
                 executed: Vec::new(),
+                raw_filters: Vec::new(),
             }),
             forced_db: AtomicUsize::new(NO_FORCED_DB),
             block_next: AtomicBool::new(false),
@@ -237,6 +240,11 @@ impl FakeStore {
     /// it started (stop) is not in it.
     pub fn executed(&self) -> Vec<String> {
         self.lock().executed.clone()
+    }
+
+    /// The raw JSON filters DataAccess::page / count received, verbatim, in order.
+    pub fn raw_filters(&self) -> Vec<String> {
+        self.lock().raw_filters.clone()
     }
 
     /// Simulates a reconnect that lands in database `db` (`"0"` … `"15"`): the next
@@ -1374,6 +1382,16 @@ impl Keyspace for FakeCommandSession {
 }
 
 impl FakeCommandSession {
+    /// A raw JSON filter is the driver's to validate (the app passes it on unparsed):
+    /// recorded, then checked as a real driver does.
+    fn check_raw(&self, filter: Option<&DataFilter>) -> Result<(), DbError> {
+        if let Some(raw) = filter.and_then(|f| f.raw_json.as_deref()) {
+            self.store.lock().raw_filters.push(raw.to_string());
+            check_raw_json(raw)?;
+        }
+        Ok(())
+    }
+
     /// The db index and hash key of collection `obj`.
     fn collection(obj: &ObjectRef) -> Result<(usize, Vec<u8>), DbError> {
         match obj.kind {
@@ -1422,6 +1440,7 @@ impl DataAccess for FakeCommandSession {
     /// `FIND <key> [WHERE …] [SORT …] SKIP n LIMIT n`.
     fn page(&self, obj: &ObjectRef, spec: &PageSpec) -> Result<ParsedCommand, DbError> {
         let (db, key) = Self::collection(obj)?;
+        self.check_raw(spec.filter.as_ref())?;
         let filter = RowFilter::of(spec.filter.as_ref())?;
         let sort = spec
             .sort
@@ -1463,6 +1482,7 @@ impl DataAccess for FakeCommandSession {
         filter: Option<&DataFilter>,
     ) -> Result<ParsedCommand, DbError> {
         let (db, key) = Self::collection(obj)?;
+        self.check_raw(filter)?;
         let filter = RowFilter::of(filter)?;
         let args = filter.text();
         let op = Op::Count {

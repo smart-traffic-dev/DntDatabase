@@ -23,7 +23,8 @@ use dnt_store::repo::{ConnectionRepo, NewSecrets};
 use dnt_testkit::fake_command::{collection_key, FakeCommandDriver, FakeStore, FakeValue};
 use dnt_tunnel::KnownHosts;
 use dntdatabase::commands::browse::{
-    list_databases_impl, list_objects_impl, list_schemas_impl, refresh_node_impl, table_detail_impl,
+    command_system_names, filter_command_databases, list_databases_impl, list_objects_impl,
+    list_schemas_impl, refresh_node_impl, table_detail_impl,
 };
 use dntdatabase::export_paths::ExportPaths;
 use dntdatabase::file_picks::FilePicks;
@@ -131,18 +132,18 @@ async fn command_tree_lists_databases_and_objects() {
         FakeValue::Hash(BTreeMap::from([("u1".into(), "alice".into())])),
     );
     store.set("0", b"h:", FakeValue::Str("not a hash".into()));
-    let objects = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Collection)
+    let objects = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Collection, false)
         .await
         .unwrap();
     let names: Vec<_> = objects.iter().map(|o| o.name.as_str()).collect();
     assert_eq!(names, ["users"]);
     assert_eq!(objects[0].kind, ObjectKind::Collection);
     // Other folders are empty; another db lists its own collections.
-    let tables = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Table)
+    let tables = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Table, false)
         .await
         .unwrap();
     assert!(tables.is_empty());
-    let other = list_objects_impl(&f.state, f.id, scope("7"), ObjectKind::Collection)
+    let other = list_objects_impl(&f.state, f.id, scope("7"), ObjectKind::Collection, false)
         .await
         .unwrap();
     assert_eq!(other[0].name, "orders");
@@ -182,11 +183,115 @@ async fn command_tree_lists_databases_and_objects() {
     refresh_node_impl(&f.state, f.id, vec!["db:0".into()])
         .await
         .unwrap();
-    let objects = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Collection)
+    let objects = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Collection, false)
         .await
         .unwrap();
     let names: Vec<_> = objects.iter().map(|o| o.name.as_str()).collect();
     assert_eq!(names, ["audit", "users"]);
+}
+
+/// The fake Command driver as Mongo, with db "0" holding `orders` and `system.views`.
+async fn mongo_fixture() -> Fixture {
+    let driver = FakeCommandDriver::with_kind(DbKind::Mongo);
+    let store = driver.store();
+    store.set(
+        "0",
+        &collection_key("orders"),
+        FakeValue::Hash(BTreeMap::new()),
+    );
+    store.set(
+        "0",
+        &collection_key("system.views"),
+        FakeValue::Hash(BTreeMap::new()),
+    );
+    let mut cfg = ConnectionConfig {
+        id: Uuid::nil(),
+        kind: DbKind::Mongo,
+        name: "Fake Mongo".into(),
+        port: 27017,
+        default_db: Some("0".into()),
+        secret_mode: SecretMode::Saved,
+        ..sample_config()
+    };
+    cfg.options.driver = DriverOptions::Mongo {
+        srv: false,
+        auth_source: None,
+        replica_set: None,
+        direct_connection: false,
+        extra_hosts: vec![],
+    };
+    fixture(Arc::new(driver), cfg).await
+}
+
+#[tokio::test]
+async fn mongo_system_collections_hidden() {
+    let f = mongo_fixture().await;
+    let names = |objects: Vec<ObjectSummary>| -> Vec<String> {
+        objects.into_iter().map(|o| o.name).collect()
+    };
+    let hidden = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Collection, false)
+        .await
+        .unwrap();
+    assert_eq!(names(hidden), ["orders"]);
+    let shown = list_objects_impl(&f.state, f.id, scope("0"), ObjectKind::Collection, true)
+        .await
+        .unwrap();
+    assert_eq!(names(shown), ["orders", "system.views"]);
+}
+
+#[test]
+fn mongo_system_dbs_hidden_unless_show_system() {
+    let dbs = |names: &[&str]| -> Vec<DatabaseInfo> {
+        names
+            .iter()
+            .map(|n| DatabaseInfo {
+                name: n.to_string(),
+                key_count: None,
+            })
+            .collect()
+    };
+    let all = ["admin", "config", "local", "shop", "Admin", "local2"];
+    let shown = filter_command_databases(DbKind::Mongo, dbs(&all), false);
+    assert_eq!(db_names(shown), ["shop", "Admin", "local2"]);
+    let shown = filter_command_databases(DbKind::Mongo, dbs(&all), true);
+    assert_eq!(db_names(shown), all);
+    // Redis has none: nothing is hidden.
+    let redis = filter_command_databases(DbKind::Redis, dbs(&["admin", "0"]), false);
+    assert_eq!(db_names(redis), ["admin", "0"]);
+    assert_eq!(
+        command_system_names(DbKind::Mongo),
+        (&["admin", "local", "config"][..], "system.")
+    );
+    assert_eq!(command_system_names(DbKind::Redis), (&[][..], ""));
+}
+
+/// Redis keeps its tree whatever `show_system` says (an empty prefix hides nothing).
+#[tokio::test]
+async fn redis_tree_unchanged() {
+    let (f, store) = redis_fixture().await;
+    store.set("3", b"plain", FakeValue::Str("x".into()));
+    store.set(
+        "0",
+        &collection_key("system.x"),
+        FakeValue::Hash(BTreeMap::new()),
+    );
+    for show_system in [false, true] {
+        let dbs = list_databases_impl(&f.state, f.id, show_system)
+            .await
+            .unwrap();
+        assert_eq!(db_names(dbs), ["0", "3"]);
+        let objects = list_objects_impl(
+            &f.state,
+            f.id,
+            scope("0"),
+            ObjectKind::Collection,
+            show_system,
+        )
+        .await
+        .unwrap();
+        let names: Vec<_> = objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, ["system.x"]);
+    }
 }
 
 // ---------------------------------------------------------------------------------

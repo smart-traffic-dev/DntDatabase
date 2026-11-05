@@ -242,6 +242,7 @@ describe('ConnectionTree', () => {
       id: ids.prod,
       scope: { database: 'shop', schema: null },
       kind: 'Table',
+      showSystem: false,
     });
     expect(screen.getByRole('treeitem', { name: /orders/ })).toBeInTheDocument();
   });

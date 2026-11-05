@@ -324,9 +324,9 @@ async listSchemas(id: string, db: string, showSystem: boolean) : Promise<Result<
     else return { status: "error", error: e  as any };
 }
 },
-async listObjects(id: string, scope: Scope, kind: ObjectKind) : Promise<Result<ObjectSummary[], AppError>> {
+async listObjects(id: string, scope: Scope, kind: ObjectKind, showSystem: boolean) : Promise<Result<ObjectSummary[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("list_objects", { id, scope, kind }) };
+    return { status: "ok", data: await TAURI_INVOKE("list_objects", { id, scope, kind, showSystem }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

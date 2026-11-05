@@ -353,7 +353,7 @@ async fn slow_page_does_not_block_browsing_and_cancel_stops_it() {
             async {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let browse = Instant::now();
-                list_objects_impl(&state, id, scope.clone(), ObjectKind::Table)
+                list_objects_impl(&state, id, scope.clone(), ObjectKind::Table, false)
                     .await
                     .unwrap();
                 table_detail_impl(&state, id, obj(t, "customers"))

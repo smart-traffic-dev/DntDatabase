@@ -83,7 +83,7 @@ async fn mysql_system_databases_hidden_unless_requested() {
         database: FIXTURE_DB.into(),
         schema: None,
     };
-    let tables = list_objects_impl(&state, id, scope, ObjectKind::Table)
+    let tables = list_objects_impl(&state, id, scope, ObjectKind::Table, false)
         .await
         .unwrap();
     assert!(tables.iter().any(|t| t.name == "customers"), "{tables:?}");

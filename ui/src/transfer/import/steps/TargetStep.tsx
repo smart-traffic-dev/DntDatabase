@@ -64,7 +64,7 @@ export function TargetStep({ state, dispatch, targetError }: Props) {
   useEffect(() => {
     let live = true;
     if (!database || (pg && !schema)) return;
-    api.listObjects(id, { database, schema: pg ? schema : null }, 'Table').then(
+    api.listObjects(id, { database, schema: pg ? schema : null }, 'Table', false).then(
       (list) => live && setTables(list.map((o) => o.name)),
       () => live && setTables([]),
     );
