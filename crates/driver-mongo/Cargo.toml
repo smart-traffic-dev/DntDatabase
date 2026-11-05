@@ -1,0 +1,14 @@
+[package]
+name = "dnt-driver-mongo"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "dnt_driver_mongo"
+
+[dependencies]
+base64.workspace = true
+dnt-core.workspace = true
+hex.workspace = true
+mongodb.workspace = true
+serde_json.workspace = true

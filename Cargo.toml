@@ -16,6 +16,7 @@ chacha20poly1305 = "0.10"
 dirs = "6"
 dnt-ai = { path = "crates/ai" }
 dnt-core = { path = "crates/core" }
+dnt-driver-mongo = { path = "crates/driver-mongo" }
 dnt-driver-mysql = { path = "crates/driver-mysql" }
 dnt-driver-pg = { path = "crates/driver-pg" }
 dnt-query = { path = "crates/query" }
@@ -27,6 +28,8 @@ futures-util = { version = "0.3", default-features = false }
 hex = "0.4"
 keyring = { version = "3", features = ["windows-native"] }
 # rustls (ring provider) only: no native-tls/OpenSSL, and aws-lc-rs would need cmake/NASM on Windows.
+# MongoDB driver; rustls (ring) only. bson comes through mongodb::bson.
+mongodb = { version = "3", default-features = false, features = ["compat-3-0-0", "rustls-tls", "dns-resolver"] }
 mysql_async = { version = "0.37", default-features = false, features = ["default-rustls-ring"] }
 quick-xml = "0.37"
 rusqlite = { version = "0.40", features = ["bundled"] }
