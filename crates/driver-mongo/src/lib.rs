@@ -1,8 +1,12 @@
 //! MongoDB driver built on the official `mongodb` crate (rustls with ring only).
 
 mod client;
+mod exec;
 pub mod rows;
+mod session;
 pub mod shell;
+
+pub use session::MongoSession;
 
 use async_trait::async_trait;
 use dnt_core::command::CommandLanguage;
@@ -31,13 +35,9 @@ impl Driver for MongoDriver {
         Some(Arc::new(shell::MongoLanguage))
     }
 
-    /// Connects and checks the server; the session itself comes with `MongoSession`.
+    /// Connects, checks the server and starts the session in `cfg.database` (or `test`).
     async fn connect(&self, cfg: &ResolvedConfig) -> Result<Box<dyn Session>, DbError> {
         let opened = client::open(cfg).await?;
-        opened.client.shutdown().immediate(true).await;
-        Err(DbError::Unsupported {
-            feature: "MongoDB sessions".into(),
-            version: String::new(),
-        })
+        Ok(Box::new(MongoSession::new(opened, cfg)))
     }
 }

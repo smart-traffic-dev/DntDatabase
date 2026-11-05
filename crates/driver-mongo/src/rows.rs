@@ -5,10 +5,11 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use dnt_core::driver::CellMode;
 use dnt_core::error::DbError;
-use dnt_core::value::Value;
+use dnt_core::value::{ColumnMeta, LogicalType, Value};
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::spec::BinarySubtype;
 use mongodb::bson::{Binary, Bson, DateTime, Decimal128, Document, Regex, Timestamp};
+use std::collections::BTreeSet;
 
 /// Smallest and largest `DateTime` millis shown as `Value::DateTime`:
 /// 0000-01-01T00:00:00.000Z ..= 9999-12-31T23:59:59.999Z.
@@ -297,6 +298,86 @@ pub fn row_of(doc: &Document, cols: &[String], cells: &CellMode) -> Vec<Value> {
     cols.iter()
         .map(|c| doc.get(c).map_or(Value::Null, |b| bson_to_value(b, cells)))
         .collect()
+}
+
+/// The BSON type name of a value (spec §6.1): `objectId`, `string`, `int`, `long`,
+/// `double`, `decimal`, `bool`, `date`, `object`, `array`, `binData`, `uuid`,
+/// `timestamp`, `regex`, `null`, and the rarer `undefined`, `symbol`, `minKey`, `maxKey`,
+/// `javascript`, `codeWithScope`, `dbPointer`.
+pub fn bson_type_name(b: &Bson) -> &'static str {
+    match b {
+        Bson::ObjectId(_) => "objectId",
+        Bson::String(_) => "string",
+        Bson::Int32(_) => "int",
+        Bson::Int64(_) => "long",
+        Bson::Double(_) => "double",
+        Bson::Decimal128(_) => "decimal",
+        Bson::Boolean(_) => "bool",
+        Bson::DateTime(_) => "date",
+        Bson::Document(_) => "object",
+        Bson::Array(_) => "array",
+        Bson::Binary(bin) if bin.subtype == BinarySubtype::Uuid && bin.bytes.len() == 16 => "uuid",
+        Bson::Binary(_) => "binData",
+        Bson::Timestamp(_) => "timestamp",
+        Bson::RegularExpression(_) => "regex",
+        Bson::Null => "null",
+        Bson::Undefined => "undefined",
+        Bson::Symbol(_) => "symbol",
+        Bson::MinKey => "minKey",
+        Bson::MaxKey => "maxKey",
+        Bson::JavaScriptCode(_) => "javascript",
+        Bson::JavaScriptCodeWithScope(_) => "codeWithScope",
+        Bson::DbPointer(_) => "dbPointer",
+    }
+}
+
+/// The column of each of `cols` over `docs`: `db_type` is the BSON type of the field's
+/// values, or `mixed(a|b)` (sorted) when they have several; a field no document has is
+/// `null`.
+pub fn column_metas(cols: &[String], docs: &[Document]) -> Vec<ColumnMeta> {
+    cols.iter()
+        .map(|name| {
+            let types: BTreeSet<&'static str> = docs
+                .iter()
+                .filter_map(|d| d.get(name))
+                .map(bson_type_name)
+                .collect();
+            let (db_type, logical) = match types.len() {
+                0 => ("null".to_string(), LogicalType::Other),
+                1 => {
+                    let t = types.iter().next().copied().unwrap_or("null");
+                    (t.to_string(), logical_of(t))
+                }
+                _ => {
+                    let all: Vec<&str> = types.into_iter().collect();
+                    (format!("mixed({})", all.join("|")), LogicalType::Other)
+                }
+            };
+            ColumnMeta {
+                name: name.clone(),
+                db_type,
+                logical,
+                nullable: None,
+                origin_table: None,
+                origin_column: None,
+            }
+        })
+        .collect()
+}
+
+/// The logical type of the values of one BSON type, as [`bson_to_value`] shows them.
+fn logical_of(type_name: &str) -> LogicalType {
+    match type_name {
+        "int" | "long" => LogicalType::Integer,
+        "double" => LogicalType::Float,
+        "string" | "symbol" => LogicalType::Text,
+        "bool" => LogicalType::Bool,
+        "date" => LogicalType::DateTime,
+        "object" | "array" => LogicalType::Json,
+        "uuid" => LogicalType::Uuid,
+        // `decimal` is `Value::Other` (as are the rest).
+        _ => LogicalType::Other,
+    }
 }
 
 #[cfg(test)]

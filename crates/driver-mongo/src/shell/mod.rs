@@ -46,9 +46,7 @@ impl std::error::Error for ShellError {}
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MongoLanguage;
 
-/// The driver's form of a parsed command (`ParsedCommand::payload`).
-// Read by the session's executor (`exec.rs`, a later task).
-#[allow(dead_code)]
+/// The driver's form of a parsed command (`ParsedCommand::payload`), read by `exec.rs`.
 pub(crate) struct Payload {
     pub cmd: ShellCommand,
 }

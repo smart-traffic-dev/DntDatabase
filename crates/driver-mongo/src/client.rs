@@ -49,11 +49,8 @@ const KEY_MARKERS: [&str; 3] = [
 /// A connected `Client` with what the server said about itself.
 pub struct Opened {
     pub client: Client,
-    /// Read by the session (`MongoSession`, plan Task 9).
-    #[cfg_attr(not(feature = "test-helpers"), allow(dead_code))]
     pub info: ServerInfo,
     /// The session's first database: `cfg.database`, or `test`.
-    #[cfg_attr(not(feature = "test-helpers"), allow(dead_code))]
     pub db: String,
 }
 
