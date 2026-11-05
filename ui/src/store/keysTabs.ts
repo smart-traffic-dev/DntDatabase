@@ -33,6 +33,8 @@ export interface KeysTabState {
   /** The page of the value asked for last. */
   range: ValueRange;
   loadingValue: boolean;
+  /** A scan of this tab has succeeded (a restored tab scans again when its connection opens). */
+  scanned: boolean;
   /** A failed scan, value read or preview. */
   error: string | null;
   /** `Key no longer exists`, until another key is selected. */
@@ -64,6 +66,8 @@ interface KeysTabsStore {
   /** Applies the plan under review (`data_apply`). */
   confirm(tabId: string): Promise<void>;
   cancel(tabId: string): void;
+  /** Forgets a closed tab: reopening it starts again with a fresh scan. */
+  drop(tabId: string): void;
   reset(): void;
 }
 
@@ -101,11 +105,15 @@ function applyFailure(report: ApplyReport): string {
   }
 }
 
-/** Sequence numbers of the latest scan / value read per tab: an older answer is dropped. */
+/**
+ * Sequence numbers of the latest scan / value read per tab: an older answer is dropped. One
+ * counter for all, so a tab closed and reopened never reuses the number of a read still running.
+ */
 const scanSeq = new Map<string, number>();
 const valueSeq = new Map<string, number>();
+let lastSeq = 0;
 const bump = (m: Map<string, number>, id: string) => {
-  const n = (m.get(id) ?? 0) + 1;
+  const n = ++lastSeq;
   m.set(id, n);
   return n;
 };
@@ -140,6 +148,7 @@ export const useKeysTabs = create<KeysTabsStore>()((set, get) => {
         cursor: page.next_cursor,
         done: page.next_cursor === null,
         scanning: false,
+        scanned: true,
       });
     } catch (e) {
       if (scanSeq.get(tabId) === seq) patch(tabId, { scanning: false, error: toAppError(e).message });
@@ -250,6 +259,7 @@ export const useKeysTabs = create<KeysTabsStore>()((set, get) => {
             cursor: null,
             done: false,
             scanning: false,
+            scanned: false,
             selected: null,
             value: null,
             range: firstRange(),
@@ -303,6 +313,16 @@ export const useKeysTabs = create<KeysTabsStore>()((set, get) => {
       }
     },
     cancel: (tabId) => patch(tabId, { pending: null, edit: null, creates: null }),
+    drop(tabId) {
+      scanSeq.delete(tabId);
+      valueSeq.delete(tabId);
+      set((s) => {
+        if (!(tabId in s.byTab)) return s;
+        const byTab = { ...s.byTab };
+        delete byTab[tabId];
+        return { byTab };
+      });
+    },
     reset() {
       scanSeq.clear();
       valueSeq.clear();
@@ -331,6 +351,33 @@ export function persistKeysTabs(): () => void {
       // Storage unavailable: the keys tabs just do not come back.
     }
   });
+}
+
+/**
+ * Keeps the key browsers in step with the tabs and connections; returns the unsubscribe. A closed
+ * keys tab loses its state (switching tabs unmounts it too, so this is not an unmount cleanup), and
+ * a tab whose scan has not succeeded yet (restored before its connection was open) scans again
+ * once its connection's server info arrives.
+ */
+export function syncKeysTabs(): () => void {
+  const stopTabs = useTabs.subscribe((s, prev) => {
+    if (s.tabs === prev.tabs) return;
+    const open = new Set(s.tabs.map((t) => t.id));
+    for (const t of prev.tabs) if (t.kind === 'keys' && !open.has(t.id)) useKeysTabs.getState().drop(t.id);
+  });
+  const stopConnections = useConnections.subscribe((s, prev) => {
+    if (s.info === prev.info) return;
+    const keys = useKeysTabs.getState();
+    for (const t of useTabs.getState().tabs) {
+      if (t.kind !== 'keys' || !s.info.has(t.connectionId) || prev.info.has(t.connectionId)) continue;
+      const state = keys.byTab[t.id];
+      if (state && !state.scanned) void keys.rescan(t.id);
+    }
+  });
+  return () => {
+    stopTabs();
+    stopConnections();
+  };
 }
 
 /**

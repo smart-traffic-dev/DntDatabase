@@ -16,7 +16,7 @@ import { StatusBar } from './components/StatusBar';
 import { EditorArea } from './components/EditorArea';
 import { TitleBar } from './components/TitleBar';
 import { persistArrangement, restoreArrangement } from './store/editorArrangement';
-import { persistKeysTabs, restoreKeysTabs } from './store/keysTabs';
+import { persistKeysTabs, restoreKeysTabs, syncKeysTabs } from './store/keysTabs';
 import { installRunMarks } from './store/runMarks';
 import { useJobs } from './store/jobs';
 import { useTabs } from './store/tabs';
@@ -47,9 +47,11 @@ export default function App() {
       if (live) {
         const stopArrangement = persistArrangement();
         const stopKeys = persistKeysTabs();
+        const stopKeysSync = syncKeysTabs();
         stopPersist = () => {
           stopArrangement();
           stopKeys();
+          stopKeysSync();
         };
       }
     })();

@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ConnectionConfig, EditPreview, KeyName, KeyPage, KeySummary, KeyType, KeyValueView } from '../../bindings';
 import { useConnections } from '../../store/connections';
-import { KEY_GONE, useKeysTabs } from '../../store/keysTabs';
+import { KEY_GONE, syncKeysTabs, useKeysTabs } from '../../store/keysTabs';
 import { openKeysTab, useTabs, type KeysTabRef } from '../../store/tabs';
 import { useTree } from '../../store/tree';
 import { connNodeId } from '../../store/treeModel';
@@ -334,6 +334,26 @@ describe('KeysTab', () => {
     await within(valuePane()).findByRole('button', { name: 'Edit item 1' });
     expect(within(valuePane()).queryByRole('button', { name: 'Edit item 0' })).toBeNull();
     expect(within(valuePane()).getByRole('button', { name: 'Remove item 0' })).toBeInTheDocument();
+  });
+
+  it('a closed keys tab reopens with a fresh scan, not its old list', async () => {
+    const stop = syncKeysTabs();
+    try {
+      let n = 0;
+      const tab = setup({ keys_scan: () => page([summary(++n === 1 ? 'old' : 'new')]) });
+      await waitFor(() => expect(keyRows()).toHaveLength(1));
+      expect(keyRows()[0]).toHaveTextContent('old');
+      cleanup();
+      act(() => useTabs.getState().close(tab.id));
+      expect(useKeysTabs.getState().byTab[tab.id]).toBeUndefined();
+
+      openKeysTab(ids.prod, '0');
+      render(<KeysTab tab={useTabs.getState().tabs[0] as KeysTabRef} />);
+      await waitFor(() => expect(callsOf('keys_scan')).toHaveLength(2));
+      await waitFor(() => expect(keyRows()[0]).toHaveTextContent('new'));
+    } finally {
+      stop();
+    }
   });
 
   it('Refresh of an open key that vanished shows the notice and leaves the list usable', async () => {

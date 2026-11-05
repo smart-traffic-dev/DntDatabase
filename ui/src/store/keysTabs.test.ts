@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { config, ids, mockBackend, resetStores } from '../test/backend';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { callsOf, config, fail, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
 import { useConnections } from './connections';
-import { KEYS_TABS_KEY, persistKeysTabs, restoreKeysTabs, useKeysTabs, valueCounts } from './keysTabs';
+import { KEYS_TABS_KEY, persistKeysTabs, restoreKeysTabs, syncKeysTabs, useKeysTabs, valueCounts } from './keysTabs';
 import { keysTabId, openKeysTab, useTabs } from './tabs';
 
 let stop = () => {};
@@ -56,6 +56,55 @@ describe('keys tabs', () => {
       [keysTabId(ids.legacy, '3'), true],
       [keysTabId(ids.prod, '0'), false],
     ]);
+  });
+
+  it('a restored keys tab scans again once its connection opens', async () => {
+    let open = false;
+    mockBackend({
+      tabs_save: () => null,
+      keys_scan: () => {
+        if (!open) throw fail('not_open');
+        return { keys: [{ name: { display: 'a', raw: 'YQ==' }, key_type: 'String', ttl_ms: null }], next_cursor: null };
+      },
+    });
+    stop = syncKeysTabs();
+    openKeysTab(ids.prod, '0');
+    openKeysTab(ids.legacy, '0');
+    const tabId = keysTabId(ids.prod, '0');
+    const other = keysTabId(ids.legacy, '0');
+    // The tabs mount (restored at startup) before their connections are open: the scans fail.
+    useKeysTabs.getState().ensure({ id: tabId, connectionId: ids.prod, database: '0' });
+    useKeysTabs.getState().ensure({ id: other, connectionId: ids.legacy, database: '0' });
+    await vi.waitFor(() => expect(useKeysTabs.getState().byTab[tabId]!.error).not.toBeNull());
+    expect(callsOf('keys_scan')).toHaveLength(2);
+
+    open = true;
+    useConnections.getState().setInfo(ids.prod, serverInfo('Redis'));
+    await vi.waitFor(() => expect(useKeysTabs.getState().byTab[tabId]!.keys).toHaveLength(1));
+    // Only the tab of the connection that opened scans again.
+    expect(callsOf('keys_scan').map((c) => c.id)).toEqual([ids.prod, ids.legacy, ids.prod]);
+    expect(useKeysTabs.getState().byTab[tabId]!.error).toBeNull();
+
+    // A tab that already scanned is left alone when the info changes again.
+    useConnections.getState().setInfo(ids.prod, serverInfo('Redis'));
+    await Promise.resolve();
+    expect(callsOf('keys_scan')).toHaveLength(3);
+  });
+
+  it('closing a keys tab drops its state', async () => {
+    mockBackend({ tabs_save: () => null, keys_scan: () => ({ keys: [], next_cursor: null }) });
+    stop = syncKeysTabs();
+    openKeysTab(ids.prod, '0');
+    openKeysTab(ids.prod, '1');
+    const a = keysTabId(ids.prod, '0');
+    const b = keysTabId(ids.prod, '1');
+    useKeysTabs.getState().ensure({ id: a, connectionId: ids.prod, database: '0' });
+    useKeysTabs.getState().ensure({ id: b, connectionId: ids.prod, database: '1' });
+    // Switching tabs keeps both.
+    useTabs.getState().activate(a);
+    expect(Object.keys(useKeysTabs.getState().byTab).sort()).toEqual([a, b].sort());
+    useTabs.getState().close(a);
+    expect(Object.keys(useKeysTabs.getState().byTab)).toEqual([b]);
   });
 
   it('junk in storage restores nothing', () => {
