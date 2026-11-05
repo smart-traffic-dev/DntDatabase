@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { AiConfig, AiSettings, AiTestResult, AiTrigger } from '../bindings';
+import { familyOf } from '../engine';
 import { aiErrorText, aiOnFor, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
@@ -169,7 +170,7 @@ export function SettingsAiPanel() {
   const sqlConnections = useMemo(
     () =>
       [...summaries.values()]
-        .filter((c) => c.config.kind === 'mysql' || c.config.kind === 'postgres')
+        .filter((c) => familyOf(c.config.kind) === 'sql')
         .sort((a, b) => a.config.name.localeCompare(b.config.name)),
     [summaries],
   );
