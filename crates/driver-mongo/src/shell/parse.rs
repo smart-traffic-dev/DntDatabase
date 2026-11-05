@@ -1029,7 +1029,11 @@ fn token_spans(text: &str, tokens: &[Token], out: &mut Vec<CommandSpan>) {
 /// One command per non-blank line of `text[from..to]` (text that does not lex).
 fn line_spans(text: &str, from: usize, to: usize, out: &mut Vec<CommandSpan>) {
     let mut at = from;
-    for line in text.get(from..to).unwrap_or_default().split_inclusive('\n') {
+    for line in text
+        .get(from..to)
+        .unwrap_or_default()
+        .split_inclusive(['\n', '\r'])
+    {
         let body = line.trim();
         if !body.is_empty() && !body.starts_with("//") {
             let start = at + (line.len() - line.trim_start().len());
@@ -1191,6 +1195,36 @@ mod tests {
             assert_eq!(got, want, "{text:?}");
             assert!(got.iter().all(|s| s != "db.c.drop()"), "{text:?}");
         }
+        // A string continued over a line (`\` at the line end) that does not end, or
+        // meets a plain line break later: from its quote, the rest is one command.
+        for (text, want) in [
+            (
+                "db.c.insertOne({note: 'do not run \\\ndb.c.drop()",
+                vec!["db.c.insertOne({note:", "'do not run \\\ndb.c.drop()"],
+            ),
+            (
+                "db.c.find({a: \"x\\\ndb.c.drop()\ny\"})",
+                vec!["db.c.find({a:", "\"x\\\ndb.c.drop()\ny\"})"],
+            ),
+            (
+                "db.c.find({a: 'x\\\r\ny\\x'})\ndb.c.drop()",
+                vec!["db.c.find({a:", "'x\\\r\ny\\x'})\ndb.c.drop()"],
+            ),
+        ] {
+            let got = spans(text);
+            assert_eq!(got, want, "{text:?}");
+            assert!(got.iter().all(|s| s != "db.c.drop()"), "{text:?}");
+        }
+        // A string continued over a line that does end is fine.
+        assert_eq!(
+            spans("db.c.find({a: 'x\\\ny'})\ndb.d.find()"),
+            ["db.c.find({a: 'x\\\ny'})", "db.d.find()"]
+        );
+        // A lone CR ends a line as LF does.
+        assert_eq!(
+            spans("db.a.find({x: 'bad)\rdb.c.find()\rshow dbs"),
+            ["db.a.find({x: 'bad)", "db.c.find()", "show dbs"]
+        );
         // A bad escape in a string is one bad line; the next command is its own.
         assert_eq!(
             spans("db.a.find({t: '\\1'})\ndb.c.find()"),

@@ -158,23 +158,50 @@ pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
 }
 
 /// When the lex error `message` at `bad` (lexing from `pos`) is inside a construct that
-/// may span lines and does not end (an unterminated template literal or comment, or a
-/// `${` or bad escape inside a template literal): where that construct begins.
+/// spans lines and does not end, where that construct begins. Such constructs are:
+///
+/// - an unterminated template literal or comment;
+/// - an unterminated string continued over a line (`\` at a line end);
+/// - a `${` inside a template literal;
+/// - a bad escape inside a template literal or inside a string continued over a line.
 fn unclosed_begin(text: &str, pos: usize, bad: usize, message: &str) -> Option<usize> {
     const TEMPLATE: &str = "Unterminated template literal";
-    let inside_template = || {
-        // Lexing up to the error ends inside the template, at its backtick.
-        match lex(text.get(pos..bad)?) {
-            Err(e) if e.message == TEMPLATE => Some(pos + e.offset),
-            _ => None,
+    const STRING: &str = "Unterminated string";
+    // Lexing up to the error ends inside the construct holding it, at its first quote.
+    let enclosing = || match lex(text.get(pos..bad)?) {
+        Err(e) if e.message == TEMPLATE => Some(pos + e.offset),
+        Err(e) if e.message == STRING && continues_over_a_line(text, pos + e.offset) => {
+            Some(pos + e.offset)
         }
+        _ => None,
     };
     match message {
         TEMPLATE | "Unterminated comment" => Some(bad),
-        m if m.starts_with("Template literal substitutions") => inside_template(),
-        "Invalid escape sequence" => inside_template(),
+        STRING => continues_over_a_line(text, bad).then_some(bad),
+        m if m.starts_with("Template literal substitutions") => enclosing(),
+        "Invalid escape sequence" => enclosing(),
         _ => None,
     }
+}
+
+/// Whether the `'` / `"` string that starts at byte `quote` holds a line continuation
+/// (`\` before a line break) before it ends or meets a plain line break.
+fn continues_over_a_line(text: &str, quote: usize) -> bool {
+    let b = text.as_bytes();
+    let Some(&q) = b.get(quote) else {
+        return false;
+    };
+    let mut k = quote + 1;
+    while k < b.len() {
+        match b[k] {
+            b'\\' if matches!(b.get(k + 1), Some(b'\n' | b'\r')) => return true,
+            b'\\' => k += 2,
+            b'\n' | b'\r' => return false,
+            c if c == q => return false,
+            _ => k += 1,
+        }
+    }
+    false
 }
 
 fn shifted(tokens: Vec<Token>, by: usize) -> Vec<Token> {
@@ -188,21 +215,27 @@ fn shifted(tokens: Vec<Token>, by: usize) -> Vec<Token> {
         .collect()
 }
 
-/// The start of the line holding byte `i`.
+/// The start of the line holding byte `i` (lines end at LF, CR or CRLF, as the lexer
+/// ends a string).
 fn line_start(text: &str, i: usize) -> usize {
     let b = text.as_bytes();
     b[..i.min(b.len())]
         .iter()
-        .rposition(|&c| c == b'\n')
+        .rposition(|&c| matches!(c, b'\n' | b'\r'))
         .map_or(0, |p| p + 1)
 }
 
-/// Just past the end (`\n` included) of the line holding byte `i`.
+/// Just past the end (its LF, CR or CRLF included) of the line holding byte `i`.
 fn line_end(text: &str, i: usize) -> usize {
     let b = text.as_bytes();
-    b.get(i..)
-        .and_then(|s| s.iter().position(|&c| c == b'\n'))
-        .map_or(b.len(), |p| i + p + 1)
+    match b
+        .get(i..)
+        .and_then(|s| s.iter().position(|&c| matches!(c, b'\n' | b'\r')))
+    {
+        None => b.len(),
+        Some(p) if b[i + p] == b'\r' && b.get(i + p + 1) == Some(&b'\n') => i + p + 2,
+        Some(p) => i + p + 1,
+    }
 }
 
 /// The tokens of `text[pos..cut]`, backing `cut` off to earlier line starts while it

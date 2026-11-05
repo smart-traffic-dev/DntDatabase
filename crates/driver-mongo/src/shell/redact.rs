@@ -2,20 +2,25 @@
 //! Favorites. Secrets are replaced with `***`, in two tiers, per command of
 //! [`split`](super::parse::split):
 //!
-//! - **Precise**, for a command that lexes and parses: the value of every key whose name
-//!   holds `pwd`, `password` or `secret` (any case, at any depth: `ldapQueryPassword`,
-//!   `client_secret`), and the password of a `mongodb://` / `mongodb+srv://` URI up to
-//!   the last `@` before the host (so a password holding `@` is masked whole).
-//! - **Coarse**, for everything else: a run of commands that do not parse (with the
-//!   text between them), the text between commands (comments), and comments inside a
-//!   parsed command. Everything after the FIRST secret marker of the region is masked,
-//!   to the region's end. The markers are those key names anywhere (as names or inside
-//!   quotes), `.auth` / `.changeUserPassword` (masked after `(` and a quoted first
-//!   argument), and a `mongodb://` / `mongodb+srv://` URI with user info (masked after
-//!   the scheme). Over-masking is accepted; leaking is not.
+//! - **Precise**, for a command that lexes and parses. Masked: the value of every key
+//!   whose (decoded) name holds `pwd`, `password` or `secret` (any case, at any depth:
+//!   `ldapQueryPassword`, `client_secret`), and every string whose decoded value holds a
+//!   `mongodb://` / `mongodb+srv://` URI with user info. The password of a URI in the
+//!   raw text is also masked up to the last `@` before the host.
+//! - **Coarse**, for everything else. That is a run of commands that do not parse,
+//!   together with the text around it up to the commands that parse on either side
+//!   (comments); the text between parsed commands; and comments inside a parsed command.
+//!   A region that holds any marker is replaced
+//!   WHOLE by `***`; one without stays as it is. Markers, in any case:
+//!   - `pwd`, `password` and `secret` anywhere;
+//!   - `auth` as a whole word (`db.auth`, `db . auth`, `db['auth']`);
+//!   - `mongodb`;
+//!   - any backslash: an escape or a line continuation can spell a marker (`p\u0077d`,
+//!     `p\wd`).
 //!
-//! `db.auth(…)` and `db.changeUserPassword(…)` are not in the grammar, so they are
-//! always coarse. Never panics.
+//!   Such commands are blocked by the guard, so nothing useful is lost.
+//!
+//! Never panics.
 
 use dnt_core::command::CommandLanguage;
 use dnt_core::redact::Redacted;
@@ -29,7 +34,9 @@ pub const MASK: &str = "***";
 /// The redacted form of `text`.
 pub fn redact(text: &str) -> Redacted {
     let mut ranges = Vec::new();
-    // The end of the last command, and where the current run of bad commands began.
+    // The end of the last command, and where the current coarse region began: the end
+    // of the last command that parsed (so the region holds the comments around a run of
+    // bad commands: `mongodb://…` outside a string lexes as `mongodb:` and a comment).
     let mut at = 0;
     let mut bad_from: Option<usize> = None;
     for s in split(text) {
@@ -56,17 +63,20 @@ fn is_word(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
-fn skip_space(b: &[u8], mut i: usize) -> usize {
-    while b.get(i).is_some_and(u8::is_ascii_whitespace) {
-        i += 1;
-    }
-    i
+/// A `mongodb://` / `mongodb+srv://` URI with user info (an `@` after the scheme).
+fn has_uri_with_user_info(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    ["mongodb://", "mongodb+srv://"].iter().any(|scheme| {
+        lower
+            .find(scheme)
+            .is_some_and(|i| lower[i + scheme.len()..].contains('@'))
+    })
 }
 
 // ---------------------------------------------------------------------------------
 // Precise: a command that parses
 
-/// The secret values of the parsed command `span` (at byte `start` of `text`), and the
+/// The secrets of the parsed command `span` (at byte `start` of `text`), and the
 /// comments between its tokens (coarse).
 fn precise(text: &str, start: usize, span: &str, out: &mut Vec<(usize, usize)>) {
     let Ok(toks) = lex(span) else {
@@ -83,11 +93,18 @@ fn precise(text: &str, start: usize, span: &str, out: &mut Vec<(usize, usize)>) 
         })
         .collect();
     for (i, t) in toks.iter().enumerate() {
-        if let TokenKind::Ident(key) | TokenKind::Str(key) = &t.kind {
-            if is_secret(key) && punct(&toks, i + 1, ':') && i + 2 < toks.len() {
+        match &t.kind {
+            TokenKind::Ident(key) | TokenKind::Str(key)
+                if is_secret(key) && punct(&toks, i + 1, ':') && i + 2 < toks.len() =>
+            {
                 let end = value_end(&toks, i + 2);
                 out.push((toks[i + 2].start, toks[end - 1].end));
             }
+            // String values are decoded: `mongodb:\/\/u:p\x40h` is a URI too.
+            TokenKind::Str(value) if has_uri_with_user_info(value) => {
+                out.push((t.start, t.end));
+            }
+            _ => {}
         }
     }
     for w in toks.windows(2) {
@@ -137,96 +154,49 @@ fn value_end(toks: &[Token], mut i: usize) -> usize {
 // ---------------------------------------------------------------------------------
 // Coarse: everything else
 
-/// Masks `text[from..to]` from just after its first secret marker to `to` (trailing
-/// whitespace, which holds no secret, is kept).
+/// Masks the whole of `text[from..to]` when it holds a marker (but the whitespace and
+/// `;` at its edges, which hold no secret).
 fn coarse(text: &str, from: usize, to: usize, out: &mut Vec<(usize, usize)>) {
     let Some(region) = text.get(from..to) else {
         return;
     };
-    if let Some(m) = first_marker(region) {
-        let end = region.trim_end().len();
-        if m < end {
-            out.push((from + m, from + end));
+    if has_marker(region) {
+        let edge = |c: char| c.is_whitespace() || c == ';';
+        let start = from + (region.len() - region.trim_start_matches(edge).len());
+        let end = from + region.trim_end_matches(edge).len();
+        if start < end {
+            out.push((start, end));
         }
     }
 }
 
-/// Where masking starts in `s`: just after its first secret marker.
-fn first_marker(s: &str) -> Option<usize> {
+/// Whether `s` holds a secret marker (see the module docs).
+fn has_marker(s: &str) -> bool {
     let lower = s.to_ascii_lowercase();
+    if lower.contains('\\')
+        || lower.contains("mongodb")
+        || ["pwd", "password", "secret"]
+            .iter()
+            .any(|k| lower.contains(k))
+    {
+        return true;
+    }
     let b = lower.as_bytes();
-    // (where the marker starts, where masking starts)
-    let mut best: Option<(usize, usize)> = None;
-    let mut consider = |start: usize, mask_from: usize| {
-        if best.is_none_or(|(s0, _)| start < s0) {
-            best = Some((start, mask_from));
+    let mut from = 0;
+    while let Some(i) = lower.get(from..).and_then(|r| r.find("auth")) {
+        let i = from + i;
+        let e = i + "auth".len();
+        let whole = (i == 0 || !is_word(b[i - 1])) && !b.get(e).is_some_and(|&c| is_word(c));
+        if whole {
+            return true;
         }
-    };
-    for key in ["pwd", "password", "secret"] {
-        if let Some(i) = lower.find(key) {
-            let mut e = i + key.len();
-            while e < b.len() && is_word(b[e]) {
-                e += 1;
-            }
-            consider(i, e);
-        }
+        from = e;
     }
-    for name in [".auth", ".changeuserpassword"] {
-        let mut from = 0;
-        while let Some(i) = lower.get(from..).and_then(|r| r.find(name)) {
-            let i = from + i;
-            let e = i + name.len();
-            if !b.get(e).is_some_and(|&c| is_word(c)) {
-                consider(i, after_first_argument(b, e));
-                break;
-            }
-            from = e;
-        }
-    }
-    for scheme in ["mongodb://", "mongodb+srv://"] {
-        let mut from = 0;
-        while let Some(i) = lower.get(from..).and_then(|r| r.find(scheme)) {
-            let i = from + i;
-            let e = i + scheme.len();
-            let uri_end = b[e..]
-                .iter()
-                .position(u8::is_ascii_whitespace)
-                .map_or(b.len(), |p| e + p);
-            if b[e..uri_end].contains(&b'@') {
-                consider(i, e);
-                break;
-            }
-            from = e;
-        }
-    }
-    best.map(|(_, m)| m)
-}
-
-/// After `.auth` (ending at `e`): past `(` and a quoted first argument and its `,` when
-/// they are there, else past what is there of them. Never past the password.
-fn after_first_argument(b: &[u8], e: usize) -> usize {
-    let open = skip_space(b, e);
-    if b.get(open) != Some(&b'(') {
-        return e;
-    }
-    let arg = skip_space(b, open + 1);
-    let Some(&q @ (b'\'' | b'"' | b'`')) = b.get(arg) else {
-        return open + 1;
-    };
-    let mut k = arg + 1;
-    while k < b.len() && b[k] != q {
-        k += if b[k] == b'\\' { 2 } else { 1 };
-    }
-    let comma = skip_space(b, k + 1);
-    if k < b.len() && b.get(comma) == Some(&b',') {
-        comma + 1
-    } else {
-        open + 1
-    }
+    false
 }
 
 // ---------------------------------------------------------------------------------
-// URIs
+// URIs in the raw text
 
 /// The password of every `mongodb://` / `mongodb+srv://` URI: from the first `:` of the
 /// user info to the last `@` before the next whitespace.
@@ -353,111 +323,102 @@ mod tests {
                 "use 2024logs\ndb.c.insertOne({pwd: 'x'})",
                 "use 2024logs\ndb.c.insertOne({pwd: ***})",
             ),
+            // An escaped key is read decoded.
+            (
+                "db.c.insertOne({'p\\u0077d': 'hunter2'})",
+                "db.c.insertOne({'p\\u0077d': ***})",
+            ),
             // Nothing to redact: the text is kept byte for byte.
             ("db.c.find({name: 'pwd'})", "db.c.find({name: 'pwd'})"),
+            ("db.c.find({auth: 1})", "db.c.find({auth: 1})"),
             ("use 2024_logs\nshow dbs", "use 2024_logs\nshow dbs"),
-            // A comment is coarse: everything after its marker.
+            // A comment with a marker is masked whole.
             (
-                "db.c.find({name: 'x'}) // password: none\nshow dbs",
-                "db.c.find({name: 'x'}) // password***\nshow dbs",
+                "db.c.find({name: 'x'}) // password: none\nshow dbs // plain",
+                "db.c.find({name: 'x'}) ***\nshow dbs // plain",
             ),
             (
                 "db.c.find({a: 1 /* pwd: x */, b: 2})",
-                "db.c.find({a: 1 /* pwd***, b: 2})",
+                "db.c.find({a: 1 ***, b: 2})",
             ),
-            // Not parsed: everything after the first marker.
-            (
-                "db.c.insertOne({secret: 'a' + 'b', n: 1})",
-                "db.c.insertOne({secret***",
-            ),
-            ("db.auth('admin', 'hunter2')", "db.auth('admin',***"),
+            // A command that does not parse, with a marker: masked whole.
+            ("db.c.insertOne({secret: 'a' + 'b', n: 1})", "***"),
+            ("db.auth('admin', 'hunter2')", "***"),
             (
                 "db.getSiblingDB('admin').changeUserPassword('u', \"n3w\" )",
-                "db.getSiblingDB('admin').changeUserPassword('u',***",
+                "***",
             ),
-            ("db.auth({user: 'u', pwd: 'p'})", "db.auth(***"),
-            ("db.auth('u')", "db.auth(***"),
+            ("db.auth({user: 'u', pwd: 'p'})", "***"),
+            ("db.auth('u')", "***"),
             // A parsed command after a bad one is precise again.
             (
                 "db.auth('u', 'p')\ndb.c.insertOne({pwd: 'q', n: 1})",
-                "db.auth('u',***\ndb.c.insertOne({pwd: ***, n: 1})",
+                "***\ndb.c.insertOne({pwd: ***, n: 1})",
             ),
+            // Without a marker, a bad command is kept.
+            ("db.c.find({a: 'open", "db.c.find({a: 'open"),
         ]);
     }
 
     #[test]
     fn redacts_uri_password_with_at_sign() {
         check(&[
+            // In a parsed command: the whole string.
             (
                 "db.c.insertOne({uri: 'mongodb://app:p@ss@db.example.com:27017/x?tls=true'})",
-                "db.c.insertOne({uri: 'mongodb://app:***@db.example.com:27017/x?tls=true'})",
+                "db.c.insertOne({uri: ***})",
             ),
             (
-                "db.c.insertOne({u: 'mongodb+srv://u:s3cr@t@cluster0.example.net/?w=1'})",
-                "db.c.insertOne({u: 'mongodb+srv://u:***@cluster0.example.net/?w=1'})",
-            ),
-            (
-                "db.c.insertOne({a: 'MONGODB://u:x@h', b: 'mongodb://v:y@h2'})",
-                "db.c.insertOne({a: 'MONGODB://u:***@h', b: 'mongodb://v:***@h2'})",
-            ),
-            // Not a command: coarse, after the scheme.
-            (
-                "mongodb+srv://u:s3cr@t@cluster0.example.net/?retryWrites=true",
-                "mongodb+srv://***",
+                "db.c.insertOne({a: 'MONGODB+SRV://u:x@h', b: 'mongodb://v@h2', n: 1})",
+                "db.c.insertOne({a: ***, b: ***, n: 1})",
             ),
             // No user info: unchanged.
             (
-                "db.c.insertOne({u: 'mongodb://u@h/db'})",
-                "db.c.insertOne({u: 'mongodb://u@h/db'})",
+                "db.c.insertOne({u: 'mongodb://h:27017/db'})",
+                "db.c.insertOne({u: 'mongodb://h:27017/db'})",
             ),
-            ("mongodb://h:27017/db", "mongodb://h:27017/db"),
+            // Not a command: masked whole.
+            (
+                "mongodb+srv://u:s3cr@t@cluster0.example.net/?retryWrites=true",
+                "***",
+            ),
+            ("mongodb://h:27017/db", "***"),
         ]);
+        // Escapes and line continuations are decoded before the URI is looked for.
+        for text in [
+            "db.c.insertOne({u: 'mongodb:\\/\\/u:hunter2@h'})",
+            "db.c.insertOne({u: 'mongodb://u:hunter2\\x40h'})",
+            "db.c.insertOne({u: 'mongodb://u:hunter2\\u0040h'})",
+            "db.c.insertOne({u: '\\x6dongodb://u:hunter2@h'})",
+            "db.c.insertOne({u: 'mongodb\\x3a//u:hunter2@h'})",
+            "db.c.insertOne({u: 'mongodb://u:hunter2\\\n@h'})",
+        ] {
+            assert!(MongoLanguage.parse(text).is_ok(), "{text}");
+            assert_eq!(
+                MongoLanguage.redact(text).text,
+                "db.c.insertOne({u: ***})",
+                "{text}"
+            );
+        }
     }
 
     #[test]
     fn redacts_unparsable_lines() {
-        check(&[
-            (
-                "db.createUser({user: 'u', pwd: 'hunter2",
-                "db.createUser({user: 'u', pwd***",
-            ),
-            ("db.auth('u', 'hunter2", "db.auth('u',***"),
-            (
-                "db.changeUserPassword('u', \"n3w",
-                "db.changeUserPassword('u',***",
-            ),
-            (
-                "db.c.insertOne({password: \"a,b\", note: 'open",
-                "db.c.insertOne({password***",
-            ),
-            ("{secret: `multi\nline` 'x", "{secret***"),
-            (
-                "x = {'Password' : abc def, y: 1} 'oops",
-                "x = {'Password***",
-            ),
-            // A bad run masks to its end, past the lines that do lex.
-            (
-                "db.createUser({\n  user: 'u',\n  pwd: 'p1'\n})\ndb.auth('u', 'p2\nmongodb://u:p3@h",
-                "db.createUser({\n  user: 'u',\n  pwd***",
-            ),
-            ("db.c.find({a: 'open", "db.c.find({a: 'open"),
-            (
-                "db.runCommand({createUser: 'app', pwd:\n  'S3cret!, roles: []})",
-                "db.runCommand({createUser: 'app', pwd***",
-            ),
-            ("db.auth('admin',\n  'hunter2", "db.auth('admin',***"),
-            ("x({a: 'open\n pwd:\n 'p'", "x({a: 'open\n pwd***"),
-            ("x('a, y.auth('u',\r\n 'hunter4'", "x('a, y.auth('u',***"),
-        ]);
-        for (text, secret) in [
-            (
-                "db.runCommand({createUser: 'app', pwd:\n  'S3cret!, roles: []})",
-                "S3cret",
-            ),
-            ("db.auth('admin',\n  'hunter2", "hunter2"),
-            ("x({a: 'open\n pwd:\n 'p'", "'p'"),
+        // Every one of these does not parse and holds a marker: nothing is left.
+        for text in [
+            "db.createUser({user: 'u', pwd: 'hunter2",
+            "db.auth('u', 'hunter2",
+            "db.changeUserPassword('u', \"n3w",
+            "db.c.insertOne({password: \"a,b\", note: 'open",
+            "{secret: `multi\nline` 'x",
+            "x = {'Password' : abc def, y: 1} 'oops",
+            "db.createUser({\n  user: 'u',\n  pwd: 'p1'\n})\ndb.auth('u', 'p2\nmongodb://u:p3@h",
+            "db.runCommand({createUser: 'app', pwd:\n  'S3cret!, roles: []})",
+            "db.auth('admin',\n  'hunter2",
+            "x({a: 'open\n pwd:\n 'p'",
+            "x('a, y.auth('u',\r\n 'hunter4'",
         ] {
-            hidden(text, &[secret]);
+            check(&[(text, "***")]);
         }
     }
 
@@ -479,6 +440,8 @@ mod tests {
             "db.c.insertOne({note: `Bob's\nit's ok', pwd: 'hunter2'})",
             "db.c.find({a: 1}); db.auth('u',\n'hunter2'); show dbs",
             "// pwd\n'hunter2",
+            "db.c.insertOne({pwd: 'a\\\nhunter2'})",
+            "db.c.insertOne({pwd: 'a\\\nhunter2",
         ] {
             hidden(text, &["hunter2"]);
         }
@@ -487,6 +450,39 @@ mod tests {
             "db.c.insertOne({note: 'it's', pwd: 'S3cret's'})",
             &["S3cret"],
         );
+    }
+
+    #[test]
+    fn redacts_disguised_markers() {
+        for text in [
+            "db. auth('admin', 'hunter2')",
+            "db.\nauth('admin', 'hunter2')",
+            "db./*x*/auth('admin', 'hunter2')",
+            "db['auth']('admin', 'hunter2')",
+            "db[\"auth\"]('admin', 'hunter2')",
+            "db.getSiblingDB('admin')['auth']('u', 'hunter2')",
+            "db.AUTH('u', 'hunter2')",
+            "db.c.insertOne({'p\\u0077d': 'hunter2",
+            "db.c.insertOne({a: 1, \\u0070wd: 'hunter2'})",
+            "db.c.insertOne({'p\\wd': 'hunter2",
+            "db.c.insertOne({'p\\\nwd': 'hunter2",
+            "var pw = 'hunter2'; db.createUser({user: 'u', pwd: pw, roles: []})",
+        ] {
+            hidden(text, &["hunter2"]);
+        }
+        // The command before the bad one is kept.
+        check(&[
+            (
+                "db.c.find({a: 1});db['auth']('u','hunter2')",
+                "db.c.find({a: 1});***",
+            ),
+            (
+                "db.c.insertOne({a: 1})\ndb . auth('u', 'hunter2')\nshow dbs",
+                "db.c.insertOne({a: 1})\n***\nshow dbs",
+            ),
+            // `auth` only as a whole word.
+            ("db.c.find({author: 'open", "db.c.find({author: 'open"),
+        ]);
     }
 
     #[test]
