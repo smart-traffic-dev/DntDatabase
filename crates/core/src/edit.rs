@@ -30,6 +30,8 @@ pub enum CellInput {
     Loaded {
         token: Uuid,
     },
+    /// Removes the field (Command family only).
+    Unset,
 }
 
 /// One loaded row: its key values, every loaded cell as it was, and (PostgreSQL) its
@@ -67,4 +69,17 @@ pub struct EditSet {
     pub edits: Vec<RowEdit>,
     /// Drop every row guard (an explicit "Overwrite" after a conflict).
     pub overwrite: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unset_round_trips_serde() {
+        let json = serde_json::to_value(CellInput::Unset).unwrap();
+        assert_eq!(json, serde_json::json!({ "kind": "unset" }));
+        let back: CellInput = serde_json::from_value(json).unwrap();
+        assert_eq!(back, CellInput::Unset);
+    }
 }

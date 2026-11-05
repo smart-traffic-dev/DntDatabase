@@ -1,5 +1,6 @@
 import { useImperativeHandle, useRef, type KeyboardEvent, type Ref } from 'react';
-import type { FilterMode, FilterOp } from '../bindings';
+import type { EngineFamily, FilterMode, FilterOp } from '../bindings';
+import { assertNever } from '../engine';
 import { newFilterRow, opArity, type FilterDraft, type FilterRow } from '../store/tableData';
 
 /** The operators of the bar, in menu order, with their labels. */
@@ -36,13 +37,28 @@ interface Props {
   onApply(): void;
   onClear(): void;
   handle?: Ref<FilterBarHandle>;
+  /** The raw mode is a SQL WHERE condition (`sql`, the default) or a JSON filter (`command`). */
+  family?: EngineFamily;
+}
+
+/** How the raw mode reads per family: its toggle / input name, tooltip, placeholder and the word before the input. */
+function rawCopy(family: EngineFamily): { label: string; title: string; placeholder: string; prefix: string | null } {
+  switch (family) {
+    case 'sql':
+      return { label: 'Raw WHERE', title: 'Type the WHERE condition as SQL', placeholder: "total > 100 AND status = 'paid'", prefix: 'WHERE' };
+    case 'command':
+      return { label: 'JSON filter', title: 'Type the filter as a JSON object', placeholder: '{ "status": "paid" }', prefix: null };
+    default:
+      return assertNever(family);
+  }
 }
 
 /**
  * The data view's filter bar (Navicat Filter): condition rows of column, operator and value(s),
  * joined with AND or OR. Nothing is SQL: the rows become a structured filter on Apply.
  */
-export function FilterBar({ columns, draft, active, error, onChange, onApply, onClear, handle }: Props) {
+export function FilterBar({ columns, draft, active, error, onChange, onApply, onClear, handle, family = 'sql' }: Props) {
+  const copy = rawCopy(family);
   const root = useRef<HTMLDivElement>(null);
   useImperativeHandle(handle, () => ({
     focus() {
@@ -98,10 +114,10 @@ export function FilterBar({ columns, draft, active, error, onChange, onApply, on
           type="button"
           className={`qt-btn${raw ? ' dv-on' : ''}`}
           aria-pressed={raw}
-          title="Type the WHERE condition as SQL"
+          title={copy.title}
           onClick={() => onChange({ ...draft, rawMode: !raw })}
         >
-          Raw WHERE
+          {copy.label}
         </button>
         <span className="spacer" />
         <button type="button" className="qt-btn" onClick={onApply}>
@@ -113,11 +129,11 @@ export function FilterBar({ columns, draft, active, error, onChange, onApply, on
       </div>
       {raw ? (
         <div className="fb-row">
-          <span className="fb-and">WHERE</span>
+          {copy.prefix ? <span className="fb-and">{copy.prefix}</span> : null}
           <input
             className="fb-raw"
-            aria-label="Raw WHERE"
-            placeholder="total > 100 AND status = 'paid'"
+            aria-label={copy.label}
+            placeholder={copy.placeholder}
             spellCheck={false}
             autoComplete="off"
             value={rawText}

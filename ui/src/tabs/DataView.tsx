@@ -7,7 +7,8 @@ import { CloseIcon, FilterIcon, MoreIcon, NextIcon, PrevIcon, RefreshIcon, StopI
 import { belowRight } from './stripWidth';
 import { selectTopSql } from '../components/newQuery';
 import { dataExportRequest, requestExport, toggleTabFilterBar } from '../dialogs/resultExport';
-import { isKind } from '../engine';
+import { isKind, type SqlEngine } from '../engine';
+import { capsOfConnection, useCaps } from '../engine/useCaps';
 import { useAppSettings } from '../store/appSettings';
 import { confirmDiscard, readOnlyCopy, rowIdOf, rowKeyPairs, rowRef, UNKNOWN_OUTCOME, useDataEdits, type RowId, type Staged } from '../store/dataEdits';
 import { useObjectData } from '../store/objectData';
@@ -44,9 +45,17 @@ const ARROW = { asc: '↑', desc: '↓' } as const;
 /** PostgreSQL types without an order (the backend refuses to sort by them too). */
 const UNSORTABLE_PG = new Set(['json', 'xml', 'point', 'line', 'lseg', 'box', 'path', 'polygon', 'circle']);
 
-/** Whether a column of `dbType` cannot be sorted on (MySQL sorts every type). */
-export function unsortable(engine: 'mysql' | 'postgres', dbType: string): boolean {
-  if (!isKind(engine, 'postgres')) return false;
+/**
+ * The SQL engine of a data tab's connection; null on the Command family (no SQL: no Open in query,
+ * no Copy as SQL, no SQL type rules), whatever `dialectOfConnection` falls back to.
+ */
+export function dataSqlEngine(connectionId: string): SqlEngine | null {
+  return capsOfConnection(connectionId)?.family === 'command' ? null : dialectOfConnection(connectionId);
+}
+
+/** Whether a column of `dbType` cannot be sorted on (MySQL and the Command family sort every type). */
+export function unsortable(engine: SqlEngine | null, dbType: string): boolean {
+  if (engine === null || !isKind(engine, 'postgres')) return false;
   let t = dbType.trim().toLowerCase();
   while (t.endsWith('[]')) t = t.slice(0, -2).trim();
   t = t.split('.').pop() ?? t;
@@ -97,14 +106,15 @@ const CUT_CELL_CHARS = 64 * 1024;
  * The text a grid value is filtered by ("Filter = this value"), sent as a bound parameter;
  * null when the value cannot be matched exactly (binary, arrays, a cut text cell).
  */
-export function filterValueText(v: Value, engine: 'mysql' | 'postgres'): string | null {
+export function filterValueText(v: Value, engine: SqlEngine | null): string | null {
   switch (v.t) {
     case 'Null':
     case 'Bytes':
     case 'Array':
       return null;
     case 'Bool':
-      return isKind(engine, 'postgres') ? String(v.v) : v.v ? '1' : '0';
+      // MySQL binds booleans as 1 / 0; PostgreSQL and the Command family as true / false.
+      return engine !== null && isKind(engine, 'mysql') ? (v.v ? '1' : '0') : String(v.v);
     case 'Int':
     case 'UInt':
     case 'Float':
@@ -130,7 +140,7 @@ export function addFilterCondition(tab: Tab, row: FilterRow) {
   const draft = { mode: 'and' as const, rows: [...kept, row], rawMode: false, rawText: state.draft.rawText ?? '' };
   store.setDraft(tab, draft);
   store.toggleFilterBar(tab, true);
-  store.applyFilter(tab, draftToFilter(draft).filter);
+  store.applyFilter(tab, draftToFilter(draft, capsOfConnection(tab.connectionId)?.family).filter);
 }
 
 /** The context of a grid cell menu (`ResultGrid`'s `extraCellMenu`). */
@@ -154,7 +164,7 @@ export function dataCellMenu(tab: Tab): (ctx: CellMenuContext) => MenuEntry[] {
         { label: `Filter: ${column.name} IS NOT NULL`, run: add('is_not_null') },
       ];
     }
-    const text = filterValueText(value, dialectOfConnection(tab.connectionId));
+    const text = filterValueText(value, dataSqlEngine(tab.connectionId));
     if (text === null) return [];
     return [
       { label: `Filter: ${column.name} = ${shortText(text)}`, run: add('eq', text) },
@@ -200,10 +210,10 @@ export function turnPage(tab: Tab, direction: 'prev' | 'next'): boolean {
 }
 
 /** Opens this page's SELECT (sort, offset and size; not the filter) in a new query tab. */
-function openPageInQuery(tab: Tab) {
+function openPageInQuery(tab: Tab, engine: SqlEngine) {
   const state = useTableData.getState().byTab[tab.id];
   if (!state) return;
-  const sql = selectTopSql(tab, dialectOfConnection(tab.connectionId), { limit: state.pageSize, offset: state.offset, orderBy: state.sort[0] ?? null });
+  const sql = selectTopSql(tab, engine, { limit: state.pageSize, offset: state.offset, orderBy: state.sort[0] ?? null });
   const docs = useQueryDocs.getState();
   const id = docs.newQuery(tab.connectionId, tab.objectRef.database);
   docs.update(id, { sql });
@@ -226,6 +236,8 @@ export function DataActions({ tab }: { tab: Tab }) {
 
   const moreItems = (): MenuEntry[] => {
     if (!state) return [];
+    // A page's SELECT exists on the SQL family only.
+    const engine = dataSqlEngine(tab.connectionId);
     return [
       {
         label: 'Export…',
@@ -233,11 +245,15 @@ export function DataActions({ tab }: { tab: Tab }) {
         title: 'Export these rows or all rows to a file',
         run: () => requestExport(dataExportRequest(tab, state)),
       },
-      {
-        label: 'Open in query',
-        title: state.filter !== null ? "Open this page's SELECT in a new query tab (without the filter)" : "Open this page's SELECT in a new query tab",
-        run: () => openPageInQuery(tab),
-      },
+      ...(engine
+        ? [
+            {
+              label: 'Open in query',
+              title: state.filter !== null ? "Open this page's SELECT in a new query tab (without the filter)" : "Open this page's SELECT in a new query tab",
+              run: () => openPageInQuery(tab, engine),
+            },
+          ]
+        : []),
       { separator: true },
       ...pageSizeOptions(settingsDefault, state.pageSize).map((n) => ({
         label: `${fmt(n)} rows per page`,
@@ -325,7 +341,7 @@ export function DataPager({ tab, estimate }: { tab: Tab; estimate: number | null
   const sort = state.sort;
   return (
     <div className="dv-pagerbar" role="group" aria-label="Pages">
-      {state.filter !== null ? <span className="dv-filtered">Filtered ({state.filter.raw_where ? 'raw' : state.filter.conditions.length})</span> : null}
+      {state.filter !== null ? <span className="dv-filtered">Filtered ({state.filter.raw_where || state.filter.raw_json ? 'raw' : state.filter.conditions.length})</span> : null}
       {sort.length > 0 ? (
         <span className="dv-chip" title={`Sorted by ${sortLabel(sort)}`}>
           {sortLabel(sort)}
@@ -401,6 +417,8 @@ function DataError({ error, onRetry, onReconnect }: { error: AppError; onRetry()
  */
 export function DataView({ tab }: { tab: Tab }) {
   const state = useTableData((s) => s.byTab[tab.id]);
+  // The filter bar's raw mode, the cell menu and the preview follow the family; `sql` until the connection is known.
+  const family = useCaps(tab.connectionId)?.family ?? 'sql';
   const [notice, setNotice] = useState<string | null>(null);
   const [editableError, setEditableError] = useState<string | null>(null);
   const [filterError, setFilterError] = useState<string | null>(null);
@@ -671,7 +689,8 @@ export function DataView({ tab }: { tab: Tab }) {
   if (!state) return <p className="dv-loading muted">Loading…</p>;
 
   const store = useTableData.getState();
-  const engine = dialectOfConnection(tab.connectionId);
+  const engine = dataSqlEngine(tab.connectionId);
+  const command = family === 'command';
   const filtered = state.filter !== null;
   const count = state.count;
 
@@ -699,7 +718,7 @@ export function DataView({ tab }: { tab: Tab }) {
   };
 
   const apply = () => {
-    const { filter, error } = draftToFilter(state.draft);
+    const { filter, error } = draftToFilter(state.draft, family);
     setFilterError(error);
     if (!error) guarded(() => store.applyFilter(tab, filter));
   };
@@ -709,9 +728,9 @@ export function DataView({ tab }: { tab: Tab }) {
     setEditNotice(r.ok ? null : r.message);
   };
 
-  // A raw WHERE the server refused (`config`) is shown under the filter bar, not as a page failure.
+  // A raw WHERE / JSON filter the server refused (`config`) is shown under the filter bar, not as a page failure.
   const rawError =
-    page?.status === 'error' && page.error.kind === 'config' && state.filter?.raw_where
+    page?.status === 'error' && page.error.kind === 'config' && (state.filter?.raw_where || state.filter?.raw_json)
       ? [page.error.message, page.error.hint].filter(Boolean).join(' ')
       : null;
   const changes = edit ? useDataEdits.getState().changeCount(tab.id) : 0;
@@ -735,6 +754,7 @@ export function DataView({ tab }: { tab: Tab }) {
           draft={state.draft}
           active={filtered}
           error={filterError ?? rawError}
+          family={family}
           onChange={(draft) => store.setDraft(tab, draft)}
           onApply={apply}
           onClear={() => {
@@ -765,6 +785,7 @@ export function DataView({ tab }: { tab: Tab }) {
               {staged.deletes.size > 0 ? <span className="de-chip dnt-row-deleted">{staged.deletes.size} deleted</span> : null}
             </>
           ) : null}
+          {command && info?.atomic === 'no' ? <span className="de-note muted">Changes are applied one document at a time.</span> : null}
         </div>
       ) : null}
       {editableError ? (
@@ -863,7 +884,7 @@ export function DataView({ tab }: { tab: Tab }) {
         }}
       >
         {rawError ? (
-          <p className="dv-empty muted">The WHERE condition was not accepted; fix it in the filter bar.</p>
+          <p className="dv-empty muted">{state.filter?.raw_json ? 'The JSON filter was not accepted' : 'The WHERE condition was not accepted'}; fix it in the filter bar.</p>
         ) : page?.status === 'error' ? (
           <DataError error={page.error} onRetry={() => void store.load(tab)} onReconnect={() => void store.reconnect(tab)} />
         ) : result ? (
@@ -871,7 +892,7 @@ export function DataView({ tab }: { tab: Tab }) {
             {/* No rows: the header still shows the columns, the message sits under it. */}
             {result.rowCount === 0 && state.offset === 0 && !editable ? (
               <p className="dv-empty dv-empty-rows muted" style={{ top: GRID_HEADER_HEIGHT }}>
-                {filtered ? 'No rows match the filter.' : `This ${tab.objectRef.kind === 'Table' ? 'table' : 'view'} has no rows.`}
+                {filtered ? 'No rows match the filter.' : `This ${tab.objectRef.kind === 'Table' ? 'table' : tab.objectRef.kind === 'Collection' ? 'collection' : 'view'} has no rows.`}
               </p>
             ) : null}
             <ResultGrid
@@ -879,7 +900,7 @@ export function DataView({ tab }: { tab: Tab }) {
               onHeaderClicked={onHeaderClicked}
               headerMarks={marks}
               firstRowNumber={state.offset + 1}
-              engine={engine}
+              engine={engine ?? undefined}
               tableRef={tab.objectRef}
               cellsCapped={truncated}
               editing={editing}
@@ -897,13 +918,22 @@ export function DataView({ tab }: { tab: Tab }) {
                 const copies: MenuEntry[] = [
                   { label: 'Copy as JSON', run: () => void copySelection('json', ctx.selection, at) },
                   { label: 'Copy as Markdown', run: () => void copySelection('markdown', ctx.selection, at) },
-                  { label: 'Copy as SQL INSERT', run: () => void copySelection('insert', ctx.selection, at) },
-                  { label: 'Copy as SQL UPDATE', run: () => void copySelection('update', ctx.selection, at) },
+                  // SQL statements of the rows: the SQL family only.
+                  ...(engine
+                    ? [
+                        { label: 'Copy as SQL INSERT', run: () => void copySelection('insert', ctx.selection, at) },
+                        { label: 'Copy as SQL UPDATE', run: () => void copySelection('update', ctx.selection, at) },
+                      ]
+                    : []),
                 ];
                 if (!editing) return [...copies, ...(filters.length > 0 ? [{ separator: true } as MenuEntry, ...filters] : [])];
                 const editEntries: MenuEntry[] = [];
                 if (writable(ctx.row, ctx.col) && !cutAt(ctx.row, ctx.col)) {
                   editEntries.push({ label: 'Set to NULL', hint: 'Ctrl+0', run: () => setCell(ctx.row, ctx.col, { kind: 'null' }) });
+                  // A document's field can be taken out of it (an existing document only).
+                  if (command && ctx.row < data.rows.length) {
+                    editEntries.push({ label: 'Remove field', run: () => setCell(ctx.row, ctx.col, { kind: 'unset' }) });
+                  }
                 }
                 editEntries.push({
                   label: ctx.row < data.rows.length ? 'Delete row' : 'Remove new row',
@@ -924,6 +954,7 @@ export function DataView({ tab }: { tab: Tab }) {
       {edit?.applying ? (
         <EditPreviewDialog
           pending={edit.applying}
+          family={family}
           onConfirm={() => void useDataEdits.getState().confirmApply(tab)}
           onCancel={() => useDataEdits.getState().cancelApply(tab.id)}
         />

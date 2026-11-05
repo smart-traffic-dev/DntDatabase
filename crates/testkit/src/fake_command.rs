@@ -27,8 +27,9 @@
 //! `Unsupported`. [`FakeStore::build_reads_as_writes`] makes both build a Write.
 //!
 //! `build_edits` writes a collection with one command per edit: setting a row's
-//! `value` or adding a row is `HSET h:<name> <_id> <value>`, deleting a row is
-//! `HDEL h:<name> <_id>` (driver-built Write commands in the collection's db).
+//! `value` or adding a row is `HSET h:<name> <_id> <value>`, deleting a row (or
+//! `Unset` on its `value`) is `HDEL h:<name> <_id>` (driver-built Write commands in the
+//! collection's db).
 
 use async_trait::async_trait;
 use dnt_core::command::{
@@ -1301,9 +1302,10 @@ impl DataAccess for FakeCommandSession {
     }
 
     /// One command per edit, in order, in the collection's db: an `Update` of `value`
-    /// is `HSET <key> <_id> <value>`, an `Insert` (of `_id` and `value`) the same, a
-    /// `Delete` is `HDEL <key> <_id>`. Values are text (`Text`, or a `Value` of text);
-    /// changing `_id`, or any other input, is a server error.
+    /// is `HSET <key> <_id> <value>` (`Unset` on it: `HDEL <key> <_id>`), an `Insert`
+    /// (of `_id` and `value`) the same, a `Delete` is `HDEL <key> <_id>`. Values are
+    /// text (`Text`, or a `Value` of text); changing `_id`, or any other input, is a
+    /// server error.
     fn build_edits(
         &self,
         obj: &ObjectRef,
@@ -1340,6 +1342,16 @@ impl DataAccess for FakeCommandSession {
                 Op::HSet(key.clone(), id, value),
             )
         };
+        let hdel = |id: String| {
+            let args = [display.clone(), id.clone()];
+            build_command(
+                Some(db),
+                "HDEL",
+                canonical_text("HDEL", &args),
+                CommandClass::Write,
+                Op::HDel(key.clone(), id),
+            )
+        };
         edits
             .edits
             .iter()
@@ -1347,6 +1359,9 @@ impl DataAccess for FakeCommandSession {
                 RowEdit::Update { row, set } => {
                     if set.iter().any(|(c, _)| c != COLLECTION_VALUE) {
                         return Err(server_err("ERR only the value of a field can be set"));
+                    }
+                    if set.iter().any(|(_, v)| *v == CellInput::Unset) {
+                        return Ok(hdel(row_id(row)?));
                     }
                     let value = cell(set, COLLECTION_VALUE)?
                         .ok_or_else(|| server_err("ERR there is no value to set"))?;
@@ -1358,17 +1373,7 @@ impl DataAccess for FakeCommandSession {
                     let value = cell(values, COLLECTION_VALUE)?.unwrap_or_default();
                     Ok(hset(id, value))
                 }
-                RowEdit::Delete { row } => {
-                    let id = row_id(row)?;
-                    let args = [display.clone(), id.clone()];
-                    Ok(build_command(
-                        Some(db),
-                        "HDEL",
-                        canonical_text("HDEL", &args),
-                        CommandClass::Write,
-                        Op::HDel(key.clone(), id),
-                    ))
-                }
+                RowEdit::Delete { row } => Ok(hdel(row_id(row)?)),
             })
             .collect()
     }
@@ -1661,6 +1666,62 @@ mod tests {
             Poll::Ready(v) => v,
             Poll::Pending => panic!("the fake's future waited"),
         }
+    }
+
+    /// `Unset` on `value` removes the field: `HDEL h:<name> <_id>`, which deletes it.
+    #[test]
+    fn fake_unset_deletes_field() {
+        struct Discard;
+        impl RowSink for Discard {
+            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+            fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+            fn result_end(&mut self, _summary: &ResultSummary) {}
+        }
+        let store = FakeStore::new();
+        let hash = BTreeMap::from([
+            ("a".to_string(), "1".to_string()),
+            ("b".to_string(), "2".to_string()),
+        ]);
+        store.set("0", &collection_key("orders"), FakeValue::Hash(hash));
+        let session = FakeCommandSession {
+            info: server_info(DbKind::Mongo),
+            store: store.clone(),
+            language: FakeLanguage,
+            db: AtomicUsize::new(0),
+            queue: Mutex::new(None),
+            cancel: Arc::new(CancelState::default()),
+        };
+        let obj = ObjectRef {
+            database: "0".into(),
+            schema: None,
+            name: "orders".into(),
+            kind: ObjectKind::Collection,
+        };
+        let edits = EditSet {
+            object: obj.clone(),
+            edits: vec![RowEdit::Update {
+                row: RowRef {
+                    key: vec![(COLLECTION_ID.into(), Value::Text("a".into()))],
+                    original: vec![],
+                    xmin: None,
+                    loaded: vec![],
+                },
+                set: vec![(COLLECTION_VALUE.into(), CellInput::Unset)],
+            }],
+            overwrite: false,
+        };
+        let detail = ready(session.table_detail(&obj)).unwrap();
+        let built = session.build_edits(&obj, &detail, &edits).unwrap();
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].text, "HDEL h:orders a");
+        ready(session.execute_command(&built[0], &ExecOptions::default(), &mut Discard)).unwrap();
+        assert_eq!(
+            store.get("0", &collection_key("orders")),
+            Some(FakeValue::Hash(BTreeMap::from([(
+                "b".to_string(),
+                "2".to_string()
+            )])))
+        );
     }
 
     #[test]

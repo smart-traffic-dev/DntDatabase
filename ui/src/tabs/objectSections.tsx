@@ -64,9 +64,10 @@ export function ObjectSections({ tab }: { tab: Tab }) {
 
 /**
  * Tables and views (incl. materialized) open on their Data (like Navicat), then Info, DDL and
- * Structure; other objects have DDL only.
+ * Structure; a collection has its Data only; other objects have DDL only.
  */
 export function subTabsOf(kind: Tab['objectRef']['kind']): SubTab[] {
+  if (kind === 'Collection') return ['data'];
   return kind === 'Table' || kind === 'View' || kind === 'MaterializedView' ? ['data', 'info', 'ddl', 'structure'] : ['ddl'];
 }
 

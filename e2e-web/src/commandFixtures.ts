@@ -45,9 +45,9 @@ export function createCommandFake(): CommandFakeState {
     ['session:c', { type: 'string', value: 'gamma' }],
   ]);
   const orders: MongoDoc[] = [
-    { _id: 'o1', customer: 'ada', total: 19.9, items: [{ sku: 'pen', qty: 2 }], paid: true },
-    { _id: 'o2', customer: 'grace', total: 5, items: [{ sku: 'ink', qty: 1 }], paid: false },
-    { _id: 'o3', customer: 'ada', total: 42, items: [{ sku: 'pad', qty: 3 }], paid: true },
+    { _id: 'o1', customer: 'ada', status: 'paid', total: 19.9, items: [{ sku: 'pen', qty: 2 }], paid: true },
+    { _id: 'o2', customer: 'grace', status: 'pending', total: 5, items: [{ sku: 'ink', qty: 1 }], paid: false },
+    { _id: 'o3', customer: 'ada', status: 'shipped', total: 42, items: [{ sku: 'pad', qty: 3 }], paid: true },
   ];
   return {
     redis: new Map([

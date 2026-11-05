@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { api, isCancelled, notOpenError, toAppError } from '../api';
-import type { AppError, DataFilter, FilterMode, FilterOp, SortSpec, TableDataPage } from '../bindings';
+import type { AppError, DataFilter, EngineFamily, FilterMode, FilterOp, SortSpec, TableDataPage } from '../bindings';
+import { assertNever } from '../engine';
 import { formatCount } from '../lib/plural';
 import type { Loadable } from './objectData';
 import { promptHandles, reopenConnection } from './reopen';
@@ -22,9 +23,9 @@ export interface FilterRow {
 export interface FilterDraft {
   mode: FilterMode;
   rows: FilterRow[];
-  /** Raw WHERE mode: the single SQL input replaces the condition rows. */
+  /** Raw mode: the single input (a SQL WHERE condition, or a JSON filter on the Command family) replaces the condition rows. */
   rawMode?: boolean;
-  /** The typed WHERE condition (sent as raw_where). */
+  /** The typed WHERE condition (sent as raw_where) or JSON filter (sent as raw_json). */
   rawText?: string;
 }
 
@@ -131,11 +132,28 @@ export function splitList(text: string): string[] {
     .filter((s) => s.length > 0);
 }
 
-/** The filter AST of a draft; rows without a column are skipped. An error names the first bad row. */
-export function draftToFilter(draft: FilterDraft): { filter: DataFilter | null; error: string | null } {
+/** The raw part of a filter: `raw_where` (SQL) or `raw_json` (Command), never both. */
+function rawFilter(family: EngineFamily, raw: string): Pick<DataFilter, 'raw_where' | 'raw_json'> {
+  switch (family) {
+    case 'sql':
+      return { raw_where: raw };
+    case 'command':
+      return { raw_json: raw };
+    default:
+      return assertNever(family);
+  }
+}
+
+/**
+ * The filter AST of a draft; rows without a column are skipped. An error names the first bad row.
+ * The raw text is a WHERE condition (`raw_where`) on the SQL family, a JSON filter (`raw_json`) on
+ * the Command family.
+ */
+export function draftToFilter(draft: FilterDraft, family: EngineFamily = 'sql'): { filter: DataFilter | null; error: string | null } {
   if (draft.rawMode) {
     const raw = (draft.rawText ?? '').trim();
-    return { filter: raw ? { mode: 'and', conditions: [], raw_where: raw } : null, error: null };
+    if (!raw) return { filter: null, error: null };
+    return { filter: { mode: 'and', conditions: [], ...rawFilter(family, raw) }, error: null };
   }
   const conditions = [];
   for (const row of draft.rows) {

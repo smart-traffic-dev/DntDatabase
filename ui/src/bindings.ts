@@ -1772,7 +1772,11 @@ export type CellInput = { kind: "null" } |
 /**
  * A full value fetched earlier, by its token.
  */
-{ kind: "loaded"; token: string }
+{ kind: "loaded"; token: string } | 
+/**
+ * Removes the field (Command family only).
+ */
+{ kind: "unset" }
 /**
  * A complete cell value as the value editor gets it.
  */

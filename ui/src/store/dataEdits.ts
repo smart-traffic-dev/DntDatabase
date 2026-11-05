@@ -7,12 +7,14 @@ import type {
   EditPreview,
   EditSet,
   EditableInfo,
+  EngineFamily,
   ObjectRef,
   RowEdit,
   RowRef,
   TableDataPage,
   Value,
 } from '../bindings';
+import { capsOfConnection } from '../engine/useCaps';
 import { useDialogs } from './dialogs';
 import { setStagedEditsSource } from './queryTabs';
 import type { ObjectTabRef as Tab } from './tabs';
@@ -96,6 +98,12 @@ function cloneStaged(s: Staged): Staged {
 }
 
 const countOf = (s: Staged) => s.updates.size + s.inserts.length + s.deletes.size;
+
+/** The engine family of a data tab's connection (`sql` while it is unknown). */
+function familyOfTab(tabId: string): EngineFamily {
+  const tab = useTabs.getState().tabs.find((t) => t.id === tabId);
+  return capsOfConnection(tab && 'connectionId' in tab ? tab.connectionId : null)?.family ?? 'sql';
+}
 
 const freshState = (object: ObjectRef | null, info: EditableInfo | null): EditState => ({
   object,
@@ -360,8 +368,9 @@ export const useDataEdits = create<DataEditsStore>()((set, get) => {
           next.inserts = next.inserts.filter((i) => i.id !== edit.insert);
           break;
       }
-      // A table that cannot roll back a batch applies one change at a time (the backend refuses more too).
-      if (state.info && state.info.atomic !== 'yes' && countOf(next) > 1) return { ok: false, message: ONE_AT_A_TIME };
+      // A SQL table that cannot roll back a batch applies one change at a time (the backend refuses more too);
+      // a collection applies its changes one document at a time, so it takes several.
+      if (state.info && state.info.atomic !== 'yes' && familyOfTab(tabId) === 'sql' && countOf(next) > 1) return { ok: false, message: ONE_AT_A_TIME };
       patch(tabId, { staged: next, history: [...state.history, state.staged].slice(-HISTORY_LIMIT), insertSeq, error: null });
       return { ok: true };
     },

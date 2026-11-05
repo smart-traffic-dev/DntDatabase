@@ -19,16 +19,19 @@ import { DataActions, DataPager, DataView, dataCellMenu, filterValueText, pageSi
 
 // The grid draws on a canvas: a stand-in with one header button per column (calls
 // `onHeaderClicked` like Glide's header click, shows the header mark) and the row numbering.
-vi.mock('./query/ResultGrid', () => ({
-  GRID_HEADER_HEIGHT: 36,
-  ResultGrid: ({
+// "Cell menu" lists the extra cell menu of row 0, column 1 as buttons (`menu: <label>`).
+vi.mock('./query/ResultGrid', async () => {
+  const { useState } = await import('react');
+  type Entry = { label?: string; run?: () => void };
+  function ResultGrid({
     result,
     onHeaderClicked,
     headerMarks,
     firstRowNumber,
     editing,
+    extraCellMenu,
   }: {
-    result: { columns: { name: string }[]; rowCount: number };
+    result: { columns: { name: string }[]; rowCount: number; chunks?: unknown[][][] };
     onHeaderClicked?: (i: number) => void;
     headerMarks?: Record<number, string>;
     firstRowNumber?: number;
@@ -39,40 +42,87 @@ vi.mock('./query/ResultGrid', () => ({
       onActivate?(row: number, col: number): void;
       onKey?(e: unknown, cell: { row: number; col: number } | null): boolean;
     };
-  }) => (
-    <div
-      data-testid="grid"
-      data-first-row={firstRowNumber}
-      onKeyDown={(e) => {
-        // The real grid reports the selected cell; the stand-in pretends row 0, column 1.
-        if (editing?.onKey?.(e, { row: 0, col: 1 })) e.stopPropagation();
-      }}
-    >
-      {result.columns.map((c, i) => (
-        <button key={c.name} type="button" data-mark={headerMarks?.[i] ?? ''} onClick={() => onHeaderClicked?.(i)}>
-          {c.name}
+    extraCellMenu?: (ctx: { row: number; col: number; value: unknown; column: string }) => Entry[];
+  }) {
+    const [menu, setMenu] = useState<Entry[] | null>(null);
+    return (
+      <div
+        data-testid="grid"
+        data-first-row={firstRowNumber}
+        onKeyDown={(e) => {
+          // The real grid reports the selected cell; the stand-in pretends row 0, column 1.
+          if (editing?.onKey?.(e, { row: 0, col: 1 })) e.stopPropagation();
+        }}
+      >
+        <button
+          type="button"
+          onClick={() => setMenu(extraCellMenu?.({ row: 0, col: 1, value: result.chunks?.[0]?.[0]?.[1], column: result.columns[1]?.name ?? '' }) ?? [])}
+        >
+          Cell menu
         </button>
-      ))}
-      {editing
-        ? Array.from({ length: result.rowCount }).flatMap((_, r) =>
-            result.columns.map((_c, ci) => (
-              <button
-                key={`${r},${ci}`}
-                type="button"
-                aria-label={`cell ${r},${ci}`}
-                data-status={editing.status(r, ci) ?? ''}
-                data-editable={String(editing.isEditable(r, ci))}
-                // The text the overlay commits: `data-next` when a test sets it, else "edited".
-                onClick={(e) => editing.onEdit(r, ci, e.currentTarget.getAttribute('data-next') ?? 'edited')}
-                onDoubleClick={() => editing.onActivate?.(r, ci)}
-              />
-            )),
-          )
-        : null}
-      <span data-testid="grid-rows">{result.rowCount}</span>
-    </div>
-  ),
-}));
+        {(menu ?? []).map((m, i) =>
+          m.label ? (
+            <button
+              key={i}
+              type="button"
+              onClick={() => {
+                setMenu(null);
+                m.run?.();
+              }}
+            >
+              {`menu: ${m.label}`}
+            </button>
+          ) : null,
+        )}
+        <Cells result={result} headerMarks={headerMarks} onHeaderClicked={onHeaderClicked} editing={editing} />
+      </div>
+    );
+  }
+  function Cells({
+    result,
+    onHeaderClicked,
+    headerMarks,
+    editing,
+  }: {
+    result: { columns: { name: string }[]; rowCount: number };
+    onHeaderClicked?: (i: number) => void;
+    headerMarks?: Record<number, string>;
+    editing?: {
+      isEditable(row: number, col: number): boolean;
+      status(row: number, col: number): string | null;
+      onEdit(row: number, col: number, text: string): void;
+      onActivate?(row: number, col: number): void;
+    };
+  }) {
+    return (
+      <>
+        {result.columns.map((c, i) => (
+          <button key={c.name} type="button" data-mark={headerMarks?.[i] ?? ''} onClick={() => onHeaderClicked?.(i)}>
+            {c.name}
+          </button>
+        ))}
+        {editing
+          ? Array.from({ length: result.rowCount }).flatMap((_, r) =>
+              result.columns.map((_c, ci) => (
+                <button
+                  key={`${r},${ci}`}
+                  type="button"
+                  aria-label={`cell ${r},${ci}`}
+                  data-status={editing.status(r, ci) ?? ''}
+                  data-editable={String(editing.isEditable(r, ci))}
+                  // The text the overlay commits: `data-next` when a test sets it, else "edited".
+                  onClick={(e) => editing.onEdit(r, ci, e.currentTarget.getAttribute('data-next') ?? 'edited')}
+                  onDoubleClick={() => editing.onActivate?.(r, ci)}
+                />
+              )),
+            )
+          : null}
+        <span data-testid="grid-rows">{result.rowCount}</span>
+      </>
+    );
+  }
+  return { GRID_HEADER_HEIGHT: 36, ResultGrid };
+});
 
 vi.mock('./data/openValueEditor', async (importOriginal) => {
   const original = await importOriginal<typeof import('./data/openValueEditor')>();
@@ -1427,3 +1477,105 @@ describe('DataView editing', () => {
 });
 
 const lastCallData = () => callsOf('table_data').at(-1)!;
+
+describe('DataView on a Command (MongoDB) connection', () => {
+  const lastCall = (cmd: string) => callsOf(cmd).at(-1)!;
+  const cell = (r: number, c: number) => screen.getByRole('button', { name: `cell ${r},${c}` });
+  const collection: ObjectRef = { database: 'shop', schema: null, name: 'orders', kind: 'Collection' };
+  const text = (v: string): Value => ({ t: 'Text', v });
+  const textCol = (name: string): ColumnMeta => ({ name, db_type: 'string', logical: 'Text', nullable: true, origin_table: null, origin_column: null });
+  const docs = (): TableDataPage =>
+    page(3, 1, false, {
+      columns: [textCol('_id'), textCol('customer'), textCol('status')],
+      rows: [
+        [text('o1'), text('ada'), text('paid')],
+        [text('o2'), text('grace'), text('pending')],
+        [text('o3'), text('ada'), text('shipped')],
+      ],
+    });
+  const docInfo = (over: Partial<EditableInfo> = {}) =>
+    editableInfo({ key: ['_id'], editable_columns: ['customer', 'status'], atomic: 'no', protection: 'key', ...over });
+  const updateOne = (id: string) => `db.orders.updateOne({ "_id": "${id}" }, { "$set": { "customer": "edited" } })`;
+
+  /** A MongoDB `orders` collection of 3 documents (editable, not atomic). */
+  async function mongoView(handlers: Record<string, (a: Record<string, unknown>) => unknown> = {}, info = docInfo()) {
+    useConnections.getState().setStored([], [config(ids.prod, 'docs', { kind: 'mongo', port: 27017 })]);
+    const user = userEvent.setup();
+    const view = setup({ table_data: () => docs(), data_editable: () => info, ...handlers }, { tab: makeTab(collection) });
+    await screen.findByText('1–3');
+    await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-editable', String(info.editable)));
+    return { user, ...view };
+  }
+
+  it('command_raw_filter_sends_raw_json', async () => {
+    const { user } = await mongoView({
+      table_data: (a) => {
+        if ((a.filter as { raw_json?: string } | null)?.raw_json === '{ "$where": "1" }') {
+          throw appError('config', 'Server-side JavaScript is not allowed in a filter', { field: 'filter' });
+        }
+        return docs();
+      },
+    });
+    await user.click(screen.getByRole('button', { name: 'Filter' }));
+    const bar = screen.getByRole('search', { name: 'Filter' });
+    await user.click(within(bar).getByRole('button', { name: 'JSON filter' }));
+    expect(within(bar).queryByRole('button', { name: 'Raw WHERE' })).toBeNull();
+    const input = within(bar).getByRole('textbox', { name: 'JSON filter' });
+    expect(input).toHaveAttribute('placeholder', '{ "status": "paid" }');
+    await user.type(input, '{{ "status": "paid" }{Enter}');
+    await waitFor(() => expect(lastCallData().filter).toEqual({ mode: 'and', conditions: [], raw_json: '{ "status": "paid" }' }));
+    expect(lastCallData().filter).not.toHaveProperty('raw_where');
+    expect(screen.getByText('Filtered (raw)')).toBeInTheDocument();
+
+    await user.clear(input);
+    await user.type(input, '{{ "$where": "1" }{Enter}');
+    expect(await within(bar).findByRole('alert')).toHaveTextContent('Server-side JavaScript is not allowed in a filter');
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
+  it('remove_field_only_for_command_family', async () => {
+    const { user } = await mongoView({ data_preview: () => previewOf({ statements: ['db.orders.updateOne({ "_id": "o1" }, { "$unset": { "customer": "" } })'], atomic: 'no' }) });
+    await user.click(screen.getByRole('button', { name: 'Cell menu' }));
+    await user.click(screen.getByRole('button', { name: 'menu: Remove field' }));
+    expect(cell(0, 1)).toHaveAttribute('data-status', 'edited');
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(lastCall('data_preview')).toMatchObject({ set: { edits: [{ op: 'update', set: [['customer', { kind: 'unset' }]] }] } });
+  });
+
+  it('the SQL family has no Remove field', async () => {
+    const user = userEvent.setup();
+    setup({ table_data: () => page(3, 1, false, { row_versions: ['5', '6', '7'] }), data_editable: () => editableInfo() });
+    await screen.findByText('1–3');
+    await waitFor(() => expect(cell(0, 1)).toHaveAttribute('data-editable', 'true'));
+    await user.click(screen.getByRole('button', { name: 'Cell menu' }));
+    expect(screen.getByRole('button', { name: 'menu: Set to NULL' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'menu: Remove field' })).toBeNull();
+  });
+
+  it('command_preview_counts_commands', async () => {
+    const { user } = await mongoView({ data_preview: () => previewOf({ statements: [updateOne('o1'), updateOne('o2')], atomic: 'no', protections: [{ level: 'key_only' }, { level: 'key_only' }] }) });
+    // Not atomic, yet each document is applied on its own: several changes may be staged.
+    await user.click(cell(0, 1));
+    await user.click(cell(1, 1));
+    expect(screen.queryByText(ONE_AT_A_TIME)).toBeNull();
+    expect(cell(1, 1)).toHaveAttribute('data-status', 'edited');
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(within(dialog).getByLabelText('Summary')).toHaveTextContent(/^2 commands$/);
+    expect(within(dialog).queryByText(/updates?$/)).toBeNull();
+    expect((lastCall('data_preview').set as { edits: unknown[] }).edits).toHaveLength(2);
+  });
+
+  it('not_atomic_banner_text', async () => {
+    await mongoView();
+    const bar = screen.getByRole('toolbar', { name: 'Edit' });
+    expect(within(bar).getByText('Changes are applied one document at a time.')).toBeInTheDocument();
+  });
+
+  it('a SQL table without transactions has no document banner', async () => {
+    setup({ table_data: () => page(3, 1, false), data_editable: () => editableInfo({ atomic: 'no' }) });
+    await screen.findByRole('toolbar', { name: 'Edit' });
+    expect(screen.queryByText('Changes are applied one document at a time.')).toBeNull();
+  });
+});

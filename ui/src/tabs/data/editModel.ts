@@ -21,6 +21,8 @@ export function inputToValue(input: CellInput): Value {
       return other('(binary value)');
     case 'loaded':
       return other('(loaded value)');
+    case 'unset':
+      return other('(field removed)');
   }
 }
 

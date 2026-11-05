@@ -170,6 +170,9 @@ pub const NOT_ATOMIC_ON_PRODUCTION: &str = "Changes to this table cannot be roll
      unit (non-transactional engine or triggers), so the data view does not edit it on a \
      Production connection. Write the SQL in a query tab instead.";
 
+/// Why a SQL edit refuses [`CellInput::Unset`] (removing a field is a Command-family edit).
+pub const UNSET_NOT_AVAILABLE: &str = "Removing a field is not available for this engine";
+
 /// MySQL engines that roll back (spec §4.2a).
 const TRANSACTIONAL_ENGINES: &[&str] = &["InnoDB", "MyRocks", "NDB", "NDBCLUSTER"];
 
@@ -727,6 +730,7 @@ impl Builder<'_> {
         let bad = |reason: String| invalid(&t.name, &reason);
         let v = match input {
             CellInput::Default => return Ok(None),
+            CellInput::Unset => return Err(bad(UNSET_NOT_AVAILABLE.into())),
             CellInput::Null => {
                 if !cd.nullable && !cd.auto_increment {
                     return Err(bad("the column cannot be NULL".into()));
@@ -2004,6 +2008,31 @@ mod tests {
     }
 
     // ---- values -------------------------------------------------------------------------
+
+    /// Removing a field is a Command-family edit: both SQL dialects refuse it, in an
+    /// UPDATE and in an INSERT, naming the column.
+    #[test]
+    fn sql_build_edits_refuse_unset() {
+        let refused = |r: Result<EditPlan, EditError>| match r {
+            Err(EditError::Invalid { column, reason }) => {
+                assert_eq!(column, "name");
+                assert_eq!(reason, "Removing a field is not available for this engine");
+            }
+            other => panic!("expected the refusal, got {other:?}"),
+        };
+        let unset = [("name", CellInput::Unset)];
+        refused(plan_my(INNODB, &set(vec![update(my_row(), &unset)]), None));
+        refused(plan_my(
+            INNODB,
+            &set(vec![RowEdit::Insert {
+                values: pairs(&unset),
+            }]),
+            None,
+        ));
+        let mut r = row(&[("id", Value::Int(1))], &[]);
+        r.xmin = Some("7".into());
+        refused(plan_pg(&pg_set(vec![update(r, &unset)])));
+    }
 
     #[test]
     fn text_input_parses_by_column_type() {
