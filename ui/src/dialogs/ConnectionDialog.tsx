@@ -28,7 +28,7 @@ import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
 import { PasswordInput } from './PasswordInput';
 import { ConfirmDialog } from './SimpleDialogs';
-import { isKind } from '../engine';
+import { isKind, sqlEngine } from '../engine';
 
 /**
  * One page (single-page redesign): name, engine, server and environment always show; the
@@ -598,6 +598,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   /** The fold holding an error says so in its row. */
   const errorSection = fieldError ? FIELDS[fieldError.field]?.section : undefined;
   const info = engineInfo(form.engine);
+  const formEngine = sqlEngine(form.engine);
 
   /** The one-line state of a folded row, shown at its right end. */
   const summary = (id: Exclude<Fold, 'url'>): string => {
@@ -676,7 +677,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         id="cd-conn-string"
         data-testid="conn-string"
         value={connString}
-        placeholder={isKind(form.engine, 'postgres') ? 'postgresql://user:password@host:5432/database' : 'mysql://user:password@host:3306/database'}
+        placeholder={formEngine !== null && isKind(formEngine, 'postgres') ? 'postgresql://user:password@host:5432/database' : 'mysql://user:password@host:3306/database'}
         spellCheck={false}
         autoComplete="off"
         // Opened from its link: the cursor goes straight into it.
@@ -846,7 +847,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           <input
             id="cd-db"
             value={form.defaultDb}
-            placeholder={isKind(form.engine, 'postgres') ? defaultUser(form.engine) : 'All databases'}
+            placeholder={formEngine !== null && isKind(formEngine, 'postgres') ? defaultUser(form.engine) : 'All databases'}
             onChange={(e) => set('defaultDb', e.target.value)}
           />
         </div>

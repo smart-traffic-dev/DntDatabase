@@ -83,8 +83,8 @@ function KeyIcon() {
 
 /** The Columns grid: one row per draft column, plus the opened table's columns the draft drops. */
 export function ColumnsGrid({ open, draft, errors, editable, selection, onSelect, edit }: ColumnsGridProps) {
-  const pg = isKind(open.server.kind, 'postgres');
   const engine = sqlEngine(open.server.kind);
+  const pg = engine !== null && isKind(engine, 'postgres');
   const rows = columnRows(open.def, draft);
   const rowEls = useRef(new Map<string, HTMLDivElement>());
   const dragFrom = useRef<number | null>(null);

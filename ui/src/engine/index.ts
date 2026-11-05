@@ -3,7 +3,7 @@
  * a kind with a literal anywhere else, so a new engine is added here and the compiler (through
  * `assertNever`) lists what is missing.
  */
-import type { Capabilities, DbKind, Dialect, EngineFamily, ServerInfo } from '../bindings';
+import type { Capabilities, DbKind, Dialect, EngineFamily, NamespaceModel, ServerInfo } from '../bindings';
 import { assertNever } from './assertNever';
 
 export { assertNever };
@@ -195,7 +195,12 @@ export function rangesDialect(kind: DbKind): Dialect {
   }
 }
 
-/** Escape hatch for SQL-only code that already holds a `SqlEngine`; prefer a `switch`. */
-export function isKind(kind: DbKind, k: DbKind): boolean {
-  return kind === k;
+/** Escape hatch for SQL-only code that already holds a `SqlEngine` (from `sqlEngine(kind)`); prefer a `switch`. */
+export function isKind(engine: SqlEngine, k: SqlEngine): boolean {
+  return engine === k;
+}
+
+/** How the kind's namespaces nest: `db_schema` addresses an object by schema, `db` by database. */
+export function namespaceModel(kind: DbKind): NamespaceModel {
+  return defaultCaps(kind).namespaces;
 }

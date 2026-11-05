@@ -3,7 +3,7 @@ import type { BinaryEncoding, EmptyAs, ImportMode, KeyChoice } from '../../../bi
 import { DEFAULT_MAX_ERRORS } from '../importState';
 import { IssueList } from './MappingStep';
 import type { StepProps } from './stepProps';
-import { isKind } from '../../../engine';
+import { isKind, sqlEngine } from '../../../engine';
 
 /** The key an upsert starts with: the primary key, else the first usable unique index. */
 export function defaultKey(keys: KeyChoice[]): KeyChoice | null {
@@ -66,7 +66,9 @@ export function OptionsStep({ state, dispatch }: StepProps) {
   const { mode, errors, convert } = state;
   const setMode = (m: ImportMode) => dispatch({ type: 'mode', mode: m });
   const key = mode.kind === 'upsert' ? target.keys.find((k) => sameColumns(k.columns, mode.key)) ?? null : null;
-  const hasIdentity = isKind(target.server.kind, 'postgres') && target.columns.some((c) => c.identity !== null);
+  const targetEngine = sqlEngine(target.server.kind);
+  const pgTarget = targetEngine !== null && isKind(targetEngine, 'postgres');
+  const hasIdentity = pgTarget && target.columns.some((c) => c.identity !== null);
 
   return (
     <div className="stack">

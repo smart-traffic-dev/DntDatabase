@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { needsReconnect } from '../api';
-import type { AppError, ColumnDetail, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
+import type { AppError, ColumnDetail, DbKind, ObjectKind, ForeignKeyDetail, IndexDetail, TableDetail } from '../bindings';
 import { useObjectData, type Loadable } from '../store/objectData';
 import { DataView } from './DataView';
 import { resourceOf, sectionPanelId, sectionTabId, useSubTab } from './objectSections';
@@ -12,9 +12,15 @@ import { editorFontOptions } from '../monaco/fonts';
 import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
-import { isKind, editorLanguage } from '../engine';
+import { editorLanguage, sqlEngine } from '../engine';
 
 const DASH = '—';
+
+/** The object kinds whose definition can be edited on this connection kind; none for a Command kind. */
+function editableKindsOf(kind: DbKind): ObjectKind[] {
+  const engine = sqlEngine(kind);
+  return engine ? DDL_EDITABLE_KINDS[engine] : [];
+}
 
 /** Base-1024 size with one decimal: 1536 -> "1.5 KB". */
 export function formatBytes(bytes: number): string {
@@ -129,7 +135,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const conn = useConnections((s) => s.summaries.get(tab.connectionId)?.config);
   const connected = useConnections((s) => s.info.has(tab.connectionId));
   // A read-only connection still opens the editor (view-only, with the reason), as the tree does.
-  const editable = !!conn && connected && DDL_EDITABLE_KINDS[isKind(conn.kind, 'postgres') ? 'postgres' : 'mysql'].includes(tab.objectRef.kind);
+  const editable = !!conn && connected && editableKindsOf(conn.kind).includes(tab.objectRef.kind);
 
   const copy = async () => {
     try {

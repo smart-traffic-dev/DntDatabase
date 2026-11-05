@@ -42,7 +42,7 @@ const normalizeNum = (t: string) => numText(parseParam(t));
 /** The fields of the selected column, as its type allows; the original type when it changed. */
 export function ColumnInspector({ open, draft, errors, editable, selection, onSelect, edit }: ColumnInspectorProps) {
   const engine = sqlEngine(open.server.kind);
-  const pg = isKind(open.server.kind, 'postgres');
+  const pg = engine !== null && isKind(engine, 'postgres');
   const index = selection?.kind === 'column' ? draft.columns.findIndex((c) => c.name === selection.name) : -1;
   const column = index >= 0 ? draft.columns[index] : undefined;
   const inBase = !!column && column.original !== null && open.def.columns.some((c) => c.name === column.original);

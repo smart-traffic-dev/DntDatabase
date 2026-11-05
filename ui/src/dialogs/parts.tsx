@@ -3,13 +3,13 @@ import type { ActionReport, ServerInfo } from '../bindings';
 import { EnvTag } from '../components/EnvTag';
 import { CheckIcon, ErrorIcon, InfoIcon, LockIcon, WarningIcon } from '../components/icons';
 import { useConnections } from '../store/connections';
+import { engineLabel, sqlEngine } from '../engine';
 import './parts.css';
-import { engineLabel } from '../engine';
 
 /** "MySQL 8.0.36", "MariaDB 11.4.2", "PostgreSQL 16.2". */
 export function serverLabel(info: ServerInfo | undefined): string | null {
   if (!info) return null;
-  const name = info.variant === 'MariaDb' ? 'MariaDB' : engineLabel(info.kind);
+  const name = info.variant === 'MariaDb' ? 'MariaDB' : sqlEngine(info.kind) === null ? engineLabel(info.kind) : info.variant === 'Postgres' ? 'PostgreSQL' : 'MySQL';
   return `${name} ${info.version.join('.')}`;
 }
 

@@ -11,7 +11,7 @@ import { connNodeId, seg } from '../store/treeModel';
 import { Modal } from './Modal';
 import { refreshAfterAction, type ObjectActionRequest } from './ObjectActionDialog';
 import './objectAction.css';
-import { isKind, namespaceLabel } from '../engine';
+import { isKind, namespaceLabel, namespaceModel, sqlEngine } from '../engine';
 
 type CreateAction = Extract<ObjectAction, { kind: 'create_namespace' }>;
 
@@ -21,7 +21,9 @@ const utf8Bytes = (s: string) => new TextEncoder().encode(s).length;
 export function nameProblem(kind: DbKind, name: string, existing: readonly string[]): string | null {
   if (!name.trim()) return 'Enter a name.';
   if (/[.\0]/.test(name)) return 'Names cannot contain a dot (.).';
-  if (isKind(kind, 'mysql')) {
+  const engine = sqlEngine(kind);
+  if (!engine) return 'Databases and schemas are not created here for this engine.';
+  if (isKind(engine, 'mysql')) {
     if ([...name].length > 64) return 'MySQL names are limited to 64 characters.';
     if (/[/\\]/.test(name)) return 'Database names cannot contain / or \\.';
     if (name.endsWith(' ')) return 'MySQL names cannot end with a space.';
@@ -47,7 +49,7 @@ export function CreateNamespaceDialog({ request, onClose }: { request: ObjectAct
   const cfg = useConnections((s) => s.summaries.get(connectionId)?.config);
   const info = useConnections((s) => s.info.get(connectionId));
   const kind: DbKind = cfg?.kind ?? info?.kind ?? 'mysql';
-  const mysql = isKind(kind, 'mysql');
+  const mysql = namespaceModel(kind) === 'db';
   const what = namespaceLabel(kind).toLowerCase();
   const parentId = mysql ? connNodeId(connectionId) : `${connNodeId(connectionId)}/db:${seg(base.database)}`;
   const childIds = useTree((s) => s.childIds.get(parentId));

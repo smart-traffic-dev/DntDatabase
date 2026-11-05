@@ -9,7 +9,7 @@ import { useConnections } from '../../store/connections';
 import { useJobs } from '../../store/jobs';
 import { PATH_LABEL, restoreMessage } from './backupFormat';
 import './backup.css';
-import { isKind } from '../../engine';
+import { isKind, sqlEngine } from '../../engine';
 
 interface Props {
   connectionId: string;
@@ -90,7 +90,8 @@ function TocList({ entries }: { entries: string[] }) {
  */
 export function RestoreDialog({ connectionId, database, params, onClose }: Props) {
   const cfg = useConnections((s) => s.summaries.get(connectionId)?.config);
-  const pg = !!cfg && isKind(cfg.kind, 'postgres');
+  const engine = cfg ? sqlEngine(cfg.kind) : null;
+  const pg = engine !== null && isKind(engine, 'postgres');
   const readOnly = !!cfg?.read_only;
   const production = cfg?.env_tag === 'production';
 

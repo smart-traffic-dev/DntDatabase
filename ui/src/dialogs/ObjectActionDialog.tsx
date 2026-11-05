@@ -20,7 +20,7 @@ import { Modal } from './Modal';
 import { CreateNamespaceDialog } from './CreateNamespaceDialog';
 import { Callout, ContextBar, FooterNote, ImpactTiles, OutcomeReport, SqlBlock, TypedConfirm, type Impact } from './parts';
 import './objectAction.css';
-import { isKind } from '../engine';
+import { namespaceModel } from '../engine';
 
 export interface ObjectActionRequest {
   connectionId: string;
@@ -121,7 +121,7 @@ export async function refreshAfterAction(request: ObjectActionRequest, report: A
   const { connectionId, action } = request;
   if (report.outcome !== 'applied' && report.outcome !== 'unknown') return null;
   const kind = useConnections.getState().summaries.get(connectionId)?.config.kind;
-  const postgres = !!kind && isKind(kind, 'postgres');
+  const postgres = !!kind && namespaceModel(kind) === 'db_schema';
   const state = useTabs.getState();
   const affected = state.tabs.filter((t): t is ObjectTabRef => t.kind === 'object' && t.connectionId === connectionId && affects(action, t, postgres));
   const replacements: Record<string, ObjectTabRef | null> = {};
@@ -161,7 +161,7 @@ function ObjectActionForm({ request, onClose }: { request: ObjectActionRequest; 
   const cfg = useConnections((s) => s.summaries.get(connectionId)?.config);
   const info = useConnections((s) => s.info.get(connectionId));
   const kind = cfg?.kind ?? info?.kind;
-  const postgres = !!kind && isKind(kind, 'postgres');
+  const postgres = !!kind && namespaceModel(kind) === 'db_schema';
   const rename = request.action.kind === 'rename_table';
   const original = rename && 'object' in request.action ? request.action.object.name : '';
   const [name, setName] = useState(rename && 'name' in request.action ? request.action.name : '');

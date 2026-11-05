@@ -19,7 +19,7 @@ import type { UiRequest } from '../../store/dialogs';
 import { useJobs } from '../../store/jobs';
 import { pickedFileMessage, TOOL_LABEL } from './backupFormat';
 import './backup.css';
-import { isKind } from '../../engine';
+import { isKind, sqlEngine } from '../../engine';
 
 /** What "Run again" hands the dialog: the stored request of a built-in or a tool dump. */
 export type DumpParams = NonNullable<Extract<UiRequest, { kind: 'dump' }>['params']>;
@@ -82,7 +82,8 @@ const fileKindOf = (format: PgDumpFormat, compress: boolean) => (format !== 'pla
  */
 export function DumpDialog({ connectionId, database, schema, table, params, onClose }: Props) {
   const cfg = useConnections((s) => s.summaries.get(connectionId)?.config);
-  const pg = !!cfg && isKind(cfg.kind, 'postgres');
+  const engine = cfg ? sqlEngine(cfg.kind) : null;
+  const pg = engine !== null && isKind(engine, 'postgres');
   const builtinParams = params?.kind === 'dump' ? params.request : null;
   const toolParams = params?.kind === 'tool_dump' ? params.request : null;
 

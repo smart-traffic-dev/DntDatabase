@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { api, toAppError } from '../api';
 import type { Dialect, QueryTabRecord, TxAction, TxState } from '../bindings';
-import { isKind, type SqlEngine } from '../engine';
+import { isKind, sqlEngine, type SqlEngine } from '../engine';
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { liveJobCount } from './jobs';
@@ -81,7 +81,7 @@ export const fileName = (path: string): string => path.split(/[\\/]/).filter(Boo
 
 export const dialectOfConnection = (connectionId: string | null): SqlEngine => {
   const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
-  return kind && isKind(kind, 'postgres') ? 'postgres' : 'mysql';
+  return (kind && sqlEngine(kind)) || 'mysql';
 };
 
 const asRowLimit = (n: number): RowLimit => (ROW_LIMITS as number[]).includes(n) ? (n as RowLimit) : DEFAULT_ROW_LIMIT;

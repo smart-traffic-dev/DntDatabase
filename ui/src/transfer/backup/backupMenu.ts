@@ -3,7 +3,7 @@ import { useConnections } from '../../store/connections';
 import { useDialogs } from '../../store/dialogs';
 import type { TreeNode } from '../../store/tree';
 import { connectionIdOf } from '../../store/treeModel';
-import { isKind } from '../../engine';
+import { namespaceModel } from '../../engine';
 
 /**
  * The tree's backup entries (spec §7.4): **Dump…** and **Restore…** on a database (MySQL) or a
@@ -30,7 +30,7 @@ export function backupActionItems(node: TreeNode): MenuEntry[] {
   }
   const scope = node.scope;
   if (!scope) return [];
-  const pg = isKind(cfg.kind, 'postgres');
+  const pg = namespaceModel(cfg.kind) === 'db_schema';
   const fits = node.kind === 'database' || (pg && node.kind === 'schema' && !!scope.schema);
   if (!fits) return [];
   return [

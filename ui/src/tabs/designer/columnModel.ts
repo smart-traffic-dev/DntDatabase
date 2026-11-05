@@ -1,5 +1,5 @@
 import type { ColumnDef, DefaultSpec, DraftError, ElementRef, Locked, TableDef, TypeInfo, TypeSpec } from '../../bindings';
-import { isKind } from '../../engine';
+import { isKind, type SqlEngine } from '../../engine';
 import { deepEqual } from '../../store/tableDesigns';
 
 export type RowState = 'unchanged' | 'modified' | 'new' | 'drop';
@@ -148,7 +148,6 @@ export function withBase(spec: TypeSpec, text: string, catalog: TypeInfo[]): Typ
   };
 }
 
-export type SqlEngine = 'mysql' | 'postgres';
 
 const INTEGERS: Record<SqlEngine, string[]> = {
   mysql: ['tinyint', 'smallint', 'mediumint', 'int', 'bigint'],

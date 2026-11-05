@@ -7,7 +7,7 @@ import { ComboInput } from './ComboInput';
 import { ElementGrid, type ElementGridProps } from './ElementGrid';
 import { GridSelect } from './GridSelect';
 import { parseList } from './elementModel';
-import { isKind } from '../../engine';
+import { isKind, sqlEngine } from '../../engine';
 
 const ACTIONS = ['NO ACTION', 'RESTRICT', 'CASCADE', 'SET NULL', 'SET DEFAULT'];
 
@@ -29,7 +29,8 @@ function tablesOf(cache: CompletionScope | null, pg: boolean, scope: Scope, refS
 
 /** The Foreign keys grid: columns, the referenced table and columns, the actions, and PostgreSQL's deferral. */
 export function ForeignKeysGrid(p: ForeignKeysGridProps) {
-  const pg = isKind(p.open.server.kind, 'postgres');
+  const engine = sqlEngine(p.open.server.kind);
+  const pg = engine !== null && isKind(engine, 'postgres');
   const [cache, setCache] = useState<CompletionScope | null>(null);
   useEffect(() => {
     let live = true;

@@ -8,7 +8,7 @@ import { openNewQuery, openSelectTop } from './newQuery';
 import { DDL_EDITABLE_KINDS, openDdlEditTab } from './openDdlEdit';
 import { openDesignTab, openObjectTab } from './openObject';
 import { backupActionItems } from '../transfer/backup/backupMenu';
-import { isKind } from '../engine';
+import { isKind, sqlEngine } from '../engine';
 
 type Item = MenuEntry;
 const SEP: Item = { separator: true };
@@ -28,7 +28,9 @@ export function objectActionItems(node: TreeNode): Item[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
-  const pg = isKind(cfg.kind, 'postgres');
+  const engine = sqlEngine(cfg.kind);
+  if (!engine) return [];
+  const pg = isKind(engine, 'postgres');
   const item = (label: string, action: ObjectAction, danger = false): Item => ({
     label, danger, disabled: cfg.read_only,
     run: () => useDialogs.getState().requestDialog({ kind: 'objectAction', connectionId, action }),
@@ -62,6 +64,8 @@ export function designActionItems(node: TreeNode): Item[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
+  const engine = sqlEngine(cfg.kind);
+  if (!engine) return [];
   const object = node.objectRef;
   if (node.kind === 'object' && object?.kind === 'Table') {
     return [{ label: 'Design table', hint: 'F4', run: () => void openDesignTab(connectionId, { database: object.database, schema: object.schema }, object.name) }];
@@ -70,8 +74,8 @@ export function designActionItems(node: TreeNode): Item[] {
   // The Tables folder is where a new table is looked for first; its scope is its database / schema.
   const tablesFolder = node.kind === 'folder' && node.folderKind === 'Table';
   const holdsTables = scope && (tablesFolder
-    ? !isKind(cfg.kind, 'postgres') || !!scope.schema
-      : isKind(cfg.kind, 'postgres') ? node.kind === 'schema' && !!scope.schema : node.kind === 'database');
+    ? !isKind(engine, 'postgres') || !!scope.schema
+    : isKind(engine, 'postgres') ? node.kind === 'schema' && !!scope.schema : node.kind === 'database');
   if (!scope || !holdsTables) return [];
   return [{ label: 'New table…', disabled: cfg.read_only, run: () => void openDesignTab(connectionId, scope, null) }];
 }
@@ -97,7 +101,9 @@ export function ddlActionItems(node: TreeNode): Item[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
-  const editable = DDL_EDITABLE_KINDS[isKind(cfg.kind, 'postgres') ? 'postgres' : 'mysql'];
+  const engine = sqlEngine(cfg.kind);
+  if (!engine) return [];
+  const editable = DDL_EDITABLE_KINDS[engine];
   const object = node.objectRef;
   if (node.kind === 'object' && object) {
     const scope = { database: object.database, schema: object.schema };
