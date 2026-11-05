@@ -7,7 +7,7 @@ use dnt_core::command::CommandSpan;
 use mongodb::bson::{Bson, Document};
 
 use super::literal::integral_value;
-use super::{lex, lex_script, parse_literal, ShellError, Token, TokenKind};
+use super::{lex, lex_script, parse_literal, Piece, ShellError, Token, TokenKind};
 
 /// The parse error of anything outside the grammar (spec §4.2).
 pub const JS_REFUSED: &str =
@@ -670,6 +670,33 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The offset of the top-level `key` of the document literal at byte `open`, or
+    /// `open`.
+    fn key_offset(&self, open: usize, key: &str) -> usize {
+        let Some(first) = self.toks.iter().position(|t| t.start == open) else {
+            return open;
+        };
+        let mut depth = 0usize;
+        for (i, t) in self.toks.iter().enumerate().skip(first) {
+            match &t.kind {
+                TokenKind::Punct('(' | '[' | '{') => depth += 1,
+                TokenKind::Punct(')' | ']' | '}') => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Ident(k) | TokenKind::Str(k)
+                    if depth == 1 && k == key && self.punct_at(i + 1, ':') =>
+                {
+                    return t.start;
+                }
+                _ => {}
+            }
+        }
+        open
+    }
+
     /// A string argument naming something (`getSiblingDB`, `getCollection`).
     fn name_arg(&mut self, usage: &str) -> Result<(String, usize), ShellError> {
         let at = self.offset();
@@ -778,6 +805,28 @@ impl<'a> Parser<'a> {
             {
                 if c.is_empty() || c.contains('\0') {
                     return Err(ShellError::new(INVALID_COLL, *start));
+                }
+            }
+        }
+        if matches!(method, DbMethod::RunCommand | DbMethod::AdminCommand) {
+            if let [Arg {
+                value: Bson::Document(d),
+                start,
+            }, ..] = args.as_slice()
+            {
+                // Session and transaction fields are the driver's; `$` fields are wire
+                // protocol (`$db` would retarget the command).
+                if let Some(k) = d.keys().find(|k| {
+                    k.starts_with('$')
+                        || matches!(
+                            k.as_str(),
+                            "lsid" | "txnNumber" | "startTransaction" | "autocommit"
+                        )
+                }) {
+                    return Err(ShellError::new(
+                        format!("{k} is not allowed in a console command"),
+                        self.key_offset(*start, k),
+                    ));
                 }
             }
         }
@@ -907,15 +956,29 @@ impl<'a> Parser<'a> {
 
 /// The commands of a script (spec §4.1): a command ends at `;`, or at the end of a line
 /// once its brackets are closed, unless the next line (past blank lines and comments)
-/// starts with `.`. Strings, regexes and comments never split. Never panics; text that
-/// does not lex gives one command per line from the line it fails on.
+/// starts with `.`. Strings, regexes and comments never split. Never panics; lines that
+/// do not lex are one command each, and the rules resume after them.
 pub fn split(text: &str) -> Vec<CommandSpan> {
-    let span = |start: usize, end: usize| CommandSpan {
+    let mut out = Vec::new();
+    for piece in lex_script(text) {
+        match piece {
+            Piece::Tokens(tokens) => token_spans(text, &tokens, &mut out),
+            Piece::Raw(from, to) => line_spans(text, from, to, &mut out),
+        }
+    }
+    out
+}
+
+fn span(text: &str, start: usize, end: usize) -> CommandSpan {
+    CommandSpan {
         range: (start, end),
         text: text.get(start..end).unwrap_or_default().to_string(),
-    };
-    let (tokens, cut) = lex_script(text);
-    let mut out = Vec::new();
+    }
+}
+
+/// The commands of `tokens` (§4.1).
+fn token_spans(text: &str, tokens: &[Token], out: &mut Vec<CommandSpan>) {
+    let span = |start: usize, end: usize| span(text, start, end);
     let mut first: Option<usize> = None;
     let mut depth = 0usize;
     for (i, t) in tokens.iter().enumerate() {
@@ -949,16 +1012,19 @@ pub fn split(text: &str) -> Vec<CommandSpan> {
             }
         }
     }
-    let mut at = cut;
-    for line in text.get(cut..).unwrap_or_default().split_inclusive('\n') {
+}
+
+/// One command per non-blank line of `text[from..to]` (text that does not lex).
+fn line_spans(text: &str, from: usize, to: usize, out: &mut Vec<CommandSpan>) {
+    let mut at = from;
+    for line in text.get(from..to).unwrap_or_default().split_inclusive('\n') {
         let body = line.trim();
         if !body.is_empty() && !body.starts_with("//") {
             let start = at + (line.len() - line.trim_start().len());
-            out.push(span(start, start + body.len()));
+            out.push(span(text, start, start + body.len()));
         }
         at += line.len();
     }
-    out
 }
 
 #[cfg(test)]
@@ -1053,6 +1119,69 @@ mod tests {
             err("db.b.find({x: 'open)"),
             ("Unterminated string".into(), Some(14))
         );
+        // After a bad line the rules of §4.1 resume: a chained command stays whole and
+        // `;` still splits.
+        let text = "db.x.find({a: 'bad)\ndb.c.aggregate([{$out: 'x'}])\n  .explain()\n\
+                    db.a.find(); db.b.find()";
+        assert_eq!(
+            spans(text),
+            [
+                "db.x.find({a: 'bad)",
+                "db.c.aggregate([{$out: 'x'}])\n  .explain()",
+                "db.a.find()",
+                "db.b.find()",
+            ]
+        );
+        // `use` names the lexer refuses, after `;` too.
+        assert_eq!(
+            spans("db.a.find(); use 2024_logs\ndb.b.find()"),
+            ["db.a.find()", "use 2024_logs", "db.b.find()"]
+        );
+    }
+
+    #[test]
+    fn run_command_refuses_session_fields() {
+        for (text, key, offset) in [
+            ("db.runCommand({find: 'c', $db: 'other'})", "$db", 26),
+            ("db.adminCommand({ping: 1, lsid: {id: 1}})", "lsid", 26),
+            (
+                "db.runCommand({insert: 'c', documents: [], txnNumber: 1})",
+                "txnNumber",
+                43,
+            ),
+            (
+                "db.runCommand({find: 'c', startTransaction: true})",
+                "startTransaction",
+                26,
+            ),
+            (
+                "db.runCommand({find: 'c', 'autocommit': false})",
+                "autocommit",
+                26,
+            ),
+            (
+                "db.runCommand({$readPreference: {mode: 'primary'}, ping: 1})",
+                "$readPreference",
+                15,
+            ),
+            (
+                "db.getSiblingDB('x').runCommand({ping: 1, \"$clusterTime\": {}})",
+                "$clusterTime",
+                42,
+            ),
+        ] {
+            assert_eq!(
+                err(text),
+                (
+                    format!("{key} is not allowed in a console command"),
+                    Some(offset)
+                ),
+                "{text}"
+            );
+        }
+        // Nested documents and other methods are not checked.
+        parsed("db.runCommand({explain: {find: 'c', filter: {$db: 1}}})");
+        parsed("db.c.find({lsid: 1, $and: [{a: 1}]})");
     }
 
     #[test]

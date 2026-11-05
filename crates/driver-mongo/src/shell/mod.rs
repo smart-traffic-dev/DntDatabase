@@ -7,7 +7,6 @@ pub mod literal;
 pub mod parse;
 pub mod redact;
 
-use std::borrow::Cow;
 use std::sync::Arc;
 
 use dnt_core::command::{CommandLanguage, CommandParseError, CommandSpan, ParsedCommand};
@@ -84,29 +83,103 @@ impl CommandLanguage for MongoLanguage {
     }
 }
 
-/// How many times [`lex_script`] backs off to an earlier line before giving up.
+/// How many times [`lex_script`] backs off to an earlier line for one bad region.
 const MAX_LEX_RETRIES: usize = 16;
 
-/// Lexes a script for splitting and redaction, which must work on any text: the tokens
-/// of the longest prefix that lexes, cut at a line start, and where that prefix ends
-/// (`text.len()` when all of it lexes). The word after a `use` that starts a line is
-/// lexed as a plain name whatever it holds (`use 2024_logs`), so it never stops the rest
-/// of the script from lexing. Offsets are bytes of `text`.
-pub(crate) fn lex_script(text: &str) -> (Vec<Token>, usize) {
-    let masked = mask_use_words(text);
-    let mut cut = masked.len();
+/// A piece of a script as [`lex_script`] reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Piece {
+    /// The tokens of text that lexes; offsets are bytes of the whole script.
+    Tokens(Vec<Token>),
+    /// Whole lines (a byte range of the script) that do not lex.
+    Raw(usize, usize),
+}
+
+/// Lexes a script for splitting and redaction, which must work on any text, into
+/// pieces in order. When the text stops lexing, the lines from the bad one (backed off
+/// to the line where an unfinished string or comment began) up to the end of the bad
+/// line are one [`Piece::Raw`], and lexing resumes on the next line.
+///
+/// The name after a `use` that starts a statement (bracket depth 0, at a line start or
+/// after `;`) is one name token whatever raw-name characters it holds (`use 2024_logs`,
+/// which the JavaScript lexer refuses), so it does not stop the script from lexing.
+pub(crate) fn lex_script(text: &str) -> Vec<Piece> {
+    let mut pieces = Vec::new();
+    let mut cur: Vec<Token> = Vec::new();
+    let mut pos = 0;
+    while pos < text.len() {
+        let Some(rest) = text.get(pos..) else {
+            break;
+        };
+        let bad = match lex(rest) {
+            Ok(t) => {
+                cur.extend(shifted(t, pos));
+                break;
+            }
+            Err(e) => pos + e.offset,
+        };
+        if let Some(t) = use_name(text, pos, bad, &cur) {
+            pos = t.last().map_or(text.len(), |t| t.end);
+            cur.extend(t);
+            continue;
+        }
+        let (cut, prefix) = lexable_prefix(text, pos, line_start(text, bad).max(pos));
+        cur.extend(prefix);
+        if !cur.is_empty() {
+            pieces.push(Piece::Tokens(std::mem::take(&mut cur)));
+        }
+        let mut end = line_end(text, bad);
+        if end <= pos {
+            end = text.len();
+        }
+        pieces.push(Piece::Raw(cut, end));
+        pos = end;
+    }
+    if !cur.is_empty() {
+        pieces.push(Piece::Tokens(cur));
+    }
+    pieces
+}
+
+fn shifted(tokens: Vec<Token>, by: usize) -> Vec<Token> {
+    tokens
+        .into_iter()
+        .map(|t| Token {
+            start: t.start + by,
+            end: t.end + by,
+            ..t
+        })
+        .collect()
+}
+
+/// The start of the line holding byte `i`.
+fn line_start(text: &str, i: usize) -> usize {
+    let b = text.as_bytes();
+    b[..i.min(b.len())]
+        .iter()
+        .rposition(|&c| c == b'\n')
+        .map_or(0, |p| p + 1)
+}
+
+/// Just past the end (`\n` included) of the line holding byte `i`.
+fn line_end(text: &str, i: usize) -> usize {
+    let b = text.as_bytes();
+    b.get(i..)
+        .and_then(|s| s.iter().position(|&c| c == b'\n'))
+        .map_or(b.len(), |p| i + p + 1)
+}
+
+/// The tokens of `text[pos..cut]`, backing `cut` off to earlier line starts while it
+/// does not lex (an unfinished string or comment began before it).
+fn lexable_prefix(text: &str, pos: usize, mut cut: usize) -> (usize, Vec<Token>) {
     for _ in 0..MAX_LEX_RETRIES {
-        let Some(prefix) = masked.get(..cut) else {
+        let Some(prefix) = text.get(pos..cut) else {
             break;
         };
         match lex(prefix) {
-            Ok(tokens) => return (tokens, cut),
+            Ok(t) => return (cut, shifted(t, pos)),
             Err(e) => {
-                // Back off to the start of the line the error is on.
-                let next = prefix
-                    .get(..e.offset.min(cut))
-                    .and_then(|s| s.rfind('\n'))
-                    .map_or(0, |i| i + 1);
+                let next = line_start(text, pos + e.offset).max(pos);
                 if next >= cut {
                     break;
                 }
@@ -114,57 +187,117 @@ pub(crate) fn lex_script(text: &str) -> (Vec<Token>, usize) {
             }
         }
     }
-    (Vec::new(), 0)
+    (pos, Vec::new())
 }
 
-/// `text` with the word after each line-leading `use` replaced by `x`s of the same byte
-/// length (a quoted name is left to the lexer).
-fn mask_use_words(text: &str) -> Cow<'_, str> {
-    let mut bytes: Option<Vec<u8>> = None;
-    let mut line_start = 0;
-    for line in text.split_inclusive('\n') {
-        let indent = line.len() - line.trim_start_matches([' ', '\t']).len();
-        if let Some(after) = line[indent..].strip_prefix("use") {
-            let gap = after.len() - after.trim_start_matches([' ', '\t']).len();
-            let word = &after[gap..];
-            if gap > 0 && !word.starts_with(['\'', '"', '`']) {
-                let len = word
-                    .find(|c: char| c.is_whitespace() || c == ';')
-                    .unwrap_or(word.len());
-                let from = line_start + indent + "use".len() + gap;
-                if let Some(b) = bytes
-                    .get_or_insert_with(|| text.as_bytes().to_vec())
-                    .get_mut(from..from + len)
-                {
-                    b.fill(b'x');
-                }
-            }
-        }
-        line_start += line.len();
+/// A character of a raw `use` name: `[A-Za-z0-9_$-]` or any non-ASCII byte.
+fn raw_name_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'-') || c >= 0x80
+}
+
+/// When the lex error at `bad` is inside the name of a `use` that starts a statement:
+/// the tokens of `text[pos..]` up to and including that name. `cur`: the tokens before
+/// `pos` in the same piece.
+fn use_name(text: &str, pos: usize, bad: usize, cur: &[Token]) -> Option<Vec<Token>> {
+    let b = text.as_bytes();
+    if !b.get(bad).is_some_and(|&c| raw_name_byte(c)) {
+        return None;
     }
-    match bytes {
-        None => Cow::Borrowed(text),
-        // Whole characters were replaced by ASCII, so this cannot fail.
-        Some(b) => String::from_utf8(b).map_or(Cow::Borrowed(text), Cow::Owned),
+    // The name around `bad` (whole characters: every byte of a non-ASCII one counts).
+    let mut start = bad;
+    while start > pos && raw_name_byte(b[start - 1]) {
+        start -= 1;
     }
+    let mut end = bad;
+    while end < b.len() && raw_name_byte(b[end]) {
+        end += 1;
+    }
+    // `use`, then at least one blank.
+    let mut kw_end = start;
+    while kw_end > pos && matches!(b[kw_end - 1], b' ' | b'\t') {
+        kw_end -= 1;
+    }
+    if kw_end == start || kw_end < pos + 3 || &b[kw_end - 3..kw_end] != b"use" {
+        return None;
+    }
+    let kw = kw_end - 3;
+    if kw > 0
+        && (b[kw - 1].is_ascii_alphanumeric()
+            || matches!(b[kw - 1], b'_' | b'$')
+            || b[kw - 1] >= 0x80)
+    {
+        return None;
+    }
+    let mut tokens = shifted(lex(text.get(pos..kw)?).ok()?, pos);
+    // A statement start: depth 0 (as `split` counts it), after `;` or a line break.
+    let depth = cur.iter().chain(&tokens).fold(0usize, |d, t| match t.kind {
+        TokenKind::Punct('(' | '[' | '{') => d + 1,
+        TokenKind::Punct(')' | ']' | '}') => d.saturating_sub(1),
+        TokenKind::Punct(';') => 0,
+        _ => d,
+    });
+    let starts = match tokens.last().or(cur.last()) {
+        None => true,
+        Some(t) if t.kind == TokenKind::Punct(';') => true,
+        Some(t) => text.get(t.end..kw).is_some_and(|gap| gap.contains('\n')),
+    };
+    if depth != 0 || !starts {
+        return None;
+    }
+    tokens.push(Token {
+        kind: TokenKind::Ident("use".into()),
+        start: kw,
+        end: kw_end,
+    });
+    tokens.push(Token {
+        kind: TokenKind::Ident(text.get(start..end)?.to_string()),
+        start,
+        end,
+    });
+    Some(tokens)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The pieces as text: tokens joined by spaces, raw lines in brackets.
+    fn pieces(text: &str) -> Vec<String> {
+        lex_script(text)
+            .into_iter()
+            .map(|p| match p {
+                Piece::Tokens(t) => t
+                    .iter()
+                    .map(|t| &text[t.start..t.end])
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                Piece::Raw(a, b) => format!("[{}]", &text[a..b]),
+            })
+            .collect()
+    }
+
     #[test]
-    fn lex_script_backs_off_to_the_bad_line() {
-        let text = "db.a.find()\nuse 2024_logs\ndb.b.find({x: 'open)\ndb.c.find()";
-        let (tokens, cut) = lex_script(text);
-        assert_eq!(cut, text.find("db.b").unwrap());
-        // `use 2024_logs` lexed as two names.
-        let words: Vec<&str> = tokens.iter().map(|t| &text[t.start..t.end]).collect();
+    fn lex_script_resumes_after_the_bad_line() {
         assert_eq!(
-            words,
-            ["db", ".", "a", ".", "find", "(", ")", "use", "2024_logs"]
+            pieces("db.a.find()\nuse 2024_logs\ndb.b.find({x: 'open)\ndb.c.find()"),
+            [
+                "db . a . find ( ) use 2024_logs",
+                "[db.b.find({x: 'open)\n]",
+                "db . c . find ( )",
+            ]
         );
-        assert_eq!(lex_script("'").1, 0);
-        assert_eq!(lex_script("").1, 0);
+        // Back off to where an unfinished template began.
+        assert_eq!(
+            pieces("a\nb(`x\ny` 'bad)\nc"),
+            ["a", "[b(`x\ny` 'bad)\n]", "c"]
+        );
+        // `use` after `;` starts a statement; inside brackets it does not.
+        assert_eq!(pieces("x; use 01-a\ny"), ["x ; use 01-a y"]);
+        assert_eq!(
+            pieces("f({\nuse 01, a: 1})\ng"),
+            ["f ( {", "[use 01, a: 1})\n]", "g"]
+        );
+        assert_eq!(pieces("'"), ["[']"]);
+        assert!(lex_script("").is_empty());
     }
 }
