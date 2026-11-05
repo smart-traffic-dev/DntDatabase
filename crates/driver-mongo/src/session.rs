@@ -39,6 +39,11 @@ pub(crate) struct Running {
     /// canceller does not need it.
     #[allow(dead_code)]
     pub class: CommandClass,
+    /// The command's own `opts.stop`: the canceller kills only once it is raised, so a
+    /// cancel meant for an earlier run cannot reach this command.
+    pub stop: StopSignal,
+    /// The command's `opts.cancel_grace`, which bounds the canceller's kill.
+    pub grace: Duration,
 }
 
 /// One MongoDB connection: a `Client` of its own (rebuilt by a cancel that outlives its
@@ -114,8 +119,13 @@ impl MongoSession {
             .clone()
     }
 
-    fn start(&self, uuid: String, class: CommandClass) -> RunningGuard<'_> {
-        *self.running.lock().unwrap_or_else(|p| p.into_inner()) = Some(Running { uuid, class });
+    fn start(&self, uuid: String, class: CommandClass, opts: &ExecOptions) -> RunningGuard<'_> {
+        *self.running.lock().unwrap_or_else(|p| p.into_inner()) = Some(Running {
+            uuid,
+            class,
+            stop: opts.stop.clone(),
+            grace: opts.cancel_grace,
+        });
         RunningGuard(&self.running)
     }
 
@@ -200,12 +210,14 @@ impl MongoSession {
         class: &CommandClass,
         after: Option<Trigger>,
     ) -> Result<exec::Output, DbError> {
-        match res {
-            Ok(out) => Ok(out),
-            // Killed: by this session's cancel, or by someone else's `killOp`.
-            Err(f) if f.interrupted() => Err(after.unwrap_or(Trigger::Stop).error(class)),
-            Err(Fail::Db(e)) => Err(e),
-            Err(Fail::Mongo(e)) => Err(self.mapped(&e, class)),
+        match (res, after) {
+            (Ok(out), _) => Ok(out),
+            // Killed by this session's cancel. Without a stop or a timeout of ours, the kill
+            // came from elsewhere (`killOp`, `killSessions`): a server error like any other
+            // (`Server { code: "Interrupted" }`, spec §5.6).
+            (Err(f), Some(trigger)) if f.interrupted() => Err(trigger.error(class)),
+            (Err(Fail::Db(e)), _) => Err(e),
+            (Err(Fail::Mongo(e)), _) => Err(self.mapped(&e, class)),
         }
     }
 
@@ -340,7 +352,7 @@ impl CommandSession for MongoSession {
         let started = Instant::now();
         let uuid = Uuid::new().to_string();
         let comment = cancel::comment_of(&uuid);
-        let _running = self.start(uuid, cmd.class.clone());
+        let _running = self.start(uuid, cmd.class.clone(), opts);
         let plan = exec::plan(&payload.cmd, &self.db(), opts, &comment)?;
         let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
         let (output, late) = self.run_watched(plan, opts, &cmd.class, sink).await?;

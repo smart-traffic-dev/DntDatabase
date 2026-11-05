@@ -147,7 +147,8 @@ async fn wait_running(admin: &Client, ns: &str) {
     }
 }
 
-/// Kills what a test left running on `ns` (a command given up after its grace).
+/// Kills, from outside the session, this crate's ops on `ns` (a command given up after its
+/// grace, or one to interrupt).
 async fn kill_leftovers(admin: &Client, ns: &str) {
     for op in dnt_ops(admin, ns).await {
         let _ = admin
@@ -342,8 +343,8 @@ async fn tiny_grace_rebuilds_client() {
         assert_eq!(cmd.current_database().as_deref(), Some(db), "{t:?}");
         let handle = s.cancel_handle();
 
-        // Only the stop: nothing kills the op within the grace.
-        let opts = grace(Duration::from_millis(1));
+        // Only the stop, and no grace at all: nothing can kill the op in time.
+        let opts = grace(Duration::ZERO);
         let text = format!("db.slow.find({SLOW_FILTER})");
         let (res, rec, since) = run_and_cancel(&*s, &admin, &ns, &text, &opts, true, None).await;
         match res {
@@ -364,11 +365,12 @@ async fn tiny_grace_rebuilds_client() {
         kill_leftovers(&admin, &ns).await;
 
         // The fresh `Client` runs the next command, and the handle taken before the
-        // rebuild still kills on it (alone: no stop raised, so only its `killOp` acts).
+        // rebuild still cancels on it: its `cancel()` succeeds (the old `Client` is shut
+        // down, where any call fails), and the kill, not a rebuild, ends the command.
         assert_eq!(count(&*s, "slow").await, Value::Int(DOCS as i64), "{t:?}");
         let opts = grace(Duration::from_secs(10));
         let (res, rec, since) =
-            run_and_cancel(&*s, &admin, &ns, &text, &opts, false, Some(&handle)).await;
+            run_and_cancel(&*s, &admin, &ns, &text, &opts, true, Some(&handle)).await;
         match res {
             Err(DbError::Cancelled {
                 outcome_unknown: false,
@@ -377,9 +379,70 @@ async fn tiny_grace_rebuilds_client() {
             other => panic!("{t:?}: expected Cancelled, got {other:?}"),
         }
         assert!(since < QUICK, "{t:?}: the op ran on for {since:?}");
-        assert!(rec.progress.is_empty(), "{t:?}: {:?}", rec.progress);
+        assert_eq!(rec.progress, [ExecProgress::CancelSent], "{t:?}");
         assert!(dnt_ops(&admin, &ns).await.is_empty(), "{t:?}: op killed");
         assert_eq!(s.reconnects(), 1, "{t:?}");
+        s.close().await;
+        admin.database(db).drop().await.unwrap();
+        admin.shutdown().immediate(true).await;
+    }
+}
+
+/// A cancel whose run is over (its `RunCancel` outlived it) reaches a later command whose
+/// own stop is not raised: the command is not killed.
+#[tokio::test]
+async fn cancel_without_stop_does_not_kill() {
+    require_db!();
+    for t in Target::mongo() {
+        let db = "dnt_cancel_stale";
+        let ns = format!("{db}.slow");
+        let admin = admin_client(t).await;
+        seed(&admin, db).await;
+        let s = connect(&root(t, db)).await;
+        let handle = s.cancel_handle();
+        // Five documents of the index range: about 1 s.
+        let text = r#"db.slow.find({_id: {$lt: 5}, $where: "sleep(200) || true"})"#;
+        let opts = grace(Duration::from_secs(10));
+        let (res, rec, _) =
+            run_and_cancel(&*s, &admin, &ns, text, &opts, false, Some(&handle)).await;
+        let outcome = res.unwrap_or_else(|e| panic!("{t:?}: the command was killed: {e:?}"));
+        assert!(!outcome.late_completion, "{t:?}");
+        assert_eq!(rec.rows.len(), 5, "{t:?}");
+        assert!(rec.progress.is_empty(), "{t:?}: {:?}", rec.progress);
+        assert_eq!(s.reconnects(), 0, "{t:?}");
+        s.close().await;
+        admin.database(db).drop().await.unwrap();
+        admin.shutdown().immediate(true).await;
+    }
+}
+
+/// A `killOp` from elsewhere, with no stop or timeout of this session: a server error
+/// (spec §5.6), not a cancel of the run.
+#[tokio::test]
+async fn external_kill_is_server_error() {
+    require_db!();
+    for t in Target::mongo() {
+        let db = "dnt_cancel_external";
+        let ns = format!("{db}.slow");
+        let admin = admin_client(t).await;
+        seed(&admin, db).await;
+        let s = connect(&root(t, db)).await;
+        let opts = grace(Duration::from_secs(10));
+        let text = format!("db.slow.find({SLOW_FILTER})");
+        let started = Instant::now();
+        let ((res, rec), ()) = tokio::join!(run_with(&*s, &text, &opts), async {
+            wait_running(&admin, &ns).await;
+            kill_leftovers(&admin, &ns).await;
+        });
+        match res {
+            Err(DbError::Server {
+                code: Some(code), ..
+            }) if code == "Interrupted" => {}
+            other => panic!("{t:?}: expected Server Interrupted, got {other:?}"),
+        }
+        assert!(started.elapsed() < QUICK, "{t:?}");
+        assert!(rec.progress.is_empty(), "{t:?}: {:?}", rec.progress);
+        assert_eq!(s.reconnects(), 0, "{t:?}");
         s.close().await;
         admin.database(db).drop().await.unwrap();
         admin.shutdown().immediate(true).await;

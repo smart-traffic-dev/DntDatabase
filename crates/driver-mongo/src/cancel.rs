@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use async_trait::async_trait;
 use dnt_core::command::CommandClass;
 use dnt_core::driver::Canceller;
-use dnt_core::error::DbError;
+use dnt_core::error::{ConnectStage, DbError};
 use mongodb::bson::{doc, Bson};
 use mongodb::Client;
 
@@ -23,18 +23,24 @@ pub(crate) struct MongoCanceller {
 
 #[async_trait]
 impl Canceller for MongoCanceller {
-    /// Nothing runs (the cancel fell between two commands): nothing to do.
+    /// Kills the running command once its own stop signal is raised (the backend raises it
+    /// first). Nothing runs (the cancel fell between two commands), or the running command's
+    /// stop is not raised (a cancel left over from an earlier run): nothing to do. The kill
+    /// is bounded by the command's cancel grace.
     async fn cancel(&self) -> Result<(), DbError> {
-        let comment = match &*self.running.lock().unwrap_or_else(|p| p.into_inner()) {
-            Some(r) => comment_of(&r.uuid),
-            None => return Ok(()),
+        let (comment, grace) = match &*self.running.lock().unwrap_or_else(|p| p.into_inner()) {
+            Some(r) if r.stop.is_stopped() => (comment_of(&r.uuid), r.grace),
+            Some(_) | None => return Ok(()),
         };
         let client = self
             .client
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
-        kill(&client, &comment).await
+        match tokio::time::timeout(grace, kill(&client, &comment)).await {
+            Ok(res) => res,
+            Err(_) => Err(DbError::timeout(ConnectStage::Execute)),
+        }
     }
 }
 
