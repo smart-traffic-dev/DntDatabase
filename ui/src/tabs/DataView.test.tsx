@@ -1573,6 +1573,30 @@ describe('DataView on a Command (MongoDB) connection', () => {
     expect(within(bar).getByText('Changes are applied one document at a time.')).toBeInTheDocument();
   });
 
+  it('a Command data view offers no Export and no Open in query; a SQL one still does', async () => {
+    const { user, unmount } = await mongoView();
+    await user.click(screen.getByRole('button', { name: 'More data actions' }));
+    expect(screen.queryByRole('menuitem', { name: 'Export…' })).toBeNull();
+    expect(screen.queryByRole('menuitem', { name: 'Open in query' })).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'Count rows' })).toBeInTheDocument();
+    unmount();
+
+    resetStores();
+    setup({ table_data: () => page(3) });
+    await screen.findByText('1–3');
+    await user.click(screen.getByRole('button', { name: 'More data actions' }));
+    expect(screen.getByRole('menuitem', { name: 'Export…' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Open in query' })).toBeInTheDocument();
+  });
+
+  it('a Command preview that deletes a document has the warning tone', async () => {
+    const { user } = await mongoView({ data_preview: () => previewOf({ statements: ['db.orders.deleteOne({ "_id": "o1" })'], atomic: 'no' }) });
+    fireEvent.keyDown(screen.getByTestId('grid'), { key: 'Delete', ctrlKey: true });
+    await user.click(screen.getByRole('button', { name: 'Apply changes' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Review changes' });
+    expect(dialog.querySelector('.modal-icon')).toHaveClass('tone-warning');
+  });
+
   it('a SQL table without transactions has no document banner', async () => {
     setup({ table_data: () => page(3, 1, false), data_editable: () => editableInfo({ atomic: 'no' }) });
     await screen.findByRole('toolbar', { name: 'Edit' });

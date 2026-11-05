@@ -1,4 +1,4 @@
-﻿import { expect, test } from '../src/test';
+import { expect, test } from '../src/test';
 import { createBackend } from '../src/backend';
 import { installBackend } from '../src/shim';
 import { byId, expandRow, saveConnectionDialog, treeRow } from '../src/app';

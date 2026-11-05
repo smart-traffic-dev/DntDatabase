@@ -236,25 +236,25 @@ export function DataActions({ tab }: { tab: Tab }) {
 
   const moreItems = (): MenuEntry[] => {
     if (!state) return [];
-    // A page's SELECT exists on the SQL family only.
+    // Export (its formats and table reads are SQL) and a page's SELECT exist on the SQL family only.
     const engine = dataSqlEngine(tab.connectionId);
     return [
-      {
-        label: 'Export…',
-        disabled: !hasData,
-        title: 'Export these rows or all rows to a file',
-        run: () => requestExport(dataExportRequest(tab, state)),
-      },
       ...(engine
         ? [
+            {
+              label: 'Export…',
+              disabled: !hasData,
+              title: 'Export these rows or all rows to a file',
+              run: () => requestExport(dataExportRequest(tab, state)),
+            },
             {
               label: 'Open in query',
               title: state.filter !== null ? "Open this page's SELECT in a new query tab (without the filter)" : "Open this page's SELECT in a new query tab",
               run: () => openPageInQuery(tab, engine),
             },
+            { separator: true } as MenuEntry,
           ]
         : []),
-      { separator: true },
       ...pageSizeOptions(settingsDefault, state.pageSize).map((n) => ({
         label: `${fmt(n)} rows per page`,
         checked: n === state.pageSize,

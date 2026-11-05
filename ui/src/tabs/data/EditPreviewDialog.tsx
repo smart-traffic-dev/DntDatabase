@@ -28,7 +28,8 @@ function countKinds(statements: string[]): Record<(typeof KINDS)[number], number
 }
 
 /** What the plan is made of, per family: its unit, the summary chips and the text the statements are shown as. */
-function planCopy(family: EngineFamily, statements: string[]): { unit: string; chips: { key: string; text: string }[]; text: string; deletes: boolean } {
+function planCopy(family: EngineFamily, pending: PendingApply): { unit: string; chips: { key: string; text: string }[]; text: string; deletes: boolean } {
+  const { statements } = pending.preview;
   switch (family) {
     case 'sql': {
       const counts = countKinds(statements);
@@ -41,7 +42,13 @@ function planCopy(family: EngineFamily, statements: string[]): { unit: string; c
     }
     case 'command':
       // A command's kind is not in a fixed first word (MongoDB methods, Redis commands): the total only.
-      return { unit: 'command', chips: [{ key: 'command', text: plural(statements.length, 'command') }], text: statements.join('\n'), deletes: false };
+      // Whether it deletes comes from the staged changes behind the plan.
+      return {
+        unit: 'command',
+        chips: [{ key: 'command', text: plural(statements.length, 'command') }],
+        text: statements.join('\n'),
+        deletes: pending.keys.some((k) => k.kind === 'delete'),
+      };
     default:
       return assertNever(family);
   }
@@ -56,7 +63,7 @@ export function EditPreviewDialog({ pending, family = 'sql', onConfirm, onCancel
     ...new Set(preview.protections.flatMap((p) => (p.level === 'columns' ? p.unchecked : []))),
   ];
   const keyOnly = preview.protections.some((p) => p.level === 'key_only');
-  const plan = planCopy(family, preview.statements);
+  const plan = planCopy(family, pending);
   // Every batch starts on Cancel, so Enter never confirms it by accident.
   const cancel = () => !busy && onCancel();
   return (
