@@ -241,11 +241,26 @@ fn parse_millis(s: &str) -> Option<i64> {
     );
     let frac3: String = format!("{frac:0<3}").chars().take(3).collect();
     let millis: i64 = frac3.parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&day) || h > 23 || mi > 59 || sec > 59 {
+    if !(1..=12).contains(&m)
+        || !(1..=days_in_month(y, m)).contains(&day)
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=59).contains(&sec)
+    {
         return None;
     }
     let days = days_from_civil(y, m, day);
     Some(days * 86_400_000 + ((h * 60 + mi) * 60 + sec) * 1000 + millis)
+}
+
+/// The days of month `m` (1–12) of year `y` (proleptic Gregorian).
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        2 if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
 }
 
 // Howard Hinnant's civil-calendar algorithms (proleptic Gregorian, days since 1970-01-01).
@@ -650,6 +665,38 @@ mod tests {
             to_value(&ms(-1)),
             Value::DateTime("1969-12-31 23:59:59.999".into())
         );
+    }
+
+    #[test]
+    fn a_date_takes_only_the_days_of_its_month() {
+        let date = |s: &str| value_to_bson(&Value::DateTime(s.into()), None);
+        for bad in [
+            "2023-02-29 00:00:00.000",
+            "2023-02-31 00:00:00.000",
+            "2024-02-30 00:00:00.000",
+            "1900-02-29 00:00:00.000",
+            "2023-04-31 00:00:00.000",
+            "2023-13-01 00:00:00.000",
+            "2023-01-32 00:00:00.000",
+        ] {
+            assert!(
+                matches!(date(bad), Err(DbError::Config { ref message, .. }) if message == &format!("invalid date value: {bad}")),
+                "{bad}: {:?}",
+                date(bad)
+            );
+        }
+        for (good, ms) in [
+            ("2024-02-29 00:00:00.000", 1_709_164_800_000),
+            ("2000-02-29 00:00:00.000", 951_782_400_000),
+            ("2023-01-31 00:00:00.000", 1_675_123_200_000),
+            ("2023-12-31 23:59:59.999", 1_704_067_199_999),
+        ] {
+            assert_eq!(
+                date(good).unwrap(),
+                Bson::DateTime(mongodb::bson::DateTime::from_millis(ms)),
+                "{good}"
+            );
+        }
     }
 
     /// The nested document of the round trip below.

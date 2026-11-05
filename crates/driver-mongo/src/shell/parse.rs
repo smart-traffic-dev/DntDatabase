@@ -277,7 +277,7 @@ pub(crate) fn use_range(text: &str) -> Option<(usize, usize)> {
 }
 
 /// The database name of `use`, which starts after byte `after`: a string literal, or
-/// the raw text up to whitespace or `;`. Only whitespace, comments and `;` may follow.
+/// the raw text up to whitespace or `;` (only [`super::raw_name_char`] characters). Only whitespace, comments and `;` may follow.
 /// Returns the name, and where it starts and ends.
 fn parse_use(text: &str, after: usize) -> Result<(String, usize, usize), ShellError> {
     let shift = |e: ShellError, by: usize| ShellError::new(e.message, e.offset + by);
@@ -298,6 +298,11 @@ fn parse_use(text: &str, after: usize) -> Result<(String, usize, usize), ShellEr
         let end = body
             .find(|c: char| c.is_whitespace() || c == ';')
             .unwrap_or(body.len());
+        // Only name characters: `use 2024_prod})` (the end of a construct a bad line was
+        // split from) is no `use`.
+        if !body[..end].chars().all(super::raw_name_char) {
+            return Err(ShellError::new(INVALID_DB, at));
+        }
         (body[..end].to_string(), at + end)
     };
     let tail = lex(&text[tail_at..]).map_err(|e| shift(e, tail_at))?;
@@ -1329,6 +1334,23 @@ mod tests {
         assert_eq!(use_range("/* c */ use 'a-b';"), Some((8, 17)));
         assert_eq!(use_range("use 'a b'"), None);
         assert_eq!(use_range("db.c.find()"), None);
+    }
+
+    /// A raw `use` name holds only raw name characters, so the end of a construct split
+    /// off a bad line (`})`) never becomes part of a database name.
+    #[test]
+    fn raw_use_name_takes_only_name_characters() {
+        assert_eq!(cmd("use 2024_prod"), ShellCommand::Use("2024_prod".into()));
+        assert_eq!(err("use 2024_prod})"), (INVALID_DB.into(), Some(4)));
+        assert_eq!(err("use a'b"), (INVALID_DB.into(), Some(4)));
+        // Quoted, any valid name.
+        assert_eq!(cmd("use 'a}'"), ShellCommand::Use("a}".into()));
+        let text = "f({\nuse 2024_prod})";
+        for s in spans(text) {
+            if let Ok(p) = MongoLanguage.parse(&s) {
+                assert_ne!(p.class, CommandClass::SessionChange, "{text:?} runs {s:?}");
+            }
+        }
     }
 
     #[test]
