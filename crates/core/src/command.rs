@@ -147,6 +147,38 @@ pub trait CommandSession: Session {
         opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError>;
+
+    /// Runs `cmds` in order as ONE atomic unit (a server transaction): all take effect
+    /// or none do. The first failure aborts the unit and is reported in
+    /// [`AtomicFailure`]. The default is `Unsupported` (`transactions`); a driver whose
+    /// server has multi-command transactions overrides it. Results are not streamed:
+    /// one [`StmtOutcome`] per command, in order.
+    async fn execute_atomic(
+        &self,
+        cmds: &[ParsedCommand],
+        opts: &ExecOptions,
+    ) -> Result<Vec<StmtOutcome>, AtomicFailure> {
+        let _ = (cmds, opts);
+        Err(AtomicFailure {
+            index: 0,
+            error: DbError::Unsupported {
+                feature: "transactions".into(),
+                version: String::new(),
+            },
+            rolled_back: false,
+        })
+    }
+}
+
+/// Why an atomic run ([`CommandSession::execute_atomic`]) failed.
+#[derive(Debug)]
+pub struct AtomicFailure {
+    /// The command that failed (an index into `cmds`); for a failure of the commit
+    /// itself, the last command.
+    pub index: usize,
+    pub error: DbError,
+    /// Whether the unit is known to have been rolled back (nothing took effect).
+    pub rolled_back: bool,
 }
 
 #[cfg(test)]

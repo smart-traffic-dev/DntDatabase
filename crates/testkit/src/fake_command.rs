@@ -33,8 +33,8 @@
 
 use async_trait::async_trait;
 use dnt_core::command::{
-    CommandClass, CommandDrop, CommandDropKind, CommandLanguage, CommandParseError, CommandSession,
-    CommandSessionEffect, CommandSpan, CommandTarget, ParsedCommand,
+    AtomicFailure, CommandClass, CommandDrop, CommandDropKind, CommandLanguage, CommandParseError,
+    CommandSession, CommandSessionEffect, CommandSpan, CommandTarget, ParsedCommand,
 };
 use dnt_core::config::ResolvedConfig;
 use dnt_core::data_access::{DataAccess, KeyEdit, PageSpec};
@@ -118,6 +118,8 @@ struct StoreInner {
     reads_as_writes: AtomicBool,
     /// Sessions opened from now on report `capabilities.paged_objects = false`.
     no_paged_objects: AtomicBool,
+    /// The command index the next `execute_atomic` fails at ([`NO_FORCED_DB`]: none).
+    fail_atomic_at: AtomicUsize,
 }
 
 /// A shared handle on the data of a [`FakeCommandDriver`] (every session of the driver
@@ -138,6 +140,7 @@ impl FakeStore {
             blocked_changed: Notify::new(),
             reads_as_writes: AtomicBool::new(false),
             no_paged_objects: AtomicBool::new(false),
+            fail_atomic_at: AtomicUsize::new(NO_FORCED_DB),
         }))
     }
 
@@ -151,6 +154,12 @@ impl FakeStore {
     /// Write) instead of their read: a driver bug the data view must refuse.
     pub fn build_reads_as_writes(&self) {
         self.0.reads_as_writes.store(true, Ordering::SeqCst);
+    }
+
+    /// The next `execute_atomic` fails at command `index` (as if the server refused it),
+    /// and rolls back. Used once.
+    pub fn fail_atomic_at(&self, index: usize) {
+        self.0.fail_atomic_at.store(index, Ordering::SeqCst);
     }
 
     fn lock(&self) -> MutexGuard<'_, StoreState> {
@@ -1127,6 +1136,50 @@ impl CommandSession for FakeCommandSession {
             late_completion: false,
         })
     }
+
+    /// Runs the commands in order on a snapshot of the store; the first error (or the
+    /// one [`FakeStore::fail_atomic_at`] forces) restores the snapshot.
+    async fn execute_atomic(
+        &self,
+        cmds: &[ParsedCommand],
+        opts: &ExecOptions,
+    ) -> Result<Vec<StmtOutcome>, AtomicFailure> {
+        struct Discard;
+        impl RowSink for Discard {
+            fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+            fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+            fn result_end(&mut self, _summary: &ResultSummary) {}
+        }
+        let snapshot = self.store.lock().dbs.clone();
+        let db = self.db.load(Ordering::SeqCst);
+        let forced = self
+            .store
+            .0
+            .fail_atomic_at
+            .swap(NO_FORCED_DB, Ordering::SeqCst);
+        let mut outcomes = Vec::with_capacity(cmds.len());
+        for (index, cmd) in cmds.iter().enumerate() {
+            let outcome = if index == forced {
+                Err(server_err("ERR forced atomic failure"))
+            } else {
+                self.execute_command(cmd, opts, &mut Discard).await
+            };
+            match outcome {
+                Ok(o) => outcomes.push(o),
+                Err(error) => {
+                    self.store.lock().dbs = snapshot;
+                    self.db.store(db, Ordering::SeqCst);
+                    *self.queue() = None;
+                    return Err(AtomicFailure {
+                        index,
+                        error,
+                        rolled_back: true,
+                    });
+                }
+            }
+        }
+        Ok(outcomes)
+    }
 }
 
 #[async_trait]
@@ -1726,6 +1779,58 @@ mod tests {
                 "2".to_string()
             )])))
         );
+    }
+
+    fn atomic_session(store: &FakeStore) -> FakeCommandSession {
+        FakeCommandSession {
+            info: server_info(DbKind::Mongo),
+            store: store.clone(),
+            language: FakeLanguage,
+            db: AtomicUsize::new(0),
+            queue: Mutex::new(None),
+            cancel: Arc::new(CancelState::default()),
+        }
+    }
+
+    fn parse_all(lines: &[&str]) -> Vec<ParsedCommand> {
+        lines
+            .iter()
+            .map(|l| FakeLanguage.parse(l).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn fake_execute_atomic_commits() {
+        let store = FakeStore::new();
+        let session = atomic_session(&store);
+        let cmds = parse_all(&["SET a 1", "SET b 2", "DEL a"]);
+        let out = ready(session.execute_atomic(&cmds, &ExecOptions::default())).unwrap();
+        assert_eq!(out.len(), 3);
+        assert_eq!(store.get("0", b"a"), None);
+        assert_eq!(store.get("0", b"b"), Some(FakeValue::Str("2".into())));
+    }
+
+    #[test]
+    fn fake_execute_atomic_rolls_back() {
+        let store = FakeStore::new();
+        store.set("0", b"a", FakeValue::Str("0".into()));
+        let session = atomic_session(&store);
+        // The third command fails on its own (unknown command).
+        let cmds = parse_all(&["SET a 1", "SET b 2", "BOGUS"]);
+        let failure = ready(session.execute_atomic(&cmds, &ExecOptions::default())).unwrap_err();
+        assert_eq!((failure.index, failure.rolled_back), (2, true));
+        assert_eq!(store.get("0", b"a"), Some(FakeValue::Str("0".into())));
+        assert_eq!(store.get("0", b"b"), None);
+
+        // The hook forces a failure at a given command, once.
+        store.fail_atomic_at(1);
+        let cmds = parse_all(&["SET a 1", "SET b 2"]);
+        let failure = ready(session.execute_atomic(&cmds, &ExecOptions::default())).unwrap_err();
+        assert_eq!((failure.index, failure.rolled_back), (1, true));
+        assert_eq!(store.get("0", b"a"), Some(FakeValue::Str("0".into())));
+        assert_eq!(store.get("0", b"b"), None);
+        ready(session.execute_atomic(&cmds, &ExecOptions::default())).unwrap();
+        assert_eq!(store.get("0", b"b"), Some(FakeValue::Str("2".into())));
     }
 
     #[test]

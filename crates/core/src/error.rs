@@ -584,6 +584,12 @@ fn static_hint(err: &DbError) -> Option<&'static str> {
             match code.as_deref() {
                 Some("1049") => return Some(HINT_DB_MISSING),
                 Some("1045") => return Some(HINT_ACCESS_DENIED),
+                // MongoDB code names.
+                Some("Unauthorized") => return Some("The user lacks the role for this command"),
+                Some("DuplicateKey") => return Some("A unique index rejected a duplicate value"),
+                Some("NotWritablePrimary") => {
+                    return Some("Connected to a secondary; writes need the primary")
+                }
                 _ => {}
             }
             match sqlstate.as_deref() {
@@ -671,6 +677,28 @@ mod tests {
             Some("pg_hba.conf rejects connections from this host/user.")
         );
         assert_eq!(static_hint(&mk("", "28P01")), Some("Wrong user/password."));
+    }
+    #[test]
+    fn hints_for_mongo_codes() {
+        let mk = |code: &str| DbError::Server {
+            code: Some(code.into()),
+            sqlstate: None,
+            message: "m".into(),
+            position: None,
+        };
+        assert_eq!(
+            static_hint(&mk("Unauthorized")),
+            Some("The user lacks the role for this command")
+        );
+        assert_eq!(
+            static_hint(&mk("DuplicateKey")),
+            Some("A unique index rejected a duplicate value")
+        );
+        assert_eq!(
+            static_hint(&mk("NotWritablePrimary")),
+            Some("Connected to a secondary; writes need the primary")
+        );
+        assert_eq!(static_hint(&mk("NamespaceNotFound")), None);
     }
     #[test]
     fn hint_pg_auth_errors() {

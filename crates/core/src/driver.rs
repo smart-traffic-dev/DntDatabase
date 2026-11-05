@@ -986,6 +986,22 @@ mod tests {
         assert_eq!(s.tx_state(), TxState::Idle);
     }
 
+    #[tokio::test]
+    async fn default_execute_atomic_is_unsupported() {
+        let c = fake_command(TxState::Idle);
+        let failure = c
+            .execute_atomic(&[], &ExecOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(failure.index, 0);
+        assert!(!failure.rolled_back);
+        assert!(
+            matches!(&failure.error, DbError::Unsupported { feature, .. } if feature == "transactions"),
+            "{:?}",
+            failure.error
+        );
+    }
+
     #[test]
     fn sessions_have_no_keyspace_by_default() {
         let s: Box<dyn Session> = Box::new(fake());
