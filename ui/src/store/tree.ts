@@ -221,6 +221,7 @@ export const useTree = create<TreeState>()((set, get) => {
           kind: keyspace ? 'keyspace-db' : 'database',
           label: keyspace ? keyspaceLabel(db.name, db.key_count) : db.name,
           scope: { database: db.name, schema: null },
+          ...(keyspace ? { keyCount: db.key_count ?? null } : {}),
         })),
       };
     }

@@ -1,0 +1,257 @@
+/* The key browser (spec §7.6): a toolbar row, then the key list and the value side by side. */
+.keys-tab {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.kt-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  height: 28px;
+  padding: 0 var(--dnt-space-2);
+  border-bottom: 1px solid var(--dnt-border);
+}
+
+.kt-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.kt-list {
+  flex: none;
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--dnt-border);
+}
+
+.kt-filter {
+  flex: none;
+  display: flex;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-1_5) var(--dnt-space-2);
+  border-bottom: 1px solid var(--dnt-border);
+}
+
+.kt-filter input {
+  flex: 1;
+  min-width: 0;
+}
+
+.kt-keys {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kt-key {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  height: var(--dnt-row-h-tree);
+  padding: 0 var(--dnt-space-2);
+  cursor: default;
+}
+
+.kt-key:hover {
+  background: var(--dnt-bg-hover);
+}
+
+.kt-key.on {
+  background: var(--dnt-bg-active);
+}
+
+.kt-key:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+.kt-key-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kt-badge {
+  flex: none;
+  padding: 0 var(--dnt-space-1);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-xs);
+}
+
+.kt-ttl,
+.kt-meta,
+.kt-count {
+  flex: none;
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+}
+
+.kt-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-1) var(--dnt-space-2);
+  border-top: 1px solid var(--dnt-border);
+}
+
+.kt-value {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.kt-empty {
+  align-items: center;
+  justify-content: center;
+}
+
+.kt-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  padding: var(--dnt-space-1_5) var(--dnt-space-2);
+  border-bottom: 1px solid var(--dnt-border);
+}
+
+.kt-title {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dnt-text-sm);
+  font-weight: 600;
+}
+
+.kt-spacer {
+  flex: 1;
+}
+
+.kt-value-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--dnt-space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-2);
+}
+
+.kt-grid {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.kt-grid th,
+.kt-grid td {
+  padding: var(--dnt-space-1) var(--dnt-space-2);
+  border-bottom: 1px solid var(--dnt-border);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.kt-grid th {
+  color: var(--dnt-fg-muted);
+  font-weight: 500;
+}
+
+.kt-cell input {
+  width: 100%;
+}
+
+.kt-actions {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.kt-actions .btn + .btn {
+  margin-left: var(--dnt-space-1);
+}
+
+.kt-members {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.kt-members li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--dnt-space-1) var(--dnt-space-2);
+  border-bottom: 1px solid var(--dnt-border);
+}
+
+.kt-add {
+  display: flex;
+  gap: var(--dnt-space-1);
+}
+
+.kt-add input {
+  flex: 1;
+  min-width: 0;
+}
+
+.kt-string {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1_5);
+  min-height: 0;
+}
+
+.kt-modes {
+  display: flex;
+  gap: 2px;
+}
+
+.kt-text {
+  flex: 1;
+  min-height: 160px;
+  resize: vertical;
+}
+
+.kt-save {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--dnt-space-2);
+}
+
+.kt-invalid,
+.kt-error {
+  color: var(--dnt-status-danger-fg);
+}
+
+.kt-error {
+  margin: 0;
+  padding: var(--dnt-space-1) var(--dnt-space-2);
+}
+
+.kt-other {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.kt-more {
+  align-self: flex-start;
+}

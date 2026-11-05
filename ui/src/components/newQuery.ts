@@ -106,6 +106,8 @@ export function openQueryFromActiveTab(): string {
       const ref = target.name ? { database: target.scope.database, schema: target.scope.schema, name: target.name, kind: target.kind } : undefined;
       return openQueryOn(tab.connectionId, target.scope.database, ref);
     }
+    case 'keys':
+      return openQueryOn(tab.connectionId, tab.database);
     case 'query': {
       const doc = useQueryDocs.getState().docs.get(tab.id);
       return useQueryDocs.getState().newQuery(doc?.connectionId ?? tab.connectionId, doc?.database ?? null);

@@ -435,6 +435,14 @@ async fn app_errors() -> BTreeMap<&'static str, AppError> {
         .into(),
     );
     out.insert("blocked", DbError::Blocked { count: 2 }.into());
+    // Key browser: the key expired or was deleted since it was listed.
+    out.insert(
+        "key_not_found",
+        DbError::KeyNotFound {
+            key: "user:1".into(),
+        }
+        .into(),
+    );
     // AI editor completion: the endpoint's own reason.
     out.insert(
         "ai",

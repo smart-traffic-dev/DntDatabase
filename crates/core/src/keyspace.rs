@@ -12,6 +12,9 @@ pub trait Keyspace: Send + Sync {
     /// glob and never becomes a `KEYS`.
     async fn scan(&self, db: &str, req: &ScanRequest) -> Result<KeyPage, DbError>;
     /// One page (`range`) of the value of `key`, with its TTL and memory use.
+    ///
+    /// A key that does not exist (expired, deleted since it was listed) is
+    /// [`DbError::KeyNotFound`], never an empty value or a `Server` error.
     async fn key_value(
         &self,
         db: &str,

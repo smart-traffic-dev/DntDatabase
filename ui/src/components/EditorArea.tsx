@@ -3,6 +3,7 @@ import { groupTabs, useTabs, type LayoutNode, type Side } from '../store/tabs';
 import { useTree } from '../store/tree';
 import { DdlEditorTab } from '../tabs/ddl/DdlEditorTab';
 import { DesignerTab } from '../tabs/designer/DesignerTab';
+import { KeysTab } from '../tabs/keys/KeysTab';
 import { ObjectTab } from '../tabs/ObjectTab';
 import { QueryTab } from '../tabs/query/QueryTab';
 import { EmptyWorkspace } from './EmptyWorkspace';
@@ -135,6 +136,8 @@ function GroupPane({ groupId, index, welcome }: { groupId: string; index: number
           <DesignerTab key={tab.id} tab={tab} />
         ) : tab?.kind === 'ddl' ? (
           <DdlEditorTab key={tab.id} tab={tab} />
+        ) : tab?.kind === 'keys' ? (
+          <KeysTab key={tab.id} tab={tab} />
         ) : welcome ? (
           <EmptyWorkspace />
         ) : (

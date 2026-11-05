@@ -188,6 +188,7 @@ export function StatusBar() {
     const tab = s.tabs.find((t) => t.id === s.activeId);
     if (tab?.kind === 'design') return tab.scope.database;
     if (tab?.kind === 'ddl') return ddlDb;
+    if (tab?.kind === 'keys') return tab.database;
     return tab?.kind === 'object' ? tab.objectRef.database : null;
   });
   const queryDb = useQueryDocs((s) => (queryTabId ? s.docs.get(queryTabId)?.database ?? null : null));

@@ -19,6 +19,8 @@ export interface TreeNode {
   folderKind?: ObjectKind;
   /** Database (and schema) a database / schema / folder node lists. */
   scope?: Scope;
+  /** A `keyspace-db` node: how many keys its database holds (null / absent: unknown). */
+  keyCount?: number | null;
 }
 
 export interface TreeRow {

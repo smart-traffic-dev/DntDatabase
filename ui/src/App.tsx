@@ -16,6 +16,7 @@ import { StatusBar } from './components/StatusBar';
 import { EditorArea } from './components/EditorArea';
 import { TitleBar } from './components/TitleBar';
 import { persistArrangement, restoreArrangement } from './store/editorArrangement';
+import { persistKeysTabs, restoreKeysTabs } from './store/keysTabs';
 import { installRunMarks } from './store/runMarks';
 import { useJobs } from './store/jobs';
 import { useTabs } from './store/tabs';
@@ -40,9 +41,17 @@ export default function App() {
       // After the connections are known, so a tab bound to a deleted one comes back unbound.
       // A tree that failed to load leaves them unknown: then every binding is kept.
       await useQueryDocs.getState().restore({ connectionsKnown: !useTree.getState().error });
+      restoreKeysTabs({ connectionsKnown: !useTree.getState().error });
       // The editor groups go back around the reopened tabs; only then are changes saved again.
       restoreArrangement();
-      if (live) stopPersist = persistArrangement();
+      if (live) {
+        const stopArrangement = persistArrangement();
+        const stopKeys = persistKeysTabs();
+        stopPersist = () => {
+          stopArrangement();
+          stopKeys();
+        };
+      }
     })();
     return () => {
       live = false;

@@ -41,6 +41,7 @@ import type {
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
 import { commandDatabases, commandInfo, commandObjects, createCommandFake, type CommandFakeState } from './commandFixtures';
 import { createCommandData } from './commandData';
+import { createCommandKeys } from './commandKeys';
 import { createCommandQueries } from './commandQuery';
 import { createDdlFake, type DdlFakeState } from './ddlEdit';
 import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
@@ -859,6 +860,8 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   };
   // The Data tab of MongoDB collections (`commandData.ts`); the SQL tables keep the handlers above.
   Object.assign(handlers, createCommandData(command, (id) => connections.find((c) => c.id === id), requireOpen, { ...handlers }));
+  // The key browser of Redis connections (`commandKeys.ts`); other edit plans go to the handlers above.
+  Object.assign(handlers, createCommandKeys(command, (id) => connections.find((c) => c.id === id), requireOpen, { ...handlers }));
 
   const all = { ...handlers, ...overrides };
   return {

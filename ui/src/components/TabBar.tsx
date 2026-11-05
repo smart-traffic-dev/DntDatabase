@@ -19,7 +19,7 @@ import { useDdlEdits } from '../store/ddlEdits';
 import { groupTabs, MAX_GROUPS, useTabs, type Tab } from '../store/tabs';
 import { ActionMenu, type MenuEntry } from './ActionMenu';
 import { EnvTag } from './EnvTag';
-import { ChevronDownIcon, CloseIcon, CodeIcon, DesignIcon, KindIcon, LockIcon, PinIcon, PlusIcon, QueryIcon, RestoreIcon } from './icons';
+import { ChevronDownIcon, CloseIcon, CodeIcon, DatabaseIcon, DesignIcon, KindIcon, LockIcon, PinIcon, PlusIcon, QueryIcon, RestoreIcon } from './icons';
 import { focusFocusedGroup } from './focusGroup';
 import { openNewQuery } from './newQuery';
 import { openObjectTab } from './openObject';
@@ -56,7 +56,7 @@ const KIND_LABEL: Record<ObjectKind, string> = {
 
 /** What a tab holds, in words (the tab's tooltip; its glyph is `TabKind`). */
 const kindLabel = (tab: Tab): string =>
-  tab.kind === 'query' ? 'Query' : tab.kind === 'design' ? 'Table design' : tab.kind === 'ddl' ? 'DDL' : KIND_LABEL[tab.objectRef.kind];
+  tab.kind === 'query' ? 'Query' : tab.kind === 'design' ? 'Table design' : tab.kind === 'ddl' ? 'DDL' : tab.kind === 'keys' ? 'Keys' : KIND_LABEL[tab.objectRef.kind];
 
 /**
  * The tab's kind as the glyph the tree shows for it (a query, a designer and a DDL editor have
@@ -64,7 +64,17 @@ const kindLabel = (tab: Tab): string =>
  */
 function TabKind({ tab }: { tab: Tab }) {
   const icon =
-    tab.kind === 'query' ? <QueryIcon /> : tab.kind === 'design' ? <DesignIcon /> : tab.kind === 'ddl' ? <CodeIcon /> : <KindIcon kind={tab.objectRef.kind} />;
+    tab.kind === 'query' ? (
+      <QueryIcon />
+    ) : tab.kind === 'design' ? (
+      <DesignIcon />
+    ) : tab.kind === 'ddl' ? (
+      <CodeIcon />
+    ) : tab.kind === 'keys' ? (
+      <DatabaseIcon />
+    ) : (
+      <KindIcon kind={tab.objectRef.kind} />
+    );
   return (
     <span className="tab-kind" aria-hidden="true" data-kind={kindLabel(tab)}>
       {icon}
@@ -92,6 +102,7 @@ const DIRTY_LABEL: Record<Tab['kind'], string> = {
   query: 'Unsaved changes',
   design: 'Unsaved design changes',
   ddl: 'Unsaved DDL changes',
+  keys: 'Unsaved changes',
 };
 
 /** The tab strip of one editor group (by default the focused one). */

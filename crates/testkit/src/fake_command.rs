@@ -1174,7 +1174,11 @@ impl Keyspace for FakeCommandSession {
         let index = db_index(db)?;
         let state = self.store.lock();
         let value = match state.dbs[index].get(&key.raw) {
-            None => return Err(server_err(format!("ERR no such key '{}'", key.display))),
+            None => {
+                return Err(DbError::KeyNotFound {
+                    key: key.display.clone(),
+                })
+            }
             Some(FakeValue::Str(s)) => KeyValue::String {
                 value: Value::Text(s.clone()),
             },
@@ -1742,5 +1746,33 @@ mod tests {
         let dbs = ready(session.list_databases()).unwrap();
         let got: Vec<_> = dbs.iter().map(|d| (d.name.as_str(), d.key_count)).collect();
         assert_eq!(got, [("0", Some(2)), ("2", Some(1))]);
+    }
+
+    /// A key that is not there (expired, deleted) is `KeyNotFound`, kind `key_not_found`.
+    #[test]
+    fn fake_missing_key_is_key_not_found() {
+        use dnt_core::error::AppError;
+        let session = FakeCommandSession {
+            info: server_info(DbKind::Redis),
+            store: FakeStore::new(),
+            language: FakeLanguage,
+            db: AtomicUsize::new(0),
+            queue: Mutex::new(None),
+            cancel: Arc::new(CancelState::default()),
+        };
+        let key = KeyName::from_bytes(b"gone".to_vec());
+        let range = ValueRange {
+            offset: 0,
+            count: 10,
+        };
+        let err = ready(session.key_value("0", &key, &range)).unwrap_err();
+        match &err {
+            DbError::KeyNotFound { key } => assert_eq!(key, "gone"),
+            other => panic!("expected KeyNotFound, got {other:?}"),
+        }
+        assert_eq!(err.to_string(), "Key no longer exists");
+        let app = AppError::from(err);
+        assert_eq!(app.kind, "key_not_found");
+        assert_eq!(app.message, "Key no longer exists");
     }
 }

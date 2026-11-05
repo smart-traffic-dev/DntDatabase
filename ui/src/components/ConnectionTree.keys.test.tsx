@@ -91,6 +91,32 @@ describe('ConnectionTree keys', () => {
     expect(useDrag.getState().item).toBeNull();
   });
 
+  it('double-click or Enter on a keyspace database opens its keys tab', async () => {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => openResult(serverInfo('Redis')),
+      list_databases: () => [
+        { name: '0', key_count: 5 },
+        { name: '2', key_count: 3 },
+      ],
+      keys_scan: () => ({ keys: [], next_cursor: null }),
+      tabs_save: () => null,
+    });
+    await useTree.getState().reloadStored();
+    useTree.getState().expand(groupNodeId(ids.groupA));
+    render(<ConnectionTree />);
+    await expandPath(prodNode);
+    fireEvent.doubleClick(screen.getAllByTestId('tree-row').find((r) => r.textContent?.includes('db0 · 5 keys'))!);
+    expect(useTabs.getState().tabs).toEqual([
+      expect.objectContaining({ kind: 'keys', id: `keys:${ids.prod}:0`, connectionId: ids.prod, database: '0', title: 'shop-prod · db0' }),
+    ]);
+    select(`${prodNode}/db:2`);
+    key('Enter');
+    expect(useTabs.getState().tabs.map((t) => t.id)).toEqual([`keys:${ids.prod}:0`, `keys:${ids.prod}:2`]);
+    expect(useTabs.getState().activeId).toBe(`keys:${ids.prod}:2`);
+    expect(useTree.getState().expanded.has(`${prodNode}/db:2`)).toBe(false);
+  });
+
   it('Ctrl+Enter opens the object on its DDL tab', async () => {
     await setup();
     select(ordersNode);

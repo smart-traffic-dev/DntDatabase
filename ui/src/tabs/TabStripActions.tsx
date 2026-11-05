@@ -22,8 +22,8 @@ function QueryActions({ tabId }: { tabId: string }) {
  * Whether `tab` has a toolbar row under the tab strip. The designer and the DDL editor have no
  * strip controls of their own (their header holds them), so they get no (empty) row either.
  */
-export const hasStripActions = (tab: Tab): tab is Exclude<Tab, { kind: 'design' | 'ddl' }> =>
-  tab.kind !== 'design' && tab.kind !== 'ddl';
+export const hasStripActions = (tab: Tab): tab is Exclude<Tab, { kind: 'design' | 'ddl' | 'keys' }> =>
+  tab.kind !== 'design' && tab.kind !== 'ddl' && tab.kind !== 'keys';
 
 /**
  * The action cluster at the right end of a group's tab strip, for that group's active tab

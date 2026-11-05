@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { ObjectKind, ObjectRef, Scope } from '../bindings';
+import { useConnections } from './connections';
 import {
   clampRatio,
   isLayoutNode,
@@ -63,7 +64,19 @@ export interface DdlTabRef {
   preview?: boolean;
 }
 
-export type Tab = ObjectTabRef | QueryTabRef | DesignTabRef | DdlTabRef;
+/** The key browser of one Redis database (id `keys:<connectionId>:<database>`); its state lives in `useKeysTabs`. */
+export interface KeysTabRef {
+  kind: 'keys';
+  id: string;
+  connectionId: string;
+  database: string;
+  /** `<connection name> · db<n>`. */
+  title: string;
+  pinned?: boolean;
+  preview?: boolean;
+}
+
+export type Tab = ObjectTabRef | QueryTabRef | DesignTabRef | DdlTabRef | KeysTabRef;
 
 /** What "Reopen closed tab" brings back: an object tab by reference, a query tab with its document. */
 export type ClosedTab = { kind: 'object'; tab: ObjectTabRef } | { kind: 'query'; doc: QueryDoc };
@@ -175,7 +188,7 @@ interface TabsState {
    */
   moveDesignTab(id: string, table: string): string | null;
   close(id: string): void;
-  /** Closes every object, design and DDL tab of a connection (it was deleted or replaced); query tabs keep their binding. */
+  /** Closes every object, design, DDL and keys tab of a connection (it was deleted or replaced); query tabs keep their binding. */
   closeConnection(connectionId: string): void;
   reset(): void;
 }
@@ -555,7 +568,7 @@ export const useTabs = create<TabsState>()((set, get) => {
       }),
     closeConnection: (connectionId) =>
       update((s) => {
-        const goes = (t: Tab) => (t.kind === 'object' || t.kind === 'design' || t.kind === 'ddl') && t.connectionId === connectionId;
+        const goes = (t: Tab) => (t.kind === 'object' || t.kind === 'design' || t.kind === 'ddl' || t.kind === 'keys') && t.connectionId === connectionId;
         const tabs = s.tabs.filter((t) => !goes(t));
         if (tabs.length === s.tabs.length) return null;
         // In each group whose active tab went away: the nearest remaining tab to its left, else the first.
@@ -574,10 +587,17 @@ export const useTabs = create<TabsState>()((set, get) => {
   };
 });
 
-// TODO(R4b Task 8): replace this stub with the keys tab of a Redis database.
-/** Activating a `keyspace-db` tree node. A no-op until the keys tab exists. */
+/** One key browser per database of a connection (decision 8). */
+export const keysTabId = (connectionId: string, database: string): string => `keys:${connectionId}:${database}`;
+
+/** `<connection name> · db<n>`. */
+export function keysTabTitle(connectionId: string, database: string): string {
+  const name = useConnections.getState().summaries.get(connectionId)?.config.name ?? 'Redis';
+  return `${name} · db${database}`;
+}
+
+/** Opens the key browser of `database` (activating a `keyspace-db` tree node); an open one is focused. */
 export function openKeysTab(connectionId: string, database: string): void {
-  void connectionId;
-  void database;
+  useTabs.getState().open({ kind: 'keys', id: keysTabId(connectionId, database), connectionId, database, title: keysTabTitle(connectionId, database) });
 }
 

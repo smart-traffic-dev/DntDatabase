@@ -161,6 +161,10 @@ pub enum DbError {
     /// A browse call (or similar) for a connection that has no runtime.
     #[error("the connection is not open")]
     NotOpen,
+    /// The key browser asked for a key that is not there (it expired or was deleted
+    /// since it was listed). `key`: its display name.
+    #[error("Key no longer exists")]
+    KeyNotFound { key: String },
     /// An error of the connect pipeline, with the stage that failed and the timings of
     /// the stages that completed before it. `AppError` keeps the inner error's kind.
     #[error("{source} (during {})", .stage.as_str())]
@@ -483,6 +487,10 @@ impl From<DbError> for AppError {
             DbError::NotOpen => AppError {
                 retryable: true,
                 ..AppError::base("not_open", "This connection is not open.")
+            },
+            DbError::KeyNotFound { key } => AppError {
+                detail: Some(key),
+                ..AppError::base("key_not_found", "Key no longer exists")
             },
             DbError::Busy => AppError::base("busy", "This tab is already running a query."),
             DbError::TransactionOpen => AppError::base(
