@@ -148,6 +148,10 @@ fn build(
         explain: None,
     };
     let c = classify(&cmd).map_err(|message| DbError::Internal { message })?;
+    let edit = matches!(
+        method,
+        CollMethod::UpdateOne | CollMethod::InsertOne | CollMethod::DeleteOne
+    );
     Ok(ParsedCommand {
         name: c.name,
         text,
@@ -160,6 +164,7 @@ fn build(
             cmd,
             typed,
             document,
+            edit,
         }),
     })
 }
@@ -1536,6 +1541,7 @@ mod tests {
         assert_eq!(docs, [Some(oid(OID)), None, Some(oid(OID))]);
         for cmd in &built {
             assert_eq!(cmd.class, CommandClass::Write, "{}", cmd.text);
+            assert!(payload_of(cmd).unwrap().edit, "{}", cmd.text);
             assert!(!cmd.unbounded && cmd.drops.is_empty(), "{}", cmd.text);
             assert_eq!(
                 cmd.targets,

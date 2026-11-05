@@ -26,7 +26,7 @@ use dnt_core::sql::filter::DataFilter;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, Value};
 use mongodb::bson::{doc, Bson, Uuid};
-use mongodb::error::UNKNOWN_TRANSACTION_COMMIT_RESULT;
+use mongodb::error::{ErrorKind, WriteFailure, UNKNOWN_TRANSACTION_COMMIT_RESULT};
 use mongodb::{Client, ClientSession};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -427,7 +427,10 @@ impl CommandSession for MongoSession {
         };
         let plan = exec::plan(shell, &self.db(), opts, &comment)?;
         let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
-        let (output, late) = self.run_watched(plan, opts, &cmd.class, sink, None).await?;
+        let (output, late) = self
+            .run_watched(plan, opts, &cmd.class, sink, None)
+            .await
+            .map_err(|e| if payload.edit { edit_error(e) } else { e })?;
         // An edit applied on its own (no transactions): a document gone stops the apply.
         if let Some(id) = &payload.document {
             data::check_found(id, output.affected)?;
@@ -458,10 +461,12 @@ impl CommandSession for MongoSession {
     /// - A commit whose result is unknown (`UnknownTransactionCommitResult`) is retried
     ///   once, the only automatic retry of the driver (commit is idempotent by
     ///   `txnNumber`); still unknown, the failure is `ConnectionLost { outcome_unknown:
-    ///   true }` at the last index, not rolled back. Any other commit error is known not
-    ///   to have committed: rolled back. An abort's single retry is the crate's own (it
-    ///   retries `abortTransaction` once and ignores its errors, as the transactions spec
-    ///   says; a second `abort_transaction` call is refused by the crate).
+    ///   true }` at the last index, not rolled back. So is a commit with a write concern
+    ///   error (it committed, but the write concern was not met), which is not retried.
+    ///   Any other commit error is known not to have committed: rolled back. An abort's
+    ///   single retry is the crate's own (it retries `abortTransaction` once and ignores
+    ///   its errors, as the transactions spec says; a second `abort_transaction` call is
+    ///   refused by the crate).
     async fn execute_atomic(
         &self,
         cmds: &[ParsedCommand],
@@ -546,7 +551,7 @@ impl CommandSession for MongoSession {
         match commit(&mut session).await {
             Ok(()) => Ok(outcomes),
             Err(e) => {
-                let unknown = e.contains_label(UNKNOWN_TRANSACTION_COMMIT_RESULT);
+                let unknown = commit_unknown(&e);
                 let mapped = self.mapped(&e, &CommandClass::Write);
                 Err(if unknown {
                     AtomicFailure {
@@ -645,7 +650,35 @@ async fn abort(session: &mut ClientSession) {
     let _ = tokio::time::timeout(ABORT_LIMIT, session.abort_transaction()).await;
 }
 
-/// Commits the transaction of `session`, once more when the result is unknown.
+/// The error of a data-view edit applied on its own: a write concern error means the
+/// write was applied but its write concern was not met, so its outcome is unknown (as a
+/// commit's with one), never "not applied".
+fn edit_error(e: DbError) -> DbError {
+    if exec::is_write_concern_error(&e) {
+        DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: true,
+            message: format!("the write's outcome is unknown: {e}"),
+        }
+    } else {
+        e
+    }
+}
+
+/// Whether a failed commit may have committed: the crate's `UnknownTransactionCommitResult`
+/// label, or any write concern error (the commit was applied but the write concern was not
+/// met: the crate labels only some codes, not `UnknownReplWriteConcern` or
+/// `UnsatisfiableWriteConcern`).
+fn commit_unknown(e: &mongodb::error::Error) -> bool {
+    e.contains_label(UNKNOWN_TRANSACTION_COMMIT_RESULT)
+        || matches!(
+            e.kind.as_ref(),
+            ErrorKind::Write(WriteFailure::WriteConcernError(_))
+        )
+}
+
+/// Commits the transaction of `session`, once more when the result is unknown by the
+/// crate's label (a write concern error without it is not retried).
 async fn commit(session: &mut ClientSession) -> mongodb::error::Result<()> {
     match session.commit_transaction().await {
         Err(e) if e.contains_label(UNKNOWN_TRANSACTION_COMMIT_RESULT) => {
@@ -800,6 +833,32 @@ mod tests {
         assert!(matches!(
             in_transaction(server),
             DbError::Server { code: Some(c), .. } if c == "DocumentNotFound"
+        ));
+    }
+
+    #[test]
+    fn an_edit_with_a_write_concern_error_may_have_applied() {
+        let server = |message: &str| DbError::Server {
+            code: Some("UnsatisfiableWriteConcern".into()),
+            sqlstate: None,
+            message: message.into(),
+            position: None,
+        };
+        match edit_error(server("Write concern error: not enough nodes")) {
+            DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: true,
+                message,
+            } => assert!(
+                message.contains("Write concern error: not enough nodes"),
+                "{message}"
+            ),
+            other => panic!("{other:?}"),
+        }
+        // Any other error of an edit stays as it is (it was not applied).
+        assert!(matches!(
+            edit_error(server("E11000 duplicate key error")),
+            DbError::Server { .. }
         ));
     }
 

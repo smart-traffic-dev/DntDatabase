@@ -14,7 +14,7 @@ use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::value::{FullValue, Value};
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::{doc, Bson, Document};
-use mongodb::error::ErrorKind;
+use mongodb::error::{ErrorKind, WriteFailure};
 use mongodb::{Client, ClientSession, Cursor};
 
 use crate::rows::{column_metas, columns_of, row_of};
@@ -57,6 +57,9 @@ const SESSION_FIELDS: &[&str] = &["lsid", "txnNumber", "startTransaction", "auto
 const CODE_NAMES: &[(i32, &str)] = &[
     (13, "Unauthorized"),
     (50, "MaxTimeMSExpired"),
+    (64, "WriteConcernFailed"),
+    (79, "UnknownReplWriteConcern"),
+    (100, "UnsatisfiableWriteConcern"),
     (121, "DocumentValidationFailure"),
     (10107, "NotWritablePrimary"),
     (11000, "DuplicateKey"),
@@ -1154,9 +1157,7 @@ fn write_result(
 }
 
 fn reply_output(shape: Shape, reply: Document, opts: &ExecOptions) -> Result<Output, DbError> {
-    if matches!(shape, Shape::Insert { .. } | Shape::Update | Shape::Delete) {
-        check_write_reply(&shape, &reply)?;
-    }
+    check_write_reply(&shape, &reply)?;
     Ok(match shape {
         Shape::Reply => Output::rows(vec![reply], false),
         Shape::Field(f) => {
@@ -1233,11 +1234,16 @@ fn reply_output(shape: Shape, reply: Document, opts: &ExecOptions) -> Result<Out
 }
 
 /// A write's reply carries its errors (`ok: 1` with `writeErrors`): the first is the
-/// error, and for `insertMany` it says how many documents went in before it.
+/// error, and for `insertMany` it says how many documents went in before it. Any reply
+/// (`findAndModify`, `createIndexes`, `drop`, `dropDatabase`, `runCommand`…) may carry a
+/// `writeConcernError`: the command was applied but its write concern was not met, which
+/// is an error too ([`write_concern_error`]). `run_command` does not check either.
 fn check_write_reply(shape: &Shape, reply: &Document) -> Result<(), DbError> {
+    let writes = matches!(shape, Shape::Insert { .. } | Shape::Update | Shape::Delete);
     if let Some(e) = reply
         .get_array("writeErrors")
         .ok()
+        .filter(|_| writes)
         .and_then(|a| a.first())
         .and_then(Bson::as_document)
     {
@@ -1254,9 +1260,29 @@ fn check_write_reply(shape: &Shape, reply: &Document) -> Result<(), DbError> {
     }
     if let Ok(e) = reply.get_document("writeConcernError") {
         let (code, message) = write_error(e);
-        return Err(server(code, format!("Write concern error: {message}")));
+        return Err(write_concern_error(code, &message));
     }
     Ok(())
+}
+
+/// The start of a write concern error's message ([`write_concern_error`]).
+const WRITE_CONCERN_ERROR: &str = "Write concern error: ";
+
+/// A write concern error: the command was applied, but its write concern was not met. The
+/// server's message is redacted after the prefix, so the prefix always stays
+/// ([`is_write_concern_error`]).
+fn write_concern_error(code: String, message: &str) -> DbError {
+    DbError::Server {
+        code: Some(code),
+        sqlstate: None,
+        message: format!("{WRITE_CONCERN_ERROR}{}", redact_message(message)),
+        position: None,
+    }
+}
+
+/// Whether `e` is a [`write_concern_error`].
+pub(crate) fn is_write_concern_error(e: &DbError) -> bool {
+    matches!(e, DbError::Server { message, .. } if message.starts_with(WRITE_CONCERN_ERROR))
 }
 
 /// The code name and message of a write error document.
@@ -1363,11 +1389,20 @@ pub(crate) fn map_error(e: &mongodb::error::Error, class: &CommandClass) -> (DbE
             }
             (server(name, message), false)
         }
+        // The crate's own writes (`commitTransaction`): applied, write concern not met.
+        ErrorKind::Write(WriteFailure::WriteConcernError(w)) => {
+            let name = if w.code_name.is_empty() {
+                code_name(w.code)
+            } else {
+                w.code_name.clone()
+            };
+            (write_concern_error(name, &w.message), false)
+        }
         ErrorKind::Io(_) | ErrorKind::ConnectionPoolCleared { .. } => (
             DbError::ConnectionLost {
                 was_in_tx: false,
                 outcome_unknown: may_have_applied,
-                message: e.kind.to_string(),
+                message: redact_message(&e.kind.to_string()),
             },
             true,
         ),
@@ -1386,9 +1421,10 @@ pub(crate) fn map_error(e: &mongodb::error::Error, class: &CommandClass) -> (DbE
             },
             false,
         ),
+        // The kind's text may quote the server's reply.
         _ => (
             DbError::Internal {
-                message: e.kind.to_string(),
+                message: redact_message(&e.kind.to_string()),
             },
             false,
         ),
@@ -2006,6 +2042,99 @@ mod tests {
                 );
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// Every reply's `writeConcernError` is an error, not only an insert's, update's or
+    /// delete's: `findAndModify`, `createIndexes`, `drop`, `dropDatabase`, `runCommand`.
+    #[test]
+    fn every_reply_reports_its_write_concern_error() {
+        let wce = doc! { "code": 100, "codeName": "UnsatisfiableWriteConcern", "errmsg": "Not enough data-bearing nodes" };
+        for (shape, mut r) in [
+            (Shape::Update, doc! { "n": 1, "nModified": 1, "ok": 1.0 }),
+            (
+                Shape::Insert {
+                    ids: vec![Bson::Int32(1)],
+                },
+                doc! { "n": 1, "ok": 1.0 },
+            ),
+            (Shape::Delete, doc! { "n": 1, "ok": 1.0 }),
+            // findAndModify
+            (
+                Shape::FindAndModify,
+                doc! { "value": { "_id": 1 }, "ok": 1.0 },
+            ),
+            // createIndexes, then drop, then dropDatabase
+            (
+                Shape::Reply,
+                doc! { "numIndexesBefore": 1, "numIndexesAfter": 2, "ok": 1.0 },
+            ),
+            (
+                Shape::Reply,
+                doc! { "nIndexesWas": 1, "ns": "d.c", "ok": 1.0 },
+            ),
+            (Shape::Reply, doc! { "dropped": "d", "ok": 1.0 }),
+            (Shape::Field("ok"), doc! { "ok": 1.0 }),
+        ] {
+            r.insert("writeConcernError", wce.clone());
+            let what = format!("{shape:?}");
+            match reply(shape, r) {
+                Err(e @ DbError::Server { .. }) => {
+                    assert!(is_write_concern_error(&e), "{what}: {e:?}");
+                    let DbError::Server { code, message, .. } = e else {
+                        unreachable!()
+                    };
+                    assert_eq!(code.as_deref(), Some("UnsatisfiableWriteConcern"), "{what}");
+                    assert_eq!(
+                        message, "Write concern error: Not enough data-bearing nodes",
+                        "{what}"
+                    );
+                }
+                other => panic!("{what}: {other:?}"),
+            }
+        }
+        // Without a code name, the known codes are named.
+        match reply(
+            Shape::Reply,
+            doc! { "ok": 1.0, "writeConcernError": { "code": 79, "errmsg": "x" } },
+        ) {
+            Err(DbError::Server { code, .. }) => {
+                assert_eq!(code.as_deref(), Some("UnknownReplWriteConcern"))
+            }
+            other => panic!("{other:?}"),
+        }
+        // A write error is not one; a write error on a plain reply is not looked at.
+        let dup = doc! { "n": 0, "ok": 1.0, "writeErrors": [{ "index": 0, "code": 11000, "errmsg": "dup" }] };
+        assert!(!is_write_concern_error(
+            &reply(Shape::Update, dup.clone()).unwrap_err()
+        ));
+        assert!(reply(Shape::Reply, dup).is_ok());
+        // The prefix stays when the server's message holds a secret.
+        let e = write_concern_error("Unknown".into(), r#"pwd: "hunter2""#);
+        assert!(is_write_concern_error(&e), "{e:?}");
+        assert!(!format!("{e:?}").contains("hunter2"), "{e:?}");
+    }
+
+    /// The fallback messages of `map_error` (the kind's own text) are redacted too.
+    #[test]
+    fn fallback_error_messages_are_redacted() {
+        let secret = r#"refused { setParameter: 1, ldapQueryPassword: "hunter2" }"#;
+        let io = mongodb::error::Error::from(std::io::Error::other(secret));
+        let other = mongodb::error::Error::from(mongodb::bson::ser::Error::from(
+            std::io::Error::other(secret),
+        ));
+        for e in [io, other] {
+            let (mapped, _) = map_error(&e, &CommandClass::Read);
+            let text = format!("{mapped:?}");
+            assert!(!text.contains("hunter2"), "{text}");
+            assert!(text.contains("refused "), "{text}");
+            assert!(
+                matches!(
+                    mapped,
+                    DbError::ConnectionLost { .. } | DbError::Internal { .. }
+                ),
+                "{text}"
+            );
         }
     }
 

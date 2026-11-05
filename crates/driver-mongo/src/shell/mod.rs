@@ -62,6 +62,11 @@ pub(crate) struct Payload {
     /// command fails with `DocumentNotFound` (spec §6.4). `None` for everything else, so a
     /// console `updateOne` that matches nothing is no error.
     pub document: Option<Bson>,
+    /// A data-view edit (`updateOne`, `insertOne`, `deleteOne`, see `data.rs`): a write
+    /// concern error on it is an unknown outcome (it was applied, the write concern was not
+    /// met), so an apply never counts it as not applied. `false` for everything else, so
+    /// the console reports the server's error as it is.
+    pub edit: bool,
 }
 
 impl CommandLanguage for MongoLanguage {
@@ -90,6 +95,7 @@ impl CommandLanguage for MongoLanguage {
                 cmd,
                 typed: None,
                 document: None,
+                edit: false,
             }),
         })
     }

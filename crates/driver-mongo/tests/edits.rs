@@ -643,6 +643,52 @@ async fn atomic_apply_rolls_back() {
         docs(&admin, &db, "items").await[0].get("qty"),
         Some(&Bson::Int32(10))
     );
+
+    // A write concern error on the commit (UnknownReplWriteConcern,
+    // UnsatisfiableWriteConcern): the transaction committed, but the crate does not label
+    // these unknown. Its outcome is unknown, and it is not retried.
+    for code in [79, 100] {
+        let qty = code.to_string();
+        let wc = build(s, &items, vec![insert(&[("qty", text(&qty))])]).await;
+        let at = fail_point(
+            &admin,
+            Some(doc! {
+                "mode": { "times": 2 },
+                "data": {
+                    "failCommands": ["commitTransaction"],
+                    "writeConcernError": { "code": code, "errmsg": "forced write concern error" },
+                },
+            }),
+        )
+        .await;
+        let failure = apply_atomic(s, &wc).await;
+        assert_eq!(
+            fail_point(&admin, None).await - at,
+            1,
+            "{code}: the commit was sent once"
+        );
+        match failure {
+            Err(AtomicFailure {
+                index: 0,
+                error:
+                    DbError::ConnectionLost {
+                        outcome_unknown: true,
+                        was_in_tx: true,
+                        message,
+                    },
+                rolled_back: false,
+            }) => assert!(
+                message.contains("Write concern error: forced write concern error"),
+                "{code}: {message}"
+            ),
+            other => panic!("{code}: expected an unknown commit, got {other:?}"),
+        }
+        let all = docs(&admin, &db, "items").await;
+        assert!(
+            all.iter().any(|d| d.get("qty") == Some(&Bson::Int32(code))),
+            "{code}: the document was committed: {all:?}"
+        );
+    }
     console(s, "db.dropDatabase()").await;
     admin.shutdown().immediate(true).await;
 }
@@ -696,6 +742,82 @@ async fn standalone_apply_not_atomic() {
         [doc! { "_id": oid(A), "qty": 10 }],
         "applied up to the failure, not after it"
     );
+    console(s, "db.dropDatabase()").await;
+    admin.shutdown().immediate(true).await;
+}
+
+/// Applied one by one, an edit whose reply has a write concern error was applied (the
+/// write concern was not met): its outcome is unknown, never "not applied". A console
+/// write reports the server's write concern error.
+#[tokio::test]
+async fn write_concern_error_on_an_edit_is_unknown() {
+    require_db!();
+    let t = Target::Mongo60;
+    let (s, db) = scratch(t, "wc").await;
+    let s = &*s;
+    console(
+        s,
+        &format!("db.items.insertOne({{_id: ObjectId('{A}'), qty: 1}})"),
+    )
+    .await;
+    let items = coll(&db, "items");
+    let admin = admin_client(t).await;
+    let wc_fail = |command: &str| {
+        doc! {
+            "mode": { "times": 1 },
+            "data": {
+                "failCommands": [command],
+                "writeConcernError": { "code": 100, "errmsg": "forced write concern error" },
+            },
+        }
+    };
+    let update_a = build(s, &items, vec![update(&oid(A), &[("qty", text("10"))])]).await;
+    let insert_one = build(s, &items, vec![insert(&[("qty", text("30"))])]).await;
+    for (cmds, command) in [(&update_a, "update"), (&insert_one, "insert")] {
+        fail_point(&admin, Some(wc_fail(command))).await;
+        let r = apply_each(s, cmds).await;
+        fail_point(&admin, None).await;
+        match r {
+            Err((
+                0,
+                DbError::ConnectionLost {
+                    outcome_unknown: true,
+                    was_in_tx: false,
+                    message,
+                },
+            )) => assert!(
+                message.contains("Write concern error: forced write concern error"),
+                "{command}: {message}"
+            ),
+            other => panic!("{command}: expected an unknown outcome, got {other:?}"),
+        }
+    }
+    let all = docs(&admin, &db, "items").await;
+    let qty: Vec<&Bson> = all.iter().map(|d| d.get("qty").unwrap()).collect();
+    assert_eq!(
+        qty,
+        [&Bson::Int32(10), &Bson::Int32(30)],
+        "both edits were applied"
+    );
+    // The console reports the server's error as it is.
+    fail_point(&admin, Some(wc_fail("update"))).await;
+    let r = command(s)
+        .execute_command(
+            &parse(&format!(
+                "db.items.updateOne({{_id: ObjectId('{A}')}}, {{$set: {{qty: 11}}}})"
+            )),
+            &ExecOptions::default(),
+            &mut Rec::default(),
+        )
+        .await;
+    fail_point(&admin, None).await;
+    match r {
+        Err(DbError::Server { code, message, .. }) => {
+            assert_eq!(code.as_deref(), Some("UnsatisfiableWriteConcern"));
+            assert_eq!(message, "Write concern error: forced write concern error");
+        }
+        other => panic!("expected a write concern error, got {other:?}"),
+    }
     console(s, "db.dropDatabase()").await;
     admin.shutdown().immediate(true).await;
 }
