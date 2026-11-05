@@ -56,17 +56,25 @@ async aiTest() : Promise<Result<AiTestResult, AppError>> {
     else return { status: "error", error: e  as any };
 }
 },
-async aiOptInList() : Promise<Result<AiConnectionView[], AppError>> {
+async aiConsentSet(granted: boolean) : Promise<Result<AiSettings, AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("ai_opt_in_list") };
+    return { status: "ok", data: await TAURI_INVOKE("ai_consent_set", { granted }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
 },
-async aiOptInSet(connId: string, enabled: boolean) : Promise<Result<AiConnectionView[], AppError>> {
+async aiConnections() : Promise<Result<AiConnectionChoice[], AppError>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("ai_opt_in_set", { connId, enabled }) };
+    return { status: "ok", data: await TAURI_INVOKE("ai_connections") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+async aiConnectionSet(connId: string, enabled: boolean) : Promise<Result<AiConnectionChoice[], AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ai_connection_set", { connId, enabled }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1604,14 +1612,10 @@ export type AiConfig = {
  */
 base_url: string | null; model: string | null; trigger: AiTrigger; max_tokens: number; timeout_ms: number; max_lines: number }
 /**
- * A connection that has consented, for Settings → AI.
+ * A connection's own AI choice. A connection without one is on, unless tagged Production
+ * ([`ai_on_by_default`]).
  */
-export type AiConnectionView = { connection_id: string; name: string; granted_at: string; 
-/**
- * Consent was given to the current endpoint. `false` after the base URL moved to
- * another origin: the user must agree again.
- */
-active: boolean }
+export type AiConnectionChoice = { connection_id: string; enabled: boolean }
 /**
  * What Settings → Test concluded.
  */
@@ -1635,7 +1639,12 @@ origin: string | null;
 /**
  * Host of the base URL, for the consent text.
  */
-host: string | null }
+host: string | null; 
+/**
+ * The user agreed to send editor text and schema names to this origin. `false` after the
+ * base URL moved to another origin: they agree again, once.
+ */
+consented: boolean }
 export type AiTestResult = { verdict: AiProbeVerdict; elapsed_ms: number; 
 /**
  * The cleaned suggestion for the probe.

@@ -199,6 +199,24 @@ CREATE TABLE ai_opt_in (
   PRIMARY KEY (connection_id, scope));
 ";
 
+/// AI consent is given once, to an endpoint's origin (`ai_consent`); each connection may then
+/// be turned off (or a Production one on) by a choice of its own (`ai_connection`). A former
+/// per-connection consent becomes that connection's choice to be on, never the app's consent:
+/// the user agrees once more, for every connection.
+const MIGRATION_12: &str = "
+CREATE TABLE ai_consent (
+  scope TEXT PRIMARY KEY CHECK (scope IN ('editor')),
+  origin TEXT NOT NULL,
+  granted_at TEXT NOT NULL);
+CREATE TABLE ai_connection (
+  connection_id TEXT NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  scope TEXT NOT NULL CHECK (scope IN ('editor')),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  PRIMARY KEY (connection_id, scope));
+INSERT INTO ai_connection (connection_id, scope, enabled) SELECT connection_id, scope, 1 FROM ai_opt_in;
+DROP TABLE ai_opt_in;
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -212,6 +230,7 @@ fn migrations() -> Migrations<'static> {
         M::up(MIGRATION_9),
         M::up_with_hook(MIGRATION_10, require_foreign_keys_off).foreign_key_check(),
         M::up(MIGRATION_11),
+        M::up(MIGRATION_12),
     ])
 }
 
@@ -287,7 +306,7 @@ mod tests {
     use super::*;
 
     /// `user_version` after every migration.
-    const LATEST: i64 = 11;
+    const LATEST: i64 = 12;
 
     #[test]
     fn migrations_are_valid() {
@@ -296,6 +315,42 @@ mod tests {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", false).unwrap();
         migrations().to_latest(&mut conn).unwrap();
+    }
+
+    /// Migration 12: a connection that had consented keeps AI on by its own choice, but the
+    /// app-wide consent starts empty (it was never given for every connection).
+    #[test]
+    fn migration_12_turns_old_consent_into_a_choice_not_a_consent() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        migrations().to_version(&mut conn, 11).unwrap();
+        conn.execute_batch(
+            "INSERT INTO connections (id, name, sort_order, kind, host, port, username, secret_mode, created_at, updated_at) \
+             VALUES ('a', 'A', 0, 'mysql', 'h', 3306, 'u', 'saved', 't', 't'); \
+             INSERT INTO ai_opt_in (connection_id, scope, origin, granted_at) VALUES ('a', 'editor', 'https://x.example', 't');",
+        )
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let choice: (String, String, i64) = conn
+            .query_row(
+                "SELECT connection_id, scope, enabled FROM ai_connection",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(choice, ("a".into(), "editor".into(), 1));
+        let consents: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_consent", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(consents, 0);
+        let old: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'ai_opt_in'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(old, 0);
     }
 
     /// A database at schema version 2 (before favorites) migrates to the latest version and keeps its rows.
@@ -784,7 +839,7 @@ mod tests {
         // Tables of later migrations are not migration 10's concern.
         let actual: Vec<_> = schema(&conn)
             .into_iter()
-            .filter(|(_, _, tbl, _)| tbl != "ai_opt_in")
+            .filter(|(_, _, tbl, _)| !tbl.starts_with("ai_"))
             .map(|(ty, name, tbl, sql)| {
                 let sql = sql.map(|s| {
                     s.replace(

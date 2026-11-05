@@ -16,7 +16,8 @@ dòng), `Tab` để nhận.
 1. **Chỉ hỗ trợ model FIM** (fill-in-the-middle): endpoint OpenAI-compatible `POST {base_url}/completions` có tham số
    `suffix`. Không giả lập FIM bằng model chat. Model chat để dành cho agent.
 2. **Chỉ query tab SQL** (MySQL, PostgreSQL). Mongo / Redis sau R4b.
-3. **Opt-in theo connection**, tắt mặc định, giống spec agent §4.5.
+3. **Tắt tới khi người dùng đồng ý** (một lần, với host của endpoint); sau đó bật cho mọi connection SQL trừ
+   Production, tắt / bật riêng từng connection được (§6.3).
 4. Không gửi dữ liệu dòng. Chỉ gửi text editor (đã redact) và tên schema (bảng, cột, kiểu).
 
 Không bao giờ: API key đi qua IPC (trừ lúc người dùng nhập để lưu), prompt ghi vào log, tự chạy SQL do AI gợi ý.
@@ -42,7 +43,7 @@ ui/  ── query/ai/inlineProvider.ts  Monaco InlineCompletionsProvider (mysql,
  ▼  IPC
 src-tauri/
  ├─ commands/ai.rs        ai_settings_get/set, ai_key_set/clear/has, ai_test, ai_complete, ai_cancel,
- │                        ai_opt_in_set/list
+ │                        ai_consent_set, ai_connections, ai_connection_set
  ├─ ai_runtime.rs         AiManager: client dùng chung, bảng request đang chạy (huỷ), trạng thái tạm dừng
  │                        sau lỗi 401/429; dựng ngữ cảnh schema từ SchemaCache
 crates/
@@ -50,7 +51,7 @@ crates/
  │   ├─ provider.rs   trait FimClient + OpenAiFimClient (reqwest); bản giả cho test
  │   ├─ prompt.rs     dựng prompt / suffix: cắt theo byte, header ngữ cảnh schema
  │   └─ post.rs       hậu xử lý gợi ý (§5.3)
- └─ store/   + migration: ai_opt_in; key settings trong app_settings
+ └─ store/   + migration: ai_consent, ai_connection; key settings trong app_settings
 ```
 
 - `crates/ai` sau này chứa thêm client chat của agent. Spec agent đổi `crates/agent/provider.rs` thành dùng
@@ -98,7 +99,7 @@ crates/
 
 - Setting `trigger`: `auto` (mặc định) / `manual` / `off`.
   - `auto`: sau 350 ms ngừng gõ. `manual`: chỉ khi bấm `Alt+\`. `Alt+\` dùng được ở cả hai chế độ.
-- Không gọi khi: connection chưa opt-in, đang có vùng chọn, popup completion hiện tại đang mở, nhiều con trỏ,
+- Không gọi khi: chưa đồng ý với endpoint hoặc connection đang tắt AI, đang có vùng chọn, popup completion hiện tại đang mở, nhiều con trỏ,
   con trỏ nằm giữa một từ (ký tự ngay sau là chữ / số / `_`), trong đoạn bị redact, đang tạm dừng vì lỗi (§7).
 - Không có connection hoặc database → không gợi ý.
 
@@ -144,7 +145,7 @@ mất dấu `;`). Token FIM và câu thứ hai do bước 2 và 5 xử lý.
 | Editor suggestions | `Automatic` / `Manual (Alt+\)` / `Off` |
 | Max tokens, timeout, max lines | 128 / 5 s / 8 |
 | Test | §6.2 |
-| Connections with AI | danh sách connection đã opt-in, nút Turn off |
+| Sharing | đồng ý / thôi đồng ý với host (§6.3); danh sách tick các connection SQL |
 
 - Lưu trong `app_settings` (key `ai.base_url`, `ai.model`, …), không có key.
 - `SecretStore` hiện chỉ có khoá theo `(conn, SecretKind)`. Thêm API cho secret cấp app (ví dụ
@@ -162,17 +163,29 @@ Gửi một FIM nhỏ: `prompt = "SELECT id, name\nFROM users\nWHERE "`, `suffix
   suffix. Use a code model with FIM support." (không chặn lưu).
 - OK → hiện gợi ý và thời gian phản hồi.
 
-### 6.3 Opt-in theo connection
+### 6.3 Đồng ý một lần, tắt theo connection
 
-- Bật trong dialog connection (tab Advanced) hoặc từ status bar của query tab ("AI off · Turn on…").
+(Sửa 2026-11-05: bản đầu bắt đồng ý riêng từng connection, rối khi dùng: nhiều chỗ bật, đổi host phải đồng ý lại
+từng cái, cấu hình xong vẫn không thấy gợi ý.)
+
+- **Đồng ý một lần cho app**, gắn với origin của base URL: Settings → AI → Sharing ("Turn on AI…"), tự hỏi ngay
+  khi Save một endpoint mới chưa được đồng ý; hoặc từ status bar của query tab ("AI off · Turn on AI…").
 - Dialog đồng ý nói rõ: text trong editor (đã ẩn mật khẩu) và tên bảng, cột sẽ được gửi tới `<host của base URL>`;
-  không gửi dữ liệu dòng. Nút `Turn on AI` chỉ bật khi tick "I am allowed to share this database's schema and
-  queries with this endpoint"; Enter = Cancel.
-- Bảng `ai_opt_in(connection_id, scope, origin, granted_at)`, `scope = 'editor'`. Agent sau này thêm
-  `scope = 'agent'` (gửi dữ liệu dòng) với dialog đồng ý riêng.
-- Đổi base URL sang origin khác → mọi opt-in cũ mất hiệu lực (giữ hàng nhưng so `origin`), phải đồng ý lại.
-- Không đi theo `.dntconn` / `.ncx`; xoá connection xoá opt-in.
-- Production và read-only vẫn bật được: gợi ý không chạy gì. Badge env vẫn hiện như thường.
+  không gửi dữ liệu dòng; AI bật cho mọi connection MySQL / PostgreSQL trừ connection gắn tag Production. Nút
+  `Turn on AI` chỉ bật khi tick "I am allowed to share these databases' schemas and queries with this endpoint";
+  Enter = Cancel.
+- **Mỗi connection có thể có lựa chọn riêng** (bật / tắt), không cần dialog: status bar, chip "AI suggestions" trong
+  dialog connection (áp dụng khi Save, chỉ hiện khi đã đồng ý), danh sách tick trong Settings → AI. Không có lựa chọn
+  riêng → bật, trừ Production (tắt). Đổi tag trong dialog thì chip đổi theo ngay.
+- Bảng `ai_consent(scope, origin, granted_at)` và `ai_connection(connection_id, scope, enabled)`, `scope = 'editor'`.
+  Agent sau này thêm `scope = 'agent'` (gửi dữ liệu dòng) với dialog đồng ý riêng.
+- Đổi base URL sang origin khác → đồng ý cũ mất hiệu lực, phải đồng ý lại một lần; lựa chọn của từng connection giữ
+  nguyên. Cùng origin, khác path → vẫn hiệu lực.
+- Migration từ `ai_opt_in`: connection đã opt-in thành lựa chọn "bật"; đồng ý cấp app không được suy ra (người dùng
+  đồng ý lại một lần).
+- Backend kiểm tra cả hai trước khi gửi: đồng ý với origin hiện tại, và connection đang bật.
+- Không đi theo `.dntconn` / `.ncx`; xoá connection xoá lựa chọn của nó.
+- Production và read-only vẫn bật được (tick riêng): gợi ý không chạy gì. Badge env vẫn hiện như thường.
 
 ## 7. Lỗi
 

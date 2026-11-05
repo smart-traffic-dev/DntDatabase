@@ -2,7 +2,8 @@ import type * as Monaco from 'monaco-editor';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiCompleteRequest, AiCompletion } from '../../bindings';
 import { useAi } from '../../store/ai';
-import { mockBackend, resetStores } from '../../test/backend';
+import { useConnections } from '../../store/connections';
+import { config, mockBackend, resetStores } from '../../test/backend';
 import type { CompletionTarget } from '../completion/monacoProvider';
 import { AI_DEBOUNCE_MS, createAiInlineProvider, type AiInlineDeps } from './inlineProvider';
 
@@ -103,8 +104,9 @@ async function ask(
 beforeEach(() => {
   resetStores();
   // Already loaded: the provider must not need the backend for settings.
-  mockBackend({ ai_settings_get: () => ({}), ai_opt_in_list: () => [] });
-  useAi.setState({ loaded: true, configured: true, trigger: 'automatic', active: new Set([CONN]), host: 'api.example.com' });
+  mockBackend({ ai_settings_get: () => ({}), ai_connections: () => [] });
+  useConnections.getState().setStored([], [config(CONN, 'Shop')]);
+  useAi.setState({ loaded: true, configured: true, trigger: 'automatic', consented: true, choices: new Map(), host: 'api.example.com' });
 });
 
 describe('AI inline provider', () => {
@@ -136,16 +138,17 @@ describe('AI inline provider', () => {
       { trigger: 'off' as const },
       { trigger: 'manual' as const },
       { configured: false },
-      { active: new Set<string>() },
+      { consented: false },
+      { choices: new Map([[CONN, false]]) },
       { loaded: false },
     ]) {
-      useAi.setState({ loaded: true, configured: true, trigger: 'automatic', active: new Set([CONN]), ...state });
+      useAi.setState({ loaded: true, configured: true, trigger: 'automatic', consented: true, choices: new Map(), ...state });
       const d = deps();
       expect(await ask(createAiInlineProvider(fakeMonaco(), d), 'SELECT |')).toEqual([]);
       expect(d.calls, JSON.stringify(state)).toEqual([]);
     }
     // Manual still answers Alt+\.
-    useAi.setState({ loaded: true, configured: true, trigger: 'manual', active: new Set([CONN]) });
+    useAi.setState({ loaded: true, configured: true, trigger: 'manual', consented: true, choices: new Map() });
     const d = deps();
     expect(await ask(createAiInlineProvider(fakeMonaco(), d), 'SELECT |', EXPLICIT)).toHaveLength(1);
   });

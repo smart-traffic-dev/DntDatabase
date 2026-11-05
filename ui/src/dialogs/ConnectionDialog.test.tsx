@@ -550,45 +550,50 @@ describe('ConnectionDialog', () => {
     expect(call).toMatchObject({ cfg: { id: ids.prod }, secrets: { db_password: 'keep' } });
   });
 
-  it('ai_switch_asks_consent_and_applies_on_save', async () => {
+  const aiSetUp = (consented: boolean) => ({
+    config: { base_url: 'https://api.example.com/v1', model: 'coder', trigger: 'automatic', max_tokens: 128, timeout_ms: 5000, max_lines: 8 },
+    has_key: true,
+    origin: 'https://api.example.com',
+    host: 'api.example.com',
+    consented,
+  });
+
+  it('ai_switch_follows_the_default_and_applies_on_save', async () => {
     const stored = config(ids.prod, 'shop');
-    let optIns: { connection_id: string; name: string; granted_at: string; active: boolean }[] = [];
     mockBackend({
       update_connection: (a) => a.cfg,
-      ai_settings_get: () => ({
-        config: { base_url: 'https://api.example.com/v1', model: 'coder', trigger: 'automatic', max_tokens: 128, timeout_ms: 5000, max_lines: 8 },
-        has_key: true,
-        origin: 'https://api.example.com',
-        host: 'api.example.com',
-      }),
-      ai_opt_in_list: () => optIns,
-      ai_opt_in_set: ({ connId, enabled }) => {
-        optIns = enabled ? [{ connection_id: connId as string, name: 'shop', granted_at: 'now', active: true }] : [];
-        return optIns;
-      },
+      ai_settings_get: () => aiSetUp(true),
+      ai_connections: () => [],
+      ai_connection_set: ({ connId, enabled }) => [{ connection_id: connId as string, enabled: enabled as boolean }],
     });
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
     const ai = await screen.findByTestId('conn-ai');
-    expect(ai).not.toBeChecked();
-
-    // Cancelled consent leaves it off.
-    await user.click(ai);
-    await user.click(within(await screen.findByTestId('ai-consent-dialog')).getByRole('button', { name: 'Cancel' }));
-    expect(ai).not.toBeChecked();
-
-    await user.click(ai);
-    const consent = await screen.findByTestId('ai-consent-dialog');
-    expect(consent).toHaveTextContent('api.example.com');
-    await user.click(within(consent).getByRole('checkbox'));
-    await user.click(within(consent).getByRole('button', { name: 'Turn on AI' }));
+    // On by default; tagging the connection Production turns the default off, live.
     expect(ai).toBeChecked();
-    expect(callsOf('ai_opt_in_set')).toEqual([]);
+    await user.click(screen.getByTestId('conn-env-production'));
+    expect(ai).not.toBeChecked();
+    await user.click(screen.getByTestId('conn-env-none'));
+    expect(ai).toBeChecked();
 
+    // Turning it off needs no dialog and is sent on Save.
+    await user.click(ai);
+    expect(ai).not.toBeChecked();
+    expect(screen.queryByTestId('ai-consent-dialog')).not.toBeInTheDocument();
+    expect(callsOf('ai_connection_set')).toEqual([]);
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
-    expect(callsOf('ai_opt_in_set')).toEqual([{ connId: ids.prod, enabled: true }]);
+    expect(callsOf('ai_connection_set')).toEqual([{ connId: ids.prod, enabled: false }]);
+  });
+
+  it('ai_switch_hidden_until_ai_is_agreed_to', async () => {
+    const stored = config(ids.prod, 'shop');
+    mockBackend({ ai_settings_get: () => aiSetUp(false), ai_connections: () => [] });
+    render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={vi.fn()} />);
+    await screen.findByTestId('conn-save');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId('conn-ai')).not.toBeInTheDocument();
   });
 
   it('ai_switch_hidden_until_ai_is_set_up', async () => {
@@ -599,8 +604,9 @@ describe('ConnectionDialog', () => {
         has_key: false,
         origin: null,
         host: null,
+        consented: false,
       }),
-      ai_opt_in_list: () => [],
+      ai_connections: () => [],
     });
     render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={vi.fn()} />);
     await screen.findByTestId('conn-save');

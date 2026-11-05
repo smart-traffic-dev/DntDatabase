@@ -33,13 +33,14 @@ const settings = (trigger: 'automatic' | 'manual'): AiSettings => ({
   has_key: true,
   origin: 'https://api.example.com',
   host: 'api.example.com',
+  consented: true,
 });
 
 async function openQuery(page: Page, trigger: 'automatic' | 'manual', requests: AiCompleteRequest[]) {
   const backend = createBackend({
     list_tree: tree,
     ai_settings_get: () => settings(trigger),
-    ai_opt_in_list: () => [{ connection_id: ids.prod, name: 'shop', granted_at: 'now', active: true }],
+    ai_connections: () => [],
     ai_complete: (args) => {
       const request = args.request as AiCompleteRequest;
       requests.push(request);

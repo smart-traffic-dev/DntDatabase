@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { AiConfig, AiConnectionView, AiSettings } from '../bindings';
+import type { AiConfig, AiConnectionChoice, AiSettings } from '../bindings';
 import { useConnections } from '../store/connections';
 import { ThemeProvider } from '../theme/ThemeProvider';
 import { appError, callsOf, config, Failure, ids, mockBackend, resetStores } from '../test/backend';
@@ -18,27 +18,46 @@ const DEFAULTS: AiConfig = {
   max_lines: 8,
 };
 
-function view(config: AiConfig, hasKey = false): AiSettings {
+function view(config: AiConfig, hasKey = false, consentOrigin: string | null = null): AiSettings {
   const url = config.base_url ? new URL(config.base_url) : null;
-  return { config, has_key: hasKey, origin: url ? url.origin : null, host: url ? url.host : null };
+  return {
+    config,
+    has_key: hasKey,
+    origin: url ? url.origin : null,
+    host: url ? url.host : null,
+    consented: !!url && url.origin === consentOrigin,
+  };
 }
 
 interface World {
   settings: AiSettings;
-  optIns: AiConnectionView[];
+  consentOrigin: string | null;
+  choices: AiConnectionChoice[];
 }
 
 function backend(world: World, over: Record<string, (args: Record<string, unknown>) => unknown> = {}) {
   mockBackend({
     ai_settings_get: () => world.settings,
-    ai_opt_in_list: () => world.optIns,
+    ai_connections: () => world.choices,
     ai_settings_set: ({ config }) => {
       const c = config as AiConfig;
       if (c.base_url && !/^https?:\/\//.test(c.base_url)) {
         throw new Failure(appError('config', 'The base URL must start with http:// or https://.'));
       }
-      world.settings = view(c, world.settings.has_key);
+      world.settings = view(c, world.settings.has_key, world.consentOrigin);
       return world.settings;
+    },
+    ai_consent_set: ({ granted }) => {
+      world.consentOrigin = granted ? world.settings.origin : null;
+      world.settings = view(world.settings.config, world.settings.has_key, world.consentOrigin);
+      return world.settings;
+    },
+    ai_connection_set: ({ connId, enabled }) => {
+      world.choices = [
+        ...world.choices.filter((c) => c.connection_id !== connId),
+        { connection_id: connId as string, enabled: enabled as boolean },
+      ];
+      return world.choices;
     },
     ai_key_set: () => {
       world.settings = { ...world.settings, has_key: true };
@@ -50,12 +69,6 @@ function backend(world: World, over: Record<string, (args: Record<string, unknow
     },
     ai_models: () => ['coder-a', 'coder-b'],
     ai_test: () => ({ verdict: 'ok', elapsed_ms: 42, sample: 'active = 1' }),
-    ai_opt_in_set: ({ connId, enabled }) => {
-      world.optIns = enabled
-        ? [{ connection_id: connId as string, name: 'Production', granted_at: 'now', active: true }]
-        : [];
-      return world.optIns;
-    },
     ...over,
   });
 }
@@ -70,10 +83,14 @@ function renderAi() {
 
 let world: World;
 
+const production = (s: ReturnType<typeof config>) => ({ ...s, config: { ...s.config, env_tag: 'production' as const } });
+
 beforeEach(() => {
   resetStores();
-  useConnections.getState().setStored([], [config(ids.prod, 'Production'), config(ids.analytics, 'Analytics')]);
-  world = { settings: view(DEFAULTS), optIns: [] };
+  useConnections
+    .getState()
+    .setStored([], [production(config(ids.prod, 'Shop')), config(ids.analytics, 'Analytics')]);
+  world = { settings: view(DEFAULTS), consentOrigin: null, choices: [] };
   backend(world);
 });
 
@@ -174,17 +191,15 @@ describe('Settings → AI', () => {
   it('needs a saved base URL before AI can be turned on', async () => {
     renderAi();
     expect(await screen.findByText('Save a base URL first.')).toBeInTheDocument();
-    expect(screen.getByLabelText('Connection to turn AI on for')).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Turn on…' })).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Turn on AI…' })).not.toBeInTheDocument();
   });
 
-  it('turns AI on only after consent, and off again', async () => {
+  it('turns AI on once for every connection, then off for one, then off', async () => {
     world.settings = view({ ...DEFAULTS, base_url: 'https://api.example.com/v1', model: 'coder' });
     const user = userEvent.setup();
     renderAi();
-    expect(await screen.findByText('AI is off for every connection.')).toBeInTheDocument();
-    await user.selectOptions(screen.getByLabelText('Connection to turn AI on for'), ids.prod);
-    await user.click(screen.getByRole('button', { name: 'Turn on…' }));
+    expect(await screen.findByTestId('ai-consent-off')).toHaveTextContent('nothing is sent to api.example.com');
+    await user.click(screen.getByRole('button', { name: 'Turn on AI…' }));
 
     const dialog = await screen.findByTestId('ai-consent-dialog');
     expect(dialog).toHaveTextContent('api.example.com');
@@ -192,42 +207,59 @@ describe('Settings → AI', () => {
     const turnOn = within(dialog).getByRole('button', { name: 'Turn on AI' });
     expect(turnOn).toBeDisabled();
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
-
     await user.click(
       within(dialog).getByRole('checkbox', {
-        name: "I am allowed to share this database's schema and queries with this endpoint",
+        name: "I am allowed to share these databases' schemas and queries with this endpoint",
       }),
     );
     expect(turnOn).toBeEnabled();
     await user.click(turnOn);
     await waitFor(() => expect(screen.queryByTestId('ai-consent-dialog')).not.toBeInTheDocument());
-    expect(callsOf('ai_opt_in_set')).toEqual([{ connId: ids.prod, enabled: true }]);
-    expect(await screen.findByText('Production')).toBeInTheDocument();
+    expect(callsOf('ai_consent_set')).toEqual([{ granted: true }]);
+    expect(await screen.findByTestId('ai-consent-on')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Turn off' }));
-    expect(await screen.findByText('AI is off for every connection.')).toBeInTheDocument();
-    expect(callsOf('ai_opt_in_set').at(-1)).toEqual({ connId: ids.prod, enabled: false });
+    // On by default, except the Production one.
+    const list = screen.getByRole('list', { name: 'Connections with AI' });
+    expect(within(list).getByRole('checkbox', { name: 'Analytics' })).toBeChecked();
+    expect(within(list).getByRole('checkbox', { name: 'Shop' })).not.toBeChecked();
+    expect(within(list).getByText('Production')).toBeInTheDocument();
+
+    await user.click(within(list).getByRole('checkbox', { name: 'Analytics' }));
+    await waitFor(() => expect(within(list).getByRole('checkbox', { name: 'Analytics' })).not.toBeChecked());
+    expect(callsOf('ai_connection_set')).toEqual([{ connId: ids.analytics, enabled: false }]);
+
+    await user.click(screen.getByRole('button', { name: 'Turn off AI' }));
+    expect(await screen.findByTestId('ai-consent-off')).toBeInTheDocument();
+    expect(callsOf('ai_consent_set').at(-1)).toEqual({ granted: false });
   });
 
   it('Enter in the consent dialog cancels', async () => {
     world.settings = view({ ...DEFAULTS, base_url: 'https://api.example.com/v1', model: 'coder' });
     const user = userEvent.setup();
     renderAi();
-    await user.selectOptions(await screen.findByLabelText('Connection to turn AI on for'), ids.prod);
-    await user.click(screen.getByRole('button', { name: 'Turn on…' }));
+    await user.click(await screen.findByRole('button', { name: 'Turn on AI…' }));
     const dialog = await screen.findByTestId('ai-consent-dialog');
     const box = within(dialog).getByRole('checkbox');
     await user.click(box);
     box.focus();
     await user.keyboard('{Enter}');
     await waitFor(() => expect(screen.queryByTestId('ai-consent-dialog')).not.toBeInTheDocument());
-    expect(callsOf('ai_opt_in_set')).toEqual([]);
+    expect(callsOf('ai_consent_set')).toEqual([]);
   });
 
-  it('marks consent given to another endpoint', async () => {
-    world.settings = view({ ...DEFAULTS, base_url: 'https://two.example/v1', model: 'coder' });
-    world.optIns = [{ connection_id: ids.prod, name: 'Production', granted_at: 'now', active: false }];
+  it('saving a new endpoint asks for consent at once', async () => {
+    const user = userEvent.setup();
     renderAi();
-    expect(await screen.findByText(/Consent needed again for the new endpoint/)).toBeInTheDocument();
+    await user.type(await screen.findByLabelText('Base URL'), 'https://api.example.com/v1');
+    await user.type(screen.getByLabelText('Model'), 'coder');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByTestId('ai-consent-dialog')).toHaveTextContent('api.example.com');
+  });
+
+  it('consent to another endpoint does not count', async () => {
+    world.consentOrigin = 'https://one.example';
+    world.settings = view({ ...DEFAULTS, base_url: 'https://two.example/v1', model: 'coder' }, false, world.consentOrigin);
+    renderAi();
+    expect(await screen.findByTestId('ai-consent-off')).toHaveTextContent('nothing is sent to two.example');
   });
 });

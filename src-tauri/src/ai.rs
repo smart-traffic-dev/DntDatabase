@@ -99,6 +99,9 @@ pub struct AiSettings {
     pub origin: Option<String>,
     /// Host of the base URL, for the consent text.
     pub host: Option<String>,
+    /// The user agreed to send editor text and schema names to this origin. `false` after the
+    /// base URL moved to another origin: they agree again, once.
+    pub consented: bool,
 }
 
 fn config_err(field: &str, message: impl Into<String>) -> DbError {
@@ -215,14 +218,24 @@ pub fn endpoint_of(
     Endpoint::parse(base_url, key, Duration::from_millis(u64::from(timeout_ms)))
 }
 
-/// The settings as the UI sees them.
-pub fn settings_view(cfg: AiConfig, has_key: bool) -> AiSettings {
+/// `scheme://host[:port]` of the base URL of `cfg`: what consent is tied to.
+pub fn origin_of(cfg: &AiConfig) -> Option<String> {
+    cfg.base_url
+        .as_deref()
+        .and_then(|u| endpoint_of(u, None, cfg.timeout_ms).ok())
+        .map(|e| e.origin())
+}
+
+/// The settings as the UI sees them; `consent_origin` is the origin the user agreed to.
+pub fn settings_view(cfg: AiConfig, has_key: bool, consent_origin: Option<&str>) -> AiSettings {
     let endpoint = cfg
         .base_url
         .as_deref()
         .and_then(|u| endpoint_of(u, None, cfg.timeout_ms).ok());
+    let origin = endpoint.as_ref().map(Endpoint::origin);
     AiSettings {
-        origin: endpoint.as_ref().map(Endpoint::origin),
+        consented: origin.is_some() && origin.as_deref() == consent_origin,
+        origin,
         host: endpoint.as_ref().map(|e| e.host().to_string()),
         config: cfg,
         has_key,

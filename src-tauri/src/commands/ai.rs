@@ -1,18 +1,19 @@
 //! AI editor completion commands (spec `2026-11-04-ai-editor-completion-design.md`):
-//! Settings → AI (settings, key, models, Test), per-connection consent, and the
-//! suggestion request of the query editor.
+//! Settings → AI (settings, key, models, Test), consent (once, to the endpoint) and each
+//! connection's own on / off choice, and the suggestion request of the query editor.
 //!
 //! The API key reaches the backend in `ai_key_set` and nothing ever sends it back.
 
 use super::{blocking, guard};
 use crate::ai::{
-    load_config, save_config, settings_view, to_db_error, validate_config, AiConfig, AiSettings,
-    AiTrigger,
+    load_config, origin_of, save_config, settings_view, to_db_error, validate_config, AiConfig,
+    AiSettings, AiTrigger,
 };
 use crate::state::AppState;
 use dnt_ai::post::{clean, judge_probe, PostCtx, ProbeVerdict, PROBE_PROMPT, PROBE_SUFFIX};
 use dnt_ai::prompt::{build, PromptInput, TableBrief};
 use dnt_ai::{AiError, FimClient, FimRequest};
+use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::error::{AppError, DbError};
 use dnt_core::secret::AppSecret;
 use dnt_core::server::{EngineFamily, ServerVariant};
@@ -36,7 +37,12 @@ async fn settings(state: &AppState) -> Result<AiSettings, DbError> {
     let secrets = Arc::clone(&state.secrets);
     blocking(move || {
         let has_key = secrets.has_app(AppSecret::AiApiKey)?;
-        Ok(settings_view(load_config(&repo), has_key))
+        let consent = repo.ai_consent(AiScope::Editor)?;
+        Ok(settings_view(
+            load_config(&repo),
+            has_key,
+            consent.as_ref().map(|c| c.origin.as_str()),
+        ))
     })
     .await
 }
@@ -150,55 +156,60 @@ pub async fn ai_test_impl(state: &AppState) -> Result<AiTestResult, DbError> {
     })
 }
 
-/// A connection that has consented, for Settings → AI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
-pub struct AiConnectionView {
-    pub connection_id: Uuid,
-    pub name: String,
-    pub granted_at: String,
-    /// Consent was given to the current endpoint. `false` after the base URL moved to
-    /// another origin: the user must agree again.
-    pub active: bool,
-}
-
-pub async fn ai_opt_in_list_impl(state: &AppState) -> Result<Vec<AiConnectionView>, DbError> {
+/// Agrees (to the current endpoint's origin) or stops agreeing that editor text and schema
+/// names may leave the machine, for every connection AI is on for.
+pub async fn ai_consent_set_impl(state: &AppState, granted: bool) -> Result<AiSettings, DbError> {
     let repo = Arc::clone(&state.repo);
     blocking(move || {
-        let origin = settings_view(load_config(&repo), false).origin;
-        let mut out = Vec::new();
-        for row in repo.ai_opt_ins(AiScope::Editor)? {
-            let name = repo.get(row.connection_id)?.name;
-            out.push(AiConnectionView {
-                connection_id: row.connection_id,
-                name,
-                granted_at: row.granted_at,
-                active: origin.as_deref() == Some(row.origin.as_str()),
-            });
+        if granted {
+            let origin = origin_of(&load_config(&repo))
+                .ok_or_else(|| config_err("base_url", "Set the base URL first."))?;
+            repo.ai_consent_grant(AiScope::Editor, &origin)
+        } else {
+            repo.ai_consent_revoke(AiScope::Editor)
         }
-        Ok(out)
+    })
+    .await?;
+    settings(state).await
+}
+
+/// A connection's own AI choice. A connection without one is on, unless tagged Production
+/// ([`ai_on_by_default`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
+pub struct AiConnectionChoice {
+    pub connection_id: Uuid,
+    pub enabled: bool,
+}
+
+/// Whether AI is on for a connection that made no choice of its own. (The UI has the same rule.)
+pub fn ai_on_by_default(cfg: &ConnectionConfig) -> bool {
+    cfg.env_tag != Some(EnvTag::Production)
+}
+
+pub async fn ai_connections_impl(state: &AppState) -> Result<Vec<AiConnectionChoice>, DbError> {
+    let repo = Arc::clone(&state.repo);
+    blocking(move || {
+        Ok(repo
+            .ai_connection_choices(AiScope::Editor)?
+            .into_iter()
+            .map(|(connection_id, enabled)| AiConnectionChoice {
+                connection_id,
+                enabled,
+            })
+            .collect())
     })
     .await
 }
 
-/// Turns AI on (consent to the current endpoint) or off for connection `conn_id`.
-pub async fn ai_opt_in_set_impl(
+/// Turns AI on or off for connection `conn_id`, whatever the default.
+pub async fn ai_connection_set_impl(
     state: &AppState,
     conn_id: Uuid,
     enabled: bool,
-) -> Result<Vec<AiConnectionView>, DbError> {
+) -> Result<Vec<AiConnectionChoice>, DbError> {
     let repo = Arc::clone(&state.repo);
-    blocking(move || {
-        if enabled {
-            let origin = settings_view(load_config(&repo), false)
-                .origin
-                .ok_or_else(|| config_err("base_url", "Set the base URL first."))?;
-            repo.ai_opt_in_grant(conn_id, AiScope::Editor, &origin)
-        } else {
-            repo.ai_opt_in_revoke(conn_id, AiScope::Editor)
-        }
-    })
-    .await?;
-    ai_opt_in_list_impl(state).await
+    blocking(move || repo.ai_connection_set(conn_id, AiScope::Editor, enabled)).await?;
+    ai_connections_impl(state).await
 }
 
 /// One suggestion request of the query editor.
@@ -230,19 +241,25 @@ pub enum AiCompletion {
     },
 }
 
-/// Whether connection `conn_id` consented to the endpoint of `cfg`. Blocking.
-fn opted_in(
+/// Whether editor text of connection `conn` may go to the endpoint of `cfg`: the user agreed to
+/// its origin, and AI is on for the connection. Blocking.
+fn may_send(
     repo: &dnt_store::repo::ConnectionRepo,
     cfg: &AiConfig,
-    conn_id: Uuid,
+    conn: &ConnectionConfig,
 ) -> Result<bool, DbError> {
-    let Some(origin) = settings_view(cfg.clone(), false).origin else {
+    let Some(origin) = origin_of(cfg) else {
         return Ok(false);
     };
-    Ok(repo
-        .ai_opt_ins(AiScope::Editor)?
-        .iter()
-        .any(|r| r.connection_id == conn_id && r.origin == origin))
+    if repo.ai_consent(AiScope::Editor)?.map(|c| c.origin) != Some(origin) {
+        return Ok(false);
+    }
+    let choice = repo
+        .ai_connection_choices(AiScope::Editor)?
+        .into_iter()
+        .find(|(id, _)| *id == conn.id)
+        .map(|(_, enabled)| enabled);
+    Ok(choice.unwrap_or_else(|| ai_on_by_default(conn)))
 }
 
 fn server_name(variant: ServerVariant) -> &'static str {
@@ -284,8 +301,11 @@ pub async fn ai_complete_impl(
     }
     let repo = Arc::clone(&state.repo);
     let (cfg2, conn_id) = (cfg.clone(), req.conn_id);
-    let (allowed, kind) =
-        blocking(move || Ok((opted_in(&repo, &cfg2, conn_id)?, repo.get(conn_id)?.kind))).await?;
+    let (allowed, kind) = blocking(move || {
+        let conn = repo.get(conn_id)?;
+        Ok((may_send(&repo, &cfg2, &conn)?, conn.kind))
+    })
+    .await?;
     if !allowed {
         return Ok(AiCompletion::Empty);
     }
@@ -425,18 +445,29 @@ pub async fn ai_test(state: State<'_, AppState>) -> Result<AiTestResult, AppErro
 
 #[tauri::command]
 #[specta::specta]
-pub async fn ai_opt_in_list(state: State<'_, AppState>) -> Result<Vec<AiConnectionView>, AppError> {
-    guard(ai_opt_in_list_impl(&state)).await
+pub async fn ai_consent_set(
+    state: State<'_, AppState>,
+    granted: bool,
+) -> Result<AiSettings, AppError> {
+    guard(ai_consent_set_impl(&state, granted)).await
 }
 
 #[tauri::command]
 #[specta::specta]
-pub async fn ai_opt_in_set(
+pub async fn ai_connections(
+    state: State<'_, AppState>,
+) -> Result<Vec<AiConnectionChoice>, AppError> {
+    guard(ai_connections_impl(&state)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn ai_connection_set(
     state: State<'_, AppState>,
     conn_id: Uuid,
     enabled: bool,
-) -> Result<Vec<AiConnectionView>, AppError> {
-    guard(ai_opt_in_set_impl(&state, conn_id, enabled)).await
+) -> Result<Vec<AiConnectionChoice>, AppError> {
+    guard(ai_connection_set_impl(&state, conn_id, enabled)).await
 }
 
 #[tauri::command]

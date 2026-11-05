@@ -22,9 +22,8 @@ import type {
 import { EnvTag as EnvTagBadge } from '../components/EnvTag';
 import { EngineLogo } from '../components/EngineLogo';
 import { CheckIcon, ChevronDownIcon, ErrorIcon, LockIcon } from '../components/icons';
-import { ensureAiLoaded, useAi } from '../store/ai';
+import { aiOnByDefault, ensureAiLoaded, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
-import { AiConsentDialog } from './AiConsentDialog';
 import {
   autoName,
   DEFAULT_HOST,
@@ -416,18 +415,19 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const [form, setForm] = useState<Form>(() => initialForm(initial));
   const [baseline] = useState(() => JSON.stringify(initialForm(initial)));
   const [confirmDiscard, setConfirmDiscard] = useState(false);
-  // AI suggestions for this connection (consent, AI editor completion spec §6.3): shown once AI
-  // is set up, applied on Save like the rest of the form.
-  const aiReady = useAi((s) => s.loaded && s.configured && s.host !== null);
+  // AI suggestions for this connection (AI editor completion spec §6.3): shown once AI is set up
+  // and agreed to, applied on Save like the rest of the form. Without a choice of its own, a
+  // connection follows the default (off when tagged Production), live with the form's tag.
+  const aiReady = useAi((s) => s.loaded && s.configured && s.consented);
   const aiHost = useAi((s) => s.host);
-  const aiWasOn = useAi((s) => (initial?.id ? s.active.has(initial.id) : false));
+  const aiStored = useAi((s) => (initial?.id ? s.choices.get(initial.id) : undefined));
   const [aiChoice, setAiChoice] = useState<boolean | null>(null);
-  const aiOn = aiChoice ?? aiWasOn;
-  const [aiConsent, setAiConsent] = useState(false);
+  const aiBefore = aiStored ?? aiOnByDefault(form.envTag || null);
+  const aiOn = aiChoice ?? aiBefore;
   useEffect(() => {
     void ensureAiLoaded();
   }, []);
-  const dirty = JSON.stringify(form) !== baseline || aiOn !== aiWasOn;
+  const dirty = JSON.stringify(form) !== baseline || aiOn !== aiBefore;
   const [open, setOpen] = useState<Record<Fold, boolean>>(CLOSED);
   const [rawFieldError, setFieldError] = useState<FieldError | null>(null);
   const [saveError, setSaveError] = useState<AppError | null>(null);
@@ -637,9 +637,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         mode === 'edit'
           ? await api.updateConnection(cfg, updateSecrets())
           : await api.createConnection(cfg, createSecrets());
-      if (aiOn !== aiWasOn) {
+      if (aiOn !== aiBefore) {
         try {
-          useAi.getState().setOptIns(await api.aiOptInSet(saved.id, aiOn));
+          useAi.getState().setChoices(await api.aiConnectionSet(saved.id, aiOn));
         } catch {
           // The connection is saved; `api` reported the failure, and AI stays as it was.
         }
@@ -1174,7 +1174,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                 type="checkbox"
                 data-testid="conn-ai"
                 checked={aiOn}
-                onChange={(e) => (e.target.checked ? setAiConsent(true) : setAiChoice(false))}
+                onChange={(e) => setAiChoice(e.target.checked)}
               />
               <span>AI suggestions</span>
             </label>
@@ -1525,17 +1525,6 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           </footer>
         </form>
       </Modal>
-      {aiConsent && aiHost && (
-        <AiConsentDialog
-          connectionName={form.name.trim() || 'this connection'}
-          host={aiHost}
-          onClose={() => setAiConsent(false)}
-          onConfirm={() => {
-            setAiConsent(false);
-            setAiChoice(true);
-          }}
-        />
-      )}
       {confirmDiscard && (
         <ConfirmDialog
           title="Discard changes?"

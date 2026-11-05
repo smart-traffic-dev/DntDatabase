@@ -3,7 +3,7 @@
 // dismisses (Monaco's own inline-suggest keys); Alt+\ asks explicitly.
 import type * as Monaco from 'monaco-editor';
 import { commands, type AiCompleteRequest, type AiCompletion } from '../../bindings';
-import { aiErrorText, ensureAiLoaded, useAi } from '../../store/ai';
+import { aiAllowed, aiErrorText, ensureAiLoaded, useAi } from '../../store/ai';
 import { queryDocTarget, suggestShown, type CompletionTarget } from '../completion/monacoProvider';
 
 /** Pause in typing before an automatic request. */
@@ -64,7 +64,7 @@ export function skipReason(
   if (!ai.configured) return 'not set up';
   if (ai.trigger === 'off') return 'off';
   if (ai.trigger === 'manual' && !explicit) return 'manual';
-  if (!ai.active.has(target.connId)) return 'not allowed';
+  if (!aiAllowed(target.connId)) return 'not allowed';
   const editor = editorOf(monaco, model);
   if (editor) {
     const selections = editor.getSelections() ?? [];
