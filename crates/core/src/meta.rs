@@ -33,6 +33,10 @@ pub struct ObjectRef {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct DatabaseInfo {
     pub name: String,
+    /// Keys in a numbered keyspace (Redis `DBSIZE`); `None` where the engine has no such count.
+    #[serde(default)]
+    #[specta(type = Option<f64>)]
+    pub key_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]

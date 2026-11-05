@@ -1,4 +1,4 @@
-import type { ConnectionConfig, DatabaseInfo, ServerInfo } from '../../ui/src/bindings';
+import type { ConnectionConfig, DatabaseInfo, ObjectKind, ObjectSummary, Scope, ServerInfo } from '../../ui/src/bindings';
 import { defaultCaps } from '../../ui/src/engine';
 
 /** A Redis value of the fake store, by type (as `TYPE key` names it). */
@@ -74,7 +74,15 @@ export function commandDatabases(state: CommandFakeState, cfg: ConnectionConfig)
     const selected = cfg.options.driver.kind === 'redis' ? cfg.options.driver.db : 0;
     const dbs = [...state.redis].filter(([i, keys]) => i === selected || keys.size > 0).map(([i]) => i);
     if (!dbs.includes(selected)) dbs.push(selected);
-    return dbs.sort((a, b) => a - b).map((i) => ({ name: String(i) }));
+    return dbs.sort((a, b) => a - b).map((i) => ({ name: String(i), key_count: state.redis.get(i)?.size ?? 0 }));
   }
-  return [...state.mongo.keys()].sort().map((name) => ({ name }));
+  return [...state.mongo.keys()].sort().map((name) => ({ name, key_count: null }));
+}
+
+/** `list_objects` of a Command connection: the collections of a MongoDB database (no views, no keys). */
+export function commandObjects(state: CommandFakeState, cfg: ConnectionConfig, scope: Scope, kind: ObjectKind): ObjectSummary[] {
+  if (cfg.kind !== 'mongo' || kind !== 'Collection') return [];
+  return [...(state.mongo.get(scope.database)?.entries() ?? [])]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, docs]) => ({ name, kind, comment: null, row_estimate: docs.length }));
 }

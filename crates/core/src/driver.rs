@@ -806,7 +806,10 @@ mod tests {
     #[async_trait]
     impl Introspector for FakeSession {
         async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
-            Ok(vec![DatabaseInfo { name: "app".into() }])
+            Ok(vec![DatabaseInfo {
+                name: "app".into(),
+                key_count: None,
+            }])
         }
         async fn list_schemas(&self, _db: &str) -> Result<Vec<SchemaInfo>, DbError> {
             Ok(vec![])

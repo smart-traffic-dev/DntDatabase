@@ -2,6 +2,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react';
 import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
+import { openKeysTab } from '../store/tabs';
 import { useConnections } from '../store/connections';
 import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
@@ -22,6 +23,14 @@ export const ERROR_ROW_HEIGHT = 42;
 const heightOf = (row: TreeRow | undefined, rowHeight: number) =>
   row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : rowHeight;
 
+/** Double-click / Enter: an object opens its tab, a Redis database its keys, anything else expands. */
+function activate(node: TreeNode, toggle: () => void) {
+  const connectionId = connectionIdOf(node.id);
+  if (node.kind === 'object') openObjectTab(node);
+  else if (node.kind === 'keyspace-db' && node.scope && connectionId) openKeysTab(connectionId, node.scope.database);
+  else toggle();
+}
+
 const domId = (key: string) => `tn-${encodeURIComponent(key)}`;
 
 /** Right-click on the tree's empty area: create at the top level, or move connections in and out. */
@@ -37,6 +46,7 @@ export function NodeIcon({ node }: { node: TreeNode }) {
     case 'group':
       return <FolderIcon />;
     case 'database':
+    case 'keyspace-db':
       return <DatabaseIcon />;
     case 'schema':
       return <SchemaIcon />;
@@ -135,7 +145,7 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
         // A single click previews the object; the next preview in that group replaces it.
         if (isObject) openObjectTab(node, { preview: true });
       }}
-      onDoubleClick={() => (node.kind === 'object' ? on.onOpen(node) : on.onToggle(node))}
+      onDoubleClick={() => (node.kind === 'object' ? on.onOpen(node) : activate(node, () => on.onToggle(node)))}
       onContextMenu={(e) => on.onMenu(node, e)}
       onDragStart={
         isObject
@@ -283,8 +293,7 @@ export function ConnectionTree() {
         break;
       case 'Enter':
         if (!current) return;
-        if (current.node.kind === 'object') openObjectTab(current.node);
-        else tree.toggle(current.key);
+        activate(current.node, () => tree.toggle(current.key));
         break;
       case 'F2': {
         // Rename = the node's existing edit / rename dialog (connections, groups).

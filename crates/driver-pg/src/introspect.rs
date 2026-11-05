@@ -519,7 +519,10 @@ impl Introspector for PgSession {
         names.sort();
         Ok(names
             .into_iter()
-            .map(|name| DatabaseInfo { name })
+            .map(|name| DatabaseInfo {
+                name,
+                key_count: None,
+            })
             .collect())
     }
 

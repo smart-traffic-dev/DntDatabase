@@ -23,6 +23,7 @@ import {
   folderKindsOf,
   folderLabel,
   groupNodeId,
+  keyspaceLabel,
   nodeKey,
   seg,
   type TreeNode,
@@ -211,21 +212,24 @@ export const useTree = create<TreeState>()((set, get) => {
         patch(id, { engine: engineOf(info.variant), meta: versionShort(info) });
       }
       const dbs = await api.listDatabases(connectionId, get().showSystem);
+      // A numbered keyspace (Redis): each database is a leaf that opens its keys.
+      const keyspace = info.capabilities.namespaces === 'numbered_db';
       return {
         children: dbs.map((db) => ({
           id: `${id}/db:${seg(db.name)}`,
           parentId: id,
-          kind: 'database',
-          label: db.name,
+          kind: keyspace ? 'keyspace-db' : 'database',
+          label: keyspace ? keyspaceLabel(db.name, db.key_count) : db.name,
           scope: { database: db.name, schema: null },
         })),
       };
     }
-    const variant = useConnections.getState().info.get(connectionId)?.variant;
-    if (!variant) throw new AppErrorEx(notOpenError());
+    const server = useConnections.getState().info.get(connectionId);
+    if (!server) throw new AppErrorEx(notOpenError());
+    const { variant, capabilities: caps } = server;
     const scope = node.scope;
     if (!scope) return null;
-    if (node.kind === 'database' && variant === 'Postgres') {
+    if (node.kind === 'database' && caps.namespaces === 'db_schema') {
       const schemas = await api.listSchemas(connectionId, scope.database, get().showSystem);
       return {
         children: schemas.map((s) => ({
@@ -239,7 +243,7 @@ export const useTree = create<TreeState>()((set, get) => {
     }
     if (node.kind === 'database' || node.kind === 'schema') {
       return {
-        children: folderKindsOf(variant).map((kind) => ({
+        children: folderKindsOf(variant, caps).map((kind) => ({
           id: `${id}/folder:${kind}`,
           parentId: id,
           kind: 'folder',

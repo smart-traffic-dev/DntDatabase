@@ -284,7 +284,10 @@ impl Introspector for ListingSqlSession {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
         Ok(["app", "information_schema", "mysql", "sys"]
             .into_iter()
-            .map(|name| DatabaseInfo { name: name.into() })
+            .map(|name| DatabaseInfo {
+                name: name.into(),
+                key_count: None,
+            })
             .collect())
     }
     async fn list_schemas(&self, _db: &str) -> Result<Vec<SchemaInfo>, DbError> {

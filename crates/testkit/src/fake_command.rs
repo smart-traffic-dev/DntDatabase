@@ -1435,6 +1435,7 @@ impl Introspector for FakeCommandSession {
             .filter(|i| *i == current || !state.dbs[*i].is_empty())
             .map(|i| DatabaseInfo {
                 name: i.to_string(),
+                key_count: Some(state.dbs[i].len() as u64),
             })
             .collect())
     }
@@ -1649,5 +1650,36 @@ mod tests {
         let spans = lang.split("GET a\n\n  # note\r\n  SET b 1\r\n");
         let got: Vec<_> = spans.iter().map(|s| (s.range, s.text.as_str())).collect();
         assert_eq!(got, [((0, 5), "GET a"), ((19, 26), "SET b 1")]);
+    }
+
+    /// Polls a future that never waits (the fake's introspection) to completion.
+    fn ready<T>(fut: impl std::future::Future<Output = T>) -> T {
+        use std::task::{Context, Poll, Waker};
+        let waker = Waker::noop();
+        let mut fut = std::pin::pin!(fut);
+        match fut.as_mut().poll(&mut Context::from_waker(waker)) {
+            Poll::Ready(v) => v,
+            Poll::Pending => panic!("the fake's future waited"),
+        }
+    }
+
+    #[test]
+    fn fake_reports_key_counts() {
+        let driver = FakeCommandDriver::with_kind(DbKind::Redis);
+        let store = driver.store();
+        store.set("0", b"a", FakeValue::Str("1".into()));
+        store.set("0", b"b", FakeValue::Str("2".into()));
+        store.set("2", b"c", FakeValue::Str("3".into()));
+        let session = FakeCommandSession {
+            info: server_info(DbKind::Redis),
+            store,
+            language: FakeLanguage,
+            db: AtomicUsize::new(0),
+            queue: Mutex::new(None),
+            cancel: Arc::new(CancelState::default()),
+        };
+        let dbs = ready(session.list_databases()).unwrap();
+        let got: Vec<_> = dbs.iter().map(|d| (d.name.as_str(), d.key_count)).collect();
+        assert_eq!(got, [("0", Some(2)), ("2", Some(1))]);
     }
 }

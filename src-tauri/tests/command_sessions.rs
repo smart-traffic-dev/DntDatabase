@@ -235,7 +235,10 @@ impl SqlSession for CapsSqlSession {
 #[async_trait]
 impl Introspector for CapsSqlSession {
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>, DbError> {
-        Ok(vec![DatabaseInfo { name: DB.into() }])
+        Ok(vec![DatabaseInfo {
+            name: DB.into(),
+            key_count: None,
+        }])
     }
     async fn list_schemas(&self, _db: &str) -> Result<Vec<SchemaInfo>, DbError> {
         Ok(vec![])

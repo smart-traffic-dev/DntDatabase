@@ -39,7 +39,7 @@ import type {
   Value,
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
-import { commandDatabases, commandInfo, createCommandFake, type CommandFakeState } from './commandFixtures';
+import { commandDatabases, commandInfo, commandObjects, createCommandFake, type CommandFakeState } from './commandFixtures';
 import { createDdlFake, type DdlFakeState } from './ddlEdit';
 import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
 import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
@@ -571,13 +571,17 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
         case 'redis':
           return commandDatabases(command, cfg);
         default:
-          return [{ name: 'dnt_fixture' }];
+          return [{ name: 'dnt_fixture', key_count: null }];
       }
     },
 
     list_schemas: () => [{ name: 'public' }],
 
     list_objects: ({ id, scope, kind }): ObjectSummary[] => {
+      const cfg = connections.find((c) => c.id === id);
+      if (cfg?.kind === 'mongo' || cfg?.kind === 'redis') {
+        return commandObjects(command, cfg, scope as Scope, kind as ObjectKind);
+      }
       if (kind !== 'Table') return ddl.listObjects(id as string, scope as Scope, kind as ObjectKind);
       if ((scope as Scope).database !== 'dnt_fixture') return [];
       return [{ name: 'orders', kind: kind as ObjectKind, comment: null, row_estimate: 3 }];

@@ -1,11 +1,13 @@
-import type { AppError, ObjectKind, ObjectRef, Scope, ServerVariant } from '../bindings';
+import type { AppError, Capabilities, ObjectKind, ObjectRef, Scope, ServerVariant } from '../bindings';
+import { assertNever } from '../engine';
+import { plural } from '../lib/plural';
 
 export type Engine = 'MY' | 'PG' | 'MA' | 'MG' | 'RD';
 
 export interface TreeNode {
   id: string;
   parentId?: string;
-  kind: 'group' | 'connection' | 'database' | 'schema' | 'folder' | 'object';
+  kind: 'group' | 'connection' | 'database' | 'keyspace-db' | 'schema' | 'folder' | 'object';
   label: string;
   meta?: string;
   engine?: Engine;
@@ -96,8 +98,37 @@ export function engineOf(variant: ServerVariant): Engine {
   }
 }
 
-/** Object folders of a database (MySQL family) or schema (PostgreSQL), spec section 6. */
-export function folderKindsOf(variant: ServerVariant): ObjectKind[] {
+/** Label of a numbered Redis database: `db0 · 1,234 keys`, plain `db0` while the count is unknown. */
+export function keyspaceLabel(name: string, keyCount: number | null | undefined): string {
+  return typeof keyCount !== 'number' ? `db${name}` : `db${name} · ${plural(keyCount, 'key')}`;
+}
+
+/**
+ * Object folders under a database or schema node, by how the engine nests its namespaces:
+ * a PostgreSQL schema or a MySQL database (spec section 6), the collections and views of a MongoDB
+ * database, none for a Redis keyspace (its databases are leaves).
+ */
+export function folderKindsOf(variant: ServerVariant, caps: Capabilities): ObjectKind[] {
+  switch (caps.namespaces) {
+    case 'numbered_db':
+      return [];
+    case 'db_schema':
+      return sqlFolders(variant);
+    case 'db':
+      switch (caps.family) {
+        case 'sql':
+          return sqlFolders(variant);
+        case 'command':
+          return ['Collection', 'View'];
+        default:
+          return assertNever(caps.family);
+      }
+    default:
+      return assertNever(caps.namespaces);
+  }
+}
+
+function sqlFolders(variant: ServerVariant): ObjectKind[] {
   switch (variant) {
     case 'Postgres':
       return ['Table', 'View', 'MaterializedView', 'Function', 'Procedure', 'Trigger', 'Sequence', 'Type'];
@@ -143,7 +174,7 @@ export function emptyLabel(node: TreeNode): string {
 }
 
 export function isExpandable(node: TreeNode): boolean {
-  return node.kind !== 'object';
+  return node.kind !== 'object' && node.kind !== 'keyspace-db';
 }
 
 /** The rows to render: expanded nodes only, or only the matches and their parents when filtering. */

@@ -1969,7 +1969,11 @@ sample: string | null; warnings: string[]; confirm: ConfirmLevel;
  * Production with an irreversible pre-step: the name typed for it (the table's).
  */
 irreversible_name: string | null; expires_in_seconds: number }
-export type DatabaseInfo = { name: string }
+export type DatabaseInfo = { name: string; 
+/**
+ * Keys in a numbered keyspace (Redis `DBSIZE`); `None` where the engine has no such count.
+ */
+key_count?: number | null }
 export type DbKind = "mysql" | "postgres" | "mongo" | "redis"
 export type DdlEditOpen = { edit_id: string; text: string; target: EditTarget; object: ObjectRef | null; server: ServerInfo; env: EnvTag | null; read_only: boolean; strategies: Strategy[]; strategy: Strategy | null; 
 /**

@@ -17,7 +17,7 @@ import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { useTabs } from './tabs';
 import { useTree } from './tree';
-import { connNodeId, groupNodeId } from './treeModel';
+import { connNodeId, groupNodeId, isExpandable } from './treeModel';
 
 const conn = connNodeId(ids.prod);
 
@@ -89,6 +89,65 @@ describe('tree store', () => {
     });
     const object = useTree.getState().nodes.get(`${conn}/db:shop/schema:public/folder:MaterializedView/obj:MaterializedView:orders`);
     expect(object?.objectRef).toEqual({ database: 'shop', schema: 'public', name: 'orders', kind: 'MaterializedView' });
+  });
+
+  it('redis_databases_are_keyspace_leaves', async () => {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => openResult(serverInfo('Redis')),
+      list_databases: () => [
+        { name: '0', key_count: 5 },
+        { name: '2', key_count: 3 },
+        { name: '7', key_count: 1 },
+        { name: '9', key_count: 1234 },
+      ],
+    });
+    await useTree.getState().reloadStored();
+    await open(conn);
+    expect(children(conn)).toEqual(['db0 · 5 keys', 'db2 · 3 keys', 'db7 · 1 key', 'db9 · 1,234 keys']);
+    const { nodes } = useTree.getState();
+    const leaf = nodes.get(`${conn}/db:0`);
+    expect(leaf).toMatchObject({ kind: 'keyspace-db', scope: { database: '0', schema: null } });
+    // A leaf: no expander row, and expanding it loads nothing.
+    expect(leaf && isExpandable(leaf)).toBe(false);
+    useTree.getState().expand(`${conn}/db:0`);
+    expect(callsOf('list_objects')).toHaveLength(0);
+  });
+
+  it('null_key_count_shows_plain_name', async () => {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => openResult(serverInfo('Redis')),
+      list_databases: () => [{ name: '3', key_count: null }],
+    });
+    await useTree.getState().reloadStored();
+    await open(conn);
+    expect(children(conn)).toEqual(['db3']);
+  });
+
+  it('mongo_database_has_collections_folder', async () => {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => openResult(serverInfo('Mongo')),
+      list_databases: () => [{ name: 'shop', key_count: null }],
+      list_objects: (args) => (args.kind === 'Collection' ? [{ name: 'orders', kind: 'Collection', comment: null, row_estimate: null }] : []),
+    });
+    await useTree.getState().reloadStored();
+    await open(conn);
+    expect(children(conn)).toEqual(['shop']);
+    await open(`${conn}/db:shop`);
+    expect(children(`${conn}/db:shop`)).toEqual(['Collections', 'Views']);
+    await open(`${conn}/db:shop/folder:Collection`);
+    expect(children(`${conn}/db:shop/folder:Collection`)).toEqual(['orders']);
+    expect(callsOf('list_schemas')).toHaveLength(0);
+  });
+
+  it('sql_tree_unchanged', async () => {
+    backend('MySql8');
+    await useTree.getState().reloadStored();
+    await open(conn);
+    expect(children(conn)).toEqual(['shop']);
+    expect(useTree.getState().nodes.get(`${conn}/db:shop`)?.kind).toBe('database');
   });
 
   it('moves a connection into a group with the index among its siblings', async () => {

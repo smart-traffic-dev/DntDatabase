@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { defaultCaps } from '../engine';
 import { ROOT, computeRows, emptyLabel, folderKindsOf, type TreeNode, type TreeRow } from './treeModel';
 
 const conn: TreeNode = { id: 'conn:abc', kind: 'connection', label: 'db' };
@@ -47,6 +48,11 @@ describe('computeRows placeholders', () => {
 
 describe('folderKindsOf', () => {
   it('lists PostgreSQL triggers after procedures', () => {
-    expect(folderKindsOf('Postgres')).toEqual(['Table', 'View', 'MaterializedView', 'Function', 'Procedure', 'Trigger', 'Sequence', 'Type']);
+    expect(folderKindsOf('Postgres', defaultCaps('postgres'))).toEqual(['Table', 'View', 'MaterializedView', 'Function', 'Procedure', 'Trigger', 'Sequence', 'Type']);
+  });
+
+  it('gives a MongoDB database collections and views, and a Redis database nothing', () => {
+    expect(folderKindsOf('Mongo', defaultCaps('mongo'))).toEqual(['Collection', 'View']);
+    expect(folderKindsOf('Redis', defaultCaps('redis'))).toEqual([]);
   });
 });

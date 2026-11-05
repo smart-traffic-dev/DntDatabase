@@ -573,3 +573,11 @@ export const useTabs = create<TabsState>()((set, get) => {
     reset: () => set(initial()),
   };
 });
+
+// TODO(R4b Task 8): replace this stub with the keys tab of a Redis database.
+/** Activating a `keyspace-db` tree node. A no-op until the keys tab exists. */
+export function openKeysTab(connectionId: string, database: string): void {
+  void connectionId;
+  void database;
+}
+
