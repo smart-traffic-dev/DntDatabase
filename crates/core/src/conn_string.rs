@@ -463,7 +463,9 @@ fn parse_mongo(srv: bool, rest: &str) -> Result<ParsedConnString, DbError> {
         }
     }
     // As the server does: the credentials belong to the path database unless told otherwise.
-    if auth_source.is_none() {
+    // Not for SRV: the TXT record's `authSource` (Atlas: `admin`) comes first, and only then
+    // the database, which the driver does at connect.
+    if auth_source.is_none() && !srv {
         auth_source = parsed.database.clone();
     }
     parsed.driver = Some(DriverOptions::Mongo {
@@ -1082,7 +1084,7 @@ mod tests {
         assert!(srv && extra.is_empty());
         assert_eq!(
             to_uri(&config_from(&p)).unwrap(),
-            "mongodb+srv://u@cluster0.x.mongodb.net/db?authSource=db"
+            "mongodb+srv://u@cluster0.x.mongodb.net/db"
         );
     }
 
@@ -1157,6 +1159,12 @@ mod tests {
         // No path database: nothing to default to.
         let p = ok("mongodb://u:pw@h/?retryWrites=true");
         assert_eq!(mongo_driver(&p).1, None);
+        // SRV: left to the lookup (Atlas's TXT record says `authSource=admin`), so the
+        // path database is not the auth source.
+        let p = ok("mongodb+srv://u:pw@cluster0.x.mongodb.net/shop");
+        assert_eq!(mongo_driver(&p).1, None);
+        let p = ok("mongodb+srv://u:pw@cluster0.x.mongodb.net/shop?authSource=admin");
+        assert_eq!(mongo_driver(&p).1, Some("admin"));
     }
 
     #[test]
