@@ -28,7 +28,7 @@ export function formatBytes(bytes: number): string {
   return `${value.toFixed(1)} ${units[unit]}`;
 }
 
-const formatCount = (n: number) => `≈ ${n.toLocaleString('en-US')}`;
+export const formatCount = (n: number) => `≈ ${n.toLocaleString('en-US')}`;
 
 interface Recovery {
   onRetry(): void;
@@ -36,7 +36,7 @@ interface Recovery {
 }
 
 /** The error of a sub-tab. A closed or lost connection offers Reconnect instead of Retry. */
-function ErrorBox({ error, onRetry, onReconnect }: { error: AppError } & Recovery) {
+export function ErrorBox({ error, onRetry, onReconnect }: { error: AppError } & Recovery) {
   const reconnect = needsReconnect(error);
   return (
     <div role="alert" className={`ot-error${reconnect ? ' ot-reconnect' : ''}`}>
@@ -202,9 +202,9 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   );
 }
 
-const orDash = (s: string | null | undefined) => (s === null || s === undefined || s === '' || s.toUpperCase() === 'NULL' ? DASH : s);
+export const orDash = (s: string | null | undefined) => (s === null || s === undefined || s === '' || s.toUpperCase() === 'NULL' ? DASH : s);
 
-function extraOf(c: ColumnDetail): string {
+export function extraOf(c: ColumnDetail): string {
   return [
     c.auto_increment ? 'auto_increment' : null,
     c.identity ? `identity (${c.identity})` : null,
@@ -215,9 +215,9 @@ function extraOf(c: ColumnDetail): string {
     .join(', ');
 }
 
-const indexTarget = (i: IndexDetail) => (i.columns.length > 0 ? i.columns.join(', ') : (i.expression ?? DASH));
+export const indexTarget = (i: IndexDetail) => (i.columns.length > 0 ? i.columns.join(', ') : (i.expression ?? DASH));
 
-function referenceOf(fk: ForeignKeyDetail): string {
+export function referenceOf(fk: ForeignKeyDetail): string {
   const table = fk.ref_schema ? `${fk.ref_schema}.${fk.ref_table}` : fk.ref_table;
   return `${fk.columns.join(', ')} → ${table}(${fk.ref_columns.join(', ')})`;
 }

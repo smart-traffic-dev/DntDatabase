@@ -15,10 +15,10 @@ beforeEach(() => {
 const bar = () => screen.getByRole('navigation', { name: 'Right sidebar' });
 
 describe('RightSidebar', () => {
-  it('has an activity bar with History and Jobs only (no disabled placeholders for planned panels)', () => {
+  it('has an activity bar with History, Jobs and Object info only (no disabled placeholders for planned panels)', () => {
     render(<RightSidebar />);
     const buttons = within(bar()).getAllByRole('button');
-    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual(['History', 'Jobs']);
+    expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual(['History', 'Jobs', 'Object info']);
     for (const b of buttons) expect(b).toBeEnabled();
     expect(buttons[0]).toHaveAttribute('title', expect.stringContaining('Ctrl+Shift+H'));
   });

@@ -1,0 +1,202 @@
+/* Object info panel of the right sidebar: the object selected in the tree (Navicat's information pane). */
+.oi-view .spacer {
+  flex: 1;
+}
+
+.oi-empty {
+  margin: 0;
+  padding: var(--dnt-space-3);
+  font-size: var(--dnt-text-sm);
+}
+
+.oi-title {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  min-width: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-2) var(--dnt-space-1) var(--dnt-space-3);
+}
+
+.oi-object {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.oi-where {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--dnt-text-sm);
+}
+
+.oi-tabs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 var(--dnt-space-2) var(--dnt-space-1);
+  border-bottom: 1px solid var(--dnt-border);
+}
+
+.oi-tabs .ot-subtab:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: -1px;
+}
+
+.oi-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-size: var(--dnt-text-sm);
+}
+
+/* The preview grid scrolls itself. */
+.oi-body-preview {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.oi-pad,
+.oi-loading {
+  margin: 0;
+  padding: var(--dnt-space-3);
+}
+
+.oi-props {
+  margin: 0;
+  padding: var(--dnt-space-1) var(--dnt-space-3);
+}
+
+.oi-prop {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: var(--dnt-space-2);
+  padding: 5px 0;
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.oi-prop dt {
+  color: var(--dnt-fg-muted);
+}
+
+.oi-prop dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.oi-columns {
+  padding-bottom: var(--dnt-space-3);
+}
+
+.oi-table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.oi-table th,
+.oi-table td {
+  padding: 4px 8px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--dnt-border-subtle);
+  vertical-align: top;
+}
+
+.oi-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--dnt-bg-chrome);
+  color: var(--dnt-fg-muted);
+  font-weight: 500;
+}
+
+.oi-name {
+  font-weight: 500;
+}
+
+.oi-key {
+  margin-right: 3px;
+  font-size: var(--dnt-text-xs);
+}
+
+.oi-key-pk {
+  background: var(--dnt-bg-selected);
+  color: var(--dnt-accent-hover);
+}
+
+.oi-h {
+  margin: var(--dnt-space-4) var(--dnt-space-3) var(--dnt-space-1);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
+  color: var(--dnt-fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.oi-none {
+  margin: 0;
+  padding: 0 var(--dnt-space-3);
+}
+
+.oi-ddl {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.oi-bar {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--dnt-space-1) var(--dnt-space-2);
+}
+
+.oi-ddl-text {
+  flex: 1;
+  margin: 0 var(--dnt-space-2) var(--dnt-space-2);
+  padding: var(--dnt-space-2);
+  overflow: auto;
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+  white-space: pre;
+  user-select: text;
+}
+
+.oi-preview {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.oi-grid {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The grid fills the section (query.css may not be loaded before a query tab opens). */
+.oi-grid > .qr-grid {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.oi-foot {
+  flex: none;
+  padding: 4px var(--dnt-space-3);
+  border-top: 1px solid var(--dnt-border-subtle);
+  font-size: var(--dnt-text-xs);
+}

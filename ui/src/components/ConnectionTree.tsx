@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, 
 import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { useConnections } from '../store/connections';
+import { useLayout } from '../store/layout';
 import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
 import { ChevronIcon, DatabaseIcon, FolderIcon, KindIcon, ListIcon, SchemaIcon } from './icons';
@@ -23,6 +24,12 @@ const heightOf = (row: TreeRow | undefined, rowHeight: number) =>
   row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : rowHeight;
 
 const domId = (key: string) => `tn-${encodeURIComponent(key)}`;
+
+/** Tables and views show in the Object info panel on a single click. */
+const showsInfo = (node: TreeNode) => {
+  const kind = node.objectRef?.kind;
+  return kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
+};
 
 /** Right-click on the tree's empty area: create at the top level, or move connections in and out. */
 export const emptyAreaItems = (): MenuEntry[] => [
@@ -132,8 +139,11 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       draggable={draggable}
       onClick={() => {
         on.onSelect(node);
-        // A single click previews the object; the next preview in that group replaces it.
-        if (isObject) openObjectTab(node, { preview: true });
+        // A single click on a table or view shows it in the Object info panel (Navicat's
+        // information pane: columns, DDL, sample rows); a double click opens its Data tab.
+        // Other objects open a preview tab; the next preview in that group replaces it.
+        if (isObject && showsInfo(node)) useLayout.getState().openRightActivity('info');
+        else if (isObject) openObjectTab(node, { preview: true });
       }}
       onDoubleClick={() => (node.kind === 'object' ? on.onOpen(node) : on.onToggle(node))}
       onContextMenu={(e) => on.onMenu(node, e)}
