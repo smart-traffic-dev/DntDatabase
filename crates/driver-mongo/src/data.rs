@@ -17,7 +17,7 @@
 //!   patterns are text. `page` / `count` cannot read the sample (they build, they do not
 //!   send), so such a command carries the filter in its payload (`Payload::typed`) and the
 //!   session coerces it with the sample's types right before the read ([`resolve`]). Its
-//!   `text` shows the values as typed.
+//!   `text` shows the values as typed, and ends with a comment that says so.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,8 +44,9 @@ const SERVER_SIDE_JS: [&str; 3] = ["$where", "$function", "$accumulator"];
 
 const SERVER_JS: &str = "Server-side JavaScript is not allowed in a filter";
 const NOT_A_DOCUMENT: &str = "The filter must be a JSON object";
-/// What `parse_document` says of text that is not one document.
-const EXPECTED_A_DOCUMENT: &str = "Expected a document";
+/// Ends the `text` of a typed read, whose values are shown as typed (a line comment, so the
+/// text still parses to the same command).
+const TYPED_NOTE: &str = " // values are converted to the field types sampled from the collection";
 
 fn config(field: &str, message: impl Into<String>) -> DbError {
     DbError::Config {
@@ -114,7 +115,10 @@ fn build(
 ) -> Result<ParsedCommand, DbError> {
     check_object(obj)?;
     let args = vec![Bson::Document(filter)];
-    let text = coll_text(Some(&obj.database), &obj.name, method, &args, &modifiers);
+    let mut text = coll_text(Some(&obj.database), &obj.name, method, &args, &modifiers);
+    if typed.is_some() {
+        text.push_str(TYPED_NOTE);
+    }
     let cmd = ShellCommand::Coll {
         db: Some(obj.database.clone()),
         coll: obj.name.clone(),
@@ -325,7 +329,7 @@ fn condition(c: &FilterCond, db_type: Option<&str>) -> Result<Document, DbError>
             doc! { "$regex": pattern(format!("^{}", escape_regex(first())), "") }
         }
         FilterOp::EndsWith => {
-            doc! { "$regex": pattern(format!("{}$", escape_regex(first())), "") }
+            doc! { "$regex": pattern(format!("{}{END}", escape_regex(first())), "") }
         }
         FilterOp::In => doc! {
             "$in": (0..n).map(value).collect::<Result<Vec<_>, _>>()?,
@@ -337,17 +341,24 @@ fn condition(c: &FilterCond, db_type: Option<&str>) -> Result<Document, DbError>
     Ok(doc! { c.column.clone(): ops })
 }
 
-/// A LIKE pattern as an anchored regex: `%` is `.*`, `_` is `.`, the rest is literal.
+/// The end of the subject (`$` would also match before a final line break).
+const END: &str = r"\z";
+
+/// A LIKE pattern as an anchored regex: `%` (one or several in a row) is `.*`, `_` is `.`,
+/// the rest is literal.
 fn like_pattern(like: &str) -> String {
     let mut out = String::from("^");
+    let mut after_percent = false;
     for ch in like.chars() {
         match ch {
+            '%' if after_percent => {}
             '%' => out.push_str(".*"),
             '_' => out.push('.'),
             c => push_literal(&mut out, c),
         }
+        after_percent = ch == '%';
     }
-    out.push('$');
+    out.push_str(END);
     out
 }
 
@@ -373,11 +384,8 @@ pub(crate) fn raw_filter(text: &str) -> Result<Document, DbError> {
     match parse_document(text) {
         Ok(doc) if runs_js(&doc) => Err(filter_error(SERVER_JS)),
         Ok(doc) => Ok(doc),
-        Err(e) if e.message == EXPECTED_A_DOCUMENT => Err(filter_error(NOT_A_DOCUMENT)),
-        Err(e) => Err(filter_error(format!(
-            "{} at offset {}",
-            e.message, e.offset
-        ))),
+        // Any text that is not one document, as core's `check_raw_json` says it.
+        Err(_) => Err(filter_error(NOT_A_DOCUMENT)),
     }
 }
 
@@ -595,12 +603,12 @@ mod tests {
             (
                 Like,
                 &["5%"],
-                doc! { "qty": { "$regex": regex("^5.*$", "s") } },
+                doc! { "qty": { "$regex": regex(r"^5.*\z", "s") } },
             ),
             (
                 NotLike,
                 &["5%"],
-                doc! { "qty": { "$not": regex("^5.*$", "s") } },
+                doc! { "qty": { "$not": regex(r"^5.*\z", "s") } },
             ),
             (
                 Contains,
@@ -615,7 +623,7 @@ mod tests {
             (
                 EndsWith,
                 &["5"],
-                doc! { "qty": { "$regex": regex("5$", "") } },
+                doc! { "qty": { "$regex": regex(r"5\z", "") } },
             ),
         ];
         for (op, values, want) in cases {
@@ -687,12 +695,17 @@ mod tests {
         // `%` and `_` are wildcards (matching line breaks too); everything else is literal.
         assert_eq!(
             one(cond("name", FilterOp::Like, &["a%b_c.d(e)*"])),
-            doc! { "name": { "$regex": regex(r"^a.*b.c\.d\(e\)\*$", "s") } }
+            doc! { "name": { "$regex": regex(r"^a.*b.c\.d\(e\)\*\z", "s") } }
         );
         assert_eq!(
             one(cond("name", FilterOp::NotLike, &["x_"])),
-            doc! { "name": { "$not": regex("^x.$", "s") } }
+            doc! { "name": { "$not": regex(r"^x.\z", "s") } }
         );
+        // Consecutive `%` are one `.*`; `_` still counts one character each. The end
+        // anchor is the end of the text (`$` would match before a final line break).
+        assert_eq!(like_pattern("%%a%%%_%"), r"^.*a.*..*\z");
+        assert_eq!(like_pattern("__"), r"^..\z");
+        assert_eq!(like_pattern(""), r"^\z");
         // The literal operators escape every metacharacter, `%` and `_` included.
         let meta = r"a.b*c+d?e^f$g|h(i)j[k]l{m}n\o%p_q";
         let escaped = r"a\.b\*c\+d\?e\^f\$g\|h\(i\)j\[k\]l\{m\}n\\o%p_q";
@@ -706,7 +719,7 @@ mod tests {
         );
         assert_eq!(
             one(cond("name", FilterOp::EndsWith, &[meta])),
-            doc! { "name": { "$regex": regex(&format!("{escaped}$"), "") } }
+            doc! { "name": { "$regex": regex(&format!(r"{escaped}\z"), "") } }
         );
         // Patterns are text whatever the field's type.
         assert_eq!(
@@ -832,9 +845,20 @@ mod tests {
         assert!(payload_of(&p).unwrap().typed.is_none());
         let c = count(&orders(), Some(&raw(&ejson))).unwrap();
         assert_eq!(filter_of(&c), want);
-        // A syntax error says where.
-        let m = filter_message(raw_filter("{a: ObjectId(\"zz\")}"));
-        assert!(m.contains("at offset"), "{m}");
+        // A syntax error is core's message too.
+        for bad in [
+            "{a: ObjectId(\"zz\")}",
+            "{",
+            "{a: }",
+            "{} {}",
+            "{a: 1,, b: 2}",
+        ] {
+            assert_eq!(
+                filter_message(raw_filter(bad)),
+                "The filter must be a JSON object",
+                "{bad}"
+            );
+        }
     }
 
     #[test]
@@ -942,6 +966,13 @@ mod tests {
                     "{}",
                     cmd.text
                 );
+                // A typed read's text ends with its note, which `parse` reads as a comment.
+                assert_eq!(
+                    cmd.text.ends_with(TYPED_NOTE),
+                    payload_of(cmd).unwrap().typed.is_some(),
+                    "{}",
+                    cmd.text
+                );
                 let back = MongoLanguage.parse(&cmd.text).unwrap();
                 assert_eq!(back.name, cmd.name, "{}", cmd.text);
                 assert_eq!(
@@ -966,7 +997,25 @@ mod tests {
             p.text,
             "db.getSiblingDB(\"dnt_fixture\").orders.find({\"$and\":[{\"qty\":{\"$gte\":\"2\"}},\
              {\"name\":{\"$regex\":{\"$regularExpression\":{\"pattern\":\"^A\",\"options\":\"\"}}}}]})\
+             .sort({\"_id\":{\"$numberInt\":\"1\"}}).skip(100).limit(51) \
+             // values are converted to the field types sampled from the collection"
+        );
+        // Only typed reads say so.
+        let plain = page(&orders(), &spec(vec![], None)).unwrap();
+        assert_eq!(
+            plain.text,
+            "db.getSiblingDB(\"dnt_fixture\").orders.find({})\
              .sort({\"_id\":{\"$numberInt\":\"1\"}}).skip(100).limit(51)"
+        );
+        let untyped_count = count(&orders(), Some(&untyped)).unwrap();
+        assert!(!untyped_count.text.contains("//"), "{}", untyped_count.text);
+        let typed_count = count(&orders(), Some(&typed)).unwrap();
+        assert!(
+            typed_count.text.ends_with(
+                ") // values are converted to the field types sampled from the collection"
+            ),
+            "{}",
+            typed_count.text
         );
         // Resolving with the sample's types coerces the values in place.
         let resolved = resolve(&payload_of(&p).unwrap().cmd, &typed, &types()).unwrap();

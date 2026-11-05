@@ -226,9 +226,13 @@ impl MongoSession {
             ..opts.clone()
         };
         let plan = exec::plan(&sample, &self.db(), &sample_opts, comment)?;
-        let (out, _) = self
+        let (out, late) = self
             .run_watched(plan, &sample_opts, &CommandClass::Read, sink)
             .await?;
+        // A sample that outlived a stop (or a timeout) ends the read: it is not sent.
+        if let Some(trigger) = sample_ended_by(late, opts.stop.is_stopped()) {
+            return Err(trigger.error(&CommandClass::Read));
+        }
         data::resolve(cmd, filter, &introspect::field_types(&out.docs))
     }
 
@@ -301,6 +305,16 @@ impl Trigger {
                 was_in_tx: false,
             },
         }
+    }
+}
+
+/// What ends a typed read once its sample is back: a stop raised by then, or a sample that
+/// completed late (after a stop or timeout) — `None`: the read is sent.
+fn sample_ended_by(late: bool, stopped: bool) -> Option<Trigger> {
+    match (stopped, late) {
+        (true, _) => Some(Trigger::Stop),
+        (false, true) => Some(Trigger::Timeout),
+        (false, false) => None,
     }
 }
 
@@ -487,5 +501,33 @@ impl DataAccess for MongoSession {
 
     fn build_key_edit(&self, _db: &str, _edit: &KeyEdit) -> Result<Vec<ParsedCommand>, DbError> {
         Err(not_yet("key edits"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stopped_or_late_sample_sends_no_read() {
+        assert_eq!(sample_ended_by(false, false), None);
+        assert_eq!(sample_ended_by(true, true), Some(Trigger::Stop));
+        assert_eq!(sample_ended_by(false, true), Some(Trigger::Stop));
+        assert_eq!(sample_ended_by(true, false), Some(Trigger::Timeout));
+        // A read's stop is a cancel whose outcome is known.
+        assert!(matches!(
+            Trigger::Stop.error(&CommandClass::Read),
+            DbError::Cancelled {
+                outcome_unknown: false,
+                was_in_tx: false
+            }
+        ));
+        assert!(matches!(
+            Trigger::Timeout.error(&CommandClass::Read),
+            DbError::Timeout {
+                outcome_unknown: false,
+                ..
+            }
+        ));
     }
 }

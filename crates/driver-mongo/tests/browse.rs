@@ -5,25 +5,33 @@
 use dnt_core::command::{CommandLanguage, CommandSession};
 use dnt_core::config::ResolvedConfig;
 use dnt_core::data_access::{check_read, PageSpec};
-use dnt_core::driver::{Driver, ExecOptions, ResultSummary, RowSink, Session};
+use dnt_core::driver::{
+    Driver, ExecOptions, ExecProgress, ResultSummary, RowSink, Session, StopSignal,
+};
 use dnt_core::error::DbError;
 use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::sql::filter::{DataFilter, FilterCond, FilterMode, FilterOp, SortDir, SortSpec};
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mongo::shell::MongoLanguage;
+use dnt_driver_mongo::test_helpers::open;
 use dnt_driver_mongo::MongoDriver;
 use dnt_query::edit::command_fingerprint;
 use dnt_testkit::{require_db, Target, FIXTURE_DB, TEST_PASSWORD};
+use mongodb::bson::{doc, Document};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Default)]
 struct Rec {
     cols: Vec<String>,
+    starts: usize,
     rows: Vec<Vec<Value>>,
     ends: usize,
+    progress: Vec<ExecProgress>,
 }
 
 impl RowSink for Rec {
     fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.starts += 1;
         self.cols = cols.iter().map(|c| c.name.clone()).collect();
     }
     fn rows(&mut self, batch: Vec<Vec<Value>>) {
@@ -31,6 +39,9 @@ impl RowSink for Rec {
     }
     fn result_end(&mut self, _summary: &ResultSummary) {
         self.ends += 1;
+    }
+    fn progress(&mut self, p: ExecProgress) {
+        self.progress.push(p);
     }
 }
 
@@ -685,5 +696,144 @@ async fn count_matches_page() {
             filter_error(count(s, &orders(), raw("[1]").as_ref()).await),
             "The filter must be a JSON object"
         );
+        assert_eq!(
+            filter_error(count(s, &orders(), raw("{qty: }").as_ref()).await),
+            "The filter must be a JSON object"
+        );
+    }
+}
+
+/// The end anchor is the end of the text, and `%` runs across line breaks.
+#[tokio::test]
+async fn patterns_end_at_the_end_of_the_text() {
+    require_db!();
+    for t in Target::mongo() {
+        let (s, db) = scratch(t, "anchor").await;
+        console(
+            &*s,
+            r#"db.texts.insertMany([{_id: 1, s: "abc"}, {_id: 2, s: "abc\n"}, {_id: 3, s: "ab\nc"}])"#,
+        )
+        .await;
+        let texts = object(&db, "texts", ObjectKind::Collection);
+        let ids = |f: Option<DataFilter>| {
+            let (s, texts) = (&*s, texts.clone());
+            async move {
+                page(s, &texts, Vec::new(), f, 0, 10)
+                    .await
+                    .unwrap()
+                    .col("_id")
+            }
+        };
+        let int = |ns: &[i64]| ns.iter().map(|n| Value::Int(*n)).collect::<Vec<_>>();
+        assert_eq!(
+            ids(where_(cond("s", FilterOp::Like, &["abc"]))).await,
+            int(&[1])
+        );
+        assert_eq!(
+            ids(where_(cond("s", FilterOp::Like, &["a%%c"]))).await,
+            int(&[1, 3])
+        );
+        assert_eq!(
+            ids(where_(cond("s", FilterOp::EndsWith, &["c"]))).await,
+            int(&[1, 3])
+        );
+        assert_eq!(
+            ids(where_(cond("s", FilterOp::NotLike, &["abc"]))).await,
+            int(&[2, 3])
+        );
+        console(&*s, "db.dropDatabase()").await;
+        s.close().await;
+    }
+}
+
+/// `configureFailPoint failCommand`: the next two `aggregate`s wait `ms` before they run;
+/// `None` turns it off.
+fn slow_next_aggregates(ms: Option<i32>) -> Document {
+    match ms {
+        Some(ms) => doc! {
+            "configureFailPoint": "failCommand",
+            "mode": { "times": 2 },
+            "data": { "failCommands": ["aggregate"], "blockConnection": true, "blockTimeMS": ms },
+        },
+        None => doc! { "configureFailPoint": "failCommand", "mode": "off" },
+    }
+}
+
+/// A stop raised while a typed read's sample runs ends the read: it is cancelled and the
+/// `find` is never sent, even when the sample itself completes within the grace. The
+/// failpoint holds the sample and then the session's own kill (its `$currentOp`
+/// aggregate), so the sample completes, late, before the kill can find it.
+#[tokio::test]
+async fn stop_during_the_sample_sends_no_read() {
+    require_db!();
+    for t in Target::mongo() {
+        let (s, db) = scratch(t, "stop").await;
+        console(&*s, "db.items.insertMany([{qty: 1}, {qty: 5}])").await;
+        let admin = open(&cfg(t, "root", "admin"))
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"))
+            .client;
+        let profiled = admin.database(&db);
+        profiled.run_command(doc! { "profile": 2 }).await.unwrap();
+        admin
+            .database("admin")
+            .run_command(slow_next_aggregates(Some(1500)))
+            .await
+            .unwrap();
+
+        let c = command(&*s);
+        let items = object(&db, "items", ObjectKind::Collection);
+        let spec = PageSpec {
+            sort: Vec::new(),
+            filter: where_(cond("qty", FilterOp::Gt, &["2"])),
+            limit: 10,
+            skip: 0,
+        };
+        let cmd = c.data_access().page(&items, &spec).unwrap();
+        let opts = ExecOptions {
+            max_rows: 10,
+            stop: StopSignal::new(),
+            cancel_grace: Duration::from_secs(10),
+            ..ExecOptions::default()
+        };
+        let mut rec = Rec::default();
+        let started = Instant::now();
+        let (res, ()) = tokio::join!(c.execute_command(&cmd, &opts, &mut rec), async {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            opts.stop.stop();
+        });
+        let took = started.elapsed();
+        admin
+            .database("admin")
+            .run_command(slow_next_aggregates(None))
+            .await
+            .unwrap();
+        profiled.run_command(doc! { "profile": 0 }).await.unwrap();
+
+        match res {
+            Err(DbError::Cancelled {
+                outcome_unknown: false,
+                was_in_tx: false,
+            }) => {}
+            other => panic!("{t:?}: expected Cancelled, got {other:?}"),
+        }
+        assert_eq!(rec.progress, [ExecProgress::CancelSent], "{t:?}");
+        assert_eq!(rec.starts, 0, "{t:?}: nothing reached the sink");
+        let finds = profiled
+            .collection::<Document>("system.profile")
+            .count_documents(doc! { "command.find": "items" })
+            .await
+            .unwrap();
+        assert_eq!(finds, 0, "{t:?}: the find was sent (after {took:?})");
+        let samples = profiled
+            .collection::<Document>("system.profile")
+            .count_documents(doc! { "command.aggregate": "items" })
+            .await
+            .unwrap();
+        assert_eq!(samples, 1, "{t:?}: the sample completed (after {took:?})");
+
+        console(&*s, "db.dropDatabase()").await;
+        s.close().await;
+        admin.shutdown().immediate(true).await;
     }
 }
