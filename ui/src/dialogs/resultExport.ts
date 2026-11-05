@@ -2,7 +2,8 @@
 // or toggle the data view's filter bar (`toggleFilterBar`).
 import type { ColumnMeta, DataFilter, ExportFormat, ExportOptions, ObjectRef, SortSpec, Value } from '../bindings';
 import { emptyRun, planAlive, useQueryRun, type ResultSet, type TabRun } from '../store/queryRun';
-import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
+import { dialectOfConnection, docKindOf, useQueryDocs } from '../store/queryTabs';
+import { sqlEngine } from '../engine';
 import { useDialogs } from '../store/dialogs';
 import { newFilterRow, useTableData, type TableDataState } from '../store/tableData';
 import { useTabs, type ObjectTabRef } from '../store/tabs';
@@ -113,6 +114,8 @@ export function queryExportRequest(tabId: string, at: number): ExportRequest | n
   const doc = useQueryDocs.getState().docs.get(tabId);
   const connectionId = run.origin?.connectionId ?? doc?.connectionId ?? null;
   if (!connectionId) return null;
+  // A Command-family result is not exported (also not through the menu, Ctrl+Alt+E).
+  if (sqlEngine(docKindOf(connectionId)) === null) return null;
   const alive = planAlive(run, doc);
   const unavailable = result.token ? null : queryAllUnavailable(run, result, alive);
   return {

@@ -30,7 +30,9 @@ vi.mock('./query/ResultGrid', async () => {
     firstRowNumber,
     editing,
     extraCellMenu,
+    engine,
   }: {
+    engine?: string;
     result: { columns: { name: string }[]; rowCount: number; chunks?: unknown[][][] };
     onHeaderClicked?: (i: number) => void;
     headerMarks?: Record<number, string>;
@@ -49,6 +51,8 @@ vi.mock('./query/ResultGrid', async () => {
       <div
         data-testid="grid"
         data-first-row={firstRowNumber}
+        // The SQL engine Copy as INSERT quotes for ('' without one: no Copy as INSERT).
+        data-engine={engine ?? ''}
         onKeyDown={(e) => {
           // The real grid reports the selected cell; the stand-in pretends row 0, column 1.
           if (editing?.onKey?.(e, { row: 0, col: 1 })) e.stopPropagation();
@@ -1551,6 +1555,17 @@ describe('DataView on a Command (MongoDB) connection', () => {
     await user.click(screen.getByRole('button', { name: 'Cell menu' }));
     expect(screen.getByRole('button', { name: 'menu: Set to NULL' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'menu: Remove field' })).toBeNull();
+  });
+
+  it('a Command data view gives the grid no SQL engine (no Copy as INSERT)', async () => {
+    await mongoView();
+    expect(screen.getByTestId('grid')).toHaveAttribute('data-engine', '');
+  });
+
+  it('a SQL data view gives the grid its engine (Copy as INSERT)', async () => {
+    setup({ table_data: () => page(3, 1, false), data_editable: () => editableInfo() });
+    await screen.findByText('1–3');
+    expect(screen.getByTestId('grid')).toHaveAttribute('data-engine', 'mysql');
   });
 
   it('command_preview_counts_commands', async () => {

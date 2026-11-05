@@ -7,6 +7,9 @@ import { useConnections } from '../../store/connections';
 import { useQueryDocs } from '../../store/queryTabs';
 import { config } from '../../test/fixtures/data';
 import { appError, resetStores } from '../../test/backend';
+import { createElement } from 'react';
+import { queryExportRequest } from '../../dialogs/resultExport';
+import { ResultGrid } from './ResultGrid';
 import { ResultPanel, resultLabel } from './ResultPanel';
 import { PLAN_GONE, rerunStatement } from './rerun';
 
@@ -14,6 +17,12 @@ vi.mock('./rerun', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./rerun')>()),
   rerunStatement: vi.fn(async () => {}),
 }));
+
+// The real grid, with its props recorded.
+vi.mock('./ResultGrid', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./ResultGrid')>();
+  return { ...real, ResultGrid: vi.fn((props: Parameters<typeof real.ResultGrid>[0]) => createElement(real.ResultGrid, props)) };
+});
 
 const stmt = (index: number, kind: PlanStmtView['kind']): PlanStmtView => ({
   index,
@@ -58,7 +67,7 @@ const show = (run: TabRun, tabId = 't') => {
 };
 
 /** A query tab on a stored connection of `kind`. */
-function tabOn(kind: 'mysql' | 'redis' | 'mongo'): string {
+function tabOn(kind: 'mysql' | 'postgres' | 'redis' | 'mongo'): string {
   const id = `${kind}-conn`;
   useConnections.getState().setStored([], [config(id, kind, { kind })]);
   return useQueryDocs.getState().newQuery(id, null);
@@ -221,6 +230,26 @@ describe('ResultPanel', () => {
       expect(screen.queryByRole('button', { name: 'JSON' })).toBeNull();
       unmount();
     }
+  });
+
+  it('Copy as INSERT and Export only for SQL connections', () => {
+    for (const [kind, engine] of [
+      ['mysql', 'mysql'],
+      ['postgres', 'postgres'],
+      ['redis', undefined],
+      ['mongo', undefined],
+    ] as const) {
+      vi.mocked(ResultGrid).mockClear();
+      const { unmount } = show(play(result(1, 0, 2)), tabOn(kind));
+      expect(vi.mocked(ResultGrid).mock.lastCall![0].engine, kind).toBe(engine);
+      if (engine) expect(screen.getByTestId('result-export'), kind).toBeInTheDocument();
+      else expect(screen.queryByTestId('result-export'), kind).toBeNull();
+      unmount();
+    }
+    // The menu hook (Ctrl+Alt+E) exports nothing for a Command result either.
+    const tab = tabOn('redis');
+    useQueryRun.setState({ runs: new Map([[tab, play(result(1, 0, 2))]]) });
+    expect(queryExportRequest(tab, 0)).toBeNull();
   });
 
   it('mongo_results_toggle_between_table_and_json', async () => {

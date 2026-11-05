@@ -101,11 +101,23 @@ describe('copy shortcuts', () => {
 
   it('refuses_an_insert_it_cannot_write_exactly', async () => {
     const bin: ResultSet = { ...result, chunks: [[[{ t: 'Int', v: 1 }, { t: 'Bytes', v: { len: 2, preview: [1, 2] } }, { t: 'Null' }]]], rowCount: 1 };
-    render(<ResultGrid result={bin} />);
+    render(<ResultGrid result={bin} engine="mysql" />);
     select(range(0, 0, 1, 1));
     key({ key: 'c', ctrlKey: true, altKey: true });
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/Cannot copy as INSERT: column name, row 1/));
     expect(written).toEqual([]);
+  });
+
+  it('ctrl_alt_c_copies_nothing_without_a_sql_engine', async () => {
+    // The Command family (no engine): no INSERT statements, and plain Ctrl+C still copies.
+    render(<ResultGrid result={result} />);
+    select(range(0, 0, 1, 1));
+    key({ key: 'c', ctrlKey: true, altKey: true });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(written).toEqual([]);
+    expect(screen.queryByRole('status')).toBeNull();
+    key({ key: 'c', ctrlKey: true });
+    await waitFor(() => expect(written).toEqual(['10']));
   });
 
   it('does_not_take_ctrl_c_from_an_input', () => {
@@ -276,8 +288,16 @@ describe('record view', () => {
 describe('cell context menu', () => {
   const openMenu = (cell: [number, number]) => act(() => glide.props!.onCellContextMenu(cell, { preventDefault: vi.fn() }));
 
-  it('lists_the_copy_actions_and_view_record', async () => {
+  it('has no Copy as INSERT without a SQL engine', () => {
     render(<ResultGrid result={result} />);
+    select(range(1, 0, 1, 1));
+    openMenu([1, 0]);
+    const labels = within(screen.getByRole('menu', { name: 'Cell menu' })).getAllByRole('menuitem').map((b) => b.textContent);
+    expect(labels).toEqual(['CopyCtrl+C', 'Copy with headersCtrl+Shift+C', 'Copy as CSV', 'Copy column name', 'View recordShift+Space']);
+  });
+
+  it('lists_the_copy_actions_and_view_record', async () => {
+    render(<ResultGrid result={result} engine="mysql" />);
     select(range(1, 0, 1, 1));
     openMenu([1, 0]);
     const menu = screen.getByRole('menu', { name: 'Cell menu' });

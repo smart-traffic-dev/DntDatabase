@@ -325,7 +325,7 @@ export function copyOutcome(
   mode: CopyMode,
   sel: GridSelection | undefined,
   result: ResultSet,
-  opts: { engine: SqlEngine; tableRef?: ObjectRef | null; cellsCapped: boolean; firstRowNumber: number; cellColumn?: number | null },
+  opts: { engine: SqlEngine | undefined; tableRef?: ObjectRef | null; cellsCapped: boolean; firstRowNumber: number; cellColumn?: number | null },
 ): CopyOutcome {
   const colCount = result.columns.length;
   if (mode === 'column') {
@@ -338,6 +338,7 @@ export function copyOutcome(
   const { block } = picked;
   if (block.rows.length === 0 || block.cols.length === 0) return { ok: false, message: 'Select cells first' };
   if (mode === 'insert') {
+    if (!opts.engine) return { ok: false, message: 'Copy as INSERT needs a SQL connection' };
     // A row is inserted whole: every column of every selected row.
     const cols = Array.from({ length: colCount }, (_, i) => i);
     const table = opts.tableRef ?? singleSourceTable(result.columns);
@@ -397,7 +398,7 @@ export function ResultGrid({
   onHeaderClicked,
   headerMarks,
   firstRowNumber,
-  engine = 'mysql',
+  engine,
   tableRef,
   cellsCapped = false,
   extraCellMenu,
@@ -415,7 +416,7 @@ export function ResultGrid({
   onHeaderClicked?: (column: number) => void;
   headerMarks?: Record<number, string>;
   firstRowNumber?: number;
-  /** Quoting rules for INSERT statements. */
+  /** Quoting rules for INSERT statements; without one (the Command family) there is no Copy as INSERT. */
   engine?: SqlEngine;
   /** The table the rows come from (the Data tab); else the result's single source table. */
   tableRef?: ObjectRef | null;
@@ -670,6 +671,7 @@ export function ResultGrid({
   // ---- copy ----
   const copyWith = useCallback(
     async (mode: CopyMode, cellColumn?: number | null) => {
+      if (mode === 'insert' && !engine) return;
       if (result.token && mode !== 'column') {
         const picked = selectionBlock(selRef.current, result.rowCount, result.columns.length, MAX_COPY_CELLS);
         if (!picked.ok) return say(tooLargeMessage(picked.cells), true);
@@ -680,7 +682,7 @@ export function ResultGrid({
           const values = await api.queryResultValues(result.token, picked.block.rows, cols);
           let text: string;
           let message: string;
-          if (mode === 'insert') {
+          if (mode === 'insert' && engine) {
             const table = tableRef ?? singleSourceTable(result.columns);
             const made = toInsertStatements({
               table: table ? qualifiedTable(table, engine) : TABLE_PLACEHOLDER,
@@ -904,7 +906,8 @@ export function ResultGrid({
     }
     if (mod && key === 'c') {
       handled();
-      void copyWith(e.altKey ? 'insert' : e.shiftKey ? 'tsv-headers' : 'tsv');
+      // Without a SQL engine Ctrl+Alt+C copies nothing (there is no Copy as INSERT).
+      if (!e.altKey || engine) void copyWith(e.altKey ? 'insert' : e.shiftKey ? 'tsv-headers' : 'tsv');
     } else if (mod && !e.altKey && key === 'f') {
       handled();
       latestRef.current.openFind();
@@ -953,7 +956,7 @@ export function ResultGrid({
     const items: MenuEntry[] = [
       { label: 'Copy', hint: 'Ctrl+C', run: () => void copyWith('tsv') },
       { label: 'Copy with headers', hint: 'Ctrl+Shift+C', run: () => void copyWith('tsv-headers') },
-      { label: 'Copy as INSERT', hint: 'Ctrl+Alt+C', run: () => void copyWith('insert') },
+      ...(engine ? [{ label: 'Copy as INSERT', hint: 'Ctrl+Alt+C', run: () => void copyWith('insert') }] : []),
       { label: 'Copy as CSV', run: () => void copyWith('csv') },
     ];
     if (onColumn) items.push({ label: 'Copy column name', run: () => void copyWith('column', col) });
@@ -967,7 +970,7 @@ export function ResultGrid({
       if (extra.length > 0) items.push({ separator: true }, ...extra);
     }
     return items;
-  }, [menu, copyWith, extraCellMenu, onOpenValue, result, viewResult]);
+  }, [menu, copyWith, engine, extraCellMenu, onOpenValue, result, viewResult]);
 
   return (
     <div

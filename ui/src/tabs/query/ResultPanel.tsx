@@ -2,8 +2,8 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
 import { ChevronDownIcon, MaximizeResultsIcon } from '../../components/icons';
 import { plural } from '../../lib/plural';
-import { hasDocumentView } from '../../engine';
-import { dialectOfConnection, docKindOf, useQueryDocs } from '../../store/queryTabs';
+import { hasDocumentView, sqlEngine } from '../../engine';
+import { docKindOf, useQueryDocs } from '../../store/queryTabs';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { ExplainView } from './ExplainView';
@@ -85,9 +85,11 @@ function ResultPanelView({
   };
   const planAlive = usePlanAlive(tabId);
   // The engine only quotes copied INSERT statements; a primitive, so typing does not re-render this.
+  // The Command family has none: no Copy as INSERT and no Export of a result.
   const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
-  const engine = dialectOfConnection(connectionId);
-  const documents = hasDocumentView(docKindOf(connectionId));
+  const kind = docKindOf(connectionId);
+  const engine = sqlEngine(kind) ?? undefined;
+  const documents = hasDocumentView(kind);
   // Table or JSON, per result of the current run (not persisted).
   const [jsonViews, setJsonViews] = useState<Record<string, boolean>>({});
   const stripRef = useRef<HTMLDivElement>(null);
@@ -190,7 +192,7 @@ function ResultPanelView({
             ))}
           </div>
         )}
-        {showResult && !collapsed && result.columns.length > 0 && (
+        {showResult && !collapsed && engine !== undefined && result.columns.length > 0 && (
           <button
             type="button"
             className="btn small"
