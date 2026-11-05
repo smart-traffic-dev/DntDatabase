@@ -43,8 +43,12 @@ hand-off, without a separate plan file.
 - Typing what the ghost text suggests keeps the rest on screen without a request, and the word suggest list
   stays closed while ghost text shows (`suppressSuggestions`), so Tab takes the ghost text. The pause before an
   automatic request is 150 ms.
-- The connection dialog has an "AI suggestions" switch (SQL engines, once AI is set up): consent when turned on,
-  applied on Save.
+- The connection dialog has an "AI suggestions" switch (SQL engines, once AI is set up), applied on Save.
+- Consent is given once, to the endpoint's origin, not per connection (spec §6.3 as revised 2026-11-05): AI is then on
+  for every SQL connection except those tagged Production, and each connection can be turned off (or a Production
+  one on) from its status bar, its dialog or Settings → AI. Saving a new endpoint asks for consent at once. Migration
+  12 replaces `ai_opt_in` with `ai_consent` + `ai_connection`; former opt-ins become "on" choices, consent is asked
+  again once.
 - PostgreSQL prompts name the current schema when the editor names none: `public` when the database has it,
   else the first table's schema (as the editor's own completion, `currentSchemaOf`).
 - Monaco's `Canceled` rejections from its inline-suggest debounce are dropped by a window `unhandledrejection`

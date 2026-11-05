@@ -757,9 +757,21 @@ fieldset.export-form {
   padding: var(--dnt-space-1) 0;
 }
 
-.settings-ai-list li > span:first-child {
+.settings-ai-list li > :first-child {
   flex: 1;
   min-width: 0;
+}
+
+.settings-ai-consent {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+}
+
+.settings-ai-consent > p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
 }
 
 .settings-stepper-value {

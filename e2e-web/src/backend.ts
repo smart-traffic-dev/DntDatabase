@@ -429,7 +429,10 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     has_key: false,
     origin: null,
     host: null,
+    consented: false,
   };
+  let aiConsentOrigin: string | null = null;
+  let aiChoices: { connection_id: string; enabled: boolean }[] = [];
 
   const summary = (cfg: ConnectionConfig): ConnectionSummary => ({
     config: cfg,
@@ -599,20 +602,34 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     set_log_level: () => null,
     open_log_folder: () => null,
 
-    // AI editor completion: not set up, AI off for every connection.
+    // AI editor completion: not set up, not agreed to.
     ai_settings_get: () => aiSettings,
     ai_settings_set: (args) => {
       const config = args.config as typeof aiSettings.config;
       const url = config.base_url ? new URL(config.base_url) : null;
-      aiSettings = { ...aiSettings, config, origin: url ? url.origin : null, host: url ? url.host : null };
+      aiSettings = {
+        ...aiSettings,
+        config,
+        origin: url ? url.origin : null,
+        host: url ? url.host : null,
+        consented: !!url && url.origin === aiConsentOrigin,
+      };
       return aiSettings;
     },
     ai_key_set: () => (aiSettings = { ...aiSettings, has_key: true }),
     ai_key_clear: () => (aiSettings = { ...aiSettings, has_key: false }),
     ai_models: () => [],
     ai_test: () => ({ verdict: 'ok', elapsed_ms: 1, sample: 'id = 1' }),
-    ai_opt_in_list: () => [],
-    ai_opt_in_set: () => [],
+    ai_consent_set: (args) => {
+      aiConsentOrigin = args.granted ? aiSettings.origin : null;
+      aiSettings = { ...aiSettings, consented: !!aiSettings.origin && aiSettings.origin === aiConsentOrigin };
+      return aiSettings;
+    },
+    ai_connections: () => aiChoices,
+    ai_connection_set: (args) => {
+      aiChoices = [...aiChoices.filter((c) => c.connection_id !== args.connId), { connection_id: args.connId as string, enabled: args.enabled as boolean }];
+      return aiChoices;
+    },
     ai_complete: () => ({ kind: 'empty' }),
     ai_cancel: () => null,
 

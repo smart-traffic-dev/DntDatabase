@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, toAppError } from '../api';
-import type { AiConfig, AiConnectionView, AiSettings, AiTestResult, AiTrigger } from '../bindings';
-import { aiErrorText, useAi } from '../store/ai';
+import type { AiConfig, AiSettings, AiTestResult, AiTrigger } from '../bindings';
+import { aiErrorText, aiOnFor, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
 import { Callout } from './parts';
@@ -49,31 +49,30 @@ function testMessage(r: AiTestResult): { tone: 'success' | 'warning'; text: stri
 
 /**
  * Settings → AI (AI editor completion spec §6.1): the OpenAI-compatible endpoint, its key (stored in
- * the OS keychain, never shown again), editor suggestion options, Test, and the connections AI is
- * on for. Turning AI on for a connection goes through the consent dialog.
+ * the OS keychain, never shown again), editor suggestion options, Test, consent (once, to the
+ * endpoint's host) and the connections AI is on for.
  */
 export function SettingsAiPanel() {
   const [settings, setSettings] = useState<AiSettings | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [key, setKey] = useState('');
   const [models, setModels] = useState<string[]>([]);
-  const [optIns, setOptIns] = useState<AiConnectionView[]>([]);
-  const [pick, setPick] = useState('');
-  const [consentFor, setConsentFor] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
   const [test, setTest] = useState<AiTestResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const summaries = useConnections((s) => s.summaries);
+  const choices = useAi((s) => s.choices);
 
   useEffect(() => {
     let live = true;
-    Promise.all([api.aiSettingsGet(), api.aiOptInList()])
+    Promise.all([api.aiSettingsGet(), api.aiConnections()])
       .then(([s, list]) => {
         if (!live) return;
         setSettings(s);
         setDraft(draftOf(s.config));
-        setOptIns(list);
+        useAi.getState().setChoices(list);
       })
       .catch((e: unknown) => live && setError(toAppError(e).message));
     return () => {
@@ -94,9 +93,12 @@ export function SettingsAiPanel() {
     }
   };
 
-  /** Stores the draft; Test and Load models use the stored settings, so they save first. */
-  const persist = async () => {
-    if (!draft || !settings || JSON.stringify(draftOf(settings.config)) === JSON.stringify(draft)) return;
+  /**
+   * Stores the draft; Test and Load models use the stored settings, so they save first.
+   * Returns the new settings, or `null` when nothing changed.
+   */
+  const persist = async (): Promise<AiSettings | null> => {
+    if (!draft || !settings || JSON.stringify(draftOf(settings.config)) === JSON.stringify(draft)) return null;
     const s = await api.aiSettingsSet({
         base_url: draft.baseUrl.trim() || null,
         model: draft.model.trim() || null,
@@ -108,16 +110,17 @@ export function SettingsAiPanel() {
     setSettings(s);
     setDraft(draftOf(s.config));
     useAi.getState().setSettings(s);
-    const list = await api.aiOptInList();
-    setOptIns(list);
-    useAi.getState().setOptIns(list);
     setTest(null);
+    return s;
   };
 
   const save = () =>
     run(async () => {
-      await persist();
+      const before = settings?.origin ?? null;
+      const s = await persist();
       setNotice('Saved.');
+      // A new endpoint the user has not agreed to: ask now rather than leave AI quietly off.
+      if (s?.origin && s.origin !== before && !s.consented && s.config.model) setAsking(true);
     });
 
   const saveKey = () =>
@@ -150,22 +153,25 @@ export function SettingsAiPanel() {
       setTest(await api.aiTest());
     });
 
-  const setOptIn = (id: string, enabled: boolean) =>
+  const setConsent = (granted: boolean) =>
     run(async () => {
-      const list = await api.aiOptInSet(id, enabled);
-      setOptIns(list);
-      useAi.getState().setOptIns(list);
-      setConsentFor(null);
-      setPick('');
+      setAsking(false);
+      const s = await api.aiConsentSet(granted);
+      setSettings(s);
+      useAi.getState().setSettings(s);
     });
 
-  const active = useMemo(() => new Set(optIns.filter((o) => o.active).map((o) => o.connection_id)), [optIns]);
-  const candidates = useMemo(
+  const setChoice = (id: string, enabled: boolean) =>
+    run(async () => {
+      useAi.getState().setChoices(await api.aiConnectionSet(id, enabled));
+    });
+
+  const sqlConnections = useMemo(
     () =>
       [...summaries.values()]
-        .filter((c) => !active.has(c.config.id))
+        .filter((c) => c.config.kind === 'mysql' || c.config.kind === 'postgres')
         .sort((a, b) => a.config.name.localeCompare(b.config.name)),
-    [summaries, active],
+    [summaries],
   );
 
   if (!settings || !draft) {
@@ -179,7 +185,6 @@ export function SettingsAiPanel() {
   const dirty =
     JSON.stringify(draftOf(settings.config)) !== JSON.stringify(draft);
   const field = (k: keyof Draft) => (e: { target: { value: string } }) => setDraft({ ...draft, [k]: e.target.value });
-  const consentName = consentFor ? (summaries.get(consentFor)?.config.name ?? '') : '';
   const result = test ? testMessage(test) : null;
 
   return (
@@ -311,46 +316,48 @@ export function SettingsAiPanel() {
 
       <section className="settings-section field" aria-labelledby="settings-ai-connections">
         <h3 id="settings-ai-connections" className="field-label">
-          Connections with AI
+          Sharing
         </h3>
-        {optIns.length === 0 ? (
-          <p className="hint">AI is off for every connection.</p>
+        {!settings.origin ? (
+          <p className="hint">Save a base URL first.</p>
+        ) : settings.consented ? (
+          <div className="settings-ai-consent" data-testid="ai-consent-on">
+            <p className="hint">Editor text and schema names of the connections ticked below go to {settings.host}.</p>
+            <button type="button" className="btn" disabled={busy} onClick={() => void setConsent(false)}>
+              Turn off AI
+            </button>
+          </div>
         ) : (
-          <ul className="settings-ai-list">
-            {optIns.map((o) => (
-              <li key={o.connection_id}>
-                <span>{o.name}</span>
-                {!o.active && <span className="hint"> Consent needed again for the new endpoint</span>}
-                <button type="button" className="btn" disabled={busy} onClick={() => void setOptIn(o.connection_id, false)}>
-                  Turn off
-                </button>
+          <div className="settings-ai-consent" data-testid="ai-consent-off">
+            <p className="hint">AI is off: nothing is sent to {settings.host} until you turn it on.</p>
+            <button type="button" className="btn primary" disabled={busy} onClick={() => setAsking(true)}>
+              Turn on AI…
+            </button>
+          </div>
+        )}
+        {sqlConnections.length > 0 && (
+          <ul className="settings-ai-list" aria-label="Connections with AI">
+            {sqlConnections.map((c) => (
+              <li key={c.config.id}>
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={aiOnFor(choices, c.config)}
+                    disabled={busy}
+                    onChange={(e) => void setChoice(c.config.id, e.target.checked)}
+                  />
+                  <span>{c.config.name}</span>
+                </label>
+                {c.config.env_tag === 'production' && <span className="hint">Production</span>}
               </li>
             ))}
           </ul>
         )}
-        <div className="settings-path-row">
-          <select aria-label="Connection to turn AI on for" value={pick} onChange={(e) => setPick(e.target.value)} disabled={!settings.origin}>
-            <option value="">Choose a connection…</option>
-            {candidates.map((c) => (
-              <option key={c.config.id} value={c.config.id}>
-                {c.config.name}
-              </option>
-            ))}
-          </select>
-          <button type="button" className="btn" disabled={busy || !pick || !settings.origin} onClick={() => setConsentFor(pick)}>
-            Turn on…
-          </button>
-        </div>
-        {!settings.origin && <p className="hint">Save a base URL first.</p>}
+        <p className="hint">Connections tagged Production stay off until you tick them.</p>
       </section>
 
-      {consentFor && settings.host && (
-        <AiConsentDialog
-          connectionName={consentName}
-          host={settings.host}
-          onClose={() => setConsentFor(null)}
-          onConfirm={() => void setOptIn(consentFor, true)}
-        />
+      {asking && settings.host && (
+        <AiConsentDialog host={settings.host} onClose={() => setAsking(false)} onConfirm={() => void setConsent(true)} />
       )}
     </>
   );

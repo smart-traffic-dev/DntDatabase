@@ -1,4 +1,4 @@
-//! Per-connection AI consent (`ai_opt_in`).
+//! AI consent (`ai_consent`) and each connection's own choice (`ai_connection`).
 
 use dnt_core::config::ConnectionConfig;
 use dnt_core::error::DbError;
@@ -33,61 +33,66 @@ fn create(repo: &ConnectionRepo, name: &str) -> Uuid {
 }
 
 #[test]
-fn grant_list_revoke() {
+fn consent_grant_replace_revoke() {
+    let repo = setup();
+    assert_eq!(repo.ai_consent(AiScope::Editor).unwrap(), None);
+
+    repo.ai_consent_grant(AiScope::Editor, "https://one.example")
+        .unwrap();
+    let c = repo.ai_consent(AiScope::Editor).unwrap().unwrap();
+    assert_eq!(c.origin, "https://one.example");
+    assert!(!c.granted_at.is_empty());
+
+    repo.ai_consent_grant(AiScope::Editor, "https://two.example")
+        .unwrap();
+    assert_eq!(
+        repo.ai_consent(AiScope::Editor).unwrap().unwrap().origin,
+        "https://two.example"
+    );
+
+    repo.ai_consent_revoke(AiScope::Editor).unwrap();
+    assert_eq!(repo.ai_consent(AiScope::Editor).unwrap(), None);
+    // Revoking again is fine.
+    repo.ai_consent_revoke(AiScope::Editor).unwrap();
+}
+
+#[test]
+fn choices_set_and_replace() {
     let repo = setup();
     let a = create(&repo, "A");
     let b = create(&repo, "B");
-    assert!(repo.ai_opt_ins(AiScope::Editor).unwrap().is_empty());
+    assert!(repo
+        .ai_connection_choices(AiScope::Editor)
+        .unwrap()
+        .is_empty());
 
-    repo.ai_opt_in_grant(a, AiScope::Editor, "https://api.example.com")
-        .unwrap();
-    repo.ai_opt_in_grant(b, AiScope::Editor, "http://localhost:8000")
-        .unwrap();
-    let rows = repo.ai_opt_ins(AiScope::Editor).unwrap();
-    let ids: Vec<_> = rows.iter().map(|r| r.connection_id).collect();
-    assert_eq!(rows.len(), 2);
-    assert!(ids.contains(&a) && ids.contains(&b));
-    let row_a = rows.iter().find(|r| r.connection_id == a).unwrap();
-    assert_eq!(row_a.origin, "https://api.example.com");
-    assert_eq!(row_a.scope, AiScope::Editor);
-    assert!(!row_a.granted_at.is_empty());
-
-    repo.ai_opt_in_revoke(a, AiScope::Editor).unwrap();
-    let rows = repo.ai_opt_ins(AiScope::Editor).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].connection_id, b);
-    // Revoking again is fine.
-    repo.ai_opt_in_revoke(a, AiScope::Editor).unwrap();
+    repo.ai_connection_set(a, AiScope::Editor, false).unwrap();
+    repo.ai_connection_set(b, AiScope::Editor, true).unwrap();
+    repo.ai_connection_set(a, AiScope::Editor, true).unwrap();
+    let mut choices = repo.ai_connection_choices(AiScope::Editor).unwrap();
+    choices.sort();
+    let mut expected = vec![(a, true), (b, true)];
+    expected.sort();
+    assert_eq!(choices, expected);
 }
 
 #[test]
-fn grant_replaces_origin() {
+fn deleting_the_connection_deletes_its_choice() {
     let repo = setup();
     let a = create(&repo, "A");
-    repo.ai_opt_in_grant(a, AiScope::Editor, "https://one.example")
-        .unwrap();
-    repo.ai_opt_in_grant(a, AiScope::Editor, "https://two.example")
-        .unwrap();
-    let rows = repo.ai_opt_ins(AiScope::Editor).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].origin, "https://two.example");
-}
-
-#[test]
-fn deleting_the_connection_deletes_consent() {
-    let repo = setup();
-    let a = create(&repo, "A");
-    repo.ai_opt_in_grant(a, AiScope::Editor, "https://api.example.com")
-        .unwrap();
+    repo.ai_connection_set(a, AiScope::Editor, false).unwrap();
     repo.delete(a).unwrap();
-    assert!(repo.ai_opt_ins(AiScope::Editor).unwrap().is_empty());
+    assert!(repo
+        .ai_connection_choices(AiScope::Editor)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
 fn unknown_connection_is_not_found() {
     let repo = setup();
     let err = repo
-        .ai_opt_in_grant(Uuid::new_v4(), AiScope::Editor, "https://x.example")
+        .ai_connection_set(Uuid::new_v4(), AiScope::Editor, true)
         .unwrap_err();
     match err {
         DbError::Internal { message } => assert!(message.contains("not found"), "{message}"),
@@ -96,12 +101,17 @@ fn unknown_connection_is_not_found() {
 }
 
 #[test]
-fn export_never_carries_consent() {
+fn export_never_carries_consent_or_choices() {
     let repo = setup();
     let a = create(&repo, "A");
-    repo.ai_opt_in_grant(a, AiScope::Editor, "https://api.example.com")
+    repo.ai_consent_grant(AiScope::Editor, "https://api.example.com")
         .unwrap();
+    repo.ai_connection_set(a, AiScope::Editor, false).unwrap();
     let text = export_dntconn(&repo, &[NodeId::Connection(a)], None).unwrap();
     assert!(!text.contains("api.example.com"), "{text}");
-    assert!(!text.to_ascii_lowercase().contains("ai_opt_in"), "{text}");
+    let lower = text.to_ascii_lowercase();
+    assert!(
+        !lower.contains("ai_consent") && !lower.contains("ai_connection"),
+        "{text}"
+    );
 }

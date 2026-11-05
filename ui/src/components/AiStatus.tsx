@@ -1,28 +1,28 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { AiConsentDialog } from '../dialogs/AiConsentDialog';
-import { AI_ERROR_AFTER, ensureAiLoaded, useAi } from '../store/ai';
-import { useConnections } from '../store/connections';
+import { AI_ERROR_AFTER, aiAllowed, ensureAiLoaded, useAi, useAiOn } from '../store/ai';
 import { useDialogs } from '../store/dialogs';
 
 type Look = 'off' | 'on' | 'busy' | 'paused' | 'error';
 
 /**
  * The AI indicator of a query tab's status bar (AI editor completion spec §7): off, on, working,
- * paused or failing for the tab's connection. Its menu turns AI on (through the consent dialog)
- * or off for the connection, and opens Settings → AI.
+ * paused or failing for the tab's connection. Its menu turns AI on or off for the connection
+ * (asking for consent first when the user has not agreed to the endpoint yet) and opens
+ * Settings → AI.
  */
 export function AiStatus({ connId }: { connId: string }) {
   const loaded = useAi((s) => s.loaded);
   const configured = useAi((s) => s.configured);
   const host = useAi((s) => s.host);
-  const on = useAi((s) => s.active.has(connId));
+  const consented = useAi((s) => s.consented);
+  const on = useAiOn(connId);
   const busy = useAi((s) => s.busy > 0);
   const paused = useAi((s) => s.paused);
   const failing = useAi((s) => s.failures >= AI_ERROR_AFTER);
   const lastError = useAi((s) => s.lastError);
   const trigger = useAi((s) => s.trigger);
-  const name = useConnections((s) => s.summaries.get(connId)?.config.name ?? '');
   const [menu, setMenu] = useState(false);
   const [consent, setConsent] = useState(false);
   const root = useRef<HTMLSpanElement>(null);
@@ -45,7 +45,7 @@ export function AiStatus({ connId }: { connId: string }) {
 
   const look: Look = !on ? 'off' : paused ? 'paused' : failing ? 'error' : busy ? 'busy' : 'on';
   const title = {
-    off: 'AI is off for this connection',
+    off: consented ? 'AI is off for this connection' : 'AI is off: nothing is sent until you turn it on',
     paused: `AI is paused: ${paused ?? ''}`,
     error: `AI requests are failing: ${lastError ?? ''}`,
     busy: 'AI is working on a suggestion',
@@ -61,11 +61,14 @@ export function AiStatus({ connId }: { connId: string }) {
     setMenu(false);
     useDialogs.getState().requestDialog({ kind: 'settings', tab: 'ai' });
   };
-  const setOptIn = async (enabled: boolean) => {
+  /** Turns AI on or off for this connection; turning it on agrees to the endpoint first if needed. */
+  const setOn = async (enabled: boolean, agree = false) => {
     setMenu(false);
     setConsent(false);
     try {
-      useAi.getState().setOptIns(await api.aiOptInSet(connId, enabled));
+      if (agree) useAi.getState().setSettings(await api.aiConsentSet(true));
+      // Its own choice only when the default does not already give what was asked.
+      if (aiAllowed(connId) !== enabled) useAi.getState().setChoices(await api.aiConnectionSet(connId, enabled));
     } catch {
       // `api` already reported anything unexpected; the indicator keeps its state.
     }
@@ -97,7 +100,7 @@ export function AiStatus({ connId }: { connId: string }) {
             }
           }}
         >
-          {look === 'off' && (
+          {!on && !consented && (
             <button
               type="button"
               role="menuitem"
@@ -106,11 +109,16 @@ export function AiStatus({ connId }: { connId: string }) {
                 setConsent(true);
               }}
             >
-              Turn on AI for this connection…
+              Turn on AI…
+            </button>
+          )}
+          {!on && consented && (
+            <button type="button" role="menuitem" onClick={() => void setOn(true)}>
+              Turn on AI for this connection
             </button>
           )}
           {on && (
-            <button type="button" role="menuitem" onClick={() => void setOptIn(false)}>
+            <button type="button" role="menuitem" onClick={() => void setOn(false)}>
               Turn off AI for this connection
             </button>
           )}
@@ -120,7 +128,7 @@ export function AiStatus({ connId }: { connId: string }) {
         </div>
       )}
       {consent && host && (
-        <AiConsentDialog connectionName={name} host={host} onClose={() => setConsent(false)} onConfirm={() => void setOptIn(true)} />
+        <AiConsentDialog host={host} onClose={() => setConsent(false)} onConfirm={() => void setOn(true, true)} />
       )}
     </span>
   );

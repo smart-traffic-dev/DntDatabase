@@ -3,14 +3,16 @@
 
 use async_trait::async_trait;
 use dnt_ai::{AiError, Endpoint, FimClient, FimReply, FimRequest};
+use dnt_core::config::EnvTag;
 use dnt_core::error::DbError;
 use dnt_core::secret::{AppSecret, MemorySecretStore, SecretStore};
 use dnt_core::test_util::sample_config;
 use dntdatabase::ai::{AiConfig, AiTrigger, ClientFactory};
 use dntdatabase::commands::ai::{
-    ai_cancel_impl, ai_complete_impl, ai_key_clear_impl, ai_key_set_impl, ai_models_impl,
-    ai_opt_in_list_impl, ai_opt_in_set_impl, ai_settings_get_impl, ai_settings_set_impl,
-    ai_test_impl, AiCompleteRequest, AiCompletion, AiProbeVerdict,
+    ai_cancel_impl, ai_complete_impl, ai_connection_set_impl, ai_connections_impl,
+    ai_consent_set_impl, ai_key_clear_impl, ai_key_set_impl, ai_models_impl, ai_settings_get_impl,
+    ai_settings_set_impl, ai_test_impl, AiCompleteRequest, AiCompletion, AiConnectionChoice,
+    AiProbeVerdict,
 };
 use dntdatabase::commands::connections::{create_connection_impl, SecretsInput};
 use dntdatabase::state::{AppPaths, AppState};
@@ -107,21 +109,26 @@ fn cfg(base_url: &str) -> AiConfig {
     }
 }
 
-async fn connection(state: &AppState) -> Uuid {
+async fn connection_tagged(state: &AppState, env_tag: Option<EnvTag>) -> Uuid {
     let mut c = sample_config();
     c.id = Uuid::nil();
+    c.env_tag = env_tag;
     let secrets: SecretsInput = serde_json::from_value(serde_json::json!({})).unwrap();
     create_connection_impl(state, c, secrets).await.unwrap().id
 }
 
-/// Set up, one opted-in MySQL connection.
+async fn connection(state: &AppState) -> Uuid {
+    connection_tagged(state, None).await
+}
+
+/// Set up and agreed to, one MySQL connection (on by default).
 async fn ready() -> (Fixture, Uuid) {
     let f = fixture();
     ai_settings_set_impl(&f.state, cfg("https://api.example.com/v1"))
         .await
         .unwrap();
+    ai_consent_set_impl(&f.state, true).await.unwrap();
     let id = connection(&f.state).await;
-    ai_opt_in_set_impl(&f.state, id, true).await.unwrap();
     (f, id)
 }
 
@@ -313,23 +320,28 @@ async fn test_reports_verdicts() {
 async fn consent_follows_the_origin() {
     let f = fixture();
     let id = connection(&f.state).await;
-    let e = ai_opt_in_set_impl(&f.state, id, true).await.unwrap_err();
+    let e = ai_consent_set_impl(&f.state, true).await.unwrap_err();
     assert_eq!(config_message(e).1, "Set the base URL first.");
 
-    ai_settings_set_impl(&f.state, cfg("https://one.example/v1"))
+    let s = ai_settings_set_impl(&f.state, cfg("https://one.example/v1"))
         .await
         .unwrap();
-    let list = ai_opt_in_set_impl(&f.state, id, true).await.unwrap();
-    assert_eq!(list.len(), 1);
-    assert_eq!(list[0].connection_id, id);
-    assert_eq!(list[0].name, "Local MySQL");
-    assert!(list[0].active);
+    assert!(!s.consented);
+    // Set up, not agreed to: nothing is sent.
+    let out = ai_complete_impl(&f.state, request(id, "SELECT |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+
+    let s = ai_consent_set_impl(&f.state, true).await.unwrap();
+    assert!(s.consented);
+    assert!(ai_settings_get_impl(&f.state).await.unwrap().consented);
 
     // Another origin: consent no longer counts, and nothing is sent.
-    ai_settings_set_impl(&f.state, cfg("https://two.example/v1"))
+    let s = ai_settings_set_impl(&f.state, cfg("https://two.example/v1"))
         .await
         .unwrap();
-    assert!(!ai_opt_in_list_impl(&f.state).await.unwrap()[0].active);
+    assert!(!s.consented);
     let out = ai_complete_impl(&f.state, request(id, "SELECT |"))
         .await
         .unwrap();
@@ -337,13 +349,61 @@ async fn consent_follows_the_origin() {
     assert!(f.fake.calls().is_empty());
 
     // Same origin, other path: still the same consent.
-    ai_settings_set_impl(&f.state, cfg("https://one.example/v2"))
+    let s = ai_settings_set_impl(&f.state, cfg("https://one.example/v2"))
         .await
         .unwrap();
-    assert!(ai_opt_in_list_impl(&f.state).await.unwrap()[0].active);
+    assert!(s.consented);
 
-    let list = ai_opt_in_set_impl(&f.state, id, false).await.unwrap();
-    assert!(list.is_empty());
+    let s = ai_consent_set_impl(&f.state, false).await.unwrap();
+    assert!(!s.consented);
+}
+
+#[tokio::test]
+async fn connections_are_on_by_default_except_production() {
+    let (f, local) = ready().await;
+    let prod = connection_tagged(&f.state, Some(EnvTag::Production)).await;
+    assert!(ai_connections_impl(&f.state).await.unwrap().is_empty());
+
+    // Production, no choice: off.
+    let out = ai_complete_impl(&f.state, request(prod, "SELECT |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+    assert!(f.fake.calls().is_empty());
+
+    // Its own choice turns it on; the other one's turns it off.
+    ai_connection_set_impl(&f.state, prod, true).await.unwrap();
+    let list = ai_connection_set_impl(&f.state, local, false)
+        .await
+        .unwrap();
+    assert_eq!(list.len(), 2);
+    assert!(list.contains(&AiConnectionChoice {
+        connection_id: prod,
+        enabled: true
+    }));
+    assert!(list.contains(&AiConnectionChoice {
+        connection_id: local,
+        enabled: false
+    }));
+
+    let out = ai_complete_impl(&f.state, request(local, "SELECT |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+    assert!(f.fake.calls().is_empty());
+    f.fake.push(Step::Reply(Ok("1".into())));
+    let out = ai_complete_impl(&f.state, request(prod, "SELECT |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Suggestion { text: "1".into() });
+
+    // Withdrawn consent stops every connection, whatever its choice.
+    ai_consent_set_impl(&f.state, false).await.unwrap();
+    let out = ai_complete_impl(&f.state, request(prod, "SELECT |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+    assert_eq!(f.fake.calls().len(), 1);
 }
 
 #[tokio::test]
@@ -376,9 +436,12 @@ async fn complete_returns_the_cleaned_suggestion() {
 }
 
 #[tokio::test]
-async fn not_opted_in_or_off_sends_nothing() {
+async fn turned_off_or_trigger_off_sends_nothing() {
     let (f, id) = ready().await;
     let other = connection(&f.state).await;
+    ai_connection_set_impl(&f.state, other, false)
+        .await
+        .unwrap();
     let out = ai_complete_impl(&f.state, request(other, "SELECT |"))
         .await
         .unwrap();
