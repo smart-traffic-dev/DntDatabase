@@ -3,6 +3,9 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlanStmtView, RunEvent, Value } from '../../bindings';
 import { emptyRun, reduceRun, startRun, useQueryRun, type TabRun } from '../../store/queryRun';
+import { useConnections } from '../../store/connections';
+import { useQueryDocs } from '../../store/queryTabs';
+import { config } from '../../test/fixtures/data';
 import { appError, resetStores } from '../../test/backend';
 import { ResultPanel, resultLabel } from './ResultPanel';
 import { PLAN_GONE, rerunStatement } from './rerun';
@@ -49,10 +52,17 @@ const result = (id: number, index: number, rows: number, truncated = false, affe
   { t: 'result_end', result_id: id, row_count: rows, affected, truncated, elapsed_ms: 5 },
 ];
 
-const show = (run: TabRun) => {
-  useQueryRun.setState({ runs: new Map([['t', run]]) });
-  return render(<ResultPanel tabId="t" />);
+const show = (run: TabRun, tabId = 't') => {
+  useQueryRun.setState({ runs: new Map([[tabId, run]]) });
+  return render(<ResultPanel tabId={tabId} />);
 };
+
+/** A query tab on a stored connection of `kind`. */
+function tabOn(kind: 'mysql' | 'redis' | 'mongo'): string {
+  const id = `${kind}-conn`;
+  useConnections.getState().setStored([], [config(id, kind, { kind })]);
+  return useQueryDocs.getState().newQuery(id, null);
+}
 
 describe('ResultPanel', () => {
   beforeEach(() => {
@@ -201,6 +211,30 @@ describe('ResultPanel', () => {
     const running = play(result(1, 0, 1), false);
     show(reduceRun(running, { t: 'done', stop: { kind: 'cancelled' }, elapsed_ms: 3093 }, 50));
     expect(screen.getByTestId('result-cancelled')).toHaveTextContent('Cancelled by user after 3.1 s');
+  });
+
+  it('toggle_only_for_document_kinds', () => {
+    for (const kind of ['redis', 'mysql'] as const) {
+      const { unmount } = show(play(result(1, 0, 2)), tabOn(kind));
+      expect(screen.getByTestId('glide-mock')).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Table' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'JSON' })).toBeNull();
+      unmount();
+    }
+  });
+
+  it('mongo_results_toggle_between_table_and_json', async () => {
+    const user = userEvent.setup();
+    show(play(result(1, 0, 2)), tabOn('mongo'));
+    expect(screen.getByRole('button', { name: 'Table' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'JSON' })).toHaveAttribute('aria-pressed', 'false');
+    await user.click(screen.getByRole('button', { name: 'JSON' }));
+    expect(screen.getByRole('button', { name: 'JSON' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByTestId('glide-mock')).toBeNull();
+    expect(screen.getAllByTestId('document')).toHaveLength(2);
+    expect(screen.getAllByTestId('document')[1]).toHaveTextContent('"a": 1');
+    await user.click(screen.getByRole('button', { name: 'Table' }));
+    expect(screen.getByTestId('glide-mock')).toBeInTheDocument();
   });
 
   it('fetch_all_is_disabled_with_a_tooltip_when_the_plan_is_gone', () => {

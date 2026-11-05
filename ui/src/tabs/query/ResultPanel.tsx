@@ -2,11 +2,13 @@ import { memo, useEffect, useRef, useState } from 'react';
 import { queryExportRequest, requestExport, shownResult } from '../../dialogs/resultExport';
 import { ChevronDownIcon, MaximizeResultsIcon } from '../../components/icons';
 import { plural } from '../../lib/plural';
-import { dialectOfConnection, useQueryDocs } from '../../store/queryTabs';
+import { hasDocumentView } from '../../engine';
+import { dialectOfConnection, docKindOf, useQueryDocs } from '../../store/queryTabs';
 import { canRun, emptyRun, useQueryRun, type ResultSet, type TabRun } from '../../store/queryRun';
 import { MEMORY_WARNING_ROWS } from './format';
 import { ExplainView } from './ExplainView';
 import { MessagesView } from './MessagesView';
+import { DocumentView } from './DocumentView';
 import { ResultGrid } from './ResultGrid';
 import { PLAN_GONE, rerunStatement, usePlanAlive } from './rerun';
 
@@ -85,12 +87,17 @@ function ResultPanelView({
   // The engine only quotes copied INSERT statements; a primitive, so typing does not re-render this.
   const connectionId = useQueryDocs((s) => s.docs.get(tabId)?.connectionId ?? null);
   const engine = dialectOfConnection(connectionId);
+  const documents = hasDocumentView(docKindOf(connectionId));
+  // Table or JSON, per result of the current run (not persisted).
+  const [jsonViews, setJsonViews] = useState<Record<string, boolean>>({});
   const stripRef = useRef<HTMLDivElement>(null);
   // Which result tab is open; reset by `key` when a new run starts.
   const [picked, setPicked] = useState<{ runId: string | null; at: number }>({ runId: run.runId, at: 0 });
   const at = Math.min(picked.runId === run.runId ? picked.at : 0, Math.max(0, run.results.length - 1));
   const result = run.results[at];
   const showResult = run.panel === 'result' && result !== undefined;
+  const viewKey = `${run.runId}:${result?.id}`;
+  const asJson = documents && jsonViews[viewKey] === true;
   const showExplain = run.panel === 'explain';
   const hasExplain = run.explain !== null || run.explainError !== null;
   const readStatement = result ? run.plan?.stmts.find((s) => s.index === result.index)?.kind === 'read' : false;
@@ -168,6 +175,21 @@ function ResultPanelView({
           </button>
         )}
         {showResult && !collapsed && <Summary result={result} />}
+        {showResult && !collapsed && documents && result.columns.length > 0 && (
+          <div className="qr-view-toggle" role="group" aria-label="Result view">
+            {([false, true] as const).map((json) => (
+              <button
+                key={String(json)}
+                type="button"
+                className="btn small"
+                aria-pressed={asJson === json}
+                onClick={() => setJsonViews((v) => ({ ...v, [viewKey]: json }))}
+              >
+                {json ? 'JSON' : 'Table'}
+              </button>
+            ))}
+          </div>
+        )}
         {showResult && !collapsed && result.columns.length > 0 && (
           <button
             type="button"
@@ -236,7 +258,7 @@ function ResultPanelView({
               Large result: {result.rowCount} rows are kept in memory.
             </div>
           )}
-          <ResultGrid key={result.id} result={result} engine={engine} />
+          {asJson ? <DocumentView key={result.id} result={result} /> : <ResultGrid key={result.id} result={result} engine={engine} />}
         </>
       ) : showExplain ? (
         <ExplainView tabId={tabId} />

@@ -17,8 +17,26 @@ const redis = (id: string, name: string, env: 'production' | null) =>
     options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0, driver: { kind: 'redis', db: 0 } },
   }).config;
 
+const mongo = (id: string, name: string) =>
+  config(id, name, {
+    kind: 'mongo',
+    port: 27017,
+    username: '',
+    default_db: 'shop',
+    options: {
+      version: 1,
+      connect_timeout_s: 10,
+      ssh_timeout_s: 10,
+      charset: null,
+      application_name: null,
+      query_timeout_s: 0,
+      driver: { kind: 'mongo', srv: false, auth_source: null, replica_set: null, direct_connection: false, extra_hosts: [] },
+    },
+  }).config;
+
 async function setup(page: Page) {
   const backend = createBackend();
+  await backend.handlers.create_connection!({ cfg: mongo(ids.legacy, 'docs') });
   await backend.handlers.create_connection!({ cfg: redis(ids.analytics, 'cache', null) });
   await backend.handlers.create_connection!({ cfg: redis(ids.prod, 'cache-prod', 'production') });
   await installBackend(page, backend.handlers);
@@ -76,6 +94,34 @@ test.describe('query tab of a Redis connection (browser, fake IPC backend)', () 
     const rows = page.getByTestId('history-row');
     await expect(rows.filter({ hasText: 'SET a 1' })).toHaveCount(1);
     await expect(rows.filter({ hasText: 'GET a' })).toHaveCount(1);
+  });
+
+  test('a MongoDB result switches between the Table and the JSON view; Redis has no switch', async ({ page }) => {
+    await setup(page);
+    await newTab(page, 'docs');
+    await runLine(page, 'db.orders.find({})');
+    await expect(byId(page, 'result-grid')).toBeVisible();
+    const table = page.getByRole('button', { name: 'Table', exact: true });
+    const json = page.getByRole('button', { name: 'JSON', exact: true });
+    await expect(table).toHaveAttribute('aria-pressed', 'true');
+
+    await json.click();
+    await expect(json).toHaveAttribute('aria-pressed', 'true');
+    await expect(byId(page, 'result-grid')).toHaveCount(0);
+    const docs = page.getByTestId('document');
+    await expect(docs).toHaveCount(3);
+    // 2-space indent, one field per line.
+    await expect(docs.first()).toContainText('"_id":');
+    await expect(docs.first().locator('pre')).toHaveText(/^\{\n {2}"_id": /);
+
+    await table.click();
+    await expect(byId(page, 'result-grid')).toBeVisible();
+    await expect(docs).toHaveCount(0);
+
+    await newTab(page, 'cache');
+    await runLine(page, 'GET a');
+    await expect(byId(page, 'result-grid')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'JSON', exact: true })).toHaveCount(0);
   });
 
   test('FLUSHDB on Production asks for the connection name before it runs', async ({ page }) => {

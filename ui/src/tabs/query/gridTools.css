@@ -186,6 +186,42 @@
   font-family: var(--font-mono);
 }
 
+/* Table / JSON switch in the result header. */
+.qr-view-toggle {
+  flex: none;
+  display: inline-flex;
+  margin-left: 8px;
+}
+
+.qr-view-toggle button[aria-pressed='true'] {
+  background: var(--dnt-bg-selected);
+}
+
+/* JSON view of a document result. */
+.qr-docs {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+}
+
+.qr-doc {
+  position: relative;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--dnt-border-subtle);
+}
+
+.qr-doc-copy {
+  position: absolute;
+  top: 4px;
+  right: 8px;
+}
+
+.qr-doc-more {
+  padding: 8px 12px;
+  color: var(--dnt-fg-muted);
+}
+
 .jt-children {
   padding-left: 14px;
 }
