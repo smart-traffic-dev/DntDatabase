@@ -585,25 +585,28 @@ mod tests {
 
     const NESTED_EJSON: &str = r#"{"a":{"id":{"$oid":"507f1f77bcf86cd799439011"},"at":{"$date":{"$numberLong":"1700000000123"}},"n":{"$numberLong":"5"},"d":{"$numberDecimal":"1.50"}}}"#;
 
-    /// Half of `nested_types_round_trip_canonical_ejson`: the canonical text is pinned.
-    /// TODO(Task 6): the other half (below, commented out) needs `shell::literal`.
+    /// The canonical text of the nested document is pinned.
     #[test]
     fn nested_types_round_trip_canonical_ejson_text() {
         let text = canonical_ejson(&Bson::Document(nested()));
         assert_eq!(text, NESTED_EJSON);
     }
 
-    // TODO(Task 6): turn this into the real `nested_types_round_trip_canonical_ejson`
-    // (drop `_text` above, un-ignore) once `crate::shell::literal::parse_document` exists:
-    //
-    // #[test]
-    // fn nested_types_round_trip_canonical_ejson() {
-    //     let d = nested();
-    //     let text = canonical_ejson(&Bson::Document(d.clone()));
-    //     assert_eq!(text, NESTED_EJSON);
-    //     let parsed = crate::shell::literal::parse_document(&text).unwrap();
-    //     assert_eq!(parsed, d);
-    // }
+    /// Document -> canonical Extended JSON -> shell literal parser -> the same document.
+    #[test]
+    fn nested_types_round_trip_canonical_ejson() {
+        let d = nested();
+        let text = canonical_ejson(&Bson::Document(d.clone()));
+        assert_eq!(text, NESTED_EJSON);
+        let parsed = crate::shell::literal::parse_document(&text).unwrap();
+        assert_eq!(parsed, d);
+        // And through the `Value::Json` cell of the data view.
+        let Value::Json(cell) = bson_to_value(&Bson::Document(d.clone()), &CellMode::Preview)
+        else {
+            panic!("document cell is not JSON")
+        };
+        assert_eq!(crate::shell::literal::parse_document(&cell).unwrap(), d);
+    }
 
     #[test]
     fn int_kind_follows_db_type() {
