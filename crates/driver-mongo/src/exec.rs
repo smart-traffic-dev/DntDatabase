@@ -15,7 +15,7 @@ use dnt_core::value::{FullValue, Value};
 use mongodb::bson::oid::ObjectId;
 use mongodb::bson::{doc, Bson, Document};
 use mongodb::error::ErrorKind;
-use mongodb::{Client, Cursor};
+use mongodb::{Client, ClientSession, Cursor};
 
 use crate::rows::{column_metas, columns_of, row_of};
 use crate::shell::literal::integral_value;
@@ -1005,14 +1005,26 @@ impl Output {
 
 /// Sends `plan` and buffers its result: a cursor is read until `opts.max_rows + 1`
 /// documents, its end, or `opts.stop`; a cursor left open is dropped (the crate kills it).
-/// `class`: the command's class, for what a stop says about its outcome.
+/// `class`: the command's class, for what a stop says about its outcome. With `session`
+/// (a transaction of `execute_atomic`, whose `Client` `client` must be), the command runs
+/// in it; only a command without a cursor can.
 pub(crate) async fn run(
     client: &Client,
     plan: Plan,
     opts: &ExecOptions,
     class: &CommandClass,
+    session: Option<&mut ClientSession>,
 ) -> Result<Output, Fail> {
     let db = client.database(&plan.db);
+    if let Some(s) = session {
+        if plan.cursor {
+            return Err(Fail::Db(DbError::Internal {
+                message: "a command with a cursor cannot run in a transaction".into(),
+            }));
+        }
+        let reply = db.run_command(plan.body).session(s).await?;
+        return reply_output(plan.shape, reply, opts).map_err(Fail::Db);
+    }
     if plan.cursor {
         let mut action = db
             .run_cursor_command(plan.body)

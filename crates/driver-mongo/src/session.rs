@@ -6,12 +6,14 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use dnt_core::command::{CommandClass, CommandLanguage, CommandSession, ParsedCommand};
+use dnt_core::command::{
+    AtomicFailure, CommandClass, CommandLanguage, CommandSession, ParsedCommand,
+};
 use dnt_core::config::ResolvedConfig;
 use dnt_core::data_access::{DataAccess, KeyEdit, PageSpec};
 use dnt_core::driver::{
-    CancelHandle, Engine, ExecOptions, ExecProgress, Introspector, RowSink, Session, StmtOutcome,
-    StopSignal,
+    CancelHandle, Engine, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
+    StmtOutcome, StopSignal,
 };
 use dnt_core::edit::EditSet;
 use dnt_core::error::{ConnectStage, DbError};
@@ -22,8 +24,10 @@ use dnt_core::meta::{
 use dnt_core::server::ServerInfo;
 use dnt_core::sql::filter::DataFilter;
 use dnt_core::tx::TxState;
-use mongodb::bson::{doc, Uuid};
-use mongodb::Client;
+use dnt_core::value::{ColumnMeta, Value};
+use mongodb::bson::{doc, Bson, Uuid};
+use mongodb::error::UNKNOWN_TRANSACTION_COMMIT_RESULT;
+use mongodb::{Client, ClientSession};
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::cancel::{self, MongoCanceller};
@@ -149,17 +153,24 @@ impl MongoSession {
     /// that completes during the grace keeps its result, which is late. One still running at
     /// the deadline is given up ([`ExecProgress::GraceExpired`]): its future is dropped and
     /// the `Client` rebuilt.
+    ///
+    /// With `session` (a transaction of `execute_atomic`), the command runs in it, on the
+    /// session's `Client`.
     async fn run_watched(
         &self,
         plan: exec::Plan,
         opts: &ExecOptions,
         class: &CommandClass,
         sink: &mut dyn RowSink,
+        session: Option<&mut ClientSession>,
     ) -> Result<(exec::Output, bool), DbError> {
-        let client = self.client();
+        let client = match &session {
+            Some(s) => s.client(),
+            None => self.client(),
+        };
         let comment = plan.comment.clone();
         let limit = if plan.read { None } else { opts.timeout };
-        let mut fut = Box::pin(exec::run(&client, plan, opts, class));
+        let mut fut = Box::pin(exec::run(&client, plan, opts, class, session));
         let expiry = async {
             match limit {
                 Some(d) => tokio::time::sleep(d).await,
@@ -227,7 +238,7 @@ impl MongoSession {
         };
         let plan = exec::plan(&sample, &self.db(), &sample_opts, comment)?;
         let (out, late) = self
-            .run_watched(plan, &sample_opts, &CommandClass::Read, sink)
+            .run_watched(plan, &sample_opts, &CommandClass::Read, sink, None)
             .await?;
         // A sample that outlived a stop (or a timeout) ends the read: it is not sent.
         if let Some(trigger) = sample_ended_by(late, opts.stop.is_stopped()) {
@@ -416,7 +427,11 @@ impl CommandSession for MongoSession {
         };
         let plan = exec::plan(shell, &self.db(), opts, &comment)?;
         let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
-        let (output, late) = self.run_watched(plan, opts, &cmd.class, sink).await?;
+        let (output, late) = self.run_watched(plan, opts, &cmd.class, sink, None).await?;
+        // An edit applied on its own (no transactions): a document gone stops the apply.
+        if let Some(id) = &payload.document {
+            data::check_found(id, output.affected)?;
+        }
         if let Some(db) = moves_to {
             *self.current_db.lock().unwrap_or_else(|p| p.into_inner()) = db;
         }
@@ -426,13 +441,239 @@ impl CommandSession for MongoSession {
             late_completion: late,
         })
     }
+
+    /// `cmds` as one transaction (spec §6.4): a `ClientSession` starts a transaction, the
+    /// commands run in it in order (each as `execute_command` runs it: comment, timeout,
+    /// stop and cancel grace), and it commits.
+    ///
+    /// - Without transactions (a standalone server): the default `Unsupported`, index 0,
+    ///   nothing sent.
+    /// - Every command is checked and planned before anything is sent; a refused one
+    ///   fails at its index, rolled back (nothing sent), except an `Unsupported` one,
+    ///   which is reported as the default's is (index 0, not rolled back).
+    /// - A command that fails, an edit whose document no longer exists
+    ///   (`DocumentNotFound`) or a stop aborts the transaction: `rolled_back: true`. Its
+    ///   error then has `outcome_unknown: false` and `was_in_tx: true`, since nothing of
+    ///   an uncommitted transaction takes effect.
+    /// - A commit whose result is unknown (`UnknownTransactionCommitResult`) is retried
+    ///   once, the only automatic retry of the driver (commit is idempotent by
+    ///   `txnNumber`); still unknown, the failure is `ConnectionLost { outcome_unknown:
+    ///   true }` at the last index, not rolled back. Any other commit error is known not
+    ///   to have committed: rolled back. An abort's single retry is the crate's own (it
+    ///   retries `abortTransaction` once and ignores its errors, as the transactions spec
+    ///   says; a second `abort_transaction` call is refused by the crate).
+    async fn execute_atomic(
+        &self,
+        cmds: &[ParsedCommand],
+        opts: &ExecOptions,
+    ) -> Result<Vec<StmtOutcome>, AtomicFailure> {
+        if !self.info.capabilities.transactions {
+            return Err(AtomicFailure {
+                index: 0,
+                error: DbError::Unsupported {
+                    feature: "transactions".into(),
+                    version: String::new(),
+                },
+                rolled_back: false,
+            });
+        }
+        let unsent = |index: usize, error: DbError| AtomicFailure {
+            index,
+            error,
+            rolled_back: true,
+        };
+        let uuid = Uuid::new().to_string();
+        let comment = cancel::comment_of(&uuid);
+        let mut steps = Vec::with_capacity(cmds.len());
+        for (index, cmd) in cmds.iter().enumerate() {
+            steps.push(self.atomic_step(cmd, opts, &comment).map_err(|e| match e {
+                // As the default's: the backend reports it as a plain error, nothing sent.
+                DbError::Unsupported { .. } => AtomicFailure {
+                    index: 0,
+                    error: e,
+                    rolled_back: false,
+                },
+                e => unsent(index, e),
+            })?);
+        }
+        let Some(last) = steps.len().checked_sub(1) else {
+            return Ok(Vec::new());
+        };
+        if opts.stop.is_stopped() {
+            return Err(unsent(0, DbError::cancelled()));
+        }
+        let _running = self.start(uuid, CommandClass::Write, opts);
+        let mut session = self
+            .client()
+            .start_session()
+            .await
+            .map_err(|e| unsent(0, self.mapped(&e, &CommandClass::Read)))?;
+        let mut start = session.start_transaction();
+        if let Some(limit) = opts.timeout {
+            start = start.max_commit_time(limit);
+        }
+        start
+            .await
+            .map_err(|e| unsent(0, self.mapped(&e, &CommandClass::Read)))?;
+        let mut outcomes = Vec::with_capacity(steps.len());
+        for (index, step) in steps.into_iter().enumerate() {
+            let ran = if opts.stop.is_stopped() {
+                Err(DbError::cancelled())
+            } else {
+                self.run_step(step, opts, &mut session).await
+            };
+            match ran {
+                Ok(out) => outcomes.push(out),
+                Err(error) => {
+                    abort(&mut session).await;
+                    return Err(AtomicFailure {
+                        index,
+                        error: in_transaction(error),
+                        rolled_back: true,
+                    });
+                }
+            }
+        }
+        // Stopped after the last command: not committed.
+        if opts.stop.is_stopped() {
+            abort(&mut session).await;
+            return Err(AtomicFailure {
+                index: last,
+                error: in_transaction(DbError::cancelled()),
+                rolled_back: true,
+            });
+        }
+        match commit(&mut session).await {
+            Ok(()) => Ok(outcomes),
+            Err(e) => {
+                let unknown = e.contains_label(UNKNOWN_TRANSACTION_COMMIT_RESULT);
+                let mapped = self.mapped(&e, &CommandClass::Write);
+                Err(if unknown {
+                    AtomicFailure {
+                        index: last,
+                        error: DbError::ConnectionLost {
+                            was_in_tx: true,
+                            outcome_unknown: true,
+                            message: format!("the commit's outcome is unknown: {mapped}"),
+                        },
+                        rolled_back: false,
+                    }
+                } else {
+                    AtomicFailure {
+                        index: last,
+                        error: in_transaction(mapped),
+                        rolled_back: true,
+                    }
+                })
+            }
+        }
+    }
 }
 
-/// Document edits come with plan Task 12; MongoDB has no keys.
-fn not_yet(what: &str) -> DbError {
-    DbError::Unsupported {
-        feature: format!("{what} on MongoDB"),
-        version: String::new(),
+/// One command of an `execute_atomic` unit, planned before anything is sent.
+struct AtomicStep {
+    plan: exec::Plan,
+    class: CommandClass,
+    /// The edited document's `_id` ([`crate::shell::Payload::document`]).
+    document: Option<Bson>,
+}
+
+impl MongoSession {
+    /// Checks and plans `cmd` for a transaction: read-only refuses it as
+    /// `execute_command` would, and only a command without a cursor runs in one.
+    fn atomic_step(
+        &self,
+        cmd: &ParsedCommand,
+        opts: &ExecOptions,
+        comment: &str,
+    ) -> Result<AtomicStep, DbError> {
+        let payload = exec::payload_of(cmd)?;
+        if self.read_only {
+            exec::check_read_only(cmd)?;
+        }
+        let plan = exec::plan(&payload.cmd, &self.db(), opts, comment)?;
+        if plan.cursor || payload.typed.is_some() {
+            return Err(DbError::Internal {
+                message: format!("`{}` cannot run in a transaction", cmd.name),
+            });
+        }
+        Ok(AtomicStep {
+            plan,
+            class: cmd.class.clone(),
+            document: payload.document.clone(),
+        })
+    }
+
+    /// Runs one planned command in the transaction of `session`.
+    async fn run_step(
+        &self,
+        step: AtomicStep,
+        opts: &ExecOptions,
+        session: &mut ClientSession,
+    ) -> Result<StmtOutcome, DbError> {
+        let started = Instant::now();
+        let (output, late) = self
+            .run_watched(step.plan, opts, &step.class, &mut Discard, Some(session))
+            .await?;
+        if let Some(id) = &step.document {
+            data::check_found(id, output.affected)?;
+        }
+        let summary = exec::emit(&mut Discard, output, opts, started)?;
+        Ok(StmtOutcome {
+            results: vec![summary],
+            late_completion: late,
+        })
+    }
+}
+
+/// The results of an atomic unit are not streamed.
+struct Discard;
+
+impl RowSink for Discard {
+    fn result_start(&mut self, _cols: &[ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+    fn result_end(&mut self, _summary: &ResultSummary) {}
+}
+
+/// How long an abort may take. It only ends the transaction sooner: one that is never
+/// committed never takes effect, and the server ends it on its own.
+const ABORT_LIMIT: Duration = Duration::from_secs(5);
+
+/// Aborts the transaction of `session`. The crate retries `abortTransaction` once and
+/// ignores its errors.
+async fn abort(session: &mut ClientSession) {
+    let _ = tokio::time::timeout(ABORT_LIMIT, session.abort_transaction()).await;
+}
+
+/// Commits the transaction of `session`, once more when the result is unknown.
+async fn commit(session: &mut ClientSession) -> mongodb::error::Result<()> {
+    match session.commit_transaction().await {
+        Err(e) if e.contains_label(UNKNOWN_TRANSACTION_COMMIT_RESULT) => {
+            session.commit_transaction().await
+        }
+        done => done,
+    }
+}
+
+/// The error of a command in a transaction that was then aborted: whatever it did was
+/// rolled back, so its outcome is known.
+fn in_transaction(e: DbError) -> DbError {
+    match e {
+        DbError::Cancelled { .. } => DbError::Cancelled {
+            outcome_unknown: false,
+            was_in_tx: true,
+        },
+        DbError::Timeout { stage, .. } => DbError::Timeout {
+            stage,
+            outcome_unknown: false,
+            was_in_tx: true,
+        },
+        DbError::ConnectionLost { message, .. } => DbError::ConnectionLost {
+            was_in_tx: true,
+            outcome_unknown: false,
+            message,
+        },
+        other => other,
     }
 }
 
@@ -492,21 +733,75 @@ impl DataAccess for MongoSession {
 
     fn build_edits(
         &self,
-        _obj: &ObjectRef,
-        _detail: &TableDetail,
-        _edits: &EditSet,
+        obj: &ObjectRef,
+        detail: &TableDetail,
+        edits: &EditSet,
     ) -> Result<Vec<ParsedCommand>, DbError> {
-        Err(not_yet("editing documents"))
+        data::build_edits(obj, detail, edits)
     }
 
+    /// MongoDB has no keys.
     fn build_key_edit(&self, _db: &str, _edit: &KeyEdit) -> Result<Vec<ParsedCommand>, DbError> {
-        Err(not_yet("key edits"))
+        Err(DbError::Unsupported {
+            feature: "key edits on MongoDB".into(),
+            version: String::new(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_aborted_transaction_applied_nothing() {
+        let unknown = [
+            DbError::Cancelled {
+                outcome_unknown: true,
+                was_in_tx: false,
+            },
+            DbError::Timeout {
+                stage: ConnectStage::Execute,
+                outcome_unknown: true,
+                was_in_tx: false,
+            },
+            DbError::ConnectionLost {
+                was_in_tx: false,
+                outcome_unknown: true,
+                message: "reset".into(),
+            },
+        ];
+        for e in unknown {
+            match in_transaction(e) {
+                DbError::Cancelled {
+                    outcome_unknown: false,
+                    was_in_tx: true,
+                }
+                | DbError::Timeout {
+                    outcome_unknown: false,
+                    was_in_tx: true,
+                    ..
+                }
+                | DbError::ConnectionLost {
+                    outcome_unknown: false,
+                    was_in_tx: true,
+                    ..
+                } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+        // A server error stays as it is.
+        let server = DbError::Server {
+            code: Some("DocumentNotFound".into()),
+            sqlstate: None,
+            message: "m".into(),
+            position: None,
+        };
+        assert!(matches!(
+            in_transaction(server),
+            DbError::Server { code: Some(c), .. } if c == "DocumentNotFound"
+        ));
+    }
 
     #[test]
     fn a_stopped_or_late_sample_sends_no_read() {

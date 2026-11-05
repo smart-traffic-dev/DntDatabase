@@ -12,6 +12,7 @@ use std::sync::Arc;
 use dnt_core::command::{CommandLanguage, CommandParseError, CommandSpan, ParsedCommand};
 use dnt_core::redact::Redacted;
 use dnt_core::sql::filter::DataFilter;
+use mongodb::bson::Bson;
 
 pub use classify::{has_out_or_merge, OutKind};
 use lexer::lex_strict;
@@ -56,6 +57,11 @@ pub(crate) struct Payload {
     /// filter. Until then `cmd` holds the filter with every value as text. `None` for
     /// everything else.
     pub typed: Option<DataFilter>,
+    /// A data-view edit (`updateOne` / `deleteOne`, see `data.rs`) of the document with
+    /// this `_id`: when it matches no document, the document no longer exists and the
+    /// command fails with `DocumentNotFound` (spec §6.4). `None` for everything else, so a
+    /// console `updateOne` that matches nothing is no error.
+    pub document: Option<Bson>,
 }
 
 impl CommandLanguage for MongoLanguage {
@@ -80,7 +86,11 @@ impl CommandLanguage for MongoLanguage {
             unbounded: c.unbounded,
             drops: c.drops,
             session_effect: c.session_effect,
-            payload: Arc::new(Payload { cmd, typed: None }),
+            payload: Arc::new(Payload {
+                cmd,
+                typed: None,
+                document: None,
+            }),
         })
     }
 

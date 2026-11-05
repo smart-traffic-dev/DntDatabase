@@ -1,5 +1,5 @@
-//! The data view's commands (spec §6.2, §6.3): `page` and `count` (this half), and the
-//! edits (`build_edits`, plan Task 12).
+//! The data view's commands (spec §6.2, §6.3): `page`, `count`, and the edits
+//! ([`build_edits`]).
 //!
 //! `page` is `find(filter).sort(sort + {_id: 1}).skip(skip).limit(limit)` and `count` is
 //! `countDocuments(filter)`, both in the object's database and classified like the same
@@ -22,21 +22,26 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use dnt_core::command::ParsedCommand;
 use dnt_core::data_access::PageSpec;
+use dnt_core::edit::{CellInput, EditSet, RowEdit, RowRef};
 use dnt_core::error::DbError;
-use dnt_core::meta::{ObjectKind, ObjectRef};
+use dnt_core::meta::{ObjectKind, ObjectRef, TableDetail};
 use dnt_core::sql::filter::{
     DataFilter, FilterCond, FilterMode, FilterOp, SortDir, SortSpec, MAX_CONDITIONS,
     MAX_VALUE_BYTES,
 };
+use dnt_core::value::Value;
 use mongodb::bson::oid::ObjectId;
-use mongodb::bson::{doc, Bson, Decimal128, Document, Regex};
+use mongodb::bson::spec::BinarySubtype;
+use mongodb::bson::{doc, Binary, Bson, Decimal128, Document, Regex};
 
-use crate::rows::canonical_ejson;
+use crate::rows::{canonical_ejson, value_to_bson};
 use crate::shell::classify::classify;
 use crate::shell::literal::{parse_document, parse_iso_date, uuid_binary};
-use crate::shell::{CollMethod, Modifier, Payload, ShellCommand};
+use crate::shell::{lex, parse_literal, CollMethod, Modifier, Payload, ShellCommand, ShellError};
 
 /// Keys that run JavaScript on the server, refused anywhere in a raw filter (as core's
 /// `check_raw_json` does for the JSON it reads).
@@ -68,7 +73,14 @@ pub(crate) fn page(obj: &ObjectRef, spec: &PageSpec) -> Result<ParsedCommand, Db
         Modifier::Skip(skip),
         Modifier::Limit(i64::from(spec.limit)),
     ];
-    build(obj, CollMethod::Find, filter, modifiers, typed)
+    build(
+        obj,
+        CollMethod::Find,
+        vec![filter.into()],
+        modifiers,
+        typed,
+        None,
+    )
 }
 
 /// The number of documents of `obj` (matching `filter`): `countDocuments(filter)`.
@@ -77,7 +89,14 @@ pub(crate) fn count(
     filter: Option<&DataFilter>,
 ) -> Result<ParsedCommand, DbError> {
     let (filter, typed) = filter_of(filter)?;
-    build(obj, CollMethod::CountDocuments, filter, Vec::new(), typed)
+    build(
+        obj,
+        CollMethod::CountDocuments,
+        vec![filter.into()],
+        Vec::new(),
+        typed,
+        None,
+    )
 }
 
 /// Collections and views have documents, in a named database.
@@ -105,16 +124,17 @@ fn check_object(obj: &ObjectRef) -> Result<(), DbError> {
     Ok(())
 }
 
-/// `method(filter)` with `modifiers` on `obj`, classified as the console classifies it.
+/// `method(args)` with `modifiers` on `obj`, classified as the console classifies it.
+/// `typed`, `document`: see [`Payload`].
 fn build(
     obj: &ObjectRef,
     method: CollMethod,
-    filter: Document,
+    args: Vec<Bson>,
     modifiers: Vec<Modifier>,
     typed: Option<DataFilter>,
+    document: Option<Bson>,
 ) -> Result<ParsedCommand, DbError> {
     check_object(obj)?;
-    let args = vec![Bson::Document(filter)];
     let mut text = coll_text(Some(&obj.database), &obj.name, method, &args, &modifiers);
     if typed.is_some() {
         text.push_str(TYPED_NOTE);
@@ -136,7 +156,11 @@ fn build(
         unbounded: c.unbounded,
         drops: c.drops,
         session_effect: c.session_effect,
-        payload: Arc::new(Payload { cmd, typed }),
+        payload: Arc::new(Payload {
+            cmd,
+            typed,
+            document,
+        }),
     })
 }
 
@@ -478,6 +502,219 @@ fn plain_name(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+// ---- Edits (spec §6.3) ----
+
+pub(crate) const ID_CANNOT_CHANGE: &str = "_id cannot be changed";
+pub(crate) const FIELD_REFUSED: &str =
+    "Fields whose name contains \".\" or starts with \"$\" cannot be edited here; use the console";
+pub(crate) const NO_DEFAULT: &str = "Default values are not available for MongoDB";
+pub(crate) const NO_LOADED: &str = "Cut cells cannot be edited for MongoDB";
+
+/// A refused edit: `Config` on field `edit`.
+fn edit_error(message: impl Into<String>) -> DbError {
+    config("edit", message)
+}
+
+/// A `Config` error of a cell's value (from §6.2's coercion or §7's mapping) as an edit's.
+fn as_edit(e: DbError) -> DbError {
+    match e {
+        DbError::Config { message, .. } => edit_error(message),
+        other => other,
+    }
+}
+
+/// The commands that apply `edits` to `obj`, one per edit, in order (spec §6.3):
+///
+/// - `Update`: `updateOne({_id}, {$set: {…}, $unset: {…}})` (an update without changes
+///   sends nothing);
+/// - `Insert`: `insertOne({…})` (without `_id`, one is made when it is sent);
+/// - `Delete`: `deleteOne({_id})`.
+///
+/// `_id` is the row's key value rebuilt by §7 (a binary `_id` keeps its subtype and
+/// bytes). A cell becomes BSON by its `CellInput` and the field's sampled type
+/// (`detail`): see [`cell_value`]. Refused (`Config`, field `edit`), and then nothing is
+/// built: changing `_id`, a field whose name holds `.` or starts with `$`, `Default`,
+/// `Loaded`, and a value its field's type cannot take.
+///
+/// Each command's `text` is in the console's syntax and parses back to the same command
+/// ([`coll_text`]); an update or delete carries its `_id` ([`Payload::document`]), so
+/// matching no document is `DocumentNotFound` ([`document_not_found`]).
+pub(crate) fn build_edits(
+    obj: &ObjectRef,
+    detail: &TableDetail,
+    edits: &EditSet,
+) -> Result<Vec<ParsedCommand>, DbError> {
+    let types: BTreeMap<&str, &str> = detail
+        .columns
+        .iter()
+        .map(|c| (c.name.as_str(), c.db_type.as_str()))
+        .collect();
+    let ty = |field: &str| types.get(field).copied();
+    let mut out = Vec::with_capacity(edits.edits.len());
+    for edit in &edits.edits {
+        match edit {
+            RowEdit::Update { row, set } => {
+                let id = row_id(row, ty("_id"))?;
+                let mut fields = Document::new();
+                let mut unset = Document::new();
+                for (field, input) in set {
+                    if field == "_id" {
+                        return Err(edit_error(ID_CANNOT_CHANGE));
+                    }
+                    check_field(field)?;
+                    match cell_value(input, ty(field))? {
+                        Some(v) => fields.insert(field.clone(), v),
+                        None => unset.insert(field.clone(), ""),
+                    };
+                }
+                let mut update = Document::new();
+                if !fields.is_empty() {
+                    update.insert("$set", fields);
+                }
+                if !unset.is_empty() {
+                    update.insert("$unset", unset);
+                }
+                if update.is_empty() {
+                    continue;
+                }
+                let filter = doc! { "_id": id.clone() };
+                out.push(build(
+                    obj,
+                    CollMethod::UpdateOne,
+                    vec![filter.into(), update.into()],
+                    Vec::new(),
+                    None,
+                    Some(id),
+                )?);
+            }
+            RowEdit::Insert { values } => {
+                let mut new = Document::new();
+                for (field, input) in values {
+                    check_field(field)?;
+                    if let Some(v) = cell_value(input, ty(field))? {
+                        new.insert(field.clone(), v);
+                    }
+                }
+                out.push(build(
+                    obj,
+                    CollMethod::InsertOne,
+                    vec![new.into()],
+                    Vec::new(),
+                    None,
+                    None,
+                )?);
+            }
+            RowEdit::Delete { row } => {
+                let id = row_id(row, ty("_id"))?;
+                let filter = doc! { "_id": id.clone() };
+                out.push(build(
+                    obj,
+                    CollMethod::DeleteOne,
+                    vec![filter.into()],
+                    Vec::new(),
+                    None,
+                    Some(id),
+                )?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The `_id` of a loaded row, rebuilt from its key value by §7.
+fn row_id(row: &RowRef, db_type: Option<&str>) -> Result<Bson, DbError> {
+    let (_, id) = row
+        .key
+        .iter()
+        .find(|(k, _)| k == "_id")
+        .ok_or_else(|| edit_error("The document has no _id to find it by"))?;
+    value_to_bson(id, db_type).map_err(as_edit)
+}
+
+/// A field this view can set: no `.` (a path) and no leading `$` (an operator).
+fn check_field(field: &str) -> Result<(), DbError> {
+    if field.contains('.') || field.starts_with('$') {
+        return Err(edit_error(FIELD_REFUSED));
+    }
+    Ok(())
+}
+
+/// The BSON value of one cell (spec §6.3), `None` to remove the field (`Unset`):
+///
+/// - `Null`: null;
+/// - `Text`: by the field's sampled type as a filter value is (§6.2); a `mixed(…)` field
+///   takes the text as a §4.3 literal when it is one, else as text; an `object` / `array`
+///   field takes a §4.3 literal; a field the sample did not see keeps the text;
+/// - `Value`: by §7, a JSON value (a document or array) read back by §4.3;
+/// - `Base64`: binary data, subtype 0;
+/// - `Default` and `Loaded` are refused.
+fn cell_value(input: &CellInput, db_type: Option<&str>) -> Result<Option<Bson>, DbError> {
+    Ok(Some(match input {
+        CellInput::Null => Bson::Null,
+        CellInput::Unset => return Ok(None),
+        CellInput::Default => return Err(edit_error(NO_DEFAULT)),
+        CellInput::Loaded { .. } => return Err(edit_error(NO_LOADED)),
+        CellInput::Text { text } => typed_text(text, db_type)?,
+        CellInput::Value {
+            value: Value::Json(json),
+        } => whole_literal(json)
+            .map_err(|e| edit_error(format!("invalid JSON value: {}", e.message)))?,
+        CellInput::Value { value } => value_to_bson(value, db_type).map_err(as_edit)?,
+        CellInput::Base64 { data } => Bson::Binary(Binary {
+            subtype: BinarySubtype::Generic,
+            bytes: B64
+                .decode(data)
+                .map_err(|_| edit_error("The binary value is not valid base64"))?,
+        }),
+    }))
+}
+
+/// Typed text by the field's sampled type (see [`cell_value`]).
+fn typed_text(text: &str, db_type: Option<&str>) -> Result<Bson, DbError> {
+    match db_type {
+        Some(t) if t.starts_with("mixed(") => {
+            Ok(whole_literal(text).unwrap_or_else(|_| Bson::String(text.to_string())))
+        }
+        Some(t @ ("object" | "array")) => whole_literal(text)
+            .map_err(|_| edit_error(format!("Value \"{text}\" is not a valid {t}"))),
+        Some(t) => coerce(text, t).map_err(as_edit),
+        None => Ok(Bson::String(text.to_string())),
+    }
+}
+
+/// `text` as exactly one §4.3 literal.
+fn whole_literal(text: &str) -> Result<Bson, ShellError> {
+    let tokens = lex(text)?;
+    if tokens.is_empty() {
+        return Err(ShellError::new("Expected a value", 0));
+    }
+    let mut at = 0;
+    let v = parse_literal(&tokens, text, &mut at)?;
+    match tokens.get(at) {
+        Some(t) => Err(ShellError::new("Unexpected text after the value", t.start)),
+        None => Ok(v),
+    }
+}
+
+/// An edit's document no longer exists: its `updateOne` / `deleteOne` matched nothing
+/// (spec §6.4). `id` is shown as canonical Extended JSON, as in the command's text.
+pub(crate) fn document_not_found(id: &Bson) -> DbError {
+    DbError::Server {
+        code: Some("DocumentNotFound".into()),
+        sqlstate: None,
+        message: format!("Document {} no longer exists", canonical_ejson(id)),
+        position: None,
+    }
+}
+
+/// `Err(DocumentNotFound)` when the edit of `id` matched no document.
+pub(crate) fn check_found(id: &Bson, affected: Option<u64>) -> Result<(), DbError> {
+    match affected {
+        Some(0) => Err(document_not_found(id)),
+        _ => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,7 +722,7 @@ mod tests {
     use crate::shell::MongoLanguage;
     use dnt_core::command::{CommandClass, CommandLanguage, CommandTarget};
     use dnt_core::data_access::check_read;
-    use dnt_core::meta::ObjectKind;
+    use dnt_core::meta::{ColumnDetail, ObjectKind, TableOptions};
     use dnt_core::sql::filter::{FilterCond, FilterMode, FilterOp, SortDir};
     use mongodb::bson::oid::ObjectId;
     use mongodb::bson::spec::BinarySubtype;
@@ -1043,5 +1280,548 @@ mod tests {
             ..orders()
         };
         assert!(matches!(count(&nodb, None), Err(DbError::Config { .. })));
+    }
+
+    // ---- build_edits (spec §6.3) ----
+
+    const OID2: &str = "65a1b2c3d4e5f60718293a02";
+
+    fn detail(cols: &[(&str, &str)]) -> TableDetail {
+        TableDetail {
+            object: orders(),
+            columns: cols
+                .iter()
+                .enumerate()
+                .map(|(i, (name, db_type))| ColumnDetail {
+                    name: name.to_string(),
+                    ordinal: i as u32 + 1,
+                    db_type: db_type.to_string(),
+                    nullable: *name != "_id",
+                    ..ColumnDetail::default()
+                })
+                .collect(),
+            primary_key: None,
+            indexes: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            triggers: Vec::new(),
+            options: TableOptions::default(),
+            row_estimate: None,
+            size_bytes: None,
+            comment: None,
+        }
+    }
+
+    /// The fields of `orders`, by their sampled type.
+    fn edit_detail() -> TableDetail {
+        detail(&[
+            ("_id", "objectId"),
+            ("name", "string"),
+            ("qty", "int"),
+            ("total", "long"),
+            ("count", "long"),
+            ("price", "double"),
+            ("amount", "decimal"),
+            ("gift", "bool"),
+            ("at", "date"),
+            ("uid", "uuid"),
+            ("mixed", "mixed(int|string)"),
+            ("alt", "mixed(int|string)"),
+            ("shipping", "object"),
+            ("items", "array"),
+            ("token", "binData"),
+            ("note", "null"),
+        ])
+    }
+
+    fn oid(hex: &str) -> Bson {
+        Bson::ObjectId(ObjectId::parse_str(hex).unwrap())
+    }
+
+    fn other(type_name: &str, text: &str) -> Value {
+        Value::Other {
+            type_name: type_name.into(),
+            text: text.into(),
+        }
+    }
+
+    fn row(id: Value) -> RowRef {
+        RowRef {
+            key: vec![("_id".into(), id)],
+            original: Vec::new(),
+            xmin: None,
+            loaded: Vec::new(),
+        }
+    }
+
+    fn text(s: &str) -> CellInput {
+        CellInput::Text { text: s.into() }
+    }
+
+    fn value(v: Value) -> CellInput {
+        CellInput::Value { value: v }
+    }
+
+    fn loaded() -> CellInput {
+        serde_json::from_value(serde_json::json!({
+            "kind": "loaded",
+            "token": "00000000-0000-0000-0000-000000000001",
+        }))
+        .unwrap()
+    }
+
+    fn cells(list: &[(&str, CellInput)]) -> Vec<(String, CellInput)> {
+        list.iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    fn update(id: Value, set: &[(&str, CellInput)]) -> RowEdit {
+        RowEdit::Update {
+            row: row(id),
+            set: cells(set),
+        }
+    }
+
+    fn insert(values: &[(&str, CellInput)]) -> RowEdit {
+        RowEdit::Insert {
+            values: cells(values),
+        }
+    }
+
+    fn delete(id: Value) -> RowEdit {
+        RowEdit::Delete { row: row(id) }
+    }
+
+    fn edits_on(
+        obj: &ObjectRef,
+        d: &TableDetail,
+        edits: Vec<RowEdit>,
+    ) -> Result<Vec<ParsedCommand>, DbError> {
+        build_edits(
+            obj,
+            d,
+            &EditSet {
+                object: obj.clone(),
+                edits,
+                overwrite: false,
+            },
+        )
+    }
+
+    fn edits(edits: Vec<RowEdit>) -> Result<Vec<ParsedCommand>, DbError> {
+        edits_on(&orders(), &edit_detail(), edits)
+    }
+
+    /// The method and arguments of a built command.
+    fn call(cmd: &ParsedCommand) -> (CollMethod, Vec<Bson>) {
+        match &payload_of(cmd).unwrap().cmd {
+            ShellCommand::Coll { method, args, .. } => (*method, args.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn edit_message(r: Result<impl std::fmt::Debug, DbError>) -> String {
+        match r {
+            Err(DbError::Config { field, message }) => {
+                assert_eq!(field.as_deref(), Some("edit"), "{message}");
+                message
+            }
+            other => panic!("expected an edit error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cell_input_table() {
+        let at = Bson::DateTime(DateTime::from_millis(1_730_764_800_123));
+        let uuid = Bson::Binary(Binary {
+            subtype: BinarySubtype::Uuid,
+            bytes: (0u8..16).collect(),
+        });
+        let input = [
+            // Text: by the sampled type (§6.2).
+            ("name", text("Zoe")),
+            ("qty", text("5")),
+            ("total", text("5")),
+            ("price", text("2.5")),
+            ("amount", text("1.10")),
+            ("gift", text("true")),
+            ("at", text("2024-11-05 00:00:00.123")),
+            ("uid", text("00010203-0405-0607-0809-0a0b0c0d0e0f")),
+            // A mixed field: a literal when the text is one, else the text.
+            ("mixed", text("42")),
+            ("alt", text("forty-two")),
+            // An object or array field: the literal replaces the whole field.
+            (
+                "shipping",
+                text(&format!(
+                    "{{carrier: 'UPS', weight_g: NumberLong(2000), ref: ObjectId('{OID2}')}}"
+                )),
+            ),
+            ("items", text("[{sku: 'A-1', qty: 2}]")),
+            // A field the sample did not see keeps the text.
+            ("extra", text("free")),
+            ("note", CellInput::Null),
+            // Value: by §7, the integer width by the sampled type.
+            ("count", value(Value::Int(7))),
+            (
+                "when",
+                value(Value::DateTime("2024-11-05 00:00:00.123".into())),
+            ),
+            ("ref", value(other("objectId", OID2))),
+            (
+                "json",
+                value(Value::Json(r#"{"a": {"$numberLong": "5"}}"#.into())),
+            ),
+            (
+                "token",
+                CellInput::Base64 {
+                    data: "AQID".into(),
+                },
+            ),
+            ("legacy", CellInput::Unset),
+        ];
+        let set = doc! {
+            "name": "Zoe",
+            "qty": 5,
+            "total": 5_i64,
+            "price": 2.5,
+            "amount": "1.10".parse::<Decimal128>().unwrap(),
+            "gift": true,
+            "at": at.clone(),
+            "uid": uuid.clone(),
+            "mixed": 42,
+            "alt": "forty-two",
+            "shipping": { "carrier": "UPS", "weight_g": 2000_i64, "ref": oid(OID2) },
+            "items": [{ "sku": "A-1", "qty": 2 }],
+            "extra": "free",
+            "note": Bson::Null,
+            "count": 7_i64,
+            "when": at.clone(),
+            "ref": oid(OID2),
+            "json": { "a": 5_i64 },
+            "token": Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2, 3] },
+        };
+        let built = edits(vec![
+            update(other("objectId", OID), &input),
+            insert(&input),
+            delete(other("objectId", OID)),
+        ])
+        .unwrap();
+        assert_eq!(built.len(), 3);
+        assert_eq!(
+            call(&built[0]),
+            (
+                CollMethod::UpdateOne,
+                vec![
+                    doc! { "_id": oid(OID) }.into(),
+                    doc! { "$set": set.clone(), "$unset": { "legacy": "" } }.into(),
+                ]
+            )
+        );
+        // Insert: `Unset` leaves the field out.
+        assert_eq!(
+            call(&built[1]),
+            (CollMethod::InsertOne, vec![set.clone().into()])
+        );
+        assert_eq!(
+            call(&built[2]),
+            (CollMethod::DeleteOne, vec![doc! { "_id": oid(OID) }.into()])
+        );
+        // An update or delete names its document; an insert does not.
+        let docs: Vec<Option<Bson>> = built
+            .iter()
+            .map(|c| payload_of(c).unwrap().document.clone())
+            .collect();
+        assert_eq!(docs, [Some(oid(OID)), None, Some(oid(OID))]);
+        for cmd in &built {
+            assert_eq!(cmd.class, CommandClass::Write, "{}", cmd.text);
+            assert!(!cmd.unbounded && cmd.drops.is_empty(), "{}", cmd.text);
+            assert_eq!(
+                cmd.targets,
+                [CommandTarget {
+                    database: Some("dnt_fixture".into()),
+                    name: "orders".into(),
+                }]
+            );
+        }
+        assert_eq!(
+            built.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            ["updateOne", "insertOne", "deleteOne"]
+        );
+
+        // Only removals: `$unset` alone. Nothing to set: no command.
+        let only = edits(vec![
+            update(other("objectId", OID), &[("note", CellInput::Unset)]),
+            update(other("objectId", OID), &[]),
+        ])
+        .unwrap();
+        assert_eq!(only.len(), 1);
+        assert_eq!(
+            call(&only[0]).1[1],
+            Bson::Document(doc! { "$unset": { "note": "" } })
+        );
+
+        // Text the field's type cannot take, as §6.2 says it.
+        let id = || other("objectId", OID);
+        for (field, typed, want) in [
+            ("qty", "x", "Value \"x\" is not a valid int"),
+            ("gift", "yes", "Value \"yes\" is not a valid bool"),
+            (
+                "shipping",
+                "{carrier: ",
+                "Value \"{carrier: \" is not a valid object",
+            ),
+            ("items", "[1,", "Value \"[1,\" is not a valid array"),
+        ] {
+            assert_eq!(
+                edit_message(edits(vec![update(id(), &[(field, text(typed))])])),
+                want
+            );
+            assert_eq!(
+                edit_message(edits(vec![insert(&[(field, text(typed))])])),
+                want
+            );
+        }
+        assert!(edit_message(edits(vec![update(
+            id(),
+            &[("token", CellInput::Base64 { data: "**".into() })]
+        )]))
+        .contains("base64"));
+        // A value §7 cannot write.
+        assert_eq!(
+            edit_message(edits(vec![update(
+                id(),
+                &[("js", value(other("javascript", "1")))]
+            )])),
+            "javascript values are read-only"
+        );
+    }
+
+    #[test]
+    fn id_cannot_change() {
+        for set in [
+            vec![("_id", text(OID2))],
+            vec![("qty", text("1")), ("_id", value(other("objectId", OID2)))],
+            vec![("_id", CellInput::Unset)],
+            vec![("_id", CellInput::Null)],
+        ] {
+            assert_eq!(
+                edit_message(edits(vec![update(other("objectId", OID), &set)])),
+                ID_CANNOT_CHANGE
+            );
+        }
+        // A new document may name its `_id`.
+        let built = edits(vec![insert(&[("_id", text(OID2)), ("qty", text("1"))])]).unwrap();
+        assert_eq!(
+            call(&built[0]).1,
+            [doc! { "_id": oid(OID2), "qty": 1 }.into()]
+        );
+        // A row without `_id` cannot be found again.
+        let no_id = RowEdit::Delete {
+            row: RowRef {
+                key: Vec::new(),
+                ..row(Value::Null)
+            },
+        };
+        edit_message(edits(vec![no_id]));
+    }
+
+    #[test]
+    fn binary_and_other_ids_are_rebuilt() {
+        let d = detail(&[("_id", "mixed(binData|objectId)"), ("qty", "int")]);
+        let cases = [
+            (
+                other("binData", "00:AQID"),
+                Bson::Binary(Binary {
+                    subtype: BinarySubtype::Generic,
+                    bytes: vec![1, 2, 3],
+                }),
+            ),
+            (
+                other("binData", "05:AAECAwQFBgcICQoLDA0ODw=="),
+                Bson::Binary(Binary {
+                    subtype: BinarySubtype::Md5,
+                    bytes: (0u8..16).collect(),
+                }),
+            ),
+            (
+                Value::Uuid("00010203-0405-0607-0809-0a0b0c0d0e0f".into()),
+                Bson::Binary(Binary {
+                    subtype: BinarySubtype::Uuid,
+                    bytes: (0u8..16).collect(),
+                }),
+            ),
+            (Value::Text("sku-1".into()), Bson::String("sku-1".into())),
+            (Value::Int(7), Bson::Int32(7)),
+            (other("objectId", OID), oid(OID)),
+        ];
+        for (id, want) in cases {
+            let built = edits_on(
+                &orders(),
+                &d,
+                vec![update(id.clone(), &[("qty", text("3"))]), delete(id)],
+            )
+            .unwrap();
+            assert_eq!(
+                call(&built[0]).1[0],
+                Bson::Document(doc! { "_id": want.clone() })
+            );
+            assert_eq!(
+                call(&built[1]).1[0],
+                Bson::Document(doc! { "_id": want.clone() })
+            );
+            assert_eq!(payload_of(&built[1]).unwrap().document, Some(want));
+        }
+        // A long `_id` stays a long.
+        let d = detail(&[("_id", "long")]);
+        let built = edits_on(&orders(), &d, vec![delete(Value::Int(5))]).unwrap();
+        assert_eq!(call(&built[0]).1[0], Bson::Document(doc! { "_id": 5_i64 }));
+    }
+
+    #[test]
+    fn dotted_or_dollar_fields_refused() {
+        for field in ["a.b", "shipping.carrier", "$set", "$", ".x"] {
+            assert_eq!(
+                edit_message(edits(vec![update(
+                    other("objectId", OID),
+                    &[(field, text("1"))]
+                )])),
+                FIELD_REFUSED,
+                "{field}"
+            );
+            assert_eq!(
+                edit_message(edits(vec![insert(&[(field, text("1"))])])),
+                FIELD_REFUSED,
+                "{field}"
+            );
+            assert_eq!(
+                edit_message(edits(vec![update(
+                    other("objectId", OID),
+                    &[(field, CellInput::Unset)]
+                )])),
+                FIELD_REFUSED,
+                "{field}"
+            );
+        }
+        // Only a leading `$` is an operator.
+        assert!(edits(vec![insert(&[("price$", text("1"))])]).is_ok());
+    }
+
+    #[test]
+    fn default_and_loaded_refused() {
+        for (input, want) in [(CellInput::Default, NO_DEFAULT), (loaded(), NO_LOADED)] {
+            assert_eq!(
+                edit_message(edits(vec![update(
+                    other("objectId", OID),
+                    &[("qty", input.clone())]
+                )])),
+                want
+            );
+            assert_eq!(
+                edit_message(edits(vec![insert(&[("qty", input.clone())])])),
+                want
+            );
+        }
+        // One refused cell refuses the whole set: nothing is built.
+        assert!(edits(vec![
+            delete(other("objectId", OID)),
+            insert(&[("qty", CellInput::Default)]),
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn edit_text_parses_back() {
+        let set = [
+            ("qty", text("5")),
+            ("total", text("9007199254740993")),
+            ("at", text("2024-11-05T00:00:00Z")),
+            (
+                "shipping",
+                text("{carrier: 'UPS', ref: ObjectId('65a1b2c3d4e5f60718293a02')}"),
+            ),
+            (
+                "token",
+                CellInput::Base64 {
+                    data: "3q2+7w==".into(),
+                },
+            ),
+            ("amount", text("1234.5678")),
+            ("note", CellInput::Null),
+            ("legacy", CellInput::Unset),
+        ];
+        let ids = [
+            other("objectId", OID),
+            other("binData", "00:AQID"),
+            Value::Uuid("00010203-0405-0607-0809-0a0b0c0d0e0f".into()),
+            Value::Text("a \"quoted\" id".into()),
+        ];
+        for obj in [
+            orders(),
+            ObjectRef {
+                name: "my coll.v2".into(),
+                ..orders()
+            },
+        ] {
+            for id in &ids {
+                let built = edits_on(
+                    &obj,
+                    &edit_detail(),
+                    vec![update(id.clone(), &set), insert(&set), delete(id.clone())],
+                )
+                .unwrap();
+                for cmd in &built {
+                    let back = MongoLanguage
+                        .parse(&cmd.text)
+                        .unwrap_or_else(|e| panic!("{}: {e:?}", cmd.text));
+                    assert_eq!(back.name, cmd.name, "{}", cmd.text);
+                    assert_eq!(back.class, cmd.class, "{}", cmd.text);
+                    assert_eq!(back.targets, cmd.targets, "{}", cmd.text);
+                    assert_eq!(
+                        payload_of(&back).unwrap().cmd,
+                        payload_of(cmd).unwrap().cmd,
+                        "{}",
+                        cmd.text
+                    );
+                }
+            }
+        }
+        // The console's syntax, values as canonical Extended JSON.
+        let built = edits(vec![
+            update(
+                other("objectId", OID),
+                &[("qty", text("5")), ("note", CellInput::Unset)],
+            ),
+            insert(&[("name", text("Zoe"))]),
+            delete(other("objectId", OID)),
+        ])
+        .unwrap();
+        let texts: Vec<&str> = built.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "db.getSiblingDB(\"dnt_fixture\").orders.updateOne(\
+                 {\"_id\":{\"$oid\":\"65a1b2c3d4e5f60718293a01\"}}, \
+                 {\"$set\":{\"qty\":{\"$numberInt\":\"5\"}},\"$unset\":{\"note\":\"\"}})",
+                "db.getSiblingDB(\"dnt_fixture\").orders.insertOne({\"name\":\"Zoe\"})",
+                "db.getSiblingDB(\"dnt_fixture\").orders.deleteOne(\
+                 {\"_id\":{\"$oid\":\"65a1b2c3d4e5f60718293a01\"}})",
+            ]
+        );
+    }
+
+    #[test]
+    fn document_not_found_names_the_id() {
+        match document_not_found(&oid(OID)) {
+            DbError::Server { code, message, .. } => {
+                assert_eq!(code.as_deref(), Some("DocumentNotFound"));
+                assert_eq!(
+                    message,
+                    "Document {\"$oid\":\"65a1b2c3d4e5f60718293a01\"} no longer exists"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
