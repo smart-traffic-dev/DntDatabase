@@ -25,6 +25,7 @@ async-trait.workspace = true
 dirs.workspace = true
 dnt-ai.workspace = true
 dnt-core.workspace = true
+dnt-driver-mongo.workspace = true
 dnt-driver-mysql.workspace = true
 dnt-driver-pg.workspace = true
 dnt-query.workspace = true

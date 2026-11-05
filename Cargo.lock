@@ -1832,6 +1832,7 @@ dependencies = [
  "dirs 6.0.0",
  "dnt-ai",
  "dnt-core",
+ "dnt-driver-mongo",
  "dnt-driver-mysql",
  "dnt-driver-pg",
  "dnt-query",

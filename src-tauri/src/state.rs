@@ -8,6 +8,7 @@ use dnt_core::driver::Driver;
 use dnt_core::error::DbError;
 use dnt_core::secret::SecretStore;
 use dnt_core::server::DbKind;
+use dnt_driver_mongo::MongoDriver;
 use dnt_driver_mysql::MySqlDriver;
 use dnt_driver_pg::PgDriver;
 use dnt_store::repo::ConnectionRepo;
@@ -66,6 +67,7 @@ pub fn default_drivers() -> HashMap<DbKind, Arc<dyn Driver>> {
     HashMap::from([
         (DbKind::MySql, Arc::new(MySqlDriver) as Arc<dyn Driver>),
         (DbKind::Postgres, Arc::new(PgDriver) as Arc<dyn Driver>),
+        (DbKind::Mongo, Arc::new(MongoDriver) as Arc<dyn Driver>),
     ])
 }
 
