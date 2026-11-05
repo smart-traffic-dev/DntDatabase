@@ -277,9 +277,14 @@ fn lexable_prefix(text: &str, pos: usize, mut cut: usize) -> (usize, Vec<Token>)
     (pos, Vec::new())
 }
 
-/// A character of a raw `use` name: `[A-Za-z0-9_$-]` or any non-ASCII byte.
-fn raw_name_byte(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, b'_' | b'$' | b'-') || c >= 0x80
+/// A character of a raw `use` name: `[A-Za-z0-9_$-]`, or a non-ASCII character that is
+/// not whitespace (U+FEFF counts as whitespace, as in JavaScript).
+fn raw_name_char(c: char) -> bool {
+    if c.is_ascii() {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '-')
+    } else {
+        !c.is_whitespace() && c != '\u{feff}'
+    }
 }
 
 /// When the lex error at `bad` is inside the name of a `use` that starts a statement:
@@ -287,18 +292,26 @@ fn raw_name_byte(c: u8) -> bool {
 /// `pos` in the same piece.
 fn use_name(text: &str, pos: usize, bad: usize, cur: &[Token]) -> Option<Vec<Token>> {
     let b = text.as_bytes();
-    if !b.get(bad).is_some_and(|&c| raw_name_byte(c)) {
+    if !text.get(bad..)?.chars().next().is_some_and(raw_name_char) {
         return None;
     }
-    // The name around `bad` (whole characters: every byte of a non-ASCII one counts).
-    let mut start = bad;
-    while start > pos && raw_name_byte(b[start - 1]) {
-        start -= 1;
-    }
-    let mut end = bad;
-    while end < b.len() && raw_name_byte(b[end]) {
-        end += 1;
-    }
+    // The name around `bad`, in whole characters; it ends at whitespace, as the parser's
+    // raw name does (U+2028 too, which also ends a `//` comment).
+    let back: usize = text
+        .get(pos..bad)?
+        .chars()
+        .rev()
+        .take_while(|&c| raw_name_char(c))
+        .map(char::len_utf8)
+        .sum();
+    let start = bad - back;
+    let fwd: usize = text
+        .get(bad..)?
+        .chars()
+        .take_while(|&c| raw_name_char(c))
+        .map(char::len_utf8)
+        .sum();
+    let end = bad + fwd;
     // `use`, then at least one blank.
     let mut kw_end = start;
     while kw_end > pos && matches!(b[kw_end - 1], b' ' | b'\t') {
@@ -316,6 +329,12 @@ fn use_name(text: &str, pos: usize, bad: usize, cur: &[Token]) -> Option<Vec<Tok
         return None;
     }
     let mut tokens = shifted(lex_strict(text.get(pos..kw)?, pos > 0).ok()?, pos);
+    // `use` must be a token of its own: the text before it can lex because it is cut
+    // inside a `//` comment that holds the `use`.
+    let with_kw = lex_strict(text.get(pos..kw_end)?, pos > 0).ok()?;
+    if with_kw.len() != tokens.len() + 1 || with_kw.last().is_none_or(|t| pos + t.start != kw) {
+        return None;
+    }
     // A statement start: depth 0 (as `split` counts it), after `;` or a line break.
     let depth = cur.iter().chain(&tokens).fold(0usize, |d, t| match t.kind {
         TokenKind::Punct('(' | '[' | '{') => d + 1,
@@ -406,6 +425,18 @@ mod tests {
         );
         // A lone CR starts a statement for `use` too.
         assert_eq!(pieces("a()\ruse 2024_x"), ["a ( ) use 2024_x"]);
+        // A `use` name stops at whitespace (U+2028 here, which ends the `//` comment that
+        // holds the `use`): nothing after the comment is taken for its name.
+        assert_eq!(
+            pieces("// a ;use \u{2028}\u{203f}\n"),
+            ["[// a ;use \u{2028}\u{203f}\n]"]
+        );
+        let text = "x; use 1é\u{a0}y";
+        let names: Vec<&str> = match lex_script(text).as_slice() {
+            [Piece::Tokens(t)] => t.iter().map(|t| &text[t.start..t.end]).collect(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(names, ["x", ";", "use", "1é", "y"]);
     }
 
     #[test]

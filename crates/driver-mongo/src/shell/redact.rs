@@ -5,10 +5,11 @@
 //! - **Precise**, for a command that lexes and parses. Masked: the value of every key
 //!   whose (decoded) name holds `pwd`, `password` or `secret` (any case, at any depth:
 //!   `ldapQueryPassword`, `client_secret`), and every string or regex whose decoded value
-//!   holds a `mongodb://` / `mongodb+srv://` URI with user info (an `@` in the authority,
+//!   holds a `mongodb://` / `mongodb+srv://` URI with a password (a `:` between `//` and
+//!   the first `@`, whatever `/`, `?` or `#` come before it) or with user info (an `@`
 //!   before the first `/`, `?` or `#`). The password of a URI in the raw text is also
-//!   masked up to the last `@` of its authority. Comments around and between the tokens
-//!   are coarse.
+//!   masked, from that `:` up to the last `@` before whitespace or a quote. Comments
+//!   around and between the tokens are coarse.
 //! - **Coarse**, for everything else. That is a run of commands that do not parse,
 //!   together with the text around it up to the commands that parse on either side
 //!   (comments); the text between parsed commands; and comments inside a parsed command.
@@ -67,11 +68,9 @@ fn is_word(b: u8) -> bool {
 
 const SCHEMES: [&str; 2] = ["mongodb://", "mongodb+srv://"];
 
-/// The user info of every `mongodb://` / `mongodb+srv://` URI in `s` (any case), as the
-/// byte offsets of the first `:` in it (if any) and of its last `@`. The user info is in
-/// the authority: the text after `//` up to the first `/`, `?`, `#`, whitespace or
-/// `stop` character, so an `@` in the path or query (`?appName=a@b`) is not one.
-fn user_infos(s: &str, stop: &[u8]) -> Vec<(Option<usize>, usize)> {
+/// Every `mongodb://` / `mongodb+srv://` URI in `s` (any case), as the byte range of the
+/// text after `//` up to whitespace or a `stop` character.
+fn uri_stretches(s: &str, stop: &[u8]) -> Vec<(usize, usize)> {
     let lower = s.to_ascii_lowercase();
     let b = s.as_bytes();
     let mut out = Vec::new();
@@ -80,26 +79,38 @@ fn user_infos(s: &str, stop: &[u8]) -> Vec<(Option<usize>, usize)> {
         while let Some(i) = lower.get(from..).and_then(|r| r.find(scheme)) {
             let begin = from + i + scheme.len();
             let mut end = begin;
-            while end < b.len()
-                && !matches!(b[end], b'/' | b'?' | b'#')
-                && !b[end].is_ascii_whitespace()
-                && !stop.contains(&b[end])
-            {
+            while end < b.len() && !b[end].is_ascii_whitespace() && !stop.contains(&b[end]) {
                 end += 1;
             }
-            if let Some(at) = b[begin..end].iter().rposition(|&c| c == b'@') {
-                let colon = b[begin..begin + at].iter().position(|&c| c == b':');
-                out.push((colon.map(|c| begin + c), begin + at));
-            }
+            out.push((begin, end));
             from = begin;
         }
     }
     out
 }
 
-/// A `mongodb://` / `mongodb+srv://` URI with user info, in a decoded string.
+/// The password of the URI whose text after `//` is `s[begin..end]`: from just after the
+/// first `:` to the LAST `@` (a password may hold `@`: `app:p@ss@h`). A URI has one when
+/// the text before its first `@` holds a `:`, whatever `/`, `?` or `#` come before that
+/// `@` (`u:pa/ss@h`, unencoded); `h/x?appName=a@b` has none.
+fn password(s: &str, begin: usize, end: usize) -> Option<(usize, usize)> {
+    let b = &s.as_bytes()[begin..end];
+    let first_at = b.iter().position(|&c| c == b'@')?;
+    let colon = b[..first_at].iter().position(|&c| c == b':')?;
+    let last_at = b.iter().rposition(|&c| c == b'@')?;
+    Some((begin + colon + 1, begin + last_at))
+}
+
+/// A `mongodb://` / `mongodb+srv://` URI with a password, or with user info (an `@`
+/// before the first `/`, `?` or `#`: `mongodb://u@h`), in a decoded string.
 fn has_uri_with_user_info(s: &str) -> bool {
-    !user_infos(s, &[]).is_empty()
+    uri_stretches(s, &[]).into_iter().any(|(begin, end)| {
+        password(s, begin, end).is_some()
+            || s.as_bytes()[begin..end]
+                .iter()
+                .take_while(|&&c| !matches!(c, b'/' | b'?' | b'#'))
+                .any(|&c| c == b'@')
+    })
 }
 
 /// The source of a regex as the text it matches, near enough to find a URI in it: `\/`
@@ -276,14 +287,11 @@ fn has_marker(s: &str) -> bool {
 // ---------------------------------------------------------------------------------
 // URIs in the raw text
 
-/// The password of every `mongodb://` / `mongodb+srv://` URI written out in the text:
-/// from the first `:` of the user info to its last `@`. The authority also ends at a
-/// quote, which ends the string holding the URI.
+/// The password ([`password`]) of every `mongodb://` / `mongodb+srv://` URI written out
+/// in the text. A URI also ends at a quote, which ends the string holding it.
 fn uri_ranges(text: &str, out: &mut Vec<(usize, usize)>) {
-    for (colon, at) in user_infos(text, b"'\"`") {
-        if let Some(colon) = colon {
-            out.push((colon + 1, at));
-        }
+    for (begin, end) in uri_stretches(text, b"'\"`") {
+        out.extend(password(text, begin, end));
     }
 }
 
@@ -603,7 +611,41 @@ mod tests {
                 "db.c.insertOne({u: 'mongodb://app:p@ss@h:1/x?a=b@c'})",
                 "db.c.insertOne({u: ***})",
             ),
+            // A `:` before the first `@` is a password, whatever `/`, `?` or `#` come
+            // before that `@` (unencoded in the password).
+            (
+                "db.c.insertOne({u: 'mongodb://u:pa/ss@h'})",
+                "db.c.insertOne({u: ***})",
+            ),
+            (
+                "db.c.insertOne({u: 'mongodb://u:pa?ss@h'})",
+                "db.c.insertOne({u: ***})",
+            ),
+            (
+                "db.c.insertOne({u: 'mongodb://u:pa#ss@h'})",
+                "db.c.insertOne({u: ***})",
+            ),
+            (
+                "db.c.insertOne({u: 'mongodb+srv://u:hunter2/x@h/db'})",
+                "db.c.insertOne({u: ***})",
+            ),
+            (
+                "db.c.find({a: /mongodb:\\/\\/u:hunter2\\/x@h/})",
+                "db.c.find({a: ***})",
+            ),
+            // Accepted by the ruling: a port before an `@` in the query counts.
+            (
+                "db.c.insertOne({u: 'mongodb://h:27017/x?appName=a@b'})",
+                "db.c.insertOne({u: ***})",
+            ),
         ]);
+        // In the raw text (a comment here, `mongodb` absent): from the `:` to the last
+        // `@` before whitespace or a quote.
+        let mut ranges = Vec::new();
+        let text = "x mongodb://app:p/@ss@h/db y 'mongodb://u:pa?ss@h' mongodb://h/x?a=b@c";
+        super::uri_ranges(text, &mut ranges);
+        let masked: Vec<&str> = ranges.iter().map(|&(a, b)| &text[a..b]).collect();
+        assert_eq!(masked, ["p/@ss", "pa?ss"]);
     }
 
     #[test]
