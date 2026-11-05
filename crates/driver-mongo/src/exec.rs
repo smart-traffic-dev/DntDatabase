@@ -60,8 +60,11 @@ const CODE_NAMES: &[(i32, &str)] = &[
     (121, "DocumentValidationFailure"),
     (10107, "NotWritablePrimary"),
     (11000, "DuplicateKey"),
+    (INTERRUPTED, "Interrupted"),
 ];
 const MAX_TIME_MS_EXPIRED: i32 = 50;
+/// What a command stopped by `killOp` fails with.
+const INTERRUPTED: i32 = 11601;
 const DOCUMENT_VALIDATION_FAILURE: i32 = 121;
 
 /// Whether a read-only connection may send `cmd` (spec §5.3, the second layer). Decided
@@ -204,6 +207,9 @@ pub(crate) struct Plan {
     /// `dnt:<uuid>`, also sent on `getMore`.
     pub comment: String,
     pub shape: Shape,
+    /// A read: `opts.timeout` went into its `maxTimeMS`. Otherwise the session enforces
+    /// `opts.timeout` itself, by cancelling the command (spec §5.4, §5.5).
+    pub read: bool,
 }
 
 /// A command before the comment and `maxTimeMS`.
@@ -277,6 +283,7 @@ pub(crate) fn plan(
         batch_size: b.batch_size,
         comment: comment.to_string(),
         shape: b.shape,
+        read: b.read,
     })
 }
 
@@ -942,6 +949,20 @@ impl From<mongodb::error::Error> for Fail {
 impl From<DbError> for Fail {
     fn from(e: DbError) -> Self {
         Fail::Db(e)
+    }
+}
+
+impl Fail {
+    /// The command was stopped by a `killOp` (`Interrupted`): as a command error, or as
+    /// the write error of a write's reply.
+    pub(crate) fn interrupted(&self) -> bool {
+        match self {
+            Fail::Mongo(e) => {
+                matches!(e.kind.as_ref(), ErrorKind::Command(c) if c.code == INTERRUPTED)
+            }
+            Fail::Db(DbError::Server { code: Some(c), .. }) => c == "Interrupted",
+            Fail::Db(_) => false,
+        }
     }
 }
 

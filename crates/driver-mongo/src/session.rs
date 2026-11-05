@@ -3,17 +3,18 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use dnt_core::command::{CommandClass, CommandLanguage, CommandSession, ParsedCommand};
 use dnt_core::config::ResolvedConfig;
 use dnt_core::data_access::{DataAccess, KeyEdit, PageSpec};
 use dnt_core::driver::{
-    CancelHandle, Canceller, Engine, ExecOptions, Introspector, RowSink, Session, StmtOutcome,
+    CancelHandle, Engine, ExecOptions, ExecProgress, Introspector, RowSink, Session, StmtOutcome,
+    StopSignal,
 };
 use dnt_core::edit::EditSet;
-use dnt_core::error::DbError;
+use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
     DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
     TableDetail,
@@ -25,16 +26,18 @@ use mongodb::bson::{doc, Uuid};
 use mongodb::Client;
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::client::Opened;
+use crate::cancel::{self, MongoCanceller};
+use crate::client::{self, Opened};
 use crate::exec::{self, Fail};
 use crate::shell::MongoLanguage;
 
 /// The command running now, shared with the canceller.
 pub(crate) struct Running {
     /// The command's comment is `dnt:<uuid>`.
-    #[allow(dead_code)] // Read by the canceller (plan Task 10).
     pub uuid: String,
-    #[allow(dead_code)] // Read by the canceller (plan Task 10).
+    /// What a stop says about its outcome; `execute_command` has it from the command, the
+    /// canceller does not need it.
+    #[allow(dead_code)]
     pub class: CommandClass,
 }
 
@@ -42,8 +45,7 @@ pub(crate) struct Running {
 /// grace), the session's database, and the command running now.
 pub struct MongoSession {
     client: Arc<RwLock<Client>>,
-    /// Rebuilds the `Client` (plan Task 10).
-    #[allow(dead_code)]
+    /// Rebuilds the `Client` after a cancel's grace ran out.
     cfg: ResolvedConfig,
     info: ServerInfo,
     /// Kept across a `Client` rebuild, so `DatabaseChanged` compares the right db.
@@ -125,17 +127,141 @@ impl MongoSession {
         }
         err
     }
+
+    /// Sends `plan` and waits for its result, watching for `opts.stop` and, for a command
+    /// whose `maxTimeMS` does not carry it, `opts.timeout` (spec §5.4, §5.5).
+    ///
+    /// Either one emits [`ExecProgress::CancelSent`] and kills the command (`killOp` by its
+    /// comment; on a stop the backend's canceller does the same, and whichever comes first
+    /// acts), then waits up to `opts.cancel_grace`. A command stopped by the kill is
+    /// `Cancelled` (`Timeout` after a timeout), with the outcome unknown unless it reads. One
+    /// that completes during the grace keeps its result, which is late. One still running at
+    /// the deadline is given up ([`ExecProgress::GraceExpired`]): its future is dropped and
+    /// the `Client` rebuilt.
+    async fn run_watched(
+        &self,
+        plan: exec::Plan,
+        opts: &ExecOptions,
+        class: &CommandClass,
+        sink: &mut dyn RowSink,
+    ) -> Result<(exec::Output, bool), DbError> {
+        let client = self.client();
+        let comment = plan.comment.clone();
+        let limit = if plan.read { None } else { opts.timeout };
+        let mut fut = Box::pin(exec::run(&client, plan, opts, class));
+        let expiry = async {
+            match limit {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending().await,
+            }
+        };
+        let trigger = tokio::select! {
+            biased;
+            res = fut.as_mut() => {
+                // The canceller's kill can end the command before the stop is polled.
+                if !opts.stop.is_stopped() {
+                    return self.ended(res, class, None).map(|o| (o, false));
+                }
+                sink.progress(ExecProgress::CancelSent);
+                return self.ended(res, class, Some(Trigger::Stop)).map(|o| (o, true));
+            }
+            () = stop_raised(&opts.stop) => Trigger::Stop,
+            () = expiry => Trigger::Timeout,
+        };
+        let deadline = tokio::time::Instant::now() + opts.cancel_grace;
+        sink.progress(ExecProgress::CancelSent);
+        let mut kill = Box::pin(cancel::kill(&client, &comment));
+        let mut killing = true;
+        let res = loop {
+            tokio::select! {
+                biased;
+                res = fut.as_mut() => break Some(res),
+                // Best effort: a failed kill leaves the grace and the rebuild.
+                _ = kill.as_mut(), if killing => killing = false,
+                () = tokio::time::sleep_until(deadline) => break None,
+            }
+        };
+        match res {
+            Some(res) => self.ended(res, class, Some(trigger)).map(|o| (o, true)),
+            None => {
+                sink.progress(ExecProgress::GraceExpired);
+                drop(kill);
+                drop(fut);
+                self.rebuild().await;
+                Err(trigger.error(class))
+            }
+        }
+    }
+
+    /// The result of a command that ended, `after` a stop or a timeout or not.
+    fn ended(
+        &self,
+        res: Result<exec::Output, Fail>,
+        class: &CommandClass,
+        after: Option<Trigger>,
+    ) -> Result<exec::Output, DbError> {
+        match res {
+            Ok(out) => Ok(out),
+            // Killed: by this session's cancel, or by someone else's `killOp`.
+            Err(f) if f.interrupted() => Err(after.unwrap_or(Trigger::Stop).error(class)),
+            Err(Fail::Db(e)) => Err(e),
+            Err(Fail::Mongo(e)) => Err(self.mapped(&e, class)),
+        }
+    }
+
+    /// Replaces the `Client` with a fresh one; the old one is shut down in the background
+    /// (the given-up command's connection with it). The canceller reads the `Client`
+    /// through the shared lock, so its handles keep working. Should the new `Client` fail
+    /// to build, the old one stays: the crate closes a connection dropped in the middle of a
+    /// command, so the next command gets a fresh connection anyway.
+    async fn rebuild(&self) {
+        if let Ok(fresh) = client::rebuild(&self.cfg).await {
+            let old = std::mem::replace(
+                &mut *self.client.write().unwrap_or_else(|p| p.into_inner()),
+                fresh,
+            );
+            tokio::spawn(async move {
+                old.shutdown().immediate(true).await;
+            });
+        }
+        self.reconnects.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
-/// Stops nothing yet: killing the running command (`$currentOp` + `killOp` by its comment)
-/// comes with plan Task 10. The backend also raises `opts.stop`, which a running cursor
-/// read checks between documents.
-struct MongoCanceller;
+/// What made a running command be cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trigger {
+    /// `opts.stop` (the user's cancel).
+    Stop,
+    /// `opts.timeout`, for a command that does not carry it as `maxTimeMS`.
+    Timeout,
+}
 
-#[async_trait]
-impl Canceller for MongoCanceller {
-    async fn cancel(&self) -> Result<(), DbError> {
-        Ok(())
+impl Trigger {
+    /// The error of a command it stopped: the outcome is unknown unless it reads.
+    fn error(self, class: &CommandClass) -> DbError {
+        let outcome_unknown = *class != CommandClass::Read;
+        match self {
+            Trigger::Stop => DbError::Cancelled {
+                outcome_unknown,
+                was_in_tx: false,
+            },
+            Trigger::Timeout => DbError::Timeout {
+                stage: ConnectStage::Execute,
+                outcome_unknown,
+                was_in_tx: false,
+            },
+        }
+    }
+}
+
+/// How often [`stop_raised`] looks at the stop signal (it has no wake-up of its own).
+const STOP_POLL: Duration = Duration::from_millis(20);
+
+/// Completes once `stop` is raised.
+async fn stop_raised(stop: &StopSignal) {
+    while !stop.is_stopped() {
+        tokio::time::sleep(STOP_POLL).await;
     }
 }
 
@@ -154,7 +280,10 @@ impl Session for MongoSession {
     }
 
     fn cancel_handle(&self) -> CancelHandle {
-        Arc::new(MongoCanceller)
+        Arc::new(MongoCanceller {
+            client: Arc::clone(&self.client),
+            running: Arc::clone(&self.running),
+        })
     }
 
     fn reconnects(&self) -> u64 {
@@ -210,22 +339,18 @@ impl CommandSession for MongoSession {
         }
         let started = Instant::now();
         let uuid = Uuid::new().to_string();
-        let comment = format!("dnt:{uuid}");
+        let comment = cancel::comment_of(&uuid);
         let _running = self.start(uuid, cmd.class.clone());
         let plan = exec::plan(&payload.cmd, &self.db(), opts, &comment)?;
         let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
-        let output = match exec::run(&self.client(), plan, opts, &cmd.class).await {
-            Ok(out) => out,
-            Err(Fail::Db(e)) => return Err(e),
-            Err(Fail::Mongo(e)) => return Err(self.mapped(&e, &cmd.class)),
-        };
+        let (output, late) = self.run_watched(plan, opts, &cmd.class, sink).await?;
         if let Some(db) = moves_to {
             *self.current_db.lock().unwrap_or_else(|p| p.into_inner()) = db;
         }
         let summary = exec::emit(sink, output, opts, started)?;
         Ok(StmtOutcome {
             results: vec![summary],
-            late_completion: false,
+            late_completion: late,
         })
     }
 }

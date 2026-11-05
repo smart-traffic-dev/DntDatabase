@@ -1,5 +1,6 @@
 //! MongoDB driver built on the official `mongodb` crate (rustls with ring only).
 
+mod cancel;
 mod client;
 mod exec;
 pub mod rows;

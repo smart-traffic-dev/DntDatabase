@@ -279,11 +279,45 @@ fn apply_srv_overrides(found: &mut ClientOptions, plan: ClientOptionsPlan) {
 /// The last heartbeat failure the client's monitors saw, named when the time runs out.
 type LastFailure = Arc<Mutex<Option<String>>>;
 
+/// A fresh `Client` for a session whose `Client` is given up (a cancel that outlived its
+/// grace, spec §5.5): the same options, without the server check, within
+/// `cfg.connect_timeout`. The crate connects lazily, on the next command.
+pub(crate) async fn rebuild(cfg: &ResolvedConfig) -> Result<Client, DbError> {
+    let plan = client_options(cfg, cfg.via_tunnel)?;
+    let seeds = plan.seeds();
+    let building = new_client(plan, &seeds, LastFailure::default());
+    match tokio::time::timeout(cfg.connect_timeout, building).await {
+        Ok(result) => result,
+        Err(_) => Err(DbError::Connect {
+            message: format!(
+                "No new MongoDB client could be set up within {:?} for {seeds}",
+                cfg.connect_timeout
+            ),
+        }),
+    }
+}
+
 async fn connect(
     plan: ClientOptionsPlan,
     seeds: &str,
     last_failure: LastFailure,
 ) -> Result<(Client, ServerInfo), DbError> {
+    let client = new_client(plan, seeds, last_failure).await?;
+    match check_server(&client, seeds).await {
+        Ok(info) => Ok((client, info)),
+        Err(e) => {
+            client.shutdown().immediate(true).await;
+            Err(e)
+        }
+    }
+}
+
+/// The `Client` of `plan` (after the SRV lookup), not yet connected.
+async fn new_client(
+    plan: ClientOptionsPlan,
+    seeds: &str,
+    last_failure: LastFailure,
+) -> Result<Client, DbError> {
     let mut options = match &plan.srv_host {
         None => plan.options,
         Some(host) => {
@@ -302,14 +336,7 @@ async fn connect(
                 Some(failed.failure.kind.to_string());
         }
     }));
-    let client = Client::with_options(options).map_err(|e| connect_error(&e, seeds))?;
-    match check_server(&client, seeds).await {
-        Ok(info) => Ok((client, info)),
-        Err(e) => {
-            client.shutdown().immediate(true).await;
-            Err(e)
-        }
-    }
+    Client::with_options(options).map_err(|e| connect_error(&e, seeds))
 }
 
 async fn check_server(client: &Client, seeds: &str) -> Result<ServerInfo, DbError> {
