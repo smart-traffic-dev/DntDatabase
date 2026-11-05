@@ -807,9 +807,20 @@ impl SessionManager {
         kinds
     }
 
+    /// The registered driver of `kind`. A build without one answers with a user-facing
+    /// `Config` error (not `Internal`: nothing went wrong, the build just lacks the driver).
     fn driver(&self, kind: DbKind) -> Result<&Arc<dyn Driver>, DbError> {
-        self.drivers.get(&kind).ok_or_else(|| DbError::Internal {
-            message: format!("no driver registered for {kind:?}"),
+        self.drivers.get(&kind).ok_or_else(|| {
+            let label = match kind {
+                DbKind::MySql => "MySQL",
+                DbKind::Postgres => "PostgreSQL",
+                DbKind::Mongo => "MongoDB",
+                DbKind::Redis => "Redis",
+            };
+            DbError::Config {
+                field: None,
+                message: format!("This build has no {label} driver yet."),
+            }
         })
     }
 
@@ -835,7 +846,7 @@ impl SessionManager {
     }
 
     /// The engine of connection `id`, of either family, once a driver is registered for
-    /// it (`Internal` "no driver registered" otherwise).
+    /// it (`Config` "This build has no … driver yet." otherwise).
     pub(crate) fn require_driver(&self, id: Uuid) -> Result<DbKind, DbError> {
         let kind = self.repo.get(id)?.kind;
         self.driver(kind)?;

@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ServerVariant } from '../bindings';
 import {
+  appError,
   callsOf,
   config,
   fail,
+  Failure,
   ids,
   mockBackend,
   openResult,
@@ -12,6 +14,7 @@ import {
   serverInfo,
 } from '../test/backend';
 import { useConnections } from './connections';
+import { useDialogs } from './dialogs';
 import { useTabs } from './tabs';
 import { useTree } from './tree';
 import { connNodeId, groupNodeId } from './treeModel';
@@ -245,19 +248,16 @@ describe('tree store: names, errors, selection, drops', () => {
     expect(useTree.getState().error?.message).toBe('An internal error occurred.');
   });
 
-  it.each([
-    // As the backend sends it: the raw driver message is the internal error's detail.
-    ['detail', { detail: 'no driver registered for Redis' }],
-    ['message', { message: 'no driver registered for Redis' }],
-  ])('tree_connect_without_driver_is_friendly (%s)', async (_where, extra) => {
+  it('tree_connect_without_driver_is_friendly', async () => {
     const tree = sampleTree();
     const cacheId = '44444444-4444-4444-8444-444444444444';
     tree.connections.push(config(cacheId, 'cache', { kind: 'redis', port: 6379, username: '' }));
     const cache = connNodeId(cacheId);
     mockBackend({
       list_tree: () => tree,
+      // As the session manager answers a kind without a registered driver.
       open_connection: () => {
-        throw fail('internal', extra);
+        throw new Failure(appError('config', 'This build has no Redis driver yet.'));
       },
     });
     await useTree.getState().reloadStored();
@@ -265,19 +265,8 @@ describe('tree store: names, errors, selection, drops', () => {
     await expect.poll(() => useTree.getState().nodes.get(cache)?.error).toBeDefined();
     expect(useTree.getState().nodes.get(cache)?.error?.message).toBe('This build has no Redis driver yet.');
     expect(useTree.getState().nodes.get(cache)?.engine).toBe('RD');
-  });
-
-  it('an open failure that is not about a driver keeps its message', async () => {
-    mockBackend({
-      list_tree: () => sampleTree(),
-      open_connection: () => {
-        throw fail('internal', { detail: 'socket closed' });
-      },
-    });
-    await useTree.getState().reloadStored();
-    useTree.getState().expand(conn);
-    await expect.poll(() => useTree.getState().nodes.get(conn)?.error).toBeDefined();
-    expect(useTree.getState().nodes.get(conn)?.error?.message).toBe('An internal error occurred.');
+    // A user-facing error: no internal-error toast.
+    expect(useDialogs.getState().internalError).toBeNull();
   });
 
   it('clears the selection when the selected node disappears on reload', async () => {

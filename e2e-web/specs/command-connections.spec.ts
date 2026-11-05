@@ -27,7 +27,8 @@ test.describe('MongoDB and Redis connections (browser, fake IPC backend)', () =>
     await expect(byId(page, 'parse-result')).toContainText('Parsed · MongoDB · db1.local:27018');
     await expect(page.getByLabel('Auth database')).toHaveValue('admin');
     await expect(page.getByLabel('Replica set')).toHaveValue('rs0');
-    await expect(page.getByLabel('Additional host 1', { exact: true })).toHaveValue('db2.local');    await byId(page, 'conn-name').fill('e2e-mongo');
+    await expect(page.getByLabel('Additional host 1', { exact: true })).toHaveValue('db2.local');
+    await byId(page, 'conn-name').fill('e2e-mongo');
     await saveConnectionDialog(page);
 
     await expect(treeRow(page, 'e2e-redis').locator('.chip')).toHaveText('RD');

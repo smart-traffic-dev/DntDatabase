@@ -1159,6 +1159,22 @@ describe('ConnectionDialog', () => {
     expect(screen.getByRole('group', { name: 'Additional hosts' })).toContainElement(alert);
   });
 
+  it('a Redis options.driver error shows under Database index and clears when it changes', async () => {
+    mockBackend({
+      available_engines: () => ALL_ENGINES,
+      create_connection: () => {
+        throw new Failure(appError('config', 'Driver options do not match the engine', { field: 'options.driver' }));
+      },
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(await screen.findByTestId('conn-engine-redis'));
+    await user.click(screen.getByTestId('conn-save'));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Driver options do not match the engine');
+    await user.type(screen.getByLabelText('Database index'), '1');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('saved_command_conn_without_driver_is_editable', async () => {
     const stored = config(ids.prod, 'cache', {
       kind: 'redis',

@@ -113,7 +113,6 @@ const FIELD_KEYS: Record<string, keyof Form> = {
   parent_id: 'groupId',
   host: 'host',
   port: 'port',
-  'options.driver': 'mongoSrv',
   'options.driver.srv': 'mongoSrv',
   'options.driver.auth_source': 'authSource',
   'options.driver.replica_set': 'replicaSet',
@@ -459,7 +458,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const detailsButton = useRef<HTMLButtonElement>(null);
 
   // A field error goes away as soon as its input is edited.
-  const valueOf = (field: string) => JSON.stringify(form[FIELD_KEYS[field] ?? 'name']);
+  // `options.driver` as a whole: any MongoDB / Redis field edit clears its error.
+  const valueOf = (field: string) =>
+    JSON.stringify(field === 'options.driver' ? buildDriver(form) : form[FIELD_KEYS[field] ?? 'name']);
   const fieldError = rawFieldError && valueOf(rawFieldError.field) === rawFieldError.value ? rawFieldError : null;
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));

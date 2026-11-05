@@ -13,7 +13,7 @@ import type { AppError, ConnectionSummary, Group, ServerInfo } from '../bindings
 import { useConnections } from './connections';
 import { useDialogs } from './dialogs';
 import { expireConnectionPlans } from './queryRun';
-import { engineChip, engineLabel } from '../engine';
+import { engineChip } from '../engine';
 import {
   ROOT,
   computeRows,
@@ -106,19 +106,6 @@ function invalidate(id: string) {
   for (const key of [...requests.keys()]) {
     if (key === id || key.startsWith(`${id}/`)) requests.set(key, (requests.get(key) ?? 0) + 1);
   }
-}
-
-const NO_DRIVER = 'no driver registered for';
-
-/**
- * Opening a kind this build has no driver for: the session manager's raw message (an internal
- * error's detail) becomes one the user can act on.
- */
-function friendlyOpenError(error: AppError, connectionId: string): AppError {
-  const raw = [error.message, error.detail ?? ''].some((m) => m.startsWith(NO_DRIVER));
-  const kind = useConnections.getState().summaries.get(connectionId)?.config.kind;
-  if (!raw || !kind) return error;
-  return { ...error, message: `This build has no ${engineLabel(kind)} driver yet.`, detail: null };
 }
 
 interface Loaded {
@@ -317,7 +304,7 @@ export const useTree = create<TreeState>()((set, get) => {
         useDialogs.getState().showPrompt({ kind: prompt, connectionId, error });
         return;
       }
-      patch(id, { loading: false, error: node.kind === 'connection' ? friendlyOpenError(error, connectionId) : error });
+      patch(id, { loading: false, error });
     }
   };
 

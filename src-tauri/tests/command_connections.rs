@@ -1,7 +1,7 @@
 //! Saving Mongo/Redis connections through the command layer (R3), before their drivers exist.
 
 use dnt_core::config::{ConnectionConfig, DriverOptions};
-use dnt_core::error::DbError;
+use dnt_core::error::{AppError, DbError};
 use dnt_core::secret::MemorySecretStore;
 use dnt_core::server::DbKind;
 use dnt_core::test_util::sample_config;
@@ -40,10 +40,19 @@ async fn redis_connection_saves_but_has_no_driver() {
     assert_eq!(created.kind, DbKind::Redis);
     assert_eq!(state.repo.get(created.id).unwrap(), created);
 
-    match state.sessions.open(created.id, None).await {
-        Err(DbError::Internal { message }) => {
-            assert_eq!(message, "no driver registered for Redis")
+    let error = match state.sessions.open(created.id, None).await {
+        Err(e) => e,
+        Ok(_) => panic!("a Redis connection opened without a Redis driver"),
+    };
+    match &error {
+        DbError::Config { field, message } => {
+            assert_eq!(field, &None);
+            assert_eq!(message, "This build has no Redis driver yet.");
         }
-        other => panic!("expected Internal, got {other:?}"),
+        other => panic!("expected Config, got {other:?}"),
     }
+    // A user-facing kind (the UI shows no internal-error toast), the message as is.
+    let app: AppError = error.into();
+    assert_eq!(app.kind, "config");
+    assert_eq!(app.message, "This build has no Redis driver yet.");
 }
