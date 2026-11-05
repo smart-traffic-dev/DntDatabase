@@ -224,6 +224,40 @@ fieldset.export-form {
   grid-template-columns: minmax(0, 1fr) 112px;
 }
 
+/* MongoDB SRV: the record names the ports, the host takes the whole row. */
+.conn-row-host.no-port {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* MongoDB options: SRV, then auth database / replica set, then the additional hosts. */
+.conn-driver {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-3);
+  outline: none;
+}
+
+.conn-hosts {
+  gap: var(--dnt-space-2);
+}
+
+.conn-host-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px auto;
+  gap: var(--dnt-space-2);
+}
+
+/* A saved connection this build cannot open: said once, above the form. */
+.conn-banner {
+  margin: 0;
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  border: 1px solid var(--dnt-status-warning-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-status-warning-bg);
+  color: var(--dnt-status-warning-fg);
+  font-size: var(--dnt-text-sm);
+}
+
 /* Database and the Save password box share a row; the box sits on the input's line. */
 .conn-row-db {
   grid-template-columns: minmax(0, 1fr) auto;
@@ -390,6 +424,16 @@ fieldset.export-form {
 .engine-logo.engine-postgres {
   background: var(--dnt-brand-postgres-bg);
   color: var(--dnt-brand-postgres);
+}
+
+.engine-logo.engine-mongo {
+  background: var(--dnt-brand-mongo-bg);
+  color: var(--dnt-brand-mongo);
+}
+
+.engine-logo.engine-redis {
+  background: var(--dnt-brand-redis-bg);
+  color: var(--dnt-brand-redis);
 }
 
 .dark .engine-logo {

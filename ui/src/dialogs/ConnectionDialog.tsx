@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { open as pickFile } from '@tauri-apps/plugin-dialog';
 import { api, isCancelled, isHostKeyMismatch, isHostKeyUnknown, stageLabel, toAppError } from '../api';
+import { commands } from '../bindings';
 import type {
   AppError,
   ConnectionConfig,
   ConnStringEngine,
   DbKind,
+  DriverOptions,
   EnvTag,
   OpenResult,
   ParsedConnString,
@@ -23,12 +25,21 @@ import { CheckIcon, ChevronDownIcon, ErrorIcon, LockIcon } from '../components/i
 import { ensureAiLoaded, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
-import { autoName, DEFAULT_HOST, defaultPort, defaultUser, ENGINES, engineInfo } from './connectionDefaults';
+import {
+  autoName,
+  DEFAULT_HOST,
+  defaultDriverOptions,
+  defaultPort,
+  defaultSsl,
+  defaultUser,
+  ENGINES,
+  engineInfo,
+} from './connectionDefaults';
 import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
 import { PasswordInput } from './PasswordInput';
 import { ConfirmDialog } from './SimpleDialogs';
-import { isKind, sqlEngine } from '../engine';
+import { assertNever, engineLabel, familyOf, isKind, sqlEngine } from '../engine';
 
 /**
  * One page (single-page redesign): name, engine, server and environment always show; the
@@ -43,12 +54,14 @@ const NIL_UUID = '00000000-0000-0000-0000-000000000000';
 
 const PORT_MAX = 65_535;
 
-/** Engines a pasted string may name that the dialog cannot edit yet (R4 adds them). */
-const COMMAND_ENGINES: readonly ConnStringEngine[] = ['mongo', 'mongo_srv', 'redis', 'rediss'];
-const COMMAND_ENGINE_UNAVAILABLE = 'MongoDB and Redis connections are not available in this version yet.';
-const COMMAND_SCHEMES: readonly string[] = ['mongodb://', 'mongodb+srv://', 'redis://', 'rediss://'];
-/** Stored kinds the dialog has no form for until R4 (it would rewrite their user / port). */
-const COMMAND_KINDS: readonly DbKind[] = ['mongo', 'redis'];
+/** The engine cards while the build's own list loads, or when it cannot be read. */
+const SQL_KINDS: readonly DbKind[] = ['mysql', 'postgres'];
+
+/** Default port of a MongoDB additional host row left without one. */
+const MONGO_PORT = engineInfo('mongo').port;
+
+const noDriverText = (kind: DbKind) =>
+  `This build has no ${engineLabel(kind)} driver yet. You can edit and save the connection, but not connect.`;
 
 const SSL_MODES: { id: SslMode; label: string }[] = [
   { id: 'disable', label: 'Disable' },
@@ -73,6 +86,13 @@ const FIELDS: Record<string, { section: SectionId; id: string }> = {
   host: { section: 'main', id: 'cd-host' },
   port: { section: 'main', id: 'cd-port' },
   conn_string: { section: 'url', id: 'cd-conn-string' },
+  'options.driver': { section: 'main', id: 'cd-driver' },
+  'options.driver.srv': { section: 'main', id: 'cd-mongo-srv' },
+  'options.driver.auth_source': { section: 'main', id: 'cd-mongo-auth' },
+  'options.driver.replica_set': { section: 'main', id: 'cd-mongo-rs' },
+  'options.driver.extra_hosts': { section: 'main', id: 'cd-mongo-hosts' },
+  'options.driver.db': { section: 'main', id: 'cd-redis-db' },
+  ssh: { section: 'ssh', id: 'cd-ssh-on' },
   ssh_host: { section: 'ssh', id: 'cd-ssh-host' },
   'ssh.host': { section: 'ssh', id: 'cd-ssh-host' },
   'ssh.port': { section: 'ssh', id: 'cd-ssh-port' },
@@ -93,6 +113,13 @@ const FIELD_KEYS: Record<string, keyof Form> = {
   parent_id: 'groupId',
   host: 'host',
   port: 'port',
+  'options.driver': 'mongoSrv',
+  'options.driver.srv': 'mongoSrv',
+  'options.driver.auth_source': 'authSource',
+  'options.driver.replica_set': 'replicaSet',
+  'options.driver.extra_hosts': 'extraHosts',
+  'options.driver.db': 'redisDb',
+  ssh: 'sshOn',
   'ssh.host': 'sshHost',
   'ssh.port': 'sshPort',
   'ssh.user': 'sshUser',
@@ -160,19 +187,68 @@ interface Form {
   sshTimeout: string;
   appName: string;
   queryTimeout: string;
+  /** `options.driver` as stored (or the engine's default); the fields below edit its MongoDB / Redis values. */
+  driver: DriverOptions;
+  mongoSrv: boolean;
+  authSource: string;
+  replicaSet: string;
+  extraHosts: { host: string; port: string }[];
+  redisDb: string;
+}
+
+/** The form fields of a driver option set (`Form.driver` keeps the rest, e.g. `direct_connection`). */
+function driverFields(driver: DriverOptions): Pick<Form, 'driver' | 'mongoSrv' | 'authSource' | 'replicaSet' | 'extraHosts' | 'redisDb'> {
+  const empty = { driver, mongoSrv: false, authSource: '', replicaSet: '', extraHosts: [], redisDb: '0' };
+  switch (driver.kind) {
+    case 'none':
+      return empty;
+    case 'mongo':
+      return {
+        ...empty,
+        mongoSrv: driver.srv,
+        authSource: driver.auth_source ?? '',
+        replicaSet: driver.replica_set ?? '',
+        extraHosts: driver.extra_hosts.map((h) => ({ host: h.host, port: String(h.port) })),
+      };
+    case 'redis':
+      return { ...empty, redisDb: String(driver.db) };
+    default:
+      return assertNever(driver);
+  }
+}
+
+/** Whether the form shows MongoDB's SRV / hosts fields or Redis's database index (Command family only). */
+function driverForm(f: Pick<Form, 'engine' | 'driver'>): DriverOptions['kind'] {
+  return familyOf(f.engine) === 'command' ? f.driver.kind : 'none';
+}
+
+/** MongoDB users paste a "connection string" (MongoDB's own word); the other engines a URL. */
+function urlLabel(driver: DriverOptions['kind']): 'Connection string' | 'Connection URL' {
+  switch (driver) {
+    case 'mongo':
+      return 'Connection string';
+    case 'none':
+    case 'redis':
+      return 'Connection URL';
+    default:
+      return assertNever(driver);
+  }
 }
 
 function initialForm(initial: ConnectionConfig | undefined): Form {
   const engine: DbKind = initial?.kind ?? 'mysql';
+  const fields = driverFields(initial?.options.driver ?? defaultDriverOptions(engine));
   return {
+    ...fields,
     engine,
     name: initial?.name ?? '',
     groupId: initial?.group_id ?? '',
     // A new connection starts filled in with a local server's defaults (localhost, the engine's
     // port and admin user); switching the engine swaps the ones still untouched.
     host: initial?.host ?? DEFAULT_HOST,
-    port: String(initial?.port ?? defaultPort(engine)),
-    portTouched: !!initial && initial.port !== defaultPort(engine),
+    // An SRV record has no port of its own (stored as 0): the field starts empty.
+    port: initial ? (fields.mongoSrv && initial.port === 0 ? '' : String(initial.port)) : String(engineInfo(engine).port),
+    portTouched: !!initial && initial.port !== engineInfo(engine).port && !(fields.mongoSrv && initial.port === 0),
     username: initial?.username ?? defaultUser(engine),
     password: '',
     passwordTouched: false,
@@ -191,7 +267,7 @@ function initialForm(initial: ConnectionConfig | undefined): Form {
     passphrase: '',
     passphraseTouched: false,
     // A stored connection without an SSL config connects in plaintext: show it as such.
-    sslMode: initial ? (initial.ssl?.mode ?? 'disable') : 'prefer',
+    sslMode: initial ? (initial.ssl?.mode ?? 'disable') : defaultSsl(engine),
     sslCa: initial?.ssl?.ca_path ?? '',
     sslCert: initial?.ssl?.cert_path ?? '',
     sslKey: initial?.ssl?.key_path ?? '',
@@ -241,13 +317,22 @@ const showsSslFiles = (f: Form) =>
 
 const CLOSED: Record<Fold, boolean> = { url: false, ssh: false, ssl: false, advanced: false };
 
-/** The connection kind a parsed scheme selects; MariaDB shares the MySQL driver. Command schemes keep the MySQL default until the dialog handles them. */
+/** The connection kind a parsed scheme selects; MariaDB shares the MySQL driver, `rediss` is Redis over TLS. */
 function kindOfScheme(engine: ConnStringEngine): DbKind {
   switch (engine) {
+    case 'mysql':
+    case 'mariadb':
+      return 'mysql';
     case 'postgres':
       return 'postgres';
+    case 'mongo':
+    case 'mongo_srv':
+      return 'mongo';
+    case 'redis':
+    case 'rediss':
+      return 'redis';
     default:
-      return 'mysql';
+      return assertNever(engine);
   }
 }
 
@@ -258,10 +343,45 @@ export function withEngine<F extends Pick<Form, 'engine' | 'port' | 'portTouched
   return {
     ...f,
     engine,
-    port: f.portTouched && f.port.trim() !== '' ? f.port : String(defaultPort(engine)),
+    port: f.portTouched && f.port.trim() !== '' ? f.port : String(engineInfo(engine).port),
     portTouched: f.portTouched && f.port.trim() !== '',
     username: user === '' || user === defaultUser(f.engine) ? defaultUser(engine) : f.username,
   };
+}
+
+/**
+ * `withEngine` for the whole form: the driver options start over at the new engine's default,
+ * and an SSL mode still at the old engine's default follows the new one.
+ */
+function switchEngine(f: Form, engine: DbKind): Form {
+  if (engine === f.engine) return f;
+  return {
+    ...withEngine(f, engine),
+    ...driverFields(defaultDriverOptions(engine)),
+    sslMode: f.sslMode === defaultSsl(f.engine) ? defaultSsl(engine) : f.sslMode,
+  };
+}
+
+/** `options.driver` as the form edits it. */
+function buildDriver(f: Form): DriverOptions {
+  const d = f.driver;
+  switch (d.kind) {
+    case 'none':
+      return d;
+    case 'mongo':
+      return {
+        ...d,
+        srv: f.mongoSrv,
+        auth_source: orNull(f.authSource),
+        replica_set: orNull(f.replicaSet),
+        // Hidden with SRV (the record lists the hosts).
+        extra_hosts: f.mongoSrv ? [] : f.extraHosts.map((h) => ({ host: h.host.trim(), port: num(h.port, MONGO_PORT) })),
+      };
+    case 'redis':
+      return { kind: 'redis', db: num(f.redisDb, 0) };
+    default:
+      return assertNever(d);
+  }
 }
 
 type TestState =
@@ -320,16 +440,27 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const [parse, setParse] = useState<ParseState>({ state: 'idle' });
   const testSeq = useRef(0);
   const parseSeq = useRef(0);
-  // Until R4: an existing Mongo/Redis connection is shown but cannot be saved from this form.
-  const unavailableKind = mode === 'edit' && !!initial && COMMAND_KINDS.includes(initial.kind);
+  // The engines this build has a driver for (fetched once per open); `null` until known.
+  const [available, setAvailable] = useState<readonly DbKind[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    commands
+      .availableEngines()
+      .then((kinds) => live && setAvailable(kinds))
+      .catch(() => live && setAvailable(SQL_KINDS));
+    return () => {
+      live = false;
+    };
+  }, []);
+  // A saved connection keeps its own card even when the build cannot connect it.
+  const cards = ENGINES.filter((e) => (available ?? SQL_KINDS).includes(e.id) || e.id === initial?.kind);
+  const noDriver = available !== null && !available.includes(form.engine);
   const testButton = useRef<HTMLButtonElement>(null);
   const detailsButton = useRef<HTMLButtonElement>(null);
 
   // A field error goes away as soon as its input is edited.
-  const fieldError =
-    rawFieldError && String(form[FIELD_KEYS[rawFieldError.field] ?? 'name']) === rawFieldError.value
-      ? rawFieldError
-      : null;
+  const valueOf = (field: string) => JSON.stringify(form[FIELD_KEYS[field] ?? 'name']);
+  const fieldError = rawFieldError && valueOf(rawFieldError.field) === rawFieldError.value ? rawFieldError : null;
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((f) => ({ ...f, [key]: value }));
 
@@ -342,15 +473,17 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     if (target) document.getElementById(target.id)?.focus();
   }, [fieldError]);
 
-  const chooseEngine = (engine: DbKind) => setForm((f) => withEngine(f, engine));
+  const chooseEngine = (engine: DbKind) => setForm((f) => switchEngine(f, engine));
 
   /** Fills the form from a parsed connection string (values it did not name are left alone). */
   const applyParsed = (p: ParsedConnString) => {
     setForm((prev) => {
       // No scheme (`user@host/db`) keeps the chosen engine; MariaDB shares the MySQL driver.
-      const f = p.engine === null ? prev : withEngine(prev, kindOfScheme(p.engine));
+      const f = p.engine === null ? prev : switchEngine(prev, kindOfScheme(p.engine));
       return {
         ...f,
+        // MongoDB / Redis options named by the string (SRV, auth database, hosts, database index).
+        ...(p.driver ? driverFields(p.driver) : {}),
         host: p.host ?? f.host,
         port: p.port ? String(p.port) : f.port,
         portTouched: p.port ? true : f.portTouched,
@@ -373,23 +506,12 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       setParse({ state: 'idle' });
       return;
     }
-    // Refused by its scheme alone: the parser would reject options the dialog does not need
-    // (e.g. Atlas's `retryWrites`) and hide the real reason.
-    if (COMMAND_SCHEMES.some((s) => text.toLowerCase().startsWith(s))) {
-      setParse({ state: 'failed', message: COMMAND_ENGINE_UNAVAILABLE });
-      return;
-    }
     setParse({ state: 'parsing' });
     const timer = setTimeout(() => {
       api
         .parseConnectionString(text)
         .then((parsed) => {
           if (seq !== parseSeq.current) return;
-          // Until R4 the dialog has no MongoDB / Redis form: refuse, never map it to MySQL.
-          if (parsed.engine !== null && COMMAND_ENGINES.includes(parsed.engine)) {
-            setParse({ state: 'failed', message: COMMAND_ENGINE_UNAVAILABLE });
-            return;
-          }
           applyParsed(parsed);
           setParse({ state: 'ok', parsed });
         })
@@ -404,7 +526,10 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
 
   /** The values an empty field stands for: host, port, login, and the name derived from them. */
   const host = () => form.host.trim() || DEFAULT_HOST;
-  const port = () => num(form.port, defaultPort(form.engine));
+  /** MongoDB with SRV: the record names the ports, so there is no Port field (stored as 0). */
+  const srv = familyOf(form.engine) === 'command' && form.mongoSrv;
+  const portDefault = defaultPort(form.engine, srv);
+  const port = () => (portDefault === null ? 0 : num(form.port, portDefault));
   const username = () => form.username.trim() || defaultUser(form.engine);
   const name = () => form.name.trim() || autoName(form.host, form.defaultDb);
 
@@ -444,10 +569,11 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       connect_timeout_s: num(form.connectTimeout, 10),
       ssh_timeout_s: num(form.sshTimeout, 10),
       charset: initial?.options.charset ?? null,
-      application_name: orNull(form.appName),
+      // Hidden for MongoDB / Redis (a SQL session option).
+      application_name: familyOf(form.engine) === 'command' ? null : orNull(form.appName),
       // 0 = no timeout; never negative, fractional or beyond MAX_QUERY_TIMEOUT_S.
       query_timeout_s: queryTimeoutSeconds(form.queryTimeout),
-      driver: initial?.options.driver ?? { kind: 'none' },
+      driver: buildDriver(form),
     },
   });
 
@@ -484,7 +610,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     if (!target) return false;
     const { section } = target;
     if (section !== 'main') setOpen((o) => ({ ...o, [section]: true }));
-    setFieldError({ field, message, value: String(form[FIELD_KEYS[field] ?? 'name']) });
+    setFieldError({ field, message, value: valueOf(field) });
     return true;
   };
 
@@ -494,13 +620,12 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
 
   /** The dialog's own checks before anything is sent; false (and the field marked) on a problem. */
   const checkForm = (): boolean => {
-    const problem = formProblem(form);
+    const problem = formProblem({ ...form, port: srv ? '' : form.port });
     if (problem) pointAt(problem.field, problem.message);
     return !problem;
   };
 
   const save = async () => {
-    if (unavailableKind) return;
     setFieldError(null);
     setSaveError(null);
     if (!checkForm()) return;
@@ -599,6 +724,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   const errorSection = fieldError ? FIELDS[fieldError.field]?.section : undefined;
   const info = engineInfo(form.engine);
   const formEngine = sqlEngine(form.engine);
+  const command = familyOf(form.engine) === 'command';
+  const driverKind = driverForm(form);
 
   /** The one-line state of a folded row, shown at its right end. */
   const summary = (id: Exclude<Fold, 'url'>): string => {
@@ -659,10 +786,10 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   );
 
   /** A checkbox with the project's switch look; the native box stays the control (and the focus ring). */
-  const toggle = (checked: boolean, onChange: (v: boolean) => void, text: ReactNode, hint?: ReactNode) => (
+  const toggle = (checked: boolean, onChange: (v: boolean) => void, text: ReactNode, hint?: ReactNode, id?: string) => (
     <div className="switch-field">
       <label className="switch-label">
-        <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+        <input id={id} type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
         <span className="switch-track" aria-hidden="true" />
         <span>{text}</span>
       </label>
@@ -670,14 +797,15 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     </div>
   );
 
+  const urlName = urlLabel(driverKind);
   const urlField = (
     <div className="field conn-string" id="cd-url">
-      <label htmlFor="cd-conn-string">Connection URL</label>
+      <label htmlFor="cd-conn-string">{urlName}</label>
       <input
         id="cd-conn-string"
         data-testid="conn-string"
         value={connString}
-        placeholder={formEngine !== null && isKind(formEngine, 'postgres') ? 'postgresql://user:password@host:5432/database' : 'mysql://user:password@host:3306/database'}
+        placeholder={info.urlExample}
         spellCheck={false}
         autoComplete="off"
         // Opened from its link: the cursor goes straight into it.
@@ -696,7 +824,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         <div className="parse-ok" role="status" data-testid="parse-result">
           <CheckIcon />
           <span>
-            Parsed · {info.label} · {form.host || DEFAULT_HOST}:{port()}
+            Parsed · {info.label} · {form.host || DEFAULT_HOST}
+            {srv ? '' : `:${port()}`}
           </span>
           {parse.parsed.ignored.length > 0 && <span className="parse-note">Ignored: {parse.parsed.ignored.join(', ')}</span>}
           {parse.parsed.warnings.map((w) => (
@@ -714,6 +843,146 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
     </div>
   );
 
+  const defaultDbField = (
+    <div className="field">
+      <label htmlFor="cd-db">Database</label>
+      <input
+        id="cd-db"
+        value={form.defaultDb}
+        placeholder={formEngine !== null && isKind(formEngine, 'postgres') ? defaultUser(form.engine) : 'All databases'}
+        onChange={(e) => set('defaultDb', e.target.value)}
+      />
+    </div>
+  );
+
+  /** Redis picks a numbered database instead of naming one (0–15 by default; the server decides). */
+  const redisDbField = (
+    <div className="field" id="cd-driver" tabIndex={-1}>
+      <label htmlFor="cd-redis-db">Database index</label>
+      <input
+        id="cd-redis-db"
+        type="number"
+        min={0}
+        max={15}
+        step={1}
+        value={form.redisDb}
+        placeholder="0"
+        onChange={(e) => set('redisDb', e.target.value)}
+        {...aria('options.driver.db')}
+      />
+      {errorFor('options.driver.db')}
+      {errorFor('options.driver')}
+    </div>
+  );
+
+  let databaseField: ReactNode;
+  switch (driverKind) {
+    case 'none':
+    case 'mongo':
+      databaseField = defaultDbField;
+      break;
+    case 'redis':
+      databaseField = redisDbField;
+      break;
+    default:
+      databaseField = assertNever(driverKind);
+  }
+
+  const setHost = (at: number, change: Partial<Form['extraHosts'][number]>) =>
+    setForm((f) => ({ ...f, extraHosts: f.extraHosts.map((h, i) => (i === at ? { ...h, ...change } : h)) }));
+
+  const mongoBody = (
+    <div className="conn-driver" id="cd-driver" tabIndex={-1}>
+      {toggle(form.mongoSrv, (v) => set('mongoSrv', v), 'SRV', undefined, 'cd-mongo-srv')}
+      {errorFor('options.driver.srv')}
+      {errorFor('options.driver')}
+      <div className="conn-row">
+        <div className="field">
+          <label htmlFor="cd-mongo-auth">Auth database</label>
+          <input
+            id="cd-mongo-auth"
+            value={form.authSource}
+            placeholder="admin"
+            onChange={(e) => set('authSource', e.target.value)}
+            {...aria('options.driver.auth_source')}
+          />
+          {errorFor('options.driver.auth_source')}
+        </div>
+        <div className="field">
+          <label htmlFor="cd-mongo-rs">Replica set</label>
+          <input
+            id="cd-mongo-rs"
+            value={form.replicaSet}
+            onChange={(e) => set('replicaSet', e.target.value)}
+            {...aria('options.driver.replica_set')}
+          />
+          {errorFor('options.driver.replica_set')}
+        </div>
+      </div>
+      {/* An SRV record names the servers itself: no extra hosts. */}
+      {!form.mongoSrv && (
+        <div className="field conn-hosts" role="group" aria-labelledby="cd-mongo-hosts-title">
+          <span className="field-label" id="cd-mongo-hosts-title">
+            Additional hosts
+          </span>
+          {form.extraHosts.map((h, i) => (
+            <div className="conn-host-row" key={i}>
+              <input
+                aria-label={`Additional host ${i + 1}`}
+                value={h.host}
+                placeholder="host"
+                onChange={(e) => setHost(i, { host: e.target.value })}
+              />
+              <input
+                aria-label={`Port of additional host ${i + 1}`}
+                type="number"
+                min={1}
+                max={PORT_MAX}
+                step={1}
+                value={h.port}
+                placeholder={String(MONGO_PORT)}
+                onChange={(e) => setHost(i, { port: e.target.value })}
+              />
+              <button
+                type="button"
+                className="btn"
+                aria-label={`Remove additional host ${i + 1}`}
+                onClick={() => setForm((f) => ({ ...f, extraHosts: f.extraHosts.filter((_, j) => j !== i) }))}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          <div>
+            <button
+              type="button"
+              className="btn"
+              id="cd-mongo-hosts"
+              onClick={() => setForm((f) => ({ ...f, extraHosts: [...f.extraHosts, { host: '', port: '' }] }))}
+              {...aria('options.driver.extra_hosts')}
+            >
+              Add host
+            </button>
+          </div>
+          {errorFor('options.driver.extra_hosts')}
+        </div>
+      )}
+    </div>
+  );
+
+  let mongoFields: ReactNode;
+  switch (driverKind) {
+    case 'mongo':
+      mongoFields = mongoBody;
+      break;
+    case 'none':
+    case 'redis':
+      mongoFields = null;
+      break;
+    default:
+      mongoFields = assertNever(driverKind);
+  }
+
   const envHelp = [
     form.envTag === 'production' ? 'Asks before statements that change data or structure, and is marked PROD in tabs and the status bar.' : null,
     form.readOnly ? 'Sessions are opened read-only on the server.' : null,
@@ -728,7 +997,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           Engine
         </span>
         <div className="engine-cards" role="radiogroup" aria-labelledby="cd-engine-title">
-          {ENGINES.map((en) => (
+          {cards.map((en) => (
             <label key={en.id} className={`engine-card${form.engine === en.id ? ' on' : ''}`}>
               <input
                 type="radio"
@@ -768,7 +1037,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
 
       {open.url && urlField}
 
-      <div className="conn-row conn-row-host">
+      <div className={`conn-row conn-row-host${srv ? ' no-port' : ''}`}>
         <div className="field">
           <div className="field-label-row">
             <label htmlFor="cd-host">Host</label>
@@ -793,6 +1062,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           />
           {errorFor('host')}
         </div>
+        {!srv && (
         <div className="field">
           <label htmlFor="cd-port">Port</label>
           <input
@@ -814,11 +1084,12 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               </p>
             ) : null)}
         </div>
+        )}
       </div>
 
       <div className="conn-row">
         <div className="field">
-          <label htmlFor="cd-user">User</label>
+          <label htmlFor="cd-user">{command ? 'Username (optional)' : 'User'}</label>
           <input
             id="cd-user"
             data-testid="conn-user"
@@ -842,15 +1113,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       </div>
 
       <div className="conn-row conn-row-db">
-        <div className="field">
-          <label htmlFor="cd-db">Database</label>
-          <input
-            id="cd-db"
-            value={form.defaultDb}
-            placeholder={formEngine !== null && isKind(formEngine, 'postgres') ? defaultUser(form.engine) : 'All databases'}
-            onChange={(e) => set('defaultDb', e.target.value)}
-          />
-        </div>
+        {databaseField}
         <label className="check conn-save-pw" title="Saved in Windows Credential Manager">
           <input
             type="checkbox"
@@ -864,6 +1127,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
       {!form.savePassword && (
         <p className="hint conn-hint">You'll be asked for the password each time. Test uses what you typed above.</p>
       )}
+      {mongoFields}
 
       <div className="field conn-env">
         <span className="field-label" id="cd-env-title">
@@ -903,7 +1167,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             <LockIcon />
             <span>Read-only</span>
           </label>
-          {aiReady && !COMMAND_KINDS.includes(form.engine) && (
+          {aiReady && !command && (
             <label className={`chip-opt conn-ai${aiOn ? ' on' : ''}`} title={`AI suggestions in query tabs, from ${aiHost ?? ''}`}>
               <input
                 type="checkbox"
@@ -926,7 +1190,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
 
   const sshBody = (
     <>
-      {toggle(form.sshOn, (v) => set('sshOn', v), 'Connect through an SSH tunnel')}
+      {toggle(form.sshOn, (v) => set('sshOn', v), 'Connect through an SSH tunnel', undefined, 'cd-ssh-on')}
+      {errorFor('ssh')}
       {/* The tunnel's fields only take room once the tunnel is on. */}
       {form.sshOn && (
         <div className="grid">
@@ -1028,6 +1293,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
               : 'Needs a CA certificate; a client certificate is optional.'}
           </p>
         )}
+        {command && form.sslMode === 'prefer' && (
+          <p className="hint">MongoDB and Redis have no "prefer" mode: TLS is used without certificate checks.</p>
+        )}
       </div>
       {/* An error on one of the files (e.g. an unreadable key) shows them too. */}
       {(showsSslFiles(form) || !!fieldError?.field.startsWith('ssl.')) && (
@@ -1058,10 +1326,13 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
         {errorFor('group_id')}
         {errorFor('parent_id')}
       </div>
-      <div className="field">
-        <label htmlFor="cd-app">Application name</label>
-        <input id="cd-app" value={form.appName} onChange={(e) => set('appName', e.target.value)} />
-      </div>
+      {/* A MySQL / PostgreSQL session option. */}
+      {!command && (
+        <div className="field">
+          <label htmlFor="cd-app">Application name</label>
+          <input id="cd-app" value={form.appName} onChange={(e) => set('appName', e.target.value)} />
+        </div>
+      )}
       <div className="field">
         <label htmlFor="cd-timeout">Connect timeout (s)</label>
         <input
@@ -1217,9 +1488,9 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
           }}
         >
           <div className="conn-page" data-testid="conn-panel">
-            {unavailableKind && (
-              <p className="field-error" role="alert" data-testid="conn-kind-unavailable">
-                {COMMAND_ENGINE_UNAVAILABLE}
+            {noDriver && (
+              <p className="conn-banner" role="status" data-testid="conn-no-driver">
+                {noDriverText(form.engine)}
               </p>
             )}
             {main}
@@ -1238,7 +1509,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
                 className="btn"
                 data-testid="conn-test"
                 onClick={() => void runTest()}
-                disabled={saving || test.state === 'running'}
+                disabled={saving || test.state === 'running' || noDriver}
               >
                 Test
               </button>
@@ -1247,7 +1518,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             <button type="button" className="btn" onClick={requestClose} disabled={saving}>
               Cancel
             </button>
-            <button type="submit" className="btn primary" data-testid="conn-save" disabled={saving || unavailableKind}>
+            <button type="submit" className="btn primary" data-testid="conn-save" disabled={saving}>
               Save
             </button>
           </footer>

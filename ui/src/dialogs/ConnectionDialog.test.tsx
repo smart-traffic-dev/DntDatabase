@@ -7,6 +7,7 @@ import {
   callsOf,
   config,
   fail,
+  Failure,
   ids,
   mockBackend,
   resetStores,
@@ -14,10 +15,13 @@ import {
 } from '../test/backend';
 const sheet = import.meta.glob('./dialogs.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const css = Object.values(sheet)[0] ?? '';
-import type { DriverOptions } from '../bindings';
+import type { DbKind } from '../bindings';
 import { ConnectionDialog, formProblem, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds, withEngine } from './ConnectionDialog';
+import { defaultDriverOptions, defaultPort, defaultSsl, engineInfo, ENGINES } from './connectionDefaults';
 
 beforeEach(resetStores);
+
+const ALL_ENGINES: DbKind[] = ['mysql', 'postgres', 'mongo', 'redis'];
 
 type User = ReturnType<typeof userEvent.setup>;
 type FoldName = 'ssh' | 'ssl' | 'advanced';
@@ -74,13 +78,14 @@ describe('ConnectionDialog', () => {
     expect(screen.getByText('Default: 5432')).toHaveAttribute('title', 'PostgreSQL default: 5432');
   });
 
-  it('engine picker offers only SQL engines', () => {
-    mockBackend({});
+  it('engine picker offers every engine of the build', async () => {
+    mockBackend({ available_engines: () => ALL_ENGINES });
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    expect(await screen.findByTestId('conn-engine-mongo')).toBeInTheDocument();
     expect(screen.getByTestId('conn-engine-mysql')).toBeInTheDocument();
     expect(screen.getByTestId('conn-engine-postgres')).toBeInTheDocument();
-    expect(screen.queryByTestId('conn-engine-mongo')).toBeNull();
-    expect(screen.queryByTestId('conn-engine-redis')).toBeNull();
+    expect(screen.getByTestId('conn-engine-redis')).toBeInTheDocument();
+    expect(screen.getByTestId('conn-engine-mongo').closest('label')).toHaveTextContent('MongoDBPort 27017');
   });
 
   it('withEngine swaps only the values still at the old default', () => {
@@ -90,6 +95,26 @@ describe('ConnectionDialog', () => {
     // A cleared port or user takes the new engine's default.
     expect(withEngine({ ...f, port: '', portTouched: true, username: '' }, 'postgres')).toMatchObject({ port: '5432', username: 'postgres' });
     expect(withEngine(f, 'mysql')).toBe(f);
+  });
+
+  it('connection defaults cover every engine', () => {
+    expect(ENGINES.map((e) => e.id)).toEqual(ALL_ENGINES);
+    expect(engineInfo('mongo')).toMatchObject({ label: 'MongoDB', port: 27017, user: '' });
+    expect(engineInfo('redis')).toMatchObject({ label: 'Redis', port: 6379, user: '' });
+    expect(defaultPort('mongo', true)).toBeNull();
+    expect(defaultPort('mongo', false)).toBe(27017);
+    expect(defaultPort('postgres')).toBe(5432);
+    expect(ALL_ENGINES.map(defaultSsl)).toEqual(['prefer', 'prefer', 'disable', 'disable']);
+    expect(defaultDriverOptions('mysql')).toEqual({ kind: 'none' });
+    expect(defaultDriverOptions('mongo')).toEqual({
+      kind: 'mongo',
+      srv: false,
+      auth_source: null,
+      replica_set: null,
+      direct_connection: false,
+      extra_hosts: [],
+    });
+    expect(defaultDriverOptions('redis')).toEqual({ kind: 'redis', db: 0 });
   });
 
   it('one page: Engine cards first with their marks, then Name; a new connection starts on Engine', () => {
@@ -874,94 +899,294 @@ describe('ConnectionDialog', () => {
     expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
   });
 
-  const mongoDriver = {
-    kind: 'mongo',
-    srv: false,
-    auth_source: null,
-    replica_set: null,
-    direct_connection: false,
-    extra_hosts: [],
-  } as const;
-  it.each([
-    { uri: 'mongodb://h', engine: 'mongo', port: 27017, driver: mongoDriver },
-    { uri: 'mongodb+srv://h', engine: 'mongo_srv', port: null, driver: { ...mongoDriver, srv: true } },
-    { uri: 'redis://h', engine: 'redis', port: 6379, driver: { kind: 'redis', db: 0 } as const },
-    { uri: 'rediss://h', engine: 'rediss', port: 6379, driver: { kind: 'redis', db: 0 } as const },
-  ])('a pasted $uri string is refused until R4 and changes nothing', async ({ uri, engine, port, driver }) => {
+  const parsedOf = (over: Record<string, unknown>) => ({
+    engine: null,
+    host: null,
+    port: null,
+    user: null,
+    password: null,
+    database: null,
+    ssl_mode: null,
+    application_name: null,
+    connect_timeout_s: null,
+    ignored: [],
+    warnings: [],
+    driver: null,
+    ...over,
+  });
+
+  it('pasted_redis_uri_fills_fields', async () => {
     mockBackend({
-      parse_connection_string: () => ({
-        engine,
-        host: 'h',
-        port,
-        user: null,
-        password: null,
-        database: null,
-        ssl_mode: engine === 'rediss' ? 'require' : null,
-        application_name: null,
-        connect_timeout_s: null,
-        ignored: [],
-        warnings: [],
-        driver,
-      }),
+      available_engines: () => ALL_ENGINES,
+      parse_connection_string: () =>
+        parsedOf({ engine: 'rediss', host: 'h', port: 6380, user: 'u', ssl_mode: 'require', driver: { kind: 'redis', db: 2 } }),
+      create_connection: (a) => a.cfg,
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    const hostBefore = (screen.getByTestId('conn-host') as HTMLInputElement).value;
     await openUrl(user);
-    await user.type(screen.getByTestId('conn-string'), uri);
-    const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
-    expect(alert).toHaveTextContent(/^MongoDB and Redis connections are not available in this version yet\.$/);
-    expect(screen.queryByTestId('parse-result')).toBeNull();
-    expect(screen.getByTestId('conn-engine-mysql')).toBeChecked();
-    expect(screen.getByTestId('conn-host')).toHaveValue(hostBefore);
-    expect(screen.getByTestId('conn-port')).toHaveValue(3306);
+    await user.type(screen.getByTestId('conn-string'), 'rediss://u@h:6380/2');
+    await screen.findByTestId('parse-result', {}, { timeout: 3_000 });
+    expect(screen.getByTestId('conn-engine-redis')).toBeChecked();
+    expect(screen.getByTestId('conn-host')).toHaveValue('h');
+    expect(screen.getByTestId('conn-port')).toHaveValue(6380);
+    expect(screen.getByLabelText('Database index')).toHaveValue(2);
+    await openFold(user, 'ssl');
+    expect(screen.getByTestId('conn-ssl-require')).toBeChecked();
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: { kind: 'redis', port: 6380, username: 'u', ssl: { mode: 'require' }, options: { driver: { kind: 'redis', db: 2 } } },
+    });
   });
 
-  it('a pasted Mongo/Redis URI is refused by its scheme, before it is parsed', async () => {
+  it('a pasted mongodb+srv:// string picks MongoDB with SRV on', async () => {
     mockBackend({
-      parse_connection_string: () => {
-        throw appError('config', 'Unsupported URI option: retryWrites', { field: 'uri' });
+      available_engines: () => ALL_ENGINES,
+      parse_connection_string: () =>
+        parsedOf({
+          engine: 'mongo_srv',
+          host: 'c.x.net',
+          database: 'shop',
+          driver: { kind: 'mongo', srv: true, auth_source: 'admin', replica_set: null, direct_connection: false, extra_hosts: [] },
+        }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await openUrl(user);
+    expect(screen.getByLabelText('Connection URL')).toBe(screen.getByTestId('conn-string'));
+    await user.type(screen.getByTestId('conn-string'), 'mongodb+srv://c.x.net/shop?authSource=admin');
+    const parsed = await screen.findByTestId('parse-result', {}, { timeout: 3_000 });
+    expect(parsed).toHaveTextContent('Parsed · MongoDB · c.x.net');
+    expect(screen.getByTestId('conn-engine-mongo')).toBeChecked();
+    expect(screen.getByLabelText('SRV')).toBeChecked();
+    expect(screen.queryByTestId('conn-port')).toBeNull();
+    expect(screen.getByLabelText('Auth database')).toHaveValue('admin');
+    // On MongoDB the field is the connection string.
+    expect(screen.getByLabelText('Connection string')).toBe(screen.getByTestId('conn-string'));
+  });
+
+  it('engine_cards_follow_available_engines', async () => {
+    mockBackend({ available_engines: () => ['mysql', 'postgres', 'redis'] });
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    expect(await screen.findByTestId('conn-engine-redis')).toBeInTheDocument();
+    const engine = screen.getByRole('radiogroup', { name: 'Engine' });
+    expect(within(engine).getAllByRole('radio')).toHaveLength(3);
+    expect(screen.queryByTestId('conn-engine-mongo')).toBeNull();
+    expect(screen.getByTestId('conn-engine-redis').closest('label')).toHaveTextContent('RedisPort 6379');
+    expect(callsOf('available_engines')).toHaveLength(1);
+  });
+
+  it('without an engine list the picker offers the SQL engines', async () => {
+    mockBackend({
+      available_engines: () => {
+        throw new Error('boom');
+      },
+    });
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await waitFor(() => expect(callsOf('available_engines')).toHaveLength(1));
+    const engine = screen.getByRole('radiogroup', { name: 'Engine' });
+    expect(within(engine).getAllByRole('radio')).toHaveLength(2);
+    expect(screen.queryByTestId('conn-engine-redis')).toBeNull();
+  });
+
+  it('mongo_fields_and_srv_hides_port', async () => {
+    mockBackend({ available_engines: () => ALL_ENGINES, create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(await screen.findByTestId('conn-engine-mongo'));
+    expect(screen.getByTestId('conn-port')).toHaveValue(27017);
+    expect(screen.getByTestId('conn-user')).toHaveValue('');
+    expect(screen.getByLabelText('Username (optional)')).toBe(screen.getByTestId('conn-user'));
+    expect(screen.queryByLabelText('Database index')).toBeNull();
+    // MySQL / PostgreSQL-only options are hidden.
+    await openFold(user, 'advanced');
+    expect(screen.queryByLabelText('Application name')).toBeNull();
+    expect(screen.queryByLabelText('Charset')).toBeNull();
+
+    await user.type(screen.getByLabelText('Auth database'), 'admin');
+    await user.type(screen.getByLabelText('Replica set'), 'rs0');
+    await user.click(screen.getByRole('button', { name: 'Add host' }));
+    await user.type(screen.getByLabelText('Additional host 1'), 'h2');
+    await user.type(screen.getByLabelText('Port of additional host 1'), '27018');
+    await user.click(screen.getByRole('button', { name: 'Add host' }));
+    await user.type(screen.getByLabelText('Additional host 2'), 'gone');
+    await user.click(screen.getByRole('button', { name: 'Remove additional host 2' }));
+    expect(screen.queryByLabelText('Additional host 2')).toBeNull();
+
+    // SRV: no port, no additional hosts.
+    await user.click(screen.getByLabelText('SRV'));
+    expect(screen.queryByTestId('conn-port')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Add host' })).toBeNull();
+    await user.click(screen.getByLabelText('SRV'));
+    expect(screen.getByTestId('conn-port')).toHaveValue(27017);
+    expect(screen.getByLabelText('Additional host 1')).toHaveValue('h2');
+
+    await user.type(screen.getByTestId('conn-name'), 'm');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: {
+        kind: 'mongo',
+        port: 27017,
+        username: '',
+        options: {
+          driver: {
+            kind: 'mongo',
+            srv: false,
+            auth_source: 'admin',
+            replica_set: 'rs0',
+            direct_connection: false,
+            extra_hosts: [{ host: 'h2', port: 27018 }],
+          },
+        },
+      },
+    });
+  });
+
+  it('a Mongo SRV connection is saved without a port or additional hosts', async () => {
+    mockBackend({ available_engines: () => ALL_ENGINES, create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(await screen.findByTestId('conn-engine-mongo'));
+    await user.click(screen.getByRole('button', { name: 'Add host' }));
+    await user.type(screen.getByLabelText('Additional host 1'), 'h2');
+    await user.click(screen.getByLabelText('SRV'));
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: { kind: 'mongo', port: 0, options: { driver: { kind: 'mongo', srv: true, extra_hosts: [] } } },
+    });
+  });
+
+  it('redis_database_index_saved_in_driver_options', async () => {
+    mockBackend({ available_engines: () => ALL_ENGINES, create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(await screen.findByTestId('conn-engine-redis'));
+    expect(screen.getByTestId('conn-port')).toHaveValue(6379);
+    expect(screen.queryByLabelText('Database')).toBeNull();
+    expect(screen.queryByLabelText('SRV')).toBeNull();
+    const index = screen.getByLabelText('Database index');
+    expect(index).toHaveValue(0);
+    expect(index).toHaveAttribute('min', '0');
+    expect(index).toHaveAttribute('max', '15');
+    await user.clear(index);
+    await user.type(index, '3');
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: { kind: 'redis', port: 6379, username: '', options: { driver: { kind: 'redis', db: 3 } } },
+    });
+  });
+
+  it('switching_engine_resets_driver_options', async () => {
+    mockBackend({ available_engines: () => ALL_ENGINES, create_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(await screen.findByTestId('conn-engine-redis'));
+    await user.clear(screen.getByLabelText('Database index'));
+    await user.type(screen.getByLabelText('Database index'), '5');
+    await user.click(screen.getByTestId('conn-engine-mongo'));
+    await user.type(screen.getByLabelText('Replica set'), 'rs0');
+    await user.click(screen.getByTestId('conn-engine-redis'));
+    expect(screen.getByLabelText('Database index')).toHaveValue(0);
+    await user.click(screen.getByTestId('conn-engine-mongo'));
+    expect(screen.getByLabelText('Replica set')).toHaveValue('');
+    await user.click(screen.getByTestId('conn-engine-postgres'));
+    await user.click(screen.getByTestId('conn-save'));
+    await waitFor(() => expect(callsOf('create_connection')).toHaveLength(1));
+    expect(callsOf('create_connection')[0]).toMatchObject({
+      cfg: { kind: 'postgres', port: 5432, username: 'postgres', options: { driver: { kind: 'none' } } },
+    });
+  });
+
+  it('command_kinds_default_ssl_disable', async () => {
+    mockBackend({ available_engines: () => ALL_ENGINES });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    expect(foldRow('ssl')).toHaveTextContent('SSL / TLSPrefer');
+    await user.click(await screen.findByTestId('conn-engine-redis'));
+    expect(foldRow('ssl')).toHaveTextContent('SSL / TLSDisable');
+    await user.click(screen.getByTestId('conn-engine-mongo'));
+    expect(foldRow('ssl')).toHaveTextContent('SSL / TLSDisable');
+    await openFold(user, 'ssl');
+    await user.click(screen.getByTestId('conn-ssl-prefer'));
+    expect(screen.getByText('MongoDB and Redis have no "prefer" mode: TLS is used without certificate checks.')).toBeVisible();
+    // Back on SQL, Prefer is a real mode: no hint.
+    await user.click(screen.getByTestId('conn-engine-mysql'));
+    expect(screen.queryByText(/have no "prefer" mode/)).toBeNull();
+  });
+
+  it('srv_with_ssh_shows_field_error', async () => {
+    mockBackend({
+      available_engines: () => ALL_ENGINES,
+      create_connection: () => {
+        throw new Failure(appError('config', 'SSH tunnel needs a single host', { field: 'ssh' }));
       },
     });
     const user = userEvent.setup();
     render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
-    await openUrl(user);
-    await user.type(screen.getByTestId('conn-string'), 'MONGODB+SRV://u:p@c.x.net/db?retryWrites=true&w=majority');
-    const alert = await screen.findByRole('alert', {}, { timeout: 3_000 });
-    expect(alert).toHaveTextContent(/^MongoDB and Redis connections are not available in this version yet\.$/);
-    // Past the debounce: still no parse call.
-    await new Promise((r) => setTimeout(r, 400));
-    expect(callsOf('parse_connection_string')).toHaveLength(0);
-    expect(screen.getByRole('alert')).toHaveTextContent(/^MongoDB and Redis connections are not available/);
+    await user.click(await screen.findByTestId('conn-engine-mongo'));
+    await user.click(screen.getByLabelText('SRV'));
+    await openFold(user, 'ssh');
+    await user.click(screen.getByLabelText('Connect through an SSH tunnel'));
+    await user.type(screen.getByLabelText('SSH host'), 'bastion');
+    await user.click(foldRow('ssh'));
+    await user.click(screen.getByTestId('conn-save'));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/^SSH tunnel needs a single host$/);
+    // Under the SSH section, opened to show it.
+    expect(foldRow('ssh')).toHaveAttribute('aria-expanded', 'true');
+    expect(foldRow('ssh')).toHaveTextContent('Error');
+    expect(foldRow('ssh').closest('section')).toContainElement(alert);
   });
 
-  it.each<{ kind: 'redis' | 'mongo'; driver: DriverOptions }>([
-    { kind: 'redis', driver: { kind: 'redis', db: 0 } },
-    {
-      kind: 'mongo',
-      driver: { kind: 'mongo', srv: true, auth_source: null, replica_set: null, direct_connection: false, extra_hosts: [] },
-    },
-  ])('editing a $kind connection is refused until R4 (no silent rewrite)', async ({ kind, driver }) => {
-    const stored = config(ids.prod, 'cache', {
-      kind,
-      host: 'cache.local',
-      port: kind === 'redis' ? 6379 : 0,
-      username: '',
-      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0, driver },
+  it('a driver option error goes under its field', async () => {
+    mockBackend({
+      available_engines: () => ALL_ENGINES,
+      create_connection: () => {
+        throw new Failure(appError('config', 'Every additional host needs a host and a port', { field: 'options.driver.extra_hosts' }));
+      },
     });
-    mockBackend({ update_connection: (a) => a.cfg });
+    const user = userEvent.setup();
+    render(<ConnectionDialog mode="create" onClose={vi.fn()} />);
+    await user.click(await screen.findByTestId('conn-engine-mongo'));
+    await user.click(screen.getByRole('button', { name: 'Add host' }));
+    await user.click(screen.getByTestId('conn-save'));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('Every additional host needs a host and a port');
+    expect(screen.getByRole('group', { name: 'Additional hosts' })).toContainElement(alert);
+  });
+
+  it('saved_command_conn_without_driver_is_editable', async () => {
+    const stored = config(ids.prod, 'cache', {
+      kind: 'redis',
+      host: 'cache.local',
+      port: 6379,
+      username: '',
+      ssl: { version: 1, mode: 'disable', ca_path: null, cert_path: null, key_path: null },
+      options: { version: 1, connect_timeout_s: 10, ssh_timeout_s: 10, charset: null, application_name: null, query_timeout_s: 0, driver: { kind: 'redis', db: 4 } },
+    });
+    mockBackend({ available_engines: () => ['mysql', 'postgres'], update_connection: (a) => a.cfg });
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      /^MongoDB and Redis connections are not available in this version yet\.$/,
+    expect(await screen.findByTestId('conn-no-driver')).toHaveTextContent(
+      /^This build has no Redis driver yet\. You can edit and save the connection, but not connect\.$/,
     );
-    expect(screen.getByTestId('conn-save')).toBeDisabled();
+    // Its own card stays, chosen.
+    expect(screen.getByTestId('conn-engine-redis')).toBeChecked();
+    expect(screen.getByLabelText('Database index')).toHaveValue(4);
+    expect(screen.getByTestId('conn-test')).toBeDisabled();
+    expect(screen.getByTestId('conn-save')).toBeEnabled();
+    await user.clear(screen.getByTestId('conn-host'));
+    await user.type(screen.getByTestId('conn-host'), 'cache2.local');
     await user.click(screen.getByTestId('conn-save'));
-    await user.keyboard('{Enter}');
-    await new Promise((r) => setTimeout(r, 50));
-    expect(callsOf('update_connection')).toHaveLength(0);
-    expect(onClose).not.toHaveBeenCalled();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(callsOf('update_connection')[0]).toMatchObject({
+      cfg: { kind: 'redis', host: 'cache2.local', port: 6379, username: '', options: { driver: { kind: 'redis', db: 4 } } },
+    });
   });
 
   it('editing a MySQL connection with an empty user still saves', async () => {
@@ -970,7 +1195,7 @@ describe('ConnectionDialog', () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(<ConnectionDialog mode="edit" initial={stored.config} hasDbPassword onClose={onClose} />);
-    expect(screen.queryByText(/not available in this version/)).toBeNull();
+    expect(screen.queryByTestId('conn-no-driver')).toBeNull();
     expect(screen.getByTestId('conn-save')).toBeEnabled();
     await user.click(screen.getByTestId('conn-save'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());

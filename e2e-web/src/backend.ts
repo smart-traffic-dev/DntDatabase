@@ -10,6 +10,7 @@ import type {
   DesignPreview,
   DesignRender,
   DesignReport,
+  DriverOptions,
   EditableInfo,
   HistoryEntry,
   ImportConfirm,
@@ -38,6 +39,7 @@ import type {
   Value,
 } from '../../ui/src/bindings';
 import { Failure, appError, fail, openResult, serverInfo } from '../../ui/src/test/fixtures/data';
+import { commandDatabases, commandInfo, createCommandFake, type CommandFakeState } from './commandFixtures';
 import { createDdlFake, type DdlFakeState } from './ddlEdit';
 import { DUMP_FILE, PSQL_FILE, PSQL_FILE_MESSAGE, RESTORE_FILE, appRunnerPreview, fixtureDumpObjects, noTools } from './backupFixtures';
 import { IMPORT_FILE, autoMap, checkMapping, importPreview, ordersInspection, ordersTarget } from './importFixtures';
@@ -69,8 +71,35 @@ const DDL: Record<string, string> = {
   ].join('\n'),
 };
 
-const infoOf = (cfg: ConnectionConfig): ServerInfo =>
-  cfg.kind === 'postgres' ? serverInfo('Postgres', [17, 0, 0]) : serverInfo('MySql8', [8, 0, 36]);
+function infoOf(cfg: ConnectionConfig): ServerInfo {
+  switch (cfg.kind) {
+    case 'mysql':
+      return serverInfo('MySql8', [8, 0, 36]);
+    case 'postgres':
+      return serverInfo('Postgres', [17, 0, 0]);
+    case 'mongo':
+    case 'redis':
+      return commandInfo(cfg.kind);
+  }
+}
+
+const MONGO_DEFAULT: Extract<DriverOptions, { kind: 'mongo' }> = {
+  kind: 'mongo',
+  srv: false,
+  auth_source: null,
+  replica_set: null,
+  direct_connection: false,
+  extra_hosts: [],
+};
+
+/** `host[:port]` of a URI authority. */
+function hostPort(text: string): { host: string | null; port: number | null } {
+  const colon = text.lastIndexOf(':');
+  return {
+    host: (colon < 0 ? text : text.slice(0, colon)) || null,
+    port: colon < 0 ? null : Number(text.slice(colon + 1)),
+  };
+}
 
 /**
  * A minimal mirror of `dnt-core`'s connection-string parser, enough to drive the dialog in the
@@ -89,20 +118,27 @@ function parseConnString(input: string): ParsedConnString {
     connect_timeout_s: null,
     ignored: [],
     warnings: [],
+    driver: null,
   };
   const text = input.trim().replace(/^jdbc:/, '');
-  const scheme = /^(postgres(?:ql)?|mysql|mariadb):\/\//i.exec(text);
+  const scheme = /^(postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?):\/\//i.exec(text);
   const url = scheme ? text.slice(scheme[0].length) : text;
   if (scheme) {
     const name = scheme[1]!.toLowerCase();
-    parsed.engine = name.startsWith('postgres') ? 'postgres' : name === 'mariadb' ? 'mariadb' : 'mysql';
+    if (name.startsWith('postgres')) parsed.engine = 'postgres';
+    else if (name === 'mariadb' || name === 'mysql') parsed.engine = name;
+    else if (name === 'mongodb') parsed.engine = 'mongo';
+    else if (name === 'mongodb+srv') parsed.engine = 'mongo_srv';
+    else parsed.engine = name === 'rediss' ? 'rediss' : 'redis';
   } else if (!text.includes('=')) {
     throw appError('config', `unsupported scheme "${text.split('://')[0]}://"`, { field: 'conn_string' });
   }
+  const mongo = parsed.engine === 'mongo' || parsed.engine === 'mongo_srv';
+  const redis = parsed.engine === 'redis' || parsed.engine === 'rediss';
   const [main, query] = url.split('?') as [string, string | undefined];
   const slash = main.indexOf('/');
   const authority = slash < 0 ? main : main.slice(0, slash);
-  if (slash >= 0) parsed.database = main.slice(slash + 1) || null;
+  const path = slash >= 0 ? main.slice(slash + 1) || null : null;
   const at = authority.lastIndexOf('@');
   const hosts = at < 0 ? authority : authority.slice(at + 1);
   if (at >= 0) {
@@ -110,13 +146,35 @@ function parseConnString(input: string): ParsedConnString {
     parsed.user = user || null;
     if (password !== undefined) parsed.password = decodeURIComponent(password);
   }
-  const colon = hosts.lastIndexOf(':');
-  parsed.host = (colon < 0 ? hosts : hosts.slice(0, colon)) || null;
-  if (colon >= 0) parsed.port = Number(hosts.slice(colon + 1));
+  // MongoDB lists several hosts; the first fills Host / Port, the rest are additional hosts.
+  const [first = '', ...rest] = mongo ? hosts.split(',') : [hosts];
+  ({ host: parsed.host, port: parsed.port } = hostPort(first));
+  if (mongo) {
+    const srv = parsed.engine === 'mongo_srv';
+    parsed.database = path;
+    parsed.driver = {
+      ...MONGO_DEFAULT,
+      srv,
+      extra_hosts: rest.map((h) => {
+        const p = hostPort(h);
+        return { host: p.host ?? '', port: p.port ?? 27017 };
+      }),
+    };
+  } else if (redis) {
+    parsed.driver = { kind: 'redis', db: path === null ? 0 : Number(path) };
+    if (parsed.engine === 'rediss') parsed.ssl_mode = 'require';
+  } else {
+    parsed.database = path;
+  }
   for (const pair of (query ?? '').split('&').filter(Boolean)) {
     const [k, v = ''] = pair.split('=') as [string, string | undefined];
     const key = k.toLowerCase().replace(/-/g, '_');
-    if (key === 'sslmode' || key === 'ssl_mode') {
+    const driver = parsed.driver;
+    if (driver?.kind === 'mongo' && key === 'authsource') {
+      driver.auth_source = v;
+    } else if (driver?.kind === 'mongo' && key === 'replicaset') {
+      driver.replica_set = v;
+    } else if (key === 'sslmode' || key === 'ssl_mode') {
       parsed.ssl_mode = v.toLowerCase().replace('-', '_') as ParsedConnString['ssl_mode'];
     } else if (key === 'application_name') {
       parsed.application_name = v;
@@ -393,6 +451,8 @@ export interface FakeBackend {
   handlers: Record<string, Handler>;
   /** The DDL editor's server objects and failure switches (see `DdlFakeState`). */
   ddl: DdlFakeState;
+  /** The MongoDB / Redis data behind every Command connection (see `createCommandFake`). */
+  command: CommandFakeState;
 }
 
 /**
@@ -444,6 +504,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     return info;
   };
   const ddl = createDdlFake(requireOpen, (id) => connections.find((c) => c.id === id));
+  const command = createCommandFake();
 
   const handlers: Record<string, Handler> = {
     // Startup: the stored connections, the restored query tabs, favorites and snippets.
@@ -482,6 +543,9 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     test_connection: ({ cfg }) => openResult(infoOf(cfg as ConnectionConfig)),
 
+    // This build "has" every driver: the dialog offers all four engines.
+    available_engines: () => ['mysql', 'postgres', 'mongo', 'redis'],
+
     // The real parser is in Rust (dnt-core); this echo is enough to drive the dialog.
     parse_connection_string: ({ input }) => parseConnString(String(input)),
 
@@ -500,7 +564,16 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
       return null;
     },
 
-    list_databases: (): DatabaseInfo[] => [{ name: 'dnt_fixture' }],
+    list_databases: ({ id }): DatabaseInfo[] => {
+      const cfg = connections.find((c) => c.id === id);
+      switch (cfg?.kind) {
+        case 'mongo':
+        case 'redis':
+          return commandDatabases(command, cfg);
+        default:
+          return [{ name: 'dnt_fixture' }];
+      }
+    },
 
     list_schemas: () => [{ name: 'public' }],
 
@@ -772,6 +845,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
   return {
     calls,
     ddl: ddl.state,
+    command,
     handlers: Object.fromEntries(
       Object.entries(all).map(([cmd, handler]) => [
         cmd,

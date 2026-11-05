@@ -53,6 +53,10 @@
   --dnt-brand-mariadb-bg: #e6eef0;
   --dnt-brand-postgres: #336791;
   --dnt-brand-postgres-bg: #e9eef9;
+  --dnt-brand-mongo: #00684a;
+  --dnt-brand-mongo-bg: #e6f4ee;
+  --dnt-brand-redis: #d82c20;
+  --dnt-brand-redis-bg: #fbeceb;
 }
 
 /* 2. Semantic — light */

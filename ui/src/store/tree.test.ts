@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { ServerVariant } from '../bindings';
 import {
   callsOf,
+  config,
   fail,
   ids,
   mockBackend,
@@ -242,6 +243,41 @@ describe('tree store: names, errors, selection, drops', () => {
     });
     await useTree.getState().refresh(`${folder}/obj:Table:orders`);
     expect(useTree.getState().error?.message).toBe('An internal error occurred.');
+  });
+
+  it.each([
+    // As the backend sends it: the raw driver message is the internal error's detail.
+    ['detail', { detail: 'no driver registered for Redis' }],
+    ['message', { message: 'no driver registered for Redis' }],
+  ])('tree_connect_without_driver_is_friendly (%s)', async (_where, extra) => {
+    const tree = sampleTree();
+    const cacheId = '44444444-4444-4444-8444-444444444444';
+    tree.connections.push(config(cacheId, 'cache', { kind: 'redis', port: 6379, username: '' }));
+    const cache = connNodeId(cacheId);
+    mockBackend({
+      list_tree: () => tree,
+      open_connection: () => {
+        throw fail('internal', extra);
+      },
+    });
+    await useTree.getState().reloadStored();
+    useTree.getState().expand(cache);
+    await expect.poll(() => useTree.getState().nodes.get(cache)?.error).toBeDefined();
+    expect(useTree.getState().nodes.get(cache)?.error?.message).toBe('This build has no Redis driver yet.');
+    expect(useTree.getState().nodes.get(cache)?.engine).toBe('RD');
+  });
+
+  it('an open failure that is not about a driver keeps its message', async () => {
+    mockBackend({
+      list_tree: () => sampleTree(),
+      open_connection: () => {
+        throw fail('internal', { detail: 'socket closed' });
+      },
+    });
+    await useTree.getState().reloadStored();
+    useTree.getState().expand(conn);
+    await expect.poll(() => useTree.getState().nodes.get(conn)?.error).toBeDefined();
+    expect(useTree.getState().nodes.get(conn)?.error?.message).toBe('An internal error occurred.');
   });
 
   it('clears the selection when the selected node disappears on reload', async () => {
