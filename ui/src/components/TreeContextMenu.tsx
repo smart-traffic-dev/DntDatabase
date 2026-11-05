@@ -9,6 +9,7 @@ import { DDL_EDITABLE_KINDS, openDdlEditTab } from './openDdlEdit';
 import { openDesignTab, openObjectTab } from './openObject';
 import { backupActionItems } from '../transfer/backup/backupMenu';
 import { isKind, sqlEngine } from '../engine';
+import { capsOfConnection } from '../engine/useCaps';
 
 type Item = MenuEntry;
 const SEP: Item = { separator: true };
@@ -28,6 +29,7 @@ export function objectActionItems(node: TreeNode): Item[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
+  if (!capsOfConnection(connectionId)?.object_actions) return [];
   const engine = sqlEngine(cfg.kind);
   if (!engine) return [];
   const pg = isKind(engine, 'postgres');
@@ -64,6 +66,7 @@ export function designActionItems(node: TreeNode): Item[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
+  if (!capsOfConnection(connectionId)?.designer) return [];
   const engine = sqlEngine(cfg.kind);
   if (!engine) return [];
   const object = node.objectRef;
@@ -101,6 +104,7 @@ export function ddlActionItems(node: TreeNode): Item[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
+  if (!capsOfConnection(connectionId)?.ddl_edit) return [];
   const engine = sqlEngine(cfg.kind);
   if (!engine) return [];
   const editable = DDL_EDITABLE_KINDS[engine];
@@ -129,6 +133,7 @@ export function importActionItems(node: TreeNode): Item[] {
   const object = node.objectRef;
   if (!connectionId || node.kind !== 'object' || object?.kind !== 'Table') return [];
   if (!useConnections.getState().info.has(connectionId)) return [];
+  if (!capsOfConnection(connectionId)?.import) return [];
   return [{ label: 'Import data…', run: () => useDialogs.getState().requestDialog({ kind: 'importData', connectionId, table: object }) }];
 }
 
@@ -142,6 +147,7 @@ export function seedActionItems(node: TreeNode): Item[] {
   if (!connectionId || node.kind !== 'object' || object?.kind !== 'Table') return [];
   const stored = useConnections.getState();
   if (!stored.info.has(connectionId)) return [];
+  if (!capsOfConnection(connectionId)?.seed) return [];
   const readOnly = !!stored.summaries.get(connectionId)?.config.read_only;
   return [
     {
@@ -153,7 +159,7 @@ export function seedActionItems(node: TreeNode): Item[] {
   ];
 }
 
-function itemsFor(node: TreeNode): Item[] {
+export function treeMenuItems(node: TreeNode): Item[] {
   const tree = useTree.getState();
   const dialogs = useDialogs.getState();
   const connectionId = connectionIdOf(node.id);
@@ -240,5 +246,5 @@ function grouped(...groups: Item[][]): Item[] {
 }
 
 export function TreeContextMenu({ node, x, y, onClose }: Props) {
-  return <ActionMenu label={`${node.label} actions`} x={x} y={y} items={itemsFor(node)} onClose={onClose} />;
+  return <ActionMenu label={`${node.label} actions`} x={x} y={y} items={treeMenuItems(node)} onClose={onClose} />;
 }

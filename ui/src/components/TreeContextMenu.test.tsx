@@ -6,7 +6,8 @@ import { useDdlEdits } from '../store/ddlEdits';
 import { callsOf, config, ids, mockBackend, resetStores, serverInfo } from '../test/backend';
 import type { TreeNode } from '../store/tree';
 import { useDialogs } from '../store/dialogs';
-import { ddlActionItems, designActionItems, importActionItems, seedActionItems } from './TreeContextMenu';
+import { defaultCaps } from '../engine';
+import { ddlActionItems, designActionItems, importActionItems, seedActionItems, treeMenuItems } from './TreeContextMenu';
 
 const table: ObjectRef = { database: 'shop', schema: null, name: 'orders', kind: 'Table' };
 const tableNode: TreeNode = { id: `conn:${ids.prod}/obj`, kind: 'object', label: 'orders', objectRef: table };
@@ -188,5 +189,45 @@ describe('DDL editor tree entries', () => {
     const mv: TreeNode = { ...tableNode, objectRef: { database: 'shop', schema: 'public', name: 'mv', kind: 'MaterializedView' } };
     ddlEntry(mv, 'Edit definition').run();
     expect(useTabs.getState().tabs[0]).toMatchObject({ kind: 'ddl', objectKind: 'MaterializedView', title: 'mv' });
+  });
+});
+
+describe('capability gates', () => {
+  const labelsOf = (node: TreeNode) => treeMenuItems(node).flatMap((e) => ('label' in e ? [e.label] : []));
+  const SQL_LABELS = [
+    'Design table', 'New table…', 'Edit definition', 'New trigger…', 'Rename table…', 'Truncate table…', 'Drop table…',
+    'Drop view…', 'Create database…', 'Drop database…', 'Import data…', 'Generate data…', 'Dump table…', 'Dump…', 'Restore…',
+  ];
+
+  it('redis_tree_menu_has_no_sql_items', () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'cache', { kind: 'redis', port: 6379 })]);
+    useConnections.getState().setInfo(ids.prod, { kind: 'redis', variant: 'Redis', version: [7, 2, 0], version_string: '7.2.0', capabilities: defaultCaps('redis') });
+    const nodes: TreeNode[] = [
+      { id: `conn:${ids.prod}`, kind: 'connection', label: 'cache' },
+      databaseNode,
+      { ...databaseNode, id: `conn:${ids.prod}/folder`, kind: 'folder', folderKind: 'Table', label: 'Keys' },
+      tableNode,
+    ];
+    for (const node of nodes) {
+      const found = labelsOf(node);
+      expect(found.filter((l) => SQL_LABELS.includes(l)), `${node.kind}: ${found.join(', ')}`).toEqual([]);
+    }
+  });
+
+  it('mysql_tree_menu_unchanged', () => {
+    expect(labelsOf(tableNode)).toEqual([
+      'Open', 'Select top 1000', 'New query',
+      'Design table', 'New trigger…', 'Rename table…',
+      'Import data…', 'Generate data…', 'Dump table…',
+      'Truncate table…', 'Drop table…',
+      'Refresh', 'Copy name',
+    ]);
+    expect(labelsOf(databaseNode)).toEqual(['New query', 'New table…', 'Dump…', 'Restore…', 'Drop database…', 'Refresh', 'Copy name']);
+  });
+
+  it('a flag that is off removes its item and leaves the others', () => {
+    const caps = { ...defaultCaps('mysql'), import: false, seed: false, dump: false, designer: false, ddl_edit: false, object_actions: false };
+    useConnections.getState().setInfo(ids.prod, { ...serverInfo('MySql8'), capabilities: caps });
+    expect(labelsOf(tableNode)).toEqual(['Open', 'Select top 1000', 'New query', 'Refresh', 'Copy name']);
   });
 });

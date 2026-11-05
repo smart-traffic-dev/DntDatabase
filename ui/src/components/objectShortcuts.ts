@@ -3,6 +3,7 @@ import { useObjectData } from '../store/objectData';
 import { useTabs, type ObjectTabRef } from '../store/tabs';
 import { refreshData, turnPage } from '../tabs/DataView';
 import { resourceOf, subTabsOf } from '../tabs/objectSections';
+import { capsOfConnection } from '../engine/useCaps';
 import { openDesignTab } from './openObject';
 
 /** The Connections tree keeps F4 / F5 for the selected node. */
@@ -61,7 +62,7 @@ export function onObjectShortcut(e: KeyboardEvent): boolean {
       else void useObjectData.getState().refresh(tab, resourceOf(sub));
       return true;
     }
-    if (e.key === 'F4' && tab.objectRef.kind === 'Table') {
+    if (e.key === 'F4' && tab.objectRef.kind === 'Table' && (capsOfConnection(tab.connectionId)?.designer ?? true)) {
       consume(e);
       const { database, schema, name } = tab.objectRef;
       void openDesignTab(tab.connectionId, { database, schema }, name);

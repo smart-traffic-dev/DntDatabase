@@ -22,6 +22,23 @@ describe('QueryToolbar commit mode', () => {
   const openMore = (user: ReturnType<typeof userEvent.setup>) => user.click(screen.getByTestId('query-more'));
   const item = (mode: 'auto' | 'manual') => screen.getByTestId(`query-tx-${mode}`);
 
+  it('command_toolbar_hides_explain_and_manual_tx', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'cache', { kind: 'redis', port: 6379 })]);
+    mockBackend({});
+    act(() => useTxMode.getState().patch(id, { mode: 'Manual' }));
+    act(() => useQueryRun.setState({ runs: new Map([[id, { ...emptyRun, txState: 'active' }]]) }));
+    render(<QueryToolbar doc={doc()} />);
+    expect(screen.queryByTestId('query-explain')).toBeNull();
+    expect(screen.queryByTestId('query-explain-menu')).toBeNull();
+    expect(screen.queryByTestId('query-tx-chip')).toBeNull();
+    expect(screen.queryByTestId('query-tx-commit')).toBeNull();
+    expect(screen.queryByTestId('query-tx-rollback')).toBeNull();
+    await openMore(userEvent.setup());
+    expect(screen.queryByTestId('query-tx-auto')).toBeNull();
+    expect(screen.queryByTestId('query-tx-manual')).toBeNull();
+    expect(screen.getByTestId('query-format')).toBeInTheDocument();
+  });
+
   it('manual_toggle_calls_tx_mode', async () => {
     mockBackend({ query_tx_mode: () => 'idle' });
     render(<QueryToolbar doc={doc()} />);

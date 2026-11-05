@@ -13,6 +13,7 @@ import { dialectOfConnection, useQueryDocs } from '../store/queryTabs';
 import { useTabs, type ObjectTabRef as Tab } from '../store/tabs';
 import './objectTab.css';
 import { editorLanguage, sqlEngine } from '../engine';
+import { useCaps } from '../engine/useCaps';
 
 const DASH = '—';
 
@@ -135,7 +136,8 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   const conn = useConnections((s) => s.summaries.get(tab.connectionId)?.config);
   const connected = useConnections((s) => s.info.has(tab.connectionId));
   // A read-only connection still opens the editor (view-only, with the reason), as the tree does.
-  const editable = !!conn && connected && editableKindsOf(conn.kind).includes(tab.objectRef.kind);
+  const caps = useCaps(tab.connectionId);
+  const editable = !!conn && connected && !!caps?.ddl_edit && editableKindsOf(conn.kind).includes(tab.objectRef.kind);
 
   const copy = async () => {
     try {

@@ -4,6 +4,7 @@ import { useDialogs } from '../../store/dialogs';
 import type { TreeNode } from '../../store/tree';
 import { connectionIdOf } from '../../store/treeModel';
 import { namespaceModel } from '../../engine';
+import { capsOfConnection } from '../../engine/useCaps';
 
 /**
  * The tree's backup entries (spec §7.4): **Dump…** and **Restore…** on a database (MySQL) or a
@@ -17,6 +18,7 @@ export function backupActionItems(node: TreeNode): MenuEntry[] {
   const stored = useConnections.getState();
   const cfg = stored.summaries.get(connectionId)?.config;
   if (!cfg || !stored.info.has(connectionId)) return [];
+  if (!capsOfConnection(connectionId)?.dump) return [];
   const { requestDialog } = useDialogs.getState();
   const object = node.objectRef;
   if (node.kind === 'object') {

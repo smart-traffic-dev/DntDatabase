@@ -1,5 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { commands } from '../bindings';
+import { capsOfConnection } from '../engine/useCaps';
 import { explainQuery, runFromEditor, stopQuery } from '../store/runQuery';
 import { useDialogs } from '../store/dialogs';
 import { useLayout } from '../store/layout';
@@ -104,6 +105,8 @@ function favoriteItems(): MenuEntry[] {
 export function buildMenus(s: MenuState): AppMenu[] {
   const dialog = useDialogs.getState().requestDialog;
   const q = s.queryTabId;
+  // No active query tab, or no connection yet: nothing is known to be missing.
+  const explainOn = capsOfConnection(q ? useQueryDocs.getState().docs.get(q)?.connectionId : null)?.explain ?? true;
   const edit = (label: string, hint: string | undefined, id: string): MenuAction => ({
     label,
     hint,
@@ -214,7 +217,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
           run: () => q && void runFromEditor(q, 'selection'),
         },
         { label: 'Stop', hint: 'Esc', disabled: !q || !s.stoppable, run: () => q && void stopQuery(q) },
-        { label: 'Explain', hint: 'Ctrl+Shift+E', disabled: !q || !s.runnable, run: () => q && void explainQuery(q, false) },
+        ...(explainOn ? [{ label: 'Explain', hint: 'Ctrl+Shift+E', disabled: !q || !s.runnable, run: () => q && void explainQuery(q, false) }] : []),
       ],
     },
     {

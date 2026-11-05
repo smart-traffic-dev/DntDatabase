@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { MenuAction, MenuEntry } from './ActionMenu';
+import { useConnections } from '../store/connections';
+import { useQueryDocs } from '../store/queryTabs';
+import { config, ids, resetStores } from '../test/backend';
 import { buildMenus, type MenuState } from './appMenus';
 
 const base: MenuState = {
@@ -133,6 +136,15 @@ describe('buildMenus', () => {
     expect(item('Query', 'Run selection', { ...run, hasSelection: true })?.disabled).toBe(false);
     expect(item('Query', 'Stop', run)?.disabled).toBe(true);
     expect(item('Query', 'Stop', { queryTabId: 'q1', runnable: false, stoppable: true })?.disabled).toBe(false);
+  });
+
+  it('Explain is removed on a connection whose engine has no Explain', () => {
+    resetStores();
+    useConnections.getState().setStored([], [config(ids.prod, 'cache', { kind: 'redis', port: 6379 })]);
+    const q = useQueryDocs.getState().newQuery(ids.prod, null);
+    const labels = items('Query', { queryTabId: q, runnable: true }).map((i) => i.label);
+    expect(labels).toContain('Run statement');
+    expect(labels).not.toContain('Explain');
   });
 
   it('the old toolbar placeholders are disabled "Coming soon" items in the menus that will own them', () => {

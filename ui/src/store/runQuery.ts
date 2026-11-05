@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import { api, toAppError } from '../api';
 import { runChannel } from '../api/query';
 import type { PlanView, Target, TxAction } from '../bindings';
+import { capsOfConnection } from '../engine/useCaps';
 import { useConnections } from './connections';
 import { exportRunOf, useExporting } from './queryExport';
 import { canRun, canStop, settleTx, useQueryRun, type MessageLine } from './queryRun';
@@ -319,6 +320,8 @@ function setExplainError(tabId: string, text: string | null) {
  * the plan, which then goes through the normal run flow, so Analyze on Production asks first.
  */
 export async function explainQuery(tabId: string, analyze: boolean): Promise<void> {
+  // The shortcut stays bound on every editor; an engine without Explain just ignores it.
+  if (!(capsOfConnection(useQueryDocs.getState().docs.get(tabId)?.connectionId)?.explain ?? true)) return;
   if (!mayStart(tabId)) return;
   const doc = useQueryDocs.getState().docs.get(tabId);
   if (!doc) return;

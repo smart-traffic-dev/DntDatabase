@@ -125,6 +125,14 @@ describe('explainQuery', () => {
     expect(callsOf('query_run')[0]).toMatchObject({ confirmed: true });
   });
 
+  it('does nothing, and says nothing, on an engine without Explain', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'cache', { kind: 'redis', port: 6379 })]);
+    useConnections.getState().clearInfo(ids.prod);
+    await explainQuery(tab, false);
+    expect(callsOf('query_explain')).toEqual([]);
+    expect(useQueryRun.getState().runs.get(tab)).toBeUndefined();
+  });
+
   it('says so without a connection', async () => {
     useQueryDocs.getState().update(tab, { connectionId: null });
     await explainQuery(tab, false);

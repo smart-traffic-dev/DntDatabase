@@ -5,6 +5,7 @@ import { addQueryToFavorites } from '../../components/favoritesActions';
 import { focusFocusedGroup } from '../../components/focusGroup';
 import { CheckIcon, ChevronDownIcon, DatabaseIcon, ExplainIcon, MoreIcon, PlayIcon, RollbackIcon, StopIcon } from '../../components/icons';
 import { formatClock } from '../../components/statusFormat';
+import { useCaps } from '../../engine/useCaps';
 import { useNow } from '../../lib/useNow';
 import { useConnections } from '../../store/connections';
 import { useExporting } from '../../store/queryExport';
@@ -689,10 +690,14 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   const stoppable = canStop(run) || exporting;
   const busy = !canRun(run) || starting || exporting;
   const commitItems = useCommitMode(doc.id, busy);
+  // No connection yet: nothing is known to be missing, so the SQL toolbar shows.
+  const caps = useCaps(doc.connectionId);
+  const explainOn = caps?.explain ?? true;
+  const txOn = caps ? caps.transactions && caps.family === 'sql' : true;
 
   const moreItems = (): MenuEntry[] => [
     // Under 360 px Explain lives here.
-    ...(narrow
+    ...(narrow && explainOn
       ? ([
           {
             label: 'Explain',
@@ -722,8 +727,7 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
       run: () => update(doc.id, { rowLimit: n }),
     })),
     { separator: true },
-    ...commitItems,
-    { separator: true },
+    ...(txOn ? [...commitItems, { separator: true } satisfies MenuEntry] : []),
     {
       label: 'Open in new group',
       hint: 'Ctrl+\\',
@@ -742,8 +746,8 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
       <ContextChip doc={doc} env={env} narrow={narrow} />
       <span className="ta-sep" aria-hidden="true" />
       <RunSplit doc={doc} env={env} runnable={runnable} stoppable={stoppable} exporting={exporting} hasSelection={hasSelection} why={why} />
-      {!narrow && <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} why={why} />}
-      <TxControls tabId={doc.id} busy={busy} />
+      {!narrow && explainOn && <ExplainSplit tabId={doc.id} runnable={runnable} analyzeOk={analyzeOk} why={why} />}
+      {txOn && <TxControls tabId={doc.id} busy={busy} />}
       <span className="ta-fill" />
       <MenuButton
         label="More query actions"
