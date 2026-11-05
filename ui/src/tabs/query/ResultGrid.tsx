@@ -998,13 +998,13 @@ export function ResultGrid({
         pointer.current = { x: e.clientX, y: e.clientY };
       }}
     >
-      {notice && (
-        <div className={`qr-banner qr-notice${notice.warn ? ' warning' : ''}`} role="status" onClick={() => setNotice(null)}>
-          {notice.text}
-        </div>
-      )}
       <div className="gt-main">
         <div className="gt-canvas" ref={boxRef}>
+          {notice && (
+            <div className={`qr-banner qr-notice${notice.warn ? ' warning' : ''}`} role="status" onClick={() => setNotice(null)}>
+              {notice.text}
+            </div>
+          )}
           {find && (
             <FindBar
               query={find.query}

@@ -295,12 +295,21 @@
   background: var(--dnt-status-danger-fg);
 }
 
+/* A toast in the grid's bottom-right corner, clear of the header and first rows (and of the
+   horizontal scrollbar). Clicks pass through a confirmation; a warning stays until clicked. */
 .qr-notice {
   position: absolute;
-  top: 44px;
-  left: 0;
-  right: 0;
+  right: 12px;
+  bottom: 22px;
   z-index: 2;
+  max-width: calc(100% - 24px);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  pointer-events: none;
+}
+
+.qr-notice.warning {
+  pointer-events: auto;
   cursor: pointer;
 }
 
