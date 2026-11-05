@@ -5,6 +5,7 @@ import { addQueryToFavorites } from '../../components/favoritesActions';
 import { focusFocusedGroup } from '../../components/focusGroup';
 import { CheckIcon, ChevronDownIcon, DatabaseIcon, ExplainIcon, MoreIcon, PlayIcon, RollbackIcon, StopIcon } from '../../components/icons';
 import { formatClock } from '../../components/statusFormat';
+import { sqlEngine } from '../../engine';
 import { useCaps } from '../../engine/useCaps';
 import { useNow } from '../../lib/useNow';
 import { useConnections } from '../../store/connections';
@@ -694,6 +695,9 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   const caps = useCaps(doc.connectionId);
   const explainOn = caps?.explain ?? true;
   const txOn = caps ? caps.transactions && caps.family === 'sql' : true;
+  // Format SQL: a tab without a (known) connection is a SQL tab.
+  const kind = useConnections((s) => (doc.connectionId ? s.summaries.get(doc.connectionId)?.config.kind : undefined));
+  const formatOn = kind === undefined || sqlEngine(kind) !== null;
 
   const moreItems = (): MenuEntry[] => [
     // Under 360 px Explain lives here.
@@ -717,8 +721,13 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
           { separator: true },
         ] satisfies MenuEntry[])
       : []),
-    { label: 'Format SQL', hint: 'Ctrl+Shift+F', testId: 'query-format', run: () => formatTab(doc.id) },
-    { separator: true },
+    // SQL only: a Command editor (MongoDB, Redis) has no formatter.
+    ...(formatOn
+      ? ([
+          { label: 'Format SQL', hint: 'Ctrl+Shift+F', testId: 'query-format', run: () => formatTab(doc.id) },
+          { separator: true },
+        ] satisfies MenuEntry[])
+      : []),
     ...ROW_LIMITS.map((n) => ({
       label: `Display limit ${limitText(n)}`,
       testId: `query-row-limit-${n}`,

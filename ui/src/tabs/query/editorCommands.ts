@@ -364,6 +364,8 @@ const bindings: Binding[] = [
     id: 'dnt.openTableData',
     label: 'Open Table or View (Data)',
     keys: (m) => [m.KeyCode.F12],
+    // Tables and views: SQL editors only.
+    precondition: SQL_EDITOR_WHEN,
     order: 8,
     run: (e) => void gotoRelationActive(e as unknown as CommandEditor, 'data'),
   },
@@ -371,6 +373,7 @@ const bindings: Binding[] = [
     id: 'dnt.openTableDdl',
     label: 'Open Table or View (DDL)',
     keys: (m) => [m.KeyMod.Shift | m.KeyCode.F12],
+    precondition: SQL_EDITOR_WHEN,
     order: 9,
     run: (e) => void gotoRelationActive(e as unknown as CommandEditor, 'ddl'),
   },

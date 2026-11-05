@@ -167,6 +167,8 @@ export function useEditorMarks(mounted: Mounted | null, kind: DbKind, run: TabRu
     let split: SplitState | null = null;
     let changedFrom = 0;
     const cmd = commandRef.current;
+    // Another language, tab or connection: the earlier ranges no longer describe the text.
+    if (cmd) ranges.current = [];
     const paint = () => {
       const model = editor.getModel();
       const pos = editor.getPosition();

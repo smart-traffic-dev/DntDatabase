@@ -340,9 +340,11 @@ describe('registered actions', () => {
   });
 
   it('format_sql_is_hidden_in_command_editors', () => {
-    const format = register().find((a) => a.id === 'dnt.formatSql')!;
-    // Shown (and bound) only while the editor speaks a SQL language.
-    expect(format.precondition).toBe('editorLangId == mysql || editorLangId == pgsql');
+    const actions = register();
+    // Shown (and bound) only while the editor speaks a SQL language; so are F12 / Shift+F12.
+    for (const id of ['dnt.formatSql', 'dnt.openTableData', 'dnt.openTableDdl']) {
+      expect(actions.find((a) => a.id === id)!.precondition).toBe('editorLangId == mysql || editorLangId == pgsql');
+    }
   });
 });
 

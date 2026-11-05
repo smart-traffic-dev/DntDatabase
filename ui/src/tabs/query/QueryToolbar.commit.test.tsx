@@ -36,7 +36,18 @@ describe('QueryToolbar commit mode', () => {
     await openMore(userEvent.setup());
     expect(screen.queryByTestId('query-tx-auto')).toBeNull();
     expect(screen.queryByTestId('query-tx-manual')).toBeNull();
-    expect(screen.getByTestId('query-format')).toBeInTheDocument();
+    expect(screen.queryByTestId('query-format')).toBeNull();
+  });
+
+  it('sql_toolbars_keep_format_sql', async () => {
+    mockBackend({});
+    for (const kind of ['mysql', 'postgres'] as const) {
+      act(() => useConnections.getState().setStored([], [config(ids.prod, 'db', { kind })]));
+      const view = render(<QueryToolbar doc={doc()} />);
+      await openMore(userEvent.setup());
+      expect(screen.getByTestId('query-format')).toBeInTheDocument();
+      view.unmount();
+    }
   });
 
   it('manual_toggle_calls_tx_mode', async () => {
