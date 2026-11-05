@@ -214,6 +214,14 @@ describe('capability gates', () => {
     }
   });
 
+  it('a Mongo view has no Select top 1000', () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'docs', { kind: 'mongo', port: 27017 })]);
+    useConnections.getState().setInfo(ids.prod, { kind: 'mongo', variant: 'Mongo', version: [7, 0, 0], version_string: '7.0.0', capabilities: defaultCaps('mongo') });
+    const view: TreeNode = { ...tableNode, label: 'active', objectRef: { database: 'shop', schema: null, name: 'active', kind: 'View' } };
+    expect(labelsOf(view)).not.toContain('Select top 1000');
+    expect(labelsOf(view)).toContain('Open');
+  });
+
   it('mysql_tree_menu_unchanged', () => {
     expect(labelsOf(tableNode)).toEqual([
       'Open', 'Select top 1000', 'New query',

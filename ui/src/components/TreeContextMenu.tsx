@@ -224,7 +224,10 @@ export function treeMenuItems(node: TreeNode): Item[] {
   const destructive = objectActions.filter((i) => 'danger' in i && i.danger);
   if (node.kind === 'object') {
     const kind = node.objectRef?.kind;
-    const queryable = kind === 'Table' || kind === 'View' || kind === 'MaterializedView';
+    const connKind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined;
+    // A SELECT needs a SQL engine: a Mongo view would open a blank console.
+    const sql = connKind === undefined || sqlEngine(connKind) !== null;
+    const queryable = sql && (kind === 'Table' || kind === 'View' || kind === 'MaterializedView');
     return grouped(
       [
         { label: 'Open', hint: 'Enter', run: () => openObjectTab(node) },
