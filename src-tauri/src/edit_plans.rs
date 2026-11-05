@@ -59,9 +59,13 @@
 //! A collection's edits are built by the driver (`DataAccess::build_edits` on a data
 //! session) and stored as they are; every command is judged by the policy, and the
 //! edit is blocked on a read-only connection and, unless atomic, on Production
-//! ([`command_edit_verdict`]). Apply checks it all again, then sends the commands in
-//! order on one data session, each once; the first failure stops it. History rows are
-//! redacted with the connection's `CommandLanguage`. A key edit of the key browser
+//! ([`command_edit_verdict`]). Apply checks it all again (the collection's
+//! [`command_fingerprint`]: its key types and indexes, not its sampled columns), then
+//! sends the commands on one data session, each once: as one `execute_atomic` unit when
+//! the plan is atomic on an engine with transactions, else in order, the first failure
+//! stopping it. Preview statements and History rows show a command's text shortened to
+//! 4 KiB ([`display_command`]); History rows are redacted with the connection's
+//! `CommandLanguage`. A key edit of the key browser
 //! (`DataAccess::build_key_edit`) is stored and applied the same way; it has no
 //! collection structure to recheck.
 //!
@@ -88,11 +92,11 @@ use crate::commands::settings::saved_confirm_unbounded;
 use crate::data_sessions::{BoundedPage, FirstCell, DATA_CANCEL_GRACE};
 use crate::run_events::utc_millis_now;
 use crate::session_manager::{config_error, is_lost, lock, ConnectionRuntime, SessionManager};
-use dnt_core::command::{CommandLanguage, ParsedCommand};
+use dnt_core::command::{AtomicFailure, CommandLanguage, ParsedCommand};
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::data_access::KeyEdit;
 use dnt_core::driver::{
-    CellMode, Engine, ExecOptions, ResultSummary, RowSink, SqlSession, StopSignal,
+    CellMode, Engine, ExecOptions, ResultSummary, RowSink, SqlSession, StmtOutcome, StopSignal,
 };
 use dnt_core::error::{AppError, DbError};
 use dnt_core::keyspace::KeyName;
@@ -101,8 +105,8 @@ use dnt_core::sql::ident::{qualified_name, quote_ident};
 use dnt_core::sql::{Dialect, StatementKind, TxControl};
 use dnt_core::value::{ColumnMeta, FullValue, LogicalType, Value};
 use dnt_query::edit::{
-    base64_encode, build_edit_plan, cell_select, display_sql, edit_verdict, fingerprint, Atomicity,
-    EditError, EditPlan, EditSet, PlannedEdit, Protection,
+    base64_encode, build_edit_plan, cell_select, command_fingerprint, display_command, display_sql,
+    edit_verdict, fingerprint, Atomicity, EditError, EditPlan, EditSet, PlannedEdit, Protection,
 };
 use dnt_query::{policy, redact, GuardCtx, PolicyCtx, RiskFacts, Verdict};
 use dnt_store::history::{HistoryOrigin, HistoryStatus, NewHistoryEntry};
@@ -203,8 +207,12 @@ enum StoredPlan {
 struct CommandEdit {
     commands: Vec<ParsedCommand>,
     atomic: Atomicity,
-    /// The collection's [`fingerprint`] when the plan was made; `None` for a key edit
-    /// (a key has no structure to change).
+    /// The engine had transactions when the plan was made: an atomic plan runs as one
+    /// `execute_atomic` unit. (A one-command key edit is atomic without them: it runs
+    /// as a plain command.)
+    transaction: bool,
+    /// The collection's [`command_fingerprint`] when the plan was made; `None` for a key
+    /// edit (a key has no structure to change).
     fingerprint: Option<u64>,
 }
 
@@ -1558,6 +1566,15 @@ fn command_report(outcome: ApplyOutcome, statements: Vec<StmtApply>) -> ApplyRep
     }
 }
 
+/// The server code of a write that matched no document (Mongo spec §6.4): the row
+/// went away since it was loaded.
+const DOCUMENT_NOT_FOUND: &str = "DocumentNotFound";
+
+/// Whether `e` says the command's document no longer exists (a conflict).
+fn document_not_found(e: &DbError) -> bool {
+    matches!(e, DbError::Server { code: Some(code), .. } if code == DOCUMENT_NOT_FOUND)
+}
+
 /// The key `edit` changes (a rename: the key before it).
 fn edit_key(edit: &KeyEdit) -> &KeyName {
     match edit {
@@ -1623,7 +1640,10 @@ impl SessionManager {
         let (verdict, reason) = command_edit_verdict(&commands, atomic, &policy_ctx(self, &cfg));
         let mut preview = EditPreview {
             plan_id: Uuid::nil(),
-            statements: commands.iter().map(|c| c.text.clone()).collect(),
+            statements: commands
+                .iter()
+                .map(|c| display_command(&c.text).0)
+                .collect(),
             verdict,
             atomic,
             protections: vec![Protection::KeyOnly; commands.len()],
@@ -1641,7 +1661,8 @@ impl SessionManager {
                 plan: StoredPlan::Command(CommandEdit {
                     commands,
                     atomic,
-                    fingerprint: Some(fingerprint(&detail)),
+                    transaction: caps.transactions,
+                    fingerprint: Some(command_fingerprint(&detail)),
                 }),
                 at: Instant::now(),
             },
@@ -1691,7 +1712,10 @@ impl SessionManager {
         let (verdict, reason) = command_edit_verdict(&commands, atomic, &policy_ctx(self, &cfg));
         let mut preview = EditPreview {
             plan_id: Uuid::nil(),
-            statements: commands.iter().map(|c| c.text.clone()).collect(),
+            statements: commands
+                .iter()
+                .map(|c| display_command(&c.text).0)
+                .collect(),
             verdict,
             atomic,
             protections: vec![Protection::KeyOnly; commands.len()],
@@ -1714,6 +1738,7 @@ impl SessionManager {
                 plan: StoredPlan::Command(CommandEdit {
                     commands,
                     atomic,
+                    transaction: caps.transactions,
                     fingerprint: None,
                 }),
                 at: Instant::now(),
@@ -1725,9 +1750,13 @@ impl SessionManager {
     /// Runs a stored Command plan once (the connection and tunnel were checked by
     /// [`Self::edit_apply`]). Before anything is sent: read-only is `blocked`, the
     /// verdict is judged again with the config as stored now, then the env tag,
-    /// read-only flag, collection fingerprint and tunnel must be the plan's. The
-    /// commands run in order, each once (never retried); the first failure stops the
-    /// apply (`partially_applied`, or `unknown` when it may have been applied).
+    /// read-only flag, collection fingerprint ([`command_fingerprint`]) and tunnel must
+    /// be the plan's. An atomic plan of an engine with transactions runs as one
+    /// `execute_atomic` unit: a failure it rolled back is `rolled_back`, any other
+    /// `unknown`. Otherwise the commands run in order, each once (never retried); the
+    /// first failure stops the apply (`partially_applied`, or `unknown` when it may have
+    /// been applied). A failure whose document no longer exists (`DocumentNotFound`) is
+    /// a conflict.
     async fn command_edit_apply(
         &self,
         stored: &StoredEdit,
@@ -1755,7 +1784,7 @@ impl SessionManager {
         }
         if let Some(planned) = edit.fingerprint {
             let detail = self.table_detail_fresh(stored.conn, &stored.object).await?;
-            if fingerprint(&detail) != planned {
+            if command_fingerprint(&detail) != planned {
                 return Err(stale("the collection's structure changed"));
             }
         }
@@ -1793,24 +1822,76 @@ impl SessionManager {
         };
         let progress = Mutex::new(CommandProgress::default());
         let record = |s: StmtApply| lock(&progress).statements.push(s);
+        let log = |cmd: &ParsedCommand| {
+            tracing::debug!(
+                target: "dnt::sql",
+                connection = %stored.conn,
+                command = %c.language().redact(&cmd.text).text,
+                "applying an edit plan"
+            );
+        };
+        let affected = |out: &StmtOutcome| {
+            out.results
+                .first()
+                .and_then(|r| r.affected)
+                .map(|n| n as f64)
+        };
+        let atomic = edit.atomic == Atomicity::Yes && edit.transaction;
         let run = async {
+            if atomic {
+                // One unit: all the commands take effect or none do.
+                edit.commands.iter().for_each(log);
+                return match c.execute_atomic(&edit.commands, &opts).await {
+                    Ok(outs) => {
+                        for (i, out) in outs.iter().enumerate() {
+                            record(StmtApply {
+                                index: count(i),
+                                affected: affected(out),
+                                error: None,
+                                conflict: false,
+                            });
+                        }
+                        (ApplyOutcome::Committed, true)
+                    }
+                    Err(AtomicFailure {
+                        index,
+                        error,
+                        rolled_back,
+                    }) => {
+                        // The commands before `index` ran inside the unit (their counts
+                        // are not reported); those after it were never sent.
+                        for i in 0..index {
+                            record(StmtApply {
+                                index: count(i),
+                                affected: None,
+                                error: None,
+                                conflict: false,
+                            });
+                        }
+                        let conflict = document_not_found(&error);
+                        record(StmtApply {
+                            index: count(index),
+                            affected: None,
+                            error: Some(AppError::from(error)),
+                            conflict,
+                        });
+                        let outcome = if rolled_back {
+                            ApplyOutcome::RolledBack
+                        } else {
+                            ApplyOutcome::Unknown { at: count(index) }
+                        };
+                        (outcome, false)
+                    }
+                };
+            }
             for (i, cmd) in edit.commands.iter().enumerate() {
                 lock(&progress).at = i;
-                tracing::debug!(
-                    target: "dnt::sql",
-                    connection = %stored.conn,
-                    command = %c.language().redact(&cmd.text).text,
-                    "applying an edit plan"
-                );
+                log(cmd);
                 let mut page = BoundedPage::new(self.data_cell_cap, self.data_page_cap);
                 match c.execute_command(cmd, &opts, &mut page).await {
                     Ok(out) => record(StmtApply {
                         index: count(i),
-                        affected: out
-                            .results
-                            .first()
-                            .and_then(|r| r.affected)
-                            .map(|n| n as f64),
+                        affected: affected(&out),
                         error: None,
                         conflict: false,
                     }),
@@ -1820,11 +1901,12 @@ impl SessionManager {
                         } else {
                             ApplyOutcome::PartiallyApplied { applied: count(i) }
                         };
+                        let conflict = document_not_found(&e);
                         record(StmtApply {
                             index: count(i),
                             affected: None,
                             error: Some(AppError::from(e)),
-                            conflict: false,
+                            conflict,
                         });
                         return (outcome, false);
                     }
@@ -1833,7 +1915,23 @@ impl SessionManager {
             (ApplyOutcome::Committed, true)
         };
         let abort = running.abort.notified();
+        let mut closed_error = None;
         let (outcome, clean) = match select(pin!(abort), pin!(run)).await {
+            // Closing gave up waiting on an atomic unit (which records nothing until it
+            // ends): it may be committing, so whether it applied cannot be told.
+            Either::Left(((), _run)) if atomic => {
+                let mut p = lock(&progress);
+                p.statements = (0..edit.commands.len())
+                    .map(|i| StmtApply {
+                        index: count(i),
+                        affected: None,
+                        error: None,
+                        conflict: false,
+                    })
+                    .collect();
+                closed_error = Some(AppError::from(closed_mid_apply(true, true)));
+                (ApplyOutcome::Unknown { at: n }, false)
+            }
             // Closing gave up waiting: the command in flight is abandoned with `run`.
             Either::Left(((), _run)) => {
                 let mut p = lock(&progress);
@@ -1854,7 +1952,8 @@ impl SessionManager {
             }
             Either::Right((out, _)) => out,
         };
-        let report = command_report(outcome, std::mem::take(&mut lock(&progress).statements));
+        let mut report = command_report(outcome, std::mem::take(&mut lock(&progress).statements));
+        report.error = closed_error;
         tracing::info!(connection = %stored.conn, outcome = ?report.outcome, "edit plan applied");
         let entries = command_history_entries(
             stored.conn,
@@ -1875,8 +1974,12 @@ impl SessionManager {
 }
 
 /// The history rows of an applied Command plan: one per command that was sent, origin
-/// `data_edit`, its text redacted with the connection's `language` (as a console run's).
-/// `outcome_unknown`: the command without an answer.
+/// `data_edit`, its text redacted with the connection's `language` (as a console run's),
+/// then shortened as in the preview ([`display_command`]; such a row is marked
+/// `redacted`). A command of a rolled-back unit that ran fine is an `error` row
+/// `rolled_back`; one whose document no longer exists is `conflict`.
+/// `outcome_unknown`: the command without an answer, or every command when the atomic
+/// unit has none.
 fn command_history_entries(
     conn: Uuid,
     database: &str,
@@ -1890,14 +1993,23 @@ fn command_history_entries(
         ApplyOutcome::Unknown { at } => Some(at as usize),
         _ => None,
     };
+    let rolled_back = report.outcome == ApplyOutcome::RolledBack;
     report
         .statements
         .iter()
         .enumerate()
         .filter_map(|(pos, sent)| {
             let cmd = commands.get(pos)?;
+            // Redacted whole first, so a secret is never cut out of the redactor's view.
             let text = language.redact(&cmd.text);
+            let (shown, shortened) = display_command(&text.text);
+            let code = |e: &AppError| e.server_code.clone().or_else(|| e.sqlstate.clone());
             let (status, error_kind, error_code) = match &sent.error {
+                _ if sent.conflict => (
+                    HistoryStatus::Error,
+                    Some("conflict".into()),
+                    sent.error.as_ref().and_then(code),
+                ),
                 Some(e) => (
                     if e.kind == "cancelled" {
                         HistoryStatus::Cancelled
@@ -1905,15 +2017,18 @@ fn command_history_entries(
                         HistoryStatus::Error
                     },
                     Some(e.kind.clone()),
-                    e.server_code.clone().or_else(|| e.sqlstate.clone()),
+                    code(e),
                 ),
+                None if rolled_back => (HistoryStatus::Error, Some("rolled_back".into()), None),
                 None => (HistoryStatus::Ok, None, None),
             };
             Some(NewHistoryEntry {
                 connection_id: conn,
                 database: Some(database.to_owned()),
-                sql_text: text.text,
-                redacted: text.changed,
+                sql_text: shown,
+                // A shortened row is not the command that ran: marked like a redacted
+                // one, so the history refuses to re-run it.
+                redacted: text.changed || shortened,
                 kind: "write".into(),
                 started_at: started_at.to_owned(),
                 elapsed_ms: Some(elapsed_ms),
@@ -1923,7 +2038,7 @@ fn command_history_entries(
                 error_kind,
                 error_code,
                 origin: HistoryOrigin::DataEdit,
-                outcome_unknown: unknown_at == Some(pos),
+                outcome_unknown: unknown_at.is_some_and(|at| at == pos || at >= commands.len()),
             })
         })
         .collect()

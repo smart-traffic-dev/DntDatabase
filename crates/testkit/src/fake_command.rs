@@ -120,6 +120,13 @@ struct StoreInner {
     no_paged_objects: AtomicBool,
     /// The command index the next `execute_atomic` fails at ([`NO_FORCED_DB`]: none).
     fail_atomic_at: AtomicUsize,
+    /// Sessions opened from now on report `capabilities.transactions = true`.
+    transactions: AtomicBool,
+    /// How many times `execute_atomic` was called (every session).
+    atomic_calls: AtomicUsize,
+    /// An `HDEL` of a field that is not there is `DocumentNotFound` (as a Mongo
+    /// `deleteOne` that matched nothing).
+    missing_documents: AtomicBool,
 }
 
 /// A shared handle on the data of a [`FakeCommandDriver`] (every session of the driver
@@ -141,7 +148,28 @@ impl FakeStore {
             reads_as_writes: AtomicBool::new(false),
             no_paged_objects: AtomicBool::new(false),
             fail_atomic_at: AtomicUsize::new(NO_FORCED_DB),
+            transactions: AtomicBool::new(false),
+            atomic_calls: AtomicUsize::new(0),
+            missing_documents: AtomicBool::new(false),
         }))
+    }
+
+    /// Sessions opened from now on report `capabilities.transactions = true` (their
+    /// `execute_atomic` is always there).
+    pub fn with_transactions(&self) {
+        self.0.transactions.store(true, Ordering::SeqCst);
+    }
+
+    /// How many times `execute_atomic` was called, by every session.
+    pub fn atomic_calls(&self) -> usize {
+        self.0.atomic_calls.load(Ordering::SeqCst)
+    }
+
+    /// From now on, an `HDEL` of a field that is not there fails
+    /// `Server { code: Some("DocumentNotFound"), message: "Document <field> no longer
+    /// exists" }` (as a Mongo `deleteOne` that matched nothing), instead of affecting 0.
+    pub fn missing_documents(&self) {
+        self.0.missing_documents.store(true, Ordering::SeqCst);
     }
 
     /// Sessions opened from now on report `capabilities.paged_objects = false` (an
@@ -295,6 +323,9 @@ impl Driver for FakeCommandDriver {
         let mut info = server_info(self.kind);
         if self.store.0.no_paged_objects.load(Ordering::SeqCst) {
             info.capabilities.paged_objects = false;
+        }
+        if self.store.0.transactions.load(Ordering::SeqCst) {
+            info.capabilities.transactions = true;
         }
         Ok(Box::new(FakeCommandSession {
             info,
@@ -921,11 +952,20 @@ impl FakeCommandSession {
                 affected = Some(u64::from(h.insert(f.clone(), v.clone()).is_none()));
             }
             Op::HDel(k, f) => {
-                affected = Some(match data.get_mut(k) {
+                let removed = match data.get_mut(k) {
                     None => 0,
                     Some(FakeValue::Hash(h)) => u64::from(h.remove(f).is_some()),
                     Some(FakeValue::Str(_)) => return Err(wrong_type()),
-                });
+                };
+                if removed == 0 && self.store.0.missing_documents.load(Ordering::SeqCst) {
+                    return Err(DbError::Server {
+                        code: Some("DocumentNotFound".into()),
+                        sqlstate: None,
+                        message: format!("Document {f} no longer exists"),
+                        position: None,
+                    });
+                }
+                affected = Some(removed);
             }
             Op::Find {
                 key,
@@ -1150,6 +1190,7 @@ impl CommandSession for FakeCommandSession {
             fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
             fn result_end(&mut self, _summary: &ResultSummary) {}
         }
+        self.store.0.atomic_calls.fetch_add(1, Ordering::SeqCst);
         let snapshot = self.store.lock().dbs.clone();
         let db = self.db.load(Ordering::SeqCst);
         let forced = self

@@ -322,6 +322,39 @@ pub fn fingerprint(detail: &TableDetail) -> u64 {
     h.0
 }
 
+/// The [`fingerprint`] of a Command-family collection (Mongo spec §6.5): a stable hash
+/// of its key columns (the primary key's, with their `db_type`) and its index list
+/// (name, columns, unique), only. Its other columns are sampled from documents, so they
+/// come and go between reads and must not make a plan stale.
+pub fn command_fingerprint(detail: &TableDetail) -> u64 {
+    let mut h = Fnv::new();
+    let keys = detail
+        .primary_key
+        .as_ref()
+        .map_or(&[][..], |pk| &pk.columns);
+    h.len(keys.len());
+    for key in keys {
+        h.str(key);
+        h.opt(
+            detail
+                .columns
+                .iter()
+                .find(|c| &c.name == key)
+                .map(|c| c.db_type.as_str()),
+        );
+    }
+    h.len(detail.indexes.len());
+    for ix in &detail.indexes {
+        h.str(&ix.name);
+        h.flag(ix.unique);
+        h.len(ix.columns.len());
+        for c in &ix.columns {
+            h.str(c);
+        }
+    }
+    h.0
+}
+
 struct Fnv(u64);
 
 impl Fnv {
@@ -511,6 +544,24 @@ pub fn display_sql(sql: &str, dialect: Dialect) -> String {
     }
     out.push_str(&sql[at..]);
     out
+}
+
+/// Bytes of a command's text that [`display_command`] keeps.
+pub const DISPLAY_COMMAND_MAX: usize = 4096;
+
+/// A Command-family command's `text` for display (a preview, History), and whether it
+/// was shortened: text over [`DISPLAY_COMMAND_MAX`] bytes becomes its first 4 KiB (cut
+/// at a char boundary) followed by `…`. Never run: the plan keeps and runs the full
+/// command.
+pub fn display_command(text: &str) -> (String, bool) {
+    if text.len() <= DISPLAY_COMMAND_MAX {
+        return (text.to_string(), false);
+    }
+    let mut end = DISPLAY_COMMAND_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}…", &text[..end]), true)
 }
 
 /// The verdict of a plan's statements under `ctx` (also used to judge a stored plan
@@ -2495,6 +2546,19 @@ mod tests {
         // A literal at the limit stays whole.
         let edge = format!("SELECT 1, '{}'", "a".repeat(DISPLAY_LITERAL_MAX - 2));
         assert_eq!(display_sql(&edge, Dialect::MYSQL), edge);
+    }
+
+    #[test]
+    fn display_command_keeps_4_kib_at_a_char_boundary() {
+        let edge = "a".repeat(DISPLAY_COMMAND_MAX);
+        assert_eq!(display_command(&edge), (edge.clone(), false));
+        let long = format!("{edge}b");
+        assert_eq!(display_command(&long), (format!("{edge}…"), true));
+        // `é` is 2 bytes: byte 4096 falls inside one, so the cut is before it.
+        let multi = format!("a{}", "é".repeat(3000));
+        let (shown, shortened) = display_command(&multi);
+        assert!(shortened);
+        assert_eq!(shown, format!("a{}…", "é".repeat(2047)));
     }
 
     #[test]

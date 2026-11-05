@@ -19,7 +19,9 @@ use dnt_core::sql::{Dialect, StatementKind};
 use dnt_core::test_util::sample_config;
 use dnt_core::tx::TxState;
 use dnt_core::value::{ColumnMeta, LogicalType, Value};
-use dnt_query::edit::{CellInput, Protection, RowEdit, RowRef};
+use dnt_query::edit::{
+    command_fingerprint, display_command, CellInput, Protection, RowEdit, RowRef,
+};
 use dnt_query::Verdict;
 use dnt_store::db::open_in_memory;
 use dnt_store::history::{HistoryEntry, HistoryFilter, HistoryOrigin, HistoryStatus};
@@ -93,7 +95,28 @@ async fn redis_fixture() -> (Fixture, FakeStore) {
 
 /// [`redis_fixture`] with an env tag and read-only flag.
 async fn redis_fixture_with(env_tag: Option<EnvTag>, read_only: bool) -> (Fixture, FakeStore) {
+    redis_fixture_on(
+        FakeCommandDriver::with_kind(DbKind::Redis),
+        env_tag,
+        read_only,
+    )
+    .await
+}
+
+/// [`redis_fixture`] whose engine has transactions (`execute_atomic`), so collection
+/// edits are atomic.
+async fn atomic_fixture() -> (Fixture, FakeStore) {
     let driver = FakeCommandDriver::with_kind(DbKind::Redis);
+    driver.store().with_transactions();
+    redis_fixture_on(driver, None, false).await
+}
+
+/// [`redis_fixture_with`] on `driver`.
+async fn redis_fixture_on(
+    driver: FakeCommandDriver,
+    env_tag: Option<EnvTag>,
+    read_only: bool,
+) -> (Fixture, FakeStore) {
     let store = driver.store();
     let mut cfg = ConnectionConfig {
         id: Uuid::nil(),
@@ -454,19 +477,29 @@ fn int_col(name: &str) -> ColumnMeta {
     }
 }
 
-/// A `COUNT(*)` gives 7; any other read gives rows `id = 1, 2`.
+/// A `COUNT(*)` gives 7, `@@character_set_client` `utf8mb4`, a write affects 1 row and
+/// returns none; any other read gives rows `id = 1, 2`.
 #[async_trait]
 impl SqlSession for RecordingSqlSession {
     async fn execute_one(
         &self,
         stmt: &str,
-        _kind: StatementKind,
+        kind: StatementKind,
         _opts: &ExecOptions,
         sink: &mut dyn RowSink,
     ) -> Result<StmtOutcome, DbError> {
         lock(&self.executed).push(stmt.to_string());
+        let write = kind == StatementKind::Write;
         let (cols, rows) = if stmt.contains("COUNT(*)") {
             (vec![int_col("COUNT(*)")], vec![vec![Value::Int(7)]])
+        } else if stmt.contains("@@character_set_client") {
+            let col = ColumnMeta {
+                logical: LogicalType::Text,
+                ..int_col("@@character_set_client")
+            };
+            (vec![col], vec![vec![Value::Text("utf8mb4".into())]])
+        } else if write {
+            (vec![], vec![])
         } else {
             (
                 vec![int_col("id")],
@@ -474,7 +507,7 @@ impl SqlSession for RecordingSqlSession {
             )
         };
         let summary = ResultSummary {
-            affected: None,
+            affected: write.then_some(1),
             row_count: rows.len() as u64,
             truncated: false,
             elapsed_ms: 0,
@@ -880,4 +913,300 @@ async fn sql_edit_unchanged() {
         *lock(&executed),
         ["SELECT `id` FROM `shop`.`orders` LIMIT 0"]
     );
+}
+
+// ---------------------------------------------------------------------------------
+// Atomic Command edits, the Command fingerprint and shortened command text (Mongo
+// driver Task 2).
+
+/// `(index, affected, has error, conflict)` of each statement of `r`.
+fn sent(r: &dntdatabase::edit_plans::ApplyReport) -> Vec<(u32, Option<f64>, bool, bool)> {
+    r.statements
+        .iter()
+        .map(|s| (s.index, s.affected, s.error.is_some(), s.conflict))
+        .collect()
+}
+
+#[tokio::test]
+async fn atomic_plan_uses_execute_atomic() {
+    let (f, store) = atomic_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    assert_eq!(p.atomic, Atomicity::Yes);
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed, "{r:?}");
+    assert!(r.error.is_none());
+    assert_eq!(
+        sent(&r),
+        [
+            (0, Some(0.0), false, false),
+            (1, Some(1.0), false, false),
+            (2, Some(1.0), false, false)
+        ]
+    );
+    // One atomic run, and each command ran once (inside it): no per-command execute.
+    assert_eq!(store.atomic_calls(), 1);
+    assert_eq!(store.executed(), ["HSET", "HSET", "HDEL"]);
+    assert_eq!(
+        users_hash(&store),
+        BTreeMap::from([
+            ("u1".into(), "alicia".into()),
+            ("u3".into(), "carol".into()),
+            ("u4".into(), "dave".into()),
+        ])
+    );
+    let rows = history(&f);
+    let texts: Vec<_> = rows.iter().map(|r| r.sql_text.as_str()).collect();
+    assert_eq!(texts, p.statements);
+    assert!(rows.iter().all(|r| r.status == HistoryStatus::Ok));
+
+    // Without transactions the commands still run one by one.
+    let (f, store) = redis_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed, "{r:?}");
+    assert_eq!(store.atomic_calls(), 0);
+}
+
+#[tokio::test]
+async fn atomic_failure_is_rolled_back() {
+    let (f, store) = atomic_fixture().await;
+    let p = data_preview_impl(&f.state, f.id, user_edits())
+        .await
+        .unwrap();
+    store.fail_atomic_at(1);
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::RolledBack, "{r:?}");
+    // The first command ran (then was rolled back); the second failed; the third was
+    // never sent.
+    assert_eq!(sent(&r), [(0, None, false, false), (1, None, true, false)]);
+    assert_eq!(store.atomic_calls(), 1);
+    assert_eq!(users_hash(&store), original_users());
+
+    let rows = history(&f);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0].sql_text, p.statements[0]);
+    assert_eq!(rows[0].status, HistoryStatus::Error);
+    assert_eq!(rows[0].error_kind.as_deref(), Some("rolled_back"));
+    assert_eq!(rows[1].sql_text, p.statements[1]);
+    assert_eq!(rows[1].status, HistoryStatus::Error);
+    assert_ne!(rows[1].error_kind.as_deref(), Some("rolled_back"));
+    assert!(rows.iter().all(|r| !r.outcome_unknown));
+}
+
+/// `u1` becomes `alicia`, `u2` is deleted.
+fn update_then_delete() -> EditSet {
+    EditSet {
+        object: users(),
+        edits: vec![
+            RowEdit::Update {
+                row: user_row("u1", "alice"),
+                set: vec![("value".into(), typed("alicia"))],
+            },
+            RowEdit::Delete {
+                row: user_row("u2", "bob"),
+            },
+        ],
+        overwrite: false,
+    }
+}
+
+/// The users without `u2` (deleted by someone else after the preview).
+fn users_without_u2() -> BTreeMap<String, String> {
+    BTreeMap::from([("u1".into(), "alice".into()), ("u3".into(), "carol".into())])
+}
+
+#[tokio::test]
+async fn document_not_found_sets_conflict() {
+    // Atomic: the transaction is rolled back and the command is a conflict.
+    let (f, store) = atomic_fixture().await;
+    store.missing_documents();
+    let p = data_preview_impl(&f.state, f.id, update_then_delete())
+        .await
+        .unwrap();
+    store.set(
+        "2",
+        &collection_key("users"),
+        FakeValue::Hash(users_without_u2()),
+    );
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::RolledBack, "{r:?}");
+    assert_eq!(sent(&r), [(0, None, false, false), (1, None, true, true)]);
+    let e = r.statements[1].error.as_ref().unwrap();
+    assert_eq!(e.server_code.as_deref(), Some("DocumentNotFound"));
+    assert_eq!(users_hash(&store), users_without_u2());
+    let rows = history(&f);
+    assert_eq!(rows[1].error_kind.as_deref(), Some("conflict"));
+    assert_eq!(rows[1].error_code.as_deref(), Some("DocumentNotFound"));
+
+    // One by one: the apply stops at the command, which is a conflict.
+    let (f, store) = redis_fixture().await;
+    store.missing_documents();
+    let p = data_preview_impl(&f.state, f.id, update_then_delete())
+        .await
+        .unwrap();
+    store.set(
+        "2",
+        &collection_key("users"),
+        FakeValue::Hash(users_without_u2()),
+    );
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(
+        r.outcome,
+        ApplyOutcome::PartiallyApplied { applied: 1 },
+        "{r:?}"
+    );
+    assert_eq!(
+        sent(&r),
+        [(0, Some(0.0), false, false), (1, None, true, true)]
+    );
+    let rows = history(&f);
+    assert_eq!(rows[1].error_kind.as_deref(), Some("conflict"));
+}
+
+/// A collection's detail as a Command driver samples it: `_id` (the key, of type
+/// `id_type`), the sampled `columns` (all `string`) and one index on `name`.
+fn sampled_detail(id_type: &str, columns: &[&str]) -> TableDetail {
+    let column = |name: &str, ordinal: u32, db_type: &str| ColumnDetail {
+        name: name.into(),
+        ordinal,
+        db_type: db_type.into(),
+        nullable: ordinal != 1,
+        ..ColumnDetail::default()
+    };
+    let mut cols = vec![column("_id", 1, id_type)];
+    for (i, c) in columns.iter().enumerate() {
+        cols.push(column(c, i as u32 + 2, "string"));
+    }
+    TableDetail {
+        object: users(),
+        columns: cols,
+        primary_key: Some(IndexDetail {
+            name: "_id_".into(),
+            unique: true,
+            primary: true,
+            columns: vec!["_id".into()],
+            ..IndexDetail::default()
+        }),
+        indexes: vec![IndexDetail {
+            name: "name_1".into(),
+            unique: false,
+            columns: vec!["name".into()],
+            ..IndexDetail::default()
+        }],
+        foreign_keys: vec![],
+        checks: vec![],
+        triggers: vec![],
+        options: Default::default(),
+        row_estimate: None,
+        size_bytes: None,
+        comment: None,
+    }
+}
+
+#[test]
+fn command_fingerprint_ignores_sampled_columns() {
+    let base = command_fingerprint(&sampled_detail("objectId", &["name"]));
+    // A new sampled column, or another type of one, changes nothing.
+    assert_eq!(
+        command_fingerprint(&sampled_detail("objectId", &["name", "age"])),
+        base
+    );
+    let mut retyped = sampled_detail("objectId", &["name"]);
+    retyped.columns[1].db_type = "int".into();
+    assert_eq!(command_fingerprint(&retyped), base);
+    // The `_id` type and the index list do.
+    assert_ne!(
+        command_fingerprint(&sampled_detail("string", &["name"])),
+        base
+    );
+    let mut unique = sampled_detail("objectId", &["name"]);
+    unique.indexes[0].unique = true;
+    assert_ne!(command_fingerprint(&unique), base);
+    let mut renamed = sampled_detail("objectId", &["name"]);
+    renamed.indexes[0].name = "name_-1".into();
+    assert_ne!(command_fingerprint(&renamed), base);
+    let mut more = sampled_detail("objectId", &["name"]);
+    more.indexes[0].columns.push("age".into());
+    assert_ne!(command_fingerprint(&more), base);
+    let mut dropped = sampled_detail("objectId", &["name"]);
+    dropped.indexes.clear();
+    assert_ne!(command_fingerprint(&dropped), base);
+}
+
+#[tokio::test]
+async fn long_command_text_is_shortened_in_history() {
+    let (f, store) = redis_fixture().await;
+    let long = "x".repeat(5000);
+    let set = EditSet {
+        object: users(),
+        edits: vec![RowEdit::Update {
+            row: user_row("u1", "alice"),
+            set: vec![("value".into(), typed(&long))],
+        }],
+        overwrite: false,
+    };
+    let p = data_preview_impl(&f.state, f.id, set).await.unwrap();
+    let full = format!("HSET h:users u1 {long}");
+    let (shown, shortened) = display_command(&full);
+    assert!(shortened);
+    assert_eq!(p.statements, std::slice::from_ref(&shown));
+    assert!(shown.ends_with('…'), "{shown}");
+    assert_eq!(shown, format!("{}…", &full[..4096]));
+
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed, "{r:?}");
+    // The full value was written.
+    assert_eq!(users_hash(&store).get("u1"), Some(&long));
+    let rows = history(&f);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sql_text, shown);
+    // A shortened row is not the command that ran: it is marked like a redacted one.
+    assert!(rows[0].redacted);
+
+    // A short command stays whole and unmarked.
+    assert_eq!(
+        display_command("HDEL h:users u1"),
+        ("HDEL h:users u1".into(), false)
+    );
+}
+
+#[tokio::test]
+async fn sql_apply_unchanged() {
+    let (f, executed) = sql_fixture().await;
+    let set = EditSet {
+        object: orders(),
+        edits: vec![RowEdit::Insert {
+            values: vec![("id".into(), typed("3"))],
+        }],
+        overwrite: false,
+    };
+    let p = data_preview_impl(&f.state, f.id, set).await.unwrap();
+    lock(&executed).clear();
+    let r = data_apply_impl(&f.state, p.plan_id, false).await.unwrap();
+    assert_eq!(r.outcome, ApplyOutcome::Committed, "{r:?}");
+    assert_eq!(sent(&r), [(0, Some(1.0), false, false)]);
+    assert_eq!(r.inserted, [vec![Value::Int(1)]]);
+    // The SQL path: the session check, the statement, its read-back; no fingerprint
+    // change made it stale.
+    assert_eq!(
+        *lock(&executed),
+        [
+            "SELECT @@character_set_client",
+            "INSERT INTO `shop`.`orders` (`id`) VALUES (3)",
+            "SELECT `id` FROM `shop`.`orders` WHERE `id` = 3",
+        ]
+    );
+    let rows = history(&f);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].sql_text,
+        "INSERT INTO `shop`.`orders` (`id`) VALUES (3)"
+    );
+    assert_eq!(rows[0].sql_text, p.statements[0]);
+    assert_eq!(rows[0].status, HistoryStatus::Ok);
+    assert!(!rows[0].redacted);
 }
