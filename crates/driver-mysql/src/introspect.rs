@@ -14,8 +14,7 @@ use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
     group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail,
     IndexPart, NamespaceDetail, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope,
-    TableColumns, TableDetail,
-    TableOptions, TriggerDetail,
+    TableColumns, TableDetail, TableOptions, TriggerDetail,
 };
 use dnt_core::server::ServerVariant;
 use mysql_async::prelude::Queryable;

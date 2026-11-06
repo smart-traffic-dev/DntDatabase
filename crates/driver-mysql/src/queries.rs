@@ -10,7 +10,8 @@ pub(crate) fn quote_ident(name: &str) -> String {
 pub(crate) const LIST_DATABASES: &str = "SHOW DATABASES";
 
 /// Default character set and collation of one database (`?` = db).
-pub(crate) const SCHEMA_DEFAULTS: &str = "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME \
+pub(crate) const SCHEMA_DEFAULTS: &str =
+    "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME \
      FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
 
 /// Data plus index bytes of the tables of one database (`?` = db); NULL with no table.

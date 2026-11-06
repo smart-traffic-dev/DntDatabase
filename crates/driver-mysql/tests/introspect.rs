@@ -711,13 +711,27 @@ async fn namespace_detail_reads_defaults_and_size() {
     require_db!();
     for t in Target::mysql_family() {
         let s = connect(t).await;
-        let d = s.namespace_detail(&fixture()).await.unwrap_or_else(|e| panic!("{t:?}: {e}"));
-        assert!(d.charset.as_deref().is_some_and(|c| !c.is_empty()), "{t:?}: {d:?}");
-        assert!(d.collation.as_deref().is_some_and(|c| c.starts_with(d.charset.as_deref().unwrap_or("?"))), "{t:?}: {d:?}");
+        let d = s
+            .namespace_detail(&fixture())
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert!(
+            d.charset.as_deref().is_some_and(|c| !c.is_empty()),
+            "{t:?}: {d:?}"
+        );
+        assert!(
+            d.collation
+                .as_deref()
+                .is_some_and(|c| c.starts_with(d.charset.as_deref().unwrap_or("?"))),
+            "{t:?}: {d:?}"
+        );
         assert!(d.size_bytes.is_some_and(|n| n > 0), "{t:?}: {d:?}");
         assert_eq!(d.owner, None, "{t:?}");
         // A database that does not exist: nothing, not an error.
-        let none = Scope { database: "dnt_no_such_db".into(), schema: None };
+        let none = Scope {
+            database: "dnt_no_such_db".into(),
+            schema: None,
+        };
         let d = s.namespace_detail(&none).await.unwrap();
         assert_eq!((d.charset, d.size_bytes), (None, None), "{t:?}");
     }

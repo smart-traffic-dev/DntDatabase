@@ -106,7 +106,7 @@ export async function loadNamespace(connectionId: string, scope: Scope): Promise
     return { detail, schemas: schemas.map((s) => s.name), counts: [], relations: [] };
   }
   const kinds = folderKindsOf(server.variant, server.capabilities);
-  const [lists, detail] = await Promise.all([Promise.allSettled(kinds.map((k) => api.listObjects(connectionId, scope, k))), detailCall]);
+  const [lists, detail] = await Promise.all([Promise.allSettled(kinds.map((k) => api.listObjects(connectionId, scope, k, useTree.getState().showSystem))), detailCall]);
   // Every list failed: the connection is the problem, say so; one kind failing only blanks its count.
   if (lists.length > 0 && lists.every((l) => l.status === 'rejected')) throw (lists[0] as PromiseRejectedResult).reason;
   const counts = kinds.map((kind, i) => {

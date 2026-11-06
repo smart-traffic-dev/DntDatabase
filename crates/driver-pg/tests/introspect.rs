@@ -901,14 +901,26 @@ async fn namespace_detail_of_database_and_schema() {
     require_db!();
     for t in Target::pg() {
         let s = connect(t).await;
-        let db = Scope { database: FIXTURE_DB.into(), schema: None };
-        let d = s.namespace_detail(&db).await.unwrap_or_else(|e| panic!("{t:?}: {e}"));
-        assert!(d.charset.is_some() && d.collation.is_some() && d.owner.is_some(), "{t:?}: {d:?}");
+        let db = Scope {
+            database: FIXTURE_DB.into(),
+            schema: None,
+        };
+        let d = s
+            .namespace_detail(&db)
+            .await
+            .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+        assert!(
+            d.charset.is_some() && d.collation.is_some() && d.owner.is_some(),
+            "{t:?}: {d:?}"
+        );
         assert!(d.size_bytes.is_some_and(|n| n > 0), "{t:?}: {d:?}");
         let d = s.namespace_detail(&scope("public")).await.unwrap();
         assert!(d.owner.is_some(), "{t:?}: {d:?}");
         assert_eq!((d.charset, d.collation), (None, None), "{t:?}");
-        let missing = s.namespace_detail(&scope("dnt_no_such_schema")).await.unwrap();
+        let missing = s
+            .namespace_detail(&scope("dnt_no_such_schema"))
+            .await
+            .unwrap();
         assert_eq!(missing, Default::default(), "{t:?}");
     }
 }
