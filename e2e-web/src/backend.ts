@@ -604,6 +604,15 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
 
     table_detail: ({ id, obj }) => detailOf(requireOpen(id as string).variant, obj as ObjectRef),
 
+    // Object info of a database / schema: MySQL defaults and size, PostgreSQL owner and encoding.
+    namespace_detail: ({ id, scope }) => {
+      const pg = requireOpen(id as string).variant === 'Postgres';
+      const schema = (scope as { schema: string | null }).schema;
+      return pg
+        ? { charset: schema ? null : 'UTF8', collation: schema ? null : 'en_US.utf8', owner: 'postgres', size_bytes: 8_388_608, comment: null }
+        : { charset: 'utf8mb4', collation: 'utf8mb4_0900_ai_ci', owner: null, size_bytes: 81_920, comment: null };
+    },
+
     object_ddl: ({ id, obj }) =>
       (obj as ObjectRef).kind === 'Table' ? (DDL[requireOpen(id as string).variant] ?? '') : ddl.objectDdl(id as string, obj as ObjectRef),
 

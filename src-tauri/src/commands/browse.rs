@@ -12,6 +12,7 @@
 //! | `list_objects`   | `["db:<db>", "schema:<s>"?, "folder:<Kind>"]`                           |
 //! | `table_detail`   | `["db:<db>", "schema:<s>"?, "folder:<Kind>", "obj:<Kind>:<name>", "detail"]` |
 //! | `object_ddl`     | `["db:<db>", "schema:<s>"?, "folder:<Kind>", "obj:<Kind>:<name>", "ddl"]`    |
+//! | `namespace_detail` | `["db:<db>", "schema:<s>"?, "detail"]`                                |
 //!
 //! Every key is the tree path of its node (an object sits in the folder of its kind), with
 //! `detail` / `ddl` appended for the object's two results. `schema:<s>` is present only
@@ -30,7 +31,8 @@ use crate::cache::{NodeKey, SchemaCache};
 use crate::state::AppState;
 use dnt_core::error::{AppError, DbError};
 use dnt_core::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableDetail,
+    DatabaseInfo, NamespaceDetail, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope,
+    TableDetail,
 };
 use dnt_core::server::{EngineFamily, SqlKind};
 use tauri::State;
@@ -193,6 +195,29 @@ pub async fn table_detail_impl(
         .await
 }
 
+/// The properties of a database or schema (Object info panel).
+pub fn namespace_key(scope: &Scope) -> NodeKey {
+    let mut segments = scope_segments(&scope.database, scope.schema.as_deref());
+    segments.push("detail".into());
+    NodeKey(segments)
+}
+
+pub async fn namespace_detail_impl(
+    state: &AppState,
+    id: Uuid,
+    scope: Scope,
+) -> Result<NamespaceDetail, DbError> {
+    let key = namespace_key(&scope);
+    let db = scope.database.clone();
+    state
+        .sessions
+        .browse(id, Some(&db), key, |i| {
+            let scope = scope.clone();
+            Box::pin(async move { i.namespace_detail(&scope).await })
+        })
+        .await
+}
+
 pub async fn object_ddl_impl(
     state: &AppState,
     id: Uuid,
@@ -270,6 +295,16 @@ pub async fn table_detail(
     obj: ObjectRef,
 ) -> Result<TableDetail, AppError> {
     guard(table_detail_impl(&state, id, obj)).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn namespace_detail(
+    state: State<'_, AppState>,
+    id: Uuid,
+    scope: Scope,
+) -> Result<NamespaceDetail, AppError> {
+    guard(namespace_detail_impl(&state, id, scope)).await
 }
 
 #[tauri::command]

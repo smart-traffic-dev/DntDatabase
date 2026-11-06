@@ -1,5 +1,6 @@
 import { getActiveEditor, runEditorCommand } from '../tabs/query/activeEditor';
 import { groupTabs, useTabs } from '../store/tabs';
+import { canDesignNow, designCurrent } from './designTable';
 import { closeOtherTabs, closeTabsToRight, togglePin } from './tabActions';
 
 /** A command the palette lists besides the menu actions. */
@@ -46,6 +47,13 @@ registerPaletteCommand({
   label: 'Editor: Command palette',
   enabled: () => getActiveEditor() !== null,
   run: () => void runEditorCommand('editor.action.quickCommand'),
+});
+registerPaletteCommand({
+  id: 'table.design',
+  label: 'Table: Design table',
+  hint: 'F4',
+  enabled: canDesignNow,
+  run: () => void designCurrent(),
 });
 registerPaletteCommand({
   id: 'tab.togglePin',

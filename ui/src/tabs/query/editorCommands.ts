@@ -1,5 +1,6 @@
 // Editing commands and shortcuts of the SQL editor: run keys (F9, Ctrl+R, Ctrl+Shift+R),
-// Format SQL, case change, duplicate, and go to table / view (F12, Shift+F12). The logic is
+// Format SQL, case change, duplicate, go to table / view (F12, Shift+F12) and Ctrl+click on a
+// table or view name (Object info panel). The logic is
 // plain functions over a small editor surface so it is testable without Monaco; only
 // `registerEditorCommands` touches Monaco's keybinding API.
 import { format as formatWithSqlFormatter, type SqlLanguage } from 'sql-formatter';
@@ -10,9 +11,13 @@ import { objectTabId, useTabs } from '../../store/tabs';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
 import { useObjectData, type SubTab } from '../../store/objectData';
+import { useObjectInfo } from '../../store/objectInfo';
+import { openDesignTab } from '../../components/openObject';
+import { capsOfConnection } from '../../engine/useCaps';
 import { currentSchemaOf } from '../../query/completion/provider';
 import { queryDocTarget, type CompletionTarget } from '../../query/completion/monacoProvider';
 import { runFromEditor } from '../../store/runQuery';
+import './editorLink.css';
 
 interface Pos {
   lineNumber: number;
@@ -202,17 +207,25 @@ const unquote = (part: string): string => {
   return (q === '`' || q === '"') && part.length >= 2 ? part.slice(1, -1).split(q + q).join(q) : part;
 };
 
-/** The (possibly qualified) identifier under the cursor, as unquoted parts: `shop.orders` -> ['shop', 'orders']. */
-export function identifierAt(line: string, column: number): string[] | null {
+/**
+ * The (possibly qualified) identifier at `column` with its columns on the line (1-based,
+ * `end` exclusive): `shop.orders` -> { parts: ['shop', 'orders'], start, end }.
+ */
+export function identifierSpanAt(line: string, column: number): { parts: string[]; start: number; end: number } | null {
   const at = column - 1;
   for (const m of line.matchAll(QUALIFIED)) {
     const start = m.index ?? 0;
     if (at >= start && at <= start + m[0].length) {
       const parts = m[0].match(new RegExp(PART, 'g')) ?? [];
-      return parts.length > 0 ? parts.map(unquote) : null;
+      return parts.length > 0 ? { parts: parts.map(unquote), start: start + 1, end: start + m[0].length + 1 } : null;
     }
   }
   return null;
+}
+
+/** The (possibly qualified) identifier under the cursor, as unquoted parts: `shop.orders` -> ['shop', 'orders']. */
+export function identifierAt(line: string, column: number): string[] | null {
+  return identifierSpanAt(line, column)?.parts ?? null;
 }
 
 const RELATIONS: ObjectKind[] = ['Table', 'View', 'MaterializedView'];
@@ -290,6 +303,157 @@ export async function gotoRelationActive(editor: CommandEditor, sub: 'data' | 'd
   }
   openRelation(target.connId, ref, sub);
   return true;
+}
+
+/** Whether the table designer works on this connection now (open, and the engine has one). */
+export const designerOn = (connectionId: string) =>
+  useConnections.getState().info.has(connectionId) && (capsOfConnection(connectionId)?.designer ?? false);
+
+/**
+ * F4 in the SQL editor: opens the table designer on the table under the cursor. A view, an
+ * unknown name or a connection without a designer: a message says why. Returns whether a
+ * designer tab was opened.
+ */
+export async function designRelationActive(editor: CommandEditor): Promise<boolean> {
+  const model = editor.getModel();
+  const position = editor.getPosition();
+  if (!model || !position) return false;
+  const parts = identifierAt(model.getLineContent(position.lineNumber), position.column);
+  if (!parts) {
+    showEditorMessage(editor, 'Put the cursor on a table name');
+    return false;
+  }
+  const label = parts.join('.');
+  const target = queryDocTarget(model);
+  if (!target?.connId) {
+    showEditorMessage(editor, `No table named ${label} (this tab has no connection)`);
+    return false;
+  }
+  if (!designerOn(target.connId)) {
+    showEditorMessage(editor, 'The table designer is not available on this connection');
+    return false;
+  }
+  const ref = await resolveRelation(target, parts).catch(() => null);
+  if (!ref) {
+    showEditorMessage(editor, `No table named ${label}`);
+    return false;
+  }
+  if (ref.kind !== 'Table') {
+    showEditorMessage(editor, `${ref.name} is a view: only tables can be designed`);
+    return false;
+  }
+  openDesignTab(target.connId, { database: ref.database, schema: ref.schema }, ref.name);
+  return true;
+}
+
+/**
+ * Ctrl+click (Cmd+click) on a table or view name: shows it in the Object info panel of the
+ * right sidebar. Anything else (a keyword, a column, an unknown name) does nothing, as a
+ * Ctrl+click on a word without a definition does in any editor. Returns whether it is shown.
+ */
+export async function showRelationInfoAt(editor: CommandEditor, position: Pos): Promise<boolean> {
+  const model = editor.getModel();
+  if (!model) return false;
+  const parts = identifierAt(model.getLineContent(position.lineNumber), position.column);
+  const target = queryDocTarget(model);
+  if (!parts || !target?.connId) return false;
+  const ref = await resolveRelation(target, parts).catch(() => null);
+  if (!ref) return false;
+  useObjectInfo.getState().show(target.connId, ref);
+  return true;
+}
+
+/** The part of a Monaco mouse event `bindCtrlClickInfo` reads. */
+export interface EditorMouse {
+  event: { ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean; leftButton: boolean };
+  target: { type: number; position: Pos | null };
+}
+interface Decorations {
+  set(decorations: { range: Rng; options: { inlineClassName: string } }[]): unknown;
+  clear(): void;
+}
+
+/** The part of a Monaco editor `bindCtrlClickInfo` uses (each listener optional, for fakes). */
+export type LinkEditor = CommandEditor & {
+  onMouseDown?(listener: (e: EditorMouse) => void): unknown;
+  onMouseMove?(listener: (e: EditorMouse) => void): unknown;
+  onMouseLeave?(listener: () => void): unknown;
+  onDidDispose?(listener: () => void): unknown;
+  createDecorationsCollection?(): Decorations;
+};
+
+/** The class of a table or view name under the mouse while Ctrl (Cmd) is held: a link. */
+export const TABLE_LINK_CLASS = 'dnt-table-link';
+
+/**
+ * Ctrl+click on a name in the text runs `showRelationInfoAt`. While Ctrl (Cmd) is held, a
+ * table or view name under the mouse is underlined as a link (only names that resolve: a
+ * keyword or a column never is).
+ */
+export function bindCtrlClickInfo(editor: LinkEditor, contentText: number): void {
+  const withCtrl = (e: { ctrlKey: boolean; metaKey: boolean }) => e.ctrlKey || e.metaKey;
+  editor.onMouseDown?.((e) => {
+    const { event, target } = e;
+    if (!withCtrl(event) || event.altKey || event.shiftKey || !event.leftButton) return;
+    if (target.type !== contentText || !target.position) return;
+    void showRelationInfoAt(editor, target.position);
+  });
+
+  const decorations = editor.createDecorationsCollection?.();
+  if (!decorations) return;
+  let hovered: Pos | null = null;
+  let linked: string | null = null;
+  let seq = 0;
+  const unlink = () => {
+    seq++;
+    if (linked === null) return;
+    linked = null;
+    decorations.clear();
+  };
+  const link = (position: Pos) => {
+    const model = editor.getModel();
+    const span = model ? identifierSpanAt(model.getLineContent(position.lineNumber), position.column) : null;
+    const target = model ? queryDocTarget(model) : null;
+    if (!span || !target?.connId) return unlink();
+    const key = `${position.lineNumber}:${span.start}:${span.end}`;
+    if (key === linked) return;
+    const mine = ++seq;
+    void resolveRelation(target, span.parts)
+      .catch(() => null)
+      .then((ref) => {
+        if (mine !== seq) return;
+        if (!ref) return unlink();
+        linked = key;
+        const range = { startLineNumber: position.lineNumber, startColumn: span.start, endLineNumber: position.lineNumber, endColumn: span.end };
+        decorations.set([{ range, options: { inlineClassName: TABLE_LINK_CLASS } }]);
+      });
+  };
+  editor.onMouseMove?.((e) => {
+    hovered = e.target.type === contentText ? e.target.position : null;
+    if (hovered && withCtrl(e.event) && !e.event.altKey && !e.event.shiftKey) link(hovered);
+    else unlink();
+  });
+  editor.onMouseLeave?.(() => {
+    hovered = null;
+    unlink();
+  });
+  // Pressing Ctrl with the mouse already on a name underlines it; releasing it removes the line.
+  // Window events, not Monaco's: the editor may not have the focus, and Monaco reports the
+  // Ctrl key's own keyup with `ctrlKey` still set.
+  const down = (e: KeyboardEvent) => {
+    if (withCtrl(e) && hovered) link(hovered);
+  };
+  const up = (e: KeyboardEvent) => {
+    if (!withCtrl(e)) unlink();
+  };
+  window.addEventListener('keydown', down, true);
+  window.addEventListener('keyup', up, true);
+  window.addEventListener('blur', unlink);
+  editor.onDidDispose?.(() => {
+    window.removeEventListener('keydown', down, true);
+    window.removeEventListener('keyup', up, true);
+    window.removeEventListener('blur', unlink);
+  });
 }
 
 // ---------------------------------------------------------------------------------------
@@ -377,6 +541,14 @@ const bindings: Binding[] = [
     order: 9,
     run: (e) => void gotoRelationActive(e as unknown as CommandEditor, 'ddl'),
   },
+  {
+    id: 'dnt.designTable',
+    label: 'Design Table',
+    keys: (m) => [m.KeyCode.F4],
+    precondition: SQL_EDITOR_WHEN,
+    order: 10,
+    run: (e) => void designRelationActive(e as unknown as CommandEditor),
+  },
 ];
 
 /**
@@ -396,4 +568,7 @@ export function registerEditorCommands(tabId: string, editor: Monaco.editor.ISta
       run: (e) => b.run(e, tabId),
     });
   }
+  // Ctrl+click on a table or view name shows it in the Object info panel.
+  const contentText = monaco.editor?.MouseTargetType?.CONTENT_TEXT;
+  if (contentText !== undefined) bindCtrlClickInfo(editor as unknown as LinkEditor, contentText);
 }

@@ -3,13 +3,20 @@ import type { SchemaCacheTable, ServerInfo } from '../../bindings';
 import { installBrowserGuard } from '../../desktop/browserGuard';
 import { mockBackend } from '../../test/backend';
 import { sqlCaps } from '../../test/fixtures/caps';
+import { config } from '../../test/fixtures/data';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
+import { useLayout } from '../../store/layout';
 import { useObjectData } from '../../store/objectData';
+import { useObjectInfo } from '../../store/objectInfo';
 import { useQueryDocs } from '../../store/queryTabs';
 import { useTabs } from '../../store/tabs';
+import { useTree } from '../../store/tree';
 import {
+  bindCtrlClickInfo,
+  designRelationActive,
   duplicateActive,
+  showRelationInfoAt,
   formatActiveEditor,
   formatSql,
   gotoRelationActive,
@@ -295,13 +302,153 @@ describe('go to table or view', () => {
     expect(await gotoRelationActive(editor, 'data')).toBe(false);
     expect(messages[0]).toMatch(/^No table or view named orders/);
   });
+
+  describe('F4 designs the table under the cursor', () => {
+    const connected = (designer = true) =>
+      useConnections.setState({
+        summaries: new Map([['c1', config('c1', 'local')]]),
+        info: new Map([['c1', { kind: 'mysql', variant: 'MySql8', version: [8, 0, 36], version_string: '8.0.36', capabilities: { ...sqlCaps('db'), designer } }]]),
+      });
+    afterEach(() => useConnections.getState().reset());
+
+    it('opens_the_designer_of_the_table', async () => {
+      connected();
+      const { editor } = fakeEditor('select * from orders', [[16, 16]], tab('shop'));
+      expect(await designRelationActive(editor)).toBe(true);
+      expect(useTabs.getState().tabs.find((t) => t.kind === 'design')).toMatchObject({
+        connectionId: 'c1',
+        scope: { database: 'shop', schema: null },
+        table: 'orders',
+      });
+    });
+
+    it('a_view_is_not_designed', async () => {
+      connected();
+      const { editor, messages } = fakeEditor('select * from order_totals', [[16, 16]], tab('shop'));
+      expect(await designRelationActive(editor)).toBe(false);
+      expect(messages).toEqual(['order_totals is a view: only tables can be designed']);
+      expect(useTabs.getState().tabs.some((t) => t.kind === 'design')).toBe(false);
+    });
+
+    it('says_so_without_a_designer_or_a_name', async () => {
+      connected(false);
+      const off = fakeEditor('select * from orders', [[16, 16]], tab('shop'));
+      expect(await designRelationActive(off.editor)).toBe(false);
+      expect(off.messages).toEqual(['The table designer is not available on this connection']);
+      connected();
+      const gap = fakeEditor('a   b', [[2, 2]], tab('shop'));
+      expect(await designRelationActive(gap.editor)).toBe(false);
+      expect(gap.messages).toEqual(['Put the cursor on a table name']);
+    });
+  });
+
+  describe('Ctrl+click shows the Object info panel', () => {
+    beforeEach(() => {
+      useObjectInfo.getState().reset();
+      useLayout.setState({ rightVisible: false, rightActivity: 'history' });
+    });
+
+    it('a_table_name_shows_it_and_opens_the_panel_without_a_tab', async () => {
+      const { editor } = fakeEditor('select * from orders', [[0, 0]], tab('shop'));
+      expect(await showRelationInfoAt(editor, { lineNumber: 1, column: 17 })).toBe(true);
+      expect(useObjectInfo.getState().target).toEqual({
+        connectionId: 'c1',
+        object: { database: 'shop', schema: null, name: 'orders', kind: 'Table' },
+      });
+      expect(useLayout.getState()).toMatchObject({ rightVisible: true, rightActivity: 'info' });
+      expect(useTabs.getState().tabs.some((t) => t.kind === 'object')).toBe(false);
+    });
+
+    it('a_keyword_or_a_function_does_nothing_and_says_nothing', async () => {
+      const { editor, messages } = fakeEditor('select fn_total from orders', [[0, 0]], tab('shop'));
+      expect(await showRelationInfoAt(editor, { lineNumber: 1, column: 3 })).toBe(false);
+      expect(await showRelationInfoAt(editor, { lineNumber: 1, column: 10 })).toBe(false);
+      expect(useObjectInfo.getState().target).toBeNull();
+      expect(useLayout.getState().rightVisible).toBe(false);
+      expect(messages).toEqual([]);
+    });
+
+    it('only_a_plain_ctrl_or_cmd_left_click_on_text_counts', async () => {
+      const { editor } = fakeEditor('select * from orders', [[0, 0]], tab('shop'));
+      let listener: ((e: unknown) => void) | undefined;
+      const CONTENT_TEXT = 6;
+      bindCtrlClickInfo({ ...editor, onMouseDown: (l) => void (listener = l as never) }, CONTENT_TEXT);
+      const click = (mods: Partial<Record<'ctrlKey' | 'metaKey' | 'altKey' | 'shiftKey', boolean>>, type = CONTENT_TEXT) =>
+        listener!({
+          event: { ctrlKey: false, metaKey: false, altKey: false, shiftKey: false, leftButton: true, ...mods },
+          target: { type, position: { lineNumber: 1, column: 17 } },
+        });
+      click({});
+      click({ ctrlKey: true, altKey: true });
+      click({ ctrlKey: true }, 2);
+      await new Promise((r) => setTimeout(r, 30));
+      expect(useObjectInfo.getState().target).toBeNull();
+      click({ metaKey: true });
+      await vi.waitFor(() => expect(useObjectInfo.getState().target?.object?.name).toBe('orders'));
+    });
+
+    it('holding_ctrl_underlines_a_table_name_under_the_mouse_only', async () => {
+      const { editor } = fakeEditor('select * from orders where id = 1', [[0, 0]], tab('shop'));
+      const CONTENT_TEXT = 6;
+      const on: Record<string, (e?: unknown) => void> = {};
+      const sets: unknown[][] = [];
+      let clears = 0;
+      bindCtrlClickInfo(
+        {
+          ...editor,
+          onMouseMove: (l) => void (on.move = l as never),
+          onMouseLeave: (l) => void (on.leave = l as never),
+          onDidDispose: (l) => void (on.dispose = l as never),
+          createDecorationsCollection: () => ({ set: (d) => void sets.push(d), clear: () => void clears++ }),
+        },
+        CONTENT_TEXT,
+      );
+      const event = (ctrlKey: boolean) => ({ ctrlKey, metaKey: false, altKey: false, shiftKey: false, leftButton: false });
+      const move = (column: number, ctrl: boolean) => on.move!({ event: event(ctrl), target: { type: CONTENT_TEXT, position: { lineNumber: 1, column } } });
+
+      move(17, false);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(sets).toEqual([]);
+      // Ctrl pressed with the mouse on `orders`: underlined, columns 15..21.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Control', ctrlKey: true }));
+      await vi.waitFor(() => expect(sets).toHaveLength(1));
+      expect(sets[0]).toEqual([
+        { range: { startLineNumber: 1, startColumn: 15, endLineNumber: 1, endColumn: 21 }, options: { inlineClassName: 'dnt-table-link' } },
+      ]);
+      // Moving within the same name does not redo it; a column name is no link.
+      move(19, true);
+      move(29, true);
+      await new Promise((r) => setTimeout(r, 20));
+      expect(sets).toHaveLength(1);
+      expect(clears).toBe(1);
+      move(17, true);
+      await vi.waitFor(() => expect(sets).toHaveLength(2));
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Control', ctrlKey: false }));
+      expect(clears).toBe(2);
+      // Disposed: the window listeners are gone.
+      on.dispose!();
+      move(17, false);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Control', ctrlKey: true }));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(sets).toHaveLength(2);
+    });
+
+    it('a_new_tree_selection_takes_the_panel_back', async () => {
+      const { editor } = fakeEditor('select * from orders', [[0, 0]], tab('shop'));
+      await showRelationInfoAt(editor, { lineNumber: 1, column: 17 });
+      expect(useObjectInfo.getState().target).not.toBeNull();
+      useTree.getState().select('some-node');
+      expect(useObjectInfo.getState().target).toBeNull();
+      useTree.getState().select(undefined);
+    });
+  });
 });
 
 describe('registered actions', () => {
   /** Monaco's KeyMod / KeyCode numbers are irrelevant here: distinct tokens are enough. */
   const monaco = {
     KeyMod: { CtrlCmd: 1 << 11, Shift: 1 << 10 },
-    KeyCode: { F9: 67, F12: 70, KeyR: 48, KeyF: 36, KeyU: 52, KeyD: 34 },
+    KeyCode: { F4: 62, F9: 67, F12: 70, KeyR: 48, KeyF: 36, KeyU: 52, KeyD: 34 },
   };
 
   function register() {
@@ -329,7 +476,7 @@ describe('registered actions', () => {
   it('every_action_is_in_the_context_menu_with_a_label', () => {
     const actions = register();
     expect(actions.map((a) => a.id)).toEqual(
-      expect.arrayContaining(['dnt.formatSql', 'dnt.toUpperCase', 'dnt.toLowerCase', 'dnt.duplicate', 'dnt.openTableData', 'dnt.openTableDdl']),
+      expect.arrayContaining(['dnt.formatSql', 'dnt.toUpperCase', 'dnt.toLowerCase', 'dnt.duplicate', 'dnt.openTableData', 'dnt.openTableDdl', 'dnt.designTable']),
     );
     for (const a of actions) {
       expect(a.label).not.toBe('');
@@ -342,7 +489,7 @@ describe('registered actions', () => {
   it('format_sql_is_hidden_in_command_editors', () => {
     const actions = register();
     // Shown (and bound) only while the editor speaks a SQL language; so are F12 / Shift+F12.
-    for (const id of ['dnt.formatSql', 'dnt.openTableData', 'dnt.openTableDdl']) {
+    for (const id of ['dnt.formatSql', 'dnt.openTableData', 'dnt.openTableDdl', 'dnt.designTable']) {
       expect(actions.find((a) => a.id === id)!.precondition).toBe('editorLangId == mysql || editorLangId == pgsql');
     }
   });

@@ -26,13 +26,55 @@
   font-weight: 600;
 }
 
-.oi-where {
+/* Connection › database › schema of the shown object, under its name. */
+.oi-context {
   flex: none;
-  max-width: 40%;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  min-width: 0;
+  margin: 0 var(--dnt-space-2) var(--dnt-space-2);
+  padding: 3px var(--dnt-space-2);
+  border: 1px solid var(--dnt-border-subtle);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+  font-size: var(--dnt-text-xs);
+}
+
+.oi-context.oi-prod {
+  background: var(--dnt-status-danger-bg);
+  border-color: var(--dnt-status-danger-border);
+}
+
+.oi-path {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: var(--dnt-text-sm);
+}
+
+.oi-conn {
+  font-weight: 600;
+}
+
+.oi-sep {
+  color: var(--dnt-fg-disabled);
+}
+
+.oi-ro {
+  flex: none;
+  display: inline-flex;
+  color: var(--dnt-fg-muted);
+}
+
+.oi-ro svg {
+  width: 12px;
+  height: 12px;
+}
+
+.oi-server {
+  flex: none;
+  white-space: nowrap;
 }
 
 .oi-tabs {
@@ -94,6 +136,87 @@
 
 .oi-columns {
   padding-bottom: var(--dnt-space-3);
+}
+
+/* Filter, Copy names, Insert above the columns. */
+.oi-colbar {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-2) var(--dnt-space-2) 0;
+}
+
+.oi-filter {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-muted);
+}
+
+.oi-filter:focus-within {
+  border-color: var(--dnt-focus);
+}
+
+.oi-filter input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--dnt-fg);
+  font: inherit;
+}
+
+.oi-colnote {
+  position: sticky;
+  left: 0;
+  padding: 4px var(--dnt-space-3);
+  font-size: var(--dnt-text-xs);
+}
+
+.oi-col {
+  cursor: default;
+}
+
+.oi-col:hover td {
+  background: var(--dnt-bg-hover);
+}
+
+/* A foreign key's table: shows it in the panel. */
+.oi-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--dnt-accent-hover);
+  font: inherit;
+  cursor: pointer;
+}
+
+.oi-link:hover {
+  text-decoration: underline;
+}
+
+.oi-link:focus-visible {
+  outline: 1px solid var(--dnt-focus);
+  outline-offset: 1px;
+}
+
+.oi-back svg {
+  transform: rotate(180deg);
+}
+
+.oi-pin.on {
+  color: var(--dnt-accent-hover);
+  background: var(--dnt-bg-selected);
 }
 
 .oi-table {

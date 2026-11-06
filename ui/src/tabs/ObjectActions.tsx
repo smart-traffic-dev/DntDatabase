@@ -1,5 +1,7 @@
 import { useRef } from 'react';
-import { DatabaseIcon, LockIcon } from '../components/icons';
+import { DatabaseIcon, DesignIcon, LockIcon } from '../components/icons';
+import { openDesignTab } from '../components/openObject';
+import { capsOfConnection } from '../engine/useCaps';
 import { useConnections } from '../store/connections';
 import type { ObjectTabRef as Tab } from '../store/tabs';
 import { DataActions, DataPager } from './DataView';
@@ -22,6 +24,9 @@ export function ObjectActions({ tab }: { tab: Tab }) {
   const estimate = useRowEstimate(tab);
   const env = conn?.env_tag ?? null;
   const { objectRef } = tab;
+  // F4 opens the designer too; the button makes it findable. Tables only, on an open connection.
+  const connected = useConnections((s) => s.info.has(tab.connectionId));
+  const designable = objectRef.kind === 'Table' && connected && (capsOfConnection(tab.connectionId)?.designer ?? false);
   const path = [objectRef.database, objectRef.schema, objectRef.name].filter(Boolean).join(' › ');
   const tip = [
     conn ? `${conn.name} (${conn.host}:${conn.port})${env ? ` · ${env}` : ''}` : null,
@@ -56,6 +61,20 @@ export function ObjectActions({ tab }: { tab: Tab }) {
       </span>
       <ObjectSections tab={tab} />
       <span className="ta-fill" />
+      {designable && (
+        <>
+          <button
+            type="button"
+            className="ta-btn"
+            aria-label="Design table"
+            title="Design table (F4)"
+            onClick={() => void openDesignTab(tab.connectionId, { database: objectRef.database, schema: objectRef.schema }, objectRef.name)}
+          >
+            <DesignIcon />
+          </button>
+          <span className="ta-sep" aria-hidden="true" />
+        </>
+      )}
       {sub === 'data' ? (
         <>
           <DataPager tab={tab} estimate={estimate} />

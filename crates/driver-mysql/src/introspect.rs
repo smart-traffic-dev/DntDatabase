@@ -13,7 +13,8 @@ use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
     group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IndexDetail,
-    IndexPart, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns, TableDetail,
+    IndexPart, NamespaceDetail, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope,
+    TableColumns, TableDetail,
     TableOptions, TriggerDetail,
 };
 use dnt_core::server::ServerVariant;
@@ -388,6 +389,23 @@ impl Introspector for MySqlSession {
             | ObjectKind::Collection
             | ObjectKind::Key => Ok(Vec::new()),
         }
+    }
+
+    /// `information_schema.SCHEMATA` defaults and the summed size of the tables. A database
+    /// the user cannot see has no SCHEMATA row: every field stays `None`.
+    async fn namespace_detail(&self, scope: &Scope) -> Result<NamespaceDetail, DbError> {
+        let mut conn = self.live_conn().await?;
+        let db = scope.database.as_str();
+        let defaults = fetch(&mut conn, queries::SCHEMA_DEFAULTS, params1(db)).await?;
+        let size = fetch(&mut conn, queries::SCHEMA_SIZE, params1(db)).await?;
+        let first = defaults.first();
+        Ok(NamespaceDetail {
+            charset: first.and_then(|r| non_empty(r, 0)),
+            collation: first.and_then(|r| non_empty(r, 1)),
+            owner: None,
+            size_bytes: size.first().and_then(|r| num(r, 0)),
+            comment: None,
+        })
     }
 
     async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError> {
