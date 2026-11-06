@@ -1,0 +1,6 @@
+/* A table or view name under the mouse while Ctrl (Cmd) is held: Ctrl+click shows it in Object info. */
+.monaco-editor .dnt-table-link {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer !important;
+}

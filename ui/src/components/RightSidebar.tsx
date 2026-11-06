@@ -51,7 +51,7 @@ export function RightSidebar() {
           <aside className="rs-panel" data-testid="right-sidebar-panel" style={{ width }}>
             {activity === 'info' ? (
               <ErrorBoundary label="Object info">
-                <ObjectInfoPanel onCollapse={() => setVisible(false)} />
+                <ObjectInfoPanel />
               </ErrorBoundary>
             ) : activity === 'jobs' ? (
               <ErrorBoundary label="Jobs">

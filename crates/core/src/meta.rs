@@ -51,6 +51,24 @@ pub struct Scope {
     pub schema: Option<String>,
 }
 
+/// Properties of a database (or, with a schema in its scope, a PostgreSQL schema) for the
+/// Object info panel. Each field is `None` where the engine has no such property or the
+/// user may not read it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Type)]
+pub struct NamespaceDetail {
+    /// MySQL: default character set; PostgreSQL database: encoding.
+    pub charset: Option<String>,
+    /// MySQL: default collation; PostgreSQL database: `datcollate`.
+    pub collation: Option<String>,
+    /// PostgreSQL: owner role.
+    pub owner: Option<String>,
+    /// Data plus indexes: MySQL the tables of the database, PostgreSQL the database
+    /// (`pg_database_size`) or the relations of the schema. Exported as a JS number.
+    #[specta(type = Option<f64>)]
+    pub size_bytes: Option<u64>,
+    pub comment: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 pub struct ObjectSummary {
     pub name: String,

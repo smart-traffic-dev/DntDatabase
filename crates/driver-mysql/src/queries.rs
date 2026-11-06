@@ -9,6 +9,14 @@ pub(crate) fn quote_ident(name: &str) -> String {
 
 pub(crate) const LIST_DATABASES: &str = "SHOW DATABASES";
 
+/// Default character set and collation of one database (`?` = db).
+pub(crate) const SCHEMA_DEFAULTS: &str = "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME \
+     FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?";
+
+/// Data plus index bytes of the tables of one database (`?` = db); NULL with no table.
+pub(crate) const SCHEMA_SIZE: &str = "SELECT CAST(SUM(DATA_LENGTH + INDEX_LENGTH) AS UNSIGNED) \
+     FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE <> 'VIEW'";
+
 /// Comments of every table of one database (`?` = db). Selects no statistics column, so
 /// MySQL 8 never computes per-table stats for it. Not used on MySQL 5.7.
 pub(crate) const TABLE_COMMENTS: &str = "SELECT TABLE_NAME, TABLE_COMMENT \

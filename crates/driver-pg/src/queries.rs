@@ -8,6 +8,22 @@ pub(crate) const CURRENT_DATABASE: &str = "SELECT current_database()::text";
 pub(crate) const LIST_DATABASES: &str = "SELECT datname::text FROM pg_database \
      WHERE NOT datistemplate AND has_database_privilege(datname, 'CONNECT')";
 
+/// Encoding, collation, owner, size and comment of the session's database. The size needs
+/// CONNECT (or `pg_read_all_stats`): without it the size is NULL rather than an error.
+pub(crate) const DATABASE_DETAIL: &str = "SELECT pg_encoding_to_char(d.encoding)::text, \
+     d.datcollate::text, pg_get_userbyid(d.datdba)::text, \
+     CASE WHEN has_database_privilege(d.oid, 'CONNECT') THEN pg_database_size(d.oid) END, \
+     shobj_description(d.oid, 'pg_database') \
+     FROM pg_database d WHERE d.datname = current_database()";
+
+/// Owner, comment and size (tables, materialized views and their indexes and TOAST) of
+/// one schema (`$1`).
+pub(crate) const SCHEMA_DETAIL: &str = "SELECT pg_get_userbyid(n.nspowner)::text, \
+     obj_description(n.oid, 'pg_namespace'), \
+     (SELECT SUM(pg_total_relation_size(c.oid))::bigint FROM pg_class c \
+       WHERE c.relnamespace = n.oid AND c.relkind IN ('r', 'm')) \
+     FROM pg_namespace n WHERE n.nspname = $1";
+
 /// Schemas the user may use, without TOAST and temporary schemas.
 pub(crate) const LIST_SCHEMAS: &str = "SELECT n.nspname::text FROM pg_namespace n \
      WHERE n.nspname !~ '^pg_(toast|temp_)' AND has_schema_privilege(n.oid, 'USAGE')";

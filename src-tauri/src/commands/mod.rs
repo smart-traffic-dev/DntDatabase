@@ -187,6 +187,7 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
             browse::list_objects,
             browse::table_detail,
             browse::object_ddl,
+            browse::namespace_detail,
             browse::refresh_node,
             browse::get_schema_cache,
             query::completion_scope,

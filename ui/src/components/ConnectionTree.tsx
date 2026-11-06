@@ -5,6 +5,7 @@ import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { openKeysTab } from '../store/tabs';
 import { useConnections } from '../store/connections';
 import { useLayout, type RightActivity } from '../store/layout';
+import { useObjectInfo } from '../store/objectInfo';
 import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
 import { EngineLogo } from './EngineLogo';
@@ -200,6 +201,8 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
         // Other objects open a preview tab; the next preview in that group replaces it.
         if (isObject && showsInfo(node)) {
           rememberPanel();
+          // The tree takes the panel back from an object picked in an editor.
+          useObjectInfo.getState().treeSelected();
           useLayout.getState().openRightActivity('info');
         }
         else if (isObject) openObjectTab(node, { preview: true });

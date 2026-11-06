@@ -126,6 +126,26 @@ describe('ObjectTab', () => {
     expect(callsOf('table_detail')).toHaveLength(1);
   });
 
+  it('a table tab has a Design button on an open connection; a view and a closed connection do not', async () => {
+    const connect = () =>
+      useConnections.setState({ summaries: new Map([[ids.prod, config(ids.prod, 'prod')]]), info: new Map([[ids.prod, serverInfo('MySql8')]]) });
+    const user = userEvent.setup();
+    const view = setup(makeTab('View', 'order_totals'));
+    connect();
+    expect(screen.queryByRole('button', { name: 'Design table' })).toBeNull();
+    view.unmount();
+
+    useConnections.setState({ summaries: new Map([[ids.prod, config(ids.prod, 'prod')]]), info: new Map() });
+    const closed = setup(makeTab('Table'));
+    expect(screen.queryByRole('button', { name: 'Design table' })).toBeNull();
+    closed.unmount();
+
+    connect();
+    setup(makeTab('Table'));
+    await user.click(screen.getByRole('button', { name: 'Design table' }));
+    expect(useTabs.getState().tabs.find((t) => t.kind === 'design')).toMatchObject({ connectionId: ids.prod, table: 'orders', scope: { database: 'shop', schema: null } });
+  });
+
   it('a structure with no foreign keys, checks or triggers says so in one line', async () => {
     setup(makeTab('Table'), { table_detail: () => detail({ foreign_keys: [], checks: [], triggers: [] }) });
     expect(await screen.findByText('No foreign keys, checks and triggers.')).toBeInTheDocument();

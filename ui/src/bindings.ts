@@ -348,6 +348,14 @@ async objectDdl(id: string, obj: ObjectRef) : Promise<Result<string, AppError>> 
     else return { status: "error", error: e  as any };
 }
 },
+async namespaceDetail(id: string, scope: Scope) : Promise<Result<NamespaceDetail, AppError>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("namespace_detail", { id, scope }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async refreshNode(id: string, key: string[]) : Promise<Result<null, AppError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("refresh_node", { id, key }) };
@@ -2718,6 +2726,29 @@ export type MysqlDumpOptions = {
  * Empty: every table of the database.
  */
 tables: string[]; structure: boolean; data: boolean; routines: boolean; events: boolean; triggers: boolean; single_transaction: boolean }
+/**
+ * Properties of a database (or, with a schema in its scope, a PostgreSQL schema) for the
+ * Object info panel. Each field is `None` where the engine has no such property or the
+ * user may not read it.
+ */
+export type NamespaceDetail = { 
+/**
+ * MySQL: default character set; PostgreSQL database: encoding.
+ */
+charset: string | null; 
+/**
+ * MySQL: default collation; PostgreSQL database: `datcollate`.
+ */
+collation: string | null; 
+/**
+ * PostgreSQL: owner role.
+ */
+owner: string | null; 
+/**
+ * Data plus indexes: MySQL the tables of the database, PostgreSQL the database
+ * (`pg_database_size`) or the relations of the schema. Exported as a JS number.
+ */
+size_bytes: number | null; comment: string | null }
 /**
  * How an engine nests its objects.
  */

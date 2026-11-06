@@ -15,8 +15,8 @@ use dnt_core::driver::{Introspector, Session};
 use dnt_core::error::{ConnectStage, DbError};
 use dnt_core::meta::{
     group_table_columns, CheckDetail, ColumnDetail, DatabaseInfo, ForeignKeyDetail, IdentityKind,
-    IndexDetail, IndexPart, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
-    TableDetail, TableOptions, TriggerDetail,
+    IndexDetail, IndexPart, NamespaceDetail, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo,
+    Scope, TableColumns, TableDetail, TableOptions, TriggerDetail,
 };
 use tokio::sync::MutexGuard;
 use tokio_postgres::types::{FromSql, ToSql};
@@ -537,6 +537,41 @@ impl Introspector for PgSession {
         }
         names.sort();
         Ok(names.into_iter().map(|name| SchemaInfo { name }).collect())
+    }
+
+    /// The database (encoding, collation, owner, `pg_database_size`, comment) or, with a
+    /// schema in `scope`, the schema (owner, comment, summed relation sizes). A schema the
+    /// user cannot see has no row: every field stays `None`.
+    async fn namespace_detail(&self, scope: &Scope) -> Result<NamespaceDetail, DbError> {
+        let conn = self.conn_for(&scope.database).await?;
+        match &scope.schema {
+            None => {
+                let rows = fetch(&conn.client, queries::DATABASE_DETAIL, &[]).await?;
+                let Some(r) = rows.first() else {
+                    return Ok(NamespaceDetail::default());
+                };
+                Ok(NamespaceDetail {
+                    charset: non_empty(r, 0)?,
+                    collation: non_empty(r, 1)?,
+                    owner: non_empty(r, 2)?,
+                    size_bytes: estimate(r, 3)?,
+                    comment: non_empty(r, 4)?,
+                })
+            }
+            Some(schema) => {
+                let rows = fetch(&conn.client, queries::SCHEMA_DETAIL, &[schema]).await?;
+                let Some(r) = rows.first() else {
+                    return Ok(NamespaceDetail::default());
+                };
+                Ok(NamespaceDetail {
+                    charset: None,
+                    collation: None,
+                    owner: non_empty(r, 0)?,
+                    comment: non_empty(r, 1)?,
+                    size_bytes: estimate(r, 2)?,
+                })
+            }
+        }
     }
 
     /// Never computes sizes; the row estimate is `reltuples` (tables and materialized

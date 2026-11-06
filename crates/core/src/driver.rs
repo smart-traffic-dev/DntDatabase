@@ -3,8 +3,8 @@ use crate::config::ResolvedConfig;
 use crate::error::DbError;
 use crate::keyspace::Keyspace;
 use crate::meta::{
-    DatabaseInfo, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope, TableColumns,
-    TableDetail,
+    DatabaseInfo, NamespaceDetail, ObjectKind, ObjectRef, ObjectSummary, SchemaInfo, Scope,
+    TableColumns, TableDetail,
 };
 use crate::server::{Capabilities, DbKind, ServerInfo, SqlKind};
 use crate::sql::{classify, split, Dialect, StatementKind};
@@ -442,6 +442,14 @@ pub trait Introspector: Send + Sync {
     async fn list_columns(&self, scope: &Scope) -> Result<Vec<TableColumns>, DbError>;
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError>;
     async fn object_ddl(&self, obj: &ObjectRef) -> Result<String, DbError>;
+    /// Charset, collation, owner, size and comment of a database (or a PostgreSQL schema
+    /// when `scope.schema` is set). Engines without such properties keep this default.
+    async fn namespace_detail(&self, _scope: &Scope) -> Result<NamespaceDetail, DbError> {
+        Err(DbError::Unsupported {
+            feature: "database properties".into(),
+            version: String::new(),
+        })
+    }
 }
 
 #[cfg(test)]
