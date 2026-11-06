@@ -111,7 +111,7 @@ describe('AddFavoriteDialog', () => {
         <DialogHost />
       </>,
     );
-    await user.click(screen.getByTestId('query-run-menu'));
+    await user.click(screen.getByTestId('query-more'));
     await user.click(screen.getByTestId('query-add-favorite'));
     expect(screen.getByRole('dialog', { name: 'Add to favorites' })).toBeInTheDocument();
     expect(useDialogs.getState().request).toMatchObject({ kind: 'addFavorite', sql: 'SELECT 7', name: 'Query 1' });

@@ -131,7 +131,8 @@ describe('StatusBar of a query tab', () => {
   it('shows the figures of the last run', () => {
     setRun({ lastRun: { rows: 12, elapsedMs: 34 } });
     render(<StatusBar />);
-    expect(screen.getByText('12 rows · 34 ms')).toBeInTheDocument();
+    // One result: its row count is on its result tab; the status bar has the run's time.
+    expect(screen.getByText('Done in 34 ms')).toBeInTheDocument();
   });
 
   it('shows running state with elapsed time and hides the previous run', () => {
@@ -161,13 +162,13 @@ describe('StatusBar of a query tab', () => {
   });
 
   it('uses singular and grouped numbers', () => {
-    setRun({ lastRun: { rows: 1, elapsedMs: 1200 } });
+    setRun({ lastRun: { rows: 1, resultSets: 0, affected: 1, elapsedMs: 1200 } });
     const { unmount } = render(<StatusBar />);
-    expect(screen.getByTestId('status-last')).toHaveTextContent('1 row · 1,200 ms');
+    expect(screen.getByTestId('status-last')).toHaveTextContent('1 row affected · 1,200 ms');
     unmount();
-    setRun({ lastRun: { rows: 10000, elapsedMs: 5 } });
+    setRun({ lastRun: { rows: 10000, resultSets: 2, statements: 2, elapsedMs: 5 } });
     render(<StatusBar />);
-    expect(screen.getByTestId('status-last')).toHaveTextContent('10,000 rows · 5 ms');
+    expect(screen.getByTestId('status-last')).toHaveTextContent('2 statements · 10,000 rows in 2 results · 5 ms');
   });
 
   // The shared run text (store/queryRun `lastRunText`): affected rows and errors too.
@@ -178,7 +179,7 @@ describe('StatusBar of a query tab', () => {
     unmount();
     setRun({ lastRun: { rows: 3, resultSets: 1, affected: null, statements: 4, errors: 2, elapsedMs: 12 } });
     render(<StatusBar />);
-    expect(screen.getByTestId('status-last')).toHaveTextContent(/^Finished with 2 errors · 3 rows · 12 ms$/);
+    expect(screen.getByTestId('status-last')).toHaveTextContent(/^Finished with 2 errors · 4 statements · 12 ms$/);
     expect(screen.getByTestId('status-last')).toHaveClass('errors');
   });
 

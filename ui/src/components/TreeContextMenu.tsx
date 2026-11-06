@@ -172,22 +172,23 @@ export function treeMenuItems(node: TreeNode): Item[] {
 
   if (node.kind === 'connection' && connectionId) {
     const isOpen = useConnections.getState().info.has(connectionId);
+    // Says what it does to the server: Connect / Disconnect (Open / Close read like a file).
+    // "New group" left this menu: a group is made from the empty area or a group's own menu.
     return [
       isOpen
-        ? { label: 'Close', run: () => void tree.closeConnection(connectionId) }
-        : { label: 'Open', hint: 'Enter', run: () => tree.expand(node.id) },
+        ? { label: 'Disconnect', run: () => void tree.closeConnection(connectionId) }
+        : { label: 'Connect', hint: 'Enter', run: () => tree.expand(node.id) },
       newQuery,
       ...objectActionItems(node),
       SEP,
-      { label: 'Edit', run: () => dialogs.requestDialog({ kind: 'editConnection', id: connectionId }) },
+      { label: 'Edit connection…', run: () => dialogs.requestDialog({ kind: 'editConnection', id: connectionId }) },
       { label: 'Duplicate', run: () => void tree.duplicateConnection(connectionId) },
-      { label: 'New group', run: () => dialogs.requestDialog({ kind: 'newGroup', parentId: node.parentId ? uuidOf(node.parentId) : null }) },
       SEP,
       refresh,
       copy,
       SEP,
       {
-        label: 'Delete',
+        label: 'Delete connection…',
         danger: true,
         run: () =>
           dialogs.requestDialog({
@@ -200,14 +201,14 @@ export function treeMenuItems(node: TreeNode): Item[] {
   }
   if (node.kind === 'group') {
     return [
-      { label: 'Edit', run: () => dialogs.requestDialog({ kind: 'renameGroup', id: uuidOf(node.id) }) },
+      { label: 'Rename group…', run: () => dialogs.requestDialog({ kind: 'renameGroup', id: uuidOf(node.id) }) },
       { label: 'New group', run: () => dialogs.requestDialog({ kind: 'newGroup', parentId: uuidOf(node.id) }) },
       SEP,
       refresh,
       copy,
       SEP,
       {
-        label: 'Delete',
+        label: 'Delete group…',
         danger: true,
         run: () =>
           dialogs.requestDialog({
@@ -240,7 +241,9 @@ export function treeMenuItems(node: TreeNode): Item[] {
       [refresh, copy],
     );
   }
-  return grouped([newQuery], [...designActionItems(node), ...ddlActionItems(node), ...structure], backupActionItems(node), destructive, [refresh, copy]);
+  // Databases, schemas, folders: "make something here" is one group (New query, New table…), not
+  // two one-item groups between separators.
+  return grouped([newQuery, ...designActionItems(node), ...ddlActionItems(node), ...structure], backupActionItems(node), destructive, [refresh, copy]);
 }
 
 /** The non-empty groups, a separator between each two. */

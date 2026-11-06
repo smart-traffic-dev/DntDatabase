@@ -45,6 +45,21 @@ it('shows the exact SQL on open and requires the exact typed name before droppin
   expect(callsOf('object_action_apply')).toHaveLength(1);
   expect(callsOf('object_action_apply')[0]).toMatchObject({ planId: 'plan', confirmed: true, name: 'orders' });
 });
+it('the lock-wait limit is a tooltip on the SQL caption, not a warning banner; the row count is neutral', async () => {
+  const lock = 'Each metadata lock wait is limited to 5 seconds.';
+  mockBackend({
+    object_action_preview: () => ({ ...preview, warnings: [lock] }),
+    table_detail: () => ({ row_estimate: 3, size_bytes: 16384, indexes: [], primary_key: null, triggers: [] }),
+  });
+  render(<ObjectActionDialog request={request} onClose={() => {}} />);
+  await waitFor(() => expect(screen.getByLabelText('SQL preview')).toHaveTextContent(preview.sql));
+  expect(screen.queryByRole('note')).toBeNull();
+  expect(screen.getByText('· exactly what runs')).toHaveAttribute('title', lock);
+  // The typed-name field says what is missing; the footer does not repeat it.
+  expect(screen.queryByText('Type the name to confirm')).toBeNull();
+  const rows = await screen.findByText('≈ 3');
+  expect(rows.closest('.impact-tile')).not.toHaveClass('impact-danger');
+});
 it('a partly finished drop stays open with its outcome and offers only Close', async () => {
   const user = userEvent.setup();
   mockBackend({ object_action_preview: () => ({ ...preview, confirm_name: null }), object_action_apply: () => ({ ...report, warnings: ['Lock wait was slow.'] }) });

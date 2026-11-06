@@ -82,42 +82,45 @@ function Loaded<T>({
   return <>{children(state.data)}</>;
 }
 
-function InfoPanel({ detail, kind }: { detail: TableDetail; kind: Tab['objectRef']['kind'] }) {
+/**
+ * The object at a glance, heading Structure (it was the Info sub-tab): only what the object has,
+ * no column of dashes. A plain view has no storage, so it lists columns and collation.
+ */
+function SummaryPanel({ detail, kind }: { detail: TableDetail; kind: Tab['objectRef']['kind'] }) {
   const { options } = detail;
-  // A plain view has no storage: its Info lists what it does have rather than a column of dashes.
-  if (kind === 'View') {
-    const viewRows: [string, string][] = [
-      ['Columns', String(detail.columns.length)],
-      ...(options.collation ? ([['Collation', options.collation]] as [string, string][]) : []),
-      ['Comment', detail.comment || DASH],
-    ];
-    return <InfoRows rows={viewRows} />;
-  }
-  const rows: [string, string][] = [
-    ['Row estimate', detail.row_estimate === null ? DASH : formatCount(detail.row_estimate)],
-    ['Size', detail.size_bytes === null ? DASH : formatBytes(detail.size_bytes)],
-    ['Engine', options.engine ?? DASH],
-    ['Collation', options.collation ?? DASH],
-    ['Tablespace', options.tablespace ?? DASH],
-    ['Partitioned by', options.partitioned_by ?? DASH],
-    ['System versioned', options.system_versioned ? 'Yes' : 'No'],
-    ['Comment', detail.comment || DASH],
-  ];
-  return <InfoRows rows={rows} />;
-}
-
-function InfoRows({ rows }: { rows: [string, string][] }) {
+  const rows: [string, string | null][] =
+    kind === 'View'
+      ? [
+          ['Columns', String(detail.columns.length)],
+          ['Collation', options.collation],
+        ]
+      : [
+          ['Rows', detail.row_estimate === null ? null : formatCount(detail.row_estimate)],
+          ['Size', detail.size_bytes === null ? null : formatBytes(detail.size_bytes)],
+          ['Columns', String(detail.columns.length)],
+          ['Engine', options.engine],
+          ['Collation', options.collation],
+          ['Tablespace', options.tablespace],
+          ['Partitioned by', options.partitioned_by],
+          ['System versioned', options.system_versioned ? 'Yes' : null],
+        ];
+  const shown = rows.filter((r): r is [string, string] => r[1] !== null && r[1] !== '');
   return (
-    <dl className="ot-info">
-      {rows.map(([label, value]) => (
-        <div key={label} className="ot-info-row">
-          <dt>{label}</dt>
-          <dd>{value}</dd>
-        </div>
-      ))}
-    </dl>
+    <section aria-label="Summary" className="ot-summary-wrap">
+      <dl className="ot-summary">
+        {shown.map(([label, value]) => (
+          <div key={label} className="ot-summary-item">
+            <dt>{label}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {detail.comment ? <p className="ot-comment">{detail.comment}</p> : null}
+    </section>
   );
 }
+
+const yesNo = (v: boolean) => (v ? 'Yes' : <span className="muted">No</span>);
 
 /** Opens a new query tab on the object's connection and database, holding `sql`. */
 function openQuery(tab: Tab, sql: string) {
@@ -157,7 +160,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
   };
 
   return (
-    <>
+    <div className="ot-ddl-wrap">
       <div className="ot-bar" role="toolbar" aria-label="DDL">
         <button type="button" className="btn small" aria-pressed={wrap} title="Wrap long lines" onClick={() => setWrap((w) => !w)}>
           Wrap
@@ -210,7 +213,7 @@ function DdlPanel({ ddl, tab }: { ddl: string; tab: Tab }) {
           />
         </div>
       </div>
-    </>
+    </div>
   );
 }
 
@@ -234,13 +237,22 @@ export function referenceOf(fk: ForeignKeyDetail): string {
   return `${fk.columns.join(', ')} → ${table}(${fk.ref_columns.join(', ')})`;
 }
 
-function StructurePanel({ detail }: { detail: TableDetail }) {
+function StructurePanel({ detail, kind }: { detail: TableDetail; kind: Tab['objectRef']['kind'] }) {
   const indexes = [
     ...(detail.primary_key ? [detail.primary_key] : []),
     ...detail.indexes.filter((i) => !(detail.primary_key && i.primary)),
   ];
+  // Empty sections are one line together, not three headings each saying "None".
+  const absent = [
+    detail.foreign_keys.length === 0 ? 'foreign keys' : null,
+    detail.checks.length === 0 ? 'checks' : null,
+    detail.triggers.length === 0 ? 'triggers' : null,
+  ].filter(Boolean) as string[];
+  const hasExtra = detail.columns.some((c) => extraOf(c) !== '');
+  const hasComment = detail.columns.some((c) => !!c.comment);
   return (
     <div className="ot-structure">
+      <SummaryPanel detail={detail} kind={kind} />
       <section aria-label="Columns">
         <h3>Columns</h3>
         <table className="ot-table">
@@ -250,21 +262,28 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
               <th>Type</th>
               <th>Nullable</th>
               <th>Default</th>
-              <th>Extra</th>
-              <th>Comment</th>
+              {hasExtra ? <th>Extra</th> : null}
+              {hasComment ? <th>Comment</th> : null}
             </tr>
           </thead>
           <tbody>
-            {detail.columns.map((c) => (
-              <tr key={c.name}>
-                <td>{c.name}</td>
-                <td className="mono">{c.db_type}</td>
-                <td>{c.nullable ? 'YES' : 'NO'}</td>
-                <td className="mono">{orDash(c.default)}</td>
-                <td>{extraOf(c)}</td>
-                <td>{c.comment || ''}</td>
-              </tr>
-            ))}
+            {detail.columns.map((c) => {
+              const pk = !!detail.primary_key?.columns.includes(c.name);
+              const dflt = orDash(c.default);
+              return (
+                <tr key={c.name}>
+                  <td>
+                    {c.name}
+                    {pk ? <span className="chip ot-pk">PK</span> : null}
+                  </td>
+                  <td className="mono">{c.db_type}</td>
+                  <td>{yesNo(c.nullable)}</td>
+                  <td className={dflt === DASH ? 'muted' : 'mono'}>{dflt}</td>
+                  {hasExtra ? <td>{extraOf(c)}</td> : null}
+                  {hasComment ? <td>{c.comment || ''}</td> : null}
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </section>
@@ -290,19 +309,17 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
                     {i.primary ? <span className="chip ot-pk">PK</span> : null}
                   </td>
                   <td className="mono">{indexTarget(i)}</td>
-                  <td>{i.unique || i.primary ? 'YES' : 'NO'}</td>
-                  <td>{i.method ?? DASH}</td>
+                  <td>{yesNo(i.unique || i.primary)}</td>
+                  <td>{i.method ?? <span className="muted">{DASH}</span>}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
       </section>
+      {detail.foreign_keys.length > 0 ? (
       <section aria-label="Foreign keys">
         <h3>Foreign keys</h3>
-        {detail.foreign_keys.length === 0 ? (
-          <p className="muted">None</p>
-        ) : (
           <table className="ot-table">
             <thead>
               <tr>
@@ -323,13 +340,11 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
               ))}
             </tbody>
           </table>
-        )}
       </section>
+      ) : null}
+      {detail.checks.length > 0 ? (
       <section aria-label="Checks">
         <h3>Checks</h3>
-        {detail.checks.length === 0 ? (
-          <p className="muted">None</p>
-        ) : (
           <ul className="ot-list">
             {detail.checks.map((c, i) => (
               <li key={`${c.name}:${i}`}>
@@ -337,13 +352,11 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
               </li>
             ))}
           </ul>
-        )}
       </section>
+      ) : null}
+      {detail.triggers.length > 0 ? (
       <section aria-label="Triggers">
         <h3>Triggers</h3>
-        {detail.triggers.length === 0 ? (
-          <p className="muted">None</p>
-        ) : (
           <ul className="ot-list">
             {detail.triggers.map((t, i) => (
               <li key={`${t.name}:${i}`}>
@@ -351,11 +364,15 @@ function StructurePanel({ detail }: { detail: TableDetail }) {
               </li>
             ))}
           </ul>
-        )}
       </section>
+      ) : null}
+      {absent.length > 0 ? <p className="muted ot-absent">{`No ${listOf(absent)}.`}</p> : null}
     </div>
   );
 }
+
+/** "a", "a and b", "a, b and c". */
+const listOf = (items: string[]) => (items.length < 2 ? (items[0] ?? '') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`);
 
 export function ObjectTab({ tab }: { tab: Tab }) {
   const stored = useObjectData((s) => s.byTab[tab.id]);
@@ -400,7 +417,7 @@ export function ObjectTab({ tab }: { tab: Tab }) {
                 </Loaded>
               ) : (
                 <Loaded state={state as Loadable<TableDetail> | undefined} onRetry={retry} onReconnect={reconnect}>
-                  {(detail) => (sub === 'info' ? <InfoPanel detail={detail} kind={objectRef.kind} /> : <StructurePanel detail={detail} />)}
+                  {(detail) => <StructurePanel detail={detail} kind={objectRef.kind} />}
                 </Loaded>
               )}
             </div>

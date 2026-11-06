@@ -27,5 +27,26 @@
 }
 
 .fav-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
   white-space: normal;
+}
+
+.fav-empty strong {
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
+/* "Snippets" next to the filter: a labelled button, the icon alone said nothing. */
+.fav-snippets {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1);
+}
+
+.fav-snippets svg {
+  width: 14px;
+  height: 14px;
 }

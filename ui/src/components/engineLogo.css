@@ -1,0 +1,95 @@
+/* Vendor marks: the glyph in the brand colour on a light tile (readable in both themes). */
+.engine-logo {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-gray-100);
+}
+
+.engine-logo svg {
+  width: 62%;
+  height: 62%;
+  fill: currentColor;
+}
+
+/*
+ * The glyph takes the tile's colour, whatever its host sets on svg (`.tree-row svg` paints icons
+ * muted grey: on the solid brand tile that made the logo a plain square). Doubled class: wins on
+ * specificity, not on file order.
+ */
+.engine-logo.engine-logo svg {
+  color: inherit;
+}
+
+/* Small marks (tree rows, pickers): the glyph fills more of the tile, the corners are tighter. */
+.engine-logo.compact {
+  border-radius: var(--dnt-radius-xs);
+}
+
+.engine-logo.compact svg {
+  width: 84%;
+  height: 84%;
+}
+
+.engine-logo.engine-mysql {
+  background: var(--dnt-brand-mysql-bg);
+  color: var(--dnt-brand-mysql);
+}
+
+.engine-logo.engine-mariadb {
+  background: var(--dnt-brand-mariadb-bg);
+  color: var(--dnt-brand-mariadb);
+}
+
+.engine-logo.engine-postgres {
+  background: var(--dnt-brand-postgres-bg);
+  color: var(--dnt-brand-postgres);
+}
+
+.engine-logo.engine-mongo {
+  background: var(--dnt-brand-mongo-bg);
+  color: var(--dnt-brand-mongo);
+}
+
+.engine-logo.engine-redis {
+  background: var(--dnt-brand-redis-bg);
+  color: var(--dnt-brand-redis);
+}
+
+.dark .engine-logo {
+  background: var(--dnt-gray-100);
+}
+
+/*
+ * At 16px a brand-coloured glyph on a pale tile is a faint squiggle (MySQL's dolphin above all):
+ * small marks invert, a white glyph on the solid brand colour, readable in both themes.
+ */
+.engine-logo.compact.engine-mysql,
+.dark .engine-logo.compact.engine-mysql {
+  background: var(--dnt-brand-mysql);
+}
+
+.engine-logo.compact.engine-mariadb,
+.dark .engine-logo.compact.engine-mariadb {
+  background: var(--dnt-brand-mariadb);
+}
+
+.engine-logo.compact.engine-postgres,
+.dark .engine-logo.compact.engine-postgres {
+  background: var(--dnt-brand-postgres);
+}
+
+.engine-logo.compact.engine-mongo,
+.dark .engine-logo.compact.engine-mongo {
+  background: var(--dnt-brand-mongo);
+}
+
+.engine-logo.compact.engine-redis,
+.dark .engine-logo.compact.engine-redis {
+  background: var(--dnt-brand-redis);
+}
+
+.engine-logo.compact {
+  color: #fff;
+}

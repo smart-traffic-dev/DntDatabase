@@ -560,19 +560,19 @@ describe('reduceRun', () => {
       { t: 'done', stop: null, elapsed_ms: 3 },
     ]);
     expect(run.lastRun).toEqual({ rows: 0, affected: 1, resultSets: 0, statements: 2, errors: 0, elapsedMs: 3 });
-    expect(lastRunText(run.lastRun!)).toBe('1 row affected · 3 ms');
+    expect(lastRunText(run.lastRun!)).toBe('2 statements · 1 row affected · 3 ms');
   });
 
-  it('last run text: rows, affected, errors, plurals and separators', () => {
-    expect(lastRunText({ rows: 12, elapsedMs: 34 })).toBe('12 rows · 34 ms');
-    expect(lastRunText({ rows: 1, elapsedMs: 5 })).toBe('1 row · 5 ms');
-    expect(lastRunText({ rows: 10000, resultSets: 1, affected: null, elapsedMs: 1234 })).toBe('10,000 rows · 1,234 ms');
-    expect(lastRunText({ rows: 3, resultSets: 1, affected: 4, elapsedMs: 40 })).toBe('3 rows · 4 rows affected · 40 ms');
+  it('last run text: the run as a whole; one result’s rows are on its result tab, not repeated', () => {
+    expect(lastRunText({ rows: 12, elapsedMs: 34 })).toBe('Done in 34 ms');
+    expect(lastRunText({ rows: 10000, resultSets: 1, affected: null, elapsedMs: 1234 })).toBe('Done in 1,234 ms');
+    expect(lastRunText({ rows: 3, resultSets: 1, affected: 4, elapsedMs: 40 })).toBe('4 rows affected · 40 ms');
+    expect(lastRunText({ rows: 40, resultSets: 2, statements: 3, affected: null, elapsedMs: 12 })).toBe('3 statements · 40 rows in 2 results · 12 ms');
     expect(lastRunText({ rows: 0, resultSets: 0, affected: 2, errors: 1, elapsedMs: 9 })).toBe(
       'Finished with 1 error · 2 rows affected · 9 ms',
     );
-    // Nothing returned and nothing affected (DDL): still "0 rows".
-    expect(lastRunText({ rows: 0, resultSets: 0, affected: null, elapsedMs: 1 })).toBe('0 rows · 1 ms');
+    // Nothing returned and nothing affected (DDL).
+    expect(lastRunText({ rows: 0, resultSets: 0, affected: null, elapsedMs: 1 })).toBe('Done in 1 ms');
   });
 
   // F10: continue on error ends with stop = null, but the errors are counted.

@@ -228,6 +228,21 @@
   .dz-header > .dz-subtle {
     display: none;
   }
+
+  /*
+   * The six sections get a row of their own instead of scrolling inside their pill, where
+   * Options and Comment were cut off with nothing saying they were there.
+   */
+  .dz-header {
+    flex-wrap: wrap;
+  }
+
+  /* Last, and never squeezed: when the row is full it wraps whole onto the next one. */
+  .dz-header .dz-sections {
+    order: 10;
+    flex: none;
+    margin-left: 0;
+  }
 }
 
 /* Very narrow: only now does the header wrap. */

@@ -48,6 +48,7 @@ describe('buildMenus', () => {
       'Export connections…',
       '-',
       'Close tab',
+      'Close saved tabs',
       'Reopen closed tab',
       'Exit',
     ]);

@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import type { AiCompleteRequest, AiSettings, Tree } from '../../ui/src/bindings';
 import { config, ids } from '../../ui/src/test/fixtures/data';
-import { byId } from '../src/app';
+import { byId, pickOption } from '../src/app';
 import { createBackend } from '../src/backend';
 import { installBackend } from '../src/shim';
 import { expect, test } from '../src/test';
@@ -52,7 +52,7 @@ async function openQuery(page: Page, trigger: 'automatic' | 'manual', requests: 
   await byId(page, 'new-query').click();
   await expect(byId(page, 'query-editor')).toBeVisible();
   await byId(page, 'query-context').click();
-  await byId(page, 'query-connection').selectOption({ label: 'shop' });
+  await pickOption(page, 'query-connection', 'shop');
   await page.keyboard.press('Escape');
 }
 

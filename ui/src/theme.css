@@ -404,6 +404,19 @@ textarea:focus-visible,
   color: var(--dnt-fg-muted);
 }
 
+/* Staging in compact places: an amber dot, its name in the tooltip. */
+.env-dot {
+  flex: none;
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.env-dot.env-staging {
+  background: var(--dnt-env-staging);
+}
+
 .ssh-tag {
   flex: none;
   font-size: var(--dnt-text-xs);
@@ -542,10 +555,53 @@ textarea:focus-visible,
   color: var(--dnt-status-danger-fg);
 }
 
+/* Shortcuts: quiet, in the UI font (a monospace column made every menu look like a terminal). */
 .context-menu kbd {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: var(--dnt-text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--dnt-fg-subtle);
+}
+
+.context-menu .menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--dnt-border-subtle);
+}
+
+/*
+ * Settings ▸ Keyboard shortcuts: one key column for every group (each `dl` sized its own `auto`
+ * column, so the keys sat at three different offsets), each shortcut a quiet keycap.
+ */
+.settings-dialog .settings-section .kv {
+  grid-template-columns: minmax(0, 1fr) 190px;
+  align-items: center;
+  row-gap: var(--dnt-space-1_5);
+}
+
+.settings-dialog .settings-section .kv dt {
+  color: var(--dnt-fg);
+}
+
+.settings-dialog .settings-section .kv kbd {
+  display: inline-block;
+  padding: 1px var(--dnt-space-1_5);
+  border: 1px solid var(--dnt-border);
+  border-bottom-width: 2px;
+  border-radius: var(--dnt-radius-xs);
+  background: var(--dnt-bg-sunken);
   color: var(--dnt-fg-muted);
+  font-family: var(--font-sans);
+  font-size: var(--dnt-text-xs);
+  white-space: nowrap;
+}
+
+/* A group's label ("Display limit"): its items are the choices under it. */
+.context-menu .menu-heading {
+  padding: var(--dnt-space-1_5) var(--dnt-space-2) var(--dnt-space-0_5);
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+  font-weight: 600;
 }
 
 /* Tabs and workspace */
@@ -750,8 +806,8 @@ textarea:focus-visible,
 .tab {
   flex: none;
   /* Never squeezed to a stub: a full strip scrolls instead. */
-  min-width: 80px;
-  max-width: 260px;
+  min-width: 72px;
+  max-width: 240px;
   display: flex;
   align-items: center;
   border-right: 1px solid var(--dnt-border-subtle);
@@ -803,13 +859,15 @@ textarea:focus-visible,
 .tab-label {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--dnt-space-1_5);
   height: 100%;
-  padding: 0 4px 0 12px;
+  padding: 0 var(--dnt-space-1) 0 var(--dnt-space-2);
   border: 0;
   background: transparent;
+  font-size: var(--dnt-text-sm);
 }
 
+/* The glyph carries the tab's kind in colour (query, table, view, designer, code). */
 .tab-kind {
   display: inline-flex;
   flex: none;
@@ -817,8 +875,41 @@ textarea:focus-visible,
 }
 
 .tab-kind svg {
-  width: 14px;
-  height: 14px;
+  width: var(--dnt-icon-size);
+  height: var(--dnt-icon-size);
+}
+
+.tab-kind.tk-query {
+  color: var(--dnt-kind-query);
+}
+
+.tab-kind.tk-table {
+  color: var(--dnt-kind-table);
+}
+
+.tab-kind.tk-view {
+  color: var(--dnt-kind-view);
+}
+
+.tab-kind.tk-design {
+  color: var(--dnt-kind-design);
+}
+
+.tab-kind.tk-code {
+  color: var(--dnt-kind-code);
+}
+
+/* Inactive tabs step back: the glyph keeps its hue, softer. */
+.tab:not(.active) .tab-kind {
+  opacity: 0.8;
+}
+
+/* "Design" / "DDL" after an object's name: tells its editor from its data tab. */
+.tab-suffix {
+  flex: none;
+  color: var(--dnt-fg-subtle);
+  font-weight: 400;
+  font-size: var(--dnt-text-xs);
 }
 
 .tab-title {
@@ -868,8 +959,8 @@ textarea:focus-visible,
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   margin-right: var(--dnt-space-1);
   border: 0;
   border-radius: var(--dnt-radius-xs);

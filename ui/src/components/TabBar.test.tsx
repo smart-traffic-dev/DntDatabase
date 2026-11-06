@@ -45,8 +45,8 @@ describe('TabBar', () => {
     expect(tab('p_orders')).toHaveClass('env-production');
     expect(tab('p_orders').querySelector('.env-tag.env-production')).toHaveAttribute('title', 'Environment: production');
     expect(tab('p_orders').querySelector('.env-tag')?.textContent).toBe('PROD');
-    expect(tab('s_orders').querySelector('.env-tag.env-staging')).not.toBeNull();
-    expect(tab('s_orders').querySelector('.env-tag')?.textContent).toBe('STG');
+    // Staging shows nothing on the tab (a dot there read as "unsaved"); its chip and status bar say it.
+    expect(tab('s_orders').querySelector('.env-dot, .env-tag')).toBeNull();
     expect(tab('c_orders').querySelector('.env-tag')).toBeNull();
     expect(tab('c_orders')).not.toHaveClass('env-production');
   });

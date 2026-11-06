@@ -15,12 +15,13 @@ import { PLAN_GONE, rerunStatement, usePlanAlive } from './rerun';
 /** Row limit "Fetch all" runs with. */
 const FETCH_ALL_ROWS = 1_000_000;
 
+/** This result's own figure (rows, or rows affected) and time; the status bar has the whole run. */
 function Summary({ result }: { result: ResultSet }) {
-  const text = result.affected !== null ? `${result.affected} rows affected` : `${result.rowCount} rows`;
+  const text = result.affected !== null ? `${plural(result.affected, 'row')} affected` : plural(result.rowCount, 'row');
   return (
     <span className="qr-summary" data-testid="result-summary">
       {text}
-      {result.elapsedMs !== null && ` · ${result.elapsedMs} ms`}
+      {result.elapsedMs !== null && ` · ${result.elapsedMs.toLocaleString('en-US')} ms`}
     </span>
   );
 }

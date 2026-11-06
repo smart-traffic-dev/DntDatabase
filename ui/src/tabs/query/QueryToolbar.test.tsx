@@ -74,7 +74,7 @@ describe('QueryToolbar', () => {
     expect(screen.getByTestId('query-run-selection')).toHaveAttribute('title', 'Select text in the editor to run only that');
   });
 
-  it('the run menu holds run all, run selection, continue on error and add to favorites', async () => {
+  it('the run menu holds only what changes the run: run all, run selection, continue on error', async () => {
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
     for (const gone of ['Run all', 'Run selection', 'Add to favorites']) expect(screen.queryByRole('button', { name: gone })).toBeNull();
@@ -87,9 +87,7 @@ describe('QueryToolbar', () => {
       'Run all',
       'Run selection',
       'Continue on error',
-      'Add to favorites',
     ]);
-    expect(screen.getByTestId('query-add-favorite')).toHaveTextContent('Ctrl+Shift+D');
     const toggle = screen.getByTestId('query-continue-on-error');
     expect(toggle).toHaveAttribute('role', 'menuitemcheckbox');
     expect(toggle).toHaveAttribute('aria-checked', 'false');
@@ -195,7 +193,7 @@ describe('QueryToolbar', () => {
       await openContext(user);
       const picker = screen.getByRole('dialog', { name: 'Connection and database' });
       expect(within(picker).getByTestId('query-connection')).toHaveFocus();
-      expect(within(picker).getByTestId('query-database')).toHaveValue('shop');
+      expect(within(picker).getByTestId('query-database')).toHaveTextContent('shop');
       expect(pill).toHaveAttribute('aria-expanded', 'true');
       await user.keyboard('{Escape}');
       expect(screen.queryByRole('dialog')).toBeNull();
@@ -227,8 +225,30 @@ describe('QueryToolbar', () => {
       render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
       const user = userEvent.setup();
       await openContext(user);
-      await user.selectOptions(screen.getByTestId('query-connection'), ids.analytics);
+      await user.click(screen.getByTestId('query-connection'));
+      await user.click(screen.getByRole('option', { name: /analytics/ }));
       expect(useQueryDocs.getState().docs.get(id)).toMatchObject({ connectionId: ids.analytics, database: null });
+      // The picker stays open (the list lives in <body>, outside it) and the select keeps the focus.
+      expect(screen.getByRole('dialog', { name: 'Connection and database' })).toBeInTheDocument();
+      expect(screen.getByTestId('query-connection')).toHaveFocus();
+    });
+
+    it('the connection list shows each engine logo; the keyboard picks without the mouse', async () => {
+      useConnections.getState().setStored([], [config(ids.prod, 'shop-prod'), config(ids.analytics, 'analytics')]);
+      const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+      render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+      const user = userEvent.setup();
+      await openContext(user);
+      await user.keyboard('{ArrowDown}');
+      const list = screen.getByRole('listbox', { name: 'Connection options' });
+      expect(within(list).getByRole('option', { name: /shop-prod/ })).toHaveAttribute('aria-selected', 'true');
+      expect(list.querySelectorAll('.engine-logo')).toHaveLength(2);
+      await user.keyboard('{ArrowDown}{Enter}');
+      expect(useQueryDocs.getState().docs.get(id)).toMatchObject({ connectionId: ids.analytics });
+      // Esc in the list closes the list only, not the picker around it.
+      await user.keyboard('{ArrowDown}{Escape}');
+      expect(screen.queryByRole('listbox')).toBeNull();
+      expect(screen.getByRole('dialog', { name: 'Connection and database' })).toBeInTheDocument();
     });
   });
 
@@ -237,9 +257,14 @@ describe('QueryToolbar', () => {
     useConnections.getState().setInfo(ids.prod, serverInfo('MySql8'));
     const id = useQueryDocs.getState().newQuery(ids.prod, null);
     render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
-    await openContext(userEvent.setup());
+    const user = userEvent.setup();
+    await openContext(user);
     const select = screen.getByTestId('query-database');
-    await waitFor(() => expect(within(select).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default database', 'shop', 'blog']));
+    await waitFor(() => expect(callsOf('list_databases')).toHaveLength(1));
+    await user.click(select);
+    await waitFor(() =>
+      expect(within(screen.getByRole('listbox', { name: 'Database options' })).getAllByRole('option').map((o) => o.textContent)).toEqual(['Default database', 'shop', 'blog']),
+    );
     expect(callsOf('list_databases')).toEqual([{ id: ids.prod, showSystem: false }]);
     expect(select).not.toHaveAttribute('title');
   });
@@ -313,9 +338,9 @@ describe('QueryToolbar', () => {
       await user.click(screen.getByTestId('query-more'));
       const menu = screen.getByRole('menu', { name: 'More query actions' });
       const labels = [...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent);
-      expect(labels.slice(0, 7)).toEqual(['Explain', 'Explain Analyze', 'Format SQL', 'Display limit 1,000', 'Display limit 10,000', 'Display limit 100,000', 'Display limit 1,000,000']);
-      expect(within(menu).getByRole('menuitemradio', { name: /Display limit 10,000$/ })).toHaveAttribute('aria-checked', 'true');
-      await user.click(within(menu).getByRole('menuitemradio', { name: /Display limit 1,000$/ }));
+      expect(labels.slice(0, 8)).toEqual(['Explain', 'Explain Analyze', 'Format SQL', 'Add to favorites', '1,000 rows', '10,000 rows', '100,000 rows', '1,000,000 rows']);
+      expect(within(menu).getByRole('menuitemradio', { name: /^✓?10,000 rows$/ })).toHaveAttribute('aria-checked', 'true');
+      await user.click(within(menu).getByRole('menuitemradio', { name: /^1,000 rows$/ }));
       expect(useQueryDocs.getState().docs.get(id)!.rowLimit).toBe(1000);
     });
   });

@@ -24,6 +24,8 @@
 
 .modal-title { flex: 1; min-width: 0; }
 .modal-title h2 { margin: 0; font-size: var(--dnt-text-lg); line-height: 20px; font-weight: 600; }
+/* The object in a title ("Drop table orders"): mono, medium weight, a touch smaller to sit on the same line. */
+.modal-obj { font-family: var(--font-mono); font-size: 0.93em; font-weight: 500; overflow-wrap: anywhere; }
 .modal-sub {
   margin: 0;
   font-size: var(--dnt-text-sm);
@@ -148,6 +150,7 @@
   font-size: var(--dnt-text-sm);
 }
 .sql-block-caption { color: var(--dnt-fg-muted); }
+.sql-block-caption.has-tip { text-decoration: underline dotted var(--dnt-fg-subtle); text-underline-offset: 3px; cursor: help; }
 .sql-block-text {
   margin: 0;
   padding: 8px 10px;

@@ -25,7 +25,7 @@ function consume(e: KeyboardEvent) {
 
 /**
  * Shortcuts of the active table / view tab:
- * `F5` refresh the visible section, `Alt+1…4` Data / Info / DDL / Structure,
+ * `F5` refresh the visible section, `Alt+1…3` Data / Structure / DDL,
  * `Alt+PgUp` / `Alt+PgDn` previous / next page of the Data section, `F4` design the table,
  * `Ctrl+Alt+E` export what the tab shows (an object tab's rows or a query tab's result).
  * Ignored while a modal dialog is open, in text fields and in the Connections tree (which has its own F4 / F5).

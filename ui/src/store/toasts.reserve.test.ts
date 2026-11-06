@@ -26,4 +26,17 @@ describe('toast room next to the internal-error toast', () => {
     s().show({ kind: 'info', title: 'five' });
     expect(s().toasts).toHaveLength(MAX_TOASTS);
   });
+
+  it('an error notice that repeats the internal error becomes its title: one toast, not two', () => {
+    useDialogs.getState().reportInternal({ kind: 'internal', message: 'An internal error occurred.', detail: 'raw' } as never);
+    useDialogs.getState().setNotice('Could not restore the query tabs: An internal error occurred.', 'error');
+    expect(s().toasts).toHaveLength(0);
+    expect(useDialogs.getState().internalError).toMatchObject({
+      message: 'Could not restore the query tabs: An internal error occurred.',
+      detail: 'raw',
+    });
+    // Other notices still get their own toast.
+    useDialogs.getState().setNotice('Saved', 'info');
+    expect(s().toasts.map((t) => t.title)).toEqual(['Saved']);
+  });
 });

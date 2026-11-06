@@ -2,6 +2,7 @@ import { useId, useState } from 'react';
 import type { ColumnDef, DefaultSpec, DesignOpen, DraftError, ElementRef, IdentityKind, TableDef, TypeSpec } from '../../bindings';
 import { isKind, sqlEngine, type SqlEngine } from '../../engine';
 import { deepEqual } from '../../store/tableDesigns';
+import { SelectMenu } from '../../components/SelectMenu';
 import { DraftInput } from './DraftInput';
 import {
   baseText,
@@ -224,24 +225,19 @@ function ColumnFields({ open, engine, column, index, errors, editable, onSelect,
         </label>
       ) : null}
       {shows.identity ? (
-        <label className="dz-field">
-          <span>Identity</span>
-          <select
-            aria-label="Identity"
-            className={`dz-input${errorOf('identity') ? ' dz-invalid' : ''}`}
+        <div className="dz-field">
+          <span aria-hidden="true">Identity</span>
+          <SelectMenu
+            label="Identity"
+            size="md"
             value={column.identity ?? ''}
+            options={[{ value: '', label: 'None' }, ...(['always', 'by_default'] as const).map((k) => ({ value: k, label: IDENTITY_LABEL[k] }))]}
             disabled={disabled}
+            invalid={!!errorOf('identity')}
             title={errorOf('identity')}
-            onChange={(e) => set({ identity: e.target.value === '' ? null : (e.target.value as IdentityKind) })}
-          >
-            <option value="">None</option>
-            {(['always', 'by_default'] as const).map((k) => (
-              <option key={k} value={k}>
-                {IDENTITY_LABEL[k]}
-              </option>
-            ))}
-          </select>
-        </label>
+            onChange={(v) => set({ identity: v === '' ? null : (v as IdentityKind) })}
+          />
+        </div>
       ) : null}
       {shows.on_update ? (
         <label className="dz-check" title={errorOf('on_update')}>

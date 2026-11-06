@@ -14,7 +14,7 @@ import { addActiveQueryToFavorites, listFavoritesForMenu, openSnippetsManager } 
 import { openExportDialog, toggleFilterBar } from '../dialogs/resultExport';
 import { openNewQuery } from './newQuery';
 import { showCommandPalette, showQuickOpen } from '../store/palette';
-import { closeGroup, closeTab, reopenClosedTab } from './tabActions';
+import { closeGroup, closeSavedTabs, closeTab, reopenClosedTab } from './tabActions';
 import { focusConnectionTree, showHistory, toggleMaximizeResults, toggleResults, toggleRightSidebar, zoomIn, zoomOut, zoomReset } from './windowActions';
 
 /** What the menu model depends on: plain data, so the builder is a pure function. */
@@ -137,6 +137,7 @@ export function buildMenus(s: MenuState): AppMenu[] {
             if (tab) void closeTab(tab);
           },
         },
+        { label: 'Close saved tabs', disabled: !s.hasTab, run: () => void closeSavedTabs() },
         { label: 'Reopen closed tab', hint: 'Ctrl+Shift+T', disabled: !s.canReopen, run: () => void reopenClosedTab() },
         { label: 'Exit', hint: 'Alt+F4', run: exitApp },
       ],

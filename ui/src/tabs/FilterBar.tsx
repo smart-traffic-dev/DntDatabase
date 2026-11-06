@@ -1,5 +1,7 @@
 import { useImperativeHandle, useRef, type KeyboardEvent, type Ref } from 'react';
 import type { EngineFamily, FilterMode, FilterOp } from '../bindings';
+import { CloseIcon } from '../components/icons';
+import { SelectMenu, type SelectMenuOption } from '../components/SelectMenu';
 import { assertNever } from '../engine';
 import { newFilterRow, opArity, type FilterDraft, type FilterRow } from '../store/tableData';
 
@@ -22,6 +24,13 @@ export const FILTER_OPS: { op: FilterOp; label: string }[] = [
   { op: 'is_not_null', label: 'IS NOT NULL' },
 ];
 
+const OP_OPTIONS: SelectMenuOption[] = FILTER_OPS.map((o) => ({ value: o.op, label: o.label }));
+
+const MODE_OPTIONS: SelectMenuOption[] = [
+  { value: 'and', label: 'all (AND)' },
+  { value: 'or', label: 'any (OR)' },
+];
+
 export interface FilterBarHandle {
   /** Moves the keyboard focus into the bar (F3). */
   focus(): void;
@@ -29,6 +38,8 @@ export interface FilterBarHandle {
 
 interface Props {
   columns: string[];
+  /** The columns' types, shown as hints in the column list (optional). */
+  columnTypes?: Record<string, string>;
   draft: FilterDraft;
   /** Whether a filter is in effect (Clear is offered then even with an empty bar). */
   active: boolean;
@@ -55,15 +66,16 @@ function rawCopy(family: EngineFamily): { label: string; title: string; placehol
 
 /**
  * The data view's filter bar (Navicat Filter): condition rows of column, operator and value(s),
- * joined with AND or OR. Nothing is SQL: the rows become a structured filter on Apply.
+ * joined with AND or OR, then one line of actions under them (add, match, raw mode | Apply, Clear).
+ * Nothing is SQL: the rows become a structured filter on Apply.
  */
-export function FilterBar({ columns, draft, active, error, onChange, onApply, onClear, handle, family = 'sql' }: Props) {
+export function FilterBar({ columns, columnTypes, draft, active, error, onChange, onApply, onClear, handle, family = 'sql' }: Props) {
   const copy = rawCopy(family);
   const root = useRef<HTMLDivElement>(null);
   useImperativeHandle(handle, () => ({
     focus() {
       // The first value box, else the first column, else "+ Condition".
-      for (const selector of ['.fb-raw', '.fb-value', '.fb-row select', '.fb-add']) {
+      for (const selector of ['.fb-raw', '.fb-value', '.fb-row .select-menu', '.fb-add']) {
         const el = root.current?.querySelector<HTMLElement>(selector);
         if (el) {
           el.focus();
@@ -87,49 +99,17 @@ export function FilterBar({ columns, draft, active, error, onChange, onApply, on
 
   const raw = draft.rawMode === true;
   const rawText = draft.rawText ?? '';
+  const columnOptions = (current: string): SelectMenuOption[] => [
+    // A column the page no longer has stays selectable (the backend refuses it).
+    ...(!columns.includes(current) && current ? [{ value: current, label: current }] : []),
+    ...columns.map((c) => ({ value: c, label: c, hint: columnTypes?.[c] })),
+  ];
 
   return (
     <div className="filter-bar" role="search" aria-label="Filter" ref={root}>
-      <div className="fb-head">
-        {raw ? null : (
-          <>
-            <label className="fb-mode">
-              <span>Match</span>
-              <select
-                className="qt-select"
-                aria-label="Match conditions"
-                value={draft.mode}
-                onChange={(e) => onChange({ ...draft, mode: e.target.value as FilterMode })}
-              >
-                <option value="and">all (AND)</option>
-                <option value="or">any (OR)</option>
-              </select>
-            </label>
-            <button type="button" className="qt-btn fb-add" onClick={add} disabled={columns.length === 0}>
-              + Condition
-            </button>
-          </>
-        )}
-        <button
-          type="button"
-          className={`qt-btn${raw ? ' dv-on' : ''}`}
-          aria-pressed={raw}
-          title={copy.title}
-          onClick={() => onChange({ ...draft, rawMode: !raw })}
-        >
-          {copy.label}
-        </button>
-        <span className="spacer" />
-        <button type="button" className="qt-btn" onClick={onApply}>
-          Apply
-        </button>
-        <button type="button" className="qt-btn" onClick={onClear} disabled={!active && (raw ? rawText === '' : draft.rows.length === 0)}>
-          Clear
-        </button>
-      </div>
       {raw ? (
         <div className="fb-row">
-          {copy.prefix ? <span className="fb-and">{copy.prefix}</span> : null}
+          <span className="fb-join">{copy.prefix}</span>
           <input
             className="fb-raw"
             aria-label={copy.label}
@@ -141,67 +121,103 @@ export function FilterBar({ columns, draft, active, error, onChange, onApply, on
             onKeyDown={onKeyDown}
           />
         </div>
-      ) : null}
-      {(raw ? [] : draft.rows).map((row, i) => {
-        const arity = opArity(row.op);
-        const n = i + 1;
-        return (
-          <div className="fb-row" key={row.id} data-testid="filter-row">
-            <select
-              className="qt-select"
-              aria-label={`Column ${n}`}
-              value={row.column}
-              onChange={(e) => update(row.id, { column: e.target.value })}
-            >
-              {/* A column the page no longer has stays selectable (the backend refuses it). */}
-              {!columns.includes(row.column) && row.column ? <option value={row.column}>{row.column}</option> : null}
-              {columns.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-            <select
-              className="qt-select fb-op"
-              aria-label={`Operator ${n}`}
-              value={row.op}
-              onChange={(e) => update(row.id, { op: e.target.value as FilterOp })}
-            >
-              {FILTER_OPS.map((o) => (
-                <option key={o.op} value={o.op}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            {arity === 0 ? null : (
-              <input
-                className="fb-value"
-                aria-label={arity === 2 ? `From ${n}` : `Value ${n}`}
-                placeholder={arity === 'list' ? 'a, b, c' : arity === 2 ? 'from' : 'value'}
-                value={row.value}
-                onChange={(e) => update(row.id, { value: e.target.value })}
-                onKeyDown={onKeyDown}
+      ) : (
+        draft.rows.map((row, i) => {
+          const arity = opArity(row.op);
+          const n = i + 1;
+          return (
+            <div className="fb-row" key={row.id} data-testid="filter-row">
+              {/* How the row joins the ones above: a reading aid; the Match menu sets it. */}
+              <span className="fb-join" aria-hidden="true">
+                {i === 0 ? 'Where' : draft.mode === 'or' ? 'or' : 'and'}
+              </span>
+              <SelectMenu
+                label={`Column ${n}`}
+                className="fb-column"
+                mono
+                value={row.column}
+                options={columnOptions(row.column)}
+                onChange={(column) => update(row.id, { column })}
               />
-            )}
-            {arity === 2 ? (
-              <>
-                <span className="fb-and">and</span>
+              <SelectMenu
+                label={`Operator ${n}`}
+                className="fb-op"
+                searchable={false}
+                value={row.op}
+                options={OP_OPTIONS}
+                onChange={(op) => update(row.id, { op: op as FilterOp })}
+              />
+              {arity === 0 ? null : (
                 <input
                   className="fb-value"
-                  aria-label={`To ${n}`}
-                  placeholder="to"
-                  value={row.value2}
-                  onChange={(e) => update(row.id, { value2: e.target.value })}
+                  aria-label={arity === 2 ? `From ${n}` : `Value ${n}`}
+                  placeholder={arity === 'list' ? 'a, b, c' : arity === 2 ? 'from' : 'value'}
+                  value={row.value}
+                  onChange={(e) => update(row.id, { value: e.target.value })}
                   onKeyDown={onKeyDown}
                 />
-              </>
-            ) : null}
-            <button type="button" className="fb-remove" aria-label={`Remove condition ${n}`} onClick={() => remove(row.id)}>
-              ×
+              )}
+              {arity === 2 ? (
+                <>
+                  <span className="fb-and">and</span>
+                  <input
+                    className="fb-value"
+                    aria-label={`To ${n}`}
+                    placeholder="to"
+                    value={row.value2}
+                    onChange={(e) => update(row.id, { value2: e.target.value })}
+                    onKeyDown={onKeyDown}
+                  />
+                </>
+              ) : null}
+              <button
+                type="button"
+                className="icon-btn fb-remove"
+                aria-label={`Remove condition ${n}`}
+                title="Remove this condition"
+                onClick={() => remove(row.id)}
+              >
+                <CloseIcon />
+              </button>
+            </div>
+          );
+        })
+      )}
+      <div className="fb-actions">
+        {raw ? null : (
+          <>
+            <button type="button" className="qt-btn fb-add" onClick={add} disabled={columns.length === 0}>
+              + Condition
             </button>
-          </div>
-        );
-      })}
+            <span className="fb-mode">
+              <span aria-hidden="true">Match</span>
+              <SelectMenu
+                label="Match conditions"
+                className="fb-mode-menu"
+                value={draft.mode}
+                options={MODE_OPTIONS}
+                onChange={(mode) => onChange({ ...draft, mode: mode as FilterMode })}
+              />
+            </span>
+          </>
+        )}
+        <button
+          type="button"
+          className={`qt-btn${raw ? ' dv-on' : ''}`}
+          aria-pressed={raw}
+          title={copy.title}
+          onClick={() => onChange({ ...draft, rawMode: !raw })}
+        >
+          {copy.label}
+        </button>
+        <span className="fb-sep" aria-hidden="true" />
+        <button type="button" className="qt-btn qt-primary" onClick={onApply}>
+          Apply
+        </button>
+        <button type="button" className="qt-btn" onClick={onClear} disabled={!active && (raw ? rawText === '' : draft.rows.length === 0)}>
+          Clear
+        </button>
+      </div>
       {error ? (
         <p role="alert" className="fb-error">
           {error}

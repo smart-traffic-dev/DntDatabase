@@ -76,8 +76,10 @@ describe('DumpDialog', () => {
     expect(skipped).toHaveTextContent('p_refresh');
     expect(skipped).toHaveTextContent('Routines are not part of the built-in dump.');
 
-    // No output file yet: Start is disabled.
+    // No output file yet: Start is disabled, and says why next to it.
     expect(startButton()).toBeDisabled();
+    expect(screen.getByTestId('dump-blocked')).toHaveTextContent('Choose an output file first');
+    expect(screen.getByRole('heading', { name: 'Dump database shop' })).toBeInTheDocument();
 
     await u.click(within(list).getByLabelText('Data of orders'));
     await u.click(within(list).getByLabelText('v_totals'));
@@ -86,6 +88,7 @@ describe('DumpDialog', () => {
     expect(callsOf('dump_pick_path')).toEqual([{ baseName: 'shop', compress: false, format: null }]);
     expect(await screen.findByText('C:\\dumps\\shop.sql')).toBeInTheDocument();
     await waitFor(() => expect(startButton()).toBeEnabled());
+    expect(screen.queryByTestId('dump-blocked')).toBeNull();
 
     await u.click(startButton());
     expect(callsOf('dump_start')).toEqual([

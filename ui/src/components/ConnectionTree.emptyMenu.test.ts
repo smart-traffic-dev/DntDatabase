@@ -6,7 +6,7 @@ import { emptyAreaItems } from './ConnectionTree';
 
 beforeEach(() => resetStores());
 
-const labels = () => emptyAreaItems().map((e) => ('separator' in e ? '-' : e.label));
+const labels = () => emptyAreaItems().map((e) => ('label' in e ? e.label : '-'));
 const run = (label: string) => (emptyAreaItems().find((e) => 'label' in e && e.label === label) as MenuAction).run();
 
 it('the empty tree area offers New connection, a top-level New group, then import / export', () => {

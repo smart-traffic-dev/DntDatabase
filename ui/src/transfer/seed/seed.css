@@ -64,19 +64,39 @@
   background: var(--dnt-bg-sunken);
 }
 
+/*
+ * One scroll region: the dialog body. The columns table and the preview grow to their whole rows
+ * (no inner vertical scroll that cuts a row in half); a wide table still scrolls sideways.
+ */
 .seed-columns,
 .seed-grid {
-  overflow: auto;
+  flex: none;
+  overflow-x: auto;
+  overflow-y: hidden;
   border: 1px solid var(--dnt-border-subtle);
   border-radius: var(--dnt-radius-sm);
 }
 
-.seed-columns {
-  max-height: 300px;
+/* The themed selects match the dialog's 28px inputs. */
+.seed-dialog .select-menu.seed-select {
+  min-width: 150px;
+  height: 28px;
 }
 
-.seed-grid {
-  max-height: 240px;
+.seed-options .seed-select {
+  width: 100%;
+}
+
+.btn.seed-dice {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+}
+
+.seed-dice svg {
+  flex: none;
 }
 
 .seed-table {
@@ -94,9 +114,6 @@
 }
 
 .seed-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
   background: var(--dnt-bg-raised);
   font-weight: 500;
   white-space: nowrap;

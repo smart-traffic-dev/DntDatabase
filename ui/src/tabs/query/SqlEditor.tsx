@@ -1,13 +1,13 @@
 import Editor, { type BeforeMount, type OnMount } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
-import { memo, useEffect } from 'react';
+import { memo, useEffect, useMemo } from 'react';
 import { useDntMonacoTheme } from '../../monaco/dntTheme';
 import { bindEditorFontScale, editorFontOptions } from '../../monaco/fonts';
 import './toolbar.css';
 import { bindAiKeys, ensureAiInline } from '../../query/ai/inlineProvider';
 import { ensureCompletion, prefetchCompletion } from '../../query/completion/monacoProvider';
 import type { DbKind } from '../../bindings';
-import { editorLanguage, sqlEngine } from '../../engine';
+import { editorLanguage, editorPlaceholder, sqlEngine } from '../../engine';
 import { registerCommandLanguages } from '../../engine/monaco';
 import { clearCursor, reportCursor } from '../../store/cursor';
 import { exportRunOf, useExporting } from '../../store/queryExport';
@@ -125,6 +125,8 @@ export const SqlEditor = memo(SqlEditorView, sameEditor);
 
 function SqlEditorView({ doc, engine: kind, onMount }: SqlEditorProps) {
   const monacoTheme = useDntMonacoTheme();
+  // An empty editor says how to start instead of showing a blank line 1.
+  const editorOpts = useMemo(() => ({ ...options(), placeholder: editorPlaceholder(kind) }), [kind]);
   const { connectionId, database } = doc;
   // Null for a Command language: no SQL autocomplete to load.
   const engine = sqlEngine(kind);
@@ -170,7 +172,7 @@ function SqlEditorView({ doc, engine: kind, onMount }: SqlEditorProps) {
           bindEditorFontScale(editor);
           onMount?.(editor, monaco);
         }}
-        options={options()}
+        options={editorOpts}
       />
     </div>
   );

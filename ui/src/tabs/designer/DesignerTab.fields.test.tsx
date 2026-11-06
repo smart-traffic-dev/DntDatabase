@@ -5,6 +5,7 @@ import type { TableDef } from '../../bindings';
 import { useQueryDocs } from '../../store/queryTabs';
 import { useTableDesigns } from '../../store/tableDesigns';
 import { resetStores } from '../../test/backend';
+import { pickMenuOption } from '../../components/selectMenuTestKit';
 import { clean, column, def, draftOf, inspector, known, nameInput, opened, pgCatalog, retype, rowOf, rows, selectRow, setup, tab } from './designerTestKit';
 
 beforeEach(() => resetStores());
@@ -43,7 +44,7 @@ describe('DesignerTab column fields and preview', () => {
     await screen.findByRole('table', { name: 'Columns' });
     await selectRow(user, 'id');
     expect(within(inspector()).queryByRole('checkbox', { name: 'Auto increment' })).toBeNull();
-    await user.selectOptions(within(inspector()).getByRole('combobox', { name: 'Identity' }), 'Always');
+    await pickMenuOption(user, within(inspector()).getByRole('combobox', { name: 'Identity' }), 'Always');
     expect(draftOf().columns[0]!.identity).toBe('always');
     expect(within(rowOf('id')).getByText('IDENTITY ALWAYS')).toBeInTheDocument();
     await retype(user, 'text');

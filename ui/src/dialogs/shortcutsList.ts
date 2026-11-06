@@ -50,7 +50,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
     group: 'Table and view tabs',
     items: [
       ['Refresh the rows or the visible section', 'F5'],
-      ['Data / Info / DDL / Structure', 'Alt+1 … 4'],
+      ['Data / Structure / DDL', 'Alt+1 … 3'],
       ['Previous / next page', 'Alt+PgUp / Alt+PgDn'],
       ['Filter rows', 'F3'],
       ['Design the table', 'F4'],

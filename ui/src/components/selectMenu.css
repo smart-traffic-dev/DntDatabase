@@ -1,0 +1,181 @@
+/* SelectMenu: a themed select (button + list in <body>, so the list carries its own fonts). Tokens only. */
+.select-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  min-width: 0;
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-1_5) 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
+  font: inherit;
+  font-size: var(--dnt-text-sm);
+  text-align: left;
+  cursor: default;
+}
+
+.select-menu:hover:not(:disabled) {
+  border-color: var(--dnt-border-strong);
+}
+
+/* Focus: the 1px border turns accent (no ring). */
+.select-menu:focus-visible,
+.select-menu[aria-expanded='true'] {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
+.select-menu:disabled {
+  background: var(--dnt-bg-sunken);
+  color: var(--dnt-fg-disabled);
+}
+
+.select-menu:disabled .select-menu-caret {
+  visibility: hidden;
+}
+
+/* Sizes: xs for dense grid cells, sm (default) for toolbars and bars, md for forms. */
+.select-menu-xs {
+  height: var(--dnt-ctl-h-xs);
+  gap: var(--dnt-space-1);
+  padding: 0 var(--dnt-space-1) 0 var(--dnt-space-1_5);
+  border-radius: var(--dnt-radius-xs);
+  font-size: var(--dnt-text-sm);
+}
+
+.select-menu-md {
+  height: var(--dnt-ctl-h-md);
+  padding: 0 var(--dnt-space-2);
+}
+
+.select-menu-mono,
+.select-menu-pop.select-menu-mono .select-menu-label {
+  font-family: var(--font-mono);
+}
+
+/* Invalid: a danger border (the focus still turns it accent). */
+.select-menu.invalid:not(:focus-visible):not([aria-expanded='true']) {
+  border-color: var(--dnt-status-danger-solid);
+  background: var(--dnt-status-danger-bg);
+}
+
+.select-menu-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.select-menu-text.placeholder {
+  color: var(--dnt-fg-subtle);
+}
+
+.select-menu-caret {
+  flex: none;
+  display: inline-flex;
+  color: var(--dnt-fg-subtle);
+}
+
+.select-menu-caret svg {
+  width: 12px;
+  height: 12px;
+}
+
+.select-menu-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+/*
+ * Portaled to <body> and opened by a control that may sit in a dialog: above the modal layer
+ * (at the dropdown layer it was under the scrim there, and took no clicks). Toasts stay above.
+ */
+.select-menu-pop {
+  position: fixed;
+  z-index: calc(var(--dnt-z-modal) + 1);
+  display: flex;
+  flex-direction: column;
+  max-height: 300px;
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-raised);
+  box-shadow: var(--dnt-shadow-2);
+  color: var(--dnt-fg);
+  font-family: var(--font-sans);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-base-lh);
+  overflow: hidden;
+}
+
+.select-menu-search {
+  flex: none;
+  height: var(--dnt-ctl-h-md);
+  margin: var(--dnt-space-1);
+  padding: 0 var(--dnt-space-2);
+  border: 1px solid var(--dnt-border);
+  border-radius: var(--dnt-radius-sm);
+  background: var(--dnt-bg-app);
+  color: var(--dnt-fg);
+  font: inherit;
+}
+
+.select-menu-search:focus {
+  outline: none;
+  border-color: var(--dnt-focus);
+}
+
+.select-menu-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--dnt-space-1) 0;
+}
+
+.select-menu-list:focus {
+  outline: none;
+}
+
+.select-menu-option {
+  display: flex;
+  align-items: center;
+  gap: var(--dnt-space-2);
+  height: 26px;
+  padding: 0 var(--dnt-space-3);
+  cursor: default;
+  white-space: nowrap;
+}
+
+.select-menu-option.active {
+  background: var(--dnt-bg-selected);
+}
+
+.select-menu-option.current {
+  color: var(--dnt-accent);
+  font-weight: 600;
+}
+
+.select-menu-option[aria-disabled='true'] {
+  color: var(--dnt-fg-disabled);
+}
+
+.select-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.select-menu-hint {
+  flex: none;
+  color: var(--dnt-fg-subtle);
+  font-size: var(--dnt-text-xs);
+}
+
+.select-menu-empty {
+  padding: var(--dnt-space-2) var(--dnt-space-3);
+  color: var(--dnt-fg-muted);
+}

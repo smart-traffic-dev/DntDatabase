@@ -12,8 +12,9 @@ import type {
   ToolDumpRequest,
   ToolsList,
 } from '../../bindings';
+import { ChevronIcon } from '../../components/icons';
 import { showJobs } from '../../components/windowActions';
-import { Modal } from '../../dialogs/Modal';
+import { Modal, ModalObject } from '../../dialogs/Modal';
 import { useConnections } from '../../store/connections';
 import type { UiRequest } from '../../store/dialogs';
 import { useJobs } from '../../store/jobs';
@@ -325,11 +326,42 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
   const skippedTable = table && listing ? listing.skipped.find((s) => s.name === table && (!schema || s.schema === schema)) : undefined;
   const nothingSelected = !!listing && selected.length === 0 && objects.length > 0;
 
+  // Why Start dump is off, next to it (the first thing missing, in the order of the form).
+  let blocked: string | null = null;
+  if (!canStart && !starting && !picking) {
+    if (!builtin && tools && !toolInfo) blocked = `${methodLabel(method)} was not found`;
+    else if (pg && schemas?.length === 0) blocked = 'Choose at least one schema';
+    else if (!listing) blocked = listError ? null : 'Listing the objects…';
+    else if (selected.length === 0) blocked = 'Choose at least one object';
+    else if (toolOutputEmpty) blocked = 'Choose structure, data or both';
+    else if (!path) blocked = picked ? 'Choose the output file again' : 'Choose an output file first';
+  }
+
+  // The context under the title: "dnt_fixture.orders on shop-dev", "On shop-dev".
+  const qualifiedTable = table ? [database, pg ? schema : null, table].filter(Boolean).join('.') : '';
+  const where = `${qualifiedTable ? `${qualifiedTable} on` : 'On'} ${cfg?.name ?? connectionId}`;
+
   return (
-    <Modal title={table ? `Dump table ${table}` : `Dump ${database}`} onClose={close} className="backup-dialog" testId="dump-dialog">
+    <Modal
+      title={
+        table ? (
+          <>
+            Dump table <ModalObject>{table}</ModalObject>
+          </>
+        ) : (
+          <>
+            Dump database <ModalObject>{database}</ModalObject>
+          </>
+        )
+      }
+      subtitle={where}
+      onClose={close}
+      className="backup-dialog"
+      testId="dump-dialog"
+    >
       <div className="modal-body stack backup-body">
         <section className="stack" aria-label="Method">
-          <div className="segmented backup-methods" role="radiogroup" aria-label="Dump method">
+          <div className="seg-group backup-methods" role="radiogroup" aria-label="Dump method">
             {methods.map((m, i) => (
               <button
                 key={m}
@@ -472,7 +504,12 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
           )}
           {builtin && listing && listing.skipped.length > 0 && (
             <details className="backup-skipped" data-testid="dump-skipped">
-              <summary>Not in the built-in dump ({listing.skipped.length})</summary>
+              <summary>
+                <span className="backup-chevron" aria-hidden="true">
+                  <ChevronIcon />
+                </span>
+                Not in the built-in dump ({listing.skipped.length})
+              </summary>
               <ul>
                 {listing.skipped.map((s) => (
                   <li key={keyOf(s)}>
@@ -579,7 +616,12 @@ export function DumpDialog({ connectionId, database, schema, table, params, onCl
           Cancel
         </button>
         <span className="spacer" />
-        <button type="button" className="btn primary" disabled={!canStart} onClick={() => void start()}>
+        {blocked && (
+          <span className="foot-note" data-testid="dump-blocked">
+            {blocked}
+          </span>
+        )}
+        <button type="button" className="btn primary" disabled={!canStart} title={blocked ?? undefined} onClick={() => void start()}>
           Start dump
         </button>
       </footer>

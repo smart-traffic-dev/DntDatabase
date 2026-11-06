@@ -117,8 +117,6 @@ const next = () => screen.getByRole('button', { name: 'Next' });
 async function toMapping(u: ReturnType<typeof user>) {
   await u.click(screen.getByRole('button', { name: 'Choose file…' }));
   await screen.findByTestId('import-preview');
-  await waitFor(() => expect(next()).toBeEnabled());
-  await u.click(next());
   await screen.findByTestId('import-target-columns');
   await waitFor(() => expect(next()).toBeEnabled());
   await u.click(next());
@@ -137,6 +135,9 @@ describe('ImportWizard', () => {
     const u = user();
     const onClose = open();
     expect(next()).toBeDisabled();
+    // The disabled Next says why; the file area is one large target.
+    expect(screen.getByTestId('import-blocked')).toHaveTextContent('Choose a file first');
+    expect(screen.getByTestId('import-file-zone')).toHaveTextContent('CSV or TSV, JSON (an array of objects), JSON Lines, or an Excel workbook (.xlsx)');
 
     await u.click(screen.getByRole('button', { name: 'Choose file…' }));
     const grid = await screen.findByTestId('import-preview');
@@ -147,8 +148,8 @@ describe('ImportWizard', () => {
       { path: 'C:\\data\\orders.csv', source: { format: 'csv', delimiter: null, header: true, sheet: null } },
     ]);
 
-    await u.click(next());
     const cols = await screen.findByTestId('import-target-columns');
+    expect(screen.getByTestId('import-file')).toHaveTextContent('C:\\data\\orders.csv');
     expect(cols).toHaveTextContent('varchar(40)');
     expect(cols).toHaveTextContent('auto increment');
     expect(callsOf('import_target')).toEqual([{ connectionId: ids.prod, table }]);
@@ -300,7 +301,6 @@ describe('ImportWizard', () => {
     open();
     await u.click(screen.getByRole('button', { name: 'Choose file…' }));
     await screen.findByTestId('import-preview');
-    await u.click(next());
     await screen.findByTestId('import-target-columns');
     await waitFor(() => expect(next()).toBeEnabled());
     await u.click(next());
@@ -444,7 +444,6 @@ describe('Run again', () => {
     open({ table, params: request });
     await screen.findByTestId('import-preview');
     expect(callsOf('import_inspect')[0]?.source).toEqual(request.source);
-    await u.click(next());
     await screen.findByTestId('import-target-columns');
     await waitFor(() => expect(next()).toBeEnabled());
     await u.click(next());
@@ -491,7 +490,6 @@ describe('Run again', () => {
     expect(callsOf('import_inspect')[1]?.source).toEqual(request.source);
     expect(screen.getByLabelText('Delimiter')).toHaveValue(';');
     expect(screen.getByLabelText('First row holds the column names')).not.toBeChecked();
-    await u.click(next());
     await screen.findByTestId('import-target-columns');
     await waitFor(() => expect(next()).toBeEnabled());
     await u.click(next());

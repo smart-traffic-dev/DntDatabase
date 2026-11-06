@@ -4,9 +4,12 @@ import { needsReconnect } from '../api';
 import { useTree, type TreeNode, type TreeRow } from '../store/tree';
 import { openKeysTab } from '../store/tabs';
 import { useConnections } from '../store/connections';
-import { useLayout } from '../store/layout';
+import { useLayout, type RightActivity } from '../store/layout';
 import { computeRows, connectionIdOf, emptyLabel } from '../store/treeModel';
 import { EnvTag } from './EnvTag';
+import { EngineLogo } from './EngineLogo';
+import type { Engine as LogoEngine } from '../dialogs/connectionDefaults';
+import type { Engine as TreeEngine } from '../store/treeModel';
 import { ChevronIcon, DatabaseIcon, FolderIcon, KindIcon, ListIcon, SchemaIcon } from './icons';
 import { useDialogs } from '../store/dialogs';
 import { openQueryOnNode } from './newQuery';
@@ -23,6 +26,49 @@ export const ROW_HEIGHT = 24;
 export const ERROR_ROW_HEIGHT = 42;
 const heightOf = (row: TreeRow | undefined, rowHeight: number) =>
   row?.type === 'error' && row.node.error?.hint ? ERROR_ROW_HEIGHT : rowHeight;
+
+/** A connection row's mark: the engine's official logo (the name is in its tooltip). */
+const LOGO_OF: Record<TreeEngine, LogoEngine> = { MY: 'mysql', MA: 'mariadb', PG: 'postgres', MG: 'mongo', RD: 'redis' };
+const ENGINE_NAME: Record<TreeEngine, string> = { MY: 'MySQL', MA: 'MariaDB', PG: 'PostgreSQL', MG: 'MongoDB', RD: 'Redis' };
+
+/**
+ * The right panel as it was before a click on a table showed it in Object info. A double click is
+ * two clicks then the open: the panel the first click brought up would only repeat the new tab's
+ * Info and DDL, so the open puts the panel back as it was. A panel the user had open stays.
+ */
+let panelBefore: { visible: boolean; activity: RightActivity; at: number } | null = null;
+const DOUBLE_CLICK_MS = 600;
+
+function rememberPanel() {
+  // The double click's second click must not overwrite what the first one saw.
+  if (panelBefore && Date.now() - panelBefore.at < DOUBLE_CLICK_MS) return;
+  const { rightVisible, rightActivity } = useLayout.getState();
+  panelBefore = { visible: rightVisible, activity: rightActivity, at: Date.now() };
+}
+
+function restorePanel() {
+  const before = panelBefore;
+  panelBefore = null;
+  if (!before || Date.now() - before.at > DOUBLE_CLICK_MS) return;
+  if (before.visible && before.activity === 'info') return;
+  const layout = useLayout.getState();
+  layout.openRightActivity(before.activity);
+  if (!before.visible) layout.setRightVisible(false);
+}
+
+/** A row's label with the part the filter matched marked (the filter matches a substring, any case). */
+function Highlighted({ text }: { text: string }) {
+  const query = useTree((s) => s.filter.trim());
+  const at = query ? text.toLowerCase().indexOf(query.toLowerCase()) : -1;
+  if (at < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, at)}
+      <mark className="tree-match">{text.slice(at, at + query.length)}</mark>
+      {text.slice(at + query.length)}
+    </>
+  );
+}
 
 /** Double-click / Enter: an object opens its tab, a Redis database its keys, anything else expands. */
 function activate(node: TreeNode, toggle: () => void) {
@@ -152,10 +198,18 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
         // A single click on a table or view shows it in the Object info panel (Navicat's
         // information pane: columns, DDL, sample rows); a double click opens its Data tab.
         // Other objects open a preview tab; the next preview in that group replaces it.
-        if (isObject && showsInfo(node)) useLayout.getState().openRightActivity('info');
+        if (isObject && showsInfo(node)) {
+          rememberPanel();
+          useLayout.getState().openRightActivity('info');
+        }
         else if (isObject) openObjectTab(node, { preview: true });
       }}
-      onDoubleClick={() => (node.kind === 'object' ? on.onOpen(node) : activate(node, () => on.onToggle(node)))}
+      onDoubleClick={() => {
+        if (node.kind !== 'object') return activate(node, () => on.onToggle(node));
+        // The tab about to open has the same Info / DDL as the panel its first click opened.
+        if (showsInfo(node)) restorePanel();
+        on.onOpen(node);
+      }}
       onContextMenu={(e) => on.onMenu(node, e)}
       onDragStart={
         isObject
@@ -190,7 +244,7 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
       </span>
       {node.kind === 'connection' ? (
         <>
-          {node.engine && <span className={`chip chip-${node.engine}`}>{node.engine}</span>}
+          {node.engine && <EngineLogo engine={LOGO_OF[node.engine]} size={16} compact label={ENGINE_NAME[node.engine]} />}
           {node.envTag && <EnvTag env={node.envTag} />}
         </>
       ) : (
@@ -201,7 +255,7 @@ function TreeRowView({ row, selected, dropTarget, style, ...on }: RowProps) {
         className={`label${node.envTag === 'production' ? ' env-production' : ''}`}
         title={node.kind === 'connection' && node.meta ? `${node.label} · ${node.meta}` : node.label}
       >
-        {node.label}
+        <Highlighted text={node.label} />
       </span>
       {readOnly && (
         <span className="ro-tag" title="Read-only connection">

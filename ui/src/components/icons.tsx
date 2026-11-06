@@ -172,11 +172,11 @@ export const EventIcon = () => (
   </Icon>
 );
 
-/** A page with a play mark: query tabs. */
+/** A SQL console (prompt and cursor): query tabs. The old page-with-a-play glyph blurred at 14px. */
 export const QueryIcon = () => (
   <Icon>
-    <path d="M6 3h9l4 4v14H6zM14 3v5h5" />
-    <path d="M10 11l5 3-5 3z" />
+    <rect x="3" y="4" width="18" height="16" rx="2.5" />
+    <path d="M7.5 9.5l3 2.5-3 2.5M12.5 15h4" />
   </Icon>
 );
 

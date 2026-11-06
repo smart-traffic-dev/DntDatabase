@@ -19,11 +19,11 @@ import type {
  * mapping rules themselves stay in the backend (`import_auto_map`, `import_check_mapping`).
  */
 
-export type StepId = 'source' | 'target' | 'mapping' | 'options' | 'check' | 'review';
+/** `source`: the file and the target table, on one page (the table is usually pre-filled from the tree). */
+export type StepId = 'source' | 'mapping' | 'options' | 'check' | 'review';
 
 export const STEPS: { id: StepId; label: string }[] = [
-  { id: 'source', label: 'Source' },
-  { id: 'target', label: 'Target' },
+  { id: 'source', label: 'Source & target' },
   { id: 'mapping', label: 'Mapping' },
   { id: 'options', label: 'Options' },
   { id: 'check', label: 'Check' },
@@ -130,9 +130,7 @@ const keyChosen = (mode: ImportMode) => mode.kind !== 'upsert' || mode.key.lengt
 export function canAdvance(s: WizardState, step: StepId = s.step): boolean {
   switch (step) {
     case 'source':
-      return s.path !== null && s.inspection !== null;
-    case 'target':
-      return s.target !== null;
+      return s.path !== null && s.inspection !== null && s.target !== null;
     case 'mapping':
       return s.report !== null && s.report.errors.length === 0;
     case 'options':
@@ -141,6 +139,27 @@ export function canAdvance(s: WizardState, step: StepId = s.step): boolean {
       return true;
     case 'review':
       return false;
+  }
+}
+
+/** Why Next is off on `step`, for the footer; null when it is on (or nothing useful to say). */
+export function advanceBlocker(s: WizardState, step: StepId = s.step): string | null {
+  if (canAdvance(s, step)) return null;
+  switch (step) {
+    case 'source':
+      if (s.path === null) return 'Choose a file first';
+      if (s.inspection === null) return 'Reading the file…';
+      if (s.table === null) return 'Choose the target table';
+      return 'Reading the table…';
+    case 'mapping':
+      if (s.report === null) return 'Checking the mapping…';
+      return 'Fix the mapping errors first';
+    case 'options':
+      if (!keyChosen(s.mode)) return 'Choose the upsert key';
+      if (s.report === null) return 'Checking the options…';
+      return 'Fix the errors first';
+    default:
+      return null;
   }
 }
 

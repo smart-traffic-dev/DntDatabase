@@ -22,6 +22,7 @@ import {
   type StatusFilter,
 } from './historyModel';
 import { ChevronIcon, TrashIcon } from './icons';
+import { SelectMenu } from './SelectMenu';
 
 /** Search box debounce. */
 export const SEARCH_DEBOUNCE_MS = 300;
@@ -291,7 +292,7 @@ export function HistoryPanel({ onCollapse }: { onCollapse?: () => void }) {
   return (
     <section className="hs-view" aria-label="History" data-testid="history-view">
       <div className="rs-head">
-        <strong className="rs-title">HISTORY</strong>
+        <strong className="rs-title">History</strong>
         <span className="spacer" />
         <button
           type="button"
@@ -348,16 +349,14 @@ export function HistoryPanel({ onCollapse }: { onCollapse?: () => void }) {
           onChange={(e) => setSearchText(e.target.value)}
         />
         <div className="hs-filter-row">
-          <select
+          <SelectMenu
             className="hs-select"
-            data-testid="history-connection"
-            aria-label="Connection"
+            testId="history-connection"
+            label="Connection"
             value={focusConnection && scope === 'focus' ? focusConnection : ''}
-            onChange={(e) => setScope(e.target.value === '' ? 'all' : 'focus')}
-          >
-            {focusConnection && <option value={focusConnection}>{focusName}</option>}
-            <option value="">All connections</option>
-          </select>
+            options={[...(focusConnection ? [{ value: focusConnection, label: focusName ?? focusConnection }] : []), { value: '', label: 'All connections' }]}
+            onChange={(v) => setScope(v === '' ? 'all' : 'focus')}
+          />
           <div className="hs-segment" role="radiogroup" aria-label="Status">
             {SEGMENTS.map((s) => (
               <button
@@ -388,7 +387,12 @@ export function HistoryPanel({ onCollapse }: { onCollapse?: () => void }) {
         <span id={keysId} hidden>
           Arrow keys move, Right and Left unfold and fold, Enter inserts the statement at the cursor, Space selects, Delete deletes.
         </span>
-        {flat.length === 0 && !error && <div className="qr-empty">No history.</div>}
+        {flat.length === 0 && !error && (
+          <div className="rs-empty">
+            <strong>No history yet</strong>
+            <span>Every statement you run is kept here, newest first. Select one and press Enter to insert it at the cursor.</span>
+          </div>
+        )}
         {groups.map((group) => (
           <div key={group.label} role="group" aria-label={group.label}>
             <div className="hs-group" aria-hidden="true">

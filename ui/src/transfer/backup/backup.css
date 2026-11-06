@@ -26,8 +26,45 @@
   flex: 1;
 }
 
+/*
+ * The method switch: the dialogs' segmented control (`.seg-group`, as SSL mode and Environment) —
+ * a sunken track, the chosen segment a raised surface in medium weight. Buttons here (not radio
+ * inputs), so the rules are spelled out: no stretch, no outline on a mouse focus, a 1px accent
+ * border on keyboard focus only.
+ */
 .backup-methods {
   flex: none;
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--dnt-radius-md);
+  background: var(--dnt-bg-sunken);
+}
+
+.backup-methods .segment {
+  flex: none;
+  height: var(--dnt-ctl-h-sm);
+  padding: 0 var(--dnt-space-3);
+  border: 1px solid transparent;
+  border-radius: var(--dnt-radius-sm);
+  background: transparent;
+  box-shadow: none;
+  color: var(--dnt-fg-muted);
+  font-weight: 400;
+}
+
+.backup-methods .segment.on {
+  border-color: var(--dnt-border-subtle);
+  background: var(--dnt-bg-raised);
+  box-shadow: var(--dnt-shadow-1);
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
+.backup-methods .segment:focus,
+.backup-methods .segment:focus-within {
+  outline: none;
 }
 
 .backup-methods .segment:focus-visible {
@@ -133,13 +170,42 @@
   font-size: var(--dnt-text-sm);
 }
 
+/* The app's chevron instead of the native disclosure triangle; it turns down when open. */
 .backup-skipped summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dnt-space-1_5);
+  list-style: none;
+  border-radius: var(--dnt-radius-xs);
   color: var(--dnt-fg-muted);
   cursor: pointer;
 }
 
+.backup-skipped summary::-webkit-details-marker {
+  display: none;
+}
+
+.backup-skipped summary::marker {
+  content: '';
+}
+
+.backup-skipped summary:hover {
+  color: var(--dnt-fg);
+}
+
+.backup-chevron {
+  display: inline-flex;
+  color: var(--dnt-fg-subtle);
+  transition: transform 0.12s ease;
+}
+
+.backup-skipped[open] .backup-chevron {
+  transform: rotate(90deg);
+}
+
 .backup-skipped summary:focus-visible {
   outline: 1px solid var(--dnt-focus);
+  outline-offset: 1px;
 }
 
 .backup-skipped ul {

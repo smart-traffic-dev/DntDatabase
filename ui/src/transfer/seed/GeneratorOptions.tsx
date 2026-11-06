@@ -1,4 +1,5 @@
 import type { FakeKind, Generator } from '../../bindings';
+import { SelectMenu } from '../../components/SelectMenu';
 import { FAKE_KINDS, FAKE_LABEL } from './seedFormat';
 
 interface Props {
@@ -94,13 +95,15 @@ export function GeneratorOptions({ column, generator: g, keyCount, reference, di
     case 'fake':
       return (
         <span className="seed-opts">
-          <select aria-label={of('Fake data')} value={g.fake} disabled={disabled} onChange={(e) => onChange({ ...g, fake: e.target.value as FakeKind })}>
-            {FAKE_KINDS.map((k) => (
-              <option key={k} value={k}>
-                {FAKE_LABEL[k]}
-              </option>
-            ))}
-          </select>
+          <SelectMenu
+            label={of('Fake data')}
+            testId={`seed-fake-${column}`}
+            className="seed-select"
+            value={g.fake}
+            disabled={disabled}
+            options={FAKE_KINDS.map((k) => ({ value: k, label: FAKE_LABEL[k] }))}
+            onChange={(fake) => onChange({ ...g, fake: fake as FakeKind })}
+          />
         </span>
       );
     case 'constant':

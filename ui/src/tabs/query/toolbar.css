@@ -257,7 +257,9 @@ button.ta-chip:hover {
 }
 
 .qt-pick .qt-select {
+  width: 100%;
   max-width: none;
+  height: var(--dnt-ctl-h-md);
   color: var(--dnt-fg);
 }
 

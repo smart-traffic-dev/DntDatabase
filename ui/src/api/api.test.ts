@@ -67,7 +67,8 @@ describe('api', () => {
     const err = await api.listTree().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppErrorEx);
     expect((err as AppErrorEx).kind).toBe('internal');
-    expect((err as AppErrorEx).message).toBe('command list_tree not found');
+    expect((err as AppErrorEx).message).toBe('An internal error occurred.');
+    expect((err as AppErrorEx).toAppError().detail).toBe('command list_tree not found');
   });
 
   it('turns an object that is not an AppError into an internal error with its text', async () => {
@@ -78,7 +79,8 @@ describe('api', () => {
     });
     const err = await api.listTree().catch((e: unknown) => e);
     expect((err as AppErrorEx).kind).toBe('internal');
-    expect((err as AppErrorEx).message).toBe('[object Object]');
+    expect((err as AppErrorEx).message).toBe('An internal error occurred.');
+    expect((err as AppErrorEx).toAppError().detail).toBe('[object Object]');
   });
 
   it('wraps a runtime failure (no Tauri backend) as an internal AppErrorEx', async () => {
@@ -90,6 +92,7 @@ describe('api', () => {
     const err = await api.listTree().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppErrorEx);
     expect((err as AppErrorEx).kind).toBe('internal');
-    expect((err as AppErrorEx).message).toBe('invoke is not available');
+    expect((err as AppErrorEx).message).toBe('An internal error occurred.');
+    expect((err as AppErrorEx).toAppError().detail).toBe('invoke is not available');
   });
 });

@@ -1,5 +1,6 @@
 import { Fragment } from 'react';
 import type { ColumnIssue, ColumnPlan, Generator, SeedColumn } from '../../bindings';
+import { SelectMenu } from '../../components/SelectMenu';
 import { GeneratorOptions } from './GeneratorOptions';
 import { GENERATOR_LABEL, generatorsFor, uniqueApplies, type GeneratorKind } from './seedFormat';
 import { defaultGenerator } from './seedState';
@@ -59,20 +60,17 @@ export function ColumnsTable({ columns, plans, issues, keyCounts, disabled, onGe
                   </th>
                   <td className="seed-type">{typeText(c)}</td>
                   <td>
-                    <select
-                      aria-label={`Generator for ${name}`}
+                    <SelectMenu
+                      label={`Generator for ${name}`}
+                      testId={`seed-gen-${name}`}
+                      className="seed-select"
                       value={g.kind}
                       disabled={disabled || c.locked}
                       title={c.locked ? LOCKED_TITLE : undefined}
-                      aria-invalid={issue.length > 0 || undefined}
-                      onChange={(e) => onGenerator(name, defaultGenerator(e.target.value as GeneratorKind, c))}
-                    >
-                      {kinds.map((k) => (
-                        <option key={k} value={k}>
-                          {GENERATOR_LABEL[k]}
-                        </option>
-                      ))}
-                    </select>
+                      invalid={issue.length > 0}
+                      options={kinds.map((k) => ({ value: k, label: GENERATOR_LABEL[k] }))}
+                      onChange={(kind) => onGenerator(name, defaultGenerator(kind as GeneratorKind, c))}
+                    />
                   </td>
                   <td>
                     <GeneratorOptions

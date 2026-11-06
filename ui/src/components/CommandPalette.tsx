@@ -63,7 +63,7 @@ export function commandList(state: MenuState): PaletteEntry[] {
   const out: PaletteEntry[] = [];
   for (const menu of buildMenus(state)) {
     for (const item of menu.items) {
-      if ('separator' in item) continue;
+      if (!('label' in item)) continue;
       const soon = item.hint === COMING_SOON;
       if (item.disabled && !soon) continue;
       out.push({

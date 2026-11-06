@@ -80,14 +80,17 @@ describe('tab strip actions: query tab', () => {
     const labels = [...menu.querySelectorAll('[role^="menuitem"]')].map((i) => i.querySelector('.menu-label')?.textContent);
     expect(labels).toEqual([
       'Format SQL',
-      'Display limit 1,000',
-      'Display limit 10,000',
-      'Display limit 100,000',
-      'Display limit 1,000,000',
+      'Add to favorites',
+      '1,000 rows',
+      '10,000 rows',
+      '100,000 rows',
+      '1,000,000 rows',
       'Auto commit',
       'Manual commit',
       'Open in new group',
     ]);
+    // Each pick-one list sits under its label.
+    expect([...menu.querySelectorAll('.menu-heading')].map((h) => h.textContent)).toEqual(['Display limit', 'Commit mode']);
     expect(within(menu).getByTestId('query-row-limit-10000')).toHaveAttribute('aria-checked', 'true');
     expect(within(menu).getByTestId('query-tx-auto')).toHaveAttribute('aria-checked', 'true');
     await user.click(within(menu).getByTestId('query-row-limit-1000'));

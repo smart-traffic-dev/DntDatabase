@@ -2,6 +2,12 @@ import { expect, type Page } from '@playwright/test';
 
 export const byId = (page: Page, id: string) => page.getByTestId(id);
 
+/** Picks `label` in a SelectMenu (the app's themed select): opens its list, clicks the option. */
+export async function pickOption(page: Page, id: string, label: string) {
+  await byId(page, id).click();
+  await page.getByRole('option', { name: label, exact: true }).click();
+}
+
 /** Tree row whose label is exactly `label` (rows for loading / error placeholders have no label). */
 export const treeRow = (page: Page, label: string) =>
   page.getByTestId('tree-row').filter({ has: page.locator('span.label').getByText(label, { exact: true }) });

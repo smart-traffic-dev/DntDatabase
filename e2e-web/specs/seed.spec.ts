@@ -1,6 +1,6 @@
 import type { JobSummary } from '../../ui/src/bindings';
 import { config, ids } from '../../ui/src/test/fixtures/data';
-import { byId, expandRow, treeRow } from '../src/app';
+import { byId, expandRow, pickOption, treeRow } from '../src/app';
 import { createBackend } from '../src/backend';
 import { jobEvent } from '../src/jobs';
 import { emitEvent, installBackend } from '../src/shim';
@@ -27,8 +27,9 @@ test.describe('data seeder (browser, fake IPC backend)', () => {
 
     const dialog = byId(page, 'seed-dialog');
     await expect(dialog).toBeVisible();
-    await expect(dialog.getByRole('heading', { name: 'Generate data — dnt_fixture.orders' })).toBeVisible();
-    await expect(dialog.getByLabel('Generator for email')).toHaveValue('fake');
+    await expect(dialog.getByRole('heading', { name: 'Generate data for orders' })).toBeVisible();
+    await expect(dialog).toContainText('dnt_fixture.orders on shop-dev');
+    await expect(byId(page, 'seed-gen-email')).toHaveAttribute('data-value', 'fake');
     await expect(dialog.getByLabel('Generator for total_with_tax')).toBeDisabled();
 
     const grid = byId(page, 'seed-preview');
@@ -36,7 +37,7 @@ test.describe('data seeder (browser, fake IPC backend)', () => {
     await expect(grid).toContainText('shipped');
 
     // A constant status: the preview is asked again with it.
-    await dialog.getByLabel('Generator for status').selectOption('constant');
+    await pickOption(page, 'seed-gen-status', 'Constant');
     await dialog.getByLabel('Value for status').fill('new');
     await expect(grid).not.toContainText('shipped');
     await expect(grid).toContainText('new');
@@ -90,7 +91,7 @@ test.describe('data seeder (browser, fake IPC backend)', () => {
 
     const dialog = byId(page, 'seed-dialog');
     await expect(byId(page, 'seed-preview').locator('tbody tr')).toHaveCount(10);
-    await dialog.getByLabel('Existing rows').selectOption('delete');
+    await pickOption(page, 'seed-existing', 'Delete first');
     const reviewButton = dialog.getByRole('button', { name: 'Review…' });
     await expect(reviewButton).toBeEnabled();
     await reviewButton.click();

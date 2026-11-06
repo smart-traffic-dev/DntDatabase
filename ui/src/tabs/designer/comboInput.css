@@ -41,21 +41,29 @@
   display: none;
 }
 
-/* A select in the grids: no native arrow, the combo's chevron instead (always shown: it is a choice). */
-.dz-select select.dz-input {
-  appearance: none;
-  padding-right: 22px;
-  cursor: default;
+/*
+ * A select in the grids (GridSelect, a SelectMenu): fills its cell and stays borderless until
+ * hovered or focused, like the grid's text fields; the chevron always shows (it is a choice).
+ */
+.select-menu.dz-grid-select {
+  width: 100%;
+  border-color: transparent;
+  background: transparent;
 }
 
-.dz-select .dz-combo-chevron {
-  pointer-events: none;
-  opacity: 1;
-  right: 4px;
+.dz-row:hover .select-menu.dz-grid-select:not(:disabled),
+.select-menu.dz-grid-select:hover:not(:disabled) {
+  border-color: var(--dnt-border);
 }
 
-.dz-select select:disabled + .dz-combo-chevron {
-  display: none;
+.select-menu.dz-grid-select:focus-visible,
+.select-menu.dz-grid-select[aria-expanded='true'] {
+  border-color: var(--dnt-focus);
+  background: var(--dnt-bg-app);
+}
+
+.select-menu.dz-grid-select:disabled {
+  background: transparent;
 }
 
 .dz-combo-list {

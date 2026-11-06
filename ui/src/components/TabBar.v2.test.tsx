@@ -151,14 +151,15 @@ describe('TabBar (editor v2)', () => {
     expect(s().tabs.filter((t) => t.kind === 'query')).toHaveLength(1);
   });
 
-  it('the tab menu splits on all four sides', async () => {
+  it('the tab menu splits right and down (left / up are the drag-to-edge drop zones)', async () => {
     act(() => ['a', 'b'].forEach((id) => s().open(obj(id))));
     render(<TabBar />);
     fireEvent.contextMenu(screen.getByRole('tab', { name: 'b' }));
-    for (const side of ['right', 'down', 'left', 'up']) expect(screen.getByRole('menuitem', { name: new RegExp(`^Split ${side}`) })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('menuitem', { name: /^Split left/ }));
+    for (const side of ['right', 'down']) expect(screen.getByRole('menuitem', { name: new RegExp(`^Split ${side}`) })).toBeInTheDocument();
+    for (const side of ['left', 'up']) expect(screen.queryByRole('menuitem', { name: new RegExp(`^Split ${side}`) })).toBeNull();
+    fireEvent.click(screen.getByRole('menuitem', { name: /^Split right/ }));
     expect(s().groups).toHaveLength(2);
-    expect(groupTabs(s(), s().groups[0]!.id).map((t) => t.id)).toEqual(['b']);
+    expect(groupTabs(s(), s().groups[1]!.id).map((t) => t.id)).toEqual(['b']);
   });
 
   it('a maximized group says so in its strip, with a restore button', () => {

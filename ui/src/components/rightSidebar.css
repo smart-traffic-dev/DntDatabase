@@ -71,6 +71,22 @@
   border-bottom: 1px solid var(--dnt-border);
 }
 
+/* Empty panel: what it is for, not just "nothing". */
+.rs-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dnt-space-1);
+  padding: var(--dnt-space-3);
+  color: var(--dnt-fg-muted);
+  font-size: var(--dnt-text-sm);
+  line-height: var(--dnt-text-sm-lh);
+}
+
+.rs-empty strong {
+  color: var(--dnt-fg);
+  font-weight: 500;
+}
+
 .rs-title {
   font-size: var(--dnt-text-sm);
   font-weight: 600;

@@ -109,6 +109,13 @@
   --dnt-env-staging: var(--dnt-status-warning-solid);
   --dnt-env-local: var(--dnt-gray-400);
 
+  /* Tab glyphs by what they hold: query, table data, view, designer, code (DDL / routines). */
+  --dnt-kind-query: var(--dnt-blue-600);
+  --dnt-kind-table: var(--dnt-green-600);
+  --dnt-kind-view: #7a4fc7;
+  --dnt-kind-design: #b26a00;
+  --dnt-kind-code: var(--dnt-gray-600);
+
   --dnt-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.06);
   --dnt-shadow-2: 0 6px 20px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.06);
   --dnt-shadow-3: 0 20px 48px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
@@ -164,6 +171,12 @@
   --dnt-env-staging: var(--dnt-status-warning-solid);
   --dnt-env-local: var(--dnt-gray-600);
 
+  --dnt-kind-query: var(--dnt-blue-400);
+  --dnt-kind-table: #5fd08f;
+  --dnt-kind-view: #b69cf0;
+  --dnt-kind-design: #f0c674;
+  --dnt-kind-code: #b3b3b8;
+
   --dnt-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.15);
   --dnt-shadow-2: 0 6px 20px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.15);
   --dnt-shadow-3: 0 20px 48px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.2);
@@ -180,7 +193,7 @@
   --dnt-row-h-grid: 24px;
   --dnt-row-h-menu: 28px;
   --dnt-titlebar-h: 36px;
-  --dnt-tab-h: 34px;
+  --dnt-tab-h: 30px;
   --dnt-statusbar-h: 24px;
   --dnt-icon-size: 16px;
 
@@ -238,7 +251,7 @@
   --dnt-row-h-grid: 30px;
   --dnt-row-h-menu: 32px;
   --dnt-titlebar-h: 40px;
-  --dnt-tab-h: 38px;
+  --dnt-tab-h: 34px;
   --dnt-statusbar-h: 26px;
 }
 

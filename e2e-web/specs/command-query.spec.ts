@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { config, ids } from '../../ui/src/test/fixtures/data';
-import { byId } from '../src/app';
+import { byId, pickOption } from '../src/app';
 import { createBackend } from '../src/backend';
 import { installBackend } from '../src/shim';
 import { expect, test } from '../src/test';
@@ -48,7 +48,7 @@ async function setup(page: Page) {
 async function newTab(page: Page, name: string) {
   await byId(page, 'new-query').click();
   await byId(page, 'query-context').click();
-  await byId(page, 'query-connection').selectOption({ label: name });
+  await pickOption(page, 'query-connection', name);
   await page.keyboard.press('Escape');
 }
 

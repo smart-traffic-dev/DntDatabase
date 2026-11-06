@@ -160,11 +160,11 @@ export function CreateNamespaceDialog({ request, onClose }: { request: ObjectAct
   const host = cfg?.name ?? connectionId;
   const server = info ? ` · ${info.variant === 'MariaDb' ? 'MariaDB' : mysql ? 'MySQL' : 'PostgreSQL'} ${info.version[0]}.${info.version[1]}` : '';
 
-  return <Modal title={`Create ${what}`} onClose={close} closable={!busy} className="create-ns-dialog"
+  return <Modal title={`Create ${what}`} subtitle={`${mysql ? `On ${host}` : `In ${base.database} on ${host}`}${server}`}
+    onClose={close} closable={!busy} className="create-ns-dialog"
     badge={production ? <EnvTag env="production" variant="chip" testId="env-chip" /> : undefined}>
     <form onSubmit={(e) => void submit(e)} noValidate>
       <div className="modal-body create-ns-body">
-        <p className="hint create-ns-context">{mysql ? `On ${host}` : `In ${base.database} on ${host}`}{server}</p>
         <div className="field">
           <label htmlFor="cns-name">Name</label>
           <input id="cns-name" aria-label="Name" value={name} readOnly={busy} autoComplete="off" spellCheck={false}

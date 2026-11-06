@@ -3,7 +3,9 @@ import { api, toAppError } from '../../api';
 import type { AppError, ObjectRef, SeedRequest } from '../../bindings';
 import { EnvTag } from '../../components/EnvTag';
 import { showJobs } from '../../components/windowActions';
-import { Modal } from '../../dialogs/Modal';
+import { SelectMenu, type SelectMenuOption } from '../../components/SelectMenu';
+import { Modal, ModalObject } from '../../dialogs/Modal';
+import { useConnections } from '../../store/connections';
 import { useJobs } from '../../store/jobs';
 import { useToasts } from '../../store/toasts';
 import { cellView } from '../../tabs/query/format';
@@ -27,6 +29,23 @@ export const PREVIEW_DEBOUNCE_MS = 300;
 const NO_CONFIRMATION: Confirmation = { typed: '', understood: false, irreversibleAck: false };
 
 const qualified = (t: ObjectRef) => [t.database, t.schema, t.name].filter(Boolean).join('.');
+
+const EXISTING: SelectMenuOption[] = [
+  { value: 'keep', label: 'Keep' },
+  { value: 'delete', label: 'Delete first' },
+  { value: 'truncate', label: 'Truncate first' },
+];
+
+/** A die (the shared icon set has none): "a new random seed". */
+const DiceIcon = () => (
+  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <rect x="4" y="4" width="16" height="16" rx="3" />
+    <circle cx="9" cy="9" r="0.9" fill="currentColor" />
+    <circle cx="15" cy="15" r="0.9" fill="currentColor" />
+    <circle cx="15" cy="9" r="0.9" fill="currentColor" />
+    <circle cx="9" cy="15" r="0.9" fill="currentColor" />
+  </svg>
+);
 
 /** The message of a failed prepare or start (the plan is used up either way). */
 function reviewMessage(err: AppError): string {
@@ -146,9 +165,24 @@ export function SeedDialog({ connectionId, table, params, onClose }: Props) {
     if (!starting) onClose();
   };
 
+  // Why Review… is off, next to it (nothing when the page already says it: an error, an issue row, read-only).
+  let blocked: string | null = null;
+  if (step === 'configure' && !canReview && !readOnly && !targetError && !previewError && issues.length === 0) {
+    if (!target) blocked = 'Reading the table…';
+    else if (!request) blocked = 'Check the rows and batch size';
+    else if (preparing) blocked = 'Preparing the review…';
+    else if (previewing || !sample) blocked = 'Updating the preview…';
+  }
+  const connectionName = useConnections((s) => s.summaries.get(connectionId)?.config.name) ?? connectionId;
+
   return (
     <Modal
-      title={`Generate data — ${qualified(table)}`}
+      title={
+        <>
+          Generate data for <ModalObject>{table.name}</ModalObject>
+        </>
+      }
+      subtitle={`${qualified(table)} on ${connectionName}`}
       badge={production ? <EnvTag env="production" variant="chip" /> : undefined}
       onClose={close}
       className={`seed-dialog${production ? ' env-production' : ''}`}
@@ -188,18 +222,26 @@ export function SeedDialog({ connectionId, table, params, onClose }: Props) {
                   onChange={(e) => Number.isFinite(e.target.valueAsNumber) && dispatch({ type: 'setBatch', batchRows: Math.trunc(e.target.valueAsNumber) })}
                 />
               </label>
-              <label className="field">
-                <span className="field-label">Existing rows</span>
-                <select value={state.existing} onChange={(e) => dispatch({ type: 'setExisting', existing: e.target.value as SeedRequest['existing'] })}>
-                  <option value="keep">Keep</option>
-                  <option value="delete">Delete first</option>
-                  <option value="truncate">Truncate first</option>
-                </select>
-              </label>
-              <label className="field">
-                <span className="field-label">Seed</span>
+              <div className="field">
+                <span className="field-label" aria-hidden="true">
+                  Existing rows
+                </span>
+                <SelectMenu
+                  label="Existing rows"
+                  testId="seed-existing"
+                  className="seed-select"
+                  value={state.existing}
+                  options={EXISTING}
+                  onChange={(existing) => dispatch({ type: 'setExisting', existing: existing as SeedRequest['existing'] })}
+                />
+              </div>
+              <div className="field">
+                <label className="field-label" htmlFor="seed-seed">
+                  Seed
+                </label>
                 <span className="seed-seed">
                   <input
+                    id="seed-seed"
                     type="number"
                     min={0}
                     value={state.seed}
@@ -207,11 +249,17 @@ export function SeedDialog({ connectionId, table, params, onClose }: Props) {
                       Number.isFinite(e.target.valueAsNumber) && dispatch({ type: 'setSeed', seed: Math.min(0xffffffff, Math.max(0, Math.trunc(e.target.valueAsNumber))) })
                     }
                   />
-                  <button type="button" className="btn" title="New seed" aria-label="New seed" onClick={() => dispatch({ type: 'setSeed', seed: randomSeed() })}>
-                    🎲
+                  <button
+                    type="button"
+                    className="btn seed-dice"
+                    title="New random seed"
+                    aria-label="New random seed"
+                    onClick={() => dispatch({ type: 'setSeed', seed: randomSeed() })}
+                  >
+                    <DiceIcon />
                   </button>
                 </span>
-              </label>
+              </div>
             </div>
 
             {target ? (
@@ -302,9 +350,16 @@ export function SeedDialog({ connectionId, table, params, onClose }: Props) {
             </button>
           </>
         ) : (
-          <button type="button" className="btn primary" disabled={!canReview} onClick={() => void prepare()}>
-            Review…
-          </button>
+          <>
+            {blocked && (
+              <span className="foot-note" data-testid="seed-blocked">
+                {blocked}
+              </span>
+            )}
+            <button type="button" className="btn primary" disabled={!canReview} title={blocked ?? undefined} onClick={() => void prepare()}>
+              Review…
+            </button>
+          </>
         )}
       </footer>
     </Modal>

@@ -62,24 +62,26 @@ describe('ConnectionTree', () => {
     resetStores();
   });
 
-  it('renders 2 groups and 3 connections with their engine chips', async () => {
+  it('renders 2 groups and 3 connections with their engine logos', async () => {
     backend();
     await renderTree();
 
     expect(screen.getByRole('tree', { name: 'Connections' })).toBeInTheDocument();
     for (const group of ['Production', 'Local']) expect(row(group)).toHaveAttribute('aria-level', '1');
-    const chips = (name: string) => within(row(name)).getByText(/^(MY|PG|MA)$/).textContent;
-    expect(chips('shop-prod')).toBe('MY');
-    expect(chips('analytics')).toBe('PG');
-    expect(chips('legacy-crm')).toBe('MY');
+    const logo = (name: string) => within(row(name)).getByRole('img', { name: /^(MySQL|PostgreSQL|MariaDB)$/ });
+    expect(logo('shop-prod')).toHaveAccessibleName('MySQL');
+    expect(logo('shop-prod')).toHaveClass('engine-logo', 'engine-mysql');
+    expect(logo('analytics')).toHaveAccessibleName('PostgreSQL');
+    expect(logo('legacy-crm')).toHaveAccessibleName('MySQL');
     expect(row('shop-prod')).toHaveAttribute('aria-level', '2');
     expect(within(row('shop-prod')).getByText('SSH')).toBeInTheDocument();
     expect(screen.getAllByTestId('tree-row')).toHaveLength(5);
 
-    // The variant is only known once the server answered: a MariaDB shows MA.
+    // The variant is only known once the server answered: a MariaDB shows the MariaDB seal.
     backend({ open_connection: () => openResult(serverInfo('MariaDb', [10, 6, 16])) });
     act(() => useTree.getState().expand(connNodeId(ids.legacy)));
-    await waitFor(() => expect(within(row('legacy-crm')).getByText('MA')).toBeInTheDocument());
+    await waitFor(() => expect(logo('legacy-crm')).toHaveAccessibleName('MariaDB'));
+    expect(logo('legacy-crm')).toHaveClass('engine-mariadb');
   });
 
   it('a connection row shows its server version in the tooltip, not as row text', async () => {
@@ -303,19 +305,18 @@ describe('ConnectionTree', () => {
     await user.pointer({ keys: '[MouseRight]', target: row('shop-prod') });
     const menu = screen.getByRole('menu');
     expect(within(menu).getAllByRole('menuitem').map((i) => i.textContent)).toEqual([
-      'OpenEnter',
+      'ConnectEnter',
       'New query',
-      'Edit',
+      'Edit connection…',
       'Duplicate',
-      'New group',
       'RefreshF5',
       'Copy name',
-      'Delete',
+      'Delete connection…',
     ]);
     // Groups of items are divided; Delete is last.
     expect(within(menu).getAllByRole('separator').length).toBeGreaterThanOrEqual(2);
 
-    await user.click(within(menu).getByRole('menuitem', { name: 'Edit' }));
+    await user.click(within(menu).getByRole('menuitem', { name: 'Edit connection…' }));
     expect(useDialogs.getState().request).toEqual({ kind: 'editConnection', id: ids.prod });
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });

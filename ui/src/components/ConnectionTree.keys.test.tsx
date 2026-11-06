@@ -86,6 +86,9 @@ describe('ConnectionTree keys', () => {
     fireEvent.doubleClick(orders);
     expect(useTabs.getState().tabs).toEqual([expect.objectContaining({ title: 'orders' })]);
     expect(useTabs.getState().tabs[0]?.preview).toBeFalsy();
+    // The panel the double click's first click brought up would repeat the tab's Info and DDL:
+    // it is back as it was (closed, on History).
+    expect(useLayout.getState()).toMatchObject({ rightVisible: false, rightActivity: 'history' });
 
     expect(orders).toHaveAttribute('draggable', 'true');
     const data = new Map<string, string>();

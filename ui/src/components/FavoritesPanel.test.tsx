@@ -80,14 +80,14 @@ describe('FavoritesPanel', () => {
     expect(screen.getAllByTestId('favorite-row')).toHaveLength(2);
   });
 
-  it('is a full-height view: no collapse toggle, Manage snippets is an icon button', async () => {
+  it('is a full-height view: no collapse toggle, Manage snippets is a labelled button', async () => {
     backend();
     render(<FavoritesPanel />);
     await waitFor(() => expect(screen.getAllByTestId('favorite-row')).toHaveLength(4));
     expect(screen.queryByRole('button', { name: /^Favorites/ })).toBeNull();
     const snippets = screen.getByRole('button', { name: 'Manage snippets' });
     expect(snippets.querySelector('svg')).not.toBeNull();
-    expect(snippets).not.toHaveTextContent('{ }');
+    expect(snippets).toHaveTextContent(/^Snippets$/);
   });
 
   it('hidden keeps it mounted (favorites still load) but out of view', async () => {

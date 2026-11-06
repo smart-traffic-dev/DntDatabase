@@ -26,6 +26,12 @@ function backend(over: Record<string, (args: Record<string, unknown>) => unknown
 
 const user = () => userEvent.setup();
 
+/** Picks option in the SelectMenu named label. */
+async function pick(u: ReturnType<typeof user>, label: string, option: string) {
+  await u.click(screen.getByRole('combobox', { name: label }));
+  await u.click(screen.getByRole('option', { name: option }));
+}
+
 function open(params?: SeedRequest) {
   const onClose = vi.fn();
   render(<SeedDialog connectionId={ids.prod} table={seedTable} params={params} onClose={onClose} />);
@@ -46,11 +52,12 @@ describe('SeedDialog', () => {
   it('shows the table, the inferred generators and the preview', async () => {
     backend();
     open();
-    expect(screen.getByRole('heading', { name: 'Generate data — shop.orders' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Generate data for orders' })).toBeInTheDocument();
+    expect(screen.getByText('shop.orders on shop')).toBeInTheDocument();
     await screen.findByTestId('seed-col-email');
-    expect(screen.getByLabelText('Generator for email')).toHaveValue('fake');
-    expect(screen.getByLabelText('Fake data for email')).toHaveValue('email');
-    expect(screen.getByLabelText('Generator for customer_id')).toHaveValue('foreign_key');
+    expect(screen.getByLabelText('Generator for email')).toHaveAttribute('data-value', 'fake');
+    expect(screen.getByLabelText('Fake data for email')).toHaveAttribute('data-value', 'email');
+    expect(screen.getByLabelText('Generator for customer_id')).toHaveAttribute('data-value', 'foreign_key');
     // The key count comes with the preview.
     await waitFor(() => expect(row('customer_id')).toHaveTextContent('customers.id · 3 keys'));
     const locked = screen.getByLabelText('Generator for total_with_tax');
@@ -69,7 +76,7 @@ describe('SeedDialog', () => {
     const u = user();
     open();
     await screen.findByTestId('seed-col-email');
-    await u.selectOptions(screen.getByLabelText('Generator for email'), 'pattern');
+    await pick(u, 'Generator for email', 'Pattern');
     const pattern = screen.getByLabelText('Pattern for email');
     expect(pattern).toHaveValue('???-#####');
     await u.clear(pattern);
@@ -96,18 +103,18 @@ describe('SeedDialog', () => {
     expect(screen.getByLabelText('NULL % for total')).toBeInTheDocument();
     expect(screen.queryByLabelText('NULL % for email')).toBeNull();
     expect(screen.getByLabelText('Unique email')).toBeChecked();
-    await u.selectOptions(screen.getByLabelText('Generator for customer_id'), 'bool');
+    await pick(u, 'Generator for customer_id', 'Boolean');
     expect(screen.queryByLabelText('Unique customer_id')).toBeNull();
     expect(screen.getByLabelText('True % for customer_id')).toHaveValue(50);
   });
 
-  it('New seed changes the seed; Refresh previews again with the same seed', async () => {
+  it('New random seed changes the seed; Refresh previews again with the same seed', async () => {
     backend();
     const u = user();
     open();
     await screen.findByTestId('seed-preview');
     await waitFor(() => expect(callsOf('seed_preview').length).toBeGreaterThan(0));
-    await u.click(screen.getByRole('button', { name: 'New seed' }));
+    await u.click(screen.getByRole('button', { name: 'New random seed' }));
     await waitFor(() => expect(screen.getByLabelText('Seed')).not.toHaveValue(48213));
     const seed = Number((screen.getByLabelText('Seed') as HTMLInputElement).value);
     await waitFor(() => expect(lastPreview()?.seed).toBe(seed));
@@ -166,7 +173,7 @@ describe('SeedDialog', () => {
     const u = user();
     open();
     await waitFor(() => expect(review()).toBeEnabled());
-    await u.selectOptions(screen.getByLabelText('Existing rows'), 'delete');
+    await pick(u, 'Existing rows', 'Delete first');
     await waitFor(() => expect(review()).toBeEnabled());
     await u.click(review());
     await waitFor(() => expect(callsOf('seed_prepare')[0]?.request).toMatchObject({ existing: 'delete' }));

@@ -225,14 +225,16 @@ export function FavoritesPanel({ hidden = false }: { hidden?: boolean }) {
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
             />
+            {/* Named, not a bare </> glyph: snippets are a different thing from favorites. */}
             <button
               type="button"
-              className="icon-btn"
+              className="btn small fav-snippets"
               aria-label="Manage snippets"
-              title="Manage snippets…"
+              title="Snippets: reusable SQL you insert while typing (Ctrl+Space)"
               onClick={openSnippetsManager}
             >
               <SnippetIcon />
+              <span>Snippets</span>
             </button>
           </div>
           {error && (
@@ -318,7 +320,12 @@ export function FavoritesPanel({ hidden = false }: { hidden?: boolean }) {
               <div className="tree-empty fav-empty" role="status">
                 {filter.trim()
                   ? `No favorites match '${filter.trim()}'`
-                  : 'No favorites yet. Use Add to favorites (Ctrl+Shift+D) in a query tab.'}
+                  : (
+                    <>
+                      <strong>No favorites yet</strong>
+                      <span>Save a query you run often: in a query tab press Ctrl+Shift+D, or ⋯ ▸ Add to favorites.</span>
+                    </>
+                  )}
               </div>
             )}
           </div>

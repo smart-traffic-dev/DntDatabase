@@ -165,7 +165,20 @@ export function ImpactTiles({ items, loading }: { items: Impact[]; loading?: boo
 }
 
 /** Read-only SQL with Copy and Open in query; `placeholder` stands in while there is none. */
-export function SqlBlock({ sql, placeholder, caption, onOpenInQuery }: { sql: string | null; placeholder?: string; caption?: string; onOpenInQuery?(sql: string): void }) {
+export function SqlBlock({
+  sql,
+  placeholder,
+  caption,
+  captionTitle,
+  onOpenInQuery,
+}: {
+  sql: string | null;
+  placeholder?: string;
+  caption?: string;
+  /** A tooltip on the caption: a fact about how the SQL runs, too minor for a callout. */
+  captionTitle?: string;
+  onOpenInQuery?(sql: string): void;
+}) {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState(false);
   const timer = useRef<number | undefined>(undefined);
@@ -189,7 +202,11 @@ export function SqlBlock({ sql, placeholder, caption, onOpenInQuery }: { sql: st
     <section className="sql-block">
       <div className="sql-block-bar">
         <strong>SQL</strong>
-        {caption && <span className="sql-block-caption">· {caption}</span>}
+        {caption && (
+          <span className={`sql-block-caption${captionTitle ? ' has-tip' : ''}`} title={captionTitle}>
+            · {caption}
+          </span>
+        )}
         <span className="ctx-grow" />
         <button type="button" className="btn small ghost" disabled={!sql} onClick={() => void copy()}>
           {copied ? 'Copied' : 'Copy'}
