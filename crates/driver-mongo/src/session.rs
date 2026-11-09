@@ -86,6 +86,38 @@ impl Drop for RunningGuard<'_> {
     }
 }
 
+/// Counts at most one reconnect for one `execute_command`, however it ends (as the SQL
+/// drivers): an idle ping that reconnected and then the command's own dropped connection,
+/// or a read dropped again when sent again, still replaced the connection for one
+/// command. The counter only ever loses what this command added beyond one.
+struct OneReconnect<'a> {
+    counter: &'a AtomicU64,
+    start: u64,
+}
+
+impl<'a> OneReconnect<'a> {
+    fn new(counter: &'a AtomicU64) -> Self {
+        OneReconnect {
+            counter,
+            start: counter.load(Ordering::SeqCst),
+        }
+    }
+}
+
+impl Drop for OneReconnect<'_> {
+    fn drop(&mut self) {
+        let extra = excess_reconnects(self.start, self.counter.load(Ordering::SeqCst));
+        if extra > 0 {
+            self.counter.fetch_sub(extra, Ordering::SeqCst);
+        }
+    }
+}
+
+/// What a command counted beyond one reconnect, from `start` to `now`.
+fn excess_reconnects(start: u64, now: u64) -> u64 {
+    now.saturating_sub(start).saturating_sub(1)
+}
+
 /// `ResolvedConfig` is not `Clone` (it holds the password); the session keeps its own.
 fn copy_config(cfg: &ResolvedConfig) -> ResolvedConfig {
     ResolvedConfig {
@@ -665,6 +697,7 @@ impl CommandSession for MongoSession {
         let uuid = Uuid::new().to_string();
         let comment = cancel::comment_of(&uuid);
         let _running = self.start(uuid, cmd.class.clone(), opts);
+        let _once = OneReconnect::new(&self.reconnects);
         let reconnected = self.wake(opts).await?;
         // A stop that came with the ping's answer: still nothing sent.
         if opts.stop.is_stopped() {
@@ -1175,6 +1208,33 @@ mod tests {
             Duration::from_secs(2)
         );
         assert_eq!(ping_limit(Some(Duration::from_secs(60)), connect), connect);
+    }
+
+    #[test]
+    fn one_reconnect_is_counted_per_command() {
+        assert_eq!(excess_reconnects(0, 0), 0);
+        assert_eq!(excess_reconnects(0, 1), 0);
+        assert_eq!(excess_reconnects(0, 2), 1);
+        assert_eq!(excess_reconnects(5, 8), 2);
+        // The idle ping reconnected (one), then the command's own connection dropped
+        // (`mapped` counts another): the command adds one.
+        let counter = AtomicU64::new(3);
+        {
+            let _once = OneReconnect::new(&counter);
+            counter.fetch_add(1, Ordering::SeqCst);
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 4);
+        // One reconnect, or none, stays as counted.
+        {
+            let _once = OneReconnect::new(&counter);
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
+        {
+            let _once = OneReconnect::new(&counter);
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 5);
     }
 
     #[test]
