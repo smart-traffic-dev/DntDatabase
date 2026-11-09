@@ -14,7 +14,7 @@ export const SHORTCUTS: { group: string; items: [string, string][] }[] = [
   {
     group: 'Editor',
     items: [
-      ['Format SQL', 'Ctrl+Shift+F'],
+      ['Format SQL / format a MongoDB script', 'Ctrl+Shift+F'],
       ['Toggle comment', 'Ctrl+/'],
       ['Duplicate line', 'Ctrl+D'],
       ['Move line up / down', 'Alt+Up / Alt+Down'],

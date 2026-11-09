@@ -46,11 +46,36 @@ export interface MongoAnalysis {
   from: number;
 }
 
-interface Token {
+/** A token of a console script: `text` is `src.slice(start, end)`. */
+export interface Token {
   kind: 'ident' | 'string' | 'number' | 'regex' | 'punct';
   text: string;
   start: number;
   end: number;
+}
+
+/** A comment of a console script; `line`: a `//` comment (its text stops before the line break). */
+export interface Comment {
+  text: string;
+  start: number;
+  end: number;
+  line: boolean;
+}
+
+/** Where a script stops lexing: the start of the string, comment or regex that does not end. */
+export interface LexProblem {
+  offset: number;
+  message: string;
+}
+
+/**
+ * What the formatter keeps beside the tokens (completion skips both): the comments, and the
+ * first text that does not lex. Comments never go to the token list, so a `/` after one is
+ * read exactly as without the sink.
+ */
+interface LexSink {
+  comments: Comment[];
+  problem: LexProblem | null;
 }
 
 const SPACE = /\s/;
@@ -80,9 +105,14 @@ const BACKTICK = 96;
 /**
  * Appends the tokens of `src` from `i` to `out`; true when `src` ends inside a string, comment
  * or regex. `out` already holds the tokens before `i` (a `/` after them may start a regex).
+ * With a `sink`, the comments go there, a `//` comment ending the text is not open, and the
+ * first text that does not lex is recorded (a string or regex stopped by its line end too).
  */
-function lexInto(src: string, i: number, out: Token[]): boolean {
+function lexInto(src: string, i: number, out: Token[], sink?: LexSink): boolean {
   const n = src.length;
+  const problem = (offset: number, message: string) => {
+    if (sink && !sink.problem) sink.problem = { offset, message };
+  };
   while (i < n) {
     const c = src.charCodeAt(i);
     if (isSpace(c)) {
@@ -92,13 +122,19 @@ function lexInto(src: string, i: number, out: Token[]): boolean {
     const c2 = src.charCodeAt(i + 1);
     if (c === SLASH && c2 === SLASH) {
       const nl = src.indexOf('\n', i);
-      if (nl < 0) return true;
+      const stop = nl < 0 ? n : nl;
+      sink?.comments.push({ text: src.slice(i, stop), start: i, end: stop, line: true });
+      if (nl < 0) return !sink;
       i = nl + 1;
       continue;
     }
     if (c === SLASH && c2 === STAR) {
       const close = src.indexOf('*/', i + 2);
-      if (close < 0) return true;
+      if (close < 0) {
+        problem(i, 'Unterminated comment');
+        return true;
+      }
+      sink?.comments.push({ text: src.slice(i, close + 2), start: i, end: close + 2, line: false });
       i = close + 2;
       continue;
     }
@@ -111,9 +147,14 @@ function lexInto(src: string, i: number, out: Token[]): boolean {
         if (c !== BACKTICK && d === NEWLINE) break;
         j += d === BACKSLASH ? 2 : 1;
       }
-      if (j >= n) return true;
+      const unterminated = c === BACKTICK ? 'Unterminated template literal' : 'Unterminated string';
+      if (j >= n) {
+        problem(i, unterminated);
+        return true;
+      }
       // Unterminated on its line: what follows is new text.
       const stop = src.charCodeAt(j) === c ? j + 1 : j;
+      if (stop === j) problem(i, unterminated);
       out.push({ kind: 'string', text: src.slice(i, stop), start: i, end: stop });
       i = stop;
       continue;
@@ -131,7 +172,10 @@ function lexInto(src: string, i: number, out: Token[]): boolean {
           else if (d === 93) cls = false;
           j++;
         }
-        if (j >= n) return true;
+        if (j >= n) {
+          problem(i, 'Unterminated regular expression');
+          return true;
+        }
         if (src.charCodeAt(j) === SLASH) {
           j++;
           while (j < n && isAsciiLetter(src.charCodeAt(j))) j++;
@@ -139,6 +183,7 @@ function lexInto(src: string, i: number, out: Token[]): boolean {
           i = j;
           continue;
         }
+        problem(i, 'Unterminated regular expression');
       }
       out.push({ kind: 'punct', text: '/', start: i, end: i + 1 });
       i++;
@@ -209,6 +254,17 @@ function lex(src: string): Token[] | null {
   const open = lexInto(src, from, tokens);
   lastLex = { src, tokens, open };
   return open ? null : tokens;
+}
+
+/**
+ * The tokens and comments of a whole script, for the formatter: the same reading as
+ * completion's. `problem`: where the text stops lexing, if it does.
+ */
+export function lexMongoScript(src: string): { tokens: Token[]; comments: Comment[]; problem: LexProblem | null } {
+  const tokens: Token[] = [];
+  const sink: LexSink = { comments: [], problem: null };
+  lexInto(src, 0, tokens, sink);
+  return { tokens, comments: sink.comments, problem: sink.problem };
 }
 
 /** The value of a string token (quotes removed, simple escapes resolved). */

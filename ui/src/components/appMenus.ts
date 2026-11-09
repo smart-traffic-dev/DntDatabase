@@ -1,8 +1,10 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { commands } from '../bindings';
+import { formatAction, formatterOf } from '../engine';
 import { capsOfConnection } from '../engine/useCaps';
 import { explainQuery, runFromEditor, stopQuery } from '../store/runQuery';
 import { useDialogs } from '../store/dialogs';
+import { useConnections } from '../store/connections';
 import { useLayout } from '../store/layout';
 import { useQueryDocs } from '../store/queryTabs';
 import type { LayoutPreset } from '../store/layoutTree';
@@ -106,7 +108,10 @@ export function buildMenus(s: MenuState): AppMenu[] {
   const dialog = useDialogs.getState().requestDialog;
   const q = s.queryTabId;
   // No active query tab, or no connection yet: nothing is known to be missing.
-  const explainOn = capsOfConnection(q ? useQueryDocs.getState().docs.get(q)?.connectionId : null)?.explain ?? true;
+  const connectionId = q ? useQueryDocs.getState().docs.get(q)?.connectionId : null;
+  const explainOn = capsOfConnection(connectionId)?.explain ?? true;
+  // Format SQL, Format (MongoDB) or nothing (Redis), as the active tab's editor has.
+  const formatter = formatterOf(connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined);
   const edit = (label: string, hint: string | undefined, id: string): MenuAction => ({
     label,
     hint,
@@ -158,7 +163,9 @@ export function buildMenus(s: MenuState): AppMenu[] {
         edit('Find', 'Ctrl+F', EDIT_COMMANDS.find),
         edit('Replace', 'Ctrl+H', EDIT_COMMANDS.replace),
         sep,
-        edit('Format SQL', 'Ctrl+Shift+F', EDIT_COMMANDS.formatSql),
+        formatter
+          ? edit(formatAction(formatter).label, 'Ctrl+Shift+F', formatAction(formatter).id)
+          : { label: 'Format', hint: 'Ctrl+Shift+F', disabled: true, run: () => {} },
         edit('Toggle comment', 'Ctrl+/', EDIT_COMMANDS.toggleComment),
         edit('Duplicate line', 'Ctrl+D', EDIT_COMMANDS.duplicate),
         edit('Upper case', 'Ctrl+Shift+U', EDIT_COMMANDS.upperCase),

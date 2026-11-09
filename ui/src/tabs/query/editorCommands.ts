@@ -1,12 +1,12 @@
 // Editing commands and shortcuts of the SQL editor: run keys (F9, Ctrl+R, Ctrl+Shift+R),
-// Format SQL, case change, duplicate, go to table / view (F12, Shift+F12) and Ctrl+click on a
+// Format SQL (Format in a MongoDB editor), case change, duplicate, go to table / view (F12, Shift+F12) and Ctrl+click on a
 // table or view name (Object info panel). The logic is
 // plain functions over a small editor surface so it is testable without Monaco; only
 // `registerEditorCommands` touches Monaco's keybinding API.
 import { format as formatWithSqlFormatter, type SqlLanguage } from 'sql-formatter';
 import type * as Monaco from 'monaco-editor';
 import type { ObjectKind, ObjectRef } from '../../bindings';
-import { SQL_EDITOR_WHEN, isKind } from '../../engine';
+import { SQL_EDITOR_WHEN, formatAction, isKind, type EditorFormatter } from '../../engine';
 import { objectTabId, useTabs } from '../../store/tabs';
 import { useCompletion } from '../../store/completion';
 import { useConnections } from '../../store/connections';
@@ -17,6 +17,7 @@ import { capsOfConnection } from '../../engine/useCaps';
 import { currentSchemaOf } from '../../query/completion/provider';
 import { queryDocTarget, type CompletionTarget } from '../../query/completion/monacoProvider';
 import { runFromEditor } from '../../store/runQuery';
+import { formatMongo, mongoStatementRange } from '../../query/mongo/format';
 import './editorLink.css';
 
 interface Pos {
@@ -123,6 +124,45 @@ export function formatActiveEditor(editor: CommandEditor, dialect?: FormatDialec
   if (formatted !== text) {
     editor.pushUndoStop();
     editor.executeEdits('dnt-format', [{ range, text: formatted }]);
+    editor.pushUndoStop();
+  }
+  return true;
+}
+
+/**
+ * Format in a MongoDB editor (Ctrl+Shift+F): the statements the selection touches if there is
+ * one, else the whole script. One undo step. A script that does not lex, or whose brackets do
+ * not pair up, stays untouched and a message says where. Returns whether the text is formatted.
+ */
+export function formatMongoActive(editor: CommandEditor): boolean {
+  const model = editor.getModel();
+  if (!model) return false;
+  const full = model.getFullModelRange();
+  const all = model.getValueInRange(full);
+  const selection = editor.getSelection();
+  let range: Rng = full;
+  if (selection && !selection.isEmpty()) {
+    const at = (p: Pos) => model.getOffsetAt(p);
+    const sel = mongoStatementRange(
+      all,
+      at({ lineNumber: selection.startLineNumber, column: selection.startColumn }),
+      at({ lineNumber: selection.endLineNumber, column: selection.endColumn }),
+    );
+    const from = model.getPositionAt(sel.from);
+    const to = model.getPositionAt(sel.to);
+    range = { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column };
+  }
+  const text = model.getValueInRange(range);
+  const result = formatMongo(text);
+  if (!result.ok) {
+    const start = model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn });
+    const p = model.getPositionAt(start + result.offset);
+    showEditorMessage(editor, `Cannot format: ${result.message} (line ${p.lineNumber}, column ${p.column})`);
+    return false;
+  }
+  if (result.text !== text) {
+    editor.pushUndoStop();
+    editor.executeEdits('dnt-format', [{ range, text: result.text }]);
     editor.pushUndoStop();
   }
   return true;
@@ -470,6 +510,12 @@ interface Binding {
   run(editor: Monaco.editor.ICodeEditor, tabId: string): void;
 }
 
+/** Ctrl+Shift+F of a formatter: shown (and bound) only while the editor speaks its language. */
+function formatBinding(f: EditorFormatter): Omit<Binding, 'run'> {
+  const { id, label, when } = formatAction(f);
+  return { id, label, keys: (m) => [m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyF], precondition: when, order: 4 };
+}
+
 const bindings: Binding[] = [
   {
     id: 'dnt.runAtCursor',
@@ -495,13 +541,13 @@ const bindings: Binding[] = [
     run: (_e, tabId) => void runFromEditor(tabId, 'selection'),
   },
   {
-    id: 'dnt.formatSql',
-    label: 'Format SQL',
-    keys: (m) => [m.KeyMod.CtrlCmd | m.KeyMod.Shift | m.KeyCode.KeyF],
-    // Hidden (and unbound) in a Command editor: there is no formatter for its language.
-    precondition: SQL_EDITOR_WHEN,
-    order: 4,
+    ...formatBinding('sql'),
     run: (e) => void formatActiveEditor(e as unknown as CommandEditor),
+  },
+  {
+    // The same key in a MongoDB editor (the two are never on together); none in Redis.
+    ...formatBinding('mongoScript'),
+    run: (e) => void formatMongoActive(e as unknown as CommandEditor),
   },
   {
     id: 'dnt.toUpperCase',

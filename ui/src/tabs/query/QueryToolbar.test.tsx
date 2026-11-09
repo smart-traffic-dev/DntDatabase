@@ -178,6 +178,23 @@ describe('QueryToolbar', () => {
     setActiveEditor(id, null);
   });
 
+  it('a_mongodb_tab_has_format_in_more_and_it_runs_the_console_formatter', async () => {
+    useConnections.getState().setStored([], [config(ids.prod, 'docs', { kind: 'mongo', port: 27017 })]);
+    const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');
+    const editor = { focus: vi.fn(), trigger: vi.fn() };
+    setActiveEditor(id, editor);
+    render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId('query-more'));
+    const format = screen.getByTestId('query-format');
+    expect(format.querySelector('.menu-label')).toHaveTextContent(/^Format$/);
+    expect(format).toHaveTextContent('Ctrl+Shift+F');
+    await user.click(format);
+    expect(editor.focus).toHaveBeenCalled();
+    expect(editor.trigger).toHaveBeenCalledWith('toolbar', 'dnt.formatMongo', null);
+    setActiveEditor(id, null);
+  });
+
   describe('context chip', () => {
     it('shows the environment, connection and database (server in the tooltip) and opens the picker', async () => {
       useConnections.getState().setStored([], [config(ids.prod, 'shop-prod', { env_tag: 'production' })]);

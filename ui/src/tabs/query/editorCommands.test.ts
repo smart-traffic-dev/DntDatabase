@@ -18,6 +18,7 @@ import {
   duplicateActive,
   showRelationInfoAt,
   formatActiveEditor,
+  formatMongoActive,
   formatSql,
   gotoRelationActive,
   identifierAt,
@@ -122,6 +123,56 @@ describe('formatSql', () => {
 
   it('keeps_the_whitespace_around_the_text', () => {
     expect(formatSql('  select 1  \n', 'mysql')).toBe('  SELECT\n  1  \n');
+  });
+});
+
+describe('formatMongoActive', () => {
+  const compact = 'db.orders.find({status:"paid"},{_id:0,customer:1,total:1}).sort({total:-1,createdAt:-1}).limit(10)';
+  const lines = (...l: string[]) => l.join('\n');
+  const formatted = lines(
+    'db.orders.find({ status: "paid" }, { _id: 0, customer: 1, total: 1 })',
+    '  .sort({ total: -1, createdAt: -1 })',
+    '  .limit(10)',
+  );
+
+  it('formats_the_whole_script_as_one_undo_step', () => {
+    const { editor } = fakeEditor(lines('use shop', compact, ''));
+    expect(formatMongoActive(editor)).toBe(true);
+    expect(editor.text()).toBe(lines('use shop', formatted, ''));
+    expect(editor.edits).toBe(1);
+    expect(editor.undoStops).toBe(2);
+  });
+
+  it('formats_the_statements_the_selection_touches_only', () => {
+    const src = lines('db.a.find( {x:1} )', compact, 'db.b.find( {y:2} )');
+    // A selection inside `.sort(…)`: its whole statement, nothing else.
+    const at = src.indexOf('total:-1');
+    const { editor } = fakeEditor(src, [[at, at + 5]]);
+    expect(formatMongoActive(editor)).toBe(true);
+    expect(editor.text()).toBe(lines('db.a.find( {x:1} )', formatted, 'db.b.find( {y:2} )'));
+  });
+
+  it('formatted_text_is_left_alone', () => {
+    const { editor } = fakeEditor(formatted);
+    expect(formatMongoActive(editor)).toBe(true);
+    expect(editor.edits).toBe(0);
+  });
+
+  it('refuses_a_broken_script_with_its_position_and_changes_nothing', () => {
+    const src = lines('db.a.find()', 'db.b.find({x: 1)');
+    const { editor, messages } = fakeEditor(src);
+    expect(formatMongoActive(editor)).toBe(false);
+    expect(editor.text()).toBe(src);
+    expect(editor.edits).toBe(0);
+    expect(messages).toEqual(["Cannot format: Unexpected ')' (line 2, column 16)"]);
+  });
+
+  it('a_refused_selection_reports_the_position_in_the_editor', () => {
+    const src = lines('db.a.find()', '', 'db.b.find({x: "open})');
+    const at = src.indexOf('x:');
+    const { editor, messages } = fakeEditor(src, [[at, at + 1]]);
+    expect(formatMongoActive(editor)).toBe(false);
+    expect(messages).toEqual(['Cannot format: Unterminated string (line 3, column 15)']);
   });
 });
 
@@ -482,8 +533,21 @@ describe('registered actions', () => {
       expect(a.label).not.toBe('');
       expect(a.contextMenuGroupId).toBe('dnt');
     }
-    const keys = actions.flatMap((a) => a.keybindings);
+    // One action per key, but for Ctrl+Shift+F: Format SQL and Format, never on together.
+    const formatKey = monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyF;
+    const keys = actions.filter((a) => !a.keybindings.includes(formatKey)).flatMap((a) => a.keybindings);
     expect(new Set(keys).size).toBe(keys.length);
+    expect(actions.filter((a) => a.keybindings.includes(formatKey)).map((a) => [a.id, a.label, a.precondition])).toEqual([
+      ['dnt.formatSql', 'Format SQL', 'editorLangId == mysql || editorLangId == pgsql'],
+      ['dnt.formatMongo', 'Format', 'editorLangId == mongo'],
+    ]);
+  });
+
+  it('format_in_a_mongodb_editor_runs_the_console_formatter', () => {
+    const actions = register();
+    const { editor } = fakeEditor('db.c.find({a:1})');
+    actions.find((a) => a.id === 'dnt.formatMongo')!.run(editor);
+    expect(editor.text()).toBe('db.c.find({ a: 1 })');
   });
 
   it('format_sql_is_hidden_in_command_editors', () => {

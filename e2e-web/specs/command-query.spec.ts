@@ -202,4 +202,54 @@ test.describe('query tab of a Redis connection (browser, fake IPC backend)', () 
     await page.keyboard.type('db.');
     await expect(page.getByTestId('query-editor').locator('.suggest-widget.visible')).toHaveCount(0);
   });
+
+  test('Ctrl+Shift+F formats a MongoDB script; a broken one stays and says where; Redis has no Format', async ({ page }) => {
+    await setup(page);
+    await newTab(page, 'docs');
+    // Monaco draws spaces as no-break spaces.
+    const text = async () => (await editor(page).innerText()).replace(/ /g, ' ');
+
+    await editor(page).click();
+    await page.keyboard.insertText('db.orders.find({status:"paid"},{_id:0,customer:1,total:1}).sort({total:-1,createdAt:-1}).limit(10)');
+    await page.keyboard.press('Control+Shift+F');
+    await expect
+      .poll(text)
+      .toBe(
+        [
+          'db.orders.find({ status: "paid" }, { _id: 0, customer: 1, total: 1 })',
+          '  .sort({ total: -1, createdAt: -1 })',
+          '  .limit(10)',
+        ].join('\n'),
+      );
+    // One undo step brings the typed text back.
+    await page.keyboard.press('Control+Z');
+    await expect.poll(text).toBe('db.orders.find({status:"paid"},{_id:0,customer:1,total:1}).sort({total:-1,createdAt:-1}).limit(10)');
+
+    // ⋯ has it too, as Format.
+    await page.keyboard.press('Control+A');
+    await page.keyboard.insertText('db.c.find({a:1,b:[1,2]})');
+    await byId(page, 'query-more').click();
+    await expect(page.getByTestId('query-format').locator('.menu-label')).toHaveText('Format');
+    await page.getByTestId('query-format').click();
+    await expect.poll(text).toBe('db.c.find({ a: 1, b: [1, 2] })');
+
+    // Unbalanced brackets: the text stays, a message points at the cause.
+    await editor(page).click();
+    await page.keyboard.press('Control+A');
+    await page.keyboard.insertText('db.c.find({a:1)');
+    // (Monaco may close the brackets it saw opened: the `)` stays the first wrong one.)
+    await expect.poll(text).toMatch(/^db\.c\.find\(\{a:1\)/);
+    const broken = await text();
+    await page.keyboard.press('Control+Shift+F');
+    await expect(page.getByTestId('query-editor').locator('.monaco-editor-overlaymessage')).toContainText(
+      "Cannot format: Unexpected ')' (line 1, column 15)",
+    );
+    expect(await text()).toBe(broken);
+
+    // A Redis tab has no formatter.
+    await newTab(page, 'cache');
+    await byId(page, 'query-more').click();
+    await expect(page.getByTestId('query-add-favorite')).toBeVisible();
+    await expect(page.getByTestId('query-format')).toHaveCount(0);
+  });
 });

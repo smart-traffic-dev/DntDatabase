@@ -147,6 +147,46 @@ export const SQL_EDITOR_WHEN = SQL_LANGUAGES.map((l) => `editorLangId == ${l}`).
 /** The Monaco language the MongoDB console completion serves. */
 export const MONGO_LANGUAGE: string = editorLanguage('mongo');
 
+/** Monaco context expression "the editor shows the MongoDB console language". */
+export const MONGO_EDITOR_WHEN = `editorLangId == ${MONGO_LANGUAGE}`;
+
+/** How a query editor formats its text (Ctrl+Shift+F): the SQL formatter, or the MongoDB console's (`formatMongo`). */
+export type EditorFormatter = 'sql' | 'mongoScript';
+
+/**
+ * The formatter of a kind's query editor; none for Redis. `undefined` (a tab without a known
+ * connection) is a SQL tab.
+ */
+export function formatterOf(kind: DbKind | undefined): EditorFormatter | null {
+  switch (kind) {
+    case undefined:
+    case 'mysql':
+    case 'postgres':
+      return 'sql';
+    case 'mongo':
+      return 'mongoScript';
+    case 'redis':
+      return null;
+    default:
+      return assertNever(kind);
+  }
+}
+
+/**
+ * The editor action of a formatter (registered by `tabs/query/editorCommands.ts`): its id, the
+ * label menus show and the Monaco context in which it is on. Both are bound to Ctrl+Shift+F.
+ */
+export function formatAction(f: EditorFormatter): { id: string; label: string; when: string } {
+  switch (f) {
+    case 'sql':
+      return { id: 'dnt.formatSql', label: 'Format SQL', when: SQL_EDITOR_WHEN };
+    case 'mongoScript':
+      return { id: 'dnt.formatMongo', label: 'Format', when: MONGO_EDITOR_WHEN };
+    default:
+      return assertNever(f);
+  }
+}
+
 /** Whether the query editor of a kind gets the MongoDB console completion (SQL kinds have their own; Redis none). */
 export function hasMongoCompletion(kind: DbKind): boolean {
   switch (kind) {

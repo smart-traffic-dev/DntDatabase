@@ -82,6 +82,21 @@ describe('buildMenus', () => {
     expect(items('Edit').map((i) => i.label)).toEqual(['Undo', 'Redo', 'Cut', 'Copy', 'Paste', 'Select all', 'Find', 'Replace', 'Format SQL', 'Toggle comment', 'Duplicate line', 'Upper case', 'Lower case']);
   });
 
+  it('Edit_format_follows_the_active_tabs_engine', () => {
+    resetStores();
+    useConnections.getState().setStored(
+      [],
+      [config(ids.prod, 'shop'), config(ids.legacy, 'docs', { kind: 'mongo', port: 27017 }), config(ids.analytics, 'cache', { kind: 'redis', port: 6379 })],
+    );
+    const tab = (conn: string) => ({ hasEditor: true, queryTabId: useQueryDocs.getState().newQuery(conn, null) });
+    const format = (state: Partial<MenuState>) => items('Edit', state)[8]!;
+    expect(format(tab(ids.prod))).toMatchObject({ label: 'Format SQL', hint: 'Ctrl+Shift+F', disabled: false });
+    expect(format(tab(ids.legacy))).toMatchObject({ label: 'Format', hint: 'Ctrl+Shift+F', disabled: false });
+    // Redis has no formatter.
+    expect(format(tab(ids.analytics))).toMatchObject({ label: 'Format', disabled: true });
+    resetStores();
+  });
+
   it('View ticks the panel toggles; the theme lives in Settings > Appearance', () => {
     const checked = (state: Partial<MenuState>) =>
       items('View', state)

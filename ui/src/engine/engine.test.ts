@@ -3,7 +3,20 @@ import { describe, expect, it } from 'vitest';
 import eslintConfig from '../../eslint.config.js';
 import type { DbKind, ServerInfo } from '../bindings';
 import { sqlCaps } from '../test/fixtures/caps';
-import { AI_LANGUAGES, capsOf, defaultCaps, editorLanguage, engineChip, familyOf, hasAiSuggestions, isKind, namespaceModel, sqlEngine } from './index';
+import {
+  AI_LANGUAGES,
+  capsOf,
+  defaultCaps,
+  editorLanguage,
+  engineChip,
+  familyOf,
+  formatAction,
+  formatterOf,
+  hasAiSuggestions,
+  isKind,
+  namespaceModel,
+  sqlEngine,
+} from './index';
 
 const KINDS: DbKind[] = ['mysql', 'postgres', 'mongo', 'redis'];
 
@@ -45,6 +58,14 @@ describe('engine', () => {
   it('ai_suggestions_for_sql_and_mongo_not_redis', () => {
     expect(KINDS.map(hasAiSuggestions)).toEqual([true, true, true, false]);
     expect(AI_LANGUAGES).toEqual(KINDS.filter(hasAiSuggestions).map(editorLanguage));
+  });
+
+  it('formatter_per_kind_sql_and_mongo_not_redis', () => {
+    expect(KINDS.map(formatterOf)).toEqual(['sql', 'sql', 'mongoScript', null]);
+    // A tab without a (known) connection is a SQL tab.
+    expect(formatterOf(undefined)).toBe('sql');
+    expect(formatAction('sql')).toEqual({ id: 'dnt.formatSql', label: 'Format SQL', when: 'editorLangId == mysql || editorLangId == pgsql' });
+    expect(formatAction('mongoScript')).toEqual({ id: 'dnt.formatMongo', label: 'Format', when: 'editorLangId == mongo' });
   });
 
   it('namespace_model_follows_the_kind', () => {

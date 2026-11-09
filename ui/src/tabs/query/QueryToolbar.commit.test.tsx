@@ -45,7 +45,7 @@ describe('QueryToolbar commit mode', () => {
       act(() => useConnections.getState().setStored([], [config(ids.prod, 'db', { kind })]));
       const view = render(<QueryToolbar doc={doc()} />);
       await openMore(userEvent.setup());
-      expect(screen.getByTestId('query-format')).toBeInTheDocument();
+      expect(screen.getByTestId('query-format').querySelector('.menu-label')).toHaveTextContent(/^Format SQL$/);
       view.unmount();
     }
   });

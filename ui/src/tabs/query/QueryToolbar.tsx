@@ -8,7 +8,7 @@ import { formatClock } from '../../components/statusFormat';
 import { EngineLogo } from '../../components/EngineLogo';
 import { ContextMark } from '../../components/EnvTag';
 import { SelectMenu, inSelectMenu, type SelectMenuOption } from '../../components/SelectMenu';
-import { sqlEngine } from '../../engine';
+import { formatAction, formatterOf } from '../../engine';
 import { useCaps } from '../../engine/useCaps';
 import { useNow } from '../../lib/useNow';
 import { useConnections } from '../../store/connections';
@@ -17,7 +17,7 @@ import { canRun, canStop, emptyRun, runElapsedMs, useQueryRun } from '../../stor
 import { explainQuery, note as noteError, runFromEditor, stopQuery, txAction, useSelection, useStarting } from '../../store/runQuery';
 import { setTxMode, txOf, useTxMode } from '../../store/txMode';
 import type { EnvTag, TxMode } from '../../bindings';
-import { EDIT_COMMANDS, editorOf } from './activeEditor';
+import { editorOf } from './activeEditor';
 import { ANALYZE_NEEDS, useRunGate } from './runGate';
 import { ROW_LIMITS, docKindOf, useQueryDocs, type QueryDoc } from '../../store/queryTabs';
 import { MAX_GROUPS, useTabs } from '../../store/tabs';
@@ -650,12 +650,12 @@ const sameToolbarDoc = (a: { doc: ToolbarDoc }, b: { doc: ToolbarDoc }) =>
  */
 export const QueryToolbar = memo(QueryToolbarView, sameToolbarDoc);
 
-/** Format SQL on the tab's editor (Ctrl+Shift+F there). */
-function formatTab(tabId: string) {
+/** Runs the format action `id` on the tab's editor (Ctrl+Shift+F there). */
+function formatTab(tabId: string, id: string) {
   const editor = editorOf(tabId);
   if (!editor) return;
   editor.focus();
-  editor.trigger('toolbar', EDIT_COMMANDS.formatSql, null);
+  editor.trigger('toolbar', id, null);
 }
 
 const limitText = (n: number) => n.toLocaleString('en-US');
@@ -681,9 +681,10 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   const caps = useCaps(doc.connectionId);
   const explainOn = caps?.explain ?? true;
   const txOn = caps ? caps.transactions && caps.family === 'sql' : true;
-  // Format SQL: a tab without a (known) connection is a SQL tab.
+  // Format SQL / Format (MongoDB): a tab without a (known) connection is a SQL tab.
   const kind = useConnections((s) => (doc.connectionId ? s.summaries.get(doc.connectionId)?.config.kind : undefined));
-  const formatOn = kind === undefined || sqlEngine(kind) !== null;
+  const formatter = formatterOf(kind);
+  const format = formatter ? formatAction(formatter) : null;
 
   const moreItems = (): MenuEntry[] => [
     // Under 360 px Explain lives here.
@@ -707,10 +708,10 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
           { separator: true },
         ] satisfies MenuEntry[])
       : []),
-    // SQL only: a Command editor (MongoDB, Redis) has no formatter.
-    ...(formatOn
+    // SQL and MongoDB: a Redis editor has no formatter.
+    ...(format
       ? ([
-          { label: 'Format SQL', hint: 'Ctrl+Shift+F', testId: 'query-format', run: () => formatTab(doc.id) },
+          { label: format.label, hint: 'Ctrl+Shift+F', testId: 'query-format', run: () => formatTab(doc.id, format.id) },
         ] satisfies MenuEntry[])
       : []),
     {
