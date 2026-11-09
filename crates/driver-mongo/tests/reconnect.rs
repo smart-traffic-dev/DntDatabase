@@ -10,7 +10,7 @@
 
 use dnt_core::command::{CommandLanguage, CommandSession, ParsedCommand};
 use dnt_core::config::ResolvedConfig;
-use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StmtOutcome};
+use dnt_core::driver::{ExecOptions, ResultSummary, RowSink, Session, StmtOutcome, StopSignal};
 use dnt_core::error::DbError;
 use dnt_core::value::{ColumnMeta, Value};
 use dnt_driver_mongo::shell::MongoLanguage;
@@ -373,6 +373,137 @@ async fn dropped_write_is_not_sent_again() {
             .run_command(doc! { "profile": 0 })
             .await
             .unwrap();
+        Box::new(s).close().await;
+        admin.database(db).drop().await.unwrap();
+        admin.shutdown().immediate(true).await;
+    }
+}
+
+/// A stop raised while the idle ping waits for its answer: a cancel with nothing sent.
+/// And one raised just as the ping answers (by [`MongoSession::on_ping_answered`], so the
+/// race is not left to timing): the command is not sent either.
+#[tokio::test]
+async fn a_stop_during_the_idle_ping_sends_nothing() {
+    require_db!();
+    for t in Target::mongo() {
+        let db = "dnt_reconnect_ping_stop";
+        let admin = admin_client(t).await;
+        seed(&admin, db, 0).await;
+        let s = connect(t, db).await;
+        s.set_idle_after(Duration::ZERO);
+
+        // The ping is held; the stop comes meanwhile.
+        let stop = StopSignal::new();
+        let opts = ExecOptions {
+            stop: stop.clone(),
+            ..ExecOptions::default()
+        };
+        let armed = stall_next(&admin, "ping", 1_500).await;
+        let raise = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            stop.stop();
+        });
+        let (res, rec) = run_with(&s, "db.items.insertOne({_id: 1})", &opts).await;
+        raise.await.unwrap();
+        let stalled = armed.off(&admin).await;
+        match res {
+            Err(DbError::Cancelled {
+                outcome_unknown: false,
+                was_in_tx: false,
+            }) => {}
+            other => panic!("{t:?}: expected a cancel with nothing sent, got {other:?}"),
+        }
+        assert_eq!(stalled, 1, "{t:?}: the failpoint held the ping");
+        assert!(rec.ends.is_empty(), "{t:?}");
+
+        // The stop lands as the ping answers.
+        let stop = StopSignal::new();
+        let opts = ExecOptions {
+            stop: stop.clone(),
+            ..ExecOptions::default()
+        };
+        s.on_ping_answered(move || stop.stop());
+        let (res, rec) = run_with(&s, "db.items.insertOne({_id: 2})", &opts).await;
+        match res {
+            Err(DbError::Cancelled {
+                outcome_unknown: false,
+                was_in_tx: false,
+            }) => {}
+            other => panic!("{t:?}: expected a cancel with nothing sent, got {other:?}"),
+        }
+        assert!(rec.ends.is_empty(), "{t:?}");
+        assert_eq!(
+            documents(&admin, db).await,
+            0,
+            "{t:?}: nothing was inserted"
+        );
+
+        Box::new(s).close().await;
+        admin.database(db).drop().await.unwrap();
+        admin.shutdown().immediate(true).await;
+    }
+}
+
+/// An `aggregate` with `$out` may write: its dropped connection is `ConnectionLost` with
+/// the outcome unknown, and it is not sent again (the failpoint fired once, and no `$out`
+/// collection was written: a second send would have run with the failpoint used up).
+#[tokio::test]
+async fn dropped_aggregate_with_out_is_not_sent_again() {
+    require_db!();
+    for t in Target::mongo() {
+        let db = "dnt_reconnect_out";
+        let admin = admin_client(t).await;
+        seed(&admin, db, 3).await;
+        let s = connect(t, db).await;
+
+        let armed = drop_next(&admin, "aggregate", 1).await;
+        let (res, _) = run(&s, "db.items.aggregate([{$match: {}}, {$out: 'copy'}])").await;
+        let closed = armed.off(&admin).await;
+        match res {
+            Err(DbError::ConnectionLost {
+                outcome_unknown: true,
+                was_in_tx: false,
+                ..
+            }) => {}
+            other => panic!("{t:?}: expected ConnectionLost, outcome unknown, got {other:?}"),
+        }
+        assert_eq!(closed, 1, "{t:?}: one attempt");
+        let names = admin.database(db).list_collection_names().await.unwrap();
+        assert!(!names.iter().any(|n| n == "copy"), "{t:?}: {names:?}");
+
+        Box::new(s).close().await;
+        admin.database(db).drop().await.unwrap();
+        admin.shutdown().immediate(true).await;
+    }
+}
+
+/// The connection drops on a `getMore`, after the first batch came: the read runs again
+/// from the start, and the sink gets every document once, in one result.
+#[tokio::test]
+async fn a_drop_during_get_more_reruns_the_read() {
+    require_db!();
+    for t in Target::mongo() {
+        let db = "dnt_reconnect_getmore";
+        let admin = admin_client(t).await;
+        seed(&admin, db, 5).await;
+        let s = connect(t, db).await;
+        let opts = ExecOptions {
+            batch_size: 2,
+            ..ExecOptions::default()
+        };
+
+        let armed = drop_next(&admin, "getMore", 1).await;
+        let (res, rec) = run_with(&s, "db.items.find({}).sort({_id: 1})", &opts).await;
+        let closed = armed.off(&admin).await;
+        res.unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+        assert_eq!(closed, 1, "{t:?}: the first getMore was dropped");
+        assert_eq!(rec.ends.len(), 1, "{t:?}: one result");
+        assert_eq!(rec.ends[0].row_count, 5, "{t:?}");
+        assert_eq!(rec.rows.len(), 5, "{t:?}: no row twice");
+        let ids: Vec<Value> = rec.rows.iter().map(|r| r[0].clone()).collect();
+        assert_eq!(ids, (0..5).map(Value::Int).collect::<Vec<_>>(), "{t:?}");
+        assert_eq!(s.reconnects(), 1, "{t:?}");
+
         Box::new(s).close().await;
         admin.database(db).drop().await.unwrap();
         admin.shutdown().immediate(true).await;

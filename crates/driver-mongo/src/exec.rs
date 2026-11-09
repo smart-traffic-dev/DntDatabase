@@ -6,7 +6,9 @@
 //! `Database::run_command` / `run_cursor_command`: the comment, `maxTimeMS` and the user's
 //! options land exactly where the server reads them, and the crate retries nothing
 //! (`retry_reads` / `retry_writes` are off). The session alone sends a command again: a
-//! read whose connection dropped under it, once (`MongoSession::execute_command`).
+//! read whose connection dropped under it, once (`MongoSession::execute_command`), and in
+//! `MongoSession::execute_atomic` a commit whose result is unknown, once (the crate also
+//! retries `abortTransaction` once).
 
 use std::time::{Duration, Instant};
 

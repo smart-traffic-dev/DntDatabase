@@ -69,7 +69,13 @@ pub struct MongoSession {
     /// How long without a successful command makes the next one `ping` first
     /// ([`IDLE_PING_AFTER`]; tests set it with [`MongoSession::set_idle_after`]).
     idle_after: Mutex<Duration>,
+    /// Called as an idle ping is answered ([`MongoSession::on_ping_answered`]).
+    #[cfg(feature = "test-helpers")]
+    ping_answered: Mutex<Option<PingHook>>,
 }
+
+#[cfg(feature = "test-helpers")]
+type PingHook = Box<dyn Fn() + Send + Sync>;
 
 /// Clears `running` when the command ends, however it ends.
 struct RunningGuard<'a>(&'a Mutex<Option<Running>>);
@@ -114,7 +120,16 @@ impl MongoSession {
             reconnects: AtomicU64::new(0),
             last_ok: Mutex::new(Instant::now()),
             idle_after: Mutex::new(IDLE_PING_AFTER),
+            #[cfg(feature = "test-helpers")]
+            ping_answered: Mutex::new(None),
         }
+    }
+
+    /// Calls `f` each time an idle ping is answered, before the command goes on (a test
+    /// raises a stop there, the race of a stop with the ping's answer).
+    #[cfg(feature = "test-helpers")]
+    pub fn on_ping_answered(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.ping_answered.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(f));
     }
 
     /// Sets how long without a successful command makes the next one `ping` first
@@ -289,8 +304,8 @@ impl MongoSession {
             // (`Server { code: "Interrupted" }`, spec §5.6).
             (Err(f), Some(trigger)) if f.interrupted() => Err(trigger.error(class).into()),
             (Err(Fail::Db(e)), _) => Err(e.into()),
-            (Err(Fail::Mongo(e)), _) => Err(SendError {
-                dropped: exec::connection_dropped(&e),
+            (Err(Fail::Mongo(e)), after) => Err(SendError {
+                dropped: dropped_unprompted(&e, after),
                 error: self.mapped(&e, class),
             }),
         }
@@ -326,8 +341,8 @@ impl MongoSession {
     /// within [`ping_limit`] (the `Client` is rebuilt) is sent once more, on a fresh
     /// connection, counting one reconnect: answered, the command goes on. Failing again,
     /// it is `ConnectionLost` with the outcome known, since nothing was sent. A stop
-    /// meanwhile is a cancel, nothing sent.
-    async fn wake(&self, opts: &ExecOptions) -> Result<(), DbError> {
+    /// meanwhile is a cancel, nothing sent. `Ok(true)`: it reconnected.
+    async fn wake(&self, opts: &ExecOptions) -> Result<bool, DbError> {
         let idle = self
             .last_ok
             .lock()
@@ -335,11 +350,11 @@ impl MongoSession {
             .elapsed();
         let after = *self.idle_after.lock().unwrap_or_else(|p| p.into_inner());
         if !needs_ping(idle, after) {
-            return Ok(());
+            return Ok(false);
         }
         let limit = ping_limit(opts.timeout, self.cfg.connect_timeout);
         let cause = match self.ping_once(opts, limit).await {
-            Pinged::Answered => return Ok(()),
+            Pinged::Answered => return Ok(false),
             Pinged::Stopped => return Err(DbError::cancelled()),
             Pinged::Failed(e) => return Err(e),
             Pinged::Dropped(text) => {
@@ -357,7 +372,7 @@ impl MongoSession {
             message,
         };
         match self.ping_once(opts, limit).await {
-            Pinged::Answered => Ok(()),
+            Pinged::Answered => Ok(true),
             Pinged::Stopped => Err(DbError::cancelled()),
             Pinged::Failed(e) => Err(e),
             Pinged::Dropped(text) => Err(lost(format!("{cause}; reconnecting failed: {text}"))),
@@ -377,6 +392,10 @@ impl MongoSession {
             res = ping => match res {
                 Ok(_) => {
                     self.mark_ok();
+                    #[cfg(feature = "test-helpers")]
+                    if let Some(f) = &*self.ping_answered.lock().unwrap_or_else(|p| p.into_inner()) {
+                        f();
+                    }
                     Pinged::Answered
                 }
                 Err(e) if exec::connection_dropped(&e) => Pinged::Dropped(exec::error_text(&e)),
@@ -454,6 +473,12 @@ enum Pinged {
     Failed(DbError),
 }
 
+/// Whether `e` is a connection that dropped under the command with no stop or timeout of
+/// ours first (`after`): a command already being cancelled is never sent again.
+fn dropped_unprompted(e: &mongodb::error::Error, after: Option<Trigger>) -> bool {
+    after.is_none() && exec::connection_dropped(e)
+}
+
 /// Whether a command `idle` after the last successful one `ping`s first.
 fn needs_ping(idle: Duration, after: Duration) -> bool {
     idle >= after
@@ -467,10 +492,11 @@ fn ping_limit(timeout: Option<Duration>, connect: Duration) -> Duration {
 
 /// Whether a command whose connection dropped under it is sent again, once, on a fresh
 /// connection: only a read, and only while nothing of its result reached the sink (as the
-/// SQL drivers re-run a read that emitted nothing). A command that may write is never
-/// sent again: it may have been applied.
-fn may_resend(class: &CommandClass, emitted: bool) -> bool {
-    *class == CommandClass::Read && !emitted
+/// SQL drivers re-run a read that emitted nothing), and not when the idle ping already
+/// reconnected for it (one reconnect per command, as the SQL drivers). A command that may
+/// write is never sent again: it may have been applied.
+fn may_resend(class: &CommandClass, emitted: bool, reconnected: bool) -> bool {
+    *class == CommandClass::Read && !emitted && !reconnected
 }
 
 /// Passes everything on to `sink`, noting whether any of a result reached it.
@@ -617,9 +643,11 @@ impl CommandSession for MongoSession {
     /// [`IDLE_PING_AFTER`] without a successful command it `ping`s first
     /// ([`MongoSession::wake`]), and a read whose connection dropped under it before any of
     /// its result reached `sink` is sent again once on a fresh connection
-    /// ([`may_resend`]). Either reconnect is counted in `reconnects()`. Nothing else is
+    /// ([`may_resend`]), unless the ping already reconnected for it or a stop or timeout
+    /// of ours came first. Either reconnect is counted in `reconnects()`. Nothing else is
     /// ever sent again: a command of any other class whose connection dropped is
-    /// `ConnectionLost` with the outcome unknown.
+    /// `ConnectionLost` with the outcome unknown. A server that cannot be selected sent
+    /// nothing: `ConnectionLost` with the outcome known, whatever the class.
     async fn execute_command(
         &self,
         cmd: &ParsedCommand,
@@ -637,7 +665,11 @@ impl CommandSession for MongoSession {
         let uuid = Uuid::new().to_string();
         let comment = cancel::comment_of(&uuid);
         let _running = self.start(uuid, cmd.class.clone(), opts);
-        self.wake(opts).await?;
+        let reconnected = self.wake(opts).await?;
+        // A stop that came with the ping's answer: still nothing sent.
+        if opts.stop.is_stopped() {
+            return Err(DbError::cancelled());
+        }
         let mut sink = Watched {
             sink,
             emitted: false,
@@ -648,7 +680,7 @@ impl CommandSession for MongoSession {
         {
             // The crate cleared the pool: a read goes again on a fresh connection, once
             // (the first failure counted the reconnect).
-            Err(e) if e.dropped && may_resend(&cmd.class, sink.emitted) => {
+            Err(e) if e.dropped && may_resend(&cmd.class, sink.emitted, reconnected) => {
                 if opts.stop.is_stopped() {
                     return Err(DbError::cancelled());
                 }
@@ -699,8 +731,9 @@ impl CommandSession for MongoSession {
     /// - Nothing is sent again after a dropped connection (no idle `ping` either, unlike
     ///   `execute_command`): a failed command aborts the transaction as above.
     /// - A commit whose result is unknown (`UnknownTransactionCommitResult`) is retried
-    ///   once, the only retry of a write (commit is idempotent by `txnNumber`); still unknown, the failure is `ConnectionLost { outcome_unknown:
-    ///   true }` at the last index, not rolled back. So is a commit with a write concern
+    ///   once, the only retry of a write (commit is idempotent by `txnNumber`); still
+    ///   unknown, the failure is `ConnectionLost { outcome_unknown: true }` at the last
+    ///   index, not rolled back. So is a commit with a write concern
     ///   error (it committed, but the write concern was not met), which is not retried.
     ///   Any other commit error is known not to have committed: rolled back. An abort's
     ///   single retry is the crate's own (it retries `abortTransaction` once and ignores
@@ -1116,8 +1149,10 @@ mod tests {
 
     #[test]
     fn only_a_read_that_emitted_nothing_is_sent_again() {
-        assert!(may_resend(&CommandClass::Read, false));
-        assert!(!may_resend(&CommandClass::Read, true));
+        assert!(may_resend(&CommandClass::Read, false, false));
+        assert!(!may_resend(&CommandClass::Read, true, false));
+        // The idle ping already reconnected for this command: one reconnect at most.
+        assert!(!may_resend(&CommandClass::Read, false, true));
         for class in [
             CommandClass::Write,
             CommandClass::Admin,
@@ -1125,8 +1160,9 @@ mod tests {
             CommandClass::Unknown,
             CommandClass::SessionChange,
         ] {
-            assert!(!may_resend(&class, false), "{class:?}");
-            assert!(!may_resend(&class, true), "{class:?}");
+            for (emitted, reconnected) in [(false, false), (true, false), (false, true)] {
+                assert!(!may_resend(&class, emitted, reconnected), "{class:?}");
+            }
         }
     }
 
@@ -1148,6 +1184,11 @@ mod tests {
         assert!(exec::connection_dropped(&io));
         let other = Error::custom("not a network error");
         assert!(!exec::connection_dropped(&other));
+        // Only a drop no stop or timeout of ours came first is one to send again on.
+        assert!(dropped_unprompted(&io, None));
+        assert!(!dropped_unprompted(&io, Some(Trigger::Timeout)));
+        assert!(!dropped_unprompted(&io, Some(Trigger::Stop)));
+        assert!(!dropped_unprompted(&other, None));
     }
 
     #[test]
