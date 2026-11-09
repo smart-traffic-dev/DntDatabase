@@ -15,9 +15,11 @@ dòng), `Tab` để nhận.
 
 1. **Chỉ hỗ trợ model FIM** (fill-in-the-middle): endpoint OpenAI-compatible `POST {base_url}/completions` có tham số
    `suffix`. Không giả lập FIM bằng model chat. Model chat để dành cho agent.
-2. **Chỉ query tab SQL** (MySQL, PostgreSQL). Mongo / Redis sau R4b.
-3. **Tắt tới khi người dùng đồng ý** (một lần, với host của endpoint); sau đó bật cho mọi connection SQL trừ
-   Production, tắt / bật riêng từng connection được (§6.3).
+2. **Query tab SQL (MySQL, PostgreSQL) và MongoDB.** (Sửa 2026-11-09: thêm console MongoDB: prompt riêng, header
+   comment `//` liệt kê collection và field đã sample, redaction của console, có secret là không gửi.) Redis chưa có.
+3. **Tắt tới khi người dùng đồng ý** (một lần, với host của endpoint); sau đó bật cho mọi connection MySQL,
+   PostgreSQL và MongoDB trừ Production, tắt / bật riêng từng connection được (§6.3). Đồng ý cũ (trước khi dialog
+   nhắc MongoDB) không áp dụng cho MongoDB (§6.3).
 4. Không gửi dữ liệu dòng. Chỉ gửi text editor (đã redact) và tên schema (bảng, cột, kiểu).
 
 Không bao giờ: API key đi qua IPC (trừ lúc người dùng nhập để lưu), prompt ghi vào log, tự chạy SQL do AI gợi ý.
@@ -145,7 +147,7 @@ mất dấu `;`). Token FIM và câu thứ hai do bước 2 và 5 xử lý.
 | Editor suggestions | `Automatic` / `Manual (Alt+\)` / `Off` |
 | Max tokens, timeout, max lines | 128 / 5 s / 8 |
 | Test | §6.2 |
-| Sharing | đồng ý / thôi đồng ý với host (§6.3); danh sách tick các connection SQL |
+| Sharing | đồng ý / thôi đồng ý với host (§6.3); danh sách tick các connection SQL và MongoDB |
 
 - Lưu trong `app_settings` (key `ai.base_url`, `ai.model`, …), không có key.
 - `SecretStore` hiện chỉ có khoá theo `(conn, SecretKind)`. Thêm API cho secret cấp app (ví dụ
@@ -170,20 +172,28 @@ từng cái, cấu hình xong vẫn không thấy gợi ý.)
 
 - **Đồng ý một lần cho app**, gắn với origin của base URL: Settings → AI → Sharing ("Turn on AI…"), tự hỏi ngay
   khi Save một endpoint mới chưa được đồng ý; hoặc từ status bar của query tab ("AI off · Turn on AI…").
-- Dialog đồng ý nói rõ: text trong editor (đã ẩn mật khẩu) và tên bảng, cột sẽ được gửi tới `<host của base URL>`;
-  không gửi dữ liệu dòng; AI bật cho mọi connection MySQL / PostgreSQL trừ connection gắn tag Production. Nút
+- Dialog đồng ý nói rõ: text trong editor (đã ẩn mật khẩu) và tên bảng, cột (MongoDB: tên collection và field) sẽ
+  được gửi tới `<host của base URL>`; không gửi dữ liệu dòng; AI bật cho mọi connection MySQL, PostgreSQL và MongoDB
+  trừ connection gắn tag Production. Nút
   `Turn on AI` chỉ bật khi tick "I am allowed to share these databases' schemas and queries with this endpoint";
   Enter = Cancel.
 - **Mỗi connection có thể có lựa chọn riêng** (bật / tắt), không cần dialog: status bar, chip "AI suggestions" trong
   dialog connection (áp dụng khi Save, chỉ hiện khi đã đồng ý), danh sách tick trong Settings → AI. Không có lựa chọn
   riêng → bật, trừ Production (tắt). Đổi tag trong dialog thì chip đổi theo ngay.
-- Bảng `ai_consent(scope, origin, granted_at)` và `ai_connection(connection_id, scope, enabled)`, `scope = 'editor'`.
-  Agent sau này thêm `scope = 'agent'` (gửi dữ liệu dòng) với dialog đồng ý riêng.
+- Bảng `ai_consent(scope, origin, granted_at, version)` và `ai_connection(connection_id, scope, enabled)`,
+  `scope = 'editor'`. Agent sau này thêm `scope = 'agent'` (gửi dữ liệu dòng) với dialog đồng ý riêng.
+- **`version` của đồng ý** (sửa 2026-11-09, migration 13): là phiên bản nội dung dialog người dùng đã đồng ý. 1 = bản
+  chỉ nhắc MySQL / PostgreSQL (mọi đồng ý có trước migration); 2 = bản nhắc cả MongoDB, mọi lần đồng ý mới đều ghi 2.
+  Backend (`may_send` → `consent_covers`, `match` đủ mọi kind): MySQL / PostgreSQL nhận mọi version, MongoDB cần
+  version ≥ 2, Redis không bao giờ. `AiSettings.consent_covers_mongo` báo cho UI: tab MongoDB với đồng ý version 1
+  hiện "AI off" và "Turn on AI…" ở status bar (mở lại dialog đồng ý); Settings → AI thêm "Turn on AI for MongoDB…";
+  chip AI trong dialog connection MongoDB ẩn tới khi đồng ý lại. Đồng ý lại ghi version 2 lên dòng cũ.
 - Đổi base URL sang origin khác → đồng ý cũ mất hiệu lực, phải đồng ý lại một lần; lựa chọn của từng connection giữ
   nguyên. Cùng origin, khác path → vẫn hiệu lực.
 - Migration từ `ai_opt_in`: connection đã opt-in thành lựa chọn "bật"; đồng ý cấp app không được suy ra (người dùng
   đồng ý lại một lần).
-- Backend kiểm tra cả hai trước khi gửi: đồng ý với origin hiện tại, và connection đang bật.
+- Backend kiểm tra cả hai trước khi gửi: đồng ý với origin hiện tại (và version đủ cho kind của connection), và
+  connection đang bật.
 - Không đi theo `.dntconn` / `.ncx`; xoá connection xoá lựa chọn của nó.
 - Production và read-only vẫn bật được (tick riêng): gợi ý không chạy gì. Badge env vẫn hiện như thường.
 

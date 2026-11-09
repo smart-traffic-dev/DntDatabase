@@ -35,6 +35,7 @@ const settings = (trigger: 'automatic' | 'manual'): AiSettings => ({
   origin: 'https://api.example.com',
   host: 'api.example.com',
   consented: true,
+  consent_covers_mongo: true,
 });
 
 async function openQuery(page: Page, trigger: 'automatic' | 'manual', requests: AiCompleteRequest[]) {

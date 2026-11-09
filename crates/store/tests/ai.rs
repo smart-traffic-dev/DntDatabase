@@ -4,7 +4,7 @@ use dnt_core::config::ConnectionConfig;
 use dnt_core::error::DbError;
 use dnt_core::secret::MemorySecretStore;
 use dnt_core::test_util::sample_config;
-use dnt_store::ai::AiScope;
+use dnt_store::ai::{AiScope, AI_CONSENT_VERSION};
 use dnt_store::db::open_in_memory;
 use dnt_store::dntconn::export_dntconn;
 use dnt_store::repo::{ConnectionRepo, NewSecrets, NodeId};
@@ -42,6 +42,22 @@ fn consent_grant_replace_revoke() {
     let c = repo.ai_consent(AiScope::Editor).unwrap().unwrap();
     assert_eq!(c.origin, "https://one.example");
     assert!(!c.granted_at.is_empty());
+    assert_eq!(c.version, AI_CONSENT_VERSION);
+    assert_eq!(AI_CONSENT_VERSION, 2);
+
+    // An earlier release's consent, granted again: the current version.
+    repo.ai_consent_grant_version(AiScope::Editor, "https://one.example", 1)
+        .unwrap();
+    assert_eq!(
+        repo.ai_consent(AiScope::Editor).unwrap().unwrap().version,
+        1
+    );
+    repo.ai_consent_grant(AiScope::Editor, "https://one.example")
+        .unwrap();
+    assert_eq!(
+        repo.ai_consent(AiScope::Editor).unwrap().unwrap().version,
+        2
+    );
 
     repo.ai_consent_grant(AiScope::Editor, "https://two.example")
         .unwrap();

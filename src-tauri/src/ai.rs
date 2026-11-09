@@ -7,13 +7,19 @@
 
 use dnt_ai::{AiError, Endpoint, FimClient, HttpFimClient};
 use dnt_core::error::DbError;
+use dnt_core::meta::ObjectKind;
 use dnt_core::secret::{AppSecret, SecretStore};
+use dnt_core::server::DbKind;
 use dnt_store::repo::ConnectionRepo;
+use futures_util::future::{BoxFuture, FutureExt, Shared};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
+use uuid::Uuid;
 
 pub const BASE_URL_KEY: &str = "ai.base_url";
 pub const MODEL_KEY: &str = "ai.model";
@@ -102,6 +108,9 @@ pub struct AiSettings {
     /// The user agreed to send editor text and schema names to this origin. `false` after the
     /// base URL moved to another origin: they agree again, once.
     pub consented: bool,
+    /// The consent covers MongoDB connections too: it was given to the consent text that names
+    /// them (version 2). A consent from before only covers MySQL and PostgreSQL.
+    pub consent_covers_mongo: bool,
 }
 
 fn config_err(field: &str, message: impl Into<String>) -> DbError {
@@ -226,15 +235,31 @@ pub fn origin_of(cfg: &AiConfig) -> Option<String> {
         .map(|e| e.origin())
 }
 
-/// The settings as the UI sees them; `consent_origin` is the origin the user agreed to.
-pub fn settings_view(cfg: AiConfig, has_key: bool, consent_origin: Option<&str>) -> AiSettings {
+/// Whether a consent given to the consent text of `version` covers a connection of `kind`:
+/// MySQL and PostgreSQL were named from the first text, MongoDB from version 2. Redis gets no
+/// suggestions.
+pub fn consent_covers(kind: DbKind, version: u32) -> bool {
+    match kind {
+        DbKind::MySql | DbKind::Postgres => true,
+        DbKind::Mongo => version >= 2,
+        DbKind::Redis => false,
+    }
+}
+
+/// The settings as the UI sees them; `consent` is the origin the user agreed to and the
+/// version of the consent text.
+pub fn settings_view(cfg: AiConfig, has_key: bool, consent: Option<(&str, u32)>) -> AiSettings {
     let endpoint = cfg
         .base_url
         .as_deref()
         .and_then(|u| endpoint_of(u, None, cfg.timeout_ms).ok());
     let origin = endpoint.as_ref().map(Endpoint::origin);
+    let consented =
+        origin.is_some() && origin.as_deref() == consent.map(|(consent_origin, _)| consent_origin);
     AiSettings {
-        consented: origin.is_some() && origin.as_deref() == consent_origin,
+        consented,
+        consent_covers_mongo: consented
+            && consent.is_some_and(|(_, version)| consent_covers(DbKind::Mongo, version)),
         origin,
         host: endpoint.as_ref().map(|e| e.host().to_string()),
         config: cfg,
@@ -277,11 +302,135 @@ struct Inner {
     client: Option<Arc<dyn FimClient>>,
     pause: Option<Pause>,
     inflight: HashMap<String, AbortHandle>,
+    /// Requests from their start: generation and cancel signal.
+    requests: HashMap<String, (u64, watch::Sender<bool>)>,
+    next_request: u64,
 }
+
+/// A load shared by everyone waiting for it.
+pub type SharedLoad<V> = Shared<BoxFuture<'static, Option<V>>>;
+/// A load to start ([`Flights::join`]), or `None` when there is nothing to load.
+pub type LoadStart<V> = Option<BoxFuture<'static, Option<V>>>;
+/// The collections and views of a MongoDB database, by name.
+pub type MongoObjects = Vec<(String, ObjectKind)>;
+
+enum Flight<V> {
+    Loading(SharedLoad<V>),
+    Failed(Instant),
+}
+
+/// Single-flight loads, detached from who asked, with a short memory of failures: while a load
+/// of a key runs, everyone gets the same one; a failed load is not tried again for
+/// `fail_ttl`. A load that succeeded is forgotten (its result is in the tree's cache).
+pub struct Flights<K, V> {
+    map: Mutex<HashMap<K, Flight<V>>>,
+    fail_ttl: Duration,
+}
+
+impl<K, V> Flights<K, V>
+where
+    K: Hash + Eq + Clone + Send + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub fn new(fail_ttl: Duration) -> Self {
+        Flights {
+            map: Mutex::new(HashMap::new()),
+            fail_ttl,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<K, Flight<V>>> {
+        self.map.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// The running load of `key`, or a new one from `start` (spawned: it finishes even when
+    /// nobody waits for it any more). `None` while a failure of `key` is remembered, or when
+    /// `start` has nothing to load (it returns `None`, and nothing is remembered).
+    pub fn join(
+        self: &Arc<Self>,
+        key: K,
+        start: impl FnOnce() -> LoadStart<V>,
+    ) -> Option<SharedLoad<V>> {
+        let mut map = self.lock();
+        match map.get(&key) {
+            Some(Flight::Loading(load)) => return Some(load.clone()),
+            Some(Flight::Failed(at)) if at.elapsed() < self.fail_ttl => return None,
+            _ => {}
+        }
+        let load = start()?;
+        let me = Arc::clone(self);
+        let k = key.clone();
+        // The task takes the map lock to record its outcome: held here until the entry is in.
+        let task = tokio::spawn(async move {
+            let out = load.await;
+            let mut map = me.lock();
+            match out {
+                Some(_) => map.remove(&k),
+                None => map.insert(k, Flight::Failed(Instant::now())),
+            };
+            out
+        });
+        let shared = async move { task.await.ok().flatten() }.boxed().shared();
+        map.insert(key, Flight::Loading(shared.clone()));
+        Some(shared)
+    }
+}
+
+/// How long a request waits for the MongoDB metadata of its prompt before it goes on with
+/// what is cached (the loads go on, detached).
+pub const METADATA_WAIT: Duration = Duration::from_millis(1500);
+/// How long a failed metadata load is not tried again.
+pub const METADATA_FAIL_TTL: Duration = Duration::from_secs(60);
+
+/// A suggestion request from its start: [`AiManager::cancel`] of its id (or a newer request
+/// with the same id) cancels it. Ends (unregisters) when dropped.
+pub struct RequestToken {
+    ai: Arc<AiManager>,
+    id: String,
+    generation: u64,
+    cancelled: watch::Receiver<bool>,
+}
+
+impl RequestToken {
+    pub fn is_cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+
+    /// Resolves once the request is cancelled.
+    pub async fn cancelled(&mut self) {
+        if self.cancelled.wait_for(|c| *c).await.is_err() {
+            // Unregistered without being cancelled: never.
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+impl Drop for RequestToken {
+    fn drop(&mut self) {
+        let mut inner = self.ai.lock();
+        if inner
+            .requests
+            .get(&self.id)
+            .is_some_and(|(generation, _)| *generation == self.generation)
+        {
+            inner.requests.remove(&self.id);
+        }
+    }
+}
+
+/// MongoDB collections and views of a database, by connection and database.
+pub type MongoListKey = (Uuid, String);
+/// The sampled fields of a collection, by connection, database and collection.
+pub type MongoFieldsKey = (Uuid, String, String);
 
 pub struct AiManager {
     factory: Mutex<ClientFactory>,
     inner: Mutex<Inner>,
+    metadata_wait: Mutex<Duration>,
+    /// Collections and views of a MongoDB database, for prompts.
+    pub mongo_lists: Arc<Flights<MongoListKey, MongoObjects>>,
+    /// Sampled top-level fields of a MongoDB collection, for prompts.
+    pub mongo_fields: Arc<Flights<MongoFieldsKey, Vec<String>>>,
 }
 
 impl Default for AiManager {
@@ -297,6 +446,9 @@ impl AiManager {
         AiManager {
             factory: Mutex::new(factory),
             inner: Mutex::new(Inner::default()),
+            metadata_wait: Mutex::new(METADATA_WAIT),
+            mongo_lists: Arc::new(Flights::new(METADATA_FAIL_TTL)),
+            mongo_fields: Arc::new(Flights::new(METADATA_FAIL_TTL)),
         }
     }
 
@@ -392,9 +544,42 @@ impl AiManager {
         self.lock().inflight.remove(id);
     }
 
-    /// Aborts request `id`; an unknown id is ignored.
+    /// How long a request waits for the MongoDB metadata of its prompt ([`METADATA_WAIT`]).
+    pub fn metadata_wait(&self) -> Duration {
+        *self.metadata_wait.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Replaces [`METADATA_WAIT`] (tests).
+    pub fn set_metadata_wait(&self, wait: Duration) {
+        *self.metadata_wait.lock().unwrap_or_else(|p| p.into_inner()) = wait;
+    }
+
+    /// Registers request `id` at its start; an earlier request with the same id is
+    /// cancelled.
+    pub fn begin(self: &Arc<Self>, id: &str) -> RequestToken {
+        let (tx, rx) = watch::channel(false);
+        let mut inner = self.lock();
+        inner.next_request += 1;
+        let generation = inner.next_request;
+        if let Some((_, old)) = inner.requests.insert(id.to_string(), (generation, tx)) {
+            old.send_replace(true);
+        }
+        RequestToken {
+            ai: Arc::clone(self),
+            id: id.to_string(),
+            generation,
+            cancelled: rx,
+        }
+    }
+
+    /// Cancels request `id`: before it reaches the endpoint it sends nothing, after it the
+    /// endpoint call is aborted. An unknown id is ignored.
     pub fn cancel(&self, id: &str) {
-        if let Some(h) = self.lock().inflight.remove(id) {
+        let mut inner = self.lock();
+        if let Some((_, tx)) = inner.requests.remove(id) {
+            tx.send_replace(true);
+        }
+        if let Some(h) = inner.inflight.remove(id) {
             h.abort();
         }
     }
@@ -403,6 +588,75 @@ impl AiManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn flights_share_one_load_and_remember_failures() {
+        let flights: Arc<Flights<&'static str, u32>> =
+            Arc::new(Flights::new(Duration::from_millis(200)));
+        let started = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = tokio::sync::oneshot::channel::<Option<u32>>();
+        let s = Arc::clone(&started);
+        let a = flights
+            .join("k", move || {
+                s.fetch_add(1, Ordering::SeqCst);
+                Some(async move { rx.await.ok().flatten() }.boxed())
+            })
+            .unwrap();
+        let b = flights
+            .join("k", || panic!("a second load of a running key"))
+            .unwrap();
+        // Nobody waits: the load still finishes.
+        drop(a);
+        tx.send(Some(7)).unwrap();
+        assert_eq!(b.await, Some(7));
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+
+        // Done: forgotten, the next join loads again.
+        let c = flights.join("k", || Some(async { None }.boxed())).unwrap();
+        assert_eq!(c.await, None);
+        // Failed: not tried again for a while.
+        assert!(flights.join("k", || panic!("retried at once")).is_none());
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let d = flights
+            .join("k", || Some(async { Some(1) }.boxed()))
+            .unwrap();
+        assert_eq!(d.await, Some(1));
+        // Nothing to load: nothing remembered.
+        assert!(flights.join("n", || None).is_none());
+        assert!(flights
+            .join("n", || Some(async { Some(2) }.boxed()))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn request_tokens_cancel_by_id() {
+        let ai = Arc::new(AiManager::new());
+        let mut first = ai.begin("r");
+        assert!(!first.is_cancelled());
+        // A newer request with the same id cancels the older one.
+        let second = ai.begin("r");
+        first.cancelled().await;
+        assert!(first.is_cancelled());
+        assert!(!second.is_cancelled());
+        // The older one ending leaves the newer registered.
+        drop(first);
+        ai.cancel("r");
+        assert!(second.is_cancelled());
+        drop(second);
+        // Unknown ids are ignored.
+        ai.cancel("r");
+        assert!(ai.lock().requests.is_empty());
+    }
+
+    #[test]
+    fn consent_covers_mongo_from_version_2() {
+        assert!(consent_covers(DbKind::MySql, 1));
+        assert!(consent_covers(DbKind::Postgres, 1));
+        assert!(!consent_covers(DbKind::Mongo, 1));
+        assert!(consent_covers(DbKind::Mongo, 2));
+        assert!(!consent_covers(DbKind::Redis, 2));
+    }
 
     #[test]
     fn rate_limit_pause_expires() {

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { AiConfig, AiSettings, AiTestResult, AiTrigger } from '../bindings';
 import { hasAiSuggestions } from '../engine';
-import { aiErrorText, aiOnFor, useAi } from '../store/ai';
+import { aiConsentCovers, aiErrorText, aiOnFor, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
 import { Callout } from './parts';
@@ -175,6 +175,11 @@ export function SettingsAiPanel() {
     [summaries],
   );
 
+  // Agreed, but before the consent text named MongoDB: its connections send nothing yet.
+  const mongoUncovered =
+    !!settings?.consented &&
+    aiConnections.some((c) => !aiConsentCovers(c.config.kind, { consented: true, consentedMongo: settings.consent_covers_mongo }));
+
   if (!settings || !draft) {
     return error ? (
       <p role="alert" className="field-error">
@@ -327,6 +332,17 @@ export function SettingsAiPanel() {
             <button type="button" className="btn" disabled={busy} onClick={() => void setConsent(false)}>
               Turn off AI
             </button>
+            {mongoUncovered && (
+              <>
+                <p className="hint" data-testid="ai-consent-mongo">
+                  MongoDB connections send nothing until you agree to share their queries and collection and field names
+                  too.
+                </p>
+                <button type="button" className="btn" disabled={busy} onClick={() => setAsking(true)}>
+                  Turn on AI for MongoDB…
+                </button>
+              </>
+            )}
           </div>
         ) : (
           <div className="settings-ai-consent" data-testid="ai-consent-off">

@@ -16,6 +16,7 @@ import {
 const sheet = import.meta.glob('./dialogs.css', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const css = Object.values(sheet)[0] ?? '';
 import type { DbKind } from '../bindings';
+import { useAi } from '../store/ai';
 import { ConnectionDialog, formProblem, MAX_QUERY_TIMEOUT_S, queryTimeoutSeconds, withEngine } from './ConnectionDialog';
 import { defaultDriverOptions, defaultPort, defaultSsl, engineInfo, ENGINES } from './connectionDefaults';
 
@@ -550,12 +551,14 @@ describe('ConnectionDialog', () => {
     expect(call).toMatchObject({ cfg: { id: ids.prod }, secrets: { db_password: 'keep' } });
   });
 
-  const aiSetUp = (consented: boolean) => ({
+  /** `mongo`: the consent names MongoDB (false: one given before the consent text did). */
+  const aiSetUp = (consented: boolean, mongo = consented) => ({
     config: { base_url: 'https://api.example.com/v1', model: 'coder', trigger: 'automatic', max_tokens: 128, timeout_ms: 5000, max_lines: 8 },
     has_key: true,
     origin: 'https://api.example.com',
     host: 'api.example.com',
     consented,
+    consent_covers_mongo: consented && mongo,
   });
 
   it('ai_switch_follows_the_default_and_applies_on_save', async () => {
@@ -602,6 +605,15 @@ describe('ConnectionDialog', () => {
     const { unmount } = render(<ConnectionDialog mode="edit" initial={mongo} hasDbPassword onClose={vi.fn()} />);
     expect(await screen.findByTestId('conn-ai')).toBeChecked();
     unmount();
+
+    // A consent from before MongoDB was named: no switch for it until agreed again.
+    resetStores();
+    mockBackend({ ai_settings_get: () => aiSetUp(true, false), ai_connections: () => [] });
+    const earlier = render(<ConnectionDialog mode="edit" initial={mongo} hasDbPassword onClose={vi.fn()} />);
+    await screen.findByTestId('conn-save');
+    await waitFor(() => expect(useAi.getState().loaded).toBe(true));
+    expect(screen.queryByTestId('conn-ai')).not.toBeInTheDocument();
+    earlier.unmount();
 
     const redis = { ...stored, kind: 'redis' as const, port: 6379, options: { ...stored.options, driver: { kind: 'redis' as const, db: 0 } } };
     render(<ConnectionDialog mode="edit" initial={redis} hasDbPassword onClose={vi.fn()} />);

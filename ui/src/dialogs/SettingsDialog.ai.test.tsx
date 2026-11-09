@@ -26,6 +26,7 @@ function view(config: AiConfig, hasKey = false, consentOrigin: string | null = n
     origin: url ? url.origin : null,
     host: url ? url.host : null,
     consented: !!url && url.origin === consentOrigin,
+    consent_covers_mongo: !!url && url.origin === consentOrigin,
   };
 }
 

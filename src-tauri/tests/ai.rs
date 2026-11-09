@@ -9,9 +9,10 @@ use dnt_core::error::DbError;
 use dnt_core::secret::{AppSecret, MemorySecretStore, SecretStore};
 use dnt_core::server::DbKind;
 use dnt_core::test_util::sample_config;
+use dnt_store::ai::AiScope;
 use dnt_store::db::open_in_memory;
 use dnt_store::repo::{ConnectionRepo, NewSecrets};
-use dnt_testkit::fake_command::{collection_key, FakeCommandDriver, FakeValue};
+use dnt_testkit::fake_command::{collection_key, FakeCommandDriver, FakeStore, FakeValue};
 use dnt_tunnel::KnownHosts;
 use dntdatabase::ai::{AiConfig, AiTrigger, ClientFactory};
 use dntdatabase::commands::ai::{
@@ -766,7 +767,7 @@ async fn redis_sends_nothing() {
 
 /// The fake Command driver as MongoDB (its databases are `0`–`15`), open, with `orders` and
 /// `audit` in database `0`; AI set up and agreed to.
-async fn fake_mongo() -> (Fixture, Uuid) {
+async fn fake_mongo() -> (Fixture, Uuid, FakeStore) {
     let driver = FakeCommandDriver::with_kind(DbKind::Mongo);
     let store = driver.store();
     for name in ["orders", "audit"] {
@@ -820,12 +821,12 @@ async fn fake_mongo() -> (Fixture, Uuid) {
         secrets,
         fake,
     };
-    (f, id)
+    (f, id, store)
 }
 
 #[tokio::test]
 async fn mongo_header_lists_the_collections_and_the_sampled_fields() {
-    let (f, id) = fake_mongo().await;
+    let (f, id, _store) = fake_mongo().await;
     f.fake.push(Step::Reply(Ok("status: 1 })".into())));
     let out = ai_complete_impl(&f.state, in_db(request(id, "db.orders.find({ |})"), "0"))
         .await
@@ -858,4 +859,184 @@ async fn mongo_header_lists_the_collections_and_the_sampled_fields() {
         f.fake.calls()[1].prompt,
         format!("{MONGO_FIRST}// Database: 0\n// Other collections: audit, orders\n")
     );
+}
+
+#[tokio::test]
+async fn an_earlier_consent_does_not_cover_mongo() {
+    let (f, mongo) = ready_with(mongo_cfg(None)).await;
+    let sql = connection(&f.state).await;
+    // Given by a release whose consent text named MySQL and PostgreSQL only.
+    f.state
+        .repo
+        .ai_consent_grant_version(AiScope::Editor, "https://api.example.com", 1)
+        .unwrap();
+    let s = ai_settings_get_impl(&f.state).await.unwrap();
+    assert!(s.consented);
+    assert!(!s.consent_covers_mongo);
+
+    let out = ai_complete_impl(&f.state, request(mongo, "db.orders.find({ |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+    assert!(f.fake.calls().is_empty());
+    // SQL still sends.
+    f.fake.push(Step::Reply(Ok("1".into())));
+    let out = ai_complete_impl(&f.state, request(sql, "SELECT |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Suggestion { text: "1".into() });
+
+    // Agreeing again, to the text that names MongoDB, covers it.
+    let s = ai_consent_set_impl(&f.state, true).await.unwrap();
+    assert!(s.consented && s.consent_covers_mongo);
+    f.fake.push(Step::Reply(Ok("a: 1 })".into())));
+    let out = ai_complete_impl(&f.state, request(mongo, "db.orders.find({ |"))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        AiCompletion::Suggestion {
+            text: "a: 1 })".into()
+        }
+    );
+    // A fresh consent covers it at once.
+    ai_consent_set_impl(&f.state, false).await.unwrap();
+    assert!(
+        !ai_settings_get_impl(&f.state)
+            .await
+            .unwrap()
+            .consent_covers_mongo
+    );
+}
+
+fn list_calls(store: &FakeStore) -> usize {
+    store
+        .introspected()
+        .iter()
+        .filter(|c| c.starts_with("list_objects"))
+        .count()
+}
+
+fn detail_calls(store: &FakeStore) -> usize {
+    store
+        .introspected()
+        .iter()
+        .filter(|c| c.starts_with("table_detail"))
+        .count()
+}
+
+/// Waits (up to 5 s) until `done`.
+async fn until(done: impl Fn() -> bool) {
+    for _ in 0..500 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out");
+}
+
+#[tokio::test]
+async fn mongo_metadata_loads_once_and_is_waited_for_briefly() {
+    let (f, id, store) = fake_mongo().await;
+    f.state.ai.set_metadata_wait(Duration::from_millis(100));
+    store.delay_introspection(Duration::from_millis(600));
+    let ask = || ai_complete_impl(&f.state, in_db(request(id, "db.orders.find({ |"), "0"));
+
+    // Typing on while the list loads: every request stops waiting at the deadline (names
+    // only: nothing cached yet), and they share one load.
+    for _ in 0..3 {
+        f.fake.push(Step::Reply(Ok("a: 1 })".into())));
+        let started = std::time::Instant::now();
+        ask().await.unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(280),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+    for call in f.fake.calls() {
+        assert_eq!(
+            call.prompt,
+            format!("{MONGO_FIRST}// Database: 0\ndb.orders.find({{ ")
+        );
+    }
+    // The load went on without them: one listing of each kind, cached.
+    until(|| list_calls(&store) == 2).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(list_calls(&store), 2);
+
+    // The names from the cache at once; the fields load (detached) past the deadline.
+    f.fake.push(Step::Reply(Ok("a: 1 })".into())));
+    ask().await.unwrap();
+    assert!(
+        f.fake.calls()[3].prompt.ends_with(
+            "// Collections:\n//   orders\n// Other collections: audit\ndb.orders.find({ "
+        ),
+        "{}",
+        f.fake.calls()[3].prompt
+    );
+    until(|| detail_calls(&store) == 1).await;
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    f.fake.push(Step::Reply(Ok("a: 1 })".into())));
+    ask().await.unwrap();
+    assert!(
+        f.fake.calls()[4]
+            .prompt
+            .contains("//   orders(_id, value)\n"),
+        "{}",
+        f.fake.calls()[4].prompt
+    );
+    assert_eq!(list_calls(&store), 2);
+    assert_eq!(detail_calls(&store), 1);
+}
+
+#[tokio::test]
+async fn a_failed_mongo_listing_is_not_retried_at_once() {
+    let (f, id, store) = fake_mongo().await;
+    // The fake has databases 0-15 only: listing `shop` fails.
+    for _ in 0..3 {
+        f.fake.push(Step::Reply(Ok("a: 1 })".into())));
+        let out = ai_complete_impl(&f.state, in_db(request(id, "db.orders.find({ |"), "shop"))
+            .await
+            .unwrap();
+        assert_eq!(
+            out,
+            AiCompletion::Suggestion {
+                text: "a: 1 })".into()
+            }
+        );
+    }
+    assert_eq!(list_calls(&store), 1);
+    assert_eq!(
+        f.fake.calls()[2].prompt,
+        format!("{MONGO_FIRST}// Database: shop\ndb.orders.find({{ ")
+    );
+}
+
+#[tokio::test]
+async fn cancel_while_the_metadata_loads_sends_nothing() {
+    let (f, id, store) = fake_mongo().await;
+    store.delay_introspection(Duration::from_millis(1000));
+    let state = Arc::new(f.state);
+    let s2 = Arc::clone(&state);
+    let started = std::time::Instant::now();
+    let pending = tokio::spawn(async move {
+        ai_complete_impl(&s2, in_db(request(id, "db.orders.find({ |"), "0")).await
+    });
+    until(|| list_calls(&store) == 1).await;
+    ai_cancel_impl(&state, "r1");
+    let out = tokio::time::timeout(Duration::from_secs(5), pending)
+        .await
+        .expect("the request ends")
+        .unwrap()
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+    // Stopped waiting at once, and never reached the endpoint.
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(f.fake.calls().is_empty());
 }

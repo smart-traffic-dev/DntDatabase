@@ -2,7 +2,8 @@
 //!
 //! - `ai_consent`: the user agreed, once for the app, that editor text and schema names may go
 //!   to the AI endpoint of `origin`. It counts only while `origin` equals the configured
-//!   endpoint's origin; the app compares them, the store just keeps the row.
+//!   endpoint's origin; the app compares them, the store just keeps the row. Its `version` says
+//!   which consent text it was given for ([`AI_CONSENT_VERSION`]).
 //! - `ai_connection`: a connection's own choice, on or off. Without one the app decides
 //!   (on, except for connections tagged Production).
 //!
@@ -14,6 +15,10 @@ use crate::repo::{not_found, now_rfc3339, ConnectionRepo};
 use dnt_core::error::DbError;
 use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
+
+/// The consent text a grant agrees to now. 1: MySQL and PostgreSQL (consents given before
+/// migration 13); 2: MySQL, PostgreSQL and MongoDB.
+pub const AI_CONSENT_VERSION: u32 = 2;
 
 /// What the consent covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +41,8 @@ pub struct AiConsent {
     pub origin: String,
     /// RFC 3339.
     pub granted_at: String,
+    /// The consent text it was given for ([`AI_CONSENT_VERSION`]).
+    pub version: u32,
 }
 
 impl ConnectionRepo {
@@ -43,12 +50,13 @@ impl ConnectionRepo {
     pub fn ai_consent(&self, scope: AiScope) -> Result<Option<AiConsent>, DbError> {
         let conn = self.lock()?;
         conn.query_row(
-            "SELECT origin, granted_at FROM ai_consent WHERE scope = ?1",
+            "SELECT origin, granted_at, version FROM ai_consent WHERE scope = ?1",
             params![scope.as_str()],
             |r| {
                 Ok(AiConsent {
                     origin: r.get(0)?,
                     granted_at: r.get(1)?,
+                    version: r.get(2)?,
                 })
             },
         )
@@ -56,14 +64,27 @@ impl ConnectionRepo {
         .map_err(|e| internal("read AI consent", e))
     }
 
-    /// Records consent to the endpoint of `origin`, replacing an earlier one.
+    /// Records consent to the endpoint of `origin`, to the current consent text
+    /// ([`AI_CONSENT_VERSION`]), replacing an earlier one.
     pub fn ai_consent_grant(&self, scope: AiScope, origin: &str) -> Result<(), DbError> {
+        self.ai_consent_grant_version(scope, origin, AI_CONSENT_VERSION)
+    }
+
+    /// [`ConnectionRepo::ai_consent_grant`] to the consent text of `version`: what a consent
+    /// given by an earlier release looks like (tests).
+    pub fn ai_consent_grant_version(
+        &self,
+        scope: AiScope,
+        origin: &str,
+        version: u32,
+    ) -> Result<(), DbError> {
         let now = now_rfc3339()?;
         let conn = self.lock()?;
         conn.execute(
-            "INSERT INTO ai_consent (scope, origin, granted_at) VALUES (?1, ?2, ?3) \
-             ON CONFLICT (scope) DO UPDATE SET origin = excluded.origin, granted_at = excluded.granted_at",
-            params![scope.as_str(), origin, now],
+            "INSERT INTO ai_consent (scope, origin, granted_at, version) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (scope) DO UPDATE SET origin = excluded.origin, \
+             granted_at = excluded.granted_at, version = excluded.version",
+            params![scope.as_str(), origin, now, version],
         )
         .map_err(|e| internal("record AI consent", e))?;
         Ok(())

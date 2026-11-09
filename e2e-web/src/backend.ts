@@ -493,6 +493,7 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     origin: null,
     host: null,
     consented: false,
+    consent_covers_mongo: false,
   };
   let aiConsentOrigin: string | null = null;
   let aiChoices: { connection_id: string; enabled: boolean }[] = [];
@@ -713,6 +714,8 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
         origin: url ? url.origin : null,
         host: url ? url.host : null,
         consented: !!url && url.origin === aiConsentOrigin,
+        // The fake's consent is always to the current text, which names MongoDB.
+        consent_covers_mongo: !!url && url.origin === aiConsentOrigin,
       };
       return aiSettings;
     },
@@ -722,7 +725,8 @@ export function createBackend(overrides: Record<string, Handler> = {}): FakeBack
     ai_test: () => ({ verdict: 'ok', elapsed_ms: 1, sample: 'id = 1' }),
     ai_consent_set: (args) => {
       aiConsentOrigin = args.granted ? aiSettings.origin : null;
-      aiSettings = { ...aiSettings, consented: !!aiSettings.origin && aiSettings.origin === aiConsentOrigin };
+      const consented = !!aiSettings.origin && aiSettings.origin === aiConsentOrigin;
+      aiSettings = { ...aiSettings, consented, consent_covers_mongo: consented };
       return aiSettings;
     },
     ai_connections: () => aiChoices,

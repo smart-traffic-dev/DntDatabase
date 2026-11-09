@@ -22,7 +22,7 @@ import type {
 import { EnvTag as EnvTagBadge } from '../components/EnvTag';
 import { EngineLogo } from '../components/EngineLogo';
 import { CheckIcon, ChevronDownIcon, ErrorIcon, LockIcon } from '../components/icons';
-import { aiOnByDefault, ensureAiLoaded, useAi } from '../store/ai';
+import { aiConsentCovers, aiOnByDefault, ensureAiLoaded, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import {
   autoName,
@@ -418,7 +418,8 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
   // AI suggestions for this connection (AI editor completion spec §6.3): shown once AI is set up
   // and agreed to, applied on Save like the rest of the form. Without a choice of its own, a
   // connection follows the default (off when tagged Production), live with the form's tag.
-  const aiReady = useAi((s) => s.loaded && s.configured && s.consented);
+  // MongoDB needs the consent that names it (an earlier one covers MySQL and PostgreSQL only).
+  const aiReady = useAi((s) => s.loaded && s.configured && aiConsentCovers(form.engine, s));
   const aiHost = useAi((s) => s.host);
   const aiStored = useAi((s) => (initial?.id ? s.choices.get(initial.id) : undefined));
   const [aiChoice, setAiChoice] = useState<boolean | null>(null);

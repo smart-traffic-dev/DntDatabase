@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
 import { AiConsentDialog } from '../dialogs/AiConsentDialog';
-import { AI_ERROR_AFTER, aiAllowed, ensureAiLoaded, useAi, useAiOn } from '../store/ai';
+import { hasAiSuggestions } from '../engine';
+import { AI_ERROR_AFTER, aiAllowed, ensureAiLoaded, useAi, useAiAgreed, useAiOn } from '../store/ai';
+import { useConnections } from '../store/connections';
 import { useDialogs } from '../store/dialogs';
 
 type Look = 'off' | 'on' | 'busy' | 'paused' | 'error';
@@ -16,7 +18,12 @@ export function AiStatus({ connId }: { connId: string }) {
   const loaded = useAi((s) => s.loaded);
   const configured = useAi((s) => s.configured);
   const host = useAi((s) => s.host);
-  const consented = useAi((s) => s.consented);
+  // The consent covers this connection's engine (MongoDB needs the consent text that names it).
+  const consented = useAiAgreed(connId);
+  const supported = useConnections((s) => {
+    const kind = s.summaries.get(connId)?.config.kind;
+    return !!kind && hasAiSuggestions(kind);
+  });
   const on = useAiOn(connId);
   const busy = useAi((s) => s.busy > 0);
   const paused = useAi((s) => s.paused);
@@ -45,7 +52,11 @@ export function AiStatus({ connId }: { connId: string }) {
 
   const look: Look = !on ? 'off' : paused ? 'paused' : failing ? 'error' : busy ? 'busy' : 'on';
   const title = {
-    off: consented ? 'AI is off for this connection' : 'AI is off: nothing is sent until you turn it on',
+    off: !supported
+      ? 'AI suggestions are not available for this connection'
+      : consented
+        ? 'AI is off for this connection'
+        : 'AI is off: nothing is sent until you turn it on',
     paused: `AI is paused: ${paused ?? ''}`,
     error: `AI requests are failing: ${lastError ?? ''}`,
     busy: 'AI is working on a suggestion',
@@ -100,7 +111,7 @@ export function AiStatus({ connId }: { connId: string }) {
             }
           }}
         >
-          {!on && !consented && (
+          {supported && !on && !consented && (
             <button
               type="button"
               role="menuitem"
@@ -112,7 +123,7 @@ export function AiStatus({ connId }: { connId: string }) {
               Turn on AI…
             </button>
           )}
-          {!on && consented && (
+          {supported && !on && consented && (
             <button type="button" role="menuitem" onClick={() => void setOn(true)}>
               Turn on AI for this connection
             </button>

@@ -4,11 +4,12 @@
 //!
 //! The API key reaches the backend in `ai_key_set` and nothing ever sends it back.
 
-use super::browse::{list_objects_impl, table_detail_impl};
+use super::browse::{filter_command_objects, folder_key, object_key};
 use super::{blocking, guard};
 use crate::ai::{
-    load_config, origin_of, save_config, settings_view, to_db_error, validate_config, AiConfig,
-    AiSettings, AiTrigger,
+    consent_covers, load_config, origin_of, save_config, settings_view, to_db_error,
+    validate_config, AiConfig, AiSettings, AiTrigger, LoadStart, MongoObjects, RequestToken,
+    SharedLoad,
 };
 use crate::state::AppState;
 use dnt_ai::post::{
@@ -19,11 +20,12 @@ use dnt_ai::{mongo_draft, AiError, CollectionBrief, FimClient, FimRequest, Mongo
 use dnt_core::command::CommandLanguage;
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::error::{AppError, DbError};
-use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
+use dnt_core::meta::{ObjectKind, ObjectRef, ObjectSummary, Scope, TableDetail};
 use dnt_core::secret::AppSecret;
 use dnt_core::server::{DbKind, ServerVariant};
 use dnt_core::sql::Dialect;
 use dnt_store::ai::AiScope;
+use futures_util::future::{select, Either, FutureExt};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -46,7 +48,7 @@ async fn settings(state: &AppState) -> Result<AiSettings, DbError> {
         Ok(settings_view(
             load_config(&repo),
             has_key,
-            consent.as_ref().map(|c| c.origin.as_str()),
+            consent.as_ref().map(|c| (c.origin.as_str(), c.version)),
         ))
     })
     .await
@@ -256,7 +258,12 @@ fn may_send(
     let Some(origin) = origin_of(cfg) else {
         return Ok(false);
     };
-    if repo.ai_consent(AiScope::Editor)?.map(|c| c.origin) != Some(origin) {
+    let Some(consent) = repo.ai_consent(AiScope::Editor)? else {
+        return Ok(false);
+    };
+    // The consent text the user agreed to must name the connection's engine (MongoDB from
+    // version 2).
+    if consent.origin != origin || !consent_covers(conn.kind, consent.version) {
         return Ok(false);
     }
     let choice = repo
@@ -352,43 +359,159 @@ async fn sql_prompt(
 const MONGO_SAMPLED_MAX: usize = 3;
 
 /// The MongoDB console prompt: the database's collections as the header, with the sampled
-/// fields of those the statement names. `None` when the text holds a secret.
+/// fields of those the statement names. `None` when the text holds a secret or the request
+/// was cancelled meanwhile.
 async fn mongo_prompt(
     state: &AppState,
     req: &AiCompleteRequest,
     language: &dyn CommandLanguage,
+    token: &mut RequestToken,
 ) -> Option<FimPrompt> {
     let draft = mongo_draft(language, &req.text, req.cursor).ok()?;
     let collections = match req.database.as_deref() {
-        Some(db) => mongo_collections(state, req.conn_id, db, &draft).await,
+        Some(db) => mongo_collections(state, req.conn_id, db, &draft, token).await?,
         None => Vec::new(),
     };
     Some(draft.build(req.database.as_deref(), &collections))
 }
 
-/// The collections and views of `db` as the tree lists them (system ones hidden, through
-/// the same cache), with the sampled top-level fields of the ones `draft`'s statement
-/// names. What cannot be had (the connection is not open, a sample fails) is left out.
+/// What waiting for a load until `deadline` gave: its value, `Some(None)` when it failed or
+/// the deadline came first (the caller takes what is cached), `None` when the request was
+/// cancelled.
+async fn wait_load<V: Clone>(
+    load: Option<SharedLoad<V>>,
+    deadline: tokio::time::Instant,
+    token: &mut RequestToken,
+) -> Option<Option<V>> {
+    let Some(load) = load else {
+        return Some(None);
+    };
+    let timed = Box::pin(tokio::time::timeout_at(deadline, load));
+    let cancelled = Box::pin(token.cancelled());
+    match select(timed, cancelled).await {
+        Either::Left((Ok(value), _)) => Some(value),
+        Either::Left((Err(_), _)) => Some(None),
+        Either::Right(_) => None,
+    }
+}
+
+fn mongo_scope(db: &str) -> Scope {
+    Scope {
+        database: db.to_string(),
+        schema: None,
+    }
+}
+
+/// The collections, then the views, of `db` as the tree lists them (system ones hidden),
+/// loaded through the tree's cache; `None` when the connection is not open.
+fn mongo_list_load(state: &AppState, id: Uuid, db: &str) -> LoadStart<MongoObjects> {
+    let mut loads = Vec::new();
+    for kind in [ObjectKind::Collection, ObjectKind::View] {
+        let scope = mongo_scope(db);
+        let key = folder_key(&scope, kind);
+        let load = state
+            .sessions
+            .browse_owned(id, Some(db.to_string()), key, move |i| {
+                let scope = scope.clone();
+                Box::pin(async move { i.list_objects(&scope, kind).await })
+            })
+            .ok()?;
+        loads.push((kind, load));
+    }
+    Some(
+        async move {
+            let mut out = Vec::new();
+            for (kind, load) in loads {
+                match load.await {
+                    Ok(list) => out.extend(
+                        filter_command_objects(DbKind::Mongo, list, false)
+                            .into_iter()
+                            .map(|o| (o.name, kind)),
+                    ),
+                    // Without the collections nothing is worth listing.
+                    Err(e) if kind == ObjectKind::Collection => {
+                        tracing::debug!(error = %e, "AI completion without the MongoDB collections");
+                        return None;
+                    }
+                    Err(e) => tracing::debug!(error = %e, "AI completion without the MongoDB views"),
+                }
+            }
+            Some(out)
+        }
+        .boxed(),
+    )
+}
+
+/// [`mongo_list_load`]'s result as the tree's cache has it now (nothing loaded).
+fn mongo_list_cached(state: &AppState, id: Uuid, db: &str) -> MongoObjects {
+    let scope = mongo_scope(db);
+    let mut out = Vec::new();
+    for kind in [ObjectKind::Collection, ObjectKind::View] {
+        let list: Vec<ObjectSummary> = state
+            .sessions
+            .cached(id, &folder_key(&scope, kind))
+            .unwrap_or_default();
+        out.extend(
+            filter_command_objects(DbKind::Mongo, list, false)
+                .into_iter()
+                .map(|o| (o.name, kind)),
+        );
+    }
+    out
+}
+
+/// The sampled top-level fields of `obj` (`table_detail`, through the tree's cache);
+/// `None` when the connection is not open.
+fn mongo_fields_load(state: &AppState, id: Uuid, obj: ObjectRef) -> LoadStart<Vec<String>> {
+    let key = object_key(&obj, "detail");
+    let db = obj.database.clone();
+    let load = state
+        .sessions
+        .browse_owned(id, Some(db), key, move |i| {
+            let obj = obj.clone();
+            Box::pin(async move { i.table_detail(&obj).await })
+        })
+        .ok()?;
+    Some(
+        async move {
+            match load.await {
+                Ok(detail) => Some(detail.columns.into_iter().map(|c| c.name).collect()),
+                Err(e) => {
+                    tracing::debug!(error = %e, "AI completion without a collection's fields");
+                    None
+                }
+            }
+        }
+        .boxed(),
+    )
+}
+
+/// The collections and views of `db`, with the sampled top-level fields of the ones `draft`'s
+/// statement names. The loads are single-flight and detached ([`crate::ai::Flights`]): the request waits
+/// for them at most [`AiManager::metadata_wait`] in all, then goes on with what the tree's
+/// cache has (names only, or no fields), while they finish and fill the cache for the next
+/// request. A failed load is not tried again for a minute. `None` when the request was
+/// cancelled meanwhile.
 async fn mongo_collections(
     state: &AppState,
     id: Uuid,
     db: &str,
     draft: &MongoDraft<'_>,
-) -> Vec<CollectionBrief> {
-    let scope = Scope {
-        database: db.to_string(),
-        schema: None,
+    token: &mut RequestToken,
+) -> Option<Vec<CollectionBrief>> {
+    let deadline = tokio::time::Instant::now() + state.ai.metadata_wait();
+    let load = state
+        .ai
+        .mongo_lists
+        .join((id, db.to_string()), || mongo_list_load(state, id, db));
+    let objects = match wait_load(load, deadline, token).await? {
+        Some(objects) => objects,
+        None => mongo_list_cached(state, id, db),
     };
-    let mut objects: Vec<(String, ObjectKind)> = Vec::new();
-    for kind in [ObjectKind::Collection, ObjectKind::View] {
-        match list_objects_impl(state, id, scope.clone(), kind, false).await {
-            Ok(list) => objects.extend(list.into_iter().map(|o| (o.name, kind))),
-            Err(e) => tracing::debug!(error = %e, "AI completion without the MongoDB collections"),
-        }
-    }
     let names: Vec<&str> = objects.iter().map(|(name, _)| name.as_str()).collect();
     let referenced = draft.referenced(&names);
-    let mut fields: Vec<Vec<String>> = vec![Vec::new(); objects.len()];
+    // Every load starts before the first is waited for: they share the deadline.
+    let mut loads = Vec::new();
     for k in referenced.into_iter().take(MONGO_SAMPLED_MAX) {
         let (name, kind) = &objects[k];
         let obj = ObjectRef {
@@ -397,22 +520,41 @@ async fn mongo_collections(
             name: name.clone(),
             kind: *kind,
         };
-        match table_detail_impl(state, id, obj).await {
-            Ok(detail) => fields[k] = detail.columns.into_iter().map(|c| c.name).collect(),
-            Err(e) => tracing::debug!(error = %e, "AI completion without a collection's fields"),
-        }
+        let o = obj.clone();
+        let load = state
+            .ai
+            .mongo_fields
+            .join((id, db.to_string(), name.clone()), || {
+                mongo_fields_load(state, id, o)
+            });
+        loads.push((k, obj, load));
     }
-    objects
-        .into_iter()
-        .zip(fields)
-        .map(|((name, _), fields)| CollectionBrief { name, fields })
-        .collect()
+    let mut fields: Vec<Vec<String>> = vec![Vec::new(); objects.len()];
+    for (k, obj, load) in loads {
+        fields[k] = match wait_load(load, deadline, token).await? {
+            Some(f) => f,
+            None => state
+                .sessions
+                .cached::<TableDetail>(id, &object_key(&obj, "detail"))
+                .map(|d| d.columns.into_iter().map(|c| c.name).collect())
+                .unwrap_or_default(),
+        };
+    }
+    Some(
+        objects
+            .into_iter()
+            .zip(fields)
+            .map(|((name, _), fields)| CollectionBrief { name, fields })
+            .collect(),
+    )
 }
 
 pub async fn ai_complete_impl(
     state: &AppState,
     req: AiCompleteRequest,
 ) -> Result<AiCompletion, DbError> {
+    // From its start: `ai_cancel` while the prompt is being built stops it before it is sent.
+    let mut token = state.ai.begin(&req.request_id);
     let cfg = config(state).await?;
     let Some(model) = cfg.model.clone() else {
         return Ok(AiCompletion::Empty);
@@ -447,7 +589,7 @@ pub async fn ai_complete_impl(
     };
     let prompt = match &language {
         PromptLanguage::Sql(dialect) => sql_prompt(state, &req, *dialect).await,
-        PromptLanguage::Mongo(language) => mongo_prompt(state, &req, &**language).await,
+        PromptLanguage::Mongo(language) => mongo_prompt(state, &req, &**language, &mut token).await,
     };
     let Some(prompt) = prompt else {
         return Ok(AiCompletion::Empty);
@@ -456,6 +598,9 @@ pub async fn ai_complete_impl(
     let Some(client) = client(state, &cfg).await? else {
         return Ok(AiCompletion::Empty);
     };
+    if token.is_cancelled() {
+        return Ok(AiCompletion::Empty);
+    }
     let mut fim = FimRequest::new(model, prompt.prompt.clone(), prompt.suffix.clone());
     fim.max_tokens = cfg.max_tokens;
     let task = tokio::spawn(async move { client.complete(&fim).await });

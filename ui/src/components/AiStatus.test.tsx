@@ -17,19 +17,30 @@ const SET_UP: AiConfig = {
   max_lines: 8,
 };
 
-function settings(config: AiConfig, consented: boolean): AiSettings {
-  return { config, has_key: true, origin: 'https://api.example.com', host: 'api.example.com', consented };
+/** `mongo`: the consent names MongoDB (false: one given before the consent text did). */
+function settings(config: AiConfig, consented: boolean, mongo = consented): AiSettings {
+  return {
+    config,
+    has_key: true,
+    origin: 'https://api.example.com',
+    host: 'api.example.com',
+    consented,
+    consent_covers_mongo: consented && mongo,
+  };
 }
 
-function backend(config: AiConfig, consented: boolean, initial: AiConnectionChoice[] = []) {
+function backend(config: AiConfig, consented: boolean, initial: AiConnectionChoice[] = [], mongo = consented) {
   let agreed = consented;
+  let agreedMongo = mongo;
   let choices = initial;
   mockBackend({
-    ai_settings_get: () => settings(config, agreed),
+    ai_settings_get: () => settings(config, agreed, agreedMongo),
     ai_connections: () => choices,
     ai_consent_set: ({ granted }) => {
+      // Granting agrees to the current consent text, which names MongoDB.
       agreed = granted as boolean;
-      return settings(config, agreed);
+      agreedMongo = agreed;
+      return settings(config, agreed, agreedMongo);
     },
     ai_connection_set: ({ connId, enabled }) => {
       choices = [...choices.filter((c) => c.connection_id !== connId), { connection_id: connId as string, enabled: enabled as boolean }];
@@ -141,5 +152,46 @@ describe('AI status indicator', () => {
     for (let i = 0; i < AI_ERROR_AFTER; i++) useAi.getState().end({ kind: 'failed', message: 'The request timed out.' });
     await waitFor(() => expect(button).toHaveAccessibleName('AI requests are failing: The request timed out.'));
     expect(button).toHaveClass('ai-error');
+  });
+});
+
+describe('AI status indicator in Command tabs', () => {
+  const MONGO = '33333333-3333-4333-8333-333333333333';
+  const REDIS = '44444444-4444-4444-8444-444444444444';
+
+  beforeEach(() => {
+    useConnections
+      .getState()
+      .setStored([], [config(MONGO, 'docs', { kind: 'mongo' }), config(REDIS, 'cache', { kind: 'redis' })]);
+  });
+
+  it('a consent from before MongoDB was named asks again for a MongoDB tab', async () => {
+    backend(SET_UP, true, [], false);
+    const user = userEvent.setup();
+    render(<AiStatus connId={MONGO} />);
+    const button = await screen.findByTestId('status-ai');
+    await waitFor(() => expect(button).toHaveAccessibleName('AI is off: nothing is sent until you turn it on'));
+    expect(button).toHaveTextContent('AI off');
+
+    await user.click(button);
+    expect(screen.queryByRole('menuitem', { name: 'Turn on AI for this connection' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('menuitem', { name: 'Turn on AI…' }));
+    const dialog = await screen.findByTestId('ai-consent-dialog');
+    expect(dialog).toHaveTextContent('MongoDB');
+    await user.click(within(dialog).getByRole('checkbox'));
+    await user.click(within(dialog).getByRole('button', { name: 'Turn on AI' }));
+    await waitFor(() => expect(screen.getByTestId('status-ai')).toHaveTextContent(/^AI$/));
+    expect(callsOf('ai_consent_set')).toEqual([{ granted: true }]);
+    expect(useAi.getState().consentedMongo).toBe(true);
+  });
+
+  it('a Redis tab offers nothing to turn on', async () => {
+    backend(SET_UP, true);
+    const user = userEvent.setup();
+    render(<AiStatus connId={REDIS} />);
+    const button = await screen.findByTestId('status-ai');
+    await waitFor(() => expect(button).toHaveAccessibleName('AI suggestions are not available for this connection'));
+    await user.click(button);
+    expect(screen.getAllByRole('menuitem').map((m) => m.textContent)).toEqual(['AI settings…']);
   });
 });

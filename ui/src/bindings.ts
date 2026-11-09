@@ -1652,7 +1652,12 @@ host: string | null;
  * The user agreed to send editor text and schema names to this origin. `false` after the
  * base URL moved to another origin: they agree again, once.
  */
-consented: boolean }
+consented: boolean; 
+/**
+ * The consent covers MongoDB connections too: it was given to the consent text that names
+ * them (version 2). A consent from before only covers MySQL and PostgreSQL.
+ */
+consent_covers_mongo: boolean }
 export type AiTestResult = { verdict: AiProbeVerdict; elapsed_ms: number; 
 /**
  * The cleaned suggestion for the probe.

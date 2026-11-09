@@ -104,6 +104,8 @@ struct StoreState {
     executed: Vec<String>,
     /// The raw JSON filters page / count were asked for, in order.
     raw_filters: Vec<String>,
+    /// `list_objects <kind>` / `table_detail <name>` calls, in order (every session).
+    introspected: Vec<String>,
 }
 
 /// No db forced by [`FakeStore::force_db`].
@@ -134,6 +136,8 @@ struct StoreInner {
     /// An `HDEL` of a field that is not there is `DocumentNotFound` (as a Mongo
     /// `deleteOne` that matched nothing).
     missing_documents: AtomicBool,
+    /// How long `list_objects` and `table_detail` take (ms).
+    introspection_delay_ms: AtomicU64,
 }
 
 /// A shared handle on the data of a [`FakeCommandDriver`] (every session of the driver
@@ -148,6 +152,7 @@ impl FakeStore {
                 dbs: vec![Db::new(); DB_COUNT],
                 executed: Vec::new(),
                 raw_filters: Vec::new(),
+                introspected: Vec::new(),
             }),
             forced_db: AtomicUsize::new(NO_FORCED_DB),
             block_next: AtomicBool::new(false),
@@ -161,6 +166,7 @@ impl FakeStore {
             atomic_unsupported: AtomicBool::new(false),
             atomic_calls: AtomicUsize::new(0),
             missing_documents: AtomicBool::new(false),
+            introspection_delay_ms: AtomicU64::new(0),
         }))
     }
 
@@ -270,6 +276,26 @@ impl FakeStore {
                 return;
             }
             changed.await;
+        }
+    }
+
+    /// `list_objects` and `table_detail` take `delay` from now on (a slow server).
+    pub fn delay_introspection(&self, delay: std::time::Duration) {
+        let ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        self.0.introspection_delay_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// The `list_objects <kind>` / `table_detail <name>` calls sessions made, in order.
+    pub fn introspected(&self) -> Vec<String> {
+        self.lock().introspected.clone()
+    }
+
+    /// Records an introspection call, then waits [`FakeStore::delay_introspection`].
+    async fn introspect(&self, call: String) {
+        self.lock().introspected.push(call);
+        let ms = self.0.introspection_delay_ms.load(Ordering::SeqCst);
+        if ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
     }
 
@@ -1647,6 +1673,9 @@ impl Introspector for FakeCommandSession {
         scope: &Scope,
         kind: ObjectKind,
     ) -> Result<Vec<ObjectSummary>, DbError> {
+        self.store
+            .introspect(format!("list_objects {kind:?}"))
+            .await;
         let index = db_index(&scope.database)?;
         Ok(match kind {
             ObjectKind::Collection => self.store.lock().dbs[index]
@@ -1682,6 +1711,9 @@ impl Introspector for FakeCommandSession {
 
     /// A collection's columns: `_id` (the field name, the primary key) and `value`.
     async fn table_detail(&self, obj: &ObjectRef) -> Result<TableDetail, DbError> {
+        self.store
+            .introspect(format!("table_detail {}", obj.name))
+            .await;
         match obj.kind {
             ObjectKind::Collection => {}
             ObjectKind::Table

@@ -178,6 +178,26 @@ export function hasAiSuggestions(kind: DbKind): boolean {
   }
 }
 
+/**
+ * Which AI consent the suggestions of a kind need (the backend has the same rule,
+ * `consent_covers`): any consent for MySQL and PostgreSQL, which the first consent text named;
+ * for MongoDB one given to the text that names it too (`consent_covers_mongo`). Redis: none
+ * is enough.
+ */
+export function aiConsentNeeded(kind: DbKind): 'any' | 'mongo' | 'never' {
+  switch (kind) {
+    case 'mysql':
+    case 'postgres':
+      return 'any';
+    case 'mongo':
+      return 'mongo';
+    case 'redis':
+      return 'never';
+    default:
+      return assertNever(kind);
+  }
+}
+
 /** The Monaco languages the AI inline provider serves (those of {@link hasAiSuggestions}). */
 export const AI_LANGUAGES: readonly string[] = [editorLanguage('mysql'), editorLanguage('postgres'), MONGO_LANGUAGE];
 

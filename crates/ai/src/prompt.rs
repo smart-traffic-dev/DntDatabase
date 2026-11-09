@@ -632,6 +632,29 @@ mod tests {
     }
 
     #[test]
+    fn other_tables_lines_are_written_once_within_budget() {
+        // More names than fit: the lines wrap until the budget runs out.
+        let tables: Vec<TableBrief> = (0..500)
+            .map(|i| {
+                table(
+                    Some("public"),
+                    &format!("a_rather_long_table_name_{i:03}"),
+                    &[],
+                )
+            })
+            .collect();
+        let p = build_at(PG, "SELECT |", &tables).unwrap();
+        let header = &p.prompt[..p.prompt.len() - body(&p).len()];
+        assert!(header.len() <= HEADER_MAX, "{}", header.len());
+        let lines: Vec<&str> = header.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.starts_with("-- "), "{line:?}");
+            assert!(!lines[..i].contains(line), "written twice: {line:?}");
+        }
+        assert!(lines.iter().any(|l| l.starts_with("-- Other tables: ")));
+    }
+
+    #[test]
     fn header_sanitizes_names() {
         let tables = [table(None, "t", &[("a\n--x", "int\r\nDROP")])];
         let p = build_at(MY, "SELECT * FROM t WHERE |", &tables).unwrap();

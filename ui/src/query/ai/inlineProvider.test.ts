@@ -218,6 +218,7 @@ describe('AI inline provider in Command tabs', () => {
 
   beforeEach(() => {
     mockBackend({ ai_settings_get: () => ({}), ai_connections: () => [], tabs_save: () => null });
+    useAi.setState({ consentedMongo: true });
     useConnections
       .getState()
       .setStored([], [config(CONN, 'Shop'), config(MONGO, 'docs', { kind: 'mongo', default_db: 'shop' }), config(REDIS, 'cache', { kind: 'redis' })]);
@@ -263,6 +264,14 @@ describe('AI inline provider in Command tabs', () => {
     const out = await createAiInlineProvider(fakeMonaco(), d).provideInlineCompletions(m, position, EXPLICIT, token() as never);
     expect((out as { items: unknown[] }).items).toEqual([]);
     expect(d.calls).toEqual([]);
+  });
+
+  it('a consent from before MongoDB was named covers SQL tabs only', () => {
+    useAi.setState({ consentedMongo: false });
+    expect(aiAllowed(MONGO)).toBe(false);
+    expect(aiAllowed(CONN)).toBe(true);
+    useAi.setState({ consentedMongo: true });
+    expect(aiAllowed(MONGO)).toBe(true);
   });
 
   it('a MongoDB connection tagged Production follows the same default as SQL', () => {

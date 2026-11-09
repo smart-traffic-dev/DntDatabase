@@ -946,20 +946,31 @@ impl SessionManager {
         F: for<'a> Fn(&'a dyn Introspector) -> MetaFuture<'a, T> + Sync,
     {
         let rt = self.runtime(id)?;
-        if let Some(hit) = rt.cache.get(&key) {
-            // A key reused for another result type is simply fetched again.
-            if let Ok(value) = serde_json::from_value(hit) {
-                return Ok(value);
-            }
-        }
-        // A refresh while the call runs makes its result stale: it is then not cached.
-        let epoch = rt.cache.epoch();
-        let value = rt.with_session(db, |s| f(s.introspector())).await?;
-        let json = serde_json::to_value(&value).map_err(|e| DbError::Internal {
-            message: format!("cache browse result: {e}"),
-        })?;
-        rt.cache.insert_if_epoch(key, json, epoch);
-        Ok(value)
+        browse_on(&rt, db, key, f).await
+    }
+
+    /// [`SessionManager::browse`] as a future that borrows nothing (it holds the connection's
+    /// runtime): for a load that is spawned and outlives its caller. `Err` when the
+    /// connection is not open.
+    pub fn browse_owned<T, F>(
+        &self,
+        id: Uuid,
+        db: Option<String>,
+        key: NodeKey,
+        f: F,
+    ) -> Result<impl Future<Output = Result<T, DbError>> + Send + 'static, DbError>
+    where
+        T: Clone + Serialize + DeserializeOwned + Send + 'static,
+        F: for<'a> Fn(&'a dyn Introspector) -> MetaFuture<'a, T> + Send + Sync + 'static,
+    {
+        let rt = self.runtime(id)?;
+        Ok(async move { browse_on(&rt, db.as_deref(), key, f).await })
+    }
+
+    /// What [`SessionManager::browse`] has cached under `key`, without loading anything.
+    pub fn cached<T: DeserializeOwned>(&self, id: Uuid, key: &NodeKey) -> Option<T> {
+        let hit = self.runtime_opt(id)?.cache.get(key)?;
+        serde_json::from_value(hit).ok()
     }
 
     /// The table detail of `obj` as the server has it now (never the cached one), which
@@ -1083,6 +1094,33 @@ impl SessionManager {
         }
         Ok(objects)
     }
+}
+
+/// [`SessionManager::browse`] on runtime `rt`.
+async fn browse_on<T, F>(
+    rt: &ConnectionRuntime,
+    db: Option<&str>,
+    key: NodeKey,
+    f: F,
+) -> Result<T, DbError>
+where
+    T: Clone + Serialize + DeserializeOwned + Send,
+    F: for<'a> Fn(&'a dyn Introspector) -> MetaFuture<'a, T> + Sync,
+{
+    if let Some(hit) = rt.cache.get(&key) {
+        // A key reused for another result type is simply fetched again.
+        if let Ok(value) = serde_json::from_value(hit) {
+            return Ok(value);
+        }
+    }
+    // A refresh while the call runs makes its result stale: it is then not cached.
+    let epoch = rt.cache.epoch();
+    let value = rt.with_session(db, |s| f(s.introspector())).await?;
+    let json = serde_json::to_value(&value).map_err(|e| DbError::Internal {
+        message: format!("cache browse result: {e}"),
+    })?;
+    rt.cache.insert_if_epoch(key, json, epoch);
+    Ok(value)
 }
 
 pub(crate) fn config_error(field: &str, message: &str) -> DbError {

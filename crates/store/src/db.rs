@@ -217,6 +217,13 @@ INSERT INTO ai_connection (connection_id, scope, enabled) SELECT connection_id, 
 DROP TABLE ai_opt_in;
 ";
 
+/// AI consent names what it was given for: version 1 is the consent text that named MySQL and
+/// PostgreSQL only; version 2 (written from now on) names MongoDB too. A version 1 consent does
+/// not let a MongoDB connection send anything (AI editor completion spec §6.3).
+const MIGRATION_13: &str = "
+ALTER TABLE ai_consent ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+";
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(MIGRATION_1),
@@ -231,6 +238,7 @@ fn migrations() -> Migrations<'static> {
         M::up_with_hook(MIGRATION_10, require_foreign_keys_off).foreign_key_check(),
         M::up(MIGRATION_11),
         M::up(MIGRATION_12),
+        M::up(MIGRATION_13),
     ])
 }
 
@@ -306,7 +314,7 @@ mod tests {
     use super::*;
 
     /// `user_version` after every migration.
-    const LATEST: i64 = 12;
+    const LATEST: i64 = 13;
 
     #[test]
     fn migrations_are_valid() {
@@ -351,6 +359,25 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old, 0);
+    }
+
+    /// Migration 13: a consent given before keeps its origin and is version 1.
+    #[test]
+    fn migration_13_marks_an_earlier_consent_version_1() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        migrations().to_version(&mut conn, 12).unwrap();
+        conn.execute_batch(
+            "INSERT INTO ai_consent (scope, origin, granted_at) VALUES ('editor', 'https://x.example', 't');",
+        )
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let row: (String, i64) = conn
+            .query_row("SELECT origin, version FROM ai_consent", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(row, ("https://x.example".into(), 1));
     }
 
     /// A database at schema version 2 (before favorites) migrates to the latest version and keeps its rows.
