@@ -82,9 +82,13 @@ export function suggestMongo(a: MongoAnalysis, data: MongoData): MongoSuggestion
       return data.databases.map((d) => ({ label: d, kind: 'database', insertText: d }));
     case 'show':
       return words(SHOW_TARGETS, 'keyword');
-    case 'db':
-      return [...data.objects.map((o) => objectItem(o, mongoCollectionMember(o.name))), ...words(DB_METHODS, 'method')];
+    case 'db': {
+      // The console takes one `getSiblingDB(…)` per statement.
+      const methods = c.db === null ? DB_METHODS : DB_METHODS.filter((m) => m.label !== 'getSiblingDB');
+      return [...data.objects.map((o) => objectItem(o, mongoCollectionMember(o.name))), ...words(methods, 'method')];
+    }
     case 'collection': {
+      if (c.explained) return words(COLL_METHODS, 'method');
       // `db.system.` also continues a dotted name (`system.users`).
       const dotted = data.objects.flatMap((o) => {
         const rest = o.name.startsWith(`${c.coll}.`) ? o.name.slice(c.coll.length + 1) : null;
@@ -93,7 +97,8 @@ export function suggestMongo(a: MongoAnalysis, data: MongoData): MongoSuggestion
       return [...words(COLL_METHODS, 'method'), ...dotted];
     }
     case 'modifier':
-      return words(MODIFIERS, 'method');
+      // `.count()` follows a `find()` only (".count() is not valid after aggregate()").
+      return words(c.countable ? MODIFIERS : MODIFIERS.filter((m) => m.label !== 'count'), 'method');
     case 'value':
       return words(HELPERS, 'helper');
     case 'key':

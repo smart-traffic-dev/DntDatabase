@@ -147,17 +147,25 @@ export function registerMongoCompletion(monaco: typeof Monaco, ctxOf: (model: un
       // answer with what is there; `incomplete` makes the next keystroke ask again.
       return (async () => {
         const deadline = Date.now() + LOAD_WAIT_MS;
-        // Opening the connection, the collections, then the fields: at most three loads in a row.
-        for (let i = 0; i < 3 && round.pending.length > 0; i++) {
-          const left = deadline - Date.now();
-          if (left <= 0) break;
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([Promise.all(round.pending), new Promise((r) => (timer = setTimeout(r, left)))]);
-          clearTimeout(timer);
-          if (token?.isCancellationRequested) return { suggestions: [] };
-          round = gather(target, a);
+        // A cancelled request (the next keystroke) stops waiting at once: no timer outlives it.
+        let cancel: (() => void) | undefined;
+        const cancelled = new Promise<void>((r) => (cancel = r));
+        const sub = token?.onCancellationRequested?.(() => cancel?.());
+        try {
+          // Opening the connection, the collections, then the fields: at most three loads in a row.
+          for (let i = 0; i < 3 && round.pending.length > 0; i++) {
+            const left = deadline - Date.now();
+            if (left <= 0) break;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            await Promise.race([Promise.all(round.pending), cancelled, new Promise((r) => (timer = setTimeout(r, left)))]);
+            clearTimeout(timer);
+            if (token?.isCancellationRequested) return { suggestions: [] };
+            round = gather(target, a);
+          }
+          return toList(suggestMongo(a, round.data), round.pending.length > 0);
+        } finally {
+          sub?.dispose();
         }
-        return toList(suggestMongo(a, round.data), round.pending.length > 0);
       })();
     },
   };

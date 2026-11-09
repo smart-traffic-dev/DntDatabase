@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { callsOf, config, mockBackend, serverInfo } from '../../../test/backend';
 import { useCompletion } from '../../../store/completion';
 import { useConnections } from '../../../store/connections';
@@ -65,6 +65,10 @@ describe('mongo completion: context', () => {
     expect(item('db.|', 'orders')?.insertText).toBe('orders');
     expect(item('db.|', 'paid_orders')?.kind).toBe('view');
     expect(item('db.|', 'runCommand')).toMatchObject({ insertText: 'runCommand({$0})', snippet: true });
+    // The console takes one getSiblingDB() per statement.
+    expect(labels('db.|')).toContain('getSiblingDB');
+    expect(labels('db.getSiblingDB("logs").|')).not.toContain('getSiblingDB');
+    expect(labels('db.getSiblingDB("logs").|')).toContain('getCollection');
   });
 
   it('after_a_collection_dot', () => {
@@ -79,15 +83,33 @@ describe('mongo completion: context', () => {
     expect(item('db.orders.|', 'aggregate')).toMatchObject({ insertText: 'aggregate([$0])', snippet: true });
     expect(item('db.orders.|', 'countDocuments')?.insertText).toBe('countDocuments({$0})');
     expect(item('db.orders.|', 'updateOne')?.insertText).toBe('updateOne({$1}, { \\$set: { $0 } })');
+    // `db.<coll>.explain(…).<method>(…)`: the collection methods again, then no modifiers.
+    expect(ctx('db.orders.explain().|')).toEqual({ kind: 'collection', db: null, coll: 'orders', explained: true });
+    expect(ctx('db.orders.explain("executionStats").fi|')).toEqual({ kind: 'collection', db: null, coll: 'orders', explained: true });
+    expect(labels('db.orders.explain().|')).toContain('aggregate');
+    expect(labels('db.system.explain().|', data)).not.toContain('users');
+    expect(ctx('db.orders.explain().find({|')).toEqual({ kind: 'key', role: 'query', db: null, coll: 'orders' });
+    expect(ctx('db.orders.explain().find({}).|')).toEqual({ kind: 'none' });
+    expect(ctx('db.orders.explain().find.|')).toEqual({ kind: 'none' });
     // `db.system.` continues a dotted collection name.
     expect(ctx('db.system.|')).toEqual({ kind: 'collection', db: null, coll: 'system' });
     expect(item('db.system.|', 'users')).toMatchObject({ kind: 'collection', insertText: 'users' });
   });
 
   it('modifiers_after_find_or_aggregate', () => {
-    expect(ctx('db.orders.find({}).|')).toEqual({ kind: 'modifier' });
-    expect(ctx('db.orders.aggregate([]).|')).toEqual({ kind: 'modifier' });
-    expect(ctx('db.orders.find({}).sort({a: 1}).|')).toEqual({ kind: 'modifier' });
+    expect(ctx('db.orders.find({}).|')).toEqual({ kind: 'modifier', countable: true });
+    expect(ctx('db.orders.aggregate([]).|')).toEqual({ kind: 'modifier', countable: false });
+    expect(ctx('db.orders.find({}).sort({a: 1}).|')).toEqual({ kind: 'modifier', countable: true });
+    expect(ctx('db.orders.aggregate([]).sort({a: 1}).|')).toEqual({ kind: 'modifier', countable: false });
+    // `.toArray()` / `.pretty()` keep the cursor open; `.count()` / `.explain()` end it.
+    expect(ctx('db.orders.find({}).toArray().|')).toEqual({ kind: 'modifier', countable: true });
+    expect(ctx('db.orders.find({}).count().|')).toEqual({ kind: 'none' });
+    expect(ctx('db.orders.find({}).explain().|')).toEqual({ kind: 'none' });
+    // The console counts a find() only (".count() is not valid after aggregate()").
+    expect(labels('db.orders.aggregate([]).|')).not.toContain('count');
+    expect(labels('db.orders.aggregate([]).sort({}).|')).not.toContain('count');
+    expect(labels('db.orders.aggregate([]).|')).toContain('sort');
+    expect(labels('db.orders.find().|')).toContain('count');
     expect(ctx('db.orders.insertOne({}).|')).toEqual({ kind: 'none' });
     expect(ctx('db.orders.find({}) |')).toEqual({ kind: 'none' });
     expect(labels('db.orders.find().|')).toEqual(
@@ -97,8 +119,11 @@ describe('mongo completion: context', () => {
   });
 
   it('chained_line_continues_the_statement', () => {
-    expect(ctx('db.orders.find({})\n  .|')).toEqual({ kind: 'modifier' });
-    expect(ctx('db.orders.find({})\n  // note\n  .so|')).toEqual({ kind: 'modifier' });
+    expect(ctx('db.orders.find({})\n  .|')).toEqual({ kind: 'modifier', countable: true });
+    expect(ctx('db.orders.find({})\n  // note\n  .so|')).toEqual({ kind: 'modifier', countable: true });
+    expect(ctx('db.orders.find({\n  status: "paid",\n})\n  .sort({ a: 1 })\n\n  .|')).toEqual({ kind: 'modifier', countable: true });
+    expect(ctx('db.orders.aggregate([\n  { $match: {} },\n])\r\n  .|')).toEqual({ kind: 'modifier', countable: false });
+    expect(ctx('db.orders.find({})\r\n|')).toEqual({ kind: 'statement' });
     expect(ctx('db.orders.find({})\n  .sort({|')).toEqual({ kind: 'key', role: 'fields', db: null, coll: 'orders' });
     // Without the dot the next line is a new statement.
     expect(ctx('db.orders.find({})\nso|')).toEqual({ kind: 'statement' });
@@ -200,6 +225,54 @@ describe('mongo completion: context', () => {
     // A closed string or comment is fine.
     expect(ctx('db.orders.find({ "status": "paid", |')).toEqual({ kind: 'key', role: 'query', db: null, coll: 'orders' });
     expect(ctx('/* x */ db.|')).toEqual({ kind: 'db', db: null });
+  });
+
+  it('big_scripts_reuse_the_tokens_of_the_previous_request', () => {
+    const line = 'db.orders.find({ status: "paid", total: { $gt: 10 } }).sort({ a: 1 }).limit(5) // c\n';
+    const big = line.repeat(5000);
+    // Same answers as a fresh analysis while the text grows, shrinks and changes mid-way.
+    const steps = [
+      `${big}db.orders.find({ `,
+      `${big}db.orders.find({ s`,
+      `${big}db.orders.find({ "s`,
+      `${big}db.orders.find({ `,
+      `${big}db.`,
+      `${big}db.orders.find({})\n  .`,
+      `/* ${big}db.`,
+      `${big}db.`,
+      `${line}/x/; db.`,
+      `${line}/x/; db.c.find({ a: /x`,
+      `${big.slice(0, 40)}"${big.slice(40)}db.`,
+    ];
+    /** `s` analysed from scratch: a text sharing no prefix with it empties the token cache. */
+    const fresh = (s: string) => {
+      analyzeMongo('\u0000', 1);
+      return analyzeMongo(s, s.length);
+    };
+    let before = steps[0]!;
+    for (const s of steps) {
+      // Warm: after the previous step (the cache holds its tokens).
+      analyzeMongo(before, before.length);
+      const warm = analyzeMongo(s, s.length);
+      expect(warm, s.slice(-30)).toEqual(fresh(s));
+      before = s;
+    }
+    // And the cursor moving back into a long script.
+    const back = steps[0]!;
+    analyzeMongo(back, back.length);
+    const mid = back.indexOf('{ status') + 2;
+    expect(analyzeMongo(back, mid)).toEqual(fresh(back.slice(0, mid)));
+    expect(analyzeMongo(back, mid).context).toEqual({ kind: 'key', role: 'query', db: null, coll: 'orders' });
+    expect(analyzeMongo(steps[0]!, steps[0]!.length).context).toEqual({ kind: 'key', role: 'query', db: null, coll: 'orders' });
+    expect(analyzeMongo(steps[2]!, steps[2]!.length).context).toEqual({ kind: 'none' });
+    expect(analyzeMongo(steps[5]!, steps[5]!.length).context).toEqual({ kind: 'modifier', countable: true });
+    expect(analyzeMongo(steps[6]!, steps[6]!.length).context).toEqual({ kind: 'none' });
+    // Warm: a keystroke at the end of a 5000-line script is cheap.
+    const s = `${big}db.orders.find({ st`;
+    analyzeMongo(s.slice(0, -1), s.length - 1);
+    const t0 = performance.now();
+    analyzeMongo(s, s.length);
+    expect(performance.now() - t0).toBeLessThan(30);
   });
 
   it('unknown_collection_has_no_fields_but_operators_work', () => {
@@ -316,6 +389,32 @@ describe('mongo completion: monaco provider', () => {
     const none = (await p.provideCompletionItems(fakeModel('db.nope.find({|'), position, {}, live)) as List;
     expect(none.suggestions).toEqual([]);
     expect(callsOf('table_detail')).toHaveLength(1);
+  });
+
+  it('a_cancelled_request_stops_waiting_for_the_load', async () => {
+    // The collections never arrive.
+    mockBackend({ list_objects: () => new Promise(() => {}) });
+    const { monaco, providers } = fakeMonaco();
+    registerMongoCompletion(monaco as never, target);
+    const p = providers.get('mongo')!;
+    let onCancel: (() => void) | undefined;
+    const disposed = vi.fn();
+    const token = {
+      isCancellationRequested: false,
+      onCancellationRequested: (cb: () => void) => {
+        onCancel = cb;
+        return { dispose: disposed };
+      },
+    };
+    const started = Date.now();
+    const answer = p.provideCompletionItems(fakeModel('db.|'), position, {}, token) as Promise<List>;
+    expect(answer).toBeInstanceOf(Promise);
+    token.isCancellationRequested = true;
+    onCancel!();
+    expect((await answer).suggestions).toEqual([]);
+    // Well before the 1.5 s wait, and the listener is released.
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(disposed).toHaveBeenCalled();
   });
 
   it('use_lists_the_databases_and_strings_get_nothing', async () => {
