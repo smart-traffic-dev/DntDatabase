@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { lexMongoScript } from '../completion/mongo/context';
-import { formatMongo, mongoStatementRange } from './format';
+import { formatMongo, formatMongoRange } from './format';
+import { lexConsole } from './lexer';
 
 /** The formatted text; fails the test when the formatter refuses. */
 function fmt(text: string, width?: number): string {
@@ -234,7 +234,12 @@ describe('formatMongo: comments', () => {
 
   it('inline_block_comments_stay_inline', () => {
     expect(fmt('db.c.find({a:/* one */1})')).toBe('db.c.find({ a: /* one */ 1 })');
-    expect(fmt('db.c.find([/* a */ 1, 2 /* b */])')).toBe('db.c.find([ /* a */ 1, 2 /* b */])');
+    expect(fmt('db.c.find([/* a */ 1, 2 /* b */])')).toBe('db.c.find([/* a */ 1, 2 /* b */])');
+    expect(fmt('db.c.find([\n/* a */ 1])')).toBe('db.c.find([/* a */ 1])');
+    // In empty brackets the comment stays where it is.
+    expect(fmt('db.c.find(/* c */)')).toBe('db.c.find(/* c */)');
+    expect(fmt('db.c.find([ /* c */ ])')).toBe('db.c.find([/* c */])');
+    expect(fmt('db.c.find({/* c */})')).toBe('db.c.find({ /* c */ })');
   });
 
   it('keeps_comments_in_a_chain', () => {
@@ -252,7 +257,13 @@ describe('formatMongo: comments', () => {
 
   it('comments_around_commas_and_hugged_arguments_stay', () => {
     expect(fmt('db.c.find({a:1} /* x */)')).toBe('db.c.find({ a: 1 } /* x */)');
-    expect(fmt('db.c.find({a:1}\n// x\n, {b: 1})')).toBe(lines('db.c.find(', '  { a: 1 }', '  // x', '  ,', '  { b: 1 }', ')'));
+    // A `,` after a comment of its own line goes back after the value.
+    expect(fmt('db.c.find({a:1}\n// x\n, {b: 1})')).toBe(lines('db.c.find(', '  { a: 1 },', '  // x', '  { b: 1 }', ')'));
+    expect(fmt('db.c.find({a:1}\n// x\n, /* y */ {b: 1})')).toBe(lines('db.c.find(', '  { a: 1 },', '  // x', '  /* y */ { b: 1 }', ')'));
+  });
+
+  it('a_dropped_trailing_comma_keeps_its_comments_in_order', () => {
+    expect(fmt('db.c.find({a: 1\n// one\n, // two\n})')).toBe(lines('db.c.find({', '  a: 1', '  // one', '  // two', '})'));
   });
 });
 
@@ -307,7 +318,7 @@ describe('formatMongo: idempotent', () => {
   it('formatting_changes_only_whitespace_and_dropped_commas', () => {
     for (const text of samples) {
       const kept = (s: string) => {
-        const { tokens, comments } = lexMongoScript(s);
+        const { tokens, comments } = lexConsole(s);
         return [...tokens.map((t) => t.text), ...comments.map((c) => c.text.trimEnd())].filter((t) => t !== ',' && t !== ';');
       };
       expect(kept(fmt(text)).sort()).toEqual(kept(text).sort());
@@ -325,8 +336,9 @@ describe('formatMongo: generated scripts', () => {
   };
   const pick = <T,>(a: T[]) => a[rnd(a.length)]!;
   const ws = () => pick(['', ' ', '  ', '\n', '\n  ', ' \n\n ', '\r\n']);
-  const cm = () => pick(['', '', '', '', ' /* c */ ', ' // lc\n', '\n// own\n', '/*m\nl*/']);
-  const scalar = () => pick(['1', '"str value here"', "'q'", '/re/i', 'ObjectId("64b7f0c2a1b2c3d4e5f60718")', '-1', 'ISODate("2024-01-01")', '`t\nx`']);
+  const cm = () => pick(['', '', '', '', ' /* c */ ', ' // lc\n', '\n// own\n', '/*m\nl*/', ' // ls\u2028', ' // cr\r']);
+  const scalar = () =>
+    pick(['1', '"str value here"', "'q'", '/re/i', '/(a,b) c/', 'ObjectId("64b7f0c2a1b2c3d4e5f60718")', '-1', '- /x(y)/', 'x/2', 'x / 2', '.5', 'ISODate("2024-01-01")', '`t\nx`']);
   const value = (d: number): string => {
     if (d > 3) return scalar();
     const r = rnd(6);
@@ -349,7 +361,7 @@ describe('formatMongo: generated scripts', () => {
   /** The commands the console runs, as token texts (trailing commas aside). */
   const commands = (text: string): string[] => {
     const src = text.replace(/\r\n?/g, '\n');
-    const { tokens } = lexMongoScript(src);
+    const { tokens } = lexConsole(src);
     const out: string[] = [];
     let cur: string[] = [];
     let depth = 0;
@@ -364,7 +376,7 @@ describe('formatMongo: generated scripts', () => {
       if (t.kind === 'punct' && '([{'.includes(t.text)) depth++;
       if (t.kind === 'punct' && ')]}'.includes(t.text)) depth--;
       if (!(t.text === ',' && next && ')]}'.includes(next.text))) cur.push(t.text.replace(/\r\n?/g, '\n'));
-      if (depth === 0 && (!next || (src.slice(t.end, next.start).includes('\n') && next.text !== '.'))) {
+      if (depth === 0 && (!next || (src.slice(t.end, next.start).includes('\n') && !next.text.startsWith('.')))) {
         out.push(cur.join(' '));
         cur = [];
       }
@@ -382,25 +394,90 @@ describe('formatMongo: generated scripts', () => {
   });
 });
 
-describe('mongoStatementRange', () => {
+describe('formatMongoRange', () => {
   const text = 'db.a.find()\ndb.b.find({\n  x: 1\n})\n  .limit(1); db.c.find()\n';
-  it('expands_a_selection_to_the_statements_it_touches', () => {
+  const sel = (s: string, from: string, to: string = from) => formatMongoRange(s, s.indexOf(from), s.indexOf(to) + to.length);
+
+  it('formats_exactly_the_statements_the_selection_touches', () => {
     // Inside `x: 1` only: the whole db.b statement with its `;`.
-    const at = text.indexOf('x: 1');
     const b = text.indexOf('db.b');
-    expect(mongoStatementRange(text, at, at + 1)).toEqual({ from: b, to: text.indexOf('; db.c') + 1 });
-    // From db.a into db.b: both.
-    expect(mongoStatementRange(text, 3, b + 2)).toEqual({ from: 0, to: text.indexOf('; db.c') + 1 });
+    const end = text.indexOf('; db.c') + 1;
+    expect(sel(text, 'x: 1')).toEqual({ ok: true, from: b, to: end, text: 'db.b.find({ x: 1 }).limit(1);' });
+    // From inside db.a to the blank after db.b's `;`: both, and not the blank.
+    expect(formatMongoRange(text, 3, end + 1)).toEqual({ ok: true, from: 0, to: end, text: 'db.a.find()\ndb.b.find({ x: 1 }).limit(1);' });
   });
 
-  it('a_selection_without_statements_stays', () => {
-    expect(mongoStatementRange('  // only\n', 0, 5)).toEqual({ from: 0, to: 5 });
+  it('a_selection_inside_a_line_comment_formats_nothing', () => {
+    // The commented-out code stays a comment.
+    const s = 'db.a.find()\n// old: db.c.find(); db.c.drop()\ndb.b.find()';
+    expect(sel(s, 'db.c.find();', 'db.c.drop()')).toBeNull();
+    expect(sel('  // only\n', '// only')).toBeNull();
   });
 
-  it('where_the_script_stops_lexing_the_statement_runs_to_the_end', () => {
-    const text = 'db.a.find()\ndb.b.find("x\ndb.c.find()';
-    expect(mongoStatementRange(text, 2, 4)).toEqual({ from: 0, to: 11 });
-    expect(mongoStatementRange(text, 15, 16)).toEqual({ from: 12, to: text.length });
-    expect(formatMongo(text.slice(12))).toEqual({ ok: false, message: 'Unterminated string', offset: 10 });
+  it('a_selection_from_a_line_comment_formats_only_the_statements_after_it', () => {
+    const s = 'db.a.find() // keep; db.c.drop()\ndb.b.find({x :1})';
+    const r = formatMongoRange(s, s.indexOf('keep;'), s.length);
+    expect(r).toEqual({ ok: true, from: s.indexOf('db.b'), to: s.length, text: 'db.b.find({ x: 1 })' });
+    expect(s.slice(0, s.indexOf('db.b')) + (r as { text: string }).text).toBe('db.a.find() // keep; db.c.drop()\ndb.b.find({ x: 1 })');
+  });
+
+  it('a_selection_edge_inside_a_block_comment_never_rewrites_it', () => {
+    // Between statements: nothing to format.
+    const s = 'db.a.find( )\n/* example: {a :1} */\ndb.b.find( )';
+    expect(sel(s, 'example', '{a :1}')).toBeNull();
+    // From inside the comment into db.b: db.b only, the comment as it is.
+    const r = sel(s, ':1}', 'db.b');
+    expect(r).toEqual({ ok: true, from: s.indexOf('db.b'), to: s.length, text: 'db.b.find()' });
+    // A comment inside a statement is formatted with it, its text unchanged.
+    const t = 'db.a.find( /* example: {a :1} */ )';
+    expect(sel(t, 'example')).toEqual({ ok: true, from: 0, to: t.length, text: 'db.a.find(/* example: {a :1} */)' });
+  });
+
+  it('a_statement_where_the_script_stops_lexing_is_refused', () => {
+    const s = 'db.a.find( )\ndb.b.find("x\ndb.c.find()';
+    expect(sel(s, 'a.find')).toEqual({ ok: true, from: 0, to: 12, text: 'db.a.find()' });
+    expect(sel(s, '"x')).toEqual({ ok: false, message: 'Unterminated string', offset: s.indexOf('"x') });
+  });
+
+  it('a_selection_the_console_would_read_another_way_on_its_own_is_refused', () => {
+    // `/x/` after `a` on the line before is a division; on its own, a regex.
+    const s = 'a\n/x/';
+    expect(sel(s, '/x/')).toEqual({ ok: false, message: 'This selection reads differently without the text before it', offset: 2 });
+  });
+});
+
+describe('formatMongo: the console reading', () => {
+  const refused = (text: string) => {
+    const r = formatMongo(text);
+    return r.ok ? null : { message: r.message, offset: r.offset };
+  };
+
+  it('a_regex_after_any_punctuation_is_kept_as_written', () => {
+    expect(fmt('db.c.find().forEach(d => /(a,b)/.test(d.name))')).toBe('db.c.find().forEach(d => /(a,b)/.test(d.name))');
+    // A regex holding what looks like code is one token: nothing in it is laid out.
+    const long = 'x = 1 - /a(db.c.deleteMany({ aaaaaaaaaaaaaaaaaaaaaa: 1, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 2 }))/';
+    expect(fmt(long)).toBe(long);
+  });
+
+  it('a_division_keeps_its_spacing', () => {
+    expect(fmt('db.c.find({a: x/2})')).toBe('db.c.find({ a: x/2 })');
+    expect(fmt('db.c.find({a: x / 2,b:[1]/2})')).toBe('db.c.find({ a: x / 2, b: [1]/2 })');
+  });
+
+  it('a_line_comment_ends_where_the_console_ends_it', () => {
+    // U+2028 ends a `//` comment but not a command: the chain goes on.
+    expect(fmt('db.c // x  .find({a: 1})\n.limit(1)')).toBe(lines('db.c.find({ a: 1 }) // x', '  .limit(1)'));
+    expect(fmt('db.c.find() // x\rdb.d.find()')).toBe('db.c.find() // x\ndb.d.find()');
+  });
+
+  it('refuses_what_the_console_reads_a_line_at_a_time', () => {
+    expect(refused('db.c.find().limit(1) / 2')).toEqual({ message: 'JavaScript may read this differently', offset: 21 });
+    expect(refused('db.c.find({a: "\\1"})')).toEqual({ message: 'Invalid escape sequence', offset: 15 });
+    expect(refused('db.c.find({a: `${x}`})')).toEqual({ message: 'Template literal substitutions (${…}) are not supported', offset: 15 });
+    expect(refused('db.c.find({a: 01})')).toEqual({ message: 'Invalid number', offset: 14 });
+  });
+
+  it('use_names_the_console_reads_raw', () => {
+    expect(fmt('use   2024-logs\nuse\t01_x')).toBe('use 2024-logs\nuse 01_x');
   });
 });

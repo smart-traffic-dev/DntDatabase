@@ -94,6 +94,10 @@ describe('buildMenus', () => {
     expect(format(tab(ids.legacy))).toMatchObject({ label: 'Format', hint: 'Ctrl+Shift+F', disabled: false });
     // Redis has no formatter.
     expect(format(tab(ids.analytics))).toMatchObject({ label: 'Format', disabled: true });
+    // A connection whose kind is not known yet: no formatter either (not Format SQL).
+    expect(format(tab('not-loaded-yet'))).toMatchObject({ label: 'Format', disabled: true });
+    // A tab without a connection is a SQL tab.
+    expect(format({ hasEditor: true, queryTabId: useQueryDocs.getState().newQuery(null, null) })).toMatchObject({ label: 'Format SQL', disabled: false });
     resetStores();
   });
 

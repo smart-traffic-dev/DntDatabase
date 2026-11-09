@@ -152,6 +152,26 @@ describe('formatMongoActive', () => {
     expect(editor.text()).toBe(lines('db.a.find( {x:1} )', formatted, 'db.b.find( {y:2} )'));
   });
 
+  it('a_selection_inside_a_comment_formats_nothing', () => {
+    const src = lines('db.a.find( )', '// old: db.c.find(); db.c.drop()', '/* example: {a :1} */', 'db.b.find( )');
+    for (const [from, to] of [
+      ['db.c.find();', 'db.c.drop()'],
+      ['example', '{a :1}'],
+    ]) {
+      const { editor, messages } = fakeEditor(src, [[src.indexOf(from!), src.indexOf(to!) + to!.length]]);
+      expect(formatMongoActive(editor)).toBe(false);
+      expect(editor.text()).toBe(src);
+      expect(messages).toEqual(['Nothing to format']);
+    }
+  });
+
+  it('a_selection_from_a_comment_into_a_statement_formats_the_statement_only', () => {
+    const src = lines('db.a.find() // keep; db.c.drop()', 'db.b.find({x :1})');
+    const { editor } = fakeEditor(src, [[src.indexOf('keep;'), src.length]]);
+    expect(formatMongoActive(editor)).toBe(true);
+    expect(editor.text()).toBe(lines('db.a.find() // keep; db.c.drop()', 'db.b.find({ x: 1 })'));
+  });
+
   it('formatted_text_is_left_alone', () => {
     const { editor } = fakeEditor(formatted);
     expect(formatMongoActive(editor)).toBe(true);

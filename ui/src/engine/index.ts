@@ -153,13 +153,9 @@ export const MONGO_EDITOR_WHEN = `editorLangId == ${MONGO_LANGUAGE}`;
 /** How a query editor formats its text (Ctrl+Shift+F): the SQL formatter, or the MongoDB console's (`formatMongo`). */
 export type EditorFormatter = 'sql' | 'mongoScript';
 
-/**
- * The formatter of a kind's query editor; none for Redis. `undefined` (a tab without a known
- * connection) is a SQL tab.
- */
-export function formatterOf(kind: DbKind | undefined): EditorFormatter | null {
+/** The formatter of a kind's query editor; none for Redis. */
+export function formatterOf(kind: DbKind): EditorFormatter | null {
   switch (kind) {
-    case undefined:
     case 'mysql':
     case 'postgres':
       return 'sql';

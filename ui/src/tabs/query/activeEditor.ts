@@ -34,8 +34,8 @@ export const EDIT_COMMANDS = {
   selectAll: 'editor.action.selectAll',
   find: 'actions.find',
   replace: 'editor.action.startFindReplaceAction',
-  // Actions registered by editorCommands.ts (triggered by id like Monaco's own).
-  formatSql: 'dnt.formatSql',
+  // Actions registered by editorCommands.ts (triggered by id like Monaco's own); the format
+  // actions' ids come from `formatAction` (engine).
   upperCase: 'dnt.toUpperCase',
   lowerCase: 'dnt.toLowerCase',
   duplicate: 'dnt.duplicate',

@@ -17,7 +17,7 @@ import { capsOfConnection } from '../../engine/useCaps';
 import { currentSchemaOf } from '../../query/completion/provider';
 import { queryDocTarget, type CompletionTarget } from '../../query/completion/monacoProvider';
 import { runFromEditor } from '../../store/runQuery';
-import { formatMongo, mongoStatementRange } from '../../query/mongo/format';
+import { formatMongo, formatMongoRange } from '../../query/mongo/format';
 import './editorLink.css';
 
 interface Pos {
@@ -130,9 +130,10 @@ export function formatActiveEditor(editor: CommandEditor, dialect?: FormatDialec
 }
 
 /**
- * Format in a MongoDB editor (Ctrl+Shift+F): the statements the selection touches if there is
- * one, else the whole script. One undo step. A script that does not lex, or whose brackets do
- * not pair up, stays untouched and a message says where. Returns whether the text is formatted.
+ * Format in a MongoDB editor (Ctrl+Shift+F): the whole statements the selection touches if
+ * there is one (never a part of a comment: a selection in comments only formats nothing),
+ * else the whole script. One undo step. A script that does not lex, or whose brackets do not
+ * pair up, stays untouched and a message says where. Returns whether the text is formatted.
  */
 export function formatMongoActive(editor: CommandEditor): boolean {
   const model = editor.getModel();
@@ -140,27 +141,29 @@ export function formatMongoActive(editor: CommandEditor): boolean {
   const full = model.getFullModelRange();
   const all = model.getValueInRange(full);
   const selection = editor.getSelection();
-  let range: Rng = full;
+  const at = (p: Pos) => model.getOffsetAt(p);
+  let result: { ok: true; from: number; to: number; text: string } | { ok: false; message: string; offset: number } | null;
   if (selection && !selection.isEmpty()) {
-    const at = (p: Pos) => model.getOffsetAt(p);
-    const sel = mongoStatementRange(
-      all,
-      at({ lineNumber: selection.startLineNumber, column: selection.startColumn }),
-      at({ lineNumber: selection.endLineNumber, column: selection.endColumn }),
-    );
-    const from = model.getPositionAt(sel.from);
-    const to = model.getPositionAt(sel.to);
-    range = { startLineNumber: from.lineNumber, startColumn: from.column, endLineNumber: to.lineNumber, endColumn: to.column };
+    const from = at({ lineNumber: selection.startLineNumber, column: selection.startColumn });
+    const to = at({ lineNumber: selection.endLineNumber, column: selection.endColumn });
+    result = formatMongoRange(all, from, to);
+  } else {
+    const r = formatMongo(all);
+    result = r.ok ? { ok: true, from: 0, to: all.length, text: r.text } : r;
   }
-  const text = model.getValueInRange(range);
-  const result = formatMongo(text);
+  if (!result) {
+    showEditorMessage(editor, 'Nothing to format');
+    return false;
+  }
   if (!result.ok) {
-    const start = model.getOffsetAt({ lineNumber: range.startLineNumber, column: range.startColumn });
-    const p = model.getPositionAt(start + result.offset);
+    const p = model.getPositionAt(result.offset);
     showEditorMessage(editor, `Cannot format: ${result.message} (line ${p.lineNumber}, column ${p.column})`);
     return false;
   }
-  if (result.text !== text) {
+  if (result.text !== all.slice(result.from, result.to)) {
+    const a = model.getPositionAt(result.from);
+    const b = model.getPositionAt(result.to);
+    const range: Rng = { startLineNumber: a.lineNumber, startColumn: a.column, endLineNumber: b.lineNumber, endColumn: b.column };
     editor.pushUndoStop();
     editor.executeEdits('dnt-format', [{ range, text: result.text }]);
     editor.pushUndoStop();

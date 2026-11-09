@@ -1257,6 +1257,51 @@ mod tests {
         );
     }
 
+    /// The commands of a script as the console runs them: each one parsed (all but its
+    /// text), or the parse error's message.
+    fn commands_of(text: &str) -> Vec<String> {
+        split(text)
+            .iter()
+            .map(|s| match MongoLanguage.parse(&s.text) {
+                Ok(p) => {
+                    let cmd = &p.payload.downcast_ref::<Payload>().expect("payload").cmd;
+                    format!(
+                        "{} {:?} {:?} unbounded={} {:?} {:?} {cmd:?}",
+                        p.name, p.class, p.targets, p.unbounded, p.drops, p.session_effect
+                    )
+                }
+                Err(e) => format!("refused: {}", e.message),
+            })
+            .collect()
+    }
+
+    /// The UI's formatter (`ui/src/query/mongo/format.ts`) only changes the layout: for each
+    /// of its [input, formatted] pairs (written by `ui/src/query/mongo/format.pairs.test.ts`,
+    /// which fails when they are stale), the console splits and parses the formatted text
+    /// into the commands of the input, refused ones included. A pair without a formatted
+    /// text is an input the formatter refuses.
+    #[test]
+    fn formatted_scripts_run_the_same_commands() {
+        let pairs: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/format_pairs.json"))
+                .expect("format_pairs.json");
+        assert!(pairs.len() >= 40, "{}", pairs.len());
+        let mut checked = 0;
+        for pair in &pairs {
+            let input = pair["input"].as_str().expect("input");
+            let Some(formatted) = pair["formatted"].as_str() else {
+                continue;
+            };
+            assert_eq!(
+                commands_of(formatted),
+                commands_of(input),
+                "{input:?}\nformatted as\n{formatted:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 30, "{checked}");
+    }
+
     #[test]
     fn split_never_runs_what_javascript_reads_as_text() {
         for text in [

@@ -1,0 +1,170 @@
+[
+  {
+    "input": "db.orders.find({status:\"paid\",total:{$gt:10}})",
+    "formatted": "db.orders.find({ status: \"paid\", total: { $gt: 10 } })"
+  },
+  {
+    "input": "db.orders.find({status:\"paid\",customer:\"alice@example.com\",total:{$gt:100,$lt:5000},createdAt:{$gte:ISODate(\"2024-01-01T00:00:00Z\")}})",
+    "formatted": "db.orders.find({\n  status: \"paid\",\n  customer: \"alice@example.com\",\n  total: { $gt: 100, $lt: 5000 },\n  createdAt: { $gte: ISODate(\"2024-01-01T00:00:00Z\") }\n})"
+  },
+  {
+    "input": "db.orders.find({status:\"paid\"},{_id:0,customer:1,total:1}).sort({total:-1,createdAt:-1}).limit(10)",
+    "formatted": "db.orders.find({ status: \"paid\" }, { _id: 0, customer: 1, total: 1 })\n  .sort({ total: -1, createdAt: -1 })\n  .limit(10)"
+  },
+  {
+    "input": "db.c.find({a:1})\n  .sort({b:-1})\n  .limit(10)",
+    "formatted": "db.c.find({ a: 1 }).sort({ b: -1 }).limit(10)"
+  },
+  {
+    "input": "db.getSiblingDB(\"reporting\").daily_totals.find({day:{$gte:\"2024-01-01\"}}).sort({day:1}).limit(100)",
+    "formatted": "db.getSiblingDB(\"reporting\")\n  .daily_totals.find({ day: { $gte: \"2024-01-01\" } })\n  .sort({ day: 1 })\n  .limit(100)"
+  },
+  {
+    "input": "db.users.updateOne({_id:ObjectId(\"64b7f0c2a1b2c3d4e5f60718\")},{$set:{name:\"Alice\",email:\"alice@example.com\"}})",
+    "formatted": "db.users.updateOne(\n  { _id: ObjectId(\"64b7f0c2a1b2c3d4e5f60718\") },\n  { $set: { name: \"Alice\", email: \"alice@example.com\" } }\n)"
+  },
+  {
+    "input": "db.orders.aggregate([{$match:{status:\"paid\"}},{$group:{_id:\"$customer\",total:{$sum:\"$total\"}}},{$sort:{total:-1}},{$limit:5}])",
+    "formatted": "db.orders.aggregate([\n  { $match: { status: \"paid\" } },\n  { $group: { _id: \"$customer\", total: { $sum: \"$total\" } } },\n  { $sort: { total: -1 } },\n  { $limit: 5 }\n])"
+  },
+  {
+    "input": "db.orders.aggregate([{$match:{status:\"paid\"}},{$group:{_id:\"$customer\",total:{$sum:\"$total\"}}}]).explain()",
+    "formatted": "db.orders.aggregate([\n  { $match: { status: \"paid\" } },\n  { $group: { _id: \"$customer\", total: { $sum: \"$total\" } } }\n])\n  .explain()"
+  },
+  {
+    "input": "db.c.insertOne({matrix:[[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]],e:[],o:{}})",
+    "formatted": "db.c.insertOne({\n  matrix: [\n    [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1],\n    [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]\n  ],\n  e: [],\n  o: {}\n})"
+  },
+  {
+    "input": "db.c.insertMany([{a:1,},{b:[1,2,],}])",
+    "formatted": "db.c.insertMany([{ a: 1 }, { b: [1, 2] }])"
+  },
+  {
+    "input": "db.c.find({a:'x',\"b c\":\"y\\\"z\",r:/^a\\/b[/]/i,n:1.5e3,h:0x1F,f:.5,neg:-1,t:`a\n  b`})",
+    "formatted": "db.c.find({\n  a: 'x',\n  \"b c\": \"y\\\"z\",\n  r: /^a\\/b[/]/i,\n  n: 1.5e3,\n  h: 0x1F,\n  f: .5,\n  neg: -1,\n  t: `a\n  b`\n})"
+  },
+  {
+    "input": "db.café.find({名前:\"東京\"})",
+    "formatted": "db.café.find({ 名前: \"東京\" })"
+  },
+  {
+    "input": "use shop\ndb.a.find();db.b.find( ) ;  db.c.find()",
+    "formatted": "use shop\ndb.a.find();\ndb.b.find();\ndb.c.find()"
+  },
+  {
+    "input": "use   2024_logs\nshow    dbs\nuse 01-x",
+    "formatted": "use 2024_logs\nshow dbs\nuse 01-x"
+  },
+  {
+    "input": "db.a.find()\n\n\n\ndb.b.find()\ndb.c.find()",
+    "formatted": "db.a.find()\n\ndb.b.find()\ndb.c.find()"
+  },
+  {
+    "input": "\n\n  db.a.find()  ;;\n\n",
+    "formatted": "db.a.find();\n"
+  },
+  {
+    "input": "db.a.find({x:1})\r\n\r\n\r\ndb.b.find()\r\n",
+    "formatted": "db.a.find({ x: 1 })\r\n\r\ndb.b.find()\r\n"
+  },
+  {
+    "input": "db.a.find()\n  .limit(1)\ndb.b.find({\na: 1\n})\nshow dbs",
+    "formatted": "db.a.find().limit(1)\ndb.b.find({ a: 1 })\nshow dbs"
+  },
+  {
+    "input": "// the paid ones\ndb.orders.find({status:\"paid\"})   // recent\n\n/* block */ db.a.find()\n// last",
+    "formatted": "// the paid ones\ndb.orders.find({ status: \"paid\" }) // recent\n\n/* block */ db.a.find()\n// last"
+  },
+  {
+    "input": "db.c.find({\n// only paid\nstatus:\"paid\", // trailing\n  total:{$gt:1} /* big */\n})",
+    "formatted": "db.c.find({\n  // only paid\n  status: \"paid\", // trailing\n  total: { $gt: 1 } /* big */\n})"
+  },
+  {
+    "input": "db.c.find({a:1, // x\n})\ndb.c.find({ // y\n})\ndb.c.find({a: // z\n1})",
+    "formatted": "db.c.find({\n  a: 1 // x\n})\ndb.c.find({ // y\n})\ndb.c.find({\n  a: 1 // z\n})"
+  },
+  {
+    "input": "db.c.find({\n  a: 1\n})\n  .sort({a: -1})\n\n  // keep going\n  .limit(5)",
+    "formatted": "db.c.find({ a: 1 })\n  .sort({ a: -1 })\n  // keep going\n  .limit(5)"
+  },
+  {
+    "input": "db.a.find(); // first\ndb.b.find() /* second */;",
+    "formatted": "db.a.find(); // first\ndb.b.find() /* second */;"
+  },
+  {
+    "input": "db.c.find() /* x */ .limit(1)\ndb.c.find()\n/* y */ .limit(1)\ndb.c // w\n.find()",
+    "formatted": "db.c.find() /* x */ .limit(1)\ndb.c.find() /* y */ .limit(1)\ndb.c.find() // w"
+  },
+  {
+    "input": "db.c.find({a:1}\n// x\n, {b: 1})",
+    "formatted": "db.c.find(\n  { a: 1 },\n  // x\n  { b: 1 }\n)"
+  },
+  {
+    "input": "db.c.find({a: 1\n// one\n, // two\n})",
+    "formatted": "db.c.find({\n  a: 1\n  // one\n  // two\n})"
+  },
+  {
+    "input": "db.c.find(/* c */)\ndb.c.find([/* a */ 1, 2 /* b */])",
+    "formatted": "db.c.find(/* c */)\ndb.c.find([/* a */ 1, 2 /* b */])"
+  },
+  {
+    "input": "db.a.find()\n// old: db.c.find(); db.c.drop()\ndb.b.find()",
+    "formatted": "db.a.find()\n// old: db.c.find(); db.c.drop()\ndb.b.find()"
+  },
+  {
+    "input": "db.a.find() // keep; db.c.drop()\ndb.b.find({x :1})",
+    "formatted": "db.a.find() // keep; db.c.drop()\ndb.b.find({ x: 1 })"
+  },
+  {
+    "input": "db.a.find( /* example: {a :1} */ )",
+    "formatted": "db.a.find(/* example: {a :1} */)"
+  },
+  {
+    "input": "db.c // x  .find({a: 1})\n.limit(1)",
+    "formatted": "db.c.find({ a: 1 }) // x\n  .limit(1)"
+  },
+  {
+    "input": "db.c.find({a: 1}) // x\rdb.c.drop()",
+    "formatted": "db.c.find({ a: 1 }) // x\ndb.c.drop()"
+  },
+  {
+    "input": "db.c.find({a: 1}) // x db.c.drop()",
+    "formatted": "db.c.find({ a: 1 }) db.c.drop() // x"
+  },
+  {
+    "input": "db.c.find().forEach(d => /(a,b)/.test(d.name))",
+    "formatted": "db.c.find().forEach(d => /(a,b)/.test(d.name))"
+  },
+  {
+    "input": "x = 1 - /a(db.c.deleteMany({ aaaaaaaaaaaaaaaaaaaaaa: 1, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 2 }))/",
+    "formatted": "x = 1 - /a(db.c.deleteMany({ aaaaaaaaaaaaaaaaaaaaaa: 1, bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb: 2 }))/"
+  },
+  {
+    "input": "db.c.find({a: x/2, b: x / 2, c: [1]/2, d: /x y/, e: [/a,b/i], f: {$regex: /(a|b) c/}})",
+    "formatted": "db.c.find({\n  a: x/2,\n  b: x / 2,\n  c: [1]/2,\n  d: /x y/,\n  e: [/a,b/i],\n  f: { $regex: /(a|b) c/ }\n})"
+  },
+  {
+    "input": "db.c.find({a: 1 + /x(/, b: 2})",
+    "formatted": "db.c.find({ a: 1 + /x(/, b: 2 })"
+  },
+  {
+    "input": "db.c.find().limit(1) / 2",
+    "formatted": null
+  },
+  {
+    "input": "db.c.find({a: \"\\1\"})",
+    "formatted": null
+  },
+  {
+    "input": "db.c.find({a:1)",
+    "formatted": null
+  },
+  {
+    "input": "db.c.find({a:1;})",
+    "formatted": null
+  },
+  {
+    "input": "x = 1\ndb.c.find({a: 01})",
+    "formatted": null
+  }
+]

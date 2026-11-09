@@ -6,7 +6,7 @@ import { explainQuery, runFromEditor, stopQuery } from '../store/runQuery';
 import { useDialogs } from '../store/dialogs';
 import { useConnections } from '../store/connections';
 import { useLayout } from '../store/layout';
-import { useQueryDocs } from '../store/queryTabs';
+import { docKindOf, useQueryDocs } from '../store/queryTabs';
 import type { LayoutPreset } from '../store/layoutTree';
 import { MAX_GROUPS, useTabs, type EditorLayout, type Tab } from '../store/tabs';
 import { EDIT_COMMANDS, runEditorCommand } from '../tabs/query/activeEditor';
@@ -110,8 +110,10 @@ export function buildMenus(s: MenuState): AppMenu[] {
   // No active query tab, or no connection yet: nothing is known to be missing.
   const connectionId = q ? useQueryDocs.getState().docs.get(q)?.connectionId : null;
   const explainOn = capsOfConnection(connectionId)?.explain ?? true;
-  // Format SQL, Format (MongoDB) or nothing (Redis), as the active tab's editor has.
-  const formatter = formatterOf(connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : undefined);
+  // Format SQL, Format (MongoDB) or nothing (Redis, or a connection not known yet), as the
+  // active tab's editor has; a tab without a connection is a SQL tab.
+  const kind = connectionId ? useConnections.getState().summaries.get(connectionId)?.config.kind : docKindOf(null);
+  const formatter = kind ? formatterOf(kind) : null;
   const edit = (label: string, hint: string | undefined, id: string): MenuAction => ({
     label,
     hint,

@@ -178,6 +178,14 @@ describe('QueryToolbar', () => {
     setActiveEditor(id, null);
   });
 
+  it('a_tab_whose_connection_kind_is_not_known_yet_has_no_format', async () => {
+    const id = useQueryDocs.getState().newQuery('not-loaded-yet', 'shop');
+    render(<QueryToolbar doc={useQueryDocs.getState().docs.get(id)!} />);
+    await userEvent.setup().click(screen.getByTestId('query-more'));
+    expect(screen.getByTestId('query-add-favorite')).toBeInTheDocument();
+    expect(screen.queryByTestId('query-format')).toBeNull();
+  });
+
   it('a_mongodb_tab_has_format_in_more_and_it_runs_the_console_formatter', async () => {
     useConnections.getState().setStored([], [config(ids.prod, 'docs', { kind: 'mongo', port: 27017 })]);
     const id = useQueryDocs.getState().newQuery(ids.prod, 'shop');

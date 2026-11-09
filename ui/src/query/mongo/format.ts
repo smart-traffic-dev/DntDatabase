@@ -1,14 +1,17 @@
 // Formats a MongoDB console script (Ctrl+Shift+F in a MongoDB query tab). It only changes
 // whitespace (and drops trailing commas and empty statements): every token, comment and
-// statement of the script stays as written, in order. The statements are those the console
-// runs (`split` in `crates/driver-mongo/src/shell/parse.rs`): a statement ends at `;`, or at
-// the end of a line once its brackets are closed unless the next line starts with `.`. So
-// a line break is only ever added inside brackets or before a `.`.
+// statement of the script stays as written, in order. The script is read as the console
+// reads it (`./lexer.ts`, a port of the console's lexer; text it would read another way is
+// refused). The statements are those the console runs (`split` in
+// `crates/driver-mongo/src/shell/parse.rs`): a statement ends at `;`, or at the end of a line
+// once its brackets are closed unless the next token starts with `.`. So a line break is
+// only ever added inside brackets or before a `.`. `format.pairs.test.ts` writes examples
+// that the console's own test splits and parses before and after formatting.
 //
 // Layout: a document, array or argument list goes on one line when it fits the print width,
 // else one entry per line; a chain `db.c.find(…).sort(…).limit(…)` that does not fit puts
 // each `.modifier(…)` after its first call on a line of its own.
-import { lexMongoScript, type Comment, type Token } from '../completion/mongo/context';
+import { lexConsole, type ConsoleComment as Comment, type ConsoleToken as Token } from './lexer';
 
 export interface FormatMongoOptions {
   /** Columns a line may take, its indent included. Default 80. */
@@ -263,7 +266,7 @@ function statements(src: string, tokens: Token[]): Statement[] {
     else if (t.kind === 'punct' && CLOSERS.has(t.text)) depth = Math.max(0, depth - 1);
     if (depth > 0) continue;
     const next = tokens[i + 1];
-    const ends = !next || (src.slice(t.end, next.start).includes('\n') && !isPunct(next, '.'));
+    const ends = !next || (/[\n\r]/.test(src.slice(t.end, next.start)) && !next.text.startsWith('.'));
     if (ends) {
       out.push({ from: first, to: i + 1, semi: null });
       first = -1;
@@ -304,10 +307,19 @@ function buildEntries(src: string, tokens: Token[], comments: Comment[]): Entry[
   const toks = new Map<Token, Tok>(kept.map((t) => [t, { tok: t, lead: [], trail: [] }]));
   // Comments with no token after them, on lines of their own.
   const endComments: Comment[] = [];
+  // A comment is on the line of the token before it when no line break comes between them
+  // outside other comments (after a `/* … */` over lines, it is where that comment ends).
+  const parts: string[] = [];
+  let at = 0;
+  for (const c of comments) {
+    parts.push(src.slice(at, c.start), ' '.repeat(c.end - c.start));
+    at = c.end;
+  }
+  const code = parts.join('') + src.slice(at);
   for (const c of comments) {
     const k = tokenAt(kept, c.end);
     const prev = kept[k - 1];
-    if (prev && !src.slice(prev.end, c.start).includes('\n')) toks.get(prev)!.trail.push(c);
+    if (prev && !code.slice(prev.end, c.start).includes('\n')) toks.get(prev)!.trail.push(c);
     else if (k < kept.length) toks.get(kept[k]!)!.lead.push({ c, newlineAfter: false });
     else endComments.push(c);
   }
@@ -389,33 +401,34 @@ function parseTerms(tokens: Token[], from: number, to: number, toks: Map<Token, 
 // Terms to layout.
 // ---------------------------------------------------------------------------------------
 
-/** Whether `a` written right before `b` would lex as other tokens (`1` `.` → `1.`). */
-function fuses(a: Token, b: Token): boolean {
-  const { tokens, comments } = lexMongoScript(a.text + b.text);
-  return comments.length > 0 || tokens.length !== 2 || tokens[0]!.text !== a.text;
-}
-
 const isClose = (t: Token) => t.kind === 'punct' && CLOSERS.has(t.text);
 /** What may come right before a `.` member, a call or an index. */
 const isOperand = (t: Token) => t.kind === 'ident' || t.kind === 'string' || t.kind === 'regex' || t.kind === 'number' || isClose(t);
 
-/** Whether a space goes between the tokens `a` and `b` (comments aside). */
+/**
+ * Whether a space goes between the tokens `a` and `b` (comments aside). Only these pairs lose
+ * the space they had, none of which the console reads another way once joined; every other
+ * pair keeps whether it had one (`x/2`, `a + +/x/`, `1 .toString()`).
+ */
 function spaced(a: Token, b: Token): boolean {
-  let space: boolean;
-  if (isPunct(b, '.') && isOperand(a)) space = false;
-  else if (isPunct(a, '.') && b.kind === 'ident') space = false;
-  else if (isPunct(b, ':') || isPunct(b, ',') || isPunct(b, ';')) space = false;
-  else if (isPunct(a, ':') || isPunct(a, ',')) space = true;
-  else if ((isPunct(b, '(') || isPunct(b, '[')) && (a.kind === 'ident' || isClose(a))) space = false;
-  else space = a.end < b.start;
-  return space || fuses(a, b);
+  if (isPunct(b, '.') && a.kind !== 'number' && isOperand(a)) return false;
+  if (isPunct(a, '.') && b.kind === 'ident') return false;
+  if (isPunct(b, ':') || isPunct(b, ',') || isPunct(b, ';')) return false;
+  if (isPunct(a, ':') || isPunct(a, ',')) return true;
+  if ((isPunct(b, '(') || isPunct(b, '[')) && (a.kind === 'ident' || isClose(a))) return false;
+  return a.end < b.start;
 }
 
 const hasInlineTrail = (t: Tok) => t.trail.some((c) => !c.line);
 
-/** The comments on the line after a token: `/* … *\/` in place, `//` at the line end. */
-function trailDoc(t: Tok): Doc[] {
-  return t.trail.map((c) => (c.line ? [{ k: 'suffix', s: ' ' + c.text } as Doc, breakParent] : ' ' + c.text));
+/**
+ * The comments on the line after a token: `/* … *\/` in place, `//` at the line end.
+ * `tight`: no space before a first `/* … *\/` (after `(` or `[`).
+ */
+function trailDoc(t: Tok, tight = false): Doc[] {
+  return t.trail.map((c, i) =>
+    c.line ? [{ k: 'suffix', s: ' ' + c.text } as Doc, breakParent] : (tight && i === 0 ? '' : ' ') + c.text,
+  );
 }
 
 /** The comments on lines before a token; `atLineStart`: the token begins an entry, so a line is already open. */
@@ -436,18 +449,32 @@ const hasGroup = (item: Item) => item.terms.some((t) => t.t === 'group');
 
 function groupDoc(g: Extract<Term, { t: 'group' }>): Doc {
   const kind = g.open.tok.text;
-  // A trailing comma goes (not after a hole, `[1, ,]`): its comments stay, after the last
-  // entry's last token, or before the closing bracket.
   const items = g.items.map((it) => ({ ...it }));
   const close: Tok = { ...g.close, lead: [...g.close.lead] };
+  // A `,` that starts its line (after comments on lines of their own) goes back right after
+  // the value; its comments go, in order, before what follows it.
+  items.forEach((it, idx) => {
+    const comma = it.comma;
+    if (!comma || comma.lead.length === 0) return;
+    const moved: Leading[] = [...comma.lead, ...comma.trail.map((c) => ({ c, newlineAfter: c.line }))];
+    const next = items[idx + 1];
+    const nextFirst = next ? firstOf(next.terms) : null;
+    if (next && nextFirst) next.terms = replaceFirst(next.terms, { ...nextFirst, lead: [...moved, ...nextFirst.lead] });
+    else if (!next) close.lead = [...moved, ...close.lead];
+    // Before a hole (`[1\n// x\n, , 2]`) the `,` keeps its comments.
+    else return;
+    it.comma = { ...comma, lead: [], trail: [] };
+  });
+  // A trailing comma goes (not after a hole, `[1, ,]`): the comments on its line stay after
+  // the last entry's last token.
   const last = items.at(-1);
   const lastTok = last ? lastOf(last.terms) : null;
   if (last?.comma && lastTok) {
     last.terms = replaceLast(last.terms, { ...lastTok, trail: [...lastTok.trail, ...last.comma.trail] });
-    close.lead = [...last.comma.lead, ...close.lead];
     last.comma = null;
   }
-  const openDoc = tokDoc(g.open, false);
+  // `(/* c */ 1)`, `[/* c */]`, but `{ /* c */ }`.
+  const openDoc = [...leadDoc(g.open, false), g.open.tok.text, ...trailDoc(g.open, kind !== '{')];
   const closeDoc = g.close.tok.text;
   if (items.length === 0 && close.lead.length === 0 && g.open.trail.length === 0) return [openDoc, closeDoc];
 
@@ -460,13 +487,18 @@ function groupDoc(g: Extract<Term, { t: 'group' }>): Doc {
     }
   });
   const closeLead: Doc[] = close.lead.flatMap((l) => [hardline, l.c.text]);
-  const first = items[0] ? firstOf(items[0].terms) : null;
-  // A `/* … */` comment after the opening bracket keeps a space after it, flat too.
-  const inlineOpen = hasInlineTrail(g.open) || (first?.lead.some((l) => !l.newlineAfter) ?? false);
-  // `{ a: 1 }`, `[1, 2]`, `(a, b)`.
-  const pad = kind === '{' || inlineOpen ? line : softline;
+  // `{ a: 1 }`, `[1, 2]`, `(a, b)`; a `/* … */` comment after `(` or `[` keeps a space after
+  // it, flat too.
+  const pad = kind === '{' || hasInlineTrail(g.open) ? line : softline;
   const padClose = kind === '{' ? line : softline;
   return group([openDoc, indent([...(items.length ? [pad, ...entries] : []), ...closeLead]), padClose, closeDoc]);
+}
+
+function replaceFirst(terms: Term[], tok: Tok): Term[] {
+  const out = [...terms];
+  const t = out[0]!;
+  out[0] = t.t === 'tok' ? { t: 'tok', tok } : { ...t, open: tok };
+  return out;
 }
 
 function replaceLast(terms: Term[], tok: Tok): Term[] {
@@ -594,7 +626,7 @@ function normalize(text: string): { src: string; original(offset: number): numbe
 export function formatMongo(text: string, opts?: FormatMongoOptions): FormatMongoResult {
   if (text.trim() === '') return { ok: true, text };
   const { src, original } = normalize(text);
-  const { tokens, comments, problem } = lexMongoScript(src);
+  const { tokens, comments, problem } = lexConsole(src);
   if (problem) return { ok: false, message: problem.message, offset: original(problem.offset) };
   try {
     checkBrackets(tokens);
@@ -625,25 +657,45 @@ export function formatMongo(text: string, opts?: FormatMongoOptions): FormatMong
   return { ok: true, text: /\n[ \t]*$/.test(src) ? out + eol : out };
 }
 
+export type FormatMongoRangeResult = { ok: true; from: number; to: number; text: string } | { ok: false; message: string; offset: number };
+
 /**
- * The selection `[from, to)` of `text` grown to the whole statements it touches (the console's
- * statements, with their `;`): what Format formats when there is a selection. A selection
- * touching no statement stays as it is. Where the script stops lexing, the statement there
- * runs to the end of the text (formatting it reports why it cannot).
+ * Format with a selection: the whole statements the selection `[from, to)` of `text` touches
+ * (the console's statements, with their `;`), formatted. The result replaces exactly
+ * `[from, to)` of the result, from the first statement's first token to the last one's last:
+ * never a part of a comment, so commented-out code stays a comment. Null when the selection
+ * touches no statement (it lies in comments or blank space). Refused where the script stops
+ * lexing inside these statements, and when they would read another way without the text
+ * before them (a leading `/`).
  */
-export function mongoStatementRange(text: string, from: number, to: number): { from: number; to: number } {
-  const { tokens, problem } = lexMongoScript(text);
+export function formatMongoRange(text: string, from: number, to: number, opts?: FormatMongoOptions): FormatMongoRangeResult | null {
+  const { tokens, comments, problem } = lexConsole(text);
   // The text that does not lex, as one token of its statement.
   if (problem) tokens.splice(tokenAt(tokens, problem.offset), Infinity, { kind: 'punct', text: '', start: problem.offset, end: text.length });
   let lo = Infinity;
   let hi = -Infinity;
+  let bad = false;
   for (const s of statements(text, tokens)) {
     const start = tokens[s.from]!.start;
-    const end = s.to === tokens.length && problem ? text.length : tokens[s.semi ?? s.to - 1]!.end;
+    const end = tokens[s.semi ?? s.to - 1]!.end;
     const touches = from === to ? start <= from && from <= end : start < to && end > from;
     if (!touches) continue;
     lo = Math.min(lo, start);
     hi = Math.max(hi, end);
+    if (problem && s.to === tokens.length) bad = true;
   }
-  return lo <= hi ? { from: Math.min(from, lo), to: Math.max(to, hi) } : { from, to };
+  if (lo > hi) return null;
+  if (problem && bad) return { ok: false, message: problem.message, offset: problem.offset };
+  // On their own, the statements must read as they do in the script.
+  const own = lexConsole(text.slice(lo, hi));
+  const inScript = tokens.filter((t) => t.start >= lo && t.end <= hi);
+  const ownComments = comments.filter((c) => c.start >= lo && c.end <= hi);
+  const same =
+    !own.problem &&
+    own.tokens.length === inScript.length &&
+    own.tokens.every((t, i) => t.start + lo === inScript[i]!.start && t.end + lo === inScript[i]!.end) &&
+    own.comments.length === ownComments.length;
+  if (!same) return { ok: false, message: 'This selection reads differently without the text before it', offset: lo };
+  const r = formatMongo(text.slice(lo, hi), opts);
+  return r.ok ? { ok: true, from: lo, to: hi, text: r.text } : { ok: false, message: r.message, offset: lo + r.offset };
 }

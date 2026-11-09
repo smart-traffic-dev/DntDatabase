@@ -681,9 +681,10 @@ function QueryToolbarView({ doc }: { doc: ToolbarDoc }) {
   const caps = useCaps(doc.connectionId);
   const explainOn = caps?.explain ?? true;
   const txOn = caps ? caps.transactions && caps.family === 'sql' : true;
-  // Format SQL / Format (MongoDB): a tab without a (known) connection is a SQL tab.
-  const kind = useConnections((s) => (doc.connectionId ? s.summaries.get(doc.connectionId)?.config.kind : undefined));
-  const formatter = formatterOf(kind);
+  // Format SQL / Format (MongoDB). A tab without a connection is a SQL tab; one whose
+  // connection is not known yet has no Format (as Redis), not a Format SQL it may not have.
+  const kind = useConnections((s) => (doc.connectionId ? s.summaries.get(doc.connectionId)?.config.kind : docKindOf(null)));
+  const formatter = kind ? formatterOf(kind) : null;
   const format = formatter ? formatAction(formatter) : null;
 
   const moreItems = (): MenuEntry[] => [

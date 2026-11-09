@@ -62,8 +62,6 @@ describe('engine', () => {
 
   it('formatter_per_kind_sql_and_mongo_not_redis', () => {
     expect(KINDS.map(formatterOf)).toEqual(['sql', 'sql', 'mongoScript', null]);
-    // A tab without a (known) connection is a SQL tab.
-    expect(formatterOf(undefined)).toBe('sql');
     expect(formatAction('sql')).toEqual({ id: 'dnt.formatSql', label: 'Format SQL', when: 'editorLangId == mysql || editorLangId == pgsql' });
     expect(formatAction('mongoScript')).toEqual({ id: 'dnt.formatMongo', label: 'Format', when: 'editorLangId == mongo' });
   });
