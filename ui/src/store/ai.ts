@@ -1,9 +1,7 @@
 import { create } from 'zustand';
 import { commands, type AiConnectionChoice, type AiSettings, type AiTrigger, type ConnectionConfig } from '../bindings';
+import { hasAiSuggestions } from '../engine';
 import { useConnections } from './connections';
-
-/** Engines whose query tabs get AI suggestions (Mongo / Redis wait for R4b). */
-const AI_KINDS: readonly string[] = ['mysql', 'postgres'];
 
 /**
  * Whether AI is on for connection `cfg` once the user agreed: its own choice, else on unless it
@@ -18,11 +16,14 @@ export function aiOnByDefault(envTag: ConnectionConfig['env_tag']): boolean {
   return envTag !== 'production';
 }
 
-/** AI suggestions may be asked for in a query tab of connection `connId` (current state). */
+/**
+ * AI suggestions may be asked for in a query tab of connection `connId` (current state): its kind
+ * has them (SQL, MongoDB; not Redis), the user agreed, and AI is on for it.
+ */
 export function aiAllowed(connId: string): boolean {
   const ai = useAi.getState();
   const cfg = useConnections.getState().summaries.get(connId)?.config;
-  return ai.consented && !!cfg && AI_KINDS.includes(cfg.kind) && aiOnFor(ai.choices, cfg);
+  return ai.consented && !!cfg && hasAiSuggestions(cfg.kind) && aiOnFor(ai.choices, cfg);
 }
 
 /** Reactive {@link aiAllowed}, for components. */
@@ -30,7 +31,7 @@ export function useAiOn(connId: string): boolean {
   const consented = useAi((s) => s.consented);
   const choices = useAi((s) => s.choices);
   const cfg = useConnections((s) => s.summaries.get(connId)?.config);
-  return consented && !!cfg && AI_KINDS.includes(cfg.kind) && aiOnFor(choices, cfg);
+  return consented && !!cfg && hasAiSuggestions(cfg.kind) && aiOnFor(choices, cfg);
 }
 
 /**

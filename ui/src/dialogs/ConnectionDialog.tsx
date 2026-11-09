@@ -38,7 +38,7 @@ import { HostKeyDialog } from './HostKeyDialog';
 import { Modal } from './Modal';
 import { PasswordInput } from './PasswordInput';
 import { ConfirmDialog } from './SimpleDialogs';
-import { assertNever, engineLabel, familyOf, isKind, sqlEngine } from '../engine';
+import { assertNever, engineLabel, familyOf, hasAiSuggestions, isKind, sqlEngine } from '../engine';
 
 /**
  * One page (single-page redesign): name, engine, server and environment always show; the
@@ -1168,7 +1168,7 @@ export function ConnectionDialog({ mode, initial, hasDbPassword = false, hasSshS
             <LockIcon />
             <span>Read-only</span>
           </label>
-          {aiReady && !command && (
+          {aiReady && hasAiSuggestions(form.engine) && (
             <label className={`chip-opt conn-ai${aiOn ? ' on' : ''}`} title={`AI suggestions in query tabs, from ${aiHost ?? ''}`}>
               <input
                 type="checkbox"

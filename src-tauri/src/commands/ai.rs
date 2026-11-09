@@ -4,19 +4,24 @@
 //!
 //! The API key reaches the backend in `ai_key_set` and nothing ever sends it back.
 
+use super::browse::{list_objects_impl, table_detail_impl};
 use super::{blocking, guard};
 use crate::ai::{
     load_config, origin_of, save_config, settings_view, to_db_error, validate_config, AiConfig,
     AiSettings, AiTrigger,
 };
 use crate::state::AppState;
-use dnt_ai::post::{clean, judge_probe, PostCtx, ProbeVerdict, PROBE_PROMPT, PROBE_SUFFIX};
-use dnt_ai::prompt::{build, PromptInput, TableBrief};
-use dnt_ai::{AiError, FimClient, FimRequest};
+use dnt_ai::post::{
+    clean, judge_probe, Language, PostCtx, ProbeVerdict, PROBE_PROMPT, PROBE_SUFFIX,
+};
+use dnt_ai::prompt::{build, FimPrompt, PromptInput, TableBrief};
+use dnt_ai::{mongo_draft, AiError, CollectionBrief, FimClient, FimRequest, MongoDraft};
+use dnt_core::command::CommandLanguage;
 use dnt_core::config::{ConnectionConfig, EnvTag};
 use dnt_core::error::{AppError, DbError};
+use dnt_core::meta::{ObjectKind, ObjectRef, Scope};
 use dnt_core::secret::AppSecret;
-use dnt_core::server::{EngineFamily, ServerVariant};
+use dnt_core::server::{DbKind, ServerVariant};
 use dnt_core::sql::Dialect;
 use dnt_store::ai::AiScope;
 use secrecy::SecretString;
@@ -139,7 +144,7 @@ pub async fn ai_test_impl(state: &AppState) -> Result<AiTestResult, DbError> {
     })?;
     state.ai.note_success();
     let ctx = PostCtx {
-        dialect: Dialect::Postgres,
+        language: Language::Sql(Dialect::Postgres),
         statement_head: PROBE_PROMPT,
         prefix_tail: PROBE_PROMPT,
         suffix: PROBE_SUFFIX,
@@ -288,6 +293,122 @@ fn current_schema(tables: &[TableBrief]) -> Option<String> {
     )
 }
 
+/// The language a prompt is written in, and its suggestion read in.
+enum PromptLanguage {
+    Sql(Dialect),
+    /// The MongoDB console, from the registered driver.
+    Mongo(Arc<dyn CommandLanguage>),
+}
+
+/// The SQL prompt: the schema cache as completion uses it as the header (no tables when it
+/// cannot be had). `None` when the cursor is in a secret.
+async fn sql_prompt(
+    state: &AppState,
+    req: &AiCompleteRequest,
+    dialect: Dialect,
+) -> Option<FimPrompt> {
+    let conn_id = req.conn_id;
+    let version = state.sessions.runtime_opt(conn_id).map(|rt| {
+        let info = rt.server_info();
+        let (a, b, c) = info.version;
+        format!("{} {a}.{b}.{c}", server_name(info.variant))
+    });
+    let tables: Vec<TableBrief> = match req.database.as_deref() {
+        Some(db) => match state.sessions.schema_cache_for(conn_id, db).await {
+            Ok(cache) => cache
+                .tables
+                .into_iter()
+                .map(|t| TableBrief {
+                    schema: t.schema,
+                    name: t.name,
+                    columns: t.columns,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "AI completion without the schema cache");
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    let schema = req.schema.clone().or_else(|| {
+        matches!(dialect, Dialect::Postgres)
+            .then(|| current_schema(&tables))
+            .flatten()
+    });
+    build(&PromptInput {
+        dialect,
+        server_version: version.as_deref(),
+        database: req.database.as_deref(),
+        schema: schema.as_deref(),
+        text: &req.text,
+        cursor_utf16: req.cursor,
+        tables: &tables,
+    })
+    .ok()
+}
+
+/// Collections whose fields are sampled for one prompt: those the statement names first.
+const MONGO_SAMPLED_MAX: usize = 3;
+
+/// The MongoDB console prompt: the database's collections as the header, with the sampled
+/// fields of those the statement names. `None` when the text holds a secret.
+async fn mongo_prompt(
+    state: &AppState,
+    req: &AiCompleteRequest,
+    language: &dyn CommandLanguage,
+) -> Option<FimPrompt> {
+    let draft = mongo_draft(language, &req.text, req.cursor).ok()?;
+    let collections = match req.database.as_deref() {
+        Some(db) => mongo_collections(state, req.conn_id, db, &draft).await,
+        None => Vec::new(),
+    };
+    Some(draft.build(req.database.as_deref(), &collections))
+}
+
+/// The collections and views of `db` as the tree lists them (system ones hidden, through
+/// the same cache), with the sampled top-level fields of the ones `draft`'s statement
+/// names. What cannot be had (the connection is not open, a sample fails) is left out.
+async fn mongo_collections(
+    state: &AppState,
+    id: Uuid,
+    db: &str,
+    draft: &MongoDraft<'_>,
+) -> Vec<CollectionBrief> {
+    let scope = Scope {
+        database: db.to_string(),
+        schema: None,
+    };
+    let mut objects: Vec<(String, ObjectKind)> = Vec::new();
+    for kind in [ObjectKind::Collection, ObjectKind::View] {
+        match list_objects_impl(state, id, scope.clone(), kind, false).await {
+            Ok(list) => objects.extend(list.into_iter().map(|o| (o.name, kind))),
+            Err(e) => tracing::debug!(error = %e, "AI completion without the MongoDB collections"),
+        }
+    }
+    let names: Vec<&str> = objects.iter().map(|(name, _)| name.as_str()).collect();
+    let referenced = draft.referenced(&names);
+    let mut fields: Vec<Vec<String>> = vec![Vec::new(); objects.len()];
+    for k in referenced.into_iter().take(MONGO_SAMPLED_MAX) {
+        let (name, kind) = &objects[k];
+        let obj = ObjectRef {
+            database: db.to_string(),
+            schema: None,
+            name: name.clone(),
+            kind: *kind,
+        };
+        match table_detail_impl(state, id, obj).await {
+            Ok(detail) => fields[k] = detail.columns.into_iter().map(|c| c.name).collect(),
+            Err(e) => tracing::debug!(error = %e, "AI completion without a collection's fields"),
+        }
+    }
+    objects
+        .into_iter()
+        .zip(fields)
+        .map(|((name, _), fields)| CollectionBrief { name, fields })
+        .collect()
+}
+
 pub async fn ai_complete_impl(
     state: &AppState,
     req: AiCompleteRequest,
@@ -312,52 +433,24 @@ pub async fn ai_complete_impl(
     if let Some(message) = state.ai.paused() {
         return Ok(AiCompletion::Paused { message });
     }
-    let dialect = match kind.family() {
-        EngineFamily::Sql => Dialect::for_kind(kind.require_sql()?),
-        // Command languages come with R4b.
-        EngineFamily::Command => return Ok(AiCompletion::Empty),
-    };
-
-    let version = state.sessions.runtime_opt(conn_id).map(|rt| {
-        let info = rt.server_info();
-        let (a, b, c) = info.version;
-        format!("{} {a}.{b}.{c}", server_name(info.variant))
-    });
-    // The schema cache as completion uses it; no tables when it cannot be had.
-    let tables: Vec<TableBrief> = match req.database.as_deref() {
-        Some(db) => match state.sessions.schema_cache_for(conn_id, db).await {
-            Ok(cache) => cache
-                .tables
-                .into_iter()
-                .map(|t| TableBrief {
-                    schema: t.schema,
-                    name: t.name,
-                    columns: t.columns,
-                })
-                .collect(),
-            Err(e) => {
-                tracing::debug!(error = %e, "AI completion without the schema cache");
-                Vec::new()
-            }
+    let language = match kind {
+        DbKind::MySql | DbKind::Postgres => {
+            PromptLanguage::Sql(Dialect::for_kind(kind.require_sql()?))
+        }
+        DbKind::Mongo => match state.sessions.language_for(kind) {
+            Some(language) => PromptLanguage::Mongo(language),
+            // A build without the MongoDB driver: nothing to redact with, nothing is sent.
+            None => return Ok(AiCompletion::Empty),
         },
-        None => Vec::new(),
+        // No Redis prompt yet.
+        DbKind::Redis => return Ok(AiCompletion::Empty),
     };
-    let schema = req.schema.clone().or_else(|| {
-        matches!(dialect, Dialect::Postgres)
-            .then(|| current_schema(&tables))
-            .flatten()
-    });
-    let prompt = match build(&PromptInput {
-        dialect,
-        server_version: version.as_deref(),
-        database: req.database.as_deref(),
-        schema: schema.as_deref(),
-        text: &req.text,
-        cursor_utf16: req.cursor,
-        tables: &tables,
-    }) {
-        Ok(p) => p,
-        Err(_) => return Ok(AiCompletion::Empty),
+    let prompt = match &language {
+        PromptLanguage::Sql(dialect) => sql_prompt(state, &req, *dialect).await,
+        PromptLanguage::Mongo(language) => mongo_prompt(state, &req, &**language).await,
+    };
+    let Some(prompt) = prompt else {
+        return Ok(AiCompletion::Empty);
     };
 
     let Some(client) = client(state, &cfg).await? else {
@@ -378,7 +471,10 @@ pub async fn ai_complete_impl(
         Ok(reply) => {
             state.ai.note_success();
             let ctx = PostCtx {
-                dialect,
+                language: match &language {
+                    PromptLanguage::Sql(dialect) => Language::Sql(*dialect),
+                    PromptLanguage::Mongo(language) => Language::Command(&**language),
+                },
                 statement_head: &prompt.statement_head,
                 prefix_tail: prompt.prefix_tail(),
                 suffix: &prompt.suffix,

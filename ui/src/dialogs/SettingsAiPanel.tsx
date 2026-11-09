@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api, toAppError } from '../api';
 import type { AiConfig, AiSettings, AiTestResult, AiTrigger } from '../bindings';
-import { familyOf } from '../engine';
+import { hasAiSuggestions } from '../engine';
 import { aiErrorText, aiOnFor, useAi } from '../store/ai';
 import { useConnections } from '../store/connections';
 import { AiConsentDialog } from './AiConsentDialog';
@@ -167,10 +167,10 @@ export function SettingsAiPanel() {
       useAi.getState().setChoices(await api.aiConnectionSet(id, enabled));
     });
 
-  const sqlConnections = useMemo(
+  const aiConnections = useMemo(
     () =>
       [...summaries.values()]
-        .filter((c) => familyOf(c.config.kind) === 'sql')
+        .filter((c) => hasAiSuggestions(c.config.kind))
         .sort((a, b) => a.config.name.localeCompare(b.config.name)),
     [summaries],
   );
@@ -336,9 +336,9 @@ export function SettingsAiPanel() {
             </button>
           </div>
         )}
-        {sqlConnections.length > 0 && (
+        {aiConnections.length > 0 && (
           <ul className="settings-ai-list" aria-label="Connections with AI">
-            {sqlConnections.map((c) => (
+            {aiConnections.map((c) => (
               <li key={c.config.id}>
                 <label className="check">
                   <input

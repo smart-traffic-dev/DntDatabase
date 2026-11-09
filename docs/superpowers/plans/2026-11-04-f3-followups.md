@@ -57,6 +57,6 @@ hand-off, without a separate plan file.
 
 ## Known and left as is
 
-- Command family (Mongo / Redis): no suggestions until R4b and a command-language prompt.
+- Command family: MongoDB has suggestions (done on `mongo-assist`); Redis pending, no suggestions yet.
 - Settings → Test calls a model good when it answers like a chat model (`judge_probe` checks only for an echoed
   suffix); the prompt header has no ENUM values; no `;` stop.

@@ -3,6 +3,9 @@
 //! - [`prompt::build`] turns the editor document, cursor and schema cache into a
 //!   fill-in-the-middle prompt: secrets redacted, text cut, a schema header of SQL
 //!   comments. It refuses when the cursor is in a secret.
+//! - [`mongo::mongo_draft`] / [`mongo::MongoDraft::build`] do the same for the MongoDB
+//!   console, with the console language's redaction (any secret refuses) and a header of
+//!   `//` comments naming the database's collections and their sampled fields.
 //! - [`HttpFimClient`] sends it to an OpenAI-compatible endpoint (`/completions` with
 //!   `suffix`, and `/models`); nothing else is spoken. Cancelling a request is dropping
 //!   its future.
@@ -15,12 +18,16 @@
 
 mod endpoint;
 mod error;
+pub mod mongo;
 pub mod post;
 pub mod prompt;
 pub mod provider;
+#[cfg(test)]
+mod test_lang;
 
 pub use endpoint::{Endpoint, DEFAULT_TIMEOUT};
 pub use error::AiError;
-pub use post::{clean, judge_probe, PostCtx, ProbeVerdict, PROBE_PROMPT, PROBE_SUFFIX};
+pub use mongo::{mongo_draft, CollectionBrief, MongoDraft};
+pub use post::{clean, judge_probe, Language, PostCtx, ProbeVerdict, PROBE_PROMPT, PROBE_SUFFIX};
 pub use prompt::{build, FimPrompt, PromptInput, Skip, TableBrief};
 pub use provider::{FimClient, FimReply, FimRequest, HttpFimClient};

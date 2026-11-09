@@ -587,6 +587,29 @@ describe('ConnectionDialog', () => {
     expect(callsOf('ai_connection_set')).toEqual([{ connId: ids.prod, enabled: false }]);
   });
 
+  it('ai_switch_for_mongo_not_redis', async () => {
+    mockBackend({ ai_settings_get: () => aiSetUp(true), ai_connections: () => [] });
+    const stored = config(ids.prod, 'docs').config;
+    const mongo = {
+      ...stored,
+      kind: 'mongo' as const,
+      port: 27017,
+      options: {
+        ...stored.options,
+        driver: { kind: 'mongo' as const, srv: false, auth_source: null, replica_set: null, direct_connection: false, extra_hosts: [] },
+      },
+    };
+    const { unmount } = render(<ConnectionDialog mode="edit" initial={mongo} hasDbPassword onClose={vi.fn()} />);
+    expect(await screen.findByTestId('conn-ai')).toBeChecked();
+    unmount();
+
+    const redis = { ...stored, kind: 'redis' as const, port: 6379, options: { ...stored.options, driver: { kind: 'redis' as const, db: 0 } } };
+    render(<ConnectionDialog mode="edit" initial={redis} hasDbPassword onClose={vi.fn()} />);
+    await screen.findByTestId('conn-save');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.queryByTestId('conn-ai')).not.toBeInTheDocument();
+  });
+
   it('ai_switch_hidden_until_ai_is_agreed_to', async () => {
     const stored = config(ids.prod, 'shop');
     mockBackend({ ai_settings_get: () => aiSetUp(false), ai_connections: () => [] });

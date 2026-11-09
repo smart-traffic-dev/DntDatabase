@@ -1,11 +1,12 @@
 import type * as Monaco from 'monaco-editor';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AiCompleteRequest, AiCompletion } from '../../bindings';
-import { useAi } from '../../store/ai';
+import { aiAllowed, useAi } from '../../store/ai';
 import { useConnections } from '../../store/connections';
+import { useQueryDocs } from '../../store/queryTabs';
 import { config, mockBackend, resetStores } from '../../test/backend';
 import type { CompletionTarget } from '../completion/monacoProvider';
-import { AI_DEBOUNCE_MS, createAiInlineProvider, type AiInlineDeps } from './inlineProvider';
+import { AI_DEBOUNCE_MS, aiDocTarget, createAiInlineProvider, ensureAiInline, type AiInlineDeps } from './inlineProvider';
 
 const CONN = 'c1';
 
@@ -208,5 +209,82 @@ describe('AI inline provider', () => {
 
     await ask(createAiInlineProvider(fakeMonaco(), deps()), 'SELECT 4 |');
     expect(useAi.getState()).toMatchObject({ failures: 0, paused: null, busy: 0 });
+  });
+});
+
+describe('AI inline provider in Command tabs', () => {
+  const MONGO = '33333333-3333-4333-8333-333333333333';
+  const REDIS = '44444444-4444-4444-8444-444444444444';
+
+  beforeEach(() => {
+    mockBackend({ ai_settings_get: () => ({}), ai_connections: () => [], tabs_save: () => null });
+    useConnections
+      .getState()
+      .setStored([], [config(CONN, 'Shop'), config(MONGO, 'docs', { kind: 'mongo', default_db: 'shop' }), config(REDIS, 'cache', { kind: 'redis' })]);
+  });
+
+  /** A one-line model of query tab `tabId` with the cursor at `|`. */
+  function tabModel(tabId: string, marked: string) {
+    const { model: m, position } = model(marked);
+    return { model: Object.assign(m, { uri: { scheme: 'query', authority: tabId } }), position };
+  }
+
+  it('resolves the tab of a MongoDB or SQL model, not of a Redis one', () => {
+    const mongoDoc = useQueryDocs.getState().newQuery(MONGO, 'logs');
+    const defaultDoc = useQueryDocs.getState().newQuery(MONGO, null);
+    const sqlDoc = useQueryDocs.getState().newQuery(CONN, 'shop');
+    const redisDoc = useQueryDocs.getState().newQuery(REDIS, null);
+    const of = (id: string) => aiDocTarget({ uri: { scheme: 'query', authority: id } });
+    expect(of(mongoDoc)).toEqual({ tabId: mongoDoc, connId: MONGO, db: 'logs' });
+    expect(of(defaultDoc)).toEqual({ tabId: defaultDoc, connId: MONGO, db: 'shop' });
+    expect(of(sqlDoc)).toMatchObject({ tabId: sqlDoc, connId: CONN, db: 'shop' });
+    expect(of(redisDoc)).toBeNull();
+  });
+
+  it('asks for a MongoDB tab with the same request shape', async () => {
+    const doc = useQueryDocs.getState().newQuery(MONGO, 'logs');
+    const d = { ...deps({ kind: 'suggestion', text: 'status: "paid" })' }), ctxOf: aiDocTarget };
+    const p = createAiInlineProvider(fakeMonaco(), d);
+    const { model: m, position } = tabModel(doc, 'db.orders.find({ |');
+    const out = await p.provideInlineCompletions(m, position, AUTO, token() as never);
+    expect((out as { items: { insertText: string }[] }).items[0]!.insertText).toBe('status: "paid" })');
+    expect(d.calls).toEqual([
+      { request_id: `ai-${doc}`, conn_id: MONGO, database: 'logs', schema: null, text: 'db.orders.find({ ', cursor: 17 },
+    ]);
+  });
+
+  it('asks nothing for a Redis tab, even with AI turned on for it', async () => {
+    useAi.setState({ choices: new Map([[REDIS, true]]) });
+    expect(aiAllowed(REDIS)).toBe(false);
+    expect(aiAllowed(MONGO)).toBe(true);
+    const doc = useQueryDocs.getState().newQuery(REDIS, null);
+    const d = { ...deps(), ctxOf: aiDocTarget };
+    const { model: m, position } = tabModel(doc, 'GET |');
+    const out = await createAiInlineProvider(fakeMonaco(), d).provideInlineCompletions(m, position, EXPLICIT, token() as never);
+    expect((out as { items: unknown[] }).items).toEqual([]);
+    expect(d.calls).toEqual([]);
+  });
+
+  it('a MongoDB connection tagged Production follows the same default as SQL', () => {
+    useConnections.getState().setStored([], [config(MONGO, 'docs', { kind: 'mongo', env_tag: 'production' })]);
+    expect(aiAllowed(MONGO)).toBe(false);
+    useAi.setState({ choices: new Map([[MONGO, true]]) });
+    expect(aiAllowed(MONGO)).toBe(true);
+  });
+
+  it('registers for the SQL languages and mongo, not redis', () => {
+    const langs: string[] = [];
+    const monaco = {
+      ...fakeMonaco(),
+      languages: {
+        InlineCompletionTriggerKind: { Automatic: 0, Explicit: 1 },
+        registerInlineCompletionsProvider: (lang: string) => {
+          langs.push(lang);
+          return { dispose() {} };
+        },
+      },
+    } as unknown as typeof Monaco;
+    ensureAiInline(monaco);
+    expect(langs).toEqual(['mysql', 'pgsql', 'mongo']);
   });
 });

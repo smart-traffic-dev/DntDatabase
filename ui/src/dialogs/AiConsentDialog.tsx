@@ -33,10 +33,10 @@ export function AiConsentDialog({
         </p>
         <ul>
           <li>the text of the query editor, with passwords hidden;</li>
-          <li>the names and types of that database's tables and columns.</li>
+          <li>the names and types of that database's tables and columns (MongoDB: collection and field names).</li>
         </ul>
         <p>
-          Row data is never sent. AI is on for every MySQL and PostgreSQL connection except those tagged Production. Turn
+          Row data is never sent. AI is on for every MySQL, PostgreSQL and MongoDB connection except those tagged Production. Turn
           it off for a connection from its query tab's status bar, its settings, or Settings → AI.
         </p>
         <label className="check">

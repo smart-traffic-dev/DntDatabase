@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import eslintConfig from '../../eslint.config.js';
 import type { DbKind, ServerInfo } from '../bindings';
 import { sqlCaps } from '../test/fixtures/caps';
-import { capsOf, defaultCaps, editorLanguage, engineChip, familyOf, isKind, namespaceModel, sqlEngine } from './index';
+import { AI_LANGUAGES, capsOf, defaultCaps, editorLanguage, engineChip, familyOf, hasAiSuggestions, isKind, namespaceModel, sqlEngine } from './index';
 
 const KINDS: DbKind[] = ['mysql', 'postgres', 'mongo', 'redis'];
 
@@ -40,6 +40,11 @@ describe('engine', () => {
     expect(engineChip('postgres')).toBe('PG');
     expect(editorLanguage('redis')).toBe('redis');
     expect(editorLanguage('postgres')).toBe('pgsql');
+  });
+
+  it('ai_suggestions_for_sql_and_mongo_not_redis', () => {
+    expect(KINDS.map(hasAiSuggestions)).toEqual([true, true, true, false]);
+    expect(AI_LANGUAGES).toEqual(KINDS.filter(hasAiSuggestions).map(editorLanguage));
   });
 
   it('namespace_model_follows_the_kind', () => {

@@ -3,10 +3,16 @@
 
 use async_trait::async_trait;
 use dnt_ai::{AiError, Endpoint, FimClient, FimReply, FimRequest};
-use dnt_core::config::EnvTag;
+use dnt_core::config::{ConnectionConfig, DriverOptions, EnvTag, SecretMode};
+use dnt_core::driver::Driver;
 use dnt_core::error::DbError;
 use dnt_core::secret::{AppSecret, MemorySecretStore, SecretStore};
+use dnt_core::server::DbKind;
 use dnt_core::test_util::sample_config;
+use dnt_store::db::open_in_memory;
+use dnt_store::repo::{ConnectionRepo, NewSecrets};
+use dnt_testkit::fake_command::{collection_key, FakeCommandDriver, FakeValue};
+use dnt_tunnel::KnownHosts;
 use dntdatabase::ai::{AiConfig, AiTrigger, ClientFactory};
 use dntdatabase::commands::ai::{
     ai_cancel_impl, ai_complete_impl, ai_connection_set_impl, ai_connections_impl,
@@ -15,9 +21,12 @@ use dntdatabase::commands::ai::{
     AiProbeVerdict,
 };
 use dntdatabase::commands::connections::{create_connection_impl, SecretsInput};
+use dntdatabase::export_paths::ExportPaths;
+use dntdatabase::file_picks::FilePicks;
+use dntdatabase::session_manager::SessionManager;
 use dntdatabase::state::{AppPaths, AppState};
 use secrecy::ExposeSecret;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use uuid::Uuid;
@@ -580,4 +589,273 @@ async fn cancel_ends_the_request_empty() {
         .unwrap()
         .unwrap();
     assert_eq!(out, AiCompletion::Empty);
+}
+
+// --- MongoDB console (and Redis, which gets nothing) ---
+
+fn mongo_cfg(env_tag: Option<EnvTag>) -> ConnectionConfig {
+    let mut c = ConnectionConfig {
+        id: Uuid::nil(),
+        kind: DbKind::Mongo,
+        name: "docs".into(),
+        port: 27017,
+        default_db: Some("shop".into()),
+        env_tag,
+        ..sample_config()
+    };
+    c.options.driver = DriverOptions::Mongo {
+        srv: false,
+        auth_source: None,
+        replica_set: None,
+        direct_connection: false,
+        extra_hosts: vec![],
+    };
+    c
+}
+
+fn redis_cfg() -> ConnectionConfig {
+    let mut c = ConnectionConfig {
+        id: Uuid::nil(),
+        kind: DbKind::Redis,
+        name: "cache".into(),
+        port: 6379,
+        ..sample_config()
+    };
+    c.options.driver = DriverOptions::Redis { db: 0 };
+    c
+}
+
+async fn create(state: &AppState, cfg: ConnectionConfig) -> Uuid {
+    let secrets: SecretsInput = serde_json::from_value(serde_json::json!({})).unwrap();
+    create_connection_impl(state, cfg, secrets)
+        .await
+        .unwrap()
+        .id
+}
+
+/// Set up and agreed to, with the app's drivers and one (not open) connection `conn`.
+async fn ready_with(conn: ConnectionConfig) -> (Fixture, Uuid) {
+    let f = fixture();
+    ai_settings_set_impl(&f.state, cfg("https://api.example.com/v1"))
+        .await
+        .unwrap();
+    ai_consent_set_impl(&f.state, true).await.unwrap();
+    let id = create(&f.state, conn).await;
+    (f, id)
+}
+
+fn in_db(mut req: AiCompleteRequest, db: &str) -> AiCompleteRequest {
+    req.database = Some(db.into());
+    req
+}
+
+const MONGO_FIRST: &str = "// MongoDB shell (mongosh subset, no JavaScript)\n";
+
+#[tokio::test]
+async fn mongo_sends_a_console_prompt_and_ends_the_suggestion_with_its_command() {
+    // The connection is not open: no collections can be listed, the header goes without.
+    let (f, id) = ready_with(mongo_cfg(None)).await;
+    f.fake.push(Step::Reply(Ok(
+        "status: 'paid' })\ndb.orders.countDocuments()".into(),
+    )));
+    let out = ai_complete_impl(&f.state, in_db(request(id, "db.orders.find({ |"), "shop"))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        AiCompletion::Suggestion {
+            text: "status: 'paid' })".into()
+        }
+    );
+    let call = &f.fake.calls()[0];
+    assert_eq!(
+        call.prompt,
+        format!("{MONGO_FIRST}// Database: shop\ndb.orders.find({{ ")
+    );
+    assert_eq!(call.suffix, "");
+
+    // A `;` that ends it is kept; JavaScript-like text is not read as SQL (`$$` opens no
+    // dollar quote).
+    f.fake
+        .push(Step::Reply(Ok("x: \"$$v\" });\ndb.b.find()".into())));
+    let out = ai_complete_impl(&f.state, request(id, "db.c.find({ |\n"))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        AiCompletion::Suggestion {
+            text: "x: \"$$v\" });".into()
+        }
+    );
+    let call = &f.fake.calls()[1];
+    assert_eq!(call.prompt, format!("{MONGO_FIRST}db.c.find({{ "));
+    assert_eq!(call.suffix, "\n");
+}
+
+#[tokio::test]
+async fn mongo_secrets_send_nothing() {
+    let (f, id) = ready_with(mongo_cfg(None)).await;
+    for marked in [
+        "db.runCommand({createUser:'u', pwd:'p'})\ndb.orders.find({ |",
+        // After the cursor too.
+        "db.orders.find({ |\ndb.runCommand({createUser:'u', pwd:'p'})",
+        "db.orders.insertOne({ uri: 'mongodb://app:hunter2@db.example.com/shop' })\ndb.orders.find({ |",
+        "// mongodb://admin:hunter2@db.example.com\ndb.orders.find({ |",
+    ] {
+        let out = ai_complete_impl(&f.state, request(id, marked))
+            .await
+            .unwrap();
+        assert_eq!(out, AiCompletion::Empty, "{marked}");
+    }
+    assert!(f.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn mongo_follows_consent_production_and_pause_as_sql_does() {
+    let (f, local) = ready_with(mongo_cfg(None)).await;
+    let prod = create(&f.state, mongo_cfg(Some(EnvTag::Production))).await;
+    let ask = |id: Uuid| ai_complete_impl(&f.state, request(id, "db.orders.find({ |"));
+
+    // Production, no choice: off.
+    assert_eq!(ask(prod).await.unwrap(), AiCompletion::Empty);
+    assert!(f.fake.calls().is_empty());
+
+    // Its own choice turns it on; the other one's turns it off.
+    ai_connection_set_impl(&f.state, prod, true).await.unwrap();
+    ai_connection_set_impl(&f.state, local, false)
+        .await
+        .unwrap();
+    assert_eq!(ask(local).await.unwrap(), AiCompletion::Empty);
+    assert!(f.fake.calls().is_empty());
+    f.fake.push(Step::Reply(Ok("a: 1 })".into())));
+    assert_eq!(
+        ask(prod).await.unwrap(),
+        AiCompletion::Suggestion {
+            text: "a: 1 })".into()
+        }
+    );
+
+    // Paused after a rejected key: the endpoint is not called again.
+    f.fake
+        .push(Step::Reply(Err(AiError::Unauthorized { status: 401 })));
+    assert!(matches!(
+        ask(prod).await.unwrap(),
+        AiCompletion::Paused { .. }
+    ));
+    assert!(matches!(
+        ask(prod).await.unwrap(),
+        AiCompletion::Paused { .. }
+    ));
+    assert_eq!(f.fake.calls().len(), 2);
+
+    // Withdrawn consent stops it, whatever its choice.
+    ai_consent_set_impl(&f.state, false).await.unwrap();
+    assert_eq!(ask(prod).await.unwrap(), AiCompletion::Empty);
+    assert_eq!(f.fake.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn redis_sends_nothing() {
+    let (f, id) = ready_with(redis_cfg()).await;
+    let out = ai_complete_impl(&f.state, request(id, "GET |"))
+        .await
+        .unwrap();
+    assert_eq!(out, AiCompletion::Empty);
+    assert!(f.fake.calls().is_empty());
+}
+
+/// The fake Command driver as MongoDB (its databases are `0`–`15`), open, with `orders` and
+/// `audit` in database `0`; AI set up and agreed to.
+async fn fake_mongo() -> (Fixture, Uuid) {
+    let driver = FakeCommandDriver::with_kind(DbKind::Mongo);
+    let store = driver.store();
+    for name in ["orders", "audit"] {
+        store.set("0", &collection_key(name), FakeValue::Hash(BTreeMap::new()));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let secrets = Arc::new(MemorySecretStore::default());
+    let store_secrets: Arc<dyn SecretStore> = secrets.clone();
+    let repo = Arc::new(ConnectionRepo::new(
+        open_in_memory().unwrap(),
+        Arc::clone(&store_secrets),
+    ));
+    let sessions = SessionManager::new(
+        Arc::clone(&repo),
+        Arc::clone(&store_secrets),
+        KnownHosts::new(dir.path().join("known_hosts")),
+        HashMap::from([(DbKind::Mongo, Arc::new(driver) as Arc<dyn Driver>)]),
+    );
+    let mut conn = mongo_cfg(None);
+    conn.default_db = Some("0".into());
+    conn.secret_mode = SecretMode::Saved;
+    let new_secrets = NewSecrets {
+        db_password: None,
+        ssh_password: None,
+        ssh_key_passphrase: None,
+    };
+    let id = repo.create(conn, new_secrets).unwrap().id;
+    sessions.open(id, None).await.unwrap();
+    let state = AppState {
+        repo,
+        secrets: store_secrets,
+        sessions,
+        paths: AppPaths::in_dir(dir.path().join("data")),
+        export_paths: ExportPaths::default(),
+        file_picks: FilePicks::default(),
+        ai: Default::default(),
+    };
+    let fake = Arc::new(Fake::default());
+    let f2 = Arc::clone(&fake);
+    state.ai.set_client_factory(Arc::new(move |ep: Endpoint| {
+        f2.built.lock().unwrap().push(ep);
+        Ok(Arc::new(FakeClient(Arc::clone(&f2))) as Arc<dyn FimClient>)
+    }));
+    ai_settings_set_impl(&state, cfg("https://api.example.com/v1"))
+        .await
+        .unwrap();
+    ai_consent_set_impl(&state, true).await.unwrap();
+    let f = Fixture {
+        _dir: dir,
+        state,
+        secrets,
+        fake,
+    };
+    (f, id)
+}
+
+#[tokio::test]
+async fn mongo_header_lists_the_collections_and_the_sampled_fields() {
+    let (f, id) = fake_mongo().await;
+    f.fake.push(Step::Reply(Ok("status: 1 })".into())));
+    let out = ai_complete_impl(&f.state, in_db(request(id, "db.orders.find({ |})"), "0"))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        AiCompletion::Suggestion {
+            text: "status: 1".into()
+        }
+    );
+    let call = &f.fake.calls()[0];
+    assert_eq!(
+        call.prompt,
+        format!(
+            "{MONGO_FIRST}// Database: 0\n\
+             // Collections:\n\
+             //   orders(_id, value)\n\
+             // Other collections: audit\n\
+             db.orders.find({{ "
+        )
+    );
+    assert_eq!(call.suffix, "})");
+
+    // Nothing named: the names alone.
+    f.fake.push(Step::Reply(Ok("db.audit.find()".into())));
+    ai_complete_impl(&f.state, in_db(request(id, "|"), "0"))
+        .await
+        .unwrap();
+    assert_eq!(
+        f.fake.calls()[1].prompt,
+        format!("{MONGO_FIRST}// Database: 0\n// Other collections: audit, orders\n")
+    );
 }

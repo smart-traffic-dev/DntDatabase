@@ -161,6 +161,26 @@ export function hasMongoCompletion(kind: DbKind): boolean {
   }
 }
 
+/**
+ * Whether the query tabs of a kind get AI suggestions (ghost text): the SQL kinds and the
+ * MongoDB console. Redis has no prompt yet.
+ */
+export function hasAiSuggestions(kind: DbKind): boolean {
+  switch (kind) {
+    case 'mysql':
+    case 'postgres':
+    case 'mongo':
+      return true;
+    case 'redis':
+      return false;
+    default:
+      return assertNever(kind);
+  }
+}
+
+/** The Monaco languages the AI inline provider serves (those of {@link hasAiSuggestions}). */
+export const AI_LANGUAGES: readonly string[] = [editorLanguage('mysql'), editorLanguage('postgres'), MONGO_LANGUAGE];
+
 export function engineChip(kind: DbKind): 'MY' | 'PG' | 'MG' | 'RD' {
   switch (kind) {
     case 'mysql':

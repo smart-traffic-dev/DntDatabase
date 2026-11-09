@@ -14,8 +14,8 @@ pub const PREFIX_MAX: usize = 6 * 1024;
 pub const SUFFIX_MAX: usize = 2 * 1024;
 /// Bytes of the schema header.
 pub const HEADER_MAX: usize = 3 * 1024;
-/// Names listed under `Other tables`.
-const OTHER_TABLES_MAX: usize = 200;
+/// Names listed under `Other tables` (and `Other collections`).
+pub(crate) const OTHER_TABLES_MAX: usize = 200;
 /// Width of an `Other tables` line.
 const LINE_WIDTH: usize = 100;
 
@@ -66,6 +66,9 @@ impl FimPrompt {
 pub enum Skip {
     /// The cursor is inside, or right after, a literal that redaction hides.
     InSecret,
+    /// The text holds a secret the console language's redaction hides (a Command
+    /// language reports only that something was hidden, not where).
+    Secret,
 }
 
 pub fn build(input: &PromptInput) -> Result<FimPrompt, Skip> {
@@ -138,7 +141,7 @@ fn redact_document(text: &str, dialect: Dialect, cursor: usize) -> Result<(Strin
 /// Where the prefix starts: the whole text before the cursor when it fits, else the
 /// earliest statement start within the last [`PREFIX_MAX`] bytes, else a line start
 /// inside the current (long) statement.
-fn prefix_start(doc: &str, cursor: usize, starts: impl Iterator<Item = usize>) -> usize {
+pub(crate) fn prefix_start(doc: &str, cursor: usize, starts: impl Iterator<Item = usize>) -> usize {
     if cursor <= PREFIX_MAX {
         return 0;
     }
@@ -154,7 +157,7 @@ fn prefix_start(doc: &str, cursor: usize, starts: impl Iterator<Item = usize>) -
 }
 
 /// At most [`SUFFIX_MAX`] bytes; when cut, cut back to the last line break.
-fn cut_suffix(rest: &str) -> &str {
+pub(crate) fn cut_suffix(rest: &str) -> &str {
     if rest.len() <= SUFFIX_MAX {
         return rest;
     }
@@ -200,23 +203,33 @@ fn header(input: &PromptInput, statement: &str) -> String {
         }
     }
 
-    let mut others: Vec<String> = input
+    let others: Vec<String> = input
         .tables
         .iter()
         .zip(&listed)
         .filter(|(_, &l)| !l)
         .map(|(t, _)| display_name(input, t))
         .collect();
-    others.sort_by_key(|n| n.to_lowercase());
-    others.truncate(OTHER_TABLES_MAX);
+    push_other_names(&mut out, "-- Other tables: ", "--   ", others);
+    out
+}
+
+/// Appends `names` (sorted case-insensitively, at most [`OTHER_TABLES_MAX`]) as lines of
+/// at most [`LINE_WIDTH`] bytes, the first starting with `first`, the next ones with
+/// `more`, while `out` stays within [`HEADER_MAX`] bytes.
+pub(crate) fn push_other_names(out: &mut String, first: &str, more: &str, mut names: Vec<String>) {
+    names.sort_by_key(|n| n.to_lowercase());
+    names.truncate(OTHER_TABLES_MAX);
     let mut line = String::new();
-    for name in others {
+    for name in names {
         let piece = if line.is_empty() {
-            format!("-- Other tables: {name}")
+            format!("{first}{name}")
         } else if line.len() + 2 + name.len() > LINE_WIDTH {
             out.push_str(&line);
             out.push('\n');
-            format!("--   {name}")
+            // Written: a `break` below must not write it again.
+            line.clear();
+            format!("{more}{name}")
         } else {
             format!("{line}, {name}")
         };
@@ -229,26 +242,30 @@ fn header(input: &PromptInput, statement: &str) -> String {
         out.push_str(&line);
         out.push('\n');
     }
-    out
 }
 
 /// `--   name(col type, …)\n` within `room` bytes, dropping trailing columns (written
 /// as `…`) when needed; `None` when not even `--   name(…)\n` fits.
 fn table_line(input: &PromptInput, t: &TableBrief, room: usize) -> Option<String> {
-    let name = display_name(input, t);
     let cols: Vec<String> = t
         .columns
         .iter()
         .map(|c| format!("{} {}", clean(&c.name), clean(&c.data_type)))
         .collect();
-    let full = format!("--   {name}({})\n", cols.join(", "));
+    member_line("--   ", &display_name(input, t), &cols, room)
+}
+
+/// `{lead}name(part, …)\n` within `room` bytes, dropping trailing parts (written as `…`)
+/// when needed; `None` when not even `{lead}name(…)\n` fits.
+pub(crate) fn member_line(lead: &str, name: &str, parts: &[String], room: usize) -> Option<String> {
+    let full = format!("{lead}{name}({})\n", parts.join(", "));
     if full.len() <= room {
         return Some(full);
     }
-    for keep in (0..cols.len()).rev() {
-        let mut shown = cols[..keep].to_vec();
+    for keep in (0..parts.len()).rev() {
+        let mut shown = parts[..keep].to_vec();
         shown.push("…".to_string());
-        let line = format!("--   {name}({})\n", shown.join(", "));
+        let line = format!("{lead}{name}({})\n", shown.join(", "));
         if line.len() <= room {
             return Some(line);
         }
@@ -338,7 +355,7 @@ fn unquote(tok: &str) -> Option<String> {
 
 /// Control characters (line breaks included) become spaces, so a name never leaves
 /// its comment line.
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect()

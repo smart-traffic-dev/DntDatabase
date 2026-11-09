@@ -1,28 +1,44 @@
 // AI ghost text in the query editor (AI editor completion spec §5): a Monaco
-// `InlineCompletionsProvider` for both SQL languages. Tab accepts, Ctrl+→ accepts a word and Esc
-// dismisses (Monaco's own inline-suggest keys); Alt+\ asks explicitly.
+// `InlineCompletionsProvider` for both SQL languages and the MongoDB console. Tab accepts, Ctrl+→
+// accepts a word and Esc dismisses (Monaco's own inline-suggest keys); Alt+\ asks explicitly.
 import type * as Monaco from 'monaco-editor';
 import { commands, type AiCompleteRequest, type AiCompletion } from '../../bindings';
+import { AI_LANGUAGES } from '../../engine';
 import { aiAllowed, aiErrorText, ensureAiLoaded, useAi } from '../../store/ai';
-import { queryDocTarget, suggestShown, type CompletionTarget } from '../completion/monacoProvider';
+import { queryDocTarget, suggestShown } from '../completion/monacoProvider';
+import { mongoDocTarget } from '../completion/mongo/monacoProvider';
 
 /** Pause in typing before an automatic request. */
 export const AI_DEBOUNCE_MS = 150;
 /** Suggestions remembered per (connection, database, text, cursor). */
 const CACHE_SIZE = 50;
 
-const LANGUAGES = ['mysql', 'pgsql'];
+/** The query tab a model belongs to: what a request names. */
+export interface AiTarget {
+  tabId: string;
+  connId: string | null;
+  db: string | null;
+}
+
+/**
+ * The query tab behind a `query://<tab id>` model when its connection gets AI suggestions: a SQL
+ * tab, or a MongoDB tab (its database is the tab's, else the connection's default, as `db` is in
+ * the console). Null for a Redis tab.
+ */
+export function aiDocTarget(model: unknown): AiTarget | null {
+  return queryDocTarget(model) ?? mongoDocTarget(model);
+}
 
 /** What the provider needs from the app; tests pass fakes. */
 export interface AiInlineDeps {
-  ctxOf(model: unknown): CompletionTarget | null;
+  ctxOf(model: unknown): AiTarget | null;
   complete(req: AiCompleteRequest): Promise<AiCompletion>;
   cancel(requestId: string): void;
   sleep(ms: number): Promise<void>;
 }
 
 const defaultDeps: AiInlineDeps = {
-  ctxOf: queryDocTarget,
+  ctxOf: aiDocTarget,
   complete: async (req) => {
     const r = await commands.aiComplete(req);
     if (r.status === 'error') throw r.error;
@@ -56,7 +72,7 @@ export function skipReason(
   model: Monaco.editor.ITextModel,
   position: Monaco.Position,
   explicit: boolean,
-  target: CompletionTarget | null,
+  target: AiTarget | null,
 ): string | null {
   if (!target?.connId) return 'no connection';
   const ai = useAi.getState();
@@ -179,7 +195,7 @@ const handles = new WeakMap<object, Handle>();
 export function ensureAiInline(monaco: typeof Monaco): void {
   if (handles.has(monaco) || !monaco.languages?.registerInlineCompletionsProvider) return;
   const provider = createAiInlineProvider(monaco);
-  const subs = LANGUAGES.map((lang) => monaco.languages.registerInlineCompletionsProvider(lang, provider));
+  const subs = AI_LANGUAGES.map((lang) => monaco.languages.registerInlineCompletionsProvider(lang, provider));
   handles.set(monaco, { dispose: () => subs.forEach((s) => s.dispose()) });
 }
 

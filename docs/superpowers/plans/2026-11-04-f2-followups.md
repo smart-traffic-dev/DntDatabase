@@ -42,6 +42,7 @@ F2 (`docs/superpowers/plans/2026-11-04-f2-ai-backend-settings.md`) adds the `ai_
 
 ## Open items
 
-- Command family (Mongo / Redis) suggestions: `ai_complete` returns `empty` until R4b and a command-language prompt.
+- Command family suggestions: MongoDB done (console prompt with `//` header, the console redaction refuses any
+  secret; `mongo-assist`). Redis pending: `ai_complete` still returns `empty` for it.
 - `ai_complete` re-reads the settings and the consent table on every call (a few small SQLite reads); cache them
   in `AiManager` if F3 measures it as too slow.
