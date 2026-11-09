@@ -464,3 +464,81 @@ async fn mongo_through_ssh_tunnel() {
     assert!(dbs.iter().any(|n| n == FIXTURE_DB), "{dbs:?}");
     close_connection_impl(&state, id).await.unwrap();
 }
+
+/// Discards a command's result (the failpoint commands of the admin session).
+struct Ignore;
+
+impl dnt_core::driver::RowSink for Ignore {
+    fn result_start(&mut self, _cols: &[dnt_core::value::ColumnMeta]) {}
+    fn rows(&mut self, _batch: Vec<Vec<Value>>) {}
+    fn result_end(&mut self, _summary: &dnt_core::driver::ResultSummary) {}
+}
+
+/// Runs `text` as root on `t` through the driver itself, outside the app.
+async fn as_root(t: Target, text: &str) {
+    use dnt_core::command::CommandLanguage;
+    use dnt_core::driver::{Driver, ExecOptions};
+    let s = dnt_driver_mongo::MongoDriver
+        .connect(&t.resolved(Some("admin")))
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {e}"));
+    let cmd = dnt_driver_mongo::shell::MongoLanguage
+        .parse(text)
+        .unwrap_or_else(|e| panic!("{text}: {e:?}"));
+    s.command()
+        .unwrap()
+        .execute_command(&cmd, &ExecOptions::default(), &mut Ignore)
+        .await
+        .unwrap_or_else(|e| panic!("{t:?}: {text}: {e:?}"));
+    s.close().await;
+}
+
+/// A query tab whose pooled connection the server dropped (as after an idle spell): the
+/// read goes again on a fresh connection, its rows arrive, and the run says it reconnected.
+#[tokio::test]
+async fn query_tab_read_survives_a_dropped_connection() {
+    require_db!();
+    const APP: &str = "dnt-app-reconnect";
+    for t in Target::mongo() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = app_state(dir.path());
+        let mut cfg = mongo_config(t, Some(EnvTag::Local));
+        cfg.options.application_name = Some(APP.into());
+        let id = open(&state, cfg).await;
+        // The tab's session is connected and has run a command.
+        run_ok(&state, id, FIXTURE_DB, "db.orders.find({})").await;
+
+        as_root(
+            t,
+            &format!(
+                "db.adminCommand({{configureFailPoint: 'failCommand', mode: {{times: 1}}, \
+                 data: {{failCommands: ['find'], closeConnection: true, appName: '{APP}'}}}})"
+            ),
+        )
+        .await;
+        let view = plan(&state, id, FIXTURE_DB, "db.orders.find({})").await;
+        let events = run(&state, &view, &[]).await;
+        as_root(
+            t,
+            "db.adminCommand({configureFailPoint: 'failCommand', mode: 'off'})",
+        )
+        .await;
+        let events = events.unwrap_or_else(|e| panic!("{t:?}: {e:?}"));
+
+        let done = events.done().await;
+        assert_eq!(done["stop"], Json::Null, "{t:?}: {done}");
+        assert!(events.of("statement_error").is_empty(), "{t:?}");
+        assert_eq!(events.of("result_end")[0]["row_count"], 5, "{t:?}");
+        let notices: Vec<Json> = events
+            .of("notice")
+            .iter()
+            .map(|n| n["message"].clone())
+            .collect();
+        assert_eq!(
+            notices,
+            [Json::from(dnt_query::run::reconnect_notice(1))],
+            "{t:?}"
+        );
+        close_connection_impl(&state, id).await.unwrap();
+    }
+}

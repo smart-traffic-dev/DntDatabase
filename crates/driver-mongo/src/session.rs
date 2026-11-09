@@ -1,6 +1,7 @@
 //! The MongoDB session (spec §5.2): one `Client` per session, the database `use` moved to,
 //! and the console's execution (`exec.rs`).
 
+use std::future::IntoFuture;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -12,8 +13,8 @@ use dnt_core::command::{
 use dnt_core::config::ResolvedConfig;
 use dnt_core::data_access::{DataAccess, KeyEdit, PageSpec};
 use dnt_core::driver::{
-    CancelHandle, Engine, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink, Session,
-    StmtOutcome, StopSignal,
+    CancelHandle, Engine, ExecOptions, ExecProgress, Introspector, ResultSummary, RowSink,
+    ServerNotices, Session, StmtOutcome, StopSignal,
 };
 use dnt_core::edit::EditSet;
 use dnt_core::error::{ConnectStage, DbError};
@@ -24,7 +25,7 @@ use dnt_core::meta::{
 use dnt_core::server::ServerInfo;
 use dnt_core::sql::filter::DataFilter;
 use dnt_core::tx::TxState;
-use dnt_core::value::{ColumnMeta, Value};
+use dnt_core::value::{ColumnMeta, FullValue, Value};
 use mongodb::bson::{doc, Bson, Uuid};
 use mongodb::error::{ErrorKind, WriteFailure, UNKNOWN_TRANSACTION_COMMIT_RESULT};
 use mongodb::{Client, ClientSession};
@@ -33,7 +34,7 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::cancel::{self, MongoCanceller};
 use crate::client::{self, Opened};
 use crate::exec::{self, Fail};
-use crate::shell::{MongoLanguage, ShellCommand};
+use crate::shell::{MongoLanguage, Payload, ShellCommand};
 use crate::{data, introspect};
 
 /// The command running now, shared with the canceller.
@@ -63,6 +64,11 @@ pub struct MongoSession {
     read_only: bool,
     running: Arc<Mutex<Option<Running>>>,
     reconnects: AtomicU64,
+    /// When the last command (or the server check of the connect) succeeded.
+    last_ok: Mutex<Instant>,
+    /// How long without a successful command makes the next one `ping` first
+    /// ([`IDLE_PING_AFTER`]; tests set it with [`MongoSession::set_idle_after`]).
+    idle_after: Mutex<Duration>,
 }
 
 /// Clears `running` when the command ends, however it ends.
@@ -106,7 +112,16 @@ impl MongoSession {
             read_only: cfg.read_only,
             running: Arc::new(Mutex::new(None)),
             reconnects: AtomicU64::new(0),
+            last_ok: Mutex::new(Instant::now()),
+            idle_after: Mutex::new(IDLE_PING_AFTER),
         }
+    }
+
+    /// Sets how long without a successful command makes the next one `ping` first
+    /// (`Duration::ZERO`: every command), so a test need not sit idle.
+    #[cfg(feature = "test-helpers")]
+    pub fn set_idle_after(&self, after: Duration) {
+        *self.idle_after.lock().unwrap_or_else(|p| p.into_inner()) = after;
     }
 
     /// The current `Client` (a cheap handle; the lock is never held across an await).
@@ -163,7 +178,7 @@ impl MongoSession {
         class: &CommandClass,
         sink: &mut dyn RowSink,
         session: Option<&mut ClientSession>,
-    ) -> Result<(exec::Output, bool), DbError> {
+    ) -> Result<(exec::Output, bool), SendError> {
         let client = match &session {
             Some(s) => s.client(),
             None => self.client(),
@@ -210,7 +225,7 @@ impl MongoSession {
                 drop(kill);
                 drop(fut);
                 self.rebuild().await;
-                Err(trigger.error(class))
+                Err(trigger.error(class).into())
             }
         }
     }
@@ -225,11 +240,12 @@ impl MongoSession {
         opts: &ExecOptions,
         comment: &str,
         sink: &mut dyn RowSink,
-    ) -> Result<ShellCommand, DbError> {
+    ) -> Result<ShellCommand, SendError> {
         let ShellCommand::Coll { db, coll, .. } = cmd else {
             return Err(DbError::Internal {
                 message: "a typed filter belongs to a collection read".into(),
-            });
+            }
+            .into());
         };
         let sample = introspect::sample_command(db.clone(), coll.clone());
         let sample_opts = ExecOptions {
@@ -242,9 +258,13 @@ impl MongoSession {
             .await?;
         // A sample that outlived a stop (or a timeout) ends the read: it is not sent.
         if let Some(trigger) = sample_ended_by(late, opts.stop.is_stopped()) {
-            return Err(trigger.error(&CommandClass::Read));
+            return Err(trigger.error(&CommandClass::Read).into());
         }
-        data::resolve(cmd, filter, &introspect::field_types(&out.docs))
+        Ok(data::resolve(
+            cmd,
+            filter,
+            &introspect::field_types(&out.docs),
+        )?)
     }
 
     /// The `DbError` of an introspection failure.
@@ -261,15 +281,18 @@ impl MongoSession {
         res: Result<exec::Output, Fail>,
         class: &CommandClass,
         after: Option<Trigger>,
-    ) -> Result<exec::Output, DbError> {
+    ) -> Result<exec::Output, SendError> {
         match (res, after) {
             (Ok(out), _) => Ok(out),
             // Killed by this session's cancel. Without a stop or a timeout of ours, the kill
             // came from elsewhere (`killOp`, `killSessions`): a server error like any other
             // (`Server { code: "Interrupted" }`, spec §5.6).
-            (Err(f), Some(trigger)) if f.interrupted() => Err(trigger.error(class)),
-            (Err(Fail::Db(e)), _) => Err(e),
-            (Err(Fail::Mongo(e)), _) => Err(self.mapped(&e, class)),
+            (Err(f), Some(trigger)) if f.interrupted() => Err(trigger.error(class).into()),
+            (Err(Fail::Db(e)), _) => Err(e.into()),
+            (Err(Fail::Mongo(e)), _) => Err(SendError {
+                dropped: exec::connection_dropped(&e),
+                error: self.mapped(&e, class),
+            }),
         }
     }
 
@@ -289,6 +312,194 @@ impl MongoSession {
             });
         }
         self.reconnects.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn mark_ok(&self) {
+        *self.last_ok.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
+    }
+
+    /// Before a command after an idle spell ([`needs_ping`]): a `ping` on `admin` finds a
+    /// connection a server or NAT dropped meanwhile before the command is sent, as the SQL
+    /// drivers reconnect before sending on a connection known dead.
+    ///
+    /// A ping whose connection dropped (the crate clears the pool) or that got no answer
+    /// within [`ping_limit`] (the `Client` is rebuilt) is sent once more, on a fresh
+    /// connection, counting one reconnect: answered, the command goes on. Failing again,
+    /// it is `ConnectionLost` with the outcome known, since nothing was sent. A stop
+    /// meanwhile is a cancel, nothing sent.
+    async fn wake(&self, opts: &ExecOptions) -> Result<(), DbError> {
+        let idle = self
+            .last_ok
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .elapsed();
+        let after = *self.idle_after.lock().unwrap_or_else(|p| p.into_inner());
+        if !needs_ping(idle, after) {
+            return Ok(());
+        }
+        let limit = ping_limit(opts.timeout, self.cfg.connect_timeout);
+        let cause = match self.ping_once(opts, limit).await {
+            Pinged::Answered => return Ok(()),
+            Pinged::Stopped => return Err(DbError::cancelled()),
+            Pinged::Failed(e) => return Err(e),
+            Pinged::Dropped(text) => {
+                self.reconnects.fetch_add(1, Ordering::SeqCst);
+                format!("the idle connection was dropped ({text})")
+            }
+            Pinged::NoAnswer => {
+                self.rebuild().await;
+                format!("the idle connection did not answer a ping within {limit:?}")
+            }
+        };
+        let lost = |message: String| DbError::ConnectionLost {
+            was_in_tx: false,
+            outcome_unknown: false,
+            message,
+        };
+        match self.ping_once(opts, limit).await {
+            Pinged::Answered => Ok(()),
+            Pinged::Stopped => Err(DbError::cancelled()),
+            Pinged::Failed(e) => Err(e),
+            Pinged::Dropped(text) => Err(lost(format!("{cause}; reconnecting failed: {text}"))),
+            Pinged::NoAnswer => Err(lost(format!(
+                "{cause}; the new connection did not answer within {limit:?} either"
+            ))),
+        }
+    }
+
+    /// One `ping` on `admin`, within `limit` and until `opts.stop`.
+    async fn ping_once(&self, opts: &ExecOptions, limit: Duration) -> Pinged {
+        let client = self.client();
+        let admin = client.database("admin");
+        let ping = admin.run_command(doc! { "ping": 1 }).into_future();
+        tokio::select! {
+            biased;
+            res = ping => match res {
+                Ok(_) => {
+                    self.mark_ok();
+                    Pinged::Answered
+                }
+                Err(e) if exec::connection_dropped(&e) => Pinged::Dropped(exec::error_text(&e)),
+                Err(e) => Pinged::Failed(self.mapped(&e, &CommandClass::Read)),
+            },
+            () = stop_raised(&opts.stop) => Pinged::Stopped,
+            () = tokio::time::sleep(limit) => Pinged::NoAnswer,
+        }
+    }
+
+    /// Sends the command of `payload` (a typed read's sample first) and waits for its
+    /// result, as [`MongoSession::run_watched`] does.
+    async fn send(
+        &self,
+        payload: &Payload,
+        class: &CommandClass,
+        opts: &ExecOptions,
+        comment: &str,
+        sink: &mut dyn RowSink,
+    ) -> Result<Sent, SendError> {
+        let typed;
+        let shell = match &payload.typed {
+            None => &payload.cmd,
+            Some(filter) => {
+                typed = self
+                    .typed_read(&payload.cmd, filter, opts, comment, sink)
+                    .await?;
+                &typed
+            }
+        };
+        let plan = exec::plan(shell, &self.db(), opts, comment)?;
+        let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
+        let (output, late) = self.run_watched(plan, opts, class, sink, None).await?;
+        Ok(Sent {
+            output,
+            late,
+            moves_to,
+        })
+    }
+}
+
+/// Why sending a command failed: its error, and whether the connection dropped under it
+/// ([`exec::connection_dropped`]).
+struct SendError {
+    error: DbError,
+    dropped: bool,
+}
+
+impl From<DbError> for SendError {
+    fn from(error: DbError) -> Self {
+        SendError {
+            error,
+            dropped: false,
+        }
+    }
+}
+
+/// What a sent command gave: its result, whether it completed late (after a stop or a
+/// timeout), and the database a `use` moves to.
+struct Sent {
+    output: exec::Output,
+    late: bool,
+    moves_to: Option<String>,
+}
+
+/// How a [`MongoSession::ping_once`] ended.
+enum Pinged {
+    Answered,
+    /// The connection dropped under it: the error's (redacted) text.
+    Dropped(String),
+    /// No answer within the limit.
+    NoAnswer,
+    Stopped,
+    /// Any other error (no server to select, ...).
+    Failed(DbError),
+}
+
+/// Whether a command `idle` after the last successful one `ping`s first.
+fn needs_ping(idle: Duration, after: Duration) -> bool {
+    idle >= after
+}
+
+/// How long the idle ping waits: the command's `timeout`, but never longer than the
+/// connect timeout (a connection that does not answer that long is given up).
+fn ping_limit(timeout: Option<Duration>, connect: Duration) -> Duration {
+    timeout.map_or(connect, |t| t.min(connect))
+}
+
+/// Whether a command whose connection dropped under it is sent again, once, on a fresh
+/// connection: only a read, and only while nothing of its result reached the sink (as the
+/// SQL drivers re-run a read that emitted nothing). A command that may write is never
+/// sent again: it may have been applied.
+fn may_resend(class: &CommandClass, emitted: bool) -> bool {
+    *class == CommandClass::Read && !emitted
+}
+
+/// Passes everything on to `sink`, noting whether any of a result reached it.
+struct Watched<'a> {
+    sink: &'a mut dyn RowSink,
+    emitted: bool,
+}
+
+impl RowSink for Watched<'_> {
+    fn result_start(&mut self, cols: &[ColumnMeta]) {
+        self.emitted = true;
+        self.sink.result_start(cols);
+    }
+    fn rows(&mut self, batch: Vec<Vec<Value>>) {
+        self.emitted = true;
+        self.sink.rows(batch);
+    }
+    fn full_rows(&mut self, batch: Vec<Vec<FullValue>>) {
+        self.emitted = true;
+        self.sink.full_rows(batch);
+    }
+    fn result_end(&mut self, summary: &ResultSummary) {
+        self.sink.result_end(summary);
+    }
+    fn progress(&mut self, p: ExecProgress) {
+        self.sink.progress(p);
+    }
+    fn server_notices(&mut self, notices: ServerNotices) {
+        self.sink.server_notices(notices);
     }
 }
 
@@ -328,6 +539,10 @@ fn sample_ended_by(late: bool, stopped: bool) -> Option<Trigger> {
         (false, false) => None,
     }
 }
+
+/// A command after this long without a successful one `ping`s first: a server or NAT may
+/// have dropped the idle connection meanwhile.
+const IDLE_PING_AFTER: Duration = Duration::from_secs(30);
 
 /// How often [`stop_raised`] looks at the stop signal (it has no wake-up of its own).
 const STOP_POLL: Duration = Duration::from_millis(20);
@@ -398,6 +613,13 @@ impl CommandSession for MongoSession {
         self
     }
 
+    /// Runs one console command, as the SQL drivers do after a dropped connection: after
+    /// [`IDLE_PING_AFTER`] without a successful command it `ping`s first
+    /// ([`MongoSession::wake`]), and a read whose connection dropped under it before any of
+    /// its result reached `sink` is sent again once on a fresh connection
+    /// ([`may_resend`]). Either reconnect is counted in `reconnects()`. Nothing else is
+    /// ever sent again: a command of any other class whose connection dropped is
+    /// `ConnectionLost` with the outcome unknown.
     async fn execute_command(
         &self,
         cmd: &ParsedCommand,
@@ -415,22 +637,38 @@ impl CommandSession for MongoSession {
         let uuid = Uuid::new().to_string();
         let comment = cancel::comment_of(&uuid);
         let _running = self.start(uuid, cmd.class.clone(), opts);
-        let typed;
-        let shell = match &payload.typed {
-            None => &payload.cmd,
-            Some(filter) => {
-                typed = self
-                    .typed_read(&payload.cmd, filter, opts, &comment, sink)
-                    .await?;
-                &typed
-            }
+        self.wake(opts).await?;
+        let mut sink = Watched {
+            sink,
+            emitted: false,
         };
-        let plan = exec::plan(shell, &self.db(), opts, &comment)?;
-        let moves_to = (plan.shape == exec::Shape::Use).then(|| plan.db.clone());
-        let (output, late) = self
-            .run_watched(plan, opts, &cmd.class, sink, None)
+        let sent = match self
+            .send(payload, &cmd.class, opts, &comment, &mut sink)
             .await
-            .map_err(|e| if payload.edit { edit_error(e) } else { e })?;
+        {
+            // The crate cleared the pool: a read goes again on a fresh connection, once
+            // (the first failure counted the reconnect).
+            Err(e) if e.dropped && may_resend(&cmd.class, sink.emitted) => {
+                if opts.stop.is_stopped() {
+                    return Err(DbError::cancelled());
+                }
+                self.send(payload, &cmd.class, opts, &comment, &mut sink)
+                    .await
+            }
+            sent => sent,
+        };
+        let Sent {
+            output,
+            late,
+            moves_to,
+        } = sent.map_err(|e| {
+            if payload.edit {
+                edit_error(e.error)
+            } else {
+                e.error
+            }
+        })?;
+        self.mark_ok();
         // An edit applied on its own (no transactions): a document gone stops the apply.
         if let Some(id) = &payload.document {
             data::check_found(id, output.affected)?;
@@ -438,7 +676,7 @@ impl CommandSession for MongoSession {
         if let Some(db) = moves_to {
             *self.current_db.lock().unwrap_or_else(|p| p.into_inner()) = db;
         }
-        let summary = exec::emit(sink, output, opts, started)?;
+        let summary = exec::emit(&mut sink, output, opts, started)?;
         Ok(StmtOutcome {
             results: vec![summary],
             late_completion: late,
@@ -458,9 +696,10 @@ impl CommandSession for MongoSession {
     ///   (`DocumentNotFound`) or a stop aborts the transaction: `rolled_back: true`. Its
     ///   error then has `outcome_unknown: false` and `was_in_tx: true`, since nothing of
     ///   an uncommitted transaction takes effect.
+    /// - Nothing is sent again after a dropped connection (no idle `ping` either, unlike
+    ///   `execute_command`): a failed command aborts the transaction as above.
     /// - A commit whose result is unknown (`UnknownTransactionCommitResult`) is retried
-    ///   once, the only automatic retry of the driver (commit is idempotent by
-    ///   `txnNumber`); still unknown, the failure is `ConnectionLost { outcome_unknown:
+    ///   once, the only retry of a write (commit is idempotent by `txnNumber`); still unknown, the failure is `ConnectionLost { outcome_unknown:
     ///   true }` at the last index, not rolled back. So is a commit with a write concern
     ///   error (it committed, but the write concern was not met), which is not retried.
     ///   Any other commit error is known not to have committed: rolled back. An abort's
@@ -619,7 +858,8 @@ impl MongoSession {
         let started = Instant::now();
         let (output, late) = self
             .run_watched(step.plan, opts, &step.class, &mut Discard, Some(session))
-            .await?;
+            .await
+            .map_err(|e| e.error)?;
         if let Some(id) = &step.document {
             data::check_found(id, output.affected)?;
         }
@@ -860,6 +1100,54 @@ mod tests {
             edit_error(server("E11000 duplicate key error")),
             DbError::Server { .. }
         ));
+    }
+
+    #[test]
+    fn an_idle_session_pings_first() {
+        let after = IDLE_PING_AFTER;
+        assert_eq!(after, Duration::from_secs(30));
+        assert!(!needs_ping(Duration::ZERO, after));
+        assert!(!needs_ping(after - Duration::from_millis(1), after));
+        assert!(needs_ping(after, after));
+        assert!(needs_ping(Duration::from_secs(3600), after));
+        // A test's zero: every command pings.
+        assert!(needs_ping(Duration::ZERO, Duration::ZERO));
+    }
+
+    #[test]
+    fn only_a_read_that_emitted_nothing_is_sent_again() {
+        assert!(may_resend(&CommandClass::Read, false));
+        assert!(!may_resend(&CommandClass::Read, true));
+        for class in [
+            CommandClass::Write,
+            CommandClass::Admin,
+            CommandClass::Ddl,
+            CommandClass::Unknown,
+            CommandClass::SessionChange,
+        ] {
+            assert!(!may_resend(&class, false), "{class:?}");
+            assert!(!may_resend(&class, true), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn the_ping_waits_for_the_shorter_limit() {
+        let connect = Duration::from_secs(10);
+        assert_eq!(ping_limit(None, connect), connect);
+        assert_eq!(
+            ping_limit(Some(Duration::from_secs(2)), connect),
+            Duration::from_secs(2)
+        );
+        assert_eq!(ping_limit(Some(Duration::from_secs(60)), connect), connect);
+    }
+
+    #[test]
+    fn a_dropped_connection_is_told_apart() {
+        use mongodb::error::Error;
+        let io = Error::from(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(exec::connection_dropped(&io));
+        let other = Error::custom("not a network error");
+        assert!(!exec::connection_dropped(&other));
     }
 
     #[test]

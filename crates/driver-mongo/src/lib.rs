@@ -23,6 +23,15 @@ use std::sync::Arc;
 #[cfg(feature = "test-helpers")]
 pub mod test_helpers {
     pub use crate::client::{open, Opened};
+
+    use dnt_core::config::ResolvedConfig;
+    use dnt_core::error::DbError;
+
+    /// What [`crate::MongoDriver`] connects, as the concrete session (for
+    /// [`crate::MongoSession::set_idle_after`]).
+    pub async fn session(cfg: &ResolvedConfig) -> Result<crate::MongoSession, DbError> {
+        Ok(crate::MongoSession::new(open(cfg).await?, cfg))
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]

@@ -4,7 +4,9 @@
 //!
 //! Every command is sent as a raw server command (`find`, `insert`, …) through
 //! `Database::run_command` / `run_cursor_command`: the comment, `maxTimeMS` and the user's
-//! options land exactly where the server reads them, and nothing is retried.
+//! options land exactly where the server reads them, and the crate retries nothing
+//! (`retry_reads` / `retry_writes` are off). The session alone sends a command again: a
+//! read whose connection dropped under it, once (`MongoSession::execute_command`).
 
 use std::time::{Duration, Instant};
 
@@ -1359,7 +1361,8 @@ fn redact_message(message: &str) -> String {
 }
 
 /// The `DbError` of a driver error for a command of `class` (spec §5.6), and whether it is
-/// a network error (the session counts it in `reconnects()`). Nothing is retried.
+/// a network error (the session counts it in `reconnects()`). Whether the command is sent
+/// again is the session's call ([`connection_dropped`]).
 pub(crate) fn map_error(e: &mongodb::error::Error, class: &CommandClass) -> (DbError, bool) {
     let may_have_applied = *class != CommandClass::Read;
     match e.kind.as_ref() {
@@ -1429,6 +1432,21 @@ pub(crate) fn map_error(e: &mongodb::error::Error, class: &CommandClass) -> (DbE
             false,
         ),
     }
+}
+
+/// The connection dropped under the command (an I/O error, or the pool cleared by one):
+/// the crate clears the pool, so the next command gets a fresh connection. Not a server
+/// that could not be selected, where there is nothing to send again on.
+pub(crate) fn connection_dropped(e: &mongodb::error::Error) -> bool {
+    matches!(
+        e.kind.as_ref(),
+        ErrorKind::Io(_) | ErrorKind::ConnectionPoolCleared { .. }
+    )
+}
+
+/// The (redacted) text of a driver error, for a message of the session's own.
+pub(crate) fn error_text(e: &mongodb::error::Error) -> String {
+    redact_message(&e.kind.to_string())
 }
 
 /// Reports `out` to `sink`: `result_start` exactly once, the rows in batches of

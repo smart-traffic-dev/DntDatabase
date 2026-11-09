@@ -1,7 +1,7 @@
 //! Cancel (spec §5.5) against the compose services `mongo60` and `mongo80`: `killOp` of the
 //! running command found by its comment, the grace period and the `Client` rebuild after
-//! it, and no automatic retry (§5.2). Needs `DNT_TEST_DB=1`. Everything runs as `root` in
-//! scratch databases (`dnt_cancel_*`).
+//! it, and no automatic retry of a write (§5.2). Needs `DNT_TEST_DB=1`. Everything runs as
+//! `root` in scratch databases (`dnt_cancel_*`).
 
 use dnt_core::command::{CommandLanguage, ParsedCommand};
 use dnt_core::config::ResolvedConfig;

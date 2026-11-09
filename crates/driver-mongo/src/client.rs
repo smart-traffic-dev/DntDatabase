@@ -26,6 +26,9 @@ const DEFAULT_APP_NAME: &str = "DntDatabase";
 const DEFAULT_DB: &str = "test";
 /// Connections a session's `Client` may open for commands.
 const MAX_POOL_SIZE: u32 = 2;
+/// A pooled connection idle this long is closed rather than reused: a server or NAT may
+/// have dropped it silently meanwhile.
+const MAX_IDLE_TIME: Duration = Duration::from_secs(60);
 /// Oldest supported server.
 const MIN_VERSION: (u32, u32, u32) = (6, 0, 0);
 /// Server error code of a rejected login.
@@ -161,6 +164,9 @@ pub fn client_options(
     options.connect_timeout = Some(cfg.connect_timeout);
     options.server_selection_timeout = Some(cfg.connect_timeout);
     options.max_pool_size = Some(MAX_POOL_SIZE);
+    options.max_idle_time = Some(MAX_IDLE_TIME);
+    // The crate never sends a command again; the session decides (a read whose
+    // connection dropped, once: `MongoSession::execute_command`).
     options.retry_reads = Some(false);
     options.retry_writes = Some(false);
     options.tls = tls;
@@ -270,6 +276,7 @@ fn apply_srv_overrides(found: &mut ClientOptions, plan: ClientOptionsPlan) {
     found.connect_timeout = o.connect_timeout;
     found.server_selection_timeout = o.server_selection_timeout;
     found.max_pool_size = o.max_pool_size;
+    found.max_idle_time = o.max_idle_time;
     found.retry_reads = o.retry_reads;
     found.retry_writes = o.retry_writes;
     found.direct_connection = o.direct_connection;
@@ -896,6 +903,18 @@ mod tests {
         assert_eq!(o.retry_reads, Some(false));
         assert_eq!(o.retry_writes, Some(false));
         assert_eq!(o.max_pool_size, Some(2));
+    }
+
+    #[test]
+    fn idle_connections_are_not_reused() {
+        assert_eq!(
+            plan(&cfg()).options.max_idle_time,
+            Some(Duration::from_secs(60))
+        );
+        // An SRV lookup's options get it too.
+        let mut found = ClientOptions::default();
+        apply_srv_overrides(&mut found, plan(&srv_cfg()));
+        assert_eq!(found.max_idle_time, Some(Duration::from_secs(60)));
     }
 
     #[test]
