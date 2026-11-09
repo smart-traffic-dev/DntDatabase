@@ -188,8 +188,13 @@ function lex(src: string): Token[] | null {
   let tokens: Token[] = [];
   let from = 0;
   if (prev) {
-    // A token that ends before the first change is unchanged (so is the character after it).
-    const d = commonPrefix(prev.src, src);
+    // Reuse up to the start of the first changed line. Every token decision reads at most
+    // its own text and the character after it, except a `/` in regex position without a
+    // closing slash: it became punctuation by scanning to the end of its line, so a change
+    // later on that line can turn it into a regex. No scan that fails reads past its own
+    // line break, so a token ending before the changed line is unchanged.
+    const changed = commonPrefix(prev.src, src);
+    const d = changed > 0 ? src.lastIndexOf('\n', changed - 1) + 1 : 0;
     let lo = 0;
     let hi = prev.tokens.length;
     while (lo < hi) {

@@ -227,6 +227,75 @@ describe('mongo completion: context', () => {
     expect(ctx('/* x */ db.|')).toEqual({ kind: 'db', db: null });
   });
 
+  /** `text` analysed from scratch: a text sharing no prefix with it empties the token cache. */
+  const freshAt = (text: string, offset: number) => {
+    analyzeMongo('\u0000', 1);
+    return analyzeMongo(text, offset);
+  };
+
+  it('a_slash_fixed_into_a_regex_is_lexed_again', () => {
+    // A `/` whose line has no closing slash is a punctuation token; closing the regex later on
+    // that line changes it, though the token ends before the change.
+    for (const body of ['(x', '"x', "'x", '`x', '[x]', '{x']) {
+      const steps = [
+        `db.c.find({ a: /${body} })\ndb.`,
+        `db.c.find({ a: /${body}/`,
+        `db.c.find({ a: /${body}/ })\ndb.`,
+        `db.c.find({ a: /${body}/ })\ndb.orders.find({ `,
+      ];
+      freshAt(steps[0]!, steps[0]!.length);
+      for (const s of steps) {
+        const warm = analyzeMongo(s, s.length);
+        expect(warm, `${body}: ${s}`).toEqual(freshAt(s, s.length));
+        // Leave the cache holding `s`, as the editor would.
+        analyzeMongo(s, s.length);
+      }
+      expect(analyzeMongo(steps[2]!, steps[2]!.length).context).toEqual({ kind: 'db', db: null });
+    }
+  });
+
+  it('cached_analysis_equals_a_fresh_one_over_random_edits', () => {
+    // A small deterministic PRNG (mulberry32): the same edit sequences every run.
+    let seed = 0x5eed;
+    const rnd = () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = <T,>(xs: readonly T[]) => xs[Math.floor(rnd() * xs.length)]!;
+    const pieces = ['/', '"', "'", '`', '\\', '(', ')', '{', '}', '[', ']', '\n', '\r\n', '.', ';', ',', ':', ' ', '*', '//', '/*', '*/', 'db', 'find', '$gt', 'x', '1', 'é'];
+    const base = 'db.orders.find({ a: /re(x/i, b: "q(", c: `t\n(` })\n  .sort({ a: 1 }) // c "\n/* ( */ db.c.aggregate([{ $match: {} }])\nuse shop\n';
+    for (let run = 0; run < 80; run++) {
+      let text = base;
+      let cursor = text.length;
+      freshAt(text, cursor);
+      for (let step = 0; step < 60; step++) {
+        // Mostly near the cursor, as typing is; sometimes anywhere.
+        const near = Math.max(0, Math.min(text.length, cursor + Math.floor(rnd() * 9) - 4));
+        const at = rnd() < 0.7 ? near : Math.floor(rnd() * (text.length + 1));
+        const r = rnd();
+        if (r < 0.55) {
+          const piece = pick(pieces);
+          text = text.slice(0, at) + piece + text.slice(at);
+          cursor = at + piece.length;
+        } else if (r < 0.85 && text.length > 0) {
+          const len = 1 + Math.floor(rnd() * 3);
+          text = text.slice(0, at) + text.slice(at + len);
+          cursor = Math.min(at, text.length);
+        } else {
+          // Only the cursor moves.
+          cursor = at;
+        }
+        const warm = analyzeMongo(text, cursor);
+        const expected = freshAt(text, cursor);
+        expect(warm, `run ${run} step ${step}: ${JSON.stringify(text.slice(0, cursor))}`).toEqual(expected);
+        // The editor's next request finds the cache holding this text.
+        analyzeMongo(text, cursor);
+      }
+    }
+  });
+
   it('big_scripts_reuse_the_tokens_of_the_previous_request', () => {
     const line = 'db.orders.find({ status: "paid", total: { $gt: 10 } }).sort({ a: 1 }).limit(5) // c\n';
     const big = line.repeat(5000);
